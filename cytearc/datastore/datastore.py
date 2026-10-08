@@ -1,0 +1,382 @@
+from typing import TYPE_CHECKING, Any
+
+from ..storage.types import ZarrMode
+from ..storage.validation_scope import validation_scoped
+from ..assay import Assay
+from ..storage.feature_selection import resolve_feature_selection
+from ..storage.io_policy import StorageIoPolicy
+from ..storage.profiles import StorageProfile, ZarrLocation
+from ..storage.refs import ArtifactRef
+from ..storage.stores import create_matrix_source
+from ..storage.validation_scope import scope_public_methods
+from ._operations.features import _FeatureOperationsMixin
+from ._operations.integration_metrics import _IntegrationMetricsOperationsMixin
+from ._operations.presentation import _PresentationOperationsMixin
+from ._operations.quality_control import _QualityControlOperationsMixin
+from ._operations.trajectory import _TrajectoryFeatureOperationsMixin
+from .mapping_datastore import MappingDatastore
+
+if TYPE_CHECKING:
+    from .artifact_accessor import ArtifactAccessor
+    from .namespaces import (
+        ClustersAccessor,
+        CompareAccessor,
+        EmbeddingsAccessor,
+        FeaturesAccessor,
+        GraphAccessor,
+        ImputationAccessor,
+        IntegrationAccessor,
+        MappingAccessor,
+        MarkersAccessor,
+        QcAccessor,
+        ReductionAccessor,
+        ScoresAccessor,
+        TrajectoryAccessor,
+    )
+    from .pipeline_accessor import PipelineAccessor
+    from .plot_accessor import DataStorePlotAccessor
+
+__all__ = ["DataStore", "mount_datastore"]
+
+
+def mount_datastore(
+    source: str,
+    at: ZarrLocation,
+    *,
+    workspace: str | None = None,
+    storage_options: dict[str, Any] | None = None,
+    **datastore_options: Any,
+) -> "DataStore":
+    """Create a writable DataStore whose count matrices come from ``source``.
+
+    The target store receives copied cell and feature metadata plus all new
+    analysis artifacts. Count matrices remain in the read-only source and are
+    remounted automatically when the target is reopened with ``DataStore``.
+    The target also resolves the source's artifacts read only, after its own:
+    listing, loading, lineage, and reuse see the source's results, including
+    imported labels and embeddings, while every write goes to the target.
+    Pipeline runs and their labels stay with the store that holds them. Results
+    that reuse source artifacts need the source, as counts do;
+    ``cytearc.tools.repack_zarr.repack_store`` copies a mount into a
+    self-contained store. The source must be prepared: open a fresh import once
+    with ``zarr_mode='r+'`` before mounting it.
+
+    Args:
+        source: Read-only store that owns the count matrices.
+        at: Writable destination for metadata and analysis artifacts.
+        workspace: Workspace name to mount. None uses the source workspace.
+        storage_options: Backend options passed when opening both locations.
+        datastore_options: Keyword arguments forwarded to ``DataStore``.
+                           ``zarr_loc`` is rejected; ``zarr_mode`` must be
+                           ``r+`` when set.
+
+    Returns:
+        An open writable ``DataStore`` pointed at ``at``.
+    """
+    from ..assay.classification import (
+        declared_assay_type,
+        is_rna_assay_type,
+        validate_assay_types,
+    )
+    from ..storage.stores import discard_mount_target
+
+    if "zarr_loc" in datastore_options:
+        raise TypeError("mount_datastore takes the target location through 'at'")
+    zarr_mode = datastore_options.pop("zarr_mode", "r+")
+    if zarr_mode != "r+":
+        raise ValueError(
+            f"A mounted datastore is writable and needs zarr_mode 'r+', got "
+            f"{zarr_mode!r}. Reopen the target with DataStore to read it."
+        )
+    _check_forwarded_options(
+        at, workspace=workspace, storage_options=storage_options, **datastore_options
+    )
+
+    source_store = DataStore(
+        source,
+        workspace=workspace,
+        zarr_mode="r",
+        storage_options=storage_options,
+        default_assay=datastore_options.get("default_assay"),
+    )
+    # The target opens each assay as the type that its assay_types declares,
+    # or else as the source declares it, so those types decide which mounted
+    # counts need a transpose.
+    explicit = validate_assay_types(
+        datastore_options.get("assay_types"), source_store.assay_names
+    )
+    required_transposes = frozenset(
+        name
+        for name in source_store.assay_names
+        if is_rna_assay_type(
+            explicit.get(name, declared_assay_type(source_store.get_assay(name)))
+        )
+    )
+    target = create_matrix_source(
+        source,
+        at,
+        required_transposes=required_transposes,
+        workspace=workspace,
+        storage_options=storage_options,
+        profile=datastore_options.get("zarrProfile"),
+    )
+    try:
+        return DataStore(
+            at,
+            zarr_mode=zarr_mode,
+            workspace=workspace,
+            storage_options=storage_options,
+            **datastore_options,
+        )
+    except BaseException:
+        # This call created the target, so a failed first open leaves none.
+        discard_mount_target(target, at)
+        raise
+
+
+def _check_forwarded_options(
+    at: ZarrLocation,
+    *,
+    workspace: str | None,
+    storage_options: dict[str, Any] | None,
+    **datastore_options: Any,
+) -> None:
+    """Apply the checks that ``DataStore`` makes before it opens a store."""
+    import inspect
+
+    from ..storage.budget import resolve_budget
+    from .base_datastore import validate_min_features_per_cell
+
+    # An unknown or repeated option raises the TypeError that DataStore would.
+    inspect.signature(DataStore).bind(
+        at,
+        zarr_mode="r+",
+        workspace=workspace,
+        storage_options=storage_options,
+        **datastore_options,
+    )
+    if "min_features_per_cell" in datastore_options:
+        validate_min_features_per_cell(datastore_options["min_features_per_cell"])
+    resolve_budget(
+        memory=datastore_options.get("mem_budget"),
+        workers=datastore_options.get("nthreads"),
+    )
+
+
+class DataStore(
+    _QualityControlOperationsMixin,
+    _FeatureOperationsMixin,
+    _TrajectoryFeatureOperationsMixin,
+    _IntegrationMetricsOperationsMixin,
+    _PresentationOperationsMixin,
+    MappingDatastore,
+):
+    """This class extends MappingDatastore and consequently inherits methods of
+    all the other DataStore classes.
+
+    DataStore is the primary interface for filtering cells, selecting features,
+    building graphs, mapping datasets, finding markers, aggregating cells, and
+    exporting data. Store-backed plots are available through `DataStore.plots`;
+    the same functions remain available through `cytearc.plotting`.
+
+    Args:
+        zarr_loc: Path to Zarr file created using one of writer functions of CyteArc.
+        assay_types: Mapping of assay names to preset types, such as 'RNA' or 'ATAC'.
+        default_assay: Name of assay that should be considered as default. It is mandatory to provide this value
+                       when DataStore loads a Zarr file for the first time.
+        min_features_per_cell: Writable opens remove from ``I`` every cell whose
+                               default-assay feature count is not greater than this
+                               value, unless that would remove at least half of the
+                               active cells.
+        mito_pattern: Feature-name pattern for the ``{assay}_percentMito`` column of each RNA assay.
+                      The first writable open replaces any existing column with values computed from
+                      this pattern, or ``^MT-`` when None. Later opens keep the stored values when
+                      None and reject a pattern that differs from the recorded one.
+        ribo_pattern: The same for ``{assay}_percentRibo``, using ``^RPS|^RPL|^MRPS|^MRPL`` when None.
+        nthreads: Maximum worker budget for multi-threaded methods. When None, auto-detected
+                  (CYTEARC_WORKERS env var, else process CPU affinity and cgroup limits). An
+                  explicit integer overrides environment detection.
+        zarr_mode: For read-write mode use ``r+`` or for read-only use ``r``.
+                   (Default value: ``r+``)
+        workspace: Workspace name within the Zarr store. None uses the legacy
+                   layout without a workspace group.
+        zarrProfile: Zarr encoding profile (``fast_local`` or ``cloud``). When
+                     None, chosen from the store location. Changing it on open
+                     does not rewrite existing arrays.
+        storage_options: Backend options passed when opening the Zarr store.
+        mem_budget: Memory budget bounding streaming and concurrency. Accepts bytes, a suffixed size
+                    (e.g. '8G'), or a fraction of total system memory (e.g. '0.6'). When None, it is
+                    auto-detected (CYTEARC_MEM_BUDGET env var, else 75% of effective system/container memory). Override it to
+                    simulate reading on a machine with a different memory size than the writer.
+        storageIo: Optional explicit read, compute, and write widths for storage
+                   work. Unset values stay under automatic planning.
+    """
+
+    def __init__(
+        self,
+        zarr_loc: ZarrLocation,
+        assay_types: dict[str, str] | None = None,
+        default_assay: str | None = None,
+        min_features_per_cell: int = 10,
+        mito_pattern: str | None = None,
+        ribo_pattern: str | None = None,
+        nthreads: int | None = None,
+        zarr_mode: ZarrMode = "r+",
+        workspace: str | None = None,
+        zarrProfile: StorageProfile | None = None,
+        storage_options: dict[str, Any] | None = None,
+        mem_budget: int | str | None = None,
+        storageIo: StorageIoPolicy | None = None,
+    ) -> None:
+        from ..storage.budget import resolve_budget
+        from ..storage.profiles import resolve_storage_profile
+
+        resources = resolve_budget(memory=mem_budget, workers=nthreads)
+        profile = resolve_storage_profile(zarr_loc, zarrProfile)
+        if zarr_mode not in ["r", "r+"]:
+            raise ValueError(
+                "ERROR: Zarr file can only be accessed using either 'r' or 'r+' mode"
+            )
+        super().__init__(
+            zarr_loc=zarr_loc,
+            assay_types=assay_types,
+            default_assay=default_assay,
+            min_features_per_cell=min_features_per_cell,
+            mito_pattern=mito_pattern,
+            ribo_pattern=ribo_pattern,
+            zarr_mode=zarr_mode,
+            workspace=workspace,
+            resources=resources,
+            storage_profile=profile,
+            storage_options=storage_options,
+            storageIo=storageIo,
+        )
+
+    @property
+    def embeddings(self) -> "EmbeddingsAccessor":
+        from .namespaces import EmbeddingsAccessor
+
+        return EmbeddingsAccessor(self)
+
+    @property
+    def clusters(self) -> "ClustersAccessor":
+        from .namespaces import ClustersAccessor
+
+        return ClustersAccessor(self)
+
+    @property
+    def compare(self) -> "CompareAccessor":
+        from .namespaces import CompareAccessor
+
+        return CompareAccessor(self)
+
+    @property
+    def features(self) -> "FeaturesAccessor":
+        from .namespaces import FeaturesAccessor
+
+        return FeaturesAccessor(self)
+
+    @property
+    def graph(self) -> "GraphAccessor":
+        from .namespaces import GraphAccessor
+
+        return GraphAccessor(self)
+
+    @property
+    def imputation(self) -> "ImputationAccessor":
+        from .namespaces import ImputationAccessor
+
+        return ImputationAccessor(self)
+
+    @property
+    def integration(self) -> "IntegrationAccessor":
+        from .namespaces import IntegrationAccessor
+
+        return IntegrationAccessor(self)
+
+    @property
+    def mapping(self) -> "MappingAccessor":
+        from .namespaces import MappingAccessor
+
+        return MappingAccessor(self)
+
+    @property
+    def markers(self) -> "MarkersAccessor":
+        from .namespaces import MarkersAccessor
+
+        return MarkersAccessor(self)
+
+    @property
+    def qc(self) -> "QcAccessor":
+        from .namespaces import QcAccessor
+
+        return QcAccessor(self)
+
+    @property
+    def reduction(self) -> "ReductionAccessor":
+        from .namespaces import ReductionAccessor
+
+        return ReductionAccessor(self)
+
+    @property
+    def scores(self) -> "ScoresAccessor":
+        from .namespaces import ScoresAccessor
+
+        return ScoresAccessor(self)
+
+    @property
+    def trajectory(self) -> "TrajectoryAccessor":
+        from .namespaces import TrajectoryAccessor
+
+        return TrajectoryAccessor(self)
+
+    @property
+    def artifacts(self) -> "ArtifactAccessor":
+        from .artifact_accessor import ArtifactAccessor
+
+        return ArtifactAccessor(self)
+
+    @property
+    def plots(self) -> "DataStorePlotAccessor":
+        """Return store-bound equivalents of store-first plotting functions."""
+        from .plot_accessor import DataStorePlotAccessor
+
+        return DataStorePlotAccessor(self)
+
+    @property
+    def pipeline(self) -> "PipelineAccessor":
+        """Return the store-bound analysis recipe runner."""
+        from .pipeline_accessor import PipelineAccessor
+
+        return PipelineAccessor(self)
+
+    def get_assay(self, assay_name: str) -> Assay:
+        """Returns the assay object for the given assay name.
+
+        Args:
+            assay_name: Name of the assay to be returned.
+
+        Returns:
+            Assay object
+        """
+        if not assay_name:
+            raise ValueError("ERROR: Provide the name of an assay")
+        return self._get_assay(assay_name)
+
+    @validation_scoped
+    def _features_resolve(
+        self,
+        assay: str,
+        features: ArtifactRef,
+    ) -> ArtifactRef:
+        """Validate and return one exact feature-selection reference."""
+
+        if not isinstance(features, ArtifactRef):
+            raise TypeError("features must be an ArtifactRef")
+        resolved_assay = self.get_assay(assay)
+        return resolve_feature_selection(self.zw, resolved_assay.name, features)
+
+
+# One public call validates each input artifact once, however many lineage
+# paths reach it.
+scope_public_methods(DataStore, module_prefix="cytearc.datastore")

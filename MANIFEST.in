@@ -1,0 +1,14 @@
+recursive-exclude * __pycache__
+recursive-exclude * *.pyc
+recursive-exclude * *.pyo
+exclude .gitignore
+exclude .gitattributes
+exclude .readthedocs.yml
+exclude Dockerfile
+prune docs
+prune tests
+prune profiling
+prune scripts
+prune .circleci
+prune .github
+include README.md

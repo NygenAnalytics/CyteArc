@@ -1,0 +1,154 @@
+version: 1
+project:
+  title: CyteArc
+  description: Out-of-core single-cell analysis for RNA, ATAC, protein, and matched
+    multi-omic data.
+  github: https://github.com/NygenAnalytics/CyteArc
+  exclude:
+  - reference/api/**
+  - '**/cytearc_datasets/**'
+  - analysis_with_agents.md
+  - tutorials/agent_workflow.md
+  - tutorials/garrido_trigo_agents.md
+  - developers/agent_decisions.md
+  static_files:
+  - llms.txt
+  - ../build/api
+  toc:
+  - file: index.md
+  - title: Getting started
+    children:
+    - file: quickstart.ipynb
+      title: Quick start
+    - file: tutorials/remote_stores.ipynb
+      title: Remote dataset mounting
+    - file: installation.md
+      title: Installation
+  - title: scRNA-seq analysis
+    children:
+    - file: tutorials/scrna_seq.ipynb
+      title: PBMC analysis
+    - file: tutorials/quality_control.ipynb
+      title: Quality control
+    - file: tutorials/feature_selection.ipynb
+      title: Highly variable genes
+    - file: tutorials/dimensionality_reduction.ipynb
+      title: Dimensionality reduction
+    - file: tutorials/graph_construction.ipynb
+      title: Neighborhood graph
+    - file: tutorials/clustering.ipynb
+      title: Clustering
+    - file: tutorials/reuse_and_tracing.ipynb
+      title: Analysis reuse
+    - file: tutorials/annotation.ipynb
+      title: Cell type annotation
+    - file: tutorials/gene_set_scoring.ipynb
+      title: Gene-set scoring
+    - file: tutorials/cell_cycle.ipynb
+      title: Cell-cycle scoring
+    - file: tutorials/plotting.ipynb
+      title: Visualization
+    - file: tutorials/imputation.ipynb
+      title: Imputation
+  - title: scATAC-seq and multimodal
+    children:
+    - file: tutorials/scatac_seq.ipynb
+      title: scATAC-seq
+    - file: tutorials/cite_seq.ipynb
+      title: CITE-seq
+    - file: tutorials/tea_seq.ipynb
+      title: TEA-seq
+    - file: tutorials/multimodal_diagnostics.ipynb
+      title: WNN and SNN integration
+    - file: tutorials/hto_demultiplexing.md
+      title: HTO demultiplexing
+  - title: Integration and mapping
+    children:
+    - file: tutorials/dataset_merging.ipynb
+      title: Dataset merging
+    - file: tutorials/batch_correction.ipynb
+      title: Harmony batch correction
+    - file: tutorials/mapping_and_label_transfer.ipynb
+      title: Reference mapping and label transfer
+  - title: Differential expression
+    children:
+    - file: tutorials/condition_comparisons.ipynb
+      title: Donor-level comparisons
+    - file: tutorials/pseudobulk_and_differential_expression.ipynb
+      title: Pseudobulk export
+  - title: Trajectory analysis
+    children:
+    - file: tutorials/pseudotime.ipynb
+      title: Pseudotime
+    - file: tutorials/expression_dynamics.ipynb
+      title: Expression dynamics
+    - file: tutorials/fate_mapping.ipynb
+      title: Fate mapping
+    - file: tutorials/trajectory_validation.md
+      title: Trajectory validation
+  - title: Data management
+    children:
+    - file: tutorials/import_and_export.ipynb
+      title: Import and export
+    - file: scanpy.md
+      title: Scanpy users
+    - file: seurat.md
+      title: Seurat users
+    - file: scanpy_and_seurat.md
+      title: Data model comparison
+    - file: tutorials/data_organization.ipynb
+      title: Cell and feature metadata
+    - file: concepts/provenance.md
+      title: Provenance
+    - file: tutorials/custom_analyses.ipynb
+      title: Custom analyses
+  - title: Public datasets
+    children:
+    - file: tutorials/cytebase.ipynb
+      title: Cytebase catalog
+    - file: tutorials/cytebase_covid19.ipynb
+      title: COVID-19 atlas case study
+  - title: Reference
+    children:
+    - title: API reference
+      url: /api/index.html
+      open_in_same_tab: true
+    - file: concepts/memory_and_execution.md
+      title: Memory and execution
+    - file: reference/remote_storage.md
+      title: Remote storage configuration
+    - file: reference/methods.md
+      title: Methods and limitations
+    - file: reference/faq.md
+      title: FAQ
+    - file: reference/glossary.md
+      title: Glossary
+    - file: reference/license.md
+      title: License
+    - url: https://github.com/NygenAnalytics/CyteArc/discussions
+      title: Ask a question
+    - url: https://github.com/NygenAnalytics/CyteArc/issues
+      title: Report a bug
+  - title: Developers
+    children:
+    - file: developers/contributing.md
+      title: Contributing
+    - file: developers/architecture.md
+      title: Architecture
+    - file: developers/zarr_internals.md
+      title: Zarr internals
+    - file: developers/operation_revisions.md
+      title: Operation revisions
+  bibliography:
+  - references.bib
+site:
+  template: book-theme
+  parts:
+    primary_sidebar_footer: <!-- No sidebar footer. -->
+  options:
+    folders: true
+    favicon: favicon.ico
+    logo: _static/cytearc-logo-black.png
+    logo_dark: _static/cytearc-logo-white.png
+    logo_text: CyteArc
+    hide_authors: true

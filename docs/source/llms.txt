@@ -1,0 +1,84 @@
+# CyteArc
+
+> Out-of-core, provenance-backed single-cell analysis for RNA, ATAC, protein, and matched multi-omic data. Follow the linked documentation for the installed release. Do not infer unsupported methods or biological conclusions.
+
+- [Home](./): choose a first example or find a guide for your analysis
+
+## Getting started
+
+- [Quick start](quickstart/): inspect a prepared analysis of 100,000 Tabula Sapiens cells, then run the RNA pipeline
+- [Remote dataset mounting](tutorials/remote-stores/): plot the Tabula Sapiens atlas, save a local cell selection, and reopen it while counts stay remote
+- [Installation](installation/): supported Python versions and installation paths
+
+## scRNA-seq analysis
+
+- [PBMC analysis](tutorials/scrna-seq/): interpret a prepared PBMC run with marker evidence
+- [Quality control](tutorials/quality-control/): modality-aware and sample-aware filtering
+- [Highly variable genes](tutorials/feature-selection/): feature-set diagnostics
+- [Dimensionality reduction](tutorials/dimensionality-reduction/): PCA dimensions and layout comparison
+- [Neighborhood graph](tutorials/graph-construction/): granular normalization, reduction, neighbours, and graphs
+- [Clustering](tutorials/clustering/): Leiden, Paris, stability, connectivity, and markers
+- [Analysis reuse](tutorials/reuse-and-tracing/): change the neighbour count without rerunning normalization, PCA, or the search index
+- [Cell type annotation](tutorials/annotation/): marker interpretation and label assignment
+- [Gene-set scoring](tutorials/gene-set-scoring/): AUCell and WAGGR activity scores
+- [Cell-cycle scoring](tutorials/cell-cycle/): canonical phase scoring
+- [Visualization](tutorials/plotting/): embedding, marker, hierarchy, and trajectory displays
+- [Imputation](tutorials/imputation/): graph diffusion for exploratory visualization
+
+## scATAC-seq and multimodal
+
+- [scATAC-seq](tutorials/scatac-seq/): peak filtering, LSI, graph construction, clustering, and gene scores
+- [CITE-seq](tutorials/cite-seq/): matched RNA and ADT analysis with WNN integration
+- [TEA-seq](tutorials/tea-seq/): prepared RNA, ATAC, and protein analysis with three-way WNN
+- [WNN and SNN integration](tutorials/multimodal-diagnostics/): compare SNN and WNN and inspect modality weights
+- [HTO demultiplexing](tutorials/hto-demultiplexing/): sample-tag classification and Seurat comparison
+
+## Integration and mapping
+
+- [Dataset merging](tutorials/dataset-merging/): compatible stores and an uncorrected joint baseline
+- [Harmony batch correction](tutorials/batch-correction/): Harmony, batch mixing, and biological conservation
+- [Reference mapping and label transfer](tutorials/mapping-and-label-transfer/): fixed-reference projection
+
+## Differential expression
+
+- [Donor-level comparisons](tutorials/condition-comparisons/): matched donor-level testing and its limits
+- [Pseudobulk export](tutorials/pseudobulk-and-differential-expression/): biological-replicate aggregation and export
+
+## Trajectory analysis
+
+- [Pseudotime](tutorials/pseudotime/): supervised sources and sinks
+- [Expression dynamics](tutorials/expression-dynamics/): feature profiles and modules
+- [Fate mapping](tutorials/fate-mapping/): multiple terminal outcomes
+- [Trajectory validation](tutorials/trajectory-validation/): boundary, graph, statistical, and numerical checks
+
+## Data management
+
+- [Import and export](tutorials/import-and-export/): source formats, saved Seurat import, and output contracts
+- [Scanpy users](scanpy/): workflow mapping and H5AD exchange
+- [Seurat users](seurat/): workflow mapping, RDS import, and WNN differences
+- [Data model comparison](scanpy-and-seurat/): how objects, selections, and saved results differ between tools
+- [Cell and feature metadata](tutorials/data-organization/): assays, cell data, feature data, and metadata
+- [Provenance](concepts/provenance/): artifacts, reuse, lineage, and limits
+- [Custom analyses](tutorials/custom-analyses/): public extension and export boundaries
+
+## Public datasets
+
+- [Cytebase catalog](tutorials/cytebase/): search cloud-hosted datasets, inspect annotations, and mount a published store
+- [COVID-19 atlas case study](tutorials/cytebase-covid19/): compare donors using metadata, the published UMAP, and gene summaries
+
+## Reference
+
+- [API reference](api/index.html): exact public signatures and result contracts
+- [Memory and execution](concepts/memory-and-execution/): choose budgets and workers, inspect run reports, and understand memory reservations
+- [Remote storage configuration](reference/remote-storage/): object-store credentials, mount behavior, and scratch space for reductions
+- [Methods and limitations](reference/methods/): supported workflows, implemented methods, validation evidence, and scope
+- [FAQ](reference/faq/): concise method and interoperability answers
+- [Glossary](reference/glossary/): CyteArc concepts and terms
+- [Cytebase API](api/cytebase.html): catalog queries, metadata-only DatasetEntry objects, remote DataStore access, imported embedding helpers, and writable mounts with remote counts
+
+## Developers
+
+- [Contributing](developers/contributing/): local workflow and required checks
+- [Architecture](developers/architecture/): package boundaries and code placement
+- [Zarr internals](developers/zarr-internals/): on-disk layout for maintainers
+- [Operation revisions](developers/operation-revisions/): maintainer rules for invalidating saved computations after algorithm changes

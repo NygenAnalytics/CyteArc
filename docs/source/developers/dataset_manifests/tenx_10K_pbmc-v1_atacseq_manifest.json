@@ -1,0 +1,138 @@
+{
+  "archiveBytes": 509243412,
+  "archiveSha256": "0dd554174379918936a9964ba883e60dc9acff28737169a53ce68c1e6e944d35",
+  "artifacts": [
+    {
+      "artifactId": "4e723025092ed5d6671c679756de1d1d5f7d1e83b2d560984f0bf62dbefce7ad",
+      "assay": null,
+      "kind": "cell_selection",
+      "operation": "auto_filter_cells",
+      "path": "artifacts/cell_selection/4e723025092ed5d6671c679756de1d1d5f7d1e83b2d560984f0bf62dbefce7ad",
+      "scope": "datastore"
+    },
+    {
+      "artifactId": "a72a87add3a37b9a58e3d8c2b7bb36bbedbeae2e35831f1fb3537a93cbb79325",
+      "assay": null,
+      "kind": "cell_selection",
+      "operation": "manual_selection",
+      "path": "artifacts/cell_selection/a72a87add3a37b9a58e3d8c2b7bb36bbedbeae2e35831f1fb3537a93cbb79325",
+      "scope": "datastore"
+    },
+    {
+      "artifactId": "fb55663a9b7850ec33e123c13f350328286f0d205ec0069aa220c160923cdfea",
+      "assay": "ATAC",
+      "kind": "ann_index",
+      "operation": "build_ann_index",
+      "path": "ATAC/artifacts/ann_index/fb55663a9b7850ec33e123c13f350328286f0d205ec0069aa220c160923cdfea",
+      "scope": "assay"
+    },
+    {
+      "artifactId": "aa627598be0de729f116aa14f4aca995c820921503a976b9804f283d08e6038a",
+      "assay": "ATAC",
+      "kind": "cluster_labels",
+      "operation": "run_leiden_clustering",
+      "path": "ATAC/artifacts/cluster_labels/aa627598be0de729f116aa14f4aca995c820921503a976b9804f283d08e6038a",
+      "scope": "assay"
+    },
+    {
+      "artifactId": "d86859cbfd271ba2f0aef71bfca307331184caeb88ef6dc2394e5ceb34b92eda",
+      "assay": "ATAC",
+      "kind": "connectivity_map",
+      "operation": "build_connectivity_map",
+      "path": "ATAC/artifacts/connectivity_map/d86859cbfd271ba2f0aef71bfca307331184caeb88ef6dc2394e5ceb34b92eda",
+      "scope": "assay"
+    },
+    {
+      "artifactId": "2307d298e8cff53ea72c72bbcd24115b08ac572fa3a93378a0f169973cf57ecf",
+      "assay": "ATAC",
+      "kind": "embedding",
+      "operation": "run_umap",
+      "path": "ATAC/artifacts/embedding/2307d298e8cff53ea72c72bbcd24115b08ac572fa3a93378a0f169973cf57ecf",
+      "scope": "assay"
+    },
+    {
+      "artifactId": "6cc67e111cc1ec8f1a850aec19867a38584b7e7e29de59ec63f5fa410b5c7f79",
+      "assay": "ATAC",
+      "kind": "embedding_initialization",
+      "operation": "build_embedding_initialization",
+      "path": "ATAC/artifacts/embedding_initialization/6cc67e111cc1ec8f1a850aec19867a38584b7e7e29de59ec63f5fa410b5c7f79",
+      "scope": "assay"
+    },
+    {
+      "artifactId": "18429cfd83abc6dcee1e9a029acf6d2809ea0f9b46be2d5d11a0689793b7270a",
+      "assay": "ATAC",
+      "kind": "feature_scaling",
+      "operation": "calculate_feature_scaling",
+      "path": "ATAC/artifacts/feature_scaling/18429cfd83abc6dcee1e9a029acf6d2809ea0f9b46be2d5d11a0689793b7270a",
+      "scope": "assay"
+    },
+    {
+      "artifactId": "95b24fe45b9f3b6090c649eba183bc8ea4809967b6c7d52ab53214c7816452a4",
+      "assay": "ATAC",
+      "kind": "feature_selection",
+      "operation": "select_prevalent_peaks",
+      "path": "ATAC/artifacts/feature_selection/95b24fe45b9f3b6090c649eba183bc8ea4809967b6c7d52ab53214c7816452a4",
+      "scope": "assay"
+    },
+    {
+      "artifactId": "021b6aa21aa558aeac5b1eb062fb8ec744cd34fbb95fb909ee112c2d2512f74e",
+      "assay": "ATAC",
+      "kind": "feature_summary",
+      "operation": "summarize_atac_features",
+      "path": "ATAC/artifacts/feature_summary/021b6aa21aa558aeac5b1eb062fb8ec744cd34fbb95fb909ee112c2d2512f74e",
+      "scope": "assay"
+    },
+    {
+      "artifactId": "8ef36e29815c162107112e2232a999aa9cdcc8b236632e5bc37fe92afb0df416",
+      "assay": "ATAC",
+      "kind": "neighbors",
+      "operation": "query_neighbors",
+      "path": "ATAC/artifacts/neighbors/8ef36e29815c162107112e2232a999aa9cdcc8b236632e5bc37fe92afb0df416",
+      "scope": "assay"
+    },
+    {
+      "artifactId": "dc1ada149f52fcedbced713e88b8b1edd7741fdc3c8b186adcba9473b44d468b",
+      "assay": "ATAC",
+      "kind": "normalized",
+      "operation": "run_normalization",
+      "path": "ATAC/artifacts/normalized/dc1ada149f52fcedbced713e88b8b1edd7741fdc3c8b186adcba9473b44d468b",
+      "scope": "assay"
+    },
+    {
+      "artifactId": "695f084da1a997b232340acb1a64a4d674a2d5da170c5aa4e82997f0ecfc99a6",
+      "assay": "ATAC",
+      "kind": "reduction",
+      "operation": "run_lsi",
+      "path": "ATAC/artifacts/reduction/695f084da1a997b232340acb1a64a4d674a2d5da170c5aa4e82997f0ecfc99a6",
+      "scope": "assay"
+    }
+  ],
+  "carriedColumns": [],
+  "cellColumns": [
+    "ATAC_UMAP1",
+    "ATAC_UMAP2",
+    "ATAC_leiden_cluster",
+    "ATAC_nCounts",
+    "ATAC_nFeatures",
+    "I",
+    "ids",
+    "names"
+  ],
+  "cytearcVersion": "1.0.0rc1",
+  "dataset": "tenx_10K_pbmc-v1_atacseq",
+  "generatedAt": "2026-10-08T04:31:59.959692+00:00",
+  "nCellsActive": 8426,
+  "nCellsTotal": 8728,
+  "pipelineRuns": [],
+  "publishNotes": [
+    "Publish with: uv run python scripts/publish_docs_datasets.py tenx_10K_pbmc-v1_atacseq",
+    "That replaces data.zarr.tar.gz in place."
+  ],
+  "recipe": "25000 prevalent peaks, TF-IDF normalization, LSI 50, k=21 graph, UMAP, Leiden 0.6",
+  "repository": "cytearc_docs",
+  "sourceDatasets": [],
+  "sourceFiles": [
+    "data.h5"
+  ],
+  "storeBytes": 723103771
+}
