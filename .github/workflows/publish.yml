@@ -12,15 +12,37 @@ concurrency:
   group: publish-${{ github.event.release.tag_name }}
   cancel-in-progress: false
 
-# Every job checks out github.sha, the commit the release tag named when the
-# release was published, so the tests, the documentation build, and the
-# published files all come from the same commit.
+# The prior test run, documentation build, and published files must all come
+# from github.sha, the commit named by the release tag when it was published.
 jobs:
   verify:
-    name: Verify the release commit
-    uses: ./.github/workflows/pytest.yml
-    with:
-      ref: ${{ github.sha }}
+    name: Require successful CI for the release commit
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: read
+    steps:
+    - name: Check the latest Tests run for the release commit
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        # Pull request runs can test a merge commit instead of their head SHA.
+        run="$(gh api --method GET \
+          "repos/${GITHUB_REPOSITORY}/actions/workflows/pytest.yml/runs" \
+          -f head_sha="$GITHUB_SHA" -f per_page=100 --paginate \
+          --jq '.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")
+            | [.run_number, .status, (.conclusion | tostring), .html_url] | @tsv' \
+          | sort -nr | sed -n '1p')"
+        if [[ -z "$run" ]]; then
+          echo "::error::No push or manual Tests run exists for ${GITHUB_SHA}. Run Tests for this commit, then rerun the release workflow."
+          exit 1
+        fi
+        IFS=$'\t' read -r run_number run_status conclusion run_url <<< "$run"
+        echo "Tests run ${run_number} for ${GITHUB_SHA}: ${run_status} / ${conclusion} (${run_url})"
+        if [[ "$run_status" != "completed" || "$conclusion" != "success" ]]; then
+          echo "::error::The latest Tests run for ${GITHUB_SHA} must complete successfully before publishing: ${run_url}"
+          exit 1
+        fi
 
   docs:
     name: Verify the documentation

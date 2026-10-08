@@ -157,7 +157,7 @@ class WorkflowParameters(BaseModel):
     annParallel: bool = False
     umapEpochs: int = 300
     umapSeed: int = 4444
-    umapParallel: bool = False
+    umapParallel: bool = True
     leidenResolution: float = 1.0
     leidenBackend: Literal["igraph", "leidenalg"] = "igraph"
     leidenSeed: int = 4444

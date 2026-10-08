@@ -2,13 +2,6 @@ name: Tests
 
 on:
   workflow_dispatch:
-  # The release workflow verifies the exact commit it publishes.
-  workflow_call:
-    inputs:
-      ref:
-        description: Commit to check out and test
-        type: string
-        required: true
   push:
     branches:
       - master
@@ -44,7 +37,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
       with:
-        ref: ${{ inputs.ref || github.sha }}
+        ref: ${{ github.sha }}
         fetch-depth: 0
     - name: Install system build dependencies
       run: |
@@ -72,7 +65,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
       with:
-        ref: ${{ inputs.ref || github.sha }}
+        ref: ${{ github.sha }}
         fetch-depth: 0
     - name: Install system build dependencies
       run: |
@@ -104,7 +97,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
       with:
-        ref: ${{ inputs.ref || github.sha }}
+        ref: ${{ github.sha }}
         fetch-depth: 0
     - name: Install system build dependencies
       run: |
@@ -140,16 +133,13 @@ jobs:
           pytest_args+=(--cov=cytearc --cov-report=xml --cov-report=term)
         fi
         uv run --no-sync pytest "${pytest_args[@]}"
-    # A release smoke-tests the wheel that it publishes (publish.yml).
     - name: Build and smoke-test wheel
-      if: matrix.resolution == 'locked' && matrix.python-version == '3.14' && github.event_name != 'release'
+      if: matrix.resolution == 'locked' && matrix.python-version == '3.14'
       run: |
         uv build
         uv run --no-project python tests/smoke_wheel.py dist/*.whl
-    # A release has no Codecov token, and its verification must not depend on
-    # the coverage service.
     - name: Upload coverage to Codecov
-      if: matrix.resolution == 'locked' && matrix.python-version == '3.14' && github.event_name != 'release'
+      if: matrix.resolution == 'locked' && matrix.python-version == '3.14'
       uses: codecov/codecov-action@v5
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
