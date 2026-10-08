@@ -1,9 +1,9 @@
 # Data access
 
 Open, inspect, import, and connect to CyteArc DataStores, including Cytebase remote and mounted
-stores. Docs: <https://nygenanalytics.github.io/CyteArc/tutorials/data-organization>,
-<https://nygenanalytics.github.io/CyteArc/tutorials/import-and-export>, <https://nygenanalytics.github.io/CyteArc/tutorials/cytebase>,
-<https://nygenanalytics.github.io/CyteArc/tutorials/remote-stores>, <https://nygenanalytics.github.io/CyteArc/api/datastore.html>, `import_export.html`, `cytebase.html` (same folder).
+stores. Docs: <https://docs.nygen.io/CyteArc/tutorials/data-organization>,
+<https://docs.nygen.io/CyteArc/tutorials/import-and-export>, <https://docs.nygen.io/CyteArc/tutorials/cytebase>,
+<https://docs.nygen.io/CyteArc/tutorials/remote-stores>, <https://docs.nygen.io/CyteArc/api/datastore.html>, `import_export.html`, `cytebase.html` (same folder).
 
 ## When to use
 

@@ -258,7 +258,7 @@ any changes you make after seeing the comparison as such.
 
 ## Documentation map
 
-The docs hold the full explanations, online at <https://nygenanalytics.github.io/CyteArc/>:
+The docs hold the full explanations, online at <https://docs.nygen.io/CyteArc/>:
 `quickstart.html`, `tutorials/<step>.html` (one page per step, for example `quality_control`,
 `graph_construction`, `clustering`, `annotation`, `batch_correction`,
 `pseudobulk_and_differential_expression`, `cytebase`), `concepts/` (`provenance`,

@@ -107,8 +107,8 @@ docs = [
 
 [project.urls]
 Homepage = "https://github.com/NygenAnalytics/CyteArc"
-Documentation = "https://nygenanalytics.github.io/CyteArc/"
-Installation = "https://nygenanalytics.github.io/CyteArc/installation"
+Documentation = "https://docs.nygen.io/CyteArc/"
+Installation = "https://docs.nygen.io/CyteArc/installation"
 Issues = "https://github.com/NygenAnalytics/CyteArc/issues"
 
 [tool.setuptools]

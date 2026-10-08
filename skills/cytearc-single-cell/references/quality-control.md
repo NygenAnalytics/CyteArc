@@ -2,8 +2,8 @@
 
 Check what the count matrix holds, inspect per-cell QC metrics, build immutable filtered cell
 selections, audit removals without author labels, and score doublets. Docs:
-<https://nygenanalytics.github.io/CyteArc/tutorials/quality-control>, <https://nygenanalytics.github.io/CyteArc/api/datastore.html>,
-<https://nygenanalytics.github.io/CyteArc/api/pipeline.html>.
+<https://docs.nygen.io/CyteArc/tutorials/quality-control>, <https://docs.nygen.io/CyteArc/api/datastore.html>,
+<https://docs.nygen.io/CyteArc/api/pipeline.html>.
 
 ## When to use
 

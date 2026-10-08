@@ -1,9 +1,9 @@
 # Features and graphs
 
 Select features, normalize, reduce with PCA and build the neighbourhood graph as an explicit
-chain of artifacts, then branch or subcluster it safely. Docs: <https://nygenanalytics.github.io/CyteArc/tutorials/feature-selection>,
-<https://nygenanalytics.github.io/CyteArc/tutorials/graph-construction>, <https://nygenanalytics.github.io/CyteArc/tutorials/dimensionality-reduction> and
-<https://nygenanalytics.github.io/CyteArc/api/graph_construction.html>.
+chain of artifacts, then branch or subcluster it safely. Docs: <https://docs.nygen.io/CyteArc/tutorials/feature-selection>,
+<https://docs.nygen.io/CyteArc/tutorials/graph-construction>, <https://docs.nygen.io/CyteArc/tutorials/dimensionality-reduction> and
+<https://docs.nygen.io/CyteArc/api/graph_construction.html>.
 
 ## When to use
 

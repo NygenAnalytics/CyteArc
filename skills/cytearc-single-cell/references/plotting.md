@@ -1,8 +1,8 @@
 # Plotting
 
 Draw, inspect and save CyteArc figures headlessly, from a completed pipeline run or from explicit
-artifact refs. Docs: <https://nygenanalytics.github.io/CyteArc/tutorials/plotting>,
-<https://nygenanalytics.github.io/CyteArc/api/plotting.html>, <https://nygenanalytics.github.io/CyteArc/api/datastore.html>.
+artifact refs. Docs: <https://docs.nygen.io/CyteArc/tutorials/plotting>,
+<https://docs.nygen.io/CyteArc/api/plotting.html>, <https://docs.nygen.io/CyteArc/api/datastore.html>.
 
 ## When to use
 

@@ -32,7 +32,7 @@ language = "en"
 
 html_theme = "sphinx_book_theme"
 html_title = "CyteArc API reference"
-html_baseurl = "https://nygenanalytics.github.io/CyteArc/api/"
+html_baseurl = "https://docs.nygen.io/CyteArc/api/"
 html_favicon = str(SOURCE_ROOT / "favicon.ico")
 html_logo = str(SOURCE_ROOT / "_static" / "cytearc-logo-black.png")
 html_theme_options = {

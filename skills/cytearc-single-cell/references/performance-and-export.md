@@ -1,9 +1,9 @@
 # Performance and export
 
 Resource budgets, out-of-core rules, remote I/O on mounts, and exporting counts, metadata,
-markers, and pipeline-run results. Docs: <https://nygenanalytics.github.io/CyteArc/concepts/memory-and-execution>,
-<https://nygenanalytics.github.io/CyteArc/tutorials/remote-stores>, <https://nygenanalytics.github.io/CyteArc/tutorials/import-and-export>,
-<https://nygenanalytics.github.io/CyteArc/tutorials/custom-analyses>, <https://nygenanalytics.github.io/CyteArc/concepts/memory-and-execution#measuring-resource-use>.
+markers, and pipeline-run results. Docs: <https://docs.nygen.io/CyteArc/concepts/memory-and-execution>,
+<https://docs.nygen.io/CyteArc/tutorials/remote-stores>, <https://docs.nygen.io/CyteArc/tutorials/import-and-export>,
+<https://docs.nygen.io/CyteArc/tutorials/custom-analyses>, <https://docs.nygen.io/CyteArc/concepts/memory-and-execution#measuring-resource-use>.
 
 ## When to use
 

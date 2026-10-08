@@ -41,7 +41,7 @@ jobs:
       id-token: write
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: https://docs.nygen.io/CyteArc/
     steps:
       - name: Deploy GitHub Pages
         id: deployment

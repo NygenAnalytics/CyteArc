@@ -2,8 +2,8 @@
 
 Partition a cell graph with Leiden or Paris, choose a partition with evidence, build UMAP or t-SNE
 layouts, and extract labels and coordinates as cell-aligned arrays. Docs:
-<https://nygenanalytics.github.io/CyteArc/tutorials/clustering>, <https://nygenanalytics.github.io/CyteArc/tutorials/dimensionality-reduction>,
-<https://nygenanalytics.github.io/CyteArc/api/datastore.html>, <https://nygenanalytics.github.io/CyteArc/api/integration.html>.
+<https://docs.nygen.io/CyteArc/tutorials/clustering>, <https://docs.nygen.io/CyteArc/tutorials/dimensionality-reduction>,
+<https://docs.nygen.io/CyteArc/api/datastore.html>, <https://docs.nygen.io/CyteArc/api/integration.html>.
 
 ## When to use
 

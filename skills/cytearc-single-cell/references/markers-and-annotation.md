@@ -2,8 +2,8 @@
 
 Find cluster markers, turn marker evidence into cautious cell-type labels, separate progenitors
 from multiplets, score gene sets and the cell cycle, and run a final comparison with existing
-labels. Docs: <https://nygenanalytics.github.io/CyteArc/tutorials/annotation>, <https://nygenanalytics.github.io/CyteArc/tutorials/gene-set-scoring>,
-<https://nygenanalytics.github.io/CyteArc/tutorials/cell-cycle>, <https://nygenanalytics.github.io/CyteArc/api/datastore.html>.
+labels. Docs: <https://docs.nygen.io/CyteArc/tutorials/annotation>, <https://docs.nygen.io/CyteArc/tutorials/gene-set-scoring>,
+<https://docs.nygen.io/CyteArc/tutorials/cell-cycle>, <https://docs.nygen.io/CyteArc/api/datastore.html>.
 
 ## When to use
 

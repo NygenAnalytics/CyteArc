@@ -15,7 +15,7 @@ from cytearc.storage.async_execution import (
     ensure_zarr_host_ceiling,
     zarr_io_concurrency,
 )
-from cytearc.storage.budget import ResourceBudget, detect_workers
+from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.count_matrix import (
     CountMatrixPolicy,
     persist_count_matrix_plan,
@@ -493,18 +493,23 @@ def test_host_ceiling_is_fixed_by_its_first_use(monkeypatch) -> None:
     assert ensure_zarr_host_ceiling() == 5
 
 
-def test_sequential_runners_keep_their_own_plans() -> None:
-    host = detect_workers()
+@pytest.mark.parametrize("host_workers", [1, 2, 4])
+def test_sequential_runners_keep_their_own_plans(
+    monkeypatch: pytest.MonkeyPatch, host_workers: int
+) -> None:
+    monkeypatch.setattr(
+        "cytearc.storage.execution.detect_workers", lambda: host_workers
+    )
     first = _runner(ResourceBudget(1024, 2), chunksPerShard=10)
     second = _runner(ResourceBudget(1024, 4), chunksPerShard=1)
     third = _runner(ResourceBudget(1024, 4), chunksPerShard=10)
 
-    assert first.plan.codecWorkers == min(host, 2)
-    assert first.plan.ioConcurrency == min(host, 2)
-    assert second.plan.codecWorkers == min(host, 4)
+    assert first.plan.codecWorkers == min(host_workers, 2)
+    assert first.plan.ioConcurrency == 2
+    assert second.plan.codecWorkers == min(host_workers, 4)
     assert second.plan.ioConcurrency == 1
-    assert third.plan.codecWorkers == min(host, 4)
-    assert third.plan.ioConcurrency == min(host, 4)
+    assert third.plan.codecWorkers == min(host_workers, 4)
+    assert third.plan.ioConcurrency == 4
 
     assert first.run(_current_async_concurrency) == first.plan.ioConcurrency
     assert second.run(_current_async_concurrency) == 1
@@ -512,20 +517,34 @@ def test_sequential_runners_keep_their_own_plans() -> None:
     assert zarr.config.get("async.concurrency") == 10
 
 
-def test_codec_tasks_use_the_worker_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("cytearc.storage.async_execution.detect_workers", lambda: 64)
+@pytest.mark.parametrize("host_workers", [1, 2, 4])
+def test_codec_tasks_use_the_worker_budget(
+    monkeypatch: pytest.MonkeyPatch, host_workers: int
+) -> None:
+    monkeypatch.setattr(
+        "cytearc.storage.execution.detect_workers", lambda: host_workers
+    )
     runner = _runner(ResourceBudget(1024, 2))
-    barrier = threading.Barrier(2, timeout=5)
+    expected_workers = min(host_workers, 2)
+    barrier = threading.Barrier(expected_workers, timeout=5)
 
     def codec_task() -> int:
         barrier.wait()
         return threading.get_ident()
 
-    async def operation(_active: AsyncStorageRunner) -> list[int]:
+    async def operation(active: AsyncStorageRunner) -> list[int]:
+        assert active._codec_pool is not None
+        assert active._codec_pool._max_workers == expected_workers
         return await asyncio.gather(*(asyncio.to_thread(codec_task) for _ in range(8)))
 
-    assert len(set(runner.run(operation))) == 2
-    assert ensure_zarr_host_ceiling() != 2
+    with (
+        ThreadPoolExecutor(max_workers=4) as host_pool,
+        monkeypatch.context() as runtime,
+    ):
+        runtime.setattr("zarr.core.sync._executor", host_pool)
+        assert ensure_zarr_host_ceiling() == 4
+        assert len(set(runner.run(operation))) == expected_workers
+        assert ensure_zarr_host_ceiling() == 4
 
 
 def test_runner_scopes_async_concurrency_and_restores_configured_default(

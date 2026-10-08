@@ -59,7 +59,7 @@ jobs:
       - name: Render complete documentation for GitHub Pages
         if: inputs.pages
         env:
-          BASE_URL: /${{ github.event.repository.name }}
+          BASE_URL: /CyteArc
         run: make -C docs html
       - name: Render complete documentation and check API coverage
         if: ${{ !inputs.pages }}
@@ -72,8 +72,13 @@ jobs:
           name: documentation-preview
           path: docs/build/site/_build/html/
           if-no-files-found: error
+      - name: Place documentation under the custom domain's CyteArc path
+        if: inputs.pages
+        run: |
+          mkdir -p docs/build/pages
+          mv docs/build/site/_build/html docs/build/pages/CyteArc
       - name: Store GitHub Pages site
         if: inputs.pages
         uses: actions/upload-pages-artifact@v4
         with:
-          path: docs/build/site/_build/html/
+          path: docs/build/pages/

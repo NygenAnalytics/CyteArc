@@ -155,8 +155,11 @@ inspect the complete HTML build, and commit the updated notebooks. Prose-only ch
 outputs. Rendered site files under `docs/build/` remain ignored by Git.
 
 In the repository's Pages settings, select **GitHub Actions** as the publishing source.
+Set the custom domain to `docs.nygen.io`; the documentation is served at
+`https://docs.nygen.io/CyteArc/`.
 The workflow checks each notebook's execution metadata and code fingerprint, then builds with
-`BASE_URL=/CyteArc`. The deployment job alone receives Pages write permissions.
+`BASE_URL=/CyteArc` and places the site inside the Pages artifact's `CyteArc/` directory.
+The deployment job alone receives Pages write permissions.
 A manual run of `GitHub Pages` on `master` can publish
 the current commit again.
 

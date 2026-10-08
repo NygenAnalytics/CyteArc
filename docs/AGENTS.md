@@ -34,8 +34,9 @@ is no dependency fingerprint or cache invalidation service.
 
 Pull requests, release checks, and GitHub Pages validate and render the notebooks from the
 checkout with `make -C docs html`. CI does not execute them. Missing, failed, or stale executions
-fail the build. GitHub Pages publishes from `master` and sets the repository's URL prefix.
-Keep rendered site files outside Git.
+fail the build. GitHub Pages publishes from `master` at `https://docs.nygen.io/CyteArc/`.
+The workflow sets `BASE_URL=/CyteArc` and places the generated site inside the artifact's
+`CyteArc/` directory. Keep rendered site files outside Git.
 
 ## Execute affected pages on Modal
 

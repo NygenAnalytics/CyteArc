@@ -2,9 +2,9 @@
 
 Run the standard RNA recipe, reopen and audit runs, inspect and trace immutable artifacts, branch
 from a run with exact refs, and record the analysis for handoff. Docs:
-<https://nygenanalytics.github.io/CyteArc/api/pipeline.html>, <https://nygenanalytics.github.io/CyteArc/api/artifacts.html>,
-<https://nygenanalytics.github.io/CyteArc/concepts/provenance>, <https://nygenanalytics.github.io/CyteArc/tutorials/reuse-and-tracing>,
-<https://nygenanalytics.github.io/CyteArc/analysis-with-agents>.
+<https://docs.nygen.io/CyteArc/api/pipeline.html>, <https://docs.nygen.io/CyteArc/api/artifacts.html>,
+<https://docs.nygen.io/CyteArc/concepts/provenance>, <https://docs.nygen.io/CyteArc/tutorials/reuse-and-tracing>,
+<https://docs.nygen.io/CyteArc/analysis-with-agents>.
 
 ## When to use
 

@@ -3,7 +3,7 @@
 <p align="left">
   <a href="https://github.com/NygenAnalytics/CyteArc/actions/workflows/pytest.yml"><img src="https://github.com/NygenAnalytics/CyteArc/actions/workflows/pytest.yml/badge.svg" alt="Tests"></a>
   <a href="https://codecov.io/gh/NygenAnalytics/CyteArc"><img src="https://codecov.io/gh/NygenAnalytics/CyteArc/graph/badge.svg" alt="Coverage"></a>
-  <a href="https://nygenanalytics.github.io/CyteArc/"><img src="https://github.com/NygenAnalytics/CyteArc/actions/workflows/pages.yml/badge.svg" alt="Docs"></a>
+  <a href="https://docs.nygen.io/CyteArc/"><img src="https://github.com/NygenAnalytics/CyteArc/actions/workflows/pages.yml/badge.svg" alt="Docs"></a>
   <a href="https://pypi.org/project/cytearc"><img src="https://img.shields.io/pypi/v/cytearc.svg?color=4c72b0" alt="PyPI"></a>
   <a href="https://pypi.org/project/cytearc"><img src="https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-4c72b0.svg" alt="Python 3.12, 3.13, and 3.14"></a>
   <a href="https://pepy.tech/projects/cytearc"><img src="https://static.pepy.tech/personalized-badge/cytearc?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads" alt="Downloads"></a>
@@ -16,7 +16,7 @@ CyteArc is a Python framework for analysing single-cell RNA, ATAC, protein, and 
 
 | Problem | How CyteArc solves it | What you get |
 | :-- | :-- | :-- |
-| Your **dataset is larger than RAM** | Out-of-core algorithms, and neighbour search streams from cell-major and gene-major layouts, inside a memory budget you set | Analyse the selected cells with [explicit memory controls](https://nygenanalytics.github.io/CyteArc/concepts/memory-and-execution) |
+| Your **dataset is larger than RAM** | Out-of-core algorithms, and neighbour search streams from cell-major and gene-major layouts, inside a memory budget you set | Analyse the selected cells with [explicit memory controls](https://docs.nygen.io/CyteArc/concepts/memory-and-execution) |
 | The **data is stored remotely** and requires downloading | Fetches only the chunks an operation touches, and writes results to a store you own | Start analysing immediately, with one authoritative copy |
 | A **single parameter change costs hours** of computation | Each step is fingerprinted by its settings and inputs, so reuse is by content, not by layer name | Only what changed recomputes, and the old version stays for comparison |
 | Sub-population analysis leaves **scattered copies that nobody can trace back** | Subsets are masks in one file, and every result carries the cells and parameters behind it | A year later, a result still explains itself |
@@ -30,7 +30,7 @@ uv venv --python 3.12
 uv pip install --python .venv "cytearc[extra]"
 ```
 
-Detailed installation instructions [here](https://nygenanalytics.github.io/CyteArc/installation)
+Detailed installation instructions [here](https://docs.nygen.io/CyteArc/installation)
 
 ## Quick start
 
@@ -49,11 +49,11 @@ ds.plots.embedding(
 )
 ```
 
-Read the [scRNA-seq tutorial](https://nygenanalytics.github.io/CyteArc/tutorials/scrna-seq) for a granular workflow, or [remote stores](https://nygenanalytics.github.io/CyteArc/tutorials/remote-stores) for cloud setups.
+Read the [scRNA-seq tutorial](https://docs.nygen.io/CyteArc/tutorials/scrna-seq) for a granular workflow, or [remote stores](https://docs.nygen.io/CyteArc/tutorials/remote-stores) for cloud setups.
 
 ## Documentation
 
-Read workflow vignettes and API references in the **[documentation](https://nygenanalytics.github.io/CyteArc/)**.
+Read workflow vignettes and API references in the **[documentation](https://docs.nygen.io/CyteArc/)**.
 
 ## CyteArc's capabilities
 

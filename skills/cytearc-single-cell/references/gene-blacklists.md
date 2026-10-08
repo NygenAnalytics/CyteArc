@@ -2,7 +2,7 @@
 
 What `features.hvgs(blacklist=...)` removes, how to check it on your store, the corrected strings to
 pass today, and when to add the clonotype or haemoglobin add-ons. Docs:
-<https://nygenanalytics.github.io/CyteArc/tutorials/feature-selection>, <https://nygenanalytics.github.io/CyteArc/api/pipeline.html>.
+<https://docs.nygen.io/CyteArc/tutorials/feature-selection>, <https://docs.nygen.io/CyteArc/api/pipeline.html>.
 
 ## When to use
 

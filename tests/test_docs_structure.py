@@ -198,7 +198,7 @@ def test_installation_links_match_the_published_route() -> None:
         .endswith("/installation")
     )
     assert (
-        "https://nygenanalytics.github.io/CyteArc/installation"
+        "https://docs.nygen.io/CyteArc/installation"
         in (_REPOSITORY_ROOT / "README.md").read_text()
     )
 
