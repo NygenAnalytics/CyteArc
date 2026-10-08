@@ -3,16 +3,16 @@ revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version == '3.14.*' and sys_platform == 'win32'",
     "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
     "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32'",
+    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
     "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
@@ -388,7 +388,7 @@ name = "cffi"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+    { name = "pycparser" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz", hash = "sha256:dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be", size = 530807, upload-time = "2026-08-03T21:21:18.939Z" }
 wheels = [
@@ -1488,8 +1488,8 @@ name = "httpcore2"
 version = "2.13.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11", marker = "sys_platform != 'emscripten'" },
-    { name = "truststore", marker = "sys_platform != 'emscripten'" },
+    { name = "h11" },
+    { name = "truststore" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cb/f3/1db7aa2bc2524062192bb0e0323969492d1883152a232fe36eea65f4e35c/httpcore2-2.13.1.tar.gz", hash = "sha256:e0aa977abe17e69a3b820a24542a6fa88702676d83880b8d194dcd18408e5103", size = 68071, upload-time = "2026-09-23T07:47:22.372Z" }
 wheels = [
@@ -3075,7 +3075,7 @@ name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "ptyprocess" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2023-11-25T09:07:26.339Z" }
 wheels = [
@@ -3381,7 +3381,7 @@ wheels = [
 
 [[package]]
 name = "pydantic-ai-slim"
-version = "2.51.0"
+version = "2.52.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -3393,9 +3393,9 @@ dependencies = [
     { name = "pydantic-graph" },
     { name = "typing-inspection" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/09/0f/59ea27224107f9bed00595e0c51154ed1805f9d6d4c96e8b59d8abd45dc2/pydantic_ai_slim-2.51.0.tar.gz", hash = "sha256:3d88112514a75d84ec85414a3001317d3ed53d4cc2f9d9f39f6096178f98b00e", size = 1656608, upload-time = "2026-09-25T23:32:27.986Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/26/2b/b70b807abcfe81f9b11f1c67e9ee72fc36140c2af1d6569c085fcb1c8167/pydantic_ai_slim-2.52.0.tar.gz", hash = "sha256:87819dbc35c5a0a75d59d0f2c3afe7dde16c0455e6716b816055e6770b417a83", size = 1753704, upload-time = "2026-09-30T01:18:01.858Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/27/6f/6b8475f3c7c7139a5b16956ba513733fe34c71bab06b91acf4c63773f18d/pydantic_ai_slim-2.51.0-py3-none-any.whl", hash = "sha256:e2adf6adec72326fab7088640f27c749a969738bfd5b5b068bc4de21b965af00", size = 1955926, upload-time = "2026-09-25T23:32:20.443Z" },
+    { url = "https://files.pythonhosted.org/packages/73/50/d2d32f19189b0bc8678aaf4decd8b135566d2f79cafcff14baa1eb4deb25/pydantic_ai_slim-2.52.0-py3-none-any.whl", hash = "sha256:02b546f18ad75aca5fe4b1058df19ca293c4a75e64962af23b99386d0fa34fdf", size = 2061949, upload-time = "2026-09-30T01:17:50.898Z" },
 ]
 
 [package.optional-dependencies]
@@ -3481,7 +3481,7 @@ wheels = [
 
 [[package]]
 name = "pydantic-graph"
-version = "2.51.0"
+version = "2.52.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -3489,9 +3489,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "typing-inspection" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e9/b1/fced751b7075556c19efcf286d48511a0981a8dae39b2bf02a6de3a1d2c0/pydantic_graph-2.51.0.tar.gz", hash = "sha256:5208f8a91e71c6c81b932a255495e56253fb86e154c16fa3c0ea3885441a271f", size = 45256, upload-time = "2026-09-25T23:32:30.45Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c5/fa/71b517ad0104d4574b5f04a79f2df3abda4da9ab05eb5bb573d5e0e70ff5/pydantic_graph-2.52.0.tar.gz", hash = "sha256:ee66b35e48671804ef0f72831dd0087efe4bfafc9747f122e6ef9dc1778a7cd0", size = 45272, upload-time = "2026-09-30T01:18:05.795Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0b/9d/ccdb6b50e7b8f18ae1dda7b220ec6c0a660f4ec296263f5a73829e8782b3/pydantic_graph-2.51.0-py3-none-any.whl", hash = "sha256:38ccf69d931e1bf7a719cb380224af1d66064bac050219eee83287cec4b0309f", size = 52764, upload-time = "2026-09-25T23:32:23.749Z" },
+    { url = "https://files.pythonhosted.org/packages/bb/b2/924abf303f259dd52c1e1c461c773b4af14984766947342091e4e2aa2a70/pydantic_graph-2.52.0-py3-none-any.whl", hash = "sha256:55359f5d5cc2b9351f7d1c20b95e588b53f7abacc64745d81eae664420445399", size = 52763, upload-time = "2026-09-30T01:17:55.588Z" },
 ]
 
 [[package]]
