@@ -267,6 +267,94 @@ def test_create_store_defers_counts_t_to_write_stage(tmp_path):
     np.testing.assert_array_equal(after_write["RNA/countsT"][:], values.T)
 
 
+def _write_h5ad_input(path, matrix_key):
+    import anndata
+    import pandas as pd
+    from scipy.sparse import csr_matrix
+
+    counts = np.array([[1, 0, 3], [4, 2, 0], [0, 3, 1], [2, 1, 5]], dtype=np.float32)
+    obs = pd.DataFrame(index=pd.Index(["c1", "c2", "c3", "c4"], name="cell_id"))
+    var = pd.DataFrame(
+        {"gene_symbols": ["RPL1", "MT-X", "GENE"]},
+        index=pd.Index(["g1", "g2", "g3"], name="gene_id"),
+    )
+    data = anndata.AnnData(X=csr_matrix(counts / 10), obs=obs, var=var)
+    if matrix_key == "raw/X":
+        data.raw = anndata.AnnData(X=csr_matrix(counts), obs=obs, var=var)
+        data = data[:, :2].copy()
+    elif matrix_key == "layers/counts":
+        data.layers["counts"] = csr_matrix(counts)
+    elif matrix_key == "X":
+        data.X = csr_matrix(counts)
+    data.write_h5ad(path)
+    return counts
+
+
+@pytest.mark.parametrize("matrix_key", ["X", "raw/X", "layers/counts"])
+def test_create_store_inspects_h5ad_count_matrix_and_feature_names(
+    tmp_path, matrix_key
+):
+    path = tmp_path / "arbitrary-name.h5ad"
+    counts = _write_h5ad_input(path, matrix_key)
+    store_path = tmp_path / "store.zarr"
+
+    result = run_stage(
+        "createStore",
+        nRows=len(counts),
+        storeUri=str(store_path),
+        workflow=WorkflowParameters(),
+        resources=_resources(),
+        localH5adPath=path,
+        sampleIntervalSeconds=0.01,
+        submissionId="testsubmission",
+    )
+
+    assert result.status == "ok", result.error
+    root = zarr.open_group(str(store_path), mode="r")
+    np.testing.assert_array_equal(root["RNA/counts"][:], counts)
+    np.testing.assert_array_equal(
+        root["RNA/featureData/names"][:], ["RPL1", "MT-X", "GENE"]
+    )
+    assert result.details["h5adInput"] == {
+        "matrixKey": matrix_key,
+        "featureAttrsKey": "raw/var" if matrix_key == "raw/X" else "var",
+        "featureNameKey": "gene_symbols",
+        "nRows": 4,
+        "nColumns": 3,
+    }
+    assert "countsT" not in root["RNA"]
+
+
+@pytest.mark.parametrize(
+    "matrix_key, n_rows, message",
+    [
+        ("X", 999, "H5AD contains 4 cells, but the requested size is 999"),
+        ("normalized", 4, "H5AD has no integer-like count matrix"),
+    ],
+)
+def test_create_store_rejects_wrong_size_or_transformed_input_before_writing(
+    tmp_path, matrix_key, n_rows, message
+):
+    path = tmp_path / "arbitrary-name.h5ad"
+    _write_h5ad_input(path, matrix_key)
+    store_path = tmp_path / "store.zarr"
+
+    result = run_stage(
+        "createStore",
+        nRows=n_rows,
+        storeUri=str(store_path),
+        workflow=WorkflowParameters(),
+        resources=_resources(),
+        localH5adPath=path,
+        sampleIntervalSeconds=0.01,
+        submissionId="testsubmission",
+    )
+
+    assert result.status == "error"
+    assert message in result.error
+    assert not store_path.exists()
+
+
 def test_write_counts_t_clears_complete_when_validation_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

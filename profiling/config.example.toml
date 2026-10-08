@@ -1,11 +1,12 @@
-# Copy to profiling/config.toml and replace secret, region, endpoint, bucket, and prefixes.
+# Copy to profiling/config.toml and replace secret, endpoint, bucket, and prefixes.
 
 modalEnvironmentName = "cytearc_profiling"
 modalAppName = "cytearc-profiling"
 modalSecretName = "replace-with-modal-secret"
-modalRegion = "eu"
 r2EndpointUrl = "https://replace-with-account-id.r2.cloudflarestorage.com"
 datasetPrefixUri = "s3://example-bucket/cytearc-profiling/datasets"
+# inputUri = "s3://example-bucket/h5ad/cells.h5ad"
+# With inputUri, set targetSizes to the file's actual cell count only.
 resultsUri = "s3://example-bucket/cytearc-profiling"
 # Optional: isolate stores/results under stores/<runTag>/ and results/<runTag>/.
 # runTag = "replace-with-a-fresh-run-tag"
@@ -79,10 +80,10 @@ graphLocalCache = "auto"
 
 # Tune memory before large runs. Values are examples.
 #
-# run-e2e and run-local open one DataStore in initializeStore and reuse it
+# workflow opens one DataStore in initializeStore and reuses it
 # through findMarkers (runLeiden and reopenStore open their own), so those
 # stages must share workers and cytearcMemoryBudget; the funnel refuses a
-# mismatch. Their Modal CPU and memory may still differ: they size the run-all
+# mismatch. Their Modal CPU and memory may still differ: they size the steps
 # containers and the funnel envelope, which takes the largest of each.
 
 # Pin createStore / writeCountsT / markHvgs / findMarkers to 8 CPU / 32 GiB

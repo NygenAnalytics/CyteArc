@@ -78,9 +78,15 @@ def test_consume_requires_matching_leiden_backend(
         if backend == workflow.leidenBackend:
             matching.append(ref)
 
-    if matching:
+    if len(matching) > 1:
+        with pytest.raises(
+            ValueError, match="Multiple Leiden cluster artifacts match"
+        ) as error:
+            discover_consume_inputs(str(path), workflow, "makeBulkMean")
+        assert all(ref.artifact_id in str(error.value) for ref in matching)
+    elif matching:
         assert discover_consume_inputs(str(path), workflow, "makeBulkMean") == {
-            "clusters": matching[-1]
+            "clusters": matching[0]
         }
     else:
         with pytest.raises(ValueError, match="No Leiden cluster artifact matches"):

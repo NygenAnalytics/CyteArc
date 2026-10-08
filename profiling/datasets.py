@@ -144,6 +144,7 @@ class PreparedArtifact:
     dataDtype: str
     indicesDtype: str
     indptrDtype: str
+    sourceSha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1188,6 +1189,7 @@ def prepare_local_datasets(
             dataDtype=written.dataDtype,
             indicesDtype=written.indicesDtype,
             indptrDtype=written.indptrDtype,
+            sourceSha256=source_sha256,
         )
         artifacts.append(artifact)
         if onArtifact is not None:

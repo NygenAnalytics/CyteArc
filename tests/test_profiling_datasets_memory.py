@@ -1,9 +1,16 @@
 from pathlib import Path
+import hashlib
+import io
+import json
+import shutil
+from dataclasses import replace
 
 import h5py
 import numpy as np
+import pytest
+from obstore.store import MemoryStore
 
-from profiling.config import load_profiling_config
+from profiling.config import ProfilingConfig, load_profiling_config
 from profiling.datasets import (
     SourceSpec,
     download_source,
@@ -111,10 +118,218 @@ def test_prepare_local_datasets_uses_in_memory_path(tmp_path: Path) -> None:
         )
         assert artifact.sourceRowsSha256 == ordered_source_row_digest(rows)
         assert artifact.finalSourceRow == int(rows[-1])
+        assert artifact.sourceSha256 == prepared.sourceSha256
         # Each sample holds exactly its selected source rows, in order.
         with h5py.File(artifact.localPath, "r") as h5:
             np.testing.assert_array_equal(h5["obs/_index"][:], source_ids[rows])
             assert h5["X"].attrs["shape"].tolist() == [artifact.targetRows, 30]
+
+
+@pytest.fixture
+def sample_preparation(tmp_path, monkeypatch):
+    from profiling import app
+
+    source = tmp_path / "source.h5ad"
+    artifact = write_fixture_h5ad(source, nRows=80, nColumns=30, seed=5)
+    spec = _fixture_spec(source, nRows=80, nColumns=30, nnz=artifact.nnz)
+    config = load_profiling_config(
+        Path(__file__).parents[1] / "profiling" / "config.example.toml"
+    ).model_copy(
+        update={"datasetPrefixUri": "s3://bucket/samples", "targetSizes": (10, 25)}
+    )
+    store = MemoryStore()
+    store.put("samples/source.h5ad", source)
+    monkeypatch.setattr(
+        "profiling.r2.open_r2_object",
+        lambda uri: (store, uri.removeprefix("s3://bucket/")),
+    )
+    monkeypatch.setattr(app, "SOURCE_SPEC", spec)
+    monkeypatch.setattr(app, "_WORK", tmp_path / "work")
+    return app, config, store, source
+
+
+@pytest.mark.parametrize("command", ["prepare", "prepare-fixture"])
+@pytest.mark.parametrize("entrypoint", ["client", "worker"])
+def test_prepare_rejects_direct_input_before_io(
+    sample_preparation, monkeypatch, command, entrypoint
+):
+    app, config, store, _ = sample_preparation
+    payload = config.model_dump()
+    payload.update(inputUri="s3://bucket/samples/source.h5ad", targetSizes=(80,))
+    config = ProfilingConfig.model_validate(payload)
+    before = bytes(store.get("samples/source.h5ad").bytes())
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Direct input preparation must fail before I/O or spawn")
+
+    monkeypatch.setattr("profiling.r2.open_r2_object", forbidden)
+    monkeypatch.setattr(app, "_launch", forbidden)
+    monkeypatch.setattr(app, "attach_client_provenance", forbidden)
+    monkeypatch.setattr(app, "_load_config", lambda _: config)
+
+    with pytest.raises(
+        SystemExit if entrypoint == "client" else ValueError,
+        match=f"{command} cannot be used with inputUri",
+    ):
+        if entrypoint == "client":
+            app.main(command, "--config", "unused.toml")
+        elif command == "prepare":
+            app.prepare_datasets.local(config.model_dump())
+        else:
+            app.prepare_fixture_datasets_job.local(config.model_dump(), sizes=[80])
+
+    assert not app._WORK.exists()
+    assert bytes(store.get("samples/source.h5ad").bytes()) == before
+    assert [item["path"] for batch in store.list() for item in batch] == [
+        "samples/source.h5ad"
+    ]
+
+
+def test_prepare_records_identity_and_skips_without_source_io(sample_preparation):
+    app, config, store, source = sample_preparation
+    result = app.prepare_datasets.local(config.model_dump())
+    assert [item["nRows"] for item in result["uploaded"]] == [10, 25]
+    source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+    for n_rows in config.targetSizes:
+        payload = bytes(store.get(f"samples/{n_rows}.h5ad").bytes())
+        metadata = json.loads(bytes(store.get(f"samples/{n_rows}.h5ad.json").bytes()))
+        assert metadata["fileSha256"] == hashlib.sha256(payload).hexdigest()
+        assert metadata["sourceSha256"] == source_sha
+        assert metadata["fileBytes"] == len(payload)
+        assert metadata["eTag"] == store.head(f"samples/{n_rows}.h5ad")["e_tag"]
+        assert metadata["status"] == "complete"
+        with h5py.File(io.BytesIO(payload), "r") as h5:
+            rows = np.array(
+                [
+                    int(name.decode().removeprefix("cell-"))
+                    for name in h5["obs/_index"][:]
+                ]
+            )
+            assert metadata["sourceRowsSha256"] == ordered_source_row_digest(rows)
+            assert metadata["nnz"] == int(h5["X/indptr"][-1])
+            assert metadata["dataDtype"] == str(h5["X/data"].dtype)
+    store.delete("samples/source.h5ad")
+    shutil.rmtree(app._WORK)
+    skipped = app.prepare_datasets.local(config.model_dump())
+    assert skipped["uploaded"] == []
+    assert len(skipped["skipped"]) == 2
+    assert skipped["sourceOrigin"] == "not-needed"
+    assert skipped["sourceSha256"] == source_sha
+    assert not app._WORK.exists()
+
+
+def test_prepare_rejects_unverified_large_fixture_before_source_io(sample_preparation):
+    app, config, store, source = sample_preparation
+    fixture = write_fixture_h5ad(
+        source.parent / "large.h5ad", nRows=50_000, nColumns=500
+    )
+    assert fixture.fileBytes > 5_000_000
+    store.put("samples/10.h5ad", fixture.localPath)
+    before = {
+        item["path"]: bytes(store.get(item["path"]).bytes())
+        for batch in store.list()
+        for item in batch
+    }
+    with pytest.raises(ValueError, match="no identity metadata"):
+        app.prepare_datasets.local(config.model_dump())
+    assert not app._WORK.exists()
+    assert {
+        item["path"]: bytes(store.get(item["path"]).bytes())
+        for batch in store.list()
+        for item in batch
+    } == before
+
+
+@pytest.mark.parametrize(
+    "mismatch", ["seed", "source", "kind", "object", "reservation"]
+)
+def test_prepare_rejects_changed_identity_without_writes(
+    sample_preparation, monkeypatch, mismatch
+):
+    app, config, store, _ = sample_preparation
+    app.prepare_datasets.local(config.model_dump())
+    shutil.rmtree(app._WORK)
+    if mismatch == "seed":
+        config = config.model_copy(update={"samplingSeed": config.samplingSeed + 1})
+    elif mismatch == "source":
+        monkeypatch.setattr(
+            app, "SOURCE_SPEC", replace(app.SOURCE_SPEC, versionId="another-source")
+        )
+    elif mismatch == "object":
+        payload = bytes(store.get("samples/10.h5ad").bytes())
+        store.put("samples/10.h5ad", b"!" + payload[1:])
+    else:
+        metadata = json.loads(bytes(store.get("samples/10.h5ad.json").bytes()))
+        metadata["kind" if mismatch == "kind" else "status"] = (
+            "fixture" if mismatch == "kind" else "preparing"
+        )
+        store.put("samples/10.h5ad.json", json.dumps(metadata).encode())
+    before = {
+        item["path"]: bytes(store.get(item["path"]).bytes())
+        for batch in store.list()
+        for item in batch
+    }
+    with pytest.raises(ValueError, match="does not match|unfinished"):
+        app.prepare_datasets.local(config.model_dump())
+    assert not app._WORK.exists()
+    assert {
+        item["path"]: bytes(store.get(item["path"]).bytes())
+        for batch in store.list()
+        for item in batch
+    } == before
+
+
+def test_prepare_fills_only_missing_sizes(sample_preparation):
+    app, config, store, _ = sample_preparation
+    small = config.model_copy(update={"targetSizes": (10,)})
+    app.prepare_datasets.local(small.model_dump())
+    sample_before = bytes(store.get("samples/10.h5ad").bytes())
+    metadata_before = bytes(store.get("samples/10.h5ad.json").bytes())
+    result = app.prepare_datasets.local(config.model_dump())
+    assert [item["nRows"] for item in result["uploaded"]] == [25]
+    assert [item["nRows"] for item in result["skipped"]] == [10]
+    assert bytes(store.get("samples/10.h5ad").bytes()) == sample_before
+    assert bytes(store.get("samples/10.h5ad.json").bytes()) == metadata_before
+
+
+def test_upload_sample_keeps_interrupted_reservation(sample_preparation, monkeypatch):
+    app, config, store, source = sample_preparation
+    artifact = write_fixture_h5ad(source.parent / "new.h5ad", nRows=10, nColumns=30)
+
+    def interrupted(*args, **kwargs):
+        raise OSError("upload interrupted")
+
+    monkeypatch.setattr(app, "upload_file", interrupted)
+    with pytest.raises(OSError, match="upload interrupted") as exc:
+        app._upload_sample(config, artifact, kind="fixture")
+    assert "samples/10.h5ad.json" in exc.value.__notes__[0]
+    metadata = json.loads(bytes(store.get("samples/10.h5ad.json").bytes()))
+    assert metadata["status"] == "preparing"
+    with pytest.raises(FileExistsError, match="reservation already exists"):
+        app._upload_sample(config, artifact, kind="fixture")
+    with pytest.raises(FileNotFoundError):
+        store.head("samples/10.h5ad")
+
+
+def test_fixture_upload_records_identity_and_preserves_existing_sample(
+    sample_preparation,
+):
+    app, config, store, _ = sample_preparation
+    app.prepare_fixture_datasets_job.local(config.model_dump(), sizes=[10], nColumns=30)
+    payload = bytes(store.get("samples/10.h5ad").bytes())
+    metadata_payload = bytes(store.get("samples/10.h5ad.json").bytes())
+    metadata = json.loads(metadata_payload)
+    assert metadata["kind"] == "fixture"
+    assert metadata["source"] is None
+    assert metadata["fileSha256"] == hashlib.sha256(payload).hexdigest()
+    with pytest.raises(FileExistsError, match="Refusing to replace"):
+        app.prepare_fixture_datasets_job.local(
+            config.model_dump(), sizes=[10], nColumns=30
+        )
+    assert bytes(store.get("samples/10.h5ad").bytes()) == payload
+    assert bytes(store.get("samples/10.h5ad.json").bytes()) == metadata_payload
+    with pytest.raises(ValueError, match="kind"):
+        app.prepare_datasets.local(config.model_dump())
 
 
 def test_example_config_loads_prepare_resources() -> None:

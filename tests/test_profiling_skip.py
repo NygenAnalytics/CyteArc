@@ -35,8 +35,8 @@ def test_example_config_loads():
     assert config.resultUri(10_000, "createStore").endswith(
         "/results/10000/createStore.json"
     )
-    assert config.funnelResultUri(10_000).endswith("/results/10000/funnel.json")
-    assert config.e2eClaimUri().endswith("/results/e2e-claim.json")
+    assert config.workflowResultUri(10_000).endswith("/results/10000/funnel.json")
+    assert config.workflowClaimUri().endswith("/results/e2e-claim.json")
     leiden = config.resourcesFor("runLeiden")
     assert leiden.modalMemoryLimitMb == 32_768
     assert leiden.modalCpuLimit == 2.0
@@ -65,6 +65,51 @@ def test_run_tag_isolates_store_and_result_uris():
     )
 
 
+def test_direct_input_uses_the_original_object_for_its_declared_size():
+    payload = load_profiling_config(_EXAMPLE_CONFIG).model_dump()
+    payload.update(
+        inputUri="s3://bucket/h5ad/tabula_sapiens.h5ad", targetSizes=(483_152,)
+    )
+    config = ProfilingConfig.model_validate(payload)
+
+    assert config.datasetUri(483_152) == payload["inputUri"]
+    assert config.storeUri(483_152).endswith("/stores/483152.zarr")
+    with pytest.raises(ValueError, match="size 1000000 is not in config.targetSizes"):
+        config.datasetUri(1_000_000)
+
+
+@pytest.mark.parametrize(
+    "input_uri",
+    [
+        "https://bucket/file.h5ad",
+        "file.h5ad",
+        "s3://bucket",
+        "s3://bucket/",
+        "s3://bucket/folder/",
+        "s3:///file.h5ad",
+        "s3://bucket/file.h5ad?version=1",
+        "s3://bucket/file.h5ad#matrix",
+    ],
+)
+def test_direct_input_requires_an_s3_object_uri(input_uri):
+    payload = load_profiling_config(_EXAMPLE_CONFIG).model_dump()
+    payload.update(inputUri=input_uri, targetSizes=(483_152,))
+
+    with pytest.raises(ValidationError, match="inputUri must be an s3:// URI"):
+        ProfilingConfig.model_validate(payload)
+
+
+def test_direct_input_cannot_represent_multiple_sizes():
+    payload = load_profiling_config(_EXAMPLE_CONFIG).model_dump()
+    payload.update(
+        inputUri="s3://bucket/h5ad/tabula_sapiens.h5ad",
+        targetSizes=(483_152, 1_000_000),
+    )
+
+    with pytest.raises(ValidationError, match="exactly one targetSizes entry"):
+        ProfilingConfig.model_validate(payload)
+
+
 def test_fixed_resource_map_expands_the_current_funnel():
     fixed = {"placeholder": "fixed"}
     normalized = _normalize_raw_config(
@@ -86,6 +131,19 @@ def test_workflow_defaults_are_algorithmic_not_output_aliases():
     assert not hasattr(workflow, "leidenLabel")
     assert not hasattr(workflow, "markerFeatures")
     assert not hasattr(workflow, "clusterLabelColumn")
+
+
+@pytest.mark.parametrize(
+    "settings, message",
+    [
+        ({"cellKey": "selected_cells"}, "profiling does not use cellKey"),
+        ({"parisNClusters": 12}, "profiling does not run Paris"),
+        ({"parisMinClusterSize": 20}, "profiling does not run Paris"),
+    ],
+)
+def test_workflow_rejects_ignored_settings(settings, message):
+    with pytest.raises(ValidationError, match=message):
+        WorkflowParameters.model_validate(settings)
 
 
 def test_cluster_source_requires_an_explicit_artifact_id() -> None:
@@ -255,6 +313,9 @@ def test_stage_run_result_json_shape():
         "utilization": None,
         "details": None,
         "provenance": None,
+        "settings": None,
+        "measurementWindows": None,
+        "sampleIntervalSeconds": None,
         "datasetUri": None,
         "datasetETag": None,
         "datasetBytes": None,

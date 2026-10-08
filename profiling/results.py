@@ -38,7 +38,7 @@ def claim_submission(
     config: ProfilingConfig, nRows: int, stage: str, submissionId: str
 ) -> None:
     _require_submission_id(submissionId)
-    uri = f"{config.funnelResultUri(nRows)}.submissions/{submissionId}/{stage}.json"
+    uri = f"{config.workflowResultUri(nRows)}.submissions/{submissionId}/{stage}.json"
     if not put_json_if_absent(
         uri, {"submissionId": submissionId, "nRows": nRows, "stage": stage}
     ):
@@ -97,7 +97,7 @@ def write_funnel_result(
     nRows: int,
     payload: dict[str, object],
 ) -> str:
-    uri = config.funnelResultUri(nRows)
+    uri = config.workflowResultUri(nRows)
     if not put_json_if_absent(uri, payload):
         raise FileExistsError(f"Refusing to overwrite existing funnel result at {uri}")
     return uri

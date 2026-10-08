@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from cytearc import DataStore, H5adReader, H5adToZarr, configure_output
+from cytearc import DataStore, H5adReader, H5adToZarr, configure_output, inspect_h5ad
 from cytearc.metadata.artifacts import (
     plan_cell_data_artifact,
     write_cell_data_artifact,
@@ -202,6 +202,9 @@ class StageRunResult:
     utilization: dict[str, float | None] | None = None
     details: dict[str, Any] | None = None
     provenance: dict[str, Any] | None = None
+    settings: dict[str, Any] | None = None
+    measurementWindows: dict[str, str] | None = None
+    sampleIntervalSeconds: float | None = None
     # The downloaded input H5AD of a createStore stage.
     datasetUri: str | None = None
     datasetETag: str | None = None
@@ -209,6 +212,42 @@ class StageRunResult:
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def stage_settings(
+    workflow: WorkflowParameters,
+    resources: StageResources,
+    *,
+    countMatrix: CountMatrixConfig | None = None,
+    storageIo: StorageIoConfig | None = None,
+    invalidateCache: bool = False,
+    allowArtifactReuse: bool = False,
+    recordStoreOperations: bool = True,
+    sharedSession: bool = False,
+    resetCgroupPeak: bool = True,
+) -> dict[str, Any]:
+    from cytearc.storage.count_matrix import DEFAULT_COUNT_MATRIX_POLICY
+    from cytearc.storage.io_policy import DEFAULT_STORAGE_IO_POLICY
+
+    return {
+        "workflow": workflow.model_dump(mode="json"),
+        "requestedResources": resources.model_dump(mode="json"),
+        "countMatrix": (
+            asdict(DEFAULT_COUNT_MATRIX_POLICY)
+            if countMatrix is None
+            else countMatrix.model_dump(mode="json")
+        ),
+        "storageIo": (
+            asdict(DEFAULT_STORAGE_IO_POLICY)
+            if storageIo is None
+            else storageIo.model_dump(mode="json")
+        ),
+        "invalidateCache": invalidateCache,
+        "allowArtifactReuse": allowArtifactReuse,
+        "recordStoreOperations": recordStoreOperations,
+        "sharedSession": sharedSession,
+        "resetCgroupPeak": resetCgroupPeak,
+    }
 
 
 def _storage_profile(uri: str) -> Any:
@@ -289,6 +328,7 @@ def _close_h5ad_reader(reader: H5adReader) -> None:
 def _prepare_create_store(
     *,
     localH5adPath: Path,
+    nRows: int,
     storeUri: str,
     workflow: WorkflowParameters,
     resources: StageResources,
@@ -302,17 +342,16 @@ def _prepare_create_store(
     createStore stage job therefore deletes the store before this runs, and
     an unforced one refuses a destination that already holds a store.
     """
+    inspection = inspect_h5ad(str(localH5adPath))
+    if inspection.nCells != nRows:
+        raise ValueError(
+            f"H5AD contains {inspection.nCells} cells, but the requested size is {nRows}"
+        )
+    if not inspection.integerLike:
+        raise ValueError("H5AD has no integer-like count matrix for RNA profiling")
     options = storage_options(storeUri)
     location = _wrap_store_probe(storeUri, options, storeProbe)
-    reader = H5adReader(
-        str(localH5adPath),
-        matrix_key="X",
-        cell_attrs_key="obs",
-        cell_ids_key="_index",
-        feature_attrs_key="var",
-        feature_ids_key="_index",
-        feature_name_key="feature_name",
-    )
+    reader = H5adReader.from_inspect(inspection)
     try:
         writer = H5adToZarr(
             reader,
@@ -669,8 +708,8 @@ def install_stage_zarr_runtime() -> None:
 # createStore times only the counts write, which keeps the definition of the
 # published benchmark tables.
 CREATE_STORE_TIMING = (
-    "seconds covers writer._write_counts only; inputSetupSeconds covers opening "
-    "the H5AD and constructing H5adToZarr (dtype scan, cell and feature metadata, "
+    "seconds covers writer._write_counts only; inputSetupSeconds covers inspecting "
+    "and opening the H5AD and constructing H5adToZarr (dtype scan, cell and feature metadata, "
     "and assay creation)"
 )
 
@@ -823,6 +862,7 @@ def run_stage(
                     with timer.inputSetup():
                         reader, writer = _prepare_create_store(
                             localH5adPath=localH5adPath,
+                            nRows=nRows,
                             storeUri=storeUri,
                             workflow=workflow,
                             resources=resources,
@@ -837,8 +877,16 @@ def run_stage(
                         writer._write_counts(batch_size=workflow.h5adBatchSize)
                 finally:
                     if writer is not None:
+                        assert reader is not None
                         details = {
                             "timingDefinition": CREATE_STORE_TIMING,
+                            "h5adInput": {
+                                "matrixKey": reader.matrixKey,
+                                "featureAttrsKey": reader.featureAttrsKey,
+                                "featureNameKey": reader.featNamesKey,
+                                "nRows": reader.nCells,
+                                "nColumns": reader.nFeatures,
+                            },
                             "h5adProducerWorkers": getattr(
                                 writer,
                                 "_lastImportProducerCount",
@@ -1111,6 +1159,33 @@ def run_stage(
             nonpreemptible=True,
             clientProvenance=clientProvenance,
         ),
+        settings=stage_settings(
+            workflow,
+            resources,
+            countMatrix=countMatrix,
+            storageIo=storageIo,
+            invalidateCache=invalidateCache,
+            allowArtifactReuse=allowArtifactReuse,
+            recordStoreOperations=recordStoreOperations,
+            sharedSession=session is not None,
+            resetCgroupPeak=resetCgroupPeak,
+        ),
+        measurementWindows={
+            "seconds": (
+                "Operation inside the Leiden worker, excluding process startup"
+                if worker_status is not None
+                else "Operation only"
+            ),
+            "memory": "Input setup, operation, and validation",
+            "wholeFunctionSeconds": (
+                "Input setup, operation, validation, and sampler startup and shutdown"
+            ),
+            "processCpuSeconds": (
+                "Stage setup through measurement summary, excluding provenance"
+            ),
+            "childCpuSeconds": "Child processes reaped during the stage",
+        },
+        sampleIntervalSeconds=float(sampleIntervalSeconds),
         **resource_summary,
     )
     utilization = stage_utilization(result.to_json())
@@ -1356,20 +1431,6 @@ def _validate_experiment(
 _LEIDEN_OPERATION = "run_leiden_clustering"
 
 
-def _leiden_cluster_rank(
-    status: Any,
-    workflow: WorkflowParameters,
-) -> tuple[int, int]:
-    params = status.parameters or {}
-    resolution_ok = params.get("resolution") == workflow.leidenResolution
-    seed_ok = params.get("random_seed") == workflow.leidenSeed
-    backend = params.get("backend")
-    backend_ok = backend == workflow.leidenBackend
-    rank = int(resolution_ok and seed_ok and backend_ok)
-    created = status.created_at_ns or 0
-    return (rank, created)
-
-
 def _select_leiden_clusters(
     root: Any,
     workflow: WorkflowParameters,
@@ -1389,19 +1450,28 @@ def _select_leiden_clusters(
             "Consume stage needs a complete run_leiden_clustering artifact "
             f"on assay {workflow.assayName!r}"
         )
-    ranked = [
-        (_leiden_cluster_rank(inspect_artifact(root, ref), workflow), ref)
-        for ref in refs
-    ]
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    best_rank, chosen = ranked[0]
-    if best_rank[0] == 0:
+    matching = []
+    for ref in refs:
+        parameters = inspect_artifact(root, ref).parameters or {}
+        if (
+            parameters.get("resolution") == workflow.leidenResolution
+            and parameters.get("random_seed") == workflow.leidenSeed
+            and parameters.get("backend") == workflow.leidenBackend
+        ):
+            matching.append(ref)
+    if not matching:
         raise ValueError(
             "No Leiden cluster artifact matches resolution "
             f"{workflow.leidenResolution}, backend {workflow.leidenBackend!r}, "
             f"and seed {workflow.leidenSeed}"
         )
-    return chosen
+    if len(matching) > 1:
+        artifact_ids = ", ".join(ref.artifact_id for ref in matching)
+        raise ValueError(
+            f"Multiple Leiden cluster artifacts match: {artifact_ids}. "
+            "Use a store and workflow Leiden settings that identify one artifact."
+        )
+    return matching[0]
 
 
 def _graph_from_clusters(root: Any, clusters: ArtifactRef) -> ArtifactRef:

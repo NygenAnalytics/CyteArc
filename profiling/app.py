@@ -1,23 +1,4 @@
-"""Modal entrypoints for one-shot CyteArc profiling.
-
-Deploy once (you run this), then trigger jobs that keep running if your laptop
-disconnects:
-
-  uv run --group profiling modal deploy --env cytearc_profiling -m profiling.modal_app
-
-  uv run --group profiling modal run --env cytearc_profiling \\
-    -m profiling.modal_app -- prepare --config profiling/config.toml
-  uv run --group profiling modal run --env cytearc_profiling \\
-    -m profiling.modal_app -- run-e2e --config profiling/config.toml --size 1000000
-
-prepare / run / run-all / run-local / run-e2e spawn and return immediately.
-run-all fans out one size pipeline per container (stages stay sequential on R2).
-run-e2e and run-local run one funnel in one container, with the Zarr store on R2
-or on the container's ephemeral disk (fast_local). Like DataStore.pipeline, the
-funnel runs its stages one at a time.
-Watch progress with:
-  uv run --group profiling modal app logs cytearc-profiling --env cytearc_profiling
-"""
+"""Measure CyteArc steps and fixed benchmark workflows on Modal."""
 
 import argparse
 import dataclasses
@@ -44,13 +25,14 @@ from profiling.config import (
     bind_cluster_source,
     load_profiling_config,
     require_consume_only_override,
+    validate_requested_stages,
 )
 from profiling.datasets import (
     SOURCE_SPEC,
+    PreparedArtifact,
     download_source,
     prepare_fixture_datasets,
     prepare_local_datasets,
-    sha256_file,
 )
 from profiling.modal_image import COMMON_FUNCTION_OPTIONS, app
 from profiling.modal_resources import (
@@ -72,8 +54,10 @@ from profiling.r2 import (
     ObjectDownload,
     delete_prefix,
     download_file,
+    get_json,
     object_exists,
-    object_size,
+    object_metadata,
+    put_json,
     put_json_if_absent,
     storage_options,
     upload_file,
@@ -96,6 +80,7 @@ from profiling.stages import (
     require_artifact_ref,
     run_stage,
     session_resource_mismatches,
+    stage_settings,
     summarize_resource_measurement,
 )
 
@@ -211,7 +196,7 @@ def _dataset_fields(
     }
 
 
-def _e2e_conflicting_uris(
+def _workflow_conflicting_uris(
     config: ProfilingConfig,
     nRows: int,
     stages: tuple[StageName, ...] = CORE_STAGE_ORDER,
@@ -219,8 +204,8 @@ def _e2e_conflicting_uris(
     storeOnR2: bool = True,
 ) -> list[str]:
     candidates = [
-        config.e2eClaimUri(),
-        config.funnelResultUri(nRows),
+        config.workflowClaimUri(),
+        config.workflowResultUri(nRows),
         *(config.resultUri(nRows, stage) for stage in stages),
         *(config.stageClaimUri(nRows, stage) for stage in stages),
     ]
@@ -229,7 +214,7 @@ def _e2e_conflicting_uris(
     return [uri for uri in candidates if object_exists(uri)]
 
 
-def _require_funnel_settings(
+def _require_workflow_settings(
     config: ProfilingConfig,
     nRows: int,
     stages: tuple[StageName, ...],
@@ -237,6 +222,7 @@ def _require_funnel_settings(
     storeOnR2: bool,
 ) -> WorkflowParameters:
     """Reject a funnel whose settings would not run as recorded; return its workflow."""
+    validate_requested_stages(stages)
     if storeOnR2:
         require_consume_only_override(config, nRows, stages)
     mismatches = session_resource_mismatches(stages, config.resourcesFor)
@@ -248,13 +234,13 @@ def _require_funnel_settings(
     return bind_cluster_source(config, nRows, stages)
 
 
-def _e2e_function_options(
+def _workflow_function_options(
     config: ProfilingConfig,
     stages: tuple[StageName, ...] = CORE_STAGE_ORDER,
 ) -> dict[str, Any]:
-    envelope = _e2e_resource_envelope(config, stages)
+    envelope = _workflow_resource_envelope(config, stages)
     peak = max(
-        _e2e_resources(config, stages),
+        _workflow_stage_resources(config, stages),
         key=lambda item: (
             item.modalMemoryLimitMb,
             item.modalCpuLimit,
@@ -279,7 +265,7 @@ def _e2e_function_options(
     return options
 
 
-def _e2e_resources(
+def _workflow_stage_resources(
     config: ProfilingConfig,
     stages: tuple[StageName, ...] = CORE_STAGE_ORDER,
 ) -> list[StageResources]:
@@ -293,12 +279,12 @@ def _e2e_resources(
     return [config.resourcesFor(stage) for stage in stages]
 
 
-def _e2e_resource_envelope(
+def _workflow_resource_envelope(
     config: ProfilingConfig,
     stages: tuple[StageName, ...] = CORE_STAGE_ORDER,
 ) -> dict[str, int | float]:
     """Size one container to the per-field maximum of the funnel's stages."""
-    resources = _e2e_resources(config, stages)
+    resources = _workflow_stage_resources(config, stages)
     require_base_ephemeral_disk(max(item.ephemeralDiskMb for item in resources))
     return {
         "modalMemoryRequestMb": max(item.modalMemoryRequestMb for item in resources),
@@ -307,6 +293,126 @@ def _e2e_resource_envelope(
         "modalCpuLimit": max(item.modalCpuLimit for item in resources),
         "ephemeralDiskMb": BASE_EPHEMERAL_DISK_MB,
         "timeoutSeconds": MAX_TIMEOUT_SECONDS,
+    }
+
+
+def _existing_sample(config: ProfilingConfig, nRows: int) -> dict[str, Any] | None:
+    uri = config.datasetUri(nRows)
+    metadata_uri = f"{uri}.json"
+    existing = object_metadata(uri)
+    try:
+        metadata = get_json(metadata_uri)
+    except FileNotFoundError:
+        if existing is None:
+            return None
+        raise ValueError(
+            f"Existing sample {uri} has no identity metadata at {metadata_uri}. "
+            "It remains usable for profiling; use a fresh datasetPrefixUri to "
+            "prepare verified samples."
+        ) from None
+    if metadata.get("status") != "complete":
+        raise ValueError(
+            f"Sample preparation is unfinished at {metadata_uri}. Confirm its "
+            "job has stopped before inspecting or removing that reservation."
+        )
+    expected = {
+        "kind": "cellxgene",
+        "seed": config.samplingSeed,
+        "source": dataclasses.asdict(SOURCE_SPEC),
+        "nRows": nRows,
+        "nColumns": SOURCE_SPEC.nColumns,
+        "dataDtype": SOURCE_SPEC.dataDtype,
+        "indicesDtype": SOURCE_SPEC.indicesDtype,
+        "indptrDtype": SOURCE_SPEC.indptrDtype,
+    }
+    mismatches = [key for key, value in expected.items() if metadata.get(key) != value]
+    for key in ("fileSha256", "sourceRowsSha256", "sourceSha256"):
+        value = metadata.get(key)
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(char not in "0123456789abcdef" for char in value)
+        ):
+            mismatches.append(key)
+    if existing is None:
+        mismatches.append("missing H5AD")
+    elif (
+        metadata.get("fileBytes") != existing.fileBytes
+        or not existing.eTag
+        or metadata.get("eTag") != existing.eTag
+    ):
+        mismatches.append("object identity")
+    if mismatches:
+        raise ValueError(
+            f"Existing sample {uri} does not match preparation settings or its "
+            f"saved identity ({', '.join(mismatches)}). Use a fresh datasetPrefixUri."
+        )
+    return metadata
+
+
+def _upload_sample(
+    config: ProfilingConfig,
+    artifact: PreparedArtifact,
+    *,
+    kind: Literal["cellxgene", "fixture"],
+) -> dict[str, Any]:
+    uri = config.datasetUri(artifact.targetRows)
+    metadata_uri = f"{uri}.json"
+    if object_exists(uri):
+        raise FileExistsError(f"Refusing to replace existing sample {uri}")
+    metadata = {
+        "kind": kind,
+        "seed": config.samplingSeed,
+        "source": dataclasses.asdict(SOURCE_SPEC) if kind == "cellxgene" else None,
+        "sourceSha256": artifact.sourceSha256,
+        "nRows": artifact.targetRows,
+        "nColumns": artifact.nColumns,
+        "nnz": artifact.nnz,
+        "fileBytes": artifact.fileBytes,
+        "fileSha256": artifact.sha256,
+        "sourceRowsSha256": artifact.sourceRowsSha256,
+        "finalSourceRow": artifact.finalSourceRow,
+        "dataDtype": artifact.dataDtype,
+        "indicesDtype": artifact.indicesDtype,
+        "indptrDtype": artifact.indptrDtype,
+    }
+    reservation = {**metadata, "status": "preparing", "owner": uuid4().hex}
+    if not put_json_if_absent(metadata_uri, reservation):
+        raise FileExistsError(
+            f"Sample identity or preparation reservation already exists at {metadata_uri}"
+        )
+    try:
+        if object_exists(uri):
+            raise FileExistsError(f"Refusing to replace existing sample {uri}")
+        # Real samples need multipart upload; their sidecar excludes other preparers.
+        upload_file(artifact.localPath, uri, createOnly=kind == "fixture")
+        uploaded = object_metadata(uri)
+        if (
+            uploaded is None
+            or uploaded.fileBytes != artifact.fileBytes
+            or not uploaded.eTag
+        ):
+            raise RuntimeError(
+                f"Uploaded sample identity could not be verified at {uri}"
+            )
+        if get_json(metadata_uri) != reservation:
+            raise RuntimeError(f"Sample reservation changed at {metadata_uri}")
+        put_json(
+            metadata_uri, {**metadata, "status": "complete", "eTag": uploaded.eTag}
+        )
+    except Exception as exc:
+        exc.add_note(
+            f"Preparation metadata remains at {metadata_uri}; inspect it and the "
+            "sample after this job stops before attempting preparation again."
+        )
+        raise
+    return {
+        "nRows": artifact.targetRows,
+        "uri": uri,
+        "fileBytes": artifact.fileBytes,
+        "nnz": artifact.nnz,
+        "nColumns": artifact.nColumns,
+        "status": "uploaded",
     }
 
 
@@ -319,61 +425,59 @@ def _e2e_resource_envelope(
 )
 def prepare_datasets(configDict: dict[str, Any]) -> dict[str, Any]:
     config = ProfilingConfig.model_validate(configDict)
+    if config.inputUri is not None:
+        raise ValueError("prepare cannot be used with inputUri; run step or workflow")
     os.environ.setdefault("R2_ENDPOINT", config.r2EndpointUrl)
-    work = _WORK / "prepare"
-    work.mkdir(parents=True, exist_ok=True)
-    source_path = work / "source.h5ad"
-    source_uri = config.sourceUri()
-    source_origin = "local-cache"
-    if not source_path.is_file():
-        if object_exists(source_uri):
-            download_file(source_uri, source_path)
-            source_origin = "r2-cache"
-        else:
-            download_source(
-                source_path,
-                url=SOURCE_SPEC.url,
-                expectedBytes=SOURCE_SPEC.sourceBytes,
-            )
-            upload_file(source_path, source_uri)
-            source_origin = "cellxgene+r2-upload"
-
     uploaded: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    # Fixture uploads are tiny; real nested samples are much larger.
-    minimum_real_bytes = 5_000_000
-
     pending_sizes: list[int] = []
+    source_sha256 = None
     for n_rows in config.targetSizes:
-        uri = config.datasetUri(n_rows)
-        existing = object_size(uri)
-        if existing is not None and existing >= minimum_real_bytes:
-            skipped.append(
-                {
-                    "nRows": n_rows,
-                    "uri": uri,
-                    "fileBytes": existing,
-                    "status": "skipped-existing",
-                }
-            )
+        existing = _existing_sample(config, n_rows)
+        if existing is None:
+            pending_sizes.append(n_rows)
             continue
-        pending_sizes.append(n_rows)
-
-    def _upload_artifact(artifact: Any) -> None:
-        uri = config.datasetUri(artifact.targetRows)
-        upload_file(artifact.localPath, uri)
-        uploaded.append(
+        if source_sha256 is not None and existing["sourceSha256"] != source_sha256:
+            raise ValueError(
+                "Existing samples have different source hashes; use a fresh datasetPrefixUri"
+            )
+        source_sha256 = existing["sourceSha256"]
+        skipped.append(
             {
-                "nRows": artifact.targetRows,
-                "uri": uri,
-                "fileBytes": artifact.fileBytes,
-                "nnz": artifact.nnz,
-                "status": "uploaded",
+                "nRows": n_rows,
+                "uri": config.datasetUri(n_rows),
+                "fileBytes": existing["fileBytes"],
+                "status": "skipped-existing",
             }
         )
 
-    source_sha256 = None
+    source_uri = config.sourceUri()
+    source_origin = "not-needed"
     if pending_sizes:
+        work = _WORK / "prepare"
+        work.mkdir(parents=True, exist_ok=True)
+        source_path = work / "source.h5ad"
+        source_origin = "local-cache"
+        if not source_path.is_file():
+            if object_exists(source_uri):
+                download_file(source_uri, source_path)
+                source_origin = "r2-cache"
+            else:
+                download_source(
+                    source_path,
+                    url=SOURCE_SPEC.url,
+                    expectedBytes=SOURCE_SPEC.sourceBytes,
+                )
+                upload_file(source_path, source_uri)
+                source_origin = "cellxgene+r2-upload"
+
+        def _upload_artifact(artifact: PreparedArtifact) -> None:
+            if source_sha256 is not None and artifact.sourceSha256 != source_sha256:
+                raise ValueError(
+                    "Source hash differs from existing samples; use a fresh datasetPrefixUri"
+                )
+            uploaded.append(_upload_sample(config, artifact, kind="cellxgene"))
+
         prepared = prepare_local_datasets(
             source_path,
             work / "subsets",
@@ -383,8 +487,6 @@ def prepare_datasets(configDict: dict[str, Any]) -> dict[str, Any]:
             onArtifact=_upload_artifact,
         )
         source_sha256 = prepared.sourceSha256
-    elif source_path.is_file():
-        source_sha256 = sha256_file(source_path)
 
     return {
         "uploaded": uploaded,
@@ -413,6 +515,10 @@ def prepare_fixture_datasets_job(
     ``datasetPrefixUri`` at a fixture prefix to test stage jobs with them.
     """
     config = ProfilingConfig.model_validate(configDict)
+    if config.inputUri is not None:
+        raise ValueError(
+            "prepare-fixture cannot be used with inputUri; run step or workflow"
+        )
     os.environ.setdefault("R2_ENDPOINT", config.r2EndpointUrl)
     selected = tuple(sizes) if sizes else (10_000,)
     for size in selected:
@@ -424,18 +530,8 @@ def prepare_fixture_datasets_job(
     work = _fresh_work_dir(_WORK / "fixture")
     uploaded: list[dict[str, Any]] = []
 
-    def _upload_artifact(artifact: Any) -> None:
-        uri = config.datasetUri(artifact.targetRows)
-        upload_file(artifact.localPath, uri, createOnly=True)
-        uploaded.append(
-            {
-                "nRows": artifact.targetRows,
-                "uri": uri,
-                "fileBytes": artifact.fileBytes,
-                "nnz": artifact.nnz,
-                "nColumns": artifact.nColumns,
-            }
-        )
+    def _upload_artifact(artifact: PreparedArtifact) -> None:
+        uploaded.append(_upload_sample(config, artifact, kind="fixture"))
 
     prepare_fixture_datasets(
         work,
@@ -456,7 +552,7 @@ def prepare_fixture_datasets_job(
     # Targeted writeCountsT / long stages: avoid worker preemption.
     nonpreemptible=True,
 )
-def run_stage_job(
+def profile_step(
     configDict: dict[str, Any],
     nRows: int,
     stage: StageName,
@@ -482,7 +578,7 @@ def run_stage_job(
         return completed
     claim_stage(config, nRows, stage, submissionId)
     try:
-        if object_exists(config.e2eClaimUri()):
+        if object_exists(config.workflowClaimUri()):
             raise FileExistsError(
                 f"runTag {config.runTag!r} is held by an e2e funnel; use a fresh runTag"
             )
@@ -544,6 +640,15 @@ def run_stage_job(
                 storeUri=store_uri,
                 error=f"{type(exc).__name__}: {exc}",
                 workers=resources.workers,
+                settings=stage_settings(
+                    workflow,
+                    resources,
+                    countMatrix=config.countMatrix,
+                    storageIo=config.storageIo,
+                    invalidateCache=force,
+                    allowArtifactReuse=allowReuse,
+                ),
+                provenance=provenance_from_config(config, nonpreemptible=True),
             )
         if download is not None:
             result = dataclasses.replace(
@@ -561,24 +666,18 @@ def run_stage_job(
     memory=32_768,
     cpu=8.0,
     ephemeral_disk=BASE_EPHEMERAL_DISK_MB,
-    # One container holds the whole funnel, and run-local keeps the store on
+    # One container holds the whole workflow, and local storage keeps the store on
     # its ephemeral disk; avoid preemption (Modal bills about 3x CPU/memory).
     nonpreemptible=True,
 )
-def run_funnel_job(
+def profile_workflow(
     configDict: dict[str, Any],
     nRows: int,
     submissionId: str,
     storeBackend: Literal["r2", "local"],
     stages: list[StageName],
 ) -> dict[str, Any]:
-    """Run one funnel in one container and persist its summary to R2.
-
-    The store lives on R2 (run-e2e) or on the container's ephemeral disk
-    (run-local), and the stages run one at a time in order. The create-only
-    runTag claim makes the funnel exclusive, and stage jobs refuse a runTag it
-    holds.
-    """
+    """Run the benchmark workflow in one container and save its results to R2."""
     config = ProfilingConfig.model_validate(configDict)
     os.environ.setdefault("R2_ENDPOINT", config.r2EndpointUrl)
     selected = tuple(stages)
@@ -591,10 +690,10 @@ def run_funnel_job(
     if not selected or selected[0] != "createStore":
         raise ValueError("A funnel must start with createStore")
     local = storeBackend == "local"
-    resource_envelope = _e2e_resource_envelope(config, selected)
+    resource_envelope = _workflow_resource_envelope(config, selected)
     # findMarkers reads imported clusters only when the funnel imports them.
-    workflow = _require_funnel_settings(config, nRows, selected, storeOnR2=not local)
-    conflicts = _e2e_conflicting_uris(config, nRows, selected, storeOnR2=not local)
+    workflow = _require_workflow_settings(config, nRows, selected, storeOnR2=not local)
+    conflicts = _workflow_conflicting_uris(config, nRows, selected, storeOnR2=not local)
     if conflicts:
         raise FileExistsError(
             "A funnel requires a fresh runTag; existing R2 objects: "
@@ -602,7 +701,7 @@ def run_funnel_job(
         )
     store_uri = config.storeUri(nRows)
     if not put_json_if_absent(
-        config.e2eClaimUri(),
+        config.workflowClaimUri(),
         {
             "runTag": config.runTag,
             "submissionId": submissionId,
@@ -615,8 +714,10 @@ def run_funnel_job(
     # A stage job may have claimed a stage between the check and the runTag claim.
     late_conflicts = [
         uri
-        for uri in _e2e_conflicting_uris(config, nRows, selected, storeOnR2=not local)
-        if uri != config.e2eClaimUri()
+        for uri in _workflow_conflicting_uris(
+            config, nRows, selected, storeOnR2=not local
+        )
+        if uri != config.workflowClaimUri()
     ]
     if late_conflicts:
         raise FileExistsError(
@@ -631,9 +732,10 @@ def run_funnel_job(
     local_h5ad = work / f"{nRows}.h5ad"
     if local:
         store_uri = str(work / f"{nRows}.zarr")
-    label = "e2e" if not local else "local"
+    label = f"workflow {storeBackend}"
 
-    sampler = ResourceSampler()
+    sample_interval_seconds = 0.1
+    sampler = ResourceSampler(sampleIntervalSeconds=sample_interval_seconds)
     sampler.start()
     started = time.perf_counter()
     download: ObjectDownload | None = None
@@ -727,6 +829,23 @@ def run_funnel_job(
         "wholeFunctionSeconds": time.perf_counter() - started,
         "modalResources": resource_envelope,
         "stageOrder": list(selected),
+        "settings": {
+            stage: stage_settings(
+                workflow,
+                config.resourcesFor(stage),
+                countMatrix=config.countMatrix,
+                storageIo=config.storageIo,
+                sharedSession=True,
+                resetCgroupPeak=False,
+            )
+            for stage in selected
+        },
+        "sampleIntervalSeconds": sample_interval_seconds,
+        "measurementWindows": {
+            "memory": "Dataset download and all steps, including result persistence",
+            "funnelSeconds": "All steps and result persistence, excluding dataset download",
+            "wholeFunctionSeconds": "Dataset download, all steps, and sampler shutdown",
+        },
         "completedStages": [
             item["stage"] for item in outcomes if item["status"] == "ok"
         ],
@@ -735,8 +854,8 @@ def run_funnel_job(
             {"stage": item["stage"], **(item.get("utilization") or {})}
             for item in outcomes
         ],
-        "claimUri": config.e2eClaimUri(),
-        "funnelResultUri": config.funnelResultUri(nRows),
+        "claimUri": config.workflowClaimUri(),
+        "funnelResultUri": config.workflowResultUri(nRows),
         **summarize_resource_measurement(measurement),
         "provenance": provenance_from_config(config, nonpreemptible=True),
     }
@@ -751,7 +870,7 @@ def run_funnel_job(
     cpu=1.0,
     ephemeral_disk=BASE_EPHEMERAL_DISK_MB,
 )
-def run_size_jobs(
+def profile_steps_for_size(
     configDict: dict[str, Any],
     nRows: int,
     submissionId: str,
@@ -777,7 +896,7 @@ def run_size_jobs(
             maxContainers=max(1, len(config.targetSizes)),
             retries=0,
         )
-        call = run_stage_job.with_options(**options).spawn(
+        call = profile_step.with_options(**options).spawn(
             configDict,
             nRows,
             stage,
@@ -826,7 +945,7 @@ def run_size_jobs(
     cpu=1.0,
     ephemeral_disk=BASE_EPHEMERAL_DISK_MB,
 )
-def run_all_jobs(
+def profile_steps(
     configDict: dict[str, Any],
     submissionId: str,
     sizes: list[int] | None = None,
@@ -841,7 +960,7 @@ def run_all_jobs(
     for n_rows in selected_sizes:
         if n_rows not in config.targetSizes:
             raise ValueError(f"size {n_rows} is not in config.targetSizes")
-    if object_exists(config.e2eClaimUri()):
+    if object_exists(config.workflowClaimUri()):
         raise FileExistsError(
             f"runTag {config.runTag!r} is held by an e2e funnel; use a fresh runTag"
         )
@@ -854,7 +973,7 @@ def run_all_jobs(
 
     stage_list = list(selected_stages)
     handles = [
-        run_size_jobs.with_options(**orchestrator_options).spawn(
+        profile_steps_for_size.with_options(**orchestrator_options).spawn(
             configDict,
             n_rows,
             submissionId,
@@ -912,7 +1031,7 @@ def _deployed_function(config: ProfilingConfig, name: str) -> modal.Function:
             f"Could not find deployed function {MODAL_APP_NAME}/{name}. "
             "Deploy first with:\n"
             "  uv run --group profiling modal deploy "
-            f"--env {MODAL_ENVIRONMENT_NAME} -m profiling.modal_app\n"
+            f"--env {MODAL_ENVIRONMENT_NAME} -m profiling.app\n"
             f"Original error: {exc}"
         ) from exc
 
@@ -947,7 +1066,7 @@ def _launch(
 
 @app.local_entrypoint()
 def main(*arg_list: str) -> None:
-    parser = argparse.ArgumentParser(prog="profiling.modal_app")
+    parser = argparse.ArgumentParser(prog="profiling.app")
     sub = parser.add_subparsers(dest="command", required=True)
 
     smoke_parser = sub.add_parser("smoke")
@@ -965,10 +1084,15 @@ def main(*arg_list: str) -> None:
         "Accept a stage whose artifact already existed. Its seconds then measure a "
         "cache lookup, not the computation."
     )
-    run_parser = sub.add_parser("run")
+    run_parser = sub.add_parser("step", help="Measure one step in its own container")
+    run_parser.add_argument(
+        "stage",
+        choices=ALL_STAGE_CHOICES,
+        metavar="STEP",
+        help="Step to measure, for example runPca",
+    )
     run_parser.add_argument("--config", required=True)
     run_parser.add_argument("--size", type=int, required=True)
-    run_parser.add_argument("--stage", choices=ALL_STAGE_CHOICES, required=True)
     run_parser.add_argument(
         "--force",
         action="store_true",
@@ -985,11 +1109,18 @@ def main(*arg_list: str) -> None:
         help="Spawn from this modal run app (no deploy). Prefer --detach.",
     )
 
-    all_parser = sub.add_parser("run-all")
+    all_parser = sub.add_parser(
+        "steps", help="Measure steps in separate containers for one or more sizes"
+    )
     all_parser.add_argument("--config", required=True)
     all_parser.add_argument("--sizes", nargs="*", type=int, default=None)
     all_parser.add_argument(
-        "--stages", nargs="*", choices=ALL_STAGE_CHOICES, default=None
+        "--steps",
+        dest="stages",
+        nargs="+",
+        choices=ALL_STAGE_CHOICES,
+        metavar="STEP",
+        default=None,
     )
     all_parser.add_argument("--allow-reuse", action="store_true", help=allow_reuse_help)
     all_parser.add_argument(
@@ -998,31 +1129,27 @@ def main(*arg_list: str) -> None:
         help="Spawn from this modal run app (no deploy). Prefer --detach.",
     )
 
-    local_parser = sub.add_parser(
-        "run-local",
-        help=(
-            "One-container funnel on ephemeral-disk Zarr (fast_local); "
-            "H5AD downloaded once from R2; stage results still written to R2"
-        ),
+    workflow_parser = sub.add_parser(
+        "workflow", help="Measure the fixed benchmark workflow in one Modal container"
     )
-    local_parser.add_argument("--config", required=True)
-    local_parser.add_argument("--size", type=int, required=True)
-    local_parser.add_argument(
-        "--stages", nargs="*", choices=ALL_STAGE_CHOICES, default=None
+    workflow_parser.add_argument("--config", required=True)
+    workflow_parser.add_argument("--size", type=int, required=True)
+    workflow_parser.add_argument(
+        "--storage",
+        choices=("r2", "local"),
+        default="r2",
+        help="Store the matrix on R2 or the Modal container's local disk (default: r2)",
     )
-    local_parser.add_argument(
-        "--ephemeral",
-        action="store_true",
-        help="Spawn from this modal run app (no deploy). Prefer --detach.",
+    workflow_parser.add_argument(
+        "--steps",
+        dest="stages",
+        nargs="+",
+        choices=ALL_STAGE_CHOICES,
+        metavar="STEP",
+        default=None,
+        help="Default: the full benchmark on R2, or configured steps for local storage",
     )
-
-    e2e_parser = sub.add_parser(
-        "run-e2e",
-        help="One-container graph-construction funnel with a fresh R2 Zarr store",
-    )
-    e2e_parser.add_argument("--config", required=True)
-    e2e_parser.add_argument("--size", type=int, required=True)
-    e2e_parser.add_argument(
+    workflow_parser.add_argument(
         "--ephemeral",
         action="store_true",
         help=(
@@ -1034,6 +1161,10 @@ def main(*arg_list: str) -> None:
 
     args = parser.parse_args(list(arg_list))
     config = _load_config(args.config)
+    if args.command in {"prepare", "prepare-fixture"} and config.inputUri is not None:
+        raise SystemExit(
+            f"{args.command} cannot be used with inputUri; run step or workflow"
+        )
     payload = attach_client_provenance(
         config.model_dump(mode="python"),
         configPath=args.config,
@@ -1077,7 +1208,7 @@ def main(*arg_list: str) -> None:
 
     submission_id = uuid4().hex
 
-    if args.command == "run":
+    if args.command == "step":
         if args.size not in config.targetSizes:
             raise SystemExit(f"size {args.size} is not in config.targetSizes")
         # Fail fast here; the stage job checks the same settings again.
@@ -1099,7 +1230,7 @@ def main(*arg_list: str) -> None:
             return
         _launch(
             config,
-            "run_stage_job",
+            "profile_step",
             modal_function_options(config, config.resourcesFor(args.stage), retries=0),
             payload,
             args.size,
@@ -1109,14 +1240,15 @@ def main(*arg_list: str) -> None:
             None,
             args.allow_reuse,
             ephemeral=args.ephemeral,
-            label=f"run_stage_job {args.size}/{args.stage}",
+            label=f"profile_step {args.size}/{args.stage}",
         )
         return
 
-    if args.command == "run-all":
+    if args.command == "steps":
         sizes = list(args.sizes) if args.sizes else None
         stages = list(args.stages) if args.stages else None
         selected_stages = tuple(stages) if stages else config.effectiveStages
+        validate_requested_stages(selected_stages)
         for size in sizes or config.targetSizes:
             if size not in config.targetSizes:
                 raise SystemExit(f"size {size} is not in config.targetSizes")
@@ -1124,7 +1256,7 @@ def main(*arg_list: str) -> None:
             bind_cluster_source(config, size, selected_stages)
         _launch(
             config,
-            "run_all_jobs",
+            "profile_steps",
             orchestrator_function_options(config),
             payload,
             submission_id,
@@ -1132,35 +1264,34 @@ def main(*arg_list: str) -> None:
             stages,
             args.allow_reuse,
             ephemeral=args.ephemeral,
-            label="run_all_jobs",
+            label="profile_steps",
         )
         return
 
-    if args.command in {"run-e2e", "run-local"}:
+    if args.command == "workflow":
         if args.size not in config.targetSizes:
             raise SystemExit(f"size {args.size} is not in config.targetSizes")
         if not config.runTag.strip():
             raise SystemExit(f"{args.command} requires a non-empty runTag")
-        backend = "r2" if args.command == "run-e2e" else "local"
-        stages = (
-            list(CORE_STAGE_ORDER)
-            if backend == "r2"
-            else list(args.stages or config.effectiveStages)
+        backend = args.storage
+        stages = list(
+            args.stages
+            or (CORE_STAGE_ORDER if backend == "r2" else config.effectiveStages)
         )
-        _require_funnel_settings(
+        _require_workflow_settings(
             config, args.size, tuple(stages), storeOnR2=backend == "r2"
         )
-        print(f"result URI (when done): {config.funnelResultUri(args.size)}")
+        print(f"result URI (when done): {config.workflowResultUri(args.size)}")
         _launch(
             config,
-            "run_funnel_job",
-            _e2e_function_options(config, tuple(stages)),
+            "profile_workflow",
+            _workflow_function_options(config, tuple(stages)),
             payload,
             args.size,
             submission_id,
             backend,
             stages,
             ephemeral=args.ephemeral,
-            label=f"run_funnel_job {backend} {args.size}",
+            label=f"profile_workflow {backend} {args.size}",
         )
         return

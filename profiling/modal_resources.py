@@ -67,7 +67,7 @@ def orchestrator_function_options(
     *,
     maxContainers: int = 1,
 ) -> dict[str, Any]:
-    """Tiny options for run_all_jobs / run_size_jobs coordinators.
+    """Tiny options for profile_steps / profile_steps_for_size coordinators.
 
     These only spawn/wait; they must not request stage RAM (32–64 GiB) or they
     compete with the real stage workers for scarce high-memory capacity.

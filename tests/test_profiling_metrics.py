@@ -64,6 +64,66 @@ def test_process_tree_rss_aggregates_descendants_by_parent_pid(tmp_path):
     assert read_process_tree_rss_bytes(100, procRoot=proc_root) == (10 + 20 + 30) * 1024
 
 
+def test_stage_failure_preserves_settings_and_measurement_metadata(tmp_path):
+    from profiling.config import (
+        CountMatrixConfig,
+        StageResources,
+        StorageIoConfig,
+        WorkflowParameters,
+    )
+    from profiling.stages import run_stage
+
+    workflow = WorkflowParameters(graphSeed=123, topN=500)
+    resources = StageResources(
+        modalMemoryRequestMb=128,
+        modalMemoryLimitMb=256,
+        modalCpuRequest=1,
+        modalCpuLimit=1,
+        cytearcMemoryBudget=100_000_000,
+        workers=1,
+        timeoutSeconds=60,
+        ephemeralDiskMb=256,
+    )
+    result = run_stage(
+        "createStore",
+        submissionId="metadata-test",
+        nRows=1,
+        storeUri=str(tmp_path / "store.zarr"),
+        workflow=workflow,
+        resources=resources,
+        countMatrix=CountMatrixConfig(unitBytes=4096, chunkBytes=1024),
+        storageIo=StorageIoConfig(readWorkers=2),
+        sampleIntervalSeconds=0.01,
+        recordStoreOperations=False,
+    )
+    payload = json.loads(json.dumps(result.to_json()))
+
+    assert payload["status"] == "error"
+    assert payload["error"] == "ValueError: createStore requires localH5adPath"
+    assert payload["seconds"] is None
+    assert payload["wholeFunctionSeconds"] > 0
+    assert payload["settings"]["workflow"] == workflow.model_dump(mode="json")
+    assert payload["settings"]["requestedResources"] == resources.model_dump(
+        mode="json"
+    )
+    assert payload["settings"]["countMatrix"] == {
+        "unitBytes": 4096,
+        "chunkBytes": 1024,
+    }
+    assert payload["settings"]["storageIo"] == {
+        "readWorkers": 2,
+        "computeWorkers": None,
+        "writeWorkers": None,
+    }
+    assert payload["settings"]["recordStoreOperations"] is False
+    assert payload["sampleIntervalSeconds"] == 0.01
+    assert payload["measurementWindows"]["seconds"] == "Operation only"
+    assert payload["measurementWindows"]["memory"] == (
+        "Input setup, operation, and validation"
+    )
+    assert not (tmp_path / "store.zarr").exists()
+
+
 def test_sampler_captures_events_limits_cpu_quota_and_operation_peak(tmp_path):
     proc_root = tmp_path / "proc"
     cgroup = tmp_path / "cgroup"

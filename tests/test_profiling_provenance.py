@@ -1,5 +1,6 @@
 import hashlib
 import platform
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -109,6 +110,23 @@ def test_identity_is_collected_here_without_client_provenance(
     assert result["gitSha"] == "local"
     assert result["hasClientCodeIdentity"] is False
     assert "clientCapturedOn" not in result
+
+
+def test_worker_package_versions_do_not_replace_client_versions(executed_tree):
+    client_versions = {"numpy": "client-only-version"}
+    result = collect_run_provenance(
+        clientProvenance={"packageVersions": client_versions}
+    )
+
+    assert result["packageVersions"] == client_versions
+    assert result["executedPackageVersions"]["numpy"] == version("numpy")
+    assert set(result["executedPackageVersions"]) == {
+        "zarr",
+        "numba",
+        "numpy",
+        "obstore",
+        "cytearc",
+    }
 
 
 def test_source_tree_digest_covers_exactly_the_shipped_code(tmp_path: Path) -> None:

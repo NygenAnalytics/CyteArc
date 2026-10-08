@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from profiling import modal_app, stages
+from profiling import app, stages
 from profiling.config import (
     CORE_STAGE_ORDER,
     ProfilingConfig,
@@ -57,9 +57,9 @@ def test_load_stage_input_refs_from_prior_stage_result(
             "details": {"artifact": refs[stage].to_dict()},
         }
 
-    monkeypatch.setattr(modal_app, "load_result", load_result)
+    monkeypatch.setattr(app, "load_result", load_result)
 
-    assert modal_app._load_stage_input_refs(
+    assert app._load_stage_input_refs(
         config,
         10_000,
         "runNormalization",
@@ -69,10 +69,10 @@ def test_load_stage_input_refs_from_prior_stage_result(
 def test_load_stage_input_refs_rejects_missing_dependency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(modal_app, "load_result", lambda *_args: None)
+    monkeypatch.setattr(app, "load_result", lambda *_args: None)
 
     with pytest.raises(ValueError, match="filterCells stage result is unavailable"):
-        modal_app._load_stage_input_refs(
+        app._load_stage_input_refs(
             _config(),
             10_000,
             "runNormalization",
@@ -92,7 +92,7 @@ def test_load_stage_input_refs_uses_bound_imported_cluster_source(
             "details": {"artifact": _CLUSTER_REF.to_dict()},
         }
 
-    monkeypatch.setattr(modal_app, "load_result", load_result)
+    monkeypatch.setattr(app, "load_result", load_result)
     workflow = config.workflow.model_copy(
         update={
             "clusterSourceUri": "s3://bucket/source.zarr",
@@ -100,7 +100,7 @@ def test_load_stage_input_refs_uses_bound_imported_cluster_source(
         }
     )
 
-    assert modal_app._load_stage_input_refs(
+    assert app._load_stage_input_refs(
         config,
         10_000,
         "findMarkers",
@@ -160,8 +160,8 @@ def _stage_result(
     )
 
 
-def _run_e2e(config: ProfilingConfig) -> dict[str, Any]:
-    return modal_app.run_funnel_job.local(
+def _run_workflow(config: ProfilingConfig) -> dict[str, Any]:
+    return app.profile_workflow.local(
         config.model_dump(mode="python"),
         10_000,
         "testsubmission",
@@ -170,18 +170,16 @@ def _run_e2e(config: ProfilingConfig) -> dict[str, Any]:
     )
 
 
-def _mock_e2e_dependencies(
+def _mock_workflow_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> tuple[list[dict[str, Any]], list[StageRunResult]]:
     funnel_payloads: list[dict[str, Any]] = []
     stage_results: list[StageRunResult] = []
-    monkeypatch.setattr(modal_app, "_WORK", tmp_path)
-    monkeypatch.setattr(
-        modal_app, "_e2e_conflicting_uris", lambda *_args, **_kwargs: []
-    )
-    monkeypatch.setattr(modal_app, "ResourceSampler", _Sampler)
-    monkeypatch.setattr(modal_app, "put_json_if_absent", lambda *_args: True)
+    monkeypatch.setattr(app, "_WORK", tmp_path)
+    monkeypatch.setattr(app, "_workflow_conflicting_uris", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(app, "ResourceSampler", _Sampler)
+    monkeypatch.setattr(app, "put_json_if_absent", lambda *_args: True)
 
     def download(_uri: str, destination: Path) -> ObjectDownload:
         destination.write_bytes(b"h5ad")
@@ -197,36 +195,36 @@ def _mock_e2e_dependencies(
         payload: dict[str, Any],
     ) -> str:
         funnel_payloads.append(payload)
-        return _config.funnelResultUri(_n_rows)
+        return _config.workflowResultUri(_n_rows)
 
-    monkeypatch.setattr(modal_app, "download_file", download)
-    monkeypatch.setattr(modal_app, "write_result", write_stage)
-    monkeypatch.setattr(modal_app, "write_funnel_result", write_funnel)
+    monkeypatch.setattr(app, "download_file", download)
+    monkeypatch.setattr(app, "write_result", write_stage)
+    monkeypatch.setattr(app, "write_funnel_result", write_funnel)
     return funnel_payloads, stage_results
 
 
-def test_e2e_funnel_runs_graph_construction_core_once_on_r2(
+def test_workflow_funnel_runs_graph_construction_core_once_on_r2(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     config = _config()
-    funnel_payloads, stage_results = _mock_e2e_dependencies(monkeypatch, tmp_path)
+    funnel_payloads, stage_results = _mock_workflow_dependencies(monkeypatch, tmp_path)
     calls: list[tuple[StageName, dict[str, Any]]] = []
 
     def run_stage(stage: StageName, **kwargs: Any) -> StageRunResult:
         calls.append((stage, kwargs))
         return _stage_result(stage)
 
-    monkeypatch.setattr(modal_app, "run_stage", run_stage)
+    monkeypatch.setattr(app, "run_stage", run_stage)
     monkeypatch.setattr(
-        modal_app,
+        app,
         "result_exists",
         lambda *_args: (_ for _ in ()).throw(
             AssertionError("e2e must not skip stage results")
         ),
     )
 
-    summary = _run_e2e(config)
+    summary = _run_workflow(config)
 
     assert [stage for stage, _kwargs in calls] == list(CORE_STAGE_ORDER)
     assert all(
@@ -347,7 +345,7 @@ def test_forced_initialize_rejects_prepared_data_before_changes(tmp_path):
     np.testing.assert_array_equal(root["cellData/RNA_nCounts"][:], [10.0, 20.0])
 
 
-def test_e2e_funnel_forwards_storage_io(
+def test_workflow_funnel_forwards_storage_io(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -359,28 +357,28 @@ def test_e2e_funnel_forwards_storage_io(
         computeWorkers=1,
     )
     config = _config(runTag="e2e-policy").model_copy(update={"storageIo": policy})
-    _mock_e2e_dependencies(monkeypatch, tmp_path)
+    _mock_workflow_dependencies(monkeypatch, tmp_path)
     calls: list[dict[str, Any]] = []
 
     def run_stage(stage: StageName, **kwargs: Any) -> StageRunResult:
         calls.append(kwargs)
         return _stage_result(stage)
 
-    monkeypatch.setattr(modal_app, "run_stage", run_stage)
+    monkeypatch.setattr(app, "run_stage", run_stage)
 
-    summary = _run_e2e(config)
+    summary = _run_workflow(config)
 
     assert summary["status"] == "ok"
     assert calls
     assert all(kwargs["storageIo"] == policy for kwargs in calls)
 
 
-def test_e2e_funnel_stops_and_persists_failure(
+def test_workflow_funnel_stops_and_persists_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     config = _config(runTag="e2e-failure")
-    funnel_payloads, stage_results = _mock_e2e_dependencies(monkeypatch, tmp_path)
+    funnel_payloads, stage_results = _mock_workflow_dependencies(monkeypatch, tmp_path)
     calls: list[StageName] = []
 
     def run_stage(stage: StageName, **_kwargs: Any) -> StageRunResult:
@@ -389,9 +387,9 @@ def test_e2e_funnel_stops_and_persists_failure(
             return _stage_result(stage, status="error", error="RuntimeError: failed")
         return _stage_result(stage)
 
-    monkeypatch.setattr(modal_app, "run_stage", run_stage)
+    monkeypatch.setattr(app, "run_stage", run_stage)
 
-    summary = _run_e2e(config)
+    summary = _run_workflow(config)
 
     expected = list(CORE_STAGE_ORDER[: CORE_STAGE_ORDER.index("runPca") + 1])
     assert calls == expected
@@ -402,31 +400,29 @@ def test_e2e_funnel_stops_and_persists_failure(
     assert funnel_payloads == [summary]
 
 
-def test_e2e_funnel_rejects_empty_or_reused_run_tag(
+def test_workflow_funnel_rejects_empty_or_reused_run_tag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with pytest.raises(ValueError, match="non-empty runTag"):
-        _run_e2e(_config(runTag=""))
+        _run_workflow(_config(runTag=""))
 
     config = _config(runTag="used")
     conflict = f"{config.storeUri(10_000)}/zarr.json"
     monkeypatch.setattr(
-        modal_app,
-        "_e2e_conflicting_uris",
+        app,
+        "_workflow_conflicting_uris",
         lambda *_args, **_kwargs: [conflict],
     )
     with pytest.raises(FileExistsError, match="fresh runTag"):
-        _run_e2e(config)
+        _run_workflow(config)
 
-    monkeypatch.setattr(
-        modal_app, "_e2e_conflicting_uris", lambda *_args, **_kwargs: []
-    )
-    monkeypatch.setattr(modal_app, "put_json_if_absent", lambda *_args: False)
+    monkeypatch.setattr(app, "_workflow_conflicting_uris", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(app, "put_json_if_absent", lambda *_args: False)
     with pytest.raises(FileExistsError, match="claimed concurrently"):
-        _run_e2e(_config(runTag="racing"))
+        _run_workflow(_config(runTag="racing"))
 
 
-def test_e2e_freshness_checks_store_and_all_results(
+def test_workflow_freshness_checks_store_and_all_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config()
@@ -436,18 +432,18 @@ def test_e2e_freshness_checks_store_and_all_results(
         checked.append(uri)
         return False
 
-    monkeypatch.setattr(modal_app, "object_exists", exists)
+    monkeypatch.setattr(app, "object_exists", exists)
 
-    assert modal_app._e2e_conflicting_uris(config, 10_000) == []
+    assert app._workflow_conflicting_uris(config, 10_000) == []
     assert f"{config.storeUri(10_000)}/zarr.json" in checked
-    assert config.e2eClaimUri() in checked
-    assert config.funnelResultUri(10_000) in checked
+    assert config.workflowClaimUri() in checked
+    assert config.workflowResultUri(10_000) in checked
     assert {config.resultUri(10_000, stage) for stage in CORE_STAGE_ORDER}.issubset(
         checked
     )
 
 
-def test_e2e_modal_options_use_max_resources_and_disable_retries(
+def test_workflow_modal_options_use_max_resources_and_disable_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config()
@@ -468,9 +464,9 @@ def test_e2e_modal_options_use_max_resources_and_disable_retries(
         )
         return {}
 
-    monkeypatch.setattr(modal_app, "modal_function_options", options)
+    monkeypatch.setattr(app, "modal_function_options", options)
 
-    result = modal_app._e2e_function_options(config)
+    result = app._workflow_function_options(config)
 
     assert captured["config"] is config
     assert captured["maxContainers"] == 1
@@ -480,7 +476,7 @@ def test_e2e_modal_options_use_max_resources_and_disable_retries(
     assert result["timeout"] == 86_400
 
 
-def test_e2e_rejects_unavailable_dynamic_ephemeral_disk() -> None:
+def test_workflow_rejects_unavailable_dynamic_ephemeral_disk() -> None:
     config = _config()
     resources = dict(config.stageResources)
     resources["createStore"] = resources["createStore"].model_copy(
@@ -489,13 +485,13 @@ def test_e2e_rejects_unavailable_dynamic_ephemeral_disk() -> None:
     config = config.model_copy(update={"stageResources": resources})
 
     with pytest.raises(ValueError, match="dynamic ephemeral_disk override"):
-        modal_app._e2e_resource_envelope(config)
+        app._workflow_resource_envelope(config)
 
 
-def test_run_e2e_cli_spawns_deployed_function_and_returns(
+def test_workflow_cli_spawns_deployed_function_and_returns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = _config()
+    config = _config().model_copy(update={"stages": ("createStore", "writeCountsT")})
     captured: dict[str, Any] = {}
 
     class _Target:
@@ -507,10 +503,10 @@ def test_run_e2e_cli_spawns_deployed_function_and_returns(
             captured["spawnArgs"] = args
             return SimpleNamespace(object_id="fc-e2e")
 
-    monkeypatch.setattr(modal_app, "_load_config", lambda _path: config)
+    monkeypatch.setattr(app, "_load_config", lambda _path: config)
     monkeypatch.setattr(
-        modal_app,
-        "_e2e_function_options",
+        app,
+        "_workflow_function_options",
         lambda _config, _stages: {"timeout": 86_400, "retries": 0},
     )
 
@@ -518,43 +514,45 @@ def test_run_e2e_cli_spawns_deployed_function_and_returns(
         captured["functionName"] = name
         return _Target()
 
-    monkeypatch.setattr(modal_app, "_deployed_function", deployed)
+    monkeypatch.setattr(app, "_deployed_function", deployed)
     monkeypatch.setattr(
-        modal_app,
+        app,
         "_print_spawned",
         lambda label, call: captured.update(label=label, call=call),
     )
 
-    modal_app.main(
-        "run-e2e",
+    app.main(
+        "workflow",
         "--config",
         "unused.toml",
         "--size",
         "10000",
     )
 
-    assert captured["functionName"] == "run_funnel_job"
+    assert captured["functionName"] == "profile_workflow"
     assert captured["options"] == {"timeout": 86_400, "retries": 0}
     payload, n_rows, submission_id, backend, funnel_stages = captured["spawnArgs"]
     assert re.fullmatch(r"[0-9a-f]{32}", submission_id)
     assert payload["runTag"] == "e2e-test"
     assert n_rows == 10_000
     assert (backend, funnel_stages) == ("r2", list(CORE_STAGE_ORDER))
-    assert captured["label"] == "run_funnel_job r2 10000"
+    assert captured["label"] == "profile_workflow r2 10000"
 
-    modal_app.main(
-        "run-local",
+    app.main(
+        "workflow",
+        "--storage",
+        "local",
         "--config",
         "unused.toml",
         "--size",
         "10000",
-        "--stages",
+        "--steps",
         "createStore",
         "writeCountsT",
     )
     *_head, backend, funnel_stages = captured["spawnArgs"]
     assert (backend, funnel_stages) == ("local", ["createStore", "writeCountsT"])
-    assert captured["label"] == "run_funnel_job local 10000"
+    assert captured["label"] == "profile_workflow local 10000"
 
 
 def test_targeted_run_requires_force_to_overwrite_an_existing_result(
@@ -579,31 +577,30 @@ def test_targeted_run_requires_force_to_overwrite_an_existing_result(
             captured["spawnArgs"] = args
             return _Call()
 
-    monkeypatch.setattr(modal_app, "_load_config", lambda _path: config)
-    monkeypatch.setattr(modal_app, "load_result", lambda *_args: {"status": "ok"})
+    monkeypatch.setattr(app, "_load_config", lambda _path: config)
+    monkeypatch.setattr(app, "load_result", lambda *_args: {"status": "ok"})
     monkeypatch.setattr(
-        modal_app,
+        app,
         "modal_function_options",
         lambda *_args, **_kwargs: {"retries": 0},
     )
-    monkeypatch.setattr(modal_app, "run_stage_job", _Target())
-    monkeypatch.setattr(modal_app, "_print_spawned", lambda *_args: None)
+    monkeypatch.setattr(app, "profile_step", _Target())
+    monkeypatch.setattr(app, "_print_spawned", lambda *_args: None)
 
     base_args = (
-        "run",
+        "step",
+        "findMarkers",
         "--config",
         "unused.toml",
         "--size",
         "10000",
-        "--stage",
-        "findMarkers",
         "--ephemeral",
     )
-    modal_app.main(*base_args)
+    app.main(*base_args)
     assert "spawnArgs" not in captured
     assert "waitTimeout" not in captured
 
-    modal_app.main(*base_args, "--force")
+    app.main(*base_args, "--force")
     payload, n_rows, stage, submission_id, force, stages, allow_reuse = captured[
         "spawnArgs"
     ]
@@ -621,23 +618,22 @@ def test_targeted_run_stops_on_an_existing_error_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config()
-    monkeypatch.setattr(modal_app, "_load_config", lambda _path: config)
-    monkeypatch.setattr(modal_app, "load_result", lambda *_args: {"status": "error"})
+    monkeypatch.setattr(app, "_load_config", lambda _path: config)
+    monkeypatch.setattr(app, "load_result", lambda *_args: {"status": "error"})
 
     def unexpected_launch(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("an existing error result must not be recomputed")
 
-    monkeypatch.setattr(modal_app, "_launch", unexpected_launch)
+    monkeypatch.setattr(app, "_launch", unexpected_launch)
 
     with pytest.raises(SystemExit) as stopped:
-        modal_app.main(
-            "run",
+        app.main(
+            "step",
+            "findMarkers",
             "--config",
             "unused.toml",
             "--size",
             "10000",
-            "--stage",
-            "findMarkers",
         )
     assert stopped.value.code == 1
 
@@ -706,7 +702,7 @@ def test_shared_session_counts_store_operations_per_stage(tmp_path: Path) -> Non
     assert all("keysTouched" not in counts for counts in operations.values())
 
 
-def test_funnel_runs_every_stage_in_order_on_the_calling_thread(
+def test_workflow_runs_every_stage_in_order_on_the_calling_thread(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -714,7 +710,7 @@ def test_funnel_runs_every_stage_in_order_on_the_calling_thread(
     import threading
 
     config = _config(runTag="e2e-sequential")
-    _mock_e2e_dependencies(monkeypatch, tmp_path)
+    _mock_workflow_dependencies(monkeypatch, tmp_path)
     # The local backend pins the storage profile for its whole process, so let
     # monkeypatch restore the variable after this test.
     monkeypatch.setenv("CYTEARC_ZARR_PROFILE", "fast_local")
@@ -733,9 +729,9 @@ def test_funnel_runs_every_stage_in_order_on_the_calling_thread(
         )
         return _stage_result(stage)
 
-    monkeypatch.setattr(modal_app, "run_stage", run_stage)
+    monkeypatch.setattr(app, "run_stage", run_stage)
 
-    summary = modal_app.run_funnel_job.local(
+    summary = app.profile_workflow.local(
         config.model_dump(mode="python"),
         10_000,
         "testsubmission",
@@ -749,7 +745,7 @@ def test_funnel_runs_every_stage_in_order_on_the_calling_thread(
     ]
 
 
-def test_funnel_refuses_stages_that_would_share_other_resources(
+def test_workflow_refuses_stages_that_would_share_other_resources(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -759,38 +755,34 @@ def test_funnel_refuses_stages_that_would_share_other_resources(
         update={"cytearcMemoryBudget": 2 * resources["markHvgs"].cytearcMemoryBudget}
     )
     config = config.model_copy(update={"stageResources": resources})
-    _mock_e2e_dependencies(monkeypatch, tmp_path)
+    _mock_workflow_dependencies(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        modal_app,
+        app,
         "run_stage",
         lambda *_args, **_kwargs: pytest.fail("a mismatched funnel must not start"),
     )
 
     with pytest.raises(ValueError, match="markHvgs requests workers=8"):
-        _run_e2e(config)
+        _run_workflow(config)
     with pytest.raises(ValueError, match="initializeStore opens the shared DataStore"):
-        modal_app._require_funnel_settings(
-            config, 10_000, CORE_STAGE_ORDER, storeOnR2=True
-        )
+        app._require_workflow_settings(config, 10_000, CORE_STAGE_ORDER, storeOnR2=True)
     # Stages that open their own store may differ.
     resources["markHvgs"] = config.resourcesFor("initializeStore")
     resources["runLeiden"] = resources["runLeiden"].model_copy(update={"workers": 1})
     uniform = config.model_copy(update={"stageResources": resources})
-    modal_app._require_funnel_settings(
-        uniform, 10_000, CORE_STAGE_ORDER, storeOnR2=True
-    )
+    app._require_workflow_settings(uniform, 10_000, CORE_STAGE_ORDER, storeOnR2=True)
 
 
-def test_funnel_refuses_a_store_override_and_an_unused_cluster_source(
+def test_workflow_refuses_a_store_override_and_an_unused_cluster_source(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    _mock_e2e_dependencies(monkeypatch, tmp_path)
+    _mock_workflow_dependencies(monkeypatch, tmp_path)
     overridden = _config(runTag="e2e-override").model_copy(
         update={"storeUriBySize": {10_000: "s3://bucket/existing.zarr"}}
     )
     with pytest.raises(ValueError, match="only for consume stages"):
-        _run_e2e(overridden)
+        _run_workflow(overridden)
 
     config = _config(runTag="e2e-cluster-source")
     config = config.model_copy(
@@ -804,37 +796,39 @@ def test_funnel_refuses_a_store_override_and_an_unused_cluster_source(
         }
     )
     with pytest.raises(ValueError, match="requires the importClusters stage"):
-        _run_e2e(config)
+        _run_workflow(config)
 
 
-def test_funnel_refuses_a_stage_claimed_during_its_own_claim(
+def test_workflow_refuses_a_stage_claimed_during_its_own_claim(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     config = _config(runTag="e2e-late-claim")
-    _mock_e2e_dependencies(monkeypatch, tmp_path)
+    _mock_workflow_dependencies(monkeypatch, tmp_path)
     checks: list[int] = []
 
     def conflicts(*_args: Any, **_kwargs: Any) -> list[str]:
         checks.append(1)
         if len(checks) == 1:
             return []
-        return [config.e2eClaimUri(), config.stageClaimUri(10_000, "createStore")]
+        return [config.workflowClaimUri(), config.stageClaimUri(10_000, "createStore")]
 
-    monkeypatch.setattr(modal_app, "_e2e_conflicting_uris", conflicts)
+    monkeypatch.setattr(app, "_workflow_conflicting_uris", conflicts)
     monkeypatch.setattr(
-        modal_app,
+        app,
         "run_stage",
         lambda *_args, **_kwargs: pytest.fail("a contested funnel must not start"),
     )
 
     with pytest.raises(FileExistsError, match="createStore.claim.json"):
-        _run_e2e(config)
+        _run_workflow(config)
 
 
-def test_e2e_freshness_checks_stage_claims(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_workflow_freshness_checks_stage_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config = _config()
     claimed = config.stageClaimUri(10_000, "markHvgs")
-    monkeypatch.setattr(modal_app, "object_exists", lambda uri: uri == claimed)
+    monkeypatch.setattr(app, "object_exists", lambda uri: uri == claimed)
 
-    assert modal_app._e2e_conflicting_uris(config, 10_000) == [claimed]
+    assert app._workflow_conflicting_uris(config, 10_000) == [claimed]

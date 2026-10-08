@@ -4,6 +4,7 @@ import tomllib
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -168,17 +169,17 @@ class WorkflowParameters(BaseModel):
 
     @model_validator(mode="after")
     def _check_workflow(self) -> Self:
+        if self.cellKey != "I":
+            raise ValueError("cellKey must be 'I'; profiling does not use cellKey")
+        if self.parisNClusters != "auto" or self.parisMinClusterSize is not None:
+            raise ValueError(
+                "profiling does not run Paris; leave parisNClusters='auto' "
+                "and parisMinClusterSize unset"
+            )
         if not math.isfinite(self.kmeansSampling) or not 0 < self.kmeansSampling <= 1:
             raise ValueError("kmeansSampling must be greater than 0 and at most 1")
         if self.kmeansBatchSize <= 0:
             raise ValueError("kmeansBatchSize must be positive")
-        if self.parisNClusters != "auto" and self.parisNClusters <= 1:
-            raise ValueError("parisNClusters must be > 1")
-        if self.parisMinClusterSize is not None:
-            if self.parisMinClusterSize < 2:
-                raise ValueError("parisMinClusterSize must be >= 2")
-            if self.parisNClusters != "auto":
-                raise ValueError("parisMinClusterSize requires parisNClusters='auto'")
         if (self.clusterSourceUri is None) != (self.clusterSourceArtifactId is None):
             raise ValueError(
                 "clusterSourceUri and clusterSourceArtifactId must be set together"
@@ -320,9 +321,10 @@ class ProfilingConfig(BaseModel):
     modalEnvironmentName: str = MODAL_ENVIRONMENT_NAME
     modalAppName: str = MODAL_APP_NAME
     modalSecretName: str
-    modalRegion: str
+    modalRegion: str | None = None
     r2EndpointUrl: str
     datasetPrefixUri: str
+    inputUri: str | None = None
     resultsUri: str
     runTag: str = ""
     # When set, stage jobs read/write this store instead of stores/{runTag}/...
@@ -367,6 +369,19 @@ class ProfilingConfig(BaseModel):
             raise ValueError(f"modalAppName must be {MODAL_APP_NAME}")
         if not self.datasetPrefixUri.startswith("s3://"):
             raise ValueError("datasetPrefixUri must be an s3:// URI")
+        if self.inputUri is not None:
+            parsed = urlsplit(self.inputUri)
+            if (
+                not self.inputUri.startswith("s3://")
+                or not parsed.netloc
+                or not parsed.path.strip("/")
+                or parsed.path.endswith("/")
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("inputUri must be an s3:// URI naming one H5AD object")
+            if len(self.targetSizes) != 1:
+                raise ValueError("inputUri requires exactly one targetSizes entry")
         if not self.resultsUri.startswith("s3://"):
             raise ValueError("resultsUri must be an s3:// URI")
         if self.storeUriOverride is not None:
@@ -400,6 +415,10 @@ class ProfilingConfig(BaseModel):
         return self
 
     def datasetUri(self, nRows: int) -> str:
+        if self.inputUri is not None:
+            if nRows not in self.targetSizes:
+                raise ValueError(f"size {nRows} is not in config.targetSizes")
+            return self.inputUri
         return f"{self.datasetPrefixUri.rstrip('/')}/{nRows}.h5ad"
 
     def sourceUri(self) -> str:
@@ -429,10 +448,10 @@ class ProfilingConfig(BaseModel):
     def resultUri(self, nRows: int, stage: StageName) -> str:
         return f"{self._tagged_prefix('results')}/{nRows}/{stage}.json"
 
-    def funnelResultUri(self, nRows: int) -> str:
+    def workflowResultUri(self, nRows: int) -> str:
         return f"{self._tagged_prefix('results')}/{nRows}/funnel.json"
 
-    def e2eClaimUri(self) -> str:
+    def workflowClaimUri(self) -> str:
         return f"{self._tagged_prefix('results')}/e2e-claim.json"
 
     def stageClaimUri(self, nRows: int, stage: StageName) -> str:

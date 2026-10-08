@@ -101,13 +101,17 @@ def object_exists(uri: str) -> bool:
     return True
 
 
-def object_size(uri: str) -> int | None:
+def object_metadata(uri: str) -> ObjectDownload | None:
     store, key = open_r2_object(uri)
     try:
         meta = store.head(key)
     except FileNotFoundError:
         return None
-    return int(meta["size"])
+    raw_e_tag = meta.get("e_tag")
+    return ObjectDownload(
+        fileBytes=int(meta["size"]),
+        eTag=str(raw_e_tag) if raw_e_tag else None,
+    )
 
 
 def get_json(uri: str) -> dict[str, Any]:

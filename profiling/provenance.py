@@ -15,6 +15,7 @@ from typing import Any
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SOURCE_PACKAGES = ("cytearc", "profiling")
 _SOURCE_FILES = ("pyproject.toml", "uv.lock")
+_PROFILE_PACKAGES = ("zarr", "numba", "numpy", "obstore", "cytearc")
 # Code and config identity. The submitting client captures it once and every
 # stage and funnel result carries it under these flat keys.
 _IDENTITY_KEYS = (
@@ -157,10 +158,7 @@ def collect_client_code_identity(
         "sourceTreeSha256": source_tree_digest(_REPO_ROOT),
         "lockfileSha256": _lockfile_digest(),
         "configSha256": config_digest(configPayload),
-        "packageVersions": {
-            name: _package_version(name)
-            for name in ("zarr", "numba", "numpy", "obstore", "cytearc")
-        },
+        "packageVersions": {name: _package_version(name) for name in _PROFILE_PACKAGES},
         "capturedOn": "client",
     }
 
@@ -230,6 +228,9 @@ def collect_run_provenance(
             "nonpreemptible": nonpreemptible,
             "hasClientCodeIdentity": client_digest is not None,
             "executedSourceTreeSha256": executed_digest,
+            "executedPackageVersions": {
+                name: _package_version(name) for name in _PROFILE_PACKAGES
+            },
             "sourceTreeMatchesClient": (
                 None if client_digest is None else client_digest == executed_digest
             ),

@@ -24,7 +24,7 @@ Never run `modal deploy`. Deployment is a user action. Ask the user to run:
 
 ```bash
 uv run --group profiling modal deploy --env cytearc_profiling \
-  -m profiling.modal_app
+  -m profiling.app
 ```
 
 Do not create Modal environments, secrets, or credentials.
@@ -36,23 +36,23 @@ and confirm the requested result before starting the funnel:
 
 ```bash
 uv run --group profiling modal run --env cytearc_profiling \
-  -m profiling.modal_app -- prepare \
+  -m profiling.app -- prepare \
   --config profiling/config.toml
 
 uv run --group profiling modal run --env cytearc_profiling \
-  -m profiling.modal_app -- run-e2e \
+  -m profiling.app -- workflow --storage r2 \
   --config profiling/config.toml --size 1000000
 ```
 
 `prepare` spawns work and returns immediately. Confirm that its requested H5AD exists before
-`run-e2e`.
+`workflow --storage r2`.
 
-Use `run --stage ...` for a targeted stage, including repair of an incomplete `countsT`; use
-`run-local` for the Modal ephemeral-disk comparison.
+Use `step STEP` for a targeted stage, including repair of an incomplete `countsT`; use
+`workflow --storage local` for the Modal ephemeral-disk comparison.
 
 ## 1M R2 gate
 
-The 1M gate is `run-e2e` on the product rotateOnce path. Use a fresh `runTag`, full funnel,
+The 1M gate is `workflow --storage r2` on the product rotateOnce path. Use a fresh `runTag`, full funnel,
 size `1000000`, R2 backend (`cytearc_profiling` env).
 
 `profiling/config.example.toml` pins **8 CPU / 32 GiB** (CyteArc budget ~24 GiB) on
@@ -60,20 +60,20 @@ size `1000000`, R2 backend (`cytearc_profiling` env).
 the example so the gate does not claim the whole 1M funnel fits in 32 GiB.
 
 A funnel reuses the DataStore that `initializeStore` opens through `findMarkers`, so those stages
-must share `workers` and `cytearcMemoryBudget`; `run-e2e` and `run-local` refuse a config where they
+must share `workers` and `cytearcMemoryBudget`; `workflow` refuses a config where they
 differ. Their Modal CPU and memory may differ.
 
 ```bash
 # User action only; agents never deploy.
 uv run --group profiling modal deploy --env cytearc_profiling \
-  -m profiling.modal_app
+  -m profiling.app
 
 uv run --group profiling modal run --env cytearc_profiling \
-  -m profiling.modal_app -- prepare \
+  -m profiling.app -- prepare \
   --config profiling/config.toml
 
 uv run --group profiling modal run --env cytearc_profiling \
-  -m profiling.modal_app -- run-e2e \
+  -m profiling.app -- workflow --storage r2 \
   --config profiling/config.toml --size 1000000
 ```
 
@@ -90,8 +90,8 @@ result JSON under the run's `runTag`. Expect hours of Modal time and real cost.
   Modal can raise an empty `TimeoutError` for a failed input.
 - Give coordinators about 1 CPU and 2 to 4 GiB with `retries=0`. Do not assign stage-worker
   resources to coordinators.
-- Prefer the broad `eu` region and leave the Modal cloud option unset unless the experiment
-  explicitly measures another placement.
+- Leave the Modal region and cloud options unset unless the experiment explicitly measures
+  a particular placement.
 - Log start, plan, periodic progress, and completion lines.
 - Persist each stage result and `funnel.json` before treating a run as complete.
 
@@ -117,10 +117,10 @@ result JSON under the run's `runTag`. Expect hours of Modal time and real cost.
 - Compare runs only when dataset, code revision, settings, storage conditions, and resource
   envelope are stated.
 - Do not present measurements from different machine sizes as one scaling curve.
-- `run-e2e` and `run-local` run one stage at a time, as `DataStore.pipeline` does, so the
+- `workflow` runs one stage at a time, as `DataStore.pipeline` does, so the
   CPU, memory, and store figures of each stage cover its own window, and `funnelSeconds` is the
   funnel's wall time. Results that list `concurrentStages` come from earlier funnels that ran
   UMAP beside a Leiden child process: those stages share one CPU and memory window, and their
-  `funnelSeconds` is not comparable with sequential funnels. Use `run --stage` to measure one
+  `funnelSeconds` is not comparable with sequential funnels. Use `step STEP` to measure one
   stage alone.
 - Do not generalize one run into a hardware guarantee or a biological correctness claim.
