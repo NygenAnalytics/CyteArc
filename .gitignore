@@ -63,7 +63,6 @@ cytearc/_version.py
 .env
 temp/
 cellxgene_cytebase/datasets/
-# Dev testing scard reports
 modal_cytearc/
 notebook/
 PR/
