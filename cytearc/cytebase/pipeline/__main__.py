@@ -26,7 +26,7 @@ def main() -> None:
     )
     inventory.add_argument("--output", type=Path, required=True)
     inventory.add_argument(
-        "--bucket", help="Optionally join a verified Cytebase catalog snapshot"
+        "--bucket", help="Optionally join a verified CyteBase catalog snapshot"
     )
     reset = commands.add_parser(
         "reset-run", help="Reset an interrupted run only after draining its workers"

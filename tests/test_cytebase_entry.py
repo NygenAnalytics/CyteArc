@@ -76,7 +76,7 @@ def test_describe_summarizes_the_dataset_with_a_split_citation():
         [
             "### Healthy lung atlas",
             "",
-            f"- **Cytebase ID:** `{CYTEBASE_ID}`",
+            f"- **CyteBase ID:** `{CYTEBASE_ID}`",
             "- **Citation:**",
             "    - Publication: https://doi.org/10.1000/lung",
             "    - Dataset Version: https://datasets.example.org/source.h5ad",
@@ -114,7 +114,7 @@ def test_describe_keeps_other_citations_on_one_line_and_skips_missing_fields(
         [
             "### lung_b",
             "",
-            "- **Cytebase ID:** `lung_b`",
+            "- **CyteBase ID:** `lung_b`",
             "- **Citation:** Smith et al. (2024) Lung Journal",
             "- **Size:** 6 cells",
             "- **Status:** registered",

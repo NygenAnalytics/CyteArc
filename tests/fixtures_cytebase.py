@@ -1,6 +1,6 @@
-"""Offline fakes and builders shared by the Cytebase SDK and pipeline tests.
+"""Offline fakes and builders shared by the CyteBase SDK and pipeline tests.
 
-Nothing here is autouse. Cytebase test modules opt in with
+Nothing here is autouse. CyteBase test modules opt in with
 ``pytestmark = pytest.mark.usefixtures("cytebase_offline")``, which blocks
 non-loopback network access, isolates credentials and the home directory, turns
 unexpected retry backoff into a failure, and keeps unpatched Modal calls from

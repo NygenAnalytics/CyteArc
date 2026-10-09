@@ -1,5 +1,5 @@
 ---
-description: Run an unattended CyteArc agent analysis on a local copy of the Garrido-Trigo Cytebase RNA dataset.
+description: Run an unattended CyteArc agent analysis on a local copy of the Garrido-Trigo CyteBase RNA dataset.
 jupytext:
   text_representation:
     extension: .md
@@ -85,7 +85,7 @@ run_dir = work_dir / "agent_runs" / "garrido-trigo"
 As in [](agent_workflow.md), prepare the dataset before asking the agent to analyze it.
 `Catalog.mount_datastore()` creates a writable local mount whose counts remain
 remote. It has no full-copy option. To obtain a complete
-local copy, resolve the source through Cytebase, download its files read-only, and
+local copy, resolve the source through CyteBase, download its files read-only, and
 use the public `repack_store(data_only=True)` operation to prepare `data.zarr` with the required metadata.
 This preparation leaves published data unchanged and excludes prior numerical
 analysis artifacts from the working copy.
@@ -105,14 +105,14 @@ from cytearc.tools.repack_zarr import repack_store
 # Prepare the local dataset once; later visits reuse this directory.
 if not data_path.exists():
 
-    # Resolve this dataset through the public Cytebase catalog.
+    # Resolve this dataset through the public CyteBase catalog.
     catalog = cytebase.Catalog()
     entry = catalog.dataset(dataset_id)
     source_uri = entry.row["zarr_uri"]
 
     # Check that the source uses the bucket layout expected by this recipe.
     if not source_uri.startswith("hf://buckets/"):
-        raise ValueError("This copy recipe expects a Cytebase HF bucket source")
+        raise ValueError("This copy recipe expects a CyteBase HF bucket source")
     pieces = source_uri.removeprefix("hf://buckets/").split("/")
     bucket, prefix = "/".join(pieces[:2]), "/".join(pieces[2:]).rstrip("/") + "/"
 
@@ -195,7 +195,7 @@ import json
 # Describe the biological objective and hold author annotations out of the analysis.
 study = Study(
     context=(
-        "Garrido-Trigo 2023 IBD and healthy-control intestinal RNA cohort from Cytebase. "
+        "Garrido-Trigo 2023 IBD and healthy-control intestinal RNA cohort from CyteBase. "
         "Describe the supplied populations with measured markers. Author labels are held out. "
         "No technical batch correction or doublet scoring is authorized. "
         "Donors are biological identities; missing capture or replication details do not "
@@ -346,4 +346,4 @@ limitations, cluster sizes, and marker evidence. Its HTML embeds the saved figur
 Copy both the dataset and external run directory to retain numerical results and
 the full decision history. A store-only copy keeps the compact result, but its
 external-history locator may need rebinding. Data-only repacking omits analysis
-records, and a fresh Cytebase mount does not inherit this local agent result.
+records, and a fresh CyteBase mount does not inherit this local agent result.

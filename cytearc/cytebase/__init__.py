@@ -1,4 +1,4 @@
-"""Discover Cytebase datasets and connect to their CyteArc DataStores."""
+"""Discover CyteBase datasets and connect to their CyteArc DataStores."""
 
 import os
 import shutil
@@ -129,7 +129,7 @@ def _bucket_files(
 
 
 def list_repositories() -> list[str]:
-    """Return the top-level repositories in Cytebase."""
+    """Return the top-level repositories in CyteBase."""
     repositories = []
     for item in list_bucket_tree(_BUCKET_ID, recursive=False, token=False):
         if isinstance(item, BucketFolder) and "/" not in item.path:
@@ -138,13 +138,13 @@ def list_repositories() -> list[str]:
 
 
 def connect(repository: str) -> "Repository":
-    """Connect to a public Cytebase repository."""
+    """Connect to a public CyteBase repository."""
     repository = _safe_name(repository, kind="repository name")
     available = list_repositories()
     if repository not in available:
         choices = "\n".join(available)
         raise KeyError(
-            f"{repository!r} is not a Cytebase repository. "
+            f"{repository!r} is not a CyteBase repository. "
             f"Available repositories:\n{choices}"
         )
     return Repository(repository)
@@ -152,7 +152,7 @@ def connect(repository: str) -> "Repository":
 
 @dataclass(frozen=True, slots=True)
 class Repository:
-    """Read files from one top-level Cytebase repository."""
+    """Read files from one top-level CyteBase repository."""
 
     name: str
 
@@ -187,7 +187,7 @@ class Repository:
         _safe_relative_path(path, kind="download path")
         files = _bucket_files(self.name, path, recursive=True)
         if not files:
-            raise FileNotFoundError(f"No Cytebase files found at {self.name}/{path}")
+            raise FileNotFoundError(f"No CyteBase files found at {self.name}/{path}")
         return _download_files(self.name, files, Path(destination))
 
     def download_dataset(
@@ -294,7 +294,7 @@ def _download_files(
 
         for file, staged_file, _ in downloads:
             if not staged_file.is_file():
-                raise FileNotFoundError(f"Cytebase did not download {file.path!r}")
+                raise FileNotFoundError(f"CyteBase did not download {file.path!r}")
             if staged_file.stat().st_size != file.size:
                 raise OSError(
                     f"Downloaded {staged_file.stat().st_size} bytes for {file.path!r}, "

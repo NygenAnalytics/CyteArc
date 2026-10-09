@@ -1,4 +1,4 @@
-"""Offline tests for opening and mounting published Cytebase stores."""
+"""Offline tests for opening and mounting published CyteBase stores."""
 
 import asyncio
 import json
@@ -553,7 +553,7 @@ def test_mount_datastore_requires_a_local_destination(ready_dataset):
 def test_mount_datastore_refuses_unreceipted_destinations(ready_dataset, tmp_path):
     existing = tmp_path / "existing.zarr"
     existing.mkdir()
-    with pytest.raises(FileExistsError, match="without a Cytebase mount receipt"):
+    with pytest.raises(FileExistsError, match="without a CyteBase mount receipt"):
         connector.mount_datastore(ready_dataset.bucket, CYTEBASE_ID, existing)
     orphan = tmp_path / "orphan.zarr"
     (tmp_path / "orphan.zarr.cytebase.json").write_text("{}")
@@ -578,7 +578,7 @@ def test_mount_datastore_refuses_a_foreign_matrix_source(
     (tmp_path / "analysis.zarr.cytebase.json").write_text(
         json.dumps(_identity_of(ready_dataset))
     )
-    with pytest.raises(ValueError, match="does not match the Cytebase receipt"):
+    with pytest.raises(ValueError, match="does not match the CyteBase receipt"):
         connector.mount_datastore(ready_dataset.bucket, CYTEBASE_ID, target)
 
 

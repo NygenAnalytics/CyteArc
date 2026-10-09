@@ -1,4 +1,4 @@
-"""Offline tests for the Cytebase pipeline command line."""
+"""Offline tests for the CyteBase pipeline command line."""
 
 import inspect
 import json

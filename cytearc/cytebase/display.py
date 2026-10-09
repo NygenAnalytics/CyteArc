@@ -5,7 +5,7 @@ from numbers import Integral
 from typing import Any
 
 _HEADERS = {
-    "cytebase_id": "Cytebase ID",
+    "cytebase_id": "CyteBase ID",
     "status": "Status",
     "title": "Title",
     "cell_count": "Cells",

@@ -1,4 +1,4 @@
-"""Offline tests for the shared Cytebase bucket helpers."""
+"""Offline tests for the shared CyteBase bucket helpers."""
 
 import threading
 from concurrent.futures import CancelledError

@@ -242,7 +242,7 @@ def _assign_name(parts: list[str], dataset_id: UUID, reserved: dict[str, UUID]) 
             reserved[name] = dataset_id
             return name
     raise ValueError(
-        f"Could not assign a unique Cytebase name for dataset {dataset_id}"
+        f"Could not assign a unique CyteBase name for dataset {dataset_id}"
     )
 
 

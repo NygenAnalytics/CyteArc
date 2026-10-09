@@ -1,4 +1,4 @@
-"""Offline tests for the Cytebase dataset workers and the queued pipeline run."""
+"""Offline tests for the CyteBase dataset workers and the queued pipeline run."""
 
 import hashlib
 import json

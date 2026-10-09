@@ -1,4 +1,4 @@
-"""Offline tests for the Cytebase development HTTP API served by the Modal app."""
+"""Offline tests for the CyteBase development HTTP API served by the Modal app."""
 
 import json
 from datetime import datetime
@@ -481,7 +481,7 @@ def test_process_expands_collection_selectors_from_registered_records(
         pytest.param(
             [],
             {"cytebaseIds": [CYTEBASE_ID, "Lung-Atlas"]},
-            "ValueError: Cytebase IDs use 1 to 80 lowercase letters, digits, "
+            "ValueError: CyteBase IDs use 1 to 80 lowercase letters, digits, "
             "or underscores",
             id="invalid-id",
         ),
@@ -765,7 +765,7 @@ def test_dataset_lists_generated_paths_that_need_replacement_approval(client, fa
             "Lung-Atlas",
             None,
             422,
-            "ValueError: Cytebase IDs use 1 to 80 lowercase letters, digits, "
+            "ValueError: CyteBase IDs use 1 to 80 lowercase letters, digits, "
             "or underscores",
             id="invalid-id",
         ),
@@ -806,7 +806,7 @@ def test_web_app_serves_the_development_api(pipeline_app, spawned, runs, monkeyp
     monkeypatch.setenv("CYTEBASE_API_TOKEN", API_TOKEN)
     web = pipeline_app.web_app.local()
     assert isinstance(web, FastAPI)
-    assert web.title == "Cytebase pipeline (development)"
+    assert web.title == "CyteBase pipeline (development)"
     with TestClient(web) as test_client:
         assert test_client.get("/health").json() == UNAUTHORIZED
         assert test_client.get("/health", headers=AUTH).json() == {"ok": True}

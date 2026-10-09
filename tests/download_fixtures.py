@@ -134,7 +134,7 @@ def _download_cytebase_fixtures(target: Path, *, force: bool) -> None:
     for name, dest, expected in needed:
         if not dest.is_file():
             raise RuntimeError(
-                f"Cytebase did not download {_remote_path(name)}. "
+                f"CyteBase did not download {_remote_path(name)}. "
                 "Publish fixtures with: "
                 "uv run python scripts/publish_test_fixtures.py --apply"
             )
@@ -167,7 +167,7 @@ def build_citeseq_zarr_fixture(*, force: bool = False) -> None:
     """Write a prepared ``1K_pbmc_citeseq.zarr.tar.gz`` from the Cell Ranger H5.
 
     Tests expect the Antibody Capture assay to be named ``assay2``. The
-    published Cytebase archive is not rebuilt here because its persisted
+    published CyteBase archive is not rebuilt here because its persisted
     layout no longer replays against the current planner.
     """
     archive = datasets_dir() / "1K_pbmc_citeseq.zarr.tar.gz"
@@ -300,7 +300,7 @@ def download_optional_h5ad(*, attempts: int = _H5AD_DOWNLOAD_ATTEMPTS) -> bool:
             if local_h5ad.is_file():
                 return True
             last_error = FileNotFoundError(
-                f"Cytebase download finished without creating {local_h5ad}"
+                f"CyteBase download finished without creating {local_h5ad}"
             )
         except Exception as exc:
             last_error = exc
@@ -329,14 +329,14 @@ def main(argv: list[str] | None = None) -> int:
         "--force",
         action="store_true",
         help=(
-            "Re-download Cytebase fixtures and rebuild "
+            "Re-download CyteBase fixtures and rebuild "
             "1K_pbmc_citeseq.zarr.tar.gz even when files already exist."
         ),
     )
     parser.add_argument(
         "--with-h5ad",
         action="store_true",
-        help="Also download the bastidas-ponce h5ad from Cytebase.",
+        help="Also download the bastidas-ponce h5ad from CyteBase.",
     )
     args = parser.parse_args(argv)
 

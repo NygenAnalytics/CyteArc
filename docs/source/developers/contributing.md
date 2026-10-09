@@ -171,7 +171,7 @@ the current commit again.
 4. Commit the notebook with its outputs and execution metadata. Keep rendered site files outside Git.
 
 Fact-check method names against `cytearc/`, dataset identifiers against the `cytearc_docs`
-Cytebase repository, and numerical claims against actual outputs. Keep credentials and private
+CyteBase repository, and numerical claims against actual outputs. Keep credentials and private
 connection values out of sources and notebook outputs.
 
 ### Republishing the example stores

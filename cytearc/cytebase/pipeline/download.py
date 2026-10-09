@@ -166,7 +166,7 @@ def download_h5ad(
     if executable is None:
         raise RuntimeError(
             "aria2c is required for downloads. Install the aria2 system package "
-            "or deploy the updated Cytebase Modal image."
+            "or deploy the updated CyteBase Modal image."
         )
     connections = download_connections()
     destination = Path(destination)

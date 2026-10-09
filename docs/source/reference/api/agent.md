@@ -1,7 +1,7 @@
 # Agent analysis API reference
 
 The optional `cytearc[agent]` dependency provides a bounded RNA workflow for prepared local
-CyteArc stores and Cytebase mounts. Numerical work uses the existing CyteArc pipeline; agents
+CyteArc stores and CyteBase mounts. Numerical work uses the existing CyteArc pipeline; agents
 choose among registered options and provide provisional cluster identities.
 
 ## Start an analysis

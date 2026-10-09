@@ -1,4 +1,4 @@
-"""Offline tests for Cytebase primary-RNA selection and the pipeline data models."""
+"""Offline tests for CyteBase primary-RNA selection and the pipeline data models."""
 
 import re
 from datetime import UTC, datetime

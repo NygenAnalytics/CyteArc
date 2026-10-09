@@ -63,7 +63,7 @@
 
 ## Public datasets
 
-- [Cytebase catalog](tutorials/cytebase/): search cloud-hosted datasets, inspect annotations, and mount a published store
+- [CyteBase catalog](tutorials/cytebase/): search cloud-hosted datasets, inspect annotations, and mount a published store
 - [COVID-19 atlas case study](tutorials/cytebase-covid19/): compare donors using metadata, the published UMAP, and gene summaries
 
 ## Reference
@@ -74,7 +74,7 @@
 - [Methods and limitations](reference/methods/): supported workflows, implemented methods, validation evidence, and scope
 - [FAQ](reference/faq/): concise method and interoperability answers
 - [Glossary](reference/glossary/): CyteArc concepts and terms
-- [Cytebase API](api/cytebase.html): catalog queries, metadata-only DatasetEntry objects, remote DataStore access, imported embedding helpers, and writable mounts with remote counts
+- [CyteBase API](api/cytebase.html): catalog queries, metadata-only DatasetEntry objects, remote DataStore access, imported embedding helpers, and writable mounts with remote counts
 
 ## Developers
 

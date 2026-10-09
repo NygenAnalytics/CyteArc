@@ -16,7 +16,7 @@ passes two checks.
    ``Modal-Key`` and ``Modal-Secret`` headers. Modal rejects a request without
    them before it reaches the app. A proxy token is valid for every
    proxy-authenticated endpoint of the workspace, so on its own it does not
-   identify a Cytebase operator.
+   identify a CyteBase operator.
 2. The API token. Only the web function receives the ``cytebase-api`` Modal
    secret, whose ``CYTEBASE_API_TOKEN`` holds at least 32 visible ASCII
    characters without whitespace. Send that value in the ``Cytebase-Token``
@@ -1085,7 +1085,7 @@ def create_web_app(api_token: str) -> FastAPI:
             "without whitespace"
         )
     web = FastAPI(
-        title="Cytebase pipeline (development)",
+        title="CyteBase pipeline (development)",
         openapi_url=None,
         docs_url=None,
         redoc_url=None,

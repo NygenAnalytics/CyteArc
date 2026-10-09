@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish the rebuilt documentation stores to the Cytebase bucket.
+"""Publish the rebuilt documentation stores to the CyteBase bucket.
 
 Each rebuilt archive and its manifest replace `<dataset>/data.zarr.tar.gz`
 and `<dataset>/manifest.json` in place.

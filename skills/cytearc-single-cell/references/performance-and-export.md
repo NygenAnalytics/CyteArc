@@ -314,7 +314,7 @@ contains no artifacts or pipeline runs. Use it to hand off, or before `to_mtx` o
 
 ## See also
 
-- `data-access.md`: opening stores, mounts, Cytebase, imports.
+- `data-access.md`: opening stores, mounts, CyteBase, imports.
 - `pipeline-runs-and-artifacts.md`: run reports, `snapshot_columns`, artifact loading.
 - `markers-and-annotation.md`: marker statistics and thresholds.
 - `integration-and-comparisons.md`: donors, two-arm donors and tests behind a pseudobulk design.

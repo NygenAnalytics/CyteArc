@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish unit-test fixtures to the Cytebase cytearc_tests repository.
+"""Publish unit-test fixtures to the CyteBase cytearc_tests repository.
 
 Run without `--apply` to print the plan. Uploading needs a write token for the
 bucket.

@@ -1,4 +1,4 @@
-"""Deploy the Cytebase Modal app to a chosen Modal environment and bucket.
+"""Deploy the CyteBase Modal app to a chosen Modal environment and bucket.
 
 Use ``uv run python -m cytearc.cytebase.pipeline.deploy`` for supported deployment.
 This command validates a supplied ``CYTEBASE_PIPELINE_VERSION`` or resolves the
@@ -35,7 +35,7 @@ APP_MODULE = "cytearc.cytebase.pipeline.app"
 
 
 def deploy_command(environment: str | None) -> list[str]:
-    """Return the ``modal deploy`` command for the Cytebase app."""
+    """Return the ``modal deploy`` command for the CyteBase app."""
     command = [sys.executable, "-m", "modal", "deploy"]
     if environment is not None:
         command += ["--env", environment]

@@ -1,6 +1,6 @@
 # Data access
 
-Open, inspect, import, and connect to CyteArc DataStores, including Cytebase remote and mounted
+Open, inspect, import, and connect to CyteArc DataStores, including CyteBase remote and mounted
 stores. Docs: <https://docs.nygen.io/CyteArc/tutorials/data-organization>,
 <https://docs.nygen.io/CyteArc/tutorials/import-and-export>, <https://docs.nygen.io/CyteArc/tutorials/cytebase>,
 <https://docs.nygen.io/CyteArc/tutorials/remote-stores>, <https://docs.nygen.io/CyteArc/api/datastore.html>, `import_export.html`, `cytebase.html` (same folder).
@@ -9,7 +9,7 @@ stores. Docs: <https://docs.nygen.io/CyteArc/tutorials/data-organization>,
 
 - First contact with any dataset: choose read-only or writable, then inspect before computing.
 - Converting 10x, Matrix Market, H5AD, or Seurat RDS input into a CyteArc Zarr store.
-- Finding a Cytebase dataset, exploring it remotely, or mounting it for analysis that saves results.
+- Finding a CyteBase dataset, exploring it remotely, or mounting it for analysis that saves results.
 - Reopening a store or a mount from an earlier session.
 
 ## Key concepts
@@ -34,7 +34,7 @@ stores. Docs: <https://docs.nygen.io/CyteArc/tutorials/data-organization>,
 - A mount is a local writable target whose counts resolve from a separate source recorded in the
   root `matrixSource` attribute (absolute path or URI). Metadata is copied once at mount time; new
   artifacts are written only to the target.
-- Cytebase has three layers: `Catalog` (verified local DuckDB copy of the catalog, no counts),
+- CyteBase has three layers: `Catalog` (verified local DuckDB copy of the catalog, no counts),
   `open_datastore` (read-only, everything remote), `mount_datastore` (local writable target,
   counts remote, plus a `<target>.cytebase.json` receipt beside it).
 - `workspace` names a group inside one Zarr with its own `cellData`, assays, and artifacts (counts
@@ -165,7 +165,7 @@ cytearc.CrToZarr(reader, zarr_loc="pbmc.zarr", mem_budget="128M", policy=policy)
 The need follows genes per cell relative to the gene count, not the number of cells. The 1K PBMC
 CITE-seq file refuses at `512M` and imports at `1G`.
 
-### Find a Cytebase dataset
+### Find a CyteBase dataset
 
 ```python
 from cytearc import cytebase
@@ -185,7 +185,7 @@ print(entry.describe())                   # Markdown summary; does not open the 
 print(entry.cell_count, entry.source_embeddings())    # source obsm keys, imported or not
 ```
 
-### Explore a Cytebase dataset read-only
+### Explore a CyteBase dataset read-only
 
 ```python
 ds = catalog.open_datastore(entry.id)     # zarr_mode="r", min_features_per_cell=-1
@@ -199,7 +199,7 @@ frame = coords.join(meta)                 # join on ids, never on row order
 This lookup works for imported embeddings in any `DataStore` and requires exactly one match.
 Without `imported=`, `find` searches computed results. `cytebase.embedding` remains supported.
 
-### Mount a Cytebase dataset for writable analysis
+### Mount a CyteBase dataset for writable analysis
 
 The target must be a new local path. Mounting copies metadata and verifies the source; expect a
 few minutes for a few thousand cells.
@@ -256,7 +256,7 @@ raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datas
 - Imports: `reader.assayFeats` lists the assays to be written; afterwards check
   `ds.RNA.rawData.shape` and dtype. For H5AD, `insp.integerLike` should be `True` for raw counts,
   but SCT-corrected counts are integers too: run "Check the matrix first" in `quality-control.md`.
-- Cytebase: `entry.row["status"] == "ready"`; check `cytebase.embeddings(ds)` before plotting an
+- CyteBase: `entry.row["status"] == "ready"`; check `cytebase.embeddings(ds)` before plotting an
   imported layout.
 - Mounts: `<target>.cytebase.json` exists beside the target; `ds.RNA.rawData.shape` resolves.
 
@@ -281,7 +281,7 @@ raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datas
 - Catalog reopen needs the sidecar: copying a mount without `<name>.cytebase.json` makes
   `catalog.mount_datastore` raise `FileExistsError`; plain `cytearc.DataStore` still opens it.
 - The mount source must stay at its recorded path or URI. Mounting a mount raises; repack first.
-  A changed Cytebase build requires a new mount directory.
+  A changed CyteBase build requires a new mount directory.
 - Printed `CatalogResults` tables HTML-escape text (`_` as `&#95;`, `'` as `&#39;`). Read IDs and
   facet labels from the row dicts (`row["cytebase_id"]`, `row["label"]`), never from the table.
 - A mount resolves its source's imported embeddings read only, so `cytebase.embedding(analysis)`

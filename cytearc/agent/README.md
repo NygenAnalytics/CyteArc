@@ -17,7 +17,7 @@ to package resource configuration.
 
 Prepare and mount the dataset separately. The source must already be an
 initialized local CyteArc directory with a finalized dataset fingerprint and an RNA
-assay. A Cytebase mount can read count bytes remotely despite having a local
+assay. A CyteBase mount can read count bytes remotely despite having a local
 directory. The agent does not download, convert, hydrate, mount, or publish data.
 
 During development, a new analysis requires the selected RNA assay to have no

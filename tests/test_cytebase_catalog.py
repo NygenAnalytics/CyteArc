@@ -1,4 +1,4 @@
-"""Offline tests for the Cytebase catalog cache and queries."""
+"""Offline tests for the CyteBase catalog cache and queries."""
 
 import shutil
 import sys
@@ -404,7 +404,7 @@ def test_find_datasets_returns_ready_datasets_by_default(catalog):
     assert [row["cytebase_id"] for row in ready] == [CYTEBASE_ID]
     assert ready[0]["dataset_id"] == DATASET_ID
     assert ready.to_markdown().splitlines()[0] == (
-        "| Cytebase ID | Status | Cells | Genes | Tissues | Diseases |"
+        "| CyteBase ID | Status | Cells | Genes | Tissues | Diseases |"
     )
 
 
@@ -444,7 +444,7 @@ def test_search_matches_every_word_ignoring_case(catalog):
     limited = catalog.search("atlas", ready_only=False, limit=2)
     assert [row["cytebase_id"] for row in limited] == ordered[:2]
     assert everything.to_markdown(max_rows=0).splitlines()[0] == (
-        "| Cytebase ID | Title | Cells | Tissues | Diseases |"
+        "| CyteBase ID | Title | Cells | Tissues | Diseases |"
     )
 
 

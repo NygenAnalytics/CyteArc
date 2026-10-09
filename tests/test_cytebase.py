@@ -144,7 +144,7 @@ def test_connect_rejects_unknown_repository(monkeypatch):
     with pytest.raises(KeyError) as raised:
         cytebase.connect("missing")
     assert raised.value.args[0] == (
-        "'missing' is not a Cytebase repository. Available repositories:\n"
+        "'missing' is not a CyteBase repository. Available repositories:\n"
         "cellxgene\ndocs"
     )
 
@@ -631,7 +631,7 @@ def test_download_reports_a_path_without_files(monkeypatch, tmp_path):
     )
 
     with pytest.raises(
-        FileNotFoundError, match="^No Cytebase files found at cytearc_docs/alpha/empty$"
+        FileNotFoundError, match="^No CyteBase files found at cytearc_docs/alpha/empty$"
     ):
         cytebase.Repository("cytearc_docs").download("alpha/empty", tmp_path / "out")
     assert not (tmp_path / "out").exists()
@@ -690,7 +690,7 @@ def test_download_rejects_files_the_transfer_skipped(monkeypatch, tmp_path):
 
     with pytest.raises(
         FileNotFoundError,
-        match="^Cytebase did not download 'cytearc_docs/alpha/data.bin'$",
+        match="^CyteBase did not download 'cytearc_docs/alpha/data.bin'$",
     ):
         cytebase.Repository("cytearc_docs").download("alpha/data.bin", downloads)
 

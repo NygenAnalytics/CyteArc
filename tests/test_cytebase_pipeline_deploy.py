@@ -1,4 +1,4 @@
-"""Offline tests for the Cytebase deployment command."""
+"""Offline tests for the CyteBase deployment command."""
 
 import os
 import runpy

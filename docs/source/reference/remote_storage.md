@@ -162,7 +162,7 @@ Plan local disk for float32 dense blocks roughly as `n_cells × n_features × 4`
 
 Object-store latency, request costs, credentials, and provider behavior depend on the service.
 Repeated passes over counts may be faster with a local copy. Downloads remain available through
-Cytebase, as shown in the [](../quickstart.ipynb).
+CyteBase, as shown in the [](../quickstart.ipynb).
 
 For timing and memory measurements, see
 [Measuring resource use](../concepts/memory_and_execution.md#measuring-resource-use).

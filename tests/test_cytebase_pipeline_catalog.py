@@ -572,7 +572,7 @@ def test_assign_name_fails_when_every_suffix_is_taken():
         for length in (8, 12, 32)
     }
     with pytest.raises(
-        ValueError, match=f"unique Cytebase name for dataset {DATASET_ID}"
+        ValueError, match=f"unique CyteBase name for dataset {DATASET_ID}"
     ):
         catalog._assign_name(NAME_PARTS, dataset_id, reserved)
 

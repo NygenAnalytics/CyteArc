@@ -26,7 +26,7 @@ uv pip install "cytearc[agent]"
 ```
 
 Import or mount the data before calling the agent. Follow [](import_and_export.ipynb) for count
-files and [](remote_stores.ipynb) for Cytebase mounts. The agent does not download, convert, mount,
+files and [](remote_stores.ipynb) for CyteBase mounts. The agent does not download, convert, mount,
 or publish a dataset. A local mount may still read remote count bytes during numerical work.
 
 During development, a new analysis rejects complete numerical artifacts from earlier analyses,

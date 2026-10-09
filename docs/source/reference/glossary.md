@@ -67,7 +67,7 @@ dataset
   A dataset can be distributed as a source file and as a CyteArc datastore.
 
 DatasetEntry
-: Metadata-only Cytebase catalog entry returned by `Catalog.dataset(cytebase_id)`.
+: Metadata-only CyteBase catalog entry returned by `Catalog.dataset(cytebase_id)`.
   It describes a dataset's identity, citation, size, and source record.
   Use `Catalog.open_datastore(entry.id)` or `Catalog.mount_datastore(entry.id, at=...)` to access its CyteArc datastore.
 

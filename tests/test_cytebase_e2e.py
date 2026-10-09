@@ -70,7 +70,7 @@ DESCRIPTION = "\n".join(
     [
         f"### {TITLE}",
         "",
-        f"- **Cytebase ID:** `{CYTEBASE_ID}`",
+        f"- **CyteBase ID:** `{CYTEBASE_ID}`",
         "- **Citation:**",
         "    - Publication: https://doi.org/10.1000/lung",
         f"    - Dataset Version: {SOURCE_URL}",

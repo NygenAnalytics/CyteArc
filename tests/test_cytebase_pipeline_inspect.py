@@ -1,4 +1,4 @@
-"""Offline tests for Cytebase H5AD inspection, count selection and manifest checks."""
+"""Offline tests for CyteBase H5AD inspection, count selection and manifest checks."""
 
 import copy
 import dataclasses

@@ -65,7 +65,7 @@ class DatasetEntry:
     def describe(self) -> str:
         """Summarize the dataset as Markdown without opening its Zarr store."""
         row = self.row
-        lines = [f"### {self.title or self.id}", "", f"- **Cytebase ID:** `{self.id}`"]
+        lines = [f"### {self.title or self.id}", "", f"- **CyteBase ID:** `{self.id}`"]
         if self.citation:
             parts = _CITATION_BREAKS.split(self.citation.strip())
             if len(parts) == 1:

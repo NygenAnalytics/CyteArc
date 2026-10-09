@@ -1,4 +1,4 @@
-"""Shared authenticated bucket transfers for the SDK and Cytebase pipeline."""
+"""Shared authenticated bucket transfers for the SDK and CyteBase pipeline."""
 
 import json
 import os
@@ -29,7 +29,7 @@ from huggingface_hub.utils import disable_progress_bars, parse_ratelimit_headers
 def dataset_prefix(cytebase_id: str) -> str:
     if not re.fullmatch(r"[a-z0-9_]{1,80}", cytebase_id):
         raise ValueError(
-            "Cytebase IDs use 1 to 80 lowercase letters, digits, or underscores"
+            "CyteBase IDs use 1 to 80 lowercase letters, digits, or underscores"
         )
     return f"datasets/{cytebase_id}"
 

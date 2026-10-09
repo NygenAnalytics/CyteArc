@@ -189,7 +189,7 @@ def _options(options: dict, *, mode: str) -> dict:
                 f"{reserved} is resolved by Catalog and cannot be overridden"
             )
     if result.pop("zarr_mode", mode) != mode:
-        raise ValueError(f"This Cytebase access requires zarr_mode={mode!r}")
+        raise ValueError(f"This CyteBase access requires zarr_mode={mode!r}")
     if mode == "r" and result.get("min_features_per_cell", -1) != -1:
         raise ValueError(
             "Read-only access requires min_features_per_cell=-1; use a local mount for filtering"
@@ -247,7 +247,7 @@ def mount_datastore(
     from cytearc import mount_datastore as cytearc_mount_datastore
 
     if "://" in str(at):
-        raise ValueError("Cytebase analysis mounts require a local destination")
+        raise ValueError("CyteBase analysis mounts require a local destination")
     target = Path(at).expanduser().absolute()
     sidecar = target.with_name(target.name + ".cytebase.json")
     identity = _identity(storage, cytebase_id)
@@ -257,7 +257,7 @@ def mount_datastore(
     if reopening:
         if not sidecar.is_file():
             raise FileExistsError(
-                "Destination exists without a Cytebase mount receipt; choose a new local path"
+                "Destination exists without a CyteBase mount receipt; choose a new local path"
             )
         saved = json.loads(sidecar.read_text(encoding="utf-8"))
         if saved != identity:
@@ -274,7 +274,7 @@ def mount_datastore(
                 or source.get("location") != identity["zarrUri"]
             ):
                 raise ValueError(
-                    "Mounted matrix source does not match the Cytebase receipt"
+                    "Mounted matrix source does not match the CyteBase receipt"
                 )
         finally:
             root.store.close()
@@ -284,7 +284,7 @@ def mount_datastore(
     else:
         if sidecar.exists():
             raise FileExistsError(
-                "A Cytebase mount receipt already exists at this destination; choose a new local path"
+                "A CyteBase mount receipt already exists at this destination; choose a new local path"
             )
         datastore = cytearc_mount_datastore(
             identity["zarrUri"],

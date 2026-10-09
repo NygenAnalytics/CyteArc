@@ -1,4 +1,4 @@
-"""Offline tests for converting, verifying, and publishing Cytebase CyteArc stores."""
+"""Offline tests for converting, verifying, and publishing CyteBase CyteArc stores."""
 
 import dataclasses
 import shutil

@@ -29,7 +29,7 @@ Prefer calling methods on `DataStore`.
 | Integration and metrics | [Integration and metrics API reference](/api/integration.html) |
 | Mapping | [Mapping API reference](/api/mapping.html) |
 | Plotting | [Plotting API reference](/api/plotting.html) |
-| Cytebase datasets | [Cytebase API reference](/api/cytebase.html) |
+| CyteBase datasets | [CyteBase API reference](/api/cytebase.html) |
 | Utilities | [Utilities API reference](/api/utilities.html) |
 
 [](../scanpy.md), [](../seurat.md), and [](../tutorials/scrna_seq.ipynb) describe related workflows;

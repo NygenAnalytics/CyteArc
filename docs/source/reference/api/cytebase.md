@@ -1,9 +1,9 @@
-# Cytebase API reference
+# CyteBase API reference
 
-The Cytebase SDK connects directly to cloud-hosted CyteArc DataStores for exploration and
+The CyteBase SDK connects directly to cloud-hosted CyteArc DataStores for exploration and
 analysis without downloading a complete dataset first. Search the catalog, open a shared
 store read-only, or mount it for writable analysis with remote counts. Install the `cytebase`
-extra described in [Installation](../installation) and follow [Explore Cytebase](../tutorials/cytebase) for
+extra described in [Installation](../installation) and follow [Explore CyteBase](../tutorials/cytebase) for
 an executable walkthrough. Its [example notebooks](../tutorials/cytebase#cytebase-example-notebooks) show
 longer use cases.
 
@@ -45,7 +45,7 @@ Supported facets are `tissue`, `organ`, `disease`, `assay`, `organism`, `cell_ty
 `development_stage`, and `suspension_type`. Both search methods default to `ready_only=True`,
 which selects datasets with a ready store for their latest registered version. Pass
 `ready_only=False` to include other registered datasets. Results are ordered by descending cell
-count, then Cytebase ID. `list_terms()` summarizes terms across the registered catalog, including
+count, then CyteBase ID. `list_terms()` summarizes terms across the registered catalog, including
 datasets that are not ready.
 
 ```python
@@ -166,7 +166,7 @@ notebook representation. Use `to_markdown()` to choose displayed columns and row
 ## Public example repositories
 
 The repository interface lists and downloads CyteArc's public example files. It uses repository
-and dataset directory names, while `Catalog` discovers catalog datasets by Cytebase ID.
+and dataset directory names, while `Catalog` discovers catalog datasets by CyteBase ID.
 The examples in other tutorials use `connect("cytearc_docs")` and
 `Repository.download_dataset(..., zarr=True)` to download and extract prepared CyteArc stores.
 

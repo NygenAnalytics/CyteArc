@@ -7,7 +7,7 @@ pass today, and when to add the clonotype or haemoglobin add-ons. Docs:
 ## When to use
 
 - Before the baseline run on any new store, to see what the default blacklist matches there.
-- The store uses current HGNC or MGI histone symbols (`H2AC*`, `H3C*`, `H4C*`, `H1-*`), as Cytebase
+- The store uses current HGNC or MGI histone symbols (`H2AC*`, `H3C*`, `H4C*`, `H1-*`), as CyteBase
   datasets do. The default `^HIST` then matches nothing; only older `HIST1H*` references match.
 - Fibroblast, smooth-muscle, endothelial or tumour data, where `CCN1`/`CCN2` (CYR61/CTGF) or
   `CCND1`/`CCND2` carry biology that the default `^CCN` hides.

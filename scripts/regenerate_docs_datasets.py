@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild the analyzed Zarr stores that Cytebase publishes for the documentation.
+"""Rebuild the analyzed Zarr stores that CyteBase publishes for the documentation.
 
 Source stores are built from raw counts. Derived stores use their declared inputs,
 preferring prepared local stores before downloading. Every result uses the current Zarr layout and carries
@@ -1623,14 +1623,14 @@ def main(argv: list[str] | None = None) -> int:
         "--all",
         action="store_true",
         help=(
-            "Rebuild Cytebase-backed datasets, excluding external recipes and "
+            "Rebuild CyteBase-backed datasets, excluding external recipes and "
             "stores derived directly from them"
         ),
     )
     parser.add_argument(
         "--repository",
         default="cytearc_docs",
-        help="Cytebase repository holding the declared source inputs",
+        help="CyteBase repository holding the declared source inputs",
     )
     parser.add_argument(
         "--destination",

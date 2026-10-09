@@ -269,7 +269,7 @@ CyteArc validates persisted data and public arguments against the following cont
 - Mounted targets resolve their source's artifacts read only. A mount lists, loads, traces, and
   reuses the complete artifacts of its identity-checked source after its own, so a recipe that matches saved
   provenance reuses the source's results instead of recomputing them, and labels and embeddings
-  imported into the source, such as the Cytebase `X_umap`, are visible on the mount. Nothing is
+  imported into the source, such as the CyteBase `X_umap`, are visible on the mount. Nothing is
   migrated because no record changes: `ArtifactRef` stays a location-free name with a random ID,
   provenance and run records are unchanged, and `ExternalArtifactRef` stays the cross-dataset
   identity. Every write goes to the target, and a write inside a source artifact group raises
@@ -507,7 +507,7 @@ CyteArc validates persisted data and public arguments against the following cont
   features in any source stores uint8 instead of uint32. Derived assays (grouped and melded) keep
   their float64 values. Dense writers (CSV and dense Seurat counts) no longer cast batches before
   the checked cast, so a count that the stored dtype cannot hold raises OverflowError instead of
-  wrapping. The Cytebase build no longer forces the source dtype, and its records drop
+  wrapping. The CyteBase build no longer forces the source dtype, and its records drop
   `storageDtypePolicy`. Count matrices hold finite values: every count writer, including subset,
   merge, repack, and derived assays, rejects NaN and infinity, and the H5AD, 10x HDF5, Matrix
   Market, CSV, sparse, and Seurat imports read every value and reject them before they create the
@@ -754,7 +754,7 @@ CyteArc validates persisted data and public arguments against the following cont
   gets the first free `_2`, `_3`, and so on, in source order. Reserved names are checked after
   renaming. Matrix Market feature-reference columns with separators are renamed instead of
   rejected. `inspect_h5ad` and the agent manifest see such columns, the manifest reports stored
-  names, and `uns/batch_condition` columns map to stored names. Cytebase `obs_summary` uses
+  names, and `uns/batch_condition` columns map to stored names. CyteBase `obs_summary` uses
   stored names while `h5ad_keys` keeps source names. The original name is not recorded in the
   store, and `to_h5ad` exports the stored names. `DataStoreMerge` rejects a `source_column` or
   `prepend_text` with a separator or the mask prefix, at construction and again when planning,
@@ -787,7 +787,7 @@ CyteArc validates persisted data and public arguments against the following cont
   `cytearc.matrix.Block`, `ChunkedArray.blocks`, `map_blocks`, `dot`, `std`, `chunks`, and
   `nthreads`, `Assay.to_raw_sparse`, `Assay.mean_features`, `cytearc.assay.rna_assay_type_names`,
   `MetaData.mount_location`, `unmount_location`, `remove_trend`, and `insert(location=)`,
-  cytebase `Repository.list_files` and `open_zarr`, `DataStore.set_default_assay`,
+  CyteBase `Repository.list_files` and `open_zarr`, `DataStore.set_default_assay`,
   `last_execution_report`, `calibrate_label_transfer_threshold`, `metric_lisi`, and
   `load_metric_lisi` (use `cytearc.metrics.compute_lisi`), `cytearc.clustering.balanced_cut`,
   `BalancedCut`, and `paris_dendrogram`, `cytearc.neighbors.wnn_integration`,
@@ -1028,7 +1028,7 @@ CyteArc validates persisted data and public arguments against the following cont
   download again.
 - A Seurat matrix specification that holds a mapping where a vector belongs raises
   `MatrixSourceError` naming the slot, instead of `KeyError`.
-- The Cytebase pipeline's HTTP API requires Modal proxy authentication and its own `Cytebase-Token`
+- The CyteBase pipeline's HTTP API requires Modal proxy authentication and its own `Cytebase-Token`
   header, from the `cytebase-api` Modal secret that every deployment environment needs. `GET
   /jobs/{call_id}` reports only calls that the API started, and the API no longer serves
   `/openapi.json` or documentation pages.

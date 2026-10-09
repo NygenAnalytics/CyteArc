@@ -1,4 +1,4 @@
-"""Offline tests for choosing the resource tier of a Cytebase dataset worker."""
+"""Offline tests for choosing the resource tier of a CyteBase dataset worker."""
 
 from pathlib import Path
 

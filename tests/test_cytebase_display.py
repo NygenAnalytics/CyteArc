@@ -1,4 +1,4 @@
-"""Tests for the Markdown tables returned by Cytebase catalog queries."""
+"""Tests for the Markdown tables returned by CyteBase catalog queries."""
 
 import pytest
 
@@ -70,7 +70,7 @@ def test_results_behave_like_lists_of_complete_rows():
 def test_markdown_uses_headers_alignment_and_display_columns():
     results = CatalogResults(ROWS, columns=("cytebase_id", "cell_count"))
     assert results.to_markdown() == (
-        "| Cytebase ID | Cells |\n"
+        "| CyteBase ID | Cells |\n"
         "| --- | ---: |\n"
         "| lung&#95;a | 1,234 |\n"
         "| lung&#95;b |  |\n"
@@ -83,7 +83,7 @@ def test_markdown_uses_headers_alignment_and_display_columns():
 def test_markdown_defaults_to_every_column_and_titles_unknown_headers():
     text = CatalogResults(ROWS[:1]).to_markdown()
     assert text.splitlines()[:2] == [
-        "| Cytebase ID | Cells | Year | First Author |",
+        "| CyteBase ID | Cells | Year | First Author |",
         "| --- | ---: | ---: | --- |",
     ]
     assert text.endswith("\n\n1 row.")
@@ -100,7 +100,7 @@ def test_markdown_limits_rows_and_reports_shortened_cells():
     )
     assert results.to_markdown(max_rows=None).endswith("3 rows.")
     assert results.to_markdown(columns=["cytebase_id"], max_rows=0).startswith(
-        "| Cytebase ID |"
+        "| CyteBase ID |"
     )
 
 
