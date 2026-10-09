@@ -3,10 +3,9 @@
 <p align="left">
   <a href="https://github.com/NygenAnalytics/CyteArc/actions/workflows/pytest.yml"><img src="https://github.com/NygenAnalytics/CyteArc/actions/workflows/pytest.yml/badge.svg" alt="Tests"></a>
   <a href="https://codecov.io/gh/NygenAnalytics/CyteArc"><img src="https://codecov.io/gh/NygenAnalytics/CyteArc/graph/badge.svg" alt="Coverage"></a>
-  <a href="https://docs.nygen.io/CyteArc/"><img src="https://github.com/NygenAnalytics/CyteArc/actions/workflows/pages.yml/badge.svg" alt="Docs"></a>
+  <a href="https://docs.nygen.io/CyteArc/"><img src="https://img.shields.io/github/actions/workflow/status/NygenAnalytics/CyteArc/pages.yml?label=Documentation" alt="Documentation"></a>
   <a href="https://pypi.org/project/cytearc"><img src="https://img.shields.io/pypi/v/cytearc.svg?color=4c72b0" alt="PyPI"></a>
   <a href="https://pypi.org/project/cytearc"><img src="https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-4c72b0.svg" alt="Python 3.12, 3.13, and 3.14"></a>
-  <a href="https://pepy.tech/projects/cytearc"><img src="https://static.pepy.tech/personalized-badge/cytearc?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads" alt="Downloads"></a>
 </p>
 
 
