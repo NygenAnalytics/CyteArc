@@ -23,6 +23,37 @@ Analytical outputs are artifacts only. Feature selection, embedding, clustering,
 operations leave metadata tables unchanged. Consumers validate exact refs,
 artifact completion, lineage, and ordered-axis identity.
 
+## Composite sources and virtual counts
+
+A composite has ordinary local cell and feature metadata, preparation summaries, and analysis
+artifacts. Its root `composite` attribute records `assay`, `sources`, `arrays`, `maps`, and
+`complete`. Each source binding holds its `name`, `location`, `workspace`, `datasetFingerprint`,
+and `countsFingerprint`. Source credentials are supplied at reopen through
+`DataStore(source_storage_options={source_name: options})` and are never persisted.
+
+The `_composite` group stores `rowSources` and `sourceRows`, which map output cells to source
+names and row indices, and `featureColumns`, which maps output features to columns in each
+source. A feature column of `-1` contributes zeros. The manifest records mapping fingerprints;
+reopening verifies these and the saved source identities. Reads load mapping windows as needed.
+
+`arrays` holds the virtual Zarr metadata for `{assay}/counts` and, when required by the assay,
+`{assay}/countsT`. Their `zarr.json` documents and chunks are not stored as ordinary arrays:
+the adapter supplies them during a CyteArc open. Bare Zarr therefore cannot silently substitute
+zeros for the missing counts. Virtual reads gather source chunks in the requested orientation.
+They do not create a stored composite transpose. Published mappings and count metadata are
+immutable; analysis artifacts remain writable. A failed creation leaves `complete=False`, and
+CyteArc refuses to reopen it.
+
+The manifest uses a strict, unversioned shape. Missing or unknown fields fail closed; there is
+no automatic migration. Changing this persisted shape requires an explicit compatibility
+decision before changing the reader or writer.
+
+Sources must remain available and unchanged. Nested composites, mounts, and repacking are
+unsupported. Existing `SubsetZarr` and `DataStoreMerge` writers can read a composite and create
+ordinary stores with copied counts; there is no separate composite materialization API.
+
+## Artifact publication
+
 A producer creates an artifact group with `complete=False` at a path that ends in its random
 256-bit `artifact_id`, so the path belongs to that producer alone. After it validates the payload,
 one metadata write sets `complete=True` and publishes the artifact. The producer deletes the group

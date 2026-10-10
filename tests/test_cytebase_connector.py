@@ -4,14 +4,17 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import httpx2
 import numpy as np
 import pytest
 import zarr
+from huggingface_hub.errors import HfHubHTTPError
 from zarr.abc.store import RangeByteRequest
 from zarr.core.buffer import default_buffer_prototype
 from zarr.storage import FsspecStore
 
 from cytearc.cytebase import connector
+from cytearc.storage import huggingface
 from tests.fixtures_cytebase import (
     COLLECTION_ID,
     CYTEBASE_ID,
@@ -271,7 +274,7 @@ def test_read_store_removes_repeated_listing_entries(tmp_path, monkeypatch):
             yield name
 
     monkeypatch.setattr(FsspecStore, "list_dir", repeated)
-    store = connector._HfReadStore.from_url(
+    store = huggingface.HfReadStore.from_url(
         str(tmp_path), read_only=True, storage_options={"token": False}
     )
 
@@ -293,8 +296,8 @@ def test_read_store_caches_metadata_per_open(tmp_path, monkeypatch, key, value):
         return None if published is None else prototype.buffer.from_bytes(published)
 
     monkeypatch.setattr(FsspecStore, "get", read)
-    first = connector._HfReadStore.from_url(str(tmp_path), read_only=True)
-    second = connector._HfReadStore.from_url(str(tmp_path), read_only=True)
+    first = huggingface.HfReadStore.from_url(str(tmp_path), read_only=True)
+    second = huggingface.HfReadStore.from_url(str(tmp_path), read_only=True)
 
     async def check():
         nonlocal published
@@ -320,7 +323,7 @@ def test_read_store_shares_fetches_without_serializing_other_keys(
 ):
     calls = []
     prototype = default_buffer_prototype()
-    store = connector._HfReadStore.from_url(str(tmp_path), read_only=True)
+    store = huggingface.HfReadStore.from_url(str(tmp_path), read_only=True)
 
     async def check():
         started, release = asyncio.Event(), asyncio.Event()
@@ -363,7 +366,7 @@ def test_read_store_retries_failed_metadata_fetches(tmp_path, monkeypatch):
         return prototype.buffer.from_bytes(b"metadata")
 
     monkeypatch.setattr(FsspecStore, "get", read)
-    store = connector._HfReadStore.from_url(str(tmp_path), read_only=True)
+    store = huggingface.HfReadStore.from_url(str(tmp_path), read_only=True)
 
     async def check():
         with pytest.raises(OSError, match="Temporary transfer failure"):
@@ -382,7 +385,7 @@ def test_read_store_handles_failure_after_its_reader_is_cancelled(
     tmp_path, monkeypatch
 ):
     prototype = default_buffer_prototype()
-    store = connector._HfReadStore.from_url(str(tmp_path), read_only=True)
+    store = huggingface.HfReadStore.from_url(str(tmp_path), read_only=True)
     errors = []
 
     async def check():
@@ -434,7 +437,7 @@ def test_read_store_does_not_cache_chunks_ranges_or_writable_metadata(
         return prototype.buffer.from_bytes(str(len(calls)).encode())
 
     monkeypatch.setattr(FsspecStore, "get", read)
-    store = connector._HfReadStore.from_url(str(tmp_path), read_only=read_only)
+    store = huggingface.HfReadStore.from_url(str(tmp_path), read_only=read_only)
 
     async def check():
         first = await store.get(key, prototype, byte_range)
@@ -445,6 +448,140 @@ def test_read_store_does_not_cache_chunks_ranges_or_writable_metadata(
     try:
         asyncio.run(check())
         assert calls == [(key, byte_range), (key, byte_range)]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("failure_at", ["metadata", "shard_index", "shard_values"])
+def test_read_store_retries_throttled_array_reads(tmp_path, monkeypatch, failure_at):
+    values = np.arange(128, dtype=np.int32).reshape(16, 8)
+    zarr.create_array(store=tmp_path, data=values, chunks=(4, 4), shards=(8, 8))
+    store = huggingface.HfReadStore.from_url(str(tmp_path), read_only=True)
+    read = store.fs._cat_file
+    failed = False
+    sleeps = []
+
+    async def throttled(path, *args, **kwargs):
+        nonlocal failed
+        start = kwargs.get("start")
+        category = (
+            "metadata"
+            if path.endswith("zarr.json")
+            else "shard_index"
+            if start is not None and start < 0
+            else "shard_values"
+        )
+        if category == failure_at and not failed:
+            failed = True
+            response = httpx2.Response(
+                429,
+                headers={"Retry-After": "7"},
+                request=httpx2.Request("GET", "https://bucket.invalid/object"),
+            )
+            raise HfHubHTTPError("Rate limited", response=response)
+        return await read(path, *args, **kwargs)
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(store.fs, "_cat_file", throttled)
+    monkeypatch.setattr(huggingface.asyncio, "sleep", sleep)
+    try:
+        array = zarr.open_array(store=store, mode="r", zarr_format=3)
+        np.testing.assert_array_equal(array[1:3, 2:4], values[1:3, 2:4])
+        assert failed
+        assert sleeps == [7.0]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("status", "retry_after", "attempts", "delays"),
+    [
+        (429, None, 4, [2.0, 4.0, 8.0]),
+        (429, "301", 1, []),
+        (403, "7", 1, []),
+        (500, "7", 1, []),
+    ],
+)
+def test_read_store_bounds_retries_and_preserves_failures(
+    tmp_path, monkeypatch, status, retry_after, attempts, delays
+):
+    (tmp_path / "chunk").write_bytes(b"source counts")
+    store = huggingface.HfReadStore.from_url(str(tmp_path), read_only=True)
+    read = store.fs._cat_file
+    response = httpx2.Response(
+        status,
+        headers={} if retry_after is None else {"Retry-After": retry_after},
+        request=httpx2.Request("GET", "https://bucket.invalid/object"),
+    )
+    failure = HfHubHTTPError("Read failed", response=response)
+    calls = 0
+    sleeps = []
+
+    async def failing(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise failure
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(store.fs, "_cat_file", failing)
+    monkeypatch.setattr(huggingface.asyncio, "sleep", sleep)
+    prototype = default_buffer_prototype()
+    try:
+        with pytest.raises(HfHubHTTPError) as raised:
+            asyncio.run(store.get("chunk", prototype))
+        assert raised.value is failure
+        assert calls == attempts
+        assert sleeps == delays
+        monkeypatch.setattr(store.fs, "_cat_file", read)
+        assert asyncio.run(store.get("chunk", prototype)).to_bytes() == b"source counts"
+    finally:
+        store.close()
+
+
+def test_read_store_cancels_rate_limit_backoff(tmp_path, monkeypatch):
+    (tmp_path / "chunk").write_bytes(b"source counts")
+    store = huggingface.HfReadStore.from_url(str(tmp_path), read_only=True)
+    read = store.fs._cat_file
+    calls = 0
+
+    async def failing(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        response = httpx2.Response(
+            429,
+            headers={"Retry-After": "30"},
+            request=httpx2.Request("GET", "https://bucket.invalid/object"),
+        )
+        raise HfHubHTTPError("Rate limited", response=response)
+
+    async def check():
+        waiting = asyncio.Event()
+
+        async def sleep(delay):
+            assert delay == 30.0
+            waiting.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(huggingface.asyncio, "sleep", sleep)
+        task = asyncio.create_task(store.get("chunk", default_buffer_prototype()))
+        await asyncio.wait_for(waiting.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    monkeypatch.setattr(store.fs, "_cat_file", failing)
+    try:
+        asyncio.run(check())
+        assert calls == 1
+        monkeypatch.setattr(store.fs, "_cat_file", read)
+        assert (
+            asyncio.run(store.get("chunk", default_buffer_prototype())).to_bytes()
+            == b"source counts"
+        )
     finally:
         store.close()
 
@@ -465,17 +602,84 @@ def test_open_datastore_reads_the_published_store_without_writing(ready_dataset)
     assert _file_contents(ready_dataset.store) == before
 
 
+@pytest.mark.parametrize("orientation", ["counts", "countsT"])
+def test_reopened_composite_retries_throttled_source_reads(
+    ready_dataset, tmp_path, monkeypatch, orientation
+):
+    from cytearc import DataStore
+    from cytearc.composite import create_composite
+
+    source = connector.open_datastore(ready_dataset.bucket, CYTEBASE_ID)
+    source.zarr_loc = "hf://buckets/test/cytebase/source.zarr"
+    path = tmp_path / "joint.zarr"
+    joint = create_composite(
+        {"study": source},
+        at=path,
+        features="intersection",
+        rows={"study": [1, 4]},
+        nthreads=1,
+        mem_budget="64M",
+    )
+    expected = joint.RNA.matrixGroup[orientation][:]
+    from_url = huggingface.HfReadStore.from_url
+
+    def local_source(url, *, storage_options=None, read_only=False):
+        assert url == source.zarr_loc
+        assert storage_options == {"token": False}
+        return from_url(str(ready_dataset.store), read_only=read_only)
+
+    monkeypatch.setattr(huggingface.HfReadStore, "from_url", local_source)
+    reopened = DataStore(
+        str(path),
+        nthreads=1,
+        mem_budget="64M",
+        source_storage_options={"study": {"token": False}},
+    )
+    store = reopened.z.store._roots["study"].store
+    read = store.fs._cat_file
+    failed = False
+    sleeps = []
+
+    async def throttled(path, *args, **kwargs):
+        nonlocal failed
+        if f"/RNA/{orientation}/c/" in path and not failed:
+            failed = True
+            response = httpx2.Response(
+                429,
+                headers={"Retry-After": "7"},
+                request=httpx2.Request("GET", "https://bucket.invalid/object"),
+            )
+            raise HfHubHTTPError("Rate limited", response=response)
+        return await read(path, *args, **kwargs)
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(store.fs, "_cat_file", throttled)
+    monkeypatch.setattr(huggingface.asyncio, "sleep", sleep)
+    try:
+        np.testing.assert_array_equal(
+            reopened.RNA.matrixGroup[orientation][:], expected
+        )
+        assert failed
+        assert sleeps == [7.0]
+    finally:
+        connector._close(reopened)
+        connector._close(joint)
+        connector._close(source)
+
+
 def test_open_datastore_closes_the_store_when_the_datastore_fails(
     ready_dataset, monkeypatch
 ):
     created = []
-    original = connector._HfReadStore.from_url
+    original = huggingface.HfReadStore.from_url
 
     def from_url(*args, **kwargs):
         created.append(original(*args, **kwargs))
         return created[-1]
 
-    monkeypatch.setattr(connector._HfReadStore, "from_url", from_url)
+    monkeypatch.setattr(huggingface.HfReadStore, "from_url", from_url)
     with pytest.raises(TypeError, match="bogus_option"):
         connector.open_datastore(ready_dataset.bucket, CYTEBASE_ID, bogus_option=True)
     assert len(created) == 1

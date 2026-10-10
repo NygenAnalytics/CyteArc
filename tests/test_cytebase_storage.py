@@ -11,6 +11,7 @@ import pytest
 from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
 
 from cytearc.cytebase import _storage
+from cytearc.storage import huggingface
 from tests.fixtures_cytebase import BUCKET_ID, bucket_file
 
 pytestmark = pytest.mark.usefixtures("cytebase_offline")
@@ -412,8 +413,8 @@ def test_retry_waits_on_the_stop_event_between_attempts(recorded_sleeps):
 
 
 def test_retry_delay_without_a_response_uses_exponential_backoff():
-    assert _storage._retry_delay(httpx.ConnectError("reset"), 0) == 2.0
-    assert _storage._retry_delay(httpx.ConnectError("reset"), 2) == 8.0
+    assert huggingface.retry_delay(httpx.ConnectError("reset"), 0) == 2.0
+    assert huggingface.retry_delay(httpx.ConnectError("reset"), 2) == 8.0
 
 
 @pytest.mark.parametrize(
@@ -430,8 +431,9 @@ def test_retry_delay_without_a_response_uses_exponential_backoff():
         ({"RateLimit": '"api";r=3;t=55'}, 2.0),
     ],
 )
-def test_retry_delay_honours_server_headers(recorded_sleeps, headers, expected):
-    assert _storage._retry_delay(_status_error(503, headers), 0) == expected
+def test_retry_delay_honours_server_headers(monkeypatch, headers, expected):
+    monkeypatch.setattr(huggingface, "time", SimpleNamespace(time=lambda: NOW))
+    assert huggingface.retry_delay(_status_error(503, headers), 0) == expected
 
 
 @pytest.mark.parametrize("aware", [True, False])
@@ -440,5 +442,5 @@ def test_retry_delay_accepts_http_dates(aware):
     header = format_datetime(
         moment if aware else moment.replace(tzinfo=None), usegmt=aware
     )
-    delay = _storage._retry_delay(_status_error(503, {"Retry-After": header}), 0)
+    delay = huggingface.retry_delay(_status_error(503, {"Retry-After": header}), 0)
     assert 100 < delay <= 120

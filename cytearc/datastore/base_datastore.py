@@ -183,6 +183,7 @@ class BaseDataStore:
         storage_profile: StorageProfile,
         storage_options: dict[str, Any] | None = None,
         storageIo: Any | None = None,
+        source_storage_options: dict[str, dict[str, Any]] | None = None,
     ):
         # Checked before the store is opened, so an invalid value writes nothing.
         min_features_per_cell = validate_min_features_per_cell(min_features_per_cell)
@@ -192,6 +193,7 @@ class BaseDataStore:
             zarr_loc=zarr_loc,
             mode=zarr_mode,
             storage_options=storage_options,
+            source_storage_options=source_storage_options,
         )
         resolved = resolve_matrix_source(
             self.z,

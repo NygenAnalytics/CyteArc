@@ -19,6 +19,7 @@ class ArrayGeometry:
     chunks: tuple[int, ...]
     shards: tuple[int, ...] | None
     itemsize: int
+    readScratchBytes: int = 0
 
     def axisChunk(self, axis: int) -> int:
         """Return the chunk extent along one axis."""
@@ -53,14 +54,22 @@ class ArrayGeometry:
         the chunks it decodes, but not the compressed bytes of a chunk while
         it decodes. ``chunks`` counts the inner chunks the read touches in one
         shard and ``decodes`` the chunks Zarr decodes at once, all of them
-        unless given.
+        unless given. Storage-provided scratch covers one shard request,
+        including its sequential inner-chunk reads. Independent shard requests
+        each need this allowance. Unsharded reads charge scratch per decode.
         """
         touched = max(1, int(chunks))
         decoding = touched if decodes is None else min(touched, max(1, int(decodes)))
         result = max(0, int(resultBytes))
         if self.shards is None:
-            return result + decoding * self.nominalChunkBytes()
-        return 2 * result + (touched + decoding) * self.nominalChunkBytes()
+            return result + decoding * (
+                self.nominalChunkBytes() + self.readScratchBytes
+            )
+        return (
+            2 * result
+            + (touched + decoding) * self.nominalChunkBytes()
+            + self.readScratchBytes
+        )
 
     def binOf(self, axis: int, indices: np.ndarray) -> np.ndarray:
         """Map indices along one axis to the chunk they live in."""
@@ -98,9 +107,15 @@ def array_geometry(array: Any) -> ArrayGeometry | None:
                 f"Array shards {shards} do not match shape {resolved_shape}"
             )
 
+    read_scratch = getattr(getattr(array, "store", None), "read_scratch_bytes", None)
+    scratch = operator.index(read_scratch(array.path)) if callable(read_scratch) else 0
+    if scratch < 0:
+        raise ValueError(f"Array read scratch cannot be negative, got {scratch}")
+
     return ArrayGeometry(
         shape=resolved_shape,
         chunks=resolved_chunks,
         shards=shards,
         itemsize=max(1, int(np.dtype(array.dtype).itemsize)),
+        readScratchBytes=scratch,
     )

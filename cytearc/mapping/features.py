@@ -18,7 +18,9 @@ from ..storage.partition import (
     affordable_width,
     checked_indices,
     contiguous_ranges,
+    is_contiguous,
     row_band,
+    row_read_parts,
 )
 from ..utils.arrays import read_only_copy
 from ..utils.count_values import is_real_count_dtype
@@ -304,10 +306,10 @@ class AlignedFeatureStream:
             scalars.setflags(write=False)
             self._cell_scalars = scalars
 
-        self._decode_bytes = (
-            0
-            if self._source_geometry is None
-            else self._source_geometry.nominalChunkBytes()
+        self._decode_bytes, read_row_bytes = row_read_parts(
+            self._source_geometry,
+            self._query_index_map,
+            rows_contiguous=is_contiguous(self._query_cell_indices),
         )
         self._resident_bytes = self._calculate_resident_bytes() + int(
             reserved_resident_bytes
@@ -319,6 +321,7 @@ class AlignedFeatureStream:
             + (normalized_bytes if self.renormalize_subset else 0)
             + np.dtype(bool).itemsize
             + int(reserved_per_row_bytes)
+            + read_row_bytes
         )
         block_rows, boundaries, io_concurrency = self._plan_rows(
             bytes_per_row=self._stream_row_bytes,
@@ -473,3 +476,4 @@ class AlignedFeatureStream:
                     values=values,
                     observed=observed,
                 )
+                del raw, normalized, values, observed

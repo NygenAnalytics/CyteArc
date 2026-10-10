@@ -119,10 +119,11 @@ def is_remote_datastore(
     ``Store``.
     """
     store = node.store
-    if isinstance(store, MountedArtifactStore):
+    node_stores = getattr(store, "_node_stores", None)
+    if callable(node_stores):
         from zarr.core.sync import sync
 
-        return not all(map(_is_local_store, sync(store._node_stores(node.path))))
+        return not all(map(_is_local_store, sync(node_stores(node.path))))
     if isinstance(zarr_loc, str) and zarr_loc:
         return is_remote_zarr_location(zarr_loc)
     return not _is_local_store(store)
@@ -191,9 +192,9 @@ def make_store(
     if isinstance(location, str):
         if is_remote_zarr_location(location):
             if location.startswith("hf://"):
-                from zarr.storage import FsspecStore
+                from .huggingface import HfReadStore
 
-                return FsspecStore.from_url(
+                return HfReadStore.from_url(
                     location,
                     storage_options=storage_options,
                     read_only=read_only,
@@ -213,12 +214,14 @@ def make_store(
     )
 
 
-def open_store(
+def _open_store_root(
     path: ZarrLocation,
     mode: ZarrMode = "r",
     storage_options: dict[str, Any] | None = None,
+    *,
+    operation: str | None = None,
 ) -> zarr.Group:
-    """Open a Zarr group from a path, URI, or store object."""
+    """Open root metadata before resolving external count bindings."""
     from .async_execution import ensure_zarr_host_ceiling
 
     ensure_zarr_host_ceiling()
@@ -227,17 +230,46 @@ def open_store(
         # Zarr reads a string as a URL, which ends a local path at '#', '?',
         # or ';', so the path that the destination checks read is passed as a
         # Path, which Zarr opens as it is written.
-        return zarr.open_group(Path(store), mode=mode)
-    return zarr.open_group(store=store, mode=mode)
+        root = zarr.open_group(Path(store), mode=mode)
+    else:
+        root = zarr.open_group(store=store, mode=mode)
+    if operation is not None and "composite" in root.attrs:
+        from ..composite.store import refuse_composite
+
+        refuse_composite(root, operation=operation)
+    return root
+
+
+def open_store(
+    path: ZarrLocation,
+    mode: ZarrMode = "r",
+    storage_options: dict[str, Any] | None = None,
+    *,
+    source_storage_options: dict[str, dict[str, Any]] | None = None,
+) -> zarr.Group:
+    """Open a Zarr group from a path, URI, or store object."""
+    root = _open_store_root(path, mode=mode, storage_options=storage_options)
+    if "composite" in root.attrs:
+        from ..composite.store import open_composite
+
+        return open_composite(root, source_storage_options=source_storage_options)
+    return root
 
 
 def load_zarr(
     zarr_loc: ZarrLocation,
     mode: ZarrMode,
     storage_options: dict[str, Any] | None = None,
+    *,
+    source_storage_options: dict[str, dict[str, Any]] | None = None,
 ) -> zarr.Group:
     """Open a Zarr group through the compatibility entry point."""
-    return open_store(zarr_loc, mode=mode, storage_options=storage_options)
+    return open_store(
+        zarr_loc,
+        mode=mode,
+        storage_options=storage_options,
+        source_storage_options=source_storage_options,
+    )
 
 
 def zarr_location_has_content(
@@ -319,10 +351,11 @@ def create_matrix_source(
     source = _persistable_location(source)
     if isinstance(at, str) and locations_overlap(source, at):
         raise ValueError("Source and destination must not overlap")
-    source_root = load_zarr(
+    source_root = _open_store_root(
         source,
         mode="r",
         storage_options=storage_options,
+        operation="mounted",
     )
     if MATRIX_SOURCE_ATTR in source_root.attrs:
         raise ValueError(

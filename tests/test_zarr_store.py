@@ -171,7 +171,7 @@ def test_remote_store_retries_for_three_minutes_unless_overridden(monkeypatch):
     assert calls[1]["retry_config"] == {"max_retries": 1}
 
 
-def test_hugging_face_store_uses_fsspec(monkeypatch):
+def test_hugging_face_store_uses_shared_reader(monkeypatch):
     sentinel = object()
     captured = {}
 
@@ -183,7 +183,7 @@ def test_hugging_face_store_uses_fsspec(monkeypatch):
         )
         return sentinel
 
-    monkeypatch.setattr("zarr.storage.FsspecStore.from_url", from_url)
+    monkeypatch.setattr("cytearc.storage.huggingface.HfReadStore.from_url", from_url)
 
     store = make_store(
         "hf://buckets/Nygen/cytebase/demo/data.zarr",

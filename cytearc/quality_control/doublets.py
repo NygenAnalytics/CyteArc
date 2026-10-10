@@ -26,7 +26,12 @@ from ..storage.budget import ResourceBudget
 from ..storage.execution import admit_stream
 from ..storage.geometry import array_geometry
 from ..storage.parallel import stream_shards
-from ..storage.partition import affordable_width, row_band
+from ..storage.partition import (
+    affordable_width,
+    is_contiguous,
+    row_band,
+    row_read_parts,
+)
 from ..storage.types import as_zarr_array
 from ..utils.arguments import float_argument, integer_argument
 from ..utils.arrays import sparse_matrix_bytes
@@ -179,12 +184,14 @@ def _load_parent_counts(
     backing = raw._backing
     geometry = array_geometry(backing)
     preferred = row_band(geometry, unit="chunk", fallback=1_000)
-    decode_bytes = 0 if geometry is None else geometry.nominalChunkBytes()
     columns = np.arange(raw.shape[1], dtype=np.int64)
+    decode_bytes, read_row_bytes = row_read_parts(
+        geometry, columns, rows_contiguous=is_contiguous(cell_indices)
+    )
     parts: list[csr_matrix] = []
     retained = 0
     # Dense read, sparse conversion scratch, and the eventual concatenation copy.
-    row_bytes = len(columns) * (4 * (raw.dtype.itemsize + 8)) + 32
+    row_bytes = len(columns) * (4 * (raw.dtype.itemsize + 8)) + 32 + read_row_bytes
 
     def boundaries() -> Iterator[tuple[int, int]]:
         start = 0

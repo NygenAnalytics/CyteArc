@@ -44,6 +44,7 @@ from cytearc.storage.sharding import (
     write_dense_in_shard_rows,
 )
 from cytearc.storage.stores import (
+    _open_store_root,
     mount_artifact_namespace,
     open_store,
     resolve_matrix_source,
@@ -333,7 +334,12 @@ def repack_store(
     if locations_overlap(input_path, output_path):
         raise ValueError("input_path and output_path must not overlap")
     resources = resolve_budget(mem_budget, nthreads)
-    src = open_store(input_path, mode="r", storage_options=storage_options)
+    src = _open_store_root(
+        input_path,
+        mode="r",
+        storage_options=storage_options,
+        operation="repacked",
+    )
     manifest = src.attrs.get(MATRIX_SOURCE_ATTR)
     if manifest is not None:
         if not isinstance(manifest, dict) or not isinstance(

@@ -6,8 +6,6 @@ import re
 import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import CancelledError
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
@@ -23,7 +21,9 @@ from huggingface_hub import (
     sync_bucket,
 )
 from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
-from huggingface_hub.utils import disable_progress_bars, parse_ratelimit_headers
+from huggingface_hub.utils import disable_progress_bars
+
+from ..storage.huggingface import retry_delay
 
 
 def dataset_prefix(cytebase_id: str) -> str:
@@ -85,37 +85,6 @@ def _reset_xet_session() -> None:
     abort_xet_session()  # type: ignore[no-untyped-call]
 
 
-def _retry_delay(error: httpx.HTTPError | httpx2.HTTPError, attempt: int) -> float:
-    delay = float(2 ** (attempt + 1))
-    response = getattr(error, "response", None)
-    if response is None:
-        return delay
-    headers = response.headers
-    raw = headers.get("Retry-After")
-    if raw:
-        try:
-            delay = max(delay, float(raw))
-        except ValueError:
-            try:
-                moment = parsedate_to_datetime(raw)
-                if moment.tzinfo is None:
-                    moment = moment.replace(tzinfo=UTC)
-                delay = max(delay, (moment - datetime.now(UTC)).total_seconds())
-            except (TypeError, ValueError, OverflowError):
-                pass
-    raw_reset = headers.get("RateLimit-Reset") or headers.get("X-RateLimit-Reset")
-    if raw_reset:
-        try:
-            reset = float(raw_reset)
-            delay = max(delay, reset - time.time() if reset > 1_000_000_000 else reset)
-        except ValueError:
-            pass
-    rate_limit = parse_ratelimit_headers(headers)
-    if rate_limit is not None and rate_limit.remaining == 0:
-        delay = max(delay, float(rate_limit.reset_in_seconds))
-    return delay
-
-
 def retry[T](
     operation: Callable[[], T],
     progress: Callable | None = None,
@@ -145,7 +114,7 @@ def retry[T](
             )
             if not transient or attempt == 3:
                 raise
-            delay = _retry_delay(error, attempt)
+            delay = retry_delay(error, attempt)
             if delay > 300:
                 raise
             limited = response is not None and response.status_code == 429

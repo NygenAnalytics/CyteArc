@@ -95,6 +95,10 @@ A domain that persists an artifact may use a narrow, named `storage` adapter.
 - `readers/` parses supported input formats.
 - `writers/` materializes CyteArc stores and exports supported formats.
 - `merge/` combines assays and datasets without importing `DataStore` during normal module loading.
+- `composite/` presents selected source counts through an ordinary `DataStore` without copying
+  them. `create.py` reuses merge alignment, metadata, and storage preparation; `store.py` owns
+  virtual count reads and imports foundation modules only. The storage opener imports its
+  adapter lazily. Assays and pipeline stages use their existing array interfaces.
 
 Readers parse, writers materialize, and merge combines.
 Format-specific code belongs in a module named for that format.
