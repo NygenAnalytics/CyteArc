@@ -20,6 +20,7 @@ __all__ = [
     "is_contiguous",
     "partition_indices",
     "row_band",
+    "row_read_parts",
     "scan_band",
 ]
 
@@ -79,6 +80,43 @@ def is_contiguous(indices: np.ndarray) -> bool:
     if indices[0] < 0:
         return False
     return bool(indices.size == 1 or np.all(np.diff(indices) == 1))
+
+
+def row_read_parts(
+    geometry: ArrayGeometry | None,
+    columns: np.ndarray,
+    *,
+    rows_contiguous: bool,
+) -> tuple[int, int]:
+    """Return per-decode and per-row bytes beside a selected row block's result."""
+    if geometry is None or columns.size == 0:
+        return 0, 0
+    column_chunks = np.unique(geometry.binOf(1, columns))
+    chunks_per_shard = -(-geometry.axisShard(1) // geometry.axisChunk(1))
+    _, counts = np.unique(column_chunks // chunks_per_shard, return_counts=True)
+    touched = -(-geometry.axisShard(0) // geometry.axisChunk(0)) * int(counts.max())
+    fixed = geometry.readBytes(0, touched, decodes=1)
+    per_row = columns.size * geometry.itemsize if geometry.shards is not None else 0
+    column_gather = not is_contiguous(columns)
+    if not rows_contiguous or column_gather:
+        # Sorted selections, permutations, chunk labels, cumulative counts,
+        # and their temporary arrays in Zarr's integer indexers.
+        index_bytes = 16 * np.dtype(np.int64).itemsize
+        grid = sum(
+            -(-extent // geometry.axisShard(axis))
+            for axis, extent in enumerate(geometry.shape)
+        )
+        fixed += index_bytes * (grid + (columns.size if column_gather else 0))
+        if not rows_contiguous:
+            per_row += index_bytes
+        if not rows_contiguous and column_gather and geometry.shards is not None:
+            # Two gathered axes become flattened coordinate arrays inside
+            # each shard, including coordinate sorting and chunk projections.
+            per_row += index_bytes * columns.size
+            fixed += index_bytes * (
+                -(-geometry.axisShard(0) // geometry.axisChunk(0)) * chunks_per_shard
+            )
+    return int(fixed), int(per_row)
 
 
 def affordable_width(fits: Fits, maxWidth: int) -> int:

@@ -124,6 +124,8 @@ def _foreign_files(group: zarr.Group, path: str) -> list[str]:
 
 def _replacement_refusal(root: zarr.Group) -> str | None:
     """Return why ``overwrite=True`` may not replace the store at ``root``, or None."""
+    if "composite" in root.attrs:
+        return "records a composite, which cannot be overwritten"
     if stores.MATRIX_SOURCE_ATTR in root.attrs:
         return f"records a {stores.MATRIX_SOURCE_ATTR}, so it is a mounted store"
     prepared: list[str] = []

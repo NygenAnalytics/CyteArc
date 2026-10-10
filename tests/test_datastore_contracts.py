@@ -118,10 +118,10 @@ _METHODS = {
 # Keep the existing digest keys so moving a method cannot hide a signature change.
 _SIGNATURE_DIGESTS = {
     # Base and inherited graph constructors accept DataStore's optional setup values.
-    BaseDataStore: "4adb7c02a447044ae5b811b8949667406cd6e32f2ecb842f9a9cf13f39589c10",
-    GraphDataStore: "dd4ecbcf2ec5982dcb60d01d67a3662df392fe9305a047acaaf36c9c5e099f77",
+    BaseDataStore: "7f5cea5c9ab2abd1066d6e3d29ddc0d0c8e6f14459792bfd1552bbf67145704a",
+    GraphDataStore: "0558f676a67ed7257cd2cb99808c241989e8db08d5ee561668db23940280db18",
     MappingDatastore: "a4839ac0372df95f021fd8c383c1ac2aff6796c6b093e05510c71ad7e8449a72",
-    DataStore: "bad4567e78ed0f10d258fa79eae2f80d8a3a81ac0715c0b4e7ee8ad93fcce90d",
+    DataStore: "3c863125ef47c3d38fd3e8649f36a768d44c4d729ab3e9d8a527da70362b0105",
     ArtifactAccessor: "c48b4badcb3fbd03d03326278eafae0cf429ac31e5d053390e60ed9316d6b54b",
 }
 

@@ -126,7 +126,7 @@ def execute_page(source: str) -> str:
     with TemporaryDirectory(prefix="cytearc-docs-") as working_directory:
         NotebookClient(
             notebook,
-            timeout=600,
+            timeout=TIMEOUT_SECONDS,
             allow_errors=False,
             record_timing=True,
             resources={"metadata": {"path": working_directory}},

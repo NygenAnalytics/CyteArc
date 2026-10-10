@@ -154,6 +154,14 @@ def _scoped_task(
     scope = _IO_TASKS.get() if context is None else context.get(_IO_TASKS)
     if scope is not None:
         scope.add(task)
+
+        def completed(future: asyncio.Future[Any]) -> None:
+            # Successful results belong to their caller. Keep failures and
+            # cancelled tasks for _drained, without retaining decoded buffers.
+            if not future.cancelled() and future.exception() is None:
+                scope.discard(future)
+
+        task.add_done_callback(completed)
     return task
 
 

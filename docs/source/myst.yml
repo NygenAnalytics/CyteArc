@@ -64,6 +64,8 @@ project:
       title: HTO demultiplexing
   - title: Integration and mapping
     children:
+    - file: tutorials/composite_datasets.ipynb
+      title: CyteBase composite datasets
     - file: tutorials/dataset_merging.ipynb
       title: Dataset merging
     - file: tutorials/batch_correction.ipynb

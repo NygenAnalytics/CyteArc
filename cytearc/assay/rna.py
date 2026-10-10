@@ -10,7 +10,12 @@ from ..matrix import ChunkedArray
 from ..metadata import MetaData
 from ..storage.execution import admit_stream
 from ..storage.geometry import array_geometry
-from ..storage.partition import row_band
+from ..storage.partition import (
+    affordable_width,
+    is_contiguous,
+    row_band,
+    row_read_parts,
+)
 from ..storage.types import as_zarr_group
 from ..utils.arguments import integer_argument
 from ..utils.compute import compute_with_progress
@@ -564,7 +569,25 @@ class RNAassay(Assay):
             return out
 
         geometry = array_geometry(zarr_arr)
-        block_rows = row_band(geometry, unit="chunk", fallback=n_cells)
+        decode_bytes, read_row_bytes = row_read_parts(
+            geometry, union, rows_contiguous=is_contiguous(cell_idx)
+        )
+        resident_bytes += sum(value.nbytes for value in out.values())
+        row_bytes = (
+            max(1, len(union))
+            * (np.dtype(zarr_arr.dtype).itemsize + 2 * np.dtype(np.float64).itemsize)
+            + read_row_bytes
+        )
+        block_rows = max(
+            1,
+            affordable_width(
+                lambda rows: (
+                    resident_bytes + rows * row_bytes + decode_bytes
+                    <= self.resources.memoryBytes
+                ),
+                min(n_cells, row_band(geometry, unit="chunk", fallback=n_cells)),
+            ),
+        )
 
         starts = range(0, n_cells, block_rows)
 
@@ -572,17 +595,12 @@ class RNAassay(Assay):
             rows = cell_idx[start : start + block_rows]
             return start, _read_facade_block(zarr_arr, rows, union)
 
-        block_bytes = (
-            block_rows
-            * max(1, len(union))
-            * (np.dtype(zarr_arr.dtype).itemsize + np.dtype(np.float64).itemsize)
-        )
         admission = admit_stream(
             self.resources,
             nBlocks=self.resources.workers,
-            blockBytes=block_bytes,
-            decodeBytes=0 if geometry is None else geometry.nominalChunkBytes(),
-            residentBytes=resident_bytes + sum(value.nbytes for value in out.values()),
+            blockBytes=block_rows * row_bytes,
+            decodeBytes=decode_bytes,
+            residentBytes=resident_bytes,
             requested=self.resources.workers,
         )
         for start, raw in stream_shards(
@@ -597,6 +615,7 @@ class RNAassay(Assay):
                 np.log1p(normed, out=normed)
             for key, pos in local_pos.items():
                 out[key][start:end] = normed[:, pos].mean(axis=1)
+            del raw, normed
         return out
 
     def _iter_feature_group_means(

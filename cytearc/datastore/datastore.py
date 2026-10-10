@@ -78,7 +78,7 @@ def mount_datastore(
         is_rna_assay_type,
         validate_assay_types,
     )
-    from ..storage.stores import discard_mount_target
+    from ..storage.stores import _open_store_root, discard_mount_target
 
     if "zarr_loc" in datastore_options:
         raise TypeError("mount_datastore takes the target location through 'at'")
@@ -92,6 +92,7 @@ def mount_datastore(
         at, workspace=workspace, storage_options=storage_options, **datastore_options
     )
 
+    _open_store_root(source, storage_options=storage_options, operation="mounted")
     source_store = DataStore(
         source,
         workspace=workspace,
@@ -204,6 +205,9 @@ class DataStore(
                      None, chosen from the store location. Changing it on open
                      does not rewrite existing arrays.
         storage_options: Backend options passed when opening the Zarr store.
+        source_storage_options: Backend options keyed by source name when reopening
+                                a composite. Credentials are used at runtime and
+                                are never saved in the composite.
         mem_budget: Memory budget bounding streaming and concurrency. Accepts bytes, a suffixed size
                     (e.g. '8G'), or a fraction of total system memory (e.g. '0.6'). When None, it is
                     auto-detected (CYTEARC_MEM_BUDGET env var, else 75% of effective system/container memory). Override it to
@@ -227,6 +231,7 @@ class DataStore(
         storage_options: dict[str, Any] | None = None,
         mem_budget: int | str | None = None,
         storageIo: StorageIoPolicy | None = None,
+        source_storage_options: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         from ..storage.budget import resolve_budget
         from ..storage.profiles import resolve_storage_profile
@@ -250,6 +255,7 @@ class DataStore(
             storage_profile=profile,
             storage_options=storage_options,
             storageIo=storageIo,
+            source_storage_options=source_storage_options,
         )
 
     @property

@@ -261,6 +261,59 @@ def test_matrix_source_must_be_a_store_location_that_holds_assays(
     assert not target.exists()
 
 
+@pytest.mark.parametrize("operation", ["mount", "matrix_source", "repack"])
+@pytest.mark.parametrize("source_failure", ["missing", "identity"])
+@pytest.mark.parametrize("existing_destination", [False, True])
+def test_composite_refused_before_resolving_sources(
+    tmp_path: Path,
+    operation: str,
+    source_failure: str,
+    existing_destination: bool,
+) -> None:
+    from cytearc.composite import create_composite
+    from cytearc.tools.repack_zarr import repack_store
+
+    source_path = tmp_path / "source.zarr"
+    source = _open(
+        _write_store(source_path, {"RNA": _COUNTS}),
+        nthreads=1,
+        mem_budget="64M",
+    )
+    joint_path = tmp_path / "joint.zarr"
+    create_composite(
+        {"source": source},
+        at=joint_path,
+        features="intersection",
+        nthreads=1,
+        mem_budget="64M",
+    )
+    if source_failure == "missing":
+        source_path.rename(tmp_path / "unavailable.zarr")
+    else:
+        root = zarr.open_group(source_path, mode="r+")
+        root["RNA"].attrs["dataset_fingerprint"] = "changed-source"
+
+    target = tmp_path / "target.zarr"
+    if existing_destination:
+        target.mkdir()
+        (target / "sentinel").write_text("keep")
+    action = "repacked" if operation == "repack" else "mounted"
+    with pytest.raises(ValueError, match=f"A composite datastore cannot be {action}"):
+        if operation == "mount":
+            mount_datastore(str(joint_path), at=str(target))
+        elif operation == "matrix_source":
+            create_matrix_source(
+                str(joint_path), str(target), required_transposes=frozenset({"RNA"})
+            )
+        else:
+            repack_store(str(joint_path), str(target))
+    if existing_destination:
+        assert list(target.iterdir()) == [target / "sentinel"]
+        assert (target / "sentinel").read_text() == "keep"
+    else:
+        assert not target.exists()
+
+
 class _FailingTarget(WrapperStore[Store]):
     """A backend that rejects table writes and cannot delete anything."""
 

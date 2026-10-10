@@ -61,7 +61,10 @@ def _source_keys(
 
 
 def _merge_order_feats(
-    keyed: list[tuple[np.ndarray, np.ndarray]], key: FeatureKey
+    keyed: list[tuple[np.ndarray, np.ndarray]],
+    key: FeatureKey,
+    *,
+    require_overlap: bool,
 ) -> tuple[pd.DataFrame, float]:
     union: dict[Any, Any] = {}
     source_presence: Counter[Any] = Counter()
@@ -86,7 +89,7 @@ def _merge_order_feats(
     else:
         shared = sum(count > 1 for count in source_presence.values())
         overlap = 0.0 if not union else shared / len(union)
-        if overlap == 0:
+        if overlap == 0 and require_overlap:
             message = _NO_OVERLAP.format(kind="IDs" if key == "ids" else "names")
             raise ValueError(message + (_NAME_HINT if key == "ids" else ""))
         if overlap < 0.1:
@@ -95,7 +98,11 @@ def _merge_order_feats(
 
 
 def align_features(
-    assays: list[Any | None], names: list[str], *, key: FeatureKey = "ids"
+    assays: list[Any | None],
+    names: list[str],
+    *,
+    key: FeatureKey = "ids",
+    require_overlap: bool = True,
 ) -> FeatureAlignment:
     """Compute the merged feature table and remapping for one assay type.
 
@@ -116,7 +123,9 @@ def align_features(
         )
 
     keyed = _source_keys(assays, names, key)
-    merged_feats, overlap = _merge_order_feats(keyed, key)
+    merged_feats, overlap = _merge_order_feats(
+        keyed, key, require_overlap=require_overlap
+    )
     positions = pd.Index(merged_feats["ids"])
     return FeatureAlignment(
         mergedFeatsMap=merged_feats,

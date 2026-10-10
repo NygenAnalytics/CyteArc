@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import math
 import threading
 from typing import Any
+import weakref
 
 import numpy as np
 import pytest
@@ -894,6 +895,27 @@ def test_cancelled_native_work_keeps_its_reservation_until_finished(kind):
             await task
         assert finished.is_set()
         assert active.ledger.is_empty()
+
+    runner.run(operation)
+
+
+def test_io_releases_completed_results_before_the_outer_read_finishes():
+    runner = _runner(ResourceBudget(1024**2, 1))
+
+    async def operation(active):
+        async def read():
+            async def decode():
+                return np.empty(1024, dtype=np.uint8)
+
+            references = []
+            for _ in range(3):
+                values = await asyncio.create_task(decode())
+                references.append(weakref.ref(values))
+                del values
+            await asyncio.sleep(0)
+            assert all(reference() is None for reference in references)
+
+        await active.io(read())
 
     runner.run(operation)
 

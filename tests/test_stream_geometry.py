@@ -1,11 +1,13 @@
 import numpy as np
 import pytest
+import tracemalloc
 import zarr
 from zarr.storage import MemoryStore
 
 from cytearc.assay.persistence import _read_block
 from cytearc.matrix.chunked import ChunkedArray
 from cytearc.storage.budget import ResourceBudget
+from cytearc.storage.async_execution import zarr_io_concurrency
 from cytearc.storage.execution import admit_stream
 from cytearc.storage.feature_stream import plan_feature_stream
 from cytearc.storage.geometry import ArrayGeometry, array_geometry
@@ -17,6 +19,7 @@ from cytearc.storage.partition import (
     is_contiguous,
     partition_indices,
     row_band,
+    row_read_parts,
 )
 
 from .store_probes import RecordingStore
@@ -117,6 +120,54 @@ def test_row_band_follows_the_requested_stored_unit() -> None:
 def test_row_band_uses_the_fallback_without_geometry() -> None:
     assert row_band(None, fallback=10_000) == 10_000
     assert row_band(None, fallback=0) == 1
+
+
+def test_selected_row_cost_covers_sharded_coordinate_buffers() -> None:
+    values = np.random.default_rng(73).integers(
+        0, 30, size=(1024, 512), dtype=np.uint16
+    )
+    array = _array(
+        shape=values.shape,
+        chunks=(128, 64),
+        shards=(256, 256),
+        dtype=np.uint16,
+    )
+    array[:] = values
+    rows = np.arange(1023, -1, -2)
+    columns = np.arange(511, -1, -3)
+    fixed, per_row = row_read_parts(
+        array_geometry(array), columns, rows_contiguous=False
+    )
+    planned = (
+        len(rows) * len(columns) * array.dtype.itemsize + fixed + len(rows) * per_row
+    )
+    with zarr_io_concurrency(1):
+        _read_block(array, rows, columns)
+        tracemalloc.start()
+        try:
+            actual = _read_block(array, rows, columns)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    np.testing.assert_array_equal(actual, values[np.ix_(rows, columns)])
+    assert peak <= planned
+
+
+def test_selected_row_cost_admits_only_touched_chunks_within_each_shard() -> None:
+    geometry = ArrayGeometry((32, 24), (4, 2), (8, 8), 2, 10_000)
+    narrow, _ = row_read_parts(geometry, np.array([0, 8, 16]), rows_contiguous=True)
+    wide, _ = row_read_parts(geometry, np.array([0, 2, 4]), rows_contiguous=True)
+    # Both selections touch three feature chunks, but only the second puts
+    # them in one shard alongside its two row chunks.
+    assert wide - narrow == 4 * geometry.nominalChunkBytes()
+    minimum = narrow + 1
+    with pytest.raises(MemoryError):
+        admit_stream(
+            ResourceBudget(minimum - 1, 1),
+            nBlocks=1,
+            blockBytes=1,
+            decodeBytes=narrow,
+        )
 
 
 def test_contiguous_ranges_cover_the_axis_without_overlap() -> None:

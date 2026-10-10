@@ -4414,6 +4414,64 @@ def test_build_row_plan_rejects_inconsistent_sources(cells, chunks, names, messa
         build_row_plan(cells, chunks, names)
 
 
+def test_selected_row_plan_preserves_default_order_and_source_coordinates():
+    from cytearc.merge.row_plan import build_row_plan, iter_row_plan_segments
+
+    def coordinates(plan):
+        return [
+            (segment.sourceIdx, int(row))
+            for segment in iter_row_plan_segments(plan)
+            for row in segment.localRows
+        ]
+
+    arguments = ([13, 11], [4, 3], ["a", "b"])
+    ordinary = build_row_plan(*arguments, seed=7)
+    default = build_row_plan(*arguments, seed=7, selected_rows=[None, None])
+    full = build_row_plan(
+        *arguments,
+        seed=7,
+        selected_rows=[np.arange(13)[::-1], np.arange(11)],
+    )
+    assert coordinates(ordinary) == coordinates(default) == coordinates(full)
+    selected = [np.array([12, 7, 0, 4]), np.array([10, 0])]
+    plan = build_row_plan(*arguments, seed=7, selected_rows=selected)
+    repeated = build_row_plan(*arguments, seed=7, selected_rows=selected)
+    assert coordinates(plan) == coordinates(repeated)
+    assert sorted(coordinates(plan)) == [
+        (0, 0),
+        (0, 4),
+        (0, 7),
+        (0, 12),
+        (1, 0),
+        (1, 10),
+    ]
+    assert plan.nCells == 6
+    for segment in iter_row_plan_segments(plan):
+        assert len(set(segment.localRows // arguments[1][segment.sourceIdx])) == 1
+    empty = build_row_plan(*arguments, selected_rows=[np.array([], dtype=int)] * 2)
+    assert empty.nCells == 0
+    assert empty.coordinatesPermutations.shape == (0, 2)
+    assert list(iter_row_plan_segments(empty)) == []
+
+
+@pytest.mark.parametrize(
+    ("selection", "error", "message"),
+    [
+        ([np.array([0])], ValueError, "Selected rows must match"),
+        ([np.array([-1]), None], IndexError, "out-of-range"),
+        ([None, np.array([3])], IndexError, "out-of-range"),
+        ([np.array([1, 1]), None], ValueError, "duplicate"),
+        ([np.array([1.0]), None], TypeError, "integers"),
+        ([np.array([[1]]), None], ValueError, "one-dimensional"),
+    ],
+)
+def test_selected_row_plan_rejects_invalid_selections(selection, error, message):
+    from cytearc.merge.row_plan import build_row_plan
+
+    with pytest.raises(error, match=message):
+        build_row_plan([5, 3], [2, 3], ["a", "b"], selected_rows=selection)
+
+
 def test_row_plan_segments_and_identity_checks_cover_every_cell_once():
     from cytearc.merge.row_plan import (
         RowPlan,

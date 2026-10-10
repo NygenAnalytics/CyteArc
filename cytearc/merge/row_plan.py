@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 
 from ..metadata.rows import read_metadata_rows_chunkwise
+from ..storage.partition import checked_indices
 from ..utils.arrays import permute_into_chunks
 
 
@@ -37,6 +38,8 @@ def build_row_plan(
     row_chunk_sizes: list[int],
     source_names: list[str],
     seed: int | None = 42,
+    *,
+    selected_rows: list[np.ndarray | None] | None = None,
 ) -> RowPlan:
     """Build a deterministic shared row order for concatenated sources."""
     if len(n_cells_per_source) != len(row_chunk_sizes):
@@ -47,16 +50,31 @@ def build_row_plan(
         raise ValueError("Row chunk sizes must be positive")
     if len(source_names) != len(set(source_names)):
         raise ValueError("A unique name must be provided for each source DataStore")
+    if selected_rows is not None and len(selected_rows) != len(source_names):
+        raise ValueError("Selected rows must match the number of sources")
 
     rng = np.random.default_rng(seed=seed)
     chunk_size = np.asarray(row_chunk_sizes, dtype=int)
     n_cells = np.asarray(n_cells_per_source, dtype=int)
     # Within-block permutation keeps the historical fixed seed used by
     # permute_into_chunks; the caller seed only reorders source blocks.
-    permutations = {
-        i: permute_into_chunks(int(n_cells[i]), int(chunk_size[i]))
-        for i in range(len(n_cells_per_source))
-    }
+    permutations = {}
+    for i in range(len(n_cells_per_source)):
+        selected = None if selected_rows is None else selected_rows[i]
+        if selected is None:
+            permutations[i] = permute_into_chunks(int(n_cells[i]), int(chunk_size[i]))
+            continue
+        selected = np.sort(
+            checked_indices(selected, limit=int(n_cells[i]), name="selected_rows")
+        )
+        boundaries = np.flatnonzero(np.diff(selected // chunk_size[i])) + 1
+        block_rng = np.random.default_rng(42)
+        permutations[i] = [
+            block_rng.permutation(block)
+            for block in np.split(selected, boundaries)
+            if block.size
+        ]
+        n_cells[i] = selected.size
     permutations_rows = {
         key: {i: x for i, x in enumerate(arrays)}
         for key, arrays in permutations.items()
@@ -81,7 +99,9 @@ def build_row_plan(
 
     return RowPlan(
         permutationsRows=permutations_rows,
-        coordinatesPermutations=np.asarray(coordinates_permutations, dtype=np.int64),
+        coordinatesPermutations=np.asarray(
+            coordinates_permutations, dtype=np.int64
+        ).reshape(-1, 2),
         nCells=int(n_cells.sum()),
         sourceNames=tuple(source_names),
     )
