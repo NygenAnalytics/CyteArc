@@ -1,7 +1,6 @@
 ---
 description: Assign sample identities from hashtag oligo counts and interpret singlet, negative, and doublet labels.
 ---
-
 (hto_demultiplexing)=
 
 # HTO demultiplexing
@@ -71,6 +70,6 @@ The method does not replace RNA doublet scoring, because homotypic and untagged 
 
 ## Catalog limitation
 
-CyteArc's public dataset catalog does not currently contain a cell-hashing dataset, so this page cannot provide an executable result without inventing unrepresentative data.
-Adding a licensed public HTO dataset to the catalog is required before this guide can become executable.
-See the [DataStore API reference](/api/datastore.html) reference for the current signature.
+CyteArc's public dataset catalog does not currently contain a cell-hashing dataset, so this page cannot provide an executable result yet.
+For further information on the API behind HTO demultiplexing,
+see the [DataStore API reference](/api/datastore.html).
