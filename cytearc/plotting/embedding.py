@@ -7,6 +7,7 @@ from typing import Any, Hashable
 import numpy as np
 import pandas as pd
 
+from ..features.values import normalization_is_cell_local, resolve_feature_batch
 from ..metadata.rows import apply_missing_mask
 from ..metadata.selection import CellFieldKind, cell_value_spec
 from ..storage.artifacts import ArtifactRef
@@ -30,7 +31,6 @@ from ._data import (
     fetch_normalized_feature_matrix,
     has_finite_values,
     resolve_cell_selection,
-    resolve_feature,
     unmeasured_cell_counts,
     unmeasured_extras,
 )
@@ -128,6 +128,8 @@ def _color_labels(
 ) -> list[str]:
     metadata_columns = _cell_metadata_columns(store, color_items)
     labels: list[str] = []
+    feature_slots: list[int] = []
+    features: list[str | FeatureRef] = []
     for item in color_items:
         if item is None:
             labels.append("cells")
@@ -138,7 +140,15 @@ def _color_labels(
         elif isinstance(item, str) and item in metadata_columns:
             labels.append(item)
         else:
-            labels.append(resolve_feature(store, item, from_assay=from_assay).label)
+            feature_slots.append(len(labels))
+            features.append(item)
+            labels.append("")
+    for slot, feature in zip(
+        feature_slots,
+        resolve_feature_batch(store, features, from_assay=from_assay),
+        strict=True,
+    ):
+        labels[slot] = feature.label
     return labels
 
 
@@ -405,6 +415,7 @@ def _prefetch_colors(
     normalization: NormalizationSpec,
     cell_indices: np.ndarray | None = None,
     unmeasured: dict[str, np.ndarray] | None = None,
+    read_features: bool = True,
 ) -> list[tuple[np.ndarray, str, bool, bool]]:
     """Return list of (values, label, is_categorical, is_uniform).
 
@@ -415,9 +426,7 @@ def _prefetch_colors(
     """
     out: list[tuple[np.ndarray, str, bool, bool]] = []
 
-    # Batch RNA-like feature refs / gene strings for one matrix read.
-    feature_slots: list[tuple[int, Any]] = []
-    for i, item in enumerate(color_items):
+    for item in color_items:
         if item is None:
             out.append((np.ones(n_cells), "cells", False, True))
             continue
@@ -479,27 +488,93 @@ def _prefetch_colors(
             continue
         # Feature path: placeholder, fill after batch resolve
         out.append((np.zeros(n_cells), "", False, False))
-        feature_slots.append((i, item))
-
-    if feature_slots:
-        resolved = [
-            resolve_feature(store, item, from_assay=from_assay)
-            for _, item in feature_slots
-        ]
-        cell_idx = (
-            store.cells.active_index(cell_key) if cell_indices is None else cell_indices
-        )
-        mat = fetch_normalized_feature_matrix(
+    if read_features:
+        _prefetch_feature_colors(
             store,
-            resolved,
-            cell_idx,
+            color_items,
+            out,
+            metadata_columns=metadata_columns,
+            from_assay=from_assay,
+            cell_key=cell_key,
             normalization=normalization,
+            cell_indices=cell_indices,
             unmeasured=unmeasured,
         )
-        for col_i, (slot_i, _) in enumerate(feature_slots):
-            feat = resolved[col_i]
-            out[slot_i] = (mat[:, col_i], feat.label, False, False)
     return out
+
+
+def _prefetch_feature_colors(
+    store: Any,
+    color_items: Sequence[str | ArtifactRef | FeatureRef | CellField | None],
+    colors: list[tuple[np.ndarray, str, bool, bool]],
+    *,
+    metadata_columns: Collection[str],
+    from_assay: str | None,
+    cell_key: str,
+    normalization: NormalizationSpec,
+    cell_indices: np.ndarray | None,
+    unmeasured: dict[str, np.ndarray] | None,
+    selection: np.ndarray | None = None,
+) -> None:
+    """Fill feature colors after metadata determines the displayed cells."""
+    slots: list[int] = []
+    features: list[str | FeatureRef] = []
+    for index, item in enumerate(color_items):
+        if item is None or isinstance(item, ArtifactRef | CellField):
+            continue
+        if isinstance(item, str) and item in metadata_columns:
+            continue
+        slots.append(index)
+        features.append(item)
+    if not slots:
+        return
+    resolved = resolve_feature_batch(store, features, from_assay=from_assay)
+    cell_idx = (
+        store.cells.active_index(cell_key) if cell_indices is None else cell_indices
+    )
+    # Cell-local values of the shown cells do not depend on hidden cells, so
+    # only the shown cells are read for them.
+    shown_only = np.zeros(len(resolved), dtype=bool)
+    if selection is not None and not selection.all():
+        cell_local = {
+            name: normalization_is_cell_local(store._get_assay(name), normalization)
+            for name in {feature.assay for feature in resolved}
+        }
+        shown_only = np.asarray([cell_local[feature.assay] for feature in resolved])
+    for read_shown in (False, True):
+        positions = np.flatnonzero(shown_only == read_shown)
+        if not len(positions):
+            continue
+        read_idx = cell_idx
+        if read_shown:
+            assert selection is not None
+            read_idx = cell_idx[selection]
+        missing: dict[str, np.ndarray] = {}
+        values = (
+            fetch_normalized_feature_matrix(
+                store,
+                [resolved[position] for position in positions],
+                read_idx,
+                normalization=normalization,
+                unmeasured=missing,
+            )
+            if len(read_idx)
+            else np.empty((0, len(positions)))
+        )
+        if unmeasured is not None:
+            for name, mask in missing.items():
+                if read_shown:
+                    expanded = np.zeros(len(cell_idx), dtype=bool)
+                    expanded[selection] = mask
+                    mask = expanded
+                unmeasured[name] = mask
+        for column, position in enumerate(positions):
+            color = values[:, column]
+            if read_shown:
+                expanded_color = np.full(len(cell_idx), np.nan)
+                expanded_color[selection] = color
+                color = expanded_color
+            colors[slots[position]] = (color, resolved[position].label, False, False)
 
 
 def _resolve_highlight_mask(
@@ -1376,6 +1451,7 @@ def embedding(
         normalization=normalization,
         cell_indices=artifact_cell_indices,
         unmeasured=unmeasured,
+        read_features=False,
     )
     classified_cache: list[tuple[np.ndarray, str, bool, bool]] = []
     for index, entry in enumerate(color_cache):
@@ -1410,17 +1486,6 @@ def embedding(
                 if missing_color is None
                 else replace(stored_categorical, missing_color=missing_color)
             )
-    if clip_fraction > 0:
-        clipped: list[tuple[np.ndarray, str, bool, bool]] = []
-        for vals, label, is_cat, is_uniform in color_cache:
-            if is_cat or is_uniform:
-                clipped.append((vals, label, is_cat, is_uniform))
-            else:
-                clipped.append(
-                    (_soft_clip(vals, clip_fraction), label, is_cat, is_uniform)
-                )
-        color_cache = clipped
-
     subset_vals = (
         _selected_metadata_column(
             store,
@@ -1479,6 +1544,28 @@ def embedding(
         groups=groups,
     )
     base_mask = finite_coordinates & selection_mask
+    _prefetch_feature_colors(
+        store,
+        color_items,
+        color_cache,
+        metadata_columns=metadata_columns,
+        from_assay=resolved_from_assay,
+        cell_key=cell_key,
+        normalization=normalization,
+        cell_indices=artifact_cell_indices,
+        unmeasured=unmeasured,
+        selection=selection_mask if clip_fraction == 0 else None,
+    )
+    if clip_fraction > 0:
+        clipped: list[tuple[np.ndarray, str, bool, bool]] = []
+        for vals, label, is_cat, is_uniform in color_cache:
+            if is_cat or is_uniform:
+                clipped.append((vals, label, is_cat, is_uniform))
+            else:
+                clipped.append(
+                    (_soft_clip(vals, clip_fraction), label, is_cat, is_uniform)
+                )
+        color_cache = clipped
 
     if facet_by is not None:
         assert facet_values is not None

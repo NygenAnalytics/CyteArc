@@ -28,6 +28,7 @@ from ..plotting._contracts import (
 from ..plotting._figure import PlotResult
 from ..plotting.recipes import PlotRecipe, PlotRecipeResult
 from ..storage.refs import ArtifactRef
+from ..storage.validation_scope import scope_public_methods
 from .pipeline_run import PipelineRun
 
 if TYPE_CHECKING:
@@ -889,3 +890,6 @@ class DataStorePlotAccessor:
     ) -> "PlotResult":
         """Plot feature profiles ordered by stored pseudotime."""
         return self._forward(PlotResult, "pseudotime_heatmap", locals())
+
+
+scope_public_methods(DataStorePlotAccessor, module_prefix="cytearc.datastore")

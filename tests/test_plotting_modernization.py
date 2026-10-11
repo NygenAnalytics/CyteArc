@@ -495,16 +495,20 @@ def test_embedding_feature_matrix_prefetch_batches_feature_slots(monkeypatch):
     resolved_items = []
     fetches = []
 
-    def resolve_feature(_store, item, *, from_assay):
-        resolved_items.append((item, from_assay))
-        label = item.label if isinstance(item, splt.FeatureRef) else str(item)
-        return SimpleNamespace(label=label)
+    def resolve_features(_store, items, *, from_assay):
+        resolved_items.extend((item, from_assay) for item in items)
+        return [
+            SimpleNamespace(
+                label=item.label if isinstance(item, splt.FeatureRef) else str(item)
+            )
+            for item in items
+        ]
 
     def fetch_matrix(_store, resolved, cell_idx, *, normalization, unmeasured=None):
         fetches.append((resolved, cell_idx.copy(), normalization))
         return matrix
 
-    monkeypatch.setattr(embedding_module, "resolve_feature", resolve_feature)
+    monkeypatch.setattr(embedding_module, "resolve_feature_batch", resolve_features)
     monkeypatch.setattr(
         embedding_module,
         "fetch_normalized_feature_matrix",
@@ -539,6 +543,151 @@ def test_embedding_feature_matrix_prefetch_batches_feature_slots(monkeypatch):
     assert prefetched[1][1:] == ("category", True, False)
     np.testing.assert_array_equal(prefetched[2][0], matrix[:, 1])
     assert prefetched[2][1:] == ("gene_b", False, False)
+
+
+@pytest.mark.parametrize("source", ["raw", "assay"])
+@pytest.mark.parametrize("facet", [False, True])
+def test_embedding_reads_only_displayed_independent_features(
+    tmp_path, monkeypatch, source, facet
+):
+    import zarr
+
+    from cytearc import DataStore
+    from cytearc.metadata.membership import membership_attributes
+    from tests.storage_helpers import write_count_store
+
+    module = import_module("cytearc.plotting.embedding")
+    path = str(tmp_path / "cells.zarr")
+    counts = np.random.default_rng(54).integers(0, 20, size=(30, 4), dtype=np.uint16)
+    counts[[6, 27]] = 0
+    write_count_store(path, {"RNA": counts}, "uint16")
+    measured = np.ones(30, dtype=bool)
+    measured[[6, 27]] = False
+    root = zarr.open_group(path, mode="r+")
+    membership = root["cellData"].create_array("RNA_I", data=measured)
+    membership.attrs.update(membership_attributes("RNA"))
+    store = DataStore(path, min_features_per_cell=-1, nthreads=1)
+    for name, values in {
+        "xy1": np.arange(30, dtype=float),
+        "xy2": np.sin(np.arange(30)),
+        "keep": np.arange(30) < 9,
+        "group": np.where(np.arange(30) % 3 == 0, "B", "A"),
+    }.items():
+        store.cells.insert(name, values)
+    fetched = []
+    fetch = module.fetch_normalized_feature_matrix
+
+    def track(*args, **kwargs):
+        fetched.append(args[2].copy())
+        return fetch(*args, **kwargs)
+
+    monkeypatch.setattr(module, "fetch_normalized_feature_matrix", track)
+    cell_local = module.normalization_is_cell_local
+    monkeypatch.setattr(module, "normalization_is_cell_local", lambda *_: False)
+    options = dict(
+        layout_key="xy",
+        color_by=["group", "RNA0", "RNA1"],
+        subset_by="keep",
+        groups=["B"],
+        facet_by="group" if facet else None,
+        normalization=splt.NormalizationSpec(source=source, transform="log1p"),
+        highlight=splt.Highlight(indices=(0, 12)),
+        sort_values=True,
+        show=False,
+    )
+    reference = splt.embedding(store, **options)
+    monkeypatch.setattr(module, "normalization_is_cell_local", cell_local)
+    result = store.plots.embedding(**options)
+    try:
+        np.testing.assert_array_equal(fetched[0], np.arange(30))
+        np.testing.assert_array_equal(fetched[1], [0, 3, 6])
+        assert len(fetched) == 2
+        assert result.provenance == reference.provenance
+        assert result.provenance.n_cells == 3
+        assert result.provenance.extras["input_n_cells"] == 30
+        assert result.provenance.extras["highlight"]["n_highlighted"] == 1
+        assert result.provenance.extras["unmeasured_cells"] == {"RNA": 1}
+        assert result.scales == reference.scales
+        assert result.axes.keys() == reference.axes.keys()
+        for key in result.axes:
+            expected = reference.axes[key]
+            actual = result.axes[key]
+            assert actual.get_xlim() == expected.get_xlim()
+            assert actual.get_ylim() == expected.get_ylim()
+            assert len(actual.collections) == len(expected.collections)
+            for observed, original in zip(
+                actual.collections, expected.collections, strict=True
+            ):
+                np.testing.assert_array_equal(
+                    observed.get_offsets(), original.get_offsets()
+                )
+                np.testing.assert_array_equal(
+                    observed.get_facecolors(), original.get_facecolors()
+                )
+                np.testing.assert_array_equal(
+                    observed.get_sizes(), original.get_sizes()
+                )
+    finally:
+        reference.close()
+        result.close()
+
+
+@pytest.mark.parametrize("normalizer", ["clr", "custom", "clipped"])
+def test_embedding_subset_keeps_normalization_and_clipping_context(
+    tmp_path, monkeypatch, normalizer
+):
+    from cytearc import DataStore
+    from cytearc.assay.normalization import norm_clr
+    from tests.storage_helpers import write_count_store
+
+    module = import_module("cytearc.plotting.embedding")
+    path = str(tmp_path / "cells.zarr")
+    counts = np.random.default_rng(54).integers(1, 20, size=(30, 4), dtype=np.uint16)
+    write_count_store(path, {"RNA": counts}, "uint16")
+    store = DataStore(path, min_features_per_cell=-1, nthreads=1)
+    for name, values in {
+        "xy1": np.arange(30, dtype=float),
+        "xy2": np.sin(np.arange(30)),
+        "keep": np.arange(30) < 3,
+    }.items():
+        store.cells.insert(name, values)
+    if normalizer == "clr":
+        store.RNA.normMethod = norm_clr
+    elif normalizer == "custom":
+        store.RNA.normMethod = lambda _assay, values: values / values.mean(axis=0)
+    original = store.RNA.normed(
+        cell_idx=np.arange(30), feat_idx=np.asarray([0])
+    ).compute()[:, 0]
+    if normalizer == "clipped":
+        original = np.clip(original, *np.percentile(original, [10, 90]))
+    fetched = []
+    fetch = module.fetch_normalized_feature_matrix
+
+    def track(*args, **kwargs):
+        values = fetch(*args, **kwargs)
+        fetched.append((args[2].copy(), values.copy()))
+        return values
+
+    monkeypatch.setattr(module, "fetch_normalized_feature_matrix", track)
+    result = splt.embedding(
+        store,
+        layout_key="xy",
+        color_by="RNA0",
+        subset_by="keep",
+        clip_fraction=0.1 if normalizer == "clipped" else 0,
+        show=False,
+    )
+    try:
+        assert len(fetched) == 1
+        np.testing.assert_array_equal(fetched[0][0], np.arange(30))
+        if normalizer != "clipped":
+            np.testing.assert_array_equal(fetched[0][1][:, 0], original)
+        assert result.provenance.extras["color_limits"]["RNA0"] == (
+            original[:3].min(),
+            original[:3].max(),
+        )
+    finally:
+        result.close()
 
 
 def test_embedding_multi_layout_facets_include_requested_empty_panels():

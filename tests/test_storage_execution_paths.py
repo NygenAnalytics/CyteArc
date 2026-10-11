@@ -28,7 +28,7 @@ from cytearc.storage.count_matrix import (
     plan_count_matrix_pair,
 )
 from cytearc.storage.execution import WorkShape, execution_report_scope, plan_operation
-from cytearc.storage.feature_stream import _iter_bounded_handoff
+from cytearc.storage.feature_stream import iter_bounded_handoff
 from cytearc.storage.io_policy import DEFAULT_STORAGE_IO_POLICY, StorageIoPolicy
 from cytearc.storage.sharding import (
     SparseRowBand,
@@ -322,7 +322,7 @@ def test_handoff_retries_its_end_marker_while_the_consumer_holds_an_item(
 
         asyncio.run(main())
 
-    stream = _iter_bounded_handoff(in_flight=1, run=run)
+    stream = iter_bounded_handoff(in_flight=1, run=run)
     assert next(stream) == "first"
     holding.set()
     assert queues[0].full.wait(5)
@@ -346,7 +346,7 @@ def test_stopped_handoff_producer_drops_items_nobody_took(
 
         asyncio.run(main())
 
-    stream = _iter_bounded_handoff(in_flight=1, run=run)
+    stream = iter_bounded_handoff(in_flight=1, run=run)
     assert next(stream) == "first"
     holding.set()
     assert queues[0].ended.wait(5)
@@ -374,7 +374,7 @@ def test_closed_handoff_releases_the_items_still_queued(
 
         asyncio.run(main())
 
-    stream = _iter_bounded_handoff(in_flight=1, run=run)
+    stream = iter_bounded_handoff(in_flight=1, run=run)
     assert next(stream) == "first"
     holding.set()
     assert queued.wait(5)
@@ -390,7 +390,7 @@ def test_handoff_end_marker_retries_when_the_queue_empties_meanwhile(
     def run(_deliver: Any, stop: threading.Event) -> None:
         stop.set()
 
-    assert list(_iter_bounded_handoff(in_flight=1, run=run)) == []
+    assert list(iter_bounded_handoff(in_flight=1, run=run)) == []
     assert queues[0].full.is_set() and queues[0].ended.is_set()
 
 

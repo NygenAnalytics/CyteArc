@@ -16,6 +16,7 @@ from ..features.statistical import (
     tested_feature_identity,
     value_fingerprint,
 )
+from ..features.values import ResolvedFeature, resolve_feature_batch
 from ..metadata.rows import read_metadata_missing_rows, read_metadata_rows
 from ..metadata.selection import (
     resolve_grouping as resolve_grouping_source,
@@ -103,6 +104,7 @@ def _fetch_series(
     from_assay: str | None,
     normalization: NormalizationSpec,
     unmeasured: dict[str, np.ndarray] | None = None,
+    resolved: ResolvedFeature | None = None,
 ) -> tuple[np.ndarray, str, bool, str, str | None]:
     """Return values, label, feature flag, stable identity, and source assay.
 
@@ -123,7 +125,8 @@ def _fetch_series(
     if isinstance(key, FeatureRef) or (
         isinstance(key, str) and key not in metadata_columns
     ):
-        resolved = resolve_feature(store, key, from_assay=from_assay)
+        if resolved is None:
+            resolved = resolve_feature(store, key, from_assay=from_assay)
         mat = fetch_normalized_feature_matrix(
             store,
             [resolved],
@@ -1254,6 +1257,25 @@ def distribution(
             artifact_series.append((values[keep], value_name, False, identity, None))
 
     unmeasured: dict[str, np.ndarray] = {}
+    resolved_features: dict[int, ResolvedFeature] = {}
+    if artifact_series is None:
+        feature_keys = {
+            index: key
+            for index, key in enumerate(key_list)
+            if isinstance(key, FeatureRef)
+            or (isinstance(key, str) and key not in metadata_columns)
+        }
+        resolved_features = dict(
+            zip(
+                feature_keys,
+                resolve_feature_batch(
+                    store,
+                    list(feature_keys.values()),
+                    from_assay=from_assay,
+                ),
+                strict=True,
+            )
+        )
     series_list = (
         artifact_series
         if artifact_series is not None
@@ -1266,8 +1288,9 @@ def distribution(
                 from_assay=from_assay,
                 normalization=normalization,
                 unmeasured=unmeasured,
+                resolved=resolved_features.get(index),
             )
-            for k in key_list
+            for index, k in enumerate(key_list)
         ]
     )
     n = len(series_list[0][0])

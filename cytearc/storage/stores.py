@@ -21,6 +21,7 @@ from zarr.core.common import ZARR_JSON
 from zarr.storage import WrapperStore
 
 from .types import ZarrMode, as_zarr_array, as_zarr_group
+from .budget import ResourceBudget
 from .profiles import (
     StorageProfile,
     ZarrLocation,
@@ -340,6 +341,8 @@ def create_matrix_source(
     required_transposes: frozenset[str],
     storage_options: dict[str, Any] | None = None,
     profile: StorageProfile | None = None,
+    source_root: zarr.Group | None = None,
+    resources: ResourceBudget | None = None,
 ) -> zarr.Group:
     """Create a writable store that mounts count matrices from ``source``."""
     from .arrays import create_metadata_column
@@ -351,12 +354,13 @@ def create_matrix_source(
     source = _persistable_location(source)
     if isinstance(at, str) and locations_overlap(source, at):
         raise ValueError("Source and destination must not overlap")
-    source_root = _open_store_root(
-        source,
-        mode="r",
-        storage_options=storage_options,
-        operation="mounted",
-    )
+    if source_root is None:
+        source_root = _open_store_root(
+            source,
+            mode="r",
+            storage_options=storage_options,
+            operation="mounted",
+        )
     if MATRIX_SOURCE_ATTR in source_root.attrs:
         raise ValueError(
             "Mounting a mounted target requires repacking it into a store that owns its counts first"
@@ -404,7 +408,9 @@ def create_matrix_source(
                 target_zw.attrs[key] = source_zw.attrs[key]
 
         cell_data = target_zw.create_group("cellData")
-        copy_zarr_group_tree(source_cell_data, cell_data, profile=profile)
+        copy_zarr_group_tree(
+            source_cell_data, cell_data, profile=profile, resources=resources
+        )
         for assay_name in assay_names:
             source_assay = source_assays[assay_name]
             target_assay = target_zw.create_group(assay_name)
@@ -425,6 +431,7 @@ def create_matrix_source(
                 feature_data,
                 exclude_members={"I"},
                 profile=profile,
+                resources=resources,
             )
             source_feature_ids = as_zarr_array(
                 source_feature_data["ids"],

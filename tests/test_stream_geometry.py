@@ -195,6 +195,23 @@ def test_is_contiguous_accepts_only_increasing_consecutive_runs(
     assert is_contiguous(np.asarray(indices, dtype=np.int64)) is expected
 
 
+@pytest.mark.parametrize(
+    ("indices", "dtype", "expected"),
+    [
+        # A descending step would wrap around to one in the narrow type.
+        ([255, 0], np.uint8, False),
+        ([127, -128], np.int8, False),
+        ([65535, 0], np.uint16, False),
+        ([3, 4, 5], np.uint8, True),
+        ([125, 126, 127], np.int8, True),
+    ],
+)
+def test_is_contiguous_does_not_wrap_narrow_integer_steps(
+    indices, dtype, expected
+) -> None:
+    assert is_contiguous(np.asarray(indices, dtype=dtype)) is expected
+
+
 def test_affordable_width_finds_the_largest_accepted_width() -> None:
     assert affordable_width(lambda width: width <= 3, 10) == 3
     assert affordable_width(lambda width: width <= 20, 10) == 10

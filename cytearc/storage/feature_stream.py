@@ -1,4 +1,10 @@
-"""Geometry-aware planning and bounded reads for feature-column streams."""
+"""Geometry-aware planning and bounded reads for feature-column streams.
+
+A virtual array, such as composite counts, supplies its own streams through
+its ``VirtualArrayReader``. They keep the contract of ``map_feature_read_groups``
+and ``map_feature_cell_bands`` and are built from the planning, selection, and
+handoff functions exported here, so a change to those affects them too.
+"""
 
 import asyncio
 import contextvars
@@ -17,6 +23,7 @@ from typing import Any, TypeVar
 import numpy as np
 
 from .async_execution import AsyncStorageRunner
+from .virtual_arrays import virtual_array_reader
 from .budget import ResourceBudget, resolve_budget
 from .execution import admit_stream
 from .execution import (
@@ -46,15 +53,24 @@ type BlockBytes = Callable[[int], int]
 T = TypeVar("T")
 
 __all__ = [
+    "CellBandSelection",
     "FeatureCellBand",
     "FeatureReadGroup",
     "FeatureStreamPlan",
+    "ReadGroupLayout",
+    "cell_band_selection",
+    "feature_group_ranges",
+    "iter_bounded_handoff",
     "map_feature_cell_bands",
     "map_feature_read_groups",
+    "plan_feature_consume",
     "plan_feature_stream",
     "persisted_read_group",
+    "read_group_layout",
     "selected_feature_chunk_starts",
     "selected_feature_values",
+    "sparse_group_rows",
+    "stream_units",
 ]
 
 
@@ -88,9 +104,11 @@ class FeatureCellBand:
 
     ``values`` is the raw decoded band. When ``rows`` is set, ``values`` holds
     only those group-local feature rows; otherwise it holds every row of the
-    group. ``selectedLocal`` indexes active cells inside that band.
-    ``selectedDestinations`` maps those cells onto the caller-requested
-    selected-cell order.
+    group. ``selectedLocal`` indexes the active cells among the columns of
+    ``values``: every cell of the band for a stored array, or only the
+    selected cells for a virtual array, whose reader reads no others. Read
+    the columns through it. ``selectedDestinations`` maps those cells onto
+    the caller-requested selected-cell order.
     """
 
     featStart: int
@@ -330,12 +348,17 @@ def persisted_read_group(array: Any) -> tuple[int, int]:
     return feature_width, read_group_bytes
 
 
-def _feature_group_ranges(
+def feature_group_ranges(
     array: Any,
     *,
     feat_idx: Sequence[int] | np.ndarray | None,
     featureWidth: int,
 ) -> list[tuple[int, int]]:
+    """Return the feature ranges that the streams of ``array`` read as groups.
+
+    Each group is a run of whole feature chunks that hold a selected feature,
+    merged while it spans at most ``featureWidth`` features.
+    """
     geometry = _plane(array)
     n_feats = int(geometry.shape[0])
     group_width = max(1, int(featureWidth))
@@ -354,7 +377,7 @@ def _feature_group_ranges(
     return merged
 
 
-def _sparse_group_rows(
+def sparse_group_rows(
     groups: list[tuple[int, int]],
     feat_idx: Sequence[int] | np.ndarray | None,
     *,
@@ -377,7 +400,7 @@ def _sparse_group_rows(
     return sparse
 
 
-def _plan_feature_consume(
+def plan_feature_consume(
     budget: ResourceBudget,
     *,
     io: StorageIoPolicy,
@@ -390,6 +413,7 @@ def _plan_feature_consume(
     chunksPerShard: int = 1,
     ordered: bool,
 ) -> OperationPlan:
+    """Plan the read and compute widths of a feature stream that only reads."""
     return plan_operation(
         budget,
         WorkShape(
@@ -407,11 +431,18 @@ def _plan_feature_consume(
     )
 
 
-def _iter_bounded_handoff(
+def iter_bounded_handoff(
     *,
     in_flight: int,
     run: Callable[[Callable[[Any], Awaitable[None]], threading.Event], None],
 ) -> Iterator[Any]:
+    """Yield what ``run`` delivers from a producer thread, ``in_flight`` at most.
+
+    ``run(deliver, stop)`` runs in a copy of the caller's context. Each
+    ``deliver`` returns once the consumer has moved past the item, so the
+    producer may free its buffers then. Closing the iterator sets ``stop``,
+    and an error of ``run`` is raised to the consumer.
+    """
     handoff: queue.Queue[Any] = queue.Queue(maxsize=max(1, int(in_flight)))
     stop = threading.Event()
     sentinel = object()
@@ -531,7 +562,7 @@ def _touched_chunks(geometry: ArrayGeometry, n_features: int) -> int:
 
 
 @dataclass(frozen=True, slots=True)
-class _CellSelection:
+class CellBandSelection:
     """Selected cells of one stream and the bands they fall in."""
 
     cells: np.ndarray
@@ -539,9 +570,9 @@ class _CellSelection:
     indexBytes: int
 
 
-def _cell_selection(
+def cell_band_selection(
     geometry: ArrayGeometry, cell_idx: np.ndarray | None
-) -> _CellSelection:
+) -> CellBandSelection:
     """Split the selected cells into cell bands and count their index bytes.
 
     The bands hold a local and a destination index for every selected cell,
@@ -563,11 +594,11 @@ def _cell_selection(
     )
     if cells is not cell_idx:
         index_bytes += int(cells.nbytes)
-    return _CellSelection(cells=cells, bands=bands, indexBytes=index_bytes)
+    return CellBandSelection(cells=cells, bands=bands, indexBytes=index_bytes)
 
 
 @dataclass(frozen=True, slots=True)
-class _ReadGroupLayout:
+class ReadGroupLayout:
     """Read groups of one stream and the bytes its plan reserves for them.
 
     ``unitBytes`` is the destination of the widest group over the selected
@@ -577,7 +608,7 @@ class _ReadGroupLayout:
 
     geometry: ArrayGeometry
     groups: list[tuple[int, int]]
-    selection: _CellSelection
+    selection: CellBandSelection
     featureWidth: int
     readGroupBytes: int
     bandBytes: int
@@ -585,25 +616,26 @@ class _ReadGroupLayout:
     readBytes: int
 
 
-def _read_group_layout(
+def read_group_layout(
     array: Any,
     *,
     cell_idx: np.ndarray | None,
     feat_idx: Sequence[int] | np.ndarray | None,
-) -> _ReadGroupLayout | None:
+) -> ReadGroupLayout | None:
+    """Return the read groups of a stream over ``array``, or None for no feature."""
     geometry = _plane(array)
     feature_width, read_group_bytes = persisted_read_group(array)
-    groups = _feature_group_ranges(array, feat_idx=feat_idx, featureWidth=feature_width)
+    groups = feature_group_ranges(array, feat_idx=feat_idx, featureWidth=feature_width)
     if not groups:
         return None
-    selection = _cell_selection(geometry, cell_idx)
+    selection = cell_band_selection(geometry, cell_idx)
     widest = max(feat_end - feat_start for feat_start, feat_end in groups)
     band_cells = max(
         (cell_end - cell_start for cell_start, cell_end, _l, _d in selection.bands),
         default=0,
     )
     band_bytes = widest * band_cells * geometry.itemsize
-    return _ReadGroupLayout(
+    return ReadGroupLayout(
         geometry=geometry,
         groups=groups,
         selection=selection,
@@ -627,7 +659,7 @@ def read_group_stream_bytes(
     and at least one band read while Zarr decodes it, and the stream holds its
     band indices once.
     """
-    layout = _read_group_layout(
+    layout = read_group_layout(
         as_zarr_array(counts_t), cell_idx=cell_idx, feat_idx=feat_idx
     )
     if layout is None:
@@ -660,7 +692,7 @@ def read_group_rows(
     """
     array = as_zarr_array(counts_t)
     feature_width, _ = persisted_read_group(array)
-    groups = _feature_group_ranges(array, feat_idx=feat_idx, featureWidth=feature_width)
+    groups = feature_group_ranges(array, feat_idx=feat_idx, featureWidth=feature_width)
     bounds = np.asarray(groups, dtype=np.int64).reshape(-1, 2)
     if feat_idx is None:
         return bounds[:, 1] - bounds[:, 0]
@@ -670,7 +702,7 @@ def read_group_rows(
     )
 
 
-def _stream_units(
+def stream_units(
     units: Sequence[Any],
     load: Callable[[AsyncStorageRunner, int, Any], AbstractAsyncContextManager[Any]],
     process: Callable[[Any], T],
@@ -783,7 +815,7 @@ def _stream_units(
             if metrics is not None:
                 metrics.update(report.as_metrics())
 
-    return _iter_bounded_handoff(in_flight=in_flight, run=run)
+    return iter_bounded_handoff(in_flight=in_flight, run=run)
 
 
 def map_feature_read_groups(
@@ -811,7 +843,21 @@ def map_feature_read_groups(
     ``process`` call that can run at once.
     """
     array = as_zarr_array(counts_t)
-    layout = _read_group_layout(array, cell_idx=cell_idx, feat_idx=feat_idx)
+    reader = virtual_array_reader(array)
+    if reader is not None:
+        return reader.map_feature_read_groups(
+            array,
+            process,
+            cell_idx=cell_idx,
+            feat_idx=feat_idx,
+            resources=resources,
+            progress=progress,
+            io=io,
+            metrics=metrics,
+            scratchBytes=scratchBytes,
+            orderedCompute=orderedCompute,
+        )
+    layout = read_group_layout(array, cell_idx=cell_idx, feat_idx=feat_idx)
     if layout is None:
         return iter(())
     geometry = layout.geometry
@@ -844,7 +890,7 @@ def map_feature_read_groups(
         computeWorkers=resolved_io.computeWorkers,
         writeWorkers=resolved_io.writeWorkers,
     )
-    plan = _plan_feature_consume(
+    plan = plan_feature_consume(
         budget,
         io=chunk_io,
         nUnits=len(merged),
@@ -915,7 +961,7 @@ def map_feature_read_groups(
             yield group
             del group
 
-    return _stream_units(
+    return stream_units(
         merged,
         load,
         process,
@@ -959,18 +1005,33 @@ def map_feature_cell_bands(
     with the stream's band and row indices and ``scratchBytes`` for the caller.
     """
     array = as_zarr_array(counts_t)
+    reader = virtual_array_reader(array)
+    if reader is not None:
+        return reader.map_feature_cell_bands(
+            array,
+            process,
+            cell_idx=cell_idx,
+            feat_idx=feat_idx,
+            resources=resources,
+            progress=progress,
+            io=io,
+            metrics=metrics,
+            scratchBytes=scratchBytes,
+            orderedCompute=orderedCompute,
+            cellMajorOrder=cellMajorOrder,
+        )
     geometry = _plane(array)
     n_feats = int(geometry.shape[0])
     feature_width, read_group_bytes = persisted_read_group(array)
-    merged = _feature_group_ranges(
+    merged = feature_group_ranges(
         array,
         feat_idx=feat_idx,
         featureWidth=feature_width,
     )
     if not merged:
         return iter(())
-    sparse_rows = _sparse_group_rows(merged, feat_idx, n_feats=n_feats)
-    selection = _cell_selection(geometry, cell_idx)
+    sparse_rows = sparse_group_rows(merged, feat_idx, n_feats=n_feats)
+    selection = cell_band_selection(geometry, cell_idx)
     bands = selection.bands
     if cellMajorOrder:
         work = [
@@ -996,7 +1057,7 @@ def map_feature_cell_bands(
         * max(cell_end - cell_start for cell_start, cell_end, _l, _d in bands)
         * itemsize
     )
-    plan = _plan_feature_consume(
+    plan = plan_feature_consume(
         budget,
         io=resolved_io,
         nUnits=len(work),
@@ -1052,7 +1113,7 @@ def map_feature_cell_bands(
             )
             del block
 
-    return _stream_units(
+    return stream_units(
         work,
         load,
         process,

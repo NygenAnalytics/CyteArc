@@ -242,6 +242,8 @@ class _ObjectStrings:
     def __init__(self, values: list[Any]) -> None:
         self.values = np.asarray(values, dtype=object)
         self.shape = self.values.shape
+        self.store = object()
+        self.path = "ids"
 
     def __getitem__(self, key: Any) -> np.ndarray:
         return self.values[key]
@@ -255,6 +257,8 @@ class _BooleanMask:
     def __init__(self, values: list[bool]) -> None:
         self.values = np.asarray(values, dtype=bool)
         self.shape = self.values.shape
+        self.store = object()
+        self.path = "selection"
 
     def __getitem__(self, key: Any) -> np.ndarray:
         return self.values[key]

@@ -24,10 +24,13 @@ from zarr.core.dtype import UInt64
 from zarr.storage import WrapperStore
 
 from ..storage.artifacts import fingerprint_stored_arrays
-from ..storage.geometry import ArrayGeometry, array_geometry
+from ..storage.geometry import ArrayGeometry
 from ..storage.identity import count_fingerprint, validate_preparation
-from ..storage.partition import partition_indices
+from ..storage.profiles import is_remote_zarr_location
 from ..storage.types import as_zarr_array, as_zarr_group
+from ..storage.virtual_arrays import VirtualArrayReader, VirtualArrayStore
+from .reader import CompositeArrayReader
+from .source_cache import SourceCache, new_source_cache
 
 COMPOSITE_ATTR = "composite"
 _MAP_NAMES = ("rowSources", "sourceRows", "featureColumns")
@@ -87,91 +90,30 @@ def _uncompressed(document: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _read_scratch_bytes(
-    geometry: ArrayGeometry,
-    mappings: dict[str, ArrayGeometry],
-    sources: Sequence[ArrayGeometry],
-    *,
-    transposed: bool,
+def computed_shard_scratch_bytes(
+    selection_scratch: int, geometry: ArrayGeometry
 ) -> int:
+    """Return what a Zarr read of one computed shard holds beside its result.
+
+    ``selection_scratch`` is what the reader holds while it fills the shard's
+    selection. A partial read also fills one inner chunk and copies it, and
+    every request encodes the shard index.
+    """
     assert geometry.shards is not None
-    cells, features = geometry.shards[::-1] if transposed else geometry.shards
-    mapping_bytes = 0
-    for name, result_bytes in (
-        ("rowSources", cells * 4),
-        ("sourceRows", cells * 8),
-        ("featureColumns", features * 8),
-    ):
-        mapping = mappings[name]
-        touched = max(1, math.ceil(result_bytes / mapping.nominalChunkBytes()) + 1)
-        mapping_bytes += mapping.readBytes(result_bytes, chunks=touched)
-    source_bytes = max(
-        source.readBytes(source.nominalChunkBytes()) for source in sources
+    grid = math.prod(
+        s // c for s, c in zip(geometry.shards, geometry.chunks, strict=True)
     )
-    index_bytes = (
-        32
-        * math.prod(
-            s // c for s, c in zip(geometry.shards, geometry.chunks, strict=True)
-        )
-        + 4
-    )
-    return (
-        source_bytes
-        + mapping_bytes
-        + 2 * geometry.nominalChunkBytes()
-        + 96 * (cells + features)
-        + index_bytes
-    )
+    return selection_scratch + 2 * geometry.nominalChunkBytes() + 32 * grid + 4
 
 
-async def _copy_source(
-    source: zarr.Array,
-    rows: np.ndarray,
-    columns: np.ndarray,
-    output: np.ndarray,
-    row_destinations: np.ndarray,
-    column_destinations: np.ndarray,
-) -> None:
-    """Copy selected values through rectangular reads within source chunks."""
-    geometry = array_geometry(source)
-    assert geometry is not None
-    row_blocks = partition_indices(geometry, 0, rows)
-    column_blocks = partition_indices(geometry, 1, columns)
-    for row in row_blocks:
-        row_start, row_stop = int(row.indices.min()), int(row.indices.max()) + 1
-        for column in column_blocks:
-            col_start, col_stop = (
-                int(column.indices.min()),
-                int(column.indices.max()) + 1,
-            )
-            values = np.asarray(
-                await source.async_array.getitem(
-                    (slice(row_start, row_stop), slice(col_start, col_stop))
-                )
-            )
-            dest_rows, dest_columns = np.ix_(
-                row_destinations[row.destinations],
-                column_destinations[column.destinations],
-            )
-            destination: tuple[np.ndarray, ...]
-            if output.ndim == 4:
-                chunk_rows, chunk_columns = output.shape[2:]
-                destination = (
-                    dest_rows // chunk_rows,
-                    dest_columns // chunk_columns,
-                    dest_rows % chunk_rows,
-                    dest_columns % chunk_columns,
-                )
-            else:
-                destination = (dest_rows, dest_columns)
-            output[destination] = values[
-                np.ix_(row.indices - row_start, column.indices - col_start)
-            ]
-            del values, destination, dest_rows, dest_columns
+class CompositeStore(WrapperStore[Store], VirtualArrayStore):
+    """Expose virtual counts while keeping ordinary metadata and results writable.
 
-
-class CompositeStore(WrapperStore[Store]):
-    """Expose virtual counts while keeping ordinary metadata and results writable."""
+    Zarr reads of the counts receive shards computed from the sources. CyteArc
+    reads them through ``virtual_array_reader`` instead, which gathers only the
+    selected values. Remote sources read through one ``SourceCache`` unless
+    ``CYTEARC_SOURCE_CACHE_BYTES`` turns it off.
+    """
 
     def __init__(
         self,
@@ -187,8 +129,10 @@ class CompositeStore(WrapperStore[Store]):
         self.constructing = constructing
         self._roots = source_roots
         self._owns_sources = owns_sources
-        self._maps: dict[str, Any] = {}
+        self._source_cache: SourceCache | None = None
+        self._owns_cache = True
         self._scratch: dict[str, int] = {}
+        self._readers: dict[str, CompositeArrayReader] = {}
         self._sources: list[dict[str, zarr.Array]] = []
         for source in record["sources"]:
             root = source_roots[source["name"]]
@@ -201,13 +145,87 @@ class CompositeStore(WrapperStore[Store]):
             arrays = {"counts": as_zarr_array(matrix["counts"])}
             if "countsT" in matrix:
                 arrays["countsT"] = as_zarr_array(matrix["countsT"])
+            if is_remote_zarr_location(source["location"]):
+                if self._source_cache is None:
+                    self._source_cache = new_source_cache()
+                if self._source_cache is not None:
+                    cached = self._source_cache.wrap(root.store)
+                    arrays = {
+                        name: zarr.open_array(store=cached, path=array.path, mode="r")
+                        for name, array in arrays.items()
+                    }
             self._sources.append(arrays)
 
     def _with_store(self, store: Store) -> Self:
         clone = copy.copy(self)
         clone._store = store
         clone._owns_sources = False
+        clone._owns_cache = False
+        # Readers hold mapping arrays of the store that created them.
+        clone._readers = {}
         return clone
+
+    def virtual_array_reader(self, path: str) -> VirtualArrayReader | None:
+        return self._reader(path)
+
+    def _reader(self, path: str) -> CompositeArrayReader | None:
+        """Return the cached reader of the virtual array at ``path``."""
+        if path not in self.record["arrays"]:
+            return None
+        reader = self._readers.get(path)
+        if reader is None:
+            mappings = {
+                name: zarr.open_array(
+                    store=self._store, path=f"_composite/{name}", mode="r"
+                )
+                for name in _MAP_NAMES
+            }
+            reader = self._readers.setdefault(path, self._new_reader(path, mappings))
+        return reader
+
+    async def _reader_async(self, path: str) -> CompositeArrayReader | None:
+        """Return the cached reader from Zarr's event loop, opening it there."""
+        if path not in self.record["arrays"]:
+            return None
+        reader = self._readers.get(path)
+        if reader is None:
+            mappings = {
+                name: zarr.Array(
+                    await zarr.api.asynchronous.open_array(
+                        store=self._store, path=f"_composite/{name}", mode="r"
+                    )
+                )
+                for name in _MAP_NAMES
+            }
+            reader = self._readers.setdefault(path, self._new_reader(path, mappings))
+        return reader
+
+    def _new_reader(
+        self, path: str, mappings: dict[str, zarr.Array]
+    ) -> CompositeArrayReader:
+        document = self.record["arrays"][path]
+        _, _, dtype = _array_spec(document)
+        return CompositeArrayReader(
+            shape=tuple(document["shape"]),
+            dtype=dtype,
+            transposed=path.endswith("/countsT"),
+            mappings=mappings,
+            sources=self._sources,
+        )
+
+    @property
+    def source_cache(self) -> SourceCache | None:
+        """The cache that remote sources read through, if any is in use."""
+        return self._source_cache
+
+    def source_arrays(self, name: str) -> list[zarr.Array]:
+        """Return each source's ``counts`` or ``countsT``, in source order."""
+        return [arrays[name] for arrays in self._sources]
+
+    def _forget_virtual_arrays(self) -> None:
+        """Drop what was derived from the array metadata after it changes."""
+        self._scratch.clear()
+        self._readers.clear()
 
     @property
     def root(self) -> Any:
@@ -249,17 +267,12 @@ class CompositeStore(WrapperStore[Store]):
             return None
         return coords[0], coords[1]
 
-    async def _map(self, name: str) -> Any:
-        if name not in self._maps:
-            self._maps[name] = await zarr.api.asynchronous.open_array(
-                store=self._store, path=f"_composite/{name}", mode="r"
-            )
-        return self._maps[name]
-
     async def _chunk(self, path: str, lower: tuple[int, int]) -> memoryview:
         document = self.record["arrays"][path]
         chunks, _, dtype = _array_spec(document)
-        output = np.zeros(chunks, dtype=dtype)
+        # One inner chunk is filled as a one-chunk shard, in the same chunk
+        # order and so the same source orientation as a whole shard.
+        output = np.zeros((1, 1, *chunks), dtype=dtype)
         await self._fill(path, lower, chunks, output)
         return memoryview(output).cast("B")
 
@@ -277,39 +290,9 @@ class CompositeStore(WrapperStore[Store]):
         )
         if any(stop <= start for start, stop in zip(lower, upper, strict=True)):
             return
-        transposed = path.endswith("/countsT")
-        cell_axis, feature_axis = (1, 0) if transposed else (0, 1)
-        cell_slice = slice(lower[cell_axis], upper[cell_axis])
-        feature_slice = slice(lower[feature_axis], upper[feature_axis])
-        owners = np.asarray(await (await self._map("rowSources")).getitem(cell_slice))
-        rows = np.asarray(await (await self._map("sourceRows")).getitem(cell_slice))
-        if np.any(owners < 0) or np.any(owners >= len(self._sources)):
-            raise ValueError("Composite row mapping names an invalid source")
-        for owner in np.unique(owners):
-            cell_dest = np.flatnonzero(owners == owner)
-            source_rows = rows[cell_dest]
-            columns = np.asarray(
-                await (await self._map("featureColumns")).getitem(
-                    (int(owner), feature_slice)
-                )
-            )
-            feature_dest = np.flatnonzero(columns >= 0)
-            source_features = columns[feature_dest]
-            source = self._sources[int(owner)]["countsT" if transposed else "counts"]
-            if (
-                np.any(source_rows < 0)
-                or np.any(source_rows >= source.shape[cell_axis])
-                or np.any(source_features >= source.shape[feature_axis])
-            ):
-                raise ValueError("Composite mapping is outside a source matrix")
-            await _copy_source(
-                source,
-                source_features if transposed else source_rows,
-                source_rows if transposed else source_features,
-                output,
-                feature_dest if transposed else cell_dest,
-                cell_dest if transposed else feature_dest,
-            )
+        reader = await self._reader_async(path)
+        assert reader is not None
+        await reader.fill(slice(lower[0], upper[0]), slice(lower[1], upper[1]), output)
 
     async def _index(self, path: str) -> bytes:
         chunks, shards, dtype = _array_spec(self.record["arrays"][path])
@@ -530,7 +513,7 @@ class CompositeStore(WrapperStore[Store]):
             if not self.constructing or key != path + "/zarr.json":
                 raise PermissionError("Composite counts are immutable")
             self.record["arrays"][path] = _uncompressed(json.loads(value.to_bytes()))
-            self._scratch.clear()
+            self._forget_virtual_arrays()
             return
         if not self.constructing and self._protected(key):
             raise PermissionError("Composite mappings are immutable")
@@ -559,6 +542,7 @@ class CompositeStore(WrapperStore[Store]):
         if self._protected(key):
             if self.constructing and self._path(key) is not None:
                 self.record["arrays"].pop(self._path(key), None)
+                self._forget_virtual_arrays()
                 return
             raise PermissionError("Composite counts and mappings are immutable")
         await self._store.delete(key)
@@ -572,6 +556,7 @@ class CompositeStore(WrapperStore[Store]):
         if self._protected(path):
             if self.constructing and self._path(path) is not None:
                 self.record["arrays"].pop(self._path(path), None)
+                self._forget_virtual_arrays()
                 return
             raise PermissionError("Composite counts and mappings are immutable")
         if any(name.startswith(path + "/") for name in self.record["arrays"]):
@@ -597,39 +582,23 @@ class CompositeStore(WrapperStore[Store]):
             return tuple(root.store for root in self._roots.values())
         return (self._store,)
 
-    def read_scratch_bytes(self, path: str) -> int:
+    def chunk_read_scratch_bytes(self, path: str) -> int:
         if path not in self.record["arrays"]:
             return 0
         if path in self._scratch:
             return self._scratch[path]
-        chunks, shards, dtype = _array_spec(self.record["arrays"][path])
-        transposed = path.endswith("/countsT")
-        # Mapping windows and source chunk reads are sequential; no decoder cache.
-        mappings = {}
-        for name in _MAP_NAMES:
-            array = zarr.open_array(
-                store=self._store, path=f"_composite/{name}", mode="r"
-            )
-            self._maps[name] = array.async_array
-            geometry = array_geometry(array)
-            assert geometry is not None
-            mappings[name] = geometry
-        sources = []
-        for arrays in self._sources:
-            array = arrays["countsT" if transposed else "counts"]
-            geometry = array_geometry(array)
-            assert geometry is not None
-            sources.append(geometry)
-        self._scratch[path] = _read_scratch_bytes(
-            ArrayGeometry(
-                tuple(self.record["arrays"][path]["shape"]),
-                chunks,
-                shards,
-                dtype.itemsize,
-            ),
-            mappings,
-            sources,
-            transposed=transposed,
+        document = self.record["arrays"][path]
+        chunks, shards, dtype = _array_spec(document)
+        geometry = ArrayGeometry(
+            tuple(document["shape"]), chunks, shards, dtype.itemsize
+        )
+        reader = self._reader(path)
+        assert reader is not None
+        rows, columns = (
+            min(s, n) for s, n in zip(shards, document["shape"], strict=True)
+        )
+        self._scratch[path] = computed_shard_scratch_bytes(
+            reader.read_scratch_bytes(rows, columns), geometry
         )
         return self._scratch[path]
 
@@ -641,6 +610,8 @@ class CompositeStore(WrapperStore[Store]):
         self.constructing = False
 
     def close(self) -> None:
+        if self._owns_cache and self._source_cache is not None:
+            self._source_cache.close()
         self._store.close()
         if self._owns_sources:
             for root in self._roots.values():

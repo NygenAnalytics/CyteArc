@@ -281,7 +281,7 @@ def test_feature_major_normalization_rejects_missing_or_unsorted_cells() -> None
         feature_stream_module, "map_feature_cell_bands", lambda *_a, **_k: iter(())
     )
     try:
-        with pytest.raises(RuntimeError, match="did not cover every selected cell"):
+        with pytest.raises(RuntimeError, match="did not cover every requested cell"):
             list(
                 _counts_t_renormalized_batches(
                     ready,
@@ -313,7 +313,7 @@ def test_feature_major_normalization_rejects_missing_or_unsorted_cells() -> None
         feature_stream_module, "map_feature_cell_bands", empty_feature_group
     )
     try:
-        with pytest.raises(RuntimeError, match="did not contain selected features"):
+        with pytest.raises(RuntimeError, match="contained no requested features"):
             list(
                 _counts_t_renormalized_batches(
                     SimpleNamespace(

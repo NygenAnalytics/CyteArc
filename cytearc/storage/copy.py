@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +18,7 @@ from .arrays import (
 from .budget import ResourceBudget
 from .geometry import array_geometry
 from .layout import PROFILE_METADATA_CHUNK, normed_array_spec
-from .partition import row_band, scan_band
+from .partition import affordable_width, row_band, scan_band
 from .profiles import StorageProfile
 from .sharding import write_dense_in_shard_rows
 
@@ -61,6 +62,36 @@ def _metadata_block_rows(array: zarr.Array) -> int:
     )
 
 
+def _metadata_copy_bytes(
+    array: zarr.Array, rows: int, missing: zarr.Array | None
+) -> int:
+    rows = min(rows, int(array.shape[0]))
+    if rows == 0:
+        return 0
+    dtype = stored_metadata_dtype(array.dtype, lambda: ())
+    destination_chunks = min(
+        -(-int(array.shape[0]) // PROFILE_METADATA_CHUNK),
+        -(-rows // PROFILE_METADATA_CHUNK) + 1,
+    )
+    total = 0
+    sources = [(array, dtype.itemsize)]
+    if missing is not None:
+        sources.append((missing, 1))
+    for source, output_size in sources:
+        geometry = array_geometry(source)
+        assert geometry is not None
+        chunks = min(
+            -(-int(source.shape[0]) // geometry.axisChunk(0)),
+            -(-rows // geometry.axisChunk(0)) + 1,
+        )
+        # Include the previous yielded block, conversion, and destination
+        # chunk buffers while Zarr decodes or encodes the current block.
+        total += geometry.readBytes(rows * geometry.itemsize, chunks)
+        total += 2 * rows * output_size
+        total += 2 * destination_chunks * PROFILE_METADATA_CHUNK * output_size
+    return total
+
+
 def _copy_metadata_array(
     src: zarr.Array,
     dst: zarr.Group,
@@ -71,6 +102,7 @@ def _copy_metadata_array(
     row_indices: np.ndarray | None = None,
     missing: zarr.Array | None = None,
     copy_attributes: bool = True,
+    block_rows: int | None = None,
 ) -> None:
     """Stream-copy one metadata column, its rows ``row_indices`` or all.
 
@@ -85,11 +117,12 @@ def _copy_metadata_array(
         )
     # Whole numeric and Unicode columns can overlap reads within a bounded band.
     # Selected rows and text needing conversion keep their smaller read blocks.
-    block_rows = (
-        scan_band(array_geometry(src), fallback=PROFILE_METADATA_CHUNK)
-        if row_indices is None and np.dtype(src.dtype).kind in "biufcmMU"
-        else _metadata_block_rows(src)
-    )
+    if block_rows is None:
+        block_rows = (
+            scan_band(array_geometry(src), fallback=PROFILE_METADATA_CHUNK)
+            if row_indices is None and np.dtype(src.dtype).kind in "biufcmMU"
+            else _metadata_block_rows(src)
+        )
     n_source = int(src.shape[0])
     dtype = stored_metadata_dtype(
         src.dtype,
@@ -115,7 +148,9 @@ def _copy_metadata_array(
             )
             yield MetadataBlock(
                 start=start,
-                values=np.asarray(_decode_metadata_values(values)).astype(dtype),
+                values=np.asarray(_decode_metadata_values(values)).astype(
+                    dtype, copy=False
+                ),
                 missing=None if mask is None else np.asarray(mask, dtype=bool),
             )
 
@@ -166,6 +201,7 @@ def copy_zarr_group_tree(
     exclude_members: set[str] | frozenset[str] | None = None,
     row_indices: np.ndarray | None = None,
     profile: StorageProfile | None = None,
+    resources: ResourceBudget | None = None,
 ) -> None:
     """Recursively copy a Zarr group tree.
 
@@ -177,6 +213,10 @@ def copy_zarr_group_tree(
 
         prefetch_metadata_listing(src)
     masks = validate_metadata_dependencies(src, exclude_members=exclude_members)
+    from .stores import metadata_workers, run_concurrently
+
+    arrays: list[tuple[str, zarr.Array]] = []
+    groups: list[tuple[str, zarr.Group]] = []
     for name, node in src.members():
         if exclude_members is not None and name in exclude_members:
             continue
@@ -184,25 +224,90 @@ def copy_zarr_group_tree(
         if name.startswith(MISSING_MASK_PREFIX):
             continue
         if isinstance(node, zarr.Group):
-            child = dst.create_group(name, overwrite=overwrite)
-            copy_zarr_group_tree(
-                node,
-                child,
-                overwrite=overwrite,
-                row_indices=row_indices,
-                profile=profile,
-            )
+            groups.append((name, node))
         else:
-            array = as_zarr_array(node, name=name)
-            _copy_metadata_array(
-                array,
-                dst,
-                name,
-                overwrite=overwrite,
-                row_indices=row_indices,
-                missing=masks.get(name),
-                profile=profile,
+            arrays.append((name, as_zarr_array(node, name=name)))
+
+    planned_rows: dict[str, int] = {}
+    workers = 1
+    if resources is not None and row_indices is None:
+        # Byte and variable-width strings create temporary Python objects
+        # during conversion, so they retain their serial chunk-sized reads.
+        fixed = [
+            (name, array)
+            for name, array in arrays
+            if array.ndim == 1 and np.dtype(array.dtype).kind in "biufcmMU"
+        ]
+        chunk_bytes = {
+            name: _metadata_copy_bytes(
+                array, _metadata_block_rows(array), masks.get(name)
             )
+            for name, array in fixed
+        }
+        minimum = max(chunk_bytes.values(), default=0)
+        if minimum > resources.memoryBytes:
+            # Every block holds at least one chunk of its column, so no plan,
+            # serial or not, stays within a budget below one chunk.
+            column = max(chunk_bytes, key=chunk_bytes.__getitem__)
+            raise MemoryError(
+                f"Copying one chunk of metadata column {column!r} needs {minimum} "
+                f"bytes, but the memory budget is {resources.memoryBytes} bytes. "
+                "Increase mem_budget."
+            )
+        workers = max(
+            1,
+            min(
+                metadata_workers(src),
+                resources.workers,
+                len(fixed),
+                resources.memoryBytes // max(1, minimum),
+            ),
+        )
+        for name, array in fixed:
+            chunk_rows = _metadata_block_rows(array)
+            preferred = scan_band(array_geometry(array), fallback=chunk_rows)
+            chunks = affordable_width(
+                lambda width: (
+                    _metadata_copy_bytes(array, width * chunk_rows, masks.get(name))
+                    <= resources.memoryBytes // workers
+                ),
+                max(1, preferred // chunk_rows),
+            )
+            planned_rows[name] = max(1, chunks) * chunk_rows
+
+    def copy_column(name: str, array: zarr.Array) -> None:
+        _copy_metadata_array(
+            array,
+            dst,
+            name,
+            overwrite=overwrite,
+            row_indices=row_indices,
+            missing=masks.get(name),
+            profile=profile,
+            block_rows=planned_rows.get(name),
+        )
+
+    run_concurrently(
+        [
+            partial(copy_column, name, array)
+            for name, array in arrays
+            if name in planned_rows
+        ],
+        workers=workers,
+    )
+    for name, array in arrays:
+        if name not in planned_rows:
+            copy_column(name, array)
+    for name, node in groups:
+        child = dst.create_group(name, overwrite=overwrite)
+        copy_zarr_group_tree(
+            node,
+            child,
+            overwrite=overwrite,
+            row_indices=row_indices,
+            profile=profile,
+            resources=resources,
+        )
 
 
 def validate_metadata_dependencies(

@@ -1448,6 +1448,169 @@ def test_imported_artifacts_validate_and_coordinates_reuse_read_only(tmp_path) -
     assert tuple(sorted(read_only["cellData"].keys())) == columns_before
 
 
+def test_imported_validations_share_payload_and_selected_id_checks_per_call(
+    monkeypatch,
+) -> None:
+    from cytearc.embeddings import imported_storage
+    from cytearc.storage import selections
+    from cytearc.storage.validation_scope import validation_scope
+
+    root, selection, cell_ids, mask = _root_with_selection()
+    coordinates, _ = _write_coordinate_fixture(root, selection, cell_ids, mask)
+    embedding, _ = _write_embedding_fixture(root, selection, cell_ids, mask)
+    payloads = []
+    selected_ids = []
+    payload = imported_storage.payload_fingerprint
+    selected = selections._fingerprint_selected_stored_strings
+
+    def count_payload(group, name):
+        payloads.append((group.path, name))
+        return payload(group, name)
+
+    def count_selected(ids, values):
+        selected_ids.append((ids.path, values.path))
+        return selected(ids, values)
+
+    monkeypatch.setattr(imported_storage, "payload_fingerprint", count_payload)
+    monkeypatch.setattr(
+        selections, "_fingerprint_selected_stored_strings", count_selected
+    )
+    for call in range(2):
+        with validation_scope():
+            for _ in range(2):
+                validate_imported_coordinates_artifact(root, coordinates)
+                validate_imported_embedding_artifact(root, embedding)
+        assert len(payloads) == 2 * (call + 1)
+        assert len(selected_ids) == call + 1
+
+    artifact_group(root, coordinates)["data"][0, 0] = -1
+    with validation_scope():
+        for _ in range(2):
+            with pytest.raises(ArtifactResolutionError, match="fingerprint"):
+                validate_imported_coordinates_artifact(root, coordinates)
+    # An unsuccessful validation is run again even inside the same call.
+    assert len(payloads) == 6
+
+
+@pytest.mark.parametrize("accessor", [False, True])
+def test_embedding_validation_scope_expires_before_the_next_plot(
+    monkeypatch, accessor
+) -> None:
+    from cytearc import plotting
+    from cytearc.embeddings import imported_storage
+    from cytearc.storage import validation_scope
+
+    root, selection, cell_ids, mask = _root_with_selection()
+    embedding, values = _write_embedding_fixture(root, selection, cell_ids, mask)
+    store = _graph_store(root)
+    payload = imported_storage.payload_fingerprint
+    scopes = []
+
+    def record_scope(group, name):
+        scopes.append(validation_scope._RESULTS.get())
+        return payload(group, name)
+
+    monkeypatch.setattr(imported_storage, "payload_fingerprint", record_scope)
+
+    def plot():
+        if accessor:
+            return store.plots.embedding(layout=embedding, show=False)
+        return plotting.embedding(store, layout=embedding, show=False)
+
+    result = plot()
+    result.close()
+    assert len(scopes) == 1 and scopes[0] is not None
+    assert validation_scope._RESULTS.get() is None
+
+    artifact_group(root, embedding)["values"][0, 0] = -1
+    with pytest.raises(ValueError, match="payload fingerprint"):
+        plot()
+    assert len(scopes) == 2
+    assert scopes[1] is not None and scopes[1] is not scopes[0]
+    assert validation_scope._RESULTS.get() is None
+
+    artifact_group(root, embedding)["values"][:] = values
+    root["cellData/ids"][0] = "changed-cell"
+    with pytest.raises(ArtifactResolutionError, match="row identity"):
+        plot()
+    assert validation_scope._RESULTS.get() is None
+
+
+@pytest.mark.parametrize("accessor", [False, True])
+@pytest.mark.parametrize("continue_on_error", [False, True])
+def test_recipe_validation_is_shared_and_expires_between_calls(
+    monkeypatch, accessor, continue_on_error
+) -> None:
+    from cytearc import plotting
+    from cytearc.embeddings import imported_storage
+    from cytearc.storage import validation_scope
+
+    root, selection, cell_ids, mask = _root_with_selection()
+    embedding, values = _write_embedding_fixture(root, selection, cell_ids, mask)
+    store = _graph_store(root)
+    recipe = plotting.PlotRecipe(
+        tuple(
+            plotting.PlotStep(
+                name=name,
+                plot="embedding",
+                artifact_kwargs={"layout": "umap"},
+            )
+            for name in ("first", "second")
+        )
+    )
+    payload = imported_storage.payload_fingerprint
+    checks = []
+
+    def record_check(group, name):
+        checks.append((group.path, name))
+        return payload(group, name)
+
+    monkeypatch.setattr(imported_storage, "payload_fingerprint", record_check)
+
+    def run():
+        options = {
+            "artifacts": {"umap": embedding},
+            "continue_on_error": continue_on_error,
+        }
+        if accessor:
+            return store.plots.run_recipe(recipe, **options)
+        return plotting.run_recipe(store, recipe, **options)
+
+    def check_outputs(result):
+        try:
+            assert not result.failures
+            assert [output.name for output in result.outputs] == ["first", "second"]
+            for output in result.outputs:
+                axis = next(iter(output.result.axes.values()))
+                np.testing.assert_array_equal(axis.collections[0].get_offsets(), values)
+        finally:
+            for output in result.outputs:
+                output.result.close()
+
+    check_outputs(run())
+    assert len(checks) == 1
+    assert validation_scope._RESULTS.get() is None
+
+    artifact_group(root, embedding)["values"][0, 0] = -1
+    if continue_on_error:
+        failed = run()
+        assert not failed.outputs
+        assert set(failed.failures) == {"first", "second"}
+        assert all(
+            "payload fingerprint" in message for message in failed.failures.values()
+        )
+    else:
+        with pytest.raises(ValueError, match="payload fingerprint"):
+            run()
+    assert len(checks) == (3 if continue_on_error else 2)
+    assert validation_scope._RESULTS.get() is None
+
+    artifact_group(root, embedding)["values"][:] = values
+    check_outputs(run())
+    assert len(checks) == (4 if continue_on_error else 3)
+    assert validation_scope._RESULTS.get() is None
+
+
 def _imported_coordinate_artifacts(root: zarr.Group) -> list[ArtifactRef]:
     return list_artifacts(root, scope="assay", assay="RNA", kind="imported_coordinates")
 

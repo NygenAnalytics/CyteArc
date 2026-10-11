@@ -34,6 +34,7 @@ from .normalization import (
     norm_lib_size,
     norm_lib_size_log,
     norm_tf_idf,
+    normalizes_per_cell,
     reject_unknown_normalization_params,
     uses_library_size_normalization,
 )
@@ -391,6 +392,8 @@ class RNAassay(Assay):
             operation="run_normalization",
         )
 
+    # Without ``renormalize_subset``, each cell is scaled by its own prepared total.
+    @normalizes_per_cell(norm_dummy, norm_lib_size, norm_lib_size_log)
     def normed(
         self,
         cell_idx: np.ndarray | None = None,

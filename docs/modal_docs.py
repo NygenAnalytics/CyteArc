@@ -25,6 +25,7 @@ image = (
     .env(
         {
             "CYTEARC_WORKERS": "4",
+            "CYTEARC_MEM_BUDGET": "6G",
             "MPLBACKEND": "module://matplotlib_inline.backend_inline",
             "PYTHONPATH": "/root",
         }

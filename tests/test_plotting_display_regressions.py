@@ -30,6 +30,194 @@ def _summary_store(groups) -> _ArrayStore:
     )
 
 
+@pytest.fixture
+def feature_plot_store(tmp_path):
+    from cytearc import DataStore
+    from tests.storage_helpers import write_count_store
+
+    path = str(tmp_path / "summary.zarr")
+    rng = np.random.default_rng(32)
+    write_count_store(
+        path,
+        {
+            "RNA": rng.integers(0, 20, size=(24, 17), dtype=np.uint16),
+            "ADT": rng.integers(0, 20, size=(24, 3), dtype=np.uint16),
+        },
+        "uint16",
+    )
+    store = DataStore(path, default_assay="RNA", min_features_per_cell=-1, nthreads=1)
+    store.cells.insert("group", np.repeat(["a", "b"], 12))
+    store.cells.insert("sample", np.tile(np.repeat(["s1", "s2"], 6), 2))
+    return store
+
+
+@pytest.mark.parametrize("plot_name", ["dotplot", "matrixplot"])
+def test_summary_plots_read_each_assay_feature_index_once(
+    feature_plot_store, monkeypatch, plot_name
+):
+    from zarr.storage import LocalStore
+
+    from cytearc.features.values import resolve_feature
+
+    store = feature_plot_store
+    features = {
+        "RNA": [*[f"rna{i}" for i in range(16)], splt.FeatureRef("RNA16", by="id")],
+        "ADT": [
+            splt.FeatureRef(0, by="index", assay="ADT"),
+            splt.FeatureRef("adt1", assay="ADT"),
+            splt.FeatureRef("ADT2", by="id", assay="ADT"),
+        ],
+        "repeat": ["RNA0"],
+    }
+    requests = []
+    get = LocalStore.get
+
+    async def record(source, key, *args, **kwargs):
+        result = await get(source, key, *args, **kwargs)
+        if "/featureData/" in key and ("/names/c/" in key or "/ids/c/" in key):
+            requests.append((key, len(result)))
+        return result
+
+    monkeypatch.setattr(LocalStore, "get", record)
+    module = import_module("cytearc.plotting.summary")
+    batch = module.resolve_feature_batch
+
+    def serial(store, features, *, from_assay):
+        return [
+            resolve_feature(store, feature, from_assay=from_assay)
+            for feature in features
+        ]
+
+    options = dict(
+        features=features,
+        from_assay="RNA",
+        group_by="group",
+        sample_by="sample",
+        normalization=splt.NormalizationSpec(source="raw", transform="log1p"),
+        show=False,
+    )
+    monkeypatch.setattr(module, "resolve_feature_batch", serial)
+    reference = getattr(splt, plot_name)(store, **options)
+    previous_requests = requests.copy()
+    requests.clear()
+    monkeypatch.setattr(module, "resolve_feature_batch", batch)
+    result = getattr(store.plots, plot_name)(**options)
+    try:
+        assert len(previous_requests) == 42
+        assert len(requests) == 4
+        assert {key for key, _ in requests} == {key for key, _ in previous_requests}
+        assert sum(size for _, size in requests) < sum(
+            size for _, size in previous_requests
+        )
+        assert result.tables.keys() == reference.tables.keys()
+        for name in result.tables:
+            pd.testing.assert_frame_equal(
+                result.tables[name], reference.tables[name], check_exact=True
+            )
+        assert result.provenance == reference.provenance
+        if plot_name == "dotplot":
+            actual = result.axes[plot_name].collections[0]
+            expected = reference.axes[plot_name].collections[0]
+            np.testing.assert_array_equal(actual.get_array(), expected.get_array())
+            np.testing.assert_array_equal(actual.get_sizes(), expected.get_sizes())
+        else:
+            np.testing.assert_array_equal(
+                result.axes[plot_name].images[0].get_array(),
+                reference.axes[plot_name].images[0].get_array(),
+            )
+    finally:
+        reference.close()
+        result.close()
+
+
+def test_distribution_batches_feature_lookup_without_combining_normalizers(
+    feature_plot_store, monkeypatch
+):
+    from zarr.storage import LocalStore
+
+    from cytearc.features.values import resolve_feature
+
+    store = feature_plot_store
+    module = import_module("cytearc.plotting.distribution")
+    batch = module.resolve_feature_batch
+    normed = store.RNA.normed
+    normalized_columns = []
+
+    def feature_dependent_normed(*, cell_idx, feat_idx, **kwargs):
+        normalized_columns.append(tuple(feat_idx))
+        return normed(cell_idx=cell_idx, feat_idx=feat_idx, **kwargs).compute() + (
+            100.0 * len(feat_idx)
+        )
+
+    monkeypatch.setattr(store.RNA, "normed", feature_dependent_normed)
+    requests = []
+    get = LocalStore.get
+
+    async def record(source, key, *args, **kwargs):
+        result = await get(source, key, *args, **kwargs)
+        if "/featureData/" in key and ("/names/c/" in key or "/ids/c/" in key):
+            requests.append(key)
+        return result
+
+    monkeypatch.setattr(LocalStore, "get", record)
+
+    def serial(store, features, *, from_assay):
+        return [
+            resolve_feature(store, feature, from_assay=from_assay)
+            for feature in features
+        ]
+
+    options = dict(
+        keys=[
+            "RNA3",
+            splt.CellField("RNA_nCounts", label="counts"),
+            splt.FeatureRef("ADT1", assay="ADT"),
+            "RNA0",
+            "RNA_nFeatures",
+        ],
+        grouping=splt.CellField("group"),
+        kind="hist",
+        normalization=splt.NormalizationSpec(),
+        show=False,
+    )
+    monkeypatch.setattr(module, "resolve_feature_batch", serial)
+    reference = splt.distribution(store, **options)
+    previous_requests = requests.copy()
+    previous_columns = normalized_columns.copy()
+    requests.clear()
+    normalized_columns.clear()
+    monkeypatch.setattr(module, "resolve_feature_batch", batch)
+    result = store.plots.distribution(**options)
+    try:
+        assert len(previous_requests) == 6
+        assert len(requests) == 4
+        assert set(requests) == set(previous_requests)
+        assert normalized_columns == previous_columns == [(3,), (0,)]
+        assert result.tables.keys() == reference.tables.keys()
+        for name in result.tables:
+            pd.testing.assert_frame_equal(
+                result.tables[name], reference.tables[name], check_exact=True
+            )
+        assert result.provenance == reference.provenance
+        direct = module._fetch_series(
+            store,
+            "RNA0",
+            metadata_columns=store.cells.columns,
+            cell_indices=np.arange(store.cells.N),
+            from_assay=None,
+            normalization=options["normalization"],
+        )
+        assert direct[1] == "RNA0"
+        assert direct[2] is True
+        assert direct[4] == "RNA"
+        np.testing.assert_array_equal(
+            direct[0], result.tables["RNA0"]["value"].to_numpy()
+        )
+    finally:
+        reference.close()
+        result.close()
+
+
 def test_summaries_reject_implicitly_shared_feature_labels():
     store = _summary_store(np.repeat(["a", "b"], 4))
     store.ADT = _ArrayAssay(np.full((8, 2), 100.0), ["GeneA", "Other"])

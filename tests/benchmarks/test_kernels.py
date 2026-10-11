@@ -17,6 +17,53 @@ CELLS = Ladder(sizes=(4_000, 8_000, 16_000, 32_000), smoke=600)
 GRAPH_CELLS = Ladder(sizes=(2_000, 4_000, 8_000, 16_000), smoke=600)
 
 
+def test_aucell_sparse_ranking(bench) -> None:
+    from cytearc.features.enrichment.aucell import GeneSetIndex, score_aucell_block
+
+    n_features = 33_538
+    n_up = int(n_features * 0.05)
+    rng = np.random.default_rng(944)
+    permutation = rng.permutation(n_features)
+    connections = rng.choice(n_features, size=800, replace=False)
+    sets = GeneSetIndex(
+        connections=connections,
+        starts=np.arange(8, dtype=np.int64) * 100,
+        offsets=np.full(8, 100, dtype=np.int64),
+    )
+
+    def counts(n_cells: int):
+        rng = np.random.default_rng(945)
+        values = rng.integers(1, 9, size=(n_cells, n_features), dtype=np.int16)
+        values[rng.random(values.shape) > 0.05] = 0
+        values[0] = 0
+        return values
+
+    def make(n_cells: int):
+        values = counts(n_cells)
+        return lambda: score_aucell_block(values, permutation, sets, n_up=n_up)
+
+    def check(n_cells: int, scores) -> None:
+        values = counts(n_cells)
+        expected = np.zeros((n_cells, 8))
+        denominator = np.sum(n_up - np.arange(1, 101))
+        for row_index in range(1, n_cells):
+            order = np.argsort(-values[row_index, permutation], kind="stable")
+            ranks = np.empty(n_features, dtype=np.int64)
+            ranks[order] = np.arange(1, n_features + 1)
+            selected = ranks[connections].reshape(8, 100)
+            expected[row_index] = (
+                np.maximum(n_up - selected, 0).sum(axis=1) / denominator
+            )
+        np.testing.assert_array_equal(scores, expected)
+
+    bench(
+        "aucell.sparse_ranking",
+        make,
+        Ladder(sizes=(128, 256, 512, 1_024), smoke=16),
+        check=check,
+    )
+
+
 def test_library_size_normalization(bench) -> None:
     from cytearc.assay.normalization import library_size_values
 

@@ -7,6 +7,7 @@ from typing import Any, Hashable
 import numpy as np
 import pandas as pd
 
+from ..features.values import resolve_feature_batch
 from ..storage.artifacts import ArtifactRef
 
 from ._contracts import (
@@ -25,7 +26,6 @@ from ._data import (
     _resolve_grouping,
     _summarize_resolved_features,
     coerce_feature_list,
-    resolve_feature,
     unmeasured_extras,
 )
 from ._deps import require_matplotlib
@@ -376,10 +376,9 @@ def dotplot(
         )
     feature_pairs = coerce_feature_list(features)
     _check_feature_count(feature_pairs)
-    resolved_features = [
-        resolve_feature(store, feature, from_assay=from_assay)
-        for _, feature in feature_pairs
-    ]
+    resolved_features = resolve_feature_batch(
+        store, [feature for _, feature in feature_pairs], from_assay=from_assay
+    )
     aggregate, per_sample, unmeasured = _summarize_resolved_features(
         store,
         resolved_features,
@@ -807,10 +806,9 @@ def matrixplot(
 
     feature_pairs = coerce_feature_list(features)
     _check_feature_count(feature_pairs)
-    resolved_features = [
-        resolve_feature(store, feature, from_assay=from_assay)
-        for _, feature in feature_pairs
-    ]
+    resolved_features = resolve_feature_batch(
+        store, [feature for _, feature in feature_pairs], from_assay=from_assay
+    )
     aggregate, per_sample, unmeasured = _summarize_resolved_features(
         store,
         resolved_features,

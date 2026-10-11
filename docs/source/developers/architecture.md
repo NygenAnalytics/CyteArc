@@ -42,8 +42,16 @@ These calls do not create module-load cycles.
   profiles, materialization, ANN persistence, selection snapshots, run/stage records, Zarr runtime
   guards, and artifact lineage reports.
   It also owns the operation revision registry (`storage/operation_revisions.py`, see [](operation_revisions.md)), the finite-value contract of artifact arrays (`storage/finite_values.py`), and the writer destination contract (`storage/destinations.py`).
+  `storage/virtual_arrays.py` is the one seam for arrays that a store computes, such as composite
+  counts: a `VirtualArrayStore` hands out a `VirtualArrayReader` for such an array. Count selections
+  are read through `read_selection`, and `storage.feature_stream` hands a virtual array's feature
+  streams to its reader, so no other module checks for a virtual array.
 - `matrix/` owns the lazy blockwise matrix abstraction used over NumPy and Zarr arrays.
   Its arithmetic, indexing, and reduction behavior keeps it separate from low-level storage mechanics.
+  An assay's `ChunkedArray` over `counts` carries the validated `countsT`. Streams that allow it,
+  such as feature value reads, take the selected rows from `countsT` through
+  `storage/feature_major_rows.py` when that touches fewer chunk bytes, and the matrix's operations
+  transform them exactly as rows of `counts`, so a normalization has one implementation.
 - `utils/` owns generic array, argument validation, compute, logging, process, and progress helpers.
   It also owns streamed column moments (`utils/moments.py`) and the one warning helper (`utils/warnings.py`), which points each warning at the caller's code.
   Zarr-specific helpers belong in `storage`, not `utils`.
@@ -96,9 +104,13 @@ A domain that persists an artifact may use a narrow, named `storage` adapter.
 - `writers/` materializes CyteArc stores and exports supported formats.
 - `merge/` combines assays and datasets without importing `DataStore` during normal module loading.
 - `composite/` presents selected source counts through an ordinary `DataStore` without copying
-  them. `create.py` reuses merge alignment, metadata, and storage preparation; `store.py` owns
-  virtual count reads and imports foundation modules only. The storage opener imports its
-  adapter lazily. Assays and pipeline stages use their existing array interfaces.
+  them. It is an adapter: only the storage opener imports it, lazily, and core reads reach it
+  only through the `storage/virtual_arrays.py` seam. `create.py` reuses merge alignment,
+  metadata, and storage preparation. `store.py` is the virtual Zarr store that implements the
+  seam, `reader.py` reads selections from the source matrices, `streams.py` holds the feature
+  streams, which batch adjacent feature groups into one source read, and `source_cache.py` keeps
+  remote source objects on local disk. These four modules import foundation modules only.
+  Assays and pipeline stages use their existing array interfaces.
 
 Readers parse, writers materialize, and merge combines.
 Format-specific code belongs in a module named for that format.
@@ -1078,6 +1090,10 @@ Public imports, result records, facade behavior, and wheel contents have separat
 - Pseudotime-specific feature aggregation and module clustering live under `trajectory.feature_dynamics`.
 - `metadata` remains a root data-model package because assays and datastore orchestration both depend on it.
 - Unified plotting uses a datastore adapter instead of reading Zarr paths.
+- Arrays that a store computes are read through `storage/virtual_arrays.py` only. A virtual array
+  may supply its own feature streams, which keep the contract of `storage.feature_stream` and are
+  built from its public stream building blocks; composite streams batch reads there instead of
+  adding composite cases to the core streams.
 - Store-backed plotting is available through the lazy `DataStore.plots` accessor without moving implementation ownership out of `plotting`.
 - Old flat compatibility modules remain deleted.
 - Operation revisions are the only explicit invalidation mechanism; reuse stays exact on canonical

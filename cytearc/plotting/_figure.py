@@ -10,6 +10,7 @@ from typing import Any, Hashable, cast
 import numpy as np
 import pandas as pd
 
+from ..storage.validation_scope import validation_scope
 from ._contracts import CategoricalScale, ColorScale, PlotProvenance, SizeScale
 from ._deps import require_matplotlib
 from ._style import (
@@ -58,12 +59,13 @@ def close_figures_on_error[**P, R](function: Callable[P, R]) -> Callable[P, R]:
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         plt, _ = require_matplotlib()
         existing = set(plt.get_fignums())
-        try:
-            return function(*args, **kwargs)
-        except BaseException:
-            for number in set(plt.get_fignums()) - existing:
-                plt.close(number)
-            raise
+        with validation_scope():
+            try:
+                return function(*args, **kwargs)
+            except BaseException:
+                for number in set(plt.get_fignums()) - existing:
+                    plt.close(number)
+                raise
 
     return wrapper
 

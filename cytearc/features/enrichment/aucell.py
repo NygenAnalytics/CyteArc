@@ -193,20 +193,36 @@ def _score_ranked_block(
     scores = np.zeros((n_rows, starts.size), dtype=np.float64)
     for row_index in prange(n_rows):
         row = matrix[row_index]
-        has_signal = False
+        nonzero_count = 0
+        positive_count = 0
         for feature in range(n_features):
             if row[feature] != 0:
-                has_signal = True
-                break
-        if not has_signal:
+                nonzero_count += 1
+                if row[feature] > 0:
+                    positive_count += 1
+        if nonzero_count == 0:
             continue
-        negated = np.empty(n_features, dtype=np.float64)
-        for position in range(n_features):
-            negated[position] = -np.float64(row[permutation[position]])
-        order = np.argsort(negated, kind="mergesort")
+        negated = np.empty(nonzero_count, dtype=np.float64)
+        positions = np.empty(nonzero_count, dtype=np.int64)
         ranks = np.empty(n_features, dtype=np.int64)
+        nonzero_position = 0
+        zero_rank = positive_count + 1
         for position in range(n_features):
-            ranks[order[position]] = position + 1
+            value = row[permutation[position]]
+            if value == 0:
+                ranks[position] = zero_rank
+                zero_rank += 1
+            else:
+                negated[nonzero_position] = -np.float64(value)
+                positions[nonzero_position] = position
+                nonzero_position += 1
+        order = np.argsort(negated, kind="mergesort")
+        zero_count = n_features - nonzero_count
+        for position in range(nonzero_count):
+            rank = position + 1
+            if position >= positive_count:
+                rank += zero_count
+            ranks[positions[order[position]]] = rank
         scores[row_index] = _score_ranked_row(
             ranks,
             connections,

@@ -1,6 +1,7 @@
 import hashlib
 import shutil
 import tracemalloc
+from contextlib import contextmanager
 
 import numpy as np
 import pytest
@@ -42,6 +43,28 @@ def _write_source(
         nthreads=1,
         mem_budget="64M",
     )
+
+
+@contextmanager
+def count_fallbacks(monkeypatch):
+    """Record every Zarr read of composite counts.
+
+    CyteArc reads composite counts through the store's reader; a Zarr read of
+    their computed shards is many times slower, so workflows must make none.
+    """
+    from cytearc.composite.store import CompositeStore
+
+    get = CompositeStore.get
+    reads = []
+
+    async def record(self, key, prototype, byte_range=None):
+        if self._path(key) is not None and not key.endswith("zarr.json"):
+            reads.append(key)
+        return await get(self, key, prototype, byte_range)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(CompositeStore, "get", record)
+        yield reads
 
 
 def _tree_digest(path):
@@ -107,6 +130,126 @@ def _expected_counts(joint, sources):
     return expected
 
 
+def test_composite_metadata_handles_preserve_boolean_selection_contract(sources):
+    from cytearc.composite.create import _CachedMetadataTable
+
+    table = sources["a"].cells
+    handles = _CachedMetadataTable(table)
+    np.testing.assert_array_equal(handles._bool_array("I")[:], table.fetch_all("I"))
+    assert handles.default_block_rows() == table.default_block_rows()
+    with pytest.raises(TypeError, match="must have boolean dtype"):
+        handles._bool_array("quality")
+
+
+def test_composite_schema_prefetch_skips_local_and_empty_tables(
+    sources, tmp_path, monkeypatch
+):
+    from cytearc.composite.create import _CachedMetadataTable, _prefetch_metadata_schema
+    from cytearc.composite.source_cache import SourceCache
+    from cytearc.metadata.table import MetaData
+    from cytearc.storage.budget import ResourceBudget
+
+    root = zarr.open_group(str(tmp_path / "empty.zarr"), mode="w")
+    create_cell_data(
+        root, None, ids=np.array([], dtype="U1"), names=np.array([], dtype="U1")
+    )
+    empty = _CachedMetadataTable(MetaData(root["cellData"]))
+    local = _CachedMetadataTable(sources["a"].cells)
+    cache = SourceCache()
+    empty.use_source_cache(cache)
+    requests = []
+    get = LocalStore.get
+
+    async def record(store, key, *args, **kwargs):
+        if "/c/" in key:
+            requests.append(key)
+        return await get(store, key, *args, **kwargs)
+
+    monkeypatch.setattr(LocalStore, "get", record)
+    try:
+        _prefetch_metadata_schema(
+            [local, empty],
+            [frozenset(), frozenset()],
+            ResourceBudget(2, 1024**2),
+            cache=cache,
+            resident_bytes=0,
+            read_workers=2,
+        )
+        assert not requests
+        assert not cache._entries
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize(
+    "reason", ("memory", "empty_features", "sparse_shard", "entries")
+)
+def test_composite_count_prefetch_only_admits_selected_objects(
+    tmp_path, monkeypatch, reason
+):
+    from cytearc.composite.create import _prefetch_counts
+    from cytearc.composite.source_cache import SourceCache
+    from cytearc.merge.row_plan import build_row_plan
+    from cytearc.storage.geometry import array_geometry
+
+    root = zarr.open_group(str(tmp_path / "source.zarr"), mode="w")
+    sparse = reason == "sparse_shard"
+    shape = (4, 8) if sparse else (64, 64)
+    chunks = (2, 2) if sparse else (32, 32)
+    shards = (4, 4) if sparse else shape
+    for name in ("a", "b"):
+        root.create_array(
+            name,
+            data=np.ones(shape, dtype=np.uint16),
+            chunks=chunks,
+            shards=shards,
+        )
+    cache = SourceCache(max_entries=1 if reason == "entries" else 16)
+    cached = cache.wrap(root.store)
+    arrays = [zarr.open_array(cached, path=name, mode="r") for name in ("a", "b")]
+    selections = [np.array([0]), np.array([], dtype=np.int64)] if sparse else None
+    plan = build_row_plan(
+        [shape[0]] * 2, [shape[0]] * 2, ["a", "b"], selected_rows=selections
+    )
+    mappings = [np.arange(shape[1]) for _ in arrays]
+    if reason == "empty_features":
+        mappings = [np.full(shape[1], -1) for _ in arrays]
+    elif sparse:
+        mappings[0][5:] = -1
+    requests = []
+    get = LocalStore.get
+
+    async def record(store, key, *args, **kwargs):
+        if store.root == root.store.root and "/c/" in key:
+            requests.append(key)
+        return await get(store, key, *args, **kwargs)
+
+    monkeypatch.setattr(LocalStore, "get", record)
+    try:
+        _prefetch_counts(
+            arrays,
+            plan,
+            mappings,
+            [array_geometry(array) for array in arrays],
+            segment_rows=shape[0],
+            read_workers=2,
+            memory_bytes=4096 if reason == "memory" else 1024**2,
+            cache=cache,
+        )
+        if reason in {"memory", "empty_features"}:
+            assert not requests
+        elif sparse:
+            assert requests == ["a/c/0/0"]
+        else:
+            first = ("a", "b")[plan.coordinatesPermutations[0, 0]]
+            assert requests == [f"{first}/c/0/0"]
+            assert len(cache._entries) == 1
+            np.testing.assert_array_equal(arrays[("a", "b").index(first)][:], 1)
+            assert requests == [f"{first}/c/0/0"]
+    finally:
+        cache.close()
+
+
 @pytest.mark.parametrize("features", ["union", "intersection"])
 def test_selected_composite_matches_values_and_reopens(
     sources, composite_sources, tmp_path, features
@@ -122,6 +265,7 @@ def test_selected_composite_matches_values_and_reopens(
         nthreads=1,
     )
     expected = _expected_counts(joint, composite_sources)
+    assert joint.z.store.virtual_array_reader("cellData/I") is None
     assert set(joint.cells.fetch_all("ids")) == {
         *(f"a__c{row}" for row in selected),
         *(f"b__c{row}" for row in range(11)),
@@ -302,6 +446,99 @@ def test_workspace_and_non_rna_sources_reopen(tmp_path, assay, workspace):
     assert ("countsT" in output.matrixGroup) is (assay == "RNA")
     if assay == "RNA":
         np.testing.assert_array_equal(output.matrixGroup["countsT"][:], expected.T)
+
+
+def test_remote_composite_reuses_metadata_table_listings(
+    composite_sources, tmp_path, monkeypatch
+):
+    from huggingface_hub import BucketFile, HfFileSystem
+
+    from cytearc.storage.huggingface import HfReadStore
+    from tests.fixtures_cytebase import FakeHub
+
+    hub = FakeHub(tmp_path / "hub")
+    bucket_id = "tests/composite"
+    fs = HfFileSystem(token=False, skip_instance_cache=True)
+    fs._bucket_exists_cache[bucket_id] = (True, None)
+
+    def list_tree(bucket_id, prefix=None, *, recursive=False):
+        entries = hub.list_bucket_tree(bucket_id, prefix, recursive=recursive)
+        return [
+            entry for entry in entries if not recursive or isinstance(entry, BucketFile)
+        ]
+
+    def open_file(path, mode="rb", **options):
+        info = fs.info(path)
+        resolved = fs.resolve_path(path)
+        opened = hub.path(resolved.path, resolved.bucket_id).open(mode)
+        opened.size = info["size"]
+        return opened
+
+    monkeypatch.setattr(fs._api, "list_bucket_tree", list_tree)
+    monkeypatch.setattr(fs, "_open", open_file)
+    sources = {}
+    joint = None
+    try:
+        for name, (path, _, _) in composite_sources.items():
+            shutil.copytree(path, hub.path(f"{name}.zarr", bucket_id))
+            store = HfReadStore.from_mapper(
+                fs.get_mapper(f"hf://buckets/{bucket_id}/{name}.zarr"), read_only=True
+            )
+            sources[name] = DataStore(
+                store,
+                zarr_mode="r",
+                min_features_per_cell=-1,
+                nthreads=1,
+                mem_budget="64M",
+            )
+        fs.dircache.clear()
+        hub.calls.clear()
+
+        joint = create_composite(
+            sources,
+            at=tmp_path / "joint.zarr",
+            features="union",
+            rows={"a": [0, 7, 12], "b": [3, 5]},
+            nthreads=1,
+            mem_budget="64M",
+        )
+
+        expected = _expected_counts(joint, composite_sources)
+        np.testing.assert_array_equal(joint.RNA.rawData.compute(), expected)
+        np.testing.assert_array_equal(joint.RNA.matrixGroup["countsT"][:], expected.T)
+        np.testing.assert_array_equal(
+            joint.RNA.feats.fetch_all("names"), joint.RNA.feats.fetch_all("ids")
+        )
+        for identity, dataset, quality in zip(
+            joint.cells.fetch_all("ids"),
+            joint.cells.fetch_all("dataset"),
+            joint.cells.fetch_all("orig_quality"),
+            strict=True,
+        ):
+            name, row = identity.split("__c")
+            assert dataset == name
+            assert quality == int(row)
+
+        tables = {
+            f"{name}.zarr/{table}"
+            for name in sources
+            for table in ("cellData", "RNA/featureData")
+        }
+        for table in tables:
+            calls = [
+                call
+                for call in hub.calls
+                if call[2] == table or call[2].startswith(table + "/")
+            ]
+            recursive = ("list_bucket_tree", bucket_id, table, True, None)
+            assert calls.count(recursive) == 1
+            assert calls[calls.index(recursive) :] == [recursive]
+        assert {call[2] for call in hub.calls if call[3]} == tables
+    finally:
+        if joint is not None:
+            joint.z.store.close()
+        for source in sources.values():
+            source.z.store.close()
 
 
 def test_remote_source_credentials_are_runtime_only(
@@ -557,6 +794,98 @@ def test_failed_preparation_leaves_an_incomplete_destination(sources, tmp_path):
         DataStore(str(path))
 
 
+def test_composite_rejects_duplicate_source_cell_ids_without_changing_source(tmp_path):
+    source_path = tmp_path / "source.zarr"
+    source = _write_source(
+        source_path,
+        np.ones((2, 2), dtype=np.uint8),
+        ["g0", "g1"],
+        ids=["duplicate", "duplicate"],
+        policy=CountMatrixPolicy(128, 32),
+    )
+    before = _tree_digest(source_path)
+    destination = tmp_path / "joint.zarr"
+    with pytest.raises(ValueError, match="Composite cell IDs are not unique"):
+        create_composite(
+            {"source": source},
+            at=destination,
+            features="union",
+            mem_budget="64M",
+            nthreads=1,
+        )
+    assert (
+        zarr.open_group(str(destination), mode="r").attrs["composite"]["complete"]
+        is False
+    )
+    assert _tree_digest(source_path) == before
+    np.testing.assert_array_equal(source.RNA.matrixGroup["counts"][:], 1)
+
+
+@pytest.mark.parametrize("phase", ("metadata", "identity", "counts"))
+def test_composite_creation_rejects_unaffordable_work_before_count_reads(
+    tmp_path, monkeypatch, phase
+):
+    metadata = phase == "metadata"
+    identity = phase == "identity"
+    shape = (100, 2) if metadata else (150_000, 1) if identity else (4, 256)
+    source = _write_source(
+        tmp_path / "source.zarr",
+        np.ones(shape, dtype=np.uint8),
+        [f"g{index}" for index in range(shape[1])],
+        ids=[f"{index}_{'x' * 1000}" for index in range(shape[0])]
+        if metadata
+        else None,
+        policy=(
+            CountMatrixPolicy(1_048_576, 262_144)
+            if identity
+            else CountMatrixPolicy(1024, 256)
+        ),
+    )
+    if not identity:
+        for table in (source.cells, source.RNA.feats):
+            for name, array in list(table._group.arrays()):
+                values, attributes = array[:], dict(array.attrs)
+                del table._group[name]
+                table._group.create_array(
+                    name,
+                    data=values,
+                    chunks=(min(table.N, 2 if metadata else 256),),
+                    attributes=attributes,
+                )
+    requests = []
+    get = LocalStore.get
+
+    async def record(store, key, *args, **kwargs):
+        if store.root == source.z.store.root and key.startswith("RNA/counts/c/"):
+            requests.append(key)
+        return await get(store, key, *args, **kwargs)
+
+    monkeypatch.setattr(LocalStore, "get", record)
+    destination = tmp_path / "joint.zarr"
+    message = {
+        "metadata": "Merged cell metadata cannot fit one row",
+        "identity": "Composite cell identity validation exceeds mem_budget",
+        "counts": "Composite count preparation cannot fit one row",
+    }[phase]
+    with pytest.raises(MemoryError, match=message):
+        create_composite(
+            {"source": source},
+            at=destination,
+            features="union",
+            # Large enough to fit the composite layout, too small for one
+            # prepared row.
+            mem_budget="24M" if identity else 71_000 if phase == "counts" else 65_536,
+            nthreads=1,
+        )
+    assert not requests
+    if metadata:
+        assert not destination.exists()
+    else:
+        root = zarr.open_group(str(destination), mode="r")
+        assert root.attrs["composite"]["complete"] is False
+    np.testing.assert_array_equal(source.RNA.matrixGroup["counts"][:], 1)
+
+
 def test_one_cell_selection_scans_source_metadata_in_bands(
     sources, tmp_path, monkeypatch
 ):
@@ -567,7 +896,10 @@ def test_one_cell_selection_scans_source_metadata_in_bands(
 
     def recorded(table, column, **kwargs):
         for values in read(table, column, **kwargs):
-            if table is sources["a"].cells and column == "ids":
+            if (
+                column == "ids"
+                and table._get_array(column).store == sources["a"].z.store
+            ):
                 blocks.append(values.copy())
             yield values
 
@@ -646,8 +978,14 @@ def test_creation_and_virtual_reads_fit_measured_buffer_budget(tmp_path):
     for name in ("counts", "countsT"):
         array = joint.RNA.matrixGroup[name]
         geometry = array_geometry(array)
-        chunks = geometry.shards[1] // geometry.chunks[1]
-        planned = geometry.readBytes(array.shape[1] * array.dtype.itemsize, chunks)
+        # Zarr reads the row's shards at once, and each shard request holds its
+        # own allowance.
+        planned = 0
+        for start in range(0, array.shape[1], geometry.shards[1]):
+            width = min(geometry.shards[1], array.shape[1] - start)
+            planned += geometry.readBytes(
+                width * array.dtype.itemsize, -(-width // geometry.chunks[1])
+            )
         array[:1, :]
         tracemalloc.start()
         try:
@@ -666,8 +1004,9 @@ def test_creation_and_virtual_reads_fit_measured_buffer_budget(tmp_path):
 def test_composite_consumers_admit_source_scratch_before_count_reads(
     tmp_path, monkeypatch, operation
 ):
+    from zarr.core.array import AsyncArray
+
     from cytearc.assay import norm_lib_size
-    from cytearc.composite.store import CompositeStore
     from cytearc.mapping.features import AlignedFeatureStream
     from cytearc.quality_control.doublets import _load_parent_counts
     from cytearc.storage.artifacts import callable_identity
@@ -728,14 +1067,18 @@ def test_composite_consumers_admit_source_scratch_before_count_reads(
         return np.concatenate([block.values[:, 0] for block in stream.iter_blocks()])
 
     requests = []
-    original_get = CompositeStore.get
+    original_getitem = AsyncArray.getitem
+    source_root = str(source.z.store.root)
 
-    async def recorded_get(self, key, *args, **kwargs):
-        if key.startswith("RNA/counts/c/"):
-            requests.append(key)
-        return await original_get(self, key, *args, **kwargs)
+    async def recorded_getitem(self, selection, *args, **kwargs):
+        if str(getattr(self.store, "root", "")) == source_root and self.path in {
+            "RNA/counts",
+            "RNA/countsT",
+        }:
+            requests.append((self.path, selection))
+        return await original_getitem(self, selection, *args, **kwargs)
 
-    monkeypatch.setattr(CompositeStore, "get", recorded_get)
+    monkeypatch.setattr(AsyncArray, "getitem", recorded_getitem)
     limited = DataStore(str(destination), mem_budget="4M", nthreads=1)
     with pytest.raises(MemoryError):
         read(limited)
@@ -894,7 +1237,7 @@ def test_budget_fitted_virtual_chunks_stream_counts_and_transpose(tmp_path):
     )
 
 
-def test_pipeline_matches_materialized_counts_and_reopens(tmp_path):
+def test_pipeline_matches_materialized_counts_and_reopens(tmp_path, monkeypatch):
     rng = np.random.default_rng(72)
     features = np.array([f"g{column}" for column in range(64)])
     sources = {}
@@ -933,7 +1276,9 @@ def test_pipeline_matches_materialized_counts_and_reopens(tmp_path):
         "doublets": False,
         "markers": False,
     }
-    actual_run = joint.pipeline.run(params=params)
+    with count_fallbacks(monkeypatch) as fallbacks:
+        actual_run = joint.pipeline.run(params=params)
+    assert fallbacks == []
     expected_run = reference.pipeline.run(params=params)
     assert actual_run.status == expected_run.status == "completed"
     assert list(actual_run) == list(expected_run)

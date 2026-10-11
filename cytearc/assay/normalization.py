@@ -24,7 +24,7 @@ turns on: only those of the RNA library-size normalizers, whose scale CyteArc
 knows. Every other flag defaults to False.
 """
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
@@ -65,6 +65,7 @@ from ..storage.selections import (
 from ..storage.types import as_zarr_array, as_zarr_group
 
 if TYPE_CHECKING:
+    from ..metadata.selection import NormalizationSpec
     from .base import Assay
 
 type NormMethod = Callable[["Assay", ChunkedArray], ChunkedArray]
@@ -581,6 +582,163 @@ def resolve_normalization_params(
     }
 
 
+# The built-in ``normed`` functions and the normalizers each applies per cell.
+_PER_CELL_NORMED: dict[Callable[..., Any], tuple[NormMethod, ...]] = {}
+
+
+def normalizes_per_cell[F: Callable[..., Any]](
+    *normalizers: NormMethod,
+) -> Callable[[F], F]:
+    """Mark a built-in ``normed`` that applies ``normalizers`` to each cell alone.
+
+    With those normalizers, the values of a cell do not depend on the other
+    selected cells. Only the marked function is listed: an override of
+    ``normed`` is another function, and nothing is assumed about its values.
+    """
+
+    def mark(normed: F) -> F:
+        _PER_CELL_NORMED[normed] = normalizers
+        return normed
+
+    return mark
+
+
+def normalization_is_cell_local(
+    assay: "Assay", normalization: "NormalizationSpec"
+) -> bool:
+    """Return whether each cell's values depend on that cell's counts alone.
+
+    Raw counts always do. Normalized values do when the assay's ``normed`` is
+    a built-in one marked with ``normalizes_per_cell`` for the configured
+    normalizer: ``norm_dummy``, and for RNA the library-size normalizers,
+    which scale each cell by its own prepared total. Then reading fewer cells
+    gives the values that ``normed`` gives them among all the cells. A
+    ``normed`` that a subclass or an instance replaces is never cell-local
+    here.
+
+    Args:
+        assay: Assay whose configured normalizer and ``normed`` are checked.
+        normalization: Requested value source and transform.
+
+    Returns:
+        True if the values of a cell do not depend on the other selected cells.
+
+    Raises:
+        ValueError: If ``normed`` would reject the requested ``log1p``, or a
+            library-size normalizer has no size factor.
+    """
+    if normalization.source == "raw":
+        return True
+    normed = getattr(assay.normed, "__func__", None)
+    normalizers = () if normed is None else _PER_CELL_NORMED.get(normed, ())
+    method = getattr(assay, "normMethod", None)
+    if not any(method is normalizer for normalizer in normalizers):
+        return False
+    # The same checks that ``normed`` makes before it reads any value.
+    check_normalization_flags(
+        assay,
+        log_transform=normalization.transform == "log1p",
+        renormalize_subset=False,
+    )
+    if method is not norm_dummy and getattr(assay, "sf", None) is None:
+        raise ValueError(
+            "RNA library-size normalization requires a size factor (sf), got None"
+        )
+    return True
+
+
+def _feature_values(
+    assay: Any,
+    physical_indices: np.ndarray,
+    cell_idx: np.ndarray,
+    normalization: "NormalizationSpec",
+) -> Any:
+    """Return the lazy raw or normalized values of features over cells."""
+    if normalization.source == "raw":
+        return assay.rawData[:, physical_indices][cell_idx, :]
+    # ``normed`` applies log1p under the normalizer's rule, so values that are
+    # already logarithms, such as CLR, are never logged twice.
+    return assay.normed(
+        cell_idx=cell_idx,
+        feat_idx=physical_indices,
+        log_transform=normalization.transform == "log1p",
+    )
+
+
+def streamed_block_rows(values: Any) -> int:
+    """Return the most rows that one streamed block of ``values`` holds.
+
+    Args:
+        values: A chunked array, or an in-memory matrix streamed as one block.
+
+    Returns:
+        The rows of one block, at least 1.
+    """
+    chunks = getattr(values, "chunksize", None)
+    if chunks is not None:
+        return max(1, int(chunks[0]))
+    return max(1, len(values))
+
+
+def _value_blocks(
+    values: Any, nthreads: int, resident_bytes: int, scratch_bytes_per_row: int
+) -> Iterable[Any]:
+    """Stream ``values`` in row blocks, or yield an in-memory matrix whole.
+
+    The rows of the counts beneath ``values`` may come from their stored
+    transpose, ``countsT``, when that touches fewer chunk bytes.
+    """
+    if isinstance(values, np.ndarray):
+        return (values,)
+    blocks: Iterable[Any] = values._stream_blocks(
+        nthreads=nthreads,
+        msg=None,
+        prefetch=None,
+        row_mask=None,
+        resident_bytes=resident_bytes,
+        scratch_bytes_per_row=scratch_bytes_per_row,
+        allow_transposed=True,
+    )
+    return blocks
+
+
+def feature_value_blocks(
+    assay: Any,
+    physical_indices: np.ndarray,
+    cell_idx: np.ndarray,
+    normalization: "NormalizationSpec",
+    *,
+    nthreads: int,
+    resident_bytes: int,
+    scratch_bytes_per_row: int,
+) -> tuple[int, Iterable[np.ndarray]]:
+    """Stream the raw or normalized values of features over cells in row blocks.
+
+    The counts of sorted unique cells are read feature-major from ``countsT``
+    when that touches fewer chunk bytes and fits the budget, and otherwise
+    from ``counts``. The assay's ``normed`` transforms either in the same row
+    blocks, so both give the same values.
+
+    Args:
+        assay: Assay that holds the features.
+        physical_indices: Physical feature indices, in output column order.
+        cell_idx: Cell indices, in output row order.
+        normalization: Requested value source and transform.
+        nthreads: Workers that the reads may use.
+        resident_bytes: Bytes the caller holds while the blocks stream.
+        scratch_bytes_per_row: Bytes per row the caller creates from a block.
+
+    Returns:
+        The most rows of one block, and the blocks in cell order.
+    """
+    values = _feature_values(
+        assay, np.asarray(physical_indices), np.asarray(cell_idx), normalization
+    )
+    return streamed_block_rows(values), _value_blocks(
+        values, nthreads, resident_bytes, scratch_bytes_per_row
+    )
+
+
 def _feature_group_positions(
     feature_groups: Sequence[np.ndarray],
 ) -> tuple[np.ndarray, list[np.ndarray]]:
@@ -697,7 +855,8 @@ def _counts_t_renormalized_batches(
     logTransform: bool,
     resources: ResourceBudget | None = None,
 ) -> Iterator[np.ndarray]:
-    from ..storage.feature_stream import map_feature_cell_bands, selected_feature_values
+    from ..storage.feature_major_rows import CellBandAssembler
+    from ..storage.feature_stream import map_feature_cell_bands
 
     counts_t = assay.rawDataT
     if counts_t is None:
@@ -725,45 +884,10 @@ def _counts_t_renormalized_batches(
         + selected_features.nbytes
     )
 
-    raw: np.ndarray | None = None
-    completed_groups = 0
     metrics: dict[str, Any] = {}
-
-    # The ordered cell-major stream hands over every feature group of a cell
-    # band before the next band, and the bands in cell order.
-    def fill_band(band: Any) -> np.ndarray | None:
-        nonlocal raw, completed_groups
-        local_dest = feature_destinations[band.featStart + band.featureRows()]
-        keep = local_dest >= 0
-        if not np.any(keep):
-            raise RuntimeError(
-                "Planned countsT group did not contain selected features"
-            )
-        row_destinations = np.asarray(band.selectedDestinations, dtype=np.int64)
-        row_start = int(row_destinations[0])
-        expected_rows = np.arange(
-            row_start,
-            row_start + int(row_destinations.shape[0]),
-            dtype=np.int64,
-        )
-        if not np.array_equal(row_destinations, expected_rows):
-            raise ValueError(
-                "Feature-major normalization requires contiguous selected-cell bands"
-            )
-        if raw is None:
-            raw = np.empty(
-                (int(row_destinations.shape[0]), n_features), dtype=counts_t.dtype
-            )
-        selected = selected_feature_values(band.values, keep)
-        destinations = local_dest[keep]
-        raw[:, destinations] = selected[:, band.selectedLocal].T
-        completed_groups += 1
-        if completed_groups != int(metrics["featureGroupCount"]):
-            return None
-        result = raw
-        raw = None
-        completed_groups = 0
-        return result
+    fill_band = CellBandAssembler(
+        feature_destinations, n_features, counts_t.dtype, metrics
+    )
 
     next_row = 0
     for raw_values in map_feature_cell_bands(
@@ -788,10 +912,8 @@ def _counts_t_renormalized_batches(
         )
         next_row += int(normalized.shape[0])
         yield normalized
-    if raw is not None or completed_groups or next_row != int(selected_cells.shape[0]):
-        raise RuntimeError(
-            "Feature-major normalization did not cover every selected cell"
-        )
+    if fill_band.pending or next_row != int(selected_cells.shape[0]):
+        raise RuntimeError("countsT reads did not cover every requested cell")
 
 
 def write_renorm_subset_to_zarr(

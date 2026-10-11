@@ -33,6 +33,7 @@ from ..storage.selections import (
     validate_stored_selection_integrity,
 )
 from ..storage.types import as_zarr_array
+from ..storage.validation_scope import store_key, validated_once
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,7 +311,92 @@ def require_selected_row_order(
         )
 
 
+def validate_imported_embedding_artifact(
+    root: zarr.Group,
+    ref: ArtifactRef,
+) -> None:
+    return validated_once(
+        ("imported_embedding", *store_key(root), ref),
+        lambda: _validate_imported_embedding_artifact(root, ref),
+    )
+
+
+def _validate_imported_embedding_artifact(
+    root: zarr.Group,
+    ref: ArtifactRef,
+) -> None:
+    storage = ImportedArtifactStorage(root)
+    if ref.kind != "embedding" or ref.scope != "assay" or ref.assay is None:
+        raise ValueError("Imported embedding must be an assay-scoped embedding")
+    status = storage.require_complete(ref)
+    if status.operation != "import_dimreduc":
+        raise ValueError("Imported embedding operation must be 'import_dimreduc'")
+    label = "Imported embedding"
+    context = {
+        "assay": ref.assay,
+        "artifact_id": ref.artifact_id,
+        "actual_kind": ref.kind,
+    }
+    require_positive_block_rows(
+        status.execution_options,
+        label=label,
+        context=context,
+    )
+    inputs = status.inputs or {}
+    raw_selection = inputs.get("cell_selection")
+    if not isinstance(raw_selection, Mapping):
+        raise ValueError("Imported embedding has no cell selection input")
+    selection = ArtifactRef.from_dict(raw_selection)
+    validated_selection = storage.validate_cell_selection(selection)
+    group = storage.artifact_group(ref)
+    if "values" not in group:
+        raise ValueError("Imported embedding has no values array")
+    values = storage.as_array(group["values"], "values")
+    parameters = status.parameters or {}
+    dimreduc_key = parameters.get("dimreduc_key")
+    if not isinstance(dimreduc_key, str) or not dimreduc_key:
+        raise ValueError("Imported embedding source key is missing")
+    dims = parameters.get("dims")
+    role = parameters.get("role")
+    if (
+        values.ndim != 2
+        or int(values.shape[0]) < 1
+        or np.dtype(values.dtype).kind != "f"
+        or isinstance(dims, bool)
+        or not isinstance(dims, int | np.integer)
+        or int(dims) < 1
+        or tuple(values.shape)[1] != int(dims)
+        or role not in {"umap", "tsne"}
+    ):
+        raise ValueError("Imported embedding payload is malformed")
+    require_selected_row_order(
+        validated_selection,
+        row_count=int(values.shape[0]),
+        ordered_fingerprint=inputs.get("ordered_cell_ids_fingerprint"),
+        label=label,
+        context=context,
+    )
+    require_source_digest(inputs, label=label, context=context)
+    fingerprints = inputs.get("payload_fingerprints")
+    if (
+        not isinstance(fingerprints, Mapping)
+        or set(fingerprints) != {"values"}
+        or fingerprints.get("values") != payload_fingerprint(group, "values")
+    ):
+        raise ValueError("Imported embedding payload fingerprint does not match")
+
+
 def validate_imported_coordinates_artifact(
+    root: zarr.Group,
+    coordinates: ArtifactRef,
+) -> None:
+    return validated_once(
+        ("imported_coordinates", *store_key(root), coordinates),
+        lambda: _validate_imported_coordinates_artifact(root, coordinates),
+    )
+
+
+def _validate_imported_coordinates_artifact(
     root: zarr.Group,
     coordinates: ArtifactRef,
 ) -> None:

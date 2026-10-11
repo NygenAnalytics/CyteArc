@@ -17,6 +17,7 @@ from ._operations.trajectory import _TrajectoryFeatureOperationsMixin
 from .mapping_datastore import MappingDatastore
 
 if TYPE_CHECKING:
+    from ..storage.budget import ResourceBudget
     from .artifact_accessor import ArtifactAccessor
     from .namespaces import (
         ClustersAccessor,
@@ -78,6 +79,7 @@ def mount_datastore(
         is_rna_assay_type,
         validate_assay_types,
     )
+    from ..storage.budget import ResourceBudget
     from ..storage.stores import _open_store_root, discard_mount_target
 
     if "zarr_loc" in datastore_options:
@@ -88,13 +90,27 @@ def mount_datastore(
             f"A mounted datastore is writable and needs zarr_mode 'r+', got "
             f"{zarr_mode!r}. Reopen the target with DataStore to read it."
         )
-    _check_forwarded_options(
+    resources = _check_forwarded_options(
         at, workspace=workspace, storage_options=storage_options, **datastore_options
     )
+    storage_io = datastore_options.get("storageIo")
+    if storage_io is not None:
+        # Each metadata worker reads, converts, and writes one column.
+        resources = ResourceBudget(
+            resources.memoryBytes,
+            min(
+                resources.workers,
+                storage_io.readWorkers or resources.workers,
+                storage_io.computeWorkers or resources.workers,
+                storage_io.writeWorkers or resources.workers,
+            ),
+        )
 
-    _open_store_root(source, storage_options=storage_options, operation="mounted")
+    source_root = _open_store_root(
+        source, storage_options=storage_options, operation="mounted"
+    )
     source_store = DataStore(
-        source,
+        source_root.store,
         workspace=workspace,
         zarr_mode="r",
         storage_options=storage_options,
@@ -113,6 +129,7 @@ def mount_datastore(
             explicit.get(name, declared_assay_type(source_store.get_assay(name)))
         )
     )
+    del source_store
     target = create_matrix_source(
         source,
         at,
@@ -120,6 +137,8 @@ def mount_datastore(
         workspace=workspace,
         storage_options=storage_options,
         profile=datastore_options.get("zarrProfile"),
+        source_root=source_root,
+        resources=resources,
     )
     try:
         return DataStore(
@@ -141,7 +160,7 @@ def _check_forwarded_options(
     workspace: str | None,
     storage_options: dict[str, Any] | None,
     **datastore_options: Any,
-) -> None:
+) -> "ResourceBudget":
     """Apply the checks that ``DataStore`` makes before it opens a store."""
     import inspect
 
@@ -158,7 +177,7 @@ def _check_forwarded_options(
     )
     if "min_features_per_cell" in datastore_options:
         validate_min_features_per_cell(datastore_options["min_features_per_cell"])
-    resolve_budget(
+    return resolve_budget(
         memory=datastore_options.get("mem_budget"),
         workers=datastore_options.get("nthreads"),
     )

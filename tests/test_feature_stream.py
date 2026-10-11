@@ -651,7 +651,7 @@ def test_feature_stream_plans_reject_malformed_requests() -> None:
 def test_handoff_waits_for_room_and_stops_waiting_once_closed() -> None:
     import asyncio
 
-    from cytearc.storage.feature_stream import _iter_bounded_handoff
+    from cytearc.storage.feature_stream import iter_bounded_handoff
 
     def run(deliver, _stop):  # type: ignore[no-untyped-def]
         async def produce() -> None:
@@ -661,7 +661,7 @@ def test_handoff_waits_for_room_and_stops_waiting_once_closed() -> None:
 
         asyncio.run(produce())
 
-    stream = _iter_bounded_handoff(in_flight=1, run=run)
+    stream = iter_bounded_handoff(in_flight=1, run=run)
     assert next(stream) == 1
     stream.close()
 
@@ -690,19 +690,19 @@ def test_cell_major_bands_visit_every_feature_group_of_a_band_first() -> None:
 
 
 def test_feature_group_ranges_merge_only_adjacent_chunks() -> None:
-    from cytearc.storage.feature_stream import _feature_group_ranges
+    from cytearc.storage.feature_stream import feature_group_ranges
 
     counts_t = _counts_t_with_plan(np.arange(40 * 80, dtype=np.uint16).reshape(40, 80))
     chunk = int(counts_t.chunks[0])
     n_feats = int(counts_t.shape[0])
-    assert _feature_group_ranges(counts_t, feat_idx=None, featureWidth=10_000) == [
+    assert feature_group_ranges(counts_t, feat_idx=None, featureWidth=10_000) == [
         (0, n_feats)
     ]
-    separate = _feature_group_ranges(counts_t, feat_idx=None, featureWidth=chunk)
+    separate = feature_group_ranges(counts_t, feat_idx=None, featureWidth=chunk)
     assert separate == [
         (start, min(start + chunk, n_feats)) for start in range(0, n_feats, chunk)
     ]
-    gapped = _feature_group_ranges(
+    gapped = feature_group_ranges(
         counts_t, feat_idx=np.array([0, 2 * chunk]), featureWidth=10_000
     )
     assert gapped == [(0, chunk), (2 * chunk, min(3 * chunk, n_feats))]
@@ -1035,7 +1035,7 @@ def test_hvg_stats_mask_matches_gathered_cells() -> None:
 def test_early_close_joins_the_producer_and_surfaces_its_failure() -> None:
     import asyncio
 
-    from cytearc.storage.feature_stream import _iter_bounded_handoff
+    from cytearc.storage.feature_stream import iter_bounded_handoff
 
     def run(deliver, _stop):
         async def produce():
@@ -1045,7 +1045,7 @@ def test_early_close_joins_the_producer_and_surfaces_its_failure() -> None:
 
         asyncio.run(produce())
 
-    stream = _iter_bounded_handoff(in_flight=1, run=run)
+    stream = iter_bounded_handoff(in_flight=1, run=run)
     assert next(stream) == 1
     with pytest.raises(ValueError, match="producer failed"):
         stream.close()

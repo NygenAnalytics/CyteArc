@@ -265,6 +265,7 @@ contains no artifacts or pipeline runs. Use it to hand off, or before `to_mtx` o
 | `nthreads` / `CYTEARC_WORKERS` | detected CPUs | shared host, remote stores |
 | `configure_output(progress=)` | `True` | `False` in logs and batch jobs |
 | `reduction.pca(local_cache=)` | `"auto"` | path string to keep scratch for a remote store; plan `cells x features x 4` bytes |
+| env `CYTEARC_SOURCE_CACHE_BYTES` | `2G` of `TMPDIR` per open composite with remote sources | lower it for a small or memory-backed `TMPDIR`; `0` reads the sources directly |
 | `to_anndata(matrix=)`, `to_h5ad(matrix=)` | `"raw"` | `"normed"`: with `run=`, the values its PCA read; `to_anndata` without `run=`, live `normed` |
 | `to_h5ad(embeddings_cols=)` | `["UMAP", "tSNE"]` live column prefixes | legacy stores only; rejected with `run=` |
 | `to_mtx(compress=)` | `False` | `True` for Cell Ranger 3 file names |

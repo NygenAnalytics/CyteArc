@@ -79,7 +79,11 @@ def is_contiguous(indices: np.ndarray) -> bool:
         return True
     if indices[0] < 0:
         return False
-    return bool(indices.size == 1 or np.all(np.diff(indices) == 1))
+    if indices.size == 1:
+        return True
+    # Steps are taken in int64: in a narrow integer type a descending step,
+    # such as 255 to 0 in uint8, would wrap around to a step of one.
+    return bool(np.all(np.diff(np.asarray(indices).astype(np.int64, copy=False)) == 1))
 
 
 def row_read_parts(

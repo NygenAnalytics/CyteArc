@@ -12,6 +12,7 @@ from zarr.storage import ObjectStore
 from cytearc.datastore.datastore import DataStore, mount_datastore
 from cytearc.storage.artifacts import ArtifactRef, artifact_group, artifact_path
 from cytearc.storage.budget import ResourceBudget
+from cytearc.storage.io_policy import StorageIoPolicy
 from cytearc.storage.sharding import write_counts_t
 from cytearc.storage.stores import (
     MATRIX_SOURCE_ATTR,
@@ -173,6 +174,153 @@ def test_mount_datastore_creates_and_reopens(default_sources, tmp_path, workspac
     assert reopened.workspace == workspace
     np.testing.assert_array_equal(reopened.RNA.rawData.compute(), values)
     assert MATRIX_SOURCE_ATTR in zarr.open_group(target, mode="r").attrs
+
+
+def test_mount_reuses_the_source_connection_before_final_validation(
+    default_sources, monkeypatch, tmp_path
+):
+    import cytearc.storage.stores as stores_module
+
+    source = str(tmp_path / "source.zarr")
+    target = str(tmp_path / "target.zarr")
+    values = _copy_source(default_sources, source)
+    opened_sources = []
+    make = stores_module.make_store
+
+    def record(location, **options):
+        store = make(location, **options)
+        if location == source:
+            opened_sources.append(store)
+        return store
+
+    monkeypatch.setattr(stores_module, "make_store", record)
+    mounted = mount_datastore(source, target, min_features_per_cell=1, nthreads=1)
+
+    assert len(opened_sources) == 2
+    np.testing.assert_array_equal(mounted.get_assay("RNA").rawData.compute(), values)
+    np.testing.assert_array_equal(
+        mounted.cells.fetch_all("ids"), [f"c{i}" for i in range(10)]
+    )
+
+
+def test_failed_parallel_mount_finishes_writes_before_discarding_target(monkeypatch):
+    from zarr.core.sync import sync
+
+    import cytearc.storage.stores as stores_module
+    from tests.store_probes import RecordingStore
+
+    source = RecordingStore(delay=0.001)
+    _write_source_store(source, workspace=None)
+    target = RecordingStore(delay=0.01, fail_on="cellData/names/c/0")
+    make = stores_module.make_store
+
+    def open_source(location, **options):
+        if location == "memory://source":
+            return source.with_read_only(True)
+        return make(location, **options)
+
+    monkeypatch.setattr(stores_module, "make_store", open_source)
+    with pytest.raises(RuntimeError, match="injected write failure"):
+        mount_datastore("memory://source", target, nthreads=4, mem_budget="64M")
+
+    assert target.max_in_flight_for("set") > 1
+    assert sync(target.is_empty(""))
+    assert all(count == 0 for count in target.probe._kind_in_flight.values())
+
+
+@pytest.mark.parametrize(
+    ("policy", "limit"),
+    [
+        (None, 4),
+        (StorageIoPolicy(), 4),
+        (StorageIoPolicy(readWorkers=1), 1),
+        (StorageIoPolicy(computeWorkers=1), 1),
+        (StorageIoPolicy(writeWorkers=1), 1),
+        (StorageIoPolicy(readWorkers=2, writeWorkers=3), 2),
+    ],
+)
+def test_mount_honors_storage_io_limits_without_changing_workers(
+    monkeypatch, policy, limit
+):
+    import cytearc.storage.stores as stores_module
+    from tests.store_probes import RecordingStore
+
+    class ColumnStore(RecordingStore):
+        async def get(self, key, prototype, byte_range=None):
+            if not (key.startswith("cellData/copy_") and "/c/" in key):
+                return await super().get(key, prototype, byte_range)
+            return await self._tracked(
+                "column_read",
+                key,
+                lambda: super(ColumnStore, self).get(key, prototype, byte_range),
+            )
+
+        async def set(self, key, value, byte_range=None):
+            if not (key.startswith("cellData/copy_") and "/c/" in key):
+                return await super().set(key, value, byte_range)
+            return await self._tracked(
+                "column_write",
+                key,
+                lambda: super(ColumnStore, self).set(key, value, byte_range),
+            )
+
+    source = ColumnStore(delay=0.005)
+    counts = _write_source_store(source, workspace=None)
+    root = zarr.open_group(source, mode="r+")
+    values = np.arange(len(counts), dtype=np.float64)
+    for index in range(4):
+        root["cellData"].create_array(
+            f"copy_{index}", data=values + index, chunks=(len(values),)
+        )
+    source.reset()
+    target = ColumnStore(delay=0.005)
+    make = stores_module.make_store
+
+    def open_source(location, **options):
+        if location == "memory://source":
+            return source.with_read_only(True)
+        return make(location, **options)
+
+    monkeypatch.setattr(stores_module, "make_store", open_source)
+    mounted = mount_datastore(
+        "memory://source",
+        target,
+        nthreads=4,
+        mem_budget="64M",
+        min_features_per_cell=1,
+        storageIo=policy,
+    )
+
+    reads = source.max_in_flight_for("column_read")
+    writes = target.max_in_flight_for("column_write")
+    assert 1 <= reads <= limit and 1 <= writes <= limit
+    assert mounted.nthreads == mounted.resources.workers == 4
+    assert mounted.resources.memoryBytes == 64 * 1024**2
+    assert mounted.storageIo is policy
+    for index in range(4):
+        np.testing.assert_array_equal(
+            mounted.cells.fetch_all(f"copy_{index}"), values + index
+        )
+    np.testing.assert_array_equal(mounted.RNA.rawData.compute(), counts)
+
+
+def test_mount_rejects_a_budget_below_one_metadata_chunk(default_sources, tmp_path):
+    source = str(tmp_path / "source.zarr")
+    target = tmp_path / "target.zarr"
+    _copy_source(default_sources, source)
+    # One destination chunk of 64-character IDs needs more than the budget.
+    barcodes = np.array([f"{index:064d}" for index in range(10)])
+    zarr.open_group(source, mode="r+")["cellData"].create_array(
+        "barcode", data=barcodes, chunks=(len(barcodes),)
+    )
+
+    with pytest.raises(
+        MemoryError, match="metadata column 'barcode' needs .* Increase mem_budget"
+    ):
+        mount_datastore(
+            source, str(target), min_features_per_cell=1, nthreads=4, mem_budget="32M"
+        )
+    assert not target.exists()
 
 
 def test_mount_datastore_multiple_assays(default_sources, tmp_path):

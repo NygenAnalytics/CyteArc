@@ -27,8 +27,10 @@ def test_embedding_helper_labels_duplicate_panels_and_explicit_facets(monkeypatc
     store = SimpleNamespace(cells=SimpleNamespace(columns=("group",)))
     monkeypatch.setattr(
         embedding_module,
-        "resolve_feature",
-        lambda *_args, **_kwargs: SimpleNamespace(label="resolved feature"),
+        "resolve_feature_batch",
+        lambda _store, items, **_kwargs: [
+            SimpleNamespace(label="resolved feature") for _ in items
+        ],
     )
 
     assert _color_labels(store, [None, "group", "gene"], from_assay=None) == [

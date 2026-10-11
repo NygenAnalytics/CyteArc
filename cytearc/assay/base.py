@@ -12,6 +12,7 @@ from ..metadata import MetaData
 from ..storage.artifacts import provenance_hash
 from ..storage.budget import ResourceBudget, resolve_budget
 from ..storage.types import as_zarr_array, as_zarr_group, read_fresh_group
+from ..storage.virtual_arrays import read_selection
 from ..utils.arguments import integer_argument
 from ..utils.arrays import array_digest, regex_match_mask
 from ..utils.compute import controlled_compute
@@ -25,6 +26,7 @@ from .normalization import (
     norm_lib_size,
     norm_lib_size_log,
     norm_tf_idf,
+    normalizes_per_cell,
     uses_library_size_normalization,
 )
 
@@ -143,6 +145,9 @@ class Assay:
             matrix_group,
             require_transpose=self.requiresCountsT or "countsT" in matrix_group,
         )
+        if self.rawDataT is not None:
+            # Validated against counts, so reads may take rows from either.
+            self.rawData = self.rawData.with_transposed(self.rawDataT)
         self.attrs = self.z.attrs
         self.normMethod: NormMethod = norm_dummy
         self.sf: int | None = None
@@ -195,6 +200,7 @@ class Assay:
         totals = self.cells.fetch_all(self._totals_name)[cell_idx]
         return np.asarray(totals, dtype=np.float64)
 
+    @normalizes_per_cell(norm_dummy)
     def normed(
         self,
         cell_idx: np.ndarray | None = None,
@@ -393,7 +399,7 @@ class Assay:
         def add(bounds: tuple[int, int]) -> None:
             start, stop = bounds
             values = np.asarray(
-                source.get_orthogonal_selection((wanted, slice(start, stop))),
+                read_selection(source, wanted, slice(start, stop)),
                 dtype=np.float64,
             )
             for name, position in positions.items():

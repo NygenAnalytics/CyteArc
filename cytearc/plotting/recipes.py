@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import Any
 
+from ..storage.validation_scope import validation_scoped
 from ..utils.logging import logger
 from ._contracts import (
     CategoricalScale,
@@ -707,6 +708,7 @@ def _run_step(
     return PlotOutput(name=step.name, result=plot_result, path=output_path)
 
 
+@validation_scoped
 def run_recipe(
     store: Any,
     recipe: PlotRecipe | str | Path,

@@ -37,6 +37,7 @@ from ..storage.sharding import (
     write_dense_in_shard_rows,
 )
 from ..storage.stores import load_zarr
+from ..storage.virtual_arrays import read_selection
 from ..utils.arrays import has_duplicates
 from ..utils.logging import logger
 
@@ -167,9 +168,7 @@ def subset_assay_zarr(
     summary = CountSummary(og)
     write_dense_in_shard_rows(
         og,
-        lambda start, end: np.asarray(
-            ig.get_orthogonal_selection((cells_idx[start:end], feat_idx))
-        ),
+        lambda start, end: read_selection(ig, cells_idx[start:end], feat_idx),
         msg="Subsetting assay",
         resources=resources,
         io=io,

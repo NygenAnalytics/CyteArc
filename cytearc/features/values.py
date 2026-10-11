@@ -14,7 +14,6 @@ from ..metadata.selection import (
     NormalizationSpec,
 )
 from ..metadata.table import CaseInsensitiveIndex
-from ..utils.compute import controlled_compute
 
 __all__ = [
     "ResolvedFeature",
@@ -173,44 +172,16 @@ def fetch_normalized_feature_matrix(
     return output
 
 
-def _feature_values(
-    assay: Any,
-    physical_indices: np.ndarray,
-    cell_idx: np.ndarray,
-    normalization: NormalizationSpec,
-) -> Any:
-    """Return the lazy raw or normalized values of features over cells."""
-    if normalization.source == "raw":
-        return assay.rawData[:, physical_indices][cell_idx, :]
-    # ``normed`` applies log1p under the normalizer's rule, so values that are
-    # already logarithms, such as CLR, are never logged twice.
-    return assay.normed(
-        cell_idx=cell_idx,
-        feat_idx=physical_indices,
-        log_transform=normalization.transform == "log1p",
-    )
+def normalization_is_cell_local(assay: Any, normalization: NormalizationSpec) -> bool:
+    """Return whether each cell's values depend on that cell's counts alone.
 
+    Plots read only the cells they show when this holds. The normalizer policy
+    is ``cytearc.assay.normalization.normalization_is_cell_local``; it is
+    imported when called, so importing this module loads no assay code.
+    """
+    from ..assay.normalization import normalization_is_cell_local as is_cell_local
 
-def _block_rows(values: Any) -> int:
-    """Return the most rows that one streamed block of ``values`` holds."""
-    chunks = getattr(values, "chunksize", None)
-    if chunks is not None:
-        return max(1, int(chunks[0]))
-    return max(1, len(values))
-
-
-def _value_blocks(values: Any, store: Any, resident_bytes: int) -> Iterable[Any]:
-    """Stream ``values`` in row blocks, or yield an in-memory matrix whole."""
-    if isinstance(values, np.ndarray):
-        return (values,)
-    blocks: Iterable[Any] = values._stream_blocks(
-        nthreads=store.nthreads,
-        msg=None,
-        prefetch=None,
-        row_mask=None,
-        resident_bytes=resident_bytes,
-    )
-    return blocks
+    return is_cell_local(assay, normalization)
 
 
 def spread_measured_rows(
@@ -262,6 +233,8 @@ def iter_normalized_feature_blocks(
     unmeasured: dict[str, np.ndarray] | None = None,
 ) -> Iterator[tuple[list[int], int, np.ndarray]]:
     """Yield feature slots, selected-row offsets, and normalized value blocks."""
+    from ..assay.normalization import feature_value_blocks, streamed_block_rows
+
     normalization = normalization or NormalizationSpec()
     assay_slots: dict[str, list[int]] = {}
     for slot, feat in enumerate(resolved):
@@ -300,13 +273,24 @@ def iter_normalized_feature_blocks(
                     output[:, column] = selected.mean(axis=1)
             return output
 
+        # ``reduce_block`` holds two float64 copies of a block and its output.
+        float_bytes = np.dtype(np.float64).itemsize
+        scratch_bytes_per_row = (2 * len(physical_indices) + len(slots)) * float_bytes
         # Membership comes from the assay's own cell table, which a run's
         # frozen cell view does not replace.
         measured = measured_rows(assay.cells, assay_name, cell_idx)
         if measured is None:
-            values = _feature_values(assay, physical_indices, cell_idx, normalization)
+            _, blocks = feature_value_blocks(
+                assay,
+                physical_indices,
+                cell_idx,
+                normalization,
+                nthreads=store.nthreads,
+                resident_bytes=resident_bytes,
+                scratch_bytes_per_row=scratch_bytes_per_row,
+            )
             start = 0
-            for block in _value_blocks(values, store, resident_bytes):
+            for block in blocks:
                 output = reduce_block(block)
                 yield slots, start, output
                 start += len(output)
@@ -316,18 +300,22 @@ def iter_normalized_feature_blocks(
         read_idx = np.asarray(cell_idx)[measured]
         if len(read_idx) == 0:
             # No requested cell was measured, so nothing is normalized.
-            blocks: Iterable[np.ndarray] = ()
-            piece_rows = _block_rows(assay.rawData)
+            blocks = ()
+            piece_rows = streamed_block_rows(assay.rawData)
         else:
-            values = _feature_values(assay, physical_indices, read_idx, normalization)
-            piece_rows = _block_rows(values)
             # The membership mask and the positions of the measured cells are
             # held beside the stream, which charges the rows that it reads.
             held = measured.nbytes + read_idx.nbytes
-            blocks = (
-                reduce_block(block)
-                for block in _value_blocks(values, store, resident_bytes + held)
+            piece_rows, raw_blocks = feature_value_blocks(
+                assay,
+                physical_indices,
+                read_idx,
+                normalization,
+                nthreads=store.nthreads,
+                resident_bytes=resident_bytes + held,
+                scratch_bytes_per_row=scratch_bytes_per_row,
             )
+            blocks = (reduce_block(block) for block in raw_blocks)
         for start, output in spread_measured_rows(
             blocks, measured, len(slots), piece_rows
         ):
@@ -345,16 +333,36 @@ def measured_feature_means(
 
     Cells that the assay did not measure are NaN.
     """
+    from ..assay.normalization import feature_value_blocks
+
     cell_idx = np.asarray(cell_idx, dtype=np.int64)
     measured = measured_rows(assay.cells, assay.name, cell_idx)
     read_idx = cell_idx if measured is None else cell_idx[measured]
     if len(read_idx) == 0:
         return np.full(len(cell_idx), np.nan)
-    values = controlled_compute(
-        assay.normed(read_idx, feature_indices).mean(axis=1), nthreads
-    ).astype(np.float64)
-    if measured is None:
-        return values
     means = np.full(len(cell_idx), np.nan)
-    means[measured] = values
+    positions = None
+    held = means.nbytes
+    if measured is not None:
+        positions = np.flatnonzero(measured)
+        held += positions.nbytes + measured.nbytes + read_idx.nbytes
+    _, blocks = feature_value_blocks(
+        assay,
+        np.asarray(feature_indices),
+        read_idx,
+        NormalizationSpec(),
+        nthreads=nthreads,
+        resident_bytes=held,
+        # One float64 mean per row.
+        scratch_bytes_per_row=np.dtype(np.float64).itemsize,
+    )
+    start = 0
+    for block in blocks:
+        stop = start + len(block)
+        values = block.mean(axis=1, dtype=np.promote_types(block.dtype, np.float64))
+        if positions is None:
+            means[start:stop] = values
+        else:
+            means[positions[start:stop]] = values
+        start = stop
     return means

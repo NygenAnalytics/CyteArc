@@ -445,3 +445,137 @@ def test_a_scalar_variance_holds_no_array_per_column():
     finally:
         tracemalloc.stop()
     assert peak < 4 * 2**20
+
+
+class TestTransposedReads:
+    """Row blocks read from a stored transpose match those read from rows."""
+
+    @pytest.fixture
+    def counts_pair(self):
+        from zarr.storage import MemoryStore
+
+        from cytearc.storage.count_matrix import CountMatrixPolicy
+        from cytearc.storage.schema import create_zarr_count_assay
+        from cytearc.writers.counts_t import finalize_writer_counts_t
+        from tests.storage_helpers import finalize_test_counts
+
+        dense = np.random.default_rng(7).integers(0, 30, (173, 401), dtype=np.uint16)
+        root = zarr.open_group(store=MemoryStore(), mode="w")
+        features = np.array([f"g{index}" for index in range(dense.shape[1])])
+        counts = create_zarr_count_assay(
+            root,
+            "RNA",
+            None,
+            dense.shape[0],
+            features,
+            features,
+            dense.dtype,
+            policy=CountMatrixPolicy(unitBytes=2_000, chunkBytes=200),
+        )
+        counts[:] = dense
+        finalize_test_counts(counts)
+        finalize_writer_counts_t(root, "RNA", None)
+        return root["RNA/counts"], root["RNA/countsT"], dense
+
+    @staticmethod
+    def stream(values, **options):
+        from cytearc.storage.execution import execution_report_scope
+
+        with execution_report_scope() as reports:
+            blocks = list(
+                values._stream_blocks(nthreads=2, msg=None, prefetch=None, **options)
+            )
+        return blocks, {report.unitKind for report in reports}
+
+    @pytest.mark.parametrize("rows", [None, np.arange(3, 170, 2)])
+    def test_operations_see_the_same_blocks(self, counts_pair, rows):
+        from cytearc.storage.budget import ResourceBudget
+
+        counts, counts_t, dense = counts_pair
+        matrix = ChunkedArray(
+            counts, nthreads=2, resources=ResourceBudget(2**30, 2)
+        ).with_transposed(counts_t)
+        selected = matrix[:, [21, 1, 7]]
+        if rows is not None:
+            selected = selected[rows, :]
+        totals = np.arange(1, len(selected) + 1, dtype=np.float64)
+        values = np.log1p(selected * 2.5 / totals.reshape(-1, 1), dtype=np.float64)
+        expected, row_kinds = self.stream(values, row_mask=None)
+        actual, kinds = self.stream(values, row_mask=None, allow_transposed=True)
+        assert row_kinds == {"countsRowBlock"}
+        assert kinds == {"countsTCellBand"}
+        assert [len(block) for block in actual] == [len(block) for block in expected]
+        for block, reference in zip(actual, expected, strict=True):
+            np.testing.assert_array_equal(block, reference)
+        reference_rows = dense if rows is None else dense[rows]
+        np.testing.assert_array_equal(
+            np.concatenate(actual),
+            np.log1p(reference_rows[:, [21, 1, 7]] * 2.5 / totals.reshape(-1, 1)),
+        )
+
+    def test_rows_are_read_where_the_transpose_cannot_serve(self, counts_pair):
+        from cytearc.storage.budget import ResourceBudget
+
+        counts, counts_t, dense = counts_pair
+        matrix = ChunkedArray(
+            counts, nthreads=2, resources=ResourceBudget(2**30, 2)
+        ).with_transposed(counts_t)
+        reordered = matrix[:, [21, 1, 7]][[12, 2, 40], :]
+        blocks, kinds = self.stream(reordered, row_mask=None, allow_transposed=True)
+        assert kinds == {"countsRowBlock"}
+        np.testing.assert_array_equal(
+            np.concatenate(blocks), dense[[12, 2, 40]][:, [21, 1, 7]]
+        )
+        selected = matrix[:, [21, 1, 7]]
+        mask = np.zeros(len(selected), dtype=bool)
+        mask[::3] = True
+        blocks, kinds = self.stream(selected, row_mask=mask, allow_transposed=True)
+        assert kinds == {"countsRowBlock"}
+        np.testing.assert_array_equal(
+            np.concatenate(blocks), dense[mask][:, [21, 1, 7]]
+        )
+        # Streams that do not allow the transpose read rows.
+        assert self.stream(selected, row_mask=None)[1] == {"countsRowBlock"}
+        np.testing.assert_array_equal(selected.compute(), dense[:, [21, 1, 7]])
+
+    def test_derived_matrices_keep_the_transpose(self, counts_pair):
+        counts, counts_t, _ = counts_pair
+        matrix = ChunkedArray(counts).with_transposed(counts_t)
+        derived = (matrix[:, [1, 2]] * 2)[[0, 4], :]._with_block_size(1)
+        assert derived._transposed is counts_t
+
+    @pytest.mark.parametrize("missing", ["counts", "counts_t"])
+    def test_unavailable_geometry_keeps_row_reads(
+        self, counts_pair, monkeypatch, missing
+    ):
+        from cytearc.storage import feature_major_rows
+        from cytearc.storage.budget import ResourceBudget
+
+        counts, counts_t, dense = counts_pair
+        matrix = ChunkedArray(
+            counts, resources=ResourceBudget(2**30, 2)
+        ).with_transposed(counts_t)
+        selected = matrix[:, [21, 1, 7]] * 2.5
+        unavailable = counts if missing == "counts" else counts_t
+        geometry = feature_major_rows.array_geometry
+
+        def read_geometry(array):
+            return None if array is unavailable else geometry(array)
+
+        monkeypatch.setattr(feature_major_rows, "array_geometry", read_geometry)
+        blocks, kinds = self.stream(selected, row_mask=None, allow_transposed=True)
+        assert kinds == {"countsRowBlock"}
+        np.testing.assert_array_equal(
+            np.concatenate(blocks), dense[:, [21, 1, 7]] * 2.5
+        )
+
+    def test_the_transpose_must_match_the_backing(self, counts_pair):
+        counts, counts_t, dense = counts_pair
+        with pytest.raises(ValueError, match="swap the shape"):
+            ChunkedArray(counts).with_transposed(counts)
+        root = zarr.open_group(store=zarr.storage.MemoryStore(), mode="w")
+        wider = root.create_array("t", shape=counts_t.shape, dtype=np.uint32)
+        with pytest.raises(ValueError, match="share its dtype"):
+            ChunkedArray(counts).with_transposed(wider)
+        with pytest.raises(ValueError, match="Zarr backing"):
+            ChunkedArray.from_numpy(dense).with_transposed(counts_t)

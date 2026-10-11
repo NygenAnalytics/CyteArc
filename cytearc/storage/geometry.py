@@ -107,8 +107,9 @@ def array_geometry(array: Any) -> ArrayGeometry | None:
                 f"Array shards {shards} do not match shape {resolved_shape}"
             )
 
-    read_scratch = getattr(getattr(array, "store", None), "read_scratch_bytes", None)
-    scratch = operator.index(read_scratch(array.path)) if callable(read_scratch) else 0
+    from .virtual_arrays import chunk_read_scratch_bytes
+
+    scratch = chunk_read_scratch_bytes(array)
     if scratch < 0:
         raise ValueError(f"Array read scratch cannot be negative, got {scratch}")
 

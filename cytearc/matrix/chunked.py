@@ -17,7 +17,7 @@ from ..storage.budget import (
 )
 from ..storage.io_policy import StorageIoPolicy
 from ..storage.geometry import ArrayGeometry, array_geometry
-from ..storage.partition import is_contiguous
+from ..storage.virtual_arrays import read_selection, virtual_array_reader
 from ._indexing import local_positions
 from ._operations import (
     _Op,
@@ -62,7 +62,13 @@ def _reduction_axis(axis: int | None) -> Axis:
 
 
 class ChunkedArray:
-    """A lazy, row-chunked 2D matrix backed by Zarr or NumPy."""
+    """A lazy, row-chunked 2D matrix backed by Zarr or NumPy.
+
+    A matrix over Zarr may carry its backing's stored transpose, such as
+    ``countsT`` beside ``counts``; see ``with_transposed``. Streams that allow
+    it read selected rows from that copy when it touches fewer chunk bytes,
+    and transform them exactly as rows of the backing.
+    """
 
     __array_priority__ = 1000.0
 
@@ -83,6 +89,7 @@ class ChunkedArray:
         self._ops: list[_Op] = list(ops) if ops else []
         self._resources = resources
         self._io: StorageIoPolicy | None = None
+        self._transposed: zarr.Array | None = None
         self._nthreads = (
             max(1, min(int(nthreads), resources.workers))
             if resources is not None
@@ -166,60 +173,26 @@ class ChunkedArray:
         return contiguous_ranges(self._n_rows, self._block_size)
 
     def _read(self, start: int, end: int) -> np.ndarray:
-        if self._rows is None:
-            row_selection: slice | np.ndarray = slice(start, end)
-            rows_contiguous = True
-        else:
-            row_selection = self._rows[start:end]
-            rows_contiguous = is_contiguous(row_selection)
+        row_selection: slice | np.ndarray = (
+            slice(start, end) if self._rows is None else self._rows[start:end]
+        )
         if self._is_numpy:
             numpy_backing = cast(np.ndarray, self._backing)
             if self._cols is None:
                 return np.asarray(numpy_backing[row_selection])
             return np.asarray(numpy_backing[row_selection][:, self._cols])
 
-        zarr_backing = cast(zarr.Array, self._backing)
-        if self._cols is None:
-            if isinstance(row_selection, slice):
-                return np.asarray(zarr_backing[row_selection, :])
-            if rows_contiguous:
-                return np.asarray(
-                    zarr_backing[
-                        int(row_selection[0]) : int(row_selection[-1]) + 1,
-                        :,
-                    ]
-                )
-            return np.asarray(
-                zarr_backing.get_orthogonal_selection(
-                    (row_selection, slice(None)),
-                )
-            )
-        if isinstance(row_selection, slice):
-            return np.asarray(
-                zarr_backing.get_orthogonal_selection(
-                    (row_selection, self._cols),
-                )
-            )
-        if rows_contiguous:
-            return np.asarray(
-                zarr_backing.get_orthogonal_selection(
-                    (
-                        slice(
-                            int(row_selection[0]),
-                            int(row_selection[-1]) + 1,
-                        ),
-                        self._cols,
-                    )
-                )
-            )
-        return np.asarray(
-            zarr_backing.get_orthogonal_selection(
-                (row_selection, self._cols),
-            )
+        return read_selection(
+            cast(zarr.Array, self._backing),
+            row_selection,
+            slice(None) if self._cols is None else self._cols,
         )
 
     def _materialize_range(self, start: int, end: int) -> np.ndarray:
-        array = self._read(start, end)
+        return self._apply_ops(self._read(start, end), start, end)
+
+    def _apply_ops(self, array: np.ndarray, start: int, end: int) -> np.ndarray:
+        """Transform the backing values of rows ``start`` to ``end``."""
         for operation in self._ops:
             array = operation.apply(array, start, end)
         return array
@@ -234,6 +207,12 @@ class ChunkedArray:
         read touches, in each shard, the inner chunks of every row chunk and
         of the selected columns.
         """
+        if not self._is_numpy:
+            reader = virtual_array_reader(cast(zarr.Array, self._backing))
+            if reader is not None:
+                return input_bytes + reader.read_scratch_bytes(
+                    min(self._block_size, self._n_rows), self._n_cols
+                )
         geometry = self._geometry()
         if geometry is None:
             return input_bytes
@@ -259,7 +238,16 @@ class ChunkedArray:
         rows = min(self._block_size, max(1, self._n_rows))
         elements = rows * max(1, self._n_cols)
         input_bytes = elements * max(1, int(self._backing.dtype.itemsize))
-        held = self._read_bytes(input_bytes) - self._max_decode_bytes()
+        return self._op_peak_bytes(
+            rows, self._read_bytes(input_bytes) - self._max_decode_bytes()
+        )
+
+    def _op_peak_bytes(self, rows: int, held: int) -> int:
+        """Most bytes a block of ``rows`` holds while its operations run.
+
+        ``held`` is what the block holds before the first operation.
+        """
+        elements = rows * max(1, self._n_cols)
         peak = held
         for dtype in self._op_dtypes():
             output_bytes = elements * max(1, int(dtype.itemsize))
@@ -389,7 +377,13 @@ class ChunkedArray:
         resident_bytes: int = 0,
         memory_bytes: int | None = None,
         scratch_bytes_per_row: int = 0,
+        allow_transposed: bool = False,
     ) -> Iterator[np.ndarray]:
+        """Yield the row blocks, read ahead within the memory budget.
+
+        With ``allow_transposed`` and no ``row_mask``, the blocks may be read
+        from the backing's stored transpose; see ``_transposed_row_blocks``.
+        """
         from ..storage.execution import WorkShape, plan_operation
         from ..storage.parallel import stream_shards, in_shard_context
         from ..storage.partition import contiguous_ranges
@@ -417,6 +411,20 @@ class ChunkedArray:
                 unit_bytes = block_rows * bytes_per_row
             else:
                 unit_bytes += block_rows * scratch_per_row
+            if allow_transposed and row_mask is None:
+                transposed = self._transposed_row_blocks(
+                    block_rows,
+                    ResourceBudget(
+                        resources.memoryBytes, min(threads, resources.workers)
+                    ),
+                    held_bytes=resident
+                    + self._op_peak_bytes(block_rows, 0)
+                    + block_rows * scratch_per_row,
+                    msg=msg,
+                )
+                if transposed is not None:
+                    yield from transposed
+                    return
         ranges = contiguous_ranges(self._n_rows, block_rows)
         # Callers pass a boolean vector over the rows as ``row_mask``.
         mask = None if row_mask is None else np.asarray(row_mask)
@@ -491,6 +499,74 @@ class ChunkedArray:
                 )
             )
 
+    def _transposed_row_blocks(
+        self,
+        block_rows: int,
+        resources: ResourceBudget,
+        *,
+        held_bytes: int,
+        msg: str | None,
+    ) -> Iterator[np.ndarray] | None:
+        """Return the row blocks read from the stored transpose, or None.
+
+        The transpose is read when the matrix selects strictly increasing rows
+        and distinct columns of its backing, and its bands touch fewer chunk
+        bytes than the row blocks and fit the budget beside ``held_bytes``.
+        Its blocks hold the same rows as the row blocks, so the operations
+        give the same values.
+        """
+        if (
+            self._transposed is None
+            or self._cols is None
+            or self._n_rows == 0
+            or self._n_cols == 0
+        ):
+            return None
+        from ..storage.feature_major_rows import (
+            feature_major_row_scratch,
+            iter_feature_major_rows,
+        )
+
+        backing = cast(zarr.Array, self._backing)
+        n_rows, n_cols = backing.shape
+        rows = np.arange(n_rows) if self._rows is None else self._rows
+        cols = self._cols
+        if (
+            rows.dtype.kind not in "iu"
+            or cols.dtype.kind not in "iu"
+            or rows[0] < 0
+            or rows[-1] >= n_rows
+            or bool(np.any(rows[1:] <= rows[:-1]))
+            or cols.min() < 0
+            or cols.max() >= n_cols
+            or np.unique(cols).size != cols.size
+        ):
+            return None
+        scratch = feature_major_row_scratch(
+            backing,
+            self._transposed,
+            rows,
+            cols,
+            block_rows=block_rows,
+            held_bytes=held_bytes + (rows.nbytes if self._rows is None else 0),
+            memory_bytes=resources.memoryBytes,
+        )
+        if scratch is None:
+            return None
+        return (
+            self._apply_ops(values, start, start + len(values))
+            for start, values in iter_feature_major_rows(
+                self._transposed,
+                rows,
+                cols,
+                block_rows=block_rows,
+                resources=resources,
+                io=self._io,
+                scratch_bytes=scratch,
+                progress=msg,
+            )
+        )
+
     def compute(
         self,
         nthreads: int | None = None,
@@ -551,12 +627,17 @@ class ChunkedArray:
             )
         return np.asarray(self.compute(), dtype=dtype)
 
-    def _with_io(self, array: "ChunkedArray") -> "ChunkedArray":
+    def _derived(self, array: "ChunkedArray") -> "ChunkedArray":
+        """Give ``array``, derived from this matrix, its storage context.
+
+        That is the I/O policy and the stored transpose of the backing.
+        """
         array._io = self._io
+        array._transposed = self._transposed
         return array
 
     def _with_op(self, operation: _Op) -> "ChunkedArray":
-        return self._with_io(
+        return self._derived(
             ChunkedArray(
                 self._backing,
                 rows=self._rows,
@@ -570,7 +651,7 @@ class ChunkedArray:
         )
 
     def _with_block_size(self, block_size: int) -> "ChunkedArray":
-        return self._with_io(
+        return self._derived(
             ChunkedArray(
                 self._backing,
                 rows=self._rows,
@@ -582,6 +663,34 @@ class ChunkedArray:
                 is_numpy=self._is_numpy,
             )
         )
+
+    def with_transposed(self, transposed: zarr.Array) -> "ChunkedArray":
+        """Return this matrix with ``transposed``, its backing's stored transpose.
+
+        Streams that allow it then read selected rows from ``transposed``
+        when that touches fewer chunk bytes. Every matrix derived from the
+        result carries it too.
+
+        Args:
+            transposed: The values of the Zarr backing with rows and columns
+                swapped, in the same dtype.
+
+        Raises:
+            ValueError: If the backing is NumPy, or ``transposed`` does not
+                swap its shape or does not share its dtype.
+        """
+        if (
+            self._is_numpy
+            or tuple(transposed.shape) != tuple(self._backing.shape[::-1])
+            or transposed.dtype != self._backing.dtype
+        ):
+            raise ValueError(
+                "A transposed copy must swap the shape of a Zarr backing and "
+                "share its dtype"
+            )
+        array = self._with_block_size(self._block_size)
+        array._transposed = transposed
+        return array
 
     def _unary(self, func: Callable[..., NDArray[Any]]) -> "ChunkedArray":
         return self._with_op(_unary_op(func))
@@ -699,7 +808,7 @@ class ChunkedArray:
             n_rows = int(row_positions.size)
 
         block_size = n_rows if self._is_numpy and n_rows > 0 else self._block_size
-        return self._with_io(
+        return self._derived(
             ChunkedArray(
                 self._backing,
                 rows=rows,

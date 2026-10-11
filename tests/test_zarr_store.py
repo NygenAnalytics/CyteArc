@@ -56,6 +56,17 @@ from cytearc.storage.types import array_metadata_shards
 from tests.store_probes import RecordingStore
 
 
+class _ColumnReadStore(RecordingStore):
+    async def get(self, key, prototype, byte_range=None):
+        if "/c/" not in key:
+            return await super().get(key, prototype, byte_range)
+        return await self._tracked(
+            "column_chunk",
+            key,
+            lambda: super(_ColumnReadStore, self).get(key, prototype, byte_range),
+        )
+
+
 def _planned_counts(group: zarr.Group, values: np.ndarray, name: str = "counts"):
     plan = plan_count_matrix_pair(values.shape[0], values.shape[1], values.dtype)
     counts = group.create_array(
@@ -504,7 +515,10 @@ def test_copy_metadata_array_drops_presentation_attributes():
 
 @pytest.mark.parametrize("dtype", ["f8", "U8", "S8", "T"])
 @pytest.mark.parametrize("selected_rows", [False, True])
-def test_metadata_copy_overlaps_full_fixed_width_chunk_reads(dtype, selected_rows):
+@pytest.mark.parametrize("resources", [None, ResourceBudget(64 * 1024**2, 4)])
+def test_metadata_copy_overlaps_full_fixed_width_chunk_reads(
+    dtype, selected_rows, resources
+):
     store = RecordingStore(delay=0.01)
     source = zarr.open_group(store=store, mode="w")
     values = (
@@ -520,7 +534,7 @@ def test_metadata_copy_overlaps_full_fixed_width_chunk_reads(dtype, selected_row
 
     # A real store delays reads to expose overlap without testing elapsed time.
     with zarr.config.set({"async.concurrency": 4}):
-        copy_zarr_group_tree(source, target, row_indices=rows)
+        copy_zarr_group_tree(source, target, row_indices=rows, resources=resources)
 
     if not selected_rows and dtype in {"f8", "U8"}:
         assert store.max_in_flight_for("get") > 1
@@ -531,6 +545,106 @@ def test_metadata_copy_overlaps_full_fixed_width_chunk_reads(dtype, selected_row
         target["values"][:], expected if rows is None else expected[rows]
     )
     assert target["values"].attrs["display"] == {"label": "Values"}
+
+
+@pytest.mark.parametrize(
+    ("resources", "expected_overlap"),
+    [
+        (None, 1),
+        (ResourceBudget(64 * 1024**2, 4), 4),
+        (ResourceBudget(2 * 1024**2, 4), 1),
+        (ResourceBudget(64 * 1024**2, 1), 1),
+    ],
+)
+def test_metadata_copy_overlaps_columns_within_budget(
+    resources, expected_overlap, monkeypatch
+):
+    import asyncio
+
+    store = _ColumnReadStore()
+    source = zarr.open_group(store=store, mode="w")
+    values = np.arange(12, dtype=np.float64)
+    missing = np.arange(12) % 3 == 0
+    for name in ("a", "b", "c", "d"):
+        source.create_array(name, data=values, chunks=(12,))
+    source.create_array("__cytearc_missing__a", data=missing, chunks=(12,))
+    source["a"].attrs.update(
+        {"missing_mask": "__cytearc_missing__a", "display": {"label": "A"}}
+    )
+    store.reset()
+    target = zarr.open_group(store=MemoryStore(), mode="w")
+    original_get = MemoryStore.get
+    reached_overlap = asyncio.Event()
+    reads_started = 0
+
+    async def gated_get(self, key, prototype, byte_range=None):
+        nonlocal reads_started
+        if self is store and "/c/" in key:
+            reads_started += 1
+            if reads_started == expected_overlap:
+                reached_overlap.set()
+            await asyncio.wait_for(reached_overlap.wait(), timeout=10)
+        return await original_get(self, key, prototype, byte_range)
+
+    monkeypatch.setattr(MemoryStore, "get", gated_get)
+
+    copy_zarr_group_tree(source, target, resources=resources)
+
+    assert store.max_in_flight_for("column_chunk") == expected_overlap
+    for name in ("a", "b", "c", "d"):
+        np.testing.assert_array_equal(target[name][:], values)
+    np.testing.assert_array_equal(target["__cytearc_missing__a"][:], missing)
+    assert target["a"].attrs["missing_mask"] == "__cytearc_missing__a"
+    assert target["a"].attrs["display"] == {"label": "A"}
+
+
+def test_metadata_copy_shrinks_read_bands_to_fit_budget():
+    store = _ColumnReadStore(delay=0.001)
+    source = zarr.open_group(store=store, mode="w")
+    values = np.arange(100_000, dtype=np.float64)
+    source.create_array("values", data=values, chunks=(10_000,))
+    store.reset()
+    target = zarr.open_group(store=MemoryStore(), mode="w")
+
+    copy_zarr_group_tree(source, target, resources=ResourceBudget(2 * 1024**2, 4))
+
+    assert store.max_in_flight_for("column_chunk") == 1
+    assert len([op for op in store.ops if op[0] == "column_chunk"]) == 10
+    np.testing.assert_array_equal(target["values"][:], values)
+
+
+def test_metadata_copy_rejects_infeasible_budget_before_reading_columns():
+    store = _ColumnReadStore()
+    source = zarr.open_group(store=store, mode="w")
+    source.create_array("values", data=np.arange(12, dtype=np.float64), chunks=(12,))
+    store.reset()
+    target = zarr.open_group(store=MemoryStore(), mode="w")
+
+    with pytest.raises(
+        MemoryError, match="one chunk of metadata column 'values' needs"
+    ):
+        copy_zarr_group_tree(source, target, resources=ResourceBudget(1024**2, 4))
+
+    assert not [op for op in store.ops if op[0] == "column_chunk"]
+    assert list(target.members()) == []
+
+
+@pytest.mark.parametrize("dtype", ["f8", "U3"])
+def test_empty_metadata_copy_needs_no_payload_memory(dtype):
+    store = RecordingStore()
+    source = zarr.group(store=store)
+    values = np.empty(0, dtype=dtype)
+    source.create_array("values", data=values, chunks=(4,))
+    source["values"].attrs["description"] = "Empty values"
+    target = zarr.group(store=MemoryStore())
+    store.reset()
+
+    copy_zarr_group_tree(source, target, resources=ResourceBudget(1, 4))
+
+    np.testing.assert_array_equal(target["values"][:], values)
+    assert target["values"].dtype == values.dtype
+    assert target["values"].attrs["description"] == "Empty values"
+    assert not [op for op in store.ops if op[0] == "get" and "/c/" in op[1]]
 
 
 @pytest.mark.parametrize("metadata_path", ["cellData", "RNA/featureData"])

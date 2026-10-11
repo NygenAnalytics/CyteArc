@@ -44,6 +44,20 @@ They do not create a stored composite transpose. Published mappings and count me
 immutable; analysis artifacts remain writable. A failed creation leaves `complete=False`, and
 CyteArc refuses to reopen it.
 
+CyteArc reads the virtual counts through the composite store's `VirtualArrayReader` rather than
+through computed chunk bytes. A read gathers only the selected values and, for each source,
+reads whichever of its `counts` and `countsT` touches fewer chunk bytes. Feature streams batch
+adjacent feature groups into one read when the budget allows, so a source chunk is decoded once
+per batch. Zarr reads of the computed chunks remain correct for code that reads the arrays
+directly.
+
+Remote sources read through a temporary cache in the system temporary directory (`TMPDIR` on
+Linux and macOS). It keeps the encoded shards that a read covers densely and the shard-index
+suffixes of sharded reads, up to `CYTEARC_SOURCE_CACHE_BYTES` per open composite: bytes or a size
+such as `512M`, 2 GiB when unset, and `0` to read the sources directly. The directory is created
+by the first fetch and removed when the store closes or the process exits. A fault of the local
+directory turns the cache off, and reads continue from the sources.
+
 The manifest uses a strict, unversioned shape. Missing or unknown fields fail closed; there is
 no automatic migration. Changing this persisted shape requires an explicit compatibility
 decision before changing the reader or writer.

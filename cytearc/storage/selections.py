@@ -534,6 +534,16 @@ def fingerprint_selected_stored_strings(
     selection: zarr.Array,
 ) -> tuple[str, int]:
     """Fingerprint selected row IDs without materializing the selection."""
+    return validated_once(
+        ("selected_strings", *store_key(ids), *store_key(selection)),
+        lambda: _fingerprint_selected_stored_strings(ids, selection),
+    )
+
+
+def _fingerprint_selected_stored_strings(
+    ids: zarr.Array,
+    selection: zarr.Array,
+) -> tuple[str, int]:
     if ids.ndim != 1 or selection.ndim != 1 or ids.shape != selection.shape:
         raise ValueError("Stored row IDs and selection must be aligned vectors")
     if np.dtype(selection.dtype) != np.dtype(bool):

@@ -228,6 +228,51 @@ def test_aucell_block_kernel_matches_reference_with_ties(dtype):
         )
 
 
+@pytest.mark.parametrize("dtype", [np.int64, np.float32, np.float64])
+@pytest.mark.parametrize("compiled", [True, False])
+def test_aucell_sparse_ranking_preserves_zero_and_negative_ties(
+    dtype, compiled, monkeypatch
+):
+    if not compiled:
+        from cytearc.features.enrichment import aucell
+
+        monkeypatch.setattr(
+            aucell, "_score_ranked_block", aucell._score_ranked_block.py_func
+        )
+    rng = np.random.default_rng(944)
+    values = rng.integers(-3, 4, size=(18, 67)).astype(dtype)
+    values[rng.random(values.shape) > 0.1] = 0
+    values[0] = 0
+    values[1] = -1
+    values[2] = 1
+    values[3, ::2] = -0.0
+    permutation = rng.permutation(values.shape[1])
+    sets = GeneSetIndex(
+        connections=np.arange(values.shape[1], dtype=np.int64),
+        starts=np.array([0, 7, 31], dtype=np.int64),
+        offsets=np.array([7, 24, 36], dtype=np.int64),
+    )
+
+    for n_up in (2, 7, 31, values.shape[1]):
+        expected = _reference_score_aucell_block(values, permutation, sets, n_up)
+        actual = score_aucell_block(values, permutation, sets, n_up=n_up)
+        np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
+
+
+def test_aucell_sparse_ranking_preserves_float64_integer_ties():
+    values = np.array([[0, 2**63, 2**63 + 1, 0, 2**64 - 1, 1, 0]], dtype=np.uint64)
+    permutation = np.array([2, 0, 3, 1, 5, 6, 4], dtype=np.int64)
+    sets = GeneSetIndex(
+        connections=np.array([0, 1, 3, 5], dtype=np.int64),
+        starts=np.array([0, 2], dtype=np.int64),
+        offsets=np.array([2, 2], dtype=np.int64),
+    )
+    for n_up in (2, 4, 7):
+        expected = _reference_score_aucell_block(values, permutation, sets, n_up)
+        actual = score_aucell_block(values, permutation, sets, n_up=n_up)
+        np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
+
+
 def test_resolve_n_up_validates_the_ranking_universe():
     assert resolve_n_up(100, None) == 5
     assert resolve_n_up(3, None) == 2

@@ -1474,3 +1474,30 @@ def test_missing_mask_links_are_resolved_by_the_canonical_reader():
                 offenders.add((relative.as_posix(), node.lineno))
 
     assert offenders == set()
+
+
+def test_composite_is_an_adapter_behind_the_virtual_array_seam():
+    importers = {
+        path.relative_to(_CYTEARC_ROOT).as_posix()
+        for path in _CYTEARC_ROOT.rglob("*.py")
+        if path.relative_to(_CYTEARC_ROOT).parts[0] != "composite"
+        and any(
+            module.split(".")[0] == "composite"
+            for module in _runtime_import_modules(path)
+        )
+    }
+    # Only the storage opener reaches the adapter, and only when it opens one.
+    assert importers == {"storage/stores.py"}
+    assert not any(
+        module.split(".")[0] == "composite"
+        for module in _runtime_import_modules(
+            _CYTEARC_ROOT / "storage" / "stores.py", include_function_local=False
+        )
+    )
+    # The virtual counts read core data only through foundation modules.
+    for name in ("store.py", "reader.py", "streams.py", "source_cache.py"):
+        roots = {
+            module.split(".")[0]
+            for module in _runtime_import_modules(_CYTEARC_ROOT / "composite" / name)
+        }
+        assert roots <= {"composite", "matrix", "storage", "utils"}, (name, roots)
