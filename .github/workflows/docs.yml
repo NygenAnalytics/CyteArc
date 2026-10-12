@@ -72,14 +72,9 @@ jobs:
           name: documentation-preview
           path: docs/build/site/_build/html/
           if-no-files-found: error
-      - name: Place documentation under the custom domain's CyteArc path
-        if: inputs.pages
-        run: |
-          mkdir -p docs/build/pages
-          mv docs/build/site/_build/html docs/build/pages/CyteArc
-          mv docs/build/pages/CyteArc/robots.txt docs/build/pages/robots.txt
       - name: Store GitHub Pages site
         if: inputs.pages
+        # Served at docs.nygen.io/CyteArc/ by the organization site, which owns the root robots.txt.
         uses: actions/upload-pages-artifact@v4
         with:
-          path: docs/build/pages/
+          path: docs/build/site/_build/html/
