@@ -4,8 +4,8 @@ The CyteBase SDK connects directly to cloud-hosted CyteArc DataStores for explor
 analysis without downloading a complete dataset first. Search the catalog, open a shared
 store read-only, or mount it for writable analysis with remote counts. Install the `cytebase`
 extra described in [Installation](../installation) and follow [Explore CyteBase](../tutorials/cytebase) for
-an executable walkthrough. Its [example notebooks](../tutorials/cytebase#cytebase-example-notebooks) show
-longer use cases.
+an executable walkthrough, and [CyteBase case study: COVID-19 blood](../tutorials/cytebase-covid19) for a
+longer use case.
 
 Use the same SDK from a local notebook or cloud compute. Operations read metadata and count
 blocks over the network and run in your Python environment; the SDK does not provision compute.
