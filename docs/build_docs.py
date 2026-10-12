@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tomllib
+from datetime import datetime
 from fnmatch import fnmatchcase
 from html import escape
 from html.parser import HTMLParser
@@ -206,19 +207,23 @@ def latest_source_commit(repository: Path, dependencies: set[Path]) -> str | Non
         return None
     relative = sorted(path.relative_to(repository).as_posix() for path in paths)
 
-    def git(*arguments: str) -> str:
+    def git(*arguments: str, paths: list[str]) -> str:
         return subprocess.run(
-            ["git", *arguments, "--", *relative],
+            ["git", *arguments, "--", *paths],
             cwd=repository,
             capture_output=True,
             text=True,
             check=True,
         ).stdout
 
-    tracked = set(git("ls-files", "-z").rstrip("\0").split("\0"))
-    if tracked != set(relative) or git("status", "--porcelain"):
+    tracked = set(git("ls-files", "-z", paths=relative).rstrip("\0").split("\0"))
+    if tracked != set(relative) or git("status", "--porcelain", paths=relative):
         return None
-    return git("log", "-1", "--format=%cI").strip() or None
+    # Combined path histories can report merges that changed no individual file.
+    dates = [
+        git("log", "-1", "--format=%cI", paths=[path]).strip() for path in relative
+    ]
+    return max(dates, key=datetime.fromisoformat)
 
 
 def api_source_files(doctree) -> set[Path]:
