@@ -82,7 +82,30 @@ jobs:
     - name: Compare publication plotting references
       run: uv run pytest -n 0 -m visual tests/test_plotting_showcase.py
 
+  wheel:
+    runs-on: ubuntu-26.04
+    env:
+      HNSWLIB_NO_NATIVE: "1"
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 0
+    - name: Install system build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential pkg-config libhdf5-dev libfftw3-dev libmetis-dev
+    - name: Install uv
+      uses: astral-sh/setup-uv@v9.0.0
+      with:
+        python-version: "3.14"
+    - name: Build and smoke-test wheel
+      run: |
+        uv build
+        uv run --no-project python tests/smoke_wheel.py dist/*.whl
+
   test:
+    name: test (${{ matrix.python-version }}, ${{ matrix.resolution }}, ${{ matrix.shard }}/4)
     runs-on: ubuntu-26.04
     env:
       HNSWLIB_NO_NATIVE: "1"
@@ -90,9 +113,14 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.13", "3.14", "3.15"]
-        resolution: [locked]
-        include:
-          - python-version: "3.13"
+        resolution: [locked, lowest-direct]
+        # Each job runs a quarter of the test files, balanced by
+        # tests/shard_durations.json. The pytest step names the shard count.
+        shard: [1, 2, 3, 4]
+        exclude:
+          - python-version: "3.14"
+            resolution: lowest-direct
+          - python-version: "3.15"
             resolution: lowest-direct
     steps:
     - uses: actions/checkout@v7
@@ -130,16 +158,12 @@ jobs:
         echo "installed_cpu_count=$(nproc --all)"
     - name: Test with pytest (parallel)
       run: |
-        pytest_args=(-n logical --durations=25)
+        pytest_args=(-n logical --durations=25 --shard "${{ matrix.shard }}/4")
         if [ "${{ matrix.resolution }}" = "locked" ] && [ "${{ matrix.python-version }}" = "3.14" ]; then
-          pytest_args+=(--cov=cytearc --cov-report=xml --cov-report=term)
+          # Codecov merges the four shard reports; codecov.yml waits for all of them.
+          pytest_args+=(--cov=cytearc --cov-report=xml)
         fi
         uv run --no-sync pytest "${pytest_args[@]}"
-    - name: Build and smoke-test wheel
-      if: matrix.resolution == 'locked' && matrix.python-version == '3.14'
-      run: |
-        uv build
-        uv run --no-project python tests/smoke_wheel.py dist/*.whl
     - name: Upload coverage to Codecov
       if: matrix.resolution == 'locked' && matrix.python-version == '3.14'
       uses: codecov/codecov-action@v5

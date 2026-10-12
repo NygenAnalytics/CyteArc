@@ -1,0 +1,7 @@
+# The Tests workflow uploads one coverage report from each of the four
+# Python 3.14 shards. Codecov merges them and reports only after all four.
+codecov:
+  notify:
+    after_n_builds: 4
+comment:
+  after_n_builds: 4

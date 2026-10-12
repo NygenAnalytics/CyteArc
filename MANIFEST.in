@@ -5,6 +5,7 @@ exclude .gitignore
 exclude .gitattributes
 exclude .python-version
 exclude .readthedocs.yml
+exclude codecov.yml
 exclude Dockerfile
 prune docs
 prune tests

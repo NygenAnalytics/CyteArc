@@ -39,6 +39,12 @@ While iterating, skip both:
     uv run pytest -m "not slow and not integration"
 
 CI runs the whole suite, so run `uv run pytest` before opening a pull request.
+CI splits the suite into four jobs per configuration; `uv run pytest --shard 2/4` runs the second of those shards locally.
+`tests/shards.py` balances the shards by the seconds each test file took, recorded in `tests/shard_durations.json`.
+After adding slow test files or changing how long existing ones take, refresh the record with a cold Numba cache, as on a CI runner:
+
+    NUMBA_CACHE_DIR=$(mktemp -d) uv run pytest --store-shard-durations
+
 For full CI parity, also run the visual regression step (or see `AGENTS.md`):
 
     MPLBACKEND=Agg CYTEARC_RUN_VISUAL_REGRESSION=1 \
