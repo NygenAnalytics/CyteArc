@@ -7,7 +7,12 @@ from ._storage import versioned_bucket
 
 @dataclass(frozen=True, slots=True)
 class Release:
-    """One public CyteBase release and the bucket that holds it."""
+    """One public CyteBase release and the bucket that holds it.
+
+    ``version`` is ``YYMM`` or ``YYMM.N``, ``released`` is the ``YYYY-MM``
+    month of release, ``notes`` summarizes the release, and ``changelog``
+    lists its changes.
+    """
 
     version: str
     released: str

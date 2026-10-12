@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from ._embeddings import embedding as embedding
     from ._embeddings import embedding_coordinates as embedding_coordinates
     from ._embeddings import embeddings as embeddings
+    from ._releases import Release as Release
     from ._releases import releases as releases
     from .catalog import Catalog as Catalog
     from .entry import DatasetEntry as DatasetEntry
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
 __all__ = [
     "Catalog",
     "DatasetEntry",
+    "Release",
     "Repository",
     "connect",
     "embedding",
@@ -61,11 +63,12 @@ def __getattr__(name: str) -> Any:
         value = getattr(_embeddings, name)
         globals()[name] = value
         return value
-    if name == "releases":
-        from ._releases import releases
+    if name in {"Release", "releases"}:
+        from . import _releases
 
-        globals()[name] = releases
-        return releases
+        value = getattr(_releases, name)
+        globals()[name] = value
+        return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

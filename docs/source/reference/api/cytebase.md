@@ -36,6 +36,9 @@ for release in cytebase.releases():
 
 ```{eval-rst}
 .. autofunction:: cytearc.cytebase.releases
+
+.. autoclass:: cytearc.cytebase.Release
+   :members: bucket, latest
 ```
 
 To use any other bucket, pass `Catalog(bucket=...)` or set `CYTEBASE_BUCKET`.
