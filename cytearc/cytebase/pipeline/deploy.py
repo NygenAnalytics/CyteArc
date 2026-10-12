@@ -22,6 +22,12 @@ reports only calls that this deployment's API started, until Modal expires the
 API's record of the call 7 days after the call started or was last polled. The
 ``cytearc.cytebase.pipeline.app`` module describes how to create the secret and
 which jobs the API reports.
+
+``--bucket-version 2610.1`` writes to the public release bucket
+``Nygen/cytebase-2610.1`` instead of the bucket the secret names, and the secret
+then needs only ``HF_TOKEN``. The app and its run state belong to the Modal
+environment, not the bucket, so drain any active run before deploying another
+bucket version to the same environment.
 """
 
 import argparse
@@ -31,7 +37,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .._storage import versioned_bucket
+
 APP_MODULE = "cytearc.cytebase.pipeline.app"
+
+
+def _bucket_version(value: str) -> str:
+    """Accept a ``YYMM`` or ``YYMM.N`` release version on the command line."""
+    try:
+        versioned_bucket(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    return value
 
 
 def deploy_command(environment: str | None) -> list[str]:
@@ -45,11 +62,12 @@ def deploy_command(environment: str | None) -> list[str]:
 def deploy_settings(args: argparse.Namespace) -> dict[str, str]:
     """Return the variables ``app.py`` reads while defining the deployment.
 
-    The bucket key is always set, so a key left in the shell never selects the
-    development bucket for a production deployment.
+    The bucket key and version are always set, so values left in the shell never
+    select the development bucket or another release for a deployment.
     """
     settings = {
-        "CYTEBASE_BUCKET_KEY": "CYTEBASE_BUCKET_DEV" if args.dev else "CYTEBASE_BUCKET"
+        "CYTEBASE_BUCKET_KEY": "CYTEBASE_BUCKET_DEV" if args.dev else "CYTEBASE_BUCKET",
+        "CYTEBASE_BUCKET_VERSION": args.bucket_version or "",
     }
     revision = os.environ.get("CYTEBASE_PIPELINE_VERSION")
     if revision is None:
@@ -78,10 +96,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "-e", "--env", help="Modal environment; Modal's default when omitted"
     )
-    parser.add_argument(
+    bucket = parser.add_mutually_exclusive_group()
+    bucket.add_argument(
         "--dev",
         action="store_true",
         help="Use the bucket named by CYTEBASE_BUCKET_DEV in the cytearc-env secret",
+    )
+    bucket.add_argument(
+        "--bucket-version",
+        type=_bucket_version,
+        help="Use the release bucket Nygen/cytebase-VERSION, for example 2610.1",
     )
     parser.add_argument(
         "--process-containers", type=int, help="Dataset worker container limit"

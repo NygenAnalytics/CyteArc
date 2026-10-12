@@ -79,7 +79,7 @@ analysis = catalog.mount_datastore(dataset_id, at="kidney_analysis.zarr")
 
 Use `analysis` with the pipeline shown above to save new results locally. Computation runs in your Python environment, reading count blocks over the network as needed.
 
-Follow the [CyteBase tutorial](https://docs.nygen.io/CyteArc/tutorials/cytebase) for catalog filters, plotting, and example notebooks, or see the [CyteBase API reference](https://docs.nygen.io/CyteArc/api/cytebase.html).
+Follow the [CyteBase tutorial](https://docs.nygen.io/CyteArc/tutorials/cytebase) for catalog filters, plotting, and a COVID-19 case study, or see the [CyteBase API reference](https://docs.nygen.io/CyteArc/api/cytebase.html).
 
 ## Documentation
 

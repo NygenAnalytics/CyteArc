@@ -10,8 +10,8 @@ The CyteBase SDK connects directly to cloud-hosted CyteArc DataStores for explor
 analysis without downloading a complete dataset first. Search the catalog, open a shared
 store read-only, or mount it for writable analysis with remote counts. Install the `cytebase`
 extra described in [Installation](../installation) and follow [Explore CyteBase](../tutorials/cytebase) for
-an executable walkthrough. Its [example notebooks](../tutorials/cytebase#cytebase-example-notebooks) show
-longer use cases.
+an executable walkthrough, and [CyteBase case study: COVID-19 blood](../tutorials/cytebase-covid19) for a
+longer use case.
 
 Use the same SDK from a local notebook or cloud compute. Operations read metadata and count
 blocks over the network and run in your Python environment; the SDK does not provision compute.
@@ -24,14 +24,40 @@ from cytearc.cytebase import Catalog
 catalog = Catalog()
 ```
 
-`Catalog()` defaults to the public `Nygen/cytebase` bucket. Public readers do not
-need credentials, and dataset stores are opened read-only. To use another bucket,
-set `CYTEBASE_BUCKET` or pass `Catalog(bucket=...)`; the explicit argument takes
-precedence over the environment variable. Accepted forms are `namespace/name` and
-`hf://buckets/namespace/name`. The default `token=None` uses Hugging Face credentials
-when available and anonymous access otherwise; `token=False` explicitly selects
-anonymous access. This SDK default does not apply to the ingestion pipeline,
-which still requires an explicit `CYTEBASE_BUCKET` for its writes.
+`Catalog()` defaults to the latest public release, currently `Nygen/cytebase-2610`.
+Public readers do not need credentials, and dataset stores are opened read-only. Each
+release has its own bucket named by year and month (`YYMM`); a later release in the
+same month adds a patch number (`YYMM.N`). Select another release with
+`Catalog(version="2610.1")`, which opens `Nygen/cytebase-2610.1`.
+
+`releases()` lists every public release, newest first, with its bucket, release month,
+notes, and changelog. The release marked `latest` is the one `Catalog()` opens by default.
+
+```python
+from cytearc import cytebase
+
+for release in cytebase.releases():
+    print(release.version, release.bucket, release.latest, release.notes)
+```
+
+```{eval-rst}
+.. autofunction:: cytearc.cytebase.releases
+
+.. autoclass:: cytearc.cytebase.Release
+   :members: bucket, latest
+```
+
+To use any other bucket, pass `Catalog(bucket=...)` or set `CYTEBASE_BUCKET`.
+Accepted forms are `namespace/name` and `hf://buckets/namespace/name`. Resolution
+order is `bucket=`, then `version=`, then `CYTEBASE_BUCKET`, then the latest
+release; passing both `bucket=` and `version=` raises an error. The default
+`token=None` uses Hugging Face credentials when available and anonymous access
+otherwise; `token=False` explicitly selects anonymous access.
+
+This SDK default does not apply to the ingestion pipeline. Its writes go to the
+bucket that `CYTEBASE_BUCKET` names in the deployment's `cytearc-env` secret, or to
+the release bucket that `python -m cytearc.cytebase.pipeline.deploy
+--bucket-version 2610.1` selects.
 
 Construction downloads or reuses a verified local DuckDB catalog. Each new query checks its
 published SHA-256 checksum and refreshes the local copy when needed. Queries therefore require

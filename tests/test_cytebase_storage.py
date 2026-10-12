@@ -129,6 +129,33 @@ def test_bucket_requires_a_namespace_and_name(bucket):
         _storage.Bucket(bucket)
 
 
+@pytest.mark.parametrize("version", ["2610", "2601", "2612", "2610.1", "2610.12"])
+def test_versioned_bucket_names_follow_year_month(version):
+    assert _storage.versioned_bucket(version) == f"Nygen/cytebase-{version}"
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "",
+        "261",
+        "26100",
+        "2600",
+        "2613",
+        "2610.",
+        "2610.0",
+        "2610.01",
+        "2610..1",
+        "v2610",
+        "2610.1.1",
+        None,
+    ],
+)
+def test_versioned_bucket_rejects_invalid_versions(version):
+    with pytest.raises(ValueError, match="YYMM or YYMM.N"):
+        _storage.versioned_bucket(version)
+
+
 def test_bucket_round_trips_objects(fake_hub, tmp_path):
     bucket = fake_hub.bucket(token="secret")
     bucket.write_json("datasets/a/dataset.json", {"cytebaseId": "a"})

@@ -916,7 +916,7 @@ def test_live_zarr_archive_download(tmp_path, monkeypatch):
 
 def test_lazy_exports_import_and_cache_sdk_objects(monkeypatch):
     from cytearc import cytebase
-    from cytearc.cytebase import _embeddings
+    from cytearc.cytebase import _embeddings, _releases
     from cytearc.cytebase.catalog import Catalog
     from cytearc.cytebase.entry import DatasetEntry
 
@@ -926,6 +926,8 @@ def test_lazy_exports_import_and_cache_sdk_objects(monkeypatch):
         "embeddings": _embeddings.embeddings,
         "embedding": _embeddings.embedding,
         "embedding_coordinates": _embeddings.embedding_coordinates,
+        "Release": _releases.Release,
+        "releases": _releases.releases,
     }
     for name, value in exports.items():
         monkeypatch.delitem(vars(cytebase), name, raising=False)
@@ -963,4 +965,6 @@ def test_dir_lists_lazy_exports():
         "embeddings",
         "embedding",
         "embedding_coordinates",
+        "Release",
+        "releases",
     } <= set(dir(cytebase))

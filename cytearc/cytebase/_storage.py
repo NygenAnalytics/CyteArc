@@ -152,6 +152,21 @@ def _path(path: str, *, prefix: bool = False) -> str:
     return path
 
 
+# Each public release has its own bucket named by year and month; a later
+# release in the same month adds a patch number, as in 2610.1. The release
+# list and the latest release live in ``_releases``.
+_VERSION_PATTERN = re.compile(r"\d{2}(?:0[1-9]|1[0-2])(?:\.[1-9]\d*)?")
+
+
+def versioned_bucket(version: str) -> str:
+    """Return the public CyteBase bucket of a ``YYMM`` release or ``YYMM.N`` patch."""
+    if not isinstance(version, str) or not _VERSION_PATTERN.fullmatch(version):
+        raise ValueError(
+            "CyteBase version must be YYMM or YYMM.N, for example 2610 or 2610.1"
+        )
+    return f"Nygen/cytebase-{version}"
+
+
 class Bucket:
     """Access one explicit bucket without a public or production fallback."""
 
