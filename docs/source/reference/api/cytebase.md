@@ -1,3 +1,9 @@
+---
+myst:
+  html_meta:
+    description: Search the CyteBase catalog, inspect dataset metadata, and open or mount cloud-hosted CyteArc datastores.
+---
+
 # CyteBase API reference
 
 The CyteBase SDK connects directly to cloud-hosted CyteArc DataStores for exploration and

@@ -1,3 +1,7 @@
+---
+description: Definitions of CyteArc terms for assays, selections, artifacts, provenance, pipelines, and single-cell analysis.
+---
+
 (glossary)=
 # Glossary
 

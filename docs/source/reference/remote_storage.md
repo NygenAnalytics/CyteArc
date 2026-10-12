@@ -1,3 +1,7 @@
+---
+description: Connect CyteArc to object storage, mount shared count matrices, and configure local scratch space for remote analysis.
+---
+
 (remote_storage)=
 
 # Remote storage configuration

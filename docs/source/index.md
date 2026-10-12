@@ -1,4 +1,5 @@
 ---
+title: Out-of-core single-cell analysis
 description: Mount remote single-cell datasets, analyze large cell atlases, and reuse shared references while keeping your own results separate.
 ---
 
@@ -93,3 +94,6 @@ limitations. For help, check the [](reference/faq.md) and [](reference/glossary.
 [ask a question](https://github.com/NygenAnalytics/CyteArc/discussions), or
 [report a bug](https://github.com/NygenAnalytics/CyteArc/issues).
 See [](developers/contributing.md) to contribute code or documentation.
+
+The [documentation index for LLMs](https://docs.nygen.io/CyteArc/llms.txt)
+lists guides and API references for assistants that read this site.

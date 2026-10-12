@@ -1,3 +1,9 @@
+---
+myst:
+  html_meta:
+    description: Inspect, find, and load CyteArc artifacts, trace result lineage, and summarize datastore selections and saved analyses.
+---
+
 # Artifacts, lineage, and summaries API reference
 
 An [artifact](../reference/glossary#term-artifact) is an immutable persisted result. Its [provenance](../reference/glossary#term-provenance) lets CyteArc verify its

@@ -1,3 +1,7 @@
+---
+description: Install CyteArc with Python 3.13 or newer, configure a C++ compiler, and choose optional dependencies for your analysis.
+---
+
 (installation)=
 # Installation
 

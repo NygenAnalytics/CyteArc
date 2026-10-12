@@ -1,3 +1,9 @@
+---
+myst:
+  html_meta:
+    description: CyteArc DataStore methods for opening stores, selecting cells and features, running analyses, and accessing saved results.
+---
+
 # DataStore API reference
 
 `DataStore` is the primary analyst-facing object.

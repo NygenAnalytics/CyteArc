@@ -1,3 +1,9 @@
+---
+myst:
+  html_meta:
+    description: Browse the CyteArc Python API for datastores, analysis pipelines, artifacts, plotting, data import, and remote datasets.
+---
+
 # CyteArc API reference
 
 Return to the [guides and tutorials](../).

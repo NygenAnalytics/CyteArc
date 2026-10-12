@@ -1,3 +1,9 @@
+---
+myst:
+  html_meta:
+    description: Build CyteArc neighborhood graphs through explicit normalization, reduction, neighbor search, and connectivity stages.
+---
+
 # Graph construction API reference
 
 These `DataStore` methods build a neighbourhood graph as explicit, provenance-backed stages. Each

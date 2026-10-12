@@ -1,3 +1,7 @@
+---
+description: Inspect the CyteArc Zarr layout for count matrices, assay metadata, immutable artifacts, and saved pipeline runs.
+---
+
 (zarr_internals)=
 # Zarr internals
 

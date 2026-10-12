@@ -1,3 +1,9 @@
+---
+myst:
+  html_meta:
+    description: CyteArc utility functions for loading stores, controlling computation, reading gene sets, and configuring logging and progress.
+---
+
 # Utilities API reference
 
 For dataset discovery, remote exploration, and example downloads, see {doc}`cytebase`.

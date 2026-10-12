@@ -1,3 +1,9 @@
+---
+myst:
+  html_meta:
+    description: Read, write, merge, and subset CyteArc datasets using Cell Ranger, H5AD, Matrix Market, Seurat, and Zarr formats.
+---
+
 # Import and export API reference
 
 ## Readers

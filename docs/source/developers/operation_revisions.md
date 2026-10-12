@@ -1,3 +1,7 @@
+---
+description: Learn when CyteArc computation changes require an operation revision and how revisions affect artifact reuse and lineage.
+---
+
 (operation_revisions)=
 # Operation revisions
 

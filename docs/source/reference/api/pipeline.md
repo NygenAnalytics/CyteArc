@@ -1,3 +1,9 @@
+---
+myst:
+  html_meta:
+    description: Run and configure CyteArc RNA pipelines, inspect durable PipelineRun records, and access frozen analysis outputs.
+---
+
 # Analysis pipeline API reference
 
 `DataStore.pipeline` runs CyteArc's standard RNA recipe and records every invocation in the datastore.

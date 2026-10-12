@@ -1,3 +1,9 @@
+---
+myst:
+  html_meta:
+    description: Work with CyteArc assay types, normalized count blocks, cell and feature metadata, and metadata selections.
+---
+
 # Assays and metadata API reference
 
 Each assay opens as the class of the preset that its store declares in `assayTypes`, such as

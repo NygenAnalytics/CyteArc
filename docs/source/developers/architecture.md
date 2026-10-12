@@ -1,3 +1,7 @@
+---
+description: Understand CyteArc package boundaries, dependency direction, and where storage, computation, orchestration, and plotting code belong.
+---
+
 (architecture)=
 # Architecture
 

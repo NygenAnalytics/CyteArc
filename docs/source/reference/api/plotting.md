@@ -1,3 +1,9 @@
+---
+myst:
+  html_meta:
+    description: Plot CyteArc embeddings, gene expression, clusters, trajectories, and diagnostics using standalone functions or datastore accessors.
+---
+
 # Plotting API reference
 
 `cytearc.plotting` is CyteArc's plotting API.

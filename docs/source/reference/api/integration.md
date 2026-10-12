@@ -1,3 +1,9 @@
+---
+myst:
+  html_meta:
+    description: Integrate CyteArc modalities with WNN or SNN, correct batches with Harmony, and evaluate integration metrics.
+---
+
 # Integration and metrics API reference
 
 Prefer the `DataStore` methods below in analysis code.

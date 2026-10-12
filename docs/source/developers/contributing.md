@@ -1,3 +1,7 @@
+---
+description: Contribute to CyteArc with the development, testing, documentation, and release workflows used by the project.
+---
+
 # Contributing
 
 ## Contributions through pull requests

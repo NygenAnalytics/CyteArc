@@ -4,6 +4,9 @@ project:
   description: Out-of-core single-cell analysis for RNA, ATAC, protein, and matched
     multi-omic data.
   github: https://github.com/NygenAnalytics/CyteArc
+  plugins:
+  - type: executable
+    path: ../render_outputs.py
   exclude:
   - reference/api/**
   - '**/cytearc_datasets/**'

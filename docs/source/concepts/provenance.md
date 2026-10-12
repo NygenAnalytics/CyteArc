@@ -1,3 +1,7 @@
+---
+description: Understand how CyteArc records selections, parameters, and artifact lineage to trace analyses and reuse completed results.
+---
+
 (provenance)=
 
 # Why CyteArc records provenance

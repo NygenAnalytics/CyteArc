@@ -1,3 +1,9 @@
+---
+myst:
+  html_meta:
+    description: Build CyteArc mapping references, project query cells, and transfer labels while preserving the exact reference and result lineage.
+---
+
 # Mapping API reference
 
 A mapping workflow retains every boundary explicitly:

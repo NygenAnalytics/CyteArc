@@ -9,9 +9,10 @@ help:
 	@echo 'make execute-docs-modal PAGES="tea_seq cell_cycle" MODAL_ENVIRONMENT=...'
 
 check-reference:
-	@rm -rf build/api
+	@rm -rf build/api build/api-text
 	@$(UVRUN) sphinx-build -b html -n -W source/reference/api build/api
 	@$(UVRUN) python check_reference_coverage.py
+	@$(UVRUN) sphinx-build -b text -n -W -d build/api/.doctrees source/reference/api build/api-text
 
 html: check-reference
 	@$(UVRUN) python build_docs.py
