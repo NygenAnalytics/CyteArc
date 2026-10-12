@@ -170,7 +170,8 @@ CITE-seq file refuses at `512M` and imports at `1G`.
 ```python
 from cytearc import cytebase
 
-catalog = cytebase.Catalog()              # public Nygen/cytebase, no credentials
+catalog = cytebase.Catalog()              # latest public release (Nygen/cytebase-2610), no credentials
+latest = [r for r in cytebase.releases() if r.latest]  # every release: version, bucket, notes, changelog
 hits = catalog.search("bladder immune", limit=5)      # every word, case-insensitive
 ids = [row["cytebase_id"] for row in hits]            # take IDs from rows, not printed tables
 blood = catalog.find_datasets(tissue="blood", organism="Homo sapiens")  # exact labels
@@ -245,7 +246,7 @@ raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datas
 | `workspace` | `None` | store written into a named workspace |
 | `storage_options` | `None` | object-store credentials or endpoints (read from env vars) |
 | `zarrProfile` | from location (`fast_local`/`cloud`) | affects newly written arrays only |
-| `Catalog(bucket=, token=)` | `Nygen/cytebase`, `None` (HF login if present) | private bucket; `token=False` forces anonymous |
+| `Catalog(bucket=, token=, version=)` | `Nygen/cytebase-2610`, `None` (HF login if present), `None` | private bucket; `token=False` forces anonymous; `version="2610.1"` for another `YYMM.N` release |
 | `search(limit=)`, `ready_only=` | `50`, `True` | `limit=None` for all; `ready_only=False` for unfinished |
 
 ## Check before moving on

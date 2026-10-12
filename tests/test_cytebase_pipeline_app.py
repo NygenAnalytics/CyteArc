@@ -485,6 +485,25 @@ def test_storage_requires_a_bucket(monkeypatch):
         app._storage()
 
 
+def test_storage_opens_the_versioned_bucket(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf_workerToken")
+    monkeypatch.setenv("CYTEBASE_BUCKET", "other/bucket")
+    monkeypatch.setenv("CYTEBASE_BUCKET_VERSION", " 2610.1 ")
+    bucket = app._storage()
+    assert (bucket.bucket_id, bucket.token) == (
+        "Nygen/cytebase-2610.1",
+        "hf_workerToken",
+    )
+
+
+def test_storage_rejects_an_invalid_bucket_version(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf_workerToken")
+    monkeypatch.setenv("CYTEBASE_BUCKET", BUCKET_ID)
+    monkeypatch.setenv("CYTEBASE_BUCKET_VERSION", "2613")
+    with pytest.raises(ValueError, match="YYMM or YYMM.N"):
+        app._storage()
+
+
 def test_dev_storage_opens_the_dev_bucket(monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "hf_workerToken")
     monkeypatch.setenv("CYTEBASE_BUCKET_KEY", "CYTEBASE_BUCKET_DEV")

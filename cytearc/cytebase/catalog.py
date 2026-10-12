@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 from cytearc.utils.logging import logger, progress_enabled
 
-from ._storage import Bucket
+from ._releases import LATEST
+from ._storage import Bucket, versioned_bucket
 from .display import CatalogResults
 
 if TYPE_CHECKING:
@@ -223,22 +224,33 @@ def _cached_catalog(storage: Bucket) -> Path:
 class Catalog:
     """Discover dataset entries and open their verified CyteArc DataStores.
 
-    ``bucket`` accepts ``namespace/name`` or an HF bucket URI and otherwise uses
-    ``CYTEBASE_BUCKET``, falling back to the public ``Nygen/cytebase`` bucket.
-    ``token=None`` uses standard Hugging Face authentication when available;
-    ``token=False`` explicitly selects anonymous access. Construction prepares a
-    verified local catalog. Each new catalog query checks the published checksum
-    again and opens a verified local snapshot read-only.
+    ``bucket`` accepts ``namespace/name`` or an HF bucket URI. ``version`` selects
+    a public release bucket by year and month, ``YYMM`` or ``YYMM.N`` for a later
+    release in the same month, such as ``"2610.1"`` for ``Nygen/cytebase-2610.1``.
+    Without either, ``CYTEBASE_BUCKET`` applies, and otherwise the release that
+    ``cytearc.cytebase.releases()`` marks as latest. ``token=None`` uses standard Hugging Face authentication when
+    available; ``token=False`` explicitly selects anonymous access. Construction
+    prepares a verified local catalog. Each new catalog query checks the published
+    checksum again and opens a verified local snapshot read-only.
     """
 
     def __init__(
-        self, bucket: str | None = None, token: str | bool | None = None
+        self,
+        bucket: str | None = None,
+        token: str | bool | None = None,
+        *,
+        version: str | None = None,
     ) -> None:
-        selected_bucket = (
-            bucket
-            if bucket is not None
-            else os.environ.get("CYTEBASE_BUCKET", "Nygen/cytebase")
-        )
+        if bucket is not None and version is not None:
+            raise ValueError("Supply bucket= or version=, not both")
+        if bucket is not None:
+            selected_bucket = bucket
+        elif version is not None:
+            selected_bucket = versioned_bucket(version)
+        else:
+            selected_bucket = os.environ.get(
+                "CYTEBASE_BUCKET", versioned_bucket(LATEST)
+            )
         self._storage = Bucket(selected_bucket, token)
         _cached_catalog(self._storage)
 

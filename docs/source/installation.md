@@ -104,9 +104,10 @@ uv pip install --prerelease allow "cytearc[cytebase,extra]"
 ```
 
 This adds DuckDB for catalog queries and the SDK's plotting dependencies.
-`cytebase.Catalog()` defaults to the public, read-only `Nygen/cytebase` catalog
-without requiring credentials. Set `CYTEBASE_BUCKET` or pass `bucket=` to use
-another catalog, then follow
+`cytebase.Catalog()` defaults to the current public, read-only release,
+`Nygen/cytebase-2610`, without requiring credentials. Pass `version="2610.1"` to
+open another release, or set `CYTEBASE_BUCKET` or pass `bucket=` to use another
+catalog, then follow
 [](tutorials/cytebase.ipynb). See [CyteBase API reference](/api/cytebase.html) for the full SDK reference.
 
 (installation_tsne)=

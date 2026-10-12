@@ -58,7 +58,11 @@ def test_deploy_runs_modal_with_the_selected_bucket_key(
     assert runs == [
         (
             [*MODAL_DEPLOY, *env_args, "-m", APP_MODULE],
-            {**os.environ, "CYTEBASE_BUCKET_KEY": bucket_key},
+            {
+                **os.environ,
+                "CYTEBASE_BUCKET_KEY": bucket_key,
+                "CYTEBASE_BUCKET_VERSION": "",
+            },
         )
     ]
 
@@ -68,6 +72,33 @@ def test_production_deploy_overrides_an_inherited_dev_bucket_key(runs, monkeypat
     deploy.main([])
     [(_, env)] = runs
     assert env["CYTEBASE_BUCKET_KEY"] == "CYTEBASE_BUCKET"
+
+
+def test_deploy_selects_a_release_bucket_version(runs):
+    assert deploy.main(["--bucket-version", "2610.1"]) == 0
+    [(_, env)] = runs
+    assert env["CYTEBASE_BUCKET_VERSION"] == "2610.1"
+
+
+def test_deploy_clears_an_inherited_bucket_version(runs, monkeypatch):
+    monkeypatch.setenv("CYTEBASE_BUCKET_VERSION", "2601")
+    deploy.main([])
+    [(_, env)] = runs
+    assert env["CYTEBASE_BUCKET_VERSION"] == ""
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["--bucket-version", "2613"], id="invalid-month"),
+        pytest.param(["--dev", "--bucket-version", "2610"], id="with-dev"),
+    ],
+)
+def test_deploy_rejects_unusable_bucket_versions(runs, argv):
+    with pytest.raises(SystemExit) as exited:
+        deploy.main(argv)
+    assert exited.value.code == 2
+    assert runs == []
 
 
 def test_deploy_passes_container_and_connection_limits(runs):

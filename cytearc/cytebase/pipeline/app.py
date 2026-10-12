@@ -4,7 +4,9 @@ The supported deployment command is
 ``uv run python -m cytearc.cytebase.pipeline.deploy``. It validates a supplied
 ``CYTEBASE_PIPELINE_VERSION`` or resolves the Git revision. Invoking this Modal
 app directly bypasses that preparation, so the caller must supply a nonblank
-``CYTEBASE_PIPELINE_VERSION``.
+``CYTEBASE_PIPELINE_VERSION``. The deployment writes to the bucket the
+``cytearc-env`` secret names, or to the public release bucket that
+``--bucket-version`` selects through ``CYTEBASE_BUCKET_VERSION``.
 
 The HTTP API can register collections, start dataset processing, and rebuild
 the catalog with the deployment's Hugging Face credentials, so every request
@@ -71,7 +73,7 @@ from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocketClose
 
-from .._storage import Bucket, dataset_prefix, error_message
+from .._storage import Bucket, dataset_prefix, error_message, versioned_bucket
 from .catalog import load_record, select_dataset_ids
 from .download import download_connections
 from .models import AttemptResources, DatasetRecord, ProcessRequest, RegisterRequest
@@ -114,11 +116,25 @@ def _bucket_key() -> str:
     return key
 
 
+def _bucket_version() -> str | None:
+    """Return the release version that overrides the secret's bucket, if any."""
+    version = os.environ.get("CYTEBASE_BUCKET_VERSION", "").strip()
+    if not version:
+        return None
+    versioned_bucket(version)
+    return version
+
+
 BUCKET_KEY = _bucket_key()
+BUCKET_VERSION = _bucket_version()
 API_TOKEN_KEY = "CYTEBASE_API_TOKEN"
 API_TOKEN_HEADER = "Cytebase-Token"
 app = modal.App("cytebase")
-secret = modal.Secret.from_name("cytearc-env", required_keys=["HF_TOKEN", BUCKET_KEY])
+# A release version names the bucket itself, so the secret needs no bucket key.
+secret = modal.Secret.from_name(
+    "cytearc-env",
+    required_keys=["HF_TOKEN", *([] if BUCKET_VERSION else [BUCKET_KEY])],
+)
 # Attached to the web function only, so no worker can read the API token.
 api_secret = modal.Secret.from_name("cytebase-api", required_keys=[API_TOKEN_KEY])
 progress_store = modal.Dict.from_name("cytebase-progress", create_if_missing=True)
@@ -180,6 +196,7 @@ image = (
                 if key in os.environ
             },
             "CYTEBASE_BUCKET_KEY": BUCKET_KEY,
+            "CYTEBASE_BUCKET_VERSION": BUCKET_VERSION or "",
             "CYTEBASE_DOWNLOAD_CONNECTIONS": str(download_connections()),
             "CYTEBASE_PROCESS_CONTAINERS": str(PROCESS_CONTAINERS),
             "CYTEBASE_HUB_API_QUOTA": str(HUB_API_QUOTA),
@@ -193,6 +210,9 @@ def _storage() -> Bucket:
     token = os.environ.get("HF_TOKEN", "").strip()
     if not token:
         raise RuntimeError("Missing required environment variable: HF_TOKEN")
+    version = _bucket_version()
+    if version is not None:
+        return Bucket(versioned_bucket(version), token=token)
     key = _bucket_key()
     bucket = os.environ.get(key, "").strip()
     if not bucket:
