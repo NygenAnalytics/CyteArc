@@ -65,6 +65,7 @@ nitpick_ignore = [
     ("py:class", "collections.abc.Callable"),
     ("py:class", "collections.abc.Iterable"),
     ("py:class", "collections.abc.Iterator"),
+    ("py:class", "collections.abc.Mapping"),
     ("py:class", "collections.abc.Sequence"),
     ("py:class", "collections.abc.Generator"),
     ("py:class", "cytearc.matrix.ChunkedArray"),

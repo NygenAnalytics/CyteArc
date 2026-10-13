@@ -7,6 +7,8 @@ Public CyteArc surfaces for analysts:
 - Graph-construction methods and `ds.pipeline.run`
 - `ArtifactRef`, `ArtifactStatus`, `PipelineRun`, and strict artifact-resolution errors
 - `EnrichmentResult` and `read_gmt` for gene-set scoring
+- `cytearc.regulons` for SCENIC-style regulons, chromVAR motif activity, cistromes from motifs or
+  CUT&RUN peaks, enhancer-driven regulons, and co-regulated gene programs
 - Readers that ingest source formats; writers that create or export Zarr stores (and other exports)
 - `cytearc.plotting`
 - `cytearc.cytebase.Catalog`, metadata-only `DatasetEntry` objects, and direct access to cloud-hosted CyteArc DataStores
@@ -28,6 +30,7 @@ Prefer calling methods on `DataStore`.
 | Assays and metadata | [Assays and metadata API reference](/api/assays.html) |
 | Integration and metrics | [Integration and metrics API reference](/api/integration.html) |
 | Mapping | [Mapping API reference](/api/mapping.html) |
+| Regulons and gene programs | [Regulons API reference](/api/regulons.html) |
 | Plotting | [Plotting API reference](/api/plotting.html) |
 | CyteBase datasets | [CyteBase API reference](/api/cytebase.html) |
 | Utilities | [Utilities API reference](/api/utilities.html) |

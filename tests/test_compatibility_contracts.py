@@ -74,6 +74,7 @@ _EXPECTED_RESULT_FIELDS = {
         "cell_selection",
         "feature_selection",
         "method",
+        "deviations",
     ),
     mapping.MappingResult: (
         "ref",

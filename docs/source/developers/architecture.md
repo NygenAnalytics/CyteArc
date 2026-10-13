@@ -14,7 +14,7 @@ Module-load dependencies point toward the earlier layers in this list:
 
 1. Foundation: `storage`, `matrix`, and `utils`
 2. Data model: `metadata`, `assay`, and `graph`
-3. Domain algorithms: `neighbors`, `embeddings`, `clustering`, `trajectory`, `metrics`, `features`, `quality_control`, and `mapping`
+3. Domain algorithms: `neighbors`, `embeddings`, `clustering`, `trajectory`, `metrics`, `features`, `quality_control`, `mapping`, and `regulons`
 4. Import and export: `readers`, `writers`, and `merge`
 5. Orchestration: `datastore` and `datastore._operations`
 6. Presentation: `plotting`
@@ -89,10 +89,26 @@ They must not import those packages at module load time.
 - `trajectory/` owns pseudotime scoring, feature-profile aggregation, feature module clustering, and pseudotime result records.
 - `metrics/` owns LISI, silhouette, graph, concordance, and integration scores, including the neighbor label agreement that membership strength stores.
 - `features/` owns variability selection, LOWESS trend fitting, feature scoring, enrichment, rank and regression marker searches, group-wise statistical tests, bulk aggregation, GFF parsing, genomic intervals, coordinate-based feature construction, and the name-based gene-family registry.
+  `features/genomic/` also owns genome sequence access (`sequence.py`: an indexed FASTA reader
+  and GC content), gene annotations and region-to-gene windows (`annotation.py`), and motif
+  matrices with MOODS-equivalent thresholds and a two-strand scanner (`motifs.py`).
+  `features/enrichment/chromvar.py` owns chromVAR background peaks and deviation scoring beside
+  AUCell and WAGGR.
   It also owns presentation-independent feature resolution and normalized value fetching used by datastore workflows and plots.
   `features/statistical.py` owns the statistical design of `compare.test`, and `features/aggregation.py` the bulk profiles of `compare.compute_bulk`; the datastore methods keep grouping resolution, value reads, artifact planning, and persistence.
 - `quality_control/` owns filtering, HTO demultiplexing, doublet processing, cell-cycle assignment, and the default cell-cycle gene references.
 - `mapping/` owns reference artifacts, feature alignment, confidence, Symphony-style correction, label transfer, and mapping results.
+- `regulons/` owns transcription-factor regulon inference: GRNBoost2-equivalent importance
+  networks (`grn.py`), co-expression modules (`modules.py`), cisTarget ranking databases and
+  motif annotations (`databases.py`), recovery-curve enrichment (`cistarget.py`), pruning into
+  regulons (`pruning.py`), cistromes from motifs or binding peaks (`cistromes.py`),
+  region-to-gene links (`links.py`), enhancer-driven regulons with preranked GSEA
+  (`eregulons.py`), co-regulated gene programs (`programs.py`), and regulon specificity
+  (`specificity.py`). Its functions work on in-memory arrays and reference files; `polars`
+  is an optional dependency for ranking databases. Do not read them with `pyarrow`: installing
+  it switches pandas to Arrow-backed strings for the whole environment, which plotting and
+  memory admission do not support. `results.py` holds `GrnResult`, which names
+  `storage.refs` only.
 
 Domain algorithm packages must not import `datastore`, `plotting`, or general import/export packages at module load time.
 A domain that persists an artifact may use a narrow, named `storage` adapter.
@@ -148,6 +164,7 @@ quality_control
 features
 integration_metrics
 presentation
+regulons
 ```
 
 Shared helpers under the same package include `enrichment_store`, `paris_persistence`, and `statistical_store`, which owns the layout, reuse check, writer, and reader of stored statistical-test results.
@@ -202,7 +219,7 @@ The accessor imports concrete plot implementations only when a method is called,
 
 ### Lazy and eager facades
 
-The lazy facades in `cytearc`, `agent`, `features` and its subpackages, `readers`, `writers`, `merge`, `utils`, `neighbors`, `clustering`, `embeddings`, `trajectory`, and `plotting` are architectural boundaries, not temporary deprecation shims.
+The lazy facades in `cytearc`, `agent`, `features` and its subpackages, `readers`, `writers`, `merge`, `utils`, `neighbors`, `clustering`, `embeddings`, `trajectory`, `regulons`, and `plotting` are architectural boundaries, not temporary deprecation shims.
 Their documented 1.x exports preserve stable import paths and defer optional or expensive implementations until an export is accessed.
 All of them use one private helper, `cytearc._facade`: an export wins over a same-named submodule, resolving an export never replaces a bound value, and only `readers`, `writers`, `merge`, and `utils` present the objects they own under the facade's `__module__`.
 
@@ -281,6 +298,20 @@ CyteArc validates persisted data and public arguments against the following cont
   `clusters.compute_concordance(first, second, metric=...)` compares exact clustering artifacts.
   Their former `label_colname` keywords and column- or array-based concordance inputs are
   unsupported.
+- `DataStore.regulons.grn` writes an assay-scoped `grn_adjacencies` artifact with operation
+  `run_grn_inference`: parallel `tf_index`, `target_index`, `importance`, and `correlation`
+  arrays (one row per link with positive importance), a `regulator_index` array of the factors
+  offered to every target, and the method, layout, cell, feature, and regulator digests as
+  attributes. It models raw counts, and `early_stopping` records which out-of-bag improvement
+  ended each fit. `regulons.load_grn` returns a `GrnResult` and checks those digests.
+- `enrichment_scores` artifacts gain the `chromvar` method, written by `scores.chromvar` with
+  operation `run_chromvar` on an ATAC assay. Its `scores` are chromVAR z-scores and may hold NaN
+  for a cell that expects fewer than one fragment in a set; a `deviations` array of the same
+  shape holds the bias-corrected deviations, and `background_index` (selected peaks by
+  iterations, physical indices) holds the drawn background peaks. `gc_digest` records the GC
+  content of the selected peaks as an input. `scores.load` accepts ATAC assays for this method,
+  and `EnrichmentResult.deviations` is set only for it. WAGGR and AUCell artifacts are
+  unchanged.
 - Derived assays are published atomically. `add_grouped_assay` and `add_melded_assay` stage the
   assay under a `cytearc:pending_assay` marker and remove what they created when an error stops them.
   Counts written by `create_zarr_count_assay` carry `complete=False` until they are finalized. A

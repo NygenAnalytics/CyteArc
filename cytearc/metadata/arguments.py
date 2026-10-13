@@ -259,6 +259,44 @@ class AucellArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class ChromvarArguments(OperationArguments):
+    operation: ClassVar[str] = "run_chromvar"
+    artifact_kind: ClassVar[str] = "enrichment_scores"
+
+    cell_selection: ArtifactRef = artifact_input()
+    feature_selection: ArtifactRef = artifact_input()
+    network_digest: str = artifact_input()
+    gc_digest: str = artifact_input()
+    tmin: int = parameter()
+    n_backgrounds: int = parameter()
+    background_seed: int = parameter()
+    kernel_width: float = parameter()
+    bins: int = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class GrnArguments(OperationArguments):
+    operation: ClassVar[str] = "run_grn_inference"
+    artifact_kind: ClassVar[str] = "grn_adjacencies"
+
+    cell_selection: ArtifactRef = artifact_input()
+    feature_selection: ArtifactRef = artifact_input()
+    regulators_digest: str = artifact_input()
+    method: str = parameter()
+    values: str = parameter()
+    learning_rate: float = parameter()
+    max_stages: int = parameter()
+    max_features: float = parameter()
+    subsample: float = parameter()
+    early_stop_window: int = parameter()
+    early_stopping: str = parameter()
+    random_seed: int = parameter()
+    nthreads: int = execution()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class HtoIdentityArguments(OperationArguments):
     operation: ClassVar[str] = "run_hto_demultiplexing"
     artifact_kind: ClassVar[str] = "hto_identity"

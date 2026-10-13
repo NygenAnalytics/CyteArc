@@ -31,6 +31,7 @@
 - [CITE-seq](tutorials/cite-seq/): matched RNA and ADT analysis with WNN integration
 - [TEA-seq](tutorials/tea-seq/): prepared RNA, ATAC, and protein analysis with three-way WNN
 - [WNN and SNN integration](tutorials/multimodal-diagnostics/): compare SNN and WNN and inspect modality weights
+- [Regulons and gene programs](tutorials/regulons/): SCENIC regulons, co-regulated gene programs, chromVAR motif and CUT&RUN activity, and enhancer-driven regulons
 - [HTO demultiplexing](tutorials/hto-demultiplexing/): sample-tag classification and Seurat comparison
 
 ## Integration and mapping

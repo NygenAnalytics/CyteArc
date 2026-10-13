@@ -12,6 +12,7 @@ from ._operations.mapping import _MappingOperationsMixin
 from ._operations.mapping_reference import _MappingReferenceOperationsMixin
 from ._operations.presentation import _PresentationOperationsMixin
 from ._operations.quality_control import _QualityControlOperationsMixin
+from ._operations.regulons import _RegulonOperationsMixin
 from ._operations.trajectory import _TrajectoryFeatureOperationsMixin
 from ._operations.trajectory import _TrajectoryOperationsMixin
 from .datastore import DataStore
@@ -28,6 +29,7 @@ __all__ = [
     "MarkersAccessor",
     "QcAccessor",
     "ReductionAccessor",
+    "RegulonsAccessor",
     "ScoresAccessor",
     "TrajectoryAccessor",
 ]
@@ -180,10 +182,18 @@ class ReductionAccessor(_Accessor):
     harmony = _bind(_GraphOperationsMixin._reduction_harmony)
 
 
+class RegulonsAccessor(_Accessor):
+    __slots__ = ()
+
+    grn = _bind(_RegulonOperationsMixin._regulons_grn)
+    load_grn = _bind(_RegulonOperationsMixin._regulons_load_grn)
+
+
 class ScoresAccessor(_Accessor):
     __slots__ = ()
 
     aucell = _bind(_FeatureOperationsMixin._scores_aucell)
+    chromvar = _bind(_FeatureOperationsMixin._scores_chromvar)
     waggr = _bind(_FeatureOperationsMixin._scores_waggr)
     load = _bind(_FeatureOperationsMixin._scores_load)
     cell_cycle = _bind(_QualityControlOperationsMixin._scores_cell_cycle)

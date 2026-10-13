@@ -11,19 +11,24 @@ __all__ = ["EnrichmentResult"]
 
 @dataclass(frozen=True, slots=True, eq=False)
 class EnrichmentResult:
-    """A persisted gene-set enrichment result.
+    """A persisted gene-set or peak-set enrichment result.
 
     Attributes:
         data: Lazy score matrix with cells as rows and sources as columns.
+            chromVAR stores z-scores here, with NaN where a cell has too few
+            expected fragments in a set.
         source_names: Source names aligned to the score columns.
         source_sizes: Matched target counts aligned to ``source_names``.
         cell_index: Assay cell indices aligned to the score rows.
         artifact: Immutable enrichment artifact backing the result.
         storage_path: Zarr path that owns the result.
-        assay: Name of the RNA assay used for scoring.
+        assay: Name of the assay used for scoring: an RNA assay for WAGGR and
+            AUCell, an ATAC assay for chromVAR.
         cell_selection: Immutable cell selection used for scoring.
         feature_selection: Feature-selection artifact used for scoring.
-        method: Enrichment method, either ``"waggr"`` or ``"aucell"``.
+        method: Enrichment method: ``"waggr"``, ``"aucell"``, or ``"chromvar"``.
+        deviations: chromVAR's bias-corrected deviations, aligned to ``data``;
+            None for other methods.
     """
 
     data: ChunkedArray = field(repr=False)
@@ -36,6 +41,7 @@ class EnrichmentResult:
     cell_selection: ArtifactRef
     feature_selection: ArtifactRef
     method: str
+    deviations: ChunkedArray | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -82,5 +88,9 @@ class EnrichmentResult:
             raise ValueError("Enrichment cell indices must be unique")
         if np.any(self.source_sizes <= 0):
             raise ValueError("Enrichment source sizes must be positive")
-        if self.method not in {"waggr", "aucell"}:
+        if self.method not in {"waggr", "aucell", "chromvar"}:
             raise ValueError(f"Unknown enrichment method: {self.method!r}")
+        if (self.deviations is None) != (self.method != "chromvar"):
+            raise ValueError("Only chromVAR results carry deviations")
+        if self.deviations is not None and self.deviations.shape != self.data.shape:
+            raise ValueError("Enrichment deviations must align with the scores")

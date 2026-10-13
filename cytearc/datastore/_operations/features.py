@@ -1,3 +1,4 @@
+import os
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -96,6 +97,7 @@ from ...features.values import (
 )
 from ...metadata.arguments import (
     AucellArguments,
+    ChromvarArguments,
     MarkerTableArguments,
     StatisticalTestingArguments,
     WaggrArguments,
@@ -616,7 +618,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
     def _run_enrichment(
         self,
         *,
-        assay: RNAassay,
+        assay: Assay,
         invalidate_cache: bool,
         scorer: _EnrichmentScorer,
     ) -> ArtifactRef:
@@ -693,6 +695,9 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 rank_feature_index=scorer.rank_feature_index,
                 resources=self.resources,
                 io=self.storageIo,
+                allow_missing=scorer.allow_missing,
+                extra_dense=scorer.extra_dense,
+                extra_arrays=scorer.extra_arrays,
             )
         return planned.ref
 
@@ -1036,6 +1041,282 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         )
 
     @validation_scoped
+    def _scores_chromvar(
+        self,
+        net: pd.DataFrame,
+        cell_selection: ArtifactRef,
+        *,
+        from_assay: str | None = None,
+        features: ArtifactRef,
+        gc: np.ndarray | None = None,
+        genome: str | os.PathLike[str] | None = None,
+        n_backgrounds: int = 50,
+        background_seed: int = 0,
+        kernel_width: float = 0.1,
+        bins: int = 50,
+        tmin: int = 1,
+        ambiguous_targets: AmbiguousTargets = "drop",
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Score peak-set accessibility deviations of cells with chromVAR.
+
+        For each source of ``net``, such as a motif with its matching peaks
+        or a transcription factor with the peaks a CUT&RUN experiment bound,
+        a cell's deviation is its fragments in the source's peaks minus the
+        fragments expected from the cell's depth and the peaks' share of all
+        fragments, relative to that expectation. It is corrected by the same
+        deviation of background peak sets matched in GC content and
+        accessibility, and the z-score divides it by the background
+        deviations' standard deviation, as chromVAR's ``computeDeviations``
+        does. A cell expecting fewer than one fragment in a set has no value
+        for it (NaN). Raw ATAC counts are read twice: once for the peak
+        totals that define expectations and background peaks, once to score.
+
+        Args:
+            net: Network with ``source`` and ``target`` columns whose targets
+                are peak names, such as ``match_motifs`` output.
+            cell_selection: Explicit cells to score.
+            from_assay: ATAC assay to score. The default assay when omitted.
+            features: Explicit selection of the peaks that define fragment
+                totals, expectations, and backgrounds. Every selected peak
+                needs a fragment among the selected cells.
+            gc: GC content of every assay feature in feature order. Pass this
+                or ``genome``.
+            genome: Uncompressed FASTA of the genome the peak coordinates
+                (``ids``, ``chrom:start-end``) refer to; GC content is read
+                from it.
+            n_backgrounds: Background peak sets per source.
+            background_seed: Seed of the background peak draws.
+            kernel_width: Width of the kernel that matches background peaks,
+                in whitened units.
+            bins: Grid points per axis of the background model.
+            tmin: Minimum number of selected peaks per source.
+            ambiguous_targets: Handling of a target that matches several
+                selected peaks: ``"drop"`` removes it, ``"error"`` raises.
+            invalidate_cache: Recompute even when a matching result exists.
+
+        Returns:
+            A complete ``enrichment_scores`` artifact whose scores are z-scores
+            and whose ``deviations`` array holds the bias-corrected deviations.
+
+        Raises:
+            MemoryError: If the background model does not fit the budget.
+            PermissionError: If the store is not opened with ``zarr_mode='r+'``.
+            UnmeasuredCellsError: If the assay did not measure a selected cell.
+        """
+        from scipy.sparse import csc_matrix
+
+        from ...assay import ATACassay
+        from ...features.enrichment.chromvar import (
+            background_peaks,
+            build_chromvar_model,
+            chromvar_model_bytes,
+            score_chromvar_block,
+        )
+        from ...features.enrichment.net import prepare_network
+        from ...features.genomic.sequence import (
+            IndexedFasta,
+            gc_content,
+            parse_coordinate_ids,
+        )
+        from ...utils.compute import compute_with_progress
+
+        if not isinstance(features, ArtifactRef):
+            raise TypeError("features must be an ArtifactRef")
+        if not isinstance(cell_selection, ArtifactRef):
+            raise TypeError("cell_selection must be an ArtifactRef")
+        if (gc is None) == (genome is None):
+            raise ValueError("Pass exactly one of gc or genome")
+        for label, value, low in (
+            ("n_backgrounds", n_backgrounds, 2),
+            ("bins", bins, 2),
+            ("background_seed", background_seed, 0),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < low:
+                raise ValueError(f"{label} must be an integer of at least {low}")
+        if not float(kernel_width) > 0:
+            raise ValueError("kernel_width must be positive")
+        assay = self._get_assay(from_assay)
+        if not isinstance(assay, ATACassay):
+            raise TypeError("chromVAR can only be run on an ATACassay")
+        self._require_measured_cells(
+            assay.name, cell_selection, operation="run_chromvar"
+        )
+        self._require_writable("chromVAR")
+        self._ensure_dataset_fingerprint(assay.name)
+        feature_selection = self._features_resolve(assay.name, features)
+        feature_index = np.flatnonzero(
+            _feature_selection_values(self.zw, feature_selection)
+        ).astype(np.int64, copy=False)
+        cell_index = read_stored_selection_indices(
+            self.zw,
+            cell_selection,
+            kind="cell_selection",
+            scope="datastore",
+            assay=None,
+            table_path="cellData",
+        ).astype(np.int64, copy=False)
+        if len(cell_index) == 0:
+            raise ValueError("Cell selection contains no active cells")
+        if len(feature_index) < 2:
+            raise ValueError("chromVAR needs at least two selected peaks")
+        names = np.asarray(assay.feats.fetch_all("names"))[feature_index]
+        network = prepare_network(
+            net,
+            active_feature_names=names,
+            active_feature_index=feature_index,
+            tmin=tmin,
+            weighted=False,
+            ambiguous_targets=ambiguous_targets,
+        )
+        if gc is not None:
+            gc_values = np.asarray(gc, dtype=np.float64)
+            if gc_values.shape != (assay.feats.N,):
+                raise ValueError(
+                    f"gc must hold one value per {assay.name} feature ({assay.feats.N})"
+                )
+            peak_gc = gc_values[feature_index]
+        else:
+            ids = np.asarray(assay.feats.fetch_all("ids"))[feature_index]
+            chroms, starts, ends = parse_coordinate_ids(ids)
+            with IndexedFasta(genome) as fasta:  # type: ignore[arg-type]
+                peak_gc = gc_content(fasta, chroms, starts, ends)
+        if not np.isfinite(peak_gc).all():
+            raise ValueError(
+                f"{int((~np.isfinite(peak_gc)).sum())} selected peaks have no GC "
+                "content; their sequence holds no A, C, G, or T base"
+            )
+        n_entries = len(network.edge_feature_index)
+        needed = chromvar_model_bytes(n_entries, len(feature_index), n_backgrounds)
+        if needed > self.resources.memoryBytes // 2:
+            raise MemoryError(
+                f"The chromVAR background model needs about {needed} bytes, more "
+                f"than half the memory budget of {self.resources.memoryBytes} "
+                "bytes; score fewer sources or peaks per call"
+            )
+        arguments = ChromvarArguments(
+            cell_selection=cell_selection,
+            feature_selection=feature_selection,
+            network_digest=network.network_digest,
+            gc_digest=array_digest(peak_gc),
+            tmin=tmin,
+            n_backgrounds=n_backgrounds,
+            background_seed=background_seed,
+            kernel_width=float(kernel_width),
+            bins=bins,
+            invalidate_cache=invalidate_cache,
+        )
+        n_sources = len(network.source_names)
+        positions = np.searchsorted(feature_index, network.edge_feature_index)
+        background_holder: list[np.ndarray] = []
+
+        def score_batches() -> Iterator[tuple[np.ndarray, np.ndarray]]:
+            # Read complete rows and select the peaks in memory. Zarr's
+            # orthogonal selection with index arrays on both axes holds many
+            # times the block for wide peak matrices.
+            counts = assay.rawData[cell_index, :]
+            fragments = np.asarray(
+                compute_with_progress(
+                    counts.sum(axis=0, dtype=np.float64),
+                    f"({assay.name}) Counting fragments per peak",
+                    self.nthreads,
+                ),
+                dtype=np.float64,
+            )[feature_index]
+            if np.any(fragments <= 0):
+                raise ValueError(
+                    f"{int((fragments <= 0).sum())} selected peaks have no fragments "
+                    "in the selected cells; select peaks with fragments, for "
+                    "example with features.prevalent_peaks"
+                )
+            background = background_peaks(
+                fragments,
+                peak_gc,
+                n_iterations=n_backgrounds,
+                kernel_width=float(kernel_width),
+                bins=bins,
+                seed=background_seed,
+            )
+            background_holder.append(background)
+            annotation = csc_matrix(
+                (
+                    np.ones(len(positions), dtype=np.float64),
+                    (positions, network.edge_source_index),
+                ),
+                shape=(len(feature_index), n_sources),
+            )
+            model = build_chromvar_model(annotation, fragments, background)
+            for raw_block in counts.stream_blocks(
+                nthreads=self.nthreads,
+                msg="Scoring chromVAR",
+                prefetch=1,
+            ):
+                block = np.asarray(raw_block)[:, feature_index]
+                deviations, scores = score_chromvar_block(block, model)
+                yield scores, deviations
+
+        def extra_arrays() -> tuple[tuple[str, np.ndarray], ...]:
+            (background,) = background_holder
+            return (("background_index", feature_index[background]),)
+
+        @contextmanager
+        def chromvar_write_context() -> Iterator[None]:
+            import numba
+
+            previous_threads = numba.get_num_threads()
+            numba.set_num_threads(
+                min(max(1, int(self.nthreads)), numba.config.NUMBA_NUM_THREADS)
+            )
+            try:
+                yield
+            finally:
+                numba.set_num_threads(previous_threads)
+
+        return self._run_enrichment(
+            assay=assay,
+            invalidate_cache=invalidate_cache,
+            scorer=_EnrichmentScorer(
+                method="chromvar",
+                method_payload={
+                    "background_seed": background_seed,
+                    "bins": bins,
+                    "dropped_ambiguous_targets": list(
+                        network.dropped_ambiguous_targets
+                    ),
+                    "gc_digest": array_digest(peak_gc),
+                    "kernel_width": float(kernel_width),
+                    "n_backgrounds": n_backgrounds,
+                    "network_digest": network.network_digest,
+                    "tmin": tmin,
+                },
+                arguments=arguments,
+                cell_index=cell_index,
+                feature_index=feature_index,
+                matched_feature_index=network.matched_feature_index,
+                source_names=network.source_names,
+                source_sizes=network.source_sizes,
+                rank_feature_index=None,
+                extra_required_arrays=(
+                    ArrayRequirement(
+                        "deviations",
+                        shape=(len(cell_index), n_sources),
+                        dtype_kind="f",
+                    ),
+                    ArrayRequirement(
+                        "background_index",
+                        shape=(len(feature_index), n_backgrounds),
+                        dtype_kind="i",
+                    ),
+                ),
+                score_batches=score_batches,
+                write_context=chromvar_write_context,
+                allow_missing=True,
+                extra_dense=("deviations",),
+                extra_arrays=extra_arrays,
+            ),
+        )
+
+    @validation_scoped
     def _scores_load(
         self,
         enrichment: ArtifactRef,
@@ -1061,9 +1342,13 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             raise ValueError(
                 "enrichment must identify an assay enrichment_scores artifact"
             )
+        from ...assay import ATACassay
+
         assay = self._get_assay(enrichment.assay)
-        if not isinstance(assay, RNAassay):
-            raise TypeError("Enrichment results are only available for an RNAassay")
+        if not isinstance(assay, (RNAassay, ATACassay)):
+            raise TypeError(
+                "Enrichment results are only available for an RNAassay or ATACassay"
+            )
         return _load_enrichment_result(
             assay,
             enrichment=enrichment,

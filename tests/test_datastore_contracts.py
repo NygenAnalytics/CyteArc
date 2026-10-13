@@ -20,6 +20,7 @@ from cytearc.datastore.namespaces import (
     MarkersAccessor,
     QcAccessor,
     ReductionAccessor,
+    RegulonsAccessor,
     ScoresAccessor,
     TrajectoryAccessor,
 )
@@ -139,6 +140,7 @@ _ACCESSORS = {
     "markers": MarkersAccessor,
     "qc": QcAccessor,
     "reduction": ReductionAccessor,
+    "regulons": RegulonsAccessor,
     "scores": ScoresAccessor,
     "trajectory": TrajectoryAccessor,
 }
@@ -151,7 +153,7 @@ _NAMESPACE_METHODS = [
 
 
 def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
-    assert len(_NAMESPACE_METHODS) == 70
+    assert len(_NAMESPACE_METHODS) == 73
 
 
 @pytest.mark.parametrize(
@@ -279,6 +281,7 @@ def test_datastore_accessor_namespace_contract_is_stable():
         "trajectory",
         "mapping",
         "compare",
+        "regulons",
     ):
         descriptor = inspect.getattr_static(DataStore, name)
         assert isinstance(descriptor, property)
@@ -361,6 +364,7 @@ def test_datastore_private_mixin_order_is_stable():
     from cytearc.datastore._operations.quality_control import (
         _QualityControlOperationsMixin,
     )
+    from cytearc.datastore._operations.regulons import _RegulonOperationsMixin
     from cytearc.datastore._operations.trajectory import (
         _TrajectoryFeatureOperationsMixin,
     )
@@ -371,15 +375,17 @@ def test_datastore_private_mixin_order_is_stable():
         _TrajectoryFeatureOperationsMixin,
         _IntegrationMetricsOperationsMixin,
         _PresentationOperationsMixin,
+        _RegulonOperationsMixin,
         MappingDatastore,
     )
-    assert DataStore.mro()[:7] == [
+    assert DataStore.mro()[:8] == [
         DataStore,
         _QualityControlOperationsMixin,
         _FeatureOperationsMixin,
         _TrajectoryFeatureOperationsMixin,
         _IntegrationMetricsOperationsMixin,
         _PresentationOperationsMixin,
+        _RegulonOperationsMixin,
         MappingDatastore,
     ]
 
@@ -418,6 +424,7 @@ def test_datastore_operation_mixins_have_unique_method_owners():
     from cytearc.datastore._operations.quality_control import (
         _QualityControlOperationsMixin,
     )
+    from cytearc.datastore._operations.regulons import _RegulonOperationsMixin
     from cytearc.datastore._operations.trajectory import (
         _TrajectoryFeatureOperationsMixin,
         _TrajectoryOperationsMixin,
@@ -435,6 +442,7 @@ def test_datastore_operation_mixins_have_unique_method_owners():
         _TrajectoryFeatureOperationsMixin,
         _IntegrationMetricsOperationsMixin,
         _PresentationOperationsMixin,
+        _RegulonOperationsMixin,
     )
     owners: dict[str, list[str]] = {}
     for mixin in mixins:

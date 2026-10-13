@@ -2,7 +2,7 @@ import json
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import zarr
@@ -43,15 +43,56 @@ class _EnrichmentScorer:
     source_sizes: np.ndarray
     rank_feature_index: np.ndarray | None
     extra_required_arrays: tuple[ArrayRequirement, ...]
-    score_batches: Callable[[], Iterator[np.ndarray]]
+    score_batches: Callable[[], Iterator[Any]]
     write_context: Callable[[], AbstractContextManager[None]] = nullcontext
+    # chromVAR leaves cells with too few expected fragments without a value.
+    allow_missing: bool = False
+    # Further cells-by-sources arrays; score batches are then tuples of the
+    # scores and these arrays in this order.
+    extra_dense: tuple[str, ...] = ()
+    # Further method arrays, such as background peaks, produced once the
+    # score batches have been streamed.
+    extra_arrays: Callable[[], tuple[tuple[str, np.ndarray], ...]] = tuple
+
+
+class _RowBandWriter:
+    """Write streamed rows of a cells-by-sources array in whole chunk bands."""
+
+    def __init__(self, array: zarr.Array) -> None:
+        from ...storage.layout import array_shard_rows
+
+        self.array = array
+        self.band = array_shard_rows(array)
+        self.buffer: list[np.ndarray] = []
+        self.buffered = 0
+        self.start = 0
+
+    def add(self, rows: np.ndarray) -> None:
+        self.buffer.append(rows)
+        self.buffered += rows.shape[0]
+        while self.buffered >= self.band:
+            stacked = np.vstack(self.buffer)
+            self.array[self.start : self.start + self.band] = stacked[: self.band]
+            self.start += self.band
+            rest = stacked[self.band :]
+            self.buffer = [rest] if rest.shape[0] else []
+            self.buffered = rest.shape[0]
+
+    def finish(self) -> int:
+        if self.buffered:
+            stacked = np.vstack(self.buffer)
+            self.array[self.start : self.start + self.buffered] = stacked
+            self.start += self.buffered
+        self.buffer = []
+        self.buffered = 0
+        return self.start
 
 
 def _write_enrichment_slot(
     slot: zarr.Group,
     *,
     attrs: dict[str, Any],
-    score_batches: Iterator[np.ndarray],
+    score_batches: Iterator[Any],
     n_cells: int,
     source_names: np.ndarray,
     source_sizes: np.ndarray,
@@ -60,8 +101,15 @@ def _write_enrichment_slot(
     rank_feature_index: np.ndarray | None,
     resources: ResourceBudget,
     io: StorageIoPolicy | None,
+    allow_missing: bool = False,
+    extra_dense: tuple[str, ...] = (),
+    extra_arrays: Callable[[], tuple[tuple[str, np.ndarray], ...]] = tuple,
 ) -> None:
-    from ...storage.arrays import create_metadata_column, create_numeric_array
+    from ...storage.arrays import (
+        create_metadata_column,
+        create_numeric_array,
+        create_zarr_dataset,
+    )
     from ...storage.layout import normed_array_spec
     from ...storage.profiles import resolve_storage_profile
     from ...storage.sharding import write_dense_from_row_batches
@@ -122,23 +170,38 @@ def _write_enrichment_slot(
         dtype=np.int64,
         chunkSize=100_000,
     )
-    scores = create_numeric_array(
-        slot,
-        "scores",
-        normed_array_spec(
-            n_cells,
-            n_sources,
-            profile=resolve_storage_profile(slot.store),
-        ),
+    spec = normed_array_spec(
+        n_cells,
+        n_sources,
+        profile=resolve_storage_profile(slot.store),
     )
+    scores = create_numeric_array(slot, "scores", spec)
+    extra_writers = [
+        _RowBandWriter(create_numeric_array(slot, name, spec)) for name in extra_dense
+    ]
+
+    def checked(values: Any) -> np.ndarray:
+        array = np.asarray(values, dtype=np.float64)
+        if array.ndim != 2 or array.shape[1] != n_sources:
+            raise ValueError("Enrichment score batch has an invalid shape")
+        valid = ~np.isnan(array) if allow_missing else np.ones(array.shape, bool)
+        if not np.isfinite(array[valid]).all():
+            raise ValueError("Enrichment score batch contains non-finite values")
+        return array
 
     def checked_batches() -> Iterator[np.ndarray]:
         for batch in score_batches:
-            values = np.asarray(batch, dtype=np.float64)
-            if values.ndim != 2 or values.shape[1] != n_sources:
-                raise ValueError("Enrichment score batch has an invalid shape")
-            if not np.isfinite(values).all():
-                raise ValueError("Enrichment score batch contains non-finite values")
+            if extra_writers:
+                if not isinstance(batch, tuple) or len(batch) != 1 + len(extra_writers):
+                    raise ValueError("Enrichment batch lacks its extra arrays")
+                values = checked(batch[0])
+                for writer, extra in zip(extra_writers, batch[1:], strict=True):
+                    extra_values = checked(extra)
+                    if extra_values.shape != values.shape:
+                        raise ValueError("Enrichment extra batch is misaligned")
+                    writer.add(extra_values.astype(np.float32))
+            else:
+                values = checked(batch)
             yield values
 
     written = write_dense_from_row_batches(
@@ -153,6 +216,23 @@ def _write_enrichment_slot(
         raise ValueError(
             f"Enrichment writer produced {written} rows, expected {n_cells}"
         )
+    for writer in extra_writers:
+        if writer.finish() != n_cells:
+            raise ValueError("Enrichment extra writer produced misaligned rows")
+    for name, values in extra_arrays():
+        if values.ndim == 1:
+            create_metadata_column(
+                slot, name, data=values, dtype=values.dtype, chunkSize=100_000
+            )
+        else:
+            stored = create_zarr_dataset(
+                slot,
+                name,
+                chunks=(min(max(1, values.shape[0]), 100_000), values.shape[1]),
+                dtype=values.dtype,
+                shape=values.shape,
+            )
+            stored[:, :] = values
     # finish_artifact validates the payload and marks the slot complete.
 
 
@@ -221,7 +301,18 @@ def _validate_enrichment_artifact_provenance(
     expected_parameters: dict[str, Any] = {
         "tmin": group.attrs["tmin"],
     }
-    if method == "waggr":
+    if method == "chromvar":
+        expected_parameters.update(
+            {
+                "background_seed": group.attrs["background_seed"],
+                "bins": group.attrs["bins"],
+                "kernel_width": group.attrs["kernel_width"],
+                "n_backgrounds": group.attrs["n_backgrounds"],
+            }
+        )
+        if inputs.get("gc_digest") != group.attrs["gc_digest"]:
+            raise ValueError("chromVAR artifact GC input does not match its metadata")
+    elif method == "waggr":
         # WAGGR only runs with norm_lib_size, so the stored identity is fixed;
         # the live assay normalization may have changed since.
         normalization_method = parameters.get("normalization_method")
@@ -314,7 +405,7 @@ def _load_enrichment_result(
     if slot.attrs.get("complete") is not True:
         raise ValueError(f"Enrichment slot {label!r} is incomplete")
     method = str(slot.attrs.get("method", ""))
-    if method not in {"waggr", "aucell"}:
+    if method not in {"waggr", "aucell", "chromvar"}:
         raise ValueError(f"Enrichment slot {label!r} has an unknown method")
     if status.operation != f"run_{method}":
         raise ValueError(
@@ -330,11 +421,17 @@ def _load_enrichment_result(
     }
     if not required_attrs.issubset(slot.attrs):
         raise ValueError(f"Enrichment slot {label!r} is missing required metadata")
-    method_attrs = (
-        {"log_transform", "normalization", "size_factor", "waggr_mode"}
-        if method == "waggr"
-        else {"n_up", "tie_seed"}
-    )
+    method_attrs = {
+        "waggr": {"log_transform", "normalization", "size_factor", "waggr_mode"},
+        "aucell": {"n_up", "tie_seed"},
+        "chromvar": {
+            "background_seed",
+            "bins",
+            "gc_digest",
+            "kernel_width",
+            "n_backgrounds",
+        },
+    }[method]
     if not method_attrs.issubset(slot.attrs):
         raise ValueError(f"Enrichment slot {label!r} is missing method metadata")
     if slot.attrs["layout"] != _ENRICHMENT_LAYOUT:
@@ -376,6 +473,27 @@ def _load_enrichment_result(
             or not isinstance(slot.attrs["log_transform"], bool)
         ):
             raise ValueError(f"WAGGR slot {label!r} has invalid method metadata")
+    elif method == "chromvar":
+        integers = {
+            name: slot.attrs[name]
+            for name in ("background_seed", "bins", "n_backgrounds")
+        }
+        width = slot.attrs["kernel_width"]
+        if (
+            any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in integers.values()
+            )
+            or cast(int, integers["background_seed"]) < 0
+            or cast(int, integers["bins"]) < 2
+            or cast(int, integers["n_backgrounds"]) < 2
+            or isinstance(width, bool)
+            or not isinstance(width, (int, float, np.integer, np.floating))
+            or not float(width) > 0
+            or not isinstance(slot.attrs["gc_digest"], str)
+            or not slot.attrs["gc_digest"]
+        ):
+            raise ValueError(f"chromVAR slot {label!r} has invalid method metadata")
     else:
         n_up = slot.attrs["n_up"]
         tie_seed = slot.attrs["tie_seed"]
@@ -408,8 +526,10 @@ def _load_enrichment_result(
         raise ValueError(f"Enrichment slot {label!r} is missing required arrays")
     if method == "aucell" and "rank_feature_index" not in slot:
         raise ValueError(f"AUCell slot {label!r} is missing its ranking universe")
-    if method == "waggr" and "rank_feature_index" in slot:
-        raise ValueError(f"WAGGR slot {label!r} contains unexpected rank metadata")
+    if method != "aucell" and "rank_feature_index" in slot:
+        raise ValueError(f"Enrichment slot {label!r} contains unexpected rank metadata")
+    if method == "chromvar" and not {"background_index", "deviations"}.issubset(slot):
+        raise ValueError(f"chromVAR slot {label!r} is missing its deviations")
 
     scores = as_zarr_array(slot["scores"], name=f"{storage_path}/scores")
     cell_node = as_zarr_array(slot["cell_index"], name="cell_index")
@@ -476,6 +596,34 @@ def _load_enrichment_result(
         if not np.isin(matched_feature_index, rank_feature_index).all():
             raise ValueError(f"AUCell slot {label!r} has unmatched network features")
 
+    deviations: ChunkedArray | None = None
+    if method == "chromvar":
+        deviation_node = as_zarr_array(
+            slot["deviations"], name=f"{storage_path}/deviations"
+        )
+        background_node = as_zarr_array(
+            slot["background_index"], name="background_index"
+        )
+        if deviation_node.shape != scores.shape or np.dtype(
+            deviation_node.dtype
+        ) != np.dtype(np.float32):
+            raise ValueError(f"chromVAR slot {label!r} has misaligned deviations")
+        background_index = np.asarray(background_node[:])
+        selection_path = inspect_artifact(artifact_root, feature_selection).path
+        selection_group = as_zarr_group(
+            artifact_root[selection_path], name=selection_path
+        )
+        selected = np.flatnonzero(
+            np.asarray(as_zarr_array(selection_group["values"], name="values")[:])
+        )
+        if (
+            background_index.ndim != 2
+            or background_index.shape
+            != (len(selected), cast(int, slot.attrs["n_backgrounds"]))
+            or not np.isin(background_index, selected).all()
+        ):
+            raise ValueError(f"chromVAR slot {label!r} has invalid background peaks")
+        deviations = ChunkedArray(deviation_node, nthreads=assay.nthreads)
     data = ChunkedArray(scores, nthreads=assay.nthreads)
     if sources is not None:
         if isinstance(sources, str):
@@ -498,6 +646,8 @@ def _load_enrichment_result(
             dtype=np.int64,
         )
         data = data[:, positions]
+        if deviations is not None:
+            deviations = deviations[:, positions]
         source_names = source_names[positions]
         source_sizes = source_sizes[positions]
 
@@ -512,4 +662,5 @@ def _load_enrichment_result(
         cell_selection=cell_selection,
         feature_selection=feature_selection,
         method=method,
+        deviations=deviations,
     )

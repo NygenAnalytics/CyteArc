@@ -307,6 +307,30 @@ Compare plausible source and sink definitions when the endpoints are uncertain.
 Check validity keys, graph components, terminal probabilities, and expected marker trends.
 A pseudotime or fate artifact is a model-based summary, not evidence of causal lineage.
 
+### Regulons, chromatin activity, and gene programs
+
+Use [](tutorials/regulons.ipynb) for RNA regulons, motif and binding-peak activity in ATAC
+cells, enhancer-driven regulons, and co-regulated gene programs.
+Treat every regulon as a hypothesis about regulation, not as evidence of binding or causality.
+
+- A SCENIC regulon combines co-expression with motif enrichment near target genes.
+  GRNBoost2 is stochastic: rerun `regulons.grn` with a second `random_seed` and report regulons
+  and targets that persist across seeds.
+- Use a cisTarget database for the same species and gene naming as the expression data, and a
+  JASPAR or cisTarget motif collection with the factor annotations it was built for. Module
+  genes missing from the database are skipped; check how many modules survive.
+- chromVAR measures accessibility of every peak that matches a motif. Paralogous factors share
+  motifs, so a motif deviation names a motif family; pair it with the factor's expression or a
+  binding experiment before naming one factor. Cells that expect fewer than one fragment in a
+  set have no value.
+- CUT&RUN, CUT&Tag, and ChIP-seq peaks measure binding in the profiled cells. Peaks from a cell
+  line or another cell type describe that context; remove blacklisted regions before mapping
+  them onto your peaks.
+- Enhancer-driven regulons need RNA and ATAC from the same cells. Region-to-gene links from
+  metacells are associations, so report them as candidate enhancers.
+- Gene programs group genes that co-vary across metacells. Factors nominated by motif
+  enrichment of a program are candidates to test, not its demonstrated regulators.
+
 ### Methods outside CyteArc
 
 Use [](tutorials/custom_analyses.ipynb) for block streams, graph access, custom selections, external reductions, and supported export paths.

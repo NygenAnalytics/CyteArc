@@ -88,6 +88,7 @@ test = [
     "scikit-network>=0.33.3",
     "rdata>=1.1.0",
     "pydantic-ai-slim[openai]>=2.51.0",
+    "polars>=1.20",
     # CI runs t-SNE on Linux x86_64, where sgtsnepi has wheels.
     "sgtsnepi>=0.7; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
@@ -103,6 +104,12 @@ docs = [
     "sphinx-copybutton",
     # The tutorials run t-SNE on Linux x86_64, where sgtsnepi has wheels.
     "sgtsnepi>=0.7; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+# Reads cisTarget ranking databases, which are Feather (Arrow IPC) files.
+# polars reads them without installing pyarrow, which would change pandas'
+# default string storage for the whole environment.
+regulons = [
+    "polars>=1.20",
 ]
 
 [project.urls]

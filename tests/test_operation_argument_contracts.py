@@ -19,6 +19,7 @@ from cytearc.datastore.namespaces import (
     MarkersAccessor,
     QcAccessor,
     ReductionAccessor,
+    RegulonsAccessor,
     ScoresAccessor,
     TrajectoryAccessor,
 )
@@ -181,6 +182,31 @@ _CONTRACTS = (
             # The network digest hashes only the retained edges.
             **_classified("transformed", "ambiguous_targets"),
         },
+    ),
+    OperationContract(
+        ScoresAccessor.chromvar,
+        metadata_arguments.ChromvarArguments,
+        aliases={
+            "features": "feature_selection",
+            "gc": "gc_digest",
+            "net": "network_digest",
+        },
+        signature_only={
+            **_classified("routing", "from_assay"),
+            # The network digest hashes only the retained edges, and the GC
+            # digest hashes the selected peaks' GC content, read from either.
+            **_classified("transformed", "ambiguous_targets", "genome"),
+        },
+    ),
+    OperationContract(
+        RegulonsAccessor.grn,
+        metadata_arguments.GrnArguments,
+        aliases={
+            "features": "feature_selection",
+            "tfs": "regulators_digest",
+        },
+        signature_only=_classified("routing", "from_assay"),
+        model_only=_classified("algorithm_policy", "method", "values"),
     ),
     OperationContract(
         ScoresAccessor.cell_cycle,

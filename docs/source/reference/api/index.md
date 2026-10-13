@@ -19,6 +19,7 @@ assays
 import_export
 integration
 mapping
+regulons
 plotting
 cytebase
 utilities

@@ -63,6 +63,8 @@ project:
       title: TEA-seq
     - file: tutorials/multimodal_diagnostics.ipynb
       title: WNN and SNN integration
+    - file: tutorials/regulons.ipynb
+      title: Regulons and gene programs
     - file: tutorials/hto_demultiplexing.ipynb
       title: HTO demultiplexing
   - title: Integration and mapping

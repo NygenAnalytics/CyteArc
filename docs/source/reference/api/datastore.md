@@ -113,9 +113,22 @@ See {doc}`artifacts` for supported filters and ambiguity handling.
 
 ### `ds.scores`
 
+`chromvar` scores peak sets, such as motif matches or CUT&RUN peaks of one factor, on an
+ATAC assay; see {doc}`regulons` for building those networks.
+
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.ScoresAccessor
-    :members: aucell, waggr, load, cell_cycle
+    :members: aucell, chromvar, waggr, load, cell_cycle
+```
+
+### `ds.regulons`
+
+`grn` infers transcription-factor to target importances with GRNBoost2 on raw counts; the
+functions in {doc}`regulons` turn them into regulons.
+
+```{eval-rst}
+.. autoclass:: cytearc.datastore.namespaces.RegulonsAccessor
+    :members: grn, load_grn
 ```
 
 ### `ds.imputation`
@@ -517,6 +530,9 @@ The recommended workflow is in [Read RNA and protein together with CITE-seq](../
     :members:
 
 .. autoclass:: cytearc.EnrichmentResult
+    :members:
+
+.. autoclass:: cytearc.regulons.GrnResult
     :members:
 
 .. autoclass:: cytearc.features.statistical.StatisticalTestResult
