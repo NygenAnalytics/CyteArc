@@ -259,6 +259,16 @@ def test_indexed_read_parts_charge_the_narrower_band() -> None:
     )
 
 
+def test_band_costs_are_zero_for_empty_selections() -> None:
+    geometry = ArrayGeometry((4096, 4096), (1024, 1024), (4096, 4096), 2)
+    empty = np.array([], dtype=np.int64)
+    # Callers skip empty selections, but the exported helpers answer them.
+    assert widest_chunk_span(empty, 1024) == 0
+    assert indexed_read_parts(geometry, empty, block_rows=1024) == (0, 0)
+    assert row_read_parts(geometry, empty, rows_contiguous=False) == (0, 0)
+    assert row_read_parts(None, np.array([0, 2]), rows_contiguous=False) == (0, 0)
+
+
 def test_selected_row_cost_admits_only_touched_chunks_within_each_shard() -> None:
     geometry = ArrayGeometry((32, 24), (4, 2), (8, 8), 2, 10_000)
     narrow, _ = row_read_parts(geometry, np.array([0, 8, 16]), rows_contiguous=True)

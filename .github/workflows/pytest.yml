@@ -106,11 +106,18 @@ jobs:
 
   pyarrow:
     # pandas stores text with pyarrow whenever it is installed, as in many user
-    # environments. The lock file does not install it, so this job layers it on
-    # the locked environment and runs the quick suite.
+    # environments. The lock file does not install it, so these jobs layer it on
+    # the locked environment and run the quick suite.
+    name: pyarrow (${{ matrix.shard }}/4)
     runs-on: ubuntu-26.04
     env:
       HNSWLIB_NO_NATIVE: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        # One job took about eight minutes, twice the slowest test shard; four
+        # shards, balanced like the test jobs, keep it off the critical path.
+        shard: [1, 2, 3, 4]
     steps:
     - uses: actions/checkout@v7
       with:
@@ -131,7 +138,7 @@ jobs:
     - name: Test the quick suite with pyarrow installed
       run: |
         uv run --with pyarrow python -c "import pandas; assert pandas.Series(['a']).dtype.storage == 'pyarrow'"
-        uv run --with pyarrow pytest -n logical --durations=25 -m "not slow and not integration"
+        uv run --with pyarrow pytest -n logical --durations=25 -m "not slow and not integration" --shard "${{ matrix.shard }}/4"
 
   test:
     name: test (${{ matrix.python-version }}, ${{ matrix.resolution }}, ${{ matrix.shard }}/4)
