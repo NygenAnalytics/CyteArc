@@ -23,6 +23,9 @@ class ShutdownRequested(BaseException):
         self.request = request
         super().__init__(request.reason)
 
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
+        return (type(self), (self.request,), self.__dict__)
+
 
 @dataclass(frozen=True, slots=True)
 class _Claim:

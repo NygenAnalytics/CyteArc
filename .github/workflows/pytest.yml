@@ -104,6 +104,35 @@ jobs:
         uv build
         uv run --no-project python tests/smoke_wheel.py dist/*.whl
 
+  pyarrow:
+    # pandas stores text with pyarrow whenever it is installed, as in many user
+    # environments. The lock file does not install it, so this job layers it on
+    # the locked environment and runs the quick suite.
+    runs-on: ubuntu-26.04
+    env:
+      HNSWLIB_NO_NATIVE: "1"
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 0
+    - name: Install system build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential
+    - name: Install uv
+      uses: astral-sh/setup-uv@v9.0.0
+      with:
+        python-version: "3.13"
+    - name: Install dependencies
+      run: uv sync --group profiling --group cytebase --extra test --extra extra --extra agent --extra cytebase
+    - name: Download test fixtures
+      run: uv run python -m tests.download_fixtures --with-h5ad
+    - name: Test the quick suite with pyarrow installed
+      run: |
+        uv run --with pyarrow python -c "import pandas; assert pandas.Series(['a']).dtype.storage == 'pyarrow'"
+        uv run --with pyarrow pytest -n logical --durations=25 -m "not slow and not integration"
+
   test:
     name: test (${{ matrix.python-version }}, ${{ matrix.resolution }}, ${{ matrix.shard }}/4)
     runs-on: ubuntu-26.04

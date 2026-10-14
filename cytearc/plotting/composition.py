@@ -48,6 +48,23 @@ class _MissingCategory:
 _MISSING_CATEGORY = _MissingCategory()
 
 
+def _missing_category_as_none(table: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of ``table`` with None for the missing-category key.
+
+    The key is found by identity: pandas refuses ``==`` between an arbitrary
+    object and a text column that pyarrow stores.
+    """
+    output = table.copy()
+    categories = output["category"]
+    missing = np.fromiter(
+        (value is _MISSING_CATEGORY for value in categories),
+        dtype=bool,
+        count=len(categories),
+    )
+    output["category"] = categories.mask(missing, None)
+    return output
+
+
 def _constant_within_sample(
     samples: np.ndarray,
     values: np.ndarray,
@@ -950,26 +967,13 @@ def composition(
             ax.set_ylim(-0.02, min(1.02, max(0.2, ymax * 1.15)))
         apply_figure_chrome(fig, theme)
 
-    aggregate_table = aggregate.copy()
-    aggregate_table["category"] = aggregate_table["category"].mask(
-        aggregate_table["category"] == _MISSING_CATEGORY,
-        None,
-    )
-    tables = {"aggregate": aggregate_table}
+    tables = {"aggregate": _missing_category_as_none(aggregate)}
     if per_sample is not None:
-        per_sample_table = per_sample.copy()
-        per_sample_table["category"] = per_sample_table["category"].mask(
-            per_sample_table["category"] == _MISSING_CATEGORY,
-            None,
+        tables["per_group" if grouping is not None else "per_sample"] = (
+            _missing_category_as_none(per_sample)
         )
-        tables["per_group" if grouping is not None else "per_sample"] = per_sample_table
     if summary_table is not None:
-        summary_output = summary_table.copy()
-        summary_output["category"] = summary_output["category"].mask(
-            summary_output["category"] == _MISSING_CATEGORY,
-            None,
-        )
-        tables["summary"] = summary_output
+        tables["summary"] = _missing_category_as_none(summary_table)
 
     notes = ["composition", kind]
     if pair_col is not None:

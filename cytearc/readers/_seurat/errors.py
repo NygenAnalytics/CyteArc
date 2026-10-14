@@ -1,3 +1,6 @@
+from typing import Any
+
+
 class MatrixSourceError(ValueError):
     """Base error for matrix source validation."""
 
@@ -30,3 +33,10 @@ class UnsupportedMatrixOperation(NotImplementedError):
         self.operation = operation
         self.className = class_name
         self.reason = reason
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
+        return (
+            type(self),
+            (self.objectPath, self.operation, self.className, self.reason),
+            self.__dict__,
+        )

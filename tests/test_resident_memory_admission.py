@@ -647,7 +647,8 @@ def _reserved_bytes(reports: list[ExecutionReport]) -> list[int]:
 def _batch_label_bytes() -> int:
     """Bytes of the batch labels that run_harmony holds: one text object each."""
     labels = np.where(np.arange(N_CELLS) % 2, "a", "b").astype(object)
-    return int(pd.DataFrame({"batch": labels}).memory_usage(deep=True).sum())
+    frame = pd.DataFrame({"batch": labels}, dtype=object)
+    return int(frame.memory_usage(deep=True).sum())
 
 
 def test_harmony_admission_counts_the_batch_labels(memory_store, monkeypatch) -> None:

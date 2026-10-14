@@ -52,8 +52,8 @@ class NonFiniteArtifactError(ValueError):
             f"array {array!r} at row {self.row}, where only finite values are allowed"
         )
 
-    def __reduce__(self) -> tuple[Any, tuple[str, str, int]]:
-        return (type(self), (self.operation, self.array, self.row))
+    def __reduce__(self) -> tuple[Any, tuple[str, str, int], dict[str, Any]]:
+        return (type(self), (self.operation, self.array, self.row), self.__dict__)
 
 
 def first_nonfinite_row(values: Any) -> int | None:

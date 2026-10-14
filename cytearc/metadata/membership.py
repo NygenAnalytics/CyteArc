@@ -316,7 +316,7 @@ class UnmeasuredCellsError(ValueError):
             f"{_measured_cells_remedy(remedy, assay, column, cell_key)}"
         )
 
-    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
         return (
             type(self),
             (
@@ -328,6 +328,7 @@ class UnmeasuredCellsError(ValueError):
                 self.remedy,
                 self.cell_key,
             ),
+            self.__dict__,
         )
 
 

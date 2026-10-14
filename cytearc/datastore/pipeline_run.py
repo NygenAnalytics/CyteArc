@@ -1,4 +1,5 @@
 import json
+import pickle
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, Literal, Protocol, overload
 
@@ -79,6 +80,52 @@ class PipelineExecutionError(RuntimeError):
         )
         self.run_id = run_id
         self.stage = stage
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
+        return (
+            _restore_pipeline_execution_error,
+            (
+                type(self),
+                self.args,
+                self.run_id,
+                self.stage,
+                _portable_cause(self.__cause__),
+            ),
+            self.__dict__,
+        )
+
+
+def _portable_cause(cause: BaseException | None) -> BaseException | None:
+    """Return ``cause`` if it survives pickling, or a stand-in that names it.
+
+    A pickled error drops its ``__cause__``, which callers inspect to classify
+    a failure, so the pipeline error carries it. A cause that cannot be
+    pickled, or cannot be rebuilt from its pickle, would make the pipeline
+    error fail to unpickle, so its type and message travel instead.
+    """
+    if cause is None:
+        return None
+    try:
+        pickle.loads(pickle.dumps(cause))
+    except Exception:
+        kind = type(cause)
+        return RuntimeError(f"{kind.__module__}.{kind.__qualname__}: {cause}")
+    return cause
+
+
+def _restore_pipeline_execution_error(
+    error_type: type[PipelineExecutionError],
+    args: tuple[Any, ...],
+    run_id: str,
+    stage: str,
+    cause: BaseException | None,
+) -> PipelineExecutionError:
+    error = error_type(run_id, stage, RuntimeError(*args) if cause is None else cause)
+    # The message names the original cause, which a stand-in does not repeat.
+    error.args = args
+    if cause is not None:
+        error.__cause__ = cause
+    return error
 
 
 def _artifact_context(

@@ -205,7 +205,8 @@ class ChunkedArray:
 
         Row-block streams run Zarr with one decode at a time, and a block's
         read touches, in each shard, the inner chunks of every row chunk and
-        of the selected columns.
+        of the selected columns. A block whose rows and columns are both index
+        arrays is read in bands instead; see ``_indexed_read_parts``.
         """
         if not self._is_numpy:
             reader = virtual_array_reader(cast(zarr.Array, self._backing))
@@ -222,7 +223,36 @@ class ChunkedArray:
             column_chunks = min(
                 column_chunks, int(np.unique(geometry.binOf(1, self._cols)).size)
             )
-        return geometry.readBytes(input_bytes, row_chunks * column_chunks, decodes=1)
+        read_bytes = geometry.readBytes(
+            input_bytes, row_chunks * column_chunks, decodes=1
+        )
+        parts = self._indexed_read_parts(geometry)
+        if parts is None:
+            return read_bytes
+        fixed, per_row = parts
+        rows = -(-input_bytes // max(1, self._n_cols * geometry.itemsize))
+        # A block whose selected rows form one run is read in one Zarr request.
+        return max(read_bytes, input_bytes + fixed + rows * per_row)
+
+    def _indexed_read_parts(self, geometry: ArrayGeometry) -> tuple[int, int] | None:
+        """Bytes beside a row block's result when its read indexes both axes.
+
+        ``read_selection`` reads such a block of a sharded backing in bands;
+        ``indexed_read_parts`` gives the bytes. Blocks may index both axes when
+        the matrix selects rows and columns that are not one run; otherwise, or
+        for an unsharded backing, this returns None.
+        """
+        from ..storage.partition import indexed_read_parts, is_contiguous
+
+        if geometry.shards is None or self._rows is None or self._cols is None:
+            return None
+        if is_contiguous(self._cols):
+            return None
+        return indexed_read_parts(
+            geometry,
+            self._cols,
+            block_rows=min(self._block_size, max(1, self._n_rows)),
+        )
 
     def _max_decode_bytes(self) -> int:
         """Bytes a row block's read holds for its inner chunks, whatever its rows."""
