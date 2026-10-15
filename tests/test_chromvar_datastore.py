@@ -61,7 +61,7 @@ def store_path(tmp_path_factory) -> tuple[str, str]:
         None,
         N_CELLS,
         feat_ids=np.asarray(_peaks()),
-        feat_names=np.asarray(_peaks()),
+        feat_names=np.asarray([f"peak{index}" for index in range(N_PEAKS)]),
         dtype="uint16",
     )
     array[:] = _counts()
@@ -217,6 +217,20 @@ def test_chromvar_reuses_identical_requests_and_accepts_gc_values(store_path):
 
     assert from_values == first
     assert reseeded != first
+    # A stored result is returned under any budget; only new work must fit.
+    small = DataStore(
+        path,
+        default_assay="ATAC",
+        min_features_per_cell=-1,
+        nthreads=2,
+        mem_budget="1K",
+    )
+    assert (
+        small.scores.chromvar(
+            _network(), cells, features=peaks, gc=gc, n_backgrounds=20
+        )
+        == first
+    )
 
 
 def test_chromvar_validates_its_inputs(store_path):

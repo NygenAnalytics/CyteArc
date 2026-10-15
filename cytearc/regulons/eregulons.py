@@ -16,6 +16,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from ..utils.arguments import integer_argument
+
 __all__ = [
     "EREGULON_COLUMNS",
     "EregulonParameters",
@@ -69,17 +71,12 @@ class EregulonParameters:
             raise ValueError("rhoThreshold must be non-negative")
         if any(not 0 <= value <= 1 for value in self.quantiles):
             raise ValueError("quantiles must lie in [0, 1]")
-        if any(
-            isinstance(value, bool) or not isinstance(value, int) or value < 1
-            for value in self.topRegionsPerGene
-        ):
-            raise ValueError("topRegionsPerGene must hold positive integers")
-        for label, value in (
-            ("minTargetGenes", self.minTargetGenes),
-            ("nPermutations", self.nPermutations),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(f"{label} must be a positive integer")
+        for value in self.topRegionsPerGene:
+            integer_argument(value, "topRegionsPerGene", minimum=1)
+        integer_argument(self.minTargetGenes, "minTargetGenes", minimum=1)
+        integer_argument(self.nPermutations, "nPermutations", minimum=1)
+        # numpy's legacy random state accepts 32-bit unsigned seeds only.
+        integer_argument(self.seed, "seed", minimum=0, maximum=2**32 - 1)
 
 
 #: SCENIC+ 1.0 pipeline settings.
@@ -133,34 +130,34 @@ def gsea_prerank(
     n_genes = len(genes)
     members = set(str(gene) for gene in gene_set)
     tags = np.fromiter(
-        (str(gene) in members for gene in genes), dtype=np.int64, count=n_genes
+        (str(gene) in members for gene in genes), dtype=bool, count=n_genes
     )
     hits = np.flatnonzero(tags)
     if len(hits) == 0 or len(hits) == n_genes or not weights[hits].sum() > 0:
         # gseapy divides by zero here; such a module has no score.
         return GseaResult(np.nan, np.nan, np.nan, ())
+    norm_miss = 1.0 / (n_genes - len(hits))
+
+    def extremes(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        norm_tag = 1.0 / np.sum(weights * rows, axis=1, keepdims=True)
+        running = np.cumsum(rows * weights * norm_tag - ~rows * norm_miss, axis=1)
+        highest, lowest = running.max(axis=1), running.min(axis=1)
+        return np.where(np.abs(highest) > np.abs(lowest), highest, lowest), running
+
     # gseapy seeds numpy's global generator with ``seed`` and draws one
-    # stream seed per gene set; a local generator gives the same draw.
+    # stream seed per gene set; a local generator gives the same draw. The
+    # permutations are shuffled in gseapy's order, a bounded block at a time.
     stream_seed = np.random.RandomState(seed).randint(np.iinfo(np.int32).max, size=1)[0]
     random_state = np.random.RandomState(stream_seed)
-    tag_matrix = np.tile(tags, (n_permutations + 1, 1))
-    for row in range(n_permutations):
-        random_state.shuffle(tag_matrix[row])
-    weight_matrix = np.tile(weights, (n_permutations + 1, 1))
-    n_hits = tag_matrix.sum(axis=1, keepdims=True)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        norm_tag = 1.0 / np.sum(weight_matrix * tag_matrix, axis=1, keepdims=True)
-        norm_miss = 1.0 / (n_genes - n_hits)
-        running = np.cumsum(
-            tag_matrix * weight_matrix * norm_tag - (1 - tag_matrix) * norm_miss,
-            axis=1,
-        )
-    highest = running.max(axis=1)
-    lowest = running.min(axis=1)
-    scores = np.where(np.abs(highest) > np.abs(lowest), highest, lowest)
-    observed = float(scores[-1])
-    null = scores[:-1]
-    observed_running = running[-1]
+    null = np.empty(n_permutations)
+    for start in range(0, n_permutations, 64):
+        rows = np.tile(tags, (min(64, n_permutations - start), 1))
+        for row in rows:
+            random_state.shuffle(row)
+        null[start : start + len(rows)] = extremes(rows)[0]
+    scores, running = extremes(tags[None, :])
+    observed = float(scores[0])
+    observed_running = running[0]
     same_sign = null[null >= 0] if observed >= 0 else null[null < 0]
     if len(same_sign) == 0:
         nes = p_value = np.nan
@@ -221,6 +218,10 @@ def binarize_region_to_gene(
     required = {"region", "gene", "importance", "rho"}
     if not required <= set(links.columns):
         raise ValueError(f"links lacks columns {sorted(required - set(links.columns))}")
+    if len(links) and links["importance"].isna().all():
+        raise ValueError(
+            "links have no importances; score them with region_gene_links(importance='gbm')"
+        )
     result: list[tuple[str, str, pd.DataFrame]] = []
     rho = links["rho"].to_numpy(dtype=np.float64)
     with np.errstate(invalid="ignore"):
@@ -247,15 +248,16 @@ def binarize_region_to_gene(
     return result
 
 
-def _rankings(
-    tf_to_gene: pd.DataFrame, factors: set[str], parameters: EregulonParameters
-) -> dict[tuple[str, str], pd.Series]:
-    """Positive and negative co-expression rankings of each factor.
+def _with_self_links(tf_to_gene: pd.DataFrame, factors: set[str]) -> pd.DataFrame:
+    """The factors' co-expression links, each factor targeting itself.
 
-    Each factor gets a self-link with its top importance plus 1e-5 and
-    correlation 1, as SCENIC+ adds before ranking.
+    The self-link has the factor's top importance plus 1e-5 and correlation
+    1, as SCENIC+ adds before ranking; it replaces any given self-link.
     """
-    links = tf_to_gene.loc[tf_to_gene["TF"].isin(factors)]
+    links = tf_to_gene.loc[
+        tf_to_gene["TF"].isin(factors) & (tf_to_gene["TF"] != tf_to_gene["target"]),
+        ["TF", "target", "importance", "correlation"],
+    ]
     tops = links.groupby("TF")["importance"].max()
     self_links = pd.DataFrame(
         {
@@ -265,7 +267,13 @@ def _rankings(
             "correlation": 1.0,
         }
     )
-    links = pd.concat([links, self_links], ignore_index=True)
+    return pd.concat([links, self_links], ignore_index=True)
+
+
+def _rankings(
+    links: pd.DataFrame, parameters: EregulonParameters
+) -> dict[tuple[str, str], pd.Series]:
+    """Positive and negative co-expression rankings of each factor."""
     rankings: dict[tuple[str, str], pd.Series] = {}
     for sign, mask in (
         ("+", links["correlation"] > parameters.rhoThreshold),
@@ -316,8 +324,9 @@ def build_eregulons(
             raise ValueError(
                 f"{name} lacks columns {sorted(columns - set(frame.columns))}"
             )
-    if isinstance(nthreads, bool) or not isinstance(nthreads, int) or nthreads < 1:
-        raise ValueError("nthreads must be a positive integer")
+    integer_argument(nthreads, "nthreads", minimum=1)
+    if tf_to_gene.duplicated(["TF", "target"]).any():
+        raise ValueError("tf_to_gene repeats a (TF, target) link")
     factors = set(cistromes["source"].astype(str)) & set(tf_to_gene["TF"].astype(str))
     regions_of = {
         str(tf): set(group["target"].astype(str))
@@ -325,7 +334,8 @@ def build_eregulons(
             "source"
         )
     }
-    rankings = _rankings(tf_to_gene, factors, parameters)
+    co_expression = _with_self_links(tf_to_gene, factors)
+    rankings = _rankings(co_expression, parameters)
     modules: list[tuple[str, str, str, pd.DataFrame]] = []
     for r2g_sign, context, links in binarize_region_to_gene(
         region_to_gene, parameters=parameters
@@ -343,29 +353,25 @@ def build_eregulons(
         if (tf, tf2g_sign) in rankings
     ]
 
-    def test(task: tuple[str, str, str, pd.DataFrame]) -> GseaResult | None:
+    def test(task: tuple[str, str, str, pd.DataFrame]) -> GseaResult:
         tf, _r2g, tf2g_sign, selected = task
-        try:
-            return gsea_prerank(
-                rankings[(tf, tf2g_sign)],
-                sorted(set(selected["gene"].astype(str))),
-                n_permutations=parameters.nPermutations,
-                seed=parameters.seed,
-            )
-        except (FloatingPointError, ValueError, ZeroDivisionError):
-            return None
+        return gsea_prerank(
+            rankings[(tf, tf2g_sign)],
+            sorted(set(selected["gene"].astype(str))),
+            n_permutations=parameters.nPermutations,
+            seed=parameters.seed,
+        )
 
     if nthreads == 1:
         results = [test(task) for task in tasks]
     else:
         with ThreadPoolExecutor(max_workers=nthreads) as executor:
             results = list(executor.map(test, tasks))
+    # A module without a score (NaN) is dropped before the correction.
     tested = [
         (task, result)
         for task, result in zip(tasks, results, strict=True)
-        if result is not None
-        and np.isfinite(result.enrichmentScore)
-        and np.isfinite(result.pValue)
+        if np.isfinite(result.enrichmentScore) and np.isfinite(result.pValue)
     ]
     adjusted = _bh(np.asarray([result.pValue for _task, result in tested]))
     kept: dict[tuple[str, str, str], set[tuple[str, str]]] = {}
@@ -389,32 +395,15 @@ def build_eregulons(
         ].itertuples(index=False):
             pairs.add((str(region), str(gene)))
             values[(str(region), str(gene))] = (float(importance), float(rho))
-    co_expression = tf_to_gene.set_index(["TF", "target"])[
-        ["importance", "correlation"]
+    rows = [
+        (f"{tf}_{label}_{tf2g_sign}/{r2g_sign}", tf, tf2g_sign, r2g_sign, region, gene)
+        + link_values[(tf, tf2g_sign, r2g_sign)][(region, gene)]
+        for (tf, tf2g_sign, r2g_sign), pairs in sorted(kept.items())
+        for region, gene in sorted(pairs)
     ]
-    rows = []
-    for (tf, tf2g_sign, r2g_sign), pairs in sorted(kept.items()):
-        name = f"{tf}_{label}_{tf2g_sign}/{r2g_sign}"
-        for region, gene in sorted(pairs):
-            importance, rho = link_values[(tf, tf2g_sign, r2g_sign)][(region, gene)]
-            if (tf, gene) in co_expression.index:
-                tf_importance, tf_rho = co_expression.loc[(tf, gene)].to_numpy()
-            elif gene == tf:
-                tf_importance, tf_rho = np.nan, 1.0
-            else:
-                tf_importance, tf_rho = np.nan, np.nan
-            rows.append(
-                (
-                    name,
-                    tf,
-                    tf2g_sign,
-                    r2g_sign,
-                    region,
-                    gene,
-                    importance,
-                    rho,
-                    float(tf_importance),
-                    float(tf_rho),
-                )
-            )
-    return pd.DataFrame.from_records(rows, columns=list(EREGULON_COLUMNS))
+    eregulons = pd.DataFrame.from_records(rows, columns=list(EREGULON_COLUMNS[:8]))
+    # Each target's co-expression statistics, the factor's self-link included.
+    statistics = co_expression.set_axis(
+        ["TF", "gene", "importance_TF2G", "rho_TF2G"], axis=1
+    ).astype({"TF": str, "gene": str})
+    return eregulons.merge(statistics, on=["TF", "gene"], how="left")

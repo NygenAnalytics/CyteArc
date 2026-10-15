@@ -3,14 +3,15 @@
 import gzip
 import os
 import re
-from collections.abc import Iterator
-from typing import TextIO
-
-from typing import Literal
+from collections.abc import Iterable, Iterator
+from typing import Literal, TextIO
+from urllib.parse import unquote
 
 import numpy as np
 import pandas as pd
 from numba import njit
+
+from ...utils.arguments import integer_argument
 
 __all__ = [
     "link_regions_to_genes",
@@ -24,10 +25,25 @@ GENE_COLUMNS = ("chrom", "start", "end", "strand", "gene_id", "gene_name", "gene
 _GTF_ATTRIBUTE = re.compile(r'\s*([^\s";]+)\s+"?([^";]*)"?\s*')
 
 
-def _open_text(path: str | os.PathLike[str]) -> TextIO:
-    if os.fspath(path).endswith(".gz"):
+def open_text(path: str | os.PathLike[str]) -> TextIO:
+    """Open a text file, gzip-compressed (by its magic bytes, not its name) or not."""
+    with open(path, "rb") as handle:
+        compressed = handle.read(2) == b"\x1f\x8b"
+    if compressed:
         return gzip.open(path, "rt", encoding="utf-8")
     return open(path, encoding="utf-8")
+
+
+def shared_chromosomes(regions: np.ndarray, others: np.ndarray, what: str) -> list[str]:
+    """Chromosomes named by both inputs; none at all means mismatched naming."""
+    shared = sorted(set(regions.tolist()) & set(others.tolist()))
+    if not shared and len(regions) and len(others):
+        raise ValueError(
+            f"No chromosome is named in both the regions (such as {regions[0]!r}) "
+            f"and {what} (such as {others[0]!r}); use one naming, for example "
+            "with or without a 'chr' prefix"
+        )
+    return shared
 
 
 def _gtf_attributes(raw: str) -> dict[str, str]:
@@ -44,35 +60,38 @@ def _gff3_attributes(raw: str) -> dict[str, str]:
     for item in raw.strip().split(";"):
         key, equals, value = item.partition("=")
         if equals:
-            values.setdefault(key.strip(), value.strip())
+            # GFF3 percent-encodes reserved characters in values.
+            values.setdefault(key.strip(), unquote(value.strip()))
     return values
 
 
 def _feature_rows(
-    handle: TextIO, *, gff3: bool, feature: str
+    handle: TextIO, *, gff3: bool, features: frozenset[str]
 ) -> Iterator[tuple[str, int, int, str, str, str, str]]:
     for line_number, raw in enumerate(handle, start=1):
+        # A GFF3 file may end with its sequences.
+        if raw.startswith("##FASTA"):
+            break
         if not raw.strip() or raw.startswith("#"):
             continue
         fields = raw.rstrip("\r\n").split("\t")
         if len(fields) != 9:
             raise ValueError(f"Annotation line {line_number} does not have 9 columns")
-        if fields[2] != feature:
+        if fields[2] not in features:
             continue
         attributes = _gff3_attributes(fields[8]) if gff3 else _gtf_attributes(fields[8])
-        if gff3:
-            gene_id = attributes.get("gene_id") or attributes.get("ID", "")
-            gene_id = (
-                gene_id.split(":", 1)[1] if gene_id.startswith("gene:") else gene_id
-            )
-            gene_name = attributes.get("Name") or attributes.get("gene_name") or gene_id
-            gene_type = attributes.get("biotype") or attributes.get("gene_type", "")
-        else:
-            gene_id = attributes.get("gene_id", "")
-            gene_name = attributes.get("gene_name") or gene_id
-            gene_type = attributes.get("gene_type") or attributes.get(
-                "gene_biotype", ""
-            )
+        # Ensembl and NCBI prefix GFF3 gene IDs with "gene:" and "gene-".
+        gene_id = attributes.get("gene_id") or (
+            re.sub(r"^gene[:-]", "", attributes.get("ID", "")) if gff3 else ""
+        )
+        gene_name = attributes.get("Name" if gff3 else "gene_name") or (
+            attributes.get("gene_name") or gene_id
+        )
+        gene_type = (
+            attributes.get("biotype")
+            or attributes.get("gene_type")
+            or attributes.get("gene_biotype", "")
+        )
         if not gene_id:
             raise ValueError(f"Annotation line {line_number} has no gene identifier")
         strand = fields[6]
@@ -89,7 +108,7 @@ def _feature_rows(
 def read_gene_annotation(
     path: str | os.PathLike[str],
     *,
-    feature: str = "gene",
+    feature: str | Iterable[str] = "gene",
     gene_types: set[str] | frozenset[str] | None = None,
 ) -> pd.DataFrame:
     """Read gene intervals and strands from a GTF, GFF3, or BED file.
@@ -97,15 +116,18 @@ def read_gene_annotation(
     GTF and GFF3 files (optionally gzipped) contribute their ``feature``
     records, converted to zero-based half-open coordinates. BED files need
     at least six columns: chrom, start, end, gene name, score, and strand; a
-    seventh column, if present, is read as the gene identifier.
+    file of exactly seven columns gives the gene identifier in the seventh
+    (in BED12, the seventh column is thickStart).
 
     Args:
         path: Annotation file. The format follows the extension: ``.gtf``,
             ``.gff3``/``.gff``, or ``.bed``, each optionally ``.gz``.
-        feature: GTF/GFF3 feature type to read.
-        gene_types: Keep only these gene types (GTF ``gene_type`` or GFF3
-            ``biotype``), such as ``{"protein_coding"}``. BED files carry no
-            type, so they reject this filter.
+        feature: GTF/GFF3 feature type, or types, to read. Ensembl GFF3
+            types non-coding genes ``ncRNA_gene``.
+        gene_types: Keep only these gene types (GTF ``gene_type`` or
+            ``gene_biotype``, GFF3 ``biotype``), such as
+            ``{"protein_coding"}``. BED files carry no type, so they reject
+            this filter.
 
     Returns:
         A DataFrame with ``chrom``, ``start``, ``end``, ``strand``,
@@ -115,17 +137,25 @@ def read_gene_annotation(
     if name.endswith(".bed"):
         if gene_types is not None:
             raise ValueError("BED annotations carry no gene types to filter")
-        table = pd.read_csv(path, sep="\t", header=None, comment="#")
-        if table.shape[1] < 6:
+        with open_text(path) as handle:
+            # Fields stay text: gene names such as "NA" are not missing values.
+            lines = [
+                raw.rstrip("\r\n").split("\t")
+                for raw in handle
+                if raw.strip() and not raw.startswith(("#", "track", "browser"))
+            ]
+        if not lines or min(len(fields) for fields in lines) < 6:
             raise ValueError("A BED gene annotation needs at least six columns")
         frame = pd.DataFrame(
             {
-                "chrom": table[0].astype(str),
-                "start": table[1].astype(np.int64),
-                "end": table[2].astype(np.int64),
-                "strand": table[5].astype(str),
-                "gene_id": (table[6] if table.shape[1] > 6 else table[3]).astype(str),
-                "gene_name": table[3].astype(str),
+                "chrom": [fields[0] for fields in lines],
+                "start": np.asarray([fields[1] for fields in lines], dtype=np.int64),
+                "end": np.asarray([fields[2] for fields in lines], dtype=np.int64),
+                "strand": [fields[5] for fields in lines],
+                "gene_id": [
+                    fields[6] if len(fields) == 7 else fields[3] for fields in lines
+                ],
+                "gene_name": [fields[3] for fields in lines],
                 "gene_type": "",
             }
         )
@@ -134,9 +164,10 @@ def read_gene_annotation(
         if (frame["start"] < 0).any() or (frame["end"] <= frame["start"]).any():
             raise ValueError("BED gene annotation holds an invalid interval")
     elif name.endswith((".gtf", ".gff3", ".gff")):
-        with _open_text(path) as handle:
+        features = frozenset([feature] if isinstance(feature, str) else feature)
+        with open_text(path) as handle:
             rows = list(
-                _feature_rows(handle, gff3=not name.endswith(".gtf"), feature=feature)
+                _feature_rows(handle, gff3=not name.endswith(".gtf"), features=features)
             )
         frame = pd.DataFrame.from_records(rows, columns=list(GENE_COLUMNS))
         if gene_types is not None:
@@ -278,9 +309,8 @@ def link_regions_to_genes(
     """
     if anchor not in ("tss", "gene_body"):
         raise ValueError("anchor must be 'tss' or 'gene_body'")
-    for label, value in (("upstream", upstream), ("downstream", downstream)):
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError(f"{label} must be a non-negative integer")
+    upstream = integer_argument(upstream, "upstream", minimum=0)
+    downstream = integer_argument(downstream, "downstream", minimum=0)
     chrom_values = np.asarray(chroms, dtype=object)
     start_values = np.asarray(starts, dtype=np.int64)
     end_values = np.asarray(ends, dtype=np.int64)
@@ -302,7 +332,7 @@ def link_regions_to_genes(
 
     regions: list[np.ndarray] = []
     gene_rows: list[np.ndarray] = []
-    for chrom in sorted(set(chrom_values.tolist()) & set(gene_chroms.tolist())):
+    for chrom in shared_chromosomes(chrom_values, gene_chroms, "the genes"):
         region_rows = np.flatnonzero(chrom_values == chrom)
         order = region_rows[np.argsort(start_values[region_rows], kind="stable")]
         windows = np.flatnonzero(gene_chroms == chrom)

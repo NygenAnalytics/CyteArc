@@ -106,8 +106,6 @@ docs = [
     "sgtsnepi>=0.7; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 # Reads cisTarget ranking databases, which are Feather (Arrow IPC) files.
-# polars reads them without installing pyarrow, which would change pandas'
-# default string storage for the whole environment.
 regulons = [
     "polars>=1.20",
 ]

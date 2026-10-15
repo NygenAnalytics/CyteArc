@@ -112,6 +112,7 @@ from ...metadata.selection import (
     valid_category_mask,
 )
 from ...metadata.rows import read_metadata_missing_rows, read_metadata_rows
+from ...utils.arguments import float_argument, integer_argument
 from ...utils.arrays import (
     array_digest,
     has_duplicates,
@@ -1074,7 +1075,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
         Args:
             net: Network with ``source`` and ``target`` columns whose targets
-                are peak names, such as ``match_motifs`` output.
+                are peak ids (``chrom:start-end``), such as ``match_motifs`` output.
             cell_selection: Explicit cells to score.
             from_assay: ATAC assay to score. The default assay when omitted.
             features: Explicit selection of the peaks that define fragment
@@ -1127,14 +1128,13 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             raise TypeError("cell_selection must be an ArtifactRef")
         if (gc is None) == (genome is None):
             raise ValueError("Pass exactly one of gc or genome")
-        for label, value, low in (
-            ("n_backgrounds", n_backgrounds, 2),
-            ("bins", bins, 2),
-            ("background_seed", background_seed, 0),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < low:
-                raise ValueError(f"{label} must be an integer of at least {low}")
-        if not float(kernel_width) > 0:
+        n_backgrounds = integer_argument(n_backgrounds, "n_backgrounds", minimum=2)
+        bins = integer_argument(bins, "bins", minimum=2)
+        background_seed = integer_argument(
+            background_seed, "background_seed", minimum=0
+        )
+        kernel_width = float_argument(kernel_width, "kernel_width")
+        if not kernel_width > 0:
             raise ValueError("kernel_width must be positive")
         assay = self._get_assay(from_assay)
         if not isinstance(assay, ATACassay):
@@ -1160,10 +1160,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             raise ValueError("Cell selection contains no active cells")
         if len(feature_index) < 2:
             raise ValueError("chromVAR needs at least two selected peaks")
-        names = np.asarray(assay.feats.fetch_all("names"))[feature_index]
+        # Peaks are named by their chrom:start-end ids, which also give the GC.
+        ids = np.asarray(assay.feats.fetch_all("ids"))[feature_index]
         network = prepare_network(
             net,
-            active_feature_names=names,
+            active_feature_names=ids,
             active_feature_index=feature_index,
             tmin=tmin,
             weighted=False,
@@ -1177,7 +1178,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 )
             peak_gc = gc_values[feature_index]
         else:
-            ids = np.asarray(assay.feats.fetch_all("ids"))[feature_index]
             chroms, starts, ends = parse_coordinate_ids(ids)
             with IndexedFasta(genome) as fasta:  # type: ignore[arg-type]
                 peak_gc = gc_content(fasta, chroms, starts, ends)
@@ -1185,14 +1185,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             raise ValueError(
                 f"{int((~np.isfinite(peak_gc)).sum())} selected peaks have no GC "
                 "content; their sequence holds no A, C, G, or T base"
-            )
-        n_entries = len(network.edge_feature_index)
-        needed = chromvar_model_bytes(n_entries, len(feature_index), n_backgrounds)
-        if needed > self.resources.memoryBytes // 2:
-            raise MemoryError(
-                f"The chromVAR background model needs about {needed} bytes, more "
-                f"than half the memory budget of {self.resources.memoryBytes} "
-                "bytes; score fewer sources or peaks per call"
             )
         arguments = ChromvarArguments(
             cell_selection=cell_selection,
@@ -1211,10 +1203,18 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         background_holder: list[np.ndarray] = []
 
         def score_batches() -> Iterator[tuple[np.ndarray, np.ndarray]]:
-            # Read complete rows and select the peaks in memory. Zarr's
-            # orthogonal selection with index arrays on both axes holds many
-            # times the block for wide peak matrices.
-            counts = assay.rawData[cell_index, :]
+            # Checked only when computing: a stored result needs no model.
+            needed = chromvar_model_bytes(
+                len(network.edge_feature_index), len(feature_index), n_backgrounds
+            )
+            if needed > self.resources.memoryBytes // 2:
+                raise MemoryError(
+                    f"The chromVAR background model needs about {needed} bytes, "
+                    f"more than half the memory budget of "
+                    f"{self.resources.memoryBytes} bytes; score fewer sources or "
+                    "peaks per call"
+                )
+            counts = assay.rawData[:, feature_index][cell_index, :]
             fragments = np.asarray(
                 compute_with_progress(
                     counts.sum(axis=0, dtype=np.float64),
@@ -1222,18 +1222,18 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     self.nthreads,
                 ),
                 dtype=np.float64,
-            )[feature_index]
+            )
             if np.any(fragments <= 0):
                 raise ValueError(
                     f"{int((fragments <= 0).sum())} selected peaks have no fragments "
                     "in the selected cells; select peaks with fragments, for "
-                    "example with features.prevalent_peaks"
+                    "example with features.detected(cells, min_cells=1)"
                 )
             background = background_peaks(
                 fragments,
                 peak_gc,
                 n_iterations=n_backgrounds,
-                kernel_width=float(kernel_width),
+                kernel_width=kernel_width,
                 bins=bins,
                 seed=background_seed,
             )
@@ -1246,13 +1246,18 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 shape=(len(feature_index), n_sources),
             )
             model = build_chromvar_model(annotation, fragments, background)
-            for raw_block in counts.stream_blocks(
+            # Blocks shrink to fit beside the model; each row adds its two
+            # float64 outputs.
+            for raw_block in counts._stream_blocks(
                 nthreads=self.nthreads,
                 msg="Scoring chromVAR",
                 prefetch=1,
+                row_mask=None,
+                resident_bytes=model.nbytes,
+                memory_bytes=self.resources.memoryBytes,
+                scratch_bytes_per_row=16 * n_sources,
             ):
-                block = np.asarray(raw_block)[:, feature_index]
-                deviations, scores = score_chromvar_block(block, model)
+                deviations, scores = score_chromvar_block(np.asarray(raw_block), model)
                 yield scores, deviations
 
         def extra_arrays() -> tuple[tuple[str, np.ndarray], ...]:
@@ -1326,7 +1331,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         """Load an explicit enrichment artifact without materializing scores.
 
         Args:
-            enrichment: Artifact returned by ``scores.waggr`` or ``scores.aucell``.
+            enrichment: Artifact returned by ``scores.waggr``, ``scores.aucell``,
+                or ``scores.chromvar``.
             sources: Optional source names to select and order.
 
         Returns:

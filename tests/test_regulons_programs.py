@@ -57,6 +57,15 @@ def test_gene_programs_recover_planted_programs():
     assert best > 0.95
 
 
+def test_gene_programs_find_none_in_noise_at_metacell_scale():
+    # Few samples make chance correlations strong; nearest-neighbour graphs of
+    # noise genes must still not pass as programs.
+    for samples in (30, 50, 120):
+        profiles = np.random.default_rng(samples).standard_normal((samples, 1500))
+        programs = gene_programs(profiles, [f"G{i}" for i in range(1500)])
+        assert programs.empty
+
+
 def test_gene_programs_validates_inputs():
     with pytest.raises(ValueError, match="unique"):
         gene_programs(np.ones((5, 2)), ["a", "a"])
@@ -132,7 +141,13 @@ def test_set_overlaps_match_fisher_exact():
         assert overlaps.loc[reference, "p_value"] == pytest.approx(
             fisher_exact(table, alternative="greater").pvalue
         )
+        assert overlaps.loc[reference, "odds_ratio"] == pytest.approx(
+            fisher_exact(table).statistic
+        )
     assert overlaps["q_value"].notna().all()
+    # A reference covering the universe has an empty margin: no odds ratio.
+    whole = pd.DataFrame({"set": "all", "gene": universe})
+    assert np.isnan(set_overlaps(queries, whole, universe)["odds_ratio"].iloc[0])
 
 
 def test_regulon_specificity_matches_pyscenic():

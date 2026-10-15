@@ -70,26 +70,31 @@ def region_gene_links(
         ``region``, ``gene``, ``importance``, and ``rho`` for every candidate
         whose region and gene are both measured. Constant vectors give NaN rho.
     """
-    access = np.asarray(accessibility, dtype=np.float64)
-    express = np.asarray(expression, dtype=np.float64)
-    regions = np.asarray(region_names, dtype=object).astype(str)
-    genes = np.asarray(gene_names, dtype=object).astype(str)
+    access = np.asarray(accessibility)
+    express = np.asarray(expression)
+    regions = pd.Index(np.asarray(region_names, dtype=object).astype(str))
+    genes = pd.Index(np.asarray(gene_names, dtype=object).astype(str))
     if access.ndim != 2 or express.ndim != 2 or access.shape[0] != express.shape[0]:
         raise ValueError("accessibility and expression must share their samples (rows)")
     if access.shape[1] != len(regions) or express.shape[1] != len(genes):
         raise ValueError("Names must align with the matrix columns")
+    if not (regions.is_unique and genes.is_unique):
+        raise ValueError("region_names and gene_names must be unique")
     if access.shape[0] < 3:
         raise ValueError("At least three samples are needed")
     if importance not in ("gbm", "none"):
         raise ValueError("importance must be 'gbm' or 'none'")
     if not {"region", "gene"} <= set(candidates.columns):
         raise ValueError("candidates needs region and gene columns")
-    region_position = {name: index for index, name in enumerate(regions)}
-    gene_position = {name: index for index, name in enumerate(genes)}
     table = candidates.loc[:, ["region", "gene"]].astype(str).drop_duplicates()
-    table = table.loc[
-        table["region"].isin(region_position) & table["gene"].isin(gene_position)
-    ]
+    table = table.loc[table["region"].isin(regions) & table["gene"].isin(genes)]
+    # Rank only the candidates' columns: ranking copies what it ranks.
+    used_regions = pd.unique(table["region"])
+    used_genes = pd.unique(table["gene"])
+    access = access[:, regions.get_indexer(used_regions)].astype(np.float64)
+    express = express[:, genes.get_indexer(used_genes)].astype(np.float64)
+    region_position = {name: index for index, name in enumerate(used_regions)}
+    gene_position = {name: index for index, name in enumerate(used_genes)}
     region_ranks = _standardized(_ranks(access))
     gene_ranks = _standardized(_ranks(express))
     groups = list(table.groupby("gene", sort=True))

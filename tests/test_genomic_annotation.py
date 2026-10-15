@@ -54,10 +54,37 @@ def test_read_gff3_strips_the_gene_prefix(tmp_path):
     ]
 
 
+def test_read_gff3_follows_ncbi_and_ensembl_conventions(tmp_path):
+    path = tmp_path / "genes.gff3"
+    path.write_text(
+        "##gff-version 3\n"
+        "1\tRefSeq\tgene\t11\t20\t.\t+\t.\t"
+        "ID=gene-OR4F5;Name=OR4F5;gene_biotype=protein_coding\n"
+        "1\tEnsembl\tncRNA_gene\t31\t40\t.\t-\t.\t"
+        "ID=gene:ENSG2;Name=AB%2CC;biotype=lncRNA\n"
+        "##FASTA\n>1\nACGT\n"
+    )
+
+    genes = read_gene_annotation(path, feature=("gene", "ncRNA_gene"))
+
+    assert genes[["gene_id", "gene_name", "gene_type"]].values.tolist() == [
+        ["OR4F5", "OR4F5", "protein_coding"],
+        ["ENSG2", "AB,C", "lncRNA"],
+    ]
+    assert len(read_gene_annotation(path, gene_types={"protein_coding"})) == 1
+
+
 def test_read_bed_annotation_requires_strand(tmp_path):
     path = tmp_path / "genes.bed"
     path.write_text("chr1\t100\t200\tALPHA\t0\t+\tENSG1\n")
     assert read_gene_annotation(path)["gene_id"].tolist() == ["ENSG1"]
+    # Track lines are skipped, names stay text, and BED12 column 7 is thickStart.
+    path.write_text(
+        "track name=genes\nchr1\t100\t200\tNA\t0\t+\t120\t180\t0\t1\t100,\t0,\n"
+    )
+    assert read_gene_annotation(path)[["gene_id", "gene_name"]].values.tolist() == [
+        ["NA", "NA"]
+    ]
 
     path.write_text("chr1\t100\t200\tALPHA\t0\t.\n")
     with pytest.raises(ValueError, match="strand"):
@@ -104,6 +131,11 @@ def test_link_regions_to_genes_uses_strand_aware_windows():
         "gene_name": ["A", "A", "B", "B"],
         "distance": [-101, 50, 0, -51],
     }
+    # Regions named without the genes' "chr" prefix share no chromosome.
+    with pytest.raises(ValueError, match="'chr' prefix"):
+        link_regions_to_genes(
+            np.array(["1"], dtype=object), [0], [10], _genes(), upstream=1, downstream=1
+        )
 
 
 def test_link_regions_to_genes_matches_brute_force():

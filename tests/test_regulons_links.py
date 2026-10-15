@@ -74,3 +74,12 @@ def test_region_gene_links_without_importance():
 
     assert links["importance"].isna().all()
     assert links.loc[0, "rho"] > 0.8
+    with pytest.raises(ValueError, match="unique"):
+        region_gene_links(
+            access,
+            ["r0"] * 6,
+            expression,
+            ["A", "B", "C"],
+            candidates,
+            importance="none",
+        )

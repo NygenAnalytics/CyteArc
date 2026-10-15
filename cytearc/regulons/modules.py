@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from ..utils.arguments import integer_argument
+
 __all__ = [
     "ModuleParameters",
     "SCENIC_MODULE_PARAMETERS",
@@ -45,20 +47,17 @@ class ModuleParameters:
         if any(not 0 <= value <= 1 for value in self.thresholds):
             raise ValueError("thresholds must be quantiles in [0, 1]")
         for label, values in (
+            ("thresholds", self.thresholds),
             ("topTargets", self.topTargets),
             ("topRegulators", self.topRegulators),
         ):
-            if any(
-                isinstance(value, bool) or not isinstance(value, int) or value < 1
-                for value in values
-            ):
-                raise ValueError(f"{label} must hold positive integers")
-        if (
-            isinstance(self.minGenes, bool)
-            or not isinstance(self.minGenes, int)
-            or self.minGenes < 1
-        ):
-            raise ValueError("minGenes must be a positive integer")
+            # A repeated rule would merge two modules under one name.
+            if len(set(values)) != len(values):
+                raise ValueError(f"{label} must not repeat a value")
+            if label != "thresholds":
+                for value in values:
+                    integer_argument(value, label, minimum=1)
+        integer_argument(self.minGenes, "minGenes", minimum=1)
         if not self.rhoThreshold > 0:
             raise ValueError("rhoThreshold must be positive")
 

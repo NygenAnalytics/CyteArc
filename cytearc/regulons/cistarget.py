@@ -15,6 +15,8 @@ import numpy as np
 import pandas as pd
 from numba import njit
 
+from ..utils.arguments import integer_argument
+
 __all__ = [
     "MotifEnrichment",
     "auc_rank_cutoff",
@@ -32,8 +34,7 @@ def auc_rank_cutoff(auc_threshold: float, total: int) -> int:
     """
     if not 0 < auc_threshold <= 1:
         raise ValueError("auc_threshold must be in (0, 1]")
-    if isinstance(total, bool) or not isinstance(total, int) or total < 2:
-        raise ValueError("total must be an integer of at least 2")
+    integer_argument(total, "total", minimum=2)
     cutoff = int(round(auc_threshold * total)) - 1
     if cutoff < 1:
         raise ValueError(
@@ -85,6 +86,8 @@ def recovery_aucs(
     total_weight = float(weight_values.sum())
     if not total_weight > 0:
         raise ValueError("Signature weights must sum to a positive value")
+    if np.any(ranks < 0):
+        raise ValueError("Ranks must be non-negative")
     cutoff = auc_rank_cutoff(auc_threshold, total)
     areas = _aucs(np.ascontiguousarray(ranks), weight_values, cutoff)
     return areas / ((cutoff + 1) * total_weight)
@@ -122,15 +125,69 @@ def recovery_curves(
         raise ValueError("rankings must be a two-dimensional integer matrix")
     if weight_values.shape != (ranks.shape[1],):
         raise ValueError("weights must align with the ranking columns")
-    if (
-        isinstance(rank_threshold, bool)
-        or not isinstance(rank_threshold, int)
-        or rank_threshold < 1
-    ):
-        raise ValueError("rank_threshold must be a positive integer")
+    integer_argument(rank_threshold, "rank_threshold", minimum=1)
     if np.any(ranks < 0):
         raise ValueError("Ranks must be non-negative")
     return _curves(np.ascontiguousarray(ranks), weight_values, rank_threshold)
+
+
+@njit(cache=True, nogil=True)
+def _envelope(ranks: np.ndarray, weights: np.ndarray, length: int) -> np.ndarray:
+    """Mean plus two population SDs of all motifs' recovery curves.
+
+    Sums run over motifs in row order, then the deviations are summed again,
+    the order of numpy's ``mean(axis=0)`` and ``std(axis=0)`` on the stacked
+    curves, without holding every curve at once.
+    """
+    n_motifs, n_genes = ranks.shape
+    curve = np.zeros(length, dtype=np.float64)
+    total = np.zeros(length, dtype=np.float64)
+    for motif in range(n_motifs):
+        curve[:] = 0.0
+        for gene in range(n_genes):
+            rank = ranks[motif, gene]
+            if rank < length:
+                curve[rank] += weights[gene]
+        running = 0.0
+        for position in range(length):
+            running += curve[position]
+            total[position] += running
+    mean = total / n_motifs
+    squares = np.zeros(length, dtype=np.float64)
+    for motif in range(n_motifs):
+        curve[:] = 0.0
+        for gene in range(n_genes):
+            rank = ranks[motif, gene]
+            if rank < length:
+                curve[rank] += weights[gene]
+        running = 0.0
+        for position in range(length):
+            running += curve[position]
+            deviation = running - mean[position]
+            squares[position] += deviation * deviation
+    envelope: np.ndarray = mean + 2.0 * np.sqrt(squares / n_motifs)
+    return envelope
+
+
+@njit(cache=True, nogil=True)
+def _rank_at_max(ranks: np.ndarray, weights: np.ndarray, envelope: np.ndarray) -> int:
+    """First rank where one motif's recovery curve exceeds the envelope most."""
+    length = envelope.size
+    curve = np.zeros(length, dtype=np.float64)
+    for gene in range(ranks.size):
+        rank = ranks[gene]
+        if rank < length:
+            curve[rank] += weights[gene]
+    running = 0.0
+    best = 0
+    best_value = -np.inf
+    for position in range(length):
+        running += curve[position]
+        value = running - envelope[position]
+        if value > best_value:
+            best_value = value
+            best = position
+    return best
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,12 +261,15 @@ def enrich_signature(
             leading_edges={},
             n_signature=len(features),
         )
-    curves = recovery_curves(ranks, weight_values, rank_threshold)
-    envelope = curves.mean(axis=0) + 2.0 * curves.std(axis=0)
+    integer_argument(rank_threshold, "rank_threshold", minimum=1)
+    # The envelope streams the curves: all of them at once would hold
+    # motifs by rank_threshold values.
+    contiguous = np.ascontiguousarray(ranks)
+    envelope = _envelope(contiguous, weight_values, rank_threshold)
     rows = []
     edges: dict[str, pd.DataFrame] = {}
     for motif in enriched:
-        rank_at_max = int(np.argmax(curves[motif] - envelope))
+        rank_at_max = int(_rank_at_max(contiguous[motif], weight_values, envelope))
         motif_ranks = ranks[motif]
         keep = motif_ranks <= rank_at_max
         order = np.argsort(motif_ranks[keep], kind="stable")

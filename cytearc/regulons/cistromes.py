@@ -5,14 +5,17 @@ annotation table as SCENIC+ does, or from an experiment that measured binding
 directly, such as CUT&RUN, CUT&Tag, or ChIP-seq peaks of one factor.
 """
 
-import gzip
 import os
 from collections.abc import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 
-from ..features.genomic.annotation import overlapping_intervals
+from ..features.genomic.annotation import (
+    open_text,
+    overlapping_intervals,
+    shared_chromosomes,
+)
 from ..features.genomic.sequence import parse_coordinate_ids
 
 __all__ = [
@@ -37,8 +40,7 @@ def read_peak_file(path: str | os.PathLike[str]) -> pd.DataFrame:
         ``summit`` the narrowPeak summit offset (-1 when absent).
     """
     rows = []
-    opener = gzip.open if os.fspath(path).endswith(".gz") else open
-    with opener(path, "rt", encoding="utf-8") as handle:
+    with open_text(path) as handle:
         for line_number, raw in enumerate(handle, start=1):
             line = raw.rstrip("\r\n")
             if not line or line.startswith(("#", "track", "browser")):
@@ -54,7 +56,8 @@ def read_peak_file(path: str | os.PathLike[str]) -> pd.DataFrame:
                     if len(fields) > 4 and fields[4] not in {"", "."}
                     else np.nan
                 )
-                summit = int(fields[9]) if len(fields) > 9 else -1
+                # Only narrowPeak's ten columns end with a summit offset.
+                summit = int(fields[9]) if len(fields) == 10 else -1
             except ValueError as exc:
                 raise ValueError(f"Peak line {line_number} is malformed") from exc
             if start < 0 or end <= start:
@@ -143,11 +146,12 @@ def binding_cistromes(
         table = source if isinstance(source, pd.DataFrame) else read_peak_file(source)
         if not {"chrom", "start", "end"} <= set(table.columns):
             raise ValueError(f"Peaks of {factor!r} need chrom, start, and end columns")
+        peak_chroms = table["chrom"].astype(str).to_numpy(dtype=object)
         peak_starts = table["start"].to_numpy(dtype=np.int64)
         peak_ends = table["end"].to_numpy(dtype=np.int64)
+        shared_chromosomes(chroms, peak_chroms, f"the peaks of {factor!r}")
         region_index, peak_index, shared = overlapping_intervals(
-            (chroms, starts, ends),
-            (table["chrom"].astype(str).to_numpy(dtype=object), peak_starts, peak_ends),
+            (chroms, starts, ends), (peak_chroms, peak_starts, peak_ends)
         )
         if min_overlap_fraction > 0:
             keep = (

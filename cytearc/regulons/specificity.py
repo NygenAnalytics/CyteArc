@@ -5,6 +5,8 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
+from ..utils.arguments import integer_argument
+
 __all__ = [
     "connection_specificity",
     "regulon_modules",
@@ -102,8 +104,7 @@ def regulon_modules(csi: pd.DataFrame, n_modules: int) -> pd.Series:
     """
     from scipy.cluster.hierarchy import fcluster, linkage
 
-    if isinstance(n_modules, bool) or not isinstance(n_modules, int) or n_modules < 1:
-        raise ValueError("n_modules must be a positive integer")
+    integer_argument(n_modules, "n_modules", minimum=1)
     if len(csi) < 2:
         return pd.Series(np.ones(len(csi), dtype=np.int64), index=csi.index)
     tree = linkage(csi.to_numpy(dtype=np.float64), method="ward")

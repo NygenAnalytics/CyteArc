@@ -10,6 +10,7 @@ import numpy as np
 from numba import njit, prange
 from scipy.sparse import csr_matrix
 
+from ...utils.arguments import integer_argument
 from ...utils.arrays import read_only_copy
 
 if TYPE_CHECKING:
@@ -127,7 +128,12 @@ def read_jaspar_motifs(path: str | os.PathLike[str]) -> list[Motif]:
 
 
 def read_meme_motifs(path: str | os.PathLike[str]) -> list[Motif]:
-    """Read letter-probability matrices from a MEME-format motif file."""
+    """Read motifs from a MEME-format file as counts.
+
+    Each letter-probability row is multiplied by its matrix's ``nsites`` (20
+    when absent, the MEME format's default), so a pseudocount weighs as much
+    as it does for count matrices such as JASPAR's.
+    """
     motifs: list[Motif] = []
     with open(path, encoding="utf-8") as handle:
         lines = handle.read().splitlines()
@@ -160,6 +166,8 @@ def read_meme_motifs(path: str | os.PathLike[str]) -> list[Motif]:
         if index >= len(lines):
             raise ValueError(f"MEME motif {motif_id!r} has no probability matrix")
         width_match = re.search(r"\bw=\s*(\d+)", lines[index])
+        sites_match = re.search(r"\bnsites=\s*([0-9.eE+-]+)", lines[index])
+        sites = float(sites_match.group(1)) if sites_match else 20.0
         index += 1
         values: list[list[float]] = []
         while index < len(lines):
@@ -182,7 +190,9 @@ def read_meme_motifs(path: str | os.PathLike[str]) -> list[Motif]:
                 f"MEME motif {motif_id!r} declares w={width_match.group(1)} but "
                 f"has {len(values)} rows"
             )
-        motifs.append(Motif(motif_id, name, np.asarray(values, dtype=np.float64)))
+        motifs.append(
+            Motif(motif_id, name, np.asarray(values, dtype=np.float64) * sites)
+        )
     if not motifs:
         raise ValueError("The MEME file contains no motifs")
     return motifs
@@ -445,12 +455,7 @@ def scan_motif_matches(
         raise ValueError("thresholds must align with matrices")
     if np.isnan(threshold_values).any():
         raise ValueError("thresholds must not be NaN")
-    if (
-        isinstance(batch_size, bool)
-        or not isinstance(batch_size, int)
-        or batch_size < 1
-    ):
-        raise ValueError("batch_size must be a positive integer")
+    batch_size = integer_argument(batch_size, "batch_size", minimum=1)
     widths = []
     for matrix in matrices:
         values = np.asarray(matrix, dtype=np.float64)

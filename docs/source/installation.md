@@ -131,6 +131,17 @@ Without `sgtsnepi`, computing a new t-SNE embedding raises an `ImportError` that
 Reusing a t-SNE embedding that a store already holds, and plotting or exporting it, does not need `sgtsnepi`.
 A pipeline run that enables t-SNE without `sgtsnepi` therefore still runs, and it logs a warning that names the extra before its first stage.
 
+## Optional regulon databases
+
+`cytearc.regulons.RankingDatabase` reads cisTarget ranking databases with [polars], which CyteArc does not install by default.
+Add it with the `regulons` extra:
+
+```bash
+uv pip install --prerelease allow "cytearc[extra,regulons]"
+```
+
+Without `polars`, opening a ranking database raises an `ImportError` that names the extra.
+
 ## JupyterLab
 
 Install and launch JupyterLab from the same activated environment as CyteArc.
@@ -214,4 +225,5 @@ After the import check succeeds, continue with the {ref}`Quick start <quickstart
 
 [Visual C++ Build Tools]: https://visualstudio.microsoft.com/visual-cpp-build-tools
 [sgtsnepi]: https://github.com/alex-unofficial/sgtsnepi-python
+[polars]: https://pola.rs
 [Microsoft long-path documentation]: https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation

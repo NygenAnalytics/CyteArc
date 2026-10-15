@@ -91,6 +91,6 @@ class EnrichmentResult:
         if self.method not in {"waggr", "aucell", "chromvar"}:
             raise ValueError(f"Unknown enrichment method: {self.method!r}")
         if (self.deviations is None) != (self.method != "chromvar"):
-            raise ValueError("Only chromVAR results carry deviations")
+            raise ValueError("chromVAR results, and only they, carry deviations")
         if self.deviations is not None and self.deviations.shape != self.data.shape:
             raise ValueError("Enrichment deviations must align with the scores")

@@ -246,36 +246,46 @@ def test_prune_modules_matches_reference(tmp_path):
 
 def test_prune_modules_skips_modules_missing_from_the_database(tmp_path):
     rng = np.random.default_rng(2)
-    genes = [f"G{index}" for index in range(100)]
+    total = 600
+    genes = [f"G{index}" for index in range(total)]
+    rankings = np.vstack([rng.permutation(total) for _ in range(80)])
+    # m3 ranks G0..G23 among its top 30, so it is enriched for the module.
+    top = rng.permutation(30)[:24]
+    rest = rng.permutation(np.setdiff1d(np.arange(total), top))
+    rankings[3] = np.concatenate([top, rest])
     database = _database(
-        tmp_path / "db.feather",
-        np.vstack([rng.permutation(100) for _ in range(10)]),
-        genes,
-        [f"m{index}" for index in range(10)],
-    )
-    targets = ["G1", "G2", "G3", "X1", "X2"]
-    modules = pd.DataFrame(
-        {
-            "module": "M",
-            "TF": "G1",
-            "direction": "activating",
-            "context": "top50",
-            "target": targets,
-            "weight": 1.0,
-        }
+        tmp_path / "db.feather", rankings, genes, [f"m{index}" for index in range(80)]
     )
     annotations = pd.DataFrame(
         {
-            "motif": ["m0"],
-            "TF": ["G1"],
+            "motif": ["m3"],
+            "TF": ["G0"],
             "motif_similarity_qvalue": [0.0],
             "orthologous_identity": [1.0],
             "description": ["d"],
         }
     )
 
-    result = prune_modules(
-        modules, [database], annotations, parameters=PruningParameters(rankThreshold=50)
-    )
+    def prune(n_missing):
+        targets = genes[:24] + [f"X{index}" for index in range(n_missing)]
+        modules = pd.DataFrame(
+            {
+                "module": "M",
+                "TF": "G0",
+                "direction": "activating",
+                "context": "top50",
+                "target": targets,
+                "weight": 1.0,
+            }
+        )
+        return prune_modules(
+            modules,
+            [database],
+            annotations,
+            parameters=PruningParameters(rankThreshold=100),
+        )
 
-    assert result.empty
+    # The motif is found while under a fifth of the module is missing, and
+    # the module is skipped from exactly a fifth, as pySCENIC does.
+    assert prune(5)["motif"].tolist() == ["m3"]
+    assert prune(6).empty

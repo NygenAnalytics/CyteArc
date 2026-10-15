@@ -15,6 +15,8 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import coo_matrix
 
+from ..utils.arguments import integer_argument
+
 from .cistarget import enrich_signature
 from .databases import RankingDatabase
 
@@ -35,8 +37,11 @@ class GeneProgramParameters:
         nNeighbors: Most correlated genes linked to each gene.
         minCorrelation: Links need at least this Pearson correlation.
         resolution: Leiden resolution of the gene graph.
-        minMembership: Genes correlating less than this with their program's
-            mean profile are left unassigned, so chance groupings of
+        minMembership: Genes correlating less than this with the mean profile
+            of their program's other genes are left unassigned.
+        alpha: A gene's membership must also be significantly positive at
+            this family-wise level over all genes (one-sided Fisher z,
+            Bonferroni) for the number of samples, so chance groupings of
             uncorrelated genes do not form programs.
         minSize: Programs with fewer genes are left unassigned.
         seed: Leiden random seed.
@@ -46,21 +51,21 @@ class GeneProgramParameters:
     minCorrelation: float = 0.2
     resolution: float = 1.0
     minMembership: float = 0.3
+    alpha: float = 0.05
     minSize: int = 10
     seed: int = 0
 
     def __post_init__(self) -> None:
-        for label, value, low in (
-            ("nNeighbors", self.nNeighbors, 1),
-            ("minSize", self.minSize, 2),
-            ("seed", self.seed, 0),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < low:
-                raise ValueError(f"{label} must be an integer of at least {low}")
-        if not -1 <= self.minCorrelation < 1:
-            raise ValueError("minCorrelation must lie in [-1, 1)")
+        integer_argument(self.nNeighbors, "nNeighbors", minimum=1)
+        integer_argument(self.minSize, "minSize", minimum=2)
+        integer_argument(self.seed, "seed", minimum=0)
+        # Negative links would give the modularity graph negative weights.
+        if not 0 <= self.minCorrelation < 1:
+            raise ValueError("minCorrelation must lie in [0, 1)")
         if not -1 <= self.minMembership < 1:
             raise ValueError("minMembership must lie in [-1, 1)")
+        if not 0 < self.alpha < 1:
+            raise ValueError("alpha must lie in (0, 1)")
         if not self.resolution > 0:
             raise ValueError("resolution must be positive")
 
@@ -91,15 +96,20 @@ def gene_programs(
 
     Returns:
         One row per assigned gene with ``program`` (``P1`` is the largest),
-        ``gene``, and ``membership``, the gene's Pearson correlation with its
-        program's mean standardized profile; rows sort by program, then
-        decreasing membership.
+        ``gene``, and ``membership``, the gene's Pearson correlation with the
+        mean standardized profile of its program's other genes; rows sort by
+        program, then decreasing membership.
     """
+    from scipy.stats import norm
+
     from ..clustering import leiden_membership
 
     names = np.asarray(gene_names, dtype=object).astype(str)
     if np.asarray(profiles).ndim != 2 or np.asarray(profiles).shape[1] != len(names):
         raise ValueError("gene_names must align with the profile columns")
+    n_samples = np.asarray(profiles).shape[0]
+    if n_samples < 4:
+        raise ValueError("Programs need at least four samples")
     if len(set(names)) != len(names):
         raise ValueError("gene_names must be unique")
     unit, varying = _standardize(profiles)
@@ -107,6 +117,11 @@ def gene_programs(
     n_genes = len(names)
     if n_genes <= parameters.nNeighbors:
         raise ValueError("Programs need more varying genes than nNeighbors")
+    # One-sided Fisher z critical correlation, Bonferroni-corrected over genes.
+    z = norm.isf(parameters.alpha / n_genes)
+    threshold = max(
+        parameters.minMembership, float(np.tanh(z / np.sqrt(n_samples - 3)))
+    )
     k = parameters.nNeighbors
     rows: list[np.ndarray] = []
     columns: list[np.ndarray] = []
@@ -133,13 +148,13 @@ def gene_programs(
         members = np.flatnonzero(labels == label)
         if len(members) < parameters.minSize:
             continue
-        score = unit[:, members].mean(axis=1)
-        centered = score - score.mean()
-        norm = np.sqrt((centered * centered).sum())
-        if not norm > 0:
-            continue
-        membership = unit[:, members].T @ (centered / norm)
-        coherent = membership >= parameters.minMembership
+        # Correlate each gene with the sum of the others: a mean that included
+        # the gene would correlate with it by chance alone.
+        total = unit[:, members].sum(axis=1)
+        dots = unit[:, members].T @ total
+        with np.errstate(divide="ignore", invalid="ignore"):
+            membership = (dots - 1) / np.sqrt(total @ total - 2 * dots + 1)
+        coherent = membership >= threshold
         if coherent.sum() >= parameters.minSize:
             candidates.append((members[coherent], membership[coherent]))
     candidates.sort(key=lambda item: (-len(item[0]), int(item[0][0])))
@@ -290,7 +305,11 @@ def set_overlaps(
             b = len(members) - overlap
             c = len(targets) - overlap
             d = total - len(members) - len(targets) + overlap
-            odds = (a * d) / (b * c) if b * c > 0 else np.inf
+            # As scipy's fisher_exact: undefined when a margin is empty.
+            if 0 in (a + b, c + d, a + c, b + d):
+                odds = np.nan
+            else:
+                odds = (a * d) / (b * c) if b * c > 0 else np.inf
             rows.append((query, reference, overlap, expected, odds, p_value))
     frame = pd.DataFrame.from_records(
         rows,

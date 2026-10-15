@@ -178,3 +178,17 @@ def test_background_peaks_reject_invalid_inputs(kwargs, message):
     arguments.update(kwargs)
     with pytest.raises(ValueError, match=message):
         background_peaks(**arguments)
+
+
+def test_z_is_missing_when_background_deviations_do_not_vary():
+    counts = np.array([[3, 1, 2], [1, 4, 2], [2, 2, 5]], dtype=np.float64)
+    # Every peak draws only itself, so a set's background deviations are equal.
+    background = np.repeat(np.arange(3)[:, None], 50, axis=1)
+    annotation = csc_matrix(np.array([[1.0], [0.0], [0.0]]))
+
+    deviations, z = score_chromvar_block(
+        counts, build_chromvar_model(annotation, counts.sum(axis=0), background)
+    )
+
+    assert np.isfinite(deviations).all()
+    assert np.isnan(z).all()

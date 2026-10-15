@@ -7,11 +7,13 @@ myst:
 # Regulons API reference
 
 `cytearc.regulons` builds transcription-factor regulons the way SCENIC and SCENIC+ do, and
-co-regulated gene programs, from RNA, ATAC, and binding data such as CUT&RUN. Every result is
-a network table with `source`/`TF` and `target` columns that {meth}`ds.scores.aucell
-<cytearc.datastore.namespaces.ScoresAccessor.aucell>` (genes) and {meth}`ds.scores.chromvar
-<cytearc.datastore.namespaces.ScoresAccessor.chromvar>` (peaks) score per cell. Reading cisTarget
-ranking databases needs the `regulons` extra: `pip install "cytearc[regulons]"`.
+co-regulated gene programs, from RNA, ATAC, and binding data such as CUT&RUN.
+{meth}`ds.scores.aucell <cytearc.datastore.namespaces.ScoresAccessor.aucell>` (genes) and
+{meth}`ds.scores.chromvar <cytearc.datastore.namespaces.ScoresAccessor.chromvar>` (peak ids)
+score per cell any table with `source` and `target` columns. Cistromes have them; rename
+`regulon` of regulons, `program` and `gene` of programs, and `eRegulon` and `gene` of eRegulons
+to `source` and `target`. Reading cisTarget ranking databases needs the `regulons` extra:
+`pip install "cytearc[regulons]"`.
 
 The cell-level steps run on a `DataStore`: {meth}`ds.regulons.grn
 <cytearc.datastore.namespaces.RegulonsAccessor.grn>` infers the co-expression network, and the
@@ -29,6 +31,9 @@ enriched, annotated motif of each module's factor recovers, and the leading edge
 .. autofunction:: cytearc.regulons.infer_grn
 
 .. autoclass:: cytearc.regulons.GrnParameters
+
+.. autodata:: cytearc.regulons.grn.GRNBOOST2_PARAMETERS
+    :annotation:
 
 .. autofunction:: cytearc.regulons.pearson_correlations
 

@@ -85,10 +85,10 @@ Agreement measured for one method is not evidence of equivalence for the rest of
   regulons, 7% for pySCENIC regulons, 9% for enhancer-driven regulons, and 3% for each factor's
   top 50 GRNBoost2 targets.
 - Gene programs are compared with Hotspot 1.1.1 modules on the same cells and highly variable
-  genes. The six programs contain 94% of the 503 genes in Hotspot's ten modules, and 75% of those
-  genes fall in their module's majority program (adjusted Rand index 0.42 on shared genes,
-  against 0.007 for permuted labels). Hotspot splits the T-cell, monocyte, and B-cell programs
-  into finer modules.
+  genes. The six programs contain 89% of the 503 genes in Hotspot's ten modules, and 76% of those
+  genes fall in their module's majority program (adjusted Rand index 0.45 on shared genes,
+  against at most 0.008 for 100 permuted labelings). Hotspot splits the T-cell, monocyte, and
+  B-cell programs into finer modules.
 
 ## Current boundaries
 

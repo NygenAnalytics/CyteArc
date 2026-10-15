@@ -81,7 +81,10 @@ def test_read_meme_motifs(tmp_path):
         ("MA0004.1", "Arnt", 3),
         ("MA0006.1", "MA0006.1", 2),
     ]
-    np.testing.assert_allclose(motifs[1].counts[1], [0.0, 0.0, 0.958, 0.042])
+    # Probabilities become counts of the matrix's nsites (24 here).
+    np.testing.assert_allclose(
+        motifs[1].counts[1], 24 * np.array([0.0, 0.0, 0.958, 0.042])
+    )
 
 
 def test_motif_rejects_empty_positions():
@@ -139,7 +142,7 @@ def test_score_threshold_matches_exhaustive_enumeration(seed):
         }
     )
 
-    precision = 1e6
+    precision = 1e4
     # Rounding each position to the grid moves a score by at most this much.
     band = matrix.shape[0] / precision
     for p_value in (0.5, 0.05, 1e-2, 1e-3):

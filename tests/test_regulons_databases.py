@@ -55,6 +55,21 @@ def test_ranking_database_rejects_feather_v1_and_missing_index(tmp_path):
     with pytest.raises(ValueError, match="index column"):
         RankingDatabase(no_index)
 
+    # A transposed file names its rows by region, not by motif.
+    transposed = tmp_path / "motifs_vs_regions.feather"
+    pl.DataFrame({"m0": [0, 1], "m1": [1, 0], "regions": ["r0", "r1"]}).write_ipc(
+        transposed
+    )
+    with pytest.raises(ValueError, match="index column"):
+        RankingDatabase(transposed)
+
+    # Scores fall inside the rank range when there are many features.
+    scores = tmp_path / "genes_vs_motifs.scores.feather"
+    columns = {f"G{i}": [1.5, 0.25] for i in range(10)} | {"motifs": ["m0", "m1"]}
+    pl.DataFrame(columns).write_ipc(scores)
+    with pytest.raises(ValueError, match="scores database"):
+        RankingDatabase(scores)
+
 
 _TBL = (
     "#motif_id\tmotif_name\tmotif_description\tsource_name\tsource_version\tgene_name\t"

@@ -2,7 +2,7 @@
 name: cytearc-single-cell
 description: Analyze single-cell data with core CyteArc, the out-of-core Zarr DataStore library with immutable artifacts and pipeline runs. Covers opening, converting and mounting stores (including CyteBase datasets), QC with removal audits, HVG/PCA/neighbour graphs, Leiden/Paris clustering, UMAP, markers and cautious annotation, batch correction and donor-level comparisons, headless plotting, provenance and export. Use when a task involves a CyteArc .zarr store, a CyteBase dataset, cytearc.DataStore, ds.pipeline, or converting H5AD/10x/MTX/Seurat data for CyteArc. Does not cover cytearc.agent (the automated agent package).
 license: BSD-3-Clause
-compatibility: Requires Python 3.13+ and cytearc 1.0.0rc1 or newer (pip install "cytearc[extra]>=1.0.0rc1"; add the cytebase extra and network access for CyteBase datasets, and the tsne extra for t-SNE).
+compatibility: Requires Python 3.13+ and cytearc 1.0.0rc1 or newer (pip install "cytearc[extra]>=1.0.0rc1"; add the cytebase extra and network access for CyteBase datasets, the tsne extra for t-SNE, and the regulons extra for cisTarget ranking databases).
 metadata:
   version: "0.4"
 ---
@@ -23,7 +23,8 @@ not thresholds.
 ## Setup
 
 - Install into the environment you run Python from: `pip install "cytearc[extra]>=1.0.0rc1"`, plus
-  `cytearc[cytebase]` for CyteBase and `cytearc[tsne]` for t-SNE. The explicit pre-release floor matters: a
+  `cytearc[cytebase]` for CyteBase, `cytearc[tsne]` for t-SNE, and `cytearc[regulons]` for cisTarget
+  ranking databases. The explicit pre-release floor matters: a
   bare `cytearc[extra]` does not explicitly request a release candidate.
 - Set resources per process before importing CyteArc. Defaults use 75% of detected RAM and every detected CPU:
   `CYTEARC_MEM_BUDGET=8G CYTEARC_WORKERS=8` (memory specs need a unit; a bare `8` is rejected).
@@ -232,7 +233,7 @@ any changes you make after seeing the comparison as such.
 | `Assay 'RNA' is not prepared` on a read-only open | store just written by a converter or `SubsetZarr` | open once writable, then read-only |
 | Fewer active cells than expected after opening | writable open applied `min_features_per_cell` | `ds.cells.reset_key("I")`; reopen with `-1` |
 | `ValueError` on `ds.pipeline.run(label=...)` | label already completed | new label; reuse makes it cheap |
-| `PermissionError` from a producer | store opened with `zarr_mode="r"` and no matching artifact; feature selections, WAGGR, AUCell, `features.prevalent_peaks`, and cell-cycle scoring refuse even with one | reopen writable |
+| `PermissionError` from a producer | store opened with `zarr_mode="r"` and no matching artifact; feature selections, WAGGR, AUCell, chromVAR, `regulons.grn`, `features.prevalent_peaks`, and cell-cycle scoring refuse even with one | reopen writable |
 | `KeyError: 'values'` on a Paris ref | Paris stores `labels` | `ds.artifacts.load(ref)["labels"]` |
 | Array length differs from `ds.cells.N` | payload follows the cell selection | align with `run.cells.fetch_all` or the selection mask |
 | Plot raises with `run=` and a gene or live column | run mode reads only frozen run fields and run outputs, and genes need an explicit normalization | gene: add `normalization=cytearc.plotting.NormalizationSpec()`; live column: freeze it with `snapshot_columns=` or use `layout=run["umap"]` |

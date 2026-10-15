@@ -1,5 +1,5 @@
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -22,6 +22,7 @@ from ...storage.selections import (
 )
 from ...storage.types import as_zarr_array, as_zarr_group
 from ...storage.validation_scope import validation_scoped
+from ...utils.arguments import integer_argument
 from ...utils.arrays import array_digest
 from ...utils.logging import logger
 
@@ -152,20 +153,23 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             PermissionError: If the store is not opened with ``zarr_mode='r+'``.
             UnmeasuredCellsError: If the assay did not measure a selected cell.
         """
-        from ...regulons.grn import GrnParameters, infer_grn, pearson_correlations
+        from ...regulons.grn import GrnParameters, _grn_links, _pair_correlations
 
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
         if not isinstance(features, ArtifactRef):
             raise TypeError("features must be an ArtifactRef")
-        if isinstance(tfs, str) or not isinstance(tfs, Sequence):
+        if isinstance(tfs, str) or not isinstance(tfs, Iterable):
+            raise TypeError("tfs must be a sequence of names")
+        tfs = list(tfs)
+        if not all(isinstance(name, str) for name in tfs):
             raise TypeError("tfs must be a sequence of names")
         if not tfs:
             raise ValueError("tfs must name at least one transcription factor")
-        if isinstance(random_seed, bool) or not isinstance(random_seed, int):
-            raise TypeError("random_seed must be an integer")
-        if random_seed < 0:
-            raise ValueError("random_seed must be non-negative")
+        # scikit-learn accepts 32-bit unsigned random states only.
+        random_seed = integer_argument(
+            random_seed, "random_seed", minimum=0, maximum=2**32 - 1
+        )
         parameters = GrnParameters(
             learningRate=learning_rate,
             maxStages=max_stages,
@@ -174,9 +178,9 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             earlyStopWindow=early_stop_window,
             earlyStopping=early_stopping,
         )
-        threads = self.nthreads if nthreads is None else nthreads
-        if isinstance(threads, bool) or not isinstance(threads, int) or threads < 1:
-            raise ValueError("nthreads must be a positive integer")
+        threads = integer_argument(
+            self.nthreads if nthreads is None else nthreads, "nthreads", minimum=1
+        )
         assay = self._get_assay(from_assay)
         if not isinstance(assay, RNAassay):
             raise TypeError("regulons.grn can only be run on an RNAassay")
@@ -208,7 +212,7 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             )
         feature_index = feature_index[keep]
         names = names[keep]
-        requested = {str(name) for name in tfs}
+        requested = set(tfs)
         regulator_mask = np.isin(names, list(requested))
         if not regulator_mask.any():
             raise ValueError("None of tfs names a selected feature")
@@ -216,15 +220,9 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
         n_cells = len(cell_index)
         n_genes = len(feature_index)
         n_regulators = int(regulator_mask.sum())
-        # The matrix, the regulator copy, and one leave-one-out copy per thread.
-        needed = 4 * n_cells * (n_genes + n_regulators * (1 + threads))
-        needed += 8 * n_cells * 2 * max(n_regulators, 256)
-        if needed > self.resources.memoryBytes:
-            raise MemoryError(
-                f"GRN inference over {n_cells} cells and {n_genes} genes needs "
-                f"about {needed} bytes, but the memory budget is "
-                f"{self.resources.memoryBytes} bytes; select fewer cells or genes"
-            )
+        logger.info(
+            f"{n_regulators} of {len(requested)} requested factors are selected"
+        )
 
         arguments = GrnArguments(
             cell_selection=cell_selection,
@@ -270,6 +268,18 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
         )
         if planned.reused:
             return planned.ref
+        # The matrix, the regulator copy, one leave-one-out copy per thread,
+        # the correlation blocks, and about 64 bytes per possible link while
+        # the links are sorted, correlated, and written.
+        needed = 4 * n_cells * (n_genes + n_regulators * (1 + threads))
+        needed += 8 * n_cells * 2 * max(n_regulators, 256)
+        needed += 64 * n_genes * n_regulators
+        if needed > self.resources.memoryBytes:
+            raise MemoryError(
+                f"GRN inference over {n_cells} cells and {n_genes} genes needs "
+                f"about {needed} bytes, but the memory budget is "
+                f"{self.resources.memoryBytes} bytes; select fewer cells or genes"
+            )
 
         from ...assay.normalization import feature_value_blocks
 
@@ -303,21 +313,19 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
                     f"({now - started:.0f} s elapsed)"
                 )
 
-        links = infer_grn(
+        tf_codes, target_codes, importance = _grn_links(
             expression,
             names.tolist(),
-            names[regulator_mask].tolist(),
-            seed=int(random_seed),
+            np.flatnonzero(regulator_mask),
+            np.arange(n_genes),
+            seed=random_seed,
             parameters=parameters,
             nthreads=threads,
             progress=progress,
         )
-        correlation = pearson_correlations(expression, names.tolist(), links)
+        correlation = _pair_correlations(expression, tf_codes, target_codes)
         if not np.isfinite(correlation).all():
             raise ValueError("A linked factor or target has constant counts")
-        position = {name: index for index, name in enumerate(names.tolist())}
-        tf_index = feature_index[[position[name] for name in links["TF"]]]
-        target_index = feature_index[[position[name] for name in links["target"]]]
         import sklearn
 
         attrs_written = {**attrs, "sklearn_version": sklearn.__version__}
@@ -326,9 +334,11 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
                 slot,
                 attrs=attrs_written,
                 arrays={
-                    "tf_index": np.asarray(tf_index, dtype=np.int64),
-                    "target_index": np.asarray(target_index, dtype=np.int64),
-                    "importance": links["importance"].to_numpy(dtype=np.float64),
+                    "tf_index": np.asarray(feature_index[tf_codes], dtype=np.int64),
+                    "target_index": np.asarray(
+                        feature_index[target_codes], dtype=np.int64
+                    ),
+                    "importance": importance,
                     "correlation": np.asarray(correlation, dtype=np.float64),
                     "regulator_index": np.asarray(
                         feature_index[regulator_mask], dtype=np.int64

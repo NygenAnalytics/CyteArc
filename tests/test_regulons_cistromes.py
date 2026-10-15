@@ -70,7 +70,8 @@ def test_binding_cistromes_overlap_rules():
                 "end": [160, 900, 495],
             }
         ),
-        "PAX5": pd.DataFrame({"chrom": ["chr3"], "start": [0], "end": [10]}),
+        # PAX5 binds away from every region, so it has no cistrome.
+        "PAX5": pd.DataFrame({"chrom": ["chr2"], "start": [500], "end": [510]}),
     }
 
     anywhere = binding_cistromes(peaks, regions)
@@ -89,6 +90,10 @@ def test_binding_cistromes_overlap_rules():
     ]
     with pytest.raises(ValueError, match="min_overlap_fraction"):
         binding_cistromes(peaks, regions, min_overlap_fraction=1.0)
+    # Peaks named without the regions' "chr" prefix share no chromosome.
+    ensembl = {"SPI1": peaks["SPI1"].assign(chrom="1")}
+    with pytest.raises(ValueError, match="'chr' prefix"):
+        binding_cistromes(ensembl, regions)
 
 
 def test_project_to_genes_counts_linking_regions():

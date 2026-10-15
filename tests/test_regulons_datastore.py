@@ -99,9 +99,18 @@ def test_grn_requires_a_writable_store_and_known_regulators(store_path):
 
 
 def test_grn_refuses_counts_beyond_the_memory_budget(store_path):
+    full = _open(store_path)
+    computed = full.regulons.grn(
+        full.snapshot_cell_selection("everyone"),
+        features=full.features.universe(),
+        tfs=TFS,
+        **FAST,
+    )
     store = _open(store_path, mem_budget="1K")
     cells = store.snapshot_cell_selection("everyone")
     universe = store.features.universe()
 
+    # A new network must fit the budget; an existing one is returned as is.
     with pytest.raises(MemoryError, match="memory budget"):
-        store.regulons.grn(cells, features=universe, tfs=TFS, **FAST)
+        store.regulons.grn(cells, features=universe, tfs=TFS, random_seed=77, **FAST)
+    assert store.regulons.grn(cells, features=universe, tfs=TFS, **FAST) == computed

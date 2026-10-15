@@ -13,8 +13,8 @@ __all__ = [
     "read_motif_annotations",
 ]
 
-#: Names that a cisTarget database gives the column of its row identifiers.
-INDEX_COLUMNS = ("motifs", "tracks", "regions", "genes")
+#: Names that a cisTarget rankings database gives its column of motifs or tracks.
+INDEX_COLUMNS = ("motifs", "tracks")
 
 #: ``.tbl`` columns that annotation filtering and pruning read.
 ANNOTATION_COLUMNS = (
@@ -69,7 +69,8 @@ class RankingDatabase:
                 "Feather version 1 databases first"
             )
         self.name = name or self.path.name
-        names = list(polars.read_ipc_schema(self.path))
+        schema = polars.read_ipc_schema(self.path)
+        names = list(schema)
         index = [column for column in names if column in INDEX_COLUMNS]
         if len(index) != 1:
             raise ValueError(
@@ -82,6 +83,12 @@ class RankingDatabase:
         )
         if len(set(self.featureNames)) != len(self.featureNames):
             raise ValueError(f"{self.path.name} repeats a feature column")
+        # A scores database holds floats beside its rankings; ranks are integers.
+        if not all(schema[name].is_integer() for name in self.featureNames):
+            raise ValueError(
+                f"{self.path.name} holds non-integer values; pass a rankings "
+                "database, not a scores database"
+            )
         self._position = {name: index for index, name in enumerate(self.featureNames)}
         index_frame = polars.read_ipc(self.path, columns=[self.indexColumn])
         self.rowNames = np.asarray(

@@ -6,9 +6,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from numba import njit
 
-from .cistarget import auc_rank_cutoff, recovery_aucs
+from ..utils.arguments import float_argument, integer_argument
+
+from .cistarget import _envelope, _rank_at_max, auc_rank_cutoff, recovery_aucs
 from .databases import RankingDatabase
 
 __all__ = [
@@ -58,12 +59,8 @@ class PruningParameters:
     maxMissingFraction: float = 0.2
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.rankThreshold, bool)
-            or not isinstance(self.rankThreshold, int)
-            or self.rankThreshold < 1
-        ):
-            raise ValueError("rankThreshold must be a positive integer")
+        integer_argument(self.rankThreshold, "rankThreshold", minimum=1)
+        float_argument(self.nesThreshold, "nesThreshold")
         if not 0 < self.aucThreshold <= 1:
             raise ValueError("aucThreshold must be in (0, 1]")
         if not 0 < self.maxMissingFraction <= 1:
@@ -72,65 +69,6 @@ class PruningParameters:
 
 #: ``pyscenic ctx`` 0.12.1 defaults.
 SCENIC_PRUNING_PARAMETERS = PruningParameters()
-
-
-@njit(cache=True, nogil=True)
-def _envelope(ranks: np.ndarray, weights: np.ndarray, length: int) -> np.ndarray:
-    """Mean plus two population SDs of all motifs' recovery curves.
-
-    Sums run over motifs in row order, then the deviations are summed again,
-    the order of numpy's ``mean(axis=0)`` and ``std(axis=0)`` on the stacked
-    curves, without holding every curve at once.
-    """
-    n_motifs, n_genes = ranks.shape
-    curve = np.zeros(length, dtype=np.float64)
-    total = np.zeros(length, dtype=np.float64)
-    for motif in range(n_motifs):
-        curve[:] = 0.0
-        for gene in range(n_genes):
-            rank = ranks[motif, gene]
-            if rank < length:
-                curve[rank] += weights[gene]
-        running = 0.0
-        for position in range(length):
-            running += curve[position]
-            total[position] += running
-    mean = total / n_motifs
-    squares = np.zeros(length, dtype=np.float64)
-    for motif in range(n_motifs):
-        curve[:] = 0.0
-        for gene in range(n_genes):
-            rank = ranks[motif, gene]
-            if rank < length:
-                curve[rank] += weights[gene]
-        running = 0.0
-        for position in range(length):
-            running += curve[position]
-            deviation = running - mean[position]
-            squares[position] += deviation * deviation
-    envelope: np.ndarray = mean + 2.0 * np.sqrt(squares / n_motifs)
-    return envelope
-
-
-@njit(cache=True, nogil=True)
-def _rank_at_max(ranks: np.ndarray, weights: np.ndarray, envelope: np.ndarray) -> int:
-    """First rank where one motif's recovery curve exceeds the envelope most."""
-    length = envelope.size
-    curve = np.zeros(length, dtype=np.float64)
-    for gene in range(ranks.size):
-        rank = ranks[gene]
-        if rank < length:
-            curve[rank] += weights[gene]
-    running = 0.0
-    best = 0
-    best_value = -np.inf
-    for position in range(length):
-        running += curve[position]
-        value = running - envelope[position]
-        if value > best_value:
-            best_value = value
-            best = position
-    return best
 
 
 def _best_annotations(annotations: pd.DataFrame) -> pd.DataFrame:
@@ -218,8 +156,7 @@ def prune_modules(
     """
     if not databases:
         raise ValueError("At least one ranking database is required")
-    if isinstance(nthreads, bool) or not isinstance(nthreads, int) or nthreads < 1:
-        raise ValueError("nthreads must be a positive integer")
+    integer_argument(nthreads, "nthreads", minimum=1)
     annotation_columns = {
         "motif",
         "TF",

@@ -14,8 +14,10 @@ way, and find co-regulated gene programs. Docs: <https://docs.nygen.io/CyteArc/t
 
 ## Key concepts
 
-- Everything is a network table: `source` (or `TF`) and `target`. `ds.scores.aucell` scores gene
-  targets on RNA; `ds.scores.chromvar` scores peak targets on ATAC. Both return
+- The scorers take a table with `source` and `target` columns: `ds.scores.aucell` scores gene
+  targets on RNA; `ds.scores.chromvar` scores peak targets, matched to ATAC feature ids
+  (`chrom:start-end`). Motif matches and cistromes have these columns; rename `regulon` of
+  regulons, `program`/`gene` of programs, and `eRegulon`/`gene` of eRegulons. Both return
   `kind="enrichment_scores"`; `ds.scores.load(ref)` gives `.data` (cells x sources) and, for
   chromVAR, `.deviations`. chromVAR z-scores are NaN where a cell expects under one fragment.
 - `ds.regulons.grn(cells, features=..., tfs=..., random_seed=...)` runs GRNBoost2 on **raw counts**
@@ -30,12 +32,18 @@ way, and find co-regulated gene programs. Docs: <https://docs.nygen.io/CyteArc/t
   Ranking databases need `pip install "cytearc[regulons]"` (polars).
 - Motifs: `read_jaspar_motifs`/`read_meme_motifs`, `match_motifs(chroms, starts, ends,
   IndexedFasta(genome.fa), motifs, names=peak_ids)` (motifmatchr settings: p 5e-5, log2,
-  pseudocount 0.8, `background="subject"`). Use the genome build of the peaks (10x GRCh38-2020-A:
+  pseudocount 0.8, `background="subject"`; scores are proper log-odds, so matches overlap
+  motifmatchr's at Jaccard 0.94, not exactly). Use the genome build of the peaks (10x GRCh38-2020-A:
   GENCODE v32 primary assembly). An uncompressed FASTA is indexed in memory or read from `.fai`.
-- Cistromes: `cistromes_from_motifs(matches, annotations)` (JASPAR names or cisTarget `.tbl`),
-  `binding_cistromes({"SPI1": "peaks.narrowPeak"}, peak_ids)` for CUT&RUN/ChIP peaks.
-- eRegulons: `link_regions_to_genes(..., upstream=150_000, downstream=150_000, anchor="gene_body")`
-  then `region_gene_links` on metacell profiles, then `build_eregulons(cistromes, r2g, tf2g)`.
+- Cistromes: `cistromes_from_motifs(matches, annotations)` joins on motif ID, so the annotation's
+  `motif` column must equal the scanned IDs. A cisTarget `.tbl` uses its own IDs
+  (`jaspar__MA0080.6`), and a mismatch returns an empty table. For JASPAR scans build
+  `pd.DataFrame([(m.motifId, m.name.upper(), "direct") for m in motifs], columns=["motif", "TF",
+  "category"])`. `binding_cistromes({"SPI1": "peaks.narrowPeak"}, peak_ids)` for CUT&RUN/ChIP peaks.
+- eRegulons: `search = link_regions_to_genes(..., upstream=150_000, downstream=150_000,
+  anchor="gene_body")` gives region positions; name them with `pd.DataFrame({"region":
+  peak_ids[search["region"]], "gene": search["gene_name"]})`, score those candidates with
+  `region_gene_links` on metacell profiles, then `build_eregulons(cistromes, r2g, tf2g)`.
 - Gene programs: `gene_programs(metacell_profiles, genes)`; `program_regulators` runs cisTarget on
   each program; `set_overlaps` relates programs to regulons.
 

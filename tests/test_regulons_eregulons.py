@@ -11,7 +11,11 @@ from cytearc.regulons.eregulons import (
 
 
 def _gseapy_0_10_8(gene_list, correl_vector, gene_set, nperm, seed):
-    """gseapy 0.10.8 gsea_compute + enrichment_score for one gene set."""
+    """gseapy 0.10.8 gsea_compute + enrichment_score for one gene set.
+
+    Adapted from gseapy (https://github.com/zqfang/GSEApy), Copyright (c) 2017
+    Zhuoqing Fang, BSD 3-Clause License.
+    """
     np.random.seed(seed)
     stream = np.random.randint(np.iinfo(np.int32).max, size=1)[0]
     N = len(gene_list)
@@ -141,7 +145,8 @@ def test_build_eregulons_keeps_co_expressed_targets_of_the_cistrome():
     for gene in genes:
         for k in range(3):
             rows.append((f"{gene}_r{k}", gene, 10.0 if k == 0 else 1.0, 0.3))
-    region_to_gene = pd.DataFrame(rows, columns=["region", "gene", "importance", "rho"])
+    rows_columns = ["region", "gene", "importance", "rho"]
+    region_to_gene = pd.DataFrame(rows, columns=rows_columns)
     # SPI1 binds the strong regions of G0..G24; CEBPA binds those of G0..G24 too.
     cistromes = pd.DataFrame(
         {
@@ -161,3 +166,30 @@ def test_build_eregulons_keeps_co_expressed_targets_of_the_cistrome():
     assert set(spi1["gene"]) <= {f"G{i}" for i in range(25)}
     assert len(set(spi1["gene"]) & {f"G{i}" for i in range(20)}) >= 10
     assert (spi1["importance_TF2G"] >= 30).all()
+
+    # The factor's own gene carries its injected self-link, as SCENIC+ reports.
+    with_self = build_eregulons(
+        pd.concat([cistromes, pd.DataFrame({"source": ["SPI1"], "target": ["s_r0"]})]),
+        pd.concat(
+            [
+                region_to_gene,
+                pd.DataFrame([("s_r0", "SPI1", 10.0, 0.3)], columns=rows_columns),
+            ]
+        ),
+        tf_to_gene,
+        parameters=parameters,
+    )
+    self_row = with_self.loc[with_self["gene"] == "SPI1"]
+    assert not self_row.empty
+    assert self_row["importance_TF2G"].to_numpy() == pytest.approx(50 + 1e-5)
+    assert (self_row["rho_TF2G"] == 1.0).all()
+
+    # Invalid inputs raise rather than return an empty table.
+    with pytest.raises(ValueError, match="repeats"):
+        build_eregulons(
+            cistromes, region_to_gene, pd.concat([tf_to_gene, tf_to_gene.iloc[:1]])
+        )
+    with pytest.raises(ValueError, match="importances"):
+        build_eregulons(cistromes, region_to_gene.assign(importance=np.nan), tf_to_gene)
+    with pytest.raises(ValueError, match="seed"):
+        EregulonParameters(seed=-1)

@@ -16,6 +16,8 @@ import numpy as np
 from numba import njit, prange
 from scipy.sparse import csc_matrix, csr_matrix
 
+from ...utils.arguments import float_argument, integer_argument
+
 __all__ = [
     "ChromvarModel",
     "background_peaks",
@@ -65,13 +67,11 @@ def background_peaks(
         raise ValueError("Every peak needs at least one fragment")
     if not np.isfinite(bias).all():
         raise ValueError("GC content must be finite; a peak has no A, C, G, or T base")
-    for label, value in (("n_iterations", n_iterations), ("bins", bins)):
-        if isinstance(value, bool) or not isinstance(value, int) or value < 2:
-            raise ValueError(f"{label} must be an integer of at least 2")
-    if not kernel_width > 0:
+    n_iterations = integer_argument(n_iterations, "n_iterations", minimum=2)
+    bins = integer_argument(bins, "bins", minimum=2)
+    seed = integer_argument(seed, "seed", minimum=0)
+    if not float_argument(kernel_width, "kernel_width") > 0:
         raise ValueError("kernel_width must be positive")
-    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
-        raise ValueError("seed must be a non-negative integer")
     from scipy.linalg import solve_triangular
 
     points = np.column_stack([np.log10(counts), bias])
@@ -86,10 +86,6 @@ def background_peaks(
     axis1 = np.linspace(whitened[:, 0].min(), whitened[:, 0].max(), bins)
     axis2 = np.linspace(whitened[:, 1].min(), whitened[:, 1].max(), bins)
     centers = np.column_stack([np.repeat(axis1, bins), np.tile(axis2, bins)])
-    differences = centers[:, None, :] - centers[None, :, :]
-    distances = np.sqrt((differences * differences).sum(axis=2))
-    # The normal density's constant cancels when probabilities are normalized.
-    kernel = np.exp(-0.5 * (distances / kernel_width) ** 2)
     membership = _nearest_center(whitened, axis1, axis2, bins)
     density = np.bincount(membership, minlength=bins * bins).astype(np.float64)
 
@@ -98,7 +94,12 @@ def background_peaks(
     weight_per_peak = 1.0 / density[membership]
     for grid_bin in np.flatnonzero(density > 0):
         members = np.flatnonzero(membership == grid_bin)
-        probability = kernel[membership, grid_bin] * weight_per_peak
+        # Kernel weight of each grid point from this bin; the normal density's
+        # constant cancels when the probabilities are normalized.
+        offsets = centers - centers[grid_bin]
+        distances = np.sqrt((offsets * offsets).sum(axis=1))
+        kernel = np.exp(-0.5 * (distances / kernel_width) ** 2)
+        probability = kernel[membership] * weight_per_peak
         probability = probability / probability.sum()
         draws = rng.choice(
             len(counts), size=(len(members), n_iterations), replace=True, p=probability
@@ -326,6 +327,8 @@ def _score_block(
                 continue
             observed_deviation = (observed[peak_set] - expected) / expected
             mean = 0.0
+            low = np.inf
+            high = -np.inf
             for iteration in range(n_iterations):
                 expected_sample = expected_background[iteration, peak_set] * depth
                 value = (
@@ -333,6 +336,8 @@ def _score_block(
                 ) / expected_sample
                 background[iteration] = value
                 mean += value
+                low = min(low, value)
+                high = max(high, value)
             mean /= n_iterations
             spread = 0.0
             for iteration in range(n_iterations):
@@ -341,7 +346,9 @@ def _score_block(
             sd = np.sqrt(spread / (n_iterations - 1))
             corrected = observed_deviation - mean
             deviations[cell, peak_set] = corrected
-            if sd > 0.0:
+            # Equal background deviations have no spread, whatever rounding
+            # leaves in the computed one.
+            if high > low and sd > 0.0:
                 scores[cell, peak_set] = corrected / sd
     return deviations, scores
 
@@ -374,9 +381,9 @@ def score_chromvar_block(
     annotation = model.annotation
     return _score_block(
         np.ascontiguousarray(values),
-        annotation.indptr.astype(np.int64),
-        annotation.indices.astype(np.int64),
-        annotation.data.astype(np.float64),
+        annotation.indptr,
+        annotation.indices,
+        annotation.data,
         model.invertedIndptr,
         model.invertedIndices,
         model.expectedSet,

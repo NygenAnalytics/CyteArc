@@ -9,6 +9,8 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
+from ..utils.arguments import integer_argument
+
 __all__ = [
     "GRNBOOST2_PARAMETERS",
     "GrnParameters",
@@ -54,24 +56,14 @@ class GrnParameters:
     def __post_init__(self) -> None:
         if not 0 < self.learningRate <= 1:
             raise ValueError("learningRate must be in (0, 1]")
-        if (
-            isinstance(self.maxStages, bool)
-            or not isinstance(self.maxStages, int)
-            or self.maxStages < 1
-        ):
-            raise ValueError("maxStages must be a positive integer")
+        integer_argument(self.maxStages, "maxStages", minimum=1)
         if not 0 < self.maxFeatures <= 1:
             raise ValueError("maxFeatures must be in (0, 1]")
         if not 0 < self.subsample < 1:
             raise ValueError(
                 "subsample must be in (0, 1) so out-of-bag early stopping applies"
             )
-        if (
-            isinstance(self.earlyStopWindow, bool)
-            or not isinstance(self.earlyStopWindow, int)
-            or self.earlyStopWindow < 1
-        ):
-            raise ValueError("earlyStopWindow must be a positive integer")
+        integer_argument(self.earlyStopWindow, "earlyStopWindow", minimum=1)
         if self.earlyStopping not in ("stage", "consecutive"):
             raise ValueError("earlyStopping must be 'stage' or 'consecutive'")
 
@@ -225,17 +217,17 @@ def infer_grn(
         matrix.dtype, np.complexfloating
     ):
         raise ValueError("expression must be real-valued")
-    if not np.isfinite(matrix).all():
+    # A sum is non-finite exactly when a value is, without a mask of the matrix.
+    if not np.isfinite(matrix.sum(dtype=np.float64)):
         raise ValueError("expression must be finite")
     names = [str(name) for name in gene_names]
     if len(names) != matrix.shape[1]:
         raise ValueError("gene_names must align with the expression columns")
     if len(set(names)) != len(names):
         raise ValueError("gene_names must be unique")
-    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
-        raise ValueError("seed must be a non-negative integer")
-    if isinstance(nthreads, bool) or not isinstance(nthreads, int) or nthreads < 1:
-        raise ValueError("nthreads must be a positive integer")
+    # scikit-learn accepts 32-bit unsigned random states only.
+    seed = integer_argument(seed, "seed", minimum=0, maximum=2**32 - 1)
+    nthreads = integer_argument(nthreads, "nthreads", minimum=1)
     if matrix.shape[0] < 2:
         raise ValueError("At least two cells are required")
     tf_set = {str(name) for name in tf_names}
@@ -250,40 +242,64 @@ def infer_grn(
         if missing:
             raise ValueError(f"Targets are not expression columns: {missing[:5]}")
         target_columns = list(dict.fromkeys(position[str(name)] for name in targets))
-    tf_matrix = np.ascontiguousarray(matrix[:, tf_columns], dtype=np.float32)
-    tf_labels = np.asarray([names[index] for index in tf_columns], dtype=object)
-    tf_position = {column: index for index, column in enumerate(tf_columns)}
+    tf_codes, target_codes, importance = _grn_links(
+        matrix,
+        names,
+        np.asarray(tf_columns, dtype=np.int64),
+        np.asarray(target_columns, dtype=np.int64),
+        seed=seed,
+        parameters=parameters,
+        nthreads=nthreads,
+        progress=progress,
+    )
+    labels = np.asarray(names, dtype=object)
+    return pd.DataFrame(
+        {
+            "TF": labels[tf_codes],
+            "target": labels[target_codes],
+            "importance": importance,
+        }
+    ).astype({"TF": "str", "target": "str"})
 
-    def fit(column: int) -> pd.DataFrame | None:
+
+def _grn_links(
+    matrix: np.ndarray,
+    names: Sequence[str],
+    tf_columns: np.ndarray,
+    target_columns: np.ndarray,
+    *,
+    seed: int,
+    parameters: GrnParameters,
+    nthreads: int,
+    progress: Callable[[int, int], None] | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the factor and target columns and importances of every link.
+
+    Links are sorted by decreasing importance, then by target and factor name.
+    """
+    # scikit-learn gathers predictors by column, faster in Fortran order.
+    tf_matrix = np.asfortranarray(matrix[:, tf_columns], dtype=np.float32)
+    own_position = {column: index for index, column in enumerate(tf_columns.tolist())}
+
+    def fit(column: int) -> tuple[np.ndarray, np.ndarray] | None:
         target = np.asarray(matrix[:, column], dtype=np.float64)
         if np.all(target == target[0]):
             return None
-        own = tf_position.get(column)
-        if own is None:
-            predictors = tf_matrix
-            labels = tf_labels
-        else:
-            if tf_matrix.shape[1] == 1:
+        own = own_position.get(column)
+        predictors, codes = tf_matrix, tf_columns
+        if own is not None:
+            if len(tf_columns) == 1:
                 return None
-            predictors = np.delete(tf_matrix, own, axis=1)
-            labels = np.delete(tf_labels, own)
+            predictors = np.asfortranarray(np.delete(tf_matrix, own, axis=1))
+            codes = np.delete(tf_columns, own)
         importances = _fit_target(predictors, target, parameters=parameters, seed=seed)
         keep = importances > 0
-        if not keep.any():
-            return None
-        return pd.DataFrame(
-            {
-                "TF": labels[keep],
-                "target": names[column],
-                "importance": importances[keep],
-            }
-        )
+        return codes[keep], importances[keep]
 
-    frames: list[pd.DataFrame] = []
     lock = threading.Lock()
     done = 0
 
-    def run(column: int) -> pd.DataFrame | None:
+    def run(column: int) -> tuple[np.ndarray, np.ndarray] | None:
         nonlocal done
         result = fit(column)
         if progress is not None:
@@ -292,26 +308,23 @@ def infer_grn(
                 progress(done, len(target_columns))
         return result
 
-    if nthreads == 1 or len(target_columns) == 1:
-        results = [run(column) for column in target_columns]
+    columns = target_columns.tolist()
+    if nthreads == 1 or len(columns) == 1:
+        results = [run(column) for column in columns]
     else:
         with ThreadPoolExecutor(max_workers=nthreads) as executor:
-            results = list(executor.map(run, target_columns))
-    frames = [frame for frame in results if frame is not None]
-    if not frames:
-        return pd.DataFrame(
-            {
-                "TF": pd.Series(dtype=object),
-                "target": pd.Series(dtype=object),
-                "importance": pd.Series(dtype=np.float64),
-            }
-        )
-    links = pd.concat(frames, ignore_index=True)
-    return links.sort_values(
-        ["importance", "target", "TF"],
-        ascending=[False, True, True],
-        kind="mergesort",
-    ).reset_index(drop=True)
+            results = list(executor.map(run, columns))
+    fitted = [(column, result) for column, result in zip(columns, results) if result]
+    if not fitted:
+        return (np.empty(0, np.int64), np.empty(0, np.int64), np.empty(0, np.float64))
+    tf_codes = np.concatenate([codes for _, (codes, _) in fitted])
+    importance = np.concatenate([values for _, (_, values) in fitted])
+    target_codes = np.repeat(
+        [column for column, _ in fitted], [len(values) for _, (_, values) in fitted]
+    )
+    name_rank = np.argsort(np.argsort(np.asarray(names, dtype=object), kind="stable"))
+    order = np.lexsort((name_rank[tf_codes], name_rank[target_codes], -importance))
+    return tf_codes[order], target_codes[order], importance[order]
 
 
 def pearson_correlations(
@@ -339,6 +352,13 @@ def pearson_correlations(
         )
     except KeyError as exc:
         raise ValueError(f"Gene {exc.args[0]!r} is not an expression column") from exc
+    return _pair_correlations(matrix, tf_index, target_index)
+
+
+def _pair_correlations(
+    matrix: np.ndarray, tf_index: np.ndarray, target_index: np.ndarray
+) -> np.ndarray:
+    """Pearson correlation of each pair of expression columns."""
     result = np.full(len(tf_index), np.nan, dtype=np.float64)
     if len(tf_index) == 0:
         return result

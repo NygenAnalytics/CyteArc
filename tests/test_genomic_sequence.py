@@ -40,7 +40,12 @@ def test_indexed_fasta_reads_every_interval(tmp_path, width, newline):
                     )
 
 
-def test_indexed_fasta_uses_samtools_index_when_present(tmp_path):
+def test_indexed_fasta_uses_samtools_index_when_present(tmp_path, monkeypatch):
+    import cytearc.features.genomic.sequence as sequence
+
+    def scan(path):
+        raise AssertionError("the FASTA file was scanned despite its index")
+
     fasta = tmp_path / "genome.fa"
     _write_fasta(fasta, width=5)
     # samtools faidx: name, length, offset, line bases, line width.
@@ -52,6 +57,7 @@ def test_indexed_fasta_uses_samtools_index_when_present(tmp_path):
 
     records = read_fasta_index(tmp_path / "genome.fa.fai")
     assert records["chr2"].offset == chr2_offset
+    monkeypatch.setattr(sequence, "_build_fasta_index", scan)
     with IndexedFasta(fasta) as genome:
         assert genome.records == records
         assert genome.fetch("chr2", 3, 9) == _CHR2[3:9].encode()

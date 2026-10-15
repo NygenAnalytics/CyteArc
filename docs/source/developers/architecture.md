@@ -105,10 +105,8 @@ They must not import those packages at module load time.
   region-to-gene links (`links.py`), enhancer-driven regulons with preranked GSEA
   (`eregulons.py`), co-regulated gene programs (`programs.py`), and regulon specificity
   (`specificity.py`). Its functions work on in-memory arrays and reference files; `polars`
-  is an optional dependency for ranking databases. Do not read them with `pyarrow`: installing
-  it switches pandas to Arrow-backed strings for the whole environment, which plotting and
-  memory admission do not support. `results.py` holds `GrnResult`, which names
-  `storage.refs` only.
+  is an optional dependency for ranking databases, so the `regulons` extra does not install
+  `pyarrow`. `results.py` holds `GrnResult`, which names `storage.refs` only.
 
 Domain algorithm packages must not import `datastore`, `plotting`, or general import/export packages at module load time.
 A domain that persists an artifact may use a narrow, named `storage` adapter.
@@ -303,7 +301,8 @@ CyteArc validates persisted data and public arguments against the following cont
   arrays (one row per link with positive importance), a `regulator_index` array of the factors
   offered to every target, and the method, layout, cell, feature, and regulator digests as
   attributes. It models raw counts, and `early_stopping` records which out-of-bag improvement
-  ended each fit. `regulons.load_grn` returns a `GrnResult` and checks those digests.
+  ended each fit. `regulons.load_grn` returns a `GrnResult` and checks the cell and regulator
+  digests.
 - `enrichment_scores` artifacts gain the `chromvar` method, written by `scores.chromvar` with
   operation `run_chromvar` on an ATAC assay. Its `scores` are chromVAR z-scores and may hold NaN
   for a cell that expects fewer than one fragment in a set; a `deviations` array of the same
