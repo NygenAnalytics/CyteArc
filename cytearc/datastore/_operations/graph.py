@@ -1713,8 +1713,12 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 selected = apply_missing_mask(selected, missing, labels=True)
             return selected.astype(object)
 
+        # An explicit object dtype keeps the labels' representation, and so
+        # their admitted bytes, the same whether or not pandas stores text
+        # with pyarrow.
         batches = pd.DataFrame(
-            {column: selected_snapshot_values(column) for column in batch_columns}
+            {column: selected_snapshot_values(column) for column in batch_columns},
+            dtype=object,
         )
         # The coordinate source has one row per selected cell.
         source, n_cells, dims = self._coordinate_source(

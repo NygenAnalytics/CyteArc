@@ -74,11 +74,13 @@ def _merge_order_feats(
             keys.tolist(), feature_names.tolist(), strict=True
         ):
             union.setdefault(feature_key, feature_name)
+    # Object columns keep the table's representation, and so its resident
+    # bytes, the same whether or not pandas stores text with pyarrow.
     ret_val = pd.DataFrame(
         {
             "idx": list(range(len(union))),
-            "names": list(union.values()),
-            "ids": list(union.keys()),
+            "names": pd.Series(list(union.values()), dtype=object),
+            "ids": pd.Series(list(union.keys()), dtype=object),
         }
     )
     non_empty = sum(1 for keys, _names in keyed if keys.size)

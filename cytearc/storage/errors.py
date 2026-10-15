@@ -37,10 +37,11 @@ class ArtifactResolutionError(ValueError):
         self.code = code
         self.context = normalized
 
-    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
         return (
             _restore_artifact_resolution_error,
             (type(self), str(self), self.code, self.context),
+            self.__dict__,
         )
 
 

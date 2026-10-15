@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import numpy as np
 import pytest
 import tracemalloc
@@ -16,11 +18,14 @@ from cytearc.storage.partition import (
     affordable_width,
     checked_indices,
     contiguous_ranges,
+    indexed_read_parts,
     is_contiguous,
     partition_indices,
     row_band,
     row_read_parts,
+    widest_chunk_span,
 )
+from cytearc.storage.virtual_arrays import read_selection
 
 from .store_probes import RecordingStore
 
@@ -122,7 +127,7 @@ def test_row_band_uses_the_fallback_without_geometry() -> None:
     assert row_band(None, fallback=0) == 1
 
 
-def test_selected_row_cost_covers_sharded_coordinate_buffers() -> None:
+def test_selected_row_cost_covers_sharded_reads_that_index_both_axes() -> None:
     values = np.random.default_rng(73).integers(
         0, 30, size=(1024, 512), dtype=np.uint16
     )
@@ -151,6 +156,117 @@ def test_selected_row_cost_covers_sharded_coordinate_buffers() -> None:
             tracemalloc.stop()
     np.testing.assert_array_equal(actual, values[np.ix_(rows, columns)])
     assert peak <= planned
+
+
+def _sharded_counts() -> tuple[np.ndarray, zarr.Array]:
+    values = np.random.default_rng(11).integers(
+        0, 30, size=(1024, 2048), dtype=np.uint16
+    )
+    array = _array(
+        shape=values.shape, chunks=(256, 256), shards=(1024, 2048), dtype=np.uint16
+    )
+    array[:] = values
+    return values, array
+
+
+def _traced_peak[T](read: Callable[[], T]) -> tuple[T, int]:
+    with zarr_io_concurrency(1):
+        read()
+        tracemalloc.start()
+        try:
+            value = read()
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    return value, peak
+
+
+def test_sharded_reads_that_index_both_axes_hold_little_beside_their_result() -> None:
+    values, array = _sharded_counts()
+    rows = np.flatnonzero(np.arange(1024) % 7 != 0)
+    columns = np.flatnonzero(np.arange(2048) % 4 != 0)
+
+    actual, peak = _traced_peak(lambda: read_selection(array, rows, columns))
+
+    np.testing.assert_array_equal(actual, values[np.ix_(rows, columns)])
+    # Zarr's coordinates of every selected value in a shard would hold about
+    # thirty times the result.
+    assert peak <= 3 * actual.nbytes
+
+
+@pytest.mark.parametrize(
+    ("rows", "columns"),
+    (
+        (np.arange(1024)[np.arange(1024) % 7 != 0], np.arange(2048)[::3]),
+        (np.arange(1024)[np.arange(1024) % 7 != 0], np.arange(0, 2048, 17)),
+        (np.arange(5, 1024, 11), np.arange(2048)[np.arange(2048) % 4 != 0]),
+    ),
+    ids=("dense", "few columns", "few rows"),
+)
+def test_row_blocks_that_index_both_axes_hold_no_more_than_planned(
+    rows: np.ndarray, columns: np.ndarray
+) -> None:
+    values, array = _sharded_counts()
+    matrix = ChunkedArray(array, rows=rows, cols=columns, block_size=rows.size)
+
+    block, peak = _traced_peak(lambda: matrix._materialize_range(0, rows.size))
+
+    np.testing.assert_array_equal(block, values[np.ix_(rows, columns)])
+    assert peak <= matrix._block_task_bytes()
+
+
+def test_planning_reads_that_index_both_axes_copies_no_row_selection() -> None:
+    array = _array(
+        shape=(2_000_000, 8), chunks=(4096, 4), shards=(65536, 8), dtype=np.uint8
+    )
+    rows = np.arange(0, 2_000_000, 2)
+    columns = np.array([0, 5])
+    # Imports the planner on its first call.
+    ChunkedArray(array, rows=rows, cols=columns, block_size=256)._block_task_bytes()
+    matrix = ChunkedArray(array, rows=rows, cols=columns, block_size=256)
+
+    tracemalloc.start()
+    try:
+        planned = matrix._block_task_bytes()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert planned > 0
+    # A plan is admitted before its stream reads; a copy or sort of a million
+    # selected rows would hold megabytes the budget never sees.
+    assert peak < rows.nbytes // 64
+
+
+def test_indexed_read_parts_charge_the_narrower_band() -> None:
+    geometry = ArrayGeometry((4096, 4096), (1024, 1024), (4096, 4096), 2)
+    touched = 4  # four row chunks per shard, or four column chunks of the columns
+    decode = geometry.readBytes(0, touched, decodes=1)
+    # Two columns in each column chunk span all 1,024 positions, so a block
+    # of 1,024 rows is cheaper to read in bands of rows.
+    spread = np.array([0, 1023, 1024, 2047, 2048, 3071, 3072, 4095])
+    assert widest_chunk_span(spread, 1024) == 1024
+    assert indexed_read_parts(geometry, spread, block_rows=1024) == (
+        geometry.readBytes(8 * 1024 * 2, touched, decodes=1),
+        0,
+    )
+    # A dense run in each column chunk spans 16 positions: bands of columns.
+    dense = np.concatenate([np.arange(start, start + 16) for start in (0, 1024)])
+    assert widest_chunk_span(dense, 1024) == 16
+    assert indexed_read_parts(geometry, dense, block_rows=1024) == (
+        decode,
+        geometry.readBytes(16 * 2, touched, decodes=1) - decode,
+    )
+
+
+def test_band_costs_are_zero_for_empty_selections() -> None:
+    geometry = ArrayGeometry((4096, 4096), (1024, 1024), (4096, 4096), 2)
+    empty = np.array([], dtype=np.int64)
+    # Callers skip empty selections, but the exported helpers answer them.
+    assert widest_chunk_span(empty, 1024) == 0
+    assert indexed_read_parts(geometry, empty, block_rows=1024) == (0, 0)
+    assert row_read_parts(geometry, empty, rows_contiguous=False) == (0, 0)
+    assert row_read_parts(None, np.array([0, 2]), rows_contiguous=False) == (0, 0)
 
 
 def test_selected_row_cost_admits_only_touched_chunks_within_each_shard() -> None:

@@ -17,11 +17,13 @@ __all__ = [
     "affordable_width",
     "checked_indices",
     "contiguous_ranges",
+    "indexed_read_parts",
     "is_contiguous",
     "partition_indices",
     "row_band",
     "row_read_parts",
     "scan_band",
+    "widest_chunk_span",
 ]
 
 # One multi-chunk read per band: Zarr fetches a band's chunks concurrently.
@@ -86,6 +88,65 @@ def is_contiguous(indices: np.ndarray) -> bool:
     return bool(np.all(np.diff(np.asarray(indices).astype(np.int64, copy=False)) == 1))
 
 
+def widest_chunk_span(indices: np.ndarray, chunk: int) -> int:
+    """Return how many positions the widest chunk's selected indices span.
+
+    The indices that one stored chunk of extent ``chunk`` holds span from the
+    smallest to the largest of them. ``indices`` are non-negative.
+    """
+    if indices.size == 0:
+        return 0
+    values = np.sort(np.asarray(indices, dtype=np.int64))
+    bins = values // max(1, int(chunk))
+    boundary = bins[1:] != bins[:-1]
+    first = values[np.r_[True, boundary]]
+    last = values[np.r_[boundary, True]]
+    return int((last - first).max()) + 1
+
+
+def _shard_column_chunks(geometry: ArrayGeometry, columns: np.ndarray) -> int:
+    """Return the most inner column chunks that ``columns`` touch in one shard."""
+    column_chunks = np.unique(geometry.binOf(1, columns))
+    chunks_per_shard = -(-geometry.axisShard(1) // geometry.axisChunk(1))
+    _, counts = np.unique(column_chunks // chunks_per_shard, return_counts=True)
+    return int(counts.max())
+
+
+def indexed_read_parts(
+    geometry: ArrayGeometry,
+    columns: np.ndarray,
+    *,
+    block_rows: int,
+) -> tuple[int, int]:
+    """Return per-decode and per-row bytes beside a read that indexes both axes.
+
+    ``read_selection`` reads a sharded array's index arrays on both axes one
+    stored chunk of one axis at a time, as a band that slices that axis over
+    the indices the chunk holds, and holds the widest band beside the result
+    while Zarr reads it. A band of columns has ``widest_chunk_span(columns)``
+    values per row; a band of rows holds every selected column over at most
+    one stored row chunk. The reader slices the axis whose band is narrower,
+    so either bound covers its read; the one that is smaller for a block of
+    ``block_rows`` rows is charged. The selected rows are not scanned, so a
+    plan holds no copy of them.
+    """
+    if columns.size == 0:
+        return 0, 0
+    row_chunks = -(-geometry.axisShard(0) // geometry.axisChunk(0))
+    # A column band touches a column chunk of each row chunk in a shard; a
+    # row band touches a row chunk of each selected column chunk.
+    touched = max(row_chunks, _shard_column_chunks(geometry, columns))
+    fixed = geometry.readBytes(0, touched, decodes=1)
+    column_band = widest_chunk_span(columns, geometry.axisChunk(1)) * geometry.itemsize
+    per_row = geometry.readBytes(column_band, touched, decodes=1) - fixed
+    row_span = min(geometry.axisChunk(0), geometry.shape[0])
+    rows_band = columns.size * row_span * geometry.itemsize
+    rows_fixed = geometry.readBytes(rows_band, touched, decodes=1)
+    if max(1, int(block_rows)) * per_row <= rows_fixed - fixed:
+        return int(fixed), int(per_row)
+    return int(rows_fixed), 0
+
+
 def row_read_parts(
     geometry: ArrayGeometry | None,
     columns: np.ndarray,
@@ -95,13 +156,19 @@ def row_read_parts(
     """Return per-decode and per-row bytes beside a selected row block's result."""
     if geometry is None or columns.size == 0:
         return 0, 0
-    column_chunks = np.unique(geometry.binOf(1, columns))
-    chunks_per_shard = -(-geometry.axisShard(1) // geometry.axisChunk(1))
-    _, counts = np.unique(column_chunks // chunks_per_shard, return_counts=True)
-    touched = -(-geometry.axisShard(0) // geometry.axisChunk(0)) * int(counts.max())
+    row_chunks = -(-geometry.axisShard(0) // geometry.axisChunk(0))
+    touched = row_chunks * _shard_column_chunks(geometry, columns)
     fixed = geometry.readBytes(0, touched, decodes=1)
     per_row = columns.size * geometry.itemsize if geometry.shards is not None else 0
     column_gather = not is_contiguous(columns)
+    if not rows_contiguous and column_gather and geometry.shards is not None:
+        # Sharded blocks that index both axes are read in bands. A block whose
+        # rows form one run is read by Zarr in one request, so both are covered.
+        band_fixed, band_per_row = indexed_read_parts(
+            geometry, columns, block_rows=geometry.axisChunk(0)
+        )
+        fixed = max(fixed, band_fixed)
+        per_row = max(per_row, band_per_row)
     if not rows_contiguous or column_gather:
         # Sorted selections, permutations, chunk labels, cumulative counts,
         # and their temporary arrays in Zarr's integer indexers.
@@ -113,13 +180,6 @@ def row_read_parts(
         fixed += index_bytes * (grid + (columns.size if column_gather else 0))
         if not rows_contiguous:
             per_row += index_bytes
-        if not rows_contiguous and column_gather and geometry.shards is not None:
-            # Two gathered axes become flattened coordinate arrays inside
-            # each shard, including coordinate sorting and chunk projections.
-            per_row += index_bytes * columns.size
-            fixed += index_bytes * (
-                -(-geometry.axisShard(0) // geometry.axisChunk(0)) * chunks_per_shard
-            )
     return int(fixed), int(per_row)
 
 

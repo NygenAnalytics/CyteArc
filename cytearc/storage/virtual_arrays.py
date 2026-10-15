@@ -9,6 +9,7 @@ answer a selection directly does less work. Such a store implements
 ``storage.feature_stream``, which hand virtual arrays to the store's reader.
 """
 
+import math
 import operator
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
@@ -17,6 +18,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 import numpy as np
 import zarr
 from zarr.storage import WrapperStore
+
+from .types import array_metadata_shards
 
 if TYPE_CHECKING:
     from .budget import ResourceBudget
@@ -168,7 +171,9 @@ def read_selection(
     A virtual array is read through its store's reader. Any other array is
     read through Zarr, as a basic slice when both axes are contiguous runs and
     otherwise through orthogonal indexing, which preserves the order of index
-    arrays. Call it outside Zarr's event loop, like any synchronous Zarr read.
+    arrays. A sharded array's index arrays on both axes are read in bands;
+    see ``_read_index_arrays``. Call it outside Zarr's event loop, like any
+    synchronous Zarr read.
     """
     reader = virtual_array_reader(array)
     if reader is not None:
@@ -179,4 +184,103 @@ def read_selection(
     column_selection = _axis_selection(columns, int(array.shape[1]))
     if isinstance(row_selection, slice) and isinstance(column_selection, slice):
         return np.asarray(array[row_selection, column_selection])
+    if (
+        isinstance(row_selection, np.ndarray)
+        and isinstance(column_selection, np.ndarray)
+        and array_metadata_shards(array) is not None
+    ):
+        return _read_index_arrays(array, row_selection, column_selection)
     return np.asarray(array.get_orthogonal_selection((row_selection, column_selection)))
+
+
+def _in_axis_indices(selection: np.ndarray, extent: int) -> np.ndarray | None:
+    """Return ``selection`` as positions if it holds integers inside the axis."""
+    if selection.ndim != 1 or selection.size == 0 or selection.dtype.kind not in "iu":
+        return None
+    if selection.min() < 0 or selection.max() >= extent:
+        return None
+    return selection.astype(np.intp, copy=False)
+
+
+def _read_index_arrays(
+    array: zarr.Array, rows: np.ndarray, columns: np.ndarray
+) -> np.ndarray:
+    """Read a sharded array's index arrays on both axes in bands.
+
+    Zarr turns index arrays on both axes into coordinates of every selected
+    value, and inside a shard those coordinates and their sorting hold many
+    times the result; an unsharded read indexes each chunk directly and holds
+    none. Instead, one stored chunk of one axis at a time is read as a band
+    that slices the axis over the indices the chunk holds, with the other axis
+    indexed by Zarr, and the band's selected positions are copied into the
+    result in the requested order, repeats included. The axis whose widest
+    band is narrower is sliced, so the read holds its result beside one Zarr
+    read of that band, as ``indexed_read_parts`` charges.
+    """
+    from .partition import widest_chunk_span
+
+    row_indices = _in_axis_indices(rows, int(array.shape[0]))
+    column_indices = _in_axis_indices(columns, int(array.shape[1]))
+    if row_indices is None or column_indices is None:
+        # Zarr reads empty selections, negative indices, and boolean masks,
+        # and rejects indices outside the axis before it reads anything.
+        return np.asarray(array.get_orthogonal_selection((rows, columns)))
+    row_chunk, column_chunk = (operator.index(extent) for extent in array.chunks)
+    column_band = row_indices.size * widest_chunk_span(column_indices, column_chunk)
+    row_band = column_indices.size * widest_chunk_span(row_indices, row_chunk)
+    if column_band <= row_band:
+        return _read_bands(
+            array, row_indices, column_indices, axis=1, chunk=column_chunk
+        )
+    return _read_bands(array, row_indices, column_indices, axis=0, chunk=row_chunk)
+
+
+def _read_bands(
+    array: zarr.Array,
+    rows: np.ndarray,
+    columns: np.ndarray,
+    *,
+    axis: int,
+    chunk: int,
+) -> np.ndarray:
+    """Read ``rows`` by ``columns`` one stored chunk of ``axis`` at a time.
+
+    Each band slices ``axis`` from the smallest to the largest index that one
+    chunk holds, and Zarr indexes the other axis. A band's selected positions
+    are copied in slabs of at most one chunk, so the copy holds no more than a
+    decoded chunk beside the band.
+    """
+    spanned, indexed = (rows, columns) if axis == 0 else (columns, rows)
+    order = np.argsort(spanned, kind="stable")
+    values = spanned[order]
+    bins = values // chunk
+    starts = np.flatnonzero(np.r_[True, bins[1:] != bins[:-1]])
+    stops = np.r_[starts[1:], values.size]
+    slab = max(1, math.prod(operator.index(extent) for extent in array.chunks))
+    result: np.ndarray | None = None
+    for first, last in zip(starts.tolist(), stops.tolist(), strict=True):
+        start, stop = int(values[first]), int(values[last - 1]) + 1
+        positions = order[first:last]
+        local = values[first:last] - start
+        band = np.asarray(
+            array.get_orthogonal_selection(
+                (slice(start, stop), indexed)
+                if axis == 0
+                else (indexed, slice(start, stop))
+            )
+        )
+        if result is None:
+            result = np.empty((rows.size, columns.size), dtype=band.dtype)
+        if axis == 0:
+            step = max(1, slab // columns.size)
+            for begin in range(0, positions.size, step):
+                end = begin + step
+                result[positions[begin:end]] = band[local[begin:end]]
+        else:
+            step = max(1, slab // positions.size)
+            for begin in range(0, rows.size, step):
+                end = begin + step
+                result[begin:end, positions] = band[begin:end, local]
+        del band
+    assert result is not None
+    return result

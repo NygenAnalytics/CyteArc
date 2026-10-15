@@ -137,6 +137,23 @@ class SeuratImportError(ValueError):
         self.context = dict(context or {})
         super().__init__(f"{message} at {object_path} [{code}]")
 
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
+        return (
+            _restore_seurat_import_error,
+            (type(self), self.message, self.objectPath, self.code, self.context),
+            self.__dict__,
+        )
+
+
+def _restore_seurat_import_error(
+    error_type: type[SeuratImportError],
+    message: str,
+    object_path: str,
+    code: str,
+    context: Mapping[str, Any],
+) -> SeuratImportError:
+    return error_type(message, object_path=object_path, code=code, context=context)
+
 
 @dataclass(frozen=True, slots=True)
 class SeuratDiagnostic:

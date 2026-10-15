@@ -1,5 +1,6 @@
 import enum
 from dataclasses import dataclass
+from typing import Any
 
 
 class RType(enum.IntEnum):
@@ -143,6 +144,19 @@ class RdsError(Exception):
             location += f" (byte {offset})"
         super().__init__(f"{message}{location}")
 
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
+        return (
+            _restore_rds_error,
+            (type(self), self.message, self.path, self.offset),
+            self.__dict__,
+        )
+
+
+def _restore_rds_error(
+    error_type: type[RdsError], message: str, path: str, offset: int | None
+) -> RdsError:
+    return error_type(message, path=path, offset=offset)
+
 
 class RdsFormatError(RdsError):
     """Malformed or unsupported wire data."""
@@ -168,6 +182,24 @@ class RdsLimitError(RdsError):
             path=path,
             offset=offset,
         )
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
+        return (
+            _restore_rds_limit_error,
+            (type(self), self.limit, self.actual, self.maximum, self.path, self.offset),
+            self.__dict__,
+        )
+
+
+def _restore_rds_limit_error(
+    error_type: type[RdsLimitError],
+    limit: str,
+    actual: int,
+    maximum: int,
+    path: str,
+    offset: int | None,
+) -> RdsLimitError:
+    return error_type(limit, actual, maximum, path=path, offset=offset)
 
 
 class RdsClosedError(RdsError):

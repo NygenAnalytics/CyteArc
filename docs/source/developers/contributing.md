@@ -40,6 +40,8 @@ While iterating, skip both:
 
 CI runs the whole suite, so run `uv run pytest` before opening a pull request.
 CI splits the suite into four jobs per configuration; `uv run pytest --shard 2/4` runs the second of those shards locally.
+pandas stores text with pyarrow whenever pyarrow is installed, which the lock file does not do, so four more jobs layer pyarrow on the locked environment and split the quick suite into shards.
+`uv run --with pyarrow pytest -m "not slow and not integration"` runs it locally without changing the project environment.
 `tests/shards.py` balances the shards by the seconds each test file took, recorded in `tests/shard_durations.json`.
 After adding slow test files or changing how long existing ones take, refresh the record with a cold Numba cache, as on a CI runner:
 
@@ -224,7 +226,7 @@ A dataset needs a matching generated manifest and archive before it can be publi
 Publishing a GitHub release runs `.github/workflows/publish.yml`.
 Every job checks out the exact commit that the release tag named when the release was published (`github.sha`), and the upload to PyPI waits for four gates on that commit:
 
-- `verify` runs the test workflow, `pytest.yml`: the static checks, the visual regression comparison, and the complete suite on Python 3.13, 3.14, and 3.15 and with the lowest direct dependency versions. A release uploads no coverage report.
+- `verify` runs the test workflow, `pytest.yml`: the static checks, the visual regression comparison, the complete suite on Python 3.13, 3.14, and 3.15 and with the lowest direct dependency versions, and the quick suite with pyarrow installed. A release uploads no coverage report.
 - `docs` runs the documentation workflow, `docs.yml`: the documentation tests, the complete MyST build using committed notebooks, and the nitpicky Sphinx API build with reference coverage. Tutorial execution remains a separate Modal action.
 - `build` first requires the release tag to still name that commit, then builds the wheel and the source distribution from a clean checkout and checks their metadata against the tag.
 - `smoke` runs `tests/smoke_wheel.py` on the built wheel on Linux with Python 3.13, 3.14, and 3.15 and on Windows with Python 3.13.
