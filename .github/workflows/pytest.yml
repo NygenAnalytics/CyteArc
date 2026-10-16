@@ -145,6 +145,7 @@ jobs:
     runs-on: ubuntu-26.04
     env:
       HNSWLIB_NO_NATIVE: "1"
+      UV_CACHE_DIR: /tmp/uv-cache
     strategy:
       fail-fast: false
       matrix:
@@ -173,6 +174,17 @@ jobs:
       uses: astral-sh/setup-uv@v9.0.0
       with:
         python-version: ${{ matrix.python-version }}
+        enable-cache: false
+    - name: Restore the uv cache
+      # setup-uv's cache misses whenever uv.lock changes, and the 3.15 row then
+      # compiles every package without a 3.15 wheel again (about 20 minutes).
+      # The fallback key restores the latest earlier cache instead. Wheels are
+      # built against the runner image's libraries, so its release is in the key.
+      uses: actions/cache@v6
+      with:
+        path: /tmp/uv-cache
+        key: uv-ubuntu-26.04-${{ matrix.python-version }}-${{ matrix.resolution }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}
+        restore-keys: uv-ubuntu-26.04-${{ matrix.python-version }}-${{ matrix.resolution }}-
     - name: Install dependencies (locked)
       if: matrix.resolution == 'locked'
       run: uv sync --group profiling --group cytebase --extra test --extra extra --extra agent --extra cytebase
@@ -208,3 +220,6 @@ jobs:
         files: coverage.xml
         disable_search: true
         fail_ci_if_error: true
+    - name: Keep only source-built wheels in the uv cache
+      # Downloaded wheels are faster to fetch again than to restore.
+      run: uv cache prune --ci
