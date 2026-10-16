@@ -291,7 +291,7 @@ def test_reverse_complement_matrix_scores_the_other_strand():
 def _brute_force_matches(sequences, matrices, thresholds):
     hits = np.zeros((len(sequences), len(matrices)), dtype=bool)
     for row, sequence in enumerate(sequences):
-        for column, (matrix, threshold) in enumerate(
+        for column, (matrix, (forward, reverse)) in enumerate(
             zip(matrices, thresholds, strict=True)
         ):
             rc = reverse_complement_matrix(matrix)
@@ -300,7 +300,7 @@ def _brute_force_matches(sequences, matrices, thresholds):
                 window = sequence[start : start + width]
                 if np.any(window > 3):
                     continue
-                for scorer in (matrix, rc):
+                for scorer, threshold in ((matrix, forward), (rc, reverse)):
                     score = scorer[np.arange(width), window].sum()
                     if score >= threshold:
                         hits[row, column] = True
@@ -315,13 +315,16 @@ def test_scan_motif_matches_agrees_with_brute_force(batch_size):
     for length in rng.integers(0, 40, size=25):
         letters = rng.choice(alphabet, size=length, p=[0.24, 0.24, 0.24, 0.24, 0.04])
         sequences.append(encode_sequence("".join(letters)))
-    bg = np.full(4, 0.25)
+    # A background whose A and T frequencies differ gives the strands
+    # different thresholds.
+    bg = np.array([0.35, 0.2, 0.2, 0.25])
     matrices = [
         log_odds_matrix(rng.integers(0, 10, size=(width, 4)), bg, pseudocount=0.5)
         for width in (3, 5, 6, 8)
     ]
-    assert all(np.isfinite(score_threshold(matrix, bg, 0.02)) for matrix in matrices)
-    thresholds = [score_threshold(matrix, bg, 0.02) for matrix in matrices]
+    thresholds = motif_module._strand_thresholds(matrices, bg, 0.02)
+    assert np.isfinite(thresholds).all()
+    assert (thresholds[:, 0] != thresholds[:, 1]).any()
 
     hits = scan_motif_matches(sequences, matrices, thresholds, batch_size=batch_size)
 
@@ -345,15 +348,57 @@ def test_scan_motif_matches_ignores_windows_with_unknown_bases(kernels, monkeypa
     hits = scan_motif_matches(
         [encode_sequence(bases) for bases in ("AAN", "TTT", "NAAA", "AA")],
         [matrix],
-        [matrix.max(axis=1).sum() - 1e-9],
+        [[matrix.max(axis=1).sum() - 1e-9] * 2],
     )
 
     # TTT is the reverse complement of AAA, and AA is shorter than the motif.
     np.testing.assert_array_equal(hits.toarray()[:, 0], [False, True, True, False])
 
 
+@pytest.mark.parametrize(
+    "background",
+    [[0.25, 0.25, 0.25, 0.25], [0.4, 0.1, 0.2, 0.3], [0.45, 0.05, 0.3, 0.2]],
+)
+def test_each_strand_threshold_keeps_its_false_positive_rate(background):
+    background = np.asarray(background)
+    counts = np.array(
+        [
+            [8, 1, 1, 0],
+            [9, 0, 1, 0],
+            [0, 1, 9, 0],
+            [7, 2, 0, 1],
+            [8, 0, 0, 2],
+            [0, 0, 1, 9],
+        ]
+    )
+    matrix = log_odds_matrix(counts, background, pseudocount=0.8)
+    reverse = reverse_complement_matrix(matrix)
+
+    ((forward_threshold, reverse_threshold),) = motif_module._strand_thresholds(
+        [matrix], background, 0.01
+    )
+
+    # The probability under the background of a window scoring at least each
+    # threshold, summed over every possible window.
+    def tail(scorer, threshold):
+        return sum(
+            np.prod(background[list(word)])
+            for word in itertools.product(range(4), repeat=6)
+            if scorer[np.arange(6), word].sum() >= threshold
+        )
+
+    # Each strand keeps the requested rate, up to MOODS's rounding of scores.
+    assert tail(matrix, forward_threshold) == pytest.approx(0.01, rel=0.05)
+    assert tail(reverse, reverse_threshold) == pytest.approx(0.01, rel=0.05)
+    # Only where complementary bases share a frequency would the forward
+    # threshold also serve the reverse strand.
+    symmetric = background[0] == background[3] and background[1] == background[2]
+    reused = tail(reverse, forward_threshold)
+    assert (reused == pytest.approx(0.01, rel=0.05)) == symmetric
+
+
 def test_scan_motif_matches_of_no_sequences_is_empty():
-    hits = scan_motif_matches([], [np.zeros((2, 4))], [0.0])
+    hits = scan_motif_matches([], [np.zeros((2, 4))], [[0.0, 0.0]])
 
     assert hits.shape == (0, 1)
     assert hits.dtype == bool
@@ -363,8 +408,8 @@ def test_scan_motif_matches_of_no_sequences_is_empty():
     ("override", "match"),
     [
         ({"matrices": [], "thresholds": []}, "At least one motif matrix"),
-        ({"thresholds": [0.0, 1.0]}, "align"),
-        ({"thresholds": [np.nan]}, "NaN"),
+        ({"thresholds": [0.0]}, "two strand thresholds"),
+        ({"thresholds": [[np.nan, 0.0]]}, "NaN"),
         ({"matrices": [np.zeros((0, 4))]}, "non-empty"),
         ({"matrices": [np.full((2, 4), np.inf)]}, "finite"),
         ({"sequences": [np.zeros(3, dtype=np.int64)]}, "uint8"),
@@ -374,7 +419,7 @@ def test_scan_motif_matches_rejects_invalid_inputs(override, match):
     arguments = {
         "sequences": [encode_sequence("ACGT")],
         "matrices": [np.zeros((2, 4))],
-        "thresholds": [0.0],
+        "thresholds": [[0.0, 0.0]],
     }
 
     with pytest.raises(ValueError, match=match):

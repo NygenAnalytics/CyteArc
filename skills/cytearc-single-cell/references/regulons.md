@@ -34,7 +34,8 @@ way, and find co-regulated gene programs. Docs: <https://docs.nygen.io/CyteArc/t
   Ranking databases need `pip install "cytearc[regulons]"` (polars).
 - Motifs: `read_jaspar_motifs`/`read_meme_motifs`, `match_motifs(peak_ids, IndexedFasta(genome.fa),
   motifs)` (motifmatchr settings: p 5e-5, log2, pseudocount 0.8, `background="subject"`; scores are
-  proper log-odds, so matches overlap motifmatchr's at Jaccard 0.94, not exactly). Use the genome
+  proper log-odds and each strand has its own threshold, as in MOODS, so matches differ from
+  motifmatchr's, which reuses the forward threshold). Use the genome
   build of the peaks (10x GRCh38-2020-A: GENCODE v32 primary assembly). An uncompressed FASTA is
   indexed in memory or read from `.fai`.
 - Cistromes: `cistromes_from_motifs(matches, annotations)` joins on motif ID.
@@ -49,8 +50,10 @@ way, and find co-regulated gene programs. Docs: <https://docs.nygen.io/CyteArc/t
   `set_overlaps(programs, regulons, genes)` relates programs to regulons.
 - eRegulons: `link_regions_to_genes(peak_ids, genes, upstream=150_000, downstream=150_000,
   anchor="gene_body")` gives the candidates that `region_gene_links(atac, rna, candidates)` scores
-  on metacell profiles; then `build_eregulons(cistromes, links, adjacencies)`. A gene linked by
-  several peaks repeats, so score `eregulons[["source", "target"]].drop_duplicates()`.
+  on metacell profiles; then `build_eregulons(cistromes, links, adjacencies)`. Each kept module's
+  links carry its `context`, `NES`, `p_value`, and `adjusted_p`; SCENIC+'s defaults keep modules
+  without evidence, so filter on `adjusted_p` (or set `EregulonParameters(adjustedPThreshold=...)`)
+  before scoring `eregulons[["source", "target"]].drop_duplicates()`.
 
 ## Recipes
 
@@ -128,3 +131,6 @@ auc = ds.scores.aucell(eregulons[["source", "target"]].drop_duplicates(), cells,
 - Binding peaks from cell lines describe that cell line's context.
 - `motif_annotations` upper-cases factor names like human gene symbols; recase its `TF` column
   for other species.
+- `gene_programs` assumes independent samples (metacells, pseudobulk); smoothed cells share
+  counts and produce spurious programs. Its threshold screens chance groupings, not a calibrated
+  test of each program.

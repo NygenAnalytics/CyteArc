@@ -72,13 +72,11 @@ def region_gene_links(
         raise ValueError(
             "accessibility and expression must hold the same samples in the same order"
         )
-    access = accessibility.to_numpy()
-    express = expression.to_numpy()
     regions = accessibility.columns.astype(str)
     genes = expression.columns.astype(str)
     if not (regions.is_unique and genes.is_unique):
         raise ValueError("Region and gene names must be unique")
-    if access.shape[0] < 3:
+    if len(accessibility) < 3:
         raise ValueError("At least three samples are needed")
     if importance not in ("gbm", "none"):
         raise ValueError("importance must be 'gbm' or 'none'")
@@ -86,36 +84,32 @@ def region_gene_links(
         raise ValueError("candidates needs region and gene columns")
     table = candidates.loc[:, ["region", "gene"]].astype(str).drop_duplicates()
     table = table.loc[table["region"].isin(regions) & table["gene"].isin(genes)]
-    # Rank only the candidates' columns: ranking copies what it ranks.
-    used_regions = pd.unique(table["region"])
-    used_genes = pd.unique(table["gene"])
-    access = access[:, regions.get_indexer(used_regions)].astype(np.float64)
-    express = express[:, genes.get_indexer(used_genes)].astype(np.float64)
-    region_position = {name: index for index, name in enumerate(used_regions)}
-    gene_position = {name: index for index, name in enumerate(used_genes)}
-    region_ranks = _standardized(_ranks(access))
-    gene_ranks = _standardized(_ranks(express))
+    table = table.assign(region_column=regions.get_indexer(table["region"]))
     groups = list(table.groupby("gene", sort=True))
     lock_free_total = len(groups)
 
     def score(item: tuple[str, pd.DataFrame]) -> pd.DataFrame:
         gene, group = item
-        region_index = np.asarray([region_position[name] for name in group["region"]])
-        target = gene_ranks[:, gene_position[gene]]
-        rho = np.clip(region_ranks[:, region_index].T @ target, -1.0, 1.0)
-        values = np.full(len(region_index), np.nan)
+        # Each gene reads and ranks only its own candidates, so the workspace
+        # is one gene's regions per thread, not every candidate region.
+        access = accessibility.iloc[:, group["region_column"].to_numpy()].to_numpy(
+            dtype=np.float64
+        )
+        outcome = expression.iloc[:, genes.get_loc(gene)].to_numpy(dtype=np.float64)
+        target = _standardized(_ranks(outcome[:, None]))[:, 0]
+        rho = np.clip(_standardized(_ranks(access)).T @ target, -1.0, 1.0)
+        values = np.full(len(group), np.nan)
         if importance == "gbm":
-            outcome = express[:, gene_position[gene]]
             if np.ptp(outcome) > 0:
                 from sklearn.ensemble import GradientBoostingRegressor
 
                 regressor = GradientBoostingRegressor(
                     random_state=seed, **SCENICPLUS_R2G_PARAMETERS
                 )
-                regressor.fit(access[:, region_index], outcome)
+                regressor.fit(access, outcome)
                 values = np.asarray(regressor.feature_importances_, dtype=np.float64)
             else:
-                values = np.zeros(len(region_index))
+                values = np.zeros(len(group))
         return pd.DataFrame(
             {
                 "region": group["region"].to_numpy(),

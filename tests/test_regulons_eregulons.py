@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -98,6 +100,9 @@ def test_gsea_prerank_with_a_missing_weight_has_no_score():
         ({"rhoThreshold": -0.1}, "rhoThreshold"),
         ({"quantiles": (0.5, 1.5)}, "quantiles"),
         ({"seed": -1}, "seed"),
+        ({"adjustedPThreshold": 0.0}, "adjustedPThreshold"),
+        ({"adjustedPThreshold": 1.5}, "adjustedPThreshold"),
+        ({"nesThreshold": np.inf}, "nesThreshold"),
     ],
 )
 def test_eregulon_parameters_reject_invalid_settings(kwargs, message):
@@ -125,7 +130,8 @@ def test_binarization_follows_scenicplus_rules():
         ("+", "0.85 quantile"),
         ("+", "Top 5 region-to-gene links per gene"),
     ]
-    for sign, context, selected in sets:
+    for sign, context, rows in sets:
+        selected = links.iloc[rows]
         subset = links[(links["rho"] > 0.05) if sign == "+" else (links["rho"] < -0.05)]
         for gene, group in subset.groupby("gene"):
             values = group["importance"].to_numpy()
@@ -191,12 +197,23 @@ def test_build_eregulons_keeps_co_expressed_targets_of_the_cistrome():
     assert set(spi1["target"]) <= {f"G{i}" for i in range(25)}
     assert len(set(spi1["target"]) & {f"G{i}" for i in range(20)}) >= 10
     assert (spi1["importance_TF2G"] >= 30).all()
-    # Each module holds at most the 25 genes the cistrome links to, so no
-    # leading edge has 30 targets.
-    strict = EregulonParameters(nPermutations=200, minTargetGenes=30)
-    assert build_eregulons(
-        cistromes, region_to_gene, tf_to_gene, parameters=strict
-    ).empty
+    # Every link carries the statistics of the module that kept it.
+    modules = spi1.drop_duplicates("context")
+    assert set(modules["context"]) <= {
+        f"{q} quantile" for q in parameters.quantiles
+    } | {f"Top {n} region-to-gene links per gene" for n in parameters.topRegionsPerGene}
+    assert (modules["NES"] > 0).all()
+    assert (modules["adjusted_p"] >= modules["p_value"]).all()
+    assert (spi1.groupby("context")["adjusted_p"].nunique() == 1).all()
+    # No module passes an NES above the largest; each module holds at most
+    # the 25 genes the cistrome links to, so no leading edge has 30 targets.
+    for strict in (
+        replace(parameters, nesThreshold=modules["NES"].max()),
+        replace(parameters, minTargetGenes=30),
+    ):
+        assert build_eregulons(
+            cistromes, region_to_gene, tf_to_gene, parameters=strict
+        ).empty
 
     # The factor's own gene carries its injected self-link, as SCENIC+ reports.
     with_self = build_eregulons(
@@ -224,6 +241,42 @@ def test_build_eregulons_keeps_co_expressed_targets_of_the_cistrome():
         )
     with pytest.raises(ValueError, match="importances"):
         build_eregulons(cistromes, region_to_gene.assign(importance=np.nan), tf_to_gene)
+
+
+def test_eregulons_of_random_links_fail_a_significance_threshold():
+    rng = np.random.default_rng(5)
+    genes = [f"G{i}" for i in range(80)]
+    factors = [f"TF{i}" for i in range(4)]
+    # Positive correlations, but random importances and memberships.
+    tf_to_gene = pd.DataFrame(
+        [(tf, gene, rng.gamma(1.0), 0.3) for tf in factors for gene in genes],
+        columns=["TF", "target", "importance", "correlation"],
+    )
+    region_to_gene = pd.DataFrame(
+        [(f"r{i}", rng.choice(genes), rng.gamma(1.0), 0.3) for i in range(400)],
+        columns=["region", "gene", "importance", "rho"],
+    ).drop_duplicates(["region", "gene"])
+    cistromes = pd.DataFrame(
+        [(tf, f"r{i}") for tf in factors for i in rng.choice(400, 200, replace=False)],
+        columns=["source", "target"],
+    )
+    parameters = EregulonParameters(nPermutations=200, minTargetGenes=5)
+
+    permissive = build_eregulons(
+        cistromes, region_to_gene, tf_to_gene, parameters=parameters
+    )
+    strict = build_eregulons(
+        cistromes,
+        region_to_gene,
+        tf_to_gene,
+        parameters=replace(parameters, adjustedPThreshold=0.05),
+    )
+
+    # SCENIC+'s defaults keep modules whose adjusted p-values show no evidence;
+    # the reported statistics let a stricter threshold remove them.
+    assert not permissive.empty
+    assert (permissive["adjusted_p"] > 0.05).all()
+    assert strict.empty
 
 
 def test_build_eregulons_without_a_ranked_factor_is_empty():

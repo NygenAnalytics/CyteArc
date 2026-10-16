@@ -70,10 +70,14 @@ Agreement measured for one method is not evidence of equivalence for the rest of
   2024 motifs over 98,316 peaks. Given R's motif matches and background peaks, deviations and
   z-scores agree within 4e-12, with the same missing values. With an even background, motif
   matching finds every motifmatchr match (Jaccard 0.9998); all 2,510 additional matches belong
-  to four-base motifs. With the default subject background, motifmatchr applies the background
-  adjustment with the opposite sign to a log-odds score, which CyteArc does not reproduce
-  (Jaccard 0.94). End to end, with independently drawn background peaks, per-motif z-scores
-  correlate at a median Pearson of 0.96 and population means at 0.995.
+  to four-base motifs. With the default subject background CyteArc departs from motifmatchr
+  twice: motifmatchr applies the background adjustment with the opposite sign to a log-odds
+  score, and it reuses each motif's forward-strand threshold for the reverse strand, which misses
+  the requested p-value when complementary bases differ in frequency. CyteArc scores proper
+  log-odds and gives each strand its own threshold, as MOODS does. Before the per-strand
+  thresholds, matches overlapped motifmatchr's at Jaccard 0.94, and end to end, with
+  independently drawn background peaks, per-motif z-scores correlated at a median Pearson of
+  0.96 and population means at 0.995; these have not been measured again since.
 - Enhancer-driven regulons were not compared with a SCENIC+ run. Preranked GSEA matches a
   line-by-line transcription of gseapy 0.10.8's statistics and permutations in unit tests, and
   region-to-gene links use SCENIC+'s regressor settings. On the multiome sample, chromVAR scores
@@ -88,7 +92,10 @@ Agreement measured for one method is not evidence of equivalence for the rest of
   genes. The six programs contain 89% of the 503 genes in Hotspot's ten modules, and 76% of those
   genes fall in their module's majority program (adjusted Rand index 0.45 on shared genes,
   against at most 0.008 for 100 permuted labelings). Hotspot splits the T-cell, monocyte, and
-  B-cell programs into finer modules.
+  B-cell programs into finer modules. Independent noise profiles form no programs, but the
+  membership threshold assumes independent samples and ignores that programs are chosen from
+  the same data: it screens chance groupings rather than testing programs, and profiles of
+  smoothed cells form spurious ones.
 
 ## Current boundaries
 

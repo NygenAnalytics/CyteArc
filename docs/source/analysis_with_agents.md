@@ -328,8 +328,11 @@ Treat every regulon as a hypothesis about regulation, not as evidence of binding
   them onto your peaks.
 - Enhancer-driven regulons need RNA and ATAC from the same cells. Region-to-gene links from
   metacells are associations, so report them as candidate enhancers.
-- Gene programs group genes that co-vary across metacells. Factors nominated by motif
-  enrichment of a program are candidates to test, not its demonstrated regulators.
+- Gene programs group genes that co-vary across metacells. Build them from independent samples
+  (metacells or pseudobulk), never from smoothed cells, whose shared counts inflate correlations;
+  the membership threshold screens chance groupings but is not a calibrated test of a program.
+  Factors nominated by motif enrichment of a program are candidates to test, not its
+  demonstrated regulators.
 
 ### Methods outside CyteArc
 

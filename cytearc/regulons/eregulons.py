@@ -5,13 +5,15 @@ through region-to-gene links, to target genes. Region-to-gene links are split
 by the sign of their correlation and thresholded several ways per gene; each
 factor's cistrome selects the links of its regions; and a preranked GSEA of
 the selected genes against the factor's co-expression targets (GRNBoost2
-importances) keeps the leading edge. Surviving modules are merged per factor
-and sign class, as SCENIC+ 1.0 ``build_grn`` with its pipeline settings does.
+importances) keeps the leading edge. Surviving modules form an eRegulon per
+factor and sign class, as SCENIC+ 1.0 ``build_grn`` with its pipeline settings
+does; each module's statistics stay with its links.
 """
 
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -33,6 +35,10 @@ EREGULON_COLUMNS = (
     "TF",
     "tf_to_gene_sign",
     "region_to_gene_sign",
+    "context",
+    "NES",
+    "p_value",
+    "adjusted_p",
     "region",
     "target",
     "importance_R2G",
@@ -54,7 +60,11 @@ class EregulonParameters:
             correlation above this are positive, below its negative negative.
         quantiles: Per-gene importance quantiles that threshold region links.
         topRegionsPerGene: Each gene's most important region links.
-        minTargetGenes: Smallest eRegulon, and smallest co-expression ranking.
+        minTargetGenes: Smallest leading edge of a kept module, and smallest
+            co-expression ranking.
+        adjustedPThreshold: Kept modules have a Benjamini-Hochberg adjusted
+            GSEA p-value below this; SCENIC+ keeps every tested module (1).
+        nesThreshold: Kept modules have a GSEA NES above this.
         nPermutations: GSEA gene-set permutations.
         seed: GSEA random seed, the same for every module.
     """
@@ -63,6 +73,8 @@ class EregulonParameters:
     quantiles: tuple[float, ...] = (0.85, 0.90, 0.95)
     topRegionsPerGene: tuple[int, ...] = (5, 10, 15)
     minTargetGenes: int = 10
+    adjustedPThreshold: float = 1.0
+    nesThreshold: float = 0.0
     nPermutations: int = 1000
     seed: int = 666
 
@@ -74,6 +86,10 @@ class EregulonParameters:
         for value in self.topRegionsPerGene:
             integer_argument(value, "topRegionsPerGene", minimum=1)
         integer_argument(self.minTargetGenes, "minTargetGenes", minimum=1)
+        if not 0 < self.adjustedPThreshold <= 1:
+            raise ValueError("adjustedPThreshold must lie in (0, 1]")
+        if not np.isfinite(self.nesThreshold):
+            raise ValueError("nesThreshold must be finite")
         integer_argument(self.nPermutations, "nPermutations", minimum=1)
         # numpy's legacy random state accepts 32-bit unsigned seeds only.
         integer_argument(self.seed, "seed", minimum=0, maximum=2**32 - 1)
@@ -199,7 +215,7 @@ def binarize_region_to_gene(
     links: pd.DataFrame,
     *,
     parameters: EregulonParameters = SCENICPLUS_EREGULON_PARAMETERS,
-) -> list[tuple[str, str, pd.DataFrame]]:
+) -> list[tuple[str, str, np.ndarray]]:
     """Threshold region-to-gene links per gene, separately for each sign.
 
     Positive links (``rho`` above the threshold) and negative links (below
@@ -213,7 +229,9 @@ def binarize_region_to_gene(
         parameters: Thresholds; SCENIC+ pipeline settings when omitted.
 
     Returns:
-        ``(sign, context, links)`` triples, sign ``"+"`` or ``"-"``.
+        ``(sign, context, rows)`` triples: sign ``"+"`` or ``"-"``, the
+        thresholding rule, and the positions in ``links`` of the links that
+        pass it.
     """
     required = {"region", "gene", "importance", "rho"}
     if not required <= set(links.columns):
@@ -222,29 +240,38 @@ def binarize_region_to_gene(
         raise ValueError(
             "links have no importances; score them with region_gene_links(importance='gbm')"
         )
-    result: list[tuple[str, str, pd.DataFrame]] = []
+    importance = links["importance"].to_numpy(dtype=np.float64)
     rho = links["rho"].to_numpy(dtype=np.float64)
+    genes = links["gene"].to_numpy()
+    result: list[tuple[str, str, np.ndarray]] = []
     with np.errstate(invalid="ignore"):
-        subsets = (
-            ("-", links.loc[rho < -parameters.rhoThreshold]),
-            ("+", links.loc[rho > parameters.rhoThreshold]),
+        signs = (
+            ("-", np.flatnonzero(rho < -parameters.rhoThreshold)),
+            ("+", np.flatnonzero(rho > parameters.rhoThreshold)),
         )
-    for sign, subset in subsets:
-        if subset.empty:
+    for sign, rows in signs:
+        if rows.size == 0:
             continue
-        grouped = subset.groupby("gene", sort=False)["importance"]
+        values = importance[rows]
+        grouped = pd.Series(values).groupby(genes[rows], sort=False)
         for quantile in parameters.quantiles:
             thresholds = grouped.transform(lambda x, q=quantile: np.quantile(x, q))
-            passing = subset.loc[subset["importance"] > thresholds]
-            result.append((sign, f"{quantile} quantile", passing))
+            result.append(
+                (sign, f"{quantile} quantile", rows[values > thresholds.to_numpy()])
+            )
         for n in parameters.topRegionsPerGene:
             thresholds = grouped.transform(
                 lambda x, n=n: (
                     np.sort(x.to_numpy())[-n:].min() if len(x) >= n else x.min()
                 )
             )
-            passing = subset.loc[subset["importance"] >= thresholds]
-            result.append((sign, f"Top {n} region-to-gene links per gene", passing))
+            result.append(
+                (
+                    sign,
+                    f"Top {n} region-to-gene links per gene",
+                    rows[values >= thresholds.to_numpy()],
+                )
+            )
     return result
 
 
@@ -299,6 +326,14 @@ def build_eregulons(
 ) -> pd.DataFrame:
     """Build eRegulons from cistromes, region-to-gene links, and a co-expression network.
 
+    Each factor's cistrome selects, from every binarization of the
+    region-to-gene links, a module of links. A module is kept when the
+    preranked GSEA of its genes against the factor's co-expression ranking
+    has a Benjamini-Hochberg adjusted p-value below ``adjustedPThreshold``
+    and an NES above ``nesThreshold``, and when the leading edge holds at
+    least ``minTargetGenes`` genes. An eRegulon is the union of its kept
+    modules' leading-edge links.
+
     Args:
         cistromes: ``source`` (factor) and ``target`` (region) columns, from
             ``cistromes_from_motifs`` or ``binding_cistromes``.
@@ -309,15 +344,18 @@ def build_eregulons(
         label: Cistrome label in eRegulon names, such as ``direct``,
             ``extended``, or the experiment that measured binding.
         parameters: Construction settings; SCENIC+ pipeline settings when omitted.
-        nthreads: Modules tested concurrently.
+        nthreads: Factors tested concurrently.
 
     Returns:
-        One row per eRegulon region-to-gene link: ``source`` (the eRegulon,
-        named ``{TF}_{label}_{TF-to-gene sign}/{region-to-gene sign}``),
-        ``TF``, the two signs, ``region``, ``target`` (the gene), the link's
-        ``importance_R2G`` and ``rho_R2G``, and the target's factor-to-gene
-        ``importance_TF2G`` and ``rho_TF2G``. A gene linked by several regions
-        repeats, so score the unique ``source`` and ``target`` pairs.
+        One row per leading-edge link of each kept module: ``source`` (the
+        eRegulon, named ``{TF}_{label}_{TF-to-gene sign}/{region-to-gene
+        sign}``), ``TF``, the two signs, the module's ``context`` (its
+        binarization) with its ``NES``, ``p_value``, and ``adjusted_p``,
+        ``region``, ``target`` (the gene), the link's ``importance_R2G`` and
+        ``rho_R2G``, and the target's factor-to-gene ``importance_TF2G`` and
+        ``rho_TF2G``. A link kept by several modules, or a gene linked by
+        several regions, repeats: filter by the module statistics, then score
+        the unique ``source`` and ``target`` pairs.
     """
     for frame, columns, name in (
         (cistromes, {"source", "target"}, "cistromes"),
@@ -331,80 +369,105 @@ def build_eregulons(
     if tf_to_gene.duplicated(["TF", "target"]).any():
         raise ValueError("tf_to_gene repeats a (TF, target) link")
     factors = set(cistromes["source"].astype(str)) & set(tf_to_gene["TF"].astype(str))
-    regions_of = {
-        str(tf): set(group["target"].astype(str))
-        for tf, group in cistromes.loc[cistromes["source"].isin(factors)].groupby(
-            "source"
-        )
-    }
     co_expression = _with_self_links(tf_to_gene, factors)
     rankings = _rankings(co_expression, parameters)
-    modules: list[tuple[str, str, str, pd.DataFrame]] = []
-    for r2g_sign, context, links in binarize_region_to_gene(
-        region_to_gene, parameters=parameters
-    ):
-        if links.empty:
-            continue
-        for tf in sorted(factors):
-            selected = links.loc[links["region"].astype(str).isin(regions_of[tf])]
-            if not selected.empty:
-                modules.append((tf, r2g_sign, context, selected))
-    tasks = [
-        (tf, r2g_sign, tf2g_sign, selected)
-        for tf, r2g_sign, _context, selected in modules
-        for tf2g_sign in ("+", "-")
-        if (tf, tf2g_sign) in rankings
-    ]
-
-    def test(task: tuple[str, str, str, pd.DataFrame]) -> GseaResult:
-        tf, _r2g, tf2g_sign, selected = task
-        return gsea_prerank(
-            rankings[(tf, tf2g_sign)],
-            sorted(set(selected["gene"].astype(str))),
-            n_permutations=parameters.nPermutations,
-            seed=parameters.seed,
+    # A factor without a co-expression ranking cannot form a module.
+    tested = sorted({tf for tf, _sign in rankings})
+    cistrome_regions = {
+        str(tf): set(group.astype(str))
+        for tf, group in cistromes.groupby("source")["target"]
+    }
+    # Modules are row positions into the links, never copies of them.
+    region_codes, regions = pd.factorize(region_to_gene["region"].astype(str))
+    gene_codes, genes = pd.factorize(region_to_gene["gene"].astype(str))
+    contexts = {
+        (sign, context): rows
+        for sign, context, rows in binarize_region_to_gene(
+            region_to_gene, parameters=parameters
         )
+    }
+
+    def modules(tf: str) -> list[tuple[str, str, np.ndarray]]:
+        """The factor's non-empty modules: the links of its cistrome's regions."""
+        member = regions.isin(cistrome_regions[tf])
+        selected = [
+            (sign, context, rows[member[region_codes[rows]]])
+            for (sign, context), rows in contexts.items()
+        ]
+        return [module for module in selected if module[2].size]
+
+    def test(tf: str) -> list[tuple[str, str, str, GseaResult]]:
+        results = []
+        for r2g_sign, context, rows in modules(tf):
+            gene_set = genes[np.unique(gene_codes[rows])]
+            for tf2g_sign in ("+", "-"):
+                if (tf, tf2g_sign) in rankings:
+                    result = gsea_prerank(
+                        rankings[(tf, tf2g_sign)],
+                        gene_set,
+                        n_permutations=parameters.nPermutations,
+                        seed=parameters.seed,
+                    )
+                    results.append((tf2g_sign, r2g_sign, context, result))
+        return results
 
     if nthreads == 1:
-        results = [test(task) for task in tasks]
+        per_factor = [test(tf) for tf in tested]
     else:
         with ThreadPoolExecutor(max_workers=nthreads) as executor:
-            results = list(executor.map(test, tasks))
+            per_factor = list(executor.map(test, tested))
     # A module without a score (NaN) is dropped before the correction.
-    tested = [
-        (task, result)
-        for task, result in zip(tasks, results, strict=True)
-        if np.isfinite(result.enrichmentScore) and np.isfinite(result.pValue)
+    scored = [
+        (tf, *outcome)
+        for tf, outcomes in zip(tested, per_factor, strict=True)
+        for outcome in outcomes
+        if np.isfinite(outcome[-1].enrichmentScore) and np.isfinite(outcome[-1].pValue)
     ]
-    adjusted = _bh(np.asarray([result.pValue for _task, result in tested]))
-    kept: dict[tuple[str, str, str], set[tuple[str, str]]] = {}
-    link_values: dict[
-        tuple[str, str, str], dict[tuple[str, str], tuple[float, float]]
-    ] = {}
-    for ((tf, r2g_sign, tf2g_sign, selected), result), adjusted_p in zip(
-        tested, adjusted, strict=True
+    adjusted = _bh(np.asarray([outcome[-1].pValue for outcome in scored]))
+    passed: dict[str, list[tuple[str, str, str, GseaResult, float]]] = {}
+    for (tf, tf2g_sign, r2g_sign, context, result), adjusted_p in zip(
+        scored, adjusted, strict=True
     ):
-        if not (adjusted_p < 1 and result.nes > 0):
-            continue
-        edge = set(result.leadingEdge)
-        in_edge = selected.loc[selected["gene"].astype(str).isin(edge)]
-        if in_edge["gene"].nunique() < parameters.minTargetGenes:
-            continue
-        key = (tf, tf2g_sign, r2g_sign)
-        pairs = kept.setdefault(key, set())
-        values = link_values.setdefault(key, {})
-        for region, gene, importance, rho in in_edge[
-            ["region", "gene", "importance", "rho"]
-        ].itertuples(index=False):
-            pairs.add((str(region), str(gene)))
-            values[(str(region), str(gene))] = (float(importance), float(rho))
-    rows = [
-        (f"{tf}_{label}_{tf2g_sign}/{r2g_sign}", tf, tf2g_sign, r2g_sign, region, gene)
-        + link_values[(tf, tf2g_sign, r2g_sign)][(region, gene)]
-        for (tf, tf2g_sign, r2g_sign), pairs in sorted(kept.items())
-        for region, gene in sorted(pairs)
-    ]
-    eregulons = pd.DataFrame.from_records(rows, columns=list(EREGULON_COLUMNS[:8]))
+        if (
+            adjusted_p < parameters.adjustedPThreshold
+            and result.nes > parameters.nesThreshold
+        ):
+            passed.setdefault(tf, []).append(
+                (tf2g_sign, r2g_sign, context, result, float(adjusted_p))
+            )
+    kept_modules: list[tuple[tuple[Any, ...], np.ndarray]] = []
+    for tf, kept in passed.items():
+        module_rows = {(sign, context): rows for sign, context, rows in modules(tf)}
+        for tf2g_sign, r2g_sign, context, result, adjusted_p in kept:
+            rows = module_rows[(r2g_sign, context)]
+            rows = rows[
+                np.isin(gene_codes[rows], genes.get_indexer(result.leadingEdge))
+            ]
+            if np.unique(gene_codes[rows]).size < parameters.minTargetGenes:
+                continue
+            name = f"{tf}_{label}_{tf2g_sign}/{r2g_sign}"
+            evidence = (name, tf, tf2g_sign, r2g_sign, context)
+            kept_modules.append(
+                (evidence + (result.nes, result.pValue, adjusted_p), rows)
+            )
+    # Each module's evidence repeats over its links, which stay column arrays.
+    rows = np.concatenate([np.zeros(0, np.int64)] + [r for _, r in kept_modules])
+    module_of_row = np.repeat(
+        np.arange(len(kept_modules)), [len(r) for _, r in kept_modules]
+    )
+    eregulons = pd.DataFrame.from_records(
+        [evidence for evidence, _ in kept_modules], columns=list(EREGULON_COLUMNS[:8])
+    )
+    eregulons = eregulons.iloc[module_of_row].reset_index(drop=True)
+    eregulons = eregulons.assign(
+        region=regions.to_numpy()[region_codes[rows]],
+        target=genes.to_numpy()[gene_codes[rows]],
+        importance_R2G=region_to_gene["importance"].to_numpy(dtype=np.float64)[rows],
+        rho_R2G=region_to_gene["rho"].to_numpy(dtype=np.float64)[rows],
+    )
+    eregulons = eregulons.sort_values(
+        ["source", "context", "region", "target"], kind="mergesort"
+    )
     # Each target's co-expression statistics, the factor's self-link included.
     statistics = co_expression.set_axis(
         ["TF", "target", "importance_TF2G", "rho_TF2G"], axis=1

@@ -402,7 +402,6 @@ def _scan_block(
         for motif in range(n_motifs):
             offset = motif_offsets[motif]
             width = motif_offsets[motif + 1] - offset
-            threshold = thresholds[motif]
             for position in range(length - width + 1):
                 window = begin + position
                 if _strand_hit(
@@ -413,7 +412,7 @@ def _scan_block(
                     forward_suffix,
                     offset,
                     width,
-                    threshold,
+                    thresholds[motif, 0],
                 ) or _strand_hit(
                     codes,
                     window,
@@ -422,7 +421,7 @@ def _scan_block(
                     reverse_suffix,
                     offset,
                     width,
-                    threshold,
+                    thresholds[motif, 1],
                 ):
                     hits[sequence, motif] = True
                     break
@@ -442,7 +441,10 @@ def scan_motif_matches(
         sequences: Encoded sequences (see ``encode_sequence``). A window that
             holds an unknown base (code 4) never matches.
         matrices: Forward-strand ``(width, 4)`` log-odds matrices.
-        thresholds: Minimum score of a match for each matrix.
+        thresholds: Minimum score of a match for each matrix, as a
+            ``(len(matrices), 2)`` array of forward-strand and reverse-strand
+            thresholds: under a background whose A and T, or C and G,
+            frequencies differ, the strands score differently.
         batch_size: Sequences scanned per parallel batch.
 
     Returns:
@@ -450,9 +452,9 @@ def scan_motif_matches(
     """
     if not matrices:
         raise ValueError("At least one motif matrix is required")
-    threshold_values = np.asarray(thresholds, dtype=np.float64)
-    if threshold_values.shape != (len(matrices),):
-        raise ValueError("thresholds must align with matrices")
+    threshold_values = np.ascontiguousarray(thresholds, dtype=np.float64)
+    if threshold_values.shape != (len(matrices), 2):
+        raise ValueError("thresholds must hold two strand thresholds per matrix")
     if np.isnan(threshold_values).any():
         raise ValueError("thresholds must not be NaN")
     batch_size = integer_argument(batch_size, "batch_size", minimum=1)
@@ -539,6 +541,22 @@ def nucleotide_frequencies(sequences: Iterable[np.ndarray]) -> np.ndarray:
     return counts[:4] / known
 
 
+def _strand_thresholds(
+    matrices: Sequence[np.ndarray], background: np.ndarray, p_value: float
+) -> np.ndarray:
+    """Forward and reverse-strand thresholds at ``p_value`` of each matrix."""
+    return np.asarray(
+        [
+            [
+                score_threshold(matrix, background, p_value),
+                score_threshold(reverse_complement_matrix(matrix), background, p_value),
+            ]
+            for matrix in matrices
+        ],
+        dtype=np.float64,
+    )
+
+
 def match_motifs(
     regions: Sequence[str] | np.ndarray,
     genome: "IndexedFasta",
@@ -553,11 +571,14 @@ def match_motifs(
     """Find which regions contain a match of each motif on either strand.
 
     Counts become log-odds scores against the background (``log_odds_matrix``),
-    each motif's threshold is the MOODS score threshold at ``p_value``, and a
-    region matches when any window on either strand scores at least the
-    threshold. Windows never span an N or other ambiguity code. These are the
-    motifmatchr defaults that chromVAR uses, except that scores are proper
-    log-odds against the ``"subject"`` background.
+    each strand's threshold is the MOODS score threshold at ``p_value`` of that
+    strand's matrix, and a region matches when any window on either strand
+    scores at least its strand's threshold. Windows never span an N or other
+    ambiguity code. These are the motifmatchr defaults that chromVAR uses,
+    except that scores are proper log-odds against the ``"subject"``
+    background, and that the reverse strand has its own threshold, as in
+    MOODS: motifmatchr reuses the forward one, which misses ``p_value`` for a
+    background whose A and T, or C and G, frequencies differ.
 
     Args:
         regions: Region ids ``chrom:start-end`` (zero-based, half-open), such
@@ -610,7 +631,7 @@ def match_motifs(
         )
         for motif in motifs
     ]
-    thresholds = [score_threshold(matrix, frequencies, p_value) for matrix in matrices]
+    thresholds = _strand_thresholds(matrices, frequencies, p_value)
     hits = scan_motif_matches(sequences, matrices, thresholds, batch_size=batch_size)
     by_motif = hits.tocsc()
     rows = []

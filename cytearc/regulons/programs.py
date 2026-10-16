@@ -1,9 +1,10 @@
 """Co-regulated gene programs: genes that rise and fall together as a unit.
 
 Programs are found from expression alone, so they need no chromatin data:
-genes are standardized across samples (metacells, pseudobulk groups, or
-smoothed cells), each gene is linked to the genes it correlates with most,
-and the gene graph is partitioned with the Leiden algorithm. Motif enrichment
+genes are standardized across independent samples (metacells or pseudobulk
+groups, each from its own cells), each gene is linked to the genes it
+correlates with most, and the gene graph is partitioned with the Leiden
+algorithm. Motif enrichment
 of each program's genes then nominates the transcription factors that may
 drive it, and overlap tests relate programs to regulons.
 """
@@ -39,10 +40,13 @@ class GeneProgramParameters:
         resolution: Leiden resolution of the gene graph.
         minMembership: Genes correlating less than this with the mean profile
             of their program's other genes are left unassigned.
-        alpha: A gene's membership must also be significantly positive at
-            this family-wise level over all genes (one-sided Fisher z,
-            Bonferroni) for the number of samples, so chance groupings of
-            uncorrelated genes do not form programs.
+        alpha: A screen against chance groupings: a gene's membership must
+            also exceed the correlation that is significantly positive at this
+            family-wise level over all genes (one-sided Fisher z, Bonferroni)
+            for that many independent samples. It assumes independent samples
+            and ignores that each program was chosen from the same
+            correlations, so it is a filter, not a calibrated test of the
+            programs.
         minSize: Programs with fewer genes are left unassigned.
         seed: Leiden random seed.
     """
@@ -87,9 +91,11 @@ def gene_programs(
     """Partition genes into co-regulated programs.
 
     Args:
-        profiles: Samples-by-genes expression named by gene, such as the
-            metacell profiles of ``ds.regulons.profiles``. Constant genes are
-            skipped.
+        profiles: Samples-by-genes expression named by gene, over independent
+            samples such as the metacell or pseudobulk profiles of
+            ``ds.regulons.profiles``. Smoothed or overlapping cells share their
+            counts, which inflates every correlation and admits chance
+            programs. Constant genes are skipped.
         parameters: Discovery settings.
         block_size: Genes whose correlations are computed at once.
 
