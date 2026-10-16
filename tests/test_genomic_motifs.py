@@ -3,22 +3,26 @@ import itertools
 import numpy as np
 import pytest
 
+from cytearc.features.genomic import motifs as motif_module
 from cytearc.features.genomic.motifs import (
     Motif,
     log_odds_matrix,
+    match_motifs,
+    nucleotide_frequencies,
     read_jaspar_motifs,
     read_meme_motifs,
     reverse_complement_matrix,
     scan_motif_matches,
     score_threshold,
 )
-from cytearc.features.genomic.sequence import encode_sequence
+from cytearc.features.genomic.sequence import IndexedFasta, encode_sequence
 
 _JASPAR = """>MA0004.1\tArnt
 A  [     4     19      0      0      0      0 ]
 C  [    16      0     20      0      0      0 ]
 G  [     0      1      0     20      0     20 ]
 T  [     0      0      0      0     20      0 ]
+
 >MA0006.1 Ahr::Arnt
 A [ 3 0 0 0 0 0 ]
 C [ 8 0 23 0 0 0 ]
@@ -26,6 +30,7 @@ G [ 2 23 0 23 0 24 ]
 T [ 11 1 1 1 24 0 ]
 """
 
+# Blank lines may surround the rows of a matrix, as in the second motif.
 _MEME = """MEME version 4
 
 ALPHABET= ACGT
@@ -44,8 +49,10 @@ URL http://jaspar.genereg.net/matrix/MA0004.1
 
 MOTIF MA0006.1
 letter-probability matrix: alength= 4 w= 2 nsites= 24 E= 0
+
  0.125 0.333 0.083 0.458
  0.000 0.000 0.958 0.042
+
 """
 
 
@@ -63,11 +70,23 @@ def test_read_jaspar_motifs(tmp_path):
     np.testing.assert_array_equal(motifs[1].counts[:, 3], [11, 1, 1, 1, 24, 0])
 
 
-def test_read_jaspar_rejects_missing_rows(tmp_path):
+@pytest.mark.parametrize(
+    ("content", "match"),
+    [
+        (">M1 X\nA [1 2]\nC [1 2]\nG [1 2]\n", "needs A, C, G, and T rows"),
+        (">M1\nA [1 2]\nC [1 2]\nG [1 2]\nT [1]\n", "rows of different lengths"),
+        (">\nA [1]\n", "line 1 has no ID"),
+        ("A [1 2]\n", "Malformed JASPAR line 1"),
+        (">M1\nA [1]\nA [1]\n", "repeats row A"),
+        (">M1\nA [1 x]\n", "Malformed JASPAR line 2"),
+        ("", "contains no motifs"),
+    ],
+)
+def test_read_jaspar_rejects_malformed_files(tmp_path, content, match):
     path = tmp_path / "bad.jaspar"
-    path.write_text(">M1 X\nA [1 2]\nC [1 2]\nG [1 2]\n")
+    path.write_text(content)
 
-    with pytest.raises(ValueError, match="needs A, C, G, and T rows"):
+    with pytest.raises(ValueError, match=match):
         read_jaspar_motifs(path)
 
 
@@ -87,9 +106,42 @@ def test_read_meme_motifs(tmp_path):
     )
 
 
-def test_motif_rejects_empty_positions():
-    with pytest.raises(ValueError, match="empty position"):
-        Motif("M", "M", np.array([[1, 0, 0, 0], [0, 0, 0, 0]]))
+@pytest.mark.parametrize(
+    ("content", "match"),
+    [
+        ("ALPHABET= ACDEFGHIKLMNPQRSTVWY\nMOTIF M1\n", "Only DNA"),
+        ("MOTIF\n", "line 1 has no identifier"),
+        # The next motif, or the end of the file, comes before a matrix.
+        ("MOTIF M1\nURL x\nMOTIF M2\n", "'M1' has no probability matrix"),
+        ("MOTIF M1\n", "'M1' has no probability matrix"),
+        ("MOTIF M1\nletter-probability matrix:\n0.5 0.5 0.0\n", "without 4 values"),
+        (
+            "MOTIF M1\nletter-probability matrix: w= 2\n0.25 0.25 0.25 0.25\n",
+            "declares w=2 but has 1 rows",
+        ),
+        ("MEME version 4\n", "contains no motifs"),
+    ],
+)
+def test_read_meme_rejects_malformed_files(tmp_path, content, match):
+    path = tmp_path / "bad.meme"
+    path.write_text(content)
+
+    with pytest.raises(ValueError, match=match):
+        read_meme_motifs(path)
+
+
+@pytest.mark.parametrize(
+    ("motif_id", "counts", "match"),
+    [
+        ("M", np.ones((2, 3)), "non-empty"),
+        ("M", [[-1.0, 1.0, 1.0, 1.0]], "negative or non-finite"),
+        ("M", [[1, 0, 0, 0], [0, 0, 0, 0]], "empty position"),
+        ("", [[1.0, 1.0, 1.0, 1.0]], "identifiers must be non-empty"),
+    ],
+)
+def test_motif_rejects_invalid_counts_and_ids(motif_id, counts, match):
+    with pytest.raises(ValueError, match=match):
+        Motif(motif_id, "M", counts)
 
 
 def test_log_odds_matrix_matches_moods_formula():
@@ -118,6 +170,26 @@ def test_log_odds_matrix_with_even_background_is_tfbstools_to_pwm():
         ((counts + 0.2) / (counts.sum(axis=1, keepdims=True) + 0.8)) / 0.25
     )
     np.testing.assert_allclose(scores, expected, rtol=1e-15, atol=1e-15)
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"counts": np.ones((2, 3))}, "counts must be"),
+        ({"background": [0.5, 0.5, 0.0, 0.0]}, "four positive"),
+        ({"pseudocount": -1.0}, "pseudocount"),
+        ({"log_base": 1.0}, "log_base"),
+    ],
+)
+def test_log_odds_matrix_rejects_invalid_arguments(override, match):
+    arguments = {
+        "counts": np.ones((2, 4)),
+        "background": [0.25] * 4,
+        "pseudocount": 0.8,
+    }
+
+    with pytest.raises(ValueError, match=match):
+        log_odds_matrix(**(arguments | override))
 
 
 def _brute_force_tail(matrix, bg, threshold):
@@ -180,6 +252,29 @@ def test_score_threshold_follows_moods_discretization():
     assert score_threshold(matrix, bg, 0.2) == 1.0005
 
 
+def test_score_threshold_admits_every_score_when_p_exceeds_the_background_mass():
+    # A background may sum to 1 within 1e-6, so no tail exceeds a p-value
+    # above its total mass and the threshold sits one below the lowest score.
+    matrix = np.array([[1.0, 0.0, 0.0, -1.0]])
+
+    assert score_threshold(matrix, [0.25, 0.25, 0.25, 0.2499995], 0.9999999) == -2.0
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"matrix": np.zeros((0, 4))}, "non-empty"),
+        ({"p_value": 1.0}, "p_value"),
+        ({"precision": 0.0}, "precision"),
+    ],
+)
+def test_score_threshold_rejects_invalid_arguments(override, match):
+    arguments = {"matrix": np.zeros((2, 4)), "background": [0.25] * 4, "p_value": 0.1}
+
+    with pytest.raises(ValueError, match=match):
+        score_threshold(**(arguments | override))
+
+
 def test_reverse_complement_matrix_scores_the_other_strand():
     rng = np.random.default_rng(3)
     matrix = rng.normal(size=(4, 4))
@@ -237,23 +332,61 @@ def test_scan_motif_matches_agrees_with_brute_force(batch_size):
     )
 
 
-def test_scan_motif_matches_ignores_windows_with_unknown_bases():
+@pytest.mark.parametrize("kernels", ["jit", "python"])
+def test_scan_motif_matches_ignores_windows_with_unknown_bases(kernels, monkeypatch):
+    if kernels == "python":
+        # Line coverage cannot see compiled code, so also run the Python
+        # sources of the scanning kernels on the same inputs.
+        for name in ("_suffix_maxima", "_strand_hit", "_scan_block"):
+            kernel = getattr(motif_module, name).py_func
+            monkeypatch.setattr(motif_module, name, kernel)
     matrix = np.log(np.array([[0.97, 0.01, 0.01, 0.01]] * 3) / 0.25)
 
     hits = scan_motif_matches(
-        [encode_sequence("AAN"), encode_sequence("TTT"), encode_sequence("NAAA")],
+        [encode_sequence(bases) for bases in ("AAN", "TTT", "NAAA", "AA")],
         [matrix],
         [matrix.max(axis=1).sum() - 1e-9],
     )
 
-    # TTT is the reverse complement of AAA.
-    np.testing.assert_array_equal(hits.toarray()[:, 0], [False, True, True])
+    # TTT is the reverse complement of AAA, and AA is shorter than the motif.
+    np.testing.assert_array_equal(hits.toarray()[:, 0], [False, True, True, False])
 
 
-def test_match_motifs_finds_planted_sites_on_both_strands(tmp_path):
-    from cytearc.features.genomic.motifs import match_motifs, nucleotide_frequencies
-    from cytearc.features.genomic.sequence import IndexedFasta
+def test_scan_motif_matches_of_no_sequences_is_empty():
+    hits = scan_motif_matches([], [np.zeros((2, 4))], [0.0])
 
+    assert hits.shape == (0, 1)
+    assert hits.dtype == bool
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"matrices": [], "thresholds": []}, "At least one motif matrix"),
+        ({"thresholds": [0.0, 1.0]}, "align"),
+        ({"thresholds": [np.nan]}, "NaN"),
+        ({"matrices": [np.zeros((0, 4))]}, "non-empty"),
+        ({"matrices": [np.full((2, 4), np.inf)]}, "finite"),
+        ({"sequences": [np.zeros(3, dtype=np.int64)]}, "uint8"),
+    ],
+)
+def test_scan_motif_matches_rejects_invalid_inputs(override, match):
+    arguments = {
+        "sequences": [encode_sequence("ACGT")],
+        "matrices": [np.zeros((2, 4))],
+        "thresholds": [0.0],
+    }
+
+    with pytest.raises(ValueError, match=match):
+        scan_motif_matches(**(arguments | override))
+
+
+@pytest.mark.parametrize(
+    "bg",
+    ["subject", "even", [0.3, 0.2, 0.2, 0.3]],
+    ids=["subject", "even", "frequencies"],
+)
+def test_match_motifs_finds_planted_sites_on_both_strands(tmp_path, bg):
     rng = np.random.default_rng(11)
     site = "ATGCAAATGA"
     background = "".join(rng.choice(list("ACGT"), size=2000))
@@ -286,12 +419,10 @@ def test_match_motifs_finds_planted_sites_on_both_strands(tmp_path):
 
     with IndexedFasta(fasta) as fasta_genome:
         network = match_motifs(
-            ["chr1", "chr1", "chr1"],
-            [0, 450, 880],
-            [300, 700, 1100],
+            ["chr1:0-300", "chr1:450-700", "chr1:880-1100"],
             fasta_genome,
             [motif],
-            background="even",
+            background=bg,
         )
         sequences = [
             fasta_genome.encode("chr1", s, e)
@@ -303,3 +434,24 @@ def test_match_motifs_finds_planted_sites_on_both_strands(tmp_path):
     frequencies = nucleotide_frequencies(sequences)
     assert frequencies.sum() == pytest.approx(1.0)
     assert np.all(frequencies > 0.2)
+
+
+@pytest.mark.parametrize(
+    ("region", "motif_ids", "background", "match"),
+    [
+        ("chr1:0-4", [], "even", "At least one motif"),
+        ("chr1:0-4", ["M1", "M1"], "even", "must be unique"),
+        ("chr1:0-4", ["M1"], "uniform", "'subject', 'even', or frequencies"),
+        # A region of Ns has no subject background.
+        ("chr1:4-8", ["M1"], "subject", "no A, C, G, or T base"),
+    ],
+)
+def test_match_motifs_rejects_invalid_inputs(
+    tmp_path, region, motif_ids, background, match
+):
+    fasta = tmp_path / "genome.fa"
+    fasta.write_text(">chr1\nACGTNNNN\n")
+    motifs = [Motif(motif_id, motif_id, np.eye(4)) for motif_id in motif_ids]
+
+    with IndexedFasta(fasta) as genome, pytest.raises(ValueError, match=match):
+        match_motifs([region], genome, motifs, background=background)

@@ -15,7 +15,6 @@ __all__ = [
     "GRNBOOST2_PARAMETERS",
     "GrnParameters",
     "infer_grn",
-    "pearson_correlations",
 ]
 
 
@@ -206,9 +205,12 @@ def infer_grn(
         progress: Optional ``callback(done, total)`` after each target.
 
     Returns:
-        A DataFrame with ``TF``, ``target``, and ``importance`` columns, one
-        row per positive importance, sorted by decreasing importance, then by
-        target and factor name for a deterministic order.
+        A DataFrame with ``TF``, ``target``, ``importance``, and
+        ``correlation`` (Pearson, across cells) columns, one row per positive
+        importance, sorted by decreasing
+        importance, then by target and factor name for a deterministic order.
+        pySCENIC splits modules into activating and repressing links by the
+        correlation.
     """
     matrix = np.asarray(expression)
     if matrix.ndim != 2:
@@ -258,6 +260,7 @@ def infer_grn(
             "TF": labels[tf_codes],
             "target": labels[target_codes],
             "importance": importance,
+            "correlation": _pair_correlations(matrix, tf_codes, target_codes),
         }
     ).astype({"TF": "str", "target": "str"})
 
@@ -325,34 +328,6 @@ def _grn_links(
     name_rank = np.argsort(np.argsort(np.asarray(names, dtype=object), kind="stable"))
     order = np.lexsort((name_rank[tf_codes], name_rank[target_codes], -importance))
     return tf_codes[order], target_codes[order], importance[order]
-
-
-def pearson_correlations(
-    expression: np.ndarray,
-    gene_names: Sequence[str],
-    pairs: pd.DataFrame,
-) -> np.ndarray:
-    """Pearson correlation of each ``TF``-``target`` pair across cells.
-
-    pySCENIC uses these correlations to split co-expression modules into
-    activating and repressing links. A constant gene has no defined
-    correlation, which is returned as NaN, as ``numpy.corrcoef`` does.
-    """
-    matrix = np.asarray(expression)
-    names = [str(name) for name in gene_names]
-    if matrix.ndim != 2 or len(names) != matrix.shape[1]:
-        raise ValueError("gene_names must align with the expression columns")
-    position = {name: index for index, name in enumerate(names)}
-    try:
-        tf_index = np.fromiter(
-            (position[str(name)] for name in pairs["TF"]), dtype=np.int64
-        )
-        target_index = np.fromiter(
-            (position[str(name)] for name in pairs["target"]), dtype=np.int64
-        )
-    except KeyError as exc:
-        raise ValueError(f"Gene {exc.args[0]!r} is not an expression column") from exc
-    return _pair_correlations(matrix, tf_index, target_index)
 
 
 def _pair_correlations(

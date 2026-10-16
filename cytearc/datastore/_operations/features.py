@@ -1115,11 +1115,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             score_chromvar_block,
         )
         from ...features.enrichment.net import prepare_network
-        from ...features.genomic.sequence import (
-            IndexedFasta,
-            gc_content,
-            parse_coordinate_ids,
-        )
+        from ...features.genomic.sequence import IndexedFasta, gc_content
         from ...utils.compute import compute_with_progress
 
         if not isinstance(features, ArtifactRef):
@@ -1178,9 +1174,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 )
             peak_gc = gc_values[feature_index]
         else:
-            chroms, starts, ends = parse_coordinate_ids(ids)
             with IndexedFasta(genome) as fasta:  # type: ignore[arg-type]
-                peak_gc = gc_content(fasta, chroms, starts, ends)
+                peak_gc = gc_content(fasta, ids)
         if not np.isfinite(peak_gc).all():
             raise ValueError(
                 f"{int((~np.isfinite(peak_gc)).sum())} selected peaks have no GC "

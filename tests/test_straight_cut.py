@@ -6,6 +6,7 @@ from sknetwork.hierarchy import cut_straight as reference_straight_cut
 
 from scipy.sparse import csr_matrix
 
+import cytearc.clustering.paris as paris
 from cytearc.clustering.paris import fit_paris_hierarchy, fixed_cut, straight_cut
 
 
@@ -172,6 +173,28 @@ def test_straight_cut_rejects_malformed_children_before_one_cluster_return(
 def test_straight_cut_rejects_non_real_child_ids(dendrogram: np.ndarray) -> None:
     with pytest.raises(ValueError, match="child IDs must be finite integers"):
         straight_cut(dendrogram, n_clusters=1)
+
+
+def test_straight_cut_rejects_a_leaf_outside_every_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_merges_below = paris._merges_below
+
+    def dropped_leaf(
+        children: np.ndarray,
+        heights: np.ndarray,
+        cut_height: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        active, sizes = real_merges_below(children, heights, cut_height)
+        # Leaf 0 neither heads a cluster nor belongs to an applied merge.
+        active[0] = False
+        return active, sizes
+
+    monkeypatch.setattr(paris, "_merges_below", dropped_leaf)
+    dendrogram = np.asarray([[0, 1, 1, 2], [2, 3, 2, 3]], dtype=np.float64)
+
+    with pytest.raises(ValueError, match="invalid child references"):
+        straight_cut(dendrogram, n_clusters=3)
 
 
 def test_fixed_cut_never_applies_synthetic_component_joins() -> None:

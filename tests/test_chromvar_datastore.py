@@ -1,19 +1,24 @@
+import dataclasses
+import shutil
+
 import numpy as np
 import pandas as pd
 import pytest
+import zarr
 from scipy.sparse import csc_matrix
+from zarr.storage import MemoryStore
 
+from cytearc.datastore._operations.enrichment_store import _write_enrichment_slot
 from cytearc.datastore.datastore import DataStore
 from cytearc.features.enrichment.chromvar import (
     background_peaks,
     build_chromvar_model,
     score_chromvar_block,
 )
-from cytearc.features.genomic.sequence import (
-    IndexedFasta,
-    gc_content,
-    parse_coordinate_ids,
-)
+from cytearc.features.genomic.sequence import IndexedFasta, gc_content
+from cytearc.storage import layout
+from cytearc.storage.artifacts import artifact_path
+from cytearc.storage.budget import resolve_budget
 from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
 from cytearc.storage.stores import load_zarr
 from cytearc.writers.counts_t import finalize_writer_counts_t
@@ -67,6 +72,14 @@ def store_path(tmp_path_factory) -> tuple[str, str]:
     array[:] = _counts()
     finalize_test_counts(array)
     finalize_writer_counts_t(root, "ATAC", None)
+    # An RNA assay of the same cells, which chromVAR refuses to score.
+    genes = np.asarray(["gene0", "gene1"])
+    rna = create_zarr_count_assay(
+        root, "RNA", None, N_CELLS, feat_ids=genes, feat_names=genes, dtype="uint16"
+    )
+    rna[:] = 1
+    finalize_test_counts(rna)
+    finalize_writer_counts_t(root, "RNA", None)
     rng = np.random.default_rng(2)
     genome = "".join(rng.choice(list("ACGT"), size=100 * N_PEAKS + 200))
     fasta = directory / "genome.fa"
@@ -102,9 +115,8 @@ def test_chromvar_artifact_matches_the_domain_kernel(store_path):
 
     counts = _counts().astype(np.float64)
     fragments = counts.sum(axis=0)
-    chroms, starts, ends = parse_coordinate_ids(_peaks())
     with IndexedFasta(fasta) as genome:
-        gc = gc_content(genome, chroms, starts, ends)
+        gc = gc_content(genome, _peaks())
     background = background_peaks(fragments, gc, n_iterations=20, seed=3)
     network = _network()
     position = {peak: index for index, peak in enumerate(_peaks())}
@@ -141,9 +153,19 @@ def test_chromvar_artifact_matches_the_domain_kernel(store_path):
     np.testing.assert_array_equal(
         np.asarray(subset.deviations.compute()), deviations[:, [2, 0]]
     )
+    frame = subset.to_pandas()
+    assert frame.columns.tolist() == ["motifC", "motifA"]
+    assert frame.index.name == "cell_index"
+    np.testing.assert_array_equal(frame.index, np.arange(N_CELLS))
+    np.testing.assert_array_equal(frame.to_numpy(), z[:, [2, 0]])
+    # Deviations belong to chromVAR results and align with their scores.
+    with pytest.raises(ValueError, match="only they, carry deviations"):
+        dataclasses.replace(result, deviations=None)
+    with pytest.raises(ValueError, match="must align with the scores"):
+        dataclasses.replace(result, deviations=subset.deviations)
 
 
-def test_chromvar_scores_a_subset_of_cells_and_peaks(store_path):
+def test_chromvar_scores_a_subset_of_cells_and_peaks(store_path, monkeypatch):
     path, _fasta = store_path
     store = _open(path)
     cell_mask = np.arange(N_CELLS) % 4 != 3
@@ -153,11 +175,15 @@ def test_chromvar_scores_a_subset_of_cells_and_peaks(store_path):
     cells = store.snapshot_cell_selection("most")
     peaks = store.features.snapshot(mask=peak_mask)
     gc = np.linspace(0.3, 0.7, N_PEAKS)
+    # Chunks of 25 rows of the three sources leave the 60 cells a partial
+    # last band to write.
+    monkeypatch.setattr(layout, "DEFAULT_TARGET_CHUNK_BYTES", 25 * 3 * 4)
 
     ref = store.scores.chromvar(
         _network(), cells, features=peaks, gc=gc, n_backgrounds=20, background_seed=5
     )
     result = store.scores.load(ref)
+    assert store.zw[artifact_path(ref)]["deviations"].chunks == (25, 3)
 
     selected = counts[:, peak_mask]
     fragments = selected.sum(axis=0)
@@ -201,9 +227,8 @@ def test_chromvar_reuses_identical_requests_and_accepts_gc_values(store_path):
     store = _open(path)
     cells = store.snapshot_cell_selection("everyone")
     peaks = store.features.universe()
-    chroms, starts, ends = parse_coordinate_ids(_peaks())
     with IndexedFasta(fasta) as genome:
-        gc = gc_content(genome, chroms, starts, ends)
+        gc = gc_content(genome, _peaks())
 
     first = store.scores.chromvar(
         _network(), cells, features=peaks, genome=fasta, n_backgrounds=20
@@ -231,19 +256,142 @@ def test_chromvar_reuses_identical_requests_and_accepts_gc_values(store_path):
         )
         == first
     )
-
-
-def test_chromvar_validates_its_inputs(store_path):
-    path, fasta = store_path
-    store = _open(path)
-    cells = store.snapshot_cell_selection("everyone")
-    peaks = store.features.universe()
-
-    with pytest.raises(ValueError, match="exactly one of gc or genome"):
-        store.scores.chromvar(_network(), cells, features=peaks)
-    with pytest.raises(ValueError, match="one value per ATAC feature"):
-        store.scores.chromvar(_network(), cells, features=peaks, gc=np.ones(3))
-    with pytest.raises(ValueError, match="n_backgrounds"):
-        store.scores.chromvar(
-            _network(), cells, features=peaks, genome=fasta, n_backgrounds=1
+    with pytest.raises(MemoryError, match="background model"):
+        small.scores.chromvar(
+            _network(),
+            cells,
+            features=peaks,
+            gc=gc,
+            n_backgrounds=20,
+            background_seed=1,
         )
+
+
+@pytest.mark.parametrize(
+    ("change", "error", "message"),
+    [
+        ({"features": "peaks"}, TypeError, "features must be an ArtifactRef"),
+        ({"cell_selection": "everyone"}, TypeError, "cell_selection must be an"),
+        ({"gc": None}, ValueError, "exactly one of gc or genome"),
+        ({"gc": np.ones(3)}, ValueError, "one value per ATAC feature"),
+        ({"gc": np.full(N_PEAKS, np.nan)}, ValueError, "have no GC content"),
+        ({"n_backgrounds": 1}, ValueError, "n_backgrounds"),
+        ({"kernel_width": 0.0}, ValueError, "kernel_width must be positive"),
+        ({"from_assay": "RNA"}, TypeError, "only be run on an ATACassay"),
+        ({"cells": np.zeros(N_CELLS, dtype=bool)}, ValueError, "no active cells"),
+        ({"peaks": np.arange(N_PEAKS) == 0}, ValueError, "at least two selected"),
+        # Cell 0 has no fragments in any peak.
+        ({"cells": np.arange(N_CELLS) == 0}, ValueError, "have no fragments"),
+    ],
+)
+def test_chromvar_validates_its_inputs(store_path, change, error, message):
+    path, _fasta = store_path
+    store = _open(path)
+    change = dict(change)
+    store.cells.insert(
+        "chosen", change.pop("cells", np.ones(N_CELLS, dtype=bool)), overwrite=True
+    )
+    peaks = change.pop("peaks", None)
+    arguments = {
+        "cell_selection": store.snapshot_cell_selection("chosen"),
+        "features": (
+            store.features.universe()
+            if peaks is None
+            else store.features.snapshot(mask=peaks)
+        ),
+        "gc": np.linspace(0.3, 0.7, N_PEAKS),
+        **change,
+    }
+
+    with pytest.raises(error, match=message):
+        store.scores.chromvar(_network(), **arguments)
+
+
+def _replace(slot: zarr.Group, name: str, data: np.ndarray) -> None:
+    del slot[name]
+    slot.create_array(name, data=data)
+
+
+@pytest.mark.parametrize(
+    ("edit", "message"),
+    [
+        (
+            lambda slot: slot.attrs.update(gc_digest="0" * 64),
+            "GC input does not match its metadata",
+        ),
+        (lambda slot: slot.attrs.update(bins=1), "invalid method metadata"),
+        (lambda slot: slot.__delitem__("deviations"), "missing its deviations"),
+        (
+            lambda slot: _replace(
+                slot, "deviations", np.zeros((N_CELLS, 1), dtype=np.float32)
+            ),
+            "misaligned deviations",
+        ),
+        (
+            lambda slot: _replace(slot, "background_index", np.full((N_PEAKS, 20), -1)),
+            "invalid background peaks",
+        ),
+    ],
+    ids=["gc-digest", "bins", "no-deviations", "deviation-shape", "background-range"],
+)
+def test_chromvar_loader_rejects_results_edited_outside_cytearc(
+    store_path, tmp_path, edit, message
+):
+    path, _fasta = store_path
+    store = _open(path)
+    ref = store.scores.chromvar(
+        _network(),
+        store.snapshot_cell_selection("everyone"),
+        features=store.features.universe(),
+        gc=np.linspace(0.3, 0.7, N_PEAKS),
+        n_backgrounds=20,
+    )
+    copy = _open(str(shutil.copytree(path, tmp_path / "copy.zarr")))
+    edit(copy.zw[artifact_path(ref)])
+
+    with pytest.raises(ValueError, match=message):
+        copy.scores.load(ref)
+
+
+@pytest.mark.parametrize(
+    ("batch", "message"),
+    [
+        (np.ones((3, 2)), "lacks its extra arrays"),
+        ((np.ones((3, 2)), np.ones((2, 2))), "extra batch is misaligned"),
+    ],
+    ids=["scores-only", "short-deviations"],
+)
+def test_enrichment_writer_needs_aligned_deviations_in_each_batch(batch, message):
+    slot = zarr.open_group(store=MemoryStore(), mode="w").create_group("slot")
+
+    with pytest.raises(ValueError, match=message):
+        _write_enrichment_slot(
+            slot,
+            attrs={"method": "chromvar"},
+            score_batches=iter([batch]),
+            n_cells=3,
+            source_names=np.array(["A", "B"]),
+            source_sizes=np.array([2, 2]),
+            cell_index=np.arange(3),
+            matched_feature_index=np.array([1, 3]),
+            rank_feature_index=None,
+            resources=resolve_budget(workers=1),
+            io=None,
+            allow_missing=True,
+            extra_dense=("deviations",),
+        )
+
+
+def test_profiles_name_atac_columns_by_peak_id(store_path):
+    path, _fasta = store_path
+    store = _open(path)
+    halves = (np.arange(N_CELLS) >= N_CELLS // 2).astype(np.int64)
+    store.cells.insert("halves", halves, overwrite=True)
+
+    profiles = store.regulons.profiles("halves")
+
+    counts = _counts().astype(np.float64)
+    sums = np.vstack([counts[halves == half].sum(axis=0) for half in (0, 1)])
+    expected = np.log1p(sums / sums.sum(axis=1, keepdims=True) * 1e6)
+    assert profiles.columns.tolist() == _peaks()
+    np.testing.assert_allclose(profiles.to_numpy(), expected)

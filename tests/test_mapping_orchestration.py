@@ -1192,6 +1192,7 @@ def test_run_mapping_rejects_invalid_arguments_before_writing(
     mapping_source,
     reference_store,
     tmp_path,
+    monkeypatch,
 ):
     reference = _plain_reference(reference_store, mapping_source)
     query = _copied_query(reference_store, tmp_path / "query.zarr")
@@ -1234,6 +1235,10 @@ def test_run_mapping_rejects_invalid_arguments_before_writing(
         }
         with pytest.raises(error, match=message):
             query.mapping.run(call.pop("reference"), call.pop("cell_selection"), **call)
+    # An opened store always resolves a default assay, so the test removes it.
+    monkeypatch.setattr(query, "_defaultAssay", None)
+    with pytest.raises(ValueError, match="No query assay was provided"):
+        query.mapping.run(reference, reference.cell_selection)
     assert _snapshot_store(query.zarr_loc) == before
 
 
@@ -1288,4 +1293,43 @@ def test_mapping_discards_the_projection_of_an_inconsistent_stream(
 
     expected_error = ValueError if change == "renamed" else RuntimeError
     assert caught.type is expected_error
+    assert set(query.artifacts.list(kind="projection", from_assay="RNA")) == before
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ("shifted", "Projected query blocks are not contiguous"),
+        ("truncated", "Mapping did not cover all selected query cells"),
+    ],
+)
+def test_symphony_mapping_discards_the_projection_of_inconsistent_stored_blocks(
+    mapping_source,
+    reference_store,
+    tmp_path,
+    monkeypatch,
+    change,
+    message,
+):
+    reference = _symphony_reference(reference_store, mapping_source)
+    query = _copied_query(reference_store, tmp_path / "query.zarr")
+    before = set(query.artifacts.list(kind="projection", from_assay="RNA"))
+    read_blocks = mapping_operations._read_projected_blocks
+
+    def inconsistent_blocks(*args, **kwargs):
+        # Symphony rereads the projected coordinates it stored in the first pass.
+        blocks = list(read_blocks(*args, **kwargs))
+        if change == "shifted":
+            blocks = [(start + 1, values, empty) for start, values, empty in blocks]
+        else:
+            start, values, empty = blocks[-1]
+            blocks[-1] = (start, values[:-1], empty[:-1])
+        yield from blocks
+
+    monkeypatch.setattr(
+        mapping_operations, "_read_projected_blocks", inconsistent_blocks
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        query.mapping.run(reference, reference.cell_selection)
     assert set(query.artifacts.list(kind="projection", from_assay="RNA")) == before

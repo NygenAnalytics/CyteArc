@@ -1,3 +1,6 @@
+import os
+import sys
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -30,6 +33,9 @@ def test_ranking_database_reads_only_requested_columns(tmp_path):
     assert database.indexColumn == "motifs"
     assert database.rowNames.tolist() == motifs
     assert "G7" in database and "missing" not in database
+    assert repr(database) == (
+        "RankingDatabase('test.genes_vs_motifs.rankings.feather', rows=8, features=50)"
+    )
     assert names.tolist() == ["G2", "G7", "G40"]
     np.testing.assert_array_equal(ranks, rankings[:, [2, 7, 40]])
 
@@ -69,6 +75,38 @@ def test_ranking_database_rejects_feather_v1_and_missing_index(tmp_path):
     pl.DataFrame(columns).write_ipc(scores)
     with pytest.raises(ValueError, match="scores database"):
         RankingDatabase(scores)
+
+
+def test_ranking_database_rejects_missing_and_single_motif_files(tmp_path):
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        RankingDatabase(tmp_path / "missing.feather")
+
+    single = tmp_path / "single.feather"
+    _write_database(single, np.array([[0, 1]]), ["A", "B"], ["m0"])
+    with pytest.raises(ValueError, match="at least two motifs"):
+        RankingDatabase(single)
+
+
+def test_ranking_database_validates_the_ranks_it_reads(tmp_path):
+    path = tmp_path / "db.feather"
+    _write_database(path, np.array([[0, 1], [1, 3]]), ["A", "B"], ["m0", "m1"])
+    database = RankingDatabase(path)
+    with pytest.raises(ValueError, match=r"ranks outside 0\.\.2"):
+        database.ranks(["B"])
+
+    # A file replaced after opening no longer aligns with the motifs read.
+    replacement = tmp_path / "replacement.feather"
+    _write_database(replacement, np.zeros((3, 2)), ["A", "B"], ["m0", "m1", "m2"])
+    os.replace(replacement, path)
+    with pytest.raises(ValueError, match="misaligned"):
+        database.ranks(["A"])
+
+
+def test_ranking_database_explains_how_to_install_polars(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "polars", None)
+
+    with pytest.raises(ImportError, match=r"install cytearc\[regulons\]"):
+        RankingDatabase(tmp_path / "db.feather")
 
 
 _TBL = (

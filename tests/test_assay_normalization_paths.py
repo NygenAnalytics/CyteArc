@@ -329,6 +329,23 @@ def test_library_size_normalization_requires_a_size_factor(store, monkeypatch) -
         store.RNA.normed(np.arange(4), np.arange(3))
 
 
+def test_feature_statistics_must_cover_every_selected_cell(store, monkeypatch) -> None:
+    from dataclasses import replace
+
+    import cytearc.utils.compute as compute
+
+    merge_bands = compute.pairwise_merge_tree
+
+    def merge_one_cell_short(values, merge):
+        detected, moments = merge_bands(values, merge)
+        return detected, replace(moments, count=moments.count - 1)
+
+    monkeypatch.setattr(compute, "pairwise_merge_tree", merge_one_cell_short)
+
+    with pytest.raises(RuntimeError, match="covered 15 of 16 selected cells"):
+        store.RNA._streaming_feature_stats(np.arange(16), np.arange(8))
+
+
 def test_renormalized_subset_progress_bar_shows_the_given_message(
     store: DataStore,
     capsys: pytest.CaptureFixture[str],

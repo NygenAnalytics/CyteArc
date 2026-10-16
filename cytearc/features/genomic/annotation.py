@@ -12,6 +12,7 @@ import pandas as pd
 from numba import njit
 
 from ...utils.arguments import integer_argument
+from .sequence import parse_coordinate_ids
 
 __all__ = [
     "link_regions_to_genes",
@@ -275,9 +276,7 @@ def overlapping_intervals(
 
 
 def link_regions_to_genes(
-    chroms: np.ndarray,
-    starts: np.ndarray,
-    ends: np.ndarray,
+    regions: Iterable[str],
     genes: pd.DataFrame,
     *,
     upstream: int,
@@ -294,30 +293,27 @@ def link_regions_to_genes(
     3' end, the SCENIC+ search space (150 kb each way by default there).
 
     Args:
-        chroms, starts, ends: Zero-based half-open regions.
+        regions: Region ids ``chrom:start-end`` (zero-based, half-open), such
+            as ATAC peak ids.
         genes: Annotation from ``read_gene_annotation``.
         upstream, downstream: Window extent in bases.
         anchor: ``"tss"`` or ``"gene_body"``.
 
     Returns:
-        A DataFrame with one row per overlapping region and gene:
-        ``region`` (index into the inputs), ``gene_id``, ``gene_name``, and
+        A DataFrame with one row per overlapping region and gene: ``region``
+        (the region id), ``gene`` (the gene name), ``gene_id``, and
         ``distance``, the signed distance from the anchor to the nearest base
         of the region, negative upstream, positive downstream, and zero when
-        the region overlaps the TSS (or the gene body). Rows are sorted by
-        region, then gene.
+        the region overlaps the TSS (or the gene body). Rows follow the order
+        of the regions, then of the gene ids, and are the candidates that
+        ``region_gene_links`` scores.
     """
     if anchor not in ("tss", "gene_body"):
         raise ValueError("anchor must be 'tss' or 'gene_body'")
     upstream = integer_argument(upstream, "upstream", minimum=0)
     downstream = integer_argument(downstream, "downstream", minimum=0)
-    chrom_values = np.asarray(chroms, dtype=object)
-    start_values = np.asarray(starts, dtype=np.int64)
-    end_values = np.asarray(ends, dtype=np.int64)
-    if not (len(chrom_values) == len(start_values) == len(end_values)):
-        raise ValueError("chroms, starts, and ends must be aligned")
-    if np.any(end_values <= start_values):
-        raise ValueError("Every region needs start < end")
+    region_names = np.asarray(list(regions), dtype=object).astype(str)
+    chrom_values, start_values, end_values = parse_coordinate_ids(region_names)
     tss = transcription_start_sites(genes)
     plus = genes["strand"].to_numpy() == "+"
     if anchor == "tss":
@@ -330,7 +326,7 @@ def link_regions_to_genes(
     window_ends = np.where(plus, anchor_ends + downstream, anchor_ends + upstream)
     gene_chroms = genes["chrom"].to_numpy(dtype=object)
 
-    regions: list[np.ndarray] = []
+    region_rows_found: list[np.ndarray] = []
     gene_rows: list[np.ndarray] = []
     for chrom in shared_chromosomes(chrom_values, gene_chroms, "the genes"):
         region_rows = np.flatnonzero(chrom_values == chrom)
@@ -346,10 +342,10 @@ def link_regions_to_genes(
             window_starts[windows],
             window_ends[windows],
         )
-        regions.append(order[region_index])
+        region_rows_found.append(order[region_index])
         gene_rows.append(windows[window_index])
-    if regions:
-        region_index = np.concatenate(regions)
+    if region_rows_found:
+        region_index = np.concatenate(region_rows_found)
         gene_index = np.concatenate(gene_rows)
     else:
         region_index = np.zeros(0, dtype=np.int64)
@@ -369,11 +365,11 @@ def link_regions_to_genes(
     links = pd.DataFrame(
         {
             "region": region_index,
+            "gene": genes["gene_name"].to_numpy(dtype=object)[gene_index],
             "gene_id": genes["gene_id"].to_numpy(dtype=object)[gene_index],
-            "gene_name": genes["gene_name"].to_numpy(dtype=object)[gene_index],
             "distance": distance.astype(np.int64),
         }
     )
-    return links.sort_values(["region", "gene_id"], kind="stable").reset_index(
-        drop=True
-    )
+    links = links.sort_values(["region", "gene_id"], kind="stable")
+    links["region"] = region_names[links["region"].to_numpy()]
+    return links.reset_index(drop=True)

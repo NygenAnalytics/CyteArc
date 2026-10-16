@@ -679,6 +679,26 @@ def test_query_batch_design_keeps_mixed_types_with_distinct_text():
     np.testing.assert_array_equal(design.toarray(), np.eye(2))
 
 
+def test_query_batch_design_rejects_rows_without_a_batch_code(monkeypatch):
+    from cytearc.datastore._operations.mapping import _MappingOperationsMixin
+
+    factorize = pd.factorize
+
+    def first_row_unencoded(values, **kwargs):
+        codes, levels = factorize(values, **kwargs)
+        codes = codes.copy()
+        codes[0] = -1
+        return codes, levels
+
+    # Missing values are rejected first, so a factorizer that leaves a row
+    # without a code stands in for any value it cannot encode.
+    monkeypatch.setattr(pd, "factorize", first_row_unencoded)
+    batches = pd.DataFrame({"batch": ["a", "b", "a"]})
+
+    with pytest.raises(ValueError, match="unencodable row"):
+        _MappingOperationsMixin._query_batch_design(batches, len(batches))
+
+
 @pytest.mark.parametrize("n_variables", [1, 2, 3])
 def test_additive_batch_correction_matches_direct_cell_design(n_variables):
     from cytearc.datastore._operations.mapping import _MappingOperationsMixin

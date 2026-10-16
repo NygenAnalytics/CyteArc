@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 
 import numpy as np
+import pandas as pd
 
 from ...matrix import ChunkedArray
 from ...storage.refs import ArtifactRef
@@ -94,3 +95,15 @@ class EnrichmentResult:
             raise ValueError("chromVAR results, and only they, carry deviations")
         if self.deviations is not None and self.deviations.shape != self.data.shape:
             raise ValueError("Enrichment deviations must align with the scores")
+
+    def to_pandas(self) -> pd.DataFrame:
+        """Read the scores as a cells-by-sources DataFrame.
+
+        The columns are the source names, and the index holds the assay cell
+        indices in the order of the score rows.
+        """
+        return pd.DataFrame(
+            np.asarray(self.data.compute()),
+            index=pd.Index(self.cell_index, name="cell_index"),
+            columns=self.source_names,
+        )

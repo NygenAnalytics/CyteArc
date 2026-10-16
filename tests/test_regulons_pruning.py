@@ -105,10 +105,45 @@ def test_modules_can_include_repressing_links_and_respect_min_genes():
     )
 
     assert set(both["direction"]) == {"activating", "repressing"}
-    sizes = both.groupby("module").size()
+    sizes = both.groupby("source").size()
     assert sizes.min() >= 5
     with pytest.raises(ValueError, match="repeats"):
         modules_from_adjacencies(pd.concat([adjacencies, adjacencies.iloc[:1]]))
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"thresholds": (1.5,)}, r"quantiles in \[0, 1\]"),
+        ({"topRegulators": (5, 5)}, "topRegulators must not repeat"),
+        ({"rhoThreshold": 0.0}, "rhoThreshold must be positive"),
+    ],
+)
+def test_module_parameters_reject_invalid_rules(changes, message):
+    with pytest.raises(ValueError, match=message):
+        ModuleParameters(**changes)
+
+
+def test_modules_from_adjacencies_requires_link_columns():
+    with pytest.raises(ValueError, match=r"lacks columns \['correlation'\]"):
+        modules_from_adjacencies(_adjacencies().drop(columns="correlation"))
+
+
+def test_modules_from_adjacencies_skips_rules_and_directions_without_links():
+    adjacencies = _adjacencies()
+
+    # No link is repressing or above the largest importance.
+    modules = modules_from_adjacencies(
+        adjacencies.assign(correlation=1.0),
+        parameters=ModuleParameters(thresholds=(1.0,), keepOnlyActivating=False),
+    )
+    # No link passes the correlation threshold.
+    uncorrelated = modules_from_adjacencies(adjacencies.assign(correlation=0.0))
+
+    assert set(modules["direction"]) == {"activating"}
+    assert "weight>100.0%" not in set(modules["context"])
+    assert uncorrelated.empty
+    assert uncorrelated.columns.tolist() == modules.columns.tolist()
 
 
 def _database(path, rankings, genes, motifs):
@@ -183,7 +218,7 @@ def test_prune_modules_matches_reference(tmp_path):
     weights["G0"] = 1.0
     modules = pd.DataFrame(
         {
-            "module": "G0|activating|top50",
+            "source": "G0|activating|top50",
             "TF": "G0",
             "direction": "activating",
             "context": "top50",
@@ -236,7 +271,7 @@ def test_prune_modules_matches_reference(tmp_path):
     assert m7["annotation"] == "gene is directly annotated"
 
     regulons = regulons_from_motifs(result)
-    assert set(regulons["regulon"]) == {"G0(+)"}
+    assert set(regulons["source"]) == {"G0(+)"}
     merged = {}
     for edge in expected.values():
         for gene, weight in edge:
@@ -270,7 +305,7 @@ def test_prune_modules_skips_modules_missing_from_the_database(tmp_path):
         targets = genes[:24] + [f"X{index}" for index in range(n_missing)]
         modules = pd.DataFrame(
             {
-                "module": "M",
+                "source": "M",
                 "TF": "G0",
                 "direction": "activating",
                 "context": "top50",
@@ -289,3 +324,124 @@ def test_prune_modules_skips_modules_missing_from_the_database(tmp_path):
     # the module is skipped from exactly a fifth, as pySCENIC does.
     assert prune(5)["motif"].tolist() == ["m3"]
     assert prune(6).empty
+
+
+def _ten_motif_database(path):
+    """Motif m0 ranks genes G0..G3 first; the other nine rank them last."""
+    rankings = np.tile(np.arange(20)[::-1], (10, 1))
+    rankings[0] = np.arange(20)
+    genes = [f"G{index}" for index in range(20)]
+    return _database(path, rankings, genes, [f"m{index}" for index in range(10)])
+
+
+_MODULE = pd.DataFrame(
+    {
+        "source": "M",
+        "TF": "G0",
+        "direction": "activating",
+        "context": "top50",
+        "target": ["G0", "G1", "G2", "G3"],
+        "weight": 1.0,
+    }
+)
+_ANNOTATIONS = pd.DataFrame(
+    {
+        "motif": ["m0"],
+        "TF": ["G0"],
+        "motif_similarity_qvalue": [0.0],
+        "orthologous_identity": [1.0],
+        "description": ["gene is directly annotated"],
+    }
+)
+# m0 is the only motif that recovers the module, with an NES of 3.
+_PARAMETERS = PruningParameters(rankThreshold=10, aucThreshold=0.5, nesThreshold=2.0)
+
+
+@pytest.mark.parametrize("name", ["aucThreshold", "maxMissingFraction"])
+@pytest.mark.parametrize("value", [0.0, 1.5])
+def test_pruning_parameters_reject_fractions_outside_the_unit_interval(name, value):
+    with pytest.raises(ValueError, match=rf"{name} must be in \(0, 1\]"):
+        PruningParameters(**{name: value})
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"databases": []}, "At least one ranking database"),
+        (
+            {"annotations": _ANNOTATIONS.drop(columns="description")},
+            "read_motif_annotations",
+        ),
+        ({"modules": _MODULE.drop(columns="context")}, r"lacks columns \['context'\]"),
+        ({"modules": pd.concat([_MODULE, _MODULE])}, "repeats a gene"),
+        (
+            {"parameters": PruningParameters(rankThreshold=20, aucThreshold=0.5)},
+            "below the 20 ranked features",
+        ),
+        (
+            {"parameters": PruningParameters(rankThreshold=5, aucThreshold=0.5)},
+            "AUC covers more ranks than rankThreshold",
+        ),
+    ],
+)
+def test_prune_modules_rejects_invalid_inputs(tmp_path, overrides, message):
+    arguments = {
+        "modules": _MODULE,
+        "databases": [_ten_motif_database(tmp_path / "db.feather")],
+        "annotations": _ANNOTATIONS,
+        "parameters": _PARAMETERS,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        prune_modules(**(arguments | overrides))
+
+
+@pytest.mark.parametrize("nthreads", [1, 2])
+def test_prune_modules_reports_progress_after_each_module_and_database(
+    tmp_path, nthreads
+):
+    database = _ten_motif_database(tmp_path / "db.feather")
+    calls = []
+
+    result = prune_modules(
+        pd.concat([_MODULE, _MODULE.assign(source="N")]),
+        [database, database],
+        _ANNOTATIONS,
+        parameters=_PARAMETERS,
+        nthreads=nthreads,
+        progress=lambda done, total: calls.append((done, total)),
+    )
+
+    assert calls == [(1, 4), (2, 4), (3, 4), (4, 4)]
+    assert result["module"].tolist() == ["M", "N", "M", "N"]
+
+
+@pytest.mark.parametrize(
+    ("annotated_tf", "nes_threshold"),
+    [
+        # m0 is enriched but annotated to another factor.
+        ("OTHER", 2.0),
+        # No motif reaches the NES threshold.
+        ("G0", 4.0),
+    ],
+)
+def test_prune_modules_needs_an_enriched_motif_annotated_to_the_factor(
+    tmp_path, annotated_tf, nes_threshold
+):
+    result = prune_modules(
+        _MODULE,
+        [_ten_motif_database(tmp_path / "db.feather")],
+        _ANNOTATIONS.assign(TF=annotated_tf),
+        parameters=PruningParameters(
+            rankThreshold=10, aucThreshold=0.5, nesThreshold=nes_threshold
+        ),
+    )
+
+    assert result.empty
+
+
+def test_regulons_from_motifs_requires_leading_edge_columns():
+    with pytest.raises(
+        ValueError, match=r"lacks columns \['target_weights', 'targets'\]"
+    ):
+        regulons_from_motifs(pd.DataFrame(columns=["TF", "direction"]))

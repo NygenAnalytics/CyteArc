@@ -507,6 +507,80 @@ def test_to_anndata_run_export_ignores_non_positive_umap_suffixes(
     assert exported.obs["clusters"].tolist() == [1, 2]
 
 
+@pytest.mark.parametrize(
+    ("plan", "error_type", "message"),
+    [
+        (
+            lambda store, run: store._h5ad_run_plan(run, matrix="scaled"),
+            ValueError,
+            "^matrix must be either 'raw' or 'normed'$",
+        ),
+        (
+            lambda store, run: store._h5ad_run_plan(object(), matrix="raw"),
+            TypeError,
+            "^run must be a PipelineRun$",
+        ),
+        (
+            lambda store, run: _PresentationOperationsMixin()._h5ad_run_plan(
+                run, matrix="raw"
+            ),
+            ValueError,
+            "^run must be opened from this datastore$",
+        ),
+    ],
+    ids=["matrix", "run", "owner"],
+)
+def test_run_export_plan_checks_its_own_arguments(
+    monkeypatch, plan, error_type, message
+) -> None:
+    # to_h5ad reaches the plan through the run's owner, so the plan repeats
+    # the argument checks of to_anndata.
+    store, run = _fake_run_store(
+        monkeypatch, pd.DataFrame({"I": [True], "ids": ["c0"], "names": ["a"]})
+    )
+
+    with pytest.raises(error_type, match=message):
+        plan(store, run)
+
+
+@pytest.mark.parametrize(
+    ("rows", "features", "message"),
+    [
+        (3, [False, True], "does not cover the run's cells"),
+        (2, [True, False], "holds features outside the run's feature universe"),
+    ],
+    ids=["cells", "features"],
+)
+def test_normed_run_export_rechecks_the_values_it_plans(
+    monkeypatch, rows, features, message
+) -> None:
+    from cytearc.writers.export import H5adMatrix
+
+    store, run = _fake_run_store(
+        monkeypatch,
+        pd.DataFrame(
+            {"I": [True, False, True], "ids": ["c0", "c1", "c2"], "names": list("abc")}
+        ),
+    )
+    run.run_id = "fake-run"
+    # _run_normalized_values checks the artifact's selections, so only an
+    # inconsistent result reaches the plan's own checks.
+    store._run_normalized_values = lambda _run: (
+        H5adMatrix(
+            shape=(rows, 1),
+            dtype=np.dtype(np.float32),
+            blocks=lambda: iter(()),
+        ),
+        np.asarray(features),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=f"^The normalized artifact of pipeline run fake-run {message}$",
+    ):
+        store.to_anndata(run=run, matrix="normed")
+
+
 _RUN_CELLS = 120
 _RUN_FEATURES = 40
 

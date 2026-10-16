@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from scipy.sparse import csc_matrix
 
+from cytearc.features.enrichment import chromvar
 from cytearc.features.enrichment.chromvar import (
     background_peaks,
     build_chromvar_model,
@@ -163,8 +164,15 @@ def test_background_peaks_match_gc_and_accessibility():
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
+        ({"gc": np.array([0.4, 0.45])}, "aligned vectors"),
+        (
+            {"fragments_per_peak": np.array([1.0]), "gc": np.array([0.4])},
+            "at least two peaks",
+        ),
         ({"fragments_per_peak": np.array([0.0, 2.0, 3.0])}, "at least one fragment"),
         ({"gc": np.array([0.4, np.nan, 0.5])}, "GC content must be finite"),
+        # Constant GC content leaves a singular covariance to whiten.
+        ({"gc": np.full(3, 0.5)}, "collinear or constant"),
         ({"n_iterations": 1}, "n_iterations"),
         ({"kernel_width": 0.0}, "kernel_width"),
     ],
@@ -192,3 +200,86 @@ def test_z_is_missing_when_background_deviations_do_not_vary():
 
     assert np.isfinite(deviations).all()
     assert np.isnan(z).all()
+
+
+def _small_model_arguments() -> dict[str, object]:
+    return {
+        "annotation": _annotation([[0, 1], [1, 2]], 3),
+        "fragments_per_peak": np.array([1.0, 2.0, 3.0]),
+        "background_index": np.array([[1, 2], [0, 2], [0, 1]]),
+    }
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"background_index": np.zeros((2, 2), dtype=np.int64)}, "must align"),
+        ({"fragments_per_peak": np.array([1.0, 0.0, 3.0])}, "at least one fragment"),
+        ({"background_index": np.full((3, 2), 3)}, "out of range"),
+        (
+            {"annotation": csc_matrix(np.array([[0.5], [0.0], [1.0]]))},
+            "positive integer multiplicities",
+        ),
+    ],
+)
+def test_build_chromvar_model_rejects_invalid_inputs(kwargs, message):
+    arguments = _small_model_arguments()
+    arguments.update(kwargs)
+    with pytest.raises(ValueError, match=message):
+        build_chromvar_model(**arguments)
+
+
+@pytest.mark.parametrize(
+    ("counts", "message"),
+    [
+        (np.ones((2, 4)), "cells by the model's peaks"),
+        (np.array([["1", "2", "3"]]), "finite numbers"),
+        (np.array([[1.0, np.inf, 2.0]]), "finite numbers"),
+        (np.array([[1, -1, 2]]), "non-negative"),
+    ],
+    ids=["shape", "dtype", "infinite", "negative"],
+)
+def test_score_chromvar_block_rejects_invalid_counts(counts, message):
+    model = build_chromvar_model(**_small_model_arguments())
+    with pytest.raises(ValueError, match=message):
+        score_chromvar_block(counts, model)
+
+
+def test_python_kernels_match_the_compiled_kernels():
+    # A repeated member, a zero count, a cell without fragments, and a set
+    # whose only member draws itself, so its background deviations are equal.
+    counts = np.array([[0, 0, 0, 0], [5, 0, 4, 3], [2, 6, 3, 0]], dtype=np.float64)
+    annotation = csc_matrix(np.array([[2.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]))
+    background = np.array([[1, 2, 3], [3, 0, 2], [2, 2, 2], [0, 1, 2]])
+    model = build_chromvar_model(annotation, counts.sum(axis=0), background)
+    sets = model.annotation
+    scoring = (
+        counts,
+        sets.indptr,
+        sets.indices,
+        sets.data,
+        model.invertedIndptr,
+        model.invertedIndices,
+        model.expectedSet,
+        model.expectedBackground,
+    )
+
+    pointers, indices = chromvar._invert_background.py_func(
+        sets.indptr.astype(np.int64),
+        sets.indices.astype(np.int64),
+        sets.data.astype(np.int64),
+        model.backgroundIndex,
+        model.n_sets,
+    )
+    deviations, z = chromvar._score_block.py_func(*scoring)
+
+    assert (model.n_sets, model.n_iterations) == (2, 3)
+    # The model holds the compiled inversion of the same inputs.
+    np.testing.assert_array_equal(pointers, model.invertedIndptr)
+    np.testing.assert_array_equal(indices, model.invertedIndices)
+    compiled_deviations, compiled_z = chromvar._score_block(*scoring)
+    np.testing.assert_allclose(deviations, compiled_deviations, rtol=1e-12)
+    np.testing.assert_allclose(z, compiled_z, rtol=1e-12)
+    assert np.isnan(deviations[0]).all()
+    assert np.isfinite(z[1:, 0]).all()
+    assert np.isfinite(deviations[1:, 1]).all() and np.isnan(z[1:, 1]).all()

@@ -106,7 +106,9 @@ def regulon_modules(csi: pd.DataFrame, n_modules: int) -> pd.Series:
 
     integer_argument(n_modules, "n_modules", minimum=1)
     if len(csi) < 2:
-        return pd.Series(np.ones(len(csi), dtype=np.int64), index=csi.index)
+        return pd.Series(
+            np.ones(len(csi), dtype=np.int64), index=csi.index, name="module"
+        )
     tree = linkage(csi.to_numpy(dtype=np.float64), method="ward")
     labels = fcluster(tree, t=min(n_modules, len(csi)), criterion="maxclust")
     sizes = pd.Series(labels).value_counts()

@@ -747,6 +747,22 @@ def test_projection_rejects_valid_shaped_output_tampering() -> None:
     assert replacement.ref != ref
 
 
+def test_projection_payload_must_hold_the_planned_cell_count() -> None:
+    root, cell_selection, feature_selection = _query_inputs()
+    reference, _ = _mapping_reference()
+    ref = _write(
+        root,
+        _plan(root, cell_selection, feature_selection, reference.external_ref),
+    )
+
+    # Plans check array shapes before this check, so it is reached directly.
+    with pytest.raises(ValueError, match="cell count does not match its plan"):
+        projection_storage._validate_payload(
+            artifact_group(root, ref),
+            expected_n_cells=5,
+        )
+
+
 def test_projection_plan_rejects_out_of_range_cached_neighbors() -> None:
     root, cell_selection, feature_selection = _query_inputs()
     reference, _ = _mapping_reference()
@@ -1489,6 +1505,28 @@ def _plan_arguments(
         "reference": reference,
         "reference_cell_count": reference.selected_cell_count,
     }
+
+
+def test_projection_rejects_a_feature_selection_without_reference_overlap(
+    monkeypatch,
+) -> None:
+    root, cell_selection, feature_selection = _query_inputs()
+    reference, _ = _mapping_reference()
+    # Stored selections select at least one feature, so the selection is read
+    # as holding no feature blocks, which leaves the overlap empty.
+    monkeypatch.setattr(
+        projection_storage,
+        "iter_feature_selection_blocks",
+        lambda *_args: iter(()),
+    )
+
+    with pytest.raises(ValueError, match="has no reference overlap"):
+        plan_projection(
+            root,
+            **_plan_arguments(  # type: ignore[arg-type]
+                cell_selection, feature_selection, reference
+            ),
+        )
 
 
 def test_plan_projection_requires_counts_and_methods_of_its_reference() -> None:

@@ -13,7 +13,7 @@ __all__ = [
     "modules_from_adjacencies",
 ]
 
-MODULE_COLUMNS = ("module", "TF", "direction", "context", "target", "weight")
+MODULE_COLUMNS = ("source", "TF", "direction", "context", "target", "weight")
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,8 +100,8 @@ def modules_from_adjacencies(
         parameters: Module rules; pySCENIC defaults when omitted.
 
     Returns:
-        A long table with one row per module gene: ``module`` (a unique
-        name), ``TF``, ``direction`` (``activating`` or ``repressing``),
+        A long table with one row per module gene: ``source`` (a unique
+        module name), ``TF``, ``direction`` (``activating`` or ``repressing``),
         ``context`` (the rule), ``target``, and ``weight`` (the link
         importance, 1 for the factor).
     """
@@ -159,7 +159,7 @@ def modules_from_adjacencies(
                 rows.append(
                     pd.DataFrame(
                         {
-                            "module": f"{tf}|{direction}|{context}",
+                            "source": f"{tf}|{direction}|{context}",
                             "TF": str(tf),
                             "direction": direction,
                             "context": context,

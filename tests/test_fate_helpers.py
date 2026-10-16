@@ -220,6 +220,30 @@ def test_fate_solver_rejects_nonfinite_backend_output(monkeypatch):
         )
 
 
+def test_fate_probabilities_must_sum_to_one_within_the_residual_limit(monkeypatch):
+    # The middle cell reaches A with probability 1/3 and B with 2/3, whose
+    # float32 values sum to 3e-8 above one, more than a zero limit allows.
+    graph = csr_matrix(
+        np.array(
+            [
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 2.0],
+                [0.0, 2.0, 0.0],
+            ]
+        )
+    )
+    monkeypatch.setattr(fate_module, "_residual_limit", lambda *_args: 0.0)
+
+    with pytest.raises(RuntimeError, match="do not sum to one"):
+        compute_fate_probabilities(
+            graph,
+            np.array([0.0, 0.5, 1.0]),
+            np.array(["A", "middle", "B"]),
+            ["A", "B"],
+            beta=0.0,
+        )
+
+
 def test_fate_solver_rejects_float32_overflow(monkeypatch):
     graph = csr_matrix(
         np.array(

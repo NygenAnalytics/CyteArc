@@ -103,6 +103,17 @@ def test_waggr_rejects_invalid_values_and_modes():
             score_waggr_block(np.array([[0.0, 1e308, 0.0, 0.0]]), model, mode=mode)
 
 
+def test_waggr_rejects_scores_whose_shape_drifts_from_the_adjacency():
+    from scipy.sparse import csc_matrix
+
+    model = WaggrModel(adjacency=csc_matrix(np.ones((4, 1))), denominator=np.ones(1))
+    # Denominators changed after validation broadcast one source to two.
+    object.__setattr__(model, "denominator", np.ones(2))
+
+    with pytest.raises(ValueError, match="WAGGR output shape is invalid"):
+        score_waggr_block(np.ones((2, 4)), model, mode="wmean")
+
+
 @pytest.mark.parametrize(
     ("adjacency", "denominator", "message"),
     [

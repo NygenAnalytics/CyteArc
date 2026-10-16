@@ -467,6 +467,14 @@ def test_pipeline_recipe_helper_validation() -> None:
     assert recipe_module._finite_real(3, "value") == 3.0
 
 
+def test_stage_setting_defaults_require_a_keyword_default() -> None:
+    def stage(top_n: int) -> int:
+        return top_n
+
+    with pytest.raises(TypeError, match=r"\.stage\(\) has no default for 'top_n'$"):
+        recipe_module._keyword_default(stage, "top_n")
+
+
 def test_pipeline_filtering_contract_errors() -> None:
     store = _RecipeStore()
     invalid = (

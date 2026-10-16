@@ -515,6 +515,14 @@ def test_discard_keeps_a_column_that_is_not_the_pending_assays_membership():
     del context
 
 
+def test_discard_removes_a_pending_assay_from_a_store_without_cell_data():
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    root.create_group("SCORES", attributes={PENDING_ASSAY_ATTR: "add_grouped_assay"})
+
+    assert discard_pending_assay(root, "SCORES", None) is True
+    assert "SCORES" not in root
+
+
 def test_derived_assay_transaction_publishes_only_finalized_counts():
     root = _memory_root()
 

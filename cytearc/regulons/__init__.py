@@ -16,34 +16,22 @@ if TYPE_CHECKING:
     from ..features.genomic.sequence import (
         IndexedFasta as IndexedFasta,
         gc_content as gc_content,
-        parse_coordinate_ids as parse_coordinate_ids,
-    )
-    from .cistarget import (
-        MotifEnrichment as MotifEnrichment,
-        enrich_signature as enrich_signature,
     )
     from .cistromes import (
         binding_cistromes as binding_cistromes,
         cistromes_from_motifs as cistromes_from_motifs,
-        project_to_genes as project_to_genes,
         read_peak_file as read_peak_file,
     )
     from .databases import (
         RankingDatabase as RankingDatabase,
+        motif_annotations as motif_annotations,
         read_motif_annotations as read_motif_annotations,
     )
     from .eregulons import (
         EregulonParameters as EregulonParameters,
-        GseaResult as GseaResult,
         build_eregulons as build_eregulons,
-        gsea_prerank as gsea_prerank,
     )
-    from .grn import (
-        GRNBOOST2_PARAMETERS as GRNBOOST2_PARAMETERS,
-        GrnParameters as GrnParameters,
-        infer_grn as infer_grn,
-        pearson_correlations as pearson_correlations,
-    )
+    from .grn import GrnParameters as GrnParameters, infer_grn as infer_grn
     from .links import region_gene_links as region_gene_links
     from .modules import (
         ModuleParameters as ModuleParameters,
@@ -70,34 +58,27 @@ if TYPE_CHECKING:
 
 __all__ = [
     "EregulonParameters",
-    "GRNBOOST2_PARAMETERS",
     "GeneProgramParameters",
     "GrnParameters",
     "GrnResult",
-    "GseaResult",
     "IndexedFasta",
     "ModuleParameters",
     "Motif",
-    "MotifEnrichment",
     "PruningParameters",
     "RankingDatabase",
     "binding_cistromes",
     "build_eregulons",
     "cistromes_from_motifs",
     "connection_specificity",
-    "enrich_signature",
     "gc_content",
     "gene_programs",
-    "gsea_prerank",
     "infer_grn",
     "link_regions_to_genes",
     "match_motifs",
     "modules_from_adjacencies",
-    "parse_coordinate_ids",
-    "pearson_correlations",
+    "motif_annotations",
     "program_regulators",
     "program_scores",
-    "project_to_genes",
     "prune_modules",
     "read_gene_annotation",
     "read_jaspar_motifs",
@@ -115,34 +96,27 @@ __getattr__, __dir__ = _lazy_facade(
     __name__,
     {
         "EregulonParameters": ".eregulons",
-        "GRNBOOST2_PARAMETERS": ".grn",
         "GeneProgramParameters": ".programs",
         "GrnParameters": ".grn",
         "GrnResult": ".results",
-        "GseaResult": ".eregulons",
         "IndexedFasta": "..features.genomic.sequence",
         "ModuleParameters": ".modules",
         "Motif": "..features.genomic.motifs",
-        "MotifEnrichment": ".cistarget",
         "PruningParameters": ".pruning",
         "RankingDatabase": ".databases",
         "binding_cistromes": ".cistromes",
         "build_eregulons": ".eregulons",
         "cistromes_from_motifs": ".cistromes",
         "connection_specificity": ".specificity",
-        "enrich_signature": ".cistarget",
         "gc_content": "..features.genomic.sequence",
         "gene_programs": ".programs",
-        "gsea_prerank": ".eregulons",
         "infer_grn": ".grn",
         "link_regions_to_genes": "..features.genomic.annotation",
         "match_motifs": "..features.genomic.motifs",
         "modules_from_adjacencies": ".modules",
-        "parse_coordinate_ids": "..features.genomic.sequence",
-        "pearson_correlations": ".grn",
+        "motif_annotations": ".databases",
         "program_regulators": ".programs",
         "program_scores": ".programs",
-        "project_to_genes": ".cistromes",
         "prune_modules": ".pruning",
         "read_gene_annotation": "..features.genomic.annotation",
         "read_jaspar_motifs": "..features.genomic.motifs",

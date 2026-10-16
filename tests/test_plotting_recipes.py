@@ -1,3 +1,4 @@
+import errno
 import json
 import warnings
 from dataclasses import FrozenInstanceError
@@ -571,6 +572,22 @@ def test_inline_json_longer_than_a_file_name_is_parsed_as_text() -> None:
     )
 
     assert [step.name for step in recipe.steps] == [name]
+
+
+def test_inline_json_is_parsed_as_text_when_the_file_check_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Python 3.13 raises for a name the filesystem rejects, where 3.14 returns
+    # False, so the check raises here on every version.
+    def unnamable(_path: Path, **_kwargs: object) -> bool:
+        raise OSError(errno.ENAMETOOLONG, "File name too long")
+
+    monkeypatch.setattr(Path, "is_file", unnamable)
+    recipe = PlotRecipe.from_json(
+        json.dumps({"steps": [{"name": "overview", "plot": "embedding"}]})
+    )
+
+    assert [step.name for step in recipe.steps] == ["overview"]
 
 
 @pytest.mark.parametrize(

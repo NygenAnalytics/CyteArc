@@ -943,6 +943,37 @@ def test_metadata_snapshot_reuse_validates_flattened_payload(
     np.testing.assert_array_equal(artifact_group(root, third)["values"][:], expected)
 
 
+def test_metadata_snapshot_reuse_rejects_a_payload_of_another_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    kwargs = {
+        "values": np.asarray([1.0, 2.0]),
+        "row_ids": np.asarray(["r1", "r2"]),
+        "operation": "snapshot_fixture_metadata",
+        "parameters": {"column": "fixture"},
+        "inputs": {},
+        "source_columns": ["fixture"],
+    }
+    first = resolve_metadata_snapshot(root, **kwargs)
+    payload = artifact_group(root, first)
+    del payload["values"]
+    payload.create_array("values", data=np.asarray([[1.0, 2.0]]))
+    # Stand in for a payload replaced after the generic array checks read it:
+    # they pass, so the snapshot's own shape check is what refuses it.
+    monkeypatch.setattr(
+        "cytearc.storage.artifact_writer._requirements_met",
+        lambda _group, requirements: [True] * len(requirements),
+    )
+
+    replacement = resolve_metadata_snapshot(root, **kwargs)
+
+    assert replacement != first
+    np.testing.assert_array_equal(
+        artifact_group(root, replacement)["values"][:], [1.0, 2.0]
+    )
+
+
 def test_filter_and_hvg_return_artifacts_without_metadata_aliases(
     datastore_ephemeral,
 ) -> None:

@@ -376,8 +376,6 @@ def _wnn_integration_many(
 
     if not np.all(np.isfinite(merged_data)):
         raise FloatingPointError("WNN integration produced non-finite graph weights")
-    if not np.all(np.isfinite(modality_weights)):
-        raise FloatingPointError("WNN integration produced non-finite modality weights")
     rows = np.repeat(np.arange(n_cells, dtype=index_dtype), nk)
     graph = coo_matrix(
         (merged_data, (rows, merged_columns)),

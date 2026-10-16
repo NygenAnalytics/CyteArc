@@ -87,8 +87,6 @@ def normalize_chunks(
         return (bounded_chunk(chunks[0], shape[0]),) + tuple(
             max(1, int(dimension)) for dimension in shape[1:]
         )
-    if len(chunks) == 1:
-        return (bounded_chunk(chunks[0], shape[0]),)
     raise ValueError(
         f"Cannot map chunks {chunks} to array shape {shape}. "
         "Provide one chunk size per dimension."

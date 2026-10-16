@@ -842,6 +842,46 @@ def test_run_paris_clustering_accepts_numpy_integer_cut_parameters() -> None:
     assert _run_paris(store, min_cluster_size=2).ref == adaptive.ref
 
 
+def test_reused_hierarchy_must_match_the_graph_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cytearc.datastore._operations.paris_persistence as persistence
+    from cytearc.clustering.paris import fit_paris_hierarchy
+    from cytearc.clustering.paris_multiscale import collapse_equal_height_plateaus
+
+    graph = _block_graph()
+    store = _Store(graph)
+    _run_paris(store, min_cluster_size=2)
+    # The stored leaf count passes reuse planning, but the payload has one cell
+    # fewer than the graph.
+    smaller = fit_paris_hierarchy(graph[:-1, :-1])
+    monkeypatch.setattr(
+        persistence,
+        "load_hierarchy_group",
+        lambda *_: (smaller, collapse_equal_height_plateaus(smaller)),
+    )
+
+    with pytest.raises(ValueError, match="hierarchy size does not match graph"):
+        _run_paris(store, min_cluster_size=3)
+
+
+def test_paris_artifact_requires_a_cut_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    real_run = _Store._run_paris_from_artifacts
+
+    def run_without_ref(self: _Store, **kwargs: object):
+        return replace(real_run(self, **kwargs), ref=None)
+
+    monkeypatch.setattr(_Store, "_run_paris_from_artifacts", run_without_ref)
+    store = _Store(_block_graph())
+
+    with pytest.raises(RuntimeError, match="did not produce an artifact"):
+        store.clusters.paris(store.graph_ref, n_clusters=2)
+
+
 def test_unreadable_reused_hierarchy_fails_closed() -> None:
     store = _Store(_block_graph())
     first = _run_paris(store, min_cluster_size=2)

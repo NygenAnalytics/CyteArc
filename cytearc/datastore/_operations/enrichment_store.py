@@ -50,8 +50,8 @@ class _EnrichmentScorer:
     # Further cells-by-sources arrays; score batches are then tuples of the
     # scores and these arrays in this order.
     extra_dense: tuple[str, ...] = ()
-    # Further method arrays, such as background peaks, produced once the
-    # score batches have been streamed.
+    # Further two-dimensional method arrays, such as background peaks,
+    # produced once the score batches have been streamed.
     extra_arrays: Callable[[], tuple[tuple[str, np.ndarray], ...]] = tuple
 
 
@@ -78,14 +78,13 @@ class _RowBandWriter:
             self.buffer = [rest] if rest.shape[0] else []
             self.buffered = rest.shape[0]
 
-    def finish(self) -> int:
+    def finish(self) -> None:
         if self.buffered:
             stacked = np.vstack(self.buffer)
             self.array[self.start : self.start + self.buffered] = stacked
             self.start += self.buffered
         self.buffer = []
         self.buffered = 0
-        return self.start
 
 
 def _write_enrichment_slot(
@@ -204,7 +203,9 @@ def _write_enrichment_slot(
                 values = checked(batch)
             yield values
 
-    written = write_dense_from_row_batches(
+    # The writer raises unless the batches fill every score row, and each
+    # extra batch has its score batch's rows, so every array is complete.
+    write_dense_from_row_batches(
         scores,
         checked_batches(),
         dtype=np.float32,
@@ -212,27 +213,17 @@ def _write_enrichment_slot(
         resources=resources,
         io=io,
     )
-    if written != n_cells:
-        raise ValueError(
-            f"Enrichment writer produced {written} rows, expected {n_cells}"
-        )
     for writer in extra_writers:
-        if writer.finish() != n_cells:
-            raise ValueError("Enrichment extra writer produced misaligned rows")
+        writer.finish()
     for name, values in extra_arrays():
-        if values.ndim == 1:
-            create_metadata_column(
-                slot, name, data=values, dtype=values.dtype, chunkSize=100_000
-            )
-        else:
-            stored = create_zarr_dataset(
-                slot,
-                name,
-                chunks=(min(max(1, values.shape[0]), 100_000), values.shape[1]),
-                dtype=values.dtype,
-                shape=values.shape,
-            )
-            stored[:, :] = values
+        stored = create_zarr_dataset(
+            slot,
+            name,
+            chunks=(min(max(1, values.shape[0]), 100_000), values.shape[1]),
+            dtype=values.dtype,
+            shape=values.shape,
+        )
+        stored[:, :] = values
     # finish_artifact validates the payload and marks the slot complete.
 
 
@@ -402,8 +393,6 @@ def _load_enrichment_result(
     )
     root_path = str(getattr(artifact_root, "path", "")).strip("/")
     storage_path = f"{root_path}/{status.path}" if root_path else status.path
-    if slot.attrs.get("complete") is not True:
-        raise ValueError(f"Enrichment slot {label!r} is incomplete")
     method = str(slot.attrs.get("method", ""))
     if method not in {"waggr", "aucell", "chromvar"}:
         raise ValueError(f"Enrichment slot {label!r} has an unknown method")

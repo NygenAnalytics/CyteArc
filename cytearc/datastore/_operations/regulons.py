@@ -1,6 +1,6 @@
 import time
 from collections.abc import Iterable, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -74,13 +74,9 @@ def _write_grn_slot(
 def _grn_slot_matches(group: zarr.Group, attrs: dict[str, Any]) -> bool:
     if any(group.attrs.get(key) != value for key, value in attrs.items()):
         return False
-    try:
-        shapes = {
-            as_zarr_array(group[name], name=name).shape for name in _GRN_EDGE_ARRAYS
-        }
-        regulators = as_zarr_array(group["regulator_index"], name="regulator_index")
-    except (KeyError, TypeError):
-        return False
+    # Planning runs this only after it found every required array.
+    shapes = {as_zarr_array(group[name], name=name).shape for name in _GRN_EDGE_ARRAYS}
+    regulators = as_zarr_array(group["regulator_index"], name="regulator_index")
     return (
         len(shapes) == 1
         and len(next(iter(shapes))) == 1
@@ -96,7 +92,7 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
         cell_selection: ArtifactRef,
         *,
         features: ArtifactRef,
-        tfs: Sequence[str],
+        tfs: Iterable[str],
         from_assay: str | None = None,
         random_seed: int = 0,
         learning_rate: float = 0.01,
@@ -298,8 +294,6 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             values = np.asarray(block)
             expression[row : row + values.shape[0]] = values
             row += values.shape[0]
-        if row != n_cells:
-            raise ValueError(f"Read {row} cells for GRN inference, expected {n_cells}")
 
         started = time.monotonic()
         reported = [started]
@@ -324,8 +318,6 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             progress=progress,
         )
         correlation = _pair_correlations(expression, tf_codes, target_codes)
-        if not np.isfinite(correlation).all():
-            raise ValueError("A linked factor or target has constant counts")
         import sklearn
 
         attrs_written = {**attrs, "sklearn_version": sklearn.__version__}
@@ -437,3 +429,46 @@ class _RegulonOperationsMixin(_RegulonOperationsBase):
             method="grnboost2",
             random_seed=random_seed,
         )
+
+    def _regulons_profiles(
+        self,
+        groups: ArtifactRef | str,
+        *,
+        from_assay: str | None = None,
+        cell_selection: ArtifactRef | None = None,
+    ) -> pd.DataFrame:
+        """Log counts per million of the summed raw counts of each cell group.
+
+        Summing small groups of similar cells, such as a fine clustering
+        (metacells), averages out the sampling noise of single cells. Gene
+        programs and region-to-gene links read such profiles.
+
+        Args:
+            groups: Clustering artifact or cell metadata column that groups
+                the cells, as for ``compare.compute_bulk``.
+            from_assay: Assay to read. The default assay when omitted.
+            cell_selection: Cells to read, as for ``compare.compute_bulk``.
+
+        Returns:
+            A groups-by-features DataFrame of ``log1p`` counts per million.
+            Columns are peak ids (``chrom:start-end``) for an ATAC assay and
+            feature names otherwise; names that several features share are
+            left out.
+
+        Raises:
+            UnmeasuredCellsError: If the assay did not measure a cell that is read.
+        """
+        from ...assay import ATACassay
+
+        assay = self._get_assay(from_assay)
+        sums = cast(Any, self)._compare_compute_bulk(
+            groups,
+            from_assay=assay.name,
+            cell_selection=cell_selection,
+            aggr_type="sum",
+            feature_label="id" if isinstance(assay, ATACassay) else "name",
+            remove_empty_features=False,
+        )
+        sums = sums.loc[~sums.index.duplicated(keep=False)].T.astype(np.float64)
+        profiles: pd.DataFrame = np.log1p(sums.div(sums.sum(axis=1), axis=0) * 1e6)
+        return profiles

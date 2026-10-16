@@ -187,6 +187,7 @@ class RegulonsAccessor(_Accessor):
 
     grn = _bind(_RegulonOperationsMixin._regulons_grn)
     load_grn = _bind(_RegulonOperationsMixin._regulons_load_grn)
+    profiles = _bind(_RegulonOperationsMixin._regulons_profiles)
 
 
 class ScoresAccessor(_Accessor):

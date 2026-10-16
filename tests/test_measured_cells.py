@@ -1369,6 +1369,19 @@ def test_a_few_membership_rows_read_only_their_chunks(measured, monkeypatch) -> 
     assert (raised.value.unmeasured, raised.value.selected) == (1, 2)
 
 
+def test_store_check_leaves_cells_of_another_type_to_the_operation(
+    partial_rna,
+) -> None:
+    store = _open(partial_rna)
+    rows = list(range(store.cells.N))
+    with pytest.raises(UnmeasuredCellsError):
+        require_measured_cells(store.cells, "RNA", rows, operation="probe")
+
+    # The store's check reads a selection, a column name, or an array; the
+    # operation's own argument checks judge a value of another type.
+    assert store._require_measured_cells("RNA", rows, operation="probe") is None
+
+
 def test_make_bulk_refuses_unmeasured_cells_before_it_writes(partial_rna) -> None:
     """A metadata grouping without a selection is checked over live cells.
 

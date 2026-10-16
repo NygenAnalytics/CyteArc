@@ -398,6 +398,11 @@ def test_normalize_chunks_maps_one_size_to_the_first_axis():
         ValueError, match=r"Cannot map chunks \(2, 3\) to array shape \(4,\)"
     ):
         normalize_chunks((2, 3), (4,))
+    # A scalar shape has no axis to take the size.
+    with pytest.raises(
+        ValueError, match=r"Cannot map chunks \(4,\) to array shape \(\)"
+    ):
+        normalize_chunks(4, ())
 
 
 def test_row_sharded_plan_uses_full_width_divisible_chunks():

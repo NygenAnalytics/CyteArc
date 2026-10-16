@@ -29,12 +29,12 @@ __all__ = [
 ]
 
 EREGULON_COLUMNS = (
-    "eRegulon",
+    "source",
     "TF",
     "tf_to_gene_sign",
     "region_to_gene_sign",
     "region",
-    "gene",
+    "target",
     "importance_R2G",
     "rho_R2G",
     "importance_TF2G",
@@ -312,9 +312,12 @@ def build_eregulons(
         nthreads: Modules tested concurrently.
 
     Returns:
-        One row per eRegulon region-to-gene link, with the factor-to-gene
-        statistics of the target. Names read
-        ``{TF}_{label}_{TF-to-gene sign}/{region-to-gene sign}``.
+        One row per eRegulon region-to-gene link: ``source`` (the eRegulon,
+        named ``{TF}_{label}_{TF-to-gene sign}/{region-to-gene sign}``),
+        ``TF``, the two signs, ``region``, ``target`` (the gene), the link's
+        ``importance_R2G`` and ``rho_R2G``, and the target's factor-to-gene
+        ``importance_TF2G`` and ``rho_TF2G``. A gene linked by several regions
+        repeats, so score the unique ``source`` and ``target`` pairs.
     """
     for frame, columns, name in (
         (cistromes, {"source", "target"}, "cistromes"),
@@ -404,6 +407,6 @@ def build_eregulons(
     eregulons = pd.DataFrame.from_records(rows, columns=list(EREGULON_COLUMNS[:8]))
     # Each target's co-expression statistics, the factor's self-link included.
     statistics = co_expression.set_axis(
-        ["TF", "gene", "importance_TF2G", "rho_TF2G"], axis=1
-    ).astype({"TF": str, "gene": str})
-    return eregulons.merge(statistics, on=["TF", "gene"], how="left")
+        ["TF", "target", "importance_TF2G", "rho_TF2G"], axis=1
+    ).astype({"TF": str, "target": str})
+    return eregulons.merge(statistics, on=["TF", "target"], how="left")

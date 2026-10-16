@@ -9,7 +9,6 @@ from cytearc.regulons.grn import (
     _EarlyStopMonitor,
     _StageEarlyStopMonitor,
     infer_grn,
-    pearson_correlations,
 )
 
 _FAST = GrnParameters(maxStages=200, earlyStopWindow=10)
@@ -68,9 +67,15 @@ def test_grn_leaves_each_factor_out_of_its_own_model():
     links = infer_grn(
         expression, names, names[:4], targets=["TF1"], seed=1, parameters=_FAST
     )
+    # A lone factor has no other factor to predict it from.
+    alone = infer_grn(
+        expression, names, ["TF1"], targets=["TF1"], seed=1, parameters=_FAST
+    )
 
     assert "TF1" not in set(links["TF"])
     assert set(links["TF"]) <= {"TF0", "TF2", "TF3"}
+    assert alone.empty
+    assert list(alone.columns) == list(links.columns)
 
 
 def test_grn_finds_the_simulated_regulators():
@@ -126,47 +131,62 @@ def test_grn_reports_progress():
         ({"seed": -1}, "seed"),
         ({"nthreads": 0}, "nthreads"),
         ({"gene_names": ["a"] * 8}, "unique"),
+        ({"gene_names": ["a", "b"]}, "align"),
+        ({"expression": np.zeros(8)}, "cells-by-genes"),
+        ({"expression": np.ones((3, 8), dtype=complex)}, "real-valued"),
+        ({"expression": np.full((3, 8), np.nan)}, "finite"),
+        ({"expression": np.ones((1, 8))}, "two cells"),
     ],
 )
 def test_grn_rejects_invalid_requests(kwargs, message):
     expression, names = _expression()
-    arguments = {"gene_names": names, "tf_names": names[:4], "seed": 0}
+    arguments = {
+        "expression": expression,
+        "gene_names": names,
+        "tf_names": names[:4],
+        "seed": 0,
+    }
     arguments.update(kwargs)
 
     with pytest.raises(ValueError, match=message):
-        infer_grn(expression, **arguments)
+        infer_grn(**arguments)
 
 
 @pytest.mark.parametrize(
-    "kwargs", [{"subsample": 1.0}, {"maxFeatures": 0.0}, {"earlyStopWindow": 0}]
+    "kwargs",
+    [
+        {"subsample": 1.0},
+        {"maxFeatures": 0.0},
+        {"earlyStopWindow": 0},
+        {"learningRate": 0.0},
+        {"earlyStopping": "never"},
+    ],
 )
-def test_grn_parameters_reject_settings_without_early_stopping(kwargs):
+def test_grn_parameters_reject_invalid_settings(kwargs):
     with pytest.raises(ValueError):
         GrnParameters(**kwargs)
 
 
-def test_pearson_correlations_match_numpy():
-    expression, names = _expression(5)
-    pairs = pd.DataFrame(
-        {
-            "TF": ["TF0", "TF1", "TF2", "TF0", "TF3"],
-            "target": ["G0", "G1", "G2", "Gconst", "TF0"],
-        }
-    )
+def test_stage_rule_requires_the_boosting_state():
+    # scikit-learn could stop passing its fitting loop's variables to monitors.
+    with pytest.raises(RuntimeError, match="earlyStopping='consecutive'"):
+        _StageEarlyStopMonitor(5)(0, GradientBoostingRegressor(), {})
 
-    observed = pearson_correlations(expression, names, pairs)
+
+def test_infer_grn_reports_the_pearson_correlation_of_each_link():
+    expression, names = _expression(5)
+
+    links = infer_grn(expression, names, names[:4], seed=0, parameters=_FAST)
 
     with np.errstate(invalid="ignore", divide="ignore"):
         correlation = np.corrcoef(expression.astype(np.float64).T)
     position = {name: index for index, name in enumerate(names)}
     expected = [
         correlation[position[tf], position[target]]
-        for tf, target in zip(pairs["TF"], pairs["target"])
+        for tf, target in zip(links["TF"], links["target"], strict=True)
     ]
-    np.testing.assert_allclose(
-        observed[[0, 1, 2, 4]], np.asarray(expected)[[0, 1, 2, 4]]
-    )
-    assert np.isnan(observed[3])
+    assert list(links.columns) == ["TF", "target", "importance", "correlation"]
+    np.testing.assert_allclose(links["correlation"], expected)
 
 
 def test_stage_rule_measures_each_stage_on_its_own_out_of_bag_cells():

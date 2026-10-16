@@ -7,17 +7,20 @@ myst:
 # Regulons API reference
 
 `cytearc.regulons` builds transcription-factor regulons the way SCENIC and SCENIC+ do, and
-co-regulated gene programs, from RNA, ATAC, and binding data such as CUT&RUN.
-{meth}`ds.scores.aucell <cytearc.datastore.namespaces.ScoresAccessor.aucell>` (genes) and
-{meth}`ds.scores.chromvar <cytearc.datastore.namespaces.ScoresAccessor.chromvar>` (peak ids)
-score per cell any table with `source` and `target` columns. Cistromes have them; rename
-`regulon` of regulons, `program` and `gene` of programs, and `eRegulon` and `gene` of eRegulons
-to `source` and `target`. Reading cisTarget ranking databases needs the `regulons` extra:
-`pip install "cytearc[regulons]"`.
+co-regulated gene programs, from RNA, ATAC, and binding data such as CUT&RUN. Every set it
+returns, from modules and regulons to programs, cistromes, and eRegulons, is a table with
+`source` (the set) and `target` (a member) columns, which {meth}`ds.scores.aucell
+<cytearc.datastore.namespaces.ScoresAccessor.aucell>` (genes) and {meth}`ds.scores.chromvar
+<cytearc.datastore.namespaces.ScoresAccessor.chromvar>` (peaks) score per cell and
+`set_overlaps` compares. Regions are named by their `chrom:start-end` ids, as ATAC peaks are.
+Reading cisTarget ranking databases needs the `regulons` extra: `pip install "cytearc[regulons]"`.
 
 The cell-level steps run on a `DataStore`: {meth}`ds.regulons.grn
-<cytearc.datastore.namespaces.RegulonsAccessor.grn>` infers the co-expression network, and the
-scoring methods above write `enrichment_scores` artifacts. The functions on this page work on
+<cytearc.datastore.namespaces.RegulonsAccessor.grn>` infers the co-expression network,
+{meth}`ds.regulons.profiles <cytearc.datastore.namespaces.RegulonsAccessor.profiles>` sums
+groups of cells such as metacells into profiles, and the scoring methods above write
+`enrichment_scores` artifacts, which {meth}`EnrichmentResult.to_pandas
+<cytearc.EnrichmentResult.to_pandas>` reads as a table. The functions on this page work on
 those results and on reference files, such as cisTarget databases, JASPAR motifs, a genome
 FASTA, a gene annotation, and peak files.
 
@@ -31,11 +34,6 @@ enriched, annotated motif of each module's factor recovers, and the leading edge
 .. autofunction:: cytearc.regulons.infer_grn
 
 .. autoclass:: cytearc.regulons.GrnParameters
-
-.. autodata:: cytearc.regulons.grn.GRNBOOST2_PARAMETERS
-    :annotation:
-
-.. autofunction:: cytearc.regulons.pearson_correlations
 
 .. autofunction:: cytearc.regulons.modules_from_adjacencies
 
@@ -51,10 +49,6 @@ enriched, annotated motif of each module's factor recovers, and the leading edge
 .. autoclass:: cytearc.regulons.PruningParameters
 
 .. autofunction:: cytearc.regulons.regulons_from_motifs
-
-.. autofunction:: cytearc.regulons.enrich_signature
-
-.. autoclass:: cytearc.regulons.MotifEnrichment
 ```
 
 ## Motifs, genomes, and cistromes
@@ -65,8 +59,6 @@ enriched, annotated motif of each module's factor recovers, and the leading edge
 
 .. autofunction:: cytearc.regulons.gc_content
 
-.. autofunction:: cytearc.regulons.parse_coordinate_ids
-
 .. autoclass:: cytearc.regulons.Motif
 
 .. autofunction:: cytearc.regulons.read_jaspar_motifs
@@ -74,6 +66,8 @@ enriched, annotated motif of each module's factor recovers, and the leading edge
 .. autofunction:: cytearc.regulons.read_meme_motifs
 
 .. autofunction:: cytearc.regulons.match_motifs
+
+.. autofunction:: cytearc.regulons.motif_annotations
 
 .. autofunction:: cytearc.regulons.cistromes_from_motifs
 
@@ -91,15 +85,9 @@ enriched, annotated motif of each module's factor recovers, and the leading edge
 
 .. autofunction:: cytearc.regulons.region_gene_links
 
-.. autofunction:: cytearc.regulons.project_to_genes
-
 .. autofunction:: cytearc.regulons.build_eregulons
 
 .. autoclass:: cytearc.regulons.EregulonParameters
-
-.. autofunction:: cytearc.regulons.gsea_prerank
-
-.. autoclass:: cytearc.regulons.GseaResult
 ```
 
 ## Gene programs and specificity

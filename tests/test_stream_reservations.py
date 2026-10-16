@@ -69,6 +69,12 @@ def test_array_geometry_rejects_inconsistent_layouts() -> None:
         array_geometry(layout((-1, 4), (2, 2)))
     with pytest.raises(ValueError, match="shards .* do not match shape"):
         array_geometry(layout((4, 4), (2, 2), shards=(4,)))
+    # The store that computes an array reports what one read holds beside it.
+    computed = layout((4, 4), (2, 2))
+    computed.path = "computed"
+    computed.store = SimpleNamespace(chunk_read_scratch_bytes=lambda _path: -1)
+    with pytest.raises(ValueError, match="read scratch cannot be negative"):
+        array_geometry(computed)
 
 
 @pytest.mark.parametrize("source_budget", [None, 288, 320])

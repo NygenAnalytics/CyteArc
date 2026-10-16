@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
 
+import cytearc.clustering.paris_multiscale as paris_multiscale
 from cytearc.clustering._paris_core import ParisHierarchy
 from cytearc.clustering.paris_multiscale import (
     adaptive_cut,
@@ -525,6 +526,80 @@ def test_hierarchy_validation_rejects_malformed_hierarchies(
 
     with pytest.raises(error, match=message):
         collapse_equal_height_plateaus(damage(valid))
+
+
+@pytest.mark.parametrize(
+    ("heights", "parents", "message"),
+    [
+        # Node 4 names equal-height node 5 as its parent, so no event reaches it.
+        ([1.0, 1.0, 2.0], [4, 4, 5, 5, 5, 6, -1], "event propagation failed"),
+        # Finite root 6 merges synthetic join 4, which belongs to no event.
+        (
+            [np.inf, 1.0, 2.0],
+            [4, 4, 5, 5, 6, 6, -1],
+            "boundary does not reference an event",
+        ),
+        # Root 6 names leaf 1 as its parent, which belongs to no event.
+        ([1.0, 1.0, 2.0], [4, 4, 5, 5, 6, 6, 1], "parent mapping failed"),
+    ],
+    ids=["unreached_merge", "synthetic_boundary", "leaf_parent"],
+)
+def test_plateau_collapse_rejects_an_inconsistent_parent_map(
+    monkeypatch: pytest.MonkeyPatch,
+    heights: list[float],
+    parents: list[int],
+    message: str,
+) -> None:
+    # Four leaves: (0, 1) -> 4, (2, 3) -> 5, (4, 5) -> 6.
+    hierarchy = _hierarchy([(0, 1), (2, 3), (4, 5)], heights)
+    n_nodes = 2 * hierarchy.n_leaves - 1
+    # Validation would reject these maps, so it returns them unchecked.
+    monkeypatch.setattr(
+        paris_multiscale,
+        "_validate_hierarchy",
+        lambda _hierarchy: (
+            np.asarray(parents, dtype=np.int32),
+            np.ones(n_nodes, dtype=np.int32),
+            np.arange(n_nodes, dtype=np.int32),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        collapse_equal_height_plateaus(hierarchy)
+
+
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [
+        (paris_multiscale._SPLIT, "feasible event split contains a leaf"),
+        (paris_multiscale._KEEP_SCORE, "Score-selected event has an infeasible split"),
+    ],
+    ids=["split", "score_keep"],
+)
+def test_adaptive_cut_rejects_scores_that_ignore_leaf_children(
+    monkeypatch: pytest.MonkeyPatch,
+    state: np.uint8,
+    message: str,
+) -> None:
+    real_score_events = paris_multiscale._score_events
+
+    def contradictory_scores(
+        forest: paris_multiscale.PlateauForest,
+        min_cluster_size: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        best_scores, states, blocking_counts, folded_cells = real_score_events(
+            forest,
+            min_cluster_size,
+        )
+        # Event 0 merges leaves 0 and 1, so only a constrained keep is valid.
+        states[0] = state
+        return best_scores, states, blocking_counts, folded_cells
+
+    monkeypatch.setattr(paris_multiscale, "_score_events", contradictory_scores)
+    hierarchy = _hierarchy([(0, 1), (2, 3), (4, 5)], [1.0, 1.0, 2.0])
+
+    with pytest.raises(RuntimeError, match=message):
+        adaptive_cut(hierarchy, 2)
 
 
 def test_events_above_a_rounding_inversion_have_no_persistence() -> None:

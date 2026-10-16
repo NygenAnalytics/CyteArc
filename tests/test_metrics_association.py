@@ -138,6 +138,31 @@ def test_spearman_rho_reports_ties_and_missing() -> None:
     assert result["tiedRight"] is False
 
 
+def test_spearman_rho_reports_a_non_finite_correlation_as_undefined(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from cytearc.metrics import association
+
+    # Ranks of columns with two distinct values always correlate finitely, so
+    # the test stands in a correlation backend that returns NaN.
+    monkeypatch.setattr(
+        association,
+        "stats",
+        SimpleNamespace(spearmanr=lambda *_args: SimpleNamespace(statistic=np.nan)),
+    )
+
+    result = spearman_rho(np.array([1.0, 2.0, 3.0]), np.array([3.0, 1.0, 2.0]))
+
+    assert result == {
+        "status": "notComputed",
+        "reason": "undefined",
+        "rowsUsed": 3,
+        "rowsMissing": 0,
+    }
+
+
 def test_spearman_rho_rejects_non_numeric_values() -> None:
     result = spearman_rho(np.array(["a", "b", "c"]), np.array([1.0, 2.0, 3.0]))
     assert result["status"] == "notComputed"

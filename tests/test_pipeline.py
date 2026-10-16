@@ -1,3 +1,4 @@
+import dataclasses
 import inspect
 import pickle
 import re
@@ -1898,6 +1899,182 @@ def test_cluster_selection_workspace_shrinks_for_wider_coordinates() -> None:
     wide = _silhouette_working_memory_mib(10_000, 300, budget)
 
     assert 1 <= wide < narrow
+
+
+def _two_cluster_lineage() -> tuple[
+    Any, _ClusterSelectionStore, dict[str, ArtifactRef], ArtifactRef
+]:
+    """Four scored cells and one Leiden candidate with two clusters of them."""
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    lineage = _cluster_selection_lineage(
+        root,
+        n_cells=4,
+        coordinates=np.arange(8, dtype=np.float32).reshape(4, 2),
+    )
+    labels = _cluster_labels(
+        root,
+        values=np.asarray([0, 0, 1, 1], dtype=np.int32),
+        cell_selection=lineage["cell_selection"],
+        graph=lineage["connectivity_map"],
+    )
+    return root, _ClusterSelectionStore(root), lineage, labels
+
+
+def test_cluster_selection_rejects_a_graph_over_other_cells(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cytearc.datastore._pipeline_cluster_selection as selection_store
+
+    _root, store, lineage, labels = _two_cluster_lineage()
+    other_cells = ArtifactRef("datastore", "cell_selection", "0" * 64)
+    resolve = selection_store.resolve_native_graph_inputs
+    # A graph built from the scored coordinates shares their cells, so only an
+    # inconsistent resolved lineage reaches this check.
+    monkeypatch.setattr(
+        selection_store,
+        "resolve_native_graph_inputs",
+        lambda zw, ref: dataclasses.replace(
+            resolve(zw, ref), cell_selection=other_cells
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="^connectivity map does not use the requested cell selection$",
+    ):
+        _select_clusters(store, lineage, (("clusters", labels),))
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({}, "^Coordinate artifact is missing its data array$"),
+        (
+            {"data": np.arange(4, dtype=np.float32)},
+            "^Coordinates must be a non-empty two-dimensional array$",
+        ),
+    ],
+    ids=["missing", "flat"],
+)
+def test_cluster_selection_rechecks_the_scored_coordinate_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, np.ndarray],
+    message: str,
+) -> None:
+    import cytearc.datastore._pipeline_cluster_selection as selection_store
+
+    _root, store, lineage, labels = _two_cluster_lineage()
+    # The lineage resolvers reject such payloads first, so the stand-in
+    # replaces the coordinate group only where cluster selection reads it.
+    stand_in = zarr.open_group(store=MemoryStore(), mode="w")
+    for name, values in payload.items():
+        stand_in.create_array(name, data=values)
+    group = selection_store.artifact_group
+    monkeypatch.setattr(
+        selection_store,
+        "artifact_group",
+        lambda zw, ref: stand_in if ref == lineage["coordinates"] else group(zw, ref),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        _select_clusters(store, lineage, (("clusters", labels),))
+
+
+def test_reused_cluster_selection_requires_a_known_text_selected_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cytearc.datastore._pipeline_cluster_selection as selection_store
+
+    root, store, lineage, labels = _two_cluster_lineage()
+    candidates = (("clusters", labels),)
+    decision, selected_key, _selected = _select_clusters(store, lineage, candidates)
+    group = artifact_group(root, decision)
+    validate = selection_store._cluster_selection_reuse_validator(
+        candidate_keys=("clusters",),
+        candidate_refs=(labels,),
+        expected_indices=np.arange(4),
+        seed=4466,
+        population_size=4,
+        max_sample_size=10_000,
+        min_cluster_quota=2,
+        working_memory_mib=1,
+    )
+    assert validate(decision, group)
+    # Reuse planning checks the stored type before the validator runs, so
+    # only the validator itself sees a selected key that is not text.
+    group.attrs["selectedKey"] = 1
+    assert not validate(decision, group)
+    group.attrs["selectedKey"] = selected_key
+
+    plan = selection_store.plan_artifact
+
+    def plan_then_change_key(*args: Any, **kwargs: Any) -> Any:
+        planned = plan(*args, **kwargs)
+        if planned.reused:
+            # The decision changes after it passed its reuse check.
+            artifact_group(root, planned.ref).attrs["selectedKey"] = "unknown"
+        return planned
+
+    monkeypatch.setattr(selection_store, "plan_artifact", plan_then_change_key)
+    with pytest.raises(
+        ValueError, match="^Stored cluster selection has an invalid selected key$"
+    ):
+        _select_clusters(store, lineage, candidates)
+
+
+def _minimal_recipe(datastore: DataStore, **changes: Any) -> Any:
+    from cytearc.datastore._pipeline_recipe import resolve_pipeline_recipe
+
+    return resolve_pipeline_recipe(
+        datastore,
+        assay=None,
+        label=None,
+        cell_key="I",
+        harmony_batch_columns=None,
+        snapshot_columns=(),
+        **{**_minimal_run_options(), **changes},
+    )
+
+
+def test_filtering_without_qc_columns_keeps_the_input_selection(
+    minimal_base: SimpleNamespace,
+) -> None:
+    from cytearc.datastore._pipeline_filtering import filter_pipeline_selection
+
+    run = minimal_base.run
+    recipe = _minimal_recipe(minimal_base.datastore)
+    assert recipe.filtering == {"enabled": False}
+
+    selection = filter_pipeline_selection(
+        minimal_base.datastore,
+        recipe=recipe,
+        input_selection=run["input_cell_selection"],
+        cell_snapshot=run.cells._descriptor_by_key["ids"].artifact,
+    )
+
+    assert selection == run["input_cell_selection"]
+
+
+def test_pipeline_fields_describe_only_the_leiden_partitions_that_ran(
+    minimal_base: SimpleNamespace,
+) -> None:
+    from cytearc.datastore._pipeline_fields import build_pipeline_fields
+
+    run = minimal_base.run
+    recipe = _minimal_recipe(minimal_base.datastore, leiden=True)
+    assert recipe.leiden_partitions
+    assert not any(key.startswith("leiden_") for key in run)
+
+    # A partition without an artifact adds no field.
+    fields = build_pipeline_fields(
+        minimal_base.datastore,
+        recipe,
+        dict(run),
+        cell_snapshot=run.cells._descriptor_by_key["ids"].artifact,
+        feature_snapshot=run.features._descriptor_by_key["ids"].artifact,
+    )
+
+    assert fields == run._record.fields
 
 
 def test_rich_pipeline_views_plots_and_markers_remain_frozen_after_live_i_drift(

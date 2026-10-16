@@ -153,7 +153,7 @@ _NAMESPACE_METHODS = [
 
 
 def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
-    assert len(_NAMESPACE_METHODS) == 73
+    assert len(_NAMESPACE_METHODS) == 74
 
 
 @pytest.mark.parametrize(

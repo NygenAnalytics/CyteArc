@@ -128,7 +128,7 @@ functions in {doc}`regulons` turn them into regulons.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.RegulonsAccessor
-    :members: grn, load_grn
+    :members: grn, load_grn, profiles
 ```
 
 ### `ds.imputation`

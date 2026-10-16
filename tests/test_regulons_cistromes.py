@@ -7,7 +7,6 @@ import pytest
 from cytearc.regulons.cistromes import (
     binding_cistromes,
     cistromes_from_motifs,
-    project_to_genes,
     read_peak_file,
 )
 
@@ -34,6 +33,23 @@ def test_read_peak_file_reads_narrowpeak_and_bed(tmp_path):
     assert np.isnan(plain["score"].iloc[0]) and plain["summit"].iloc[0] == -1
 
 
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("chr1\t100\n", "fewer than 3 columns"),
+        ("chr1\t100\tend\n", "malformed"),
+        ("chr1\t300\t100\n", "start >= end"),
+        ("track name=x\n# no peaks\n", "contains no peaks"),
+    ],
+)
+def test_read_peak_file_rejects_malformed_files(tmp_path, text, message):
+    path = tmp_path / "peaks.bed"
+    path.write_text(text)
+
+    with pytest.raises(ValueError, match=message):
+        read_peak_file(path)
+
+
 def _annotations() -> pd.DataFrame:
     return pd.DataFrame(
         {
@@ -58,6 +74,45 @@ def test_cistromes_from_motifs_unions_regions_per_factor():
         ["SPIB", "r2", "m2"],
     ]
     assert extended.values.tolist() == [["SPI1", "r2", "m2"]]
+    # A motif that no annotation names gives an empty network.
+    unannotated = cistromes_from_motifs(matches.assign(source="m9"), _annotations())
+    assert unannotated.empty and unannotated.columns.equals(direct.columns)
+    with pytest.raises(ValueError, match="source and target"):
+        cistromes_from_motifs(matches[["source"]], _annotations())
+    with pytest.raises(ValueError, match="read_motif_annotations"):
+        cistromes_from_motifs(matches, _annotations().drop(columns="category"))
+
+
+def test_motif_annotations_name_each_factor_of_a_motif():
+    from cytearc.features.genomic.motifs import Motif
+    from cytearc.regulons.databases import motif_annotations
+
+    counts = np.ones((6, 4))
+    motifs = [
+        Motif("MA1", "Spi1", counts),
+        Motif("MA2", "FOS::JUN", counts),
+        Motif("MA3", "TFAP2A(var.2)", counts),
+    ]
+    matches = pd.DataFrame(
+        {"source": ["MA1", "MA2", "MA3"], "target": ["r1", "r2", "r3"]}
+    )
+
+    annotations = motif_annotations(motifs)
+    cistromes = cistromes_from_motifs(matches, annotations)
+
+    assert annotations[["motif", "TF"]].values.tolist() == [
+        ["MA1", "SPI1"],
+        ["MA2", "FOS"],
+        ["MA2", "JUN"],
+        ["MA3", "TFAP2A"],
+    ]
+    assert set(annotations["category"]) == {"direct"}
+    assert cistromes[["source", "target"]].values.tolist() == [
+        ["FOS", "r2"],
+        ["JUN", "r2"],
+        ["SPI1", "r1"],
+        ["TFAP2A", "r3"],
+    ]
 
 
 def test_binding_cistromes_overlap_rules():
@@ -88,27 +143,13 @@ def test_binding_cistromes_overlap_rules():
         ["SPI1", "chr1:100-200", 1],
         ["SPI1", "chr1:300-500", 1],
     ]
+    unbound = binding_cistromes({"PAX5": peaks["PAX5"]}, regions)
+    assert unbound.empty and unbound.columns.equals(anywhere.columns)
     with pytest.raises(ValueError, match="min_overlap_fraction"):
         binding_cistromes(peaks, regions, min_overlap_fraction=1.0)
+    with pytest.raises(ValueError, match="chrom, start, and end"):
+        binding_cistromes({"SPI1": peaks["SPI1"].drop(columns="end")}, regions)
     # Peaks named without the regions' "chr" prefix share no chromosome.
     ensembl = {"SPI1": peaks["SPI1"].assign(chrom="1")}
     with pytest.raises(ValueError, match="'chr' prefix"):
         binding_cistromes(ensembl, regions)
-
-
-def test_project_to_genes_counts_linking_regions():
-    cistromes = pd.DataFrame(
-        {"source": ["SPI1", "SPI1", "PAX5"], "target": ["r1", "r2", "r2"]}
-    )
-    links = pd.DataFrame(
-        {"region": [0, 1, 1, 2], "gene_name": ["LYZ", "LYZ", "CD79A", "MS4A1"]}
-    )
-
-    genes = project_to_genes(cistromes, links, region_names=["r1", "r2", "r3"])
-
-    assert genes.values.tolist() == [
-        ["PAX5", "CD79A", 1, "r2"],
-        ["PAX5", "LYZ", 1, "r2"],
-        ["SPI1", "CD79A", 1, "r2"],
-        ["SPI1", "LYZ", 2, "r1,r2"],
-    ]

@@ -1368,6 +1368,42 @@ def test_reusable_artifacts_require_matching_operation_and_inputs() -> None:
     )
 
 
+def test_reusable_artifacts_reject_a_provenance_hash_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = zarr.open_group(store=MemoryStore(), mode="w")
+    matching = _complete_artifact(
+        root,
+        kind="normalized",
+        operation="run_normalization",
+        parameters={"log_transform": True},
+        inputs={},
+    )
+    _complete_artifact(
+        root,
+        kind="normalized",
+        operation="run_normalization",
+        parameters={"log_transform": False},
+        inputs={},
+    )
+    # Every provenance hashes alike, so only its canonical bytes tell them apart.
+    monkeypatch.setattr(
+        "cytearc.storage.artifacts.provenance_hash", lambda _provenance: "0" * 64
+    )
+
+    assert _reusable_refs(
+        root,
+        scope="assay",
+        assay="RNA",
+        kind="normalized",
+        provenance=make_provenance(
+            operation="run_normalization",
+            parameters={"log_transform": True},
+            inputs={},
+        ),
+    ) == [matching]
+
+
 def test_nondeterministic_artifacts_use_normal_provenance_reuse() -> None:
     root = zarr.open_group(store=MemoryStore(), mode="w")
     provenance = make_provenance(

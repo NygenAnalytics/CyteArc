@@ -300,7 +300,7 @@ An operation that reads an assay's values over cells checks the cells against th
 membership column after its own argument and assay-type checks and before it plans, reuses, or
 writes a result, on a read-only store too: `features.normalize`, `integration.modalities` (the shared cell
 selection against every source assay), `features.hvgs`, `features.detected`, `scores.waggr`,
-`scores.aucell`, `scores.chromvar`, `regulons.grn`, `markers.search`, `compare.compute_bulk` (the cells whose counts it reads: those of its bulk
+`scores.aucell`, `scores.chromvar`, `regulons.grn`, `regulons.profiles`, `markers.search`, `compare.compute_bulk` (the cells whose counts it reads: those of its bulk
 columns, or every selected cell for a mean that fits the assay's normalization over them, found
 from the live `I` column before a metadata grouping without `cell_selection` snapshots it),
 `compare.test` (feature keys, over the cells that the design keeps),

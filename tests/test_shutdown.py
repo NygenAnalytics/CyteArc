@@ -251,6 +251,26 @@ def test_second_signal_with_a_default_prior_delivers_it_again(
     assert token.request_record.signal_name == "SIGTERM"
 
 
+def test_escalating_to_an_ignored_prior_restores_it_without_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed: dict[int, object] = {}
+    raised: list[int] = []
+    monkeypatch.setattr(
+        signal,
+        "signal",
+        lambda number, handler: installed.__setitem__(int(number), handler),
+    )
+    monkeypatch.setattr(signal, "raise_signal", raised.append)
+
+    # A guard never replaces an ignored signal, so only a direct call escalates
+    # to one.
+    TemporarySignalGuard._escalate(int(signal.SIGTERM), None, signal.SIG_IGN)
+
+    assert installed == {int(signal.SIGTERM): signal.SIG_IGN}
+    assert raised == []
+
+
 def test_signal_during_a_request_cannot_deadlock_the_same_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

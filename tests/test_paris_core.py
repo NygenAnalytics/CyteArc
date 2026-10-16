@@ -426,6 +426,28 @@ def test_fit_stops_when_neighbor_scan_cannot_make_progress(
     assert scan_count == 1
 
 
+def test_fit_rejects_components_that_miscount_their_merge_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_fit_component = paris_core._fit_component
+
+    def skipped_node_id(
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], int, int]:
+        children, heights, sizes, root, next_node = real_fit_component(
+            *args,
+            **kwargs,
+        )
+        # One unused node id leaves the node count out of step with the merges.
+        return children, heights, sizes, root, next_node + 1
+
+    monkeypatch.setattr(paris_core, "_fit_component", skipped_node_id)
+
+    with pytest.raises(RuntimeError, match="exactly n_leaves - 1 merges"):
+        fit_paris_hierarchy(_tie_free_graph())
+
+
 def _bridged_pairs(bridge: float) -> csr_matrix:
     """Two pairs joined by weight 1e200, bridged by ``bridge``."""
     dense = np.zeros((4, 4))

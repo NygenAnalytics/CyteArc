@@ -708,3 +708,60 @@ def test_pipeline_view_calls_validate_row_identity_once(
         assert calls == 1
     frame = cells.to_pandas_dataframe(["ids", "clusters", "nullable_score"])
     assert list(frame["nullable_score"].isna()) == [False, True]
+
+
+def test_cell_field_whose_lineage_cannot_be_read_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _completed_run(_root())
+    clusters = run["clusters"]
+    inspect = pipeline_run_module.inspect_artifact
+    reads = 0
+
+    def lineage_unreadable(root: zarr.Group, ref: ArtifactRef) -> Any:
+        nonlocal reads
+        if ref == clusters:
+            reads += 1
+            # The payload read succeeds; the lineage read that follows fails.
+            if reads == 2:
+                raise ValueError("malformed inputs")
+        return inspect(root, ref)
+
+    monkeypatch.setattr(pipeline_run_module, "inspect_artifact", lineage_unreadable)
+
+    with pytest.raises(
+        ArtifactResolutionError,
+        match="^Pipeline field 'clusters' has malformed lineage$",
+    ) as caught:
+        _ = run.cells
+    assert caught.value.code == "pipeline_field_selection_mismatch"
+
+
+def test_cell_view_rechecks_the_selection_length_it_validated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _completed_run(_root())
+    short = zarr.open_group(store=MemoryStore(), mode="w").create_array(
+        "values", data=np.ones(3, dtype=bool)
+    )
+    # _selection_array checks the length itself, so only an inconsistent
+    # result reaches the contract's own check.
+    monkeypatch.setattr(PipelineAxisView, "_selection_array", lambda self: short)
+
+    with pytest.raises(AssertionError, match="^Selection shape was not validated$"):
+        _ = run.cells
+
+
+def test_plot_reads_of_the_run_selection_need_no_i_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cells = _completed_run(_root()).cells
+    # A view always holds an I descriptor, but plots read I from the stored
+    # run selection, so they do not look the descriptor up.
+    monkeypatch.delitem(cells._descriptor_by_key, "I")
+
+    assert cells._field_display("I") is None
+    np.testing.assert_array_equal(
+        cells._plot_fetch_all("I"), [True, False, True, False]
+    )
+    np.testing.assert_array_equal(cells._plot_fetch_selected("I"), [True, True])

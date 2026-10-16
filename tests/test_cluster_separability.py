@@ -429,6 +429,26 @@ def test_sampled_coordinate_rows_must_keep_their_shape():
         evaluate_cluster_separability(WideRows(), {"labels": np.arange(6) % 2})
 
 
+def test_cross_validation_must_predict_every_sampled_cell(monkeypatch):
+    import sklearn.model_selection
+
+    class FoldsMissingACell(sklearn.model_selection.StratifiedKFold):
+        """Folds whose test rows leave out their first cell."""
+
+        def split(self, X, y=None, groups=None):
+            for train_indices, test_indices in super().split(X, y, groups):
+                yield train_indices, test_indices[1:]
+
+    monkeypatch.setattr(sklearn.model_selection, "StratifiedKFold", FoldsMissingACell)
+
+    with pytest.raises(RuntimeError, match="did not predict every sampled cell"):
+        evaluate_cluster_separability(
+            np.random.default_rng(5).normal(size=(12, 2)),
+            {"labels": np.arange(12) % 2},
+            n_folds=2,
+        )
+
+
 def test_stratified_sampling_keeps_one_cell_of_each_rare_cluster():
     from cytearc.metrics.cluster_separability import _stratified_sample_indices
 
@@ -571,12 +591,28 @@ def test_datastore_wrapper_revalidates_feature_selection_ancestry(
         values[0] = original
 
 
+@pytest.mark.parametrize("parser", ["strict", "lenient"])
 def test_datastore_wrapper_rejects_malformed_feature_selection_ancestry(
     datastore,
     connectivity_graph,
     leiden_clustering,
     monkeypatch,
+    parser,
 ):
+    if parser == "lenient":
+        # A reference parser that ignores unknown fields still leaves the
+        # stored input different from the reference it parses to.
+        strict_from_dict = ArtifactRef.from_dict.__func__
+        monkeypatch.setattr(
+            ArtifactRef,
+            "from_dict",
+            classmethod(
+                lambda cls, value: strict_from_dict(
+                    cls,
+                    {key: item for key, item in value.items() if key != "unexpected"},
+                )
+            ),
+        )
     reduction = _fixture_reduction(datastore, connectivity_graph)
     normalized, _feature_selection = _normalized_feature_selection(
         datastore,

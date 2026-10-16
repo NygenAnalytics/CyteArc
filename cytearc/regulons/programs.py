@@ -79,8 +79,7 @@ def _standardize(profiles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def gene_programs(
-    profiles: np.ndarray,
-    gene_names: Sequence[str] | np.ndarray,
+    profiles: pd.DataFrame,
     *,
     parameters: GeneProgramParameters = GeneProgramParameters(),
     block_size: int = 2048,
@@ -88,31 +87,30 @@ def gene_programs(
     """Partition genes into co-regulated programs.
 
     Args:
-        profiles: Samples-by-genes expression, such as log-normalized
-            metacell or pseudobulk means. Constant genes are skipped.
-        gene_names: Names of the profile columns.
+        profiles: Samples-by-genes expression named by gene, such as the
+            metacell profiles of ``ds.regulons.profiles``. Constant genes are
+            skipped.
         parameters: Discovery settings.
         block_size: Genes whose correlations are computed at once.
 
     Returns:
-        One row per assigned gene with ``program`` (``P1`` is the largest),
-        ``gene``, and ``membership``, the gene's Pearson correlation with the
-        mean standardized profile of its program's other genes; rows sort by
-        program, then decreasing membership.
+        One row per assigned gene with ``source`` (the program, ``P1`` the
+        largest), ``target`` (the gene), and ``membership``, the gene's
+        Pearson correlation with the mean standardized profile of its
+        program's other genes; rows sort by program, then decreasing
+        membership.
     """
     from scipy.stats import norm
 
     from ..clustering import leiden_membership
 
-    names = np.asarray(gene_names, dtype=object).astype(str)
-    if np.asarray(profiles).ndim != 2 or np.asarray(profiles).shape[1] != len(names):
-        raise ValueError("gene_names must align with the profile columns")
-    n_samples = np.asarray(profiles).shape[0]
+    names = profiles.columns.to_numpy(dtype=object).astype(str)
+    n_samples = len(profiles)
     if n_samples < 4:
         raise ValueError("Programs need at least four samples")
     if len(set(names)) != len(names):
-        raise ValueError("gene_names must be unique")
-    unit, varying = _standardize(profiles)
+        raise ValueError("Profile columns must name unique genes")
+    unit, varying = _standardize(profiles.to_numpy(dtype=np.float64))
     names = names[varying]
     n_genes = len(names)
     if n_genes <= parameters.nNeighbors:
@@ -161,41 +159,36 @@ def gene_programs(
     frames = []
     for rank, (members, membership) in enumerate(candidates, start=1):
         frame = pd.DataFrame(
-            {"program": f"P{rank}", "gene": names[members], "membership": membership}
+            {"source": f"P{rank}", "target": names[members], "membership": membership}
         ).sort_values("membership", ascending=False, kind="mergesort")
         frames.append(frame)
     if not frames:
-        return pd.DataFrame({"program": [], "gene": [], "membership": []})
+        return pd.DataFrame({"source": [], "target": [], "membership": []})
     return pd.concat(frames, ignore_index=True)
 
 
-def program_scores(
-    profiles: np.ndarray,
-    gene_names: Sequence[str] | np.ndarray,
-    programs: pd.DataFrame,
-) -> pd.DataFrame:
+def program_scores(profiles: pd.DataFrame, programs: pd.DataFrame) -> pd.DataFrame:
     """Mean standardized profile of each program's genes in each sample.
 
     Args:
-        profiles: Samples-by-genes values.
-        gene_names: Names of the profile columns.
+        profiles: Samples-by-genes values named by gene.
         programs: Output of ``gene_programs``.
 
     Returns:
-        A samples-by-programs DataFrame.
+        A samples-by-programs DataFrame indexed like ``profiles``.
     """
-    names = np.asarray(gene_names, dtype=object).astype(str)
-    values = np.asarray(profiles, dtype=np.float64)
+    names = profiles.columns.to_numpy(dtype=object).astype(str)
+    values = profiles.to_numpy(dtype=np.float64)
     centered = values - values.mean(axis=0)
     spread = centered.std(axis=0)
     with np.errstate(invalid="ignore", divide="ignore"):
         z = centered / np.where(spread > 0, spread, np.nan)
     position = {name: index for index, name in enumerate(names)}
     result = {}
-    for program, group in programs.groupby("program", sort=False):
-        index = [position[gene] for gene in group["gene"] if gene in position]
+    for program, group in programs.groupby("source", sort=False):
+        index = [position[gene] for gene in group["target"] if gene in position]
         result[program] = np.nanmean(z[:, index], axis=1) if index else np.nan
-    return pd.DataFrame(result)
+    return pd.DataFrame(result, index=profiles.index)
 
 
 def program_regulators(
@@ -207,32 +200,40 @@ def program_regulators(
     auc_threshold: float = 0.05,
     nes_threshold: float = 3.0,
     categories: Sequence[str] | None = None,
+    profiles: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Nominate the transcription factors whose motifs explain each program.
 
     Each program's genes are tested with cisTarget against a gene-based
     ranking database, as pySCENIC tests modules, and enriched motifs are
-    assigned to factors by the annotation table.
+    assigned to factors by the annotation table. A large program enriches
+    many weak motifs, so pass ``profiles`` to check that each factor's own
+    expression follows its program.
 
     Args:
-        programs: Output of ``gene_programs`` (any ``program``/``gene`` table).
+        programs: Output of ``gene_programs`` (any ``source``/``target`` table).
         database: Gene-based ranking database.
         annotations: Output of ``read_motif_annotations``.
         rank_threshold, auc_threshold, nes_threshold: cisTarget settings.
         categories: Annotation categories to accept; all when omitted.
+        profiles: Samples-by-genes expression named by gene, such as metacell
+            profiles.
 
     Returns:
         One row per program, enriched motif, and annotated factor: ``program``,
         ``TF``, ``motif``, ``NES``, ``AUC``, ``n_targets`` (leading-edge
-        genes), and ``category``, sorted by program and decreasing NES.
+        genes), and ``category``, sorted by program and decreasing NES. With
+        ``profiles``, ``correlation`` is the Pearson correlation of the
+        factor's expression with the program's ``program_scores`` across
+        samples, NaN for a factor without a varying profile.
     """
     table = annotations
     if categories is not None:
         table = table.loc[table["category"].isin(list(categories))]
     by_motif = table.groupby("motif")
     rows = []
-    for program, group in programs.groupby("program", sort=False):
-        genes, ranks = database.ranks(group["gene"])
+    for program, group in programs.groupby("source", sort=False):
+        genes, ranks = database.ranks(group["target"])
         if len(genes) < 2:
             continue
         result = enrich_signature(
@@ -254,9 +255,14 @@ def program_regulators(
             ):
                 rows.append((program, tf, motif, nes, auc, n_targets, category))
     columns = ["program", "TF", "motif", "NES", "AUC", "n_targets", "category"]
-    if not rows:
-        return pd.DataFrame({column: [] for column in columns})
     frame = pd.DataFrame.from_records(rows, columns=columns)
+    if profiles is not None:
+        scores = program_scores(profiles, programs)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            frame["correlation"] = [
+                profiles[tf].corr(scores[program]) if tf in profiles.columns else np.nan
+                for program, tf in zip(frame["program"], frame["TF"], strict=True)
+            ]
     return frame.sort_values(
         ["program", "NES", "TF"], ascending=[True, False, True], kind="mergesort"
     ).reset_index(drop=True)
@@ -270,8 +276,9 @@ def set_overlaps(
     """Test every query set for overlap with every reference set.
 
     Args:
-        queries: ``set`` and ``gene`` columns, such as programs renamed.
-        references: ``set`` and ``gene`` columns, such as regulons.
+        queries: ``source`` (set) and ``target`` (gene) columns, such as
+            programs.
+        references: ``source`` and ``target`` columns, such as regulons.
         universe: Genes that could have been in any set.
 
     Returns:
@@ -286,12 +293,12 @@ def set_overlaps(
     genes = set(np.asarray(universe, dtype=object).astype(str))
     total = len(genes)
     query_sets = {
-        str(name): set(group["gene"].astype(str)) & genes
-        for name, group in queries.groupby("set")
+        str(name): set(group["target"].astype(str)) & genes
+        for name, group in queries.groupby("source")
     }
     reference_sets = {
-        str(name): set(group["gene"].astype(str)) & genes
-        for name, group in references.groupby("set")
+        str(name): set(group["target"].astype(str)) & genes
+        for name, group in references.groupby("source")
     }
     rows = []
     for query, members in query_sets.items():

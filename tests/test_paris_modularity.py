@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
 
+import cytearc.clustering._paris_modularity as paris_modularity
 from cytearc.clustering._paris_core import ParisHierarchy
 from cytearc.clustering._paris_modularity import (
     PlateauModularityStatistics,
@@ -262,7 +263,9 @@ def test_topology_statistics_reject_invalid_arrays() -> None:
         )
 
 
-def test_collect_topology_rejects_non_canonical_graphs() -> None:
+def test_collect_topology_rejects_non_canonical_graphs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     hierarchy = _balanced_four_hierarchy()
 
     with pytest.raises(TypeError, match="csr_matrix"):
@@ -321,6 +324,36 @@ def test_collect_topology_rejects_non_canonical_graphs() -> None:
     directed_only.sort_indices()
     with pytest.raises(ValueError, match="structurally symmetric"):
         collect_topology_statistics(directed_only, hierarchy)
+
+    # A symmetric graph has an even entry count, so the parity check needs the
+    # symmetry scan disabled.
+    monkeypatch.setattr(paris_modularity, "csr_symmetry_error", lambda *_: 0)
+    with pytest.raises(ValueError, match="paired undirected entries"):
+        collect_topology_statistics(directed_only, hierarchy)
+
+
+@pytest.mark.parametrize(
+    ("row", "column", "message"),
+    [
+        (0, 0, "offline LCA resolved an edge to a leaf"),
+        (1, 0, "offline LCA did not account for every topology edge"),
+        (0, 1, "leaf degrees do not account for every topology edge"),
+    ],
+    ids=["self_loop", "entry_after_its_target", "entry_before_its_target"],
+)
+def test_topology_invariants_reject_graphs_that_bypass_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    row: int,
+    column: int,
+    message: str,
+) -> None:
+    # Validation rejects each one-entry graph, so disable it to reach the
+    # offline LCA invariants. Leaf 0 is visited before leaf 1.
+    monkeypatch.setattr(paris_modularity, "_validate_canonical_csr", lambda *_: None)
+    graph = csr_matrix(([1.0], ([row], [column])), shape=(2, 2))
+
+    with pytest.raises(RuntimeError, match=message):
+        collect_topology_statistics(graph, _hierarchy([(0, 1)], [1.0]))
 
 
 def test_collect_topology_rejects_edges_across_hierarchy_components() -> None:
@@ -497,7 +530,9 @@ def test_event_aggregation_rejects_invalid_child_links() -> None:
         )
 
 
-def test_event_aggregation_rejects_invalid_roots_and_uncovered_events() -> None:
+def test_event_aggregation_rejects_invalid_roots_and_uncovered_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     hierarchy = _balanced_four_hierarchy()
     forest = collapse_equal_height_plateaus(hierarchy)
     topology = collect_topology_statistics(
@@ -537,6 +572,19 @@ def test_event_aggregation_rejects_invalid_roots_and_uncovered_events() -> None:
     )
     with pytest.raises(ValueError, match="do not cover every event"):
         aggregate_plateau_statistics(hierarchy, uncovered, topology)
+
+    # Hierarchy validation rejects a repeated component root, so disable it to
+    # reach the event traversal.
+    monkeypatch.setattr(paris_modularity, "_validate_hierarchy", lambda _: None)
+    with pytest.raises(ValueError, match="plateau components overlap"):
+        aggregate_plateau_statistics(
+            replace(
+                hierarchy,
+                component_roots=np.repeat(hierarchy.component_roots, 2),
+            ),
+            replace(forest, component_roots=np.repeat(forest.component_roots, 2)),
+            topology,
+        )
 
 
 def test_disconnected_topology_includes_an_isolated_component() -> None:

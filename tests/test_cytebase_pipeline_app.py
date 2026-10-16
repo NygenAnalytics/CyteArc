@@ -1171,6 +1171,24 @@ def test_peak_memory_reports_unavailable_when_proc_cannot_be_read(monkeypatch):
     assert visited == ["/proc"]
 
 
+def test_process_tree_bytes_skips_a_process_that_exits_while_it_is_read(
+    tmp_path, monkeypatch
+):
+    # A process table where worker 10's child 11 exited after its stat was read.
+    worker, child = tmp_path / "10", tmp_path / "11"
+    worker.mkdir()
+    (worker / "stat").write_text("10 (worker) S 1 10")
+    (worker / "statm").write_text("100 4 0")
+    child.mkdir()
+    (child / "stat").write_text("11 (child) S 10 10")
+    scandir = os.scandir
+    monkeypatch.setattr(
+        app.os, "scandir", lambda path: scandir(tmp_path if path == "/proc" else path)
+    )
+
+    assert app._process_tree_bytes(10) == 4 * os.sysconf("SC_PAGE_SIZE")
+
+
 def test_process_run_records_tier_lookup_failure_without_starting_worker(
     modal_harness, monkeypatch
 ):

@@ -32,27 +32,28 @@ def _planted(seed=0, n_samples=200, per_program=25):
         )
         truth += [program] * per_program
     noise = rng.normal(size=(n_samples, 30))
-    profiles = np.hstack(blocks + [noise])
-    names = [f"G{i}" for i in range(profiles.shape[1])]
-    return profiles, names, np.asarray(truth), factors
+    values = np.hstack(blocks + [noise])
+    names = [f"G{i}" for i in range(values.shape[1])]
+    return pd.DataFrame(values, columns=names), names, np.asarray(truth), factors
 
 
 def test_gene_programs_recover_planted_programs():
     profiles, names, truth, factors = _planted()
 
     programs = gene_programs(
-        profiles, names, parameters=GeneProgramParameters(nNeighbors=10, minSize=10)
+        profiles, parameters=GeneProgramParameters(nNeighbors=10, minSize=10)
     )
 
-    assigned = programs.set_index("gene")["program"]
+    assigned = programs.set_index("target")["source"]
     planted = [name for name in names[: len(truth)]]
     found = assigned.reindex(planted).fillna("none").to_numpy()
     assert adjusted_rand_score(truth, found) > 0.9
     # Uncorrelated genes stay unassigned.
-    assert not set(programs["gene"]) & set(names[len(truth) :])
-    assert programs["program"].nunique() == 3
+    assert not set(programs["target"]) & set(names[len(truth) :])
+    assert programs["source"].nunique() == 3
     assert programs["membership"].min() > 0.5
-    scores = program_scores(profiles, names, programs)
+    scores = program_scores(profiles, programs)
+    assert scores.index.equals(profiles.index)
     best = scores.corrwith(pd.Series(factors[:, 0])).abs().max()
     assert best > 0.95
 
@@ -62,15 +63,39 @@ def test_gene_programs_find_none_in_noise_at_metacell_scale():
     # noise genes must still not pass as programs.
     for samples in (30, 50, 120):
         profiles = np.random.default_rng(samples).standard_normal((samples, 1500))
-        programs = gene_programs(profiles, [f"G{i}" for i in range(1500)])
+        programs = gene_programs(
+            pd.DataFrame(profiles, columns=[f"G{i}" for i in range(1500)])
+        )
         assert programs.empty
 
 
-def test_gene_programs_validates_inputs():
-    with pytest.raises(ValueError, match="unique"):
-        gene_programs(np.ones((5, 2)), ["a", "a"])
-    with pytest.raises(ValueError, match="nNeighbors"):
-        GeneProgramParameters(nNeighbors=0)
+@pytest.mark.parametrize(
+    ("profiles", "message"),
+    [
+        (pd.DataFrame(np.ones((5, 2)), columns=["a", "a"]), "unique"),
+        (pd.DataFrame(np.ones((3, 2)), columns=["a", "b"]), "four samples"),
+        # Constant genes are skipped, which leaves none to link.
+        (pd.DataFrame(np.ones((5, 2)), columns=["a", "b"]), "varying genes"),
+    ],
+)
+def test_gene_programs_validates_inputs(profiles, message):
+    with pytest.raises(ValueError, match=message):
+        gene_programs(profiles)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"nNeighbors": 0}, "nNeighbors"),
+        ({"minCorrelation": 1.0}, "minCorrelation"),
+        ({"minMembership": 1.0}, "minMembership"),
+        ({"alpha": 0.0}, "alpha"),
+        ({"resolution": 0.0}, "resolution"),
+    ],
+)
+def test_gene_program_parameters_reject_invalid_settings(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        GeneProgramParameters(**kwargs)
 
 
 def test_program_regulators_nominate_annotated_factors(tmp_path):
@@ -98,11 +123,27 @@ def test_program_regulators_nominate_annotated_factors(tmp_path):
             "category": ["direct", "similarity", "direct"],
         }
     )
-    programs = pd.DataFrame({"program": "P1", "gene": program_genes})
+    # P2 has a single ranked gene, too few to test.
+    programs = pd.DataFrame(
+        {"source": ["P1"] * 20 + ["P2"], "target": program_genes + ["G300"]}
+    )
+    # SPI1's expression follows the program; SPIB is not profiled.
+    signal = rng.normal(size=12)
+    profiles = pd.DataFrame(
+        {gene: signal + rng.normal(0, 0.1, 12) for gene in program_genes}
+        | {"SPI1": signal}
+    )
 
     regulators = program_regulators(
         programs, RankingDatabase(path), annotations, rank_threshold=200
     )
+    checked = program_regulators(
+        programs,
+        RankingDatabase(path),
+        annotations,
+        rank_threshold=200,
+        profiles=profiles,
+    ).set_index("TF")
     direct = program_regulators(
         programs,
         RankingDatabase(path),
@@ -110,22 +151,34 @@ def test_program_regulators_nominate_annotated_factors(tmp_path):
         rank_threshold=200,
         categories=["direct"],
     )
+    orthology = program_regulators(
+        programs,
+        RankingDatabase(path),
+        annotations,
+        rank_threshold=200,
+        categories=["orthology"],
+    )
 
     assert regulators[["TF", "motif", "category"]].values.tolist() == [
         ["SPI1", "m5", "direct"],
         ["SPIB", "m5", "similarity"],
     ]
     assert direct["TF"].tolist() == ["SPI1"]
+    # m5 is enriched, but no orthology annotation names a factor for it.
+    assert orthology.empty
     assert (regulators["NES"] >= 3).all()
+    assert "correlation" not in regulators
+    assert checked.loc["SPI1", "correlation"] > 0.9
+    assert np.isnan(checked.loc["SPIB", "correlation"])
 
 
 def test_set_overlaps_match_fisher_exact():
     universe = [f"G{i}" for i in range(100)]
-    queries = pd.DataFrame({"set": ["P1"] * 20, "gene": universe[:20]})
+    queries = pd.DataFrame({"source": ["P1"] * 20, "target": universe[:20]})
     references = pd.DataFrame(
         {
-            "set": ["SPI1(+)"] * 15 + ["PAX5(+)"] * 10,
-            "gene": universe[10:25] + universe[50:60],
+            "source": ["SPI1(+)"] * 15 + ["PAX5(+)"] * 10,
+            "target": universe[10:25] + universe[50:60],
         }
     )
 
@@ -146,7 +199,7 @@ def test_set_overlaps_match_fisher_exact():
         )
     assert overlaps["q_value"].notna().all()
     # A reference covering the universe has an empty margin: no odds ratio.
-    whole = pd.DataFrame({"set": "all", "gene": universe})
+    whole = pd.DataFrame({"source": "all", "target": universe})
     assert np.isnan(set_overlaps(queries, whole, universe)["odds_ratio"].iloc[0])
 
 
@@ -168,6 +221,18 @@ def test_regulon_specificity_matches_pyscenic():
             expected = 1.0 - jensenshannon(values / values.sum(), onehot / onehot.sum())
             assert rss.loc[group, regulon] == pytest.approx(expected)
     assert rss["A(+)"].idxmax() == "T"
+
+
+@pytest.mark.parametrize(
+    ("values", "labels", "message"),
+    [
+        ([[1.0], [2.0]], ["T"], "align"),
+        ([[1.0], [-2.0]], ["T", "B"], "non-negative"),
+    ],
+)
+def test_regulon_specificity_rejects_invalid_inputs(values, labels, message):
+    with pytest.raises(ValueError, match=message):
+        regulon_specificity(pd.DataFrame(values), labels)
 
 
 def test_connection_specificity_and_modules():
@@ -194,3 +259,6 @@ def test_connection_specificity_and_modules():
     modules = regulon_modules(csi, 2)
     assert modules.iloc[:4].nunique() == 1 and modules.iloc[4:].nunique() == 1
     assert modules.iloc[0] != modules.iloc[4]
+    # Ward linkage needs two regulons; a lone regulon forms module 1.
+    lone = regulon_modules(csi.iloc[:1, :1], 2)
+    assert lone.tolist() == [1] and lone.name == modules.name == "module"

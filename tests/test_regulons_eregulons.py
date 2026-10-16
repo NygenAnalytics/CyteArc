@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from cytearc.regulons.eregulons import (
+    EREGULON_COLUMNS,
     EregulonParameters,
     binarize_region_to_gene,
     build_eregulons,
@@ -82,6 +83,28 @@ def test_gsea_prerank_without_hits_has_no_score():
     assert np.isnan(result.enrichmentScore) and result.leadingEdge == ()
 
 
+def test_gsea_prerank_with_a_missing_weight_has_no_score():
+    # A NaN weight makes every running sum NaN, observed and null alike.
+    ranked = pd.Series([3.0, np.nan, 1.0], index=["a", "b", "c"])
+
+    result = gsea_prerank(ranked, ["a"], n_permutations=10)
+
+    assert np.isnan([result.enrichmentScore, result.nes, result.pValue]).all()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"rhoThreshold": -0.1}, "rhoThreshold"),
+        ({"quantiles": (0.5, 1.5)}, "quantiles"),
+        ({"seed": -1}, "seed"),
+    ],
+)
+def test_eregulon_parameters_reject_invalid_settings(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        EregulonParameters(**kwargs)
+
+
 def test_binarization_follows_scenicplus_rules():
     rng = np.random.default_rng(0)
     links = pd.DataFrame(
@@ -114,6 +137,8 @@ def test_binarization_follows_scenicplus_rules():
                 )
                 expected = set(group["region"][values >= cutoff])
             assert set(selected.loc[selected["gene"] == gene, "region"]) == expected
+    with pytest.raises(ValueError, match="lacks columns"):
+        binarize_region_to_gene(links.drop(columns="rho"))
 
 
 def test_build_eregulons_keeps_co_expressed_targets_of_the_cistrome():
@@ -160,12 +185,18 @@ def test_build_eregulons_keeps_co_expressed_targets_of_the_cistrome():
         cistromes, region_to_gene, tf_to_gene, parameters=parameters, nthreads=2
     )
 
-    names = set(eregulons["eRegulon"])
+    names = set(eregulons["source"])
     assert names == {"SPI1_direct_+/+"}
-    spi1 = eregulons[eregulons["eRegulon"] == "SPI1_direct_+/+"]
-    assert set(spi1["gene"]) <= {f"G{i}" for i in range(25)}
-    assert len(set(spi1["gene"]) & {f"G{i}" for i in range(20)}) >= 10
+    spi1 = eregulons[eregulons["source"] == "SPI1_direct_+/+"]
+    assert set(spi1["target"]) <= {f"G{i}" for i in range(25)}
+    assert len(set(spi1["target"]) & {f"G{i}" for i in range(20)}) >= 10
     assert (spi1["importance_TF2G"] >= 30).all()
+    # Each module holds at most the 25 genes the cistrome links to, so no
+    # leading edge has 30 targets.
+    strict = EregulonParameters(nPermutations=200, minTargetGenes=30)
+    assert build_eregulons(
+        cistromes, region_to_gene, tf_to_gene, parameters=strict
+    ).empty
 
     # The factor's own gene carries its injected self-link, as SCENIC+ reports.
     with_self = build_eregulons(
@@ -179,17 +210,33 @@ def test_build_eregulons_keeps_co_expressed_targets_of_the_cistrome():
         tf_to_gene,
         parameters=parameters,
     )
-    self_row = with_self.loc[with_self["gene"] == "SPI1"]
+    self_row = with_self.loc[with_self["target"] == "SPI1"]
     assert not self_row.empty
     assert self_row["importance_TF2G"].to_numpy() == pytest.approx(50 + 1e-5)
     assert (self_row["rho_TF2G"] == 1.0).all()
 
     # Invalid inputs raise rather than return an empty table.
+    with pytest.raises(ValueError, match="cistromes lacks"):
+        build_eregulons(cistromes[["source"]], region_to_gene, tf_to_gene)
     with pytest.raises(ValueError, match="repeats"):
         build_eregulons(
             cistromes, region_to_gene, pd.concat([tf_to_gene, tf_to_gene.iloc[:1]])
         )
     with pytest.raises(ValueError, match="importances"):
         build_eregulons(cistromes, region_to_gene.assign(importance=np.nan), tf_to_gene)
-    with pytest.raises(ValueError, match="seed"):
-        EregulonParameters(seed=-1)
+
+
+def test_build_eregulons_without_a_ranked_factor_is_empty():
+    # SPI1's one region link passes only the top-n thresholds, and its two
+    # co-expression targets, the self-link included, are too few to rank.
+    cistromes = pd.DataFrame({"source": ["SPI1"], "target": ["r1"]})
+    region_to_gene = pd.DataFrame(
+        {"region": ["r1"], "gene": ["G1"], "importance": [1.0], "rho": [0.3]}
+    )
+    tf_to_gene = pd.DataFrame(
+        {"TF": ["SPI1"], "target": ["G1"], "importance": [1.0], "correlation": [0.4]}
+    )
+
+    eregulons = build_eregulons(cistromes, region_to_gene, tf_to_gene)
+
+    assert eregulons.empty and list(eregulons.columns) == list(EREGULON_COLUMNS)

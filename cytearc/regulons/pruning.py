@@ -35,7 +35,7 @@ MOTIF_COLUMNS = (
     "targets",
     "target_weights",
 )
-REGULON_COLUMNS = ("regulon", "TF", "direction", "target", "weight")
+REGULON_COLUMNS = ("source", "TF", "direction", "target", "weight")
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,12 +94,12 @@ class _Module:
 
 
 def _modules(modules: pd.DataFrame) -> list[_Module]:
-    required = {"module", "TF", "direction", "context", "target", "weight"}
+    required = {"source", "TF", "direction", "context", "target", "weight"}
     missing = required - set(modules.columns)
     if missing:
         raise ValueError(f"modules lacks columns {sorted(missing)}")
     result = []
-    for name, group in modules.groupby("module", sort=False):
+    for name, group in modules.groupby("source", sort=False):
         first = group.iloc[0]
         if group["target"].duplicated().any():
             raise ValueError(f"Module {name!r} repeats a gene")
@@ -285,9 +285,8 @@ def regulons_from_motifs(motifs: pd.DataFrame) -> pd.DataFrame:
         motifs: Output of ``prune_modules``.
 
     Returns:
-        A network with ``regulon``, ``TF``, ``direction``, ``target``, and
-        ``weight`` columns, which ``ds.scores.aucell`` accepts with
-        ``regulon`` renamed to ``source``.
+        A network with ``source`` (the regulon), ``TF``, ``direction``,
+        ``target``, and ``weight`` columns, which ``ds.scores.aucell`` scores.
     """
     missing = {"TF", "direction", "targets", "target_weights"} - set(motifs.columns)
     if missing:

@@ -21,7 +21,6 @@ from ..features.genomic.sequence import parse_coordinate_ids
 __all__ = [
     "binding_cistromes",
     "cistromes_from_motifs",
-    "project_to_genes",
     "read_peak_file",
 ]
 
@@ -178,55 +177,3 @@ def binding_cistromes(
     if not frames:
         return pd.DataFrame({"source": [], "target": [], "n_peaks": []})
     return pd.concat(frames, ignore_index=True)
-
-
-def project_to_genes(
-    cistromes: pd.DataFrame,
-    links: pd.DataFrame,
-    *,
-    region_names: Sequence[str] | np.ndarray | None = None,
-) -> pd.DataFrame:
-    """Turn factor-to-region cistromes into factor-to-gene networks.
-
-    A factor targets a gene when one of its cistrome regions is linked to the
-    gene, for example by ``link_regions_to_genes``. The link weight is the
-    number of such regions.
-
-    Args:
-        cistromes: ``source`` and ``target`` (region name) columns.
-        links: Region-to-gene links with ``gene_name`` and either a
-            ``region`` name column or, with ``region_names``, an integer
-            ``region`` index into ``region_names``.
-        region_names: Names for integer ``region`` indices in ``links``.
-
-    Returns:
-        A network with ``source``, ``target`` (gene), ``weight`` (number of
-        linking regions), and ``regions`` (sorted, comma-separated names).
-    """
-    if not {"source", "target"} <= set(cistromes.columns):
-        raise ValueError("cistromes needs source and target columns")
-    if not {"region", "gene_name"} <= set(links.columns):
-        raise ValueError("links needs region and gene_name columns")
-    table = links.loc[:, ["region", "gene_name"]].copy()
-    if region_names is not None:
-        names = np.asarray(region_names, dtype=object)
-        table["region"] = names[table["region"].to_numpy(dtype=np.int64)]
-    joined = cistromes.loc[:, ["source", "target"]].merge(
-        table.rename(columns={"region": "target", "gene_name": "gene"}),
-        on="target",
-        how="inner",
-    )
-    if joined.empty:
-        return pd.DataFrame({"source": [], "target": [], "weight": [], "regions": []})
-    grouped = joined.groupby(["source", "gene"], sort=True)["target"].agg(
-        lambda regions: sorted(set(regions))
-    )
-    result = grouped.reset_index()
-    return pd.DataFrame(
-        {
-            "source": result["source"],
-            "target": result["gene"],
-            "weight": result["target"].map(len).astype(np.int64),
-            "regions": result["target"].map(",".join),
-        }
-    )

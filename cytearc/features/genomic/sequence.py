@@ -2,7 +2,7 @@
 
 import mmap
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -319,23 +319,18 @@ def parse_coordinate_ids(
     )
 
 
-def gc_content(
-    genome: IndexedFasta,
-    chroms: Sequence[str] | np.ndarray,
-    starts: Sequence[int] | np.ndarray,
-    ends: Sequence[int] | np.ndarray,
-) -> np.ndarray:
-    """Return the fraction of G and C among the A, C, G, and T bases of each interval.
+def gc_content(genome: IndexedFasta, regions: Iterable[str]) -> np.ndarray:
+    """Return the fraction of G and C among the A, C, G, and T bases of each region.
 
     N and other ambiguity codes count in neither the numerator nor the
-    denominator, as in chromVAR's ``addGCBias``. An interval without any A,
-    C, G, or T base has no defined content and gives NaN.
+    denominator, as in chromVAR's ``addGCBias``. A region without any A, C,
+    G, or T base has no defined content and gives NaN.
+
+    Args:
+        genome: Genome the regions refer to.
+        regions: Region ids ``chrom:start-end``, such as ATAC peak ids.
     """
-    chrom_values = np.asarray(chroms, dtype=object)
-    start_values = np.asarray(starts, dtype=np.int64)
-    end_values = np.asarray(ends, dtype=np.int64)
-    if not (len(chrom_values) == len(start_values) == len(end_values)):
-        raise ValueError("chroms, starts, and ends must be aligned")
+    chrom_values, start_values, end_values = parse_coordinate_ids(regions)
     result = np.full(len(chrom_values), np.nan, dtype=np.float64)
     for index, (chrom, start, end) in enumerate(
         zip(chrom_values, start_values, end_values, strict=True)

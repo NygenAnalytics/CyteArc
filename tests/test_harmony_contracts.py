@@ -475,6 +475,14 @@ def test_harmony_converges_when_its_objective_is_exactly_zero():
     assert optimizer._relative_decrease(0.0, 2.0) == -np.inf
 
 
+def test_harmony_reports_an_unknown_convergence_check_as_converged():
+    # Only the k-means (0) and Harmony (1) objectives are tracked, so any
+    # other check has no objective to compare and never holds the loop open.
+    unfitted = implementation_optimizer.__new__(implementation_optimizer)
+
+    assert unfitted.check_convergence(2) is True
+
+
 def _non_finite_ridge(Z_orig, R, K, Phi_moe, lamb):
     corrected = np.full_like(Z_orig, np.nan)
     return corrected, corrected

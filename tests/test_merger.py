@@ -4641,6 +4641,22 @@ def test_schema_scan_text_bound_holds_the_text_of_every_value(dtype, values, exa
     assert _string_itemsize_bound(np.dtype(object)) == np.dtype(object).itemsize
 
 
+@pytest.mark.parametrize(
+    ("dtypes", "expected"),
+    [
+        ([], np.dtype(bool)),
+        ([np.dtype("timedelta64[s]"), np.dtype(np.int32)], np.dtype(np.float64)),
+    ],
+    ids=["no_sources", "time_and_number"],
+)
+def test_metadata_dtype_promotion_fallbacks(dtypes, expected):
+    from cytearc.merge.metadata import _promote_dtypes
+
+    # A column no source holds is boolean, and kinds that are neither all
+    # numeric nor text widen to float64.
+    assert _promote_dtypes(dtypes) == expected
+
+
 def test_dataset_merge_resume_needs_one_identity_row_within_its_budget(tmp_path):
     def merger(**options):
         sources = []

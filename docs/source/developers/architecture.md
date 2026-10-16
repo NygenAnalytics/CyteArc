@@ -104,9 +104,12 @@ They must not import those packages at module load time.
   regulons (`pruning.py`), cistromes from motifs or binding peaks (`cistromes.py`),
   region-to-gene links (`links.py`), enhancer-driven regulons with preranked GSEA
   (`eregulons.py`), co-regulated gene programs (`programs.py`), and regulon specificity
-  (`specificity.py`). Its functions work on in-memory arrays and reference files; `polars`
-  is an optional dependency for ranking databases, so the `regulons` extra does not install
-  `pyarrow`. `results.py` holds `GrnResult`, which names `storage.refs` only.
+  (`specificity.py`). Its functions work on in-memory tables and reference files, and every
+  set they return has `source` and `target` columns, the network shape that the enrichment
+  scorers read. `polars` is an optional dependency for ranking databases, so the `regulons`
+  extra does not install `pyarrow`. `results.py` holds `GrnResult`, which names
+  `storage.refs` only. `DataStore.regulons.profiles` sums cell groups with
+  `compare.compute_bulk` and writes nothing.
 
 Domain algorithm packages must not import `datastore`, `plotting`, or general import/export packages at module load time.
 A domain that persists an artifact may use a narrow, named `storage` adapter.

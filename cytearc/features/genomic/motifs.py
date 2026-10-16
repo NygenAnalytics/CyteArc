@@ -540,13 +540,10 @@ def nucleotide_frequencies(sequences: Iterable[np.ndarray]) -> np.ndarray:
 
 
 def match_motifs(
-    chroms: Sequence[str] | np.ndarray,
-    starts: Sequence[int] | np.ndarray,
-    ends: Sequence[int] | np.ndarray,
+    regions: Sequence[str] | np.ndarray,
     genome: "IndexedFasta",
     motifs: Sequence[Motif],
     *,
-    names: Sequence[str] | np.ndarray | None = None,
     p_value: float = 5e-5,
     background: Literal["subject", "even"] | Sequence[float] | np.ndarray = "subject",
     pseudocount: float = 0.8,
@@ -563,11 +560,10 @@ def match_motifs(
     log-odds against the ``"subject"`` background.
 
     Args:
-        chroms, starts, ends: Zero-based half-open regions, such as peaks.
-        genome: Genome the coordinates refer to.
+        regions: Region ids ``chrom:start-end`` (zero-based, half-open), such
+            as ATAC peak ids.
+        genome: Genome the regions refer to.
         motifs: Motifs to scan, for example from ``read_jaspar_motifs``.
-        names: Region names used as network targets; ``chrom:start-end``
-            when omitted.
         p_value: Probability under the background of a window scoring at
             least the threshold.
         background: ``"subject"`` uses the pooled base frequencies of the
@@ -578,36 +574,21 @@ def match_motifs(
         batch_size: Regions scanned per parallel batch.
 
     Returns:
-        A network with ``source`` (motif ID), ``target`` (region name), and
+        A network with ``source`` (motif ID), ``target`` (region id), and
         ``motif_name`` columns, one row per matching motif and region, sorted
         by motif then region order.
     """
     import pandas as pd
 
-    chrom_values = np.asarray(chroms, dtype=object)
-    start_values = np.asarray(starts, dtype=np.int64)
-    end_values = np.asarray(ends, dtype=np.int64)
-    if not (len(chrom_values) == len(start_values) == len(end_values)):
-        raise ValueError("chroms, starts, and ends must be aligned")
+    from .sequence import parse_coordinate_ids
+
+    region_names = np.asarray(regions, dtype=object).astype(str)
+    chrom_values, start_values, end_values = parse_coordinate_ids(region_names)
     if not motifs:
         raise ValueError("At least one motif is required")
     motif_ids = [motif.motifId for motif in motifs]
     if len(set(motif_ids)) != len(motif_ids):
         raise ValueError("Motif identifiers must be unique")
-    if names is None:
-        region_names = np.asarray(
-            [
-                f"{chrom}:{start}-{end}"
-                for chrom, start, end in zip(
-                    chrom_values, start_values, end_values, strict=True
-                )
-            ],
-            dtype=object,
-        )
-    else:
-        region_names = np.asarray(names, dtype=object)
-        if len(region_names) != len(chrom_values):
-            raise ValueError("names must align with the regions")
     sequences = [
         genome.encode(str(chrom), int(start), int(end))
         for chrom, start, end in zip(

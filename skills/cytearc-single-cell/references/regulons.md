@@ -14,38 +14,43 @@ way, and find co-regulated gene programs. Docs: <https://docs.nygen.io/CyteArc/t
 
 ## Key concepts
 
-- The scorers take a table with `source` and `target` columns: `ds.scores.aucell` scores gene
-  targets on RNA; `ds.scores.chromvar` scores peak targets, matched to ATAC feature ids
-  (`chrom:start-end`). Motif matches and cistromes have these columns; rename `regulon` of
-  regulons, `program`/`gene` of programs, and `eRegulon`/`gene` of eRegulons. Both return
-  `kind="enrichment_scores"`; `ds.scores.load(ref)` gives `.data` (cells x sources) and, for
-  chromVAR, `.deviations`. chromVAR z-scores are NaN where a cell expects under one fragment.
+- Every set is a table with `source` (the set) and `target` (a member): modules, regulons,
+  programs, cistromes, and eRegulons. `ds.scores.aucell` scores gene sets on RNA and
+  `ds.scores.chromvar` peak sets on ATAC; both return `kind="enrichment_scores"`.
+  `ds.scores.load(ref).to_pandas()` gives cells x sources; chromVAR also has `.deviations`.
+  chromVAR z-scores are NaN where a cell expects under one fragment.
+- Regions are always peak ids (`chrom:start-end`), the ATAC feature `ids`: `match_motifs`,
+  `link_regions_to_genes`, `gc_content`, `binding_cistromes`, and chromVAR targets.
 - `ds.regulons.grn(cells, features=..., tfs=..., random_seed=...)` runs GRNBoost2 on **raw counts**
   of the selected cells and genes (held in memory as float32; subsample cells for large data) and
   returns `kind="grn_adjacencies"`; `ds.regulons.load_grn(ref).adjacencies` has `TF`, `target`,
-  `importance`, `correlation`. The default `early_stopping="stage"` matches the pySCENIC 0.12.1
-  container. Fits are deterministic for a seed; different seeds give different networks.
+  `importance`, `correlation`, as does the in-memory `infer_grn`. The default
+  `early_stopping="stage"` matches the pySCENIC 0.12.1 container. Fits are deterministic for a
+  seed; different seeds give different networks.
 - SCENIC steps are plain functions in `cytearc.regulons`: `modules_from_adjacencies` (pySCENIC
   rules), `prune_modules` (cisTarget with each motif's own recovery curve), `regulons_from_motifs`
   (`TF(+)`). pySCENIC 0.12.1 gives most motifs another motif's curve, so expect the same regulon
   names as pySCENIC but different targets (median target Jaccard about 0.25 on one network).
   Ranking databases need `pip install "cytearc[regulons]"` (polars).
-- Motifs: `read_jaspar_motifs`/`read_meme_motifs`, `match_motifs(chroms, starts, ends,
-  IndexedFasta(genome.fa), motifs, names=peak_ids)` (motifmatchr settings: p 5e-5, log2,
-  pseudocount 0.8, `background="subject"`; scores are proper log-odds, so matches overlap
-  motifmatchr's at Jaccard 0.94, not exactly). Use the genome build of the peaks (10x GRCh38-2020-A:
-  GENCODE v32 primary assembly). An uncompressed FASTA is indexed in memory or read from `.fai`.
-- Cistromes: `cistromes_from_motifs(matches, annotations)` joins on motif ID, so the annotation's
-  `motif` column must equal the scanned IDs. A cisTarget `.tbl` uses its own IDs
-  (`jaspar__MA0080.6`), and a mismatch returns an empty table. For JASPAR scans build
-  `pd.DataFrame([(m.motifId, m.name.upper(), "direct") for m in motifs], columns=["motif", "TF",
-  "category"])`. `binding_cistromes({"SPI1": "peaks.narrowPeak"}, peak_ids)` for CUT&RUN/ChIP peaks.
-- eRegulons: `search = link_regions_to_genes(..., upstream=150_000, downstream=150_000,
-  anchor="gene_body")` gives region positions; name them with `pd.DataFrame({"region":
-  peak_ids[search["region"]], "gene": search["gene_name"]})`, score those candidates with
-  `region_gene_links` on metacell profiles, then `build_eregulons(cistromes, r2g, tf2g)`.
-- Gene programs: `gene_programs(metacell_profiles, genes)`; `program_regulators` runs cisTarget on
-  each program; `set_overlaps` relates programs to regulons.
+- Motifs: `read_jaspar_motifs`/`read_meme_motifs`, `match_motifs(peak_ids, IndexedFasta(genome.fa),
+  motifs)` (motifmatchr settings: p 5e-5, log2, pseudocount 0.8, `background="subject"`; scores are
+  proper log-odds, so matches overlap motifmatchr's at Jaccard 0.94, not exactly). Use the genome
+  build of the peaks (10x GRCh38-2020-A: GENCODE v32 primary assembly). An uncompressed FASTA is
+  indexed in memory or read from `.fai`.
+- Cistromes: `cistromes_from_motifs(matches, annotations)` joins on motif ID.
+  `motif_annotations(motifs)` annotates JASPAR or MEME motifs by name (upper-cased, dimers split);
+  a cisTarget `.tbl` uses its own IDs (`jaspar__MA0080.6`) and gives an empty table for JASPAR
+  scans. `binding_cistromes({"SPI1": "peaks.narrowPeak"}, peak_ids)` for CUT&RUN/ChIP peaks.
+- Metacells: `ds.regulons.profiles(groups, from_assay=...)` gives groups x features log counts per
+  million, genes named by name and peaks by id. Group with a fine Leiden clustering
+  (`resolution=15` gave 118 metacells for about 2,600 PBMCs).
+- Gene programs: `gene_programs(rna[genes])`; `program_regulators(programs, database, annotations,
+  profiles=rna)` runs cisTarget on each program and correlates each factor's expression with it;
+  `set_overlaps(programs, regulons, genes)` relates programs to regulons.
+- eRegulons: `link_regions_to_genes(peak_ids, genes, upstream=150_000, downstream=150_000,
+  anchor="gene_body")` gives the candidates that `region_gene_links(atac, rna, candidates)` scores
+  on metacell profiles; then `build_eregulons(cistromes, links, adjacencies)`. A gene linked by
+  several peaks repeats, so score `eregulons[["source", "target"]].drop_duplicates()`.
 
 ## Recipes
 
@@ -53,7 +58,6 @@ way, and find co-regulated gene programs. Docs: <https://docs.nygen.io/CyteArc/t
 
 ```python
 import numpy as np
-import pandas as pd
 import cytearc
 from cytearc import regulons as rg
 
@@ -64,14 +68,11 @@ tfs = [line.strip() for line in open("allTFs_hg38.txt") if line.strip()]
 grn = ds.regulons.grn(cells, features=run["feature_universe"], tfs=tfs, random_seed=777)
 adjacencies = ds.regulons.load_grn(grn).adjacencies
 modules = rg.modules_from_adjacencies(adjacencies)
-databases = [rg.RankingDatabase("hg38_10kbp_up_10kbp_down_full_tx_v10_clust.genes_vs_motifs.rankings.feather")]
+database = rg.RankingDatabase("hg38_10kbp_up_10kbp_down_full_tx_v10_clust.genes_vs_motifs.rankings.feather")
 annotations = rg.read_motif_annotations("motifs-v10nr_clust-nr.hgnc-m0.001-o0.0.tbl")
-motifs = rg.prune_modules(modules, databases, annotations, nthreads=8)
-regulons = rg.regulons_from_motifs(motifs)
-auc = ds.scores.aucell(regulons.rename(columns={"regulon": "source"}), cells,
-                       features=run["feature_universe"], tmin=5)
-scores = ds.scores.load(auc)
-activity = pd.DataFrame(np.asarray(scores.data.compute()), columns=scores.source_names)
+regulons = rg.regulons_from_motifs(rg.prune_modules(modules, [database], annotations, nthreads=8))
+auc = ds.scores.aucell(regulons, cells, features=run["feature_universe"], tmin=5)
+activity = ds.scores.load(auc).to_pandas()
 rss = rg.regulon_specificity(activity, run.cells.fetch("clusters"))
 ```
 
@@ -80,15 +81,40 @@ rss = rg.regulon_specificity(activity, run.cells.fetch("clusters"))
 ```python
 # chromVAR needs a fragment in every selected peak.
 peaks = ds.features.detected(cells, from_assay="ATAC", min_cells=1)
-ids = ds.ATAC.feats.fetch_all("ids")[np.flatnonzero(ds.artifacts.load(peaks)["values"][:])]
-chroms, starts, ends = rg.parse_coordinate_ids(ids)
+peak_ids = np.asarray(ds.ATAC.feats.fetch_all("ids"))[np.flatnonzero(ds.artifacts.load(peaks)["values"][:])]
+motifs = rg.read_jaspar_motifs("JASPAR2024.txt")
 with rg.IndexedFasta("GRCh38.primary_assembly.genome.fa") as genome:
-    matches = rg.match_motifs(chroms, starts, ends, genome, rg.read_jaspar_motifs("JASPAR2024.txt"), names=ids)
+    matches = rg.match_motifs(peak_ids, genome, motifs)
 z = ds.scores.chromvar(matches, cells, from_assay="ATAC", features=peaks,
                        genome="GRCh38.primary_assembly.genome.fa")
-binding = rg.binding_cistromes({"SPI1": "SPI1_cutrun.narrowPeak"}, ids)
+motif_z = ds.scores.load(z).to_pandas()
+binding = rg.binding_cistromes({"SPI1": "SPI1_cutrun.narrowPeak"}, peak_ids)
 spi1 = ds.scores.chromvar(binding, cells, from_assay="ATAC", features=peaks,
                           genome="GRCh38.primary_assembly.genome.fa", tmin=5)
+```
+
+### Gene programs and enhancer-driven regulons (multiome)
+
+```python
+metacells = ds.clusters.leiden(run["connectivity_map"], resolution=15)
+rna = ds.regulons.profiles(metacells, from_assay="RNA")
+atac = ds.regulons.profiles(metacells, from_assay="ATAC")
+names = np.asarray(ds.RNA.feats.fetch_all("names")).astype(str)
+variable = np.asarray(run.features.fetch_all("highly_variable_features"), dtype=bool)
+genes = [gene for gene in names[variable] if gene in rna.columns]
+programs = rg.gene_programs(rna[genes])
+program_tfs = rg.program_regulators(programs, database, annotations, profiles=rna)
+
+annotation = rg.read_gene_annotation("gencode.v32.primary_assembly.annotation.gtf.gz",
+                                     gene_types={"protein_coding"})
+candidates = rg.link_regions_to_genes(peak_ids, annotation, upstream=150_000,
+                                      downstream=150_000, anchor="gene_body")
+links = rg.region_gene_links(atac, rna, candidates[candidates["gene"].isin(adjacencies["target"])],
+                             nthreads=8)
+cistromes = rg.cistromes_from_motifs(matches, rg.motif_annotations(motifs))
+eregulons = rg.build_eregulons(cistromes, links, adjacencies, nthreads=8)
+auc = ds.scores.aucell(eregulons[["source", "target"]].drop_duplicates(), cells,
+                       features=run["feature_universe"], tmin=10)
 ```
 
 ## Pitfalls
@@ -100,3 +126,5 @@ spi1 = ds.scores.chromvar(binding, cells, from_assay="ATAC", features=peaks,
 - The chromVAR background model holds about four bytes per motif-peak match per background
   iteration; score fewer motifs per call if the budget refuses it.
 - Binding peaks from cell lines describe that cell line's context.
+- `motif_annotations` upper-cases factor names like human gene symbols; recase its `TF` column
+  for other species.

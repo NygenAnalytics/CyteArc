@@ -1,6 +1,6 @@
 """Region-to-gene links scored by accessibility-expression association."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 
@@ -32,10 +32,8 @@ def _standardized(values: np.ndarray) -> np.ndarray:
 
 
 def region_gene_links(
-    accessibility: np.ndarray,
-    region_names: Sequence[str] | np.ndarray,
-    expression: np.ndarray,
-    gene_names: Sequence[str] | np.ndarray,
+    accessibility: pd.DataFrame,
+    expression: pd.DataFrame,
     candidates: pd.DataFrame,
     *,
     importance: Literal["gbm", "none"] = "gbm",
@@ -55,12 +53,12 @@ def region_gene_links(
     importance is reported, as SCENIC+'s region-to-gene step does.
 
     Args:
-        accessibility: Samples-by-regions accessibility.
-        region_names: Names of the accessibility columns.
-        expression: Samples-by-genes expression over the same samples.
-        gene_names: Names of the expression columns.
-        candidates: ``region`` and ``gene`` name columns, such as a search
-            space from ``link_regions_to_genes`` with names attached.
+        accessibility: Samples-by-regions accessibility named by region, such
+            as the ATAC metacell profiles of ``ds.regulons.profiles``.
+        expression: Samples-by-genes expression named by gene, over the same
+            samples in the same order.
+        candidates: ``region`` and ``gene`` columns, such as
+            ``link_regions_to_genes`` returns.
         importance: ``"gbm"`` fits the regressor; ``"none"`` reports rho only.
         seed: Random state of each gene's regressor.
         nthreads: Genes fitted concurrently.
@@ -70,16 +68,16 @@ def region_gene_links(
         ``region``, ``gene``, ``importance``, and ``rho`` for every candidate
         whose region and gene are both measured. Constant vectors give NaN rho.
     """
-    access = np.asarray(accessibility)
-    express = np.asarray(expression)
-    regions = pd.Index(np.asarray(region_names, dtype=object).astype(str))
-    genes = pd.Index(np.asarray(gene_names, dtype=object).astype(str))
-    if access.ndim != 2 or express.ndim != 2 or access.shape[0] != express.shape[0]:
-        raise ValueError("accessibility and expression must share their samples (rows)")
-    if access.shape[1] != len(regions) or express.shape[1] != len(genes):
-        raise ValueError("Names must align with the matrix columns")
+    if not accessibility.index.equals(expression.index):
+        raise ValueError(
+            "accessibility and expression must hold the same samples in the same order"
+        )
+    access = accessibility.to_numpy()
+    express = expression.to_numpy()
+    regions = accessibility.columns.astype(str)
+    genes = expression.columns.astype(str)
     if not (regions.is_unique and genes.is_unique):
-        raise ValueError("region_names and gene_names must be unique")
+        raise ValueError("Region and gene names must be unique")
     if access.shape[0] < 3:
         raise ValueError("At least three samples are needed")
     if importance not in ("gbm", "none"):

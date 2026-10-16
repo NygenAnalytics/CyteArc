@@ -1,15 +1,20 @@
 """cisTarget ranking databases and motif-to-transcription-factor annotations."""
 
 import os
+import re
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
 
+if TYPE_CHECKING:
+    from ..features.genomic.motifs import Motif
+
 __all__ = [
     "RankingDatabase",
+    "motif_annotations",
     "read_motif_annotations",
 ]
 
@@ -81,8 +86,6 @@ class RankingDatabase:
         self.featureNames: tuple[str, ...] = tuple(
             column for column in names if column != self.indexColumn
         )
-        if len(set(self.featureNames)) != len(self.featureNames):
-            raise ValueError(f"{self.path.name} repeats a feature column")
         # A scores database holds floats beside its rankings; ranks are integers.
         if not all(schema[name].is_integer() for name in self.featureNames):
             raise ValueError(
@@ -196,3 +199,36 @@ def read_motif_annotations(
             raise ValueError(f"Unknown annotation categories: {sorted(unknown)}")
         table = table.loc[table["category"].isin(list(categories))]
     return table.reset_index(drop=True)
+
+
+def motif_annotations(motifs: Sequence["Motif"]) -> pd.DataFrame:
+    """Annotate each motif to the factors that its name lists.
+
+    JASPAR and MEME names list one factor or a dimer such as ``FOS::JUN``,
+    sometimes with a variant suffix such as ``(var.2)``. Each listed factor is
+    a direct annotation, upper-cased like human gene symbols; recase ``TF``
+    for other species.
+
+    Args:
+        motifs: Motifs such as ``read_jaspar_motifs`` returns.
+
+    Returns:
+        The columns of ``read_motif_annotations``: ``motif`` (the motif ID),
+        ``TF``, ``motif_similarity_qvalue`` (0), ``orthologous_identity`` (1),
+        ``description``, and ``category`` (``"direct"``).
+    """
+    rows = [
+        (motif.motifId, factor)
+        for motif in motifs
+        for factor in dict.fromkeys(
+            re.sub(r"\(var\.\d+\)", "", part).strip().upper()
+            for part in motif.name.split("::")
+        )
+        if factor
+    ]
+    table = pd.DataFrame.from_records(rows, columns=["motif", "TF"])
+    table["motif_similarity_qvalue"] = 0.0
+    table["orthologous_identity"] = 1.0
+    table["description"] = "gene is directly annotated"
+    table["category"] = "direct"
+    return table
