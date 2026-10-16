@@ -15,7 +15,8 @@ artifact refs. Docs: <https://docs.nygen.io/CyteArc/tutorials/plotting>,
   `embedding`, `embedding_raster`, `distribution`, `dotplot`, `matrixplot`, `composition`,
   `marker_heatmap`, `cluster_connectivity`, `cluster_tree`, `modality_weights`,
   `pseudotime_heatmap`, `mapping_score`, `mapping_evidence`, `mapping_confusion`,
-  `mapping_calibration`, `run_recipe`. Standalone only in `cytearc.plotting`: `graph_qc` (sparse
+  `mapping_calibration`, `category_proportions`, `neighborhood_beeswarm`, `neighborhood_graph`,
+  `run_recipe`. Standalone only in `cytearc.plotting`: `graph_qc` (sparse
   graph), `elbow` and `highly_variable_features` (arrays), `qc` (DataFrame), plus
   `compose_results`, `label_panels`, `theme_context`.
 - Every plot returns a `PlotResult`: `figure`, `axes` (dict keyed by panel), `tables` (dict of
@@ -288,4 +289,5 @@ plt.close(fig)
 - pipeline-runs-and-artifacts.md: which run keys and frozen fields exist.
 - quality-control.md, features-and-graphs.md, clustering-and-embedding.md,
   markers-and-annotation.md: the diagnostic plot for each step.
-- integration-and-comparisons.md: `modality_weights`, mapping plots, `StudyDesign` composition.
+- integration-and-comparisons.md: `modality_weights`, mapping plots, `StudyDesign` composition,
+  differential-abundance plots.

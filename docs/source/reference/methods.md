@@ -20,6 +20,7 @@ CyteArc provides complete workflows for:
 - transcription-factor regulons from RNA (SCENIC), motif or binding-peak activity from ATAC
   (chromVAR), enhancer-driven regulons from paired RNA and ATAC (SCENIC+), and co-regulated gene
   programs
+- differential abundance of cell categories and kNN neighbourhoods between conditions, with samples as replicates
 
 ## Implemented methods
 
@@ -33,6 +34,7 @@ The aim is one coherent execution path, not reimplementation for its own sake.
 - **Clustering:** [Leiden](https://doi.org/10.1038/s41598-019-41695-z) and a native implementation of [Paris hierarchical clustering](https://doi.org/10.48550/arXiv.1806.01664) with fixed and branch-adaptive cuts.
 - **Trajectory analysis:** memory-aware [Population Balance Analysis](https://doi.org/10.1073/pnas.1714723115), supervised terminal-state fate probabilities, pseudotime aggregation and modules, and [MAGIC-style graph diffusion](https://doi.org/10.1016/j.cell.2018.05.061) for imputation.
 - **Statistics and diagnostics:** marker AUC, the [Mann-Whitney U test](https://doi.org/10.1214/aoms/1177730491) with [Benjamini-Hochberg](https://doi.org/10.1111/j.2517-6161.1995.tb02031.x) correction, doublet scores, cluster separability, and integration metrics informed by the [scIB benchmark](https://doi.org/10.1038/s41592-021-01336-8).
+- **Differential abundance:** a port of [propeller](https://doi.org/10.1093/bioinformatics/btac582) (speckle) for category proportions, with limma's moderated t- and F-tests, and a port of the [Milo](https://doi.org/10.1038/s41587-021-01033-z) neighbourhood test (miloR): refined neighbourhood sampling on a stored kNN graph, blockwise counting, the [edgeR](https://doi.org/10.1093/bioinformatics/btp616) quasi-likelihood test with TMM normalization (the legacy QL method that miloR uses is the default), and weighted spatial FDR. The edgeR steps run in [edgePython](https://github.com/pachterlab/edgePython), a Python port of edgeR installed with the optional `milo` extra ({ref}`installation_milo`). Neither needs R at run time.
 - **Gene sets, protein, and sample tags:** [AUCell](https://doi.org/10.1038/nmeth.4463) and [WAGGR](https://doi.org/10.1093/bioadv/vbac016) activity scores, CITE-seq processing, and [cell-hashing](https://doi.org/10.1186/s13059-018-1603-1) demultiplexing.
 - **Regulons and chromatin activity:** [GRNBoost2](https://doi.org/10.1093/bioinformatics/bty916)
   co-expression networks and [SCENIC](https://doi.org/10.1038/nmeth.4463) cisTarget pruning
@@ -96,6 +98,8 @@ Agreement measured for one method is not evidence of equivalence for the rest of
   membership threshold assumes independent samples and ignores that programs are chosen from
   the same data: it screens chance groupings rather than testing programs, and profiles of
   smoothed cells form spurious ones.
+- Propeller is checked against speckle 1.10.0 (limma 3.66.0) on logit and arcsine transforms, robust and non-robust priors, the variance trend, a three-group ANOVA, and zero counts, agreeing to about 1e-14.
+- Milo is checked stage by stage against miloR 2.6.0 on four simulated cases, and end to end through `DataStore.abundance` on two. On a live opt-in test with the Wilk et al. COVID-19 atlas, miloR tests CyteArc's own kNN graph and index cells ({ref}`how to run it <live_abundance_test>`). Sampling, membership, counts, k-distances, and annotation match miloR exactly. The test statistics come from edgePython 0.2.6, which departs from edgeR 4.8.2 on Milo's path: TMM computes its log-ratios as a difference of logs, which breaks ties between rows differently on integer counts; the dispersion trend uses edgeR 3's span and evaluates locfit's local mean at every point instead of at locfit's tree vertices; the robust prior skips limma's infinite-df branch, because scipy's F distribution returns NaN for infinite degrees of freedom; `glmQLFit` does not pass `legacy` to `squeezeVar`; `glmQLFTest` does not apply edgeR's Poisson bound; and fits with zero dispersion return NaN or unconverged deviances. With these corrected in a local copy of edgePython, CyteArc reproduces miloR's significance calls in every case below. On Wilk, CyteArc finds all 931 neighbourhoods that miloR calls at spatial FDR below 0.1 and 19 more, with logFC within 0.026 and p-values ranked alike (Spearman 0.998). On the simulated cases, logFC agrees within 0.021 but significance calls can differ more: in a three-level contrast, 17 neighbourhoods pass against miloR's 5. One deliberate difference: miloR weights spatial FDR over every neighbourhood even when `min.mean` leaves some untested, which misaligns its weights, and CyteArc uses the tested neighbourhoods only.
 
 ## Current boundaries
 
@@ -116,4 +120,10 @@ Marker searches report cell-level Mann-Whitney statistics, AUC, and within-group
 Fate mapping needs user-supplied terminal states and does not infer them or use RNA velocity.
 Imputation is intended for exploratory visualization rather than differential expression.
 Export selected data to AnnData or another supported format when a downstream method is outside CyteArc.
+
+### Differential abundance
+
+Milo neighbourhoods are built on a stored graph from an `ann_metric="l2"` index, matching miloR's Euclidean kNN; an approximate index can miss a few exact neighbours that miloR's own search would find.
+Until edgePython reproduces edgeR, Milo's test statistics approximate miloR's rather than match them (see Validation).
+CyteArc does not implement Milo's graph-overlap spatial FDR, `refinement_scheme="graph"`, the GLMM model with random effects or kinship, neighbourhood expression testing, or pseudobulk differential expression.
 

@@ -14,7 +14,7 @@ Module-load dependencies point toward the earlier layers in this list:
 
 1. Foundation: `storage`, `matrix`, and `utils`
 2. Data model: `metadata`, `assay`, and `graph`
-3. Domain algorithms: `neighbors`, `embeddings`, `clustering`, `trajectory`, `metrics`, `features`, `quality_control`, `mapping`, and `regulons`
+3. Domain algorithms: `neighbors`, `embeddings`, `clustering`, `trajectory`, `metrics`, `features`, `quality_control`, `mapping`, `regulons`, `stats`, and `abundance`
 4. Import and export: `readers`, `writers`, and `merge`
 5. Orchestration: `datastore` and `datastore._operations`
 6. Presentation: `plotting`
@@ -110,6 +110,10 @@ They must not import those packages at module load time.
   extra does not install `pyarrow`. `results.py` holds `GrnResult`, which names
   `storage.refs` only. `DataStore.regulons.profiles` sums cell groups with
   `compare.compute_bulk` and writes nothing.
+- `stats/` owns the replicate-level statistics: Benjamini-Hochberg and weighted BH adjustment, treatment-coded designs and contrasts, the limma steps that propeller uses (`lmFit`, `contrasts.fit`, `eBayes`, legacy `squeezeVar`, and `fitFDist` with its robust form), and exact ports of the R numerical routines they depend on.
+  It works on in-memory per-row summaries and never imports storage.
+- `abundance/` owns differential abundance: propeller for category proportions, the storage-free Milo steps (index sampling and refinement, neighbourhood membership, counting kernels, k-distance, and annotation), and the result records that `ds.abundance` returns.
+  It imports `stats`, and `milo.differential_abundance` imports the optional edgePython package (the `milo` extra) only when it runs; the datastore methods keep graph and metadata reads, blockwise streaming, artifact planning, and persistence.
 
 Domain algorithm packages must not import `datastore`, `plotting`, or general import/export packages at module load time.
 A domain that persists an artifact may use a narrow, named `storage` adapter.
@@ -225,7 +229,7 @@ The accessor imports concrete plot implementations only when a method is called,
 
 ### Lazy and eager facades
 
-The lazy facades in `cytearc`, `agent`, `features` and its subpackages, `readers`, `writers`, `merge`, `utils`, `neighbors`, `clustering`, `embeddings`, `trajectory`, `regulons`, and `plotting` are architectural boundaries, not temporary deprecation shims.
+The lazy facades in `cytearc`, `agent`, `features` and its subpackages, `readers`, `writers`, `merge`, `utils`, `neighbors`, `clustering`, `embeddings`, `trajectory`, `regulons`, `stats`, `abundance`, and `plotting` are architectural boundaries, not temporary deprecation shims.
 Their documented 1.x exports preserve stable import paths and defer optional or expensive implementations until an export is accessed.
 All of them use one private helper, `cytearc._facade`: an export wins over a same-named submodule, resolving an export never replaces a bound value, and only `readers`, `writers`, `merge`, and `utils` present the objects they own under the facade's `__module__`.
 `cytebase` is a plain module that keeps the earlier public names of the example downloads, re-exported from `datasets`, through CyteArc 1.x.

@@ -14,6 +14,7 @@ Public CyteArc surfaces for analysts:
 - `cytearc.datasets` for the public example datasets that the tutorials download
 - Documented integration metrics (`DataStore.metric_*`; `cytearc.metrics` holds the underlying functions)
 - `MappingReference` / `MappingResult` for atlas-style mapping
+- `ds.abundance` for differential abundance between conditions (propeller and Milo)
 
 Inheritance helpers (`BaseDataStore`, `GraphDataStore`, `MappingDatastore`) are listed under [DataStore API reference](/api/datastore.html) for completeness.
 Prefer calling methods on `DataStore`.
@@ -31,6 +32,7 @@ Prefer calling methods on `DataStore`.
 | Integration and metrics | [Integration and metrics API reference](/api/integration.html) |
 | Mapping | [Mapping API reference](/api/mapping.html) |
 | Regulons and gene programs | [Regulons API reference](/api/regulons.html) |
+| Differential abundance (`ds.abundance`) | [DataStore API reference](/api/datastore.html) |
 | Plotting | [Plotting API reference](/api/plotting.html) |
 | Example datasets | [Example datasets API reference](/api/datasets.html) |
 | Utilities | [Utilities API reference](/api/utilities.html) |

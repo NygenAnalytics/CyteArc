@@ -293,6 +293,44 @@ Separate three questions that require different evidence:
 - whether expression changes within a defined population;
 - whether the population definition itself changes.
 
+### Differential abundance
+
+`ds.abundance` answers the first of those questions with samples, not cells, as the replicates.
+Pass the column that identifies independent biological units as `sample_by`. When a donor
+contributed several samples, either pool them under the donor or model the repeated measure
+outside CyteArc; do not count one donor twice. Every sample must belong to one condition.
+
+- Use `test_categories` (propeller) when the populations are already defined, for example
+  annotated cell types or a chosen clustering. It tests per-sample proportions, so a change in
+  one abundant population moves the others; read the result alongside the per-sample proportions
+  (`ds.plots.category_proportions`), not as independent changes.
+- Use the Milo methods when the change may not follow cluster boundaries, such as a shift within
+  a continuous state or a subset of one cluster. They test overlapping kNN neighbourhoods and need
+  a graph built on an `ann_metric="l2"` index over the reduction that the populations were
+  defined on.
+
+Choosing Milo parameters:
+
+- `k` (the graph's) sets neighbourhood size. Aim for neighbourhoods of roughly 5 x the number of
+  samples cells or more; check `load_neighborhoods(ref).sizes`. Larger `k` gives more power and
+  less resolution.
+- `prop` sets how many cells are drawn as index cells, 0.1 for small datasets and down to 0.05
+  for large ones; refinement merges draws, so the number of neighbourhoods is smaller.
+- Results depend on the graph and the drawn index cells. Check that a conclusion survives another
+  `seed` and a nearby `k`.
+
+Reading Milo results:
+
+- `spatial_fdr` is the FDR weighted by neighbourhood overlap (k-distance); use it, not `fdr`, to
+  call neighbourhoods. A common threshold is 0.1.
+- `log_fc` is a log2 fold change of the tested coefficient, shrunk as edgeR's `glmQLFit` does.
+- `annotate_neighborhoods` labels each neighbourhood by its majority label and its fraction. Treat
+  low fractions as mixed neighbourhoods (`neighborhood_beeswarm(..., min_fraction=0.7)`).
+- A cluster with neighbourhoods changing in both directions is a hint of heterogeneity, not a
+  net change of the cluster; check its markers and per-sample composition.
+- Few samples limit both methods. With two or three samples per condition, report effect sizes
+  and treat significance as weak evidence.
+
 ### Pseudotime and fate mapping
 
 Use pseudotime only when the graph and biological question support a plausible continuous process.

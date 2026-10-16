@@ -54,6 +54,40 @@ For full CI parity, also run the visual regression step (or see `AGENTS.md`):
     MPLBACKEND=Agg CYTEARC_RUN_VISUAL_REGRESSION=1 \
       uv run pytest -n 0 -m visual tests/test_plotting_showcase.py
 
+(live_abundance_test)=
+### Live differential-abundance test
+
+`tests/test_abundance_live_wilk.py` runs Milo and propeller on the Wilk et al. 2020 COVID-19 PBMC atlas from CyteBase and compares them with miloR 2.6.0 and speckle 1.10.0.
+It is opt-in and CI does not run it.
+It opens the dataset by its URI in the public `Nygen/cytebase-2610` bucket, so it needs network access but not the `cytebase` package, and the `milo` extra for edgePython. It compares against a local fixture that is derived from the dataset and must not be published.
+Build the fixture once with R 4.5, miloR 2.6.0, edgeR 4.8.2, and speckle 1.10.0 installed:
+
+    uv run python scripts/export_milo_golden.py --wilk
+
+The export mounts the dataset in the git-ignored `tests/datasets/wilk_milo`, builds the graph with the recipe in `WILK`, and writes `tests/datasets/milor_2_6_0_wilk_golden.json.gz`.
+It takes about 90 minutes, almost all of it in miloR's `graphSpatialFDR`, which searches neighbours once per neighbourhood over all 44,721 cells.
+Then run the test against the same mount, which reuses the saved graph:
+
+    CYTEARC_RUN_LIVE_DA=1 CYTEARC_LIVE_DA_DIR="$PWD/tests/datasets/wilk_milo" \
+      uv run pytest -n 0 tests/test_abundance_live_wilk.py
+
+Without `CYTEARC_LIVE_DA_DIR`, the test mounts a fresh copy and rebuilds the graph, which takes a few more minutes.
+The fixture records fingerprints of the graph and the index-cell draws, so a change to the graph recipe or to neighbourhood sampling fails the test until the fixture is rebuilt.
+Without the fixture, the comparisons skip and only the CyteArc-side checks run.
+
+The comparisons separate the graph from the test, because CyteArc builds its graph with an approximate index while miloR's refinement searches exact neighbours:
+
+- Graph: an exact kNN search in R on the same PCA coordinates must recover more than 99.9% of CyteArc's neighbours, and every index cell's neighbour list must be exact.
+- Refinement: miloR refines the same random draws itself, and more than 99% of its index cells must match CyteArc's.
+- Neighbourhood test: miloR then runs `makeNhoods`, `countCells`, `testNhoods`, and `annotateNhoods` on CyteArc's graph and index cells. Membership, sizes, counts, majority labels, and label fractions must match exactly, and the k-th distances to a relative tolerance of 1e-5. The test statistics come from edgePython 0.2.6, which departs from edgeR 4.8.2 ([](../reference/methods.md)), so they are held to bounds measured on this dataset: normalization factors within 0.05, log CPM within 0.03, log fold changes within 0.04, and -log10 p-values within 1.2 of miloR's, with p-values ranked alike (Spearman above 0.99). CyteArc must find at least 99% of the neighbourhoods that miloR calls at spatial FDR below 0.1, with no more than 5% extra.
+- propeller: speckle's `propeller` on the same donors and labels must give the same t statistics, p-values, and FDR to 1e-8 and proportion ratios to 1e-10.
+
+Donors are the replicates, 7 COVID-19 and 6 healthy, and the two samples of donor C1 are pooled because the atlas has no sample column.
+The fixture built with R 4.5.2 gives 1,877 neighbourhoods, 931 of them at spatial FDR below 0.1, and R's refinement picks the same index cell for all but one.
+With edgePython 0.2.6, CyteArc calls those 931 and 19 more.
+`tests/test_milo_golden.py::test_neighborhood_test_matches_edger_exactly` is a strict expected failure that records edgeR's precision: when a corrected edgePython makes it pass, tighten the bounds in both test files.
+A dependency upgrade that changes Milo's results for unchanged inputs also needs an operation revision for `test_neighborhoods` ([](operation_revisions.md)), so that stores stop reusing the earlier results.
+
 ### Performance benchmarks
 
 `tests/benchmarks/` times the operations that dominate large runs and projects each timing onto production sizes, such as one and ten million cells.
