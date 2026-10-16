@@ -517,6 +517,7 @@ accessor = store.plots
 
 assert type(accessor).__module__ == "cytearc.datastore.plot_accessor"
 concrete_modules = {
+    "cytearc.plotting.abundance",
     "cytearc.plotting.composition",
     "cytearc.plotting.diagnostics",
     "cytearc.plotting.distribution",

@@ -127,6 +127,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "SizeScale",
     "StudyDesign",
     "THEMES",
+    "category_proportions",
     "cluster_tree",
     "cluster_connectivity",
     "compose_results",
@@ -146,6 +147,8 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "mapping_score",
     "matrixplot",
     "modality_weights",
+    "neighborhood_beeswarm",
+    "neighborhood_graph",
     "pseudotime_heatmap",
     "qc",
     "run_recipe",
@@ -367,6 +370,7 @@ import cytearc.plotting as plotting
 
 exports = {_EXPECTED_PLOTTING_EXPORTS!r}
 concrete = (
+    "cytearc.plotting.abundance",
         "cytearc.plotting.cluster_connectivity",
     "cytearc.plotting.composition",
     "cytearc.plotting.diagnostics",
