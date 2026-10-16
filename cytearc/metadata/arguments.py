@@ -372,3 +372,68 @@ class StatisticalTestingArguments(OperationArguments):
     # Only Mann-Whitney records carry its p-value policy, so other tests keep
     # their identities.
     p_value_policy: str | None = parameter(None, omit_if_none=True)
+
+
+@dataclass(frozen=True, slots=True)
+class CategoryTestArguments(OperationArguments):
+    operation: ClassVar[str] = "test_categories"
+    artifact_kind: ClassVar[str] = "category_tests"
+
+    categories: ArtifactRef | None = artifact_input()
+    cell_selection: ArtifactRef | None = artifact_input()
+    cell_selection_fingerprint: str = artifact_input()
+    category_fingerprint: str = artifact_input()
+    sample_fingerprint: str = artifact_input()
+    condition_fingerprint: str = artifact_input()
+
+    category_field: str | None = parameter()
+    sample_by: str = parameter()
+    condition_by: str = parameter()
+    groups: tuple[str, ...] | None = parameter()
+    transform: str = parameter()
+    robust: bool = parameter()
+    trend: bool = parameter()
+    n_cells: int = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class NeighborhoodArguments(OperationArguments):
+    operation: ClassVar[str] = "make_neighborhoods"
+    artifact_kind: ClassVar[str] = "neighborhoods"
+
+    neighbors: ArtifactRef = artifact_input()
+    prop: float = parameter()
+    refined: bool = parameter()
+    seed: int = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class NeighborhoodCountArguments(OperationArguments):
+    operation: ClassVar[str] = "count_neighborhoods"
+    artifact_kind: ClassVar[str] = "neighborhood_counts"
+
+    neighborhoods: ArtifactRef = artifact_input()
+    sample_fingerprint: str = artifact_input()
+    sample_by: str = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class NeighborhoodTestArguments(OperationArguments):
+    operation: ClassVar[str] = "test_neighborhoods"
+    artifact_kind: ClassVar[str] = "neighborhood_tests"
+
+    counts: ArtifactRef = artifact_input()
+    design_fingerprint: str = artifact_input()
+    condition_by: str = parameter()
+    covariates: tuple[str, ...] = parameter()
+    levels: dict[str, tuple[str, ...]] | None = parameter()
+    contrast: dict[str, float] | None = parameter()
+    norm_method: str = parameter()
+    min_mean: float = parameter()
+    robust: bool = parameter()
+    legacy: bool = parameter()
+    fdr_weighting: str = parameter()
+    invalidate_cache: bool = execution()

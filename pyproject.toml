@@ -87,6 +87,8 @@ test = [
     "polars>=1.20",
     # CI runs t-SNE on Linux x86_64, where sgtsnepi has wheels.
     "sgtsnepi>=0.7; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # Milo's neighbourhood test (the milo extra).
+    "edgepython>=0.2.6",
 ]
 docs = [
     "mystmd>=1.11.0",
@@ -104,6 +106,10 @@ docs = [
 # Reads cisTarget ranking databases, which are Feather (Arrow IPC) files.
 regulons = [
     "polars>=1.20",
+]
+# edgeR's quasi-likelihood test for Milo neighbourhoods. edgePython is GPLv3.
+milo = [
+    "edgepython>=0.2.6",
 ]
 
 [project.urls]

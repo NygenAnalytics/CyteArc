@@ -356,6 +356,7 @@ def test_mapping_datastore_private_mixin_order_is_stable():
 
 
 def test_datastore_private_mixin_order_is_stable():
+    from cytearc.datastore._operations.abundance import _AbundanceOperationsMixin
     from cytearc.datastore._operations.features import _FeatureOperationsMixin
     from cytearc.datastore._operations.integration_metrics import (
         _IntegrationMetricsOperationsMixin,
@@ -370,6 +371,7 @@ def test_datastore_private_mixin_order_is_stable():
     )
 
     assert DataStore.__bases__ == (
+        _AbundanceOperationsMixin,
         _QualityControlOperationsMixin,
         _FeatureOperationsMixin,
         _TrajectoryFeatureOperationsMixin,
@@ -378,8 +380,9 @@ def test_datastore_private_mixin_order_is_stable():
         _RegulonOperationsMixin,
         MappingDatastore,
     )
-    assert DataStore.mro()[:8] == [
+    assert DataStore.mro()[:9] == [
         DataStore,
+        _AbundanceOperationsMixin,
         _QualityControlOperationsMixin,
         _FeatureOperationsMixin,
         _TrajectoryFeatureOperationsMixin,

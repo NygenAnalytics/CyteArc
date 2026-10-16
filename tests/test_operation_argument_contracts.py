@@ -11,6 +11,7 @@ from functools import cache
 import pytest
 
 from cytearc.datastore.namespaces import (
+    AbundanceAccessor,
     ClustersAccessor,
     CompareAccessor,
     EmbeddingsAccessor,
@@ -381,6 +382,40 @@ _CONTRACTS = (
             ),
             **_classified("derived", "suffix_style"),
         },
+    ),
+    OperationContract(
+        AbundanceAccessor.test_categories,
+        metadata_arguments.CategoryTestArguments,
+        signature_only={
+            **_classified("transformed", "study_design"),
+            **_classified("execution", "skip_save"),
+        },
+        model_only={
+            **_classified("resolved_input", "category_field"),
+            **_classified(
+                "derived",
+                "cell_selection_fingerprint",
+                "category_fingerprint",
+                "sample_fingerprint",
+                "condition_fingerprint",
+                "n_cells",
+            ),
+        },
+    ),
+    OperationContract(
+        AbundanceAccessor.make_neighborhoods,
+        metadata_arguments.NeighborhoodArguments,
+    ),
+    OperationContract(
+        AbundanceAccessor.count_neighborhoods,
+        metadata_arguments.NeighborhoodCountArguments,
+        model_only=_classified("derived", "sample_fingerprint"),
+    ),
+    OperationContract(
+        AbundanceAccessor.test_neighborhoods,
+        metadata_arguments.NeighborhoodTestArguments,
+        signature_only=_classified("execution", "skip_save"),
+        model_only=_classified("derived", "design_fingerprint"),
     ),
     OperationContract(
         CompareAccessor.test,
