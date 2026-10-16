@@ -1,7 +1,7 @@
 ---
 myst:
   html_meta:
-    description: Browse the CyteArc Python API for datastores, analysis pipelines, artifacts, plotting, data import, and remote datasets.
+    description: Browse the CyteArc Python API for datastores, analysis pipelines, artifacts, plotting, data import, and example datasets.
 ---
 
 # CyteArc API reference
@@ -21,6 +21,6 @@ integration
 mapping
 regulons
 plotting
-cytebase
+datasets
 utilities
 ```

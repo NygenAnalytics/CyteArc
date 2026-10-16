@@ -288,12 +288,12 @@ def download_optional_h5ad(*, attempts: int = _H5AD_DOWNLOAD_ATTEMPTS) -> bool:
     if local_h5ad.is_file():
         return True
 
-    from cytearc import cytebase
+    from cytearc import datasets
 
     last_error: BaseException | None = None
     for attempt in range(1, attempts + 1):
         try:
-            cytebase.connect("cytearc_docs").download_dataset(
+            datasets.connect("cytearc_docs").download_dataset(
                 sample,
                 destination=datasets_dir(),
             )

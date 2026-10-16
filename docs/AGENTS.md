@@ -16,7 +16,7 @@ These instructions cover documentation sources, notebook execution, and site bui
 Use Node.js 24 and install the Python tools:
 
 ```bash
-uv sync --group docs-modal --extra agent --extra docs --extra test --extra extra --extra cytebase
+uv sync --group docs-modal --extra agent --extra docs --extra test --extra extra
 make -C docs html
 ```
 

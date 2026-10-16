@@ -9,6 +9,7 @@ description: Contribute to CyteArc with the development, testing, documentation,
 If you would like to add a new feature, fix a bug or make some improvements, please follow this [guideline].
 When planning a new feature, introduce the proposal and discuss it on the [discussion page].
 Automated contributors must also follow the repository `AGENTS.md` and any instructions scoped to the directory being changed.
+Changes to the CyteBase catalog SDK or its build pipeline belong in the [CyteBase repository].
 
 The project uses [Ruff] for formatting and linting.
 Before opening a pull request, run the same static checks as CI:
@@ -108,7 +109,7 @@ reference from `docs/source/reference/api/`.
 Use Node.js 24 and install the Python tools:
 
 ```bash
-uv sync --group docs-modal --extra agent --extra docs --extra test --extra extra --extra cytebase
+uv sync --group docs-modal --extra agent --extra docs --extra test --extra extra
 ```
 
 ### Execute affected notebooks
@@ -185,8 +186,9 @@ the current commit again.
 4. Commit the notebook with its outputs and execution metadata. Keep rendered site files outside Git.
 
 Fact-check method names against `cytearc/`, dataset identifiers against the `cytearc_docs`
-CyteBase repository, and numerical claims against actual outputs. Keep credentials and private
-connection values out of sources and notebook outputs.
+example repository (`cytearc.datasets.connect("cytearc_docs").list_datasets()`), and numerical
+claims against actual outputs. Keep credentials and private connection values out of sources
+and notebook outputs.
 
 ### Republishing the example stores
 
@@ -272,6 +274,7 @@ Here we acknowledge some of them (at least those with pretty logos).
 
 [guideline]: https://www.dataschool.io/how-to-contribute-on-github
 [discussion page]: https://github.com/NygenAnalytics/CyteArc/discussions
+[CyteBase repository]: https://github.com/NygenAnalytics/CyteBase
 [Ruff]: https://docs.astral.sh/ruff/
 [Sphinx]: https://www.sphinx-doc.org
 [MyST]: https://mystmd.org/guide

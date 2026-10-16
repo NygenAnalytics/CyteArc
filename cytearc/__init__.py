@@ -10,6 +10,7 @@ from ._facade import lazy_facade as _lazy_facade
 
 if TYPE_CHECKING:
     from . import cytebase as cytebase
+    from . import datasets as datasets
     from .datastore.datastore import DataStore as DataStore
     from .datastore.pipeline_run import (
         PipelineExecutionError as PipelineExecutionError,
@@ -183,6 +184,7 @@ __getattr__, __dir__ = _lazy_facade(
     modules=(
         "assay",
         "cytebase",
+        "datasets",
         "datastore",
         "embeddings",
         "features",

@@ -1438,7 +1438,7 @@ def build_store(
     if store.exists():
         shutil.rmtree(store)
     if isinstance(recipe, RawDatasetRecipe):
-        repository = cytearc.cytebase.connect(repository_name)
+        repository = cytearc.datasets.connect(repository_name)
         for name in recipe.sources:
             repository.download(f"{dataset}/{name}", destination=str(work))
         recipe.convert(work / dataset, store)
@@ -1464,7 +1464,7 @@ def build_store(
             )
 
     else:
-        repository = cytearc.cytebase.connect(repository_name)
+        repository = cytearc.datasets.connect(repository_name)
         source_paths = _resolve_derived_sources(
             repository=repository,
             source_datasets=recipe.source_datasets,

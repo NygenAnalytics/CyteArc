@@ -17,7 +17,6 @@ from zarr.core.buffer import default_buffer_prototype
 from zarr.core.sync import collect_aiterator, sync
 from zarr.storage import LocalStore, ObjectStore
 
-from cytearc import cytebase
 from cytearc.datastore.datastore import DataStore, mount_datastore
 from cytearc.readers import H5adReader
 from cytearc.storage.artifact_writer import artifact_transaction, plan_artifact
@@ -234,14 +233,16 @@ def test_mount_uses_artifacts_imported_into_its_source(published, tmp_path):
         "type_1",
         "type_2",
     }
-    assert cytebase.embeddings(mounted) == {"X_umap": embedding}
-    assert cytebase.embedding(mounted) == embedding
+    assert (
+        mounted.artifacts.find("embedding", imported="X_umap", from_assay="RNA")
+        == embedding
+    )
     source = DataStore(
         published.location, zarr_mode="r", default_assay="RNA", min_features_per_cell=-1
     )
     pd.testing.assert_frame_equal(
-        cytebase.embedding_coordinates(mounted, embedding),
-        cytebase.embedding_coordinates(source, embedding),
+        mounted.artifacts.load_values(embedding).to_pandas(),
+        source.artifacts.load_values(embedding).to_pandas(),
     )
     assert (target / artifact_path(selection)).is_dir()
     assert (target / artifact_path(markers)).is_dir()
@@ -669,24 +670,6 @@ def test_mounting_a_fresh_import_asks_for_one_writable_open(tmp_path):
     DataStore(source, default_assay="RNA", min_features_per_cell=-1)
     mounted = _mount(source, target)
     assert mounted.artifacts.inspect(imported.cellSelection).complete
-
-
-def test_cytebase_close_closes_the_target_and_the_source_once(
-    published, tmp_path, monkeypatch
-):
-    from cytearc.cytebase.connector import _close
-
-    mounted = _mount(published.location, tmp_path / "target.zarr")
-    closed: list[str] = []
-    for name, store in (
-        ("target", mounted.z.store._store),
-        ("source", mounted._matrix_z.store),
-    ):
-        monkeypatch.setattr(store, "close", lambda name=name: closed.append(name))
-
-    _close(mounted)
-
-    assert sorted(closed) == ["source", "target"]
 
 
 def test_arrays_written_on_a_local_mount_use_the_local_profile(published, tmp_path):

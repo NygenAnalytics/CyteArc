@@ -19,7 +19,7 @@ pytest_plugins = [
     "tests.fixtures_downloader",
     "tests.fixtures_readers",
     "tests.fixtures_datastore",
-    "tests.fixtures_cytebase",
+    "tests.fixtures_hub",
     "tests.shards",
 ]
 

@@ -48,7 +48,7 @@ jobs:
       with:
         python-version: "3.13"
     - name: Install dependencies
-      run: uv sync --group dev --group profiling --group cytebase --extra test --extra extra --extra agent --extra cytebase
+      run: uv sync --group dev --group profiling --extra test --extra extra --extra agent
     - name: Lint and check formatting
       run: |
         uv run ruff check cytearc profiling tests
@@ -132,7 +132,7 @@ jobs:
       with:
         python-version: "3.13"
     - name: Install dependencies
-      run: uv sync --group profiling --group cytebase --extra test --extra extra --extra agent --extra cytebase
+      run: uv sync --group profiling --extra test --extra extra --extra agent
     - name: Download test fixtures
       run: uv run python -m tests.download_fixtures --with-h5ad
     - name: Test the quick suite with pyarrow installed
@@ -187,12 +187,12 @@ jobs:
         restore-keys: uv-ubuntu-26.04-${{ matrix.python-version }}-${{ matrix.resolution }}-
     - name: Install dependencies (locked)
       if: matrix.resolution == 'locked'
-      run: uv sync --group profiling --group cytebase --extra test --extra extra --extra agent --extra cytebase
+      run: uv sync --group profiling --extra test --extra extra --extra agent
     - name: Install dependencies (lowest-direct)
       if: matrix.resolution == 'lowest-direct'
       run: |
         uv venv --python "${{ matrix.python-version }}"
-        uv pip install --resolution lowest-direct -e ".[test,extra,agent,cytebase]" --group profiling --group cytebase
+        uv pip install --resolution lowest-direct -e ".[test,extra,agent]" --group profiling
     - name: Download test fixtures
       run: |
         if [ "${{ matrix.resolution }}" = "lowest-direct" ]; then

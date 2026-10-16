@@ -5,14 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.fixtures_cytebase import bucket_file, bucket_folder
+from tests.fixtures_hub import bucket_file, bucket_folder
 
 
 @pytest.fixture(autouse=True)
 def _offline_unless_live(request):
     """Keep every test except the explicit live checks off the network."""
     if request.node.get_closest_marker("integration") is None:
-        request.getfixturevalue("cytebase_offline")
+        request.getfixturevalue("hub_offline")
 
 
 def _write_tar(path: Path, members: list[tuple[str, str, bytes | str | None]]) -> Path:
@@ -47,7 +47,7 @@ def _tree(root: Path) -> list[str]:
 
 @pytest.mark.parametrize("member_name", ["notes.txt", "other.zarr/zarr.json"])
 def test_archive_cannot_replace_unrelated_siblings(tmp_path, member_name):
-    from cytearc.cytebase import _extract_and_replace
+    from cytearc.datasets import _extract_and_replace
 
     notes = tmp_path / "notes.txt"
     notes.write_text("keep this")
@@ -69,7 +69,7 @@ def test_archive_cannot_replace_unrelated_siblings(tmp_path, member_name):
 
 
 def test_archive_replaces_only_its_named_output_directory(tmp_path):
-    from cytearc.cytebase import _extract_and_replace
+    from cytearc.datasets import _extract_and_replace
 
     output = tmp_path / "data.zarr"
     output.mkdir()
@@ -90,7 +90,7 @@ def test_archive_replaces_only_its_named_output_directory(tmp_path):
 
 
 def test_archive_output_directory_cannot_be_a_symlink(tmp_path):
-    from cytearc.cytebase import _extract_and_replace
+    from cytearc.datasets import _extract_and_replace
 
     staged = tmp_path / "download"
     with tarfile.open(staged, "w:gz") as archive:
@@ -104,7 +104,7 @@ def test_archive_output_directory_cannot_be_a_symlink(tmp_path):
 
 
 def test_list_repositories_is_sorted_and_anonymous(monkeypatch):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     calls = []
 
@@ -116,33 +116,33 @@ def test_list_repositories_is_sorted_and_anonymous(monkeypatch):
             bucket_folder("cellxgene"),
         ]
 
-    monkeypatch.setattr(cytebase, "list_bucket_tree", fake_list_bucket_tree)
+    monkeypatch.setattr(datasets, "list_bucket_tree", fake_list_bucket_tree)
 
-    assert cytebase.list_repositories() == ["cellxgene", "cytearc_docs"]
+    assert datasets.list_repositories() == ["cellxgene", "cytearc_docs"]
     assert calls == [("Nygen/cytebase", None, False, False)]
 
 
 def test_connect_returns_repository(monkeypatch):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     monkeypatch.setattr(
-        cytebase,
+        datasets,
         "list_repositories",
         lambda: ["cellxgene", "cytearc_docs"],
     )
 
-    repository = cytebase.connect("cytearc_docs")
+    repository = datasets.connect("cytearc_docs")
 
-    assert repository == cytebase.Repository("cytearc_docs")
+    assert repository == datasets.Repository("cytearc_docs")
 
 
 def test_connect_rejects_unknown_repository(monkeypatch):
-    from cytearc import cytebase
+    from cytearc import datasets
 
-    monkeypatch.setattr(cytebase, "list_repositories", lambda: ["cellxgene", "docs"])
+    monkeypatch.setattr(datasets, "list_repositories", lambda: ["cellxgene", "docs"])
 
     with pytest.raises(KeyError) as raised:
-        cytebase.connect("missing")
+        datasets.connect("missing")
     assert raised.value.args[0] == (
         "'missing' is not a CyteBase repository. Available repositories:\n"
         "cellxgene\ndocs"
@@ -154,20 +154,20 @@ def test_connect_rejects_unknown_repository(monkeypatch):
     ["", ".", "..", "../outside", "/outside", r"..\outside", "a/b"],
 )
 def test_connect_rejects_invalid_repository_name(monkeypatch, name):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     def unexpected_listing():
         raise AssertionError("an invalid name must be rejected before listing")
 
-    monkeypatch.setattr(cytebase, "list_repositories", unexpected_listing)
+    monkeypatch.setattr(datasets, "list_repositories", unexpected_listing)
     with pytest.raises(ValueError, match="Invalid repository name"):
-        cytebase.connect(name)
+        datasets.connect(name)
     with pytest.raises(ValueError, match="Invalid repository name"):
-        cytebase.Repository(name)
+        datasets.Repository(name)
 
 
 def test_repository_lists_datasets(monkeypatch):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     calls = []
 
@@ -184,14 +184,14 @@ def test_repository_lists_datasets(monkeypatch):
             bucket_folder("cytearc_docs/alpha/raw"),
         ]
 
-    monkeypatch.setattr(cytebase, "list_bucket_tree", fake_list_bucket_tree)
+    monkeypatch.setattr(datasets, "list_bucket_tree", fake_list_bucket_tree)
 
-    assert cytebase.Repository("cytearc_docs").list_datasets() == ["alpha", "zeta"]
+    assert datasets.Repository("cytearc_docs").list_datasets() == ["alpha", "zeta"]
     assert calls == [("Nygen/cytebase", "cytearc_docs", False, False)]
 
 
 def test_repository_file_listing_is_scoped_and_sorted(monkeypatch):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     calls = []
 
@@ -203,16 +203,16 @@ def test_repository_file_listing_is_scoped_and_sorted(monkeypatch):
             bucket_file("cytearc_docs/alpha/barcodes.tsv.gz", 2),
         ]
 
-    monkeypatch.setattr(cytebase, "list_bucket_tree", fake_list_bucket_tree)
+    monkeypatch.setattr(datasets, "list_bucket_tree", fake_list_bucket_tree)
 
-    files = cytebase._bucket_files("cytearc_docs", "alpha", recursive=False)
+    files = datasets._bucket_files("cytearc_docs", "alpha", recursive=False)
 
     assert [file.path for file in files] == [
         "cytearc_docs/alpha/barcodes.tsv.gz",
         "cytearc_docs/alpha/matrix.mtx.gz",
     ]
     assert calls == [("Nygen/cytebase", "cytearc_docs/alpha", False, False)]
-    files = cytebase._bucket_files("cytearc_docs", recursive=True)
+    files = datasets._bucket_files("cytearc_docs", recursive=True)
     assert [file.path for file in files] == [
         "cytearc_docs/alpha/barcodes.tsv.gz",
         "cytearc_docs/alpha/matrix.mtx.gz",
@@ -222,11 +222,11 @@ def test_repository_file_listing_is_scoped_and_sorted(monkeypatch):
 
 
 def test_repository_downloads_file_anonymously(monkeypatch, tmp_path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     file = bucket_file("cytearc_docs/alpha/data.bin", 7)
     monkeypatch.setattr(
-        cytebase,
+        datasets,
         "_bucket_files",
         lambda repository, path, recursive: [file],
     )
@@ -236,10 +236,10 @@ def test_repository_downloads_file_anonymously(monkeypatch, tmp_path):
         calls.append((bucket_id, files, raise_on_missing_files, token))
         files[0][1].write_bytes(b"payload")
 
-    monkeypatch.setattr(cytebase, "download_bucket_files", fake_download)
+    monkeypatch.setattr(datasets, "download_bucket_files", fake_download)
 
     downloads = tmp_path / "downloads"
-    downloaded = cytebase.Repository("cytearc_docs").download(
+    downloaded = datasets.Repository("cytearc_docs").download(
         "alpha/data.bin",
         downloads,
     )
@@ -261,7 +261,7 @@ def test_repository_download_respects_progress_setting(
 ):
     import importlib
 
-    from cytearc import configure_output, cytebase
+    from cytearc import configure_output, datasets
     from cytearc.utils.logging import progress_enabled
 
     hf_progress = importlib.import_module("huggingface_hub.utils.tqdm")
@@ -269,7 +269,7 @@ def test_repository_download_respects_progress_setting(
     monkeypatch.setattr(hf_progress, "progress_bar_states", {})
     file = bucket_file("cytearc_docs/alpha/data.bin", 7)
     monkeypatch.setattr(
-        cytebase, "_bucket_files", lambda repository, path, recursive: [file]
+        datasets, "_bucket_files", lambda repository, path, recursive: [file]
     )
     output = io.StringIO()
     group = "huggingface_hub.download_bucket_files"
@@ -285,11 +285,11 @@ def test_repository_download_respects_progress_setting(
             raise RuntimeError("Transfer failed")
         files[0][1].write_bytes(b"payload")
 
-    monkeypatch.setattr(cytebase, "download_bucket_files", download)
+    monkeypatch.setattr(datasets, "download_bucket_files", download)
     original_progress = progress_enabled()
     configure_output(progress=progress)
     try:
-        repository = cytebase.Repository("cytearc_docs")
+        repository = datasets.Repository("cytearc_docs")
         if fails:
             with pytest.raises(RuntimeError, match="Transfer failed"):
                 repository.download("alpha/data.bin", tmp_path / "downloads")
@@ -306,12 +306,12 @@ def test_repository_download_respects_progress_setting(
 
 
 def test_download_dataset_excludes_zarr_archive_by_default(monkeypatch, tmp_path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     source = bucket_file("cytearc_docs/alpha/data.h5", 6)
     archive = bucket_file("cytearc_docs/alpha/data.zarr.tar.gz", 12)
     monkeypatch.setattr(
-        cytebase,
+        datasets,
         "_bucket_files",
         lambda repository, path, recursive: [archive, source],
     )
@@ -322,9 +322,9 @@ def test_download_dataset_excludes_zarr_archive_by_default(monkeypatch, tmp_path
         for _, destination in files:
             destination.write_bytes(b"source")
 
-    monkeypatch.setattr(cytebase, "download_bucket_files", fake_download)
+    monkeypatch.setattr(datasets, "download_bucket_files", fake_download)
 
-    dataset_path = cytebase.Repository("cytearc_docs").download_dataset(
+    dataset_path = datasets.Repository("cytearc_docs").download_dataset(
         "alpha",
         tmp_path,
     )
@@ -336,21 +336,21 @@ def test_download_dataset_excludes_zarr_archive_by_default(monkeypatch, tmp_path
 
 
 def test_download_dataset_copies_local_catalog_zarr(monkeypatch, tmp_path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     local_root = tmp_path / "catalog"
     store = local_root / "alpha" / "data.zarr"
     store.mkdir(parents=True)
     (store / "zarr.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setenv(cytebase._LOCAL_CATALOG_ENV, str(local_root))
+    monkeypatch.setenv(datasets._LOCAL_CATALOG_ENV, str(local_root))
 
     def fail_bucket(*_args, **_kwargs):
         raise AssertionError("local catalog should not list the remote bucket")
 
-    monkeypatch.setattr(cytebase, "_bucket_files", fail_bucket)
+    monkeypatch.setattr(datasets, "_bucket_files", fail_bucket)
 
     destination = tmp_path / "downloads"
-    dataset_path = cytebase.Repository("cytearc_docs").download_dataset(
+    dataset_path = datasets.Repository("cytearc_docs").download_dataset(
         "alpha",
         destination,
         zarr=True,
@@ -363,23 +363,23 @@ def test_download_dataset_copies_local_catalog_zarr(monkeypatch, tmp_path):
 
 
 def test_local_catalog_copy_replaces_only_the_zarr_store(monkeypatch, tmp_path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     store = tmp_path / "catalog" / "alpha" / "data.zarr"
     store.mkdir(parents=True)
     (store / "zarr.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setenv(cytebase._LOCAL_CATALOG_ENV, str(tmp_path / "catalog"))
+    monkeypatch.setenv(datasets._LOCAL_CATALOG_ENV, str(tmp_path / "catalog"))
 
     def fail_bucket(*_args, **_kwargs):
         raise AssertionError("local catalog should not list the remote bucket")
 
-    monkeypatch.setattr(cytebase, "_bucket_files", fail_bucket)
+    monkeypatch.setattr(datasets, "_bucket_files", fail_bucket)
     dataset = tmp_path / "downloads" / "alpha"
     (dataset / "data.zarr").mkdir(parents=True)
     (dataset / "data.zarr" / "stale.json").write_text("old", encoding="utf-8")
     (dataset / "data.h5").write_bytes(b"raw counts")
 
-    dataset_path = cytebase.Repository("cytearc_docs").download_dataset(
+    dataset_path = datasets.Repository("cytearc_docs").download_dataset(
         "alpha",
         tmp_path / "downloads",
         zarr=True,
@@ -394,7 +394,7 @@ def test_local_catalog_copy_replaces_only_the_zarr_store(monkeypatch, tmp_path):
 
 
 def test_download_dataset_selects_and_extracts_zarr_archive(monkeypatch, tmp_path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     archive_buffer = io.BytesIO()
     payload = b'{"zarr_format": 3, "node_type": "group"}'
@@ -409,7 +409,7 @@ def test_download_dataset_selects_and_extracts_zarr_archive(monkeypatch, tmp_pat
         len(archive_bytes),
     )
     monkeypatch.setattr(
-        cytebase,
+        datasets,
         "_bucket_files",
         lambda repository, path, recursive: [source, zarr_archive],
     )
@@ -420,9 +420,9 @@ def test_download_dataset_selects_and_extracts_zarr_archive(monkeypatch, tmp_pat
         ]
         files[0][1].write_bytes(archive_bytes)
 
-    monkeypatch.setattr(cytebase, "download_bucket_files", fake_download)
+    monkeypatch.setattr(datasets, "download_bucket_files", fake_download)
 
-    dataset_path = cytebase.Repository("cytearc_docs").download_dataset(
+    dataset_path = datasets.Repository("cytearc_docs").download_dataset(
         "alpha",
         tmp_path,
         zarr=True,
@@ -433,10 +433,10 @@ def test_download_dataset_selects_and_extracts_zarr_archive(monkeypatch, tmp_pat
 
 
 def test_download_dataset_reports_missing_zarr(monkeypatch, tmp_path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     monkeypatch.setattr(
-        cytebase,
+        datasets,
         "_bucket_files",
         lambda repository, path, recursive: [
             bucket_file("cytearc_docs/alpha/data.h5", 6)
@@ -446,7 +446,7 @@ def test_download_dataset_reports_missing_zarr(monkeypatch, tmp_path):
     with pytest.raises(
         FileNotFoundError, match="^No Zarr archive is available for 'alpha'$"
     ):
-        cytebase.Repository("cytearc_docs").download_dataset(
+        datasets.Repository("cytearc_docs").download_dataset(
             "alpha",
             tmp_path / "downloads",
             zarr=True,
@@ -455,17 +455,17 @@ def test_download_dataset_reports_missing_zarr(monkeypatch, tmp_path):
 
 
 def test_download_dataset_reports_unknown_name(monkeypatch, tmp_path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
-    monkeypatch.setattr(cytebase, "_bucket_files", lambda *args, **kwargs: [])
+    monkeypatch.setattr(datasets, "_bucket_files", lambda *args, **kwargs: [])
     monkeypatch.setattr(
-        cytebase.Repository,
+        datasets.Repository,
         "list_datasets",
         lambda self: ["alpha", "beta"],
     )
 
     with pytest.raises(KeyError) as raised:
-        cytebase.Repository("cytearc_docs").download_dataset("missing", tmp_path)
+        datasets.Repository("cytearc_docs").download_dataset("missing", tmp_path)
     assert raised.value.args[0] == (
         "'missing' is not in repository 'cytearc_docs'. Available datasets:\nalpha\nbeta"
     )
@@ -476,18 +476,18 @@ def test_download_dataset_reports_unknown_name(monkeypatch, tmp_path):
     ["", ".", "..", "../outside", "/outside", r"..\outside", "a//b"],
 )
 def test_repository_rejects_invalid_remote_paths(path, tmp_path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     with pytest.raises(ValueError, match="Invalid download path"):
-        cytebase.Repository("cytearc_docs").download(path, tmp_path)
+        datasets.Repository("cytearc_docs").download(path, tmp_path)
 
 
 def test_download_preserves_existing_file_when_transfer_fails(monkeypatch, tmp_path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     file = bucket_file("cytearc_docs/alpha/data.bin", 3)
     monkeypatch.setattr(
-        cytebase,
+        datasets,
         "_bucket_files",
         lambda repository, path, recursive: [file],
     )
@@ -500,10 +500,10 @@ def test_download_preserves_existing_file_when_transfer_fails(monkeypatch, tmp_p
         files[0][1].write_bytes(b"new")
         raise RuntimeError("transfer failed")
 
-    monkeypatch.setattr(cytebase, "download_bucket_files", fail_download)
+    monkeypatch.setattr(datasets, "download_bucket_files", fail_download)
 
     with pytest.raises(RuntimeError, match="transfer failed"):
-        cytebase.Repository("cytearc_docs").download("alpha/data.bin", downloads)
+        datasets.Repository("cytearc_docs").download("alpha/data.bin", downloads)
 
     assert destination.read_bytes() == b"existing"
     assert _tree(downloads) == ["alpha", "alpha/data.bin"]
@@ -513,11 +513,11 @@ def test_download_rejects_size_mismatch_and_preserves_existing(
     monkeypatch,
     tmp_path,
 ):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     file = bucket_file("cytearc_docs/alpha/data.bin", 4)
     monkeypatch.setattr(
-        cytebase,
+        datasets,
         "_bucket_files",
         lambda repository, path, recursive: [file],
     )
@@ -535,20 +535,20 @@ def test_download_rejects_size_mismatch_and_preserves_existing(
     ):
         files[0][1].write_bytes(b"new")
 
-    monkeypatch.setattr(cytebase, "download_bucket_files", incomplete_download)
+    monkeypatch.setattr(datasets, "download_bucket_files", incomplete_download)
 
     with pytest.raises(
         OSError,
         match="^Downloaded 3 bytes for 'cytearc_docs/alpha/data.bin', expected 4$",
     ):
-        cytebase.Repository("cytearc_docs").download("alpha/data.bin", downloads)
+        datasets.Repository("cytearc_docs").download("alpha/data.bin", downloads)
 
     assert destination.read_bytes() == b"existing"
     assert _tree(downloads) == ["alpha", "alpha/data.bin"]
 
 
 def test_download_rejects_unsafe_tar_member(monkeypatch, tmp_path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     archive_buffer = io.BytesIO()
     payload = b"unsafe"
@@ -562,7 +562,7 @@ def test_download_rejects_unsafe_tar_member(monkeypatch, tmp_path):
         len(archive_bytes),
     )
     monkeypatch.setattr(
-        cytebase,
+        datasets,
         "_bucket_files",
         lambda repository, path, recursive: [file],
     )
@@ -570,11 +570,11 @@ def test_download_rejects_unsafe_tar_member(monkeypatch, tmp_path):
     def fake_download(bucket_id, files, *, raise_on_missing_files=False, token=None):
         files[0][1].write_bytes(archive_bytes)
 
-    monkeypatch.setattr(cytebase, "download_bucket_files", fake_download)
+    monkeypatch.setattr(datasets, "download_bucket_files", fake_download)
 
     downloads = tmp_path / "downloads"
     with pytest.raises(ValueError, match="^Unsafe tar archive member: ../outside.txt$"):
-        cytebase.Repository("cytearc_docs").download("alpha/data.tar.gz", downloads)
+        datasets.Repository("cytearc_docs").download("alpha/data.tar.gz", downloads)
 
     assert not (tmp_path / "outside.txt").exists()
     assert _tree(downloads) == ["alpha"]
@@ -583,7 +583,7 @@ def test_download_rejects_unsafe_tar_member(monkeypatch, tmp_path):
 def test_download_of_a_directory_skips_folders_and_sibling_prefixes(
     monkeypatch, tmp_path
 ):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     calls = []
 
@@ -604,11 +604,11 @@ def test_download_of_a_directory_skips_folders_and_sibling_prefixes(
             requested.append(file.path)
             destination.write_bytes(b"x" * file.size)
 
-    monkeypatch.setattr(cytebase, "list_bucket_tree", fake_list_bucket_tree)
-    monkeypatch.setattr(cytebase, "download_bucket_files", fake_download)
+    monkeypatch.setattr(datasets, "list_bucket_tree", fake_list_bucket_tree)
+    monkeypatch.setattr(datasets, "download_bucket_files", fake_download)
     downloads = tmp_path / "downloads"
 
-    downloaded = cytebase.Repository("cytearc_docs").download("alpha", downloads)
+    downloaded = datasets.Repository("cytearc_docs").download("alpha", downloads)
 
     assert calls == [("Nygen/cytebase", "cytearc_docs/alpha", True, False)]
     assert requested == [
@@ -629,10 +629,10 @@ def test_download_of_a_directory_skips_folders_and_sibling_prefixes(
 
 
 def test_download_reports_a_path_without_files(monkeypatch, tmp_path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     monkeypatch.setattr(
-        cytebase,
+        datasets,
         "list_bucket_tree",
         lambda *args, **kwargs: [bucket_folder("cytearc_docs/alpha/empty")],
     )
@@ -640,24 +640,24 @@ def test_download_reports_a_path_without_files(monkeypatch, tmp_path):
     with pytest.raises(
         FileNotFoundError, match="^No CyteBase files found at cytearc_docs/alpha/empty$"
     ):
-        cytebase.Repository("cytearc_docs").download("alpha/empty", tmp_path / "out")
+        datasets.Repository("cytearc_docs").download("alpha/empty", tmp_path / "out")
     assert not (tmp_path / "out").exists()
 
 
 def test_download_rejects_a_listing_that_escapes_the_destination(monkeypatch, tmp_path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     monkeypatch.setattr(
-        cytebase,
+        datasets,
         "list_bucket_tree",
         lambda *args, **kwargs: [bucket_file("cytearc_docs/alpha/../../escape", 1)],
     )
-    monkeypatch.setattr(cytebase, "download_bucket_files", _unexpected_download)
+    monkeypatch.setattr(datasets, "download_bucket_files", _unexpected_download)
 
     with pytest.raises(
         ValueError, match="^Invalid bucket file path: 'alpha/../../escape'$"
     ):
-        cytebase.Repository("cytearc_docs").download("alpha", tmp_path / "out")
+        datasets.Repository("cytearc_docs").download("alpha", tmp_path / "out")
     assert not (tmp_path / "out").exists()
 
 
@@ -667,22 +667,22 @@ def _unexpected_download(*_args, **_kwargs):
 
 @pytest.mark.parametrize("path", ["other/alpha/data.bin", "cytearc_docs_v2/data.bin"])
 def test_bucket_file_paths_must_stay_inside_their_repository(path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     # Listings are filtered by the requested prefix first, so this guards the
     # helper rather than a path that Repository methods reach today.
     with pytest.raises(
         ValueError, match=f"^File is outside repository 'cytearc_docs': '{path}'$"
     ):
-        cytebase._relative_file_path("cytearc_docs", bucket_file(path, 1))
+        datasets._relative_file_path("cytearc_docs", bucket_file(path, 1))
 
 
 def test_download_rejects_files_the_transfer_skipped(monkeypatch, tmp_path):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     file = bucket_file("cytearc_docs/alpha/data.bin", 3)
     monkeypatch.setattr(
-        cytebase,
+        datasets,
         "_bucket_files",
         lambda repository, path, recursive: [file],
     )
@@ -692,14 +692,14 @@ def test_download_rejects_files_the_transfer_skipped(monkeypatch, tmp_path):
     destination.write_bytes(b"old")
     # The transfer returns without writing the file it was asked for.
     monkeypatch.setattr(
-        cytebase, "download_bucket_files", lambda bucket_id, files, **kwargs: None
+        datasets, "download_bucket_files", lambda bucket_id, files, **kwargs: None
     )
 
     with pytest.raises(
         FileNotFoundError,
         match="^CyteBase did not download 'cytearc_docs/alpha/data.bin'$",
     ):
-        cytebase.Repository("cytearc_docs").download("alpha/data.bin", downloads)
+        datasets.Repository("cytearc_docs").download("alpha/data.bin", downloads)
 
     assert destination.read_bytes() == b"old"
     assert _tree(downloads) == ["alpha", "alpha/data.bin"]
@@ -709,7 +709,7 @@ def test_download_rejects_files_the_transfer_skipped(monkeypatch, tmp_path):
 def test_failed_archive_install_restores_the_previous_download(
     monkeypatch, tmp_path, previous
 ):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     dataset = tmp_path / "downloads" / "alpha"
     dataset.mkdir(parents=True)
@@ -723,13 +723,13 @@ def test_failed_archive_install_restores_the_previous_download(
     ).read_bytes()
     remote = bucket_file("cytearc_docs/alpha/data.zarr.tar.gz", len(archive_bytes))
     monkeypatch.setattr(
-        cytebase, "_bucket_files", lambda repository, path, recursive: [remote]
+        datasets, "_bucket_files", lambda repository, path, recursive: [remote]
     )
 
     def fake_download(bucket_id, files, *, raise_on_missing_files=False, token=None):
         files[0][1].write_bytes(archive_bytes)
 
-    monkeypatch.setattr(cytebase, "download_bucket_files", fake_download)
+    monkeypatch.setattr(datasets, "download_bucket_files", fake_download)
     real_replace = os.replace
 
     def replace(source, destination):
@@ -738,10 +738,10 @@ def test_failed_archive_install_restores_the_previous_download(
             raise OSError("No space left on device")
         real_replace(source, destination)
 
-    monkeypatch.setattr(cytebase.os, "replace", replace)
+    monkeypatch.setattr(datasets.os, "replace", replace)
 
     with pytest.raises(OSError, match="^No space left on device$"):
-        cytebase.Repository("cytearc_docs").download_dataset(
+        datasets.Repository("cytearc_docs").download_dataset(
             "alpha", tmp_path / "downloads", zarr=True
         )
 
@@ -782,7 +782,7 @@ def test_failed_archive_install_restores_the_previous_download(
     ],
 )
 def test_archive_rejects_unsafe_links_and_special_members(tmp_path, member, message):
-    from cytearc.cytebase import _extract_and_replace
+    from cytearc.datasets import _extract_and_replace
 
     work = tmp_path / "work"
     output = work / "data.zarr"
@@ -812,7 +812,7 @@ def test_archive_rejects_unsafe_links_and_special_members(tmp_path, member, mess
 def test_tar_members_must_resolve_inside_the_staging_directory(
     tmp_path, member, message
 ):
-    from cytearc.cytebase import _safe_tar_members
+    from cytearc.datasets import _safe_tar_members
 
     # Downloads extract into a fresh directory, where a relative name without
     # ".." stays inside; an existing symlink is what could carry it outside.
@@ -830,7 +830,7 @@ def test_tar_members_must_resolve_inside_the_staging_directory(
 
 
 def test_archive_cannot_replace_its_own_download_path(tmp_path):
-    from cytearc.cytebase import _extract_and_replace
+    from cytearc.datasets import _extract_and_replace
 
     work = tmp_path / "work"
     work.mkdir()
@@ -847,7 +847,7 @@ def test_archive_cannot_replace_its_own_download_path(tmp_path):
 
 
 def test_remove_path_unlinks_symlinks_without_following_them(tmp_path):
-    from cytearc.cytebase import _remove_path
+    from cytearc.datasets import _remove_path
 
     target = tmp_path / "target"
     target.mkdir()
@@ -869,11 +869,11 @@ def test_remove_path_unlinks_symlinks_without_following_them(tmp_path):
 
 @pytest.mark.integration
 def test_live_bucket_catalog_is_public():
-    from cytearc import cytebase
+    from cytearc import datasets
 
-    assert "cytearc_docs" in cytebase.list_repositories()
-    repository = cytebase.connect("cytearc_docs")
-    datasets = set(repository.list_datasets())
+    assert "cytearc_docs" in datasets.list_repositories()
+    repository = datasets.connect("cytearc_docs")
+    names = set(repository.list_datasets())
     assert {
         "annotations",
         "bastidas-ponce_4K_pancreas-d15_rnaseq",
@@ -884,10 +884,10 @@ def test_live_bucket_catalog_is_public():
         "tenx_10K_pbmc-v1_atacseq",
         "tenx_5K_pbmc_rnaseq",
         "tenx_8K_pbmc_citeseq",
-    } <= datasets
+    } <= names
     files = [
-        cytebase._relative_file_path("cytearc_docs", file).as_posix()
-        for file in cytebase._bucket_files(
+        datasets._relative_file_path("cytearc_docs", file).as_posix()
+        for file in datasets._bucket_files(
             "cytearc_docs", "tenx_5K_pbmc_rnaseq", recursive=True
         )
     ]
@@ -901,10 +901,10 @@ def test_live_bucket_catalog_is_public():
 
 @pytest.mark.integration
 def test_live_zarr_archive_download(tmp_path, monkeypatch):
-    from cytearc import cytebase
+    from cytearc import datasets
 
     monkeypatch.delenv("CYTEARC_CYTEBASE_LOCAL", raising=False)
-    dataset_path = cytebase.connect("cytearc_docs").download_dataset(
+    dataset_path = datasets.connect("cytearc_docs").download_dataset(
         "tenx_5K_pbmc_rnaseq",
         tmp_path,
         zarr=True,
@@ -914,57 +914,44 @@ def test_live_zarr_archive_download(tmp_path, monkeypatch):
     assert (dataset_path / "data.zarr").is_dir()
 
 
-def test_lazy_exports_import_and_cache_sdk_objects(monkeypatch):
+def test_datasets_exports_the_example_repository_api():
+    from cytearc import datasets
+
+    assert datasets.__all__ == ["Repository", "connect", "list_repositories"]
+    assert set(datasets.__all__) <= set(dir(datasets))
+
+
+def test_cytebase_keeps_the_earlier_names_of_the_example_downloads():
+    from cytearc import cytebase, datasets
+
+    assert cytebase.__all__ == datasets.__all__
+    for name in datasets.__all__:
+        assert getattr(cytebase, name) is getattr(datasets, name)
+    assert set(cytebase.__all__) <= set(dir(cytebase))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Catalog",
+        "DatasetEntry",
+        "Release",
+        "embedding",
+        "embedding_coordinates",
+        "embeddings",
+        "releases",
+    ],
+)
+def test_cytebase_sdk_names_point_to_the_separate_package(name):
     from cytearc import cytebase
-    from cytearc.cytebase import _embeddings, _releases
-    from cytearc.cytebase.catalog import Catalog
-    from cytearc.cytebase.entry import DatasetEntry
 
-    exports = {
-        "Catalog": Catalog,
-        "DatasetEntry": DatasetEntry,
-        "embeddings": _embeddings.embeddings,
-        "embedding": _embeddings.embedding,
-        "embedding_coordinates": _embeddings.embedding_coordinates,
-        "Release": _releases.Release,
-        "releases": _releases.releases,
-    }
-    for name, value in exports.items():
-        monkeypatch.delitem(vars(cytebase), name, raising=False)
-        assert getattr(cytebase, name) is value
-        assert vars(cytebase)[name] is value
+    with pytest.raises(AttributeError, match=r"pip install cytebase"):
+        getattr(cytebase, name)
+    assert not hasattr(cytebase, name)
 
 
-def test_removed_dataset_wrapper_is_not_exported():
-    from importlib.util import find_spec
-
-    from cytearc import cytebase
-
-    assert find_spec("cytearc.cytebase.dataset") is None
-    assert "CytebaseDataset" not in cytebase.__all__
-    assert "CytebaseDataset" not in dir(cytebase)
-    with pytest.raises(AttributeError, match="has no attribute 'CytebaseDataset'"):
-        cytebase.CytebaseDataset
-
-
-def test_unknown_module_attributes_raise():
+def test_cytebase_rejects_unknown_names():
     from cytearc import cytebase
 
     with pytest.raises(AttributeError, match="has no attribute 'missing'"):
         cytebase.missing
-
-
-def test_dir_lists_lazy_exports():
-    from cytearc import cytebase
-
-    assert {
-        "Catalog",
-        "DatasetEntry",
-        "Repository",
-        "connect",
-        "embeddings",
-        "embedding",
-        "embedding_coordinates",
-        "Release",
-        "releases",
-    } <= set(dir(cytebase))

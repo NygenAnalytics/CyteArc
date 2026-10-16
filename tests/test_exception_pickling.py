@@ -26,7 +26,6 @@ from cytearc.agent.provider import (
     RequestBudgetExceeded,
 )
 from cytearc.agent.records import RecordError, RunLockedError
-from cytearc.cytebase.pipeline.resources import ImportMemoryRefusal
 from cytearc.datastore.pipeline_run import PipelineExecutionError
 from cytearc.merge.metadata import _SourceConflict
 from cytearc.metadata.membership import UnmeasuredCellsError
@@ -59,7 +58,6 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
     PromptTooLarge: lambda: PromptTooLarge("The request exceeds 4096 bytes"),
     RecordError: lambda: RecordError("The run record is missing"),
     RunLockedError: lambda: RunLockedError("Another process holds the lock"),
-    ImportMemoryRefusal: lambda: ImportMemoryRefusal("The layout needs 8 GB"),
     PipelineExecutionError: lambda: PipelineExecutionError(
         RUN_ID, "pca", ValueError("bad pca")
     ),

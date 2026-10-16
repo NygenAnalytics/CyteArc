@@ -111,10 +111,10 @@ project:
       title: Custom analyses
   - title: Public datasets
     children:
-    - file: tutorials/cytebase.ipynb
+    - file: tutorials/cytebase_datasets.md
+      title: CyteBase datasets
+    - url: https://docs.nygen.io/CyteBase/
       title: CyteBase catalog
-    - file: tutorials/cytebase_covid19.ipynb
-      title: COVID-19 atlas case study
   - title: Reference
     children:
     - title: API reference

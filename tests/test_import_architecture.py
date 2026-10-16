@@ -920,13 +920,29 @@ def test_retired_root_import_paths_do_not_resolve():
         assert find_spec(module_name) is None
 
 
-def test_cytebase_and_lineage_live_in_packages():
-    cytebase_root = _CYTEARC_ROOT / "cytebase"
-    assert cytebase_root.is_dir()
-    assert not (_CYTEARC_ROOT / "cytebase.py").exists()
-    assert (cytebase_root / "__init__.py").is_file()
+def test_cytebase_alias_datasets_and_lineage_locations():
+    # CyteBase is the separate cytebase package; cytebase.py only keeps the
+    # earlier names of the example-data downloads in datasets.py.
+    assert (_CYTEARC_ROOT / "cytebase.py").is_file()
+    assert not (_CYTEARC_ROOT / "cytebase").exists()
+    assert (_CYTEARC_ROOT / "datasets.py").is_file()
     assert not (_CYTEARC_ROOT / "lineage.py").exists()
     assert (_CYTEARC_ROOT / "storage" / "lineage.py").is_file()
+
+
+def test_cytearc_never_imports_the_cytebase_package():
+    importers = set()
+    for path in _CYTEARC_ROOT.rglob("*.py"):
+        for node in _nodes(path):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names = [node.module]
+            else:
+                continue
+            if any(name.split(".")[0] == "cytebase" for name in names):
+                importers.add(path.relative_to(_CYTEARC_ROOT).as_posix())
+    assert importers == set()
 
 
 def test_utility_modules_use_domain_names():

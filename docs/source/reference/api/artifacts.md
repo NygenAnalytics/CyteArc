@@ -205,7 +205,8 @@ imported_layout = ds.artifacts.find("embedding", imported="X_umap", from_assay="
 `imported` must be a nonempty string and is available only for `"embedding"`. It searches imported
 results separately from computed results, using the same assay scope rules. It cannot be combined
 with `method=`, `graph=`, or `dimreduc_key=`. Other recorded parameter filters remain available.
-The existing `cytebase.embedding` and `cytebase.embeddings` helpers remain supported.
+The `cytebase.embedding` and `cytebase.embeddings` helpers, now in the separate `cytebase` package,
+remain supported.
 For other kinds or arbitrary provenance filters, use `ds.artifacts.list`.
 
 ### Exact provenance filters

@@ -4,7 +4,6 @@ import zarr
 from zarr.storage import MemoryStore
 
 from cytearc import DataStore, mount_datastore
-from cytearc.cytebase._embeddings import embedding
 from cytearc.embeddings.imported import write_imported_embedding
 from cytearc.storage import operation_revisions, validation_scope
 from cytearc.storage.artifact_writer import (
@@ -413,8 +412,6 @@ def test_find_imported_embedding_uses_source_key_assay_and_exact_parameters(
         datastore.artifacts.find("embedding", imported="X_umap", from_assay="ADT")
         == adt
     )
-    assert embedding(datastore) == expected
-    assert embedding(datastore, assay="ADT") == adt
     loaded = datastore.artifacts.load_values(expected)
     np.testing.assert_array_equal(
         loaded.values,
@@ -461,8 +458,6 @@ def test_find_imported_embedding_ambiguity_keeps_all_refs_and_can_be_narrowed(
     assert first.artifact_id in str(caught.value)
     assert second.artifact_id in str(caught.value)
     assert datastore.artifacts.find("embedding", imported="X_umap", dims=3) == second
-    with pytest.raises(ValueError, match="ambiguous"):
-        embedding(datastore)
 
 
 def test_find_imported_embedding_reads_mount_source_and_reports_target_ambiguity(

@@ -116,11 +116,16 @@ A domain that persists an artifact may use a narrow, named `storage` adapter.
 
 ### Import and export
 
-- `cytebase/` discovers datasets and connects to their CyteArc datastores. `DatasetEntry` owns
-  catalog metadata and source-record descriptions. `Catalog.open_datastore` and
-  `Catalog.mount_datastore` return `DataStore` objects; module-level embedding helpers resolve
-  imported artifacts from those objects. Cell metadata and plotting use the existing `DataStore`
-  APIs. Repository helpers list and download public example datasets.
+- `datasets.py` owns the public example-dataset downloads: `list_repositories`, `connect`, and
+  `Repository` list and download the example repositories, such as `cytearc_docs`, in the public
+  `Nygen/cytebase` Hugging Face bucket.
+- `cytebase.py` keeps the earlier names of those downloads, `Repository`, `connect`, and
+  `list_repositories`, through CyteArc 1.x. The CyteBase catalog SDK and its build pipeline are
+  the separate `cytebase` package in the
+  [CyteBase repository](https://github.com/NygenAnalytics/CyteBase), which depends on CyteArc.
+  CyteArc never imports it, which `tests/test_import_architecture.py` enforces; reading a catalog
+  name such as `cytearc.cytebase.Catalog` raises an `AttributeError` that names the package.
+  CyteArc opens CyteBase datasets by their `hf://` URIs like any other remote store.
 - `readers/` parses supported input formats.
 - `writers/` materializes CyteArc stores and exports supported formats.
 - `merge/` combines assays and datasets without importing `DataStore` during normal module loading.
@@ -223,6 +228,7 @@ The accessor imports concrete plot implementations only when a method is called,
 The lazy facades in `cytearc`, `agent`, `features` and its subpackages, `readers`, `writers`, `merge`, `utils`, `neighbors`, `clustering`, `embeddings`, `trajectory`, `regulons`, and `plotting` are architectural boundaries, not temporary deprecation shims.
 Their documented 1.x exports preserve stable import paths and defer optional or expensive implementations until an export is accessed.
 All of them use one private helper, `cytearc._facade`: an export wins over a same-named submodule, resolving an export never replaces a bound value, and only `readers`, `writers`, `merge`, and `utils` present the objects they own under the facade's `__module__`.
+`cytebase` is a plain module that keeps the earlier public names of the example downloads, re-exported from `datasets`, through CyteArc 1.x.
 
 The `assay`, `mapping`, `matrix`, `metadata`, `metrics`, and `quality_control` package initializers are eager domain facades.
 API reference pages and public contract tests define which of their exports carry compatibility guarantees.
@@ -840,7 +846,7 @@ CyteArc validates persisted data and public arguments against the following cont
   `cytearc.matrix.Block`, `ChunkedArray.blocks`, `map_blocks`, `dot`, `std`, `chunks`, and
   `nthreads`, `Assay.to_raw_sparse`, `Assay.mean_features`, `cytearc.assay.rna_assay_type_names`,
   `MetaData.mount_location`, `unmount_location`, `remove_trend`, and `insert(location=)`,
-  CyteBase `Repository.list_files` and `open_zarr`, `DataStore.set_default_assay`,
+  `cytearc.cytebase.Repository.list_files` and `open_zarr`, `DataStore.set_default_assay`,
   `last_execution_report`, `calibrate_label_transfer_threshold`, `metric_lisi`, and
   `load_metric_lisi` (use `cytearc.metrics.compute_lisi`), `cytearc.clustering.balanced_cut`,
   `BalancedCut`, and `paris_dendrogram`, `cytearc.neighbors.wnn_integration`,
@@ -1081,10 +1087,6 @@ CyteArc validates persisted data and public arguments against the following cont
   download again.
 - A Seurat matrix specification that holds a mapping where a vector belongs raises
   `MatrixSourceError` naming the slot, instead of `KeyError`.
-- The CyteBase pipeline's HTTP API requires Modal proxy authentication and its own `Cytebase-Token`
-  header, from the `cytebase-api` Modal secret that every deployment environment needs. `GET
-  /jobs/{call_id}` reports only calls that the API started, and the API no longer serves
-  `/openapi.json` or documentation pages.
 - Profiling fixtures name ribosomal features, so their files and checksums change; prepare fixtures
   under a new `datasetPrefixUri`.
 - A forced profiling `createStore` job deletes its store prefix before it downloads; an unforced one

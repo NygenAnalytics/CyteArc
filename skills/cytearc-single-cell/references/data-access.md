@@ -2,14 +2,17 @@
 
 Open, inspect, import, and connect to CyteArc DataStores, including CyteBase remote and mounted
 stores. Docs: <https://docs.nygen.io/CyteArc/tutorials/data-organization>,
-<https://docs.nygen.io/CyteArc/tutorials/import-and-export>, <https://docs.nygen.io/CyteArc/tutorials/cytebase>,
-<https://docs.nygen.io/CyteArc/tutorials/remote-stores>, <https://docs.nygen.io/CyteArc/api/datastore.html>, `import_export.html`, `cytebase.html` (same folder).
+<https://docs.nygen.io/CyteArc/tutorials/import-and-export>,
+<https://docs.nygen.io/CyteArc/tutorials/remote-stores>, <https://docs.nygen.io/CyteArc/api/datastore.html>, `import_export.html`, `datasets.html` (same folder).
+CyteBase docs: <https://docs.nygen.io/CyteBase/>.
 
 ## When to use
 
 - First contact with any dataset: choose read-only or writable, then inspect before computing.
 - Converting 10x, Matrix Market, H5AD, or Seurat RDS input into a CyteArc Zarr store.
 - Finding a CyteBase dataset, exploring it remotely, or mounting it for analysis that saves results.
+  For catalog search in depth, read the `cytebase` skill:
+  <https://github.com/NygenAnalytics/CyteBase/tree/master/skills/cytebase>.
 - Reopening a store or a mount from an earlier session.
 
 ## Key concepts
@@ -34,9 +37,11 @@ stores. Docs: <https://docs.nygen.io/CyteArc/tutorials/data-organization>,
 - A mount is a local writable target whose counts resolve from a separate source recorded in the
   root `matrixSource` attribute (absolute path or URI). Metadata is copied once at mount time; new
   artifacts are written only to the target.
-- CyteBase has three layers: `Catalog` (verified local DuckDB copy of the catalog, no counts),
-  `open_datastore` (read-only, everything remote), `mount_datastore` (local writable target,
-  counts remote, plus a `<target>.cytebase.json` receipt beside it).
+- CyteBase datasets are published CyteArc stores in public Hugging Face buckets, one bucket per
+  release (`Nygen/cytebase-YYMM`), at
+  `hf://buckets/Nygen/cytebase-<release>/datasets/<cytebase_id>/data.zarr`. Open them by URI like
+  any remote store. The separate `cytebase` package, which CyteArc does not install, searches the
+  catalog (its `zarr_uri` column holds these URIs) and adds verified opens with mount receipts.
 - `workspace` names a group inside one Zarr with its own `cellData`, assays, and artifacts (counts
   under `matrices/`). Writers default to `None` (root layout); keep `None` unless the store was
   written with a workspace. A mount records one source workspace and rejects another.
@@ -165,60 +170,43 @@ cytearc.CrToZarr(reader, zarr_loc="pbmc.zarr", mem_budget="128M", policy=policy)
 The need follows genes per cell relative to the gene count, not the number of cells. The 1K PBMC
 CITE-seq file refuses at `512M` and imports at `1G`.
 
-### Find a CyteBase dataset
+### Open a CyteBase dataset by URI
 
 ```python
-from cytearc import cytebase
-
-catalog = cytebase.Catalog()              # latest public release, no credentials
-release = next(r for r in cytebase.releases() if r.latest)  # .version, .bucket, .notes, .changelog
-# Record release.version with results; Catalog(version=release.version) reopens that release.
-hits = catalog.search("bladder immune", limit=5)      # every word, case-insensitive
-ids = [row["cytebase_id"] for row in hits]            # take IDs from rows, not printed tables
-blood = catalog.find_datasets(tissue="blood", organism="Homo sapiens")  # exact labels
-assay_labels = [row["label"] for row in catalog.list_terms("assay")]    # exact facet labels
-small = catalog.query(
-    "SELECT cytebase_id, cell_count FROM datasets "
-    "WHERE status = ? AND cell_count < ? ORDER BY cell_count LIMIT 3",
-    parameters=["ready", 5000],
-)
-entry = catalog.dataset(ids[0])
-print(entry.describe())                   # Markdown summary; does not open the store
-print(entry.cell_count, entry.source_embeddings())    # source obsm keys, imported or not
-```
-
-### Explore a CyteBase dataset read-only
-
-```python
-ds = catalog.open_datastore(entry.id)     # zarr_mode="r", min_features_per_cell=-1
-print(cytebase.embeddings(ds))            # {"X_umap": ArtifactRef}: keys actually imported
-umap_ref = ds.artifacts.find("embedding", imported="X_umap", from_assay="RNA")
-coords = cytebase.embedding_coordinates(ds, umap_ref)  # DataFrame indexed by cell id
+uri = (
+    "hf://buckets/Nygen/cytebase-2610/datasets/"
+    "mcglade_2021_scrna_data_human_fallopian_tube_30f5e171/data.zarr"
+)  # the release (2610) is part of the URI: record the URI with results
+ds = cytearc.DataStore(uri, zarr_mode="r", storage_options={"token": False}, min_features_per_cell=-1)
+umap_ref = ds.artifacts.find("embedding", imported="X_umap", from_assay="RNA")  # the authors' UMAP
+xy = ds.artifacts.load_values(umap_ref).to_pandas()  # DataFrame indexed by cell id
 meta = ds.cells.to_pandas_dataframe(["ids", "donor_id"], key="I").set_index("ids")  # a design column
-frame = coords.join(meta)                 # join on ids, never on row order
+frame = xy.join(meta)                     # join on ids, never on row order
 ```
 
-This lookup works for imported embeddings in any `DataStore` and requires exactly one match.
-Without `imported=`, `find` searches computed results. `cytebase.embedding` remains supported.
+`find(..., imported=...)` works for imported embeddings in any `DataStore` and requires exactly one
+match; without `imported=`, it searches computed results. `storage_options={"token": False}` reads
+anonymously; omit it to use the Hugging Face login. To find URIs, search the catalog with the
+separate `cytebase` package: `cytebase.Catalog(version="2610").search("fallopian tube")[0]["zarr_uri"]`
+(see the `cytebase` skill).
 
 ### Mount a CyteBase dataset for writable analysis
 
-The target must be a new local path. Mounting copies metadata and verifies the source; expect a
-few minutes for a few thousand cells.
+The target must be a new local path. Mounting copies metadata; expect about a minute for a few
+thousand cells.
 
 ```python
-analysis = catalog.mount_datastore(entry.id, at="work/analysis.zarr")
-# Writes work/analysis.zarr (copied metadata, future artifacts) and work/analysis.zarr.cytebase.json
+analysis = cytearc.mount_datastore(
+    uri, at="work/analysis.zarr", storage_options={"token": False}, min_features_per_cell=-1
+)
 print(analysis.zarr_mode, int(analysis.cells.fetch_all("I").sum()), analysis.cells.N)
-print(cytebase.embeddings(analysis))      # the source's imported embeddings, resolved read only
+run = analysis.pipeline.run(label="baseline")  # results are written to work/analysis.zarr
 ```
 
 ### Reopen a mount, or mount any store that owns its counts
 
 ```python
-# Verify against the current published build (needs the .cytebase.json sidecar beside it)
-analysis = catalog.mount_datastore(entry.id, at="work/analysis.zarr")
-# Or open it like any store: counts resolve from matrixSource; no catalog or sidecar needed
+# Open it like any store: counts resolve from matrixSource
 analysis = cytearc.DataStore("work/analysis.zarr", min_features_per_cell=-1)
 # Generic mount; for s3:// or gs:// sources also pass storage_options (not executed here)
 mounted = cytearc.mount_datastore("shared/data.zarr", at="my_analysis.zarr", default_assay="RNA")
@@ -226,8 +214,11 @@ mounted = cytearc.mount_datastore("shared/data.zarr", at="my_analysis.zarr", def
 
 ### Download a documentation dataset
 
+`cytearc.datasets` downloads CyteArc's example datasets, which are not CyteBase catalog entries.
+`cytearc.cytebase.connect` is the same function under its earlier name.
+
 ```python
-repo = cytearc.cytebase.connect("cytearc_docs")
+repo = cytearc.datasets.connect("cytearc_docs")
 print(repo.list_datasets())
 path = repo.download_dataset("tenx_5K_pbmc_rnaseq", destination="cytearc_datasets", zarr=True)
 ds = cytearc.DataStore(f"{path}/data.zarr", zarr_mode="r")  # prepared; run label "docs_default"
@@ -247,8 +238,7 @@ raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datas
 | `workspace` | `None` | store written into a named workspace |
 | `storage_options` | `None` | object-store credentials or endpoints (read from env vars) |
 | `zarrProfile` | from location (`fast_local`/`cloud`) | affects newly written arrays only |
-| `Catalog(bucket=, token=, version=)` | latest release from `cytebase.releases()`, `None` (HF login if present), `None` | private bucket; `token=False` forces anonymous; `version=` opens another listed release (`YYMM` or `YYMM.N`) |
-| `search(limit=)`, `ready_only=` | `50`, `True` | `limit=None` for all; `ready_only=False` for unfinished |
+| `storage_options` for `hf://` URIs | `None` (Hugging Face login if present) | `{"token": False}` for anonymous reads of public CyteBase buckets |
 
 ## Check before moving on
 
@@ -258,9 +248,9 @@ raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datas
 - Imports: `reader.assayFeats` lists the assays to be written; afterwards check
   `ds.RNA.rawData.shape` and dtype. For H5AD, `insp.integerLike` should be `True` for raw counts,
   but SCT-corrected counts are integers too: run "Check the matrix first" in `quality-control.md`.
-- CyteBase: `entry.row["status"] == "ready"`; check `cytebase.embeddings(ds)` before plotting an
-  imported layout.
-- Mounts: `<target>.cytebase.json` exists beside the target; `ds.RNA.rawData.shape` resolves.
+- CyteBase: the URI names the release you intend; `ds.artifacts.find("embedding",
+  imported="X_umap", from_assay="RNA")` succeeds before you plot an imported layout.
+- Mounts: `ds.RNA.rawData.shape` resolves.
 
 ## Pitfalls
 
@@ -273,21 +263,17 @@ raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datas
   rebuild is needed.
 - Percent patterns are fixed at first preparation; a different pattern later raises `ValueError`.
   Use `qc.feature_percentage` (see `quality-control.md`) for another gene set.
-- `open_datastore` rejects writes and any `min_features_per_cell` other than `-1`. Both mount
-  functions reject `zarr_mode="r"`; `cytearc.mount_datastore` refuses an existing target, while
-  `catalog.mount_datastore` reopens one only when its matching sidecar is present.
+- `cytearc.mount_datastore` rejects `zarr_mode="r"` and refuses an existing target; reopen a
+  mount with `cytearc.DataStore`.
 - `SubsetZarr`, `DataStoreMerge`, `mount_datastore`, and repack refuse a source store that holds a
   pending derived assay (`... holds a pending derived assay and cannot be ...`). Once no process is
   writing it, run `ds.discard_interrupted_assay("<name>")` on a writable `DataStore` of its
   workspace, then retry.
-- Catalog reopen needs the sidecar: copying a mount without `<name>.cytebase.json` makes
-  `catalog.mount_datastore` raise `FileExistsError`; plain `cytearc.DataStore` still opens it.
 - The mount source must stay at its recorded path or URI. Mounting a mount raises; repack first.
   A changed CyteBase build requires a new mount directory.
-- Printed `CatalogResults` tables HTML-escape text (`_` as `&#95;`, `'` as `&#39;`). Read IDs and
-  facet labels from the row dicts (`row["cytebase_id"]`, `row["label"]`), never from the table.
-- A mount resolves its source's imported embeddings read only, so `cytebase.embedding(analysis)`
-  and plots work on it; new artifacts are written to the mount.
+- A mount resolves its source's imported embeddings read only, so
+  `analysis.artifacts.find("embedding", imported="X_umap", from_assay="RNA")` and plots work on it;
+  new artifacts are written to the mount.
 - `to_pandas_dataframe(columns)` defaults to `key=None` (all rows); pass `key="I"` for active cells.
 - `to_mtx(..., compress=True)` writes the feature `feature_type` column as the 10x feature type.
   CELLxGENE stores keep gene biotypes there, so re-import split one assay into thousands. Inspect

@@ -660,7 +660,7 @@ def test_hf_metadata_copy_reuses_one_listing(
     from huggingface_hub import BucketFile, HfFileSystem
     from zarr.storage import FsspecStore
 
-    from tests.fixtures_cytebase import FakeHub
+    from tests.fixtures_hub import FakeHub
 
     hub = FakeHub(tmp_path / "hub")
     bucket_id = "tests/metadata"

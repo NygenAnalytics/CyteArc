@@ -17,7 +17,25 @@ _RETIRED_MODULES = {
     "cytearc/bio_data.py",
     "cytearc/chunked.py",
     "cytearc/clustering/feature_graph.py",
-    "cytearc/cytebase.py",
+    "cytearc/cytebase/__init__.py",
+    "cytearc/cytebase/_embeddings.py",
+    "cytearc/cytebase/_releases.py",
+    "cytearc/cytebase/_storage.py",
+    "cytearc/cytebase/catalog.py",
+    "cytearc/cytebase/connector.py",
+    "cytearc/cytebase/display.py",
+    "cytearc/cytebase/entry.py",
+    "cytearc/cytebase/pipeline/__init__.py",
+    "cytearc/cytebase/pipeline/__main__.py",
+    "cytearc/cytebase/pipeline/app.py",
+    "cytearc/cytebase/pipeline/build.py",
+    "cytearc/cytebase/pipeline/catalog.py",
+    "cytearc/cytebase/pipeline/deploy.py",
+    "cytearc/cytebase/pipeline/download.py",
+    "cytearc/cytebase/pipeline/inventory.py",
+    "cytearc/cytebase/pipeline/models.py",
+    "cytearc/cytebase/pipeline/resources.py",
+    "cytearc/cytebase/pipeline/selection.py",
     "cytearc/dendrogram.py",
     "cytearc/downloader.py",
     "cytearc/doublet_utils.py",
@@ -91,6 +109,7 @@ from pathlib import Path
 import cytearc
 import cytearc.plotting as plotting
 import cytearc.cytebase
+import cytearc.datasets
 import cytearc.embeddings.harmony
 import cytearc.features.genomic
 import cytearc.features.markers
@@ -109,7 +128,7 @@ from cytearc.datastore.namespaces import (
     MarkersAccessor,
     TrajectoryAccessor,
 )
-from cytearc.cytebase import Repository, connect, list_repositories
+from cytearc.datasets import Repository, connect, list_repositories
 from cytearc.embeddings.harmony import Harmony, HarmonyResult, fit_harmony
 from cytearc.features import (
     RankMarkerResult,
@@ -173,6 +192,9 @@ assert cytearc.CrToZarr is cytearc.writers.CrToZarr
 assert cytearc.cytebase.Repository is Repository
 assert cytearc.cytebase.connect is connect
 assert cytearc.cytebase.list_repositories is list_repositories
+assert not hasattr(cytearc.cytebase, "Catalog")
+# CyteBase is a separate package that depends on CyteArc, never the reverse.
+assert importlib.util.find_spec("cytebase") is None
 assert cytearc.ArtifactLineage is ArtifactLineage
 assert ArtifactLineage.__module__ == "cytearc.storage.lineage"
 for feature_function in (

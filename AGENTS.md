@@ -15,6 +15,12 @@ These instructions apply to the whole repository.
   `docs/source/developers/contributing.md` for the human contribution workflow.
 - Biological decision guidance belongs in `docs/source/analysis_with_agents.md`, not in repository
   instructions.
+- CyteBase, the dataset catalog and its build pipeline, lives in its own repository,
+  https://github.com/NygenAnalytics/CyteBase, and depends on CyteArc. CyteArc never imports or
+  installs it: CyteArc opens CyteBase datasets by their `hf://` URIs, as
+  `docs/source/tutorials/cytebase_datasets.md` shows. Example-data downloads
+  (`connect("cytearc_docs")`) live in `cytearc/datasets.py`; `cytearc/cytebase.py` only keeps
+  their earlier names.
 
 ## CyteArc developer mental model
 

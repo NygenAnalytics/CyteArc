@@ -476,7 +476,7 @@ def test_remote_composite_reuses_metadata_table_listings(
     from huggingface_hub import BucketFile, HfFileSystem
 
     from cytearc.storage.huggingface import HfReadStore
-    from tests.fixtures_cytebase import FakeHub
+    from tests.fixtures_hub import FakeHub
 
     hub = FakeHub(tmp_path / "hub")
     bucket_id = "tests/composite"
@@ -1750,3 +1750,78 @@ def test_composite_layout_rejects_budget_smaller_than_one_read(sources):
             mapping_width=4,
             memory_bytes=1,
         )
+
+
+@pytest.mark.parametrize("orientation", ["counts", "countsT"])
+def test_reopened_composite_retries_throttled_source_reads(
+    composite_sources, tmp_path, monkeypatch, orientation
+):
+    import httpx2
+    from huggingface_hub.errors import HfHubHTTPError
+
+    from cytearc.storage import huggingface
+
+    local_path = str(composite_sources["a"][0])
+    source = DataStore(
+        huggingface.HfReadStore.from_url(local_path, read_only=True),
+        zarr_mode="r",
+        min_features_per_cell=-1,
+        nthreads=1,
+        mem_budget="64M",
+    )
+    source.zarr_loc = "hf://buckets/test/composite/source.zarr"
+    path = tmp_path / "joint.zarr"
+    joint = create_composite(
+        {"study": source},
+        at=path,
+        features="intersection",
+        rows={"study": [1, 4]},
+        nthreads=1,
+        mem_budget="64M",
+    )
+    expected = joint.RNA.matrixGroup[orientation][:]
+    from_url = huggingface.HfReadStore.from_url
+
+    def local_source(url, *, storage_options=None, read_only=False):
+        assert url == source.zarr_loc
+        assert storage_options == {"token": False}
+        return from_url(local_path, read_only=read_only)
+
+    monkeypatch.setattr(huggingface.HfReadStore, "from_url", local_source)
+    reopened = DataStore(
+        str(path),
+        nthreads=1,
+        mem_budget="64M",
+        source_storage_options={"study": {"token": False}},
+    )
+    store = reopened.z.store._roots["study"].store
+    read = store.fs._cat_file
+    failed = False
+    sleeps = []
+
+    async def throttled(path, *args, **kwargs):
+        nonlocal failed
+        if f"/RNA/{orientation}/c/" in path and not failed:
+            failed = True
+            response = httpx2.Response(
+                429,
+                headers={"Retry-After": "7"},
+                request=httpx2.Request("GET", "https://bucket.invalid/object"),
+            )
+            raise HfHubHTTPError("Rate limited", response=response)
+        return await read(path, *args, **kwargs)
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(store.fs, "_cat_file", throttled)
+    monkeypatch.setattr(huggingface.asyncio, "sleep", sleep)
+    try:
+        np.testing.assert_array_equal(
+            reopened.RNA.matrixGroup[orientation][:], expected
+        )
+        assert failed
+        assert sleeps == [7.0]
+    finally:
+        for datastore in (reopened, joint, source):
+            datastore.z.store.close()

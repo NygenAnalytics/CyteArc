@@ -11,7 +11,7 @@ Public CyteArc surfaces for analysts:
   CUT&RUN peaks, enhancer-driven regulons, and co-regulated gene programs
 - Readers that ingest source formats; writers that create or export Zarr stores (and other exports)
 - `cytearc.plotting`
-- `cytearc.cytebase.Catalog`, metadata-only `DatasetEntry` objects, and direct access to cloud-hosted CyteArc DataStores
+- `cytearc.datasets` for the public example datasets that the tutorials download
 - Documented integration metrics (`DataStore.metric_*`; `cytearc.metrics` holds the underlying functions)
 - `MappingReference` / `MappingResult` for atlas-style mapping
 
@@ -32,8 +32,12 @@ Prefer calling methods on `DataStore`.
 | Mapping | [Mapping API reference](/api/mapping.html) |
 | Regulons and gene programs | [Regulons API reference](/api/regulons.html) |
 | Plotting | [Plotting API reference](/api/plotting.html) |
-| CyteBase datasets | [CyteBase API reference](/api/cytebase.html) |
+| Example datasets | [Example datasets API reference](/api/datasets.html) |
 | Utilities | [Utilities API reference](/api/utilities.html) |
+
+The CyteBase catalog of cloud-hosted datasets is the separate `cytebase` package; see the
+[CyteBase documentation](https://docs.nygen.io/CyteBase/) for its API. CyteArc opens CyteBase
+datasets by URI, as [](../tutorials/cytebase_datasets.md) shows.
 
 [](../scanpy.md), [](../seurat.md), and [](../tutorials/scrna_seq.ipynb) describe related workflows;
 this table is this reference's own grouping and only partially overlaps those pages.

@@ -2,6 +2,8 @@
 
 > Out-of-core, provenance-backed single-cell analysis for RNA, ATAC, protein, and matched multi-omic data. This documentation is published from the master branch and covers supported workflows, public APIs, and their limitations.
 
+CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStores, is the separate `cytebase` package; CyteArc opens its datasets by their hf:// URIs. Its documentation is published at https://docs.nygen.io/CyteBase/.
+
 - [Home](./): choose a first example or find a guide for your analysis
 
 ## Getting started
@@ -37,6 +39,7 @@
 ## Integration and mapping
 
 - [CyteBase composite datasets](tutorials/composite-datasets/): jointly analyze remote datasets, compare Harmony correction, and reopen saved results while counts stay in their sources
+- [CyteBase datasets](tutorials/cytebase-datasets/): open public CyteBase datasets by URI, read-only or as a writable mount, and run the pipeline on them
 - [Dataset merging](tutorials/dataset-merging/): compatible stores and an uncorrected joint baseline
 - [Harmony batch correction](tutorials/batch-correction/): Harmony, batch mixing, and biological conservation
 - [Reference mapping and label transfer](tutorials/mapping-and-label-transfer/): fixed-reference projection
@@ -63,11 +66,6 @@
 - [Provenance](concepts/provenance/): artifacts, reuse, lineage, and limits
 - [Custom analyses](tutorials/custom-analyses/): public extension and export boundaries
 
-## Public datasets
-
-- [CyteBase catalog](tutorials/cytebase/): search cloud-hosted datasets, inspect annotations, and mount a published store
-- [COVID-19 atlas case study](tutorials/cytebase-covid19/): compare donors using metadata, the published UMAP, and gene summaries
-
 ## Reference
 
 - [Memory and execution](concepts/memory-and-execution/): choose budgets and workers, inspect run reports, and understand memory reservations
@@ -88,8 +86,8 @@
 - [Artifacts and lineage](api/artifacts.html): find saved results, trace their inputs, and summarize analyses
 - [Import and export](api/import_export.html): readers, writers, dataset merging, and storage controls
 - [Plotting](api/plotting.html): embeddings, expression, clusters, trajectories, and diagnostics
+- [Example datasets](api/datasets.html): list and download the public example datasets that the tutorials use
 - [Utilities](api/utilities.html): store loading, computation settings, gene sets, logging, and progress
-- [CyteBase API](api/cytebase.html): catalog queries, metadata-only DatasetEntry objects, remote DataStore access, imported embedding helpers, and writable mounts with remote counts
 
 ## Developers
 

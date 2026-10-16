@@ -165,7 +165,7 @@ def main() -> None:
         }
         dataset = args.store.parent.name
         dataset_source = (
-            "cytearc.cytebase.connect('cytearc_docs')"
+            "cytearc.datasets.connect('cytearc_docs')"
             if args.store == DEFAULT_STORE
             else str(args.store)
         )

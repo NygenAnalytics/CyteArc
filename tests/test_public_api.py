@@ -75,6 +75,7 @@ _EXPECTED_EXPORTS = {
 _EXPECTED_MODULE_ATTRIBUTES = {
     "assay": "cytearc.assay",
     "cytebase": "cytearc.cytebase",
+    "datasets": "cytearc.datasets",
     "datastore": "cytearc.datastore",
     "embeddings": "cytearc.embeddings",
     "features": "cytearc.features",

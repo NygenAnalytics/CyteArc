@@ -165,8 +165,8 @@ Plan local disk for float32 dense blocks roughly as `n_cells × n_features × 4`
 ## Choosing remote or local storage
 
 Object-store latency, request costs, credentials, and provider behavior depend on the service.
-Repeated passes over counts may be faster with a local copy. Downloads remain available through
-CyteBase, as shown in the [](../quickstart.ipynb).
+Repeated passes over counts may be faster with a local copy. The prepared example datasets can be
+downloaded as local stores, as shown in the [](../quickstart.ipynb).
 
 For timing and memory measurements, see
 [Measuring resource use](../concepts/memory_and_execution.md#measuring-resource-use).

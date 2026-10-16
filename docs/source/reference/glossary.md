@@ -71,9 +71,11 @@ dataset
   A dataset can be distributed as a source file and as a CyteArc datastore.
 
 DatasetEntry
-: Metadata-only CyteBase catalog entry returned by `Catalog.dataset(cytebase_id)`.
+: Metadata-only CyteBase catalog entry returned by `Catalog.dataset(cytebase_id)` in the separate
+  `cytebase` package. CyteArc opens the same dataset by its `zarr_uri`.
   It describes a dataset's identity, citation, size, and source record.
   Use `Catalog.open_datastore(entry.id)` or `Catalog.mount_datastore(entry.id, at=...)` to access its CyteArc datastore.
+  See the [CyteBase documentation](https://docs.nygen.io/CyteBase/).
 
 assay
 : Named modality inside a `DataStore` (for example `RNA`, `ADT`, `ATAC`).

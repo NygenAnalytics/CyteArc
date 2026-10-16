@@ -6,7 +6,8 @@ myst:
 
 # Utilities API reference
 
-For dataset discovery, remote exploration, and example downloads, see {doc}`cytebase`.
+For example downloads, see {doc}`datasets`. The CyteBase catalog of cloud-hosted datasets is the
+separate `cytebase` package, documented at <https://docs.nygen.io/CyteBase/>.
 
 ## Store and computation helpers
 

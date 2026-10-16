@@ -30,7 +30,9 @@ The general workflow and an example without provider credentials are in
 
 ## Set up the notebook folder
 
-Use an environment with CyteArc's `agent`, `cytebase`, `docs`, and `extra` extras.
+Use an environment with CyteArc's `agent`, `docs`, and `extra` extras and the separate
+`cytebase` package (`uv pip install cytebase`), which resolves the dataset through the CyteBase
+catalog.
 Configure `AGENT_API_KEY` in your environment or a local `.env` file. This example
 uses the OpenAI-compatible Baseten endpoint and `deepseek-ai/DeepSeek-V4.1-Flash`;
 model calls send supplied metadata and measured marker evidence to that provider.
@@ -96,10 +98,10 @@ A different source or scientific policy should use a new notebook folder.
 
 ```{code-cell} ipython3
 # Download the catalog source and prepare a separate local count store.
+import cytebase
 from huggingface_hub import BucketFile, download_bucket_files, get_token, list_bucket_tree
 from huggingface_hub.utils import disable_progress_bars
 
-from cytearc import cytebase
 from cytearc.tools.repack_zarr import repack_store
 
 # Prepare the local dataset once; later visits reuse this directory.

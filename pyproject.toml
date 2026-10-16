@@ -55,15 +55,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-cytebase = [
-    "duckdb>=1.5.5",
-    "httpx>=0.28.1",
-    "matplotlib>=3.9.2",
-    "pytz>=2026.3.post1",
-    "seaborn>=0.13",
-]
 agent = [
     "pydantic-ai-slim[openai]>=2.51.0",
+    # cytearc.agent.provider classifies httpx transport errors.
+    "httpx>=0.28.1",
 ]
 extra = [
     "anndata>=0.12",
@@ -88,6 +83,7 @@ test = [
     "scikit-network>=0.33.3",
     "rdata>=1.1.0",
     "pydantic-ai-slim[openai]>=2.51.0",
+    "httpx>=0.28.1",
     "polars>=1.20",
     # CI runs t-SNE on Linux x86_64, where sgtsnepi has wheels.
     "sgtsnepi>=0.7; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -183,15 +179,6 @@ badge-format = "svg"
 [dependency-groups]
 # Modal refuses to import on Python 3.15, so these groups omit it there and the
 # tests that need it skip.
-cytebase = [
-    "modal>=1.5.2; python_version < '3.15'",
-    "fastapi>=0.141.1",
-    "httpx>=0.28.1",
-    "pydantic>=2.13.4",
-    "duckdb>=1.5.5",
-    "natsort>=8.4.0",
-    "pytz>=2026.3.post1",
-]
 profiling = [
     "anndata>=0.12.18",
     "modal>=1.5.2; python_version < '3.15'",

@@ -1,10 +1,10 @@
 ---
 name: cytearc-single-cell
-description: Analyze single-cell data with core CyteArc, the out-of-core Zarr DataStore library with immutable artifacts and pipeline runs. Covers opening, converting and mounting stores (including CyteBase datasets), QC with removal audits, HVG/PCA/neighbour graphs, Leiden/Paris clustering, UMAP, markers and cautious annotation, batch correction and donor-level comparisons, headless plotting, provenance and export. Use when a task involves a CyteArc .zarr store, a CyteBase dataset, cytearc.DataStore, ds.pipeline, or converting H5AD/10x/MTX/Seurat data for CyteArc. Does not cover cytearc.agent (the automated agent package).
+description: Analyze single-cell data with core CyteArc, the out-of-core Zarr DataStore library with immutable artifacts and pipeline runs. Covers opening, converting and mounting stores (including public CyteBase datasets opened by their hf:// URIs), QC with removal audits, HVG/PCA/neighbour graphs, Leiden/Paris clustering, UMAP, markers and cautious annotation, batch correction and donor-level comparisons, headless plotting, provenance and export. Use when a task involves a CyteArc .zarr store, a CyteBase dataset, cytearc.DataStore, ds.pipeline, or converting H5AD/10x/MTX/Seurat data for CyteArc. Does not cover cytearc.agent (the automated agent package); for CyteBase catalog search in depth, use the cytebase skill.
 license: BSD-3-Clause
-compatibility: Requires Python 3.13+ and cytearc 1.0.0rc1 or newer (pip install "cytearc[extra]>=1.0.0rc1"; add the cytebase extra and network access for CyteBase datasets, the tsne extra for t-SNE, and the regulons extra for cisTarget ranking databases).
+compatibility: Requires Python 3.13+ and cytearc 1.0.0rc1 or newer (pip install "cytearc[extra]>=1.0.0rc1"; CyteBase datasets need network access, and searching their catalog needs the separate cytebase package; add the tsne extra for t-SNE and the regulons extra for cisTarget ranking databases).
 metadata:
-  version: "0.4"
+  version: "0.5"
 ---
 
 # CyteArc single-cell analysis
@@ -23,9 +23,12 @@ not thresholds.
 ## Setup
 
 - Install into the environment you run Python from: `pip install "cytearc[extra]>=1.0.0rc1"`, plus
-  `cytearc[cytebase]` for CyteBase, `cytearc[tsne]` for t-SNE, and `cytearc[regulons]` for cisTarget
-  ranking databases. The explicit pre-release floor matters: a
-  bare `cytearc[extra]` does not explicitly request a release candidate.
+  `cytearc[tsne]` for t-SNE and `cytearc[regulons]` for cisTarget ranking databases. The explicit
+  pre-release floor matters: a bare `cytearc[extra]` does not explicitly request a release candidate.
+- CyteBase datasets are CyteArc stores in public Hugging Face buckets, opened by URI with plain
+  CyteArc (`references/data-access.md`). Searching their catalog needs the separate `cytebase`
+  package (`pip install cytebase`, which CyteArc does not install) and its own skill:
+  <https://github.com/NygenAnalytics/CyteBase/tree/master/skills/cytebase>.
 - Set resources per process before importing CyteArc. Defaults use 75% of detected RAM and every detected CPU:
   `CYTEARC_MEM_BUDGET=8G CYTEARC_WORKERS=8` (memory specs need a unit; a bare `8` is rejected).
 - Headless: `MPLBACKEND=Agg`, call plots with `show=False`, then `result.save(path)` and
@@ -263,6 +266,7 @@ any changes you make after seeing the comparison as such.
 The docs hold the full explanations, online at <https://docs.nygen.io/CyteArc/>:
 `quickstart.html`, `tutorials/<step>.html` (one page per step, for example `quality_control`,
 `graph_construction`, `clustering`, `annotation`, `batch_correction`,
-`pseudobulk_and_differential_expression`, `cytebase`), `concepts/` (`provenance`,
+`pseudobulk_and_differential_expression`), `concepts/` (`provenance`,
 `memory_and_execution`), `analysis_with_agents.html` (scientific decision loop, task
-routing, handoff) and `reference/api/<module>.html` (exact signatures).
+routing, handoff) and `reference/api/<module>.html` (exact signatures). CyteBase has its own
+documentation at <https://docs.nygen.io/CyteBase/>.

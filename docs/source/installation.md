@@ -98,21 +98,13 @@ python -c "from cytearc import DataStore; import cytearc; print(cytearc.__versio
 
 The conda package satisfies CyteArc's `hnswlib>=0.8` requirement, so pip does not compile it.
 
-## CyteBase SDK
+## CyteBase
 
-To search CyteBase and connect directly to its cloud-hosted CyteArc DataStores, install the
-`cytebase` extra in your local or cloud Python environment:
-
-```bash
-uv pip install --prerelease allow "cytearc[cytebase,extra]"
-```
-
-This adds DuckDB for catalog queries and the SDK's plotting dependencies.
-`cytebase.Catalog()` defaults to the current public, read-only release,
-`Nygen/cytebase-2610`, without requiring credentials. Pass `version="2610.1"` to
-open another release, or set `CYTEBASE_BUCKET` or pass `bucket=` to use another
-catalog, then follow
-[](tutorials/cytebase.ipynb). See [CyteBase API reference](/api/cytebase.html) for the full SDK reference.
+CyteBase publishes public single-cell datasets as cloud-hosted CyteArc DataStores. CyteArc opens
+them by their Hugging Face URIs with no extra packages, as [](tutorials/cytebase_datasets.md)
+shows. To search the catalog, install the separate `cytebase` package with
+`uv pip install cytebase`; the [CyteBase documentation](https://docs.nygen.io/CyteBase/) describes
+it.
 
 (installation_tsne)=
 ## Optional t-SNE

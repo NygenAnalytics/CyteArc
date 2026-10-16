@@ -18,7 +18,7 @@ image = (
     .apt_install("build-essential", "libfftw3-dev", "libmetis-dev")
     .uv_sync(
         groups=["docs-modal"],
-        extras=["agent", "cytebase", "docs", "extra", "regulons"],
+        extras=["agent", "docs", "extra", "regulons"],
         extra_options="--no-default-groups",
         env={"HNSWLIB_NO_NATIVE": "1"},
     )

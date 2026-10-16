@@ -1,4 +1,10 @@
-"""Discover CyteBase datasets and connect to their CyteArc DataStores."""
+"""Download CyteArc's public example datasets.
+
+The examples live in repositories of the public ``Nygen/cytebase`` Hugging Face
+bucket, such as ``cytearc_docs`` for the documentation datasets. This module
+only lists and downloads files. The CyteBase catalog of cloud-hosted datasets is
+the separate ``cytebase`` package.
+"""
 
 import os
 import shutil
@@ -7,7 +13,6 @@ import tempfile
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import TYPE_CHECKING, Any
 
 from huggingface_hub import (
     BucketFile,
@@ -17,63 +22,13 @@ from huggingface_hub import (
 )
 from huggingface_hub.utils import disable_progress_bars
 
-from ..utils.logging import progress_enabled
+from .utils.logging import progress_enabled
 
-if TYPE_CHECKING:
-    from ._embeddings import embedding as embedding
-    from ._embeddings import embedding_coordinates as embedding_coordinates
-    from ._embeddings import embeddings as embeddings
-    from ._releases import Release as Release
-    from ._releases import releases as releases
-    from .catalog import Catalog as Catalog
-    from .entry import DatasetEntry as DatasetEntry
-
-__all__ = [
-    "Catalog",
-    "DatasetEntry",
-    "Release",
-    "Repository",
-    "connect",
-    "embedding",
-    "embedding_coordinates",
-    "embeddings",
-    "list_repositories",
-    "releases",
-]
+__all__ = ["Repository", "connect", "list_repositories"]
 
 _BUCKET_ID = "Nygen/cytebase"
 _ZARR_ARCHIVE_SUFFIX = ".zarr.tar.gz"
 _LOCAL_CATALOG_ENV = "CYTEARC_CYTEBASE_LOCAL"
-
-
-def __getattr__(name: str) -> Any:
-    if name == "Catalog":
-        from .catalog import Catalog
-
-        globals()[name] = Catalog
-        return Catalog
-    if name == "DatasetEntry":
-        from .entry import DatasetEntry
-
-        globals()[name] = DatasetEntry
-        return DatasetEntry
-    if name in {"embedding", "embedding_coordinates", "embeddings"}:
-        from . import _embeddings
-
-        value = getattr(_embeddings, name)
-        globals()[name] = value
-        return value
-    if name in {"Release", "releases"}:
-        from . import _releases
-
-        value = getattr(_releases, name)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(__all__))
 
 
 def _safe_name(name: str, *, kind: str) -> str:
@@ -139,7 +94,7 @@ def _bucket_files(
 
 
 def list_repositories() -> list[str]:
-    """Return the top-level repositories in CyteBase."""
+    """Return the top-level example repositories in the public bucket."""
     repositories = []
     for item in list_bucket_tree(_BUCKET_ID, recursive=False, token=False):
         if isinstance(item, BucketFolder) and "/" not in item.path:
@@ -148,7 +103,7 @@ def list_repositories() -> list[str]:
 
 
 def connect(repository: str) -> "Repository":
-    """Connect to a public CyteBase repository."""
+    """Connect to a public example repository, such as ``cytearc_docs``."""
     repository = _safe_name(repository, kind="repository name")
     available = list_repositories()
     if repository not in available:
@@ -162,7 +117,7 @@ def connect(repository: str) -> "Repository":
 
 @dataclass(frozen=True, slots=True)
 class Repository:
-    """Read files from one top-level CyteBase repository."""
+    """Read files from one top-level example repository."""
 
     name: str
 
