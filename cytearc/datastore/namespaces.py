@@ -3,6 +3,7 @@ from functools import wraps
 from types import FunctionType
 from typing import Any, Concatenate, cast
 
+from ._operations.abundance import _AbundanceOperationsMixin
 from ._operations.clustering import _ClusteringOperationsMixin
 from ._operations.embeddings import _EmbeddingOperationsMixin
 from ._operations.features import _FeatureOperationsMixin
@@ -18,6 +19,7 @@ from ._operations.trajectory import _TrajectoryOperationsMixin
 from .datastore import DataStore
 
 __all__ = [
+    "AbundanceAccessor",
     "ClustersAccessor",
     "CompareAccessor",
     "EmbeddingsAccessor",
@@ -59,6 +61,30 @@ class _Accessor:
 
     def __init__(self, store: DataStore) -> None:
         self._store = store
+
+
+class AbundanceAccessor(_Accessor):
+    __slots__ = ()
+
+    test_categories = _bind(_AbundanceOperationsMixin._abundance_test_categories)
+    load_category_tests = _bind(
+        _AbundanceOperationsMixin._abundance_load_category_tests
+    )
+    make_neighborhoods = _bind(_AbundanceOperationsMixin._abundance_make_neighborhoods)
+    load_neighborhoods = _bind(_AbundanceOperationsMixin._abundance_load_neighborhoods)
+    count_neighborhoods = _bind(
+        _AbundanceOperationsMixin._abundance_count_neighborhoods
+    )
+    load_neighborhood_counts = _bind(
+        _AbundanceOperationsMixin._abundance_load_neighborhood_counts
+    )
+    test_neighborhoods = _bind(_AbundanceOperationsMixin._abundance_test_neighborhoods)
+    load_neighborhood_tests = _bind(
+        _AbundanceOperationsMixin._abundance_load_neighborhood_tests
+    )
+    annotate_neighborhoods = _bind(
+        _AbundanceOperationsMixin._abundance_annotate_neighborhoods
+    )
 
 
 class ClustersAccessor(_Accessor):

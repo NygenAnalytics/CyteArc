@@ -10,6 +10,7 @@ from ..storage.refs import ArtifactRef
 from ..storage.stores import create_matrix_source
 from ..storage.validation_scope import scope_public_methods
 from ._operations.features import _FeatureOperationsMixin
+from ._operations.abundance import _AbundanceOperationsMixin
 from ._operations.integration_metrics import _IntegrationMetricsOperationsMixin
 from ._operations.presentation import _PresentationOperationsMixin
 from ._operations.quality_control import _QualityControlOperationsMixin
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from ..storage.budget import ResourceBudget
     from .artifact_accessor import ArtifactAccessor
     from .namespaces import (
+        AbundanceAccessor,
         ClustersAccessor,
         CompareAccessor,
         EmbeddingsAccessor,
@@ -186,6 +188,7 @@ def _check_forwarded_options(
 
 
 class DataStore(
+    _AbundanceOperationsMixin,
     _QualityControlOperationsMixin,
     _FeatureOperationsMixin,
     _TrajectoryFeatureOperationsMixin,
@@ -285,6 +288,12 @@ class DataStore(
         from .namespaces import EmbeddingsAccessor
 
         return EmbeddingsAccessor(self)
+
+    @property
+    def abundance(self) -> "AbundanceAccessor":
+        from .namespaces import AbundanceAccessor
+
+        return AbundanceAccessor(self)
 
     @property
     def clusters(self) -> "ClustersAccessor":

@@ -17,6 +17,7 @@ from cytearc.storage import ArtifactRef
 
 
 _STORE_PLOT_METHODS = (
+    "category_proportions",
     "cluster_connectivity",
     "cluster_tree",
     "composition",
@@ -31,6 +32,8 @@ _STORE_PLOT_METHODS = (
     "mapping_score",
     "matrixplot",
     "modality_weights",
+    "neighborhood_beeswarm",
+    "neighborhood_graph",
     "pseudotime_heatmap",
     "run_recipe",
 )
@@ -76,6 +79,18 @@ _EMBEDDING_REF = ArtifactRef(
     assay="RNA",
     kind="embedding",
     artifact_id="f" * 64,
+)
+_CATEGORY_TESTS_REF = ArtifactRef(
+    scope="datastore",
+    assay=None,
+    kind="category_tests",
+    artifact_id="1" * 64,
+)
+_NEIGHBORHOOD_TESTS_REF = ArtifactRef(
+    scope="assay",
+    assay="RNA",
+    kind="neighborhood_tests",
+    artifact_id="2" * 64,
 )
 _INTEGRATED_GRAPH_REF = ArtifactRef(
     scope="datastore",
@@ -257,6 +272,21 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
                 "point_alpha": 0.8,
             },
         ),
+        (
+            "category_proportions",
+            (_CATEGORY_TESTS_REF,),
+            {"categories": ["T"], "transformed": True},
+        ),
+        (
+            "neighborhood_beeswarm",
+            (_NEIGHBORHOOD_TESTS_REF,),
+            {"alpha": 0.2, "mixed_label": "mixed"},
+        ),
+        (
+            "neighborhood_graph",
+            (_NEIGHBORHOOD_TESTS_REF,),
+            {"layout": _EMBEDDING_REF, "alpha": 0.05},
+        ),
         ("run_recipe", ("recipe.toml",), {"show": False}),
         (
             "cluster_tree",
@@ -305,6 +335,12 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("transfer"))
     elif name == "run_recipe":
         expected_args.append(expected_kwargs.pop("recipe"))
+    elif name in {
+        "category_proportions",
+        "neighborhood_beeswarm",
+        "neighborhood_graph",
+    }:
+        expected_args.append(expected_kwargs.pop("tests"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

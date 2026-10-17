@@ -158,6 +158,19 @@ functions in {doc}`regulons` turn them into regulons.
     :members: compute_bulk, test, load_tests
 ```
 
+### `ds.abundance`
+
+Differential abundance between conditions, with samples as the replicates. `test_categories`
+tests the proportions of cell categories, a port of `speckle::propeller`. The Milo methods test
+overlapping kNN neighbourhoods, a port of miloR's `makeNhoods`, `countCells`, `testNhoods`, and
+`annotateNhoods`; the edgeR steps of `testNhoods` run in edgePython, installed with the `milo`
+extra. Milo needs a neighbors artifact built on an `ann_metric="l2"` index. See [Methods](../reference/methods) for validation and current boundaries.
+
+```{eval-rst}
+.. autoclass:: cytearc.datastore.namespaces.AbundanceAccessor
+    :members: test_categories, load_category_tests, make_neighborhoods, load_neighborhoods, count_neighborhoods, load_neighborhood_counts, test_neighborhoods, load_neighborhood_tests, annotate_neighborhoods
+```
+
 ## Updating existing calls
 
 Replace the method name using this table. Arguments, defaults, return values, and saved
@@ -536,6 +549,18 @@ The recommended workflow is in [Read RNA and protein together with CITE-seq](../
     :members:
 
 .. autoclass:: cytearc.features.statistical.StatisticalTestResult
+    :members:
+
+.. autoclass:: cytearc.abundance.results.CategoryTestResult
+    :members:
+
+.. autoclass:: cytearc.abundance.results.Neighborhoods
+    :members:
+
+.. autoclass:: cytearc.abundance.results.NeighborhoodCounts
+    :members:
+
+.. autoclass:: cytearc.abundance.results.NeighborhoodTestResult
     :members:
 
 .. autoclass:: cytearc.clustering.ParisClusteringResult

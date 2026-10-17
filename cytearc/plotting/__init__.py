@@ -32,6 +32,11 @@ if TYPE_CHECKING:
         PlotStep as PlotStep,
         run_recipe as run_recipe,
     )
+    from .abundance import (
+        category_proportions as category_proportions,
+        neighborhood_beeswarm as neighborhood_beeswarm,
+        neighborhood_graph as neighborhood_graph,
+    )
     from .composition import composition as composition
     from .cluster_connectivity import cluster_connectivity as cluster_connectivity
     from .diagnostics import (
@@ -78,6 +83,7 @@ __all__ = [
     "SizeScale",
     "StudyDesign",
     "THEMES",
+    "category_proportions",
     "cluster_tree",
     "cluster_connectivity",
     "compose_results",
@@ -97,6 +103,8 @@ __all__ = [
     "mapping_score",
     "matrixplot",
     "modality_weights",
+    "neighborhood_beeswarm",
+    "neighborhood_graph",
     "pseudotime_heatmap",
     "qc",
     "run_recipe",
@@ -125,6 +133,7 @@ __getattr__, __dir__ = _lazy_facade(
         "SizeScale": "._contracts",
         "StudyDesign": "._contracts",
         "THEMES": "._style",
+        "category_proportions": ".abundance",
         "cluster_tree": ".cluster_tree",
         "cluster_connectivity": ".cluster_connectivity",
         "compose_results": "._figure",
@@ -144,6 +153,8 @@ __getattr__, __dir__ = _lazy_facade(
         "mapping_score": ".mapping",
         "matrixplot": ".summary",
         "modality_weights": ".modality_weights",
+        "neighborhood_beeswarm": ".abundance",
+        "neighborhood_graph": ".abundance",
         "pseudotime_heatmap": ".heatmaps",
         "qc": ".diagnostics",
         "run_recipe": ".recipes",

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 
+from ..abundance.results import CategoryTestResult, NeighborhoodTestResult
 from ..features.values import resolve_feature, resolve_feature_batch
 from ..mapping.reference import MappingReference
 from ..plotting._contracts import (
@@ -563,6 +564,61 @@ class DataStorePlotAccessor:
     ) -> PlotResult:
         """Plot held-out label accuracy against retained coverage per threshold."""
         return self._forward(PlotResult, "mapping_calibration", locals())
+
+    def category_proportions(
+        self,
+        tests: ArtifactRef | CategoryTestResult,
+        *,
+        categories: Sequence[str] | None = None,
+        transformed: bool = False,
+        categorical_scale: CategoricalScale | None = None,
+        point_size: float = 36.0,
+        n_columns: int | None = None,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot per-sample category proportions by condition with their FDR."""
+        return self._forward(PlotResult, "category_proportions", locals())
+
+    def neighborhood_beeswarm(
+        self,
+        tests: ArtifactRef | NeighborhoodTestResult,
+        *,
+        group_by: ArtifactRef | CellField | None = None,
+        alpha: float = 0.1,
+        min_fraction: float | None = None,
+        mixed_label: str = "Mixed",
+        group_order: Sequence[Any] | None = None,
+        color_scale: ColorScale | None = None,
+        point_size: float = 14.0,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot neighbourhood log fold changes as a beeswarm per label."""
+        return self._forward(PlotResult, "neighborhood_beeswarm", locals())
+
+    def neighborhood_graph(
+        self,
+        tests: ArtifactRef | NeighborhoodTestResult,
+        *,
+        layout: ArtifactRef,
+        alpha: float = 0.1,
+        size_scale: SizeScale | None = None,
+        color_scale: ColorScale | None = None,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot Milo neighbourhoods at their index cells on a stored embedding."""
+        return self._forward(PlotResult, "neighborhood_graph", locals())
 
     def dotplot(
         self,

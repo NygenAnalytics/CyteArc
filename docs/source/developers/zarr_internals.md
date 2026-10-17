@@ -109,6 +109,33 @@ revision 1, so stores written before operation revisions existed keep their iden
 compares the whole `provenance` mapping exactly; `execution_options`, `created_at_ns`, and
 `cytearc_version` never affect it. [](operation_revisions.md) explains when a revision changes.
 
+(abundance_artifacts)=
+
+### Differential-abundance artifacts
+
+`ds.abundance` writes four datastore- or assay-scoped kinds. Labels and design metadata live in
+the slot attributes; arrays are small except for the neighbourhood membership.
+
+- `category_tests` (`test_categories`): `counts`, the categories x samples cell counts;
+  `stats`, one row per category with the columns that the `stat_columns` attribute names;
+  and the empirical Bayes `df_prior` and `s2_prior`. The attributes record the categories,
+  samples, groups, each sample's group, the transform, and the robust and trend settings.
+  Proportions are recomputed from `counts`.
+- `neighborhoods` (`make_neighborhoods`): `index_rows`, the positions of the index cells in
+  the graph's cell selection; `index_cells`, their physical cell rows; `sizes`;
+  `kth_distance`, the Euclidean distance from each index cell to its k-th neighbour; and the
+  cell-major membership as a CSR pair, `membership_indptr` (graph cells + 1) and
+  `membership_indices` (neighbourhood ids), stored in row bands so that counting streams it.
+  The attributes record the neighbors and cell-selection refs, `k`, `n_cells`, `prop`,
+  `refined`, and `seed`.
+- `neighborhood_counts` (`count_neighborhoods`): `counts`, neighbourhoods x samples, with the
+  sample labels, in order of first appearance along the graph's cells, in the attributes.
+- `neighborhood_tests` (`test_neighborhoods`): `stats`, one row per neighbourhood with the
+  `stat_columns` (`log_fc`, `log_cpm`, `f_statistic`, `p_value`, `fdr`, `spatial_fdr`); the
+  boolean `tested` mask (`min_mean` leaves some neighbourhoods untested, with missing
+  statistics); the samples x coefficients `design`; and the per-sample `norm_factors` and
+  `lib_size`. The attributes record the contrast, dispersion summaries, and test settings.
+
 ## Pipeline records and snapshots
 
 Pipeline run, stage, and label-claim documents use one strict unversioned shape. A run has exactly

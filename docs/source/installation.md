@@ -123,6 +123,19 @@ Without `sgtsnepi`, computing a new t-SNE embedding raises an `ImportError` that
 Reusing a t-SNE embedding that a store already holds, and plotting or exporting it, does not need `sgtsnepi`.
 A pipeline run that enables t-SNE without `sgtsnepi` therefore still runs, and it logs a warning that names the extra before its first stage.
 
+(installation_milo)=
+## Optional Milo neighbourhood tests
+
+`ds.abundance.test_neighborhoods` runs edgeR's quasi-likelihood test with [edgePython], a Python port of edgeR that CyteArc does not install by default.
+Add it with the `milo` extra:
+
+```bash
+uv pip install --prerelease allow "cytearc[extra,milo]"
+```
+
+edgePython is licensed under the GPLv3, while CyteArc is BSD-3-Clause and does not depend on it unless you install the extra.
+Without it, testing neighbourhoods raises an `ImportError` that names the extra; building and counting neighbourhoods, propeller, and the plots do not need it.
+
 ## Optional regulon databases
 
 `cytearc.regulons.RankingDatabase` reads cisTarget ranking databases with [polars], which CyteArc does not install by default.
@@ -219,3 +232,4 @@ After the import check succeeds, continue with the {ref}`Quick start <quickstart
 [sgtsnepi]: https://github.com/alex-unofficial/sgtsnepi-python
 [polars]: https://pola.rs
 [Microsoft long-path documentation]: https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
+[edgePython]: https://github.com/pachterlab/edgePython

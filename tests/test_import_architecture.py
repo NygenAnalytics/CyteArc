@@ -517,6 +517,7 @@ accessor = store.plots
 
 assert type(accessor).__module__ == "cytearc.datastore.plot_accessor"
 concrete_modules = {
+    "cytearc.plotting.abundance",
     "cytearc.plotting.composition",
     "cytearc.plotting.diagnostics",
     "cytearc.plotting.distribution",
@@ -617,6 +618,8 @@ def test_pca_and_lsi_implementations_live_under_embeddings():
 def test_extracted_domains_have_only_narrow_storage_dependencies():
     forbidden = {"datastore", "plotting", "readers", "writers"}
     storage_exceptions = {
+        # Result records carry artifact references.
+        "abundance": {"results.py"},
         "features": {
             "aggregation.py",
             "enrichment/results.py",
@@ -626,6 +629,7 @@ def test_extracted_domains_have_only_narrow_storage_dependencies():
         },
         "neighbors": set(),
         "quality_control": {"doublets.py"},
+        "stats": set(),
     }
     for package_name, allowed_storage_importers in storage_exceptions.items():
         assert _upward_imports(package_name, forbidden) == set()
@@ -971,6 +975,36 @@ assert not loaded("cytearc.trajectory"), loaded("cytearc.trajectory")
 
 def test_data_model_defers_domain_algorithms_until_method_calls(fresh_import_errors):
     _assert_fresh_import_check(fresh_import_errors, "data_model")
+
+
+_FRESH_IMPORT_CHECKS["abundance_facades"] = """
+import cytearc.abundance as abundance
+import cytearc.stats as stats
+
+assert "cytearc.abundance.propeller" not in sys.modules
+assert "cytearc.stats.limma" not in sys.modules
+assert "cytearc.stats.multiple_testing" not in sys.modules
+
+_ = stats.p_adjust_bh
+assert "cytearc.stats.multiple_testing" in sys.modules
+assert "cytearc.stats.limma" not in sys.modules
+
+_ = abundance.propeller
+assert "cytearc.abundance.propeller" in sys.modules
+assert "cytearc.stats.limma" in sys.modules
+
+# edgePython is the optional milo extra; only a neighbourhood test imports it.
+import cytearc.abundance.milo
+
+assert "edgepython" not in sys.modules
+assert not loaded("cytearc.datastore", "cytearc.plotting"), loaded(
+    "cytearc.datastore", "cytearc.plotting"
+)
+"""
+
+
+def test_abundance_and_stats_facades_load_lazily(fresh_import_errors):
+    _assert_fresh_import_check(fresh_import_errors, "abundance_facades")
 
 
 _FRESH_IMPORT_CHECKS["features_facades"] = """
@@ -1333,6 +1367,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         "datastore.mapping_datastore",
     }
     allowed_operation_helpers = {
+        "datastore._operations.abundance_store",
         "datastore._operations.enrichment_store",
         "datastore._operations.paris_persistence",
         "datastore._operations.statistical_store",

@@ -29,9 +29,12 @@ it, then compare composition and expression at the donor level. Docs: <https://d
 - **Metrics are evidence, not a verdict.** `metric_*` take exact neighbour or graph refs and a live
   column and return a float. iLISI (mixing) should rise while cLISI and connectivity hold.
 - **What CyteArc tests.** `compare.test` runs donor-level rank tests (a
-  `statistical_tests` artifact; several keys share one BH pass). No count GLM (DESeq2, edgeR) or
-  compositional model (scCODA, propeller): export pseudobulk counts ("Export pseudobulk counts" in
-  `performance-and-export.md`) and model one population at a time with donor-level terms.
+  `statistical_tests` artifact; several keys share one BH pass). `ds.abundance` tests
+  differential abundance with samples as replicates: `test_categories` ports `speckle::propeller`
+  (category proportions) and the Milo methods port miloR (kNN neighbourhoods, edgeR QL test via
+  edgePython, the `cytearc[milo]` extra, spatial FDR). There is no count GLM for expression (DESeq2, edgeR) or scCODA: export pseudobulk
+  counts ("Export pseudobulk counts" in `performance-and-export.md`) and model one population at a
+  time with donor-level terms.
 
 ## Recipes
 
@@ -211,6 +214,50 @@ denominator. `ds.plots.composition(..., kind="per_sample", study_design=...)` dr
 sample proportions per category (its intervals count samples, so a two-sample donor counts twice);
 `kind="stacked", sample_by=...` draws one stacked bar per sample.
 
+### Differential abundance (propeller, Milo)
+
+`sample_by` is the replicate unit. A sample must map to one condition, so a two-arm donor raises
+`ValueError`; leave it out with a cell selection (the `in_composition` column above). Propeller
+tests defined populations; Milo tests neighbourhoods of a kNN graph and finds shifts that do not
+follow cluster boundaries. Milo needs a graph on an `ann_metric="l2"` index (the pipeline default).
+
+```python
+from cytearc.plotting import CellField
+
+cells_used = ds.snapshot_cell_selection("in_composition")
+props = ds.abundance.test_categories(
+    CellField("cell_type", kind="categorical"), sample_by="donor_id",
+    condition_by="condition", cell_selection=cells_used,
+)                                   # transform="logit", robust=True: speckle defaults
+print(props.groups, props.table.sort_values("fdr").head())   # t = groups[0] minus groups[1]
+ds.plots.category_proportions(props, show=False).save("abundance_props.png")
+
+neighbors = ds.graph.neighbors(run["ann_index"], k=30)        # reuses the l2 ANN index
+nhoods = ds.abundance.make_neighborhoods(neighbors, prop=0.1, seed=0)
+print(np.percentile(ds.abundance.load_neighborhoods(nhoods).sizes, [5, 50, 95]))
+counts = ds.abundance.count_neighborhoods(nhoods, sample_by="donor_id")
+milo = ds.abundance.test_neighborhoods(
+    counts, condition_by="condition", levels={"condition": ["ctrl", "case"]},
+)                                   # tests the last design column: case versus ctrl
+print(milo.contrast, (milo.table["spatial_fdr"] < 0.1).sum(), "of", len(milo.table))
+cell_type = CellField("cell_type", kind="categorical")
+labels = ds.abundance.annotate_neighborhoods(milo.artifact, cell_type)  # label, fraction
+ds.plots.neighborhood_beeswarm(
+    milo, group_by=cell_type, min_fraction=0.7, show=False,
+).save("milo_beeswarm.png")
+ds.plots.neighborhood_graph(milo, layout=run["umap"], show=False).save("milo_graph.png")
+```
+
+Milo counts every cell of the graph's cell selection, so with a two-arm donor rebuild the chain
+(`features.hvgs` through `graph.neighbors`, `features-and-graphs.md`) on `cells_used` instead of
+reusing `run["ann_index"]`. `covariates=["batch"]` adds
+sample-level terms (constant within each sample); `contrast={...}` tests a combination of design
+columns. Read `spatial_fdr`, not `fdr`. `log_fc` is log2 and shrunk (edgeR `predFC`). `legacy=True`
+is miloR's QL method, the default. `test_neighborhoods` needs `cytearc[milo]` (edgePython); its
+statistics approximate miloR's (`reference/methods.md`), so treat calls near `spatial_fdr` 0.1
+as borderline. Neighbourhood sizes should mostly exceed 5 x the number of
+samples; raise `k` otherwise. Rerun with another `seed` before trusting a single neighbourhood.
+
 ### Donor-level expression tests
 
 ```python
@@ -316,6 +363,9 @@ an inserted copy records abstentions only as missing values and loses their reas
   CyteArc; `PermutationMethod(n_resamples=np.inf)` matches it but is exhaustive (12 versus 12: 20 s).
 - Without `cell_selection`, a `CellField` grouping covers every stored cell, `I` False included.
 - Marker search, Welch and ANOVA treat cells as observations; never use them for condition claims.
+- `make_neighborhoods` rejects a graph built on a cosine ANN index; rebuild the index with
+  `ann_metric="l2"`. Propeller and Milo proportions move together: a population expanding in one
+  condition makes the others shrink, so read them with the per-sample proportions.
 - A Symphony-style mapping correction (`query_batches`) needs a technical batch, never a condition.
 
 ## See also
