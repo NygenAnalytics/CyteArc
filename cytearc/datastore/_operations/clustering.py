@@ -43,7 +43,7 @@ class _PreparedLeidenClustering:
     planned: PlannedArtifact
     graph: ArtifactRef
     resolution: float
-    backend: Literal["igraph", "leidenalg"]
+    backend: Literal["cytearc", "igraph", "leidenalg"]
     symmetric_graph: bool
     graph_upper_only: bool
     random_seed: int
@@ -322,7 +322,7 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
         graph: ArtifactRef,
         *,
         resolution: float = 1.0,
-        backend: Literal["igraph", "leidenalg"] = "igraph",
+        backend: Literal["cytearc", "igraph", "leidenalg"] = "cytearc",
         symmetric_graph: bool = False,
         graph_upper_only: bool = False,
         random_seed: int = 4444,
@@ -330,8 +330,8 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
     ) -> _PreparedLeidenClustering:
         from ...clustering.leiden import canonical_random_seed, canonical_resolution
 
-        if backend not in {"igraph", "leidenalg"}:
-            raise ValueError("backend must be 'igraph' or 'leidenalg'")
+        if backend not in {"cytearc", "igraph", "leidenalg"}:
+            raise ValueError("backend must be 'cytearc', 'igraph' or 'leidenalg'")
         resolution = canonical_resolution(resolution)
         random_seed = canonical_random_seed(random_seed)
         symmetric_graph = graph_flag(symmetric_graph, "symmetric_graph")
@@ -380,7 +380,7 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
         graph: ArtifactRef,
         *,
         resolution: float = 1.0,
-        backend: Literal["igraph", "leidenalg"] = "igraph",
+        backend: Literal["cytearc", "igraph", "leidenalg"] = "cytearc",
         symmetric_graph: bool = False,
         graph_upper_only: bool = False,
         random_seed: int = 4444,
@@ -391,7 +391,12 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
         Args:
             graph: Explicit connectivity map or integrated graph to partition.
             resolution: Finite positive Leiden resolution, recorded as a float.
-            backend: Leiden implementation. Native igraph is the default.
+            backend: Leiden implementation. ``"cytearc"``, CyteArc's own
+                multi-threaded implementation, is the default; ``"igraph"``
+                and ``"leidenalg"`` need those GPL-licensed packages, which
+                CyteArc does not install, and are kept to reproduce earlier
+                results. The ``"cytearc"`` backend uses ``self.nthreads``
+                threads, which never change its labels.
             symmetric_graph: Forwarded to `graph.load`.
             graph_upper_only: Forwarded to `graph.load`.
             random_seed: Non-negative integer seed for the Leiden optimizer.
@@ -427,6 +432,7 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
                 prepared.resolution,
                 prepared.random_seed,
                 backend=prepared.backend,
+                nthreads=self.nthreads,
             )
         )
         shutdown_checkpoint()
@@ -446,7 +452,7 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
         graph: ArtifactRef,
         *,
         resolution: float = 1.0,
-        backend: Literal["igraph", "leidenalg"] = "igraph",
+        backend: Literal["cytearc", "igraph", "leidenalg"] = "cytearc",
         symmetric_graph: bool = False,
         graph_upper_only: bool = False,
         random_seed: int = 4444,
@@ -457,6 +463,12 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
         ``resolution`` must be a finite positive number and is recorded as a
         float, so ``1`` and ``1.0`` identify the same artifact. ``random_seed``
         must be a non-negative integer because stored labels are reused.
+        ``backend`` selects the Leiden implementation: ``"cytearc"``,
+        CyteArc's own multi-threaded implementation, is the default;
+        ``"igraph"`` and ``"leidenalg"`` need those GPL-licensed packages,
+        which CyteArc does not install, and are kept to reproduce earlier
+        results. The thread count is not part of the artifact identity and
+        never changes the labels.
         """
         return self._run_leiden_artifact(
             graph,

@@ -33,7 +33,6 @@ classifiers = [
 dependencies = [
     "h5py>=3.12.1",
     "hnswlib>=0.8",
-    "leidenalg>=0.12",
     "loguru>=0.7",
     "networkx>=3",
     "numba>=0.61",
@@ -51,7 +50,6 @@ dependencies = [
     "obstore>=0.5.1",
     "huggingface-hub>=2.0.0",
     "zstandard>=0.25.0",
-    "igraph>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -256,6 +254,8 @@ module = [
     "pydantic_ai",
     "pydantic_ai.*",
     "sgtsnepi",
+    "igraph",
+    "leidenalg",
 ]
 ignore_missing_imports = true
 
@@ -264,6 +264,12 @@ ignore_missing_imports = true
 module = [
     "cytearc.utils.numba",
     "cytearc.clustering._paris_core",
+    "cytearc.clustering._leiden_native",
+    "cytearc.clustering._leiden_graph",
+    "cytearc.clustering._leiden_primitives",
+    "cytearc.clustering._leiden_moving",
+    "cytearc.clustering._leiden_refine",
+    "cytearc.clustering._leiden_aggregate",
     "cytearc.embeddings.umap",
     "cytearc.embeddings.harmony.fit",
     "cytearc.assay.rna",

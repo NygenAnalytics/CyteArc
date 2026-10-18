@@ -30,7 +30,7 @@ The aim is one coherent execution path, not reimplementation for its own sake.
 - **Reduction and graph construction:** streamed normalization, covariance (Gram-matrix) PCA with an incremental fallback, randomized streaming {term}`LSI`, approximate nearest-neighbour search, UMAP, {term}`densMAP`, and graph-based t-SNE through the optional `tsne` extra (see {ref}`Optional t-SNE <installation_tsne>`).
 - **Batch correction and mapping:** CyteArc implementations of [Harmony2](https://doi.org/10.64898/2026.03.16.711825), which builds on the original [Harmony](https://doi.org/10.1038/s41592-019-0619-0) algorithm, and of [Symphony-style](https://doi.org/10.1038/s41467-021-25957-x) fixed-reference mapping, with label transfer and mapping diagnostics.
 - **Matched multi-omics:** {term}`SNN integration` and [Hao-inspired WNN](https://doi.org/10.1016/j.cell.2021.04.048) integration for two or more assays, with WNN reporting one per-cell weight per modality.
-- **Clustering:** [Leiden](https://doi.org/10.1038/s41598-019-41695-z) and a native implementation of [Paris hierarchical clustering](https://doi.org/10.48550/arXiv.1806.01664) with fixed and branch-adaptive cuts.
+- **Clustering:** a native, multi-threaded implementation of [Leiden](https://doi.org/10.1038/s41598-019-41695-z) community detection ({ref}`details <leiden_method>`) and a native implementation of [Paris hierarchical clustering](https://doi.org/10.48550/arXiv.1806.01664) with fixed and branch-adaptive cuts.
 - **Trajectory analysis:** memory-aware [Population Balance Analysis](https://doi.org/10.1073/pnas.1714723115), supervised terminal-state fate probabilities, pseudotime aggregation and modules, and [MAGIC-style graph diffusion](https://doi.org/10.1016/j.cell.2018.05.061) for imputation.
 - **Statistics and diagnostics:** marker AUC, the [Mann-Whitney U test](https://doi.org/10.1214/aoms/1177730491) with [Benjamini-Hochberg](https://doi.org/10.1111/j.2517-6161.1995.tb02031.x) correction, doublet scores, cluster separability, and integration metrics informed by the [scIB benchmark](https://doi.org/10.1038/s41592-021-01336-8).
 - **Gene sets, protein, and sample tags:** [AUCell](https://doi.org/10.1038/nmeth.4463) and [WAGGR](https://doi.org/10.1093/bioadv/vbac016) activity scores, CITE-seq processing, and [cell-hashing](https://doi.org/10.1186/s13059-018-1603-1) demultiplexing.
@@ -40,6 +40,35 @@ The aim is one coherent execution path, not reimplementation for its own sake.
   motif deviations with MOODS-equivalent motif matching, cistromes from motifs or CUT&RUN and
   ChIP-seq peaks, [SCENIC+](https://doi.org/10.1038/s41592-023-01938-4) enhancer-driven
   regulons, regulon specificity and connection specificity, and co-expression gene programs.
+
+(leiden_method)=
+
+## Leiden clustering
+
+`clusters.leiden`, the pipeline's Leiden stages, gene programs, and
+`cytearc.clustering.leiden_membership` partition a graph with the Leiden algorithm of
+[Traag, Waltman and van Eck](https://doi.org/10.1038/s41598-019-41695-z). Every stored entry
+`(i, j)` of the input matrix `W` is an undirected edge of weight `W[i, j]`, so the clustered graph
+has the adjacency `A = W + W^T`. Explicitly stored zeros are ignored, and weights must be finite
+and non-negative. Leiden maximizes modularity with the resolution `γ`, the `resolution` argument,
+under the configuration null model: a larger resolution gives more, smaller clusters. Every
+cluster is connected.
+
+The default backend, `"cytearc"`, is CyteArc's own implementation of the published method. It
+runs on up to `nthreads` threads, which `clusters.leiden` and the pipeline set to the datastore's
+worker budget, and it returns identical labels for every thread count. Labels run from 1: cluster
+1 has the most cells, and clusters of equal size are ordered by their smallest cell index. The
+clustering package's README (`cytearc/clustering/README.md` in the
+[CyteArc repository](https://github.com/NygenAnalytics/CyteArc)) describes the implementation, how
+it was written and verified, and how it compares with igraph and leidenalg.
+
+`backend="igraph"` and `backend="leidenalg"` call the GPL-licensed igraph and leidenalg packages
+instead, which CyteArc does not install
+({ref}`Optional GPL Leiden backends <installation_leiden_gpl>`). They optimize the same objective
+on one thread and ignore `nthreads`, and their labels differ from the native backend's even for
+the same seed. They are kept to reproduce results computed with them; `"igraph"` was CyteArc's
+default before `"cytearc"`. The backend is part of a clustering's artifact identity, so results of
+different backends are never reused for one another.
 
 ## Validation
 
@@ -56,6 +85,12 @@ Agreement measured for one method is not evidence of equivalence for the rest of
   implementations, and is not expected to match them number for number.
 - Marker statistics are checked against SciPy, including continuity and large-tie corrections.
 - Paris hierarchies are compared with the scikit-network reference implementation on tie-free graphs.
+- The native Leiden backend is checked against brute-force calculations on small random graphs,
+  and tests check that every cluster is connected, that no two clusters can be merged to increase
+  modularity, and that labels are identical on 1 to 4 threads. A separate implementation written
+  from the paper reached the same modularity within seed noise, and against the igraph backend
+  the modularity agrees within about 0.001 on graphs from 808 to 10 million cells. The clustering
+  package's README gives the details.
 - WNN is checked against scalar reference calculations, a two-modality CITE-seq fixture, and a synthetic three-modality Seurat 5.5.1 fixture, plus modality-order symmetry, row-order invariance, and degenerate bandwidths.
   It follows the published weighting equations but is not bit-identical to Seurat defaults, as described in {ref}`the FAQ <faq>`.
 - AUCell and WAGGR scores are checked against frozen decoupler 2.2 fixtures.
@@ -97,11 +132,13 @@ Agreement measured for one method is not evidence of equivalence for the rest of
 - Gene programs are compared with Hotspot 1.1.1 modules on the same cells and highly variable
   genes. The six programs contain 89% of the 503 genes in Hotspot's ten modules, and 76% of those
   genes fall in their module's majority program (adjusted Rand index 0.45 on shared genes,
-  against at most 0.008 for 100 permuted labelings). Hotspot splits the T-cell, monocyte, and
-  B-cell programs into finer modules. Independent noise profiles form no programs, but the
-  membership threshold assumes independent samples and ignores that programs are chosen from
-  the same data: it screens chance groupings rather than testing programs, and profiles of
-  smoothed cells form spurious ones.
+  against at most 0.008 for 100 permuted labelings). These figures were measured when gene
+  programs used the igraph Leiden backend, the default of earlier releases; with the native
+  default, the regulons tutorial forms the same six programs, each within 11 genes of its earlier
+  size. Hotspot splits the T-cell, monocyte, and B-cell programs into finer modules. Independent
+  noise profiles form no programs, but the membership threshold assumes independent samples and
+  ignores that programs are chosen from the same data: it screens chance groupings rather than
+  testing programs, and profiles of smoothed cells form spurious ones.
 
 ## Current boundaries
 

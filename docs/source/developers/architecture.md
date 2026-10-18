@@ -86,6 +86,13 @@ They must not import those packages at module load time.
 - `embeddings/` owns PCA, LSI, Harmony2 batch correction, UMAP, SG-tSNE, embedding initialization,
   and the narrow storage adapter for imported coordinate artifacts.
 - `clustering/` owns Leiden clustering and PARIS hierarchy operations.
+  `leiden.py` holds the public `leiden_membership` and dispatches between the native `"cytearc"`
+  backend and the `"igraph"` and `"leidenalg"` backends, whose GPL packages it imports only when
+  one of them is requested (CyteArc does not install them). The native backend lives in the private
+  `_leiden_*.py` modules, described in `cytearc/clustering/README.md`, and loads lazily, so
+  importing `cytearc.clustering.leiden` loads no Numba kernel. After a release, a change that
+  alters the native labels for unchanged parameters needs an `OperationRevision` of
+  `run_leiden_clustering` scoped to `backend == "cytearc"` (placement rule 10).
 - `trajectory/` owns pseudotime scoring, feature-profile aggregation, feature module clustering, and pseudotime result records.
 - `metrics/` owns LISI, silhouette, graph, concordance, and integration scores, including the neighbor label agreement that membership strength stores.
 - `features/` owns variability selection, LOWESS trend fitting, feature scoring, enrichment, rank and regression marker searches, group-wise statistical tests, bulk aggregation, GFF parsing, genomic intervals, coordinate-based feature construction, and the name-based gene-family registry.
@@ -400,6 +407,19 @@ CyteArc validates persisted data and public arguments against the following cont
   tied at the cut height are applied in hierarchy order, so exactly `n_clusters` clusters are
   returned. Clustering and doublet entry points reject graph
   references that are not connectivity maps or integrated graphs.
+- Leiden clustering defaults to CyteArc's own backend, `"cytearc"`, in `clusters.leiden`,
+  `cytearc.clustering.leiden_membership`, the pipeline's Leiden stages, gene programs, and the
+  profiling `leidenBackend`. igraph and leidenalg are no longer dependencies of CyteArc, in no
+  extra either: users who want `backend="igraph"` or `"leidenalg"` install the GPL packages
+  themselves, and asking for those backends without them raises `ImportError` that says so.
+  `LeidenArguments.backend` gains `"cytearc"`, and the
+  backend stays part of the artifact identity: a default call records `backend="cytearc"` and
+  computes new labels instead of reusing an artifact recorded with `"igraph"`. Such artifacts stay
+  valid and are reused by calls that pass `backend="igraph"`, without the packages. No operation
+  revision is needed, because the GPL backends compute what they did before. `leiden_membership`
+  gains a keyword-only `nthreads`, which `clusters.leiden` sets to the datastore's `nthreads`; the
+  thread count is an execution option, not part of any identity, and the native labels do not
+  depend on it. Native labels are numbered from 1 by decreasing cluster size.
 - `markers.load` returns string `group_id` values in plot category order (numeric labels first in
   numeric order) and raises for an unknown group. `markers.export_csv` uses the same column
   order. Only plain decimal labels are numeric, so plots no longer read `"1_10"` as 110; other

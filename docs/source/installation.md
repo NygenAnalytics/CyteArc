@@ -123,6 +123,24 @@ Without `sgtsnepi`, computing a new t-SNE embedding raises an `ImportError` that
 Reusing a t-SNE embedding that a store already holds, and plotting or exporting it, does not need `sgtsnepi`.
 A pipeline run that enables t-SNE without `sgtsnepi` therefore still runs, and it logs a warning that names the extra before its first stage.
 
+(installation_leiden_gpl)=
+## Optional GPL Leiden backends
+
+Leiden clustering needs no extra package.
+Its default backend, `"cytearc"`, is CyteArc's own multi-threaded implementation (see {ref}`Leiden clustering <leiden_method>`).
+The alternative `"igraph"` and `"leidenalg"` backends of `clusters.leiden`, of the pipeline's `leiden` settings, and of `cytearc.clustering.leiden_membership` call the [igraph] and [leidenalg] packages.
+They serve to reproduce a clustering computed with those packages, such as one saved by an earlier CyteArc release, whose default backend was `"igraph"`.
+CyteArc does not install them and lists them in none of its extras: igraph is licensed under the GPL-2.0-or-later and leidenalg under the GPL-3.0-or-later, while CyteArc is BSD-3-Clause.
+To use these backends, install the packages yourself in the same environment as CyteArc (leidenalg installs igraph as a dependency):
+
+```bash
+uv pip install leidenalg
+```
+
+Both run on one thread.
+Without them, computing a new clustering with either backend raises an `ImportError` that explains how to install them.
+Reusing an `"igraph"` or `"leidenalg"` clustering that a store already holds, and plotting or exporting it, does not need them.
+
 ## Optional regulon databases
 
 `cytearc.regulons.RankingDatabase` reads cisTarget ranking databases with [polars], which CyteArc does not install by default.
@@ -209,6 +227,7 @@ See [](developers/contributing.md) before making package or documentation change
 - **`hnswlib` fails to build:** install the compiler and, for a system Python, matching development headers described above.
   On Windows without Build Tools, use the conda path.
 - **`embeddings.tsne` raises `ImportError` naming the `tsne` extra:** install the extra as described in {ref}`Optional t-SNE <installation_tsne>`, or use UMAP.
+- **`clusters.leiden` raises `ImportError` naming igraph or leidenalg:** the call asked for `backend="igraph"` or `backend="leidenalg"`, whose GPL-licensed packages CyteArc does not install. Install them yourself as described in {ref}`Optional GPL Leiden backends <installation_leiden_gpl>`, or use the default `backend="cytearc"`.
 - **CyteArc imports in a terminal but not a notebook:** compare the terminal path from `python -c "import sys; print(sys.executable)"` with the notebook kernel, then launch Jupyter from the CyteArc environment or select its registered kernel.
 
 ## Next steps
@@ -217,5 +236,7 @@ After the import check succeeds, continue with the {ref}`Quick start <quickstart
 
 [Visual C++ Build Tools]: https://visualstudio.microsoft.com/visual-cpp-build-tools
 [sgtsnepi]: https://github.com/alex-unofficial/sgtsnepi-python
+[igraph]: https://pypi.org/project/igraph/
+[leidenalg]: https://pypi.org/project/leidenalg/
 [polars]: https://pola.rs
 [Microsoft long-path documentation]: https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation

@@ -195,6 +195,9 @@ Without either, the search includes the default assay and datastore-scoped resul
 keywords such as `resolution=` match saved parameters. Float parameters use the producer's
 numeric conversion, so `resolution=1` and `resolution=1.0` find the same results. Other
 parameter types retain exact matching. Superseded results remain candidates.
+For example, a graph clustered at one resolution both with `backend="igraph"`, the Leiden default
+of earlier releases, and with the current default `backend="cytearc"` has two matches; add
+`backend=` to choose one.
 
 To find an imported embedding by its original source key, pass `imported=`:
 

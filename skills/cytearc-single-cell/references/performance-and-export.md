@@ -31,7 +31,9 @@ markers, and pipeline-run results. Docs: <https://docs.nygen.io/CyteArc/concepts
 - Opt-in parallel UMAP and ANN builds are faster but not reproducible: runs on several threads
   can differ even with the same thread count. Their identities record only the `parallel` or
   `ann_parallel` flag; thread counts are execution options, so results stay reusable across
-  machines. t-SNE always runs on one thread and records no worker count.
+  machines. Leiden's default backend (`"cytearc"`) uses the worker budget and gives identical
+  labels for any thread count, so it records no worker count either. t-SNE always runs on one
+  thread and records no worker count.
 - Counts stream in blocks. `ds.RNA.rawData` is a lazy `ChunkedArray`; `.compute()` on a large
   slice materializes it. `ds.to_anndata(...)` always builds `X` in memory; `cytearc.to_h5ad`, with
   or without `run=`, and `cytearc.to_mtx` stream. `to_h5ad` writes a temporary file beside the

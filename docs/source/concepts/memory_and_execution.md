@@ -84,6 +84,7 @@ On shared hosts, multiprocess jobs, or remote object stores, set `CYTEARC_WORKER
 More workers can increase concurrent buffers or remote requests, so pair a large worker budget with an explicit `mem_budget`.
 Opt-in parallel UMAP layouts and ANN index builds are faster but not reproducible: two runs on several threads can differ even with the same thread count.
 Their artifact identities therefore record only the `parallel` or `ann_parallel` flag, and the thread counts are execution options, so the same request reuses its result on any machine.
+Leiden clustering with the default `"cytearc"` backend runs on the worker budget and returns identical labels for any thread count, so its artifacts record no worker count either; the optional `"igraph"` and `"leidenalg"` backends run on one thread.
 t-SNE always runs on one thread through the optional `sgtsnepi` package, so its artifacts record no worker count.
 
 ## Why RNA stores have two count orientations

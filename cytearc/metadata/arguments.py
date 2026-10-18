@@ -69,7 +69,7 @@ class LeidenArguments(OperationArguments):
 
     graph: ArtifactRef = artifact_input()
     resolution: float = parameter()
-    backend: Literal["igraph", "leidenalg"] = parameter()
+    backend: Literal["cytearc", "igraph", "leidenalg"] = parameter()
     edge_weighting: Literal["graph"] = parameter()
     symmetric_graph: bool = parameter()
     graph_upper_only: bool = parameter()

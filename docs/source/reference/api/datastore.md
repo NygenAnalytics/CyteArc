@@ -99,6 +99,17 @@ See {doc}`artifacts` for supported filters and ambiguity handling.
 
 ### `ds.clusters`
 
+`clusters.leiden` runs CyteArc's own Leiden implementation, `backend="cytearc"`, by default
+([Leiden clustering](../reference/methods#leiden-method)). It uses the datastore's `nthreads` and
+returns the same labels for any thread count, numbered from 1 with the largest cluster first.
+`backend="igraph"` and `backend="leidenalg"` call the GPL-licensed igraph and leidenalg packages,
+which CyteArc does not install
+([Optional GPL Leiden backends](../installation#installation-leiden-gpl)); without them, computing
+a new clustering with either backend raises `ImportError` that explains how to install them. The
+backend is part of the artifact identity: a clustering saved with `"igraph"`, the default of
+earlier releases, is reused only by a call that passes `backend="igraph"`, and reusing it does not
+need the packages.
+
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.ClustersAccessor
     :members: leiden, paris, load_paris, membership_strength, relabel_by_overlap
@@ -161,8 +172,10 @@ functions in {doc}`regulons` turn them into regulons.
 ## Updating existing calls
 
 Replace the method name using this table. Arguments, defaults, return values, and saved
-artifacts stay the same. The previous names are no longer methods on `DataStore`. Saved
-provenance retains its operation names, such as `run_umap`.
+artifacts stay the same, with one later change: the default Leiden backend of `clusters.leiden`
+is now `"cytearc"` instead of `"igraph"`, so pass `backend="igraph"` to keep reusing clusterings
+made with the earlier default (see `ds.clusters` above). The previous names are no longer methods
+on `DataStore`. Saved provenance retains its operation names, such as `run_umap`.
 
 | Previous call | Current call |
 |---|---|

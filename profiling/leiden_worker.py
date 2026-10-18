@@ -1,8 +1,10 @@
 """Run Leiden clustering in a child process so the parent container stays live.
 
 Modal's runner heartbeat interval is about 900 seconds and is not configurable.
-Leiden optimizers can hold the GIL for a large partition, so a parent that
-called one inline would emit no heartbeat or progress until it returned.
+The GPL backends ``"igraph"`` and ``"leidenalg"`` hold the GIL for the whole
+optimisation, so a parent that called one inline would emit no heartbeat or
+progress until it returned. The default ``"cytearc"`` backend releases the GIL
+inside its kernels, but every backend is profiled the same way, in this child.
 ``profiling.stages`` polls this child every 30 seconds and warns at 1800 seconds
 without killing it. Keep this indirection instead of trying to extend the
 heartbeat threshold.

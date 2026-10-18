@@ -44,10 +44,12 @@ way, and find co-regulated gene programs. Docs: <https://docs.nygen.io/CyteArc/t
   scans. `binding_cistromes({"SPI1": "peaks.narrowPeak"}, peak_ids)` for CUT&RUN/ChIP peaks.
 - Metacells: `ds.regulons.profiles(groups, from_assay=...)` gives groups x features log counts per
   million, genes named by name and peaks by id. Group with a fine Leiden clustering
-  (`resolution=15` gave 118 metacells for about 2,600 PBMCs).
+  (`resolution=15` gave 117 metacells for about 2,600 PBMCs).
 - Gene programs: `gene_programs(rna[genes])`; `program_regulators(programs, database, annotations,
   profiles=rna)` runs cisTarget on each program and correlates each factor's expression with it;
-  `set_overlaps(programs, regulons, genes)` relates programs to regulons.
+  `set_overlaps(programs, regulons, genes)` relates programs to regulons. `gene_programs` splits
+  its gene graph with Leiden's default backend (`"cytearc"`), so programs from earlier releases,
+  whose default was `"igraph"`, can differ from new ones.
 - eRegulons: `link_regions_to_genes(peak_ids, genes, upstream=150_000, downstream=150_000,
   anchor="gene_body")` gives the candidates that `region_gene_links(atac, rna, candidates)` scores
   on metacell profiles; then `build_eregulons(cistromes, links, adjacencies)`. Each kept module's

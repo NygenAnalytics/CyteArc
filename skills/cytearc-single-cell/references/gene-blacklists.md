@@ -117,8 +117,8 @@ print(run_fixed["highly_variable_features"] == hvg_fixed,
 
 The pipeline returns the very ref of the explicit call when its cells match. Compare the two
 runs' partitions with `clustering-and-embedding.md`. 10x 5K PBMC docs dataset: `CCND3` and `CCNL1`
-entered, and the Leiden 1.0 partitions agreed (ARI 0.82) about as well as two Leiden seeds of the
-baseline (0.85).
+entered, and the Leiden 1.0 partitions agreed (ARI 0.86) about as well as two Leiden seeds of the
+baseline (0.81 to 0.85).
 
 ### Decide on the add-ons with marker evidence
 

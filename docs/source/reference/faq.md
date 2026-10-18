@@ -161,6 +161,29 @@ That result is a reproducible baseline, not proof that the selected resolution i
 correct. Granular evaluation APIs such as `evaluate_cluster_separability` can inspect partitions
 outside the pipeline.
 
+## Why do Leiden clusters differ from an earlier CyteArc release?
+
+`clusters.leiden` and the pipeline now use CyteArc's own Leiden implementation,
+`backend="cytearc"`, by default; earlier releases used the igraph package. Both optimize the same
+modularity objective, but their random choices differ, so their labels differ even for the same
+seed, and the new backend numbers clusters by size, with cluster 1 the largest. Compare partitions
+with `clusters.compute_concordance`, which ignores cluster numbers, rather than by number. The
+native backend gives the same labels for any number of threads, so `nthreads` does not change
+results. See {ref}`Leiden clustering <leiden_method>` for the method.
+
+The backend is part of each clustering's identity, so a default call does not reuse a clustering
+that an earlier release stored. Pass `backend="igraph"` to reuse it, which needs no extra package,
+or to compute a new igraph clustering, which needs the igraph package installed separately
+({ref}`Optional GPL Leiden backends <installation_leiden_gpl>`).
+
+## Why does the first Leiden clustering take longer than later ones?
+
+The first call of the default Leiden backend in a fresh environment compiles its Numba kernels
+once, which took about 26 seconds on a recent laptop. Later processes load the compiled kernels
+from Numba's on-disk cache, about 0.4 seconds for their first call, and later calls in the same
+process add only a few milliseconds of overhead. The cache needs a writable directory
+(`NUMBA_CACHE_DIR` sets one).
+
 ## Why will my existing RNA Zarr store not open?
 
 Current CyteArc versions write RNA counts twice: cell-major `counts` and a gene-major `countsT` copy.
