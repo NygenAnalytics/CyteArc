@@ -13,9 +13,6 @@ git-ignored ``tests/datasets``. It is derived from the dataset and is not
 published. miloR tests CyteArc's own kNN graph and refined index cells there,
 because the graph comes from an ANN index while miloR's refinement searches
 exact neighbours; R's refinement of the same draws is compared separately.
-The test statistics come from edgePython 0.2.6, which departs from edgeR
-4.8.2 (see ``tests/test_milo_golden.py``), so they are checked against
-bounds measured on this dataset and against miloR's significance calls.
 The export takes about 90 minutes. "Live differential-abundance test" in
 ``docs/source/developers/contributing.md`` lists the run commands, the
 comparisons, and their tolerances.
@@ -30,8 +27,6 @@ from typing import Any
 
 import numpy as np
 import pytest
-from scipy.stats import spearmanr
-
 from cytearc.metadata.selection import CellField
 from scripts.export_milo_golden import (
     WILK,
@@ -182,21 +177,18 @@ def test_wilk_neighborhood_test_matches_milor(wilk):
         for column in expected["designColumns"]
     ]
     table = result.table
-    # edgePython 0.2.6 on this dataset: TMM factors within 0.027, log-CPM
-    # 0.018, logFC 0.026, and -log10 p 0.82 of miloR, with p-value ranks
-    # correlated at 0.998. It finds all 931 neighbourhoods that miloR calls
-    # at spatial FDR < 0.1, and 19 more.
-    _close(result.norm_factors, expected["normFactors"], rtol=0, atol=0.05)
-    _close(table["log_cpm"], expected["logCpm"], rtol=0, atol=0.03)
-    _close(table["log_fc"], expected["logFc"], rtol=0, atol=0.04)
-    ours = -np.log10(table["p_value"].to_numpy())
-    theirs = -np.log10(np.asarray(expected["pValue"], dtype=np.float64))
-    _close(ours, theirs, rtol=0, atol=1.2)
-    assert spearmanr(ours, theirs)[0] > 0.99
-    called = table["spatial_fdr"].to_numpy() < 0.1
-    milor_called = np.asarray(expected["spatialFdr"], dtype=np.float64) < 0.1
-    assert (called & milor_called).sum() >= 0.99 * milor_called.sum()
-    assert (called & ~milor_called).sum() <= 0.05 * milor_called.sum()
+    # On this dataset: p-values and spatial FDR within 1.1e-6 relative of
+    # miloR, logFC within 4.2e-5, and the same 931 neighbourhoods called at
+    # spatial FDR < 0.1.
+    _close(result.norm_factors, expected["normFactors"], rtol=1e-12)
+    _close(table["log_cpm"], expected["logCpm"], rtol=1e-8)
+    _close(table["log_fc"], expected["logFc"], rtol=0, atol=1e-3)
+    _close(table["p_value"], expected["pValue"], rtol=1e-5)
+    _close(table["spatial_fdr"], expected["spatialFdr"], rtol=1e-5)
+    np.testing.assert_array_equal(
+        table["spatial_fdr"].to_numpy() < 0.1,
+        np.asarray(expected["spatialFdr"], dtype=np.float64) < 0.1,
+    )
 
 
 def test_wilk_annotation_matches_milor(wilk):

@@ -253,9 +253,9 @@ Milo counts every cell of the graph's cell selection, so with a two-arm donor re
 reusing `run["ann_index"]`. `covariates=["batch"]` adds
 sample-level terms (constant within each sample); `contrast={...}` tests a combination of design
 columns. Read `spatial_fdr`, not `fdr`. `log_fc` is log2 and shrunk (edgeR `predFC`). `legacy=True`
-is miloR's QL method, the default. `test_neighborhoods` needs `cytearc[milo]` (edgePython); its
-statistics approximate miloR's (`reference/methods.md`), so treat calls near `spatial_fdr` 0.1
-as borderline. Neighbourhood sizes should mostly exceed 5 x the number of
+is miloR's QL method, the default. `test_neighborhoods` needs `cytearc[milo]` (edgePython). With
+edgePython 0.2.6 its statistics only approximate miloR's, so install edgePython from GitHub
+(`installation.md`) or treat calls near `spatial_fdr` 0.1 as borderline. Neighbourhood sizes should mostly exceed 5 x the number of
 samples; raise `k` otherwise. Rerun with another `seed` before trusting a single neighbourhood.
 
 ### Donor-level expression tests

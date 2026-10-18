@@ -882,8 +882,8 @@ profiling = [
 requires-dist = [
     { name = "anndata", marker = "extra == 'extra'", specifier = ">=0.12" },
     { name = "anndata", marker = "extra == 'test'", specifier = ">=0.12" },
-    { name = "edgepython", marker = "extra == 'milo'", specifier = ">=0.2.6" },
-    { name = "edgepython", marker = "extra == 'test'", specifier = ">=0.2.6" },
+    { name = "edgepython", marker = "extra == 'milo'", git = "https://github.com/pachterlab/edgePython?rev=8f0bf429574931f110f575729d00ee5238ada434" },
+    { name = "edgepython", marker = "extra == 'test'", git = "https://github.com/pachterlab/edgePython?rev=8f0bf429574931f110f575729d00ee5238ada434" },
     { name = "h5py", specifier = ">=3.12.1" },
     { name = "hnswlib", specifier = ">=0.8" },
     { name = "httpx", marker = "extra == 'agent'", specifier = ">=0.28.1" },
@@ -995,7 +995,7 @@ wheels = [
 [[package]]
 name = "edgepython"
 version = "0.2.6"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/pachterlab/edgePython?rev=8f0bf429574931f110f575729d00ee5238ada434#8f0bf429574931f110f575729d00ee5238ada434" }
 dependencies = [
     { name = "matplotlib" },
     { name = "numba" },
@@ -1003,10 +1003,6 @@ dependencies = [
     { name = "pandas" },
     { name = "scipy" },
     { name = "statsmodels" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ee/1b/6643eb0fb22d0bb8cfa6e32abb1bdb8a049a262ef9642ebebf53f872c390/edgepython-0.2.6.tar.gz", hash = "sha256:517eaf89f6f765926cbe3c61f414042eae35c4edf55dcaae5545376f4f40a107", size = 211195, upload-time = "2026-06-16T23:06:03.981Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/35/50/a0ddb923a590b78639bf34bead78c27517915cbd5137e3bd963e416e184b/edgepython-0.2.6-py3-none-any.whl", hash = "sha256:b360406fcc5926c824969e7745afb56807347d904821f5baa5b6a1f78eba3677", size = 188037, upload-time = "2026-06-16T23:06:02.599Z" },
 ]
 
 [[package]]

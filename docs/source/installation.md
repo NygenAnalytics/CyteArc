@@ -133,6 +133,13 @@ Add it with the `milo` extra:
 uv pip install --prerelease allow "cytearc[extra,milo]"
 ```
 
+edgePython 0.2.6, the latest release, departs from edgeR 4.8.2 on the quasi-likelihood path that Milo uses, so its p-values and significance calls only approximate miloR's.
+The fixes are merged upstream but not yet released; until they are, install edgePython from GitHub:
+
+```bash
+uv pip install "edgepython @ git+https://github.com/pachterlab/edgePython@8f0bf429574931f110f575729d00ee5238ada434"
+```
+
 edgePython is licensed under the GPLv3, while CyteArc is BSD-3-Clause and does not depend on it unless you install the extra.
 Without it, testing neighbourhoods raises an `ImportError` that names the extra; building and counting neighbourhoods, propeller, and the plots do not need it.
 

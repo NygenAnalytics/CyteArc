@@ -6,14 +6,8 @@ test imports the same reduced dimensions into a store and runs
 kNN graph, and the seed must reproduce the sampled vertices.
 
 Sampling, membership, counts, k-distances, and annotation match miloR
-exactly. The neighbourhood test runs edgeR's steps in edgePython 0.2.6, which
-departs from edgeR 4.8.2 on this path (TMM log-ratios, the dispersion trend's
-span and locfit evaluation, the robust prior at infinite prior df, legacy
-``squeezeVar``, the Poisson bound, and zero-dispersion fits; see
-``docs/source/reference/methods.md``). Its statistics are therefore checked
-against bounds measured on these cases, and
-``test_neighborhood_test_matches_edger_exactly`` records the exact agreement
-that a corrected edgePython must reach.
+exactly. The neighbourhood test runs edgeR's steps in edgePython and matches
+edgeR to near its convergence tolerance; logFC differs by up to about 5e-4.
 """
 
 import hashlib
@@ -26,7 +20,6 @@ from typing import Any
 import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
-from scipy.stats import spearmanr
 
 from cytearc.abundance import milo
 from cytearc.datastore.datastore import DataStore
@@ -40,14 +33,12 @@ FIXTURE = Path(__file__).with_name("milor_2_6_0_golden.json")
 
 pytest.importorskip("edgepython")
 
-# Largest differences from miloR that edgePython 0.2.6 gives on these cases,
-# with headroom: TMM factors and log-CPM (three_levels_contrast, TMM), logFC,
-# and -log10 p-values; p-values must rank neighbourhoods as miloR does.
-_NORM_FACTORS_ATOL = 0.05
-_LOG_CPM_ATOL = 2e-3
-_LOG_FC_ATOL = 0.03
-_LOG10_P_ATOL = 1.2
-_P_RANK_CORRELATION = 0.98
+# Largest differences from miloR on these cases, with headroom: p-values,
+# F, and spatial FDR within 1.5e-6, 4.2e-5, and 1.5e-6 relative, logFC within
+# 5.3e-4 absolute (batch_and_condition, condition_refined).
+_LOG_FC_ATOL = 1e-3
+_P_VALUE_RTOL = 1e-5
+_F_RTOL = 1e-4
 
 
 @cache
@@ -97,25 +88,23 @@ def _assert_near_milor(
     log_cpm: Any,
     log_fc: Any,
     p_value: Any,
+    spatial_fdr: Any,
 ) -> None:
-    np.testing.assert_allclose(
-        norm_factors, expected["normFactors"], rtol=0, atol=_NORM_FACTORS_ATOL
-    )
+    _close(norm_factors, expected["normFactors"], rtol=1e-12)
     tested = np.isfinite(np.asarray(expected["pValue"], dtype=np.float64))
-    for actual, key, atol in (
-        (log_cpm, "logCpm", _LOG_CPM_ATOL),
-        (log_fc, "logFc", _LOG_FC_ATOL),
-    ):
-        np.testing.assert_allclose(
-            np.asarray(actual, dtype=np.float64)[tested],
-            np.asarray(expected[key], dtype=np.float64)[tested],
-            rtol=0,
-            atol=atol,
-        )
-    ours = -np.log10(np.asarray(p_value, dtype=np.float64)[tested])
-    theirs = -np.log10(np.asarray(expected["pValue"], dtype=np.float64)[tested])
-    np.testing.assert_allclose(ours, theirs, rtol=0, atol=_LOG10_P_ATOL)
-    assert spearmanr(ours, theirs)[0] > _P_RANK_CORRELATION
+    _close(np.asarray(log_cpm)[tested], np.asarray(expected["logCpm"])[tested])
+    np.testing.assert_allclose(
+        np.asarray(log_fc, dtype=np.float64)[tested],
+        np.asarray(expected["logFc"], dtype=np.float64)[tested],
+        rtol=0,
+        atol=_LOG_FC_ATOL,
+    )
+    _close(p_value, expected["pValue"], rtol=_P_VALUE_RTOL)
+    _close(spatial_fdr, expected["spatialFdr"], rtol=_P_VALUE_RTOL)
+    np.testing.assert_array_equal(
+        np.asarray(spatial_fdr, dtype=np.float64) < 0.1,
+        np.asarray(expected["spatialFdr"], dtype=np.float64) < 0.1,
+    )
 
 
 def test_fixture_pins_milor_and_its_inputs():
@@ -193,6 +182,7 @@ def test_milo_stages_match_milor(name):
         log_cpm=fit.log_cpm,
         log_fc=fit.log_fc,
         p_value=fit.p_value,
+        spatial_fdr=fit.spatial_fdr,
     )
 
     labels = np.asarray(case["label"])
@@ -205,14 +195,8 @@ def test_milo_stages_match_milor(name):
     _close(annotation.fraction, expected["labelFraction"], rtol=1e-14)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="edgePython 0.2.6 departs from edgeR 4.8.2 on Milo's path (see the "
-    "module docstring); tighten the bounds above once a corrected release "
-    "passes this",
-)
 @pytest.mark.parametrize("name", _names())
-def test_neighborhood_test_matches_edger_exactly(name):
+def test_neighborhood_test_matches_edger(name):
     case, expected = _case(name)
     design, contrast = _design(case, expected["sampleOrder"])
     fit = milo.differential_abundance(
@@ -223,12 +207,16 @@ def test_neighborhood_test_matches_edger_exactly(name):
         norm_method=case["normMethod"],
         min_mean=case["minMean"],
     )
-    _close(fit.norm_factors, expected["normFactors"], rtol=1e-12)
-    _close(fit.trended_dispersion, expected["trendedDispersion"], rtol=1e-5)
-    _close(fit.log_fc, expected["logFc"])
-    _close(fit.f_statistic, expected["f"], rtol=1e-5)
-    _close(fit.p_value, expected["pValue"])
-    _close(fit.spatial_fdr, expected["spatialFdr"])
+    _close(fit.trended_dispersion, expected["trendedDispersion"], rtol=1e-8)
+    _close(fit.f_statistic, expected["f"], rtol=_F_RTOL)
+    _assert_near_milor(
+        expected,
+        norm_factors=fit.norm_factors,
+        log_cpm=fit.log_cpm,
+        log_fc=fit.log_fc,
+        p_value=fit.p_value,
+        spatial_fdr=fit.spatial_fdr,
+    )
 
 
 def test_neighborhood_test_names_the_extra_without_edgepython(monkeypatch):
@@ -321,6 +309,7 @@ def test_datastore_pipeline_matches_milor(tmp_path, name):
         log_cpm=frame["log_cpm"],
         log_fc=frame["log_fc"],
         p_value=frame["p_value"],
+        spatial_fdr=frame["spatial_fdr"],
     )
     reloaded = store.abundance.load_neighborhood_tests(result.artifact)
     np.testing.assert_array_equal(reloaded.table.to_numpy(), frame.to_numpy())

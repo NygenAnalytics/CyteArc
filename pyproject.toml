@@ -212,6 +212,11 @@ extra-build-variables = { hnswlib = { HNSWLIB_NO_NATIVE = "1" } }
 no-binary = ["hnswlib"]
 extra-build-variables = { hnswlib = { HNSWLIB_NO_NATIVE = "1" } }
 
+# edgePython's edgeR 4.8.2 parity fixes (pachterlab/edgePython#9) are merged
+# but not yet released. Replace this with a floor on the release.
+[tool.uv.sources]
+edgepython = { git = "https://github.com/pachterlab/edgePython", rev = "8f0bf429574931f110f575729d00ee5238ada434" }
+
 [tool.ruff]
 exclude = [
     ".git",

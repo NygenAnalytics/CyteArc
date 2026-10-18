@@ -79,13 +79,13 @@ The comparisons separate the graph from the test, because CyteArc builds its gra
 
 - Graph: an exact kNN search in R on the same PCA coordinates must recover more than 99.9% of CyteArc's neighbours, and every index cell's neighbour list must be exact.
 - Refinement: miloR refines the same random draws itself, and more than 99% of its index cells must match CyteArc's.
-- Neighbourhood test: miloR then runs `makeNhoods`, `countCells`, `testNhoods`, and `annotateNhoods` on CyteArc's graph and index cells. Membership, sizes, counts, majority labels, and label fractions must match exactly, and the k-th distances to a relative tolerance of 1e-5. The test statistics come from edgePython 0.2.6, which departs from edgeR 4.8.2 ([](../reference/methods.md)), so they are held to bounds measured on this dataset: normalization factors within 0.05, log CPM within 0.03, log fold changes within 0.04, and -log10 p-values within 1.2 of miloR's, with p-values ranked alike (Spearman above 0.99). CyteArc must find at least 99% of the neighbourhoods that miloR calls at spatial FDR below 0.1, with no more than 5% extra.
+- Neighbourhood test: miloR then runs `makeNhoods`, `countCells`, `testNhoods`, and `annotateNhoods` on CyteArc's graph and index cells. Membership, sizes, counts, majority labels, and label fractions must match exactly, and the k-th distances to a relative tolerance of 1e-5. The test statistics come from edgePython: normalization factors must match miloR's to a relative tolerance of 1e-12, log CPM to 1e-8, p-values and spatial FDR to 1e-5, and log fold changes to 1e-3 absolute, and CyteArc must call exactly the neighbourhoods that miloR calls at spatial FDR below 0.1.
 - propeller: speckle's `propeller` on the same donors and labels must give the same t statistics, p-values, and FDR to 1e-8 and proportion ratios to 1e-10.
 
 Donors are the replicates, 7 COVID-19 and 6 healthy, and the two samples of donor C1 are pooled because the atlas has no sample column.
 The fixture built with R 4.5.2 gives 1,877 neighbourhoods, 931 of them at spatial FDR below 0.1, and R's refinement picks the same index cell for all but one.
-With edgePython 0.2.6, CyteArc calls those 931 and 19 more.
-`tests/test_milo_golden.py::test_neighborhood_test_matches_edger_exactly` is a strict expected failure that records edgeR's precision: when a corrected edgePython makes it pass, tighten the bounds in both test files.
+CyteArc calls the same 931, with p-values within 1.1e-6 relative of miloR's and log fold changes within 4.2e-5.
+These bounds need edgePython's edgeR parity fixes, which `[tool.uv.sources]` in `pyproject.toml` installs from GitHub until edgePython releases them; edgePython 0.2.6 fails them.
 A dependency upgrade that changes Milo's results for unchanged inputs also needs an operation revision for `test_neighborhoods` ([](operation_revisions.md)), so that stores stop reusing the earlier results.
 
 ### Performance benchmarks
