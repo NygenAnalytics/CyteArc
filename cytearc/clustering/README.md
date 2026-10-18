@@ -116,7 +116,9 @@ graph is the Bastidas-Ponce pancreas. The others are synthetic: "hard" graphs ha
 cell types.
 
 **Setup.**
-- Modularity is at resolution 1, as a mean over seeds.
+- Modularity is at resolution 1, as a mean over seeds 0 to 4 on the 808- and 3,696-cell graphs,
+  0 to 2 at 100,000 cells, 0 and 1 at 1,000,000 cells, and seed 0 alone at 10,000,000 cells. The
+  808-cell entry therefore differs slightly from the 60-seed mean above.
 - Times cover the whole `leiden_membership` call after an untimed warm-up.
 - Memory is the peak resident memory of the process.
 - The machine was an Intel Core Ultra 7 265U laptop with 8 vCPUs under WSL2. Its cores share one

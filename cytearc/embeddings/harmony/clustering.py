@@ -14,9 +14,12 @@ add. With ``O`` and ``E`` held fixed, the assignment of one cell is the softmax 
 ``(y_k . ztilde_i - 1) 2 / sigma_k - sum_c theta log1p(O / (E + 1))``, the
 exact minimiser of the cell's part of ``J``.
 
-As in the 2019 method, cells are updated in blocks of a fixed random order, with
-``O`` and ``E`` computed on the cells outside the block, and the centroids are the
-normalised assignment-weighted sums of the unit cells (spherical k-means).
+As in the 2019 method, cells are updated in blocks, with ``O`` and ``E`` computed
+on the cells outside the block, and the centroids are the normalised
+assignment-weighted sums of the unit cells (spherical k-means). The paper leaves
+the order of the cells open. Here the blocks follow one random order, drawn once
+per fit, because the input order could put a whole batch in one block, where its
+held-out ``O`` would be zero.
 
 Every array that holds one row per cell is cell-major, and chunk temporaries come
 from the preallocated :class:`ClusteringWorkspace`.

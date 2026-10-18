@@ -70,8 +70,9 @@ other Harmony or Symphony implementation, and their tool use was audited.
   - the assignment update, as the exact minimiser of each cell's objective;
   - a whole clustering pass, against a dense pass of the 2019 algorithm;
   - the objective and the seeding distribution;
-  - a synthetic set whose two groups of batches share no cell types. Batch mixing rises from
-    0.07 to 0.20 to about 0.65, and cell-type purity stays at 1.0.
+  - a synthetic set whose two groups of batches share no cell types. Over seeds 0, 1 and 2,
+    batch mixing rises from between 0.07 and 0.20 before correction to about 0.65 after it,
+    and cell-type purity stays at 1.0.
 - **Contracts.** `tests/test_harmony_api.py` covers the API, validation, the stopping rule and failure
   handling.
 - **Integration.** The DataStore, pipeline, Symphony mapping and memory-admission tests cover how the
