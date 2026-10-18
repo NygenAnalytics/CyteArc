@@ -121,6 +121,9 @@ links = rg.region_gene_links(atac, rna, candidates[candidates["gene"].isin(genes
 - A motif deviation is a motif family's accessibility, not one factor's activity; pair it with
   the factor's expression or binding data before naming the factor.
 - Do not mix genome builds: peaks, FASTA, GTF, and cisTarget databases must agree.
+- The Aerts lab's cisTarget databases and motif tables state no license terms, and the v10
+  motif collection includes motifs derived from TRANSFAC Professional, a commercial database.
+  Confirm their terms before commercial work.
 - Regulon targets from one GRNBoost2 seed include seed-specific links; report seed-stable ones.
 - The chromVAR background model holds about four bytes per motif-peak match per background
   iteration; score fewer motifs per call if the budget refuses it.

@@ -12,6 +12,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 WORKDIR /workspace
 COPY . /workspace
 
+# .dockerignore keeps .git out of the image, so setuptools-scm cannot read the
+# version. To record it, pass a PEP 440 version, for example
+# --build-arg SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CYTEARC=1.1.0
+ARG SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CYTEARC=0+unknown
+
 # t-SNE is optional: add --extra tsne for sgtsnepi, which has wheels for
 # linux/amd64 and must otherwise be compiled with a C++ compiler and FFTW.
 RUN uv python install && uv sync --extra extra

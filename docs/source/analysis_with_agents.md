@@ -319,6 +319,9 @@ Treat every regulon as a hypothesis about regulation, not as evidence of binding
 - Use a cisTarget database for the same species and gene naming as the expression data, and a
   JASPAR or cisTarget motif collection with the factor annotations it was built for. Module
   genes missing from the database are skipped; check how many modules survive.
+- The Aerts lab's cisTarget databases and motif tables state no license terms, and the v10
+  motif collection includes motifs derived from TRANSFAC Professional, a commercial database.
+  Confirm their terms before commercial work.
 - chromVAR measures accessibility of every peak that matches a motif. Paralogous factors share
   motifs, so a motif deviation names a motif family; pair it with the factor's expression or a
   binding experiment before naming one factor. Cells that expect fewer than one fragment in a

@@ -20,6 +20,29 @@ uv run ruff format --check cytearc profiling tests
 uv run mypy cytearc profiling
 ```
 
+## Licensing and provenance
+
+CyteArc is released under the BSD 3-Clause License, and contributions are licensed under the same terms.
+
+- Contribute only code, text, and data that you wrote yourself or that come from a source whose license is compatible with BSD-3-Clause, such as MIT, BSD, Apache-2.0, or the public domain.
+- Do not copy, translate, or port code from projects under the GPL, LGPL, or AGPL, under non-commercial or no-derivatives terms, or with no license, even in small amounts.
+  Implementing a method from its paper is welcome; copying its reference implementation is not.
+- Record material from a compatible project in `THIRD_PARTY_NOTICES.md`: its copyright line, its license, the files that use it, and the full license text if the file does not already hold it.
+  Keep these records in that one file rather than in per-file license headers, and keep citing the methods that code follows in its docstrings.
+- To match another tool's results, compare against outputs you generate by running that tool, not against a transcription of its code.
+- Before publishing a new example or test dataset, record its source and license in `THIRD_PARTY_NOTICES.md`, and prefer data whose license allows redistribution.
+
+### AI-assisted contributions
+
+AI-assisted contributions follow the same rules, and you remain the author of the pull request:
+
+1. Read and understand every line before you open the pull request.
+2. Do not give an AI tool the source code of a project whose license is incompatible with BSD-3-Clause to port, translate, or imitate, and do not ask it to reproduce such an implementation.
+   If generated code reproduces a recognizable implementation, treat it as that project's code: attribute it under a compatible license, or discard it.
+3. Cite the methods and tools the code follows.
+4. Show that new behavior works, with tests, reference comparisons, or executed documentation pages.
+5. Say in the pull request description which AI tools helped.
+
 ## Testing locally
 
 You can run the tests locally on your branch with [pytest].

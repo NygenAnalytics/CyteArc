@@ -173,6 +173,34 @@ def _tree_palette(
     return colormap_palette(categories, cmap)
 
 
+def _pie_wedge_paths(values: np.ndarray) -> list[Any]:
+    """Return unit-diameter pie wedges, counter-clockwise from the +x axis.
+
+    Each wedge spans its value's share of a full turn. Arcs are cubic Bezier
+    segments of at most a quarter turn, which stay within 0.03% of the circle.
+    """
+    from matplotlib.path import Path
+
+    cumulative = np.cumsum(values, dtype=np.float64)
+    bounds = 2 * np.pi * np.concatenate(([0.0], cumulative / cumulative[-1]))
+    spans = np.diff(bounds)
+    n_segments = int(np.ceil(spans.max() / (np.pi / 2)))
+    steps = np.linspace(0.0, 1.0, n_segments + 1)
+    rim = 0.5 * np.exp(1j * (bounds[:-1, None] + spans[:, None] * steps))
+    # Control points lie on the segment end tangents, (4 / 3) tan(angle / 4) radii out.
+    handle = 1j * (4 / 3) * np.tan(spans / (4 * n_segments))[:, None]
+    curves = np.stack(
+        (rim[:, :-1] * (1 + handle), rim[:, 1:] * (1 - handle), rim[:, 1:]),
+        axis=-1,
+    ).reshape(len(spans), -1)
+    center = np.zeros((len(spans), 1))
+    points = np.concatenate((center, rim[:, :1], curves, center), axis=1)
+    codes = np.full(points.shape[1], Path.CURVE4, dtype=Path.code_type)
+    codes[[0, 1, -1]] = Path.MOVETO, Path.LINETO, Path.CLOSEPOLY
+    vertices = np.stack((points.real, points.imag), axis=-1)
+    return [Path(wedge, codes) for wedge in vertices]
+
+
 def _draw_tree_pie(
     ax: Any,
     values: np.ndarray,
@@ -182,15 +210,25 @@ def _draw_tree_pie(
     y: float,
     size: float,
 ) -> None:
-    cumulative = np.cumsum(values, dtype=np.float64)
-    cumulative /= cumulative[-1]
-    bounds = [0.0, *cumulative.tolist()]
-    for start, stop, color in zip(bounds[:-1], bounds[1:], colors):
-        angles = np.linspace(2 * np.pi * start, 2 * np.pi * stop)
-        marker_x = [0.0, *np.cos(angles).tolist()]
-        marker_y = [0.0, *np.sin(angles).tolist()]
-        marker = np.column_stack([marker_x, marker_y])
-        ax.scatter([x], [y], marker=marker, s=size, c=color, zorder=3)
+    from matplotlib.collections import PathCollection
+    from matplotlib.transforms import IdentityTransform
+
+    # Sized and offset like a scatter marker, so the pie stays a circle
+    # sqrt(size) points across whatever the data limits, aspect or dpi.
+    pie = PathCollection(
+        _pie_wedge_paths(values),
+        sizes=[size],
+        offsets=[(x, y)],
+        offset_transform=ax.transData,
+        transform=IdentityTransform(),
+        facecolors=colors,
+        edgecolors="none",
+        linewidths=0,
+        zorder=3,
+        gid="cluster-tree-pie",
+    )
+    # The node marker underneath already holds this position in the limits.
+    ax.add_collection(pie, autolim=False)
 
 
 @close_figures_on_error

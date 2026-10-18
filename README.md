@@ -98,3 +98,4 @@ Read workflow vignettes and API references in the **[documentation](https://docs
 [GitHub issues](https://github.com/NygenAnalytics/CyteArc/issues)
 
 CyteArc is open source software released under the [BSD 3-Clause License](LICENSE) and maintained by [Nygen](https://nygen.io).
+Third-party code, fonts, and data that CyteArc includes or downloads are credited with their licenses in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

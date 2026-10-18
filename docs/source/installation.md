@@ -55,11 +55,9 @@ Or activate it in Windows PowerShell:
 Install CyteArc into the activated environment:
 
 ```bash
-uv pip install --prerelease allow "cytearc[extra]"
+uv pip install "cytearc[extra]"
 ```
 
-CyteArc 1.0.0rc1 is in preparation. The installation commands apply once the release candidate is published.
-Use `--prerelease allow` to let uv select a release candidate.
 The `extra` optional dependency group adds plotting (`matplotlib`, `seaborn`), AnnData support, widgets, and other helpers used by the tutorials.
 
 Verify the install with the Python interpreter from the same environment.
@@ -77,11 +75,10 @@ If uv is unavailable, first confirm that `python` is version 3.13 or newer, then
 python -m venv .venv
 ```
 
-Use the macOS, Linux, or Windows activation command above, then install and verify CyteArc.
-`--pre` is pip's equivalent of uv's `--prerelease allow`:
+Use the macOS, Linux, or Windows activation command above, then install and verify CyteArc:
 
 ```bash
-python -m pip install --pre "cytearc[extra]"
+python -m pip install "cytearc[extra]"
 python -c "from cytearc import DataStore; import cytearc; print(cytearc.__version__)"
 ```
 
@@ -92,7 +89,7 @@ This path installs a prebuilt `hnswlib` from conda-forge and is recommended on W
 ```bash
 conda create --name cytearc_env --channel conda-forge python=3.13 pip "hnswlib>=0.8"
 conda activate cytearc_env
-python -m pip install --pre "cytearc[extra]"
+python -m pip install "cytearc[extra]"
 python -c "from cytearc import DataStore; import cytearc; print(cytearc.__version__)"
 ```
 
@@ -113,7 +110,7 @@ it.
 Add it with the `tsne` extra, in the same environment as CyteArc:
 
 ```bash
-uv pip install --prerelease allow "cytearc[extra,tsne]"
+uv pip install "cytearc[extra,tsne]"
 ```
 
 `sgtsnepi` publishes wheels only for Linux x86_64 and for macOS 26 or newer on Apple silicon (arm64).
@@ -147,7 +144,7 @@ Reusing an `"igraph"` or `"leidenalg"` clustering that a store already holds, an
 Add it with the `regulons` extra:
 
 ```bash
-uv pip install --prerelease allow "cytearc[extra,regulons]"
+uv pip install "cytearc[extra,regulons]"
 ```
 
 Without `polars`, opening a ranking database raises an `ImportError` that names the extra.
@@ -199,13 +196,13 @@ See the [Microsoft long-path documentation].
 Activate the environment that contains CyteArc, then use the same installer:
 
 ```bash
-uv pip install --upgrade --prerelease allow "cytearc[extra]"
+uv pip install --upgrade "cytearc[extra]"
 ```
 
 Or, for pip and conda environments:
 
 ```bash
-python -m pip install --upgrade --pre "cytearc[extra]"
+python -m pip install --upgrade "cytearc[extra]"
 ```
 
 ## Install from source
@@ -223,7 +220,7 @@ See [](developers/contributing.md) before making package or documentation change
 
 ## Troubleshooting
 
-- **No virtual environment found:** activate `.venv`, or pass it explicitly with `uv pip install --python .venv --prerelease allow "cytearc[extra]"`.
+- **No virtual environment found:** activate `.venv`, or pass it explicitly with `uv pip install --python .venv "cytearc[extra]"`.
 - **`hnswlib` fails to build:** install the compiler and, for a system Python, matching development headers described above.
   On Windows without Build Tools, use the conda path.
 - **`embeddings.tsne` raises `ImportError` naming the `tsne` extra:** install the extra as described in {ref}`Optional t-SNE <installation_tsne>`, or use UMAP.

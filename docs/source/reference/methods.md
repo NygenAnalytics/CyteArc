@@ -101,11 +101,15 @@ Agreement measured for one method is not evidence of equivalence for the rest of
   bit-identical because scikit-learn's tree code has changed since 1.1.3.
 - cisTarget AUC, NES, recovery envelopes, and leading edges reproduce all 297 pySCENIC regulons
   and 2,184 enriched motif rows (within 1e-15) when each motif is given the recovery curve that
-  pySCENIC 0.12.1 assigns it, and AUCell regulon scores agree within 2e-16.
+  pySCENIC 0.12.1 assigns it.
   pySCENIC 0.12.1 gives most annotated motifs another enriched motif's curve; `prune_modules`
   uses each motif's own, so on pySCENIC's network the regulon names agree but the median target
   Jaccard is 0.25. These targets are more reproducible across GRNBoost2 seeds (median Jaccard
   0.33, against 0.20 to 0.24 with pySCENIC's pruning).
+- AUCell regulon scores differ from pySCENIC's by design. CyteArc divides each cell's
+  recovery area by the largest area a regulon of that size can reach, as R AUCell and
+  decoupler do, while pySCENIC divides by the area of the whole ranking window. For an
+  unweighted 20-gene regulon among 1,000 genes, pySCENIC's scores are 0.79 times CyteArc's.
 - chromVAR deviations are compared with chromVAR 1.34.1 and motifmatchr 1.34.0 for 879 JASPAR
   2024 motifs over 98,316 peaks. Given R's motif matches and background peaks, deviations and
   z-scores agree within 4e-12, with the same missing values. With an even background, motif

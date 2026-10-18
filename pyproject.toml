@@ -8,7 +8,8 @@ dynamic = ["version"]
 description = "Out-of-core, graph-first workflows for million-cell RNA-seq and CITE-seq"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.13"
-license = "BSD-3-Clause"
+license = "BSD-3-Clause AND MIT AND OFL-1.1 AND LicenseRef-Biopython"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [
     {name = "Parashar Dhapola", email = "parashar.dhapola@gmail.com"},
 ]

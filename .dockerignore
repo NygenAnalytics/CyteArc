@@ -1,0 +1,74 @@
+# The image should hold what Git tracks, without the Git history. These rules
+# follow .gitignore, which Docker does not read, and keep credentials, local
+# configs, downloaded data and build output out of the build context.
+.git
+
+# Credentials.
+**/.env
+**/.env.*
+!**/.env.example
+
+# Machine-specific profiling configs.
+profiling/config.toml
+profiling/config.*.toml
+!profiling/config.example.toml
+profiling/cluster_sources.toml
+profiling/layouts
+
+# Environments, caches and build output.
+.venv
+.venv*
+**/__pycache__
+**/*.py[cod]
+.mypy_cache
+.pytest_cache
+.ruff_cache
+**/.ipynb_checkpoints
+**/build
+**/dist
+**/*.egg-info
+cytearc/_version.py
+.coverage
+coverage.xml
+coverage.json
+htmlcov
+interrogate_badge.svg
+
+# Downloaded datasets and generated outputs.
+tests/datasets
+tests/visual/showcase/*.json
+**/cytearc_datasets
+**/*.zarr
+**/test_data
+docs/build
+docs/source/_build
+docs/.ipython
+docs/source/**/*.tmp
+artifacts
+plotting_showcase
+:memory:
+
+# Untracked notebooks outside the documentation sources.
+**/*.ipynb
+!docs/source/**/*.ipynb
+
+# Local working directories and notes.
+.idea
+.vscode
+.agents
+.codex
+**/.cache
+**/temp
+**/notebook
+**/review
+**/ideas
+**/PR
+modal_cytearc
+cellxgene_cytebase/datasets
+cytebase_analysis
+cytearc/cytebase/collection
+cytearc/cytebase/README.md
+cytearc/agent/*.md
+!cytearc/agent/README.md
+!cytearc/agent/VALIDATION.md
+performance_reconfig.md
