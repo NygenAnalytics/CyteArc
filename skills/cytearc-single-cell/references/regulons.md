@@ -1,8 +1,8 @@
 # Regulons, chromatin activity and gene programs
 
 Infer transcription-factor regulons from RNA the SCENIC way, score motif or binding-peak activity
-in ATAC cells with chromVAR, build enhancer-driven regulons from paired RNA and ATAC the SCENIC+
-way, and find co-regulated gene programs. Docs: <https://docs.nygen.io/CyteArc/tutorials/regulons>,
+in ATAC cells with chromVAR, link peaks to genes in paired RNA and ATAC, and find co-regulated
+gene programs. Docs: <https://docs.nygen.io/CyteArc/tutorials/regulons>,
 <https://docs.nygen.io/CyteArc/api/regulons.html>.
 
 ## When to use
@@ -15,7 +15,7 @@ way, and find co-regulated gene programs. Docs: <https://docs.nygen.io/CyteArc/t
 ## Key concepts
 
 - Every set is a table with `source` (the set) and `target` (a member): modules, regulons,
-  programs, cistromes, and eRegulons. `ds.scores.aucell` scores gene sets on RNA and
+  programs, and cistromes. `ds.scores.aucell` scores gene sets on RNA and
   `ds.scores.chromvar` peak sets on ATAC; both return `kind="enrichment_scores"`.
   `ds.scores.load(ref).to_pandas()` gives cells x sources; chromVAR also has `.deviations`.
   chromVAR z-scores are NaN where a cell expects under one fragment.
@@ -50,12 +50,11 @@ way, and find co-regulated gene programs. Docs: <https://docs.nygen.io/CyteArc/t
   `set_overlaps(programs, regulons, genes)` relates programs to regulons. `gene_programs` splits
   its gene graph with Leiden's default backend (`"cytearc"`), so programs from earlier releases,
   whose default was `"igraph"`, can differ from new ones.
-- eRegulons: `link_regions_to_genes(peak_ids, genes, upstream=150_000, downstream=150_000,
-  anchor="gene_body")` gives the candidates that `region_gene_links(atac, rna, candidates)` scores
-  on metacell profiles; then `build_eregulons(cistromes, links, adjacencies)`. Each kept module's
-  links carry its `context`, `NES`, `p_value`, and `adjusted_p`; SCENIC+'s defaults keep modules
-  without evidence, so filter on `adjusted_p` (or set `EregulonParameters(adjustedPThreshold=...)`)
-  before scoring `eregulons[["source", "target"]].drop_duplicates()`.
+- Region-to-gene links: `link_regions_to_genes(peak_ids, read_gene_annotation(gtf), upstream=...,
+  downstream=..., anchor="tss" or "gene_body")` gives candidate pairs, which
+  `region_gene_links(atac, rna, candidates)` scores on metacell profiles: Spearman `rho` and a
+  gradient-boosting `importance`, one regressor per gene (`importance="none"` skips it). Links
+  are associations across metacells; report them as candidate enhancers.
 
 ## Recipes
 
@@ -98,7 +97,7 @@ spi1 = ds.scores.chromvar(binding, cells, from_assay="ATAC", features=peaks,
                           genome="GRCh38.primary_assembly.genome.fa", tmin=5)
 ```
 
-### Gene programs and enhancer-driven regulons (multiome)
+### Gene programs and region-to-gene links (multiome)
 
 ```python
 metacells = ds.clusters.leiden(run["connectivity_map"], resolution=15)
@@ -114,12 +113,7 @@ annotation = rg.read_gene_annotation("gencode.v32.primary_assembly.annotation.gt
                                      gene_types={"protein_coding"})
 candidates = rg.link_regions_to_genes(peak_ids, annotation, upstream=150_000,
                                       downstream=150_000, anchor="gene_body")
-links = rg.region_gene_links(atac, rna, candidates[candidates["gene"].isin(adjacencies["target"])],
-                             nthreads=8)
-cistromes = rg.cistromes_from_motifs(matches, rg.motif_annotations(motifs))
-eregulons = rg.build_eregulons(cistromes, links, adjacencies, nthreads=8)
-auc = ds.scores.aucell(eregulons[["source", "target"]].drop_duplicates(), cells,
-                       features=run["feature_universe"], tmin=10)
+links = rg.region_gene_links(atac, rna, candidates[candidates["gene"].isin(genes)], nthreads=8)
 ```
 
 ## Pitfalls

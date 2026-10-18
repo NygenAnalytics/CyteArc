@@ -1,8 +1,8 @@
 """Cistromes: the regions a transcription factor binds or can bind.
 
 A cistrome comes either from motif matches, assigned to factors by a motif
-annotation table as SCENIC+ does, or from an experiment that measured binding
-directly, such as CUT&RUN, CUT&Tag, or ChIP-seq peaks of one factor.
+annotation table, or from an experiment that measured binding directly, such
+as CUT&RUN, CUT&Tag, or ChIP-seq peaks of one factor.
 """
 
 import os
@@ -77,10 +77,9 @@ def cistromes_from_motifs(
     """Assign motif-matched regions to the factors their motifs are annotated to.
 
     Each factor's cistrome is the union of the regions matched by every motif
-    the annotation table assigns to it in ``categories``. SCENIC+ builds
-    ``direct`` cistromes from direct annotations and ``extended`` cistromes
-    from orthology annotations only; pass ``categories=("orthology",)`` for the
-    latter.
+    the annotation table assigns to it in ``categories``. The default keeps
+    direct annotations; ``categories=("orthology",)`` builds cistromes from
+    orthology annotations alone.
 
     Args:
         motif_network: ``source`` (motif ID) and ``target`` (region) columns,
@@ -123,8 +122,7 @@ def binding_cistromes(
 
     A region joins a factor's cistrome when one of the factor's peaks overlaps
     it. With ``min_overlap_fraction`` above zero, the shared bases must also
-    exceed that fraction of the peak or of the region, the rule pycistarget
-    uses to map regions onto its databases (``0.4``).
+    exceed that fraction of the peak or of the region.
 
     Args:
         peaks: Factor name to binding peaks, as a ``read_peak_file`` table or

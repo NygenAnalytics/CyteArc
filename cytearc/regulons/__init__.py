@@ -27,10 +27,6 @@ if TYPE_CHECKING:
         motif_annotations as motif_annotations,
         read_motif_annotations as read_motif_annotations,
     )
-    from .eregulons import (
-        EregulonParameters as EregulonParameters,
-        build_eregulons as build_eregulons,
-    )
     from .grn import GrnParameters as GrnParameters, infer_grn as infer_grn
     from .links import region_gene_links as region_gene_links
     from .modules import (
@@ -57,7 +53,6 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
-    "EregulonParameters",
     "GeneProgramParameters",
     "GrnParameters",
     "GrnResult",
@@ -67,7 +62,6 @@ __all__ = [
     "PruningParameters",
     "RankingDatabase",
     "binding_cistromes",
-    "build_eregulons",
     "cistromes_from_motifs",
     "connection_specificity",
     "gc_content",
@@ -95,7 +89,6 @@ __all__ = [
 __getattr__, __dir__ = _lazy_facade(
     __name__,
     {
-        "EregulonParameters": ".eregulons",
         "GeneProgramParameters": ".programs",
         "GrnParameters": ".grn",
         "GrnResult": ".results",
@@ -105,7 +98,6 @@ __getattr__, __dir__ = _lazy_facade(
         "PruningParameters": ".pruning",
         "RankingDatabase": ".databases",
         "binding_cistromes": ".cistromes",
-        "build_eregulons": ".eregulons",
         "cistromes_from_motifs": ".cistromes",
         "connection_specificity": ".specificity",
         "gc_content": "..features.genomic.sequence",

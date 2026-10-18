@@ -18,8 +18,7 @@ CyteArc provides complete workflows for:
 - dataset merging, Harmony or partial-PCA correction with quantitative diagnostics, reference mapping, and label transfer
 - cell-cycle scoring, gene-set activity, imputation, and pseudobulk export
 - transcription-factor regulons from RNA (SCENIC), motif or binding-peak activity from ATAC
-  (chromVAR), enhancer-driven regulons from paired RNA and ATAC (SCENIC+), and co-regulated gene
-  programs
+  (chromVAR), and co-regulated gene programs
 
 ## Implemented methods
 
@@ -38,8 +37,8 @@ The aim is one coherent execution path, not reimplementation for its own sake.
   co-expression networks and [SCENIC](https://doi.org/10.1038/nmeth.4463) cisTarget pruning
   ([pySCENIC](https://doi.org/10.1038/s41596-020-0336-2)), [chromVAR](https://doi.org/10.1038/nmeth.4401)
   motif deviations with MOODS-equivalent motif matching, cistromes from motifs or CUT&RUN and
-  ChIP-seq peaks, [SCENIC+](https://doi.org/10.1038/s41592-023-01938-4) enhancer-driven
-  regulons, regulon specificity and connection specificity, and co-expression gene programs.
+  ChIP-seq peaks, region-to-gene links from paired RNA and ATAC, regulon specificity and
+  connection specificity, and co-expression gene programs.
 
 (leiden_method)=
 
@@ -119,16 +118,12 @@ Agreement measured for one method is not evidence of equivalence for the rest of
   thresholds, matches overlapped motifmatchr's at Jaccard 0.94, and end to end, with
   independently drawn background peaks, per-motif z-scores correlated at a median Pearson of
   0.96 and population means at 0.995; these have not been measured again since.
-- Enhancer-driven regulons were not compared with a SCENIC+ run. Preranked GSEA matches a
-  line-by-line transcription of gseapy 0.10.8's statistics and permutations in unit tests, and
-  region-to-gene links use SCENIC+'s regressor settings. On the multiome sample, chromVAR scores
-  CUT&RUN and ChIP-seq peak sets highest in the expected population for SPI1 (dendritic cells),
-  LEF1 (CD4 T cells), and the B-cell factors PAX5, EBF1, POU2F2, and POU2AF1, but not for
-  BCL11B binding measured in Jurkat cells.
+- On the multiome sample, chromVAR scores CUT&RUN and ChIP-seq peak sets highest in the
+  expected population for SPI1 (dendritic cells), LEF1 (CD4 T cells), and the B-cell factors
+  PAX5, EBF1, POU2F2, and POU2AF1, but not for BCL11B binding measured in Jurkat cells.
   Against ChIP-Atlas binding within 10 kb of a gene's start (the GRETA gold standard), the
   fraction of factor-to-gene links with binding exceeds its random expectation by 8% for CyteArc
-  regulons, 7% for pySCENIC regulons, 9% for enhancer-driven regulons, and 3% for each factor's
-  top 50 GRNBoost2 targets.
+  regulons, 7% for pySCENIC regulons, and 3% for each factor's top 50 GRNBoost2 targets.
 - Gene programs are compared with Hotspot 1.1.1 modules on the same cells and highly variable
   genes. The six programs contain 89% of the 503 genes in Hotspot's ten modules, and 76% of those
   genes fall in their module's majority program (adjusted Rand index 0.45 on shared genes,

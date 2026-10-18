@@ -109,12 +109,11 @@ They must not import those packages at module load time.
   networks (`grn.py`), co-expression modules (`modules.py`), cisTarget ranking databases and
   motif annotations (`databases.py`), recovery-curve enrichment (`cistarget.py`), pruning into
   regulons (`pruning.py`), cistromes from motifs or binding peaks (`cistromes.py`),
-  region-to-gene links (`links.py`), enhancer-driven regulons with preranked GSEA
-  (`eregulons.py`), co-regulated gene programs (`programs.py`), and regulon specificity
-  (`specificity.py`). Its functions work on in-memory tables and reference files, and every
-  set they return has `source` and `target` columns, the network shape that the enrichment
-  scorers read. `polars` is an optional dependency for ranking databases, so the `regulons`
-  extra does not install `pyarrow`. `results.py` holds `GrnResult`, which names
+  region-to-gene links (`links.py`), co-regulated gene programs (`programs.py`), and regulon
+  specificity (`specificity.py`). Its functions work on in-memory tables and reference files,
+  and every set they return has `source` and `target` columns, the network shape that the
+  enrichment scorers read. `polars` is an optional dependency for ranking databases, so the
+  `regulons` extra does not install `pyarrow`. `results.py` holds `GrnResult`, which names
   `storage.refs` only. `DataStore.regulons.profiles` sums cell groups with
   `compare.compute_bulk` and writes nothing.
 

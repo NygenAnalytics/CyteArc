@@ -310,7 +310,7 @@ A pseudotime or fate artifact is a model-based summary, not evidence of causal l
 ### Regulons, chromatin activity, and gene programs
 
 Use [](tutorials/regulons.ipynb) for RNA regulons, motif and binding-peak activity in ATAC
-cells, enhancer-driven regulons, and co-regulated gene programs.
+cells, and co-regulated gene programs.
 Treat every regulon as a hypothesis about regulation, not as evidence of binding or causality.
 
 - A SCENIC regulon combines co-expression with motif enrichment near target genes.
@@ -326,8 +326,8 @@ Treat every regulon as a hypothesis about regulation, not as evidence of binding
 - CUT&RUN, CUT&Tag, and ChIP-seq peaks measure binding in the profiled cells. Peaks from a cell
   line or another cell type describe that context; remove blacklisted regions before mapping
   them onto your peaks.
-- Enhancer-driven regulons need RNA and ATAC from the same cells. Region-to-gene links from
-  metacells are associations, so report them as candidate enhancers.
+- Region-to-gene links need RNA and ATAC from the same cells. Links from metacells are
+  associations, so report them as candidate enhancers.
 - Gene programs group genes that co-vary across metacells. Build them from independent samples
   (metacells or pseudobulk), never from smoothed cells, whose shared counts inflate correlations;
   the membership threshold screens chance groupings but is not a calibrated test of a program.
