@@ -1,8 +1,9 @@
-"""Replicate-level statistics: designs, limma moderation, and FDR control.
+"""Replicate-level statistics: designs, empirical Bayes moderation, and FDR control.
 
 The package has no storage dependency. :mod:`cytearc.abundance` uses its
-limma port for propeller and its designs and FDR corrections for Milo, whose
-edgeR steps run in the optional edgePython package.
+empirical Bayes linear models for propeller and its designs and FDR
+corrections for Milo, whose edgeR steps run in the optional edgePython
+package.
 """
 
 from typing import TYPE_CHECKING

@@ -30,9 +30,10 @@ it, then compare composition and expression at the donor level. Docs: <https://d
   column and return a float. iLISI (mixing) should rise while cLISI and connectivity hold.
 - **What CyteArc tests.** `compare.test` runs donor-level rank tests (a
   `statistical_tests` artifact; several keys share one BH pass). `ds.abundance` tests
-  differential abundance with samples as replicates: `test_categories` ports `speckle::propeller`
-  (category proportions) and the Milo methods port miloR (kNN neighbourhoods, edgeR QL test via
-  edgePython, the `cytearc[milo]` extra, spatial FDR). There is no count GLM for expression (DESeq2, edgeR) or scCODA: export pseudobulk
+  differential abundance with samples as replicates: `test_categories` implements propeller
+  (category proportions, checked against speckle) and the Milo methods implement Milo (kNN
+  neighbourhoods, edgeR QL test via edgePython, the `cytearc[milo]` extra, spatial FDR; checked
+  against miloR). There is no count GLM for expression (DESeq2, edgeR) or scCODA: export pseudobulk
   counts ("Export pseudobulk counts" in `performance-and-export.md`) and model one population at a
   time with donor-level terms.
 

@@ -161,8 +161,9 @@ functions in {doc}`regulons` turn them into regulons.
 ### `ds.abundance`
 
 Differential abundance between conditions, with samples as the replicates. `test_categories`
-tests the proportions of cell categories, a port of `speckle::propeller`. The Milo methods test
-overlapping kNN neighbourhoods, a port of miloR's `makeNhoods`, `countCells`, `testNhoods`, and
+tests the proportions of cell categories with propeller, implemented from its paper and checked
+against `speckle::propeller`. The Milo methods test overlapping kNN neighbourhoods, implemented
+from the Milo paper and checked against miloR's `makeNhoods`, `countCells`, `testNhoods`, and
 `annotateNhoods`; the edgeR steps of `testNhoods` run in edgePython, installed with the `milo`
 extra. Milo needs a neighbors artifact built on an `ann_metric="l2"` index. See [Methods](../reference/methods) for validation and current boundaries.
 

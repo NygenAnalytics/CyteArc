@@ -110,7 +110,7 @@ They must not import those packages at module load time.
   extra does not install `pyarrow`. `results.py` holds `GrnResult`, which names
   `storage.refs` only. `DataStore.regulons.profiles` sums cell groups with
   `compare.compute_bulk` and writes nothing.
-- `stats/` owns the replicate-level statistics: Benjamini-Hochberg and weighted BH adjustment, treatment-coded designs and contrasts, the limma steps that propeller uses (`lmFit`, `contrasts.fit`, `eBayes`, legacy `squeezeVar`, and `fitFDist` with its robust form), and exact ports of the R numerical routines they depend on.
+- `stats/` owns the replicate-level statistics: Benjamini-Hochberg and weighted BH adjustment, treatment-coded designs and contrasts, and the empirical Bayes linear models that propeller uses (least-squares fits, contrasts, moment and robust estimation of the variance prior, and moderated t- and F-statistics), implemented from Smyth (2004) and Phipson et al. (2016) and checked against limma's outputs.
   It works on in-memory per-row summaries and never imports storage.
 - `abundance/` owns differential abundance: propeller for category proportions, the storage-free Milo steps (index sampling and refinement, neighbourhood membership, counting kernels, k-distance, and annotation), and the result records that `ds.abundance` returns.
   It imports `stats`, and `milo.differential_abundance` imports the optional edgePython package (the `milo` extra) only when it runs; the datastore methods keep graph and metadata reads, blockwise streaming, artifact planning, and persistence.

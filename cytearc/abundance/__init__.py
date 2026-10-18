@@ -1,8 +1,9 @@
 """Differential abundance of cell categories and neighbourhoods.
 
 :func:`propeller` tests category proportions between groups of samples, and
-:mod:`cytearc.abundance.milo` holds the native port of miloR's neighbourhood
-test. Both treat samples, not cells, as replicates.
+:mod:`cytearc.abundance.milo` holds the storage-free steps of Milo's
+neighbourhood test. Both were implemented from their papers and treat samples,
+not cells, as replicates.
 """
 
 from typing import TYPE_CHECKING
