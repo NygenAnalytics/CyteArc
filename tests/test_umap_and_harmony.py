@@ -286,6 +286,7 @@ def _same_label_neighbor_fraction(values: np.ndarray, labels: np.ndarray) -> flo
     return float(np.mean(labels[nearest] == labels[:, None]))
 
 
+@pytest.mark.filterwarnings("ignore:Harmony stopped before convergence")
 def test_fit_harmony_corrects_batch_structure():
     rng = np.random.default_rng(0)
     # Two cell types present in every one of three shifted batches.
@@ -315,26 +316,6 @@ def test_fit_harmony_corrects_batch_structure():
             )
         return float(np.mean(spreads))
 
-    corrected = fit_harmony(
-        data,
-        pd.DataFrame({"batch": [f"batch_{x}" for x in batch]}),
-        nclust=4,
-        max_iter_harmony=4,
-        max_iter_kmeans=5,
-        random_state=0,
-    ).corrected
-
-    assert corrected.shape == data.shape
-    assert np.all(np.isfinite(corrected))
-    assert batch_spread(corrected) < 0.2 * batch_spread(data)
-    # Batches separate the raw neighborhoods; after correction a cell's
-    # neighbors come from all three batches, about one third from its own.
-    assert _same_label_neighbor_fraction(data, batch) > 0.9
-    assert _same_label_neighbor_fraction(corrected, batch) < 0.45
-    # Cell types stay apart. Every batch holds both types equally, so removing
-    # batch deviations around each cluster keeps the gap between type centroids.
-    assert _same_label_neighbor_fraction(corrected, cell_type) == 1.0
-
     def type_gap(values: np.ndarray) -> float:
         return float(
             np.linalg.norm(
@@ -343,4 +324,36 @@ def test_fit_harmony_corrects_batch_structure():
             )
         )
 
-    np.testing.assert_allclose(type_gap(corrected), type_gap(data), rtol=1e-3)
+    metadata = pd.DataFrame({"batch": [f"batch_{x}" for x in batch]})
+    options = {
+        "n_clusters": 4,
+        "max_iter_harmony": 4,
+        "max_iter_cluster": 5,
+        "random_state": 0,
+    }
+    # Harmony2's dynamic ridge penalty, 0.2 times the expected mass of a batch
+    # in a cluster, lets the correction remove about 1 / (1 + 0.2), or 83%, of
+    # each balanced batch offset and leave 0.2 / (1 + 0.2) of it. Every round
+    # fits the original coordinates again, so nothing compounds over rounds. The
+    # 2019 fixed penalty of 1 removes nearly all of the offset in clusters of 30
+    # or more cells, so it mixes the batches more.
+    for ridge_penalty, spread_ratio, same_batch in (
+        (None, 0.25, 0.6),
+        (1.0, 0.2, 0.45),
+    ):
+        corrected = fit_harmony(
+            data, metadata, ridge_penalty=ridge_penalty, **options
+        ).corrected
+
+        assert corrected.shape == data.shape
+        assert np.all(np.isfinite(corrected))
+        assert batch_spread(corrected) < spread_ratio * batch_spread(data)
+        # Batches separate the raw neighborhoods; after correction a cell's
+        # neighbors come from all three batches, about one third from its own.
+        assert _same_label_neighbor_fraction(data, batch) > 0.9
+        assert _same_label_neighbor_fraction(corrected, batch) < same_batch
+        # Cell types stay apart. Every batch holds both types equally, so
+        # removing batch deviations around each cluster keeps the gap between
+        # type centroids.
+        assert _same_label_neighbor_fraction(corrected, cell_type) == 1.0
+        np.testing.assert_allclose(type_gap(corrected), type_gap(data), rtol=1e-3)

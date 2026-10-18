@@ -90,6 +90,10 @@ exposes only `snapshot_columns`: read a filter or Harmony column with
 As a branch of a run, `harmony = ds.reduction.harmony(run["pca"], ["batch"])` returns a ref to pass to
 `graph.ann_index` in place of PCA (chain in `features-and-graphs.md`; keep the run's `k`). Score it
 below with the run's `neighbors` and `connectivity_map` versus the new pair.
+Tune the fit with `harmony_params={...}` on `reduction.harmony`, or in a run with
+`params={"harmony": {"batch_columns": ["batch"], "harmony_params": {...}}}` instead of
+`harmony_batch_columns` (not both). Every key and default:
+<https://docs.nygen.io/CyteArc/api/integration.html>.
 
 ### Score native versus corrected
 
@@ -275,6 +279,7 @@ an inserted copy records abstentions only as missing values and loses their reas
 | Parameter | Default | Change when |
 | --- | --- | --- |
 | `harmony_batch_columns` / `batch_columns` | `None` (off) / required | Technical columns only |
+| `harmony_params` | `theta` 2, `n_clusters` cells / 30 (at most 100), dynamic ridge (`ridge_alpha` 0.2) | Mixing too weak: raise `theta`; distinct populations merge: lower it. `ridge_penalty=1.0` is the fixed 2019 penalty |
 | `neighbors_k` / `graph.neighbors(k=)` | 11 | 21 or more when LISI metrics decide |
 | metric `perplexity` | `None` = `floor(k/3)` | Keep fixed across graphs; capped at `k/3` |
 | `sample_by` / `pair_by` | `None` | Always `sample_by`; `pair_by` only if repeated |
@@ -301,13 +306,17 @@ an inserted copy records abstentions only as missing values and loses their reas
   the condition. Prefer library or batch; otherwise recheck condition-specific clusters.
 - Harmony, WNN and SNN check their memory against `mem_budget` before reading and raise
   `MemoryError` naming the bytes, cells, dimensions, clusters or neighbours, and the limit. Harmony
-  holds about 5 KB per cell at 30 dims and 100 clusters (`nclust` defaults to cells / 30, at most
-  100), plus its batch labels (about 60 bytes per cell per column): lower
-  `harmony_params={"nclust": ...}` or the PCA dims, or raise the budget. WNN holds every assay's
+  holds about 1.5 KB per cell at 30 dims and 100 clusters (`n_clusters` defaults to cells / 30, at
+  most 100), plus its batch labels (about 60 bytes per cell per column): lower
+  `harmony_params={"n_clusters": ...}` or the PCA dims, or raise the budget. WNN holds every assay's
   neighbours and coordinates, SNN every graph plus a float64 matrix per graph. The estimates are
   near-exact counts of what each step allocates, not a cap on process memory; leave headroom.
 - `reduction.harmony` and WNN reject coordinates that are normalized values (`pca_dims=0` runs); build
   PCA first, or integrate such graphs with `method="snn"`.
+- Keys of the earlier Harmony raise `ValueError: Unsupported Harmony parameter ...`, also
+  from a saved pipeline `params`: `nclust` is `n_clusters`, `max_iter_kmeans` is
+  `max_iter_cluster`, `lamb` is `ridge_penalty` (fixed and positive; omit it for the dynamic
+  default), and `cluster_fn` is gone. `max_iter_harmony` must be at least 1.
 - iLISI depends on `k`: a random synthetic batch scored 0.34, 0.67 and 0.76 at `k` 11, 21 and 31
   (10x 5K PBMC docs dataset). CELLxGENE `cell_type` may come from the authors' own integration,
   biasing cLISI toward it.

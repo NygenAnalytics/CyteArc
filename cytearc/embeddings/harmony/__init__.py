@@ -1,32 +1,28 @@
-"""Harmony correction for reduced cell embeddings."""
+"""Harmony2 batch correction of reduced cell embeddings.
 
-from .api import fit_harmony
-from .models import ClusterFn, HarmonyResult
-from .optimizer import Harmony, moe_correct_ridge, safe_entropy
+Korsunsky I, et al. Fast, sensitive and accurate integration of single-cell data with Harmony. Nat Methods 16, 1289-1296 (2019). doi:10.1038/s41592-019-0619-0
+Patikas N, Yao H, et al. Integration of large, complex single-cell datasets with Harmony2. bioRxiv (2026). doi:10.64898/2026.03.16.711825
+"""
+
+from .fit import fit_harmony
+from .memory import harmony_peak_bytes
+from .models import HarmonyResult
+from .parameters import harmony_cluster_count, validate_harmony_parameters
 
 __all__ = [
-    "ClusterFn",
-    "Harmony",
     "HarmonyResult",
     "fit_harmony",
-    "moe_correct_ridge",
-    "safe_entropy",
+    "harmony_cluster_count",
+    "harmony_peak_bytes",
+    "validate_harmony_parameters",
 ]
 
 for _public_object in (
-    Harmony,
     HarmonyResult,
     fit_harmony,
-    moe_correct_ridge,
-    safe_entropy,
+    harmony_cluster_count,
+    harmony_peak_bytes,
+    validate_harmony_parameters,
 ):
     _public_object.__module__ = __name__
-
-for _method in Harmony.__dict__.values():
-    if isinstance(_method, staticmethod):
-        _method = _method.__func__
-    if callable(_method) and hasattr(_method, "__module__"):
-        _method.__module__ = __name__
-
-del _method
 del _public_object

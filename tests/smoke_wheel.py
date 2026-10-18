@@ -39,6 +39,8 @@ _RETIRED_MODULES = {
     "cytearc/dendrogram.py",
     "cytearc/downloader.py",
     "cytearc/doublet_utils.py",
+    "cytearc/embeddings/harmony/api.py",
+    "cytearc/embeddings/harmony/optimizer.py",
     "cytearc/feat_utils.py",
     "cytearc/features/lowess.py",
     "cytearc/features/markers/batching.py",
@@ -129,7 +131,7 @@ from cytearc.datastore.namespaces import (
     TrajectoryAccessor,
 )
 from cytearc.datasets import Repository, connect, list_repositories
-from cytearc.embeddings.harmony import Harmony, HarmonyResult, fit_harmony
+from cytearc.embeddings.harmony import HarmonyResult, fit_harmony
 from cytearc.features import (
     RankMarkerResult,
     find_markers_by_rank,
@@ -172,7 +174,7 @@ from cytearc.writers import (
 assert "site-packages" in Path(cytearc.__file__).as_posix()
 assert issubclass(DataStore, MappingDatastore)
 assert issubclass(MappingDatastore, GraphDataStore)
-for harmony_object in (Harmony, HarmonyResult, fit_harmony):
+for harmony_object in (HarmonyResult, fit_harmony):
     assert harmony_object.__module__ == "cytearc.embeddings.harmony"
 assert ChunkedArray.__module__ == "cytearc.matrix"
 for metadata_class in (MetaData, MetaDataRowBlock):

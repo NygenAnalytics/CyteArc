@@ -88,7 +88,7 @@ Read workflow vignettes and API references in the **[documentation](https://docs
 | :-- | :-- |
 | Modalities | scRNA-seq, scATAC-seq, CITE-seq, matched multi-omics |
 | Core workflow | Quality control, feature selection, normalization, PCA and LSI, KNN graph, UMAP, densMAP, t-SNE (optional `tsne` extra), Leiden, Paris, marker search |
-| Integration | Harmony, partial PCA, shared and weighted nearest neighbours, integration metrics |
+| Integration | Harmony2, partial PCA, shared and weighted nearest neighbours, integration metrics |
 | Mapping | Symphony-style reference mapping, label transfer, projection diagnostics |
 | Trajectory | Population Balance Analysis pseudotime, expression dynamics and modules, multi-sink fate probabilities |
 | Also included | Cell-cycle scoring, gene-set activity, graph-diffusion imputation, doublet scores, HTO demultiplexing, pseudobulk export |

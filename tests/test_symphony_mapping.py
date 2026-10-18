@@ -543,17 +543,24 @@ def test_harmony_accepts_numpy_scalar_sigma():
         metadata,
         sigma=np.float64(0.1),
         theta=np.float64(2.0),
-        lamb=np.int64(3),
-        nclust=2,
+        ridge_penalty=np.int64(3),
+        n_clusters=2,
         max_iter_harmony=2,
-        max_iter_kmeans=2,
+        max_iter_cluster=2,
     )
 
     assert result.sigma.shape == (2,)
-    assert result.parameters["sigma"] == [0.1, 0.1]
-    assert result.parameters["theta"] == [2.0, 2.0]
-    assert result.parameters["lambda"] == [3.0, 3.0]
-    assert result.parameters["clusterBackend"] == "sklearn.cluster.KMeans"
+    parameters = result.parameters
+    assert parameters["sigma"] == [0.1, 0.1]
+    assert parameters["theta"] == [2.0, 2.0]
+    assert parameters["ridgePenalty"] == [3.0, 3.0]
+    assert parameters["ridge"] == "fixed"
+    assert parameters["initialization"] == "kmeans++"
+    # The record holds Python floats, never NumPy scalars.
+    for name in ("sigma", "theta", "ridgePenalty"):
+        values = parameters[name]
+        assert isinstance(values, list)
+        assert all(type(value) is float for value in values)
 
 
 def test_weighted_centroids_reject_empty_reference_clusters():

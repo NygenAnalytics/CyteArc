@@ -49,6 +49,7 @@ nitpick_ignore = [
     ("py:class", "_duckdb.DuckDBPyConnection"),
     ("py:class", "numpy.ndarray"),
     ("py:class", "numpy.dtype"),
+    ("py:exc", "numpy.linalg.LinAlgError"),
     ("py:class", "pandas.DataFrame"),
     ("py:class", "pandas.Series"),
     ("py:class", "pandas.api.extensions.ExtensionArray"),

@@ -6,6 +6,7 @@ that kernel at the smoke size.
 """
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from . import inputs
@@ -362,3 +363,32 @@ def test_kmeans_initialization(bench) -> None:
     # The production funnel fits 1,000 centroids, so the smoke size holds more.
     ladder = Ladder(sizes=CELLS.sizes, smoke=2_000)
     bench("initialization.kmeans", make, ladder, check=check)
+
+
+@pytest.mark.filterwarnings("ignore:Harmony stopped before convergence")
+def test_harmony_fit(bench) -> None:
+    from cytearc.embeddings.harmony import fit_harmony
+
+    dims = 30
+
+    def shifted_batches(n_cells: int) -> tuple[np.ndarray, pd.DataFrame]:
+        # Twelve cell types spread over twenty shifted batches.
+        rng = np.random.default_rng(4466)
+        centers = rng.normal(scale=4.0, size=(12, dims))
+        shifts = rng.normal(scale=1.0, size=(20, dims))
+        types = rng.integers(0, 12, size=n_cells)
+        batches = rng.integers(0, 20, size=n_cells)
+        values = centers[types] + shifts[batches] + rng.normal(size=(n_cells, dims))
+        metadata = pd.DataFrame({"batch": [f"b{batch}" for batch in batches]})
+        return np.ascontiguousarray(values.T), metadata
+
+    def make(n_cells: int):
+        values, metadata = shifted_batches(n_cells)
+        return lambda: fit_harmony(values, metadata, max_iter_harmony=2)
+
+    def check(n_cells: int, result) -> None:
+        assert result.corrected.shape == (dims, n_cells)
+        assert np.isfinite(result.corrected).all()
+        np.testing.assert_allclose(result.assignments.sum(axis=0), 1.0, atol=1e-12)
+
+    bench("harmony.fit", make, CELLS, check=check)

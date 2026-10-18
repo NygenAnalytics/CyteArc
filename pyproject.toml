@@ -265,6 +265,7 @@ module = [
     "cytearc.utils.numba",
     "cytearc.clustering._paris_core",
     "cytearc.embeddings.umap",
+    "cytearc.embeddings.harmony.fit",
     "cytearc.assay.rna",
     "cytearc.features.markers.*",
     "cytearc.features.enrichment.aucell",

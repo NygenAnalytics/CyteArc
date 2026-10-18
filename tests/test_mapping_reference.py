@@ -111,7 +111,7 @@ def build_mapping_store(path: Path, *, with_references: bool) -> MappingStoreSou
     correction = store.reduction.harmony(
         reduction,
         ["mapping_batch"],
-        harmony_params={"nclust": 3},
+        harmony_params={"n_clusters": 3},
     )
     symphony_neighbors = store.graph.neighbors(
         store.graph.ann_index(correction),
@@ -415,7 +415,7 @@ def test_symphony_mapping_reference_has_conditional_state_and_read_only_reload(
     assert reference.symphony_state.n_dims == reference.model.n_dims
     assert reference.symphony_state.n_clusters == 3
     assert reference.metadata["batch_columns"] == ["mapping_batch"]
-    assert reference.metadata["harmony_parameters"]["nclust"] == 3
+    assert reference.metadata["harmony_parameters"]["n_clusters"] == 3
     # The first selected cell is in batch b, but Harmony encodes the plain
     # labels in sorted order and the reference copies that order.
     assert reference.metadata["batch_levels"] == [["a", "b"]]
@@ -573,7 +573,7 @@ def test_symphony_mapping_reference_retains_recorded_batch_order(
 
     assert reference.batch_correction == mapping_source.correction
     assert reference.metadata["batch_levels"] == [["b", "a"]]
-    assert reference.metadata["harmony_parameters"] == {"nclust": 3}
+    assert reference.metadata["harmony_parameters"] == {"n_clusters": 3}
 
 
 def test_loaded_mapping_reference_is_deeply_immutable(
@@ -605,7 +605,7 @@ def test_loaded_mapping_reference_is_deeply_immutable(
     with pytest.raises(TypeError, match="does not support item assignment"):
         reference.metadata["method"] = "pca"  # type: ignore[index]
     with pytest.raises(TypeError, match="does not support item assignment"):
-        reference.metadata["harmony_parameters"]["nclust"] = 9  # type: ignore[index]
+        reference.metadata["harmony_parameters"]["n_clusters"] = 9  # type: ignore[index]
     # Frozen lists keep list equality in both directions.
     batch_columns = reference.metadata["batch_columns"]
     with pytest.raises(AttributeError, match="append"):

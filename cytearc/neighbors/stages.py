@@ -212,6 +212,7 @@ class BatchCorrectionStage:
             self.result = fit_harmony(
                 uncorrected,
                 self.batches,
+                nthreads=self.nthreads,
                 **self.parameters,
             )
         shutdown_checkpoint()

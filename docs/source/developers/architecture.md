@@ -83,8 +83,8 @@ They must not import those packages at module load time.
 
 - `neighbors/` owns ANN construction, KNN queries, graph operations, diffusion, and weighted-neighbor integration.
   It does not own stored KNN graph arrays; persistence lives in `datastore` and `storage`.
-- `embeddings/` owns PCA, LSI, Harmony correction, UMAP, SG-tSNE, embedding initialization, and
-  the narrow storage adapter for imported coordinate artifacts.
+- `embeddings/` owns PCA, LSI, Harmony2 batch correction, UMAP, SG-tSNE, embedding initialization,
+  and the narrow storage adapter for imported coordinate artifacts.
 - `clustering/` owns Leiden clustering and PARIS hierarchy operations.
 - `trajectory/` owns pseudotime scoring, feature-profile aggregation, feature module clustering, and pseudotime result records.
 - `metrics/` owns LISI, silhouette, graph, concordance, and integration scores, including the neighbor label agreement that membership strength stores.
@@ -1091,6 +1091,27 @@ CyteArc validates persisted data and public arguments against the following cont
   under a new `datasetPrefixUri`.
 - A forced profiling `createStore` job deletes its store prefix before it downloads; an unforced one
   refuses any non-empty destination.
+- Harmony is CyteArc's implementation of Harmony2: k-means++ seeding, a stabilized diversity
+  penalty, a dynamic ridge penalty of `ridge_alpha` times each batch level's expected mass in a
+  cluster, and batch pruning. `harmony_params` and the `fit_harmony` keywords rename `nclust` to
+  `n_clusters`, `max_iter_kmeans` to `max_iter_cluster`, and `lamb` to `ridge_penalty`, remove
+  `cluster_fn`, and add `ridge_alpha` and `prune_threshold`. The datastore calls
+  `validate_harmony_parameters` before it reads data, and the pipeline when it resolves its recipe,
+  before it creates a run record; it raises `ValueError` for an earlier key, naming its
+  replacement or why it was removed, and `fit_harmony` raises `TypeError` for it.
+  `max_iter_harmony` must be at least 1 and `ridge_penalty` positive. `HarmonyResult.ridge` is
+  replaced by `ridge_penalty` and `active_levels`, both clusters by batch levels.
+  `harmony_peak_bytes` takes `n_cells`, `dims`, `n_clusters`, `column_levels`, and the keywords
+  `n_combinations` and `block_size`, without `nthreads`; the second parameter of
+  `harmony_cluster_count` is `n_clusters`. These two and `validate_harmony_parameters` are public
+  in `cytearc.embeddings.harmony`. The `Harmony` class (in `cytearc.embeddings` and
+  `cytearc.embeddings.harmony`), `moe_correct_ridge`, `safe_entropy`, and `ClusterFn` are removed.
+- `batch_correction` artifacts replace the `ridge` array with `ridge_penalty` (float64) and
+  `active_levels` (bool), both clusters by batch levels, and add the `fit_parameters` attribute.
+  Reuse requires both arrays, so a correction saved by the earlier implementation is never reused
+  but stays loadable, and the next request recomputes the correction and everything built on it.
+  The arrays and attributes that Symphony mapping references copy are unchanged, so references
+  built from either implementation load and map without a compatibility branch.
 
 Compatibility exists only where a current public facade or an explicit file-schema test says it
 does. There are no silent migrations, implicit compatibility branches, or forwarding shims for

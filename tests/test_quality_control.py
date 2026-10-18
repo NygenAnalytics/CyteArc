@@ -841,7 +841,7 @@ def test_doublet_detection_rejects_symphony_connectivity_chain(
     correction = datastore.reduction.harmony(
         reduction,
         ["doublet_batch"],
-        harmony_params={"nclust": 5},
+        harmony_params={"n_clusters": 5},
     )
     ann_index = datastore.graph.ann_index(
         correction,

@@ -28,7 +28,7 @@ It uses established libraries where they fit the streaming and provenance model.
 The aim is one coherent execution path, not reimplementation for its own sake.
 
 - **Reduction and graph construction:** streamed normalization, covariance (Gram-matrix) PCA with an incremental fallback, randomized streaming {term}`LSI`, approximate nearest-neighbour search, UMAP, {term}`densMAP`, and graph-based t-SNE through the optional `tsne` extra (see {ref}`Optional t-SNE <installation_tsne>`).
-- **Batch correction and mapping:** CyteArc implementations of [Harmony](https://doi.org/10.1038/s41592-019-0619-0) and [Symphony-style](https://doi.org/10.1038/s41467-021-25957-x) fixed-reference mapping, with label transfer and mapping diagnostics.
+- **Batch correction and mapping:** CyteArc implementations of [Harmony2](https://doi.org/10.64898/2026.03.16.711825), which builds on the original [Harmony](https://doi.org/10.1038/s41592-019-0619-0) algorithm, and of [Symphony-style](https://doi.org/10.1038/s41467-021-25957-x) fixed-reference mapping, with label transfer and mapping diagnostics.
 - **Matched multi-omics:** {term}`SNN integration` and [Hao-inspired WNN](https://doi.org/10.1016/j.cell.2021.04.048) integration for two or more assays, with WNN reporting one per-cell weight per modality.
 - **Clustering:** [Leiden](https://doi.org/10.1038/s41598-019-41695-z) and a native implementation of [Paris hierarchical clustering](https://doi.org/10.48550/arXiv.1806.01664) with fixed and branch-adaptive cuts.
 - **Trajectory analysis:** memory-aware [Population Balance Analysis](https://doi.org/10.1073/pnas.1714723115), supervised terminal-state fate probabilities, pseudotime aggregation and modules, and [MAGIC-style graph diffusion](https://doi.org/10.1016/j.cell.2018.05.061) for imputation.
@@ -48,6 +48,12 @@ Agreement measured for one method is not evidence of equivalence for the rest of
 
 - HTO demultiplexing is checked against Seurat reference outputs.
 - Symphony-style query correction is checked against a golden fixture generated with the R Symphony 0.1.3 `mapQuery` implementation, including a case with nonzero correction.
+- Harmony2's ridge regression solves, batch pruning, stabilized cluster assignment update, and
+  clustering objective are checked against direct dense calculations from the published equations.
+  A synthetic benchmark in which two groups of batches share no cell types checks that batch mixing
+  rises while cell-type purity stays at its uncorrected level.
+  CyteArc's Harmony2 was written from the two papers, independently of other Harmony
+  implementations, and is not expected to match them number for number.
 - Marker statistics are checked against SciPy, including continuity and large-tie corrections.
 - Paris hierarchies are compared with the scikit-network reference implementation on tie-free graphs.
 - WNN is checked against scalar reference calculations, a two-modality CITE-seq fixture, and a synthetic three-modality Seurat 5.5.1 fixture, plus modality-order symmetry, row-order invariance, and degenerate bandwidths.

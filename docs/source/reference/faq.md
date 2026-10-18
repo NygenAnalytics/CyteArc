@@ -26,6 +26,39 @@ explicitly to `embeddings.initialization` and `graph.ann_index`. Continue by pas
 returned refs to `graph.neighbors` and `graph.connectivity`.
 See {ref}`Harmony batch correction <harmony_batch_correction>` and the {ref}`dataset integration guide <integration_guide>`.
 
+## How does CyteArc's Harmony2 differ from its earlier Harmony?
+
+CyteArc implements [Harmony2](https://doi.org/10.64898/2026.03.16.711825), which builds on the
+original [Harmony](https://doi.org/10.1038/s41592-019-0619-0) algorithm. CyteArc wrote this
+implementation from the two papers. Clusters start from k-means++ seeds, the diversity penalty
+takes a stabilized form that stays bounded when a batch is missing from a cluster, the ridge
+penalty of each batch level in each cluster scales with the level's expected mass in the cluster,
+and levels with almost no cells in a cluster are left out of its regression.
+
+Three `harmony_params` keys are renamed and one is removed. Each raises a `ValueError` that names
+the change, such as `Unsupported Harmony parameter 'nclust': it was renamed to 'n_clusters'`:
+
+- `nclust` is now `n_clusters`;
+- `max_iter_kmeans` is now `max_iter_cluster`;
+- `lamb` is now `ridge_penalty`, a fixed penalty that must be positive;
+- `cluster_fn` is removed, because clusters are seeded with k-means++.
+
+`max_iter_harmony` must now be at least 1, and it defaults to 40: a fit stops as soon as it
+converges, so the limit only bounds fits that settle slowly. Rename the keys in saved pipeline configurations too: a
+pipeline checks them before it creates a run record.
+
+By default the ridge penalty is dynamic: `ridge_alpha` (0.2) times each level's expected mass in
+the cluster, its share of all cells times the cluster's total assignment. Where a level has about
+its expected mass in a cluster, the correction removes about `1 / (1 + ridge_alpha)`, roughly 83%,
+of that level's shift, while a fixed penalty of 1, the 2019 default, removes nearly all of it in
+large clusters. A level with far less than its expected mass gets almost no correction. Pass
+`harmony_params={"ridge_penalty": 1.0}` for the fixed penalty; the other Harmony2 changes stay.
+
+Corrections saved by the earlier implementation stay listable and loadable, but they are not
+reused: they lack the per-cluster penalty arrays that reuse requires, so the next request computes a
+new correction and everything built on it again. See the
+[Integration API reference](/api/integration.html) for every key and the stored arrays.
+
 ## Which integration method should I choose?
 
 - Separate scRNA-seq batches: start with [](../tutorials/dataset_merging.ipynb), then compare

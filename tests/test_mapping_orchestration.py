@@ -711,7 +711,7 @@ def test_subset_fitted_pca_center_survives_mapping_reference_reload(tmp_path, me
     if method == "symphony":
         datastore.cells.insert("batch", np.where(np.arange(len(counts)) % 2, "a", "b"))
         coordinates = datastore.reduction.harmony(
-            reduction, ["batch"], harmony_params={"nclust": 2}
+            reduction, ["batch"], harmony_params={"n_clusters": 2}
         )
     ann_index = datastore.graph.ann_index(coordinates)
     neighbors = datastore.graph.neighbors(ann_index, coordinates=coordinates, k=3)
