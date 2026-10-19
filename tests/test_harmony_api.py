@@ -275,6 +275,8 @@ def test_validate_harmony_parameters_returns_a_new_equal_dict() -> None:
     assert resolved is not mapping
     # The values are untouched: the artifact identity records the user's mapping.
     assert resolved["theta"] is theta
+    # An explicit None asks for the default cluster count.
+    assert validate_harmony_parameters({"n_clusters": None}) == {"n_clusters": None}
 
 
 @pytest.mark.parametrize(
@@ -316,6 +318,12 @@ def test_validate_harmony_parameters_returns_a_new_equal_dict() -> None:
         ({"theta": [1.0, True]}, TypeError, "theta must contain real numbers"),
         ({"sigma": {"a": 1.0}}, TypeError, "sigma must contain real numbers"),
         ({"theta": [[1.0, 2.0]]}, ValueError, "one-dimensional sequence"),
+        (
+            {"theta": [1.0, [2.0, 3.0]]},
+            ValueError,
+            "theta must be a scalar or a one-dimensional sequence",
+        ),
+        ({"sigma": [0.1, None]}, TypeError, "sigma must contain real numbers"),
         ({"theta": []}, ValueError, "theta must not be empty"),
         ({"tau": "x"}, TypeError, "tau must be a real number"),
         ({"tau": math.nan}, ValueError, "tau must be finite"),

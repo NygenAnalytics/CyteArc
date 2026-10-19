@@ -158,9 +158,8 @@ MAX_PARALLEL_SWEEPS = 64
 REFINEMENT_RETRIES = 8
 QUEUE_EVALUATIONS_PER_NODE = 1000
 
+# GROUPS must be a power of two, which tests/test_leiden_native.py checks.
 _GROUP_BITS = GROUPS.bit_length() - 1
-if 1 << _GROUP_BITS != GROUPS:
-    raise ImportError("GROUPS must be a power of two")
 
 
 @dataclass(frozen=True, slots=True)

@@ -21,7 +21,11 @@ from scipy.sparse.csgraph import connected_components
 from sklearn.metrics import adjusted_rand_score
 from sklearn.neighbors import NearestNeighbors
 
+import cytearc.clustering._leiden_aggregate as aggregate_module
+import cytearc.clustering._leiden_moving as moving_module
 import cytearc.clustering._leiden_native as native_module
+import cytearc.clustering._leiden_primitives as primitives_module
+import cytearc.clustering._leiden_refine as refine_module
 from cytearc.clustering._leiden_aggregate import (
     aggregate_counts,
     aggregate_fill,
@@ -29,6 +33,7 @@ from cytearc.clustering._leiden_aggregate import (
     aggregation_order,
     compact_refined,
     final_labels,
+    renumber_partition,
     split_into_components,
 )
 from cytearc.clustering._leiden_graph import build_leiden_graph
@@ -40,8 +45,11 @@ from cytearc.clustering._leiden_moving import (
 )
 from cytearc.clustering._leiden_native import THETA, native_leiden_membership
 from cytearc.clustering._leiden_primitives import (
+    BUCKET_DIRECT_KEYS,
     EMPTY_SLOT,
     FLOAT_SUM_BLOCK,
+    GOLDEN,
+    INSERTION_SORT_LIMIT,
     PHASE_GROUPS,
     PHASE_MOVE_ORDER,
     PHASE_REFINE,
@@ -1653,3 +1661,398 @@ def test_fifty_thousand_node_graph():
     assert reference_modularity(W, groups, 1.0) >= (
         reference_modularity(W, sequential, 1.0) - 0.002
     )
+
+
+# ---------------------------------------------------------------------------
+# Kernels run as plain Python
+# ---------------------------------------------------------------------------
+
+
+_KERNEL_MODULES = (
+    "cytearc.clustering._leiden_primitives",
+    "cytearc.clustering._leiden_graph",
+    "cytearc.clustering._leiden_moving",
+    "cytearc.clustering._leiden_refine",
+    "cytearc.clustering._leiden_aggregate",
+    "cytearc.clustering._leiden_native",
+)
+
+
+def _run_kernels_as_python(monkeypatch) -> int:
+    """Bind every compiled Leiden kernel, wherever it is imported, to its Python source."""
+    import importlib
+
+    replaced = 0
+    for name in _KERNEL_MODULES:
+        module = importlib.import_module(name)
+        for attribute, value in list(vars(module).items()):
+            if isinstance(value, numba.core.dispatcher.Dispatcher):
+                monkeypatch.setattr(module, attribute, value.py_func)
+                replaced += 1
+    return replaced
+
+
+def _isolated_and_zero_strength_graph() -> sp.csr_matrix:
+    # Two triangles, an isolated node, and a node whose only edge has weight 0.
+    rows = [0, 1, 2, 3, 4, 5, 7]
+    cols = [1, 2, 0, 4, 5, 3, 0]
+    data = [1.0, 2.0, 1.5, 1.0, 1.0, 3.0, 0.0]
+    return sp.csr_matrix((data, (rows, cols)), shape=(8, 8))
+
+
+_PYTHON_KERNEL_CASES = [
+    pytest.param(lambda: knn_graph(150, 8, 3), 1.0, 7, 0, id="knn"),
+    pytest.param(
+        lambda: _random_small_graph(np.random.default_rng(4), 24),
+        0.7,
+        2,
+        0,
+        id="random",
+    ),
+    pytest.param(_isolated_and_zero_strength_graph, 1.0, 1, 0, id="isolated"),
+    pytest.param(lambda: _STALLING_CYCLE, 1.0, 0, 8, id="retry"),
+    pytest.param(lambda: _STALLING_CYCLE, 1.0, 0, 0, id="safety-stop"),
+]
+
+
+@pytest.mark.parametrize("path", PATHS)
+@pytest.mark.parametrize(
+    ("make_graph", "gamma", "seed", "retries"), _PYTHON_KERNEL_CASES
+)
+def test_kernels_run_as_python_give_the_compiled_labels(
+    monkeypatch, path, make_graph, gamma, seed, retries
+):
+    # Coverage cannot see inside compiled kernels, and the compiled backend must
+    # compute exactly what their Python source says, bit for bit.
+    graph = make_graph()
+    if retries == 0:
+        monkeypatch.setattr(native_module, "REFINEMENT_RETRIES", 0)
+    expected = native_leiden_membership(graph, gamma, seed, 2, **path)
+
+    assert _run_kernels_as_python(monkeypatch) > 50
+    # The random streams wrap uint64 products on purpose; NumPy warns about it.
+    with np.errstate(over="ignore"):
+        actual = native_leiden_membership(graph, gamma, seed, 2, **path)
+
+    np.testing.assert_array_equal(actual, expected)
+    assert valid_labelling(actual, graph.shape[0])
+
+
+def _one_community_level(n_workers: int, parallel_min_items: int, last_id: bool):
+    """The first level of an 80-node kNN graph with every node in one community.
+
+    At resolution 3 every node gains by leaving it, so local moving opens new
+    communities. With ``last_id`` only the last community id is still free.
+    """
+    graph = build_leiden_graph(knn_graph(80, 6, 5), n_workers, parallel_min_items)
+    labels, totals, sizes, n_comm = renumber_partition(
+        np.zeros(graph.n_nodes, dtype=np.int32),
+        graph.strengths,
+        n_workers,
+        parallel_min_items,
+    )
+    first_free = totals.shape[0] - 1 if last_id else n_comm
+    return graph, (labels, totals, sizes, np.array([first_free], dtype=np.int64))
+
+
+def _move_level(graph, state, n_workers, parallel_min_items, *schedule):
+    """Run ``move_nodes_level`` on a copy of ``state`` and return the result.
+
+    ``schedule`` holds the sequential level entries, the tail divisor and the
+    queue evaluations per node.
+    """
+    sequential_level_entries, tail_divisor, queue_evaluations_per_node = schedule
+    labels, totals, sizes, next_free = (array.copy() for array in state)
+    keys, vals, used, shift = _hash_scratch(graph.max_degree, n_workers)
+    stats = moving_module.move_nodes_level(
+        graph.indptr,
+        graph.indices,
+        graph.weights,
+        graph.strengths,
+        labels,
+        totals,
+        sizes,
+        next_free,
+        np.uint64(3),
+        0,
+        0,
+        3.0 / (graph.strength_scale * float(graph.total_strength)),
+        native_module.MOVE_TOLERANCE / graph.strength_scale,
+        n_workers,
+        sequential_level_entries,
+        tail_divisor,
+        native_module.MAX_PARALLEL_SWEEPS,
+        2,
+        parallel_min_items,
+        queue_evaluations_per_node,
+        keys,
+        vals,
+        used,
+        shift,
+    )
+    return labels, totals, sizes, next_free, stats
+
+
+def _move_level_compiled_and_as_python(
+    monkeypatch, n_workers, parallel_min_items, *schedule, last_id=False
+):
+    """Check that one level moves identically compiled and as Python.
+
+    Returns the first free id before the level, the one after it, and the
+    level statistics.
+    """
+    graph, state = _one_community_level(n_workers, parallel_min_items, last_id)
+    compiled = _move_level(graph, state, n_workers, parallel_min_items, *schedule)
+    _run_kernels_as_python(monkeypatch)
+    with np.errstate(over="ignore"):
+        python = _move_level(graph, state, n_workers, parallel_min_items, *schedule)
+
+    for actual, expected in zip(python, compiled):
+        np.testing.assert_array_equal(actual, expected)
+    labels, totals, sizes, next_free, stats = python
+    # The community state still describes the labels, which use handed-out ids.
+    expected_totals = np.zeros_like(totals)
+    np.add.at(expected_totals, labels, graph.strengths)
+    np.testing.assert_array_equal(totals, expected_totals)
+    np.testing.assert_array_equal(sizes, np.bincount(labels, minlength=sizes.size))
+    assert labels.max() < next_free[0] <= totals.size
+    return int(state[3][0]), int(next_free[0]), stats
+
+
+@pytest.mark.parametrize(
+    ("queue_evaluations_per_node", "last_id"),
+    [(1000, False), (1000, True), (1, False)],
+    ids=["free-ids", "last-free-id", "evaluation-cap"],
+)
+def test_the_sequential_queue_runs_as_python(
+    monkeypatch, queue_evaluations_per_node, last_id
+):
+    first_free, next_free, stats = _move_level_compiled_and_as_python(
+        monkeypatch, 1, 256, 2**62, 64, queue_evaluations_per_node, last_id=last_id
+    )
+
+    assert stats[4] == 0
+    if queue_evaluations_per_node == 1:
+        # Each node is evaluated once before the cap stops the queue.
+        assert stats[0] == 80 and stats[5] == 1
+    else:
+        assert stats[5] == 0
+    if last_id:
+        # The first node to leave takes the last id; later leavers stay.
+        assert next_free == first_free + 1
+    else:
+        assert next_free > first_free
+
+
+@pytest.mark.parametrize("parallel_min_items", [256, 1], ids=["serial", "parallel"])
+def test_group_sweeps_hand_over_to_the_tail_queue_as_python(
+    monkeypatch, parallel_min_items
+):
+    # With a tail divisor of 1 the queue takes over once a sweep leaves any
+    # node inactive.
+    first_free, next_free, stats = _move_level_compiled_and_as_python(
+        monkeypatch, 2, parallel_min_items, 0, 1, 1000
+    )
+
+    assert stats[4] == 1 and stats[2] == 1 and stats[3] > 0
+    assert next_free > first_free
+
+
+def test_a_group_asking_for_more_ids_than_remain_stays_as_python(monkeypatch):
+    # Every node asks for a new community and every group needs more than the
+    # one id left, so no node moves.
+    first_free, next_free, stats = _move_level_compiled_and_as_python(
+        monkeypatch, 2, 256, 0, 1, 1000, last_id=True
+    )
+
+    assert stats[4] == 1 and stats[1] == 0
+    assert next_free == first_free
+
+
+@pytest.fixture(params=["compiled", "python"])
+def kernel_mode(request, monkeypatch):
+    """Run a test once with the compiled kernels and once with their source."""
+    if request.param == "python":
+        _run_kernels_as_python(monkeypatch)
+    # The random streams and hashes wrap uint64 products on purpose.
+    with np.errstate(over="ignore"):
+        yield request.param
+
+
+@pytest.mark.usefixtures("kernel_mode")
+def test_hash_probing_steps_past_a_colliding_key():
+    capacity, shift = hash_capacity(8)
+    candidates = np.arange(1, 400, dtype=np.uint64)
+    home = ((candidates * GOLDEN) >> shift).astype(np.int64)
+    slot = int(np.bincount(home).argmax())
+    first, second, absent = (int(key) for key in candidates[home == slot][:3])
+    keys = np.full(capacity, EMPTY_SLOT, dtype=np.int32)
+    used = np.empty(capacity, dtype=np.int32)
+
+    n_used = primitives_module.acc_insert(keys, used, 0, first, shift)
+    n_used = primitives_module.acc_insert(keys, used, n_used, second, shift)
+    n_used = primitives_module.acc_insert(keys, used, n_used, second, shift)
+
+    assert n_used == 2
+    assert primitives_module.acc_find(keys, first, shift) == slot
+    assert primitives_module.acc_find(keys, second, shift) == (slot + 1) % capacity
+    assert primitives_module.acc_find(keys, absent, shift) == -1
+
+
+@pytest.mark.usefixtures("kernel_mode")
+def test_sort_ids_sorts_short_and_long_prefixes():
+    rng = np.random.default_rng(6)
+    for count in (0, 1, 5, INSERTION_SORT_LIMIT, INSERTION_SORT_LIMIT + 1, 300):
+        ids = rng.permutation(1000)[: count + 4].astype(np.int32)
+        expected = np.concatenate([np.sort(ids[:count]), ids[count:]])
+        primitives_module.sort_ids(ids, count)
+        np.testing.assert_array_equal(ids, expected)
+
+
+@pytest.mark.usefixtures("kernel_mode")
+def test_scratch_rows_are_checked_against_the_worker_count():
+    primitives_module.check_worker_rows(2, 2)
+    with pytest.raises(ValueError, match="n_workers must be at least 1"):
+        primitives_module.check_worker_rows(2, 0)
+    with pytest.raises(ValueError, match="one row per worker"):
+        primitives_module.check_worker_rows(1, 2)
+
+
+@pytest.mark.usefixtures("kernel_mode")
+@pytest.mark.parametrize(("n_workers", "min_items"), [(1, 256), (2, 1)])
+def test_stable_bucket_order_sorts_many_keys_range_by_range(n_workers, min_items):
+    rng = np.random.default_rng(13)
+    n_keys = 3 * BUCKET_DIRECT_KEYS + 5
+    keys = rng.integers(0, n_keys, size=20_000).astype(np.int32)
+
+    start, order = primitives_module.stable_bucket_order(
+        keys, n_keys, n_workers, min_items
+    )
+
+    np.testing.assert_array_equal(order, np.argsort(keys, kind="stable"))
+    np.testing.assert_array_equal(
+        start, np.concatenate([[0], np.cumsum(np.bincount(keys, minlength=n_keys))])
+    )
+
+
+@pytest.mark.usefixtures("kernel_mode")
+def test_split_into_components_joins_a_root_found_through_a_later_node():
+    # Edges 0-2 and 1-2: node 2 joins root 0 first, so node 1 reaches the
+    # smaller root 0 through it.
+    graph = build_leiden_graph(
+        sp.csr_matrix(([1.0, 1.0], ([0, 1], [2, 2])), shape=(3, 3)), 1
+    )
+    labels = np.zeros(3, dtype=np.int32)
+
+    components = aggregate_module.split_into_components(
+        graph.indptr, graph.indices, labels
+    )
+
+    np.testing.assert_array_equal(components, [0, 0, 0])
+
+
+def _merge_subset(merge, graph, labels, members, gamma: float):
+    """Refine the community of ``members`` and return its count and labels."""
+    n = graph.n_nodes
+    refined = np.full(n, -5, dtype=np.int32)
+    rsize = np.full(n, -5, dtype=np.int32)
+    kref = np.full(n, -5, dtype=np.int64)
+    eext = np.full(n, np.nan)
+    rlist = np.full(n, -5, dtype=np.int32)
+    keys, vals, used, shift = _hash_scratch(graph.max_degree)
+    width = graph.max_degree + 1
+    null_coef = gamma / (graph.strength_scale * float(graph.total_strength))
+    count = merge(
+        int(labels[members[0]]),
+        0,
+        members.size,
+        members,
+        graph.indptr,
+        graph.indices,
+        graph.weights,
+        graph.strengths,
+        labels,
+        null_coef,
+        THETA * graph.mean_weight,
+        np.uint64(stream_key(np.uint64(0), 0, 0, PHASE_REFINE)),
+        refined,
+        rsize,
+        kref,
+        eext,
+        rlist,
+        keys[0],
+        vals[0],
+        used[0],
+        shift,
+        np.empty(width, dtype=np.int32),
+        np.empty(width, dtype=np.float64),
+        np.empty(width, dtype=np.float64),
+    )
+    assert count == _brute_force_merge_check(
+        graph, labels, members, null_coef, refined, rsize, kref, eext
+    )
+    return count, refined[members]
+
+
+@pytest.mark.usefixtures("kernel_mode")
+def test_a_member_whose_neighbours_are_poorly_connected_stays_alone():
+    # Node 0 is well connected to its community {0, 1, 2}, but nodes 1 and 2
+    # lean on nodes outside it, so neither is a community node 0 may join.
+    W = sp.csr_matrix(
+        ([1.0, 1.0, 50.0, 50.0], ([0, 1, 1, 2], [1, 2, 3, 4])), shape=(5, 5)
+    )
+    graph = build_leiden_graph(W, 1)
+    labels = np.array([0, 0, 0, 1, 1], dtype=np.int32)
+
+    count, refined = _merge_subset(
+        refine_module.merge_nodes_subset,
+        graph,
+        labels,
+        np.arange(3, dtype=np.int32),
+        1.0,
+    )
+
+    assert count == 3
+    np.testing.assert_array_equal(refined, [0, 1, 2])
+
+
+def test_a_draw_of_one_keeps_every_shuffle_swap_in_range(monkeypatch):
+    # Draws are multiples of 2**-53 below 1, so floor(u * (i + 1)) never exceeds
+    # i. A stub that returns 1.0 reaches the guard that clamps the swap to i.
+    def draw_one(key, counter):
+        return 1.0
+
+    monkeypatch.setattr(moving_module, "uniform01", draw_one)
+    monkeypatch.setattr(refine_module, "uniform01", draw_one)
+    triangle = build_leiden_graph(sp.csr_matrix(1.0 - np.eye(3)), 1)
+
+    permutation = moving_module.random_permutation.py_func(6, np.uint64(3))
+    count, refined = _merge_subset(
+        refine_module.merge_nodes_subset.py_func,
+        triangle,
+        np.zeros(3, dtype=np.int32),
+        np.arange(3, dtype=np.int32),
+        0.05,
+    )
+
+    np.testing.assert_array_equal(permutation, np.arange(6))
+    # A draw of 1 also picks the last candidate, so every node joins node 2.
+    assert count == 1
+    np.testing.assert_array_equal(refined, [2, 2, 2])
+
+
+def test_the_group_count_is_a_power_of_two():
+    # Parallel sweeps pick a node's group from the top bits of a hash.
+    assert native_module.GROUPS == 1 << native_module._GROUP_BITS
+
+
+@pytest.mark.filterwarnings("ignore:overflow encountered in ldexp:RuntimeWarning")
+def test_strengths_that_overflow_after_normalisation_are_rejected():
+    # The symmetrized weights have a finite total, but scaling them by the tiny
+    # mean off-diagonal weight sends the self-loop's strength to infinity.
+    graph = sp.csr_matrix(
+        ([1e300, 1e-300, 1e-300], ([0, 0, 1], [0, 1, 2])), shape=(3, 3)
+    )
+
+    with pytest.raises(ValueError, match="symmetrized total is not finite"):
+        native_leiden_membership(graph, 1.0, 0, 1)

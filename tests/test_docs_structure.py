@@ -65,6 +65,25 @@ def test_llms_index_links_to_local_documentation() -> None:
         assert source.is_file(), target
 
 
+def test_markdown_pages_open_with_their_own_title() -> None:
+    # The discovery export reads a page from its first h1, and MyST renders an
+    # h1 only for a heading in the page itself, not for one an include brings in.
+    untitled = []
+    for page in sorted(_toc_files(_project()["toc"])):
+        if not page.endswith(".md"):
+            continue
+        body = re.sub(
+            r"\A---\n.*?\n---\n", "", (_DOCS_SOURCE / page).read_text(), flags=re.S
+        )
+        # MyST targets such as "(installation)=" may precede the heading.
+        lines = [line for line in body.splitlines() if line.strip()]
+        first = next((line for line in lines if not re.fullmatch(r"\(.+\)=", line)), "")
+        if not first.startswith("# "):
+            untitled.append(page)
+
+    assert untitled == []
+
+
 def test_navigation_prioritizes_remote_workflows_and_preserves_tutorials() -> None:
     toctree = _project()["toc"]
     sections = {

@@ -14,6 +14,8 @@ import pandas as pd
 import pytest
 from scipy.spatial import cKDTree
 
+import cytearc.embeddings.harmony.clustering as clustering_module
+import cytearc.embeddings.harmony.correction as correction_module
 from cytearc.embeddings.harmony import fit_harmony
 from cytearc.embeddings.harmony.clustering import (
     ClusteringWorkspace,
@@ -29,9 +31,11 @@ from cytearc.embeddings.harmony.correction import (
     _require_accurate_fixed_penalties,
     _solve_by_elimination,
     active_levels,
+    ridge_penalties,
     solve_cluster_regressions,
 )
 from cytearc.embeddings.harmony.design import BatchDesign, encode_batch_design
+from cytearc.embeddings.harmony.fit import _require_finite_centroids
 from cytearc.embeddings.harmony.kernels import assign_cells
 from cytearc.embeddings.harmony.parameters import resolve_harmony_parameters
 from cytearc.embeddings.harmony.seeding import kmeans_plus_plus_seeds, next_seed
@@ -1135,3 +1139,90 @@ def test_harmony_mixes_batches_without_merging_non_overlapping_cell_types(
     assert mixing_after >= 0.5
     assert mixing_after >= mixing_before + 0.3
     assert result.parameters["converged"]
+
+
+# Failure paths
+
+
+def _regression_case(seed: int = 2):
+    rng, _labels, design, indicators = _single_column_case(seed)
+    assignments = rng.uniform(0.05, 1.0, size=(300, 3))
+    coordinates = rng.normal(size=(300, 4))
+    penalties = rng.uniform(0.1, 2.0, size=(design.n_levels, 3))
+
+    def statistics() -> RegressionStatistics:
+        return _dense_statistics(design, indicators, assignments, coordinates)
+
+    return design, statistics, penalties
+
+
+def test_the_dynamic_penalty_needs_an_alpha() -> None:
+    design, statistics, _penalties = _regression_case()
+
+    with pytest.raises(ValueError, match="The dynamic ridge penalty needs ridge_alpha"):
+        ridge_penalties(
+            statistics(), design, None, None, np.empty((design.n_levels, 3))
+        )
+
+
+def test_the_arrowhead_refuses_penalties_that_vanish_against_the_masses() -> None:
+    design, statistics, penalties = _regression_case()
+    # With every level active and no penalty, the intercept keeps no mass of its
+    # own, so the Schur complement of the arrowhead is 0.
+    active = np.ones((design.n_levels, 3), dtype=bool)
+
+    with pytest.raises(
+        np.linalg.LinAlgError,
+        match="ridge regression for cluster 0 is not positive definite",
+    ):
+        solve_cluster_regressions(
+            statistics(), np.zeros_like(penalties), active, design
+        )
+
+
+def test_elimination_zeroes_a_cluster_without_active_levels() -> None:
+    design, statistics, penalties = _regression_case()
+    active = np.ones((design.n_levels, 3), dtype=bool)
+    active[:, 1] = False
+
+    general = statistics()
+    _solve_by_elimination(general, penalties, active, design)
+    arrowhead = solve_cluster_regressions(statistics(), penalties, active, design)
+
+    np.testing.assert_array_equal(general.level_sums[:, 1, :], 0.0)
+    np.testing.assert_allclose(general.level_sums, arrowhead, rtol=1e-10, atol=1e-12)
+
+
+def test_elimination_reports_a_system_that_is_not_positive_definite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    design, statistics, penalties = _regression_case()
+    active = np.ones((design.n_levels, 3), dtype=bool)
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise np.linalg.LinAlgError("1-th leading minor not positive definite")
+
+    monkeypatch.setattr(correction_module, "cho_factor", refuse)
+    with pytest.raises(
+        np.linalg.LinAlgError,
+        match="ridge regression for cluster 0 is not positive definite",
+    ) as raised:
+        _solve_by_elimination(statistics(), penalties, active, design)
+    assert isinstance(raised.value.__cause__, np.linalg.LinAlgError)
+
+
+def test_a_non_finite_objective_stops_the_fit(monkeypatch: pytest.MonkeyPatch) -> None:
+    values, metadata, _batch = _three_batches()
+    monkeypatch.setattr(
+        clustering_module, "clustering_objective", lambda *args: math.nan
+    )
+
+    with pytest.raises(ValueError, match="non-finite objective in round 0"):
+        fit_harmony(values, metadata, n_clusters=3, max_iter_harmony=1)
+
+
+def test_non_finite_centroids_stop_the_fit() -> None:
+    _require_finite_centroids(np.array([[0.6, 0.8]]), 4)
+
+    with pytest.raises(ValueError, match="non-finite centroids in round 4"):
+        _require_finite_centroids(np.array([[0.6, np.nan]]), 4)
