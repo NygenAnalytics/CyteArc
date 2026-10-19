@@ -1,4 +1,9 @@
-"""Result records of the differential-abundance tests."""
+"""Result records of differential-abundance tests on a datastore.
+
+``DataStore.abundance`` returns these records and keeps each as an immutable
+artifact. They carry the references of the artifacts they were computed
+from, so a result can be traced back to its cells, graph, and samples.
+"""
 
 from dataclasses import dataclass
 
@@ -6,8 +11,8 @@ import numpy as np
 import pandas as pd
 
 from ..metadata.selection import CellField
-from ..storage.refs import ArtifactRef
-from .propeller import PropellerFit, transformed_proportions
+from ..storage.artifacts import ArtifactRef
+from .propeller import PropellerFit
 
 __all__ = [
     "CategoryTestResult",
@@ -19,13 +24,16 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True, eq=False)
 class CategoryTestResult:
-    """A propeller test of category proportions between sample groups.
+    """A propeller test of category proportions (Phipson et al. 2022).
 
-    ``table`` holds one row per category, indexed by category label, with
-    ``baseline_prop``, one ``prop_mean_<group>`` column per group,
-    ``prop_ratio`` (two groups only), ``t_statistic`` or ``f_statistic``,
-    ``p_value``, and the Benjamini-Hochberg ``fdr``. With two groups the
-    contrast is ``groups[0]`` minus ``groups[1]``.
+    ``fit`` holds the counts, proportions, and statistics; its ``table`` has
+    one row per category, described in :func:`~cytearc.abundance.propeller`.
+    The categories come from the ``categories`` artifact or the
+    ``category_field`` column, over the cells of ``cell_selection`` (all
+    cells when None). ``sample_by`` and ``condition_by`` name the sample and
+    condition columns. ``robust_requested`` is the requested robust setting;
+    ``fit.robust`` is the one used, which is off for two or fewer
+    categories. ``artifact`` is None when the result was not saved.
     """
 
     fit: PropellerFit
@@ -40,41 +48,38 @@ class CategoryTestResult:
 
     @property
     def table(self) -> pd.DataFrame:
-        """Per-category statistics."""
+        """One row per category with proportions, statistics, and FDR."""
         return self.fit.table
 
     @property
     def method(self) -> str:
-        """``"t_test"`` for two groups or ``"anova"`` for more."""
+        """``"t_test"`` for two groups, ``"anova"`` for more."""
         return self.fit.method
 
     @property
     def groups(self) -> tuple[str, ...]:
-        """Group order; the two-group contrast is the first minus the second."""
+        """The tested conditions, in order; t-statistics are the first minus the second."""
         return self.fit.groups
 
-    def counts(self) -> pd.DataFrame:
-        """Cells per category (rows) and sample (columns)."""
-        return pd.DataFrame(
-            self.fit.counts,
-            index=pd.Index(self.fit.categories, name="category"),
-            columns=pd.Index(self.fit.samples, name=self.sample_by),
-        )
-
-    def proportions(self, *, transformed: bool = False) -> pd.DataFrame:
-        """Per-sample category proportions, or their transform."""
-        proportions, transform = transformed_proportions(
-            self.fit.counts, self.fit.transform
-        )
-        values: np.ndarray = transform if transformed else proportions
+    def _frame(self, values: np.ndarray) -> pd.DataFrame:
         return pd.DataFrame(
             values,
             index=pd.Index(self.fit.categories, name="category"),
             columns=pd.Index(self.fit.samples, name=self.sample_by),
         )
 
+    def counts(self) -> pd.DataFrame:
+        """Cells per category (rows) and sample (columns)."""
+        return self._frame(self.fit.counts)
+
+    def proportions(self, *, transformed: bool = False) -> pd.DataFrame:
+        """Each sample's category proportions, or their logit or arcsine transform."""
+        return self._frame(
+            self.fit.transformed if transformed else self.fit.proportions
+        )
+
     def sample_groups(self) -> pd.Series:
-        """The group of each sample."""
+        """The condition of each tested sample."""
         return pd.Series(
             self.fit.sample_groups,
             index=pd.Index(self.fit.samples, name=self.sample_by),
@@ -84,12 +89,16 @@ class CategoryTestResult:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class Neighborhoods:
-    """Milo neighbourhoods on one kNN graph.
+    """Milo neighbourhoods on a stored kNN graph (Dann et al. 2022).
 
-    ``index_rows`` are positions in the graph's ``cell_selection`` and
-    ``index_cells`` the matching physical cell rows. ``sizes`` count the
-    cells of each neighbourhood, and ``kth_distance`` is the Euclidean
-    distance from each index cell to its k-th nearest neighbour.
+    Neighbourhood ``j`` is the order-1 neighbourhood of its index cell on
+    the undirected graph of ``neighbors``. ``index_rows`` are the index
+    cells' positions in the graph's ``cell_selection`` and ``index_cells``
+    their physical cell rows. ``sizes`` counts each neighbourhood's cells
+    and ``kth_distance`` is the Euclidean distance from its index cell to
+    its k-th nearest neighbour. ``prop`` of the graph's ``n_cells`` cells
+    were drawn with ``seed`` and, when ``refined``, moved to the cell
+    nearest the median position of their neighbours.
     """
 
     artifact: ArtifactRef
@@ -107,17 +116,17 @@ class Neighborhoods:
 
     @property
     def n_neighborhoods(self) -> int:
-        """Number of neighbourhoods."""
-        return int(self.index_rows.size)
+        """The number of neighbourhoods."""
+        return int(np.asarray(self.index_rows).size)
 
     def table(self) -> pd.DataFrame:
-        """One row per neighbourhood: its index cell, size, and k-distance."""
+        """One row per neighbourhood: index row, index cell, size, and k-distance."""
         return pd.DataFrame(
             {
-                "index_cell": self.index_cells,
-                "index_row": self.index_rows,
-                "size": self.sizes,
-                "kth_distance": self.kth_distance,
+                "index_row": np.asarray(self.index_rows, dtype=np.int64),
+                "index_cell": np.asarray(self.index_cells, dtype=np.int64),
+                "size": np.asarray(self.sizes, dtype=np.int64),
+                "kth_distance": np.asarray(self.kth_distance, dtype=np.float64),
             },
             index=pd.RangeIndex(self.n_neighborhoods, name="neighborhood"),
         )
@@ -127,8 +136,8 @@ class Neighborhoods:
 class NeighborhoodCounts:
     """Cells per neighbourhood (rows) and sample (columns).
 
-    Samples are ordered by first appearance along the graph's cells, as
-    miloR's ``countCells`` orders a character sample column.
+    ``samples`` are the labels of the ``sample_by`` column, in order of
+    first appearance along the graph's cells.
     """
 
     artifact: ArtifactRef
@@ -148,14 +157,17 @@ class NeighborhoodCounts:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class NeighborhoodTestResult:
-    """A Milo differential-abundance test.
+    """A Milo test of neighbourhood counts between conditions.
 
-    ``table`` holds one row per neighbourhood with ``index_cell``, ``size``,
-    ``log_fc`` (log2), ``log_cpm``, ``f_statistic``, ``p_value``, the
-    Benjamini-Hochberg ``fdr``, ``spatial_fdr``, and ``tested``.
-    Neighbourhoods below ``min_mean`` are not tested and hold missing
-    statistics. ``design`` is the samples x coefficients design matrix and
-    ``contrast`` the weights of the tested contrast over its columns.
+    ``table`` has one row per neighbourhood with ``index_cell``, ``size``,
+    the log2 fold change ``log_fc``, ``log_cpm``, the quasi-likelihood
+    ``f_statistic`` and ``p_value``, the Benjamini-Hochberg ``fdr``, the
+    ``spatial_fdr`` of Lun, Richard and Marioni (2017), and ``tested``;
+    neighbourhoods below ``min_mean`` are not tested and have missing
+    statistics. ``design`` is the samples x columns design, with
+    ``covariates`` then ``condition_by``, and ``contrast`` the tested
+    weights over its columns. ``norm_factors`` and ``lib_size`` hold one
+    value per sample. ``artifact`` is None when the result was not saved.
     """
 
     counts: ArtifactRef

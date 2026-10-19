@@ -15,13 +15,13 @@ distribute edgePython.
 | --- | --- |
 | `abundance/propeller.py` | Category counts per sample, transformed proportions, and the propeller test |
 | `abundance/milo.py` | The storage-free Milo steps: index-cell sampling and refinement, membership blocks, counting, k-distances, the edgePython test, spatial FDR, and annotation |
-| `abundance/results.py` | The result records the `DataStore` returns |
+| `abundance/results.py` | The result records the `DataStore` returns, and their tables of counts and proportions |
 | `stats/limma.py` | Linear models, contrasts, and empirical Bayes moderated t- and F-statistics |
 | `stats/multiple_testing.py` | Benjamini-Hochberg and weighted Benjamini-Hochberg FDR |
-| `stats/design.py` | Sample-level treatment-coded design matrices and contrast weights |
-| `datastore/_operations/abundance.py` | `DataStore.abundance`: validation, streaming over the stored graph, and artifacts |
+| `stats/design.py` | Sample-level treatment-coded design matrices, R-style factor levels, and contrast weights |
+| `datastore/_operations/abundance.py` | `DataStore.abundance`: design validation, streaming over the stored graph in row bands, and artifacts |
 | `datastore/_operations/abundance_store.py` | The Zarr layouts of the four result kinds |
-| `plotting/abundance.py` | `category_proportions`, `neighborhood_beeswarm`, and `neighborhood_graph` |
+| `plotting/abundance.py` | `category_proportions`, `neighborhood_beeswarm` (with density-scaled van der Corput jitter), and `neighborhood_graph` |
 
 ## Method
 
@@ -52,15 +52,19 @@ Where the papers leave a choice open, the implementation makes these choices:
 - **Spatial FDR.** It is weighted over the tested neighbourhoods only. miloR also weights the
   neighbourhoods that `min.mean` leaves untested.
 - **Designs.** Designs are additive, with treatment coding, and contrasts are weights over design
-  columns.
+  columns. Text levels are ordered by code point, R's order in the C locale; pass `levels` where
+  another locale would order mixed-case labels differently.
 
 Docstrings give the details.
 
 ## How it was written
 
 limma, speckle, and miloR are licensed under the GPL, so CyteArc may not carry code derived from
-them. `stats/limma.py`, `stats/multiple_testing.py`, `abundance/propeller.py`, and `abundance/milo.py`
-are clean-room implementations:
+them. Every module in the table above except `abundance_store.py` is a clean-room implementation,
+written in two rounds.
+
+The statistics: `stats/limma.py`, `stats/multiple_testing.py`, `abundance/propeller.py`, and
+`abundance/milo.py`.
 - An earlier version of the four modules, and a module of ported R numerics, were deleted before
   the rewrite.
 - A separate agent wrote the new modules from the papers listed below and the R help pages.
@@ -70,6 +74,25 @@ are clean-room implementations:
   inputs and comparing outputs.
 - edgePython was used only through its public API.
 - The modules depend only on NumPy, SciPy, and pandas.
+
+The orchestration and presentation: `stats/design.py`, `abundance/results.py`,
+`datastore/_operations/abundance.py`, and `plotting/abundance.py`.
+- Their earlier versions had been written alongside a GPL-derived port, so they were deleted, with
+  every compiled cache, before the rewrite, and a separate agent wrote new modules with the same
+  public interface.
+- It never saw the deleted files, the repository history, the source of any GPL package or port,
+  or earlier work on this branch outside the repository.
+- It worked from the papers, the R help pages of `model.matrix`, `factor`, `testNhoods`,
+  `annotateNhoods`, `plotDAbeeswarm`, and `plotNhoodGraphDA`, the rest of this repository (the
+  clean-room statistics, `abundance_store.py`, the tests, and the documentation), and R run as a
+  black box.
+- Level order and column names of designs were settled by calling `factor` and `model.matrix` on
+  constructed factors, including numeric, logical, and non-syntactic ones, and comparing outputs.
+  Text levels follow R's order in the C locale.
+- Tie-breaking in neighbourhood annotation was settled by calling `annotateNhoods` on constructed
+  neighbourhoods: the label seen first along the cells wins.
+- The plots follow what the help pages and the Milo paper say they show, and an image of miloR's
+  beeswarm rendered on synthetic results; their drawing code is CyteArc's own, on Matplotlib.
 
 ## How it was verified
 
