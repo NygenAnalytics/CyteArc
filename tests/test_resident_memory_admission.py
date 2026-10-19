@@ -33,8 +33,11 @@ from threadpoolctl import threadpool_limits
 
 from cytearc import DataStore
 from cytearc.datastore._operations.graph import _ann_index_transfer_bytes
-from cytearc.embeddings.harmony import fit_harmony
-from cytearc.embeddings.harmony.api import harmony_cluster_count, harmony_peak_bytes
+from cytearc.embeddings.harmony import (
+    fit_harmony,
+    harmony_cluster_count,
+    harmony_peak_bytes,
+)
 from cytearc.neighbors.graph import merge_graphs, snn_merge_peak_bytes
 from cytearc.neighbors.index import (
     ann_index_file_bytes,
@@ -117,7 +120,7 @@ def _batches(n_cells: int, levels: int, columns: int = 1) -> pd.DataFrame:
         (4_000, 10, 20, 2, 1, 0.05),
         (4_000, 5, 10, 40, 1, 1.0),
         (4_000, 20, 30, 6, 2, 0.3),
-        # Batch levels beyond the cells make the square ridge matrices dominate.
+        # Batch levels beyond the cells make the dense Schur complements dominate.
         (400, 5, 2, 400, 4, 0.05),
     ],
     ids=["few-levels", "one-update-block", "two-columns", "many-levels"],
@@ -128,12 +131,12 @@ def test_harmony_peak_bytes_bounds_the_traced_peak(
     rng = np.random.default_rng(11)
     source = rng.normal(size=(n_cells, dims)).astype(np.float32)
     batches = _batches(n_cells, levels, columns)
-    n_levels = sum(int(batches[column].nunique()) for column in batches.columns)
+    column_levels = [int(batches[column].nunique()) for column in batches.columns]
     options = {
-        "nclust": nclust,
+        "n_clusters": nclust,
         "block_size": block_size,
         "max_iter_harmony": 1,
-        "max_iter_kmeans": 2,
+        "max_iter_cluster": 2,
     }
 
     def fit() -> None:
@@ -143,11 +146,11 @@ def test_harmony_peak_bytes_bounds_the_traced_peak(
         fit_harmony(uncorrected, batches, **options)
 
     with threadpool_limits(limits=1):
-        # Import and warm scikit-learn and the optimizer outside the trace.
+        # Import the modules and compile the kernels outside the trace.
         fit_harmony(
             rng.normal(size=(dims, 300)),
             batches.iloc[:300].reset_index(drop=True),
-            nclust=3,
+            n_clusters=3,
             max_iter_harmony=1,
         )
         peak = _traced_peak(fit)
@@ -156,12 +159,10 @@ def test_harmony_peak_bytes_bounds_the_traced_peak(
         n_cells,
         dims,
         harmony_cluster_count(n_cells, nclust),
-        n_levels,
+        column_levels,
+        n_combinations=int(len(batches.drop_duplicates())),
         block_size=block_size,
-        nthreads=1,
     )
-    # The estimate also counts scikit-learn's per-thread buffers, which the
-    # trace misses.
     assert peak <= estimate <= 2 * peak
 
 
@@ -181,7 +182,7 @@ def test_harmony_cluster_count_is_the_default_of_fit_harmony() -> None:
             harmony_cluster_count(10, nclust)
     values = np.random.default_rng(2).normal(size=(3, 75))
     result = fit_harmony(values, _batches(75, 2), max_iter_harmony=1)
-    assert result.parameters["nclust"] == harmony_cluster_count(75) == 2
+    assert result.parameters["nClusters"] == harmony_cluster_count(75) == 2
     # The estimate assumes the update blocks of fit_harmony's default.
     assert (
         inspect.signature(harmony_peak_bytes).parameters["block_size"].default
@@ -202,7 +203,7 @@ def test_estimators_refuse_shapes_they_cannot_size() -> None:
         (True, TypeError),
     ):
         with pytest.raises(error, match="block_size must be"):
-            harmony_peak_bytes(N_CELLS, 5, 4, 2, block_size=block_size)
+            harmony_peak_bytes(N_CELLS, 5, 4, [2], block_size=block_size)
 
 
 def _knn(n_cells: int, k: int, rng: np.random.Generator) -> np.ndarray:
@@ -654,8 +655,8 @@ def _batch_label_bytes() -> int:
 def test_harmony_admission_counts_the_batch_labels(memory_store, monkeypatch) -> None:
     store, refs = memory_store
     reads = _record_coordinate_reads(monkeypatch)
-    options = {"harmony_params": {"nclust": 10}}
-    peak = harmony_peak_bytes(N_CELLS, 5, 10, 2)
+    options = {"harmony_params": {"n_clusters": 10}}
+    peak = harmony_peak_bytes(N_CELLS, 5, 10, [2])
     # The fit's own estimate fits, even beside a pointer per label, but not
     # beside the labels the operation reads first and holds through the fit,
     # about 58 bytes per cell here.

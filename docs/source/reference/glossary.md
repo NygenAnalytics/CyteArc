@@ -81,7 +81,7 @@ assay
 : Named modality inside a `DataStore` (for example `RNA`, `ADT`, `ATAC`).
 
 Harmony
-: Batch correction applied to PCA embeddings with `reduction.harmony` before ANN construction.
+: Batch correction of PCA coordinates with `reduction.harmony`, CyteArc's implementation of Harmony2, before ANN construction.
 
 partial PCA
 : PCA trained on an immutable cell subset via `pca_cell_selection`.

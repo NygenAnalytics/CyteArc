@@ -227,7 +227,7 @@ any changes you make after seeing the comparison as such.
 | `references/plotting.md` | headless figures, run mode versus ref mode, every `ds.plots` method |
 | `references/integration-and-comparisons.md` | study design and units, donors in two arms, composition tests, differential abundance (propeller, Milo), Harmony and its safety, merging, mapping, condition comparisons |
 | `references/performance-and-export.md` | budgets, long-running steps, streaming, mount repacking, AnnData/H5AD/MTX/CSV and pseudobulk export, subset stores |
-| `references/regulons.md` | SCENIC regulons from RNA, chromVAR motif and CUT&RUN activity in ATAC, enhancer-driven regulons, co-regulated gene programs |
+| `references/regulons.md` | SCENIC regulons from RNA, chromVAR motif and CUT&RUN activity in ATAC, region-to-gene links, co-regulated gene programs |
 
 ## Troubleshooting
 
@@ -238,6 +238,7 @@ any changes you make after seeing the comparison as such.
 | `ValueError` on `ds.pipeline.run(label=...)` | label already completed | new label; reuse makes it cheap |
 | `PermissionError` from a producer | store opened with `zarr_mode="r"` and no matching artifact; feature selections, WAGGR, AUCell, chromVAR, `regulons.grn`, `features.prevalent_peaks`, and cell-cycle scoring refuse even with one | reopen writable |
 | `KeyError: 'values'` on a Paris ref | Paris stores `labels` | `ds.artifacts.load(ref)["labels"]` |
+| `ImportError` naming igraph or leidenalg from `clusters.leiden` or a pipeline Leiden stage | `backend="igraph"` or `"leidenalg"` needs GPL packages that CyteArc does not install | use the default `backend="cytearc"`; install the packages yourself (`uv pip install leidenalg`) only to match an external or earlier result |
 | Array length differs from `ds.cells.N` | payload follows the cell selection | align with `run.cells.fetch_all` or the selection mask |
 | Plot raises with `run=` and a gene or live column | run mode reads only frozen run fields and run outputs, and genes need an explicit normalization | gene: add `normalization=cytearc.plotting.NormalizationSpec()`; live column: freeze it with `snapshot_columns=` or use `layout=run["umap"]` |
 | `TypeError` from `distribution(grouping="col")` | grouping needs a ref or `CellField` | `grouping=cytearc.plotting.CellField("col")` |

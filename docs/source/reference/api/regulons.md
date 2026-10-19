@@ -1,14 +1,14 @@
 ---
 myst:
   html_meta:
-    description: CyteArc regulon API for GRNBoost2 networks, cisTarget motif pruning, chromVAR motif activity, motif and CUT&RUN cistromes, enhancer-driven regulons, and co-regulated gene programs.
+    description: CyteArc regulon API for GRNBoost2 networks, cisTarget motif pruning, chromVAR motif activity, motif and CUT&RUN cistromes, region-to-gene links, and co-regulated gene programs.
 ---
 
 # Regulons API reference
 
-`cytearc.regulons` builds transcription-factor regulons the way SCENIC and SCENIC+ do, and
-co-regulated gene programs, from RNA, ATAC, and binding data such as CUT&RUN. Every set it
-returns, from modules and regulons to programs, cistromes, and eRegulons, is a table with
+`cytearc.regulons` builds transcription-factor regulons the way SCENIC does, and co-regulated
+gene programs, from RNA, ATAC, and binding data such as CUT&RUN. Every set it returns, from
+modules and regulons to programs and cistromes, is a table with
 `source` (the set) and `target` (a member) columns, which {meth}`ds.scores.aucell
 <cytearc.datastore.namespaces.ScoresAccessor.aucell>` (genes) and {meth}`ds.scores.chromvar
 <cytearc.datastore.namespaces.ScoresAccessor.chromvar>` (peaks) score per cell and
@@ -76,7 +76,11 @@ enriched, annotated motif of each module's factor recovers, and the leading edge
 .. autofunction:: cytearc.regulons.binding_cistromes
 ```
 
-## Enhancer-driven regulons (SCENIC+)
+## Region-to-gene links
+
+With RNA and ATAC from the same cells, candidate links pair each peak with the genes near it,
+and each link is scored by how the peak's accessibility follows the gene's expression across
+metacells.
 
 ```{eval-rst}
 .. autofunction:: cytearc.regulons.read_gene_annotation
@@ -84,10 +88,6 @@ enriched, annotated motif of each module's factor recovers, and the leading edge
 .. autofunction:: cytearc.regulons.link_regions_to_genes
 
 .. autofunction:: cytearc.regulons.region_gene_links
-
-.. autofunction:: cytearc.regulons.build_eregulons
-
-.. autoclass:: cytearc.regulons.EregulonParameters
 ```
 
 ## Gene programs and specificity

@@ -83,9 +83,16 @@ They must not import those packages at module load time.
 
 - `neighbors/` owns ANN construction, KNN queries, graph operations, diffusion, and weighted-neighbor integration.
   It does not own stored KNN graph arrays; persistence lives in `datastore` and `storage`.
-- `embeddings/` owns PCA, LSI, Harmony correction, UMAP, SG-tSNE, embedding initialization, and
-  the narrow storage adapter for imported coordinate artifacts.
+- `embeddings/` owns PCA, LSI, Harmony2 batch correction, UMAP, SG-tSNE, embedding initialization,
+  and the narrow storage adapter for imported coordinate artifacts.
 - `clustering/` owns Leiden clustering and PARIS hierarchy operations.
+  `leiden.py` holds the public `leiden_membership` and dispatches between the native `"cytearc"`
+  backend and the `"igraph"` and `"leidenalg"` backends, whose GPL packages it imports only when
+  one of them is requested (CyteArc does not install them). The native backend lives in the private
+  `_leiden_*.py` modules, described in `cytearc/clustering/README.md`, and loads lazily, so
+  importing `cytearc.clustering.leiden` loads no Numba kernel. After a release, a change that
+  alters the native labels for unchanged parameters needs an `OperationRevision` of
+  `run_leiden_clustering` scoped to `backend == "cytearc"` (placement rule 10).
 - `trajectory/` owns pseudotime scoring, feature-profile aggregation, feature module clustering, and pseudotime result records.
 - `metrics/` owns LISI, silhouette, graph, concordance, and integration scores, including the neighbor label agreement that membership strength stores.
 - `features/` owns variability selection, LOWESS trend fitting, feature scoring, enrichment, rank and regression marker searches, group-wise statistical tests, bulk aggregation, GFF parsing, genomic intervals, coordinate-based feature construction, and the name-based gene-family registry.
@@ -102,12 +109,11 @@ They must not import those packages at module load time.
   networks (`grn.py`), co-expression modules (`modules.py`), cisTarget ranking databases and
   motif annotations (`databases.py`), recovery-curve enrichment (`cistarget.py`), pruning into
   regulons (`pruning.py`), cistromes from motifs or binding peaks (`cistromes.py`),
-  region-to-gene links (`links.py`), enhancer-driven regulons with preranked GSEA
-  (`eregulons.py`), co-regulated gene programs (`programs.py`), and regulon specificity
-  (`specificity.py`). Its functions work on in-memory tables and reference files, and every
-  set they return has `source` and `target` columns, the network shape that the enrichment
-  scorers read. `polars` is an optional dependency for ranking databases, so the `regulons`
-  extra does not install `pyarrow`. `results.py` holds `GrnResult`, which names
+  region-to-gene links (`links.py`), co-regulated gene programs (`programs.py`), and regulon
+  specificity (`specificity.py`). Its functions work on in-memory tables and reference files,
+  and every set they return has `source` and `target` columns, the network shape that the
+  enrichment scorers read. `polars` is an optional dependency for ranking databases, so the
+  `regulons` extra does not install `pyarrow`. `results.py` holds `GrnResult`, which names
   `storage.refs` only. `DataStore.regulons.profiles` sums cell groups with
   `compare.compute_bulk` and writes nothing.
 - `stats/` owns the replicate-level statistics: Benjamini-Hochberg and weighted BH adjustment, treatment-coded designs and contrasts, and the empirical Bayes linear models that propeller uses (least-squares fits, contrasts, moment and robust estimation of the variance prior, and moderated t- and F-statistics), implemented from Smyth (2004) and Phipson et al. (2016) and checked against limma's outputs.
@@ -404,6 +410,19 @@ CyteArc validates persisted data and public arguments against the following cont
   tied at the cut height are applied in hierarchy order, so exactly `n_clusters` clusters are
   returned. Clustering and doublet entry points reject graph
   references that are not connectivity maps or integrated graphs.
+- Leiden clustering defaults to CyteArc's own backend, `"cytearc"`, in `clusters.leiden`,
+  `cytearc.clustering.leiden_membership`, the pipeline's Leiden stages, gene programs, and the
+  profiling `leidenBackend`. igraph and leidenalg are no longer dependencies of CyteArc, in no
+  extra either: users who want `backend="igraph"` or `"leidenalg"` install the GPL packages
+  themselves, and asking for those backends without them raises `ImportError` that says so.
+  `LeidenArguments.backend` gains `"cytearc"`, and the
+  backend stays part of the artifact identity: a default call records `backend="cytearc"` and
+  computes new labels instead of reusing an artifact recorded with `"igraph"`. Such artifacts stay
+  valid and are reused by calls that pass `backend="igraph"`, without the packages. No operation
+  revision is needed, because the GPL backends compute what they did before. `leiden_membership`
+  gains a keyword-only `nthreads`, which `clusters.leiden` sets to the datastore's `nthreads`; the
+  thread count is an execution option, not part of any identity, and the native labels do not
+  depend on it. Native labels are numbered from 1 by decreasing cluster size.
 - `markers.load` returns string `group_id` values in plot category order (numeric labels first in
   numeric order) and raises for an unknown group. `markers.export_csv` uses the same column
   order. Only plain decimal labels are numeric, so plots no longer read `"1_10"` as 110; other
@@ -1095,6 +1114,27 @@ CyteArc validates persisted data and public arguments against the following cont
   under a new `datasetPrefixUri`.
 - A forced profiling `createStore` job deletes its store prefix before it downloads; an unforced one
   refuses any non-empty destination.
+- Harmony is CyteArc's implementation of Harmony2: k-means++ seeding, a stabilized diversity
+  penalty, a dynamic ridge penalty of `ridge_alpha` times each batch level's expected mass in a
+  cluster, and batch pruning. `harmony_params` and the `fit_harmony` keywords rename `nclust` to
+  `n_clusters`, `max_iter_kmeans` to `max_iter_cluster`, and `lamb` to `ridge_penalty`, remove
+  `cluster_fn`, and add `ridge_alpha` and `prune_threshold`. The datastore calls
+  `validate_harmony_parameters` before it reads data, and the pipeline when it resolves its recipe,
+  before it creates a run record; it raises `ValueError` for an earlier key, naming its
+  replacement or why it was removed, and `fit_harmony` raises `TypeError` for it.
+  `max_iter_harmony` must be at least 1 and `ridge_penalty` positive. `HarmonyResult.ridge` is
+  replaced by `ridge_penalty` and `active_levels`, both clusters by batch levels.
+  `harmony_peak_bytes` takes `n_cells`, `dims`, `n_clusters`, `column_levels`, and the keywords
+  `n_combinations` and `block_size`, without `nthreads`; the second parameter of
+  `harmony_cluster_count` is `n_clusters`. These two and `validate_harmony_parameters` are public
+  in `cytearc.embeddings.harmony`. The `Harmony` class (in `cytearc.embeddings` and
+  `cytearc.embeddings.harmony`), `moe_correct_ridge`, `safe_entropy`, and `ClusterFn` are removed.
+- `batch_correction` artifacts replace the `ridge` array with `ridge_penalty` (float64) and
+  `active_levels` (bool), both clusters by batch levels, and add the `fit_parameters` attribute.
+  Reuse requires both arrays, so a correction saved by the earlier implementation is never reused
+  but stays loadable, and the next request recomputes the correction and everything built on it.
+  The arrays and attributes that Symphony mapping references copy are unchanged, so references
+  built from either implementation load and map without a compatibility branch.
 
 Compatibility exists only where a current public facade or an explicit file-schema test says it
 does. There are no silent migrations, implicit compatibility branches, or forwarding shims for

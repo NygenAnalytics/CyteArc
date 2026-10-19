@@ -553,12 +553,12 @@ dot. Feature indices keep duplicate gene names distinct. Statistics come from
 the final immutable marker table, with one cluster table read at a time; no
 count matrix is read. `plot_markers(top_n=..., max_genes=...)` adjusts panel size.
 
-Reports embed Inter, the supplied Nygen and CyteArc logos, and the favicon. The
+Reports embed Inter, the Nygen logo, and the favicon. The
 responsive layout uses Nygen's blue accent, regular headlines, light subheadlines,
 and 1.2 line spacing, with print styles and keyboard navigation. No script,
 stylesheet service, or font service is required. The Inter SIL Open Font License
 is retained in an HTML source comment. The masthead links to Nygen's website;
-the footer links to the CyteArc repository and paper alongside its full citation.
+the footer names CyteArc and links to its GitHub repository.
 These are ordinary navigation links and do not load remote report assets.
 Narrative text supports paragraphs, line
 breaks, lists, emphasis, and inline code, including newline escapes in saved model

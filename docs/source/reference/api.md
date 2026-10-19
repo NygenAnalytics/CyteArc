@@ -8,7 +8,7 @@ Public CyteArc surfaces for analysts:
 - `ArtifactRef`, `ArtifactStatus`, `PipelineRun`, and strict artifact-resolution errors
 - `EnrichmentResult` and `read_gmt` for gene-set scoring
 - `cytearc.regulons` for SCENIC-style regulons, chromVAR motif activity, cistromes from motifs or
-  CUT&RUN peaks, enhancer-driven regulons, and co-regulated gene programs
+  CUT&RUN peaks, region-to-gene links, and co-regulated gene programs
 - Readers that ingest source formats; writers that create or export Zarr stores (and other exports)
 - `cytearc.plotting`
 - `cytearc.datasets` for the public example datasets that the tutorials download

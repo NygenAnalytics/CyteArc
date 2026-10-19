@@ -150,7 +150,7 @@ run = ds.pipeline.run(
 | `hvg` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.hvgs` | `top_n`, `min_cells`, `max_cells`, `min_mean`, `max_mean`, `min_var`, `max_var`, `n_bins`, `lowess_frac`, `blacklist`, `keep_bounds`, `bin_strategy` |
 | `normalization` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.normalize` | `log_transform`, `renormalize_subset` |
 | `pca` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.pca` | `dims`, `feat_scaling`, `batch_size` |
-| `harmony` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.harmony` | `batch_columns` (required), `harmony_params`, `batch_size` |
+| `harmony` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.harmony` | `batch_columns` (required), `harmony_params` (the keyword options of {py:func}`~cytearc.embeddings.fit_harmony`), `batch_size` |
 | `ann_index` | {py:meth}`~cytearc.datastore.namespaces.GraphAccessor.ann_index` | `ann_metric`, `ann_efc`, `ann_ef`, `ann_m`, `ann_parallel`, `rand_state`, `batch_size` |
 | `neighbors` | {py:meth}`~cytearc.datastore.namespaces.GraphAccessor.neighbors` | `k`, `batch_size` |
 | `connectivity` | {py:meth}`~cytearc.datastore.namespaces.GraphAccessor.connectivity` | `local_connectivity`, `bandwidth` |
@@ -189,6 +189,13 @@ raises `ValueError` before a run record is created; pass `doublets=False`.
 `leiden` `selected` names one of the partitions as the saved clustering, `run["clusters"]`, in place
 of the silhouette choice, and the cluster-selection stage is skipped; the other partitions still
 run beside it.
+`leiden` `backend` defaults to `"cytearc"`, CyteArc's own multi-threaded Leiden implementation,
+which runs on the datastore's worker budget and gives the same labels for any thread count.
+`"igraph"` and `"leidenalg"` need those GPL-licensed packages, which CyteArc does not install.
+Without them, a Leiden stage that must compute a new partition with either backend fails, after
+the earlier stages have completed, and the run raises a `PipelineExecutionError` whose `__cause__`
+is the `ImportError` naming the missing package; a partition that the store already holds is
+reused without the packages.
 
 With `dims=0` the graph has one coordinate per highly variable gene, so the memory and time of the
 ANN index, the neighbour queries, the embedding initialization, and cluster selection scale with
@@ -221,7 +228,11 @@ others: `tsne_dims`, `max_iter`, and `alpha` must be integers of at least 1, `ea
 of at least 0, `lambda_scale` and `box_h` finite positive numbers, and `symmetric_graph` and
 `graph_upper_only` booleans; an omitted setting is checked as its `embeddings.tsne` default. The `umap`
 `symmetric_graph` and `graph_upper_only` settings must be booleans too, checked at the same time;
-`embeddings.umap` no longer accepts `None` for them. A setting
+`embeddings.umap` no longer accepts `None` for them. The `harmony` `harmony_params` mapping gets
+the checks of `reduction.harmony` then as well: its keys are the keyword options of
+{py:func}`~cytearc.embeddings.fit_harmony` other than `nthreads`, and an unknown key, a key of an
+earlier release such as `nclust` (now `n_clusters`), or an invalid value raises `ValueError` or
+`TypeError`; {doc}`integration` lists the keys. A setting
 cannot also be given through its shortcut argument: `hvg_count` with
 `hvg.top_n`, `pca_dims` with `pca.dims`, `neighbors_k` with `neighbors.k`, `harmony_batch_columns`
 with `harmony`, or a changed stage switch such as `umap=False` with `params["umap"]`. Each shortcut
@@ -382,6 +393,12 @@ views work as long as the artifacts the run references exist and satisfy their p
 Running a saved configuration again recomputes a stage whose operation gained a revision that
 applies to it, or whose recorded provenance a later release changed; it never modifies the earlier
 run. Lineage reports of the earlier run's outputs mark those that a revision supersedes `stale`.
+A changed default changes the recorded provenance too. The default Leiden backend changed from
+`"igraph"` to `"cytearc"`, so a saved configuration that does not set `params["leiden"]["backend"]`
+computes new Leiden partitions when it runs again, and the stages that use them, such as cluster
+selection, doublet scoring, and marker search, compute new results too. The earlier partitions are
+not superseded or marked `stale`: set `"backend": "igraph"` to reuse them, which needs no igraph
+installation while the store holds them.
 
 A run that a newer CyteArc saved with record fields this release does not know fails closed: opening
 it by run ID raises a `ValueError` that names those fields. Upgrade CyteArc to open it. Within 1.x,

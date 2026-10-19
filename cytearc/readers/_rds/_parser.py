@@ -1,3 +1,9 @@
+"""Parse R's serialization format, the encoding inside RDS files.
+
+The parser was written from the format's description in the R Internals manual
+("Serialization Formats") for interoperability, not from R's source code.
+"""
+
 import math
 import os
 import struct

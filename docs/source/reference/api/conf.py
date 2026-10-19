@@ -7,8 +7,8 @@ SOURCE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SOURCE_ROOT.parents[1]))
 
 project = "CyteArc API"
-copyright = "2020-2026, Parashar Dhapola"
-author = "Parashar Dhapola"
+copyright = "2026, Nygen Analytics AB"
+author = "Nygen Analytics AB"
 extensions = [
     "myst_parser",
     "sphinx.ext.autodoc",
@@ -49,6 +49,7 @@ nitpick_ignore = [
     ("py:class", "_duckdb.DuckDBPyConnection"),
     ("py:class", "numpy.ndarray"),
     ("py:class", "numpy.dtype"),
+    ("py:exc", "numpy.linalg.LinAlgError"),
     ("py:class", "pandas.DataFrame"),
     ("py:class", "pandas.Series"),
     ("py:class", "pandas.api.extensions.ExtensionArray"),

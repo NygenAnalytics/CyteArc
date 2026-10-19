@@ -167,8 +167,8 @@ labels = {name: np.asarray(ds.artifacts.load(ref)["values"][:]) for name, ref in
 print(pd.crosstab(labels["k11"], labels["k21"]))
 ```
 
-(10x 5K PBMC docs dataset) Degree vs `RNA_nCounts` Spearman 0.10; 16 clusters at k=11 versus 15
-at k=21 (ARI 0.81). A larger `k` usually absorbs small clusters; the crosstab shows which.
+(10x 5K PBMC docs dataset) Degree vs `RNA_nCounts` Spearman 0.10; 17 clusters at k=11 versus 16
+at k=21 (ARI 0.83). A larger `k` usually absorbs small clusters; the crosstab shows which.
 
 ### Same knobs through the pipeline
 
@@ -245,8 +245,9 @@ combined = np.where(parent_full < 0, "not analyzed", combined).astype(object)
 ds.cells.insert("clusters_tsub_v1", combined, overwrite=True)  # new suffix for each new version
 ```
 
-(10x 5K PBMC docs dataset) The T subgraph at 0.3 split naive and memory CD4, naive CD8,
-cytotoxic and FOXP3/CTLA4 groups, with ARI 0.94 at 2,000 HVGs. The parent had no FOXP3 group.
+(10x 5K PBMC docs dataset) The T subgraph at 0.3 split naive and memory CD4, naive CD8 and
+cytotoxic groups, with ARI 0.92 at 2,000 HVGs. A FOXP3/CTLA4 group appeared only at 0.5, whose
+minimum seed ARI was 0.78. The parent had no FOXP3 group.
 
 ## Parameters that matter
 

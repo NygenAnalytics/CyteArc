@@ -396,7 +396,7 @@ def test_embedding_and_clustering_are_artifact_only(graph_store) -> None:
     coordinates = datastore.artifacts.load(embedding)["values"][:]
     assert coordinates.shape == (n_cells, 2)
     assert np.isfinite(coordinates).all()
-    assert datastore.artifacts.inspect(leiden).parameters["backend"] == "igraph"
+    assert datastore.artifacts.inspect(leiden).parameters["backend"] == "cytearc"
     assert len(artifact_values(artifact_group(datastore.zw, leiden), "values")) == (
         n_cells
     )
@@ -407,20 +407,36 @@ def test_embedding_and_clustering_are_artifact_only(graph_store) -> None:
     _assert_metadata_unchanged(datastore, before)
 
 
-def test_leiden_backend_is_part_of_artifact_identity(graph_store) -> None:
+def test_leiden_records_the_default_backend(graph_store) -> None:
     datastore, graph = graph_store
 
     native = datastore.clusters.leiden(graph)
-    legacy = datastore.clusters.leiden(graph, backend="leidenalg")
 
-    assert native != legacy
-    assert datastore.artifacts.inspect(native).parameters["backend"] == "igraph"
-    assert datastore.artifacts.inspect(legacy).parameters["backend"] == "leidenalg"
+    assert datastore.artifacts.inspect(native).parameters["backend"] == "cytearc"
     with pytest.raises(ValueError, match="backend"):
         datastore.clusters.leiden(
             graph,
             backend="unknown",  # type: ignore[arg-type]
         )
+
+
+def test_leiden_backend_is_part_of_artifact_identity(graph_store, monkeypatch) -> None:
+    import cytearc.clustering.leiden as leiden_module
+
+    datastore, graph = graph_store
+    # CyteArc does not install leidenalg; only the artifact identity is tested.
+    monkeypatch.setattr(
+        leiden_module,
+        "_leidenalg_membership",
+        lambda matrix, resolution, seed: np.ones(matrix.shape[0], dtype=np.int64),
+    )
+
+    native = datastore.clusters.leiden(graph)
+    legacy = datastore.clusters.leiden(graph, backend="leidenalg")
+
+    assert native != legacy
+    assert datastore.artifacts.inspect(native).parameters["backend"] == "cytearc"
+    assert datastore.artifacts.inspect(legacy).parameters["backend"] == "leidenalg"
 
 
 def test_leiden_graph_flags_reach_the_graph_loader_as_booleans(

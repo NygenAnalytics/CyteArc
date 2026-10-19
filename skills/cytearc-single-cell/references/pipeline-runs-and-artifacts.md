@@ -51,9 +51,11 @@ Default outputs and their kinds: `input_cell_selection`, `analysis_cell_selectio
 `embedding_initialization`, `umap` (`embedding`), `leiden_0.5` ... `leiden_1.25`
 (`cluster_labels`), `paris` (`cluster_cut`), `cluster_selection`, `clusters` (the selected Leiden
 ref itself, not a copy), `doublets` (`doublet_score`), `markers` (`marker_table`). Harmony adds
-`harmony` after `pca`; disabled stages omit their keys. A fresh baseline took 22 s on local
-counts, 10 s of it one-time compilation in the graph stage; a second run in the same process took
-11 s (10x 5K PBMC docs dataset). On remote counts expect about a minute for a few thousand cells.
+`harmony` after `pca`; disabled stages omit their keys. A fresh baseline with an empty Numba cache
+took 109 s on local counts, about 90 s of it one-time compilation (graph stage 24 s, Leiden kernels
+39 s, Paris and markers 21 s); a second run in the same process took 19 s, and a later process,
+which loads most kernels from Numba's cache, took 34 s (10x 5K PBMC docs dataset). On remote counts
+expect about a minute for a few thousand cells.
 
 ```python
 import cytearc
@@ -175,8 +177,10 @@ decision.attrs["selectedKey"], decision.attrs["candidateKeys"], decision["scores
 ### Branch from a completed run and trace lineage
 
 Pass exact run refs to granular methods. Same inputs return the run's own artifacts; new
-parameters create a branch. Explicit normalization/PCA/graph chains: features-and-graphs.md.
-Clustering choices: clustering-and-embedding.md.
+parameters create a branch. A run saved by an earlier release, whose default Leiden backend was
+`"igraph"`, holds Leiden refs that only `ds.clusters.leiden(..., backend="igraph")` reuses.
+Explicit normalization/PCA/graph chains: features-and-graphs.md. Clustering choices:
+clustering-and-embedding.md.
 
 ```python
 graph = run["connectivity_map"]

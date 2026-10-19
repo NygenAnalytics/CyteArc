@@ -294,14 +294,6 @@ def leiden_clustering(connectivity_graph, datastore):
 
 
 @pytest.fixture(scope="session")
-def legacy_leiden_clustering(connectivity_graph, datastore):
-    yield datastore.clusters.leiden(
-        connectivity_graph,
-        backend="leidenalg",
-    )
-
-
-@pytest.fixture(scope="session")
 def paris_clustering(connectivity_graph, datastore):
     yield datastore.clusters.paris(
         connectivity_graph,
@@ -339,12 +331,14 @@ def marker_search(datastore, paris_clustering, detected_features):
 
 
 @pytest.fixture(scope="session")
-def pseudotime_scoring(datastore, connectivity_graph, legacy_leiden_clustering):
+def pseudotime_scoring(datastore, connectivity_graph, leiden_clustering):
+    # The default backend numbers clusters by decreasing size, so the source and
+    # the sink are the two largest Leiden clusters.
     yield datastore.trajectory.pseudotime(
         connectivity_graph,
-        source_sink=legacy_leiden_clustering,
-        sources=[6],
-        sinks=[3],
+        source_sink=leiden_clustering,
+        sources=[1],
+        sinks=[2],
     )
 
 

@@ -319,7 +319,7 @@ def _run_harmony(array: str):
         return store.reduction.harmony(
             refs["pca"],
             ["batch"],
-            harmony_params={"nclust": 3},
+            harmony_params={"n_clusters": 3},
             invalidate_cache=True,
         )
 

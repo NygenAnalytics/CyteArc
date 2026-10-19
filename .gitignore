@@ -33,7 +33,6 @@ htmlcov/
 .pytest_cache
 interrogate_badge.svg
 tests/datasets/*
-!tests/datasets/markers_all_clusters.csv
 tests/.env
 tests/.env.*
 benchmarks/.env

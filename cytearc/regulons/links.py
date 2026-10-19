@@ -9,8 +9,8 @@ import pandas as pd
 
 __all__ = ["region_gene_links"]
 
-#: SCENIC+ region-to-gene regressor settings (``GBM_KWARGS``, seed 666).
-SCENICPLUS_R2G_PARAMETERS = {
+#: Settings of each gene's gradient boosting regressor, arboreto's ``GBM_KWARGS``.
+GBM_PARAMETERS = {
     "learning_rate": 0.01,
     "n_estimators": 500,
     "max_features": 0.1,
@@ -47,10 +47,10 @@ def region_gene_links(
     its expression over the same samples, such as metacells that aggregate
     both modalities of a multiome experiment. ``rho`` is Spearman's rank
     correlation of each region with the gene. With ``importance="gbm"``, a
-    gradient boosting regressor with SCENIC+'s settings (500 stages, learning
-    rate 0.01, a tenth of the regions per split, no subsampling) predicts the
-    gene from all its candidate regions, and each region's normalized impurity
-    importance is reported, as SCENIC+'s region-to-gene step does.
+    gradient boosting regressor with arboreto's non-stochastic settings (500
+    stages, learning rate 0.01, a tenth of the regions per split, no
+    subsampling) predicts the gene from all its candidate regions, and each
+    region's normalized impurity importance is reported.
 
     Args:
         accessibility: Samples-by-regions accessibility named by region, such
@@ -104,7 +104,7 @@ def region_gene_links(
                 from sklearn.ensemble import GradientBoostingRegressor
 
                 regressor = GradientBoostingRegressor(
-                    random_state=seed, **SCENICPLUS_R2G_PARAMETERS
+                    random_state=seed, **GBM_PARAMETERS
                 )
                 regressor.fit(access, outcome)
                 values = np.asarray(regressor.feature_importances_, dtype=np.float64)

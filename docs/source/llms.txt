@@ -33,7 +33,7 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 - [CITE-seq](tutorials/cite-seq/): matched RNA and ADT analysis with WNN integration
 - [TEA-seq](tutorials/tea-seq/): prepared RNA, ATAC, and protein analysis with three-way WNN
 - [WNN and SNN integration](tutorials/multimodal-diagnostics/): compare SNN and WNN and inspect modality weights
-- [Regulons and gene programs](tutorials/regulons/): SCENIC regulons, co-regulated gene programs, chromVAR motif and CUT&RUN activity, and enhancer-driven regulons
+- [Regulons and gene programs](tutorials/regulons/): SCENIC regulons, co-regulated gene programs, and chromVAR motif and CUT&RUN activity
 - [HTO demultiplexing](tutorials/hto-demultiplexing/): sample-tag classification and Seurat comparison
 
 ## Integration and mapping
@@ -41,7 +41,7 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 - [CyteBase composite datasets](tutorials/composite-datasets/): jointly analyze remote datasets, compare Harmony correction, and reopen saved results while counts stay in their sources
 - [CyteBase datasets](tutorials/cytebase-datasets/): open public CyteBase datasets by URI, read-only or as a writable mount, and run the pipeline on them
 - [Dataset merging](tutorials/dataset-merging/): compatible stores and an uncorrected joint baseline
-- [Harmony batch correction](tutorials/batch-correction/): Harmony, batch mixing, and biological conservation
+- [Harmony batch correction](tutorials/batch-correction/): Harmony2 batch correction, batch mixing, and biological conservation
 - [Reference mapping and label transfer](tutorials/mapping-and-label-transfer/): fixed-reference projection
 
 ## Differential expression
@@ -81,7 +81,7 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 - [Analysis pipelines](api/pipeline.html): configure RNA pipelines, inspect durable runs, and access frozen outputs
 - [Graph construction](api/graph_construction.html): normalization, reduction, neighbour search, and connectivity stages
 - [Reference mapping](api/mapping.html): build references, project query cells, and transfer labels
-- [Integration and metrics](api/integration.html): WNN, SNN, Harmony, and integration diagnostics
+- [Integration and metrics](api/integration.html): WNN, SNN, Harmony2 batch correction and its parameters, and integration diagnostics
 - [Assays and metadata](api/assays.html): assay types, count blocks, cell and feature metadata, and selections
 - [Artifacts and lineage](api/artifacts.html): find saved results, trace their inputs, and summarize analyses
 - [Import and export](api/import_export.html): readers, writers, dataset merging, and storage controls

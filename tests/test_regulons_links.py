@@ -4,7 +4,7 @@ import pytest
 from scipy.stats import spearmanr
 from sklearn.ensemble import GradientBoostingRegressor
 
-from cytearc.regulons.links import SCENICPLUS_R2G_PARAMETERS, region_gene_links
+from cytearc.regulons.links import GBM_PARAMETERS, region_gene_links
 
 
 def _data():
@@ -48,7 +48,7 @@ def test_region_gene_links_match_scipy_and_sklearn():
         else:
             assert rho == pytest.approx(expected, abs=1e-12)
     gene_a = links[links["gene"] == "A"]
-    regressor = GradientBoostingRegressor(random_state=666, **SCENICPLUS_R2G_PARAMETERS)
+    regressor = GradientBoostingRegressor(random_state=666, **GBM_PARAMETERS)
     regressor.fit(access[["r0", "r1", "r2", "r5"]].to_numpy(), expression["A"])
     np.testing.assert_allclose(gene_a["importance"], regressor.feature_importances_)
     assert gene_a.set_index("region").loc["r0", "importance"] > 0.5

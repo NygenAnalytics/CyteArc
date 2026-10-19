@@ -132,6 +132,8 @@ project:
       title: Glossary
     - file: reference/license.md
       title: License
+    - file: reference/third_party_notices.md
+      title: Third-party notices and data credits
     - url: https://github.com/NygenAnalytics/CyteArc/discussions
       title: Ask a question
     - url: https://github.com/NygenAnalytics/CyteArc/issues
@@ -151,7 +153,7 @@ project:
 site:
   template: book-theme
   parts:
-    primary_sidebar_footer: <!-- No sidebar footer. -->
+    primary_sidebar_footer: '[Third-party notices and data credits](reference/third_party_notices.md)'
   options:
     folders: true
     favicon: favicon.ico

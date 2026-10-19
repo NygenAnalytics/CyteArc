@@ -159,7 +159,7 @@ class WorkflowParameters(BaseModel):
     umapSeed: int = 4444
     umapParallel: bool = True
     leidenResolution: float = 1.0
-    leidenBackend: Literal["igraph", "leidenalg"] = "igraph"
+    leidenBackend: Literal["cytearc", "igraph", "leidenalg"] = "cytearc"
     leidenSeed: int = 4444
     graphLocalCache: bool | str = "auto"
     parisNClusters: int | Literal["auto"] = "auto"

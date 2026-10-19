@@ -145,7 +145,7 @@ class RankingDatabase:
 
 
 def _annotation_category(description: pd.Series) -> pd.Series:
-    """Classify cisTarget annotation descriptions as pycistarget does."""
+    """Classify ``.tbl`` descriptions as direct, similarity, orthology, or both."""
     text = description.fillna("").astype(str)
     similar = text.str.contains("similar")
     orthologous = text.str.contains("orthologous")
@@ -168,7 +168,7 @@ def read_motif_annotations(
 
     Rows whose motif similarity q-value exceeds ``motif_similarity_fdr`` or
     whose orthologous identity is below ``orthologous_identity_threshold``
-    are dropped, as pySCENIC and pycistarget do.
+    are dropped, as pySCENIC does.
 
     Args:
         path: Annotation table, such as ``motifs-v10nr_clust-nr.hgnc-m0.001-o0.0.tbl``.

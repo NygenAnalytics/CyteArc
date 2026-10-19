@@ -162,7 +162,9 @@ class PipelineAccessor:
           that always run. ``pca`` ``dims=0`` skips PCA and builds the graph
           on the normalized values of the selected features; it requires
           ``doublets=False`` and no Harmony batch columns.
-        - ``harmony``: ``batch_columns`` plus Harmony settings, or False.
+        - ``harmony``: ``batch_columns`` plus ``harmony_params`` (the keyword
+          options of ``cytearc.embeddings.harmony.fit_harmony``) and
+          ``batch_size``, or False.
         - ``leiden``: ``partitions``, an optional ``selected`` resolution that
           becomes the saved clustering in place of the silhouette choice, and
           Leiden settings; or a bool.

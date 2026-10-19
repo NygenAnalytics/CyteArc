@@ -304,6 +304,13 @@ def test_params_tsne_stage_forwards_its_settings(params_store, monkeypatch):
         ({"hvg": {"min_cells": 2.5}}, TypeError, "min_cells must be an integer"),
         ({"species": "human"}, ValueError, "species"),
         ({"harmony": True}, ValueError, "batch_columns"),
+        # Harmony options are checked when the recipe is resolved, so a renamed
+        # key fails before the stages that precede Harmony run.
+        (
+            {"harmony": {"batch_columns": ["ids"], "harmony_params": {"nclust": 3}}},
+            ValueError,
+            "Unsupported Harmony parameter 'nclust'",
+        ),
         ({"leiden": {"partitions": [0.5], "selected": 1.0}}, ValueError, "selected"),
     ],
 )
@@ -417,6 +424,38 @@ def test_params_sections_are_validated():
     )
     assert sections == {"markers": False, "filtering": {"method": "mad"}}
     assert species == "mus_musculus"
+
+
+def test_harmony_params_are_checked_when_the_recipe_is_resolved(rejection_store):
+    store = rejection_store
+    before = _run_ids(store)
+    for harmony_params, error, match in (
+        ({"nclust": 3}, ValueError, "Unsupported Harmony parameter 'nclust'"),
+        ({"theta": "2"}, TypeError, "theta must contain real numbers"),
+        ({"max_iter_harmony": 0}, ValueError, "max_iter_harmony must be at least 1"),
+        (["theta"], TypeError, "mapping"),
+    ):
+        params = {
+            "harmony": {"batch_columns": ["ids"], "harmony_params": harmony_params}
+        }
+        with pytest.raises(error, match=match):
+            _resolve_params(params)
+        # The store refuses the run before it records anything.
+        with pytest.raises(error, match=match):
+            store.pipeline.run(params=params)
+        assert _run_ids(store) == before
+    sections, _species = _resolve_params(
+        {
+            "harmony": {
+                "batch_columns": ["ids"],
+                "harmony_params": {"n_clusters": np.int64(3), "theta": [1.0, 2.0]},
+            }
+        }
+    )
+    assert sections["harmony"] == {
+        "batch_columns": ["ids"],
+        "harmony_params": {"n_clusters": 3, "theta": [1.0, 2.0]},
+    }
 
 
 def test_checked_settings_are_recorded_as_given():

@@ -408,6 +408,11 @@ def _resolve_params(
                             for name, default in _TSNE_SETTING_DEFAULTS.items()
                         }
                     )
+            elif stage == "harmony" and "harmony_params" in value:
+                # The checks of reduction.harmony, before a run record exists.
+                from ..embeddings.harmony import validate_harmony_parameters
+
+                validate_harmony_parameters(value["harmony_params"])
             sections[stage] = {
                 key: _parameter_value(item, f"{name}[{key!r}]")
                 for key, item in value.items()

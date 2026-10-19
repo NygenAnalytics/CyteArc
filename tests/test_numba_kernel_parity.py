@@ -6,6 +6,7 @@ from scipy.sparse.csgraph import connected_components
 
 from cytearc.clustering import _paris_core as paris_core
 from cytearc.clustering import _paris_modularity as paris_modularity
+from cytearc.embeddings.harmony import kernels as harmony_kernels
 from cytearc.features.enrichment import aucell
 from cytearc.features.genomic import intervals
 from cytearc.metrics import connectivity
@@ -625,3 +626,83 @@ def test_radix_argsort_matches_stable_argsort_for_positive_values() -> None:
             np.empty(2048, dtype=np.int64),
         )
         np.testing.assert_array_equal(order[: values.size], expected)
+
+
+def _harmony_inputs() -> dict[str, np.ndarray]:
+    rng = np.random.default_rng(11)
+    n_cells, n_clusters, n_levels = 9, 4, 5
+    inverse_norms = rng.uniform(0.5, 2.0, n_cells)
+    # A cell at the origin has inverse norm 0 and similarity 0 to every centroid.
+    inverse_norms[6] = 0.0
+    return {
+        "cells": np.array([6, 0, 4, 8, 2], dtype=np.int64),
+        "similarity": rng.normal(size=(5, n_clusters)),
+        "inverse_norms": inverse_norms,
+        "two_over_sigma": 2.0 / rng.uniform(0.05, 0.2, n_clusters),
+        "penalty": rng.normal(size=(n_levels, n_clusters)),
+        # Two batch columns, each cell holding one global level per column.
+        "level_codes": np.array(
+            [[0, 1, 2, 0, 1, 2, 0, 1, 2], [3, 3, 4, 4, 3, 3, 4, 4, 3]], dtype=np.int32
+        ),
+        "assignments": rng.dirichlet(np.ones(n_clusters), size=n_cells),
+    }
+
+
+def test_harmony_python_assignment_kernel_matches_compiled_kernel() -> None:
+    inputs = _harmony_inputs()
+    cells = inputs["cells"]
+    logits = (
+        inputs["similarity"] * inputs["inverse_norms"][cells, None] - 1.0
+    ) * inputs["two_over_sigma"] + inputs["penalty"][
+        inputs["level_codes"][:, cells]
+    ].sum(axis=0)
+    expected = np.exp(logits - logits.max(axis=1, keepdims=True))
+    expected /= expected.sum(axis=1, keepdims=True)
+    results = []
+    for kernel in (harmony_kernels.assign_cells, harmony_kernels.assign_cells.py_func):
+        assignments = np.full((9, 4), -1.0)
+        entropies = np.empty(cells.size)
+        kernel(
+            inputs["similarity"].copy(),
+            cells,
+            inputs["inverse_norms"],
+            inputs["two_over_sigma"],
+            inputs["penalty"],
+            inputs["level_codes"],
+            assignments,
+            entropies,
+        )
+        np.testing.assert_allclose(assignments[cells], expected, rtol=1e-12)
+        np.testing.assert_allclose(
+            entropies, np.sum(expected * np.log(expected), axis=1), rtol=1e-12
+        )
+        # Rows outside the chunk are left untouched.
+        untouched = np.setdiff1d(np.arange(9), cells)
+        np.testing.assert_array_equal(assignments[untouched], -1.0)
+        results.append((assignments, entropies))
+
+    np.testing.assert_allclose(results[1][0], results[0][0], rtol=1e-14)
+    np.testing.assert_allclose(results[1][1], results[0][1], rtol=1e-14)
+
+
+def test_harmony_python_accumulation_kernel_matches_compiled_kernel() -> None:
+    inputs = _harmony_inputs()
+    cells = inputs["cells"]
+    assignments = inputs["assignments"]
+    expected_mass = np.zeros((5, 4))
+    for column in inputs["level_codes"]:
+        np.add.at(expected_mass, column[cells], assignments[cells])
+    for kernel in (
+        harmony_kernels.accumulate_cells,
+        harmony_kernels.accumulate_cells.py_func,
+    ):
+        level_mass = np.zeros((5, 4))
+        totals = np.zeros(4)
+        kernel(assignments, cells, inputs["level_codes"], level_mass, totals, 1.0)
+        np.testing.assert_allclose(level_mass, expected_mass, rtol=1e-14)
+        np.testing.assert_allclose(totals, assignments[cells].sum(axis=0), rtol=1e-14)
+
+        # Removing the same cells in the same order returns the tables to zero.
+        kernel(assignments, cells, inputs["level_codes"], level_mass, totals, -1.0)
+        np.testing.assert_allclose(level_mass, 0.0, atol=1e-15)
+        np.testing.assert_allclose(totals, 0.0, atol=1e-15)

@@ -4,7 +4,6 @@ from .._facade import lazy_facade as _lazy_facade
 
 if TYPE_CHECKING:
     from .harmony import (
-        Harmony as Harmony,
         HarmonyResult as HarmonyResult,
         fit_harmony as fit_harmony,
     )
@@ -23,7 +22,6 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
-    "Harmony",
     "HarmonyResult",
     "calc_dens_map_params",
     "fit_harmony",
@@ -40,7 +38,6 @@ __all__ = [
 __getattr__, __dir__ = _lazy_facade(
     __name__,
     {
-        "Harmony": ".harmony",
         "HarmonyResult": ".harmony",
         "calc_dens_map_params": ".umap",
         "fit_harmony": ".harmony",

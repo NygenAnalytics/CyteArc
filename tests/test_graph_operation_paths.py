@@ -397,7 +397,7 @@ def test_harmony_reads_masked_batch_labels_as_missing(graph_store) -> None:
 
     with pytest.raises(ValueError, match="cannot contain missing values"):
         store.reduction.harmony(
-            refs["rna_pca"], ["batch"], harmony_params={"nclust": 3}
+            refs["rna_pca"], ["batch"], harmony_params={"n_clusters": 3}
         )
     assert not _artifacts(store, "batch_correction")
 
@@ -409,7 +409,7 @@ def test_harmony_reads_masked_batch_labels_as_missing(graph_store) -> None:
     corrected = store.reduction.harmony(
         store.reduction.pca(normalized, dims=3),
         ["batch"],
-        harmony_params={"nclust": 3},
+        harmony_params={"n_clusters": 3},
     )
     assert store.artifacts.inspect(corrected).complete
 
@@ -420,7 +420,7 @@ def test_harmony_reuses_a_matching_correction(graph_store, monkeypatch) -> None:
     corrected = store.reduction.harmony(
         refs["rna_pca"],
         ["batch"],
-        harmony_params={"nclust": 3},
+        harmony_params={"n_clusters": 3},
     )
     monkeypatch.setattr(
         "cytearc.neighbors.stages.fit_harmony",
@@ -429,10 +429,81 @@ def test_harmony_reuses_a_matching_correction(graph_store, monkeypatch) -> None:
 
     assert (
         store.reduction.harmony(
-            refs["rna_pca"], ["batch"], harmony_params={"nclust": 3}
+            refs["rna_pca"], ["batch"], harmony_params={"n_clusters": 3}
         )
         == corrected
     )
+
+
+def test_harmony_artifact_layout(graph_store) -> None:
+    store, refs = graph_store
+    store.cells.insert("batch", np.where(np.arange(N_CELLS) % 2, "a", "b"))
+
+    corrected = store.reduction.harmony(
+        refs["rna_pca"], ["batch"], harmony_params={"n_clusters": 3}
+    )
+
+    status = store.artifacts.inspect(corrected)
+    assert status.complete
+    assert status.is_current
+    # The identity records the user's mapping, not the resolved options.
+    assert status.parameters == {
+        "batch_columns": ["batch"],
+        "harmony_parameters": {"n_clusters": 3},
+    }
+    group = store.artifacts.load(corrected)
+    layout = {
+        "data": ((N_CELLS, 3), np.float32),
+        "cluster_mass": ((3,), np.float64),
+        "raw_centroids": ((3, 3), np.float64),
+        "corrected_centroids": ((3, 3), np.float64),
+        # Symphony stores the cosine centroids as dims by clusters.
+        "centroids": ((3, 3), np.float64),
+        "sigma": ((3,), np.float64),
+        "ridge_penalty": ((3, 2), np.float64),
+        "active_levels": ((3, 2), np.bool_),
+    }
+    for name, (shape, dtype) in layout.items():
+        assert group[name].shape == shape, name
+        assert group[name].dtype == np.dtype(dtype), name
+    assert "assignments" not in group
+    assert "ridge" not in group
+    assert group.attrs["batch_levels"] == [["a", "b"]]
+    fit_parameters = group.attrs["fit_parameters"]
+    assert fit_parameters["nClusters"] == 3
+    assert fit_parameters["ridge"] == "dynamic"
+    assert fit_parameters["phiColumns"] == ["batch_a", "batch_b"]
+    # The dynamic penalty is 0.2 times the expected mass: half of each
+    # cluster's mass, since each batch holds half of the cells.
+    np.testing.assert_allclose(
+        group["ridge_penalty"][:],
+        0.2 * 0.5 * group["cluster_mass"][:][:, None] * np.ones((1, 2)),
+        rtol=1e-12,
+    )
+
+
+def test_harmony_recomputes_a_correction_without_its_fitted_penalties(
+    graph_store,
+) -> None:
+    store, refs = graph_store
+    store.cells.insert("batch", np.where(np.arange(N_CELLS) % 2, "a", "b"))
+    options: dict[str, Any] = {"harmony_params": {"n_clusters": 3}}
+    earlier = store.reduction.harmony(refs["rna_pca"], ["batch"], **options)
+    # A correction written by the earlier implementation has the same identity
+    # but neither array of the per-cluster penalties, which reuse requires.
+    group = artifact_group(store.zw, earlier)
+    del group["ridge_penalty"]
+    del group["active_levels"]
+
+    current = store.reduction.harmony(refs["rna_pca"], ["batch"], **options)
+
+    assert current != earlier
+    assert store.artifacts.inspect(current).complete
+    # The earlier correction stays listable and loadable.
+    assert {earlier, current} <= set(_artifacts(store, "batch_correction"))
+    assert store.artifacts.load(earlier)["data"].shape == (N_CELLS, 3)
+    # The new correction is reused.
+    assert store.reduction.harmony(refs["rna_pca"], ["batch"], **options) == current
 
 
 def test_neighbor_queries_refuse_an_ann_record_without_a_supported_metric(

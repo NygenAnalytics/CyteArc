@@ -57,7 +57,7 @@ Some steps hold whole structures in memory beside their streamed blocks, and com
 - an approximate nearest-neighbour index holds every cell's coordinates and links, about `4 * dims + 8 * ann_m + 130` bytes per cell on x86-64 Linux, while `graph.ann_index` builds and saves it and while `graph.neighbors` loads and queries it; a query also holds the indices and distances of every cell's neighbours, 8 bytes per neighbour;
 - an in-memory k-means embedding initialization holds the coordinates of every cell;
 - pipeline cluster selection holds the coordinates of its sample of at most 10,000 cells, in their stored dtype and as float64, beside the silhouette's distance chunks; it sizes those chunks from the remaining budget with an allowance for temporary arrays and caps each distance chunk at 1 GiB;
-- Harmony holds the float64 coordinates several times over, float64 matrices of soft cluster assignments with `nclust` values per cell, and the one-hot design of its batch levels, about 5 KB per cell with 30 dimensions and 100 clusters, beside the batch labels it read, about 60 bytes per cell for each column of short labels;
+- Harmony holds the float64 coordinates three times, as its input, its original copy, and its corrected copy, and float64 soft cluster assignments with `n_clusters` values per cell, about 1.5 KB per cell with 30 dimensions and 100 clusters, plus per-level regression sums of `levels x n_clusters x dims` floats, beside the batch labels it read, about 60 bytes per cell for each column of short labels;
 - WNN integration holds every assay's neighbours and coordinates and the integrated graph;
 - SNN integration holds every source graph and a float64 matrix of shared-neighbour fractions per graph.
 
@@ -84,6 +84,7 @@ On shared hosts, multiprocess jobs, or remote object stores, set `CYTEARC_WORKER
 More workers can increase concurrent buffers or remote requests, so pair a large worker budget with an explicit `mem_budget`.
 Opt-in parallel UMAP layouts and ANN index builds are faster but not reproducible: two runs on several threads can differ even with the same thread count.
 Their artifact identities therefore record only the `parallel` or `ann_parallel` flag, and the thread counts are execution options, so the same request reuses its result on any machine.
+Leiden clustering with the default `"cytearc"` backend runs on the worker budget and returns identical labels for any thread count, so its artifacts record no worker count either; the optional `"igraph"` and `"leidenalg"` backends run on one thread.
 t-SNE always runs on one thread through the optional `sgtsnepi` package, so its artifacts record no worker count.
 
 ## Why RNA stores have two count orientations

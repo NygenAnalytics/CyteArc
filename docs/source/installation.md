@@ -55,11 +55,9 @@ Or activate it in Windows PowerShell:
 Install CyteArc into the activated environment:
 
 ```bash
-uv pip install --prerelease allow "cytearc[extra]"
+uv pip install "cytearc[extra]"
 ```
 
-CyteArc 1.0.0rc1 is in preparation. The installation commands apply once the release candidate is published.
-Use `--prerelease allow` to let uv select a release candidate.
 The `extra` optional dependency group adds plotting (`matplotlib`, `seaborn`), AnnData support, widgets, and other helpers used by the tutorials.
 
 Verify the install with the Python interpreter from the same environment.
@@ -77,11 +75,10 @@ If uv is unavailable, first confirm that `python` is version 3.13 or newer, then
 python -m venv .venv
 ```
 
-Use the macOS, Linux, or Windows activation command above, then install and verify CyteArc.
-`--pre` is pip's equivalent of uv's `--prerelease allow`:
+Use the macOS, Linux, or Windows activation command above, then install and verify CyteArc:
 
 ```bash
-python -m pip install --pre "cytearc[extra]"
+python -m pip install "cytearc[extra]"
 python -c "from cytearc import DataStore; import cytearc; print(cytearc.__version__)"
 ```
 
@@ -92,7 +89,7 @@ This path installs a prebuilt `hnswlib` from conda-forge and is recommended on W
 ```bash
 conda create --name cytearc_env --channel conda-forge python=3.13 pip "hnswlib>=0.8"
 conda activate cytearc_env
-python -m pip install --pre "cytearc[extra]"
+python -m pip install "cytearc[extra]"
 python -c "from cytearc import DataStore; import cytearc; print(cytearc.__version__)"
 ```
 
@@ -113,7 +110,7 @@ it.
 Add it with the `tsne` extra, in the same environment as CyteArc:
 
 ```bash
-uv pip install --prerelease allow "cytearc[extra,tsne]"
+uv pip install "cytearc[extra,tsne]"
 ```
 
 `sgtsnepi` publishes wheels only for Linux x86_64 and for macOS 26 or newer on Apple silicon (arm64).
@@ -143,13 +140,31 @@ uv pip install "edgepython @ git+https://github.com/pachterlab/edgePython@8f0bf4
 edgePython is licensed under the GPLv3, while CyteArc is BSD-3-Clause and does not depend on it unless you install the extra.
 Without it, testing neighbourhoods raises an `ImportError` that names the extra; building and counting neighbourhoods, propeller, and the plots do not need it.
 
+(installation_leiden_gpl)=
+## Optional GPL Leiden backends
+
+Leiden clustering needs no extra package.
+Its default backend, `"cytearc"`, is CyteArc's own multi-threaded implementation (see {ref}`Leiden clustering <leiden_method>`).
+The alternative `"igraph"` and `"leidenalg"` backends of `clusters.leiden`, of the pipeline's `leiden` settings, and of `cytearc.clustering.leiden_membership` call the [igraph] and [leidenalg] packages.
+They serve to reproduce a clustering computed with those packages, such as one saved by an earlier CyteArc release, whose default backend was `"igraph"`.
+CyteArc does not install them and lists them in none of its extras: igraph is licensed under the GPL-2.0-or-later and leidenalg under the GPL-3.0-or-later, while CyteArc is BSD-3-Clause.
+To use these backends, install the packages yourself in the same environment as CyteArc (leidenalg installs igraph as a dependency):
+
+```bash
+uv pip install leidenalg
+```
+
+Both run on one thread.
+Without them, computing a new clustering with either backend raises an `ImportError` that explains how to install them.
+Reusing an `"igraph"` or `"leidenalg"` clustering that a store already holds, and plotting or exporting it, does not need them.
+
 ## Optional regulon databases
 
 `cytearc.regulons.RankingDatabase` reads cisTarget ranking databases with [polars], which CyteArc does not install by default.
 Add it with the `regulons` extra:
 
 ```bash
-uv pip install --prerelease allow "cytearc[extra,regulons]"
+uv pip install "cytearc[extra,regulons]"
 ```
 
 Without `polars`, opening a ranking database raises an `ImportError` that names the extra.
@@ -201,13 +216,13 @@ See the [Microsoft long-path documentation].
 Activate the environment that contains CyteArc, then use the same installer:
 
 ```bash
-uv pip install --upgrade --prerelease allow "cytearc[extra]"
+uv pip install --upgrade "cytearc[extra]"
 ```
 
 Or, for pip and conda environments:
 
 ```bash
-python -m pip install --upgrade --pre "cytearc[extra]"
+python -m pip install --upgrade "cytearc[extra]"
 ```
 
 ## Install from source
@@ -225,10 +240,11 @@ See [](developers/contributing.md) before making package or documentation change
 
 ## Troubleshooting
 
-- **No virtual environment found:** activate `.venv`, or pass it explicitly with `uv pip install --python .venv --prerelease allow "cytearc[extra]"`.
+- **No virtual environment found:** activate `.venv`, or pass it explicitly with `uv pip install --python .venv "cytearc[extra]"`.
 - **`hnswlib` fails to build:** install the compiler and, for a system Python, matching development headers described above.
   On Windows without Build Tools, use the conda path.
 - **`embeddings.tsne` raises `ImportError` naming the `tsne` extra:** install the extra as described in {ref}`Optional t-SNE <installation_tsne>`, or use UMAP.
+- **`clusters.leiden` raises `ImportError` naming igraph or leidenalg:** the call asked for `backend="igraph"` or `backend="leidenalg"`, whose GPL-licensed packages CyteArc does not install. Install them yourself as described in {ref}`Optional GPL Leiden backends <installation_leiden_gpl>`, or use the default `backend="cytearc"`.
 - **CyteArc imports in a terminal but not a notebook:** compare the terminal path from `python -c "import sys; print(sys.executable)"` with the notebook kernel, then launch Jupyter from the CyteArc environment or select its registered kernel.
 
 ## Next steps
@@ -237,6 +253,8 @@ After the import check succeeds, continue with the {ref}`Quick start <quickstart
 
 [Visual C++ Build Tools]: https://visualstudio.microsoft.com/visual-cpp-build-tools
 [sgtsnepi]: https://github.com/alex-unofficial/sgtsnepi-python
+[igraph]: https://pypi.org/project/igraph/
+[leidenalg]: https://pypi.org/project/leidenalg/
 [polars]: https://pola.rs
 [Microsoft long-path documentation]: https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
 [edgePython]: https://github.com/pachterlab/edgePython

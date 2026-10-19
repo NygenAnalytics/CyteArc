@@ -68,7 +68,7 @@ umapEpochs = 300
 umapSeed = 4444
 umapParallel = true
 leidenResolution = 1.0
-leidenBackend = "igraph"
+leidenBackend = "cytearc"
 leidenSeed = 4444
 graphLocalCache = "auto"
 

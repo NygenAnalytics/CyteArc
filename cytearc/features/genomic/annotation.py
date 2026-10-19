@@ -290,7 +290,7 @@ def link_regions_to_genes(
     so the window of a minus-strand gene extends to higher coordinates
     upstream. With ``anchor="gene_body"`` the window is the gene body extended
     by ``upstream`` bases before its 5' end and ``downstream`` bases after its
-    3' end, the SCENIC+ search space (150 kb each way by default there).
+    3' end.
 
     Args:
         regions: Region ids ``chrom:start-end`` (zero-based, half-open), such

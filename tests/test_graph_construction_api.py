@@ -948,7 +948,7 @@ def test_reduction_and_harmony_keep_immutable_selection_after_live_alias_change(
     corrected = datastore.reduction.harmony(
         reduction,
         ["graph_batch"],
-        harmony_params={"nclust": 5},
+        harmony_params={"n_clusters": 5},
         invalidate_cache=True,
     )
 
@@ -962,7 +962,7 @@ def test_reduction_and_harmony_keep_immutable_selection_after_live_alias_change(
         {"graph_batch": _batch_labels(datastore.cells.N)[frozen_mask]}
     ).astype(object)
     expected = fit_harmony(
-        np.asarray(scores.T, dtype=np.float64), frozen_batches, nclust=5
+        np.asarray(scores.T, dtype=np.float64), frozen_batches, n_clusters=5
     )
     np.testing.assert_allclose(
         datastore.artifacts.load(corrected)["data"][:],
@@ -981,7 +981,9 @@ def test_run_harmony_refuses_read_only_store_before_writing_a_snapshot(
 
     read_only = DataStore(datastore.zarr_loc, default_assay="RNA", zarr_mode="r")
     with pytest.raises(PermissionError, match="snapshot_run_metadata"):
-        read_only.reduction.harmony(pca, ["graph_batch"], harmony_params={"nclust": 5})
+        read_only.reduction.harmony(
+            pca, ["graph_batch"], harmony_params={"n_clusters": 5}
+        )
     assert (
         datastore.artifacts.list(kind="metadata_snapshot", scope="datastore")
         == snapshots
@@ -1034,7 +1036,7 @@ def test_graph_harmony_is_an_explicit_ann_coordinate_source(
     expected_correction = fit_harmony(
         np.asarray(pca_scores.T, dtype=np.float64),
         active_batches,
-        nclust=5,
+        n_clusters=5,
     )
 
     def fail_projection(*_args, **_kwargs):
@@ -1049,7 +1051,7 @@ def test_graph_harmony_is_an_explicit_ann_coordinate_source(
     corrected = datastore.reduction.harmony(
         pca,
         ["graph_batch"],
-        harmony_params={"nclust": 5},
+        harmony_params={"n_clusters": 5},
     )
     ann = datastore.graph.ann_index(corrected, batch_size=100)
     datastore.graph.neighbors(ann, k=3)

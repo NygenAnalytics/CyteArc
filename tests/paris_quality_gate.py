@@ -1155,8 +1155,16 @@ def _best_cpm_partition(
     truth: np.ndarray,
     seed: int,
 ) -> tuple[float, float]:
-    import igraph
-    import leidenalg
+    try:
+        import igraph
+        import leidenalg
+    except ImportError:
+        raise ImportError(
+            "The CPM reference partition needs the leidenalg and igraph packages, "
+            "which are not installed. CyteArc does not ship them because they are "
+            "GPL-licensed, but you are welcome to install them yourself, for "
+            "example with pip install leidenalg."
+        ) from None
 
     upper = triu(graph, k=1).tocoo()
     igraph_graph = igraph.Graph(n=graph.shape[0])

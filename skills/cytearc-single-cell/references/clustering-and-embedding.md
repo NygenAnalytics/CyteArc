@@ -28,9 +28,12 @@ layouts, and extract labels and coordinates as cell-aligned arrays. Docs:
   `run["cluster_selection"]`. Silhouette favours few compact clusters and can merge distinct
   lineages or states. Treat that pick as a reproducible baseline only.
 - Leiden is seeded (`random_seed=4444`), so a single run says nothing about stability. Agreement
-  across seeds, nested resolutions, markers and representations is the evidence.
+  across seeds, nested resolutions, markers and representations is the evidence. The default
+  backend (`"cytearc"`, multi-threaded) gives the same labels for any `nthreads`, so only the
+  seed adds randomness.
 - Leiden, Paris, layouts, membership strength and separability use only the graph or PCA and take
-  seconds. Marker search is the only step on this page that reads counts.
+  seconds. The first native Leiden call in a fresh environment also compiles its kernels once,
+  in about half a minute. Marker search is the only step on this page that reads counts.
 
 ## Recipes
 
@@ -159,10 +162,10 @@ stability, break nesting, or split only one lineage. The usual case is T and NK 
 global HVGs are dominated by between-lineage genes, so a within-lineage graph resolves states
 (naive, memory, regulatory, cytotoxic) that a finer global cut either misses or splits unstably.
 
-(10x 5K PBMC docs dataset) Minimum seed ARI was 0.97, 0.82 and 0.60 at 0.5, 1.0 and 1.5; at 1.0,
-four clusters had fewer than 3 markers; ARI with the branch fell from 0.86 to 0.61. The evidence
-kept 0.5. A T-cell subgraph then gave a FOXP3/CTLA4 group (FOXP3 in 0.43 of cells); no global
-cluster up to resolution 2.0 exceeded 0.22.
+(10x 5K PBMC docs dataset) Minimum seed ARI was 0.90, 0.81 and 0.73 at 0.5, 1.0 and 1.5; at 1.0,
+five clusters had fewer than 3 markers; ARI with the branch fell from 0.84 to 0.71 and 0.62. The
+evidence kept 0.5. A T-cell subgraph then gave a FOXP3/CTLA4 group (FOXP3 in 0.42 of cells), as
+did a few global resolutions up to 2.0, but only at resolutions that failed the seed check.
 
 ### Build a Paris hierarchy
 
@@ -229,7 +232,7 @@ The same helper works for membership strength, doublet scores, cell cycle and en
 |---|---|---|
 | `resolution` (Leiden) | `1.0` (pipeline: 0.5, 0.75, 1.0, 1.25) | Raise for finer splits, lower to merge; always compare several |
 | `random_seed` (Leiden) | `4444` | Rerun with 2 or more other seeds to test stability |
-| `backend` (Leiden) | `"igraph"` | `"leidenalg"` only to match an external result |
+| `backend` (Leiden) | `"cytearc"` | `"igraph"` or `"leidenalg"` only to match an external or earlier result; both need GPL packages that CyteArc does not install |
 | `n_clusters` (Paris) | `"auto"` | An integer to match another partition; it must be cuttable at one height, else `ValueError` |
 | `min_cluster_size` (Paris) | `None` (resolved automatically) | Raise to suppress tiny branches in the auto cut |
 | `min_dist` / `spread` (UMAP) | `1.0` / `2.0` | Lower `min_dist` (0.1 to 0.5) for tighter packing; appearance only |
@@ -252,7 +255,12 @@ The same helper works for membership strength, doublet scores, cell cycle and en
 - Payload length is the selection size, not `ds.cells.N`. Align through the cell selection before
   inserting into `ds.cells` or joining with other metadata.
 - Cluster IDs are arbitrary per artifact. Never carry annotations from one partition to another by
-  ID; join on cell IDs or use `clusters.relabel_by_overlap`.
+  ID; join on cell IDs or use `clusters.relabel_by_overlap`. The default backend numbers clusters
+  by size (1 is the largest), which says nothing about identity across partitions.
+- `backend="igraph"` or `"leidenalg"` raises `ImportError` when those GPL packages, which CyteArc
+  does not install, are missing; a stored clustering of that backend is still reused. Stores analysed
+  by earlier releases hold `"igraph"` clusterings (the former default): a default call computes a
+  new `"cytearc"` clustering beside them instead of reusing them, with different labels.
 - `clusters.compute_concordance` requires both artifacts to share the exact cell-selection ref. For
   labels from different selections or from metadata, use sklearn on aligned arrays.
 - Comparing branches at the same resolution only: `k` and HVG count shift the resolution scale.

@@ -359,7 +359,8 @@ def test_cluster_tree_renders_categorical_pies_into_external_axis() -> None:
     ]
     assert result.owns_figure is False
     assert result.figure is figure
-    assert len(ax.collections) >= 5
+    pies = [c for c in ax.collections if c.get_gid() == "cluster-tree-pie"]
+    assert [len(pie.get_paths()) for pie in pies] == [2, 2]
     assert result.tables["cluster_summary"]["n_cells"].tolist() == [3, 3]
     assert isinstance(result.scales[0], splt.CategoricalScale)
     assert result.scales[0].order == ("A", "B")
@@ -426,11 +427,13 @@ def test_cluster_tree_pies_skip_absent_categories() -> None:
     try:
         # One full wedge per single-category cluster; no zero-width wedges
         # drawn as radial lines in the absent category's color.
-        wedges = [
-            matplotlib.colors.to_hex(collection.get_facecolor()[0])
+        pies = [
+            collection
             for collection in result.axes["tree"].collections
-            if len(collection.get_offsets()) == 1
+            if collection.get_gid() == "cluster-tree-pie"
         ]
+        assert [len(pie.get_paths()) for pie in pies] == [1, 1]
+        wedges = [matplotlib.colors.to_hex(pie.get_facecolor()[0]) for pie in pies]
         assert wedges == ["#ff0000", "#0000ff"]
     finally:
         result.close()

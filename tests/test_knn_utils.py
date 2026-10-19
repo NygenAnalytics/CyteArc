@@ -76,28 +76,21 @@ def _wnn_pair(
     )
 
 
-@pytest.mark.parametrize("backend", ["igraph", "leidenalg"])
-def test_leiden_membership_preserves_disconnected_partitions(backend):
+def test_leiden_membership_preserves_disconnected_partitions():
     graph = _grouped_knn_graph([[0, 1, 2, 3], [4, 5, 6, 7]])
 
-    actual = leiden_membership(
-        graph,
-        resolution=1.0,
-        random_seed=4444,
-        backend=backend,
-    )
+    actual = leiden_membership(graph, resolution=1.0, random_seed=4444)
 
     assert adjusted_rand_score([1, 1, 1, 1, 2, 2, 2, 2], actual) == pytest.approx(1.0)
 
 
-@pytest.mark.parametrize("backend", ["igraph", "leidenalg"])
-def test_leiden_membership_uses_edge_weights(backend):
+def test_leiden_membership_uses_edge_weights():
     weights = np.full((8, 8), 0.001)
     weights[:4, :4] = 1.0
     weights[4:, 4:] = 1.0
     np.fill_diagonal(weights, 0)
 
-    actual = leiden_membership(csr_matrix(weights), 1.0, 11, backend)
+    actual = leiden_membership(csr_matrix(weights), 1.0, 11)
 
     assert adjusted_rand_score([0, 0, 0, 0, 1, 1, 1, 1], actual) == 1.0
 
@@ -109,22 +102,6 @@ def test_native_leiden_membership_is_seeded_and_repeatable():
     second = leiden_membership(graph, resolution=1.0, random_seed=4444)
 
     np.testing.assert_array_equal(second, first)
-
-
-def test_leiden_restores_the_seedable_igraph_generator():
-    import random
-
-    import igraph
-
-    def seeded_edges() -> list[tuple[int, int]]:
-        random.seed(7)
-        return igraph.Graph.Erdos_Renyi(n=30, p=0.2).get_edgelist()
-
-    igraph.set_random_number_generator(random)
-    expected = seeded_edges()
-    leiden_membership(_simple_knn_graph(12), resolution=1.0, random_seed=1)
-
-    assert seeded_edges() == expected
 
 
 def test_leiden_membership_rejects_unknown_backend():
@@ -139,8 +116,7 @@ def test_leiden_membership_rejects_unknown_backend():
         )
 
 
-@pytest.mark.parametrize("backend", ["igraph", "leidenalg"])
-def test_leiden_ignores_explicit_zero_weight_edges(backend):
+def test_leiden_ignores_explicit_zero_weight_edges():
     solid = _grouped_knn_graph([[0, 1, 2, 3], [4, 5, 6, 7]]).tocoo()
     padded = coo_matrix(
         (
@@ -155,12 +131,8 @@ def test_leiden_ignores_explicit_zero_weight_edges(backend):
 
     assert np.count_nonzero(padded.data) != padded.nnz
 
-    actual = leiden_membership(
-        padded, resolution=1.0, random_seed=4444, backend=backend
-    )
-    expected = leiden_membership(
-        solid, resolution=1.0, random_seed=4444, backend=backend
-    )
+    actual = leiden_membership(padded, resolution=1.0, random_seed=4444)
+    expected = leiden_membership(solid, resolution=1.0, random_seed=4444)
 
     np.testing.assert_array_equal(actual, expected)
 
@@ -169,21 +141,25 @@ def test_igraph_membership_requires_igraph(monkeypatch):
     monkeypatch.setitem(sys.modules, "igraph", None)
     graph = _simple_knn_graph(10)
 
-    with pytest.raises(ImportError, match="igraph"):
-        leiden_membership(graph, resolution=1.0, random_seed=4444)
+    with pytest.raises(ImportError, match="igraph") as error:
+        leiden_membership(graph, resolution=1.0, random_seed=4444, backend="igraph")
+
+    assert "pip install igraph" in str(error.value)
 
 
 def test_leidenalg_membership_requires_leidenalg(monkeypatch):
     monkeypatch.setitem(sys.modules, "leidenalg", None)
     graph = _simple_knn_graph(10)
 
-    with pytest.raises(ImportError, match="leidenalg"):
+    with pytest.raises(ImportError, match="leidenalg") as error:
         leiden_membership(
             graph,
             resolution=1.0,
             random_seed=4444,
             backend="leidenalg",
         )
+
+    assert "pip install leidenalg" in str(error.value)
 
 
 def _powered_transition(graph: csr_matrix, power: int) -> coo_matrix:

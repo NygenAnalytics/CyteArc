@@ -120,7 +120,9 @@ _METHODS = {
 _SIGNATURE_DIGESTS = {
     # Base and inherited graph constructors accept DataStore's optional setup values.
     BaseDataStore: "7f5cea5c9ab2abd1066d6e3d29ddc0d0c8e6f14459792bfd1552bbf67145704a",
-    GraphDataStore: "0558f676a67ed7257cd2cb99808c241989e8db08d5ee561668db23940280db18",
+    # run_leiden_clustering gained the native backend: backend is now
+    # Literal["cytearc", "igraph", "leidenalg"] with the default "cytearc".
+    GraphDataStore: "471d38e2eafdbd330214bdb91c0433e3e0e08a7c5f5a52a842e0cce7f075b920",
     MappingDatastore: "a4839ac0372df95f021fd8c383c1ac2aff6796c6b093e05510c71ad7e8449a72",
     DataStore: "3c863125ef47c3d38fd3e8649f36a768d44c4d729ab3e9d8a527da70362b0105",
     ArtifactAccessor: "c48b4badcb3fbd03d03326278eafae0cf429ac31e5d053390e60ed9316d6b54b",

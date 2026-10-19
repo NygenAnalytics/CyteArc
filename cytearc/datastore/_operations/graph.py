@@ -329,14 +329,16 @@ def _read_pca_center(group: zarr.Group) -> np.ndarray:
 
 
 # The fitted Harmony state that a batch correction stores beside its corrected
-# coordinates, for Symphony reference mapping.
+# coordinates as float64 arrays: the first five for Symphony reference mapping,
+# and the last round's (clusters, levels) ridge penalties. The boolean
+# active_levels array is stored beside them.
 _HARMONY_FIT_ARRAYS = (
     "cluster_mass",
     "raw_centroids",
     "corrected_centroids",
     "centroids",
     "sigma",
-    "ridge",
+    "ridge_penalty",
 )
 
 
@@ -358,7 +360,7 @@ def _validated_harmony_request(
     batch_size: int | None,
 ) -> tuple[dict[str, Any], int | None]:
     """Return resolved Harmony parameters and the optional block size."""
-    from ...embeddings.harmony.api import validate_harmony_parameters
+    from ...embeddings.harmony import validate_harmony_parameters
 
     if not isinstance(batch_columns, list) or not batch_columns:
         raise ValueError("batch_columns must be a non-empty list")
@@ -424,31 +426,39 @@ def _require_harmony_fit_budget(
     dims: int,
     parameters: dict[str, Any],
     batches: pd.DataFrame,
-    nthreads: int,
 ) -> int:
     """Raise MemoryError, before any coordinate is read, for a fit over budget.
 
-    The fit holds ``harmony_peak_bytes`` of ``cytearc.embeddings.harmony.api``
-    at most beside the batch labels, which the operation reads before it
-    admits the fit and holds until the fit ends, and the plan of its
-    coordinate read needs the float64 input matrix that the read fills and
-    the labels beside one block of ``data``. Returns the bytes the operation
-    holds while its coordinates are read.
+    The fit holds ``harmony_peak_bytes`` of ``cytearc.embeddings.harmony`` at
+    most beside the batch labels, which the operation reads before it admits
+    the fit and holds until the fit ends, and the plan of its coordinate read
+    needs the float64 input matrix that the read fills and the labels beside
+    one block of ``data``. Labels that the fit would refuse, such as missing
+    values, are refused first, with the fit's message, because the size of the
+    fit depends on them. Returns the bytes the operation holds while its
+    coordinates are read.
     """
-    from ...embeddings.harmony.api import harmony_cluster_count, harmony_peak_bytes
+    from ...embeddings.harmony import harmony_cluster_count, harmony_peak_bytes
+    from ...embeddings.harmony.design import check_batch_metadata
 
-    n_clusters = harmony_cluster_count(n_cells, parameters.get("nclust"))
-    # The levels of each batch column, as fit_harmony encodes them.
-    n_levels = sum(
+    check_batch_metadata(batches, n_cells)
+    n_clusters = harmony_cluster_count(n_cells, parameters.get("n_clusters"))
+    # The levels of each batch column and the distinct combinations of levels,
+    # as fit_harmony encodes them.
+    column_levels = [
         int(batches[column].nunique(dropna=True)) for column in batches.columns
+    ]
+    n_levels = sum(column_levels)
+    n_combinations = (
+        int(len(batches.drop_duplicates())) if len(column_levels) > 1 else None
     )
     block_size = parameters.get("block_size")
     peak = harmony_peak_bytes(
         n_cells,
         dims,
         n_clusters,
-        max(1, n_levels),
-        nthreads=nthreads,
+        column_levels,
+        n_combinations=n_combinations,
         **({} if block_size is None else {"block_size": block_size}),
     )
     # The labels' object arrays and the text objects they point to.
@@ -464,7 +474,7 @@ def _require_harmony_fit_budget(
             f"Harmony needs about {required} bytes to correct {n_cells} cells "
             f"with {dims} dimensions in {n_clusters} clusters over {n_levels} "
             f"batch levels, {labels} of them for the batch labels, but the "
-            f"operation limit is {limit} bytes. Use fewer clusters (nclust in "
+            f"operation limit is {limit} bytes. Use fewer clusters (n_clusters in "
             "harmony_params) or fewer dimensions, or raise mem_budget."
         )
     return reading
@@ -1587,8 +1597,35 @@ class _GraphOperationsMixin(_GraphOperationsBase):
     ) -> ArtifactRef:
         """Snapshot live batch columns, then fit or reuse Harmony correction.
 
+        The correction is CyteArc's implementation of Harmony2. The stored
+        ``batch_correction`` artifact holds the corrected coordinates and the
+        fitted state that Symphony reference mapping needs.
+
+        Args:
+            reduction: The reduction whose coordinates are corrected, such as a
+                ``reduction.pca`` result.
+            batch_columns: Cell metadata columns whose levels are the batches;
+                their live values are snapshotted before the fit.
+            harmony_params: Options of the fit: the keyword options of
+                ``cytearc.embeddings.harmony.fit_harmony``, such as
+                ``n_clusters``, ``theta``, ``sigma`` and ``ridge_penalty``.
+                Renamed or removed keys raise an error that names their
+                replacement.
+            batch_size: Rows of each block read from the coordinates and the
+                batch labels; by default the reduction's own blocks.
+            invalidate_cache: Fit again even when a matching correction exists.
+
+        Returns:
+            The reference of the ``batch_correction`` artifact.
+
         Raises:
+            TypeError: If ``reduction`` is not an ArtifactRef or an option has
+                the wrong type.
+            ValueError: If the arguments, the options or the batch labels are
+                invalid, such as a missing batch label.
             MemoryError: If the fit exceeds the memory budget.
+            numpy.linalg.LinAlgError: If a regression of the fit is not
+                positive definite.
         """
         # Validate before the snapshot is written; the fit validates again
         # because the pipeline calls it with its own snapshot.
@@ -1751,6 +1788,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                     ArrayRequirement(name, dtype=np.float64)
                     for name in _HARMONY_FIT_ARRAYS
                 ),
+                ArrayRequirement("active_levels", dtype=np.bool_),
             ),
             invalidate_cache=invalidate_cache,
         )
@@ -1765,7 +1803,6 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 dims=dims,
                 parameters=resolved_harmony_params,
                 batches=batches,
-                nthreads=self.nthreads,
             )
             correction = BatchCorrectionStage(
                 stream=ChunkedCoordinateStream(
@@ -1801,7 +1838,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 "corrected_centroids": corrected_centroids,
                 "centroids": result.centroids,
                 "sigma": result.sigma,
-                "ridge": result.ridge,
+                "ridge_penalty": result.ridge_penalty,
             }
             with artifact_transaction(self.zw, planned) as group:
                 output = create_numeric_array(
@@ -1838,13 +1875,29 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                         values,
                         operation=arguments.operation,
                     )
+                # Checked writers take floating-point values; booleans need
+                # no finite check.
+                active_shape = tuple(int(size) for size in result.active_levels.shape)
+                active_levels = create_zarr_dataset(
+                    group,
+                    "active_levels",
+                    tuple(max(size, 1) for size in active_shape),
+                    np.bool_,
+                    active_shape,
+                )
+                active_levels[:] = result.active_levels
                 # The levels in the design order of the fit, one list per
                 # batch column, so that they pair with the per-level
-                # parameters and the ridge diagonal. Symphony references copy
-                # this record.
+                # parameters and the columns of ridge_penalty. Symphony
+                # references copy this record.
                 group.attrs["batch_levels"] = [
                     list(levels) for levels in result.batch_levels
                 ]
+                # The record holds JSON values only: text, numbers, booleans,
+                # None, and lists of them.
+                group.attrs["fit_parameters"] = cast(
+                    dict[str, Any], dict(result.parameters)
+                )
         action = "Reused" if planned.reused else "Stored"
         logger.info(
             f"{action} Harmony coordinates for {n_cells} cells with {dims} dimensions"

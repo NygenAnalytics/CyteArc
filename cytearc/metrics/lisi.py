@@ -118,26 +118,24 @@ def compute_lisi(
     label_colnames: Iterable[str],
     perplexity: float | None = None,
 ) -> np.ndarray:
-    """Compute the Local Inverse Simpson Index (LISI) for each column in metadata.
+    """Score how mixed each cell's KNN neighborhood is for each label column.
 
-    LISI measures how well mixed different groups of cells are in the neighborhood of each cell.
-    Higher values indicate better mixing of different groups.
+    Each cell weights its neighbors with an exponential kernel on their
+    distances, tuned per cell until the weights reach the requested perplexity.
+    The score is the inverse Simpson index of the weighted label frequencies,
+    the effective number of labels around the cell: 1 when all the weight falls
+    on one label, rising to the number of labels when it is spread evenly.
 
     Args:
-        distances: Pre-computed distances between cells, stored in zarr array format
-        indices: Pre-computed nearest neighbor indices, stored in zarr array format
-        metadata: DataFrame containing categorical labels for each cell
-        label_colnames: Column names in metadata to compute LISI for
+        distances: KNN distances, one row per cell, as a NumPy or Zarr array.
+        indices: KNN neighbor indices with the same shape as ``distances``.
+        metadata: Cell table with one row per cell.
+        label_colnames: Columns of ``metadata`` to score.
         perplexity: Effective neighborhood size; None uses floor(neighbor count / 3).
 
     Returns:
-        np.ndarray: Matrix of LISI scores with shape (n_cells, n_labels)
-        Each column corresponds to LISI scores for one label column in metadata
-
-    Example:
-        For metadata with a 'batch' column having 3 categories:
-        - LISI ≈ 3: Cell has neighbors from all 3 batches (well mixed)
-        - LISI ≈ 1: Cell has neighbors from only 1 batch (poorly mixed)
+        Scores with shape (n_cells, n_labels), one column per entry of
+        ``label_colnames``.
 
     References:
         Korsunsky et al. 2019 doi: 10.1038/s41592-019-0619-0

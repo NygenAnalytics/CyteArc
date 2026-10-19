@@ -206,7 +206,7 @@ def test_worker_runs_leiden(
     assert store.arguments == {
         "graph": _GRAPH_REF,
         "resolution": 1.0,
-        "backend": "igraph",
+        "backend": "cytearc",
         "random_seed": 4444,
         "invalidate_cache": True,
     }
@@ -323,7 +323,7 @@ def test_parent_starts_worker_module(
     assert request["storeUri"] == "s3://bucket/store.zarr"
     assert request["invalidateCache"] is True
     assert StorageIoConfig.model_validate(request["storageIo"]) == policy
-    assert request["workflow"]["leidenBackend"] == "igraph"
+    assert request["workflow"]["leidenBackend"] == "cytearc"
     assert request["inputs"] == {"graph": _GRAPH_REF.to_dict()}
 
 

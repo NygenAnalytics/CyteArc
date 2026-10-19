@@ -1,8 +1,8 @@
 # Regulons, chromatin activity and gene programs
 
 Infer transcription-factor regulons from RNA the SCENIC way, score motif or binding-peak activity
-in ATAC cells with chromVAR, build enhancer-driven regulons from paired RNA and ATAC the SCENIC+
-way, and find co-regulated gene programs. Docs: <https://docs.nygen.io/CyteArc/tutorials/regulons>,
+in ATAC cells with chromVAR, link peaks to genes in paired RNA and ATAC, and find co-regulated
+gene programs. Docs: <https://docs.nygen.io/CyteArc/tutorials/regulons>,
 <https://docs.nygen.io/CyteArc/api/regulons.html>.
 
 ## When to use
@@ -15,7 +15,7 @@ way, and find co-regulated gene programs. Docs: <https://docs.nygen.io/CyteArc/t
 ## Key concepts
 
 - Every set is a table with `source` (the set) and `target` (a member): modules, regulons,
-  programs, cistromes, and eRegulons. `ds.scores.aucell` scores gene sets on RNA and
+  programs, and cistromes. `ds.scores.aucell` scores gene sets on RNA and
   `ds.scores.chromvar` peak sets on ATAC; both return `kind="enrichment_scores"`.
   `ds.scores.load(ref).to_pandas()` gives cells x sources; chromVAR also has `.deviations`.
   chromVAR z-scores are NaN where a cell expects under one fragment.
@@ -44,16 +44,17 @@ way, and find co-regulated gene programs. Docs: <https://docs.nygen.io/CyteArc/t
   scans. `binding_cistromes({"SPI1": "peaks.narrowPeak"}, peak_ids)` for CUT&RUN/ChIP peaks.
 - Metacells: `ds.regulons.profiles(groups, from_assay=...)` gives groups x features log counts per
   million, genes named by name and peaks by id. Group with a fine Leiden clustering
-  (`resolution=15` gave 118 metacells for about 2,600 PBMCs).
+  (`resolution=15` gave 117 metacells for about 2,600 PBMCs).
 - Gene programs: `gene_programs(rna[genes])`; `program_regulators(programs, database, annotations,
   profiles=rna)` runs cisTarget on each program and correlates each factor's expression with it;
-  `set_overlaps(programs, regulons, genes)` relates programs to regulons.
-- eRegulons: `link_regions_to_genes(peak_ids, genes, upstream=150_000, downstream=150_000,
-  anchor="gene_body")` gives the candidates that `region_gene_links(atac, rna, candidates)` scores
-  on metacell profiles; then `build_eregulons(cistromes, links, adjacencies)`. Each kept module's
-  links carry its `context`, `NES`, `p_value`, and `adjusted_p`; SCENIC+'s defaults keep modules
-  without evidence, so filter on `adjusted_p` (or set `EregulonParameters(adjustedPThreshold=...)`)
-  before scoring `eregulons[["source", "target"]].drop_duplicates()`.
+  `set_overlaps(programs, regulons, genes)` relates programs to regulons. `gene_programs` splits
+  its gene graph with Leiden's default backend (`"cytearc"`), so programs from earlier releases,
+  whose default was `"igraph"`, can differ from new ones.
+- Region-to-gene links: `link_regions_to_genes(peak_ids, read_gene_annotation(gtf), upstream=...,
+  downstream=..., anchor="tss" or "gene_body")` gives candidate pairs, which
+  `region_gene_links(atac, rna, candidates)` scores on metacell profiles: Spearman `rho` and a
+  gradient-boosting `importance`, one regressor per gene (`importance="none"` skips it). Links
+  are associations across metacells; report them as candidate enhancers.
 
 ## Recipes
 
@@ -96,7 +97,7 @@ spi1 = ds.scores.chromvar(binding, cells, from_assay="ATAC", features=peaks,
                           genome="GRCh38.primary_assembly.genome.fa", tmin=5)
 ```
 
-### Gene programs and enhancer-driven regulons (multiome)
+### Gene programs and region-to-gene links (multiome)
 
 ```python
 metacells = ds.clusters.leiden(run["connectivity_map"], resolution=15)
@@ -112,12 +113,7 @@ annotation = rg.read_gene_annotation("gencode.v32.primary_assembly.annotation.gt
                                      gene_types={"protein_coding"})
 candidates = rg.link_regions_to_genes(peak_ids, annotation, upstream=150_000,
                                       downstream=150_000, anchor="gene_body")
-links = rg.region_gene_links(atac, rna, candidates[candidates["gene"].isin(adjacencies["target"])],
-                             nthreads=8)
-cistromes = rg.cistromes_from_motifs(matches, rg.motif_annotations(motifs))
-eregulons = rg.build_eregulons(cistromes, links, adjacencies, nthreads=8)
-auc = ds.scores.aucell(eregulons[["source", "target"]].drop_duplicates(), cells,
-                       features=run["feature_universe"], tmin=10)
+links = rg.region_gene_links(atac, rna, candidates[candidates["gene"].isin(genes)], nthreads=8)
 ```
 
 ## Pitfalls
@@ -125,6 +121,9 @@ auc = ds.scores.aucell(eregulons[["source", "target"]].drop_duplicates(), cells,
 - A motif deviation is a motif family's accessibility, not one factor's activity; pair it with
   the factor's expression or binding data before naming the factor.
 - Do not mix genome builds: peaks, FASTA, GTF, and cisTarget databases must agree.
+- The Aerts lab's cisTarget databases and motif tables state no license terms, and the v10
+  motif collection includes motifs derived from TRANSFAC Professional, a commercial database.
+  Confirm their terms before commercial work.
 - Regulon targets from one GRNBoost2 seed include seed-specific links; report seed-stable ones.
 - The chromVAR background model holds about four bytes per motif-peak match per background
   iteration; score fewer motifs per call if the budget refuses it.
