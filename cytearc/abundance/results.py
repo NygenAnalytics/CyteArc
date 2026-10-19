@@ -27,7 +27,7 @@ class CategoryTestResult:
     """A propeller test of category proportions (Phipson et al. 2022).
 
     ``fit`` holds the counts, proportions, and statistics; its ``table`` has
-    one row per category, described in :func:`~cytearc.abundance.propeller`.
+    one row per category, described in ``cytearc.abundance.propeller``.
     The categories come from the ``categories`` artifact or the
     ``category_field`` column, over the cells of ``cell_selection`` (all
     cells when None). ``sample_by`` and ``condition_by`` name the sample and
