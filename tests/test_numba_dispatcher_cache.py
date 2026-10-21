@@ -179,6 +179,22 @@ def test_a_dispatcher_numba_cannot_cache_still_computes(no_cache_locator) -> Non
     assert "no locator available" in message
 
 
+def test_dispatchers_stay_uncached_without_numbas_cache_classes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A Numba release that moves its cache classes leaves every kernel uncached.
+    monkeypatch.delattr("numba.core.caching.NullCache")
+    dispatcher = numba.njit(is_nan)
+
+    with debug_messages() as messages:
+        enable_dispatcher_cache(dispatcher)
+
+    assert isinstance(dispatcher._cache, NullCache)
+    assert dispatcher(math.nan)
+    (message,) = messages
+    assert "Numba dispatchers stay uncached" in message
+
+
 def test_a_cache_entry_that_cannot_be_saved_does_not_fail_the_call(
     cache_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

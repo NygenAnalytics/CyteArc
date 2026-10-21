@@ -1557,6 +1557,41 @@ def test_every_coordinate_order_imports_the_counts_of_the_sorted_matrix(
     assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
 
 
+@pytest.mark.parametrize(
+    ("layout", "order"),
+    [
+        ("cellMajor", "cellMajor"),
+        ("featureMajor", "featureMajor"),
+        ("cellRanger2", "unordered"),
+        ("shuffledDuplicates", "unordered"),
+    ],
+)
+def test_the_scan_finds_the_coordinate_order_across_its_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    layout: str,
+    order: str,
+) -> None:
+    from cytearc.readers.mtx import _MtxEngine
+
+    original = _MtxEngine._scan_matrix
+
+    def scan_in_small_chunks(self, lines_in_mem):
+        return original(self, 7)
+
+    # Every layout spans many scan chunks. Each chunk checks the orders that
+    # the chunks before it left possible, and once both are ruled out the
+    # later chunks check none.
+    monkeypatch.setattr(_MtxEngine, "_scan_matrix", scan_in_small_chunks)
+    reader = _layout_reader(tmp_path / layout, layout, is_filtered=True)
+    assert reader.coordinateOrder == order
+    observed, _again = _import_counts(reader, lines_in_mem=7)
+
+    values = _layout_values()
+    np.testing.assert_array_equal(observed["RNA/counts"][:], values[:, :10])
+    np.testing.assert_array_equal(observed["ADT/counts"][:], values[:, 10:])
+
+
 def test_unordered_parse_matrix_of_cells_by_features_imports(tmp_path: Path) -> None:
     _write_parse(tmp_path)
     # The entries of _write_parse, cells by features, in another order.
@@ -1649,6 +1684,37 @@ def test_unordered_duplicates_are_summed_before_the_count_dtype_is_chosen(
     assert all(batch.dtype == np.uint16 for batch in batches)
     np.testing.assert_array_equal(
         np.vstack([batch.toarray() for batch in batches]), [[300, 1], [3, 260]]
+    )
+
+
+def test_unordered_rows_wider_than_the_counts_are_cast_to_the_count_dtype(
+    tmp_path: Path,
+) -> None:
+    # The rows that construction sorts hold the largest kept total, 300, which
+    # needs uint16, but every count fits uint8.
+    _write_mex(
+        tmp_path,
+        [(2, 1, 100), (1, 1, 100), (3, 1, 100), (1, 2, 7)],
+        n_features=3,
+        n_cells=2,
+    )
+    reader = MtxReader(inspect_mtx(tmp_path)[0], temp_dir=str(tmp_path))
+    try:
+        assert reader.coordinateOrder == "unordered"
+        assert reader.matrix_dtype == np.uint8
+        # Planning counts the wider rows that each batch is cast from.
+        wider = reader.producer_staging_bytes(1, 10)
+        batches = list(reader.consume(1))
+        # The import removed them, and rows sorted again hold uint8 itself.
+        assert wider - reader.producer_staging_bytes(1, 10) == (
+            reader.max_window_nnz(1) * np.dtype(np.uint16).itemsize
+        )
+    finally:
+        reader.close()
+    assert all(batch.dtype == np.uint8 for batch in batches)
+    np.testing.assert_array_equal(
+        np.vstack([batch.toarray() for batch in batches]),
+        [[100, 100, 100], [7, 0, 0]],
     )
 
 
@@ -1755,6 +1821,25 @@ def test_unclosed_reader_unmaps_its_rows_where_mapped_files_stay(
     del reader
     gc.collect()
     assert all(mapping.closed for mapping in maps)
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+
+
+def test_interrupted_construction_removes_the_sorted_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_mex(tmp_path, [(2, 1, 1), (1, 1, 2)], n_features=2, n_cells=1)
+
+    def interrupted(self):
+        raise KeyboardInterrupt
+
+    # The feature table is built after the rows of the unordered matrix.
+    monkeypatch.setattr(MtxReader, "_make_feat_table", interrupted)
+    with pytest.raises(KeyboardInterrupt) as interruption:
+        MtxReader(inspect_mtx(tmp_path)[0], temp_dir=str(tmp_path))
+    # The traceback still holds the half-built reader, so construction itself
+    # removed the rows before the interrupt left it.
+    assert interruption.tb is not None
     assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
 
 
