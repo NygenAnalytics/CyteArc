@@ -86,6 +86,19 @@ reader closes.
 `inspect_mtx` reports every complete matrix, feature, and cell triplet in a supported source.
 Pass one returned candidate to `MtxReader`.
 
+Matrix Market coordinates may come in any order, and duplicate coordinates are summed wherever
+they appear. `MtxReader` and `CrDirReader` stream a matrix sorted by cell, as Cell Ranger 3 and
+later write it, straight from the file, and sort a matrix sorted by feature into temporary rows
+on local disk when an import starts. Any other order, such as the descending features within each
+barcode that Cell Ranger 1 and 2 write, or shuffled entries, is read once more at construction to
+sort the entries of each kept cell into the same temporary rows. The totals, the filtering
+cutoff, and the count dtype follow the summed counts, so every order imports the counts and
+identity of the same matrix in sorted order. `coordinateOrder` reports `cellMajor`,
+`featureMajor`, or `unordered`, and `temporaryDiskBytes` the size of the rows, a count and a
+feature index for each entry. Pass `temp_dir` to choose their parent directory; the default uses
+the system temporary directory, including `TMPDIR`. The rows are removed at the end of an import
+and when the reader closes, and a later import sorts the file again.
+
 ```{eval-rst}
 .. autofunction:: cytearc.inspect_mtx
 ```
@@ -192,8 +205,22 @@ whose name contains either one under the name with `_` in their place and log th
 source name that is already valid keeps its name; a renamed column whose name is taken gets
 the first free `_2`, `_3`, and so on. `SeuratToZarr` raises for reserved names instead of
 skipping them.
-The H5AD, CSV, Matrix Market, and Cell Ranger readers reject missing or repeated cell and
-feature IDs.
+The H5AD, CSV, Matrix Market, and Cell Ranger readers reject missing or repeated cell IDs. All
+but the CSV reader also reject missing or repeated feature IDs: `CSVReader` takes its feature IDs
+from the header as pandas reads it, which names a column with a blank header
+`Unnamed: <position>` and renames each later occurrence of a repeated name by appending `.1`,
+`.2`, and so on, without a warning. Some exporters use gene symbols as feature IDs, and these
+repeat. Pass
+`duplicate_feature_ids="make_unique"` to `MtxReader`, `CrDirReader`, `CrH5Reader`, or
+`H5adReader`, also through `H5adReader.from_inspect`, to keep the first occurrence of each feature
+ID and rename each later one, in file order, by appending `-1`, `-2`, and so on, as AnnData's
+`var_names_make_unique` does. A suffixed name that is already an ID is
+skipped, so the result is unique, and the reader logs how many IDs it renamed. IDs are made
+unique across all features, whatever their assay, so an antibody that repeats the ID of an
+earlier gene is renamed in its own assay, for example to `CD4-1`. Feature names are
+not changed: an H5AD file without a feature name column takes the names from the IDs it holds,
+and a Matrix Market feature reference matches the IDs of the feature sidecar. Cell IDs must be
+unique in either mode.
 
 The cell column `<assay>_I` of every assay that an import writes is reserved for the membership
 of that assay ([Assay membership](../developers/zarr-internals#assay-membership)), because a merge reads a column of that name as which

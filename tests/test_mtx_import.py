@@ -892,9 +892,10 @@ def test_duplicate_cell_ids_are_rejected_after_dimension_validation(
 @pytest.mark.parametrize(
     ("coordinates", "message"),
     [
-        ([(1, 1, 1), (2, 2, 1), (1, 1, 1)], "neither cell-major"),
         ([(0, 1, 1)], "outside the declared"),
         ([(1, 1, -1)], "non-negative"),
+        # Unordered coordinates are validated like sorted ones.
+        ([(2, 2, 1), (1, 1, 1), (1, 2, -1)], "non-negative"),
     ],
 )
 def test_invalid_matrix_market_coordinates(
@@ -1285,17 +1286,90 @@ def test_cellranger_h5_preserves_guide_feature_tags(tmp_path: Path) -> None:
 def test_archive_parse_failure_removes_temporary_extraction(tmp_path: Path) -> None:
     archive_path = tmp_path / "invalid_MEX.zip"
     with zipfile.ZipFile(archive_path, mode="w") as archive:
+        # The unordered entries are valid until the third leaves the matrix.
         archive.writestr(
             "matrix.mtx",
             "%%MatrixMarket matrix coordinate integer general\n"
-            "2 2 3\n1 1 1\n2 2 1\n1 1 1\n",
+            "2 2 3\n2 2 1\n1 1 1\n3 1 1\n",
         )
         archive.writestr("features.tsv", "f1\tg1\nf2\tg2\n")
         archive.writestr("barcodes.tsv", "c1\nc2\n")
     candidate = inspect_mtx(archive_path)[0]
-    with pytest.raises(ValueError, match="neither cell-major"):
+    with pytest.raises(ValueError, match="outside the declared dimensions"):
         MtxReader(candidate, temp_dir=str(tmp_path))
     assert not list(tmp_path.glob("cytearc-mtx-archive-*"))
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+
+
+def _write_unordered_zip(path: Path, coordinates: list[tuple[int, int, int]]) -> None:
+    rows = "".join(f"{row} {column} {value}\n" for row, column, value in coordinates)
+    with zipfile.ZipFile(path, mode="w") as archive:
+        archive.writestr(
+            "bundle/matrix.mtx.gz",
+            gzip.compress(
+                (
+                    "%%MatrixMarket matrix coordinate integer general\n"
+                    f"3 3 {len(coordinates)}\n{rows}"
+                ).encode()
+            ),
+        )
+        archive.writestr(
+            "bundle/features.tsv",
+            "".join(f"feature-{index}\tgene-{index}\n" for index in range(3)),
+        )
+        archive.writestr(
+            "bundle/barcodes.tsv", "".join(f"cell-{index}\n" for index in range(3))
+        )
+
+
+def test_unordered_archive_imports_repeatedly_and_removes_its_temporary_files(
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "unordered_MEX.zip"
+    # Feature 3 of cell 1 repeats after entries of other cells.
+    _write_unordered_zip(
+        archive_path,
+        [(3, 1, 200), (1, 3, 4), (2, 2, 5), (3, 1, 100), (1, 1, 1)],
+    )
+    reader = MtxReader(inspect_mtx(archive_path)[0], temp_dir=str(tmp_path))
+    stores = [MemoryStore(), MemoryStore()]
+    try:
+        assert reader.coordinateOrder == "unordered"
+        # Construction keeps the extracted members and the sorted rows for
+        # the first import.
+        assert list(tmp_path.glob("cytearc-mtx-archive-*"))
+        assert list(tmp_path.glob("cytearc-mtx-csr-*"))
+        # The summed 300 needs uint16, which neither entry needs alone.
+        assert reader.matrix_dtype == np.uint16
+        for store in stores:
+            MtxToZarr(
+                reader,
+                store,
+                mem_budget="64M",
+                nthreads=1,
+                policy=CountMatrixPolicy(unitBytes=16, chunkBytes=8),
+                lines_in_mem=2,
+            ).dump()
+            # Each import removes what it extracted and sorted, and the
+            # next one extracts and sorts again.
+            assert not list(tmp_path.glob("cytearc-mtx-archive-*"))
+            assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+    finally:
+        reader.close()
+    for store in stores:
+        counts = zarr.open_group(store=store, mode="r")["RNA/counts"]
+        assert counts.dtype == np.uint16
+        np.testing.assert_array_equal(counts[:], [[1, 0, 300], [0, 5, 0], [4, 0, 0]])
+
+
+def test_unordered_archive_reader_removes_its_files_on_close(tmp_path: Path) -> None:
+    archive_path = tmp_path / "unordered_MEX.zip"
+    _write_unordered_zip(archive_path, [(2, 2, 5), (1, 1, 1)])
+    reader = MtxReader(inspect_mtx(archive_path)[0], temp_dir=str(tmp_path))
+    assert list(tmp_path.glob("cytearc-mtx-csr-*"))
+    reader.close()
+    assert not list(tmp_path.glob("cytearc-mtx-archive-*"))
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
 
 
 def test_mtx_import_fits_the_parse_buffer_that_it_reads(tmp_path):
@@ -1328,3 +1402,383 @@ def test_mtx_import_fits_the_parse_buffer_that_it_reads(tmp_path):
     np.testing.assert_array_equal(
         zarr.open_group(store=store, mode="r")["RNA/counts"][:], values
     )
+
+
+# Counts of 30 cells by 12 features, 10 genes and 2 antibodies, in which cell 5
+# holds a total of 1,200 with an antibody count of 1,000 and cell 12 is empty.
+def _layout_values() -> np.ndarray:
+    rng = np.random.default_rng(7)
+    values = rng.integers(0, 6, size=(30, 12)) * (rng.random((30, 12)) < 0.5)
+    values[:, 0] += 1600
+    values[5] = 0
+    values[5, [2, 11]] = [200, 1000]
+    values[9, 3] = 300
+    values[12] = 0
+    return values
+
+
+_LAYOUT_FEATURE_TYPES = ["Gene Expression"] * 10 + ["Antibody Capture"] * 2
+
+
+def _layout_coordinates(
+    values: np.ndarray,
+    layout: str,
+) -> list[tuple[int, int, int]]:
+    """Return the one-based (feature, cell, count) entries of ``values`` in
+    ``layout``.
+
+    ``cellMajor`` and ``featureMajor`` are sorted. ``cellRanger2`` lists the
+    cells in order and the features of each cell in descending order, as Cell
+    Ranger 1 and 2 write them. ``shuffled`` lists the entries in random order,
+    and ``shuffledDuplicates`` also splits each count above one into two
+    entries, mostly far apart.
+    """
+    cells, features = np.nonzero(values)
+    entries = [
+        (int(feature) + 1, int(cell) + 1, int(values[cell, feature]))
+        for cell, feature in zip(cells, features, strict=True)
+    ]
+    if layout == "cellMajor":
+        return entries
+    if layout == "featureMajor":
+        return sorted(entries, key=lambda entry: (entry[0], entry[1]))
+    if layout == "cellRanger2":
+        return sorted(entries, key=lambda entry: (entry[1], -entry[0]))
+    if layout == "shuffledDuplicates":
+        entries = [
+            part
+            for feature, cell, count in entries
+            for part in (
+                [(feature, cell, count - count // 2), (feature, cell, count // 2)]
+                if count > 1
+                else [(feature, cell, count)]
+            )
+        ]
+    order = np.random.default_rng(11).permutation(len(entries))
+    return [entries[index] for index in order]
+
+
+def _layout_reader(
+    directory: Path,
+    layout: str,
+    *,
+    is_filtered: bool,
+) -> MtxReader:
+    values = _layout_values()
+    directory.mkdir()
+    _write_mex(
+        directory,
+        _layout_coordinates(values, layout),
+        n_features=values.shape[1],
+        n_cells=values.shape[0],
+        feature_types=_LAYOUT_FEATURE_TYPES,
+    )
+    return MtxReader(
+        inspect_mtx(directory)[0],
+        is_filtered=is_filtered,
+        filtering_cutoff=1500,
+        temp_dir=str(directory.parent),
+    )
+
+
+def _import_counts(reader: MtxReader, lines_in_mem: int) -> list[zarr.Group]:
+    """Import the reader twice; an unordered matrix is sorted again for the
+    second import, in blocks of at most ``lines_in_mem`` entries."""
+    stores = [MemoryStore(), MemoryStore()]
+    try:
+        for store in stores:
+            MtxToZarr(
+                reader,
+                store,
+                mem_budget="64M",
+                nthreads=1,
+                policy=CountMatrixPolicy(unitBytes=64, chunkBytes=32),
+                lines_in_mem=lines_in_mem,
+            ).dump()
+    finally:
+        reader.close()
+    return [zarr.open_group(store=store, mode="r") for store in stores]
+
+
+@pytest.mark.parametrize("is_filtered", [True, False], ids=["filtered", "cutoff"])
+@pytest.mark.parametrize(
+    ("layout", "order"),
+    [
+        ("featureMajor", "featureMajor"),
+        ("cellRanger2", "unordered"),
+        ("shuffled", "unordered"),
+        ("shuffledDuplicates", "unordered"),
+    ],
+)
+def test_every_coordinate_order_imports_the_counts_of_the_sorted_matrix(
+    tmp_path: Path,
+    layout: str,
+    order: str,
+    is_filtered: bool,
+) -> None:
+    sorted_reader = _layout_reader(
+        tmp_path / "sorted", "cellMajor", is_filtered=is_filtered
+    )
+    reader = _layout_reader(tmp_path / layout, layout, is_filtered=is_filtered)
+    assert sorted_reader.coordinateOrder == "cellMajor"
+    assert reader.coordinateOrder == order
+    groups = np.repeat([0, 1], [10, 2])
+    # Planning sees the summed entries, the kept cells, and their counts.
+    assert reader.cell_names() == sorted_reader.cell_names()
+    assert reader.matrix_dtype == sorted_reader.matrix_dtype == np.uint16
+    for rows in (1, 4, 30):
+        assert reader.max_window_nnz(rows) == sorted_reader.max_window_nnz(rows)
+    assert reader.count_value_ranges(0, groups) == (
+        sorted_reader.count_value_ranges(0, groups)
+    )
+
+    expected = _import_counts(sorted_reader, lines_in_mem=7)[0]
+    imports = _import_counts(reader, lines_in_mem=7)
+
+    values = _layout_values()
+    kept = np.arange(30) if is_filtered else np.flatnonzero(values.sum(axis=1) > 1500)
+    # Without the dropped cell 5, the antibody counts fit uint8.
+    antibody_dtype = np.uint16 if is_filtered else np.uint8
+    for observed in imports:
+        for assay, columns, dtype in (
+            ("RNA", slice(0, 10), np.uint16),
+            ("ADT", slice(10, 12), antibody_dtype),
+        ):
+            counts = observed[f"{assay}/counts"]
+            assert counts.dtype == dtype
+            np.testing.assert_array_equal(counts[:], values[kept, columns])
+            assert (
+                counts.attrs["content_fingerprint"]
+                == (expected[f"{assay}/counts"].attrs["content_fingerprint"])
+            )
+        np.testing.assert_array_equal(
+            observed["RNA/countsT"][:], expected["RNA/countsT"][:]
+        )
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+
+
+def test_unordered_parse_matrix_of_cells_by_features_imports(tmp_path: Path) -> None:
+    _write_parse(tmp_path)
+    # The entries of _write_parse, cells by features, in another order.
+    _write_text(
+        tmp_path / "DGE.mtx.gz",
+        "%%MatrixMarket matrix coordinate integer general\n"
+        "3 2 5\n"
+        "3 2 4\n"
+        "1 2 2\n"
+        "2 1 3\n"
+        "1 1 1\n"
+        "3 2 1\n",
+    )
+    candidate = inspect_mtx(tmp_path)[0]
+    assert candidate.matrixOrientation == "cellsByFeatures"
+    reader = MtxReader(candidate, temp_dir=str(tmp_path))
+    try:
+        assert reader.coordinateOrder == "unordered"
+        observed = np.vstack([batch.toarray() for batch in reader.consume(2)])
+    finally:
+        reader.close()
+    np.testing.assert_array_equal(observed, [[1, 2], [3, 0], [0, 5]])
+
+
+def test_cell_ranger_1_directory_with_descending_features_imports(
+    tmp_path: Path,
+) -> None:
+    from cytearc.readers import CrDirReader
+
+    # Cell Ranger 1.1 writes real-valued counts, a blank comment, two-column
+    # genes.tsv, and the features of each barcode in descending order.
+    (tmp_path / "matrix.mtx").write_text(
+        "%%MatrixMarket matrix coordinate real general\n"
+        "%\n"
+        "4 3 5\n"
+        "4 1 4\n"
+        "2 1 1\n"
+        "3 2 10\n"
+        "1 2 2\n"
+        "2 3 7\n"
+    )
+    (tmp_path / "genes.tsv").write_text(
+        "".join(f"ENSG{index}\tGENE{index}\n" for index in range(4))
+    )
+    (tmp_path / "barcodes.tsv").write_text(
+        "".join(f"AAAC{index}-1\n" for index in range(3))
+    )
+    reader = CrDirReader(str(tmp_path), temp_dir=str(tmp_path))
+    try:
+        assert reader.coordinateOrder == "unordered"
+        assert reader.feature_names() == ["GENE0", "GENE1", "GENE2", "GENE3"]
+        batches = list(reader.consume(2, lines_in_mem=2))
+    finally:
+        reader.close()
+    assert all(batch.tocsr().has_sorted_indices for batch in batches)
+    assert all(batch.dtype == np.uint8 for batch in batches)
+    np.testing.assert_array_equal(
+        np.vstack([batch.toarray() for batch in batches]),
+        [[0, 1, 0, 4], [2, 0, 10, 0], [0, 7, 0, 0]],
+    )
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+
+
+def test_unordered_duplicates_are_summed_before_the_count_dtype_is_chosen(
+    tmp_path: Path,
+) -> None:
+    # Feature 1 of cell 1 holds 200 and 100 in entries that other cells
+    # separate, and feature 2 of cell 2 holds 250 and 10.
+    _write_mex(
+        tmp_path,
+        [(1, 1, 200), (2, 2, 250), (1, 2, 3), (1, 1, 100), (2, 2, 10), (2, 1, 1)],
+        n_features=2,
+        n_cells=2,
+    )
+    reader = MtxReader(inspect_mtx(tmp_path)[0], temp_dir=str(tmp_path))
+    try:
+        assert reader.coordinateOrder == "unordered"
+        assert reader.matrix_dtype == np.uint16
+        assert reader.count_value_ranges(0)[0].maximum == 300
+        assert [
+            value_range.maximum
+            for value_range in reader.count_value_ranges(0, np.array([0, 1]))
+        ] == [300, 260]
+        # Four distinct coordinates remain of the six entries.
+        assert reader.max_window_nnz(2) == 4
+        batches = list(reader.consume(1, lines_in_mem=2))
+    finally:
+        reader.close()
+    assert [batch.nnz for batch in batches] == [2, 2]
+    assert all(batch.dtype == np.uint16 for batch in batches)
+    np.testing.assert_array_equal(
+        np.vstack([batch.toarray() for batch in batches]), [[300, 1], [3, 260]]
+    )
+
+
+def test_unordered_construction_reads_the_matrix_twice_and_imports_its_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cytearc.readers.mtx import _MtxEngine
+
+    _write_mex(
+        tmp_path,
+        [(2, 1, 1), (1, 1, 2), (3, 2, 3), (1, 3, 4), (3, 1, 5)],
+        n_features=3,
+        n_cells=3,
+    )
+    calls: list[str] = []
+    for name in ("_scan_matrix", "_build_unordered_rows"):
+        original = getattr(_MtxEngine, name)
+
+        def recorded(self, *args, _name=name, _original=original, **kwargs):
+            calls.append(_name)
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(_MtxEngine, name, recorded)
+    reader = MtxReader(inspect_mtx(tmp_path)[0], temp_dir=str(tmp_path))
+    try:
+        assert calls == ["_scan_matrix", "_build_unordered_rows"]
+        # Five uint8 counts with int32 feature indexes.
+        assert reader.temporaryDiskBytes == 5 * (1 + 4)
+        stores = [MemoryStore(), MemoryStore()]
+        policy = CountMatrixPolicy(unitBytes=16, chunkBytes=8)
+        MtxToZarr(reader, stores[0], mem_budget="64M", policy=policy).dump()
+        # The first import reads the rows that construction sorted.
+        assert calls == ["_scan_matrix", "_build_unordered_rows"]
+        MtxToZarr(reader, stores[1], mem_budget="64M", policy=policy).dump()
+        assert calls == ["_scan_matrix", *["_build_unordered_rows"] * 2]
+    finally:
+        reader.close()
+    for store in stores:
+        np.testing.assert_array_equal(
+            zarr.open_group(store=store, mode="r")["RNA/counts"][:],
+            [[2, 1, 5], [0, 0, 3], [4, 0, 0]],
+        )
+
+
+def test_unordered_rows_closed_early_are_removed_and_sorted_again(
+    tmp_path: Path,
+) -> None:
+    _write_mex(
+        tmp_path,
+        [(1, 2, 1), (2, 1, 2), (1, 1, 3), (2, 3, 4)],
+        n_features=2,
+        n_cells=3,
+    )
+    reader = MtxReader(inspect_mtx(tmp_path)[0], temp_dir=str(tmp_path))
+    source = reader.consume(1, lines_in_mem=1)
+    np.testing.assert_array_equal(next(source).toarray(), [[3, 2]])
+    source.close()
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+    completed = list(reader.consume(2, lines_in_mem=3))
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+    np.testing.assert_array_equal(
+        np.vstack([batch.toarray() for batch in completed]), [[3, 2], [1, 0], [0, 4]]
+    )
+
+
+def test_unordered_rows_of_an_unclosed_reader_are_removed_when_collected(
+    tmp_path: Path,
+) -> None:
+    import gc
+
+    _write_mex(tmp_path, [(2, 1, 1), (1, 1, 2)], n_features=2, n_cells=1)
+    reader = MtxReader(inspect_mtx(tmp_path)[0], temp_dir=str(tmp_path))
+    assert list(tmp_path.glob("cytearc-mtx-csr-*"))
+    del reader
+    gc.collect()
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+
+
+def test_unclosed_reader_unmaps_its_rows_where_mapped_files_stay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import gc
+    import shutil
+
+    _write_mex(tmp_path, [(2, 1, 1), (1, 1, 2)], n_features=2, n_cells=1)
+    reader = MtxReader(inspect_mtx(tmp_path)[0], temp_dir=str(tmp_path))
+    maps = [
+        array._mmap
+        for array in (reader._engine._csrData, reader._engine._csrIndices)
+        if getattr(array, "_mmap", None) is not None
+    ]
+    assert maps
+    remove = shutil.rmtree
+
+    def windows_rmtree(path, *args, **kwargs):
+        # Windows refuses to remove a file that is still memory-mapped.
+        if any(not mapping.closed for mapping in maps):
+            raise PermissionError(13, "The file is still mapped", str(path))
+        return remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", windows_rmtree)
+    del reader
+    gc.collect()
+    assert all(mapping.closed for mapping in maps)
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+
+
+def test_unordered_matrix_without_kept_entries_streams_empty_rows(
+    tmp_path: Path,
+) -> None:
+    # No cell's total exceeds the cutoff, so the sorted rows hold nothing.
+    _write_mex(
+        tmp_path,
+        [(2, 1, 1), (1, 1, 1), (2, 3, 1), (1, 2, 9), (2, 2, 9)],
+        n_features=2,
+        n_cells=3,
+    )
+    reader = MtxReader(
+        inspect_mtx(tmp_path)[0],
+        is_filtered=False,
+        filtering_cutoff=20,
+        temp_dir=str(tmp_path),
+    )
+    try:
+        assert reader.coordinateOrder == "unordered"
+        assert reader.nCells == 0
+        assert reader.temporaryDiskBytes == 0
+        assert list(reader.consume(1)) == []
+    finally:
+        reader.close()
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))

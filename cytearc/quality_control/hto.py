@@ -6,6 +6,7 @@ import pandas as pd
 from pandas.api.types import is_numeric_dtype
 
 from ..assay.normalization import clr_values
+from ..utils.arguments import float_argument
 
 __all__ = ["hto_demux"]
 
@@ -16,14 +17,28 @@ _KMEANS_N_STARTS = 100
 _CLUSTER_COUNT_RULE = "n_htos_plus_one"
 _BACKGROUND_STATISTIC = "raw_mean"
 _CUTOFF_DISTRIBUTION = "negative_binomial_nb2"
-_POSITIVE_QUANTILE = 0.99
+# Seurat's default positive.quantile.
+_DEFAULT_POSITIVE_QUANTILE = 0.99
 _CUTOFF_LOCATION = 0
 _CUTOFF_COMPARISON = "strictly_greater"
 _SINGLET_ASSIGNMENT = "clr_argmax"
 _RESERVED_IDENTITIES = frozenset({"Negative", "Singlet", "Doublet"})
 
 
-def _hto_demux_method() -> dict[str, object]:
+def _validated_positive_quantile(value: object) -> float:
+    """Return ``positive_quantile`` as a Python float between 0 and 1.
+
+    Raises:
+        TypeError: If ``value`` is a boolean or not a real number.
+        ValueError: If ``value`` is not finite or not strictly between 0 and 1.
+    """
+    quantile = float_argument(value, "positive_quantile")
+    if not 0.0 < quantile < 1.0:
+        raise ValueError("positive_quantile must be greater than 0 and less than 1")
+    return quantile
+
+
+def _hto_demux_method(positive_quantile: float) -> dict[str, object]:
     return {
         "normalization": _NORMALIZATION_METHOD,
         "clustering": {
@@ -35,7 +50,9 @@ def _hto_demux_method() -> dict[str, object]:
         "background": _BACKGROUND_STATISTIC,
         "cutoff": {
             "distribution": _CUTOFF_DISTRIBUTION,
-            "quantile": _POSITIVE_QUANTILE,
+            # Artifacts recorded the fixed 0.99 here before the quantile could
+            # be chosen, so artifacts of the default keep their identities.
+            "quantile": positive_quantile,
             "location": _CUTOFF_LOCATION,
             "comparison": _CUTOFF_COMPARISON,
         },
@@ -201,7 +218,7 @@ def _fit_negative_binomial_parameters(
 def _negative_binomial_cutoff(
     mu: float,
     alpha: float,
-    quantile: float = _POSITIVE_QUANTILE,
+    quantile: float = _DEFAULT_POSITIVE_QUANTILE,
 ) -> int:
     from scipy.stats import nbinom
 
@@ -236,6 +253,8 @@ def _negative_binomial_cutoff(
 def _positive_hto_calls(
     hto_counts: pd.DataFrame,
     cluster_labels: np.ndarray,
+    *,
+    positive_quantile: float = _DEFAULT_POSITIVE_QUANTILE,
 ) -> pd.DataFrame:
     background_clusters = _background_clusters(hto_counts, cluster_labels)
     cutoffs: dict[str, int] = {}
@@ -255,7 +274,7 @@ def _positive_hto_calls(
             )
         mu, alpha = _fit_negative_binomial_parameters(background, hto_name)
         try:
-            cutoffs[hto_name] = _negative_binomial_cutoff(mu, alpha)
+            cutoffs[hto_name] = _negative_binomial_cutoff(mu, alpha, positive_quantile)
         except ValueError as exc:
             raise ValueError(
                 f"Negative-binomial cutoff is invalid for HTO {hto_name!r}"
@@ -282,20 +301,39 @@ def hto_demux(
     hto_counts: pd.DataFrame,
     *,
     random_seed: int = 0,
+    positive_quantile: float = 0.99,
 ) -> pd.Series:
     """Assigns HTO identity to each cell based on the HTO count distribution.
     The algorithm is adapted from the Seurat package's HTOdemux function [Satija15]_.
 
+    A count is positive when it exceeds the ``positive_quantile`` quantile of
+    the negative-binomial distribution fitted to its HTO's background cluster.
+
     Args:
         hto_counts: A dataframe containing the raw HTO counts for each cell.
+        random_seed: Seed of the k-means clustering.
+        positive_quantile: Quantile of each HTO's background distribution that
+            a count must exceed to be positive, Seurat's ``positive.quantile``.
+            It must be greater than 0 and less than 1. A higher quantile, such
+            as 0.999, calls fewer background counts positive, and so fewer
+            false doublets, but can miss weakly stained tags.
 
     Returns:
         A series containing the HTO identity for each cell.
+
+    Raises:
+        TypeError: If ``random_seed`` is not an integer or ``positive_quantile``
+            is not a real number.
+        ValueError: If ``positive_quantile`` is not finite or not between 0 and
+            1, or if the counts cannot be demultiplexed.
     """
     if isinstance(random_seed, bool) or not isinstance(random_seed, int):
         raise TypeError("random_seed must be an integer")
+    quantile = _validated_positive_quantile(positive_quantile)
     counts = _validated_hto_counts(hto_counts)
     normalized = _clr_normalize(counts)
     cluster_labels = _cluster_labels(normalized, random_seed)
-    positive_calls = _positive_hto_calls(counts, cluster_labels)
+    positive_calls = _positive_hto_calls(
+        counts, cluster_labels, positive_quantile=quantile
+    )
     return _classify_hto_identities(normalized, positive_calls)

@@ -13,7 +13,13 @@ from ._assay_names import (
     auto_name_feat_table,
     make_feat_table_from_types,
 )
-from ._text import as_text, require_unique_identifiers
+from ._text import (
+    DuplicateFeatureIds,
+    as_text,
+    duplicate_feature_ids_option,
+    require_unique_identifiers,
+    unique_feature_identifiers,
+)
 from ..utils.arrays import (
     assay_feature_ranges,
     cumulative_nnz,
@@ -281,6 +287,18 @@ class CrH5Reader(CrReader):
 
     Args:
         h5_fn: File name for the h5 file.
+        is_filtered: Whether the barcodes are already filtered. When False,
+            only barcodes whose total count exceeds ``filtering_cutoff`` are
+            kept.
+        filtering_cutoff: Total count that a barcode must exceed to be kept
+            when ``is_filtered`` is False.
+        duplicate_feature_ids: ``"error"`` rejects repeated feature IDs.
+            ``"make_unique"`` keeps the first occurrence of each ID and
+            renames each later one, in file order and across assays, by
+            appending ``-1``, ``-2``, and so on (skipping names that are
+            already IDs), as AnnData's ``var_names_make_unique`` does, and
+            logs a warning. Feature names are never changed, and repeated
+            barcodes always raise.
 
     Attributes:
         autoNames: Specifies if the data is from RNA or ATAC sequencing.
@@ -290,6 +308,7 @@ class CrH5Reader(CrReader):
         assayFeats: A DataFrame with information about the features in the assay.
         h5obj: A File object from the h5py package.
         grp: Current active group in the hierarchy.
+        duplicateFeatureIds: How repeated feature IDs are treated.
     """
 
     def __init__(
@@ -297,18 +316,29 @@ class CrH5Reader(CrReader):
         h5_fn: str,
         is_filtered: bool = True,
         filtering_cutoff: int = 500,
+        *,
+        duplicate_feature_ids: DuplicateFeatureIds = "error",
     ) -> None:
         if filtering_cutoff < 0:
             raise ValueError("filtering_cutoff cannot be negative")
+        self.duplicateFeatureIds = duplicate_feature_ids_option(duplicate_feature_ids)
         self.h5obj: h5py.File = h5py.File(h5_fn, mode="r")
         self.grp: h5py.Group
         self.validBarcodeIdx: np.ndarray | None = None
         self._indptrCache: np.ndarray | None = None
         self._cumulativeRowNnz: np.ndarray | None = None
+        self._featureIds: list[str] | None = None
         try:
             super().__init__(self._handle_version())
             require_unique_identifiers(self.cell_names(), "Cell Ranger barcodes")
-            require_unique_identifiers(self.feature_ids(), "Cell Ranger feature IDs")
+            self._featureIds = [
+                as_text(value)
+                for value in unique_feature_identifiers(
+                    np.asarray(self._read_dataset("feature_ids"), dtype=object),
+                    "Cell Ranger feature IDs",
+                    self.duplicateFeatureIds,
+                )
+            ]
             if is_filtered:
                 self.validBarcodeIdx = np.arange(self.nCells)
             else:
@@ -433,6 +463,10 @@ class CrH5Reader(CrReader):
         return value_ranges
 
     def _read_dataset(self, key: str) -> list[str]:
+        # Construction resolves repeated feature IDs once, so every caller
+        # reads the IDs that the import stores.
+        if key == "feature_ids" and self._featureIds is not None:
+            return list(self._featureIds)
         grp_key = self.grpNames[key]
         return [as_text(x) for x in self.grp[grp_key][:]]
 

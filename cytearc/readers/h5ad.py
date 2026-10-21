@@ -34,7 +34,13 @@ from ._h5ad_columns import (
 )
 from ._h5ad_inspect import H5adInspectResult, inspect_h5ad as inspect_h5ad
 from ._sparse import SparseRowStore
-from ._text import as_text, require_unique_identifiers
+from ._text import (
+    DuplicateFeatureIds,
+    as_text,
+    duplicate_feature_ids_option,
+    require_unique_identifiers,
+    unique_feature_identifiers,
+)
 
 type H5adEmbeddingRole = Literal["umap", "tsne"]
 
@@ -61,6 +67,13 @@ class H5adReader:
         category_names_key: Looks up this group and replaces the values in `var` and 'obs' child datasets with the
                             corresponding index value within this group.
         temp_dir: Parent directory for temporary CSC row storage. None uses the system temporary directory.
+        duplicate_feature_ids: ``"error"`` rejects repeated feature IDs. ``"make_unique"`` keeps the
+                               first occurrence of each ID and renames each later one, in file order
+                               and across assays, by appending ``-1``, ``-2``, and so on (skipping
+                               names that are already IDs), as AnnData's ``var_names_make_unique``
+                               does, and logs a warning. Feature names are never changed: without a
+                               feature name column they are the IDs as the file holds them. Repeated
+                               cell IDs always raise.
 
     Attributes:
         h5: A File object from the h5py package.
@@ -82,6 +95,7 @@ class H5adReader:
                          t-SNE artifacts.
         cluster_keys: Exact ``obs`` keys to import as immutable cluster-label
                       artifacts instead of raw cell metadata.
+        duplicateFeatureIds: How repeated feature IDs are treated.
     """
 
     def __init__(
@@ -99,9 +113,14 @@ class H5adReader:
         cluster_keys: Sequence[str] = (),
         *,
         temp_dir: str | Path | None = None,
+        duplicate_feature_ids: DuplicateFeatureIds = "error",
     ) -> None:
         self.h5adFn = h5ad_fn
         self._tempDir = temp_dir
+        self.duplicateFeatureIds = duplicate_feature_ids_option(duplicate_feature_ids)
+        # The feature IDs as the file holds them and as an import stores
+        # them, read on first use.
+        self._featureIdentifiers: tuple[np.ndarray, np.ndarray] | None = None
         self.h5: h5py.File = h5py.File(h5ad_fn, mode="r")
         try:
             self.matrixKey = matrix_key
@@ -160,6 +179,7 @@ class H5adReader:
             "embedding_roles": dict(self.embeddingRoles),
             "cluster_keys": self.clusterKeys,
             "temp_dir": self._tempDir,
+            "duplicate_feature_ids": self.duplicateFeatureIds,
         }
 
     def close(self) -> None:
@@ -175,6 +195,14 @@ class H5adReader:
         inspection: H5adInspectResult,
         **overrides: Any,
     ) -> "H5adReader":
+        """Open a reader with the keys that :func:`~cytearc.inspect_h5ad` found.
+
+        Args:
+            inspection: Result of :func:`~cytearc.inspect_h5ad`.
+            **overrides: Constructor arguments that replace or add to the
+                inspected ones, such as ``embedding_roles``, ``temp_dir``, or
+                ``duplicate_feature_ids``.
+        """
         reader_kwargs = inspection.to_reader_kwargs()
         reader_kwargs.update(overrides)
         return cls(**reader_kwargs)
@@ -464,14 +492,36 @@ class H5adReader:
         require_unique_identifiers(values, "H5AD cell IDs")
         return values
 
+    def _feature_identifiers(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the feature IDs as the file holds them and as they import.
+
+        They differ only when ``duplicate_feature_ids="make_unique"`` renamed
+        repeated IDs, which happens once, on first use.
+        """
+        if self._featureIdentifiers is None:
+            source = self._identifiers(self.featureAttrsKey, self.featIdsKey, "feature")
+            resolved = unique_feature_identifiers(
+                source,
+                "H5AD feature IDs",
+                self.duplicateFeatureIds,
+            )
+            self._featureIdentifiers = (source, resolved)
+        return self._featureIdentifiers
+
     def feat_ids(self) -> np.ndarray:
-        """Returns a list of feature IDs."""
-        values = self._identifiers(self.featureAttrsKey, self.featIdsKey, "feature")
-        require_unique_identifiers(values, "H5AD feature IDs")
-        return values
+        """Returns a list of feature IDs.
+
+        Repeated IDs raise ValueError, or are renamed with
+        ``duplicate_feature_ids="make_unique"``.
+        """
+        return self._feature_identifiers()[1].copy()
 
     def feat_names(self) -> np.ndarray:
-        """Returns a list of feature names."""
+        """Returns a list of feature names.
+
+        Without the feature name key, the names are the feature IDs as the
+        file holds them, before any repeated ID is renamed.
+        """
         if self._check_exists(self.featureAttrsKey, self.featNamesKey):
             return present_column(
                 *self._read_column(self.featureAttrsKey, self.featNamesKey)
@@ -480,7 +530,7 @@ class H5adReader:
             f"Feature name key {self.featNamesKey!r} was not found in "
             f"{self.featureAttrsKey}; feature IDs will be used"
         )
-        return self.feat_ids()
+        return self._feature_identifiers()[0].copy()
 
     def _table_columns(
         self, group: str, ignore_keys: Sequence[str]

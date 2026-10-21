@@ -2,7 +2,7 @@ import inspect
 import pickle
 import subprocess
 import sys
-from typing import get_type_hints
+from typing import get_args, get_type_hints
 
 import numpy as np
 import pytest
@@ -21,6 +21,7 @@ from cytearc.readers import (
     SeuratInspectResult,
     SeuratReader,
 )
+from cytearc.readers._text import DuplicateFeatureIds
 from tests.signature_contracts import signature_digest
 
 
@@ -80,11 +81,11 @@ _PUBLIC_CLASS_METHODS = {
 }
 _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
     CrReader: "0237d8e7c63b64fb6526f3536d5f65c1d704fe56675bf38b41644be419a5607f",
-    CrH5Reader: "1883e2430d73bad3aeaa564c2478292207f9fe9c8829a0215ad120d54f4f0f85",
-    CrDirReader: "d1d6697ba86d1e34aeb3e176ba84000e4fc50267176cec6f922ef696050b40dc",
-    H5adReader: "fa58572c84f63409dbdfef77a614c0ec6dd06ecb9501e1694f3d16881abb8836",
+    CrH5Reader: "435e2965b15010e0d1a41a36dae1c492d24eac90386e3e1f58ea8b705570db7d",
+    CrDirReader: "47ae6207108e6433f78e3214a0b38c11cadf5cf2d6a79eb218949d6137311bef",
+    H5adReader: "ca5ddfbe930e729f419b42a5b7018e6a03b221c371479c26716183cb2ff08daa",
     CSVReader: "8aa6c17c876afb62765584fc7ff64d2838c66ef53095da10d7198ca60ab83851",
-    MtxReader: "2f21dbdf80ba9554aacd7fd8405c4f838a512e0b83c20038ee6a2e41cfa69cbe",
+    MtxReader: "b0ce7fc6984e0b49abd3e1e3d65ae97194af7b7de083b1d0ea0496735a8c5dd0",
     SeuratReader: "c51148f751a74072c2f79448a4b6a25f0dc0c52b0abfbe837fb1b9e0c667368c",
 }
 _MODULE_SIGNATURE_DIGEST = (
@@ -230,6 +231,18 @@ def test_reader_class_and_method_signatures_are_stable():
     for cls, names in _PUBLIC_CLASS_METHODS.items():
         methods = {name: getattr(cls, name) for name in names}
         assert signature_digest(methods) == _PUBLIC_CLASS_SIGNATURE_DIGESTS[cls]
+
+
+def test_count_readers_take_the_duplicate_feature_ids_keyword():
+    assert get_args(DuplicateFeatureIds.__value__) == ("error", "make_unique")
+    for cls in (CrH5Reader, CrDirReader, MtxReader, H5adReader):
+        parameter = inspect.signature(cls.__init__).parameters["duplicate_feature_ids"]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default == "error"
+        hints = get_type_hints(cls.__init__)
+        assert hints["duplicate_feature_ids"] is DuplicateFeatureIds
+    for cls in (CSVReader, SeuratReader):
+        assert "duplicate_feature_ids" not in inspect.signature(cls.__init__).parameters
 
 
 def test_reader_module_function_signatures_are_stable():

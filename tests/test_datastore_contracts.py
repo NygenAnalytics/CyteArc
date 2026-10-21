@@ -124,7 +124,9 @@ _SIGNATURE_DIGESTS = {
     # Literal["cytearc", "igraph", "leidenalg"] with the default "cytearc".
     GraphDataStore: "471d38e2eafdbd330214bdb91c0433e3e0e08a7c5f5a52a842e0cce7f075b920",
     MappingDatastore: "a4839ac0372df95f021fd8c383c1ac2aff6796c6b093e05510c71ad7e8449a72",
-    DataStore: "3c863125ef47c3d38fd3e8649f36a768d44c4d729ab3e9d8a527da70362b0105",
+    # run_hto_demultiplexing gained the keyword-only positive_quantile: float
+    # with the default 0.99.
+    DataStore: "9959126fed24466262c5c3abc3bc9a8ec170ed2f17d32b508bbee1e70446b119",
     ArtifactAccessor: "c48b4badcb3fbd03d03326278eafae0cf429ac31e5d053390e60ed9316d6b54b",
 }
 

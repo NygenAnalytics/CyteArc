@@ -58,6 +58,9 @@ These calls do not create module-load cycles.
   transform them exactly as rows of `counts`, so a normalization has one implementation.
 - `utils/` owns generic array, argument validation, compute, logging, process, and progress helpers.
   It also owns streamed column moments (`utils/moments.py`) and the one warning helper (`utils/warnings.py`), which points each warning at the caller's code.
+  `utils/numba.py` gives third-party Numba kernels compiled without a cache, such as umap-learn's,
+  an on-disk cache with its own files for each set of compile options, once per process and before
+  their first use.
   Zarr-specific helpers belong in `storage`, not `utils`.
 
 Facade aliases do not change implementation ownership.
@@ -821,6 +824,33 @@ CyteArc validates persisted data and public arguments against the following cont
   rejects a `batch_size` below one, as sparse `consume` does. An `obs` or `var` stored as a dataset
   without fields reads as a table without columns, as `inspect_h5ad` reads it, and cell IDs that are
   not text, such as an integer `cell_ids_key` column, import with embeddings.
+- Matrix Market coordinates may come in any order. `MtxReader` and `CrDirReader` read cell-major
+  and feature-major files as before. Any other order, such as the descending features within each
+  barcode that Cell Ranger 1 and 2 write, used to raise `ValueError` (`coordinates are neither
+  cell-major nor feature-major`); it now sets `coordinateOrder` to `"unordered"`, and construction
+  reads the file once more to write the entries of each kept cell to temporary rows under
+  `temp_dir`, sorted by feature with duplicate coordinates summed wherever they appear, which an
+  import then reads. The totals, and so the filtering cutoff, are exact in any order, and the
+  entries of each cell and the largest counts, and so `max_window_nnz` and the count dtype, come
+  from the summed rows, so such a file stores the counts, dtype, and fingerprints of the same
+  matrix in sorted order. The rows hold each count in a dtype that holds the largest kept total,
+  which bounds every sum. They take `temporaryDiskBytes` of disk, which construction checks, and
+  the end of an import or `close` removes them, as does the garbage collection of a reader that is
+  never closed. A later import sorts the file again and raises `ValueError`, `RuntimeError`, or
+  `OverflowError` when the file holds a different number of entries than at construction, when a
+  kept cell holds a different number of entries or of distinct features, or when a count exceeds
+  the largest one that construction found. Other changes, such as a lower count, import as the
+  file now holds them, as the sorted paths import them. `CrDirReader` gains `temp_dir`.
+- `MtxReader`, `CrDirReader`, `CrH5Reader`, and `H5adReader` take a keyword-only
+  `duplicate_feature_ids`. The default `"error"` rejects repeated feature IDs, as before, with a
+  message that names the option. `"make_unique"` keeps the first occurrence of each ID and
+  renames each later one, in file order and across assays, by appending `-1`, `-2`, and so on,
+  skipping a name that is already an ID, and logs a warning with the number of renamed IDs; an
+  antibody that repeats the ID of an earlier gene becomes, for example, `CD4-1`. Feature names
+  are not changed, so an H5AD file without a feature name column takes the names from the IDs it
+  holds; a Matrix Market feature reference matches the IDs of the feature sidecar; and repeated
+  cell IDs still raise. `H5adReader.from_inspect` passes the option to the reader, and
+  `H5adReader` caches the resolved IDs, so it warns once per reader.
 - Metadata column names: H5AD readers and inspection list dataframe columns from
   `column-order` and resolve each listed name as an HDF5 path, so columns that old AnnData
   versions nested under `/` are imported instead of skipped. Tables without `column-order`
@@ -1131,6 +1161,13 @@ CyteArc validates persisted data and public arguments against the following cont
   but stays loadable, and the next request recomputes the correction and everything built on it.
   The arrays and attributes that Symphony mapping references copy are unchanged, so references
   built from either implementation load and map without a compatibility branch.
+- `qc.hto_demultiplexing` and `cytearc.quality_control.hto_demux` take a keyword-only
+  `positive_quantile`, Seurat's `positive.quantile`, with the default 0.99: a real number, not a
+  boolean, strictly between 0 and 1. Each HTO's negative-binomial cutoff is that quantile of its
+  background fit. `hto_identity` artifacts already recorded the fixed 0.99 as
+  `method.cutoff.quantile`, and the quantile is recorded there, so artifacts of the default keep
+  their identities and are reused without a compatibility branch, while each other quantile has
+  its own artifact. `qc.hto_demultiplexing` checks the quantile before it reads the selection.
 
 Compatibility exists only where a current public facade or an explicit file-schema test says it
 does. There are no silent migrations, implicit compatibility branches, or forwarding shims for

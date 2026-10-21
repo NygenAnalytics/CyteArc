@@ -1,14 +1,18 @@
 """HTO demultiplexing against planted identities and an exact NB2 quantile."""
 
+import dataclasses
 import re
+from fractions import Fraction
 from math import exp, lgamma, log
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+from threadpoolctl import threadpool_limits
 
 from cytearc import DataStore
+from cytearc.metadata.arguments import HtoIdentityArguments
 from cytearc.quality_control import hto
 from cytearc.quality_control.hto import (
     _background_clusters,
@@ -16,10 +20,12 @@ from cytearc.quality_control.hto import (
     _cluster_labels,
     _clr_normalize,
     _fit_negative_binomial_parameters,
+    _hto_demux_method,
     _negative_binomial_cutoff,
     _positive_hto_calls,
     hto_demux,
 )
+from cytearc.storage.artifacts import ArtifactRef, make_provenance, provenance_hash
 from cytearc.storage.selections import read_stored_selection_indices
 from tests.storage_helpers import write_count_store
 
@@ -58,6 +64,44 @@ def planted_hto_counts(
         counts, columns=names, index=[f"cell{index}" for index in range(len(truth))]
     )
     return frame, np.asarray(truth, dtype=object)
+
+
+def poisson_background_counts(
+    sizes: tuple[int, ...] = (230, 200, 160, 10),
+    *,
+    n_negatives: int = 0,
+    n_doublets: int = 0,
+    seed: int = 0,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Return HTO counts whose untagged channels are Poisson(5) background.
+
+    ``sizes`` holds the number of singlets of each HTO, whose own tag is
+    Poisson(200). Negatives carry no tag, and each doublet carries two tags
+    drawn from all HTOs but the last.
+    """
+    rng = np.random.default_rng(seed)
+    names = [f"HTO_{index + 1}" for index in range(len(sizes))]
+    tags = np.repeat(np.arange(len(sizes)), sizes)
+    singlets = rng.poisson(5, size=(tags.size, len(sizes)))
+    singlets[np.arange(tags.size), tags] = rng.poisson(200, size=tags.size)
+    negatives = rng.poisson(5, size=(n_negatives, len(sizes)))
+    doublets = rng.poisson(5, size=(n_doublets, len(sizes)))
+    for row in range(n_doublets):
+        pair = rng.choice(len(sizes) - 1, size=2, replace=False)
+        doublets[row, pair] = rng.poisson(200, size=2)
+    truth = np.concatenate(
+        [
+            np.asarray(names, dtype=object)[tags],
+            np.full(n_negatives, "Negative", dtype=object),
+            np.full(n_doublets, "Doublet", dtype=object),
+        ]
+    )
+    frame = pd.DataFrame(
+        np.vstack([singlets, negatives, doublets]),
+        columns=names,
+        index=[f"cell{index}" for index in range(truth.size)],
+    )
+    return frame, truth
 
 
 def nb2_quantile(mu: float, alpha: float, quantile: float = 0.99) -> int:
@@ -155,6 +199,22 @@ def test_positive_calls_exceed_the_unshifted_cutoff_strictly(monkeypatch):
     # the 99th percentile itself is not positive.
     assert fitted == [([1, 2], "HTO_A")]
     assert positive["HTO_A"].tolist() == [False, False, False, True]
+
+
+@pytest.mark.parametrize("quantile", [0.5, 0.99, 0.999, 0.9999])
+def test_positive_calls_exceed_the_requested_quantile(monkeypatch, quantile):
+    monkeypatch.setattr(
+        hto, "_fit_negative_binomial_parameters", lambda values, name: (3.0, 0.1)
+    )
+    values = np.arange(30)
+    counts = pd.DataFrame({"HTO_A": values})
+
+    positive = _positive_hto_calls(
+        counts, np.repeat([0, 1], 15), positive_quantile=quantile
+    )
+
+    cutoff = nb2_quantile(3.0, 0.1, quantile)
+    assert positive["HTO_A"].tolist() == (values > cutoff).tolist()
 
 
 def test_background_cluster_uses_raw_means():
@@ -495,6 +555,90 @@ def test_hto_demux_requires_an_integer_seed(random_seed):
         hto_demux(counts, random_seed=random_seed)
 
 
+_NOT_REAL = (TypeError, "positive_quantile must be a real number")
+_NOT_FINITE = (ValueError, "positive_quantile must be finite")
+_OUT_OF_RANGE = (ValueError, "positive_quantile must be greater than 0 and less than 1")
+INVALID_QUANTILES = [
+    (True, *_NOT_REAL),
+    (np.False_, *_NOT_REAL),
+    ("0.99", *_NOT_REAL),
+    (None, *_NOT_REAL),
+    (0.99 + 0j, *_NOT_REAL),
+    (np.nan, *_NOT_FINITE),
+    (-np.inf, *_NOT_FINITE),
+    (0, *_OUT_OF_RANGE),
+    (0.0, *_OUT_OF_RANGE),
+    (1, *_OUT_OF_RANGE),
+    (1.0, *_OUT_OF_RANGE),
+    (-0.5, *_OUT_OF_RANGE),
+    (99.0, *_OUT_OF_RANGE),
+]
+
+
+@pytest.mark.parametrize(("positive_quantile", "error", "message"), INVALID_QUANTILES)
+def test_hto_demux_requires_a_quantile_between_0_and_1(
+    positive_quantile, error, message
+):
+    counts, _ = planted_hto_counts()
+
+    with pytest.raises(error, match=f"^{re.escape(message)}$"):
+        hto_demux(counts, positive_quantile=positive_quantile)
+
+
+def test_hto_demux_defaults_to_the_seurat_positive_quantile():
+    counts, truth = planted_hto_counts()
+
+    identities = hto_demux(counts)
+
+    for quantile in (0.99, np.float64(0.99), Fraction(99, 100)):
+        pd.testing.assert_series_equal(
+            hto_demux(counts, positive_quantile=quantile), identities
+        )
+    np.testing.assert_array_equal(identities.to_numpy(), truth)
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test_a_higher_positive_quantile_calls_fewer_false_doublets(seed):
+    # Every cell carries one tag. Without a negative population, k-means
+    # splits a large hashtag into two of its clusters, and background counts
+    # above a tag's cutoff make false doublets.
+    counts, truth = poisson_background_counts(seed=seed)
+
+    # The k-means restarts over these few cells gain nothing from threads.
+    with threadpool_limits(limits=1):
+        calls = {
+            quantile: hto_demux(counts, positive_quantile=quantile).to_numpy()
+            for quantile in (0.99, 0.999, 0.9999)
+        }
+
+    doublets = {quantile: int(np.sum(c == "Doublet")) for quantile, c in calls.items()}
+    assert doublets[0.99] > 0.05 * len(counts)
+    assert doublets[0.999] < doublets[0.99] / 2
+    assert doublets[0.9999] <= doublets[0.999]
+    for called in calls.values():
+        # A higher cutoff still finds every dominant tag, and singlets keep
+        # the tag they carry.
+        assert not np.any(called == "Negative")
+        singlets = called != "Doublet"
+        np.testing.assert_array_equal(called[singlets], truth[singlets])
+
+
+def test_a_higher_positive_quantile_still_calls_doublets_and_negatives():
+    counts, truth = poisson_background_counts(n_negatives=30, n_doublets=48, seed=1)
+
+    with threadpool_limits(limits=1):
+        default = hto_demux(counts).to_numpy()
+        stricter = hto_demux(counts, positive_quantile=0.999).to_numpy()
+
+    def false_doublets(called: np.ndarray) -> int:
+        return int(np.sum((called == "Doublet") & (truth != "Doublet")))
+
+    assert false_doublets(stricter) < false_doublets(default)
+    for called in (default, stricter):
+        np.testing.assert_array_equal(called[truth == "Doublet"], "Doublet")
+        assert np.mean(called[truth == "Negative"] == "Negative") >= 0.9
+
+
 def test_hto_identity_artifact_holds_the_planted_identities_of_selected_cells(
     tmp_path: Path,
 ):
@@ -548,3 +692,105 @@ def test_hto_identity_artifact_holds_the_planted_identities_of_selected_cells(
     np.testing.assert_array_equal(store.artifacts.load(ref)["values"][:], expected)
     assert store.qc.hto_demultiplexing(selection) == ref
     assert "HTO0" not in store.cells.columns
+
+
+def test_default_hto_identity_is_the_one_cytearc_1_2_recorded():
+    arguments = HtoIdentityArguments(
+        cell_selection=ArtifactRef(
+            scope="datastore",
+            assay=None,
+            kind="cell_selection",
+            artifact_id="1" * 64,
+        ),
+        feature_ids_fingerprint="2" * 64,
+        method=_hto_demux_method(0.99),
+        random_seed=0,
+        invalidate_cache=False,
+    )
+
+    def identity(arguments: HtoIdentityArguments) -> str:
+        record = arguments.to_record()
+        return provenance_hash(
+            make_provenance(
+                operation=arguments.operation,
+                parameters=record.parameters,
+                inputs=record.inputs,
+            )
+        )
+
+    # CyteArc 1.2.0 recorded its fixed quantile, 0.99, as the cutoff quantile
+    # of the method record, so stored artifacts of the default stay reused.
+    assert identity(arguments) == (
+        "eade487927ab18af43de927d0ff3d067ae58d3de6fde4f5d6b144cf4f0c6c80c"
+    )
+    stricter = dataclasses.replace(arguments, method=_hto_demux_method(0.999))
+    assert stricter.to_record().parameters["method"]["cutoff"]["quantile"] == 0.999
+    assert identity(stricter) != identity(arguments)
+
+
+@pytest.mark.parametrize(("positive_quantile", "error", "message"), INVALID_QUANTILES)
+def test_hto_demultiplexing_rejects_an_invalid_quantile_before_reading_counts(
+    tmp_path: Path, monkeypatch, positive_quantile, error, message
+):
+    counts, _ = planted_hto_counts()
+    store = _hto_store(tmp_path, counts)
+    selection = store.snapshot_cell_selection("I")
+
+    def unread(*args, **kwargs):
+        raise AssertionError("the selection was read")
+
+    monkeypatch.setattr(
+        "cytearc.datastore._operations.quality_control.read_stored_selection_indices",
+        unread,
+    )
+    with pytest.raises(error, match=f"^{re.escape(message)}$"):
+        store.qc.hto_demultiplexing(selection, positive_quantile=positive_quantile)
+    assert store.artifacts.list(kind="hto_identity", from_assay="HTO") == []
+
+
+def test_each_positive_quantile_has_its_own_hto_identity_artifact(tmp_path: Path):
+    counts, _ = poisson_background_counts(seed=0)
+    store = _hto_store(tmp_path, counts)
+    selection = store.snapshot_cell_selection("I")
+    # The HTO assay names its features HTO0 to HTO3.
+    renamed = counts.set_axis([f"HTO{index}" for index in range(4)], axis=1)
+
+    # The datastore and the direct calls run their k-means restarts alike.
+    with threadpool_limits(limits=1):
+        default = store.qc.hto_demultiplexing(selection)
+        stricter = store.qc.hto_demultiplexing(selection, positive_quantile=0.999)
+        expected = {
+            quantile: hto_demux(renamed, positive_quantile=quantile).to_numpy()
+            for quantile in (0.99, 0.999)
+        }
+
+        assert stricter != default
+        for ref, quantile in ((default, 0.99), (stricter, 0.999)):
+            parameters = store.artifacts.inspect(ref).parameters
+            assert parameters is not None
+            assert parameters["method"]["cutoff"]["quantile"] == quantile
+            np.testing.assert_array_equal(
+                store.artifacts.load(ref)["values"][:], expected[quantile]
+            )
+        assert np.sum(expected[0.999] == "Doublet") < np.sum(
+            expected[0.99] == "Doublet"
+        )
+        # Equal quantiles reuse their artifact, however they are spelled.
+        assert store.qc.hto_demultiplexing(selection) == default
+        assert store.qc.hto_demultiplexing(selection, positive_quantile=0.99) == default
+        for spelling in (np.float64(0.999), Fraction(999, 1000)):
+            assert (
+                store.qc.hto_demultiplexing(selection, positive_quantile=spelling)
+                == stricter
+            )
+    assert len(store.artifacts.list(kind="hto_identity", from_assay="HTO")) == 2
+
+
+def _hto_store(tmp_path: Path, counts: pd.DataFrame) -> DataStore:
+    """Write ``counts`` as the HTO assay of a new store beside a small RNA assay."""
+    rna = np.random.default_rng(3).poisson(2.0, size=(len(counts), 12))
+    path = tmp_path / "store.zarr"
+    write_count_store(str(path), {"RNA": rna, "HTO": counts.to_numpy()}, "uint16")
+    return DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )

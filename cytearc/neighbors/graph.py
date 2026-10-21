@@ -5,6 +5,7 @@ from numba import jit, njit
 from scipy.sparse import coo_matrix, csr_matrix
 
 from ..utils.arguments import integer_argument
+from ..utils.numba import enable_dispatcher_cache
 from ..utils.progress import iter_progress
 
 
@@ -18,6 +19,8 @@ def smooth_knn_chunk(
     """Convert one KNN distance block into fuzzy graph edges."""
     from umap.umap_ import compute_membership_strengths, smooth_knn_dist
 
+    # umap-learn compiles both kernels without an on-disk cache.
+    enable_dispatcher_cache(smooth_knn_dist, compute_membership_strengths)
     indices_array = np.asarray(indices)
     distance_array = np.asarray(distances, dtype=np.float32)
     if not distance_array.flags.c_contiguous:
