@@ -124,6 +124,9 @@ cytearc.CrToZarr(cytearc.CrDirReader("filtered_feature_bc_matrix"), zarr_loc="di
 candidates = cytearc.inspect_mtx("mtx_dir")
 reader = cytearc.MtxReader(candidates[0])
 print(reader.assayFeats)
+# Coordinates in any order import; "unordered" files (Cell Ranger 1/2, shuffled) are sorted
+# into temporary rows of temporaryDiskBytes at construction (temp_dir= picks where)
+print(reader.coordinateOrder, reader.temporaryDiskBytes)
 cytearc.MtxToZarr(reader, zarr_loc="mtx.zarr").dump()
 
 # H5AD: inspect first; selected obsm/obs values become artifacts, not live columns
@@ -154,6 +157,18 @@ for path in ("dir.zarr", "mtx.zarr", "h5ad.zarr", "seurat.zarr"):
 ```
 
 `CSVReader`/`CSVtoZarr` (small dense CSV) and `SparseToZarr` (SciPy CSR plus IDs) also exist.
+
+Repeated feature IDs (some exporters use gene symbols as IDs) raise `ValueError: ... must contain
+unique values`. Renaming them is an explicit choice: `duplicate_feature_ids="make_unique"` on
+`MtxReader`, `CrDirReader`, `CrH5Reader`, or `H5adReader` (also via `H5adReader.from_inspect`)
+keeps the first occurrence and renames later ones `ID-1`, `ID-2`, ... in file order across all
+assays (an antibody `CD4` after the gene `CD4` becomes `CD4-1`), logs how many, and leaves feature
+names unchanged. Record that choice; cell IDs must always be unique. `CSVReader` never raises for
+a repeated header: pandas renames it `ID.1`, `ID.2`, ... without a warning.
+
+```python
+reader = cytearc.CrDirReader("filtered_gene_bc_matrices/hg19", duplicate_feature_ids="make_unique")
+```
 
 Every converter raises `CountLayoutMemoryError`, a `MemoryError` subclass, when the
 count layout does not fit the budget. Catch `MemoryError`. Prefer a larger `mem_budget` when the host has

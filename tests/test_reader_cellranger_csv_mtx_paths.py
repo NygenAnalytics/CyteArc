@@ -793,6 +793,113 @@ def test_feature_major_import_without_free_temporary_disk_fails_and_cleans_up(
     np.testing.assert_array_equal(_counts(store), [[0, 1], [1, 0]])
 
 
+# Unordered entries: cell 0 holds feature 1 twice, apart, and feature 0, and
+# cell 1 holds feature 0.
+_UNORDERED = "2 1 2\n1 2 5\n1 1 3\n2 1 4\n"
+
+
+@pytest.mark.parametrize(
+    ("entries", "error", "message"),
+    [
+        ("2 1 2\n1 2 5\n1 1 3\n", ValueError, "declares 4 entries, but 3 were read"),
+        ("2 1 2\n1 2 5\n2 2 1\n2 1 4\n", RuntimeError, "inconsistent row pointers"),
+        ("2 1 2\n1 2 5\n1 1 3\n3 1 4\n", RuntimeError, "inconsistent row pointers"),
+        ("2 1 2\n1 2 5\n1 1 3\n2 1 40\n", OverflowError, "the file changed"),
+        ("2 1 5\n1 2 5\n1 1 3\n2 1 5\n", OverflowError, "the file changed"),
+    ],
+    ids=[
+        "entries-removed",
+        "cell-entries-moved",
+        "duplicate-replaced",
+        "count-raised",
+        "sum-raised",
+    ],
+)
+def test_unordered_matrix_changed_after_construction_is_rejected_when_sorted_again(
+    tmp_path: Path, entries: str, error: type[Exception], message: str
+) -> None:
+    _write_mex(tmp_path, _UNORDERED, n_features=3, n_cells=2)
+    reader = MtxReader(inspect_mtx(tmp_path)[0], temp_dir=str(tmp_path))
+    try:
+        assert reader.coordinateOrder == "unordered"
+        # The first read streams the rows that construction sorted, and
+        # removes them.
+        np.testing.assert_array_equal(
+            np.vstack([batch.toarray() for batch in reader.consume(1)]),
+            [[3, 6, 0], [5, 0, 0]],
+        )
+        (tmp_path / "matrix.mtx").write_text(f"{_BANNER}3 2 4\n{entries}")
+        with pytest.raises(error, match=message):
+            list(reader.consume(1))
+    finally:
+        reader.close()
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+
+
+def test_unordered_matrix_whose_kept_cell_lost_an_entry_is_rejected(
+    tmp_path: Path,
+) -> None:
+    # Cell 0 holds feature 1 twice, apart, and feature 0; the cutoff drops
+    # cell 1, which holds one count.
+    _write_mex(tmp_path, "2 1 2\n2 2 1\n1 1 3\n2 1 4\n", n_features=3, n_cells=2)
+    reader = MtxReader(
+        inspect_mtx(tmp_path)[0],
+        is_filtered=False,
+        filtering_cutoff=1,
+        temp_dir=str(tmp_path),
+    )
+    try:
+        assert reader.coordinateOrder == "unordered"
+        np.testing.assert_array_equal(
+            np.vstack([batch.toarray() for batch in reader.consume(1)]), [[3, 6, 0]]
+        )
+        # An entry of the kept cell moves to the dropped cell, so the header
+        # still declares every entry and no kept cell gains one.
+        (tmp_path / "matrix.mtx").write_text(
+            f"{_BANNER}3 2 4\n2 1 2\n2 2 1\n1 2 3\n2 1 4\n"
+        )
+        with pytest.raises(RuntimeError, match="inconsistent row pointers"):
+            list(reader.consume(1))
+    finally:
+        reader.close()
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+
+
+def test_unordered_matrix_without_free_temporary_disk_fails_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_mex(tmp_path, _UNORDERED, n_features=3, n_cells=2)
+    candidate = inspect_mtx(tmp_path)[0]
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+    # Four uint8 counts with int32 feature indexes.
+    with pytest.raises(OSError, match="needs 20 temporary bytes, but 0 bytes are free"):
+        MtxReader(candidate, temp_dir=str(tmp_path))
+    monkeypatch.undo()
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+
+    reader = MtxReader(candidate, temp_dir=str(tmp_path))
+    stores = [MemoryStore(), MemoryStore()]
+    try:
+        MtxToZarr(
+            reader, stores[0], mem_budget="64M", nthreads=1, policy=_POLICY
+        ).dump()
+        writer = MtxToZarr(
+            reader, stores[1], mem_budget="64M", nthreads=1, policy=_POLICY
+        )
+        # The second import sorts the rows again and fails for want of disk.
+        monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+        with pytest.raises(OSError, match="temporary bytes, but 0 bytes are free"):
+            writer.dump()
+        monkeypatch.undo()
+        assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+        writer.dump()
+    finally:
+        reader.close()
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+    for store in stores:
+        np.testing.assert_array_equal(_counts(store), [[3, 6, 0], [5, 0, 0]])
+
+
 def test_zip_matrix_imports_repeatedly_and_removes_each_extraction(
     tmp_path: Path,
 ) -> None:

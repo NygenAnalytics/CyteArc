@@ -182,7 +182,14 @@ The first call of the default Leiden backend in a fresh environment compiles its
 once, which took about 26 seconds on a recent laptop. Later processes load the compiled kernels
 from Numba's on-disk cache, about 0.4 seconds for their first call, and later calls in the same
 process add only a few milliseconds of overhead. The cache needs a writable directory
-(`NUMBA_CACHE_DIR` sets one).
+(`NUMBA_CACHE_DIR` sets one). Graph construction and UMAP use the same cache: CyteArc enables it
+for the umap-learn kernels they call, which umap-learn compiles without one. A densMAP layout
+still compiles one kernel each time it runs, because umap-learn creates that kernel inside its
+layout function.
+To build the cache into a deployment image, run a small analysis with `NUMBA_CACHE_DIR` set while
+building it, and set `NUMBA_CPU_NAME` (for example `x86-64-v3`) and an empty
+`NUMBA_CPU_FEATURES` both then and at run time, so the cache does not depend on the build
+machine's processor; the machines that run the image must support that processor level.
 
 ## Why will my existing RNA Zarr store not open?
 

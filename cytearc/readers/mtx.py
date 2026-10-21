@@ -5,6 +5,7 @@ import os
 import shutil
 import stat
 import tempfile
+import weakref
 import zipfile
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
@@ -20,10 +21,24 @@ from scipy.sparse import coo_matrix, csr_matrix
 from ..utils.arrays import cumulative_nnz, max_window_nnz
 from ..utils.count_values import CountValueRange, new_count_ranges
 from .cellranger import CrReader
-from ._text import require_unique_identifiers
+from ._text import (
+    DuplicateFeatureIds,
+    duplicate_feature_ids_option,
+    require_unique_identifiers,
+    unique_feature_identifiers,
+)
 
 type MatrixOrientation = Literal["featuresByCells", "cellsByFeatures"]
-type CoordinateOrder = Literal["cellMajor", "featureMajor"]
+type CoordinateOrder = Literal["cellMajor", "featureMajor", "unordered"]
+
+_CHANGED_COUNT_MESSAGE = (
+    "A Matrix Market count exceeds the largest count found when the reader "
+    "scanned the file; the file changed"
+)
+_CHANGED_UNORDERED_ROWS_MESSAGE = (
+    "Unordered Matrix Market preparation produced inconsistent row pointers; "
+    "the file changed after the reader scanned it"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -497,6 +512,24 @@ def _column_name(values: tuple[str, ...], preferences: tuple[str, ...]) -> str:
     )
 
 
+def _remove_prepared_rows(
+    directory: Path,
+    arrays: tuple[np.ndarray | np.memmap, ...],
+) -> None:
+    """Remove the prepared rows of a reader that was never closed.
+
+    POSIX systems remove files that are still memory-mapped, but Windows does
+    not, so only when the first removal fails are the maps closed, as
+    ``release`` closes them, and the removal tried again.
+    """
+    try:
+        shutil.rmtree(directory)
+    except OSError:
+        for array in arrays:
+            _MtxEngine._close_array(array)
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 class _MtxEngine:
     def __init__(
         self,
@@ -508,6 +541,7 @@ class _MtxEngine:
         is_filtered: bool,
         filtering_cutoff: int,
         temp_dir: str | None,
+        duplicate_feature_ids: DuplicateFeatureIds,
     ) -> None:
         self.candidate = candidate
         self.separator = separator
@@ -515,6 +549,7 @@ class _MtxEngine:
         self.isFiltered = bool(is_filtered)
         self.filteringCutoff = int(filtering_cutoff)
         self.tempDir = None if temp_dir is None else str(Path(temp_dir))
+        self.duplicateFeatureIds = duplicate_feature_ids_option(duplicate_feature_ids)
         if self.filteringCutoff < 0:
             raise ValueError("filtering_cutoff cannot be negative")
         if self.tempDir is not None and not Path(self.tempDir).is_dir():
@@ -524,9 +559,13 @@ class _MtxEngine:
         self._archiveTemporary: Any | None = None
         self._archivePaths: dict[str, str] = {}
         self._csrDirectory: Path | None = None
+        self._csrFinalizer: weakref.finalize[Any, Any] | None = None
         self._csrData: np.ndarray | np.memmap | None = None
         self._csrIndices: np.ndarray | np.memmap | None = None
         self._csrIndptr: np.ndarray | np.memmap | None = None
+        # The row slots that the scan counted for each kept cell of an
+        # unordered matrix, which hold its entries before they are summed.
+        self._slotPointers: np.ndarray | None = None
         self._importLinesInMem = 100_000
         self.temporaryDiskBytes = 0
         try:
@@ -540,7 +579,7 @@ class _MtxEngine:
             self.rawCellCount = candidate.nCells
             self.nFeatures = candidate.nFeatures
             (
-                self._rawFeatureIds,
+                self._sourceFeatureIds,
                 self._rawFeatureNames,
                 self._rawFeatureTypes,
             ) = self._read_features()
@@ -549,7 +588,11 @@ class _MtxEngine:
                 self._rawCellColumns,
                 self.selectedCellIdKey,
             ) = self._read_cells(cell_id_key)
-            require_unique_identifiers(self._rawFeatureIds, "Feature IDs")
+            self._rawFeatureIds = unique_feature_identifiers(
+                self._sourceFeatureIds,
+                "Feature IDs",
+                self.duplicateFeatureIds,
+            )
             require_unique_identifiers(self._rawCellNames, "Cell IDs")
 
             (
@@ -566,13 +609,34 @@ class _MtxEngine:
                     np.int64,
                     copy=False,
                 )
-            self._set_valid_cells(valid, row_nnz, cell_maxima)
-            # The scan's feature maxima cover every raw cell, so they are the
-            # kept cells' maxima only when no cell is dropped.
-            self._keptFeatureMaxima: np.ndarray | None = (
-                feature_maxima if valid.size == self.rawCellCount else None
-            )
+            self._set_valid_cells(valid)
             self._featureColumns = self._feature_reference_columns()
+            self._keptFeatureMaxima: np.ndarray | None
+            if self.coordinateOrder == "unordered":
+                # The totals are exact in any order, and the sum of a cell's
+                # duplicate coordinates never exceeds its total, so the
+                # largest kept total bounds every count of the sorted rows.
+                self._slotPointers = cumulative_nnz(row_nnz[valid])
+                kept_total_maximum = int(cell_totals[valid].max(initial=0))
+                del row_nnz, cell_totals, cell_maxima, feature_maxima
+                pointers, kept_maxima, self._keptFeatureMaxima = (
+                    self._build_unordered_rows(
+                        self._importLinesInMem,
+                        kept_total_maximum,
+                        expected=None,
+                    )
+                )
+                self._set_row_counts(pointers, int(kept_maxima.max(initial=0)))
+            else:
+                self._set_row_counts(
+                    cumulative_nnz(row_nnz[valid]),
+                    int(cell_maxima[valid].max(initial=0)),
+                )
+                # The scan's feature maxima cover every raw cell, so they are
+                # the kept cells' maxima only when no cell is dropped.
+                self._keptFeatureMaxima = (
+                    feature_maxima if valid.size == self.rawCellCount else None
+                )
         except BaseException:
             self.release()
             raise
@@ -619,20 +683,18 @@ class _MtxEngine:
     def _local_path(self, path: str) -> str:
         return self._archivePaths.get(path, path)
 
-    def _set_valid_cells(
-        self,
-        valid: np.ndarray,
-        row_nnz: np.ndarray,
-        cell_maxima: np.ndarray,
-    ) -> None:
+    def _set_valid_cells(self, valid: np.ndarray) -> None:
         self.validCellIndexes = valid
         self.nCells = int(valid.size)
         self._cellNames = self._rawCellNames[valid]
         self._cellColumns = {
             name: values[valid] for name, values in self._rawCellColumns.items()
         }
-        self._cumulativeRowNnz = cumulative_nnz(row_nnz[valid])
-        self.countMaximum = int(cell_maxima[valid].max(initial=0))
+
+    def _set_row_counts(self, pointers: np.ndarray, count_maximum: int) -> None:
+        """Keep the row pointers and the largest count of the kept cells."""
+        self._cumulativeRowNnz = pointers
+        self.countMaximum = int(count_maximum)
         # Batches hold the kept counts in the narrowest dtype that holds them.
         self.matrixDtype: np.dtype[Any] = np.min_scalar_type(self.countMaximum)
 
@@ -778,7 +840,9 @@ class _MtxEngine:
         )
         reference_ids = frame[id_column].astype(str).to_numpy()
         require_unique_identifiers(reference_ids, "Feature-reference IDs")
-        unknown = sorted(set(reference_ids).difference(self._rawFeatureIds))
+        # The reference names features by their IDs in the feature sidecar,
+        # before any repeated ID is renamed.
+        unknown = sorted(set(reference_ids).difference(self._sourceFeatureIds))
         if unknown:
             raise ValueError(
                 "Feature reference lists IDs that are not matrix features: "
@@ -786,7 +850,7 @@ class _MtxEngine:
             )
         positions = {value: index for index, value in enumerate(reference_ids)}
         order = np.fromiter(
-            (positions.get(str(value), -1) for value in self._rawFeatureIds),
+            (positions.get(str(value), -1) for value in self._sourceFeatureIds),
             dtype=np.int64,
             count=self.nFeatures,
         )
@@ -893,12 +957,16 @@ class _MtxEngine:
         self,
         lines_in_mem: int,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, CoordinateOrder]:
-        """Return the entries, total, and largest count of each raw cell, and
-        the largest count of each feature.
+        """Return the entries, total, and largest count of each raw cell, the
+        largest count of each feature, and the coordinate order.
 
-        Coordinates are validated in either cell-major or feature-major order,
-        which keeps duplicate coordinates adjacent, so the counts are summed
-        over duplicates, as the import stores them.
+        Cell-major and feature-major coordinates keep duplicate coordinates
+        adjacent, so the counts are summed over duplicates, as the import
+        stores them. Coordinates in any other order are unordered. Their
+        totals are exact, but duplicates that are not adjacent count as
+        separate entries and are not summed into the largest counts, so
+        construction takes the entries and largest counts of the kept cells
+        from the sorted rows instead.
         """
         row_nnz = np.zeros(self.rawCellCount, dtype=np.int64)
         cell_totals = np.zeros(self.rawCellCount, dtype=np.uint64)
@@ -907,8 +975,8 @@ class _MtxEngine:
         previous: tuple[int, int] | None = None
         pending: tuple[int, int, np.uint64] | None = None
         parsed = 0
-        cell_violation: int | None = None
-        feature_violation: int | None = None
+        cell_major = True
+        feature_major = True
 
         def account(
             features: np.ndarray,
@@ -923,24 +991,19 @@ class _MtxEngine:
         for features, cells, values in self._raw_chunks(lines_in_mem):
             if features.size == 0:
                 continue
-            cell_previous = None if previous is None else (previous[1], previous[0])
-            cell_bad = self._order_violation(
-                cells,
-                features,
-                cell_previous,
-            )
-            feature_bad = self._order_violation(features, cells, previous)
-            if cell_violation is None and cell_bad is not None:
-                cell_violation = parsed + cell_bad
-            if feature_violation is None and feature_bad is not None:
-                feature_violation = parsed + feature_bad
-            if cell_violation is not None and feature_violation is not None:
-                failed_at = max(cell_violation, feature_violation) + 1
-                raise ValueError(
-                    "Matrix Market coordinates are neither cell-major nor "
-                    f"feature-major at entry {failed_at}"
-                )
-            previous = (int(features[-1]), int(cells[-1]))
+            if cell_major or feature_major:
+                if cell_major:
+                    cell_previous = (
+                        None if previous is None else (previous[1], previous[0])
+                    )
+                    cell_major = (
+                        self._order_violation(cells, features, cell_previous) is None
+                    )
+                if feature_major:
+                    feature_major = (
+                        self._order_violation(features, cells, previous) is None
+                    )
+                previous = (int(features[-1]), int(cells[-1]))
             parsed += int(features.size)
 
             if pending is not None:
@@ -985,14 +1048,20 @@ class _MtxEngine:
                 np.array([pending[2]], dtype=np.uint64),
             )
         order: CoordinateOrder = (
-            "cellMajor" if cell_violation is None else "featureMajor"
+            "cellMajor"
+            if cell_major
+            else "featureMajor"
+            if feature_major
+            else "unordered"
         )
         return row_nnz, cell_totals, cell_maxima, feature_maxima, order
 
     def kept_feature_maxima(self) -> np.ndarray:
         """Return the largest count of each feature over the kept cells.
 
-        When the reader dropped cells, the file is read once more to find them.
+        When the reader dropped cells from a sorted matrix, the file is read
+        once more to find them. Construction finds them for an unordered
+        matrix while it sorts the rows.
         """
         if self._keptFeatureMaxima is None:
             kept = np.zeros(self.rawCellCount, dtype=bool)
@@ -1010,24 +1079,31 @@ class _MtxEngine:
         self,
         lines_in_mem: int,
     ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Yield the coordinates with each run of adjacent duplicates summed.
+
+        The order that the scan found is checked again, so a sorted file that
+        was reordered after the scan raises. Unordered coordinates are
+        yielded in file order.
+        """
         previous: tuple[int, int] | None = None
         pending: tuple[int, int, np.uint64] | None = None
         parsed = 0
         for features, cells, values in self._raw_chunks(lines_in_mem):
             if features.size == 0:
                 continue
-            first, second = (
-                (cells, features)
-                if self.coordinateOrder == "cellMajor"
-                else (features, cells)
-            )
-            invalid = self._order_violation(first, second, previous)
-            if invalid is not None:
-                raise ValueError(
-                    f"Matrix Market {self.coordinateOrder} order is invalid at "
-                    f"entry {parsed + invalid + 1}"
+            if self.coordinateOrder != "unordered":
+                first, second = (
+                    (cells, features)
+                    if self.coordinateOrder == "cellMajor"
+                    else (features, cells)
                 )
-            previous = (int(first[-1]), int(second[-1]))
+                invalid = self._order_violation(first, second, previous)
+                if invalid is not None:
+                    raise ValueError(
+                        f"Matrix Market {self.coordinateOrder} order is invalid at "
+                        f"entry {parsed + invalid + 1}"
+                    )
+                previous = (int(first[-1]), int(second[-1]))
             parsed += int(features.size)
 
             if pending is not None:
@@ -1078,10 +1154,7 @@ class _MtxEngine:
         file changed since then.
         """
         if values.size and int(values.max()) > self.countMaximum:
-            raise OverflowError(
-                "A Matrix Market count exceeds the largest count found when the "
-                "reader scanned the file; the file changed"
-            )
+            raise OverflowError(_CHANGED_COUNT_MESSAGE)
         return values.astype(self.matrixDtype, copy=False)
 
     def _prepare_feature_major(self, lines_in_mem: int = 1_000_000) -> None:
@@ -1176,13 +1249,251 @@ class _MtxEngine:
             for array in (data, indices, indptr):
                 if isinstance(array, np.memmap):
                     array.flush()
-            self._csrDirectory = directory
-            self._csrData = data
-            self._csrIndices = indices
-            self._csrIndptr = indptr
+            self._keep_rows(directory, data, indices, indptr)
         except BaseException:
             shutil.rmtree(directory, ignore_errors=True)
             raise
+
+    def _keep_rows(
+        self,
+        directory: Path,
+        data: np.ndarray | np.memmap,
+        indices: np.ndarray | np.memmap,
+        indptr: np.ndarray | np.memmap,
+    ) -> None:
+        """Hold prepared rows until :meth:`release` removes their directory.
+
+        A reader that is never closed removes the directory when it is
+        garbage collected or when the interpreter exits.
+        """
+        self._csrDirectory = directory
+        # The finalizer holds the arrays, never the engine, so that it can
+        # close their maps where mapped files cannot be removed.
+        self._csrFinalizer = weakref.finalize(
+            self, _remove_prepared_rows, directory, (data, indices, indptr)
+        )
+        self._csrData = data
+        self._csrIndices = indices
+        self._csrIndptr = indptr
+
+    def _build_unordered_rows(
+        self,
+        lines_in_mem: int,
+        limit: int,
+        *,
+        expected: np.ndarray | None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Sort the coordinates of an unordered matrix into temporary rows.
+
+        Each kept cell's coordinates are written to the slots that the scan
+        counted for it. Each row is then sorted by feature, its duplicate
+        coordinates are summed, and it is moved down over the slots that its
+        duplicates freed, so the rows end up packed in kept-cell order. The
+        rows hold the narrowest dtype that holds ``limit``, which bounds
+        every count and sum; a larger one means that the file changed.
+
+        Args:
+            lines_in_mem: Matrix Market lines parsed at a time, and entries
+                sorted at a time.
+            limit: Largest count that a row may hold.
+            expected: Row pointers that construction found, which a rebuild
+                must reproduce; None at construction.
+
+        Returns:
+            The row pointers of the kept cells, the largest count of each
+            kept cell, and the largest count of each feature over the kept
+            cells.
+        """
+        assert self._slotPointers is not None
+        slot_nnz = int(self._slotPointers[-1])
+        value_dtype = np.min_scalar_type(limit)
+        index_dtype = (
+            np.int32
+            if max(self.nFeatures, slot_nnz) <= np.iinfo(np.int32).max
+            else np.int64
+        )
+        parent = (
+            Path(self.tempDir)
+            if self.tempDir is not None
+            else Path(tempfile.gettempdir())
+        )
+        required = int(
+            slot_nnz * (value_dtype.itemsize + np.dtype(index_dtype).itemsize)
+        )
+        self.temporaryDiskBytes = required
+        free = shutil.disk_usage(parent).free
+        if required > free:
+            raise OSError(
+                f"Unordered Matrix Market preparation needs {required} temporary "
+                f"bytes, but {free} bytes are free in {parent}"
+            )
+        directory = Path(tempfile.mkdtemp(prefix="cytearc-mtx-csr-", dir=str(parent)))
+        try:
+            data: np.ndarray | np.memmap
+            indices: np.ndarray | np.memmap
+            if slot_nnz:
+                data = np.memmap(
+                    directory / "data.bin",
+                    mode="w+",
+                    dtype=value_dtype,
+                    shape=(slot_nnz,),
+                )
+                indices = np.memmap(
+                    directory / "indices.bin",
+                    mode="w+",
+                    dtype=index_dtype,
+                    shape=(slot_nnz,),
+                )
+            else:
+                data = np.empty(0, dtype=value_dtype)
+                indices = np.empty(0, dtype=index_dtype)
+            self._scatter_unordered(lines_in_mem, limit, data, indices)
+            row_counts, cell_maxima, feature_maxima = self._sort_unordered_rows(
+                lines_in_mem,
+                limit,
+                data,
+                indices,
+            )
+            pointers = cumulative_nnz(row_counts)
+            if expected is not None:
+                if not np.array_equal(pointers, expected):
+                    raise RuntimeError(_CHANGED_UNORDERED_ROWS_MESSAGE)
+                pointers = expected
+            for array in (data, indices):
+                if isinstance(array, np.memmap):
+                    array.flush()
+            self._keep_rows(directory, data, indices, pointers)
+        except BaseException:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+        return pointers, cell_maxima, feature_maxima
+
+    def _scatter_unordered(
+        self,
+        lines_in_mem: int,
+        limit: int,
+        data: np.ndarray | np.memmap,
+        indices: np.ndarray | np.memmap,
+    ) -> None:
+        """Write each kept cell's coordinates into the slots counted for it."""
+        assert self._slotPointers is not None
+        cell_map = np.full(self.rawCellCount, -1, dtype=np.int64)
+        cell_map[self.validCellIndexes] = np.arange(self.nCells, dtype=np.int64)
+        cursor = np.asarray(self._slotPointers[:-1]).copy()
+        ends = self._slotPointers[1:]
+        for features, cells, values in self._coalesced_chunks(lines_in_mem):
+            output_cells = cell_map[cells]
+            selected = output_cells >= 0
+            if not selected.any():
+                continue
+            output_cells = output_cells[selected]
+            selected_features = features[selected]
+            selected_values = values[selected]
+            # A count above every kept total can only come from a changed file.
+            if int(selected_values.max()) > limit:
+                raise OverflowError(_CHANGED_COUNT_MESSAGE)
+            order = np.argsort(output_cells)
+            grouped_cells = output_cells[order]
+            edges = np.concatenate(
+                (
+                    np.array([0], dtype=np.int64),
+                    np.flatnonzero(grouped_cells[1:] != grouped_cells[:-1]).astype(
+                        np.int64
+                    )
+                    + 1,
+                    np.array([grouped_cells.size], dtype=np.int64),
+                )
+            )
+            widths = np.diff(edges)
+            first_cells = grouped_cells[edges[:-1]]
+            starts = cursor[first_cells]
+            if bool(np.any(starts + widths > ends[first_cells])):
+                raise RuntimeError(_CHANGED_UNORDERED_ROWS_MESSAGE)
+            positions = np.repeat(starts - edges[:-1], widths)
+            positions += np.arange(grouped_cells.size, dtype=np.int64)
+            cursor[first_cells] += widths
+            data[positions] = selected_values[order]
+            indices[positions] = selected_features[order]
+        if not np.array_equal(cursor, ends):
+            raise RuntimeError(_CHANGED_UNORDERED_ROWS_MESSAGE)
+
+    def _sort_unordered_rows(
+        self,
+        lines_in_mem: int,
+        limit: int,
+        data: np.ndarray | np.memmap,
+        indices: np.ndarray | np.memmap,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Sort each row by feature, sum its duplicates, and pack the rows.
+
+        Rows are read in blocks of at most ``lines_in_mem`` slots, or of one
+        row when it holds more. A row never grows, so each block is written
+        at or before the slots it was read from, and never over slots that
+        are still to be read.
+
+        Returns:
+            The number of distinct features and the largest count of each
+            kept cell, and the largest count of each feature over the kept
+            cells.
+        """
+        assert self._slotPointers is not None
+        slots = self._slotPointers
+        row_counts = np.zeros(self.nCells, dtype=np.int64)
+        cell_maxima = np.zeros(self.nCells, dtype=np.uint64)
+        feature_maxima = np.zeros(self.nFeatures, dtype=np.uint64)
+        width = max(1, self.nFeatures)
+        # A block's keys, its local row times the feature count plus the
+        # feature, must fit int64.
+        max_block_rows = int(np.iinfo(np.int64).max // width)
+        written = 0
+        row = 0
+        while row < self.nCells:
+            start = int(slots[row])
+            stop_row = int(np.searchsorted(slots, start + lines_in_mem, side="right"))
+            stop_row = min(
+                self.nCells, max(row + 1, stop_row - 1), row + max_block_rows
+            )
+            stop = int(slots[stop_row])
+            if stop > start:
+                block_features = np.array(indices[start:stop], dtype=np.int64)
+                block_values = np.array(data[start:stop], dtype=np.uint64)
+                local_rows = np.repeat(
+                    np.arange(stop_row - row, dtype=np.int64),
+                    np.diff(slots[row : stop_row + 1]),
+                )
+                keys = local_rows * width + block_features
+                order = np.argsort(keys)
+                keys = keys[order]
+                heads = np.flatnonzero(
+                    np.concatenate((np.array([True]), keys[1:] != keys[:-1]))
+                )
+                sums = np.add.reduceat(block_values[order], heads)
+                if int(sums.max()) > limit:
+                    raise OverflowError(_CHANGED_COUNT_MESSAGE)
+                keys = keys[heads]
+                rows = keys // width
+                columns = keys - rows * width
+                row_counts[row:stop_row] = np.bincount(rows, minlength=stop_row - row)
+                np.maximum.at(cell_maxima[row:stop_row], rows, sums)
+                np.maximum.at(feature_maxima, columns, sums)
+                end = written + int(sums.size)
+                data[written:end] = sums
+                indices[written:end] = columns
+                written = end
+            row = stop_row
+        return row_counts, cell_maxima, feature_maxima
+
+    def _prepare_unordered(self, lines_in_mem: int) -> None:
+        """Sort the rows again after a release removed them."""
+        if self._csrIndptr is not None:
+            return
+        # The counts of the kept cells were found when the rows were first
+        # sorted, so the rebuilt rows hold them in matrixDtype.
+        self._build_unordered_rows(
+            lines_in_mem,
+            self.countMaximum,
+            expected=self._cumulativeRowNnz,
+        )
 
     def configure_import_lines(self, lines_in_mem: int) -> None:
         self._importLinesInMem = int(lines_in_mem)
@@ -1201,6 +1512,12 @@ class _MtxEngine:
             except BaseException:
                 self.release()
                 raise
+        elif self.coordinateOrder == "unordered":
+            try:
+                self._prepare_unordered(resolved_lines)
+            except BaseException:
+                self.release()
+                raise
 
     @staticmethod
     def _close_array(array: np.ndarray | np.memmap | None) -> None:
@@ -1216,6 +1533,9 @@ class _MtxEngine:
         self._csrIndices = None
         self._csrIndptr = None
         gc.collect()
+        if self._csrFinalizer is not None:
+            self._csrFinalizer.detach()
+            self._csrFinalizer = None
         if self._csrDirectory is not None:
             shutil.rmtree(self._csrDirectory, ignore_errors=True)
             self._csrDirectory = None
@@ -1226,7 +1546,10 @@ class _MtxEngine:
             self._archivePaths.clear()
 
     def resident_bytes(self) -> int:
-        return int(self.validCellIndexes.nbytes + self._cumulativeRowNnz.nbytes)
+        slot_bytes = 0 if self._slotPointers is None else self._slotPointers.nbytes
+        return int(
+            self.validCellIndexes.nbytes + self._cumulativeRowNnz.nbytes + slot_bytes
+        )
 
     def max_window_nnz(self, window_rows: int) -> int:
         return max_window_nnz(self._cumulativeRowNnz, window_rows)
@@ -1249,9 +1572,23 @@ class _MtxEngine:
             if self.coordinateOrder == "cellMajor"
             else 0
         )
+        # The rows that construction sorts for an unordered matrix hold a
+        # dtype that holds every kept total, and each batch is cast from it.
+        row_value_bytes = (
+            self._csrData.dtype.itemsize
+            if self.coordinateOrder == "unordered"
+            and self._csrData is not None
+            and self._csrData.dtype != self.matrixDtype
+            else 0
+        )
         return int(
             lines_in_mem * (4 * parser_value_bytes + np.dtype(np.bool_).itemsize)
-            + source_nnz * (2 * np.dtype(np.int64).itemsize + self.matrixDtype.itemsize)
+            + source_nnz
+            * (
+                2 * np.dtype(np.int64).itemsize
+                + self.matrixDtype.itemsize
+                + row_value_bytes
+            )
             + cell_map_bytes
         )
 
@@ -1265,9 +1602,9 @@ class _MtxEngine:
         if lines_in_mem <= 0:
             raise ValueError("lines_in_mem must be positive")
         try:
-            if self.coordinateOrder == "featureMajor":
+            if self.coordinateOrder in ("featureMajor", "unordered"):
                 self.prepare(lines_in_mem)
-                source = self._consume_feature_major(batch_size)
+                source = self._consume_rows(batch_size)
             else:
                 self._ensure_archive_extracted()
                 if self.candidate.archivePath is not None:
@@ -1277,10 +1614,12 @@ class _MtxEngine:
         finally:
             self.release()
 
-    def _consume_feature_major(
+    def _consume_rows(
         self,
         batch_size: int,
     ) -> Generator[coo_matrix, None, None]:
+        """Yield batches of the rows prepared for a feature-major or an
+        unordered matrix."""
         # consume prepares the CSR arrays before it reads them.
         assert self._csrData is not None
         assert self._csrIndices is not None
@@ -1291,9 +1630,12 @@ class _MtxEngine:
             value_start = int(pointers[0])
             value_end = int(pointers[-1])
             local = pointers - value_start
+            values = np.array(self._csrData[value_start:value_end], copy=True)
+            if values.dtype != self.matrixDtype:
+                values = self._checked_values(values)
             matrix = csr_matrix(
                 (
-                    np.array(self._csrData[value_start:value_end], copy=True),
+                    values,
                     np.array(self._csrIndices[value_start:value_end], copy=True),
                     local,
                 ),
@@ -1393,11 +1735,58 @@ class _MtxEngine:
 class MtxReader(CrReader):
     """Read a selected Matrix Market triplet as cell-row sparse batches.
 
-    Construction reads the matrix once to validate it and to find its
-    coordinate order, the entries of each cell, and the largest count of each
-    kept cell and each feature, with duplicate coordinates summed. Batches hold
-    the counts in the narrowest unsigned dtype that holds the largest kept
-    count.
+    Construction reads the matrix to validate it and to find its coordinate
+    order, the entries of each cell, and the largest count of each kept cell
+    and each feature, with duplicate coordinates summed. Batches hold the
+    counts in the narrowest unsigned dtype that holds the largest kept count.
+
+    Coordinates may come in any order. A matrix sorted by cell or by feature
+    is read once at construction. Any other order, such as the descending
+    features within each cell that Cell Ranger 1 and 2 write, is unordered,
+    and construction reads it once more to write the entries of each kept
+    cell to temporary rows on disk, sorted by feature and with duplicate
+    coordinates summed wherever they are in the file. Imports read the cells
+    of an unordered or feature-major matrix from these rows; a feature-major
+    matrix is sorted into them when an import starts. ``temporaryDiskBytes``
+    reports the size of the rows, which the end of an import and ``close``
+    remove.
+
+    Args:
+        matrix_path: A candidate returned by :func:`~cytearc.inspect_mtx`, or
+            the path of a Matrix Market file.
+        feature_path: Feature sidecar of a matrix path. Not allowed with a
+            candidate.
+        cell_path: Cell sidecar of a matrix path. Not allowed with a
+            candidate.
+        feature_reference_path: Optional 10x Feature Reference CSV whose
+            columns are added to the features it lists.
+        cell_id_key: Parse Biosciences cell metadata column that holds the
+            cell IDs. Required unless the metadata holds exactly one of
+            ``bc_wells`` and ``bc_index``.
+        mtx_separator: Column delimiter in the MTX file.
+        index_offset: Value added to each MTX coordinate. The default turns
+            one-based coordinates into zero-based indexes.
+        is_filtered: Whether the cells are already filtered. When False,
+            only cells whose total count exceeds ``filtering_cutoff`` are
+            kept.
+        filtering_cutoff: Total count that a cell must exceed to be kept
+            when ``is_filtered`` is False.
+        temp_dir: Parent directory of the temporary files: the selected
+            members of a ZIP archive and the sorted rows. None uses the
+            system temporary directory.
+        duplicate_feature_ids: ``"error"`` rejects repeated feature IDs.
+            ``"make_unique"`` keeps the first occurrence of each ID and
+            renames each later one, in file order and across assays, by
+            appending ``-1``, ``-2``, and so on (skipping names that are
+            already IDs), as AnnData's ``var_names_make_unique`` does, and
+            logs a warning. Feature names are never changed, and repeated
+            cell IDs always raise.
+
+    Attributes:
+        coordinateOrder: ``"cellMajor"`` or ``"featureMajor"`` for sorted
+            coordinates, otherwise ``"unordered"``.
+        temporaryDiskBytes: Bytes of the temporary rows that the reader
+            prepared most recently.
     """
 
     def __init__(
@@ -1413,6 +1802,7 @@ class MtxReader(CrReader):
         is_filtered: bool = True,
         filtering_cutoff: int = 500,
         temp_dir: str | None = None,
+        duplicate_feature_ids: DuplicateFeatureIds = "error",
     ) -> None:
         if isinstance(matrix_path, MtxCandidate):
             if feature_path is not None or cell_path is not None:
@@ -1445,13 +1835,19 @@ class MtxReader(CrReader):
             is_filtered=is_filtered,
             filtering_cutoff=filtering_cutoff,
             temp_dir=temp_dir,
+            duplicate_feature_ids=duplicate_feature_ids,
         )
         self.validBarcodeIdx = self._engine.validCellIndexes
         self.matrixEntryCount = self._engine.matrixEntryCount
         self.coordinateOrder = self._engine.coordinateOrder
         self.selectedCellIdKey = self._engine.selectedCellIdKey
         self.temporaryDiskBytes = self._engine.temporaryDiskBytes
-        super().__init__(self._handle_version())
+        try:
+            super().__init__(self._handle_version())
+        except BaseException:
+            # The rows of an unordered matrix exist from construction on.
+            self._engine.release()
+            raise
         self.nCells = self._engine.nCells
 
     def _handle_version(self) -> dict[str, str]:
@@ -1483,8 +1879,9 @@ class MtxReader(CrReader):
         Matrix Market counts are non-negative integers, and construction
         already scanned them with duplicate coordinates summed and kept the
         largest count of each feature, so this does not use ``maxBytes``.
-        When the reader dropped cells, several groups need one more read of
-        the file to find the largest counts of the kept cells.
+        When the reader dropped cells from a sorted matrix, several groups
+        need one more read of the file to find the largest counts of the kept
+        cells.
         """
         value_ranges = new_count_ranges(featureGroups)
         if featureGroups is None or len(value_ranges) == 1:
@@ -1555,6 +1952,10 @@ class CrDirReader(MtxReader):
     reading and streaming methods come from
     :class:`~cytearc.readers.MtxReader`.
 
+    Cell Ranger 1 and 2 list the features of each barcode in descending
+    order, so construction sorts their matrices into temporary rows, as
+    :class:`~cytearc.readers.MtxReader` sorts every unordered matrix.
+
     Args:
         loc: Path to the directory that contains the Cell Ranger output.
         mtx_separator: Column delimiter in the MTX file.
@@ -1565,6 +1966,12 @@ class CrDirReader(MtxReader):
             kept.
         filtering_cutoff: Total count that a barcode must exceed to be kept
             when ``is_filtered`` is False.
+        temp_dir: Parent directory of the temporary files that
+            :class:`~cytearc.readers.MtxReader` describes. None uses the
+            system temporary directory.
+        duplicate_feature_ids: ``"error"`` rejects repeated feature IDs, and
+            ``"make_unique"`` renames each later occurrence, as
+            :class:`~cytearc.readers.MtxReader` describes.
     """
 
     def __init__(
@@ -1574,6 +1981,9 @@ class CrDirReader(MtxReader):
         index_offset: int = -1,
         is_filtered: bool = True,
         filtering_cutoff: int = 500,
+        *,
+        temp_dir: str | None = None,
+        duplicate_feature_ids: DuplicateFeatureIds = "error",
     ) -> None:
         candidates = inspect_mtx(loc)
         if len(candidates) != 1:
@@ -1587,4 +1997,6 @@ class CrDirReader(MtxReader):
             index_offset=index_offset,
             is_filtered=is_filtered,
             filtering_cutoff=filtering_cutoff,
+            temp_dir=temp_dir,
+            duplicate_feature_ids=duplicate_feature_ids,
         )

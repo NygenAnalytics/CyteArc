@@ -160,7 +160,7 @@ def _write_mtx(
     feature_types: list[str] | None = None,
 ) -> Path:
     """Write a Matrix Market triplet; ``encoding`` is ``integer``, ``real``,
-    ``featureMajor``, or ``duplicates``."""
+    ``featureMajor``, ``duplicates``, ``cellRanger2``, or ``unordered``."""
     directory.mkdir()
     entries = [
         (int(cell), column, value)
@@ -176,6 +176,25 @@ def _write_mtx(
         entries.sort(key=lambda entry: (entry[0], entry[1]))
     if encoding == "featureMajor":
         entries.sort(key=lambda entry: (entry[1], entry[0]))
+    if encoding == "cellRanger2":
+        # Cell Ranger 1 and 2 list the features of each cell in descending
+        # order.
+        entries.sort(key=lambda entry: (entry[0], -entry[1]))
+    if encoding == "unordered":
+        # Each count above one is split into two entries, and the shuffled
+        # entries mostly separate the halves, which may each fit a narrower
+        # dtype than their sum.
+        entries = [
+            part
+            for cell, column, value in entries
+            for part in (
+                [(cell, column, value - value // 2), (cell, column, value // 2)]
+                if value > 1
+                else [(cell, column, value)]
+            )
+        ]
+        order = np.random.default_rng(5).permutation(len(entries))
+        entries = [entries[index] for index in order]
     field = "real" if encoding == "real" else "integer"
     lines = [
         f"%%MatrixMarket matrix coordinate {field} general",
@@ -399,6 +418,8 @@ _ENCODINGS = [
     ("mtx", "real"),
     ("mtx", "featureMajor"),
     ("mtx", "duplicates"),
+    ("mtx", "cellRanger2"),
+    ("mtx", "unordered"),
     ("csv", "integer"),
     ("csv", "real"),
     ("sparse", "float32"),
@@ -658,7 +679,8 @@ def test_a_fractional_assay_keeps_its_dtype_without_widening_the_others(
     np.testing.assert_array_equal(root["ADT/counts"][:], values[:, 4:])
 
 
-def test_matrix_market_split_assays_range_over_the_kept_cells(tmp_path):
+@pytest.mark.parametrize("encoding", ["integer", "unordered"])
+def test_matrix_market_split_assays_range_over_the_kept_cells(tmp_path, encoding):
     values = _CITE_VALUES.copy()
     values[:, 0] += 400
     # The last cell holds the largest ADT count, but its total of 300 does not
@@ -667,7 +689,7 @@ def test_matrix_market_split_assays_range_over_the_kept_cells(tmp_path):
     dropped[0, 5] = 300
     source = np.vstack([values, dropped])
     root = _import_split(
-        "mtx", tmp_path, source, "integer", is_filtered=False, filtering_cutoff=300
+        "mtx", tmp_path, source, encoding, is_filtered=False, filtering_cutoff=300
     )
     assert root["RNA/counts"].dtype == np.uint16
     assert root["ADT/counts"].dtype == np.uint8

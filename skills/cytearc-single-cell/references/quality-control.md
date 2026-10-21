@@ -249,6 +249,7 @@ doublets = ds.qc.doublets(scaffold["clusters"], scaffold["connectivity_map"])  #
 | `pipeline.run(filtering=False, cell_cycle=False, paris=False)` | filtering on | Scaffold run for the label-free audit. |
 | `qc.doublets(random_seed=)` | `4444` | Keep fixed; change only to test score stability. |
 | `qc.doublets(heterotypic_fraction=)` | `0.8` | `0` only for a clustering with one cluster, which raises `ValueError` above 0; it then pairs any two sampled cells. |
+| `qc.hto_demultiplexing(positive_quantile=)` | `0.99` (Seurat's `positive.quantile`) | Raise (for example `0.999`) when doublet calls exceed the multiplet rate the loading predicts and their second tag sits near background; each quantile is its own `hto_identity` artifact. |
 
 ## Check before moving on
 

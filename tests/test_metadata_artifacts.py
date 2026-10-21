@@ -565,7 +565,7 @@ def test_hto_identity_is_artifact_backed(
     raw = np.asarray(datastore.assay2.rawData[cells].compute())
     feature_ids = np.asarray(datastore.assay2.feats.fetch_all("ids"))
     ((counts, kwargs),) = calls
-    assert kwargs == {"random_seed": 5}
+    assert kwargs == {"random_seed": 5, "positive_quantile": 0.99}
     assert counts.columns.tolist() == feature_ids.tolist()
     np.testing.assert_array_equal(counts.to_numpy(), raw)
     np.testing.assert_array_equal(

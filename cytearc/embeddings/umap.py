@@ -6,7 +6,7 @@ from scipy.sparse import csr_matrix, issparse
 
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
-from ..utils.numba import restore_numba_threads
+from ..utils.numba import enable_dispatcher_cache, restore_numba_threads
 from ..utils.progress import tqdm_params as default_tqdm_params
 
 locale.setlocale(locale.LC_NUMERIC, "C")
@@ -128,9 +128,19 @@ def simplicial_set_embedding(
     """Run UMAP simplicial-set embedding with optional densMAP."""
     import numba
     from sklearn.utils import check_random_state
+    from umap import layouts as umap_layouts
     from umap.layouts import optimize_layout_euclidean
     from umap.umap_ import make_epochs_per_sample
 
+    # umap-learn compiles the serial and parallel layout epochs, which it
+    # keeps under these private names, without an on-disk cache. A release
+    # that renames them lays out uncached.
+    enable_dispatcher_cache(
+        getattr(umap_layouts, "_nb_optimize_layout_euclidean_single_epoch", None),
+        getattr(
+            umap_layouts, "_nb_optimize_layout_euclidean_single_epoch_parallel", None
+        ),
+    )
     epochs_per_sample = make_epochs_per_sample(g.data, n_epochs)
     logger.trace("calculated epochs_per_sample")
     rng_state = (

@@ -252,7 +252,11 @@ _CONTRACTS = (
                 "feature_ids_fingerprint",
             ),
         },
-        signature_only=_classified("routing", "from_assay"),
+        signature_only={
+            **_classified("routing", "from_assay"),
+            # The method record holds the quantile as its cutoff quantile.
+            **_classified("transformed", "positive_quantile"),
+        },
     ),
     OperationContract(
         ClustersAccessor.leiden,

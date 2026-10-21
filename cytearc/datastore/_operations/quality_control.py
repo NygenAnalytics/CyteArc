@@ -22,7 +22,11 @@ from ...quality_control.filtering import (
     validate_cell_filter_sources,
     validate_filter_bounds,
 )
-from ...quality_control.hto import _hto_demux_method, hto_demux
+from ...quality_control.hto import (
+    _hto_demux_method,
+    _validated_positive_quantile,
+    hto_demux,
+)
 from ...metadata.artifacts import (
     artifact_values,
     plan_cell_data_artifact,
@@ -1187,20 +1191,36 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         *,
         from_assay: str | None = None,
         random_seed: int = 0,
+        positive_quantile: float = 0.99,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Demultiplex HTO counts into an immutable identity artifact.
+
+        The method follows Seurat's ``HTODemux``: a count is positive when it
+        exceeds the ``positive_quantile`` quantile of the negative-binomial
+        distribution fitted to its HTO's background cluster.
 
         Args:
             from_assay: HTO assay name (default: ``'HTO'``).
             cell_selection: Explicit cell-selection artifact.
             random_seed: Seed used for HTO demultiplexing.
+            positive_quantile: Quantile of each HTO's background distribution
+                that a count must exceed to be positive, Seurat's
+                ``positive.quantile`` (default 0.99). It must be greater than 0
+                and less than 1. A higher quantile, such as 0.999, calls fewer
+                background counts positive, and so fewer false doublets, but
+                can miss weakly stained tags. The artifact records the
+                quantile, so each quantile has its own artifact.
             invalidate_cache: Recompute even when matching provenance exists.
 
         Returns:
             A complete ``hto_identity`` artifact.
 
         Raises:
+            TypeError: If ``random_seed`` is not an integer or
+                ``positive_quantile`` is not a real number.
+            ValueError: If ``positive_quantile`` is not finite or not between
+                0 and 1.
             UnmeasuredCellsError: If the HTO assay did not measure a selected cell.
         """
         from ...assay.classification import declared_assay_type
@@ -1224,6 +1244,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         assay = self._get_assay(from_assay)
         if isinstance(random_seed, bool) or not isinstance(random_seed, int):
             raise TypeError("random_seed must be an integer")
+        positive_quantile = _validated_positive_quantile(positive_quantile)
         cell_index = read_stored_selection_indices(
             self.zw,
             cell_selection,
@@ -1247,7 +1268,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             feature_ids_fingerprint=fingerprint_strings(
                 np.asarray(assay.feats.fetch_all("ids"))
             ),
-            method=_hto_demux_method(),
+            method=_hto_demux_method(positive_quantile),
             random_seed=random_seed,
             invalidate_cache=invalidate_cache,
         )
@@ -1282,6 +1303,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         hto_idents = hto_demux(
             pd.DataFrame(counts, columns=assay.feats.fetch_all("ids")),
             random_seed=random_seed,
+            positive_quantile=positive_quantile,
         )
         values = np.asarray(hto_idents.values)
         write_cell_data_artifact(
