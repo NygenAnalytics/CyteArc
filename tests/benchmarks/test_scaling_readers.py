@@ -221,3 +221,50 @@ def test_rds_barcode_parse(bench, tmp_path: Path) -> None:
     # the PCA and UMAP embeddings.
     ladder = Ladder(sizes=(4_096, 8_192, 16_384, 32_768), smoke=2_000, work=5.0)
     bench("seurat.rds_barcode_parse", make, ladder, check=check)
+
+
+# A BPCells RNA matrix stores about 2,000 entries per cell; the ladder decodes
+# 64 per cell and scales the projection to the stored entries.
+DECODED_ENTRIES_PER_CELL = 64
+STORED_ENTRIES_PER_CELL = 2_000
+
+
+@lru_cache(maxsize=4)
+def _packed_feature_indexes(n_cells: int) -> tuple[np.ndarray, ...]:
+    """Return each cell's ascending feature indexes and their BP128 d1z encoding."""
+    from tests.test_seurat_matrix_sources import _encode_bp128
+
+    rng = np.random.default_rng(inputs.SEED)
+    features = np.sort(
+        rng.integers(0, 33_538, size=(n_cells, DECODED_ENTRIES_PER_CELL)), axis=1
+    ).astype(np.uint32)
+    indexes = features.reshape(-1)
+    return (indexes, *_encode_bp128(indexes, "d1z"))
+
+
+def test_bpcells_index_decode(bench) -> None:
+    from cytearc.readers._seurat import decode_bp128
+
+    def make(n_cells: int):
+        indexes, data, block_words, offsets, starts = _packed_feature_indexes(n_cells)
+        return lambda: decode_bp128(
+            data,
+            block_words,
+            indexes.size,
+            index_offsets=offsets,
+            transform="d1z",
+            starts=starts,
+        )
+
+    def check(n_cells: int, decoded) -> None:
+        # The decoded indexes are the ones that were encoded.
+        np.testing.assert_array_equal(decoded, _packed_feature_indexes(n_cells)[0])
+
+    # A BPCells import decodes every stored index when it first reads, then
+    # again for the count dtype scan and for the write.
+    ladder = Ladder(
+        sizes=(2_048, 4_096, 8_192, 16_384),
+        smoke=256,
+        work=3 * STORED_ENTRIES_PER_CELL / DECODED_ENTRIES_PER_CELL,
+    )
+    bench("seurat.bpcells_index_decode", make, ladder, check=check)

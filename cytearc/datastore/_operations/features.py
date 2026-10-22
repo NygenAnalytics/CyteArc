@@ -1417,7 +1417,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         )
         permutation = make_rank_permutation(len(feature_index), tie_seed)
         rank_feature_index = feature_index[permutation]
-        sets = build_gene_set_index(network, rank_feature_index)
 
         arguments = AucellArguments(
             cell_selection=cell_selection,
@@ -1430,6 +1429,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         )
 
         def score_batches() -> Iterator[np.ndarray]:
+            # Built only when scoring: a stored result needs no gene-set index.
+            sets = build_gene_set_index(network, rank_feature_index)
             raw = assay.rawData[:, feature_index][cell_index, :]
             for raw_block in raw.stream_blocks(
                 nthreads=self.nthreads,
@@ -1642,7 +1643,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             invalidate_cache=invalidate_cache,
         )
         n_sources = len(network.source_names)
-        positions = np.searchsorted(feature_index, network.edge_feature_index)
         background_holder: list[np.ndarray] = []
 
         def score_batches() -> Iterator[tuple[np.ndarray, np.ndarray]]:
@@ -1681,6 +1681,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 seed=background_seed,
             )
             background_holder.append(background)
+            positions = np.searchsorted(feature_index, network.edge_feature_index)
             annotation = csc_matrix(
                 (
                     np.ones(len(positions), dtype=np.float64),
@@ -2617,6 +2618,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
     def _register_derived_assay(self, assay_label: str, assay_type: str) -> None:
         """Load a newly published derived assay and its cell properties."""
+        # Publication recorded the assay's type through another handle.
+        self._refresh_workspace_group()
         self._assayNames = tuple(self._scan_assays())
         self._load_assays(custom_assay_types={assay_label: assay_type})
         self._ini_cell_props(mito_pattern=None, ribo_pattern=None)
@@ -2767,6 +2770,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
 
         self._require_writable("discard_interrupted_assay")
         discard_pending_assay(self.z, assay_label, self.workspace)
+        # The removal rewrote the workspace's assay types through another handle.
+        self._refresh_workspace_group()
         logger.info(f"Removed the interrupted assay {assay_label!r}")
 
     @validation_scoped

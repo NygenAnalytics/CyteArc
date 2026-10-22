@@ -74,34 +74,80 @@ def _status_rss_bytes(status_path: Path) -> int | None:
     return None if status is None else _parse_proc_status(status)[1]
 
 
-def read_process_tree_rss_bytes(
-    root_pid: int,
-    *,
-    proc_root: str | Path = "/proc",
-    read_text: _ReadText | None = None,
-    list_pids: _ListPids | None = None,
-) -> int | None:
-    """Return sampled RSS for one process and all discoverable descendants."""
+def _task_children(proc_root: Path, pid: int) -> list[int] | None:
+    """Return the child processes of every thread of ``pid``.
 
-    if isinstance(root_pid, bool) or not isinstance(root_pid, int) or root_pid <= 0:
-        return None
-    resolved_root = Path(proc_root)
-    text_reader = _default_read_text if read_text is None else read_text
-    pid_reader = _default_list_pids if list_pids is None else list_pids
+    Returns None when ``/proc`` cannot list them: the process has exited, or the
+    kernel has no ``task/<tid>/children`` files (``CONFIG_PROC_CHILDREN``).
+    """
+    tasks = proc_root / str(pid) / "task"
     try:
-        pids = {int(pid) for pid in pid_reader(resolved_root)}
+        threads = sorted(tasks.iterdir())
+    except OSError:
+        return None
+    children: list[int] = []
+    for thread in threads:
+        try:
+            listed = (thread / "children").read_text(encoding="ascii")
+            pids = [int(value) for value in listed.split()]
+        except OSError:
+            if thread.is_dir() and not (thread / "children").exists():
+                return None
+            # The thread exited after the listing.
+            continue
+        except ValueError:
+            # A list that holds anything but process IDs cannot be walked.
+            return None
+        children.extend(pids)
+    return children
+
+
+def _tree_pids_by_children(proc_root: Path, root_pid: int) -> set[int] | None:
+    """Return ``root_pid`` and its descendants from the children files.
+
+    Only processes in the tree are read, so the cost follows the tree rather
+    than every process on the host. Returns None when the root's children
+    cannot be listed.
+    """
+    root_children = _task_children(proc_root, root_pid)
+    if root_children is None:
+        return None
+    tree = {root_pid}
+    pending = root_children
+    while pending:
+        pid = pending.pop()
+        if pid in tree:
+            continue
+        tree.add(pid)
+        # A descendant that exited meanwhile has no children left to list.
+        pending.extend(_task_children(proc_root, pid) or ())
+    return tree
+
+
+def _tree_pids_by_scan(
+    proc_root: Path,
+    root_pid: int,
+    statuses: dict[int, tuple[int | None, int | None]],
+    pid_reader: _ListPids,
+    text_reader: _ReadText,
+) -> set[int] | None:
+    """Return ``root_pid`` and its descendants from every process's parent.
+
+    Each status that is read is kept in ``statuses``. Returns None when the
+    processes cannot be listed.
+    """
+    try:
+        pids = {int(pid) for pid in pid_reader(proc_root)}
     except Exception:
         return None
     pids.add(root_pid)
-
-    records: dict[int, tuple[int | None, int | None]] = {}
     children: dict[int, set[int]] = {}
     for pid in pids:
-        status = _optional_read(resolved_root / str(pid) / "status", text_reader)
+        status = _optional_read(proc_root / str(pid) / "status", text_reader)
         if status is None:
             continue
         parent_pid, rss_bytes = _parse_proc_status(status)
-        records[pid] = (parent_pid, rss_bytes)
+        statuses[pid] = (parent_pid, rss_bytes)
         if parent_pid is not None:
             children.setdefault(parent_pid, set()).add(pid)
 
@@ -113,12 +159,54 @@ def read_process_tree_rss_bytes(
             continue
         tree_pids.add(pid)
         pending.extend(children.get(pid, ()))
+    return tree_pids
+
+
+def read_process_tree_rss_bytes(
+    root_pid: int,
+    *,
+    proc_root: str | Path = "/proc",
+    read_text: _ReadText | None = None,
+    list_pids: _ListPids | None = None,
+) -> int | None:
+    """Return sampled RSS for one process and all discoverable descendants.
+
+    The tree is walked through each process's ``task/<tid>/children`` files.
+    Where those are unavailable, or when ``list_pids`` is given, every listed
+    process's parent is read instead; both find the same processes.
+    """
+
+    if isinstance(root_pid, bool) or not isinstance(root_pid, int) or root_pid <= 0:
+        return None
+    resolved_root = Path(proc_root)
+    text_reader = _default_read_text if read_text is None else read_text
+    statuses: dict[int, tuple[int | None, int | None]] = {}
+    tree_pids = (
+        None
+        if list_pids is not None
+        else _tree_pids_by_children(resolved_root, root_pid)
+    )
+    if tree_pids is None:
+        tree_pids = _tree_pids_by_scan(
+            resolved_root,
+            root_pid,
+            statuses,
+            _default_list_pids if list_pids is None else list_pids,
+            text_reader,
+        )
+        if tree_pids is None:
+            return None
+    else:
+        for pid in tree_pids:
+            status = _optional_read(resolved_root / str(pid) / "status", text_reader)
+            if status is not None:
+                statuses[pid] = _parse_proc_status(status)
 
     values: list[int] = []
     for pid in tree_pids:
-        if pid not in records:
+        if pid not in statuses:
             continue
-        value = records[pid][1]
+        value = statuses[pid][1]
         if value is not None:
             values.append(value)
     return None if not values else sum(values)

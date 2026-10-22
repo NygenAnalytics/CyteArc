@@ -778,3 +778,102 @@ def test_batch_correction_rejects_invalid_designs():
             solve_query_correction(counts, sums, model, batch_design=csr_matrix(values))
     with pytest.raises(TypeError, match="CSR"):
         solve_query_correction(counts, sums, model, batch_design=np.eye(2))
+
+
+def _gathered_query_correction(
+    coordinates: np.ndarray,
+    assignments: np.ndarray,
+    batch_codes: np.ndarray,
+    correction: QueryCorrection,
+) -> np.ndarray:
+    """The earlier correction, which gathered one offset matrix for every row."""
+    return coordinates - np.einsum(
+        "nk,nkd->nd", assignments, correction.batch_offsets[batch_codes]
+    )
+
+
+@pytest.mark.parametrize(
+    ("n_clusters", "n_dims", "codes"),
+    [
+        # One batch, as when no query_batches are given.
+        (100, 30, np.zeros(257, dtype=np.int64)),
+        # Interleaved batches, one of which holds a single row.
+        (100, 30, np.r_[np.arange(64) % 3, 3]),
+        # Codes that skip a batch arrive unsorted.
+        (7, 5, np.array([4, 0, 4, 2, 2, 0, 4])),
+        (1, 1, np.array([1, 0, 1])),
+        (3, 2, np.zeros(0, dtype=np.int64)),
+    ],
+)
+def test_query_correction_matches_gathered_offsets_bit_for_bit(
+    n_clusters, n_dims, codes
+):
+    rng = np.random.default_rng(n_clusters * 31 + n_dims)
+    n_rows = codes.size
+    model = SymphonyCorrectionModel(
+        centroids=rng.normal(size=(n_clusters, n_dims)),
+        raw_centroids=np.zeros((n_clusters, n_dims)),
+        corrected_centroids=np.zeros((n_clusters, n_dims)),
+        cluster_mass=np.ones(n_clusters),
+        sigma=np.ones(n_clusters),
+    )
+    n_batches = int(codes.max()) + 1 if n_rows else 1
+    # Offsets spanning sixteen orders of magnitude make any reordering of the
+    # sum over clusters visible in the last bits.
+    scales = 10.0 ** rng.uniform(-8, 8, size=(n_batches, n_clusters, 1))
+    correction = QueryCorrection(
+        batch_offsets=rng.normal(size=(n_batches, n_clusters, n_dims)) * scales,
+        batch_counts=np.ones((n_batches, n_clusters)),
+    )
+    coordinates = rng.normal(size=(n_rows, n_dims))
+    assignments = rng.uniform(size=(n_rows, n_clusters))
+    assignments /= assignments.sum(axis=1, keepdims=True)
+
+    corrected = apply_query_correction(
+        coordinates, assignments, codes, model, correction
+    )
+
+    expected = _gathered_query_correction(coordinates, assignments, codes, correction)
+    assert corrected.dtype == expected.dtype == np.float64
+    assert corrected.shape == (n_rows, n_dims)
+    np.testing.assert_array_equal(corrected, expected)
+
+
+def test_symphony_reservation_counts_one_batch_of_gathered_rows():
+    from types import SimpleNamespace
+
+    from cytearc.datastore._operations.mapping import _mapping_memory_reservations
+
+    n_features, n_clusters, n_dims = 40, 100, 30
+    reference = SimpleNamespace(
+        model=ScaledPCAProjectionModel(
+            feature_means=np.zeros(n_features),
+            center=np.zeros(n_features),
+            feature_scales=np.ones(n_features),
+            loadings=np.zeros((n_features, n_dims)),
+        ),
+        feature_ids=np.asarray([f"g{index}" for index in range(n_features)]),
+        symphony_state=None,
+    )
+    _, plain_row = _mapping_memory_reservations(
+        reference, n_batches=1, save_k=10, batch_codes=None, batch_design=None
+    )
+    reference.symphony_state = SymphonyCorrectionModel(
+        centroids=np.ones((n_clusters, n_dims)),
+        raw_centroids=np.zeros((n_clusters, n_dims)),
+        corrected_centroids=np.zeros((n_clusters, n_dims)),
+        cluster_mass=np.ones(n_clusters),
+        sigma=np.ones(n_clusters),
+    )
+    _, corrected_row = _mapping_memory_reservations(
+        reference,
+        n_batches=2,
+        save_k=10,
+        batch_codes=np.zeros(5, dtype=np.int64),
+        batch_design=None,
+    )
+
+    # Assignment and coordinate work plus one batch's gathered assignments,
+    # their offsets, and the mask that selects them; no row reserves its own
+    # clusters-by-dims offset matrix.
+    assert corrected_row - plain_row == 8 * (4 * n_clusters + 4 * n_dims) + 1

@@ -33,6 +33,7 @@ def linked_missing_mask(
     *,
     label: str | None = None,
     values: zarr.Array | None = None,
+    opened: Mapping[str, zarr.Array | zarr.Group] | None = None,
 ) -> zarr.Array | None:
     """Return the missing-value mask linked to ``group[name]``, if it has one.
 
@@ -40,7 +41,9 @@ def linked_missing_mask(
     name the canonical ``__cytearc_missing__<name>`` sibling, and that sibling
     must be a boolean array with the same shape. ``label`` names the array in
     errors and defaults to ``Array '<name>'``. Pass the already opened
-    ``values`` array to skip reopening it.
+    ``values`` array to skip reopening it, and members of ``group`` that are
+    already open, keyed by name, as ``opened``; a mask missing from ``opened``
+    is opened from ``group``.
     """
     if values is None:
         values = as_zarr_array(group[name], name=name)
@@ -51,7 +54,11 @@ def linked_missing_mask(
     if values.attrs["missing_mask"] != missing_name:
         raise ValueError(f"{subject} has a malformed missing-mask link")
     try:
-        mask = group[missing_name]
+        mask = (
+            opened[missing_name]
+            if opened is not None and missing_name in opened
+            else group[missing_name]
+        )
     except KeyError:
         raise ValueError(f"{subject} has a missing missing-mask array") from None
     if (
@@ -119,15 +126,20 @@ def text_value(value: Any) -> str:
     return str(value)
 
 
+def _holds_bytes_or_none(values: np.ndarray) -> bool:
+    """Return whether an array of Python objects holds None or a byte string."""
+    # Each distinct type is checked once rather than each value.
+    return any(
+        kind is type(None) or issubclass(kind, bytes | bytearray | np.bytes_)
+        for kind in set(map(type, values.flat))
+    )
+
+
 def _decode_metadata_values(data: Any) -> np.ndarray:
     """Decode UTF-8 byte strings and missing values, keeping the array shape."""
     values = np.asarray(data)
     if values.dtype.kind == "S" or (
-        values.dtype.hasobject
-        and any(
-            value is None or isinstance(value, bytes | bytearray | np.bytes_)
-            for value in values.flat
-        )
+        values.dtype.hasobject and _holds_bytes_or_none(values)
     ):
         return np.asarray(
             [text_value(value) for value in values.flat], dtype=str
@@ -135,12 +147,21 @@ def _decode_metadata_values(data: Any) -> np.ndarray:
     return values
 
 
+def _text_width(block: Any) -> int:
+    """Return the length of the longest value of ``block`` as text, 0 if empty."""
+    values = np.asarray(block)
+    if values.size == 0:
+        return 0
+    if values.dtype.kind == "U":
+        return int(np.char.str_len(values).max())
+    if values.dtype == object and set(map(type, values.flat)) == {str}:
+        return max(map(len, values.flat))
+    return max(len(text_value(value)) for value in values.flat)
+
+
 def _measured_text_dtype(blocks: Iterable[Any]) -> np.dtype[Any]:
-    width = 1
-    for block in blocks:
-        for value in np.asarray(block).flat:
-            width = max(width, len(text_value(value)))
-    return np.dtype(f"U{width}")
+    width = max((_text_width(block) for block in blocks), default=0)
+    return np.dtype(f"U{max(1, width)}")
 
 
 def text_dtype(dtype: Any, blocks: Callable[[], Iterable[Any]]) -> np.dtype[Any]:

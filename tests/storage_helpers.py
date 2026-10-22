@@ -82,6 +82,13 @@ def insert_nullable_cell_column(
 
 
 def reset_zarr_runtime() -> None:
-    """Restore Zarr's process defaults so the next storage call plans afresh."""
+    """Restore Zarr's process defaults so the next storage call plans afresh.
+
+    Values reused while stored bytes are unchanged are forgotten too, so each
+    test computes them as a new process would.
+    """
+    from cytearc.storage.content_stamps import clear_content_cache
+
     zarr.config.set({"threading.max_workers": None, "async.concurrency": 10})
     async_execution._HOST_THREAD_CEILING = None
+    clear_content_cache()

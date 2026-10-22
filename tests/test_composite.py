@@ -843,13 +843,65 @@ def test_composite_rejects_duplicate_source_cell_ids_without_changing_source(tmp
     np.testing.assert_array_equal(source.RNA.matrixGroup["counts"][:], 1)
 
 
-@pytest.mark.parametrize("phase", ("metadata", "identity", "counts"))
+def test_composite_rejects_ids_that_two_sources_prefix_alike(tmp_path):
+    # "a" with "_x" and "a_" with "x" both prefix to "a___x".
+    sources = {
+        name: _write_source(
+            tmp_path / f"{name}.zarr",
+            np.ones((2, 2), dtype=np.uint8),
+            ["g0", "g1"],
+            ids=ids,
+            policy=CountMatrixPolicy(128, 32),
+        )
+        for name, ids in (("a", ["_x", "y"]), ("a_", ["x", "z"]))
+    }
+    with pytest.raises(ValueError, match="Composite cell IDs are not unique"):
+        create_composite(
+            sources,
+            at=tmp_path / "joint.zarr",
+            features="union",
+            mem_budget="64M",
+            nthreads=1,
+        )
+
+
+def test_composite_compares_distinct_ids_whose_hashes_collide(tmp_path, monkeypatch):
+    import cytearc.composite.create as composite_create
+
+    ids = [f"cell{row}" for row in range(40)]
+    source = _write_source(
+        tmp_path / "source.zarr",
+        np.ones((40, 2), dtype=np.uint8),
+        ["g0", "g1"],
+        ids=ids,
+        policy=CountMatrixPolicy(128, 32),
+    )
+    hashed: list[int] = []
+
+    def colliding(values):
+        # Every ID hashes alike, so every ID is read again and compared.
+        hashed.append(values.size)
+        return np.zeros(values.size, dtype=np.uint64)
+
+    monkeypatch.setattr(composite_create, "_text_hashes", colliding)
+    joint = create_composite(
+        {"a": source},
+        at=tmp_path / "joint.zarr",
+        features="union",
+        mem_budget="64M",
+        nthreads=1,
+    )
+
+    assert sum(hashed) == 40
+    assert sorted(joint.cells.fetch_all("ids")) == sorted(f"a__{id}" for id in ids)
+
+
+@pytest.mark.parametrize("phase", ("metadata", "counts"))
 def test_composite_creation_rejects_unaffordable_work_before_count_reads(
     tmp_path, monkeypatch, phase
 ):
     metadata = phase == "metadata"
-    identity = phase == "identity"
-    shape = (100, 2) if metadata else (150_000, 1) if identity else (4, 256)
+    shape = (100, 2) if metadata else (4, 256)
     source = _write_source(
         tmp_path / "source.zarr",
         np.ones(shape, dtype=np.uint8),
@@ -857,23 +909,18 @@ def test_composite_creation_rejects_unaffordable_work_before_count_reads(
         ids=[f"{index}_{'x' * 1000}" for index in range(shape[0])]
         if metadata
         else None,
-        policy=(
-            CountMatrixPolicy(1_048_576, 262_144)
-            if identity
-            else CountMatrixPolicy(1024, 256)
-        ),
+        policy=CountMatrixPolicy(1024, 256),
     )
-    if not identity:
-        for table in (source.cells, source.RNA.feats):
-            for name, array in list(table._group.arrays()):
-                values, attributes = array[:], dict(array.attrs)
-                del table._group[name]
-                table._group.create_array(
-                    name,
-                    data=values,
-                    chunks=(min(table.N, 2 if metadata else 256),),
-                    attributes=attributes,
-                )
+    for table in (source.cells, source.RNA.feats):
+        for name, array in list(table._group.arrays()):
+            values, attributes = array[:], dict(array.attrs)
+            del table._group[name]
+            table._group.create_array(
+                name,
+                data=values,
+                chunks=(min(table.N, 2 if metadata else 256),),
+                attributes=attributes,
+            )
     requests = []
     get = LocalStore.get
 
@@ -886,7 +933,6 @@ def test_composite_creation_rejects_unaffordable_work_before_count_reads(
     destination = tmp_path / "joint.zarr"
     message = {
         "metadata": "Merged cell metadata cannot fit one row",
-        "identity": "Composite cell identity validation exceeds mem_budget",
         "counts": "Composite count preparation cannot fit one row",
     }[phase]
     with pytest.raises(MemoryError, match=message):
@@ -896,7 +942,7 @@ def test_composite_creation_rejects_unaffordable_work_before_count_reads(
             features="union",
             # Large enough to fit the composite layout, too small for one
             # prepared row.
-            mem_budget="24M" if identity else 71_000 if phase == "counts" else 65_536,
+            mem_budget=71_000 if phase == "counts" else 65_536,
             nthreads=1,
         )
     assert not requests
@@ -906,6 +952,62 @@ def test_composite_creation_rejects_unaffordable_work_before_count_reads(
         root = zarr.open_group(str(destination), mode="r")
         assert root.attrs["composite"]["complete"] is False
     np.testing.assert_array_equal(source.RNA.matrixGroup["counts"][:], 1)
+
+
+def test_composite_identity_check_fits_where_holding_every_id_did_not(tmp_path):
+    source = _write_source(
+        tmp_path / "source.zarr",
+        np.ones((150_000, 1), dtype=np.uint8),
+        ["g0"],
+        policy=CountMatrixPolicy(1_048_576, 262_144),
+    )
+    joint = create_composite(
+        {"source": source},
+        at=tmp_path / "joint.zarr",
+        features="union",
+        mem_budget="24M",
+        nthreads=1,
+    )
+
+    ids = np.asarray(joint.cells.fetch_all("ids"))
+    # Holding every ID took three times their bytes, more than this budget;
+    # their hashes take 17 bytes per cell beside one chunk of IDs.
+    assert 3 * ids.size * ids.dtype.itemsize > 24 * 1024**2
+    assert np.unique(ids).size == ids.size == 150_000
+    np.testing.assert_array_equal(
+        np.sort(ids), np.sort(np.char.add("source__c", np.arange(150_000).astype(str)))
+    )
+
+
+def test_composite_identity_check_rejects_unaffordable_work_before_reading_ids():
+    from zarr.storage import MemoryStore
+
+    from cytearc.composite.create import _require_unique_cell_ids
+    from cytearc.storage.budget import ResourceBudget
+
+    class UnreadableIds:
+        shape = (1000,)
+        chunks = (100,)
+        dtype = np.dtype("U8")
+
+        def __getitem__(self, key):
+            raise AssertionError("IDs were read before the budget was checked")
+
+    # Resident bytes, two 8-byte words and a flag per cell, and one chunk of
+    # IDs beside two words per ID.
+    needed = 7 + 1000 * (2 * 8 + 1) + 100 * (32 + 2 * 8)
+    with pytest.raises(
+        MemoryError, match="Composite cell identity validation exceeds mem_budget"
+    ):
+        _require_unique_cell_ids(
+            UnreadableIds(), ResourceBudget(needed - 1, 1), resident_bytes=7
+        )
+    ids = zarr.open_group(store=MemoryStore(), mode="w").create_array(
+        "ids",
+        data=np.asarray([f"a__c{row}" for row in range(1000)], dtype="U8"),
+        chunks=(100,),
+    )
+    _require_unique_cell_ids(ids, ResourceBudget(needed, 1), resident_bytes=7)
 
 
 def test_one_cell_selection_scans_source_metadata_in_bands(

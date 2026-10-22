@@ -200,9 +200,11 @@ def _mapping_memory_reservations(
     )
     # Statistics, fitted offsets, and immutable output buffers overlap in the solve.
     resident += 2 * count_bytes + 3 * sum_bytes + solve_bytes
-    per_row += (
-        3 * symphony.n_clusters + 3 * symphony.n_dims
-    ) * float_bytes + symphony.n_clusters * symphony.n_dims * float_bytes
+    per_row += (3 * symphony.n_clusters + 3 * symphony.n_dims) * float_bytes
+    # The correction gathers one query batch's rows at a time: their
+    # assignments and offsets, beside the mask that selects them.
+    gathered_bytes = (symphony.n_clusters + symphony.n_dims) * float_bytes
+    per_row += gathered_bytes + np.dtype(bool).itemsize
     return resident, per_row
 
 

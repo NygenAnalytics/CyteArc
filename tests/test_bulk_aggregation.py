@@ -665,3 +665,228 @@ def test_normalized_aggregation_names_the_group_of_a_non_finite_mean():
         ChunkedArray.from_numpy(values), np.array([0, 0, 1, -1]), 2, nthreads=1
     )
     np.testing.assert_array_equal(means, np.ones((3, 2)))
+
+
+def _non_rna_store(tmp_path, counts, *, assay="ADT", workers=1):
+    path = str(tmp_path / f"{assay.lower()}.zarr")
+    ids = np.array([f"p{i}" for i in range(counts.shape[1])])
+    write_doublet_target_zarr(
+        path,
+        assay,
+        csr_matrix(counts),
+        ids,
+        ids,
+        dtype=str(counts.dtype),
+        nthreads=1,
+        policy=CountMatrixPolicy(unitBytes=4096, chunkBytes=128),
+    )
+    store = DataStore(
+        path, default_assay=assay, min_features_per_cell=0, nthreads=workers
+    )
+    store.cells.insert("all_cells", np.ones(len(counts), dtype=bool))
+    return store, store.snapshot_cell_selection("all_cells")
+
+
+def _column_profiles(raw, column_rows, *, aggr_type, return_fraction):
+    """Sum and count each column's raw rows one column at a time.
+
+    This is how compare.compute_bulk aggregated assays without countsT
+    before one pass replaced it.
+    """
+    vals, fracs = {}, {}
+    sum_dtype = np.float64 if raw.dtype.kind == "f" else None
+    for name, idx in column_rows.items():
+        if aggr_type == "sum":
+            vals[name] = np.asarray(raw[idx].sum(axis=0, dtype=sum_dtype).compute())
+        if return_fraction:
+            fracs[name] = (raw[idx] > 0).mean(axis=0).compute()
+    return vals, fracs
+
+
+@pytest.mark.parametrize("aggregation", ["sum", "mean"])
+@pytest.mark.parametrize(
+    "dtype", [np.uint8, np.uint32, np.int32, np.float32, np.float64], ids=str
+)
+def test_non_rna_bulk_matches_the_per_column_aggregation(tmp_path, dtype, aggregation):
+    from cytearc.features.aggregation import aggregate_bulk_profiles, bulk_column_rows
+
+    rng = np.random.default_rng(17)
+    counts = rng.poisson(0.8, size=(60, 9)).astype(dtype)
+    counts[:, 0] += 1
+    store, cells = _non_rna_store(tmp_path, counts)
+    groups = rng.choice(["a", "b", "c", "d"], size=60)
+    donors = rng.choice(["x", "y"], size=60)
+    store.cells.insert("group", groups)
+    store.cells.insert("donor", donors)
+    options = {
+        "cell_selection": cells,
+        "secondary_groups": "donor",
+        "aggr_type": aggregation,
+        "pseudo_reps": 2,
+        "remove_empty_features": False,
+        "remove_empty_columns": False,
+    }
+
+    values, fractions = store.compare.compute_bulk(
+        "group", return_fraction=True, **options
+    )
+
+    cell_idx = np.arange(60, dtype=np.int64)
+    column_rows = bulk_column_rows(
+        groups,
+        sorted(set(groups)),
+        np.ones(60, dtype=bool),
+        cell_idx,
+        secondary=(donors, ["x", "y"]),
+        null_vals=None,
+        secondary_null_vals=None,
+        pseudo_reps=2,
+        random_seed=4466,
+    )
+    filled = {name: rows for name, rows in column_rows.items() if len(rows)}
+    expected_vals, expected_fracs = _column_profiles(
+        store.ADT.rawData, filled, aggr_type=aggregation, return_fraction=True
+    )
+    actual_vals, actual_fracs = aggregate_bulk_profiles(
+        store.ADT,
+        filled,
+        cell_idx,
+        aggr_type=aggregation,
+        return_fraction=True,
+        cells=store.cells,
+        resources=store.resources,
+        nthreads=1,
+    )
+    assert list(actual_fracs) == list(expected_fracs) == list(filled)
+    for name in filled:
+        assert actual_fracs[name].dtype == expected_fracs[name].dtype
+        assert actual_fracs[name].tobytes() == expected_fracs[name].tobytes()
+        if aggregation == "sum":
+            assert actual_vals[name].dtype == expected_vals[name].dtype
+            # Integer-valued counts sum exactly in any order.
+            assert actual_vals[name].tobytes() == expected_vals[name].tobytes()
+            np.testing.assert_array_equal(values[name], expected_vals[name])
+        np.testing.assert_array_equal(fractions[name], expected_fracs[name])
+    if aggregation == "sum":
+        assert list(actual_vals) == list(filled)
+
+
+def test_non_rna_bulk_reads_each_raw_row_once(tmp_path, monkeypatch):
+    import cytearc.matrix.chunked as chunked
+
+    counts = np.random.default_rng(3).poisson(1.0, size=(40, 6)).astype(np.uint16)
+    store, cells = _non_rna_store(tmp_path, counts)
+    store.cells.insert("group", np.repeat(["a", "b", "c", "d", "e"], 8))
+    read = chunked.read_selection
+    rows_read: list[int] = []
+
+    def counted(array, rows, columns):
+        values = read(array, rows, columns)
+        rows_read.append(len(values))
+        return values
+
+    monkeypatch.setattr(chunked, "read_selection", counted)
+
+    values, fractions = store.compare.compute_bulk(
+        "group",
+        cell_selection=cells,
+        aggr_type="sum",
+        return_fraction=True,
+        remove_empty_features=False,
+    )
+
+    # One pass sums every group and counts its positive values; each column
+    # read its rows twice before.
+    assert sum(rows_read) == 40
+    for index, name in enumerate("abcde"):
+        rows = counts[8 * index : 8 * (index + 1)]
+        np.testing.assert_array_equal(values[name], rows.sum(axis=0))
+        np.testing.assert_array_equal(fractions[name], (rows > 0).mean(axis=0))
+
+
+def test_raw_group_sums_add_floating_rows_in_order():
+    from cytearc.features.aggregation import aggregate_raw_groups
+    from cytearc.matrix import ChunkedArray
+
+    rng = np.random.default_rng(9)
+    values = rng.normal(size=(50, 300)) * 10.0 ** rng.integers(-3, 4, size=(50, 300))
+    codes = rng.integers(0, 3, size=50)
+
+    sums, positives = aggregate_raw_groups(
+        ChunkedArray.from_numpy(values, block_size=7),
+        codes,
+        3,
+        sums=True,
+        positives=True,
+        nthreads=2,
+    )
+
+    for group in range(3):
+        expected = np.zeros(300)
+        for row in values[codes == group]:
+            expected = expected + row
+        assert sums[group].tobytes() == expected.tobytes()
+        np.testing.assert_array_equal(
+            positives[group], (values[codes == group] > 0).sum(axis=0)
+        )
+
+
+@pytest.mark.parametrize(
+    "dtype", [np.float16, np.dtype(">u4"), np.dtype("<i8"), np.bool_], ids=str
+)
+def test_raw_group_sums_read_every_count_dtype(dtype):
+    from cytearc.features.aggregation import aggregate_raw_groups
+    from cytearc.matrix import ChunkedArray
+
+    values = np.array([[1, 0, 3], [2, 5, 0], [0, 1, 1], [4, 0, 2]]).astype(dtype)
+    codes = np.array([1, 0, 1, 0])
+
+    sums, positives = aggregate_raw_groups(
+        ChunkedArray.from_numpy(values), codes, 2, sums=True, positives=True, nthreads=1
+    )
+
+    for group in range(2):
+        rows = values[codes == group]
+        expected = rows.sum(
+            axis=0, dtype=np.float64 if rows.dtype.kind == "f" else None
+        )
+        assert sums[group].dtype == expected.dtype
+        np.testing.assert_array_equal(sums[group], expected)
+        np.testing.assert_array_equal(positives[group], (rows > 0).sum(axis=0))
+    only_positives = aggregate_raw_groups(
+        ChunkedArray.from_numpy(values),
+        codes,
+        2,
+        sums=False,
+        positives=True,
+        nthreads=1,
+    )
+    assert only_positives[0] is None
+    np.testing.assert_array_equal(only_positives[1], positives)
+
+
+def test_raw_group_sums_reject_codes_off_their_rows():
+    from cytearc.features.aggregation import aggregate_raw_groups
+    from cytearc.matrix import ChunkedArray
+
+    raw = ChunkedArray.from_numpy(np.ones((3, 2), dtype=np.uint16))
+    for codes in ([0, 1], [0, 1, 2], [-1, 0, 1]):
+        with pytest.raises(ValueError, match="align with raw rows"):
+            aggregate_raw_groups(
+                raw, np.array(codes), 2, sums=True, positives=False, nthreads=1
+            )
+
+
+def test_accumulate_group_rows_kernel_adds_rows_in_order():
+    from cytearc.features.aggregation import _accumulate_group_rows
+
+    block = np.array([[1.5, -2.0, 0.0], [0.25, 3.0, np.nan], [2.0, 0.0, 1.0]])
+    codes = np.array([1, 0, 1])
+    sums = np.zeros((2, 3))
+    positives = np.zeros((2, 3), dtype=np.int64)
+
+    _accumulate_group_rows.py_func(block, codes, sums, positives)
+    _accumulate_group_rows.py_func(block, codes, None, None)
+
+    np.testing.assert_array_equal(sums, [[0.25, 3.0, np.nan], [3.5, -2.0, 1.0]])
+    np.testing.assert_array_equal(positives, [[1, 1, 0], [2, 0, 1]])

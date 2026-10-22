@@ -239,9 +239,16 @@ def test_wnn_peak_bytes_bounds_the_traced_peak(
         (_knn(n_cells, k, rng), rng.normal(size=(n_cells, d)).astype(np.float32))
         for k, d in zip(neighbor_counts, dims, strict=True)
     ]
+    # The integration compiles its Numba kernels for each coordinate dtype,
+    # so the warm-up scores float32 coordinates too, and the trace sees no
+    # compilation.
     _wnn_integration_many(
         [
-            (f"warm{index}", _knn(200, k, rng), rng.normal(size=(200, d)))
+            (
+                f"warm{index}",
+                _knn(200, k, rng),
+                rng.normal(size=(200, d)).astype(np.float32),
+            )
             for index, (k, d) in enumerate(zip(neighbor_counts, dims, strict=True))
         ],
         1,
@@ -701,6 +708,42 @@ def test_snn_integration_raises_before_loading_graphs_over_budget(
     assert f"operation limit is {peak - 1} bytes" in message
     assert loads == []
     assert store.artifacts.list(scope="datastore", kind="integrated_graph") == []
+
+
+def test_snn_integration_merges_on_the_store_threads(
+    template, tmp_path, monkeypatch
+) -> None:
+    import numba
+
+    from cytearc.neighbors import graph as neighbor_graph
+
+    zarr_loc, refs = template
+    target = tmp_path / "store.zarr"
+    shutil.copytree(zarr_loc, target)
+    store = DataStore(
+        str(target), default_assay="RNA", min_features_per_cell=0, nthreads=2
+    )
+    merge = neighbor_graph._merge_ranked_rows
+    threads: list[int] = []
+
+    def recorded(*args: Any) -> None:
+        threads.append(numba.get_num_threads())
+        merge(*args)
+
+    monkeypatch.setattr(neighbor_graph, "_merge_ranked_rows", recorded)
+    previous = numba.get_num_threads()
+    numba.set_num_threads(1)
+    try:
+        integrated = store.integration.modalities(
+            [refs["RNA"]["graph"], refs["ADT"]["graph"]], method="snn"
+        )
+        after = numba.get_num_threads()
+    finally:
+        numba.set_num_threads(previous)
+
+    assert store.artifacts.inspect(integrated).complete
+    assert threads == [min(2, numba.config.NUMBA_NUM_THREADS)]
+    assert after == 1
 
 
 def test_wnn_integration_raises_before_loading_coordinates_over_budget(

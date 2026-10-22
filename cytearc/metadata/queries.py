@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Hashable, Protocol, cast
 
@@ -40,6 +40,20 @@ class _QueryableMetaData(Protocol):
         columns: Iterable[str] | None = None,
         block_rows: int | None = None,
     ) -> Iterator[Any]: ...
+
+
+class _OpenedColumnsMetaData(_QueryableMetaData, Protocol):
+    """A table that opens each column once and lets callers reuse it."""
+
+    def _members(self) -> list[tuple[str, Any]]: ...
+
+    def _public_column_names(self, members: Iterable[tuple[str, Any]]) -> list[str]: ...
+
+    def _opened_column(
+        self, column: str, opened: Mapping[str, Any]
+    ) -> tuple[Any, Any | None]: ...
+
+    def _open_listed_column(self, column: str, opened: dict[str, Any]) -> bool: ...
 
 
 def _all_true(bools: np.ndarray) -> np.ndarray:
@@ -122,43 +136,54 @@ def missing_frame_values(values: np.ndarray, missing: np.ndarray | None) -> Any:
 
 
 def _frame_column(
-    metadata: _QueryableMetaData,
+    metadata: _OpenedColumnsMetaData,
     column: str,
+    opened: Mapping[str, Any],
     stop: int | None = None,
 ) -> Any:
-    values = np.asarray(metadata._get_array(column)[:stop])
-    mask = metadata_missing_mask(metadata, column)
+    # Each column and mask is opened once, reusing ``opened``.
+    array, mask = metadata._opened_column(column, opened)
+    values = np.asarray(array[:stop])
     return missing_frame_values(values, None if mask is None else mask[:stop])
 
 
-def head(metadata: _QueryableMetaData, n: int = 5) -> pd.DataFrame:
+def head(metadata: _OpenedColumnsMetaData, n: int = 5) -> pd.DataFrame:
     """Return the first rows of every metadata column.
 
-    Rows that a column's linked missing mask flags are shown as missing.
+    Rows that a column's linked missing mask flags are shown as missing. One
+    listing opens every column and mask.
     """
+    members = metadata._members()
+    opened = dict(members)
     return pd.DataFrame(
-        {column: _frame_column(metadata, column, n) for column in metadata.columns}
+        {
+            column: _frame_column(metadata, column, opened, n)
+            for column in metadata._public_column_names(members)
+        }
     )
 
 
 def to_pandas_dataframe(
-    metadata: _QueryableMetaData,
+    metadata: _OpenedColumnsMetaData,
     columns: list[str],
     key: str | None = None,
 ) -> pd.DataFrame:
     """Return requested metadata columns as a pandas DataFrame.
 
-    Rows that a column's linked missing mask flags are shown as missing.
+    Rows that a column's linked missing mask flags are shown as missing. Each
+    requested column is opened once, without listing the others.
 
     Raises:
         KeyError: If a requested column is not in the table; nothing is read.
     """
-    valid_columns = set(metadata.columns)
-    unknown = [column for column in columns if column not in valid_columns]
+    opened: dict[str, Any] = {}
+    unknown = [
+        column for column in columns if not metadata._open_listed_column(column, opened)
+    ]
     if unknown:
         raise KeyError(f"Columns {unknown!r} do not exist in the metadata columns.")
     frame = pd.DataFrame(
-        {column: _frame_column(metadata, column) for column in columns}
+        {column: _frame_column(metadata, column, opened) for column in columns}
     )
     if key is not None:
         frame = frame.reindex(metadata.active_index(key))

@@ -277,3 +277,265 @@ def test_prepared_network_rejects_malformed_dropped_targets(dropped):
 
     with pytest.raises(ValueError, match="dropped targets must be sorted unique"):
         dataclasses.replace(prepared, dropped_ambiguous_targets=dropped)
+
+
+def _legacy_prepare(
+    net: pd.DataFrame,
+    *,
+    active_feature_names: np.ndarray,
+    active_feature_index: np.ndarray,
+    tmin: int,
+    weighted: bool,
+    ambiguous_targets: str = "drop",
+) -> tuple:
+    """Prepare a network one edge at a time, as prepare_network did before.
+
+    Argument checks are left out: the generated networks pass them.
+    """
+    from cytearc.features.enrichment.net import _network_digest
+
+    feature_index = np.asarray(active_feature_index, dtype=np.int64)
+    columns = ["source", "target"] + (["weight"] if "weight" in net.columns else [])
+    frame = net.loc[:, columns].copy(deep=True).reset_index(drop=True)
+    if frame[["source", "target"]].isna().any().any():
+        raise ValueError("Network source and target values must not be missing")
+    frame["source"] = frame["source"].map(lambda value: str(value).strip())
+    frame["target"] = frame["target"].map(lambda value: str(value).strip())
+    if (frame["source"] == "").any() or (frame["target"] == "").any():
+        raise ValueError("Network source and target values must be non-empty")
+    if frame.duplicated(subset=["source", "target"]).any():
+        raise ValueError("Network contains duplicate source-target edges")
+    if "weight" not in frame.columns:
+        frame["weight"] = 1.0
+    if frame["weight"].map(lambda value: isinstance(value, (bool, np.bool_))).any():
+        raise ValueError("Network weights must be numeric and not boolean")
+    try:
+        weights = pd.to_numeric(frame["weight"], errors="raise").to_numpy(
+            dtype=np.float64
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Network weights must be numeric") from exc
+    if not np.isfinite(weights).all():
+        raise ValueError("Network weights must be finite")
+    frame["weight"] = weights
+    if weighted:
+        frame = frame.loc[frame["weight"] != 0.0].copy()
+        if frame.empty:
+            raise ValueError("Weighted network contains no non-zero edges")
+    else:
+        frame["weight"] = 1.0
+    positions: dict[str, list[int]] = {}
+    for position, name in enumerate(np.asarray(active_feature_names)):
+        positions.setdefault(str(name).upper(), []).append(position)
+    matched_rows, matched_indices, ambiguous = [], [], set()
+    for row_index, target in zip(frame.index, frame["target"], strict=True):
+        matches = positions.get(str(target).upper(), [])
+        if not matches:
+            continue
+        if len(matches) > 1:
+            if ambiguous_targets == "error":
+                raise ValueError(
+                    f"Network target {target!r} matches multiple active assay "
+                    "features. Pass ambiguous_targets='drop' to drop its edges."
+                )
+            ambiguous.add(str(target))
+            continue
+        matched_rows.append(int(row_index))
+        matched_indices.append(int(feature_index[matches[0]]))
+    dropped = tuple(sorted(ambiguous))
+    if not matched_rows:
+        raise ValueError(
+            "Network has no targets overlapping the active assay features"
+            + (f" after dropping {len(dropped)} ambiguous targets" if dropped else "")
+        )
+    frame = frame.loc[matched_rows].copy()
+    frame["feature_index"] = np.asarray(matched_indices, dtype=np.int64)
+    if frame.duplicated(subset=["source", "feature_index"]).any():
+        raise ValueError(
+            "Network contains duplicate edges after case-insensitive feature matching"
+        )
+    counts = frame.groupby("source", sort=False, observed=True).size()
+    kept_sources = sorted(str(source) for source in counts[counts >= tmin].index)
+    if not kept_sources:
+        raise ValueError(
+            "No network sources remain after feature overlap and "
+            f"tmin={tmin} pruning ({len(frame)} matched edges)"
+        )
+    frame = frame.loc[frame["source"].isin(kept_sources)].copy()
+    source_names = np.asarray(kept_sources, dtype="U")
+    source_to_index = {source: index for index, source in enumerate(kept_sources)}
+    frame["source_index"] = frame["source"].map(source_to_index).astype(np.int64)
+    frame = frame.sort_values(
+        ["source_index", "feature_index"], kind="mergesort"
+    ).reset_index(drop=True)
+    edge_source_index = frame["source_index"].to_numpy(dtype=np.int64)
+    edge_feature_index = frame["feature_index"].to_numpy(dtype=np.int64)
+    edge_weight = frame["weight"].to_numpy(dtype=np.float64)
+    return (
+        source_names,
+        np.bincount(edge_source_index, minlength=len(source_names)).astype(np.int64),
+        np.unique(edge_feature_index).astype(np.int64),
+        edge_source_index,
+        edge_feature_index,
+        edge_weight,
+        _network_digest(
+            source_names,
+            edge_source_index,
+            edge_feature_index,
+            edge_weight,
+            weighted=weighted,
+        ),
+        dropped,
+    )
+
+
+def _prepared_outcome(prepare, net: pd.DataFrame, **kwargs) -> tuple:
+    try:
+        result = prepare(net, **kwargs)
+    except (TypeError, ValueError) as error:
+        return type(error), str(error)
+    if not isinstance(result, tuple):
+        result = (
+            result.source_names,
+            result.source_sizes,
+            result.matched_feature_index,
+            result.edge_source_index,
+            result.edge_feature_index,
+            result.edge_weight,
+            result.network_digest,
+            result.dropped_ambiguous_targets,
+        )
+    return tuple(
+        (value.dtype.str, value.tolist()) if isinstance(value, np.ndarray) else value
+        for value in result
+    )
+
+
+# Texts whose upper case differs in length or merges distinct values, beside
+# blanks, padding, case variants, and text that looks numeric.
+_TEXTS = [
+    "GeneA",
+    "genea",
+    " GeneB",
+    "GeneB ",
+    "Straße",
+    "STRASSE",
+    "ﬁsh",
+    "FISH",
+    "İx",
+    "ix",
+    "ǅ",
+    "ǆ",
+    "x\x1fy",
+    "x y",
+    "",
+    " ",
+    "nan",
+    "1",
+    "1.0",
+    "Set",
+]
+_FEATURES = ["GeneA", "geneb", "STRASSE", "Straße", "FISH", "ix", "ǅ", "x y", "1"]
+
+
+def _generated_networks(seed: int) -> list[pd.DataFrame]:
+    rng = np.random.default_rng(seed)
+    networks = []
+    for kind in range(8):
+        n_edges = int(rng.integers(0, 30))
+        net = pd.DataFrame(
+            {
+                "source": rng.choice([*_TEXTS, "S1", "S2", "S3"], size=n_edges),
+                "target": rng.choice([*_TEXTS, *_FEATURES], size=n_edges),
+            }
+        )
+        if kind == 1:
+            net = net.astype(object)
+        elif kind == 2:
+            # Equal values whose text differs: 1, 1.0, True, and -0.0.
+            net["target"] = pd.Series(
+                [
+                    [1, 1.0, True, np.int64(1), "1", 2, -0.0, 0.0][index]
+                    for index in rng.integers(0, 8, size=n_edges)
+                ],
+                dtype=object,
+            )
+        elif kind == 3:
+            net["source"] = net["source"].astype("category")
+        elif kind == 4:
+            net["target"] = rng.integers(0, 3, size=n_edges)
+        elif kind == 5:
+            net = net.drop_duplicates(subset=["source", "target"])
+            net.index = [f"edge{index}" for index in range(len(net))]
+        if kind == 7:
+            net["weight"] = rng.choice([True, False], size=len(net))
+        elif kind % 3 == 0:
+            net["weight"] = rng.choice([0.0, 1.0, -2.5, 3.0], size=len(net))
+        elif kind % 3 == 1:
+            net["weight"] = pd.Series(rng.integers(0, 3, size=len(net)), dtype=object)
+        networks.append(net)
+    return networks
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_prepare_network_matches_the_per_edge_preparation(seed):
+    rng = np.random.default_rng(100 + seed)
+    names = rng.choice(_FEATURES, size=int(rng.integers(1, 9)), replace=False)
+    if seed % 2:
+        names = names.astype(object)
+    indices = rng.permutation(50)[: len(names)]
+
+    for net in _generated_networks(seed):
+        for weighted in (False, True):
+            for ambiguous_targets in ("drop", "error"):
+                for tmin in (1, 2):
+                    options = {
+                        "active_feature_names": names,
+                        "active_feature_index": indices,
+                        "tmin": tmin,
+                        "weighted": weighted,
+                        "ambiguous_targets": ambiguous_targets,
+                    }
+                    assert _prepared_outcome(
+                        prepare_network, net, **options
+                    ) == _prepared_outcome(_legacy_prepare, net, **options)
+
+
+def test_prepare_network_matches_targets_as_the_case_insensitive_index(monkeypatch):
+    from cytearc.metadata.table import CaseInsensitiveIndex
+
+    names = np.array(["Straße", "ǅ", "ﬁsh", "İx", "GeneA", "genea"])
+    targets = ["STRASSE", "ǆ", "Ǆ", "FISH", "İX", "i̇x", "GENEA", "straße"]
+    index = CaseInsensitiveIndex(names)
+    expected = {
+        f"S{edge}": index.positions(target)[0]
+        for edge, target in enumerate(targets)
+        if len(index.positions(target)) == 1
+    }
+    # The preparation looks up no edge one at a time.
+    monkeypatch.setattr(
+        CaseInsensitiveIndex,
+        "positions",
+        lambda self, name: pytest.fail("prepare_network looked up an edge"),
+    )
+
+    prepared = prepare_network(
+        pd.DataFrame(
+            {"source": [f"S{edge}" for edge in range(len(targets))], "target": targets}
+        ),
+        active_feature_names=names,
+        active_feature_index=np.arange(len(names)),
+        tmin=1,
+        weighted=False,
+    )
+
+    matched = dict(
+        zip(
+            prepared.source_names[prepared.edge_source_index].tolist(),
+            prepared.edge_feature_index.tolist(),
+            strict=True,
+        )
+    )
+    assert matched == expected
+    assert expected == {"S0": 0, "S1": 1, "S2": 1, "S3": 2, "S4": 3, "S7": 0}
+    assert prepared.dropped_ambiguous_targets == ("GENEA",)

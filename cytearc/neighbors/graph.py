@@ -1,7 +1,7 @@
 from numbers import Real
 
 import numpy as np
-from numba import jit, njit
+from numba import jit, njit, prange
 from scipy.sparse import coo_matrix, csr_matrix
 
 from ..utils.arguments import integer_argument
@@ -141,14 +141,53 @@ def take_nearest_per_row(
     return weights[keep], edges[keep]
 
 
-@jit(nopython=True)
+@njit(cache=True, nogil=True, parallel=True)
+def _count_sorted_shared_neighbors(
+    indices: np.ndarray,
+    ordered: np.ndarray,
+    out: np.ndarray,
+) -> None:
+    """Write the neighbors each cell shares with each of its neighbors to ``out``.
+
+    ``ordered`` holds each row of ``indices`` sorted. Two sorted rows are
+    merged, and a value repeated within a row counts once, as in the
+    intersection of the rows as sets. Each cell is its own parallel
+    iteration, so the counts do not depend on the thread count.
+    """
+    n_cells, n_neighbors = indices.shape
+    for cell in prange(n_cells):
+        for slot in range(n_neighbors):
+            neighbor = indices[cell, slot]
+            shared = 0
+            left = 0
+            right = 0
+            while left < n_neighbors and right < n_neighbors:
+                value = ordered[cell, left]
+                other = ordered[neighbor, right]
+                if value < other:
+                    left += 1
+                elif other < value:
+                    right += 1
+                else:
+                    shared += 1
+                    while left < n_neighbors and ordered[cell, left] == value:
+                        left += 1
+                    while right < n_neighbors and ordered[neighbor, right] == value:
+                        right += 1
+            out[cell, slot] = shared
+
+
+@njit(cache=True, nogil=True)
 def _count_shared_neighbors(indices: np.ndarray, out: np.ndarray) -> None:
-    """Write the neighbors each cell shares with each of its neighbors to ``out``."""
-    ncells, nk = indices.shape
-    for i in range(ncells):
-        for j in range(nk):
-            k = indices[i][j]
-            out[i][j] = len(set(indices[i]).intersection(set(indices[k])))
+    """Write the neighbors each cell shares with each of its neighbors to ``out``.
+
+    A neighbor listed twice in a row counts once, as in a set intersection.
+    """
+    ordered = np.empty(indices.shape, dtype=indices.dtype)
+    for cell in range(indices.shape[0]):
+        ordered[cell] = indices[cell]
+        ordered[cell].sort()
+    _count_sorted_shared_neighbors(indices, ordered, out)
 
 
 @jit(nopython=True)
@@ -164,17 +203,60 @@ def _shared_neighbor_fractions(indices: np.ndarray) -> np.ndarray:
     """Return :func:`calc_snn` of ``indices`` in one NumPy-allocated array.
 
     The fractions are computed in place, so merging holds one float64 matrix
-    per graph, and it holds it as NumPy memory, which a memory trace sees.
+    per graph, and it holds it and the sorted copy of the rows that the
+    counts read as NumPy memory, which a memory trace sees.
     """
     shared = np.empty(indices.shape, dtype=np.float64)
-    _count_shared_neighbors(indices, shared)
+    ordered = np.sort(indices, axis=1)
+    _count_sorted_shared_neighbors(indices, ordered, shared)
+    del ordered
     shared /= indices.shape[1] - 1
     return shared
+
+
+@njit(cache=True, nogil=True, parallel=True)
+def _merge_ranked_rows(
+    candidates: np.ndarray,
+    weights: np.ndarray,
+    order: np.ndarray,
+    kept_columns: np.ndarray,
+    kept_weights: np.ndarray,
+    kept_counts: np.ndarray,
+) -> None:
+    """Keep the best distinct candidates of each row, as ``weight_sort_indices``.
+
+    ``order`` sorts the ranks of each row's candidates in ascending order, as
+    ``np.argsort`` does, so each row is read from its end, and a candidate is
+    kept at its first and best-ranked copy until the row of ``kept_columns``
+    is full. ``kept_counts`` receives how many candidates each row kept, fewer
+    than the width of ``kept_columns`` when a row has fewer distinct ones.
+    """
+    n_rows, width = candidates.shape
+    n_keep = kept_columns.shape[1]
+    for row in prange(n_rows):
+        kept = 0
+        position = width - 1
+        while position >= 0 and kept < n_keep:
+            slot = order[row, position]
+            column = candidates[row, slot]
+            seen = False
+            for previous in range(kept):
+                if kept_columns[row, previous] == column:
+                    seen = True
+                    break
+            if not seen:
+                kept_columns[row, kept] = column
+                kept_weights[row, kept] = weights[row, slot]
+                kept += 1
+            position -= 1
+        kept_counts[row] = kept
 
 
 # Python objects a merge holds whatever the data size, such as the per-row
 # candidates and the progress bars, measured below 64 KiB.
 _SNN_OBJECT_BYTES = 256 * 1024
+# Rows whose ranked candidates a merge holds at once.
+_MERGE_BLOCK_ROWS = 4096
 
 
 def snn_merge_peak_bytes(
@@ -192,16 +274,22 @@ def snn_merge_peak_bytes(
     index_bytes = integer_argument(index_itemsize, "index_itemsize", minimum=1)
     weight_bytes = integer_argument(weight_itemsize, "weight_itemsize", minimum=1)
     edges = cells * k
-    # Each graph's indices, weights, and shared-neighbor fractions; the merged
-    # columns and weights; and the int64 rows of the COO graph with their
-    # copy in its index dtype.
-    per_edge = graphs * (index_bytes + weight_bytes + 8) + (
-        index_bytes + weight_bytes + 8 + index_bytes
+    # Each graph's indices, weights, and shared-neighbor fractions, its row
+    # pointers and row counts, and the merged columns and weights.
+    held = (
+        edges * (graphs * (index_bytes + weight_bytes + 8) + index_bytes + weight_bytes)
+        + cells * graphs * 2 * index_bytes
     )
-    # Each graph's row pointers and row counts, and the int64 row numbers
-    # that the COO rows repeat.
-    per_cell = graphs * 2 * index_bytes + 8
-    return edges * per_edge + cells * per_cell + _SNN_OBJECT_BYTES
+    # A block of rows holds two float64 copies of every graph's candidate
+    # ranks, or the ranks and their int64 order, or the order with the
+    # candidates and their weights, beside the int64 count of the candidates
+    # each row keeps.
+    block_rows = min(cells, _MERGE_BLOCK_ROWS)
+    merging = block_rows * (graphs * k * max(16, 8 + index_bytes + weight_bytes) + 8)
+    # The int64 rows of the COO graph, with their copy in its index dtype, and
+    # the int64 row numbers that they repeat.
+    graph = edges * (8 + index_bytes) + cells * 8
+    return held + max(merging, graph) + _SNN_OBJECT_BYTES
 
 
 def weight_sort_indices(
@@ -255,21 +343,47 @@ def merge_graphs(csr_mats: list[csr_matrix]) -> coo_matrix:
         n_cells * nk,
         dtype=np.result_type(*(weights.dtype for weights in weight_rows)),
     )
-    for row_idx in iter_progress(range(n_cells), desc="Merging graph edges"):
-        merged_indices, merged_weights = weight_sort_indices(
-            np.hstack([neighbors[row_idx] for neighbors in neighbor_rows]),
-            np.hstack([weights[row_idx] for weights in weight_rows]),
-            np.hstack(
-                [
-                    weights[row_idx] + snn[row_idx]
-                    for weights, snn in zip(weight_rows, snns, strict=True)
-                ]
-            ),
-            nk,
+    kept_counts = np.empty(min(n_cells, _MERGE_BLOCK_ROWS), dtype=np.int64)
+    for start in iter_progress(
+        range(0, n_cells, _MERGE_BLOCK_ROWS),
+        desc="Merging graph edges",
+        total=-(-n_cells // _MERGE_BLOCK_ROWS),
+    ):
+        stop = min(start + _MERGE_BLOCK_ROWS, n_cells)
+        # Each row's candidates are its edges in every graph, in graph order.
+        # A candidate ranks by its weight plus its shared-neighbor fraction,
+        # and np.argsort sorts each row of a block as it sorts the row alone,
+        # so tied candidates keep the order that weight_sort_indices gives them.
+        ranks = np.concatenate(
+            [
+                graph_weights[start:stop] + fractions[start:stop]
+                for graph_weights, fractions in zip(weight_rows, snns, strict=True)
+            ],
+            axis=1,
         )
-        start = row_idx * nk
-        columns[start : start + nk] = merged_indices
-        data[start : start + nk] = merged_weights
+        order = np.argsort(ranks, axis=1)
+        del ranks
+        counts = kept_counts[: stop - start]
+        _merge_ranked_rows(
+            np.concatenate(
+                [neighbors[start:stop] for neighbors in neighbor_rows], axis=1
+            ),
+            np.concatenate(
+                [graph_weights[start:stop] for graph_weights in weight_rows], axis=1
+            ),
+            order,
+            columns[start * nk : stop * nk].reshape(stop - start, nk),
+            data[start * nk : stop * nk].reshape(stop - start, nk),
+            counts,
+        )
+        del order
+        short = np.flatnonzero(counts < nk)
+        if len(short):
+            row = int(short[0])
+            raise ValueError(
+                f"Row {start + row} of the merged graphs has {int(counts[row])} "
+                f"distinct neighbors, but SNN integration keeps {nk}"
+            )
     rows = np.repeat(np.arange(n_cells), nk)
     return coo_matrix((data, (rows, columns)), shape=csr_mats[0].shape)
 

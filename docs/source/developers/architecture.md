@@ -46,6 +46,10 @@ These calls do not create module-load cycles.
   profiles, materialization, ANN persistence, selection snapshots, run/stage records, Zarr runtime
   guards, and artifact lineage reports.
   It also owns the operation revision registry (`storage/operation_revisions.py`, see [](operation_revisions.md)), the finite-value contract of artifact arrays (`storage/finite_values.py`), and the writer destination contract (`storage/destinations.py`).
+  `storage/content_stamps.py` reuses a value computed from a stored array, such as the
+  fingerprint of the ordered row IDs that every selection check compares, while a stamp of the
+  array's metadata document and stored chunk bytes is unchanged; any change to those bytes
+  computes the value again.
   `storage/virtual_arrays.py` is the one seam for arrays that a store computes, such as composite
   counts: a `VirtualArrayStore` hands out a `VirtualArrayReader` for such an array. Count selections
   are read through `read_selection`, and `storage.feature_stream` hands a virtual array's feature
@@ -57,6 +61,9 @@ These calls do not create module-load cycles.
   `storage/feature_major_rows.py` when that touches fewer chunk bytes, and the matrix's operations
   transform them exactly as rows of `counts`, so a normalization has one implementation.
 - `utils/` owns generic array, argument validation, compute, logging, process, and progress helpers.
+  The process-tree RSS sampler of pipeline stages finds a process's descendants through the
+  `/proc/<pid>/task/<tid>/children` lists, and reads the parent of every process only where the
+  kernel has no such lists.
   It also owns streamed column moments (`utils/moments.py`) and the one warning helper (`utils/warnings.py`), which points each warning at the caller's code.
   `utils/numba.py` gives third-party Numba kernels compiled without a cache, such as umap-learn's,
   an on-disk cache with its own files for each set of compile options, once per process and before
@@ -70,6 +77,9 @@ Facade aliases do not change implementation ownership.
 
 - `metadata/` owns Zarr-backed metadata tables, row streaming, and table queries.
   It is shared by datastore cell metadata and assay feature metadata, so neither `datastore`, `assay`, nor `storage` owns it.
+  A table's columns are the members that Zarr lists with their metadata, so a stray object such
+  as `.DS_Store` is never a column; `head` and the membership columns reuse the arrays that one
+  listing opened, and `to_pandas_dataframe` opens only the requested columns, each once.
   Shared value-selection contracts also live here so domain, orchestration, and presentation code can use one typed contract without reversing dependencies.
   These include the nullable value contract of metadata columns (`metadata/encoding.py`), the assay-membership contract (`metadata/membership.py`), and `CELL_VALUE_NAMES`, the table of cell-aligned artifact kinds, with the reader that aligns their rows to cells (`metadata/selection.py`).
 - `assay/` owns normalization, blockwise feature-summary computation, and the RNA, ATAC, and ADT assay types.
@@ -158,6 +168,10 @@ Format-specific code belongs in a module named for that format.
 
 `DataStore` remains the primary workflow API.
 Its analysis namespaces bind the existing scoped operations in `datastore._operations`.
+`DataStore.zw` opens a workspace group once, as the root group is opened once: its members are
+read from the store on each access, and CyteArc writes the workspace attributes through it or, after
+writing them through another handle (a derived assay's type, a discarded pending assay), opens it
+again.
 `datastore.namespaces` owns these small accessors, and `datastore.artifact_accessor` owns saved
 result access and discovery. Public names do not replace persisted operation names, parameters,
 or input keys. The namespace boundary does not change computation or artifact reuse.

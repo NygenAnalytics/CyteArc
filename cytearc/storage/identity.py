@@ -302,8 +302,10 @@ def _hash_column(
     if column.dtype.kind in "OUS" or column.dtype.hasobject:
         builder.update_bytes(name, canonical_bytes({"shape": list(column.shape)}))
         for start in range(0, column.shape[0], rows):
-            for value in _decode_metadata_values(column[start : start + rows]):
-                builder.update_bytes("value", str(value).encode("utf-8"))
+            # One record per value, as update_bytes("value", ...) adds it.
+            builder.update_text_values(
+                "value", _decode_metadata_values(column[start : start + rows])
+            )
     else:
         builder.begin_array(name, column.shape, column.dtype)
         for start in range(0, column.shape[0], rows):

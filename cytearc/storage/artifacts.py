@@ -17,6 +17,7 @@ import zarr
 
 from ..utils.logging import logger
 from .arrays import _decode_metadata_values, text_dtype
+from .content_stamps import cached_for_content
 from .errors import ArtifactErrorContextValue, ArtifactResolutionError
 from .geometry import array_geometry
 from .operation_revisions import (
@@ -140,6 +141,83 @@ def _canonical_array(values: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(packed)
 
 
+# Characters of fixed-width text encoded together; a pass holds about sixteen
+# bytes per character.
+_TEXT_PASS_CHARACTERS = 1 << 20
+
+
+def _utf8_bytes(
+    points: np.ndarray, present: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the UTF-8 bytes of code points and which of them a value holds.
+
+    Each code point takes four byte slots, of which the mask keeps the one to
+    four that its UTF-8 encoding uses, so the kept bytes of a row, in order,
+    encode the ``present`` code points of that row.
+    """
+    count, width = points.shape
+    sizes = present.astype(np.uint8)
+    for limit in (0x80, 0x800, 0x10000):
+        sizes += present & (points >= limit)
+    encoded = np.empty((count, width, 4), dtype=np.uint8)
+    lead = np.asarray([0, 0, 0xC0, 0xE0, 0xF0], dtype=np.uint32)[sizes]
+    encoded[..., 0] = (points >> (6 * (np.maximum(sizes, 1) - 1))) | lead
+    for index in range(1, 4):
+        shift = 6 * (np.maximum(sizes, index + 1) - 1 - index)
+        encoded[..., index] = 0x80 | ((points >> shift) & 0x3F)
+    keep = np.arange(4) < sizes[..., None]
+    return encoded.reshape(count, 4 * width), keep.reshape(count, 4 * width)
+
+
+def _text_value_records(head: bytes, values: np.ndarray) -> np.ndarray | None:
+    """Return the ``update_bytes`` records of fixed-width text values, in order.
+
+    Each value adds ``head``, the length of its UTF-8 encoding as eight
+    big-endian bytes, and that encoding. Returns None when a value holds a code
+    point that UTF-8 cannot encode, such as a surrogate.
+    """
+    count = values.shape[0]
+    width = values.dtype.itemsize // 4
+    points = (
+        np.ascontiguousarray(values, dtype=values.dtype.newbyteorder("="))
+        .view(np.uint32)
+        .reshape(count, width)
+    )
+    top = int(points.max(initial=0))
+    if top >= 0xD800 and np.any(
+        ((points >= 0xD800) & (points <= 0xDFFF)) | (points > 0x10FFFF)
+    ):
+        return None
+    # A value's text ends at its last code point that is not NUL, as NumPy
+    # reads it; inner NUL characters belong to the text.
+    lengths = np.char.str_len(values)
+    prefix = np.empty((count, len(head) + 8), dtype=np.uint8)
+    prefix[:, : len(head)] = np.frombuffer(head, dtype=np.uint8)
+
+    def encode_sizes(sizes: np.ndarray) -> None:
+        prefix[:, len(head) :] = sizes.astype(">u8").view(np.uint8).reshape(count, 8)
+
+    if top < 0x80:
+        # ASCII text takes one byte per code point.
+        encode_sizes(lengths)
+        payloads = points.astype(np.uint8)
+        if int(lengths.min(initial=0)) == int(lengths.max(initial=0)):
+            # Values of one length, such as barcodes, need no gather.
+            size = int(lengths.max(initial=0))
+            same_length: np.ndarray = np.concatenate(
+                (prefix, payloads[:, :size]), axis=1
+            ).reshape(-1)
+            return same_length
+        keep = np.arange(width) < lengths[:, None]
+    else:
+        payloads, keep = _utf8_bytes(points, np.arange(width) < lengths[:, None])
+        encode_sizes(keep.sum(axis=1))
+    records = np.concatenate((prefix, payloads), axis=1)
+    kept = np.concatenate((np.ones(prefix.shape, dtype=bool), keep), axis=1)
+    gathered: np.ndarray = records[kept]
+    return gathered
+
+
 class ValueFingerprintBuilder:
     def __init__(self) -> None:
         self._digest = hashlib.blake2b(digest_size=32, person=b"cytearc-values")
@@ -155,6 +233,43 @@ class ValueFingerprintBuilder:
         self._digest.update(encoded_name)
         self._digest.update(len(payload).to_bytes(8, "big"))
         self._digest.update(payload)
+
+    def update_text_values(self, name: str, values: np.ndarray) -> None:
+        """Add the text of each value as one ``update_bytes`` call per value would.
+
+        Each value adds exactly the bytes of
+        ``update_bytes(name, str(value).encode("utf-8"))``, so the digest does
+        not depend on which method added them. Fixed-width text is encoded in
+        bulk; other values, and text that UTF-8 cannot encode, one at a time.
+        """
+        if self._active_array is not None:
+            raise RuntimeError("Finish the active array before adding another value")
+        array = np.asarray(values)
+        encoded_name = name.encode("utf-8")
+        head = len(encoded_name).to_bytes(8, "big") + encoded_name
+        if array.ndim != 1 or array.dtype.kind != "U":
+            self._update_text_values_one_by_one(head, array)
+            return
+        step = max(1, _TEXT_PASS_CHARACTERS // max(1, array.dtype.itemsize // 4))
+        for start in range(0, array.shape[0], step):
+            part = array[start : start + step]
+            records = _text_value_records(head, part)
+            if records is None:
+                # A code point that is not Unicode text keeps what str.encode
+                # makes of it, such as the error it raises for a surrogate.
+                self._update_text_values_one_by_one(head, part)
+            else:
+                self._digest.update(records)
+
+    def _update_text_values_one_by_one(self, head: bytes, values: np.ndarray) -> None:
+        payloads = [str(value).encode("utf-8") for value in values]
+        self._digest.update(
+            b"".join(
+                part
+                for payload in payloads
+                for part in (head, len(payload).to_bytes(8, "big"), payload)
+            )
+        )
 
     def update_array(self, name: str, values: np.ndarray) -> None:
         array = np.asarray(values)
@@ -302,16 +417,28 @@ def fingerprint_text_blocks(
 
 
 def fingerprint_stored_strings(array: Any) -> str:
-    """Fingerprint a stored or in-memory string column in bounded bands."""
+    """Fingerprint a stored or in-memory string column in bounded bands.
+
+    The fingerprint of a Zarr array is reused while its stored bytes are
+    unchanged (:func:`~cytearc.storage.content_stamps.cached_for_content`), so
+    checking ordered row IDs again reads their encoded bytes instead of decoding
+    and hashing every ID.
+    """
     if array.ndim != 1:
         raise ValueError("Stored string fingerprints require a one-dimensional array")
     rows = _stored_array_chunk_rows(array)
     n_rows = int(array.shape[0])
-    return fingerprint_text_blocks(
-        n_rows,
-        array.dtype,
-        lambda: (array[start : start + rows] for start in range(0, n_rows, rows)),
-    )
+
+    def compute() -> str:
+        return fingerprint_text_blocks(
+            n_rows,
+            array.dtype,
+            lambda: (array[start : start + rows] for start in range(0, n_rows, rows)),
+        )
+
+    if isinstance(array, zarr.Array):
+        return cached_for_content("text_fingerprint", array, compute)
+    return compute()
 
 
 def fingerprint_strings(values: np.ndarray) -> str:

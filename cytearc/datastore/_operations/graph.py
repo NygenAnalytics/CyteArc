@@ -3018,7 +3018,20 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 ).tocsr()
                 for source in captured_sources
             ]
-            merged_graph = merge_graphs(graphs)
+            import numba
+
+            # The merge kernels run on the store's threads.
+            previous_threads = numba.get_num_threads()
+            numba.set_num_threads(
+                min(
+                    max(1, int(self.nthreads)),
+                    int(getattr(numba.config, "NUMBA_NUM_THREADS")),
+                )
+            )
+            try:
+                merged_graph = merge_graphs(graphs)
+            finally:
+                numba.set_num_threads(previous_threads)
             # The sources are released before the integrated graph is written.
             del graphs
         else:

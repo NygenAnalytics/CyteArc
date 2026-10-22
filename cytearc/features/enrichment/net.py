@@ -5,7 +5,6 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
-from ...metadata.table import CaseInsensitiveIndex
 from ...utils.arrays import has_duplicates, read_only_copy
 from ...utils.logging import logger
 
@@ -180,6 +179,34 @@ def read_gmt(path: str | os.PathLike[str]) -> pd.DataFrame:
     return pd.DataFrame.from_records(records, columns=["source", "target"])
 
 
+def _stripped_text_codes(values: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+    """Return the code of each value's text and the texts that the codes index.
+
+    A value's text is ``str(value).strip()``, as the network keeps it, so
+    values whose texts are equal share a code. Distinct values are stripped
+    once; values of a string dtype are already their own text.
+    """
+    if isinstance(values.dtype, pd.StringDtype):
+        codes, distinct = pd.factorize(values)
+    else:
+        codes, distinct = pd.factorize(
+            np.asarray([str(value) for value in values.astype(object)], dtype=object)
+        )
+    merged, texts = pd.factorize(
+        np.asarray(
+            [str(text).strip() for text in np.asarray(distinct, dtype=object)],
+            dtype=object,
+        )
+    )
+    return merged[codes], np.asarray(texts, dtype=object)
+
+
+def _repeats_a_pair(first: np.ndarray, second: np.ndarray, second_size: int) -> bool:
+    """Whether aligned codes, ``second`` below ``second_size``, repeat a pair."""
+    keys = np.sort(first.astype(np.int64) * second_size + second)
+    return bool(np.any(keys[1:] == keys[:-1]))
+
+
 def prepare_network(
     net: pd.DataFrame,
     *,
@@ -227,65 +254,72 @@ def prepare_network(
     if np.any(feature_index < 0) or has_duplicates(feature_index):
         raise ValueError("Active feature indices must be non-negative and unique")
 
-    columns = ["source", "target"]
-    if "weight" in net.columns:
-        columns.append("weight")
-    frame = net.loc[:, columns].copy(deep=True).reset_index(drop=True)
-    if frame[["source", "target"]].isna().any().any():
+    if net[["source", "target"]].isna().any().any():
         raise ValueError("Network source and target values must not be missing")
-    frame["source"] = frame["source"].map(lambda value: str(value).strip())
-    frame["target"] = frame["target"].map(lambda value: str(value).strip())
-    if (frame["source"] == "").any() or (frame["target"] == "").any():
+    source_codes, source_texts = _stripped_text_codes(net["source"])
+    target_codes, target_texts = _stripped_text_codes(net["target"])
+    if (source_texts == "").any() or (target_texts == "").any():
         raise ValueError("Network source and target values must be non-empty")
-    if frame.duplicated(subset=["source", "target"]).any():
+    if _repeats_a_pair(source_codes, target_codes, len(target_texts)):
         raise ValueError("Network contains duplicate source-target edges")
 
-    if "weight" not in frame.columns:
-        frame["weight"] = 1.0
-    if frame["weight"].map(lambda value: isinstance(value, (bool, np.bool_))).any():
-        raise ValueError("Network weights must be numeric and not boolean")
-    try:
-        weights = pd.to_numeric(frame["weight"], errors="raise").to_numpy(
-            dtype=np.float64
-        )
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Network weights must be numeric") from exc
-    if not np.isfinite(weights).all():
-        raise ValueError("Network weights must be finite")
-    frame["weight"] = weights
+    if "weight" in net.columns:
+        raw_weights = net["weight"]
+        # Values of an integer or floating dtype are never booleans.
+        if raw_weights.dtype.kind not in "iuf" and (
+            raw_weights.map(lambda value: isinstance(value, (bool, np.bool_))).any()
+        ):
+            raise ValueError("Network weights must be numeric and not boolean")
+        try:
+            weights = pd.to_numeric(raw_weights, errors="raise").to_numpy(
+                dtype=np.float64
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Network weights must be numeric") from exc
+        if not np.isfinite(weights).all():
+            raise ValueError("Network weights must be finite")
+    else:
+        weights = np.ones(len(net), dtype=np.float64)
     if weighted:
-        frame = frame.loc[frame["weight"] != 0.0].copy()
-        if frame.empty:
+        rows = np.flatnonzero(weights != 0.0)
+        if len(rows) == 0:
             raise ValueError("Weighted network contains no non-zero edges")
     else:
-        frame["weight"] = 1.0
+        rows = np.arange(len(net))
+        weights = np.ones(len(net), dtype=np.float64)
 
-    names = CaseInsensitiveIndex(feature_names)
-    matched_rows: list[int] = []
-    matched_indices: list[int] = []
-    ambiguous: set[str] = set()
-    for row_index, target in zip(frame.index, frame["target"], strict=True):
-        matches = names.positions(target)
-        if not matches:
-            continue
-        if len(matches) > 1:
-            if ambiguous_targets == "error":
-                raise ValueError(
-                    f"Network target {target!r} matches multiple active assay "
-                    "features. Pass ambiguous_targets='drop' to drop its edges."
-                )
-            ambiguous.add(str(target))
-            continue
-        matched_rows.append(int(row_index))
-        matched_indices.append(int(feature_index[matches[0]]))
+    # Targets match feature names as CaseInsensitiveIndex matches them, both
+    # compared as str(value).upper(); a distinct text is upper-cased once.
+    key_codes, keys = pd.factorize(
+        np.asarray([str(name).upper() for name in feature_names], dtype=object)
+    )
+    key_counts = np.bincount(key_codes, minlength=len(keys))
+    _, first_feature = np.unique(key_codes, return_index=True)
+    target_keys = pd.Index(keys).get_indexer(
+        [str(text).upper() for text in target_texts]
+    )
+    edge_keys = target_keys[target_codes[rows]]
+    edge_matches = np.zeros(len(rows), dtype=np.int64)
+    found = edge_keys >= 0
+    edge_matches[found] = key_counts[edge_keys[found]]
+    ambiguous = edge_matches > 1
+    if ambiguous_targets == "error" and ambiguous.any():
+        target = target_texts[target_codes[rows[np.argmax(ambiguous)]]]
+        raise ValueError(
+            f"Network target {target!r} matches multiple active assay "
+            "features. Pass ambiguous_targets='drop' to drop its edges."
+        )
 
-    dropped_ambiguous_targets = tuple(sorted(ambiguous))
+    dropped_ambiguous_targets = tuple(
+        sorted({str(target) for target in target_texts[target_codes[rows[ambiguous]]]})
+    )
     if dropped_ambiguous_targets:
         logger.warning(
             f"Dropped {len(dropped_ambiguous_targets)} network targets that match "
             "multiple active assay features: " + ", ".join(dropped_ambiguous_targets)
         )
-    if not matched_rows:
+    matched = edge_matches == 1
+    if not matched.any():
         raise ValueError(
             "Network has no targets overlapping the active assay features"
             + (
@@ -294,34 +328,42 @@ def prepare_network(
                 else ""
             )
         )
-    frame = frame.loc[matched_rows].copy()
-    frame["feature_index"] = np.asarray(matched_indices, dtype=np.int64)
-    if frame.duplicated(subset=["source", "feature_index"]).any():
+    rows = rows[matched]
+    edge_sources = source_codes[rows]
+    # Active feature indices are unique, so a feature's position stands for it.
+    edge_positions = first_feature[edge_keys[matched]]
+    if _repeats_a_pair(edge_sources, edge_positions, len(feature_index)):
         raise ValueError(
             "Network contains duplicate edges after case-insensitive feature matching"
         )
+    edge_features = feature_index[edge_positions]
 
-    counts = frame.groupby("source", sort=False, observed=True).size()
-    kept_sources = sorted(str(source) for source in counts[counts >= tmin].index)
+    source_counts = np.bincount(edge_sources, minlength=len(source_texts))
+    kept_codes = np.flatnonzero(source_counts >= tmin)
+    kept_sources = sorted(str(source_texts[code]) for code in kept_codes)
     if not kept_sources:
         raise ValueError(
             "No network sources remain after feature overlap and "
-            f"tmin={tmin} pruning ({len(frame)} matched edges)"
+            f"tmin={tmin} pruning ({len(rows)} matched edges)"
         )
-    frame = frame.loc[frame["source"].isin(kept_sources)].copy()
 
     source_names = np.asarray(kept_sources, dtype="U")
     source_to_index = {
         source: index for index, source in enumerate(source_names.tolist())
     }
-    frame["source_index"] = frame["source"].map(source_to_index).astype(np.int64)
-    frame = frame.sort_values(
-        ["source_index", "feature_index"], kind="mergesort"
-    ).reset_index(drop=True)
-
-    edge_source_index = frame["source_index"].to_numpy(dtype=np.int64)
-    edge_feature_index = frame["feature_index"].to_numpy(dtype=np.int64)
-    edge_weight = frame["weight"].to_numpy(dtype=np.float64)
+    source_ranks = np.full(len(source_texts), -1, dtype=np.int64)
+    for code in kept_codes:
+        source_ranks[code] = source_to_index[str(source_texts[code])]
+    edge_ranks = source_ranks[edge_sources]
+    kept = edge_ranks >= 0
+    edge_source_index = edge_ranks[kept]
+    edge_feature_index = edge_features[kept]
+    edge_weight = weights[rows[kept]]
+    # Source-feature pairs are distinct, so the order is canonical.
+    order = np.lexsort((edge_feature_index, edge_source_index))
+    edge_source_index = edge_source_index[order]
+    edge_feature_index = edge_feature_index[order]
+    edge_weight = edge_weight[order]
     matched_feature_index = np.unique(edge_feature_index).astype(np.int64)
     source_sizes = np.bincount(edge_source_index, minlength=len(source_names)).astype(
         np.int64

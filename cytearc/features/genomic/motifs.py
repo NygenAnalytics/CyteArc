@@ -634,11 +634,32 @@ def match_motifs(
     thresholds = _strand_thresholds(matrices, frequencies, p_value)
     hits = scan_motif_matches(sequences, matrices, thresholds, batch_size=batch_size)
     by_motif = hits.tocsc()
-    rows = []
-    for column, motif in enumerate(motifs):
-        regions = by_motif.indices[
-            by_motif.indptr[column] : by_motif.indptr[column + 1]
-        ]
-        for region in np.sort(regions):
-            rows.append((motif.motifId, region_names[region], motif.name))
-    return pd.DataFrame.from_records(rows, columns=["source", "target", "motif_name"])
+    by_motif.sort_indices()
+    columns = ["source", "target", "motif_name"]
+    if by_motif.nnz == 0:
+        return pd.DataFrame.from_records([], columns=columns)
+    hit_motifs = np.repeat(np.arange(len(motifs)), np.diff(by_motif.indptr))
+    hit_regions = by_motif.indices
+    sources = np.empty(len(motifs), dtype=object)
+    names = np.empty(len(motifs), dtype=object)
+    for index, motif in enumerate(motifs):
+        sources[index] = motif.motifId
+        names[index] = motif.name
+    matched = np.zeros(region_names.size, dtype=bool)
+    matched[hit_regions] = True
+    matched_regions = np.flatnonzero(matched)
+    # The targets are the NumPy strings that indexing region_names returns.
+    targets = np.fromiter(
+        region_names[matched_regions], dtype=object, count=matched_regions.size
+    )
+    positions = np.cumsum(matched) - 1
+    network = pd.DataFrame(
+        {
+            "source": sources[hit_motifs],
+            "target": targets[positions[hit_regions]],
+            "motif_name": names[hit_motifs],
+        }
+    )
+    # As a frame built from records, identifiers that are numbers get a
+    # numeric dtype.
+    return network.infer_objects()

@@ -11,21 +11,25 @@ from ..storage.identity import CountSummary, finalize_counts, load_count_summari
 from ..storage.count_matrix import CountMatrixPolicy
 from ..storage.io_policy import StorageIoPolicy
 from ..storage.profiles import StorageProfile
+from ..storage.layout import array_shard_rows
 from ..storage.schema import _assay_paths, create_zarr_count_assay, load_count_array
 from ..storage.sharding import (
     accumulate_sparse_to_shards,
     fit_count_layout,
+    plan_dense_write,
     resolve_sparse_import_batch,
+    row_band_task_count,
     sparse_counts_admission,
     write_counts_t,
+    write_dense_from_row_batches,
 )
 from ..storage.types import as_zarr_array, as_zarr_group
-from ..utils.arrays import canonicalize_sparse, max_window_nnz
+from ..utils.arrays import canonicalize_sparse, checked_sparse_cast, max_window_nnz
 from ..utils.compute import controlled_compute
 from ..utils.logging import logger
 from ..utils.progress import iter_progress
 from .features import FeatureAlignment
-from .row_plan import RowPlan, iter_row_plan_segments
+from .row_plan import RowPlan, iter_row_plan_segments, max_row_plan_block_rows
 
 
 CountsTReuseOutcome = Literal["reusable", "incomplete", "invalid"]
@@ -75,6 +79,44 @@ def remap_block_to_coo(
 
 def empty_block_coo(n_rows: int, n_feats: int) -> coo_matrix:
     return coo_matrix((n_rows, n_feats))
+
+
+# Column maps of fewer runs than this are copied run by run.
+_SCATTER_RUNS = 64
+
+
+def scatter_block_dense(
+    block: np.ndarray,
+    order_map: np.ndarray,
+    n_feats: int,
+    destination_dtype: np.dtype[Any],
+) -> np.ndarray:
+    """Place source columns at their merged positions in dense destination rows.
+
+    ``order_map`` must give every source column its own merged column. The
+    rows equal the dense bands that ``remap_block_to_coo`` coordinates fill:
+    values are checked and cast in the same way, and as sparse coordinates
+    hold no zero, a negative zero is written as zero.
+    """
+    values = np.asarray(block)
+    if np.can_cast(values.dtype, destination_dtype, casting="safe"):
+        values = values.astype(destination_dtype, copy=False)
+    else:
+        values = checked_sparse_cast(values, destination_dtype)
+    dense = np.zeros((values.shape[0], n_feats), dtype=destination_dtype)
+    # Merged columns mostly follow each other in runs, which copy as slices.
+    breaks = np.flatnonzero(np.diff(order_map) != 1) + 1
+    if breaks.size < _SCATTER_RUNS:
+        for start, stop in zip(
+            np.r_[0, breaks].tolist(), np.r_[breaks, order_map.size].tolist()
+        ):
+            first = int(order_map[start])
+            dense[:, first : first + stop - start] = values[:, start:stop]
+    else:
+        dense[:, order_map] = values
+    if destination_dtype.kind in "fc":
+        np.copyto(dense, 0, where=dense == 0)
+    return dense
 
 
 def create_assay_counts(
@@ -285,7 +327,17 @@ def write_assay_counts(
     additionalResidentBytes: int = 0,
     io: StorageIoPolicy | None = None,
 ) -> int:
-    """Stream remapped source blocks into the destination counts array."""
+    """Stream remapped source blocks into the destination counts array.
+
+    A row-plan block holds rows of one source chunk in a permuted order, so a
+    batch of some of its rows decodes the whole chunk. When a block spans
+    several batches and the budget holds it beside the write, each block is
+    read once and its batches are cut from memory. When every source column
+    has a merged column of its own, as with ``feature_key="ids"``, batches are
+    scattered into dense destination rows; otherwise they pass through sparse
+    coordinates, which sum the features that share a merged column. Every
+    path writes the same values in the same bands.
+    """
     destination = load_count_array(root, assay_name, workspace)
     summary = CountSummary(destination)
     requirements = _merge_import_requirements(
@@ -306,19 +358,124 @@ def write_assay_counts(
         extraProducerBytes=requirements.extraProducerBytes,
     )
     batch_rows = max(1, int(plan.batchRows))
+    destination_dtype = np.dtype(destination.dtype)
+    present = [
+        assay for assay in assays if assay is not None and int(assay.feats.N) > 0
+    ]
+    source_n_feats = max((int(assay.rawData.shape[1]) for assay in present), default=0)
+    value_bytes = max(
+        [
+            destination_dtype.itemsize,
+            *(np.dtype(assay.rawData.dtype).itemsize for assay in present),
+        ]
+    )
+    block_rows = max_row_plan_block_rows(row_plan)
+    block_bytes = (
+        block_rows * source_n_feats * value_bytes if block_rows > batch_rows else 0
+    )
 
-    def convert_rows(assay_idx: int, perm_order: np.ndarray) -> coo_matrix:
-        assay = assays[assay_idx]
-        if assay is None or int(assay.feats.N) == 0:
-            return empty_block_coo(int(perm_order.size), alignment.nFeats)
-        block = assay.rawData[np.asarray(perm_order, dtype=np.int64), :]
-        return remap_block_to_coo(
-            block,
-            alignment.featOrderMap[assay_idx],
-            alignment.nFeats,
-            resources.workers,
-            np.dtype(destination.dtype),
+    def source_batches(
+        hold_blocks: bool,
+    ) -> Iterator[tuple[int, np.ndarray | None, int]]:
+        """Yield the source, dense source rows, and row count of each batch.
+
+        Batches follow the destination rows; a source without the assay has
+        no rows to read.
+        """
+        for block in iter_row_plan_segments(row_plan):
+            assay = assays[block.sourceIdx]
+            rows = np.asarray(block.localRows, dtype=np.int64)
+            if assay is None or int(assay.feats.N) == 0:
+                for offset in range(0, rows.size, batch_rows):
+                    yield block.sourceIdx, None, min(batch_rows, rows.size - offset)
+                continue
+            held = (
+                controlled_compute(assay.rawData[rows, :], resources.workers)
+                if hold_blocks
+                else None
+            )
+            for offset in range(0, rows.size, batch_rows):
+                batch = rows[offset : offset + batch_rows]
+                values = (
+                    controlled_compute(assay.rawData[batch, :], resources.workers)
+                    if held is None
+                    else held[offset : offset + batch_rows]
+                )
+                yield block.sourceIdx, values, batch.size
+            del held
+
+    if all(
+        np.unique(order_map).size == order_map.size
+        for assay, order_map in zip(assays, alignment.featOrderMap, strict=True)
+        if assay is not None and int(assay.feats.N) > 0
+    ):
+        shard_rows = array_shard_rows(destination)
+        mask_bytes = np.dtype(bool).itemsize if destination_dtype.kind in "fc" else 0
+        # A batch holds its source rows and their cast, its destination rows,
+        # and a float destination's zero mask, beside the band it is copied
+        # into and what its read decodes.
+        dense_reserve = (
+            batch_rows * source_n_feats * (value_bytes + destination_dtype.itemsize)
+            + batch_rows * alignment.nFeats * (destination_dtype.itemsize + mask_bytes)
+            + shard_rows * alignment.nFeats * destination_dtype.itemsize
+            + requirements.extraProducerBytes(0)
         )
+
+        def dense_batches(hold_blocks: bool) -> Iterator[np.ndarray]:
+            for source_idx, values, n_rows in source_batches(hold_blocks):
+                if values is None:
+                    yield np.zeros((n_rows, alignment.nFeats), dtype=destination_dtype)
+                else:
+                    yield scatter_block_dense(
+                        values,
+                        alignment.featOrderMap[source_idx],
+                        alignment.nFeats,
+                        destination_dtype,
+                    )
+
+        for held_bytes in (block_bytes, 0) if block_bytes else (0,):
+            try:
+                plan_dense_write(
+                    destination,
+                    resources,
+                    row_band_task_count(row_plan.nCells, shard_rows),
+                    io=io,
+                    residentBytes=requirements.residentBytes
+                    + held_bytes
+                    + dense_reserve,
+                )
+            except MemoryError:
+                continue
+            counter = write_dense_from_row_batches(
+                destination,
+                dense_batches(held_bytes > 0),
+                msg=f"Writing merged assay {assay_name}",
+                resources=resources,
+                io=io,
+                producerReserveBytes=dense_reserve,
+                residentBytes=requirements.residentBytes + held_bytes,
+                countSummary=summary,
+            )
+            return _finish_assay_counts(
+                root, assay_name, workspace, destination, summary, counter
+            )
+
+    held_bytes = 0
+    if block_bytes:
+        try:
+            plan = resolve_sparse_import_batch(
+                (destination,),
+                nRows=row_plan.nCells,
+                resources=resources,
+                maxWindowNnz=requirements.maxWindowNnz,
+                sourceDtype=requirements.sourceDtype,
+                batchRows=batch_rows,
+                residentBytes=requirements.residentBytes + block_bytes,
+                extraProducerBytes=requirements.extraProducerBytes,
+            )
+            held_bytes = block_bytes
+        except MemoryError:
+            pass
 
     def block_stream() -> Iterator[coo_matrix]:
         # Split each row-plan block into planner-admitted batch widths so peak
@@ -331,11 +488,16 @@ def write_assay_counts(
             )
         )
         batches = (
-            convert_rows(segment.sourceIdx, segment.localRows)
-            for segment in iter_row_plan_segments(
-                row_plan,
-                segment_rows=batch_rows,
+            empty_block_coo(n_rows, alignment.nFeats)
+            if values is None
+            else remap_block_to_coo(
+                values,
+                alignment.featOrderMap[source_idx],
+                alignment.nFeats,
+                resources.workers,
+                destination_dtype,
             )
+            for source_idx, values, n_rows in source_batches(held_bytes > 0)
         )
         yield from iter_progress(
             batches,
@@ -347,11 +509,24 @@ def write_assay_counts(
         destination,
         block_stream(),
         resources=resources,
-        residentBytes=requirements.residentBytes,
+        residentBytes=requirements.residentBytes + held_bytes,
         producerReserveBytes=plan.producerReserveBytes,
         io=io,
         countSummary=summary,
     )
+    return _finish_assay_counts(
+        root, assay_name, workspace, destination, summary, counter
+    )
+
+
+def _finish_assay_counts(
+    root: zarr.Group,
+    assay_name: str,
+    workspace: str | None,
+    destination: zarr.Array,
+    summary: CountSummary,
+    counter: int,
+) -> int:
     matrix_path = _matrix_group_path(assay_name, workspace)
     matrix_group = as_zarr_group(root[matrix_path], name=matrix_path)
     finalize_counts(destination, summary=summary)

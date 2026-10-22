@@ -281,6 +281,62 @@ def test_largest_component_selection_is_deterministic_on_ties():
         )
 
 
+def test_largest_component_selection_keeps_a_unique_largest_component():
+    adjacency = np.zeros((6, 6), dtype=float)
+    # A pair, a path of three cells, and an isolated cell.
+    for left, right in ((0, 1), (2, 3), (3, 4)):
+        adjacency[left, right] = adjacency[right, left] = 1.0
+    # The pair holds the smallest selected index, but the path is larger.
+    selected_indices = np.array([1, 2, 30, 31, 32, 0])
+
+    retained, sizes = _select_pseudotime_component(
+        csr_matrix(adjacency),
+        selected_indices,
+        "largest",
+    )
+
+    assert sizes == [2, 3, 1]
+    np.testing.assert_array_equal(retained, [False, False, True, True, True, False])
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_largest_component_selection_matches_a_scan_of_every_component(seed):
+    from scipy.sparse.csgraph import connected_components
+
+    rng = np.random.default_rng(seed)
+    # Components of a few repeated sizes tie often; singletons are components.
+    sizes = rng.choice([1, 2, 3, 3, 5], size=int(rng.integers(2, 40)))
+    n_cells = int(sizes.sum())
+    order = rng.permutation(n_cells)
+    rows, columns = [], []
+    start = 0
+    for size in sizes.tolist():
+        members = order[start : start + size]
+        rows.extend(members[:-1].tolist())
+        columns.extend(members[1:].tolist())
+        start += size
+    graph = csr_matrix((np.ones(len(rows)), (rows, columns)), shape=(n_cells, n_cells))
+    # Unsorted selected indices, which repeat when seeds are odd.
+    selected = rng.permutation(np.arange(100, 100 + n_cells))
+    if seed % 2:
+        selected[rng.integers(0, n_cells, size=3)] = selected[0]
+
+    retained, component_sizes = _select_pseudotime_component(graph, selected, "largest")
+
+    n_components, labels = connected_components(
+        graph, directed=False, return_labels=True
+    )
+    counts = np.bincount(labels, minlength=n_components).tolist()
+    # Every component scanned in label order, the earlier selection rule.
+    expected = min(
+        range(n_components),
+        key=lambda label: (-counts[label], int(selected[labels == label].min())),
+    )
+    assert component_sizes == counts
+    if n_components > 1:
+        np.testing.assert_array_equal(retained, labels == expected)
+
+
 @pytest.mark.parametrize(
     ("shape", "n_selected"), [((6, 6), 5), ((6, 5), 6), ((5, 6), 5)]
 )

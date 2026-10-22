@@ -208,7 +208,10 @@ class Assay:
             )
             self.rawData._io = self.storageIo
             self.feats = MetaData(z[f"{name}/featureData"])  # type: ignore
-            self.z = as_zarr_group(z[name], name=name)
+            # Without a separate matrix root, the matrix group is the assay group.
+            self.z = (
+                matrix_group if matrix_root is z else as_zarr_group(z[name], name=name)
+            )
         else:
             self._artifact_root = as_zarr_group(z[workspace], name=workspace)
             counts_path = f"matrices/{name}/counts"
