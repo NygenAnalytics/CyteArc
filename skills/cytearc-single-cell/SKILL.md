@@ -67,12 +67,12 @@ not thresholds.
 
 ## Golden rules
 
-1. **Inspect read-only first.** `cytearc.DataStore(path, zarr_mode="r")` writes nothing. A writable
-   open (the default) prepares new stores and permanently removes from `I` the cells with at most
-   `min_features_per_cell` (default 10) default-assay features, unless that would remove at least
-   half of the active cells; then a `UserWarning` names a small panel or a raw droplet matrix as
-   the likely cause. Reopen existing stores and mounts with
-   `cytearc.DataStore(path, min_features_per_cell=-1)`, which keeps every cell.
+1. **Inspect read-only first.** `cytearc.DataStore(path, zarr_mode="r")` writes nothing. The first
+   writable open (the default) of a store or a new mount prepares it and permanently removes from
+   `I` the cells with at most `min_features_per_cell` (10 when omitted) default-assay features,
+   unless that would remove at least half of the active cells; then a `UserWarning` names a small
+   panel or a raw droplet matrix as the likely cause. Pass `min_features_per_cell=-1` to that first
+   open (or to `mount_datastore`) to keep every cell; later opens never filter `I`.
 2. **Never filter by editing `I`.** Keep the `cell_selection` ref a filter returns and pass it on, or
    insert a boolean column and use `cell_key=`. `ds.cells.reset_key("I")` undoes an accidental
    open-time filter.
@@ -235,7 +235,10 @@ any changes you make after seeing the comparison as such.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `Assay 'RNA' is not prepared` on a read-only open | store just written by a converter or `SubsetZarr` | open once writable, then read-only |
-| Fewer active cells than expected after opening | writable open applied `min_features_per_cell` | `ds.cells.reset_key("I")`; reopen with `-1` |
+| Fewer active cells than expected after opening | the first writable open applied `min_features_per_cell` | `ds.cells.reset_key("I")`; later opens never filter again |
+| `RuntimeError: This store is being prepared by another process` | two processes opened a fresh import at once | open again once the other open has finished; if that process was killed, remove the claim the message names |
+| `ChunkNotFoundError` naming `counts` or `countsT` | a partial copy or upload lost a count chunk | restore the store from a complete copy or rebuild it; never set `read_missing_chunks` |
+| Incomplete artifacts left after Ctrl-C or a killed kernel | an interrupted write keeps its slot, marked incomplete | `ds.artifacts.prune_incomplete()` lists them; once no process writes to the store, pass `dry_run=False` |
 | `ValueError` on `ds.pipeline.run(label=...)` | label already completed | new label; reuse makes it cheap |
 | `PermissionError` from a producer | store opened with `zarr_mode="r"` and no matching artifact; feature selections, WAGGR, AUCell, chromVAR, `regulons.grn`, `features.prevalent_peaks`, and cell-cycle scoring refuse even with one | reopen writable |
 | `KeyError: 'values'` on a Paris ref | Paris stores `labels` | `ds.artifacts.load(ref)["labels"]` |

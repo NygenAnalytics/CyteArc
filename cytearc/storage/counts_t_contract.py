@@ -1,7 +1,7 @@
 import zarr
 
 from .count_matrix import require_count_matrix_layout
-from .types import as_zarr_array, read_fresh_group
+from .types import as_zarr_array, complete_chunks, read_fresh_group
 from .validation_scope import store_key, validated_once
 
 
@@ -47,4 +47,7 @@ def _validate_count_matrix(
                 f"countsT is incomplete or does not match finalized counts. {REBUILD_REQUIRED}"
             )
     require_count_matrix_layout(matrix, counts, counts_t)
-    return counts, counts_t
+    # Writers write every count chunk, so a missing one is lost data.
+    if counts_t is not None:
+        counts_t = complete_chunks(counts_t)
+    return complete_chunks(counts), counts_t

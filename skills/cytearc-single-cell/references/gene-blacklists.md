@@ -76,7 +76,7 @@ ds = cytearc.DataStore("analysis.zarr", min_features_per_cell=-1)  # reopen; see
 names = ds.RNA.feats.fetch_all("names").astype(str)
 print("Ensembl-like names:", int(pd.Series(names).str.match(r"ENS[A-Z]*G\d").sum()), "of", len(names))
 for family, pattern in GENE_FAMILY_PATTERNS.items():
-    hits = ds.RNA.feats.grep(pattern)  # upper-cased names
+    hits = ds.RNA.feats.grep(pattern)  # stored names, matched ignoring case
     print(f"{family:13s} {len(hits):4d}", hits[:6])
 print("current histone symbols the default misses:",
       len(ds.RNA.feats.grep(r"^H2AC\d|^H2BC\d|^H3C\d|^H4C\d|^H1-[1-6]$")))

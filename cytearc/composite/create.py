@@ -341,7 +341,8 @@ def _source_location(source: Any) -> str:
                 "Composite sources must have a persistent filesystem location"
             )
     if not is_remote_zarr_location(location):
-        return str(Path(local_zarr_path(location)).resolve())
+        # As make_store opened it: "~" names the home directory.
+        return str(Path(local_zarr_path(location)).expanduser().resolve())
     parsed = urlsplit(location)
     if parsed.username is not None or parsed.query:
         raise ValueError(
@@ -497,7 +498,7 @@ def create_composite(
     target = str(at)
     if is_remote_zarr_location(target):
         raise ValueError("The composite destination must be a local path")
-    destination = Path(local_zarr_path(target)).resolve()
+    destination = Path(local_zarr_path(target)).expanduser().resolve()
     if destination.exists() or destination.is_symlink():
         raise FileExistsError(f"Composite destination already exists: {destination}")
     check_destination(str(destination))
@@ -549,7 +550,9 @@ def create_composite(
                 ),
             }
         )
-        source_roots[name] = zarr.open_group(store=source.z.store, mode="r")
+        source_roots[name] = zarr.open_group(
+            store=source.z.store, mode="r", use_consolidated=False
+        )
         membership.append(
             resolve_assay_membership(source.cells, assay) or SOURCE_MEASURES_ALL
         )
@@ -691,7 +694,7 @@ def create_composite(
             for name in ("rowSources", "sourceRows", "featureColumns")
         }
         wrapper = CompositeStore(root.store, record, source_roots, constructing=True)
-        root = zarr.open_group(store=wrapper, mode="r+")
+        root = zarr.open_group(store=wrapper, mode="r+", use_consolidated=False)
         cells = write_cell_metadata(
             root,
             None,

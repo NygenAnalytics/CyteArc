@@ -151,10 +151,11 @@ def _normalize_external_roots(
     return roots
 
 
-def _inspect_external_artifact(
+def _check_external_root(
     root: zarr.Group,
     locator: ExternalArtifactRef,
-) -> ArtifactStatus:
+) -> None:
+    """Raise unless ``root`` holds the dataset that ``locator`` names."""
     assay_name = locator.fingerprint_assay
     if assay_name not in root or not isinstance(root[assay_name], zarr.Group):
         raise ValueError(
@@ -174,7 +175,39 @@ def _inspect_external_artifact(
             f"External root assay {assay_name!r} dataset fingerprint mismatch. "
             f"Expected {locator.dataset_fingerprint!r}, received {received!r}"
         )
-    return inspect_artifact(root, locator.ref)
+
+
+def _inspect_node(
+    root: zarr.Group,
+    locator: ArtifactLocator,
+    external_roots: Mapping[str, zarr.Group],
+) -> tuple[ArtifactStatus | None, list[tuple[str, ArtifactLocator]], str | None]:
+    """Return one node's status, its inputs, and why it is corrupt, if it is.
+
+    An external input without a supplied root has no status. A node whose
+    record cannot be read, such as one whose ``artifact_id`` attribute names
+    another artifact, or whose provenance holds a malformed reference, is
+    corrupt: it keeps the error and is not followed further. An external root
+    that does not hold the named dataset is the caller's error and raises.
+    """
+    if isinstance(locator, ExternalArtifactRef):
+        node_root = external_roots.get(locator.dataset_fingerprint)
+        if node_root is None:
+            return None, [], None
+        _check_external_root(node_root, locator)
+        ref = locator.ref
+    else:
+        node_root, ref = root, locator
+    try:
+        status = inspect_artifact(node_root, ref)
+    except (KeyError, TypeError, ValueError) as error:
+        return None, [], f"{type(error).__name__}: {error}"
+    try:
+        inputs = list(_artifact_inputs(status.inputs))
+    except ValueError as error:
+        cause = f" ({error.__cause__})" if error.__cause__ is not None else ""
+        return status, [], f"{type(error).__name__}: {error}{cause}"
+    return status, inputs, None
 
 
 def _build_graph(
@@ -184,29 +217,19 @@ def _build_graph(
 ) -> nx.DiGraph:
     graph = nx.DiGraph()
     visited: set[ArtifactLocator] = set()
-
-    def visit(locator: ArtifactLocator) -> None:
+    # An explicit stack, not recursion, so a chain of any depth is traced.
+    pending: list[ArtifactLocator] = [
+        *sorted(set(outputs.values()), key=_ref_sort_key, reverse=True)
+    ]
+    while pending:
+        locator = pending.pop()
         if locator in visited:
-            return
+            continue
         visited.add(locator)
-        if isinstance(locator, ExternalArtifactRef):
-            external_root = external_roots.get(locator.dataset_fingerprint)
-            status = (
-                None
-                if external_root is None
-                else _inspect_external_artifact(
-                    external_root,
-                    locator,
-                )
-            )
-        else:
-            status = inspect_artifact(root, locator)
-        graph.add_node(locator, status=status, outputs=())
-        if status is None:
-            return
+        status, inputs, error = _inspect_node(root, locator, external_roots)
+        graph.add_node(locator, status=status, error=error, outputs=())
         dependencies = sorted(
-            _artifact_inputs(status.inputs),
-            key=lambda item: (item[0], _locator_sort_key(item[1])),
+            inputs, key=lambda item: (item[0], _locator_sort_key(item[1]))
         )
         for input_name, input_locator in dependencies:
             dependency: ArtifactLocator = input_locator
@@ -227,10 +250,8 @@ def _build_graph(
                 graph.edges[dependency, locator]["inputs"] = tuple(sorted(labels))
             else:
                 graph.add_edge(dependency, locator, inputs=(input_name,))
-            visit(dependency)
-
-    for ref in sorted(set(outputs.values()), key=_ref_sort_key):
-        visit(ref)
+            if dependency not in visited:
+                pending.append(dependency)
 
     output_names: dict[ArtifactRef, list[str]] = defaultdict(list)
     for name, ref in outputs.items():
@@ -244,7 +265,9 @@ def _build_graph(
     return nx.freeze(graph)
 
 
-def _status_label(status: ArtifactStatus | None) -> str:
+def _status_label(status: ArtifactStatus | None, error: str | None = None) -> str:
+    if error is not None:
+        return "corrupt"
     if status is None:
         return "unresolved external"
     if not status.exists:
@@ -365,13 +388,16 @@ class ArtifactLineage:
                 self._graph.nodes[locator]["status"],
             )
             ref = _located_ref(locator)
+            error = cast(str | None, self._graph.nodes[locator]["error"])
+            if status is not None:
+                operation = status.operation or "operation unavailable"
+            elif error is not None:
+                operation = "record unreadable"
+            else:
+                operation = "external source unresolved"
             label_parts = [
                 f"{_display_scope(locator)} / {ref.kind}",
-                (
-                    status.operation or "operation unavailable"
-                    if status is not None
-                    else "external source unresolved"
-                ),
+                operation,
                 ref.artifact_id[:12],
             ]
             output_names = cast(
@@ -380,7 +406,7 @@ class ArtifactLineage:
             )
             if output_names:
                 label_parts.append(f"outputs: {', '.join(output_names)}")
-            status_name = _status_label(status)
+            status_name = _status_label(status, error)
             if status_name == "stale":
                 assert status is not None
                 label_parts.append(
@@ -419,6 +445,7 @@ class ArtifactLineage:
                 self._graph.nodes[locator]["status"],
             )
             ref = _located_ref(locator)
+            error = cast(str | None, self._graph.nodes[locator]["error"])
             lines.extend(
                 [
                     "",
@@ -426,13 +453,19 @@ class ArtifactLineage:
                         f"#### {_display_scope(locator)} / {ref.kind} / "
                         f"{ref.artifact_id[:12]}"
                     ),
-                    f"- Status: `{_status_label(status)}`",
+                    f"- Status: `{_status_label(status, error)}`",
                 ]
             )
             if isinstance(locator, ExternalArtifactRef):
                 lines.append(f"- Dataset fingerprint: `{locator.dataset_fingerprint}`")
+            if error is not None:
+                text = " ".join(error.replace("`", "'").split())
+                lines.append(f"- Error: `{text}`")
             if status is None:
-                lines.append("- Resolution: `No matching external root was supplied`")
+                if error is None:
+                    lines.append(
+                        "- Resolution: `No matching external root was supplied`"
+                    )
                 continue
             lines.append(f"- Path: `{status.path}`")
             if status.operation is not None:

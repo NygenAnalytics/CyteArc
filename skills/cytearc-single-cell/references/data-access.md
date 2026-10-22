@@ -26,7 +26,10 @@ CyteBase docs: <https://docs.nygen.io/CyteBase/>.
   artifact and never edits `I`.
 - `zarr_mode="r+"` is the default. A writable open WRITES: first-open preparation of a freshly
   written store (QC columns, feature `nCells`/`dropOuts`), the `min_features_per_cell` filter
-  applied to `I`, and the `defaultAssay`/`assayTypes` attributes. `zarr_mode="r"` writes nothing;
+  applied to `I` by the first writable open only (recorded in `cellData`; reopening never filters
+  again), and the `defaultAssay`/`assayTypes` attributes. One process prepares a fresh import: a
+  second process that opens it meanwhile raises `RuntimeError` ("being prepared by another
+  process"); open it again afterwards. `zarr_mode="r"` writes nothing;
   most producers return a matching existing artifact but raise `PermissionError` instead of
   computing. Feature selections, WAGGR, AUCell, `features.prevalent_peaks`, cell-cycle scoring, and
   `pipeline.run` raise it before any lookup, and `mapping.run` and `mapping.build_reference` raise
@@ -226,7 +229,7 @@ uri = (
     "hf://buckets/Nygen/cytebase-2610/datasets/"
     "mcglade_2021_scrna_data_human_fallopian_tube_30f5e171/data.zarr"
 )  # the release (2610) is part of the URI: record the URI with results
-ds = cytearc.DataStore(uri, zarr_mode="r", storage_options={"token": False}, min_features_per_cell=-1)
+ds = cytearc.DataStore(uri, zarr_mode="r", storage_options={"token": False})
 umap_ref = ds.artifacts.find("embedding", imported="X_umap", from_assay="RNA")  # the authors' UMAP
 xy = ds.artifacts.load_values(umap_ref).to_pandas()  # DataFrame indexed by cell id
 meta = ds.cells.to_pandas_dataframe(["ids", "donor_id"], key="I").set_index("ids")  # a design column
@@ -256,7 +259,7 @@ run = analysis.pipeline.run(label="baseline")  # results are written to work/ana
 
 ```python
 # Open it like any store: counts resolve from matrixSource
-analysis = cytearc.DataStore("work/analysis.zarr", min_features_per_cell=-1)
+analysis = cytearc.DataStore("work/analysis.zarr")  # reopening never filters I
 # Generic mount; for s3:// or gs:// sources also pass storage_options (not executed here)
 mounted = cytearc.mount_datastore("shared/data.zarr", at="my_analysis.zarr", default_assay="RNA")
 ```
@@ -280,7 +283,7 @@ raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datas
 |---|---|---|
 | `zarr_mode` | `"r+"` | `"r"` to inspect, share, or protect a store; a fresh store needs one `"r+"` open |
 | `default_assay` | stored value, or the only assay | first open of a multi-assay store (otherwise `ValueError`) |
-| `min_features_per_cell` | `10` | `-1` to leave `I` untouched on writable opens |
+| `min_features_per_cell` | `None` (10 on the first writable open) | `-1` on the first writable open to keep every cell; later opens never filter |
 | `mito_pattern` / `ribo_pattern` | `None` (`^MT-`, `^RPS\|^RPL\|^MRPS\|^MRPL`) | gene names that these prefixes miss, only on the FIRST writable open; patterns ignore case, so `^MT-` already matches mouse `mt-` |
 | `assay_types` | inferred from assay names | custom names, e.g. `{"GEX": "RNA"}`; values must be presets (`RNA`, `ADT`, `HTO`, `Assay`, ...); a writable open records them, a read-only open must match the store |
 | `nthreads`, `mem_budget` | env `CYTEARC_WORKERS`, `CYTEARC_MEM_BUDGET`, else detected | see `performance-and-export.md` |
@@ -303,17 +306,22 @@ raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datas
 
 ## Pitfalls
 
-- A writable open with `min_features_per_cell=k` silently removes cells with at most `k`
-  default-assay features from `I` and persists it. When at least half of the active cells would
-  go, as in a small ADT panel or a raw (unfiltered) droplet matrix, it keeps `I` and issues a
-  `UserWarning` naming both causes; on a raw matrix, call cells or import the filtered matrix
-  before QC. `k` must be an integer of at least `-1`. Reopening with a lower value does not
-  restore cells; `ds.cells.reset_key("I")` does.
+- The first writable open of a store, with `min_features_per_cell=k` (10 when omitted), removes
+  cells with at most `k` default-assay features from `I`, persists it, and records `k` in
+  `cellData`. When at least half of the active cells would go, as in a small ADT panel or a raw
+  (unfiltered) droplet matrix, it keeps `I` and issues a `UserWarning` naming both causes; on a raw
+  matrix, call cells or import the filtered matrix before QC. `k` must be an integer of at least
+  `-1`. Later opens never filter: a different `k` is logged as not applied. Reopening does not
+  restore cells; `ds.cells.reset_key("I")` does, and filter later with `qc.filter`.
 - Stores just written by a writer or `SubsetZarr` raise `Assay 'RNA' is not prepared yet. Open the
   store once with zarr_mode='r+' ...` when opened with `zarr_mode="r"`. Open once with `"r+"`; no
   rebuild is needed.
 - Percent patterns are fixed at first preparation; a different pattern later raises `ValueError`.
   Use `qc.feature_percentage` (see `quality-control.md`) for another gene set.
+- `cells.insert` assigns a pandas Series with a non-`RangeIndex` index by label: its labels must be
+  exactly the cell `ids` (or those of the `key` rows), in any order, or it raises `ValueError`.
+  A frame from `to_pandas_dataframe(..., key="I")` is indexed by row position, not by id: pass
+  `.to_numpy()` to assign by position. `to_pandas_dataframe` raises `KeyError` for a missing column.
 - `cytearc.mount_datastore` rejects `zarr_mode="r"` and refuses an existing target; reopen a
   mount with `cytearc.DataStore`.
 - `SubsetZarr`, `DataStoreMerge`, `mount_datastore`, and repack refuse a source store that holds a

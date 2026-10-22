@@ -332,11 +332,11 @@ def create_or_open_staged_normed_array(
     """Open or create a reusable local normalized-data array."""
     path = Path(cache_path)
     if (path / "zarr.json").exists():
-        root = zarr.open_group(path, mode="r+")
+        root = zarr.open_group(path, mode="r+", use_consolidated=False)
         if "data" in root:
             array = as_zarr_array(root["data"], name="data")
             if tuple(array.shape) == tuple(shape):
                 return array
-    root = zarr.open_group(path, mode="w")
+    root = zarr.open_group(path, mode="w", use_consolidated=False)
     spec = normed_array_spec(shape[0], shape[1], profile="fast_local")
     return create_numeric_array(root, "data", spec)

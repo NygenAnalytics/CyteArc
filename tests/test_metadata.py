@@ -51,9 +51,10 @@ def test_metadata_grep_preserves_regex_character_classes(dummy_metadata):
     )
 
     assert dummy_metadata.grep(r"^RPS\d+$") == ["RPS3", "RPS4"]
-    assert dummy_metadata.grep(r"^g_\w+$") == ["G_A"]
-    assert dummy_metadata.grep(r"^x\sy$") == ["X Y"]
-    assert dummy_metadata.grep("^MT-") == ["MT-CO1"]
+    # Matching ignores case; the names come back as stored.
+    assert dummy_metadata.grep(r"^g_\w+$") == ["g_a"]
+    assert dummy_metadata.grep(r"^x\sy$") == ["x y"]
+    assert dummy_metadata.grep("^MT-") == ["mt-Co1"]
     assert dummy_metadata.grep(r"^RPS\d+$", only_valid=True) == ["RPS3", "RPS4"]
 
 

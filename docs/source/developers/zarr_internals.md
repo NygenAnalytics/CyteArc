@@ -75,8 +75,16 @@ ordinary stores with copied counts; there is no separate composite materializati
 A producer creates an artifact group with `complete=False` at a path that ends in its random
 256-bit `artifact_id`, so the path belongs to that producer alone. After it validates the payload,
 one metadata write sets `complete=True` and publishes the artifact. The producer deletes the group
-after a failure only before that write; once the write is issued, the group stays, complete or
-not, because the write can persist even when it reports an error.
+that it created after an exception only before that write; once the write is issued, the group
+stays, complete or not, because the write can persist even when it reports an error. An
+interruption (`KeyboardInterrupt`, `asyncio.CancelledError`, `SystemExit`, or a shutdown request)
+keeps the group with `complete=False`, as derived assays keep a pending assay (Rule C below),
+because Zarr may still be running the interrupted write. `DataStore.artifacts.prune_incomplete`
+removes the incomplete groups and the artifact-ID directories that hold chunks but no `zarr.json`
+once no process writes to the store.
+
+Listings and planning read each child of an artifact kind on its own when one child's `zarr.json`
+cannot be read, and skip that child and any kind that the release does not know with a warning.
 
 Producers check the arrays that must hold only finite values as they write them
 (`cytearc.storage.finite_values`): a NaN or infinite value raises `NonFiniteArtifactError`, a
@@ -427,6 +435,21 @@ CyteArc checks that those records agree with each other and with the live arrays
 Missing or mismatched layout metadata is an error.
 There is no silent rewrite on open and no automatic upgrade of older count layouts.
 
+Writers write every chunk of `counts` and `countsT`, a chunk of zeros too: every array handle that
+CyteArc creates for them, such as the one that `create_zarr_count_assay` returns, sets Zarr's
+`write_empty_chunks=True`. CyteArc therefore reads them with Zarr's
+`read_missing_chunks=False`: a chunk or shard object that a partial copy or an interrupted upload
+lost raises Zarr's `ChunkNotFoundError`, a `ValueError` that names the array's store path and the
+missing chunk key, instead of reading as zero counts. Restore the object from a complete copy or
+rebuild the store; do not set `read_missing_chunks` back to True, which reads the lost counts as
+zeros. Zarr checks only the objects that it fetches, the shards of these sharded arrays, so a chunk
+missing inside a stored shard still reads as zeros. Artifact arrays keep Zarr's default: their
+writers skip chunks that hold only the fill value, so a missing chunk is not lost data there.
+
+Every group is read from its own `zarr.json`. CyteArc never reads consolidated metadata, which a
+tool such as `zarr.consolidate_metadata` writes and which writes to the store do not update, so a
+consolidated store opens, lists, and plans with its current contents.
+
 Writers compute the raw-count identity while they write `counts`, so no second pass reads the
 matrix back. `counts` records it as `content_fingerprint`. The sibling `countSummaries` group holds
 per-cell totals (`rowSums`), per-cell detected-feature counts (`rowPositive`), and per-feature
@@ -491,6 +514,28 @@ Existing stores are never rewritten under a new dtype or layout rule and keep th
 and identity. A re-import of the same source can store a different dtype, and so get different
 fingerprints and artifact ids; mounts and mapping references bound to the replaced store fail
 closed.
+
+## Preparation
+
+The first writable `DataStore` open of a fresh import prepares its assays: it derives their cell
+and feature summaries and publishes their identity. One process prepares a store: the preparing
+open holds a claim, the group `.cytearc-preparation` below the root or workspace group, which it
+creates with the store's conditional write (`set_if_not_exists`) and removes when the preparation
+ends, however it ends. Another process that opens the store meanwhile raises `RuntimeError`, which
+names the process and host that hold the claim, instead of writing the same columns beside it; open
+it again once that open has finished. A killed preparing process leaves its claim, and the error
+names the claim to remove once that process has stopped. A backend whose conditional write is not
+atomic gives a best-effort claim, and one that refuses the conditional write prepares without a
+claim, with a warning.
+
+The first writable open of a store also removes the low-feature cells of its default assay from
+`I`, with `min_features_per_cell`, and records what it applied as the cell table's
+`minFeaturesPerCell` attribute: a mapping of exactly the default `assay` and the integer
+`threshold`. A later open never filters `I` again, whatever its `min_features_per_cell`, so the
+analysis input does not depend on how a store was last opened. A store whose cell table records no
+filter, such as one prepared by a release before 1.3.0 or a new mount, subset, or merge, is filtered
+by its next writable open, which records the filter. A malformed record raises `ValueError`.
+Repacking copies the record with the cell table; a data-only repack does not.
 
 ## Opening an RNA assay
 

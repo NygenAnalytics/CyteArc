@@ -829,8 +829,7 @@ def _require_finite_metrics(
                 f"QC metric {attr!r} has {n_nonfinite} non-finite value(s) among "
                 f"{n_complete} selected cells with recorded values. Percentages "
                 "are undefined for cells without counts, so exclude zero-count "
-                "cells first: pass a cell selection that requires nCounts > 0, or "
-                "open the DataStore with min_features_per_cell of 0 or more."
+                "cells first: pass a cell selection that requires nCounts > 0."
             )
 
 

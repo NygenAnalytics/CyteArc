@@ -51,9 +51,7 @@ uri = (
 )
 
 # Open the published store read-only; its counts stay in the bucket.
-ds = cytearc.DataStore(
-    uri, zarr_mode="r", storage_options={"token": False}, min_features_per_cell=-1
-)
+ds = cytearc.DataStore(uri, zarr_mode="r", storage_options={"token": False})
 
 # Read the published cell annotations for the active cells.
 meta = ds.cells.to_pandas_dataframe(["ids", "cell_type"], key="I")
@@ -63,9 +61,9 @@ umap = ds.artifacts.find("embedding", imported="X_umap", from_assay="RNA")
 ds.plots.embedding(layout=umap, color_by="cell_type")
 ```
 
-A read-only open writes nothing: an operation that would compute a new result raises
-`PermissionError`. `min_features_per_cell=-1` keeps the published cell selection, and
-`storage_options={"token": False}` reads anonymously; omit it to use your Hugging Face login.
+A read-only open writes nothing and never changes the published cell selection: an operation that
+would compute a new result raises `PermissionError`. `storage_options={"token": False}` reads
+anonymously; omit it to use your Hugging Face login.
 Plotting needs CyteArc's plotting dependencies, `cytearc[extra]`.
 
 ## Analyze a dataset
@@ -89,8 +87,10 @@ run = analysis.pipeline.run(label="baseline")
 analysis.plots.embedding(run=run, color_by="clusters")
 ```
 
-Reopen the mount later with `cytearc.DataStore("fallopian_tube.zarr", min_features_per_cell=-1)`.
-Its counts still resolve from the bucket, so later reads need network access.
+`min_features_per_cell=-1` keeps every published cell active in the new mount: the first writable
+open of a store removes the cells with few features, and later opens never filter again. Reopen the
+mount later with `cytearc.DataStore("fallopian_tube.zarr")`. Its counts still resolve from the
+bucket, so later reads need network access.
 [](remote_stores.ipynb) explains mounted analysis in detail, and [](composite_datasets.ipynb)
 analyzes several CyteBase datasets together without copying their counts.
 

@@ -992,8 +992,9 @@ CyteArc validates persisted data and public arguments against the following cont
 - `DataStore(min_features_per_cell=...)` must be an integer of at least -1. A writable open keeps
   `I`, with a warning, when the filter would remove at least half of the active cells; the earlier
   guard compared the threshold with the median, so an ADT panel of ten features lost every cell.
-  Derived assays no longer filter `I`. A writable open prepares assays, filters `I`, and records
-  `assayTypes` and `defaultAssay`; a read-only open writes nothing.
+  Derived assays no longer filter `I`. A writable open prepares assays and records `assayTypes`
+  and `defaultAssay`; only the first writable open of a store filters `I`, and it records the
+  threshold in the cell table. A read-only open writes nothing.
 - `mount_datastore` checks its forwarded `DataStore` options before it creates the target, and
   deletes a target whose first open fails, so the mount can be retried.
 - `DataStoreMerge` keeps per-cell assay membership: the merged `<assay>_I` is False for the cells
@@ -1337,11 +1338,11 @@ Deferred to a later structural phase:
 - Function-local cycles inside `assay` and `readers` remain accepted because there are no module-load cycles.
 - Heatmap plotting still reads Zarr-backed values from duck-typed store and assay inputs.
   Replacing those reads requires a separate plotting adapter design.
-- D5 pure open: deferred to 2.0. A writable open still prepares assays, filters `I` by
-  `min_features_per_cell`, and records `assayTypes` and `defaultAssay`, because the destination
-  contract decides what `overwrite=True` may replace by whether a store is prepared. The 2.0 plan
-  is an explicit `prepare_store` that writers call, with `min_features_per_cell` replaced by
-  recorded cell selections.
+- D5 pure open: deferred to 2.0. A writable open still prepares assays, records `assayTypes`
+  and `defaultAssay`, and, the first time only, filters `I` by `min_features_per_cell` and records
+  the threshold, because the destination contract decides what `overwrite=True` may replace by
+  whether a store is prepared. The 2.0 plan is an explicit `prepare_store` that writers call, with
+  `min_features_per_cell` replaced by recorded cell selections.
 - D7 per-cell panels wait until an operation consumes them.
 - D9 persisted ATAC TF-IDF state waits for an ATAC mapping reference, which can recompute it from
   what the normalized artifact records.

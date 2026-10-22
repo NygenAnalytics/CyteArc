@@ -149,14 +149,16 @@ def to_pandas_dataframe(
     """Return requested metadata columns as a pandas DataFrame.
 
     Rows that a column's linked missing mask flags are shown as missing.
+
+    Raises:
+        KeyError: If a requested column is not in the table; nothing is read.
     """
-    valid_columns = metadata.columns
+    valid_columns = set(metadata.columns)
+    unknown = [column for column in columns if column not in valid_columns]
+    if unknown:
+        raise KeyError(f"Columns {unknown!r} do not exist in the metadata columns.")
     frame = pd.DataFrame(
-        {
-            column: _frame_column(metadata, column)
-            for column in columns
-            if column in valid_columns
-        }
+        {column: _frame_column(metadata, column) for column in columns}
     )
     if key is not None:
         frame = frame.reindex(metadata.active_index(key))
@@ -168,13 +170,15 @@ def grep(
     pattern: str,
     only_valid: bool = False,
 ) -> list[str]:
-    """Return feature names that match a case-insensitive regex."""
+    """Return the stored feature names that match a case-insensitive regex.
+
+    Each matching name is returned once, as stored, in sorted order, so names
+    that differ only in case are distinct.
+    """
     names = metadata.fetch_all("names")
     if only_valid:
         names = names[metadata.active_index("I")]
-    return sorted(
-        {str(name).upper() for name in names[regex_match_mask(names, pattern)]}
-    )
+    return sorted({str(name) for name in names[regex_match_mask(names, pattern)]})
 
 
 _MISSING_LEVEL: Hashable = (MISSING_MASK_PREFIX,)

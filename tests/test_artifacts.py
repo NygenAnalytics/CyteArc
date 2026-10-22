@@ -45,6 +45,7 @@ from cytearc.storage.artifacts import (
     serialize_artifact_value,
 )
 from cytearc.storage.errors import ArtifactResolutionError
+from cytearc.utils.logging import logger
 
 
 def _reusable_refs(root: zarr.Group, **arguments: Any) -> list[ArtifactRef]:
@@ -1098,8 +1099,18 @@ def test_artifact_listing_validates_filters_and_malformed_paths() -> None:
         )
         == listed
     )
-    with pytest.raises(ValueError, match="Unknown artifact kind"):
-        list_artifacts(root, scope="assay", assay="RNA")
+    # A kind this release does not know, such as one a newer release wrote,
+    # is skipped with a warning; the known kinds are still listed.
+    messages: list[str] = []
+    sink = logger.add(lambda message: messages.append(message.record["message"]))
+    try:
+        assert list_artifacts(root, scope="assay", assay="RNA") == listed
+    finally:
+        logger.remove(sink)
+    assert messages == [
+        "Skipped artifact kinds that this CyteArc release does not know below "
+        "RNA/artifacts: not_a_kind"
+    ]
 
 
 def test_artifact_listing_matches_exact_serialized_provenance_predicates() -> None:

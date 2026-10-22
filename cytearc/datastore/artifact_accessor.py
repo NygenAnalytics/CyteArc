@@ -13,3 +13,4 @@ class ArtifactAccessor(_Accessor):
     load_values = _bind(BaseDataStore._artifacts_load_values)
     lineage = _bind(BaseDataStore._artifacts_lineage)
     find = _bind(BaseDataStore._artifacts_find)
+    prune_incomplete = _bind(BaseDataStore._artifacts_prune_incomplete)

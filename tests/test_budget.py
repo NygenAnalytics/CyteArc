@@ -76,8 +76,11 @@ def test_resolve_budget_leaves_headroom_by_default(monkeypatch, detected, expect
     monkeypatch.setattr(budget_module, "detect_total_memory_bytes", lambda: detected)
     monkeypatch.setattr(budget_module, "detect_workers", lambda: 7)
     assert resolve_budget() == ResourceBudget(memoryBytes=expected, workers=7)
-    # Explicit values win over detection, and are kept at least one.
-    assert resolve_budget(memory="2M", workers=0) == ResourceBudget(2 * 1024**2, 1)
+    # Explicit values win over detection; a worker count below one is refused
+    # rather than raised to one.
+    assert resolve_budget(memory="2M", workers=1) == ResourceBudget(2 * 1024**2, 1)
+    with pytest.raises(ValueError, match="^The worker count must be at least 1, got 0"):
+        resolve_budget(memory="2M", workers=0)
 
 
 def test_detect_memory_fallback_when_meminfo_and_sysconf_fail(monkeypatch):
@@ -327,3 +330,65 @@ def test_admitted_worker_split_can_reduce_inner_concurrency_to_fit():
         taskBytes=lambda concurrency: 100 + 20 * concurrency,
     )
     assert (outer, inner) == (1, 2)
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        ("8GB", 8 * 1024**3),
+        ("8GiB", 8 * 1024**3),
+        ("8gib", 8 * 1024**3),
+        ("8Gi", 8 * 1024**3),
+        ("8 GB", 8 * 1024**3),
+        ("512MB", 512 * 1024**2),
+        ("512MiB", 512 * 1024**2),
+        ("1.5GiB", 3 * 1024**3 // 2),
+        ("64KiB", 64 * 1024),
+        ("2TB", 2 * 1024**4),
+    ],
+)
+def test_memory_spec_accepts_byte_unit_suffixes(spec, expected, monkeypatch):
+    # B and iB after K, M, G, or T name the same power of 1024 as the letter.
+    monkeypatch.delenv("CYTEARC_MEM_BUDGET", raising=False)
+    assert resolve_budget(memory=spec, workers=1).memoryBytes == expected
+    monkeypatch.setenv("CYTEARC_MEM_BUDGET", spec)
+    assert resolve_budget(workers=1).memoryBytes == expected
+
+
+@pytest.mark.parametrize(
+    "spec",
+    ["inf", "-inf", "nan", "Infinity", "infG", "nanMiB", "1e300T", float("inf")],
+)
+def test_memory_spec_rejects_non_finite_sizes(spec, monkeypatch):
+    monkeypatch.delenv("CYTEARC_MEM_BUDGET", raising=False)
+    with pytest.raises(ValueError, match="^Memory budget must be finite, got "):
+        resolve_budget(memory=spec, workers=1)
+    monkeypatch.setenv("CYTEARC_MEM_BUDGET", str(spec))
+    with pytest.raises(ValueError, match="^Memory budget must be finite, got "):
+        resolve_budget(workers=1)
+
+
+@pytest.mark.parametrize("spec", ["B", "GB", "1B", "8IB", "8GBB"])
+def test_memory_spec_rejects_units_without_a_size(spec, monkeypatch):
+    monkeypatch.delenv("CYTEARC_MEM_BUDGET", raising=False)
+    with pytest.raises(ValueError, match=f"^Invalid memory spec: '{spec}'"):
+        resolve_budget(memory=spec, workers=1)
+
+
+@pytest.mark.parametrize("workers", [0, -3])
+def test_explicit_worker_counts_below_one_are_refused(workers, monkeypatch):
+    monkeypatch.delenv("CYTEARC_MEM_BUDGET", raising=False)
+    with pytest.raises(
+        ValueError, match=f"^The worker count must be at least 1, got {workers}"
+    ):
+        resolve_budget(memory="8G", workers=workers)
+
+
+@pytest.mark.parametrize("value", ["0", "-2"])
+def test_worker_environment_below_one_is_refused(value, monkeypatch):
+    monkeypatch.delenv("CYTEARC_MEM_BUDGET", raising=False)
+    monkeypatch.setenv("CYTEARC_WORKERS", value)
+    with pytest.raises(
+        ValueError, match=f"^Invalid CYTEARC_WORKERS='{value}'; expected at least 1"
+    ):
+        resolve_budget(memory="8G")

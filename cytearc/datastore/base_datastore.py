@@ -1,6 +1,7 @@
 import numpy as np
 import zarr
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, cast
 
 from ..storage.artifacts import (
@@ -32,6 +33,7 @@ from ..metadata.selection import (
     cell_value_array,
     resolve_cell_aligned_artifact,
 )
+from ..storage.preparation import preparation_claim
 from ..storage.schema import validate_assay_name
 from ..storage.profiles import StorageProfile, ZarrLocation
 from ..storage.stores import (
@@ -123,11 +125,48 @@ def _child(group: zarr.Group, key: str, error: str) -> zarr.Group | zarr.Array:
         raise KeyError(error) from None
 
 
-def validate_min_features_per_cell(value: Any) -> int:
-    """Validate a ``min_features_per_cell`` value and return it as a Python integer."""
+DEFAULT_MIN_FEATURES_PER_CELL = 10
+"""The threshold that a store's first writable open applies when none is given."""
+
+CELL_FILTER_ATTR = "minFeaturesPerCell"
+"""Cell-table attribute recording the threshold that the first writable open applied."""
+
+
+def validate_min_features_per_cell(value: Any) -> int | None:
+    """Validate a ``min_features_per_cell`` value; None means not given."""
     from ..utils.arguments import integer_argument
 
+    if value is None:
+        return None
     return integer_argument(value, "min_features_per_cell", minimum=-1)
+
+
+def _recorded_cell_filter(cells: zarr.Group) -> tuple[str, int] | None:
+    """Return the default assay and threshold of a recorded cell filter, if any.
+
+    Raises:
+        ValueError: If the record is malformed.
+    """
+    if CELL_FILTER_ATTR not in cells.attrs:
+        return None
+    record = cells.attrs[CELL_FILTER_ATTR]
+    assay = record.get("assay") if isinstance(record, dict) else None
+    threshold = record.get("threshold") if isinstance(record, dict) else None
+    if (
+        not isinstance(record, dict)
+        or set(record) != {"assay", "threshold"}
+        or not isinstance(assay, str)
+        or not assay
+        or isinstance(threshold, bool)
+        or not isinstance(threshold, int)
+        or threshold < -1
+    ):
+        raise ValueError(
+            f"The cell table's {CELL_FILTER_ATTR} attribute is malformed: "
+            f"{record!r}; it must be a mapping of a non-empty 'assay' name and "
+            "an integer 'threshold' of at least -1"
+        )
+    return assay, threshold
 
 
 class BaseDataStore:
@@ -143,10 +182,12 @@ class BaseDataStore:
                      'Assay'. A read-only open cannot change an assay's type.
         default_assay: Name of assay that should be considered as default. It is mandatory to provide this value
                        when DataStore loads a Zarr file for the first time
-        min_features_per_cell: Writable opens remove from ``I`` every cell whose
-                               default-assay feature count is not greater than
-                               this value, unless that would remove at least half
-                               of the active cells.
+        min_features_per_cell: The first writable open of a store removes from ``I``
+                               every cell whose default-assay feature count is not
+                               greater than this value, 10 when None, unless that
+                               would remove at least half of the active cells, and
+                               records the value it applied in the cell table.
+                               Later opens never filter ``I``.
         mito_pattern: Feature-name pattern for the ``{assay}_percentMito`` column of each RNA assay.
                       The first writable open replaces any existing column with values computed from
                       this pattern, or ``^MT-`` when None. Later opens keep the stored values when
@@ -174,7 +215,7 @@ class BaseDataStore:
         zarr_loc: ZarrLocation,
         assay_types: dict[str, str] | None,
         default_assay: str | None,
-        min_features_per_cell: int,
+        min_features_per_cell: int | None,
         mito_pattern: str | None,
         ribo_pattern: str | None,
         zarr_mode: ZarrMode,
@@ -254,9 +295,15 @@ class BaseDataStore:
         self._defaultAssay = self._load_default_assay(default_assay)
         self._load_assays(assay_types)
         # TODO: Reset all attrs, pca, dendrogram etc
-        self._ini_cell_props(mito_pattern, ribo_pattern)
-        if not self.zw.read_only:
-            self._filter_cells(min_features_per_cell)
+        preparing = not self.zw.read_only and any(
+            group.attrs.get("prepared") is False for group in assay_groups.values()
+        )
+        # One process prepares a fresh import; another that opens it meanwhile
+        # is refused rather than writing the same columns beside it.
+        with preparation_claim(self.zw) if preparing else nullcontext():
+            self._ini_cell_props(mito_pattern, ribo_pattern)
+            if not self.zw.read_only:
+                self._filter_cells(min_features_per_cell)
         if (
             self.zarr_mode == "r+"
             and self.zw.attrs.get("defaultAssay") != self._defaultAssay
@@ -346,6 +393,7 @@ class BaseDataStore:
             path=store_path,
             mode="r",
             zarr_format=self.zw.metadata.zarr_format,
+            use_consolidated=False,
         )
 
     @validation_scoped
@@ -435,6 +483,53 @@ class BaseDataStore:
             parameters=parameters,
             inputs=inputs,
         )
+
+    @validation_scoped
+    def _artifacts_prune_incomplete(self, *, dry_run: bool = True) -> list[str]:
+        """List, or remove, what interrupted and killed artifact writes left behind.
+
+        An interrupted write (Ctrl-C, a cancelled task) keeps its artifact,
+        marked incomplete, because Zarr may still be running the write. A
+        killed process (SIGKILL, the out-of-memory killer, a kernel restart)
+        leaves its incomplete artifact too, and a write that lands after its
+        group was removed leaves chunks without a group. Nothing reuses this
+        residue, but it takes space. This lists the incomplete artifact groups
+        and the directories of chunks without a group below the datastore's
+        artifacts and those of every assay; with ``dry_run=False`` it removes
+        them. Complete artifacts are never removed, nor anything that CyteArc
+        did not write. A mounted store is pruned of its own artifacts only.
+
+        An artifact that another process is writing is incomplete until it
+        finishes. Pass ``dry_run=False`` only after confirming that no process
+        is writing to this store.
+
+        Args:
+            dry_run: List the residue without removing it, the default.
+
+        Returns:
+            The paths below the datastore that were found, or removed, sorted.
+
+        Raises:
+            TypeError: If ``dry_run`` is not a bool.
+            PermissionError: If ``dry_run`` is False and the store was opened
+                with ``zarr_mode='r'``.
+        """
+        from ..storage.artifact_writer import prune_incomplete_artifacts
+
+        if not isinstance(dry_run, bool):
+            raise TypeError("dry_run must be a bool")
+        if not dry_run:
+            self._require_writable("artifacts.prune_incomplete")
+        paths = prune_incomplete_artifacts(self.zw, self._assayNames, dry_run=dry_run)
+        if dry_run:
+            logger.info(
+                f"Found {len(paths)} incomplete artifact path(s); after confirming "
+                "that no process is writing to this store, remove them with "
+                "artifacts.prune_incomplete(dry_run=False)"
+            )
+        else:
+            logger.info(f"Removed {len(paths)} incomplete artifact path(s)")
+        return paths
 
     @validation_scoped
     def _artifacts_find(
@@ -1132,8 +1227,8 @@ class BaseDataStore:
     ) -> None:
         """Prepare the cell and feature statistics of every assay.
 
-        This never changes ``I``. Only a writable open filters it, once, with
-        its ``min_features_per_cell`` through ``_filter_cells``.
+        This never changes ``I``. Only the first writable open of a store
+        filters it, with its ``min_features_per_cell``, through ``_filter_cells``.
         """
         for from_assay in self._assayNames:
             # _load_assays opened every assay group, so its attributes are current.
@@ -1151,38 +1246,60 @@ class BaseDataStore:
                 }
             assay.prepare(patterns)
 
-    def _filter_cells(self, min_features: int) -> None:
-        """Remove low-feature cells of the default assay from ``I``.
+    def _filter_cells(self, min_features: int | None) -> None:
+        """Remove low-feature cells of the default assay from ``I`` once.
 
-        Active cells whose feature count is not greater than ``min_features``
-        are removed, unless they are at least half of the active cells: then
-        ``I`` is kept and a warning names the likely causes.
+        The first writable open of a store, whose cell table records no
+        filter, removes the active cells whose feature count is not greater
+        than ``min_features``, or the default threshold when it is None,
+        unless they are at least half of the active cells: then ``I`` is kept
+        and a warning names the likely causes. Either way it records the
+        default assay and the threshold in the cell table. A later open leaves
+        ``I`` as it is, whatever its ``min_features``, so the analysis input
+        never depends on how the store was last opened; a threshold that
+        differs from the recorded one is logged as not applied.
+
+        Raises:
+            ValueError: If the recorded filter is malformed.
         """
         from ..quality_control.filtering import RAW_DROPLET_REMEDY
+        from ..storage.types import read_fresh_group
         from ..utils.warnings import warn
 
+        cells = read_fresh_group(self.cells.locations["primary"])
+        recorded = _recorded_cell_filter(cells)
+        if recorded is not None:
+            if min_features is not None and min_features != recorded[1]:
+                logger.info(
+                    f"min_features_per_cell={min_features} is not applied: only "
+                    "the first writable open of a store filters I, and it applied "
+                    f"min_features_per_cell={recorded[1]} to assay {recorded[0]!r}. "
+                    "Filter cells explicitly with qc.filter or cells.update_key "
+                    "instead."
+                )
+            return
         from_assay = self._defaultAssay
+        threshold = (
+            DEFAULT_MIN_FEATURES_PER_CELL if min_features is None else min_features
+        )
         active = self.cells.fetch_all("I")
         n_active = int(np.count_nonzero(active))
-        if n_active == 0:
-            return
         n_features = self.cells.fetch_all(from_assay + "_nFeatures")
-        removed = active & (n_features <= min_features)
+        removed = active & (n_features <= threshold)
         n_removed = int(np.count_nonzero(removed))
-        # Write only when filtering changes the active cells.
-        if n_removed == 0:
-            return
-        if 2 * n_removed >= n_active:
+        if 2 * n_removed >= n_active > 0:
             warn(
-                f"{n_removed} of {n_active} active cells have at most {min_features} "
+                f"{n_removed} of {n_active} active cells have at most {threshold} "
                 f"features in assay {from_assay!r}. Will not remove low quality cells "
                 "automatically, because that would remove at least half of the active "
                 "cells. A default assay with few features, such as a small antibody "
-                "panel, does this; open it with min_features_per_cell=-1 to skip "
-                f"this filter. {RAW_DROPLET_REMEDY}"
+                "panel, does this; later opens of this store do not filter it again. "
+                f"{RAW_DROPLET_REMEDY}"
             )
-            return
-        self.cells.update_key(~removed, key="I")
+        elif n_removed:
+            # Write only when filtering changes the active cells.
+            self.cells.update_key(~removed, key="I")
+        cells.attrs[CELL_FILTER_ATTR] = {"assay": from_assay, "threshold": threshold}
 
     def get_cell_vals(
         self,

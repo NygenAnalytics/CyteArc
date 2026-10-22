@@ -27,7 +27,7 @@ from ..storage.artifacts import fingerprint_stored_arrays
 from ..storage.geometry import ArrayGeometry
 from ..storage.identity import count_fingerprint, validate_preparation
 from ..storage.profiles import is_remote_zarr_location
-from ..storage.types import as_zarr_array, as_zarr_group
+from ..storage.types import as_zarr_array, as_zarr_group, complete_chunks
 from ..storage.virtual_arrays import VirtualArrayReader, VirtualArrayStore
 from .reader import CompositeArrayReader
 from .source_cache import SourceCache, new_source_cache
@@ -154,7 +154,10 @@ class CompositeStore(WrapperStore[Store], VirtualArrayStore):
                         name: zarr.open_array(store=cached, path=array.path, mode="r")
                         for name, array in arrays.items()
                     }
-            self._sources.append(arrays)
+            # A missing source count chunk is lost data, never zero counts.
+            self._sources.append(
+                {name: complete_chunks(array) for name, array in arrays.items()}
+            )
 
     def _with_store(self, store: Store) -> Self:
         clone = copy.copy(self)
@@ -681,9 +684,9 @@ def open_composite(
                 read_only=True,
             )
             source = (
-                zarr.open_group(Path(store), mode="r")
+                zarr.open_group(Path(store), mode="r", use_consolidated=False)
                 if isinstance(store, str)
-                else zarr.open_group(store=store, mode="r")
+                else zarr.open_group(store=store, mode="r", use_consolidated=False)
             )
             opened[name] = source
             refuse_composite(source, operation="used as a composite source")

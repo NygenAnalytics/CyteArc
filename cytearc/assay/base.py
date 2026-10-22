@@ -11,7 +11,12 @@ from ..matrix import ChunkedArray
 from ..metadata import MetaData
 from ..storage.artifacts import provenance_hash
 from ..storage.budget import ResourceBudget, resolve_budget
-from ..storage.types import as_zarr_array, as_zarr_group, read_fresh_group
+from ..storage.types import (
+    as_zarr_array,
+    as_zarr_group,
+    complete_chunks,
+    read_fresh_group,
+)
 from ..storage.virtual_arrays import read_selection
 from ..utils.arguments import integer_argument
 from ..utils.arrays import array_digest, regex_match_mask
@@ -194,7 +199,9 @@ class Assay:
             counts_path = f"{name}/counts"
             matrix_group = as_zarr_group(matrix_root[name], name=name)
             self.rawData = ChunkedArray(
-                as_zarr_array(matrix_root[counts_path], name=counts_path),
+                complete_chunks(
+                    as_zarr_array(matrix_root[counts_path], name=counts_path)
+                ),
                 nthreads=self.nthreads,
                 resources=self.resources,
             )
@@ -209,7 +216,9 @@ class Assay:
                 name=f"matrices/{name}",
             )
             self.rawData = ChunkedArray(
-                as_zarr_array(matrix_root[counts_path], name=counts_path),
+                complete_chunks(
+                    as_zarr_array(matrix_root[counts_path], name=counts_path)
+                ),
                 nthreads=self.nthreads,
                 resources=self.resources,
             )

@@ -320,11 +320,16 @@ def test_lineage_rejects_malformed_targets_inputs_and_external_roots() -> None:
         operation="run_normalization",
         inputs={"cells": {"selection": {"type": "artifact", "scope": "assay"}}},
     )
-    with pytest.raises(
-        ValueError,
-        match="Invalid artifact reference at lineage input 'cells.selection'",
-    ):
-        ArtifactLineage.from_store(root, ref)
+    # A malformed recorded input marks its artifact corrupt instead of
+    # aborting the report.
+    malformed = ArtifactLineage.from_store(root, ref)
+    assert set(malformed.graph) == {ref}
+    assert malformed.graph.nodes[ref]["status"].complete
+    assert malformed.graph.nodes[ref]["error"].startswith(
+        "ValueError: Invalid artifact reference at lineage input 'cells.selection'"
+    )
+    assert "- Status: `corrupt`" in malformed.to_markdown()
+    assert "status: corrupt" in malformed.to_mermaid()
 
     external = ExternalArtifactRef("reference-dataset", _ref("mapping_reference", "2"))
     projection = _ref("projection", "3")
@@ -402,7 +407,7 @@ def test_lineage_renders_one_unresolved_external_node_without_opening_paths(
     assert "query_fingerprint=" in markdown
 
 
-def test_lineage_rejects_malformed_external_artifact_inputs() -> None:
+def test_lineage_marks_malformed_external_artifact_inputs_corrupt() -> None:
     root = zarr.open_group(store=MemoryStore(), mode="w")
     projection = _ref("projection", "0")
     _write_artifact(
@@ -418,11 +423,17 @@ def test_lineage_rejects_malformed_external_artifact_inputs() -> None:
         },
     )
 
-    with pytest.raises(
-        ValueError,
-        match="Invalid external artifact reference.*mapping_reference",
-    ):
-        ArtifactLineage.from_store(root, projection)
+    lineage = ArtifactLineage.from_store(root, projection)
+
+    assert set(lineage.graph) == {projection}
+    error = lineage.graph.nodes[projection]["error"]
+    assert error.startswith(
+        "ValueError: Invalid external artifact reference at lineage input "
+        "'mapping_reference'"
+    )
+    markdown = lineage.to_markdown()
+    assert "- Status: `corrupt`" in markdown
+    assert "- Error: `ValueError: Invalid external artifact reference" in markdown
 
 
 def test_lineage_rejects_external_root_with_wrong_fingerprint() -> None:

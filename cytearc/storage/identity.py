@@ -203,7 +203,10 @@ def finalize_counts(counts: zarr.Array, summary: CountSummary) -> str:
     """
     fingerprint = summary.hexdigest()
     matrix = zarr.open_group(
-        store=counts.store, path=counts.path.rpartition("/")[0], mode="r+"
+        store=counts.store,
+        path=counts.path.rpartition("/")[0],
+        mode="r+",
+        use_consolidated=False,
     )
     totals = matrix.create_group(COUNT_SUMMARIES, overwrite=True)
     for name, values in (
@@ -534,7 +537,10 @@ def protect_metadata_column(
 def _stored_root(group: zarr.Group) -> zarr.Group:
     """Open the root of ``group``'s store, reading its stored records."""
     return zarr.open_group(
-        store=group.store, mode="r", zarr_format=group.metadata.zarr_format
+        store=group.store,
+        mode="r",
+        zarr_format=group.metadata.zarr_format,
+        use_consolidated=False,
     )
 
 
