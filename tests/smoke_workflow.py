@@ -84,7 +84,10 @@ def _check_run_export(path: Path, run: Any, matrix: str, counts: np.dtype) -> No
         assert h5["obsm/X_umap"].shape == (len(cells), 2), matrix
         assert int(h5["X/indptr"][-1]) == h5["X/data"].shape[0], matrix
         values = h5["X/data"][:]
-    expected = np.dtype(np.float32) if matrix == "normed" else counts
+    # Normalized values, and raw counts stored as uint8 or uint16, export as
+    # float32; raw counts of any other dtype keep it.
+    narrow = counts in (np.dtype(np.uint8), np.dtype(np.uint16))
+    expected = np.dtype(np.float32) if matrix == "normed" or narrow else counts
     assert values.dtype == expected, (matrix, values.dtype)
     assert values.size and np.isfinite(values).all(), matrix
 

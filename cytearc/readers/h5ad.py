@@ -18,6 +18,9 @@ from ..utils.progress import iter_progress
 from ._assay_names import auto_name_feat_table, make_feat_table_from_types
 from ._h5ad_columns import (
     SPARSE_KEYS,
+    H5adCategories,
+    category_colors,
+    column_categories,
     column_encoding,
     column_length,
     column_order,
@@ -35,14 +38,36 @@ from ._h5ad_columns import (
 from ._h5ad_inspect import H5adInspectResult, inspect_h5ad as inspect_h5ad
 from ._sparse import SparseRowStore
 from ._text import (
+    DuplicateCellIds,
     DuplicateFeatureIds,
     as_text,
+    duplicate_cell_ids_option,
     duplicate_feature_ids_option,
-    require_unique_identifiers,
+    unique_cell_identifiers,
     unique_feature_identifiers,
 )
 
-type H5adEmbeddingRole = Literal["umap", "tsne"]
+type H5adEmbeddingRole = Literal["umap", "tsne", "coordinates"]
+
+_EMBEDDING_ROLES = frozenset({"umap", "tsne", "coordinates"})
+# AnnData stores an unnamed dataframe index under this name, which no
+# dataframe column may take.
+_UNNAMED_INDEX = "_index"
+# The name under which a table's unnamed index imports when it is neither the
+# ID nor the name column.
+_SOURCE_INDEX = "source_index"
+
+
+def _texts(values: np.ndarray) -> list[str | None]:
+    return [None if value is None else as_text(value) for value in values]
+
+
+def _is_missing_name(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float | np.floating):
+        return not bool(np.isfinite(value))
+    return not as_text(value).strip()
 
 
 @dataclass(frozen=True)
@@ -72,8 +97,23 @@ class H5adReader:
                                and across assays, by appending ``-1``, ``-2``, and so on (skipping
                                names that are already IDs), as AnnData's ``var_names_make_unique``
                                does, and logs a warning. Feature names are never changed: without a
-                               feature name column they are the IDs as the file holds them. Repeated
-                               cell IDs always raise.
+                               feature name column they are the IDs as the file holds them.
+        duplicate_cell_ids: ``"error"`` rejects repeated cell IDs. ``"make_unique"`` renames each
+                            later occurrence of a repeated cell ID as ``duplicate_feature_ids``
+                            renames feature IDs, as AnnData's ``obs_names_make_unique`` does,
+                            which suits files that ``anndata.concat`` wrote without
+                            ``index_unique``.
+
+    A table's dataframe index that is neither the ID nor the name column
+    imports as a metadata column only when it holds other values: an index
+    that repeats the IDs or the names is left out, and AnnData's unnamed
+    index, which no dataframe column may be named, imports as
+    ``source_index`` (``source_index_2`` and so on when that name is taken).
+    Categorical columns keep their category order, unused categories, and
+    ``ordered`` flag, which ``H5adToZarr`` stores with the column; ``obs``
+    categories also keep the colors that ``uns["<column>_colors"]`` holds.
+    A missing or blank feature name takes the feature's ID as the file holds
+    it.
 
     Attributes:
         h5: A File object from the h5py package.
@@ -91,11 +131,16 @@ class H5adReader:
         sourceMatrixDtype: dtype in which the source holds the matrix values, in native byte order.
                            float16 is not a count storage dtype, so float16 source values are read
                            as float32.
-        embedding_roles: Exact ``obsm`` keys to import as immutable UMAP or
-                         t-SNE artifacts.
+        embedding_roles: Exact ``obsm`` keys to import as immutable artifacts:
+                         ``"umap"`` and ``"tsne"`` layouts become ``embedding``
+                         artifacts, and ``"coordinates"``, such as ``X_pca``,
+                         ``X_scVI``, or ``X_pca_harmony``, become
+                         ``imported_coordinates`` artifacts that graph
+                         construction, embeddings, and mapping accept.
         cluster_keys: Exact ``obs`` keys to import as immutable cluster-label
                       artifacts instead of raw cell metadata.
         duplicateFeatureIds: How repeated feature IDs are treated.
+        duplicateCellIds: How repeated cell IDs are treated.
     """
 
     def __init__(
@@ -114,13 +159,17 @@ class H5adReader:
         *,
         temp_dir: str | Path | None = None,
         duplicate_feature_ids: DuplicateFeatureIds = "error",
+        duplicate_cell_ids: DuplicateCellIds = "error",
     ) -> None:
         self.h5adFn = h5ad_fn
         self._tempDir = temp_dir
         self.duplicateFeatureIds = duplicate_feature_ids_option(duplicate_feature_ids)
-        # The feature IDs as the file holds them and as an import stores
-        # them, read on first use.
+        self.duplicateCellIds = duplicate_cell_ids_option(duplicate_cell_ids)
+        # The feature and cell IDs as the file holds them and as an import
+        # stores them, read on first use.
         self._featureIdentifiers: tuple[np.ndarray, np.ndarray] | None = None
+        self._cellIdentifiers: tuple[np.ndarray, np.ndarray] | None = None
+        self._featureNames: np.ndarray | None = None
         self.h5: h5py.File = h5py.File(h5ad_fn, mode="r")
         try:
             self.matrixKey = matrix_key
@@ -180,6 +229,7 @@ class H5adReader:
             "cluster_keys": self.clusterKeys,
             "temp_dir": self._tempDir,
             "duplicate_feature_ids": self.duplicateFeatureIds,
+            "duplicate_cell_ids": self.duplicateCellIds,
         }
 
     def close(self) -> None:
@@ -200,8 +250,8 @@ class H5adReader:
         Args:
             inspection: Result of :func:`~cytearc.inspect_h5ad`.
             **overrides: Constructor arguments that replace or add to the
-                inspected ones, such as ``embedding_roles``, ``temp_dir``, or
-                ``duplicate_feature_ids``.
+                inspected ones, such as ``embedding_roles``, ``temp_dir``,
+                ``duplicate_feature_ids``, or ``duplicate_cell_ids``.
         """
         reader_kwargs = inspection.to_reader_kwargs()
         reader_kwargs.update(overrides)
@@ -378,8 +428,10 @@ class H5adReader:
         for raw_key, raw_role in roles.items():
             if not isinstance(raw_key, str) or not raw_key:
                 raise ValueError("embedding_roles keys must be non-empty strings")
-            if raw_role not in {"umap", "tsne"}:
-                raise ValueError("embedding_roles values must be 'umap' or 'tsne'")
+            if raw_role not in _EMBEDDING_ROLES:
+                raise ValueError(
+                    "embedding_roles values must be 'umap', 'tsne', or 'coordinates'"
+                )
             if not self._check_exists(self.obsmAttrsKey, raw_key):
                 raise KeyError(
                     f"Embedding key {raw_key!r} was not found in {self.obsmAttrsKey}"
@@ -486,11 +538,27 @@ class H5adReader:
             values = np.array([f"{generated}_{x}" for x in range(n_rows)])
         return values
 
+    def _cell_identifiers(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the cell IDs as the file holds them and as they import.
+
+        They differ only when ``duplicate_cell_ids="make_unique"`` renamed
+        repeated IDs, which happens once, on first use.
+        """
+        if self._cellIdentifiers is None:
+            source = self._identifiers(self.cellAttrsKey, self.cellIdsKey, "cell")
+            resolved = unique_cell_identifiers(
+                source, "H5AD cell IDs", self.duplicateCellIds
+            )
+            self._cellIdentifiers = (source, resolved)
+        return self._cellIdentifiers
+
     def cell_ids(self) -> np.ndarray:
-        """Returns a list of cell IDs."""
-        values = self._identifiers(self.cellAttrsKey, self.cellIdsKey, "cell")
-        require_unique_identifiers(values, "H5AD cell IDs")
-        return values
+        """Returns a list of cell IDs.
+
+        Repeated IDs raise ValueError, or are renamed with
+        ``duplicate_cell_ids="make_unique"``.
+        """
+        return self._cell_identifiers()[1].copy()
 
     def _feature_identifiers(self) -> tuple[np.ndarray, np.ndarray]:
         """Return the feature IDs as the file holds them and as they import.
@@ -520,26 +588,84 @@ class H5adReader:
         """Returns a list of feature names.
 
         Without the feature name key, the names are the feature IDs as the
-        file holds them, before any repeated ID is renamed.
+        file holds them, before any repeated ID is renamed. A missing or
+        blank name, such as a missing category, takes the ID of its feature
+        as the file holds it.
         """
-        if self._check_exists(self.featureAttrsKey, self.featNamesKey):
-            return present_column(
-                *self._read_column(self.featureAttrsKey, self.featNamesKey)
-            ).astype(object)
-        logger.warning(
-            f"Feature name key {self.featNamesKey!r} was not found in "
-            f"{self.featureAttrsKey}; feature IDs will be used"
-        )
-        return self._feature_identifiers()[0].copy()
+        if self._featureNames is None:
+            self._featureNames = self._read_feature_names()
+        return self._featureNames.copy()
+
+    def _read_feature_names(self) -> np.ndarray:
+        if not self._check_exists(self.featureAttrsKey, self.featNamesKey):
+            logger.warning(
+                f"Feature name key {self.featNamesKey!r} was not found in "
+                f"{self.featureAttrsKey}; feature IDs will be used"
+            )
+            return self._feature_identifiers()[0].copy()
+        names = present_column(
+            *self._read_column(self.featureAttrsKey, self.featNamesKey)
+        ).astype(object)
+        missing = np.asarray([_is_missing_name(name) for name in names], dtype=bool)
+        if missing.any():
+            names[missing] = self._feature_identifiers()[0][missing]
+            logger.warning(
+                f"{int(missing.sum())} feature names in {self.featNamesKey!r} are "
+                "missing or blank; those features take their IDs as names"
+            )
+        return names
+
+    def _index_member(self, group: str) -> str | None:
+        """Return the source name of a dataframe group's index, if it has one."""
+        if self.groupCodes.get(group) != 2:
+            return None
+        table = self.h5[group]
+        recorded = index_key(table)
+        for key in (recorded, _UNNAMED_INDEX):
+            if key is not None and key in table:
+                return key
+        return None
+
+    def _import_name(self, group: str, name: str) -> str:
+        """Return the name under which a source column imports.
+
+        Only AnnData's unnamed index changes its name, to the first of
+        ``source_index``, ``source_index_2``, and so on that the table does
+        not use.
+        """
+        if name != _UNNAMED_INDEX:
+            return name
+        taken = set(table_column_names(self.h5[group]))
+        candidate, suffix = _SOURCE_INDEX, 2
+        while candidate in taken:
+            candidate, suffix = f"{_SOURCE_INDEX}_{suffix}", suffix + 1
+        return candidate
+
+    def _repeats_identifiers(
+        self,
+        group: str,
+        values: np.ndarray,
+        missing: np.ndarray,
+    ) -> bool:
+        """Return whether an index holds the IDs or the names of its table."""
+        texts = _texts(present_column(values, missing))
+        known: tuple[np.ndarray, ...]
+        if group == self.cellAttrsKey:
+            known = (self._cell_identifiers()[0],)
+        else:
+            known = (self._feature_identifiers()[0], self.feat_names())
+        return any(texts == _texts(column) for column in known)
 
     def _table_columns(
         self, group: str, ignore_keys: Sequence[str]
-    ) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
-        """Yield each decodable column with its stored values and missing mask.
+    ) -> Iterator[tuple[str, np.ndarray, np.ndarray, H5adCategories | None]]:
+        """Yield each decodable column with its values, missing mask, and categories.
 
-        Columns come by source name. A dataframe group lists them in
+        Columns come by the name they import under, which is their source
+        name except for an unnamed index. A dataframe group lists them in
         ``column-order``, which resolves a name that old AnnData versions
-        nested into groups because it contains ``/``.
+        nested into groups because it contains ``/``. An index that repeats
+        the table's IDs or names is left out.
         """
         code = self.groupCodes[group]
         if code not in {1, 2}:
@@ -557,6 +683,7 @@ class H5adReader:
                 )
             nodes = dict(members.members)
             names = tuple(nodes)
+        index = self._index_member(group)
         for name in iter_progress(names, desc=f"Reading attributes from group {group}"):
             if name in ignore_keys:
                 continue
@@ -578,10 +705,17 @@ class H5adReader:
                     f"{values.ndim}-dimensional values"
                 )
                 continue
-            yield name, values, missing
+            if name == index and self._repeats_identifiers(group, values, missing):
+                logger.info(
+                    f"Leaving out the {group} index {name!r} because it holds the "
+                    "IDs or the names that the import stores"
+                )
+                continue
+            categories = column_categories(self.h5, table, name, self._categoryGroups)
+            yield self._import_name(group, name), values, missing, categories
 
     def _source_column_names(self, group: str) -> list[str]:
-        """Return the source names of the decodable columns of a table.
+        """Return the import names of the decodable columns of a table.
 
         The names include the ID, name, and cluster columns that metadata
         import leaves out, so a caller can plan storage keys over the whole
@@ -589,7 +723,24 @@ class H5adReader:
         """
         if self.groupCodes.get(group) not in {1, 2}:
             return []
-        return table_column_names(self.h5[group])
+        return [
+            self._import_name(group, name)
+            for name in table_column_names(self.h5[group])
+        ]
+
+    def _category_colors(
+        self,
+        name: str,
+        categories: H5adCategories,
+    ) -> tuple[str, ...] | None:
+        """Return the ``uns`` colors of an ``obs`` categorical, in category order."""
+        return category_colors(self.h5, name, len(categories.values))
+
+    def _cell_column_categories(self, key: str) -> H5adCategories | None:
+        """Return the categories of an ``obs`` column, such as a cluster key."""
+        return column_categories(
+            self.h5, self.h5[self.cellAttrsKey], key, self._categoryGroups
+        )
 
     def _cell_column_value_dtype(self, key: str) -> np.dtype[Any]:
         return table_column_dtype(
@@ -622,7 +773,13 @@ class H5adReader:
         """
         if not self._check_exists(self.cellAttrsKey, self.cellIdsKey):
             return np.asarray([f"cell_{index}" for index in range(start, stop)])
-        values, _ = self._read_column(self.cellAttrsKey, self.cellIdsKey, start, stop)
+        if self.duplicateCellIds == "make_unique":
+            # Renamed IDs exist only once every ID was read.
+            values = self._cell_identifiers()[1][start:stop]
+        else:
+            values, _ = self._read_column(
+                self.cellAttrsKey, self.cellIdsKey, start, stop
+            )
         return np.asarray(
             [as_text(value) for value in values.astype(object)], dtype=str
         )
@@ -642,13 +799,17 @@ class H5adReader:
             stop = min(start + block_rows, self.nCells)
             yield np.asarray(node[start:stop], dtype=dtype)
 
-    def _cell_columns(self) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
+    def _cell_columns(
+        self,
+    ) -> Iterator[tuple[str, np.ndarray, np.ndarray, H5adCategories | None]]:
         return self._table_columns(
             self.cellAttrsKey,
             [self.cellIdsKey, self.catNamesKey, *self.clusterKeys],
         )
 
-    def _feature_columns(self) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
+    def _feature_columns(
+        self,
+    ) -> Iterator[tuple[str, np.ndarray, np.ndarray, H5adCategories | None]]:
         return self._table_columns(
             self.featureAttrsKey,
             [self.featIdsKey, self.featNamesKey, self.catNamesKey],
@@ -660,12 +821,12 @@ class H5adReader:
         Missing categorical and text values are ``None``; missing numeric
         values are NaN.
         """
-        for name, values, missing in self._cell_columns():
+        for name, values, missing, _categories in self._cell_columns():
             yield name, present_column(values, missing)
 
     def get_feat_columns(self) -> Generator[tuple[str, np.ndarray], None, None]:
         """Creates a Generator that yields the feature columns."""
-        for name, values, missing in self._feature_columns():
+        for name, values, missing, _categories in self._feature_columns():
             yield name, present_column(values, missing)
 
     def assay_membership(self) -> dict[str, str]:

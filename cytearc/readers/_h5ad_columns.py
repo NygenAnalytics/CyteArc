@@ -300,6 +300,122 @@ def read_table_column(
     return values, missing
 
 
+@dataclass(frozen=True, slots=True)
+class H5adCategories:
+    """The declared categories of an AnnData categorical column.
+
+    Attributes:
+        values: Every category in its stored order, unused ones included,
+            decoded as the column's values decode: byte strings as text and
+            NumPy scalars as Python scalars.
+        ordered: Whether the categories are ordered.
+    """
+
+    values: tuple[Any, ...]
+    ordered: bool
+
+
+def _category_value(value: Any) -> Any:
+    if isinstance(value, bytes | np.bytes_):
+        return as_text(value)
+    return value.item() if isinstance(value, np.generic) else value
+
+
+def column_categories(
+    h5: h5py.File,
+    table: H5adNode,
+    key: str,
+    category_groups: tuple[str, ...],
+) -> H5adCategories | None:
+    """Return the categories of a categorical column, or None for another column.
+
+    A group-encoded categorical keeps its categories beside its codes and
+    records ``ordered`` as an attribute. AnnData 0.7 and 0.6 kept the
+    categories of integer codes apart from them, as
+    :func:`legacy_categories` finds them, and such categories are unordered
+    unless their dataset records ``ordered``.
+    """
+    if isinstance(table, h5py.Group):
+        node = table[key]
+        if is_categorical(node):
+            return H5adCategories(
+                tuple(_category_value(value) for value in node["categories"][:]),
+                bool(node.attrs.get("ordered", False)),
+            )
+        if not isinstance(node, h5py.Dataset):
+            return None
+        stored = node.dtype
+    else:
+        stored = np.dtype(table.dtype.fields[key][0])
+    if stored.kind not in "iu":
+        return None
+    categories = legacy_categories(h5, table, key, category_groups)
+    if categories is None:
+        return None
+    ordered = False
+    if isinstance(table, h5py.Group):
+        for name in category_groups:
+            group = table.get(name)
+            if isinstance(group, h5py.Group) and key in group:
+                ordered = bool(group[key].attrs.get("ordered", False))
+                break
+    return H5adCategories(
+        tuple(_category_value(value) for value in categories), ordered
+    )
+
+
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def hex_color(value: str) -> str | None:
+    """Return a color as ``#rrggbb``, or None when it is not a color.
+
+    ``#rgb``, ``#rrggbb``, and ``#rrggbbaa`` are read directly, dropping any
+    alpha. Other names, such as ``red`` or ``tab:blue``, are resolved with
+    Matplotlib when it is installed.
+    """
+    text = value.strip()
+    if text.startswith("#") and set(text[1:]) <= _HEX_DIGITS:
+        digits = text[1:]
+        if len(digits) in {3, 4}:
+            digits = "".join(digit * 2 for digit in digits[:3])
+        if len(digits) in {6, 8}:
+            return f"#{digits[:6].lower()}"
+        return None
+    try:
+        from matplotlib.colors import to_hex
+    except ImportError:
+        return None
+    try:
+        return str(to_hex(text, keep_alpha=False))
+    except ValueError:
+        return None
+
+
+def category_colors(h5: h5py.File, key: str, count: int) -> tuple[str, ...] | None:
+    """Return the ``uns["<key>_colors"]`` of a categorical with ``count`` categories.
+
+    AnnData and Scanpy keep one color per category, in category order. Like
+    Scanpy, a list with more colors than categories gives each category the
+    color at its position. A list with fewer colors, or with a value that is
+    not a color, is not used, and None is returned.
+    """
+    node = h5.get(f"uns/{key}_colors")
+    if not isinstance(node, h5py.Dataset) or node.ndim != 1 or count < 1:
+        return None
+    if int(node.shape[0]) < count:
+        return None
+    colors = []
+    for value in node[:count]:
+        if not isinstance(value, str | bytes | np.str_ | np.bytes_):
+            return None
+        color = hex_color(as_text(value))
+        if color is None:
+            return None
+        colors.append(color)
+    return tuple(colors)
+
+
 def table_column_dtype(
     h5: h5py.File,
     table: H5adNode,

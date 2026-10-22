@@ -35,7 +35,9 @@ The full stage order is:
 1. {py:meth}`~cytearc.DataStore.snapshot_cell_selection` and an exact feature-selection ref
 2. {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.normalize`
 3. {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.pca`, {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.lsi`, or
-   {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.custom`, or none
+   {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.custom`, or none; or coordinates
+   computed elsewhere through
+   {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.import_coordinates`
 4. Optional {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.harmony`
 5. {py:meth}`~cytearc.datastore.namespaces.GraphAccessor.ann_index`
 6. {py:meth}`~cytearc.datastore.namespaces.GraphAccessor.neighbors`
@@ -70,6 +72,32 @@ supplied, but is not part of connectivity construction.
 
 `graph.neighbors` reads the coordinate ref named by the ANN artifact. Its optional `coordinates=`
 argument is only an equality check; it cannot redirect an index to different coordinates.
+
+## External coordinates
+
+A latent space computed by another tool, such as scVI's `X_scVI` or a Harmony correction saved
+as `X_pca_harmony`, becomes graph coordinates through
+{py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.import_coordinates`. Pass an array with
+one row per cell of the selection, in store order, or a pandas DataFrame indexed by cell ID, which
+is aligned to the selected cells by ID:
+
+```python
+cells = ds.snapshot_cell_selection("I")
+latent = ds.reduction.import_coordinates(
+    adata.obsm["X_scVI"],
+    cell_selection=cells,
+    name="X_scVI",
+    source={"tool": "scvi-tools", "version": "1.2.0", "parameters": {"n_latent": 30}},
+)
+ann = ds.graph.ann_index(latent)
+graph = ds.graph.connectivity(ds.graph.neighbors(ann, k=11))
+```
+
+The result is an `imported_coordinates` artifact. Its identity records the name, the `source`
+record, a fingerprint of the values, and a fingerprint of the ordered cell IDs, so importing the
+same values again reuses it and `ds.artifacts.lineage` shows where the coordinates came from.
+`H5adReader` imports such an `obsm` array in the same form when its role is `"coordinates"`, as in
+`embedding_roles={"X_scVI": "coordinates"}`.
 
 ## Downstream consumers
 
@@ -108,6 +136,7 @@ no such selection; integrated graphs preserve the ordered projections of their e
    cytearc.datastore.namespaces.ReductionAccessor.lsi
    cytearc.datastore.namespaces.ReductionAccessor.custom
    cytearc.datastore.namespaces.ReductionAccessor.harmony
+   cytearc.datastore.namespaces.ReductionAccessor.import_coordinates
    cytearc.datastore.namespaces.GraphAccessor.ann_index
    cytearc.datastore.namespaces.GraphAccessor.neighbors
    cytearc.datastore.namespaces.GraphAccessor.connectivity
@@ -122,6 +151,7 @@ no such selection; integrated graphs preserve the ordered projections of their e
 .. automethod:: cytearc.datastore.namespaces.ReductionAccessor.lsi
 .. automethod:: cytearc.datastore.namespaces.ReductionAccessor.custom
 .. automethod:: cytearc.datastore.namespaces.ReductionAccessor.harmony
+.. automethod:: cytearc.datastore.namespaces.ReductionAccessor.import_coordinates
 .. automethod:: cytearc.datastore.namespaces.GraphAccessor.ann_index
 .. automethod:: cytearc.datastore.namespaces.GraphAccessor.neighbors
 .. automethod:: cytearc.datastore.namespaces.GraphAccessor.connectivity

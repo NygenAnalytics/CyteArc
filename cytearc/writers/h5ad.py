@@ -9,7 +9,7 @@ from typing import Any, cast
 import numpy as np
 from scipy.sparse import coo_matrix
 
-from ..storage.types import as_zarr_group
+from ..storage.types import as_zarr_array, as_zarr_group
 from ..readers import H5adReader
 from ..readers.h5ad import _H5adAssayFeatures
 from ..storage import ArtifactRef
@@ -27,6 +27,106 @@ from ..utils.progress import iter_progress
 
 
 _SOURCE_DIGEST_BLOCK_BYTES = 1024 * 1024
+# Categories longer than this list are not stored with their column: AnnData
+# makes a categorical of any text that repeats a value, so a column of nearly
+# unique text can hold about one category per row.
+_MAX_STORED_CATEGORIES = 10_000
+_MISSING_DISPLAY = {"missing_label": "NA", "missing_color": "#bdbdbd"}
+
+
+def _stored_levels(dtype: np.dtype[Any], categories: Sequence[Any]) -> list[Any] | None:
+    """Return categories as the stored column holds its values, or None.
+
+    A text column holds text, and a boolean, integer, or float column holds
+    categories of that type. Categories that the column's type cannot hold
+    exactly, such as text categories of a numeric column, return None.
+    """
+    if dtype.kind == "U":
+        return [
+            category.decode("utf-8") if isinstance(category, bytes) else str(category)
+            for category in categories
+        ]
+    checks = {
+        "b": lambda value: isinstance(value, bool),
+        "i": lambda value: isinstance(value, int) and not isinstance(value, bool),
+        "f": lambda value: (
+            isinstance(value, int | float)
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        ),
+    }
+    check = checks.get("i" if dtype.kind == "u" else dtype.kind)
+    if check is None or not all(check(category) for category in categories):
+        return None
+    if dtype.kind == "f":
+        return [float(category) for category in categories]
+    return list(categories)
+
+
+def _categorical_display(
+    levels: list[Any],
+    colors: tuple[str, ...] | None,
+    has_missing: bool,
+) -> dict[str, Any] | None:
+    """Return the categorical display contract of levels in their order.
+
+    The categories keep the stored order, so plots show them in it. Colors
+    come from the file, or else from the palette of
+    :func:`~cytearc.metadata.artifacts.categorical_display`.
+    """
+    from ..metadata.artifacts import categorical_display, validate_display_metadata
+
+    if colors is None:
+        generated = {
+            category["value"]: category["color"]
+            for category in categorical_display(np.asarray(levels, dtype=object))[
+                "categories"
+            ]
+        }
+        colors = tuple(generated[level] for level in levels)
+    display: dict[str, Any] = {
+        "kind": "categorical",
+        "categories": [
+            {"value": level, "label": str(level), "color": color}
+            for level, color in zip(levels, colors, strict=True)
+        ],
+    }
+    if has_missing:
+        display.update(_MISSING_DISPLAY)
+    try:
+        return validate_display_metadata(display)
+    except (TypeError, ValueError):
+        return None
+
+
+def _categorical_attributes(
+    dtype: np.dtype[Any],
+    categories: Any,
+    *,
+    colors: tuple[str, ...] | None,
+    has_missing: bool,
+    display: bool,
+) -> dict[str, Any]:
+    """Return the attributes that keep a source categorical with its column.
+
+    ``levels`` holds every category in its source order, unused ones
+    included, ``ordered`` whether they are ordered, and for cell columns
+    ``display`` the categorical display contract that plots honor, with the
+    source colors when the file holds them. A categorical whose categories
+    the column cannot hold, or that has more than 10,000 categories, gets no
+    attributes.
+    """
+    if len(categories.values) > _MAX_STORED_CATEGORIES:
+        return {}
+    levels = _stored_levels(dtype, categories.values)
+    if levels is None:
+        return {}
+    attributes: dict[str, Any] = {"levels": levels, "ordered": categories.ordered}
+    if display:
+        contract = _categorical_display(levels, colors, has_missing)
+        if contract is not None:
+            attributes["display"] = contract
+    return attributes
 
 
 def _count_matrix_bands(
@@ -351,7 +451,10 @@ class H5adImportResult:
         assayNames: Assay groups written to the destination store.
         analysisAssay: Assay owning explicitly selected analytical outputs.
         cellSelection: Artifact covering the imported cell axis.
-        embeddingArtifacts: Embedding artifacts keyed by exact ``obsm`` key.
+        embeddingArtifacts: Artifacts of the selected ``obsm`` arrays keyed by
+            exact ``obsm`` key: ``embedding`` artifacts for the ``"umap"`` and
+            ``"tsne"`` roles, and ``imported_coordinates`` artifacts, which
+            ``graph.ann_index`` accepts, for the ``"coordinates"`` role.
         clusterArtifacts: Cluster artifacts keyed by exact ``obs`` key.
     """
 
@@ -644,10 +747,10 @@ class H5adToZarr:
             self.h5ad._source_column_names(self.h5ad.cellAttrsKey),
             taken=[*g.keys(), *reserved],
         )
-        for key, (values, missing) in keyed_metadata_columns(
+        for key, (name, values, missing, categories) in keyed_metadata_columns(
             (
-                (name, (values, missing))
-                for name, values, missing in self.h5ad._cell_columns()
+                (name, (name, values, missing, categories))
+                for name, values, missing, categories in self.h5ad._cell_columns()
                 if name not in restored
             ),
             keys,
@@ -655,8 +758,36 @@ class H5adToZarr:
             membership=reserved,
         ):
             write_metadata_column(g, key, values, missing, profile=self.profile)
+            if categories is not None:
+                self._keep_categories(
+                    as_zarr_array(g[key], name=key),
+                    categories,
+                    colors=self.h5ad._category_colors(name, categories),
+                    missing=missing,
+                    display=True,
+                )
         for assay, members in self._membership.items():
             write_membership_column(g, assay, members, profile=self.profile)
+
+    @staticmethod
+    def _keep_categories(
+        array: Any,
+        categories: Any,
+        *,
+        colors: tuple[str, ...] | None,
+        missing: np.ndarray,
+        display: bool,
+    ) -> None:
+        """Record a source categorical's categories on its stored column."""
+        array.attrs.update(
+            _categorical_attributes(
+                np.dtype(array.dtype),
+                categories,
+                colors=colors,
+                has_missing=bool(np.asarray(missing, dtype=bool).any()),
+                display=display,
+            )
+        )
 
     def _ini_feature_data(self) -> None:
         from ..storage.metadata_keys import metadata_column_keys
@@ -682,10 +813,10 @@ class H5adToZarr:
         )
         # Stream one column at a time so a single decoded var column is held in
         # memory rather than every column for the full feature axis at once.
-        for column_name, (values, missing) in keyed_metadata_columns(
+        for column_name, (values, missing, categories) in keyed_metadata_columns(
             (
-                (name, (values, missing))
-                for name, values, missing in self.h5ad._feature_columns()
+                (name, (values, missing, categories))
+                for name, values, missing, categories in self.h5ad._feature_columns()
             ),
             keys,
             "feature",
@@ -703,6 +834,14 @@ class H5adToZarr:
                     selected_missing,
                     profile=self.profile,
                 )
+                if categories is not None:
+                    self._keep_categories(
+                        as_zarr_array(feat_group[column_name], name=column_name),
+                        categories,
+                        colors=None,
+                        missing=selected_missing,
+                        display=False,
+                    )
 
     def dump(self, batch_size: int | None = None) -> H5adImportResult:
         """Write h5ad matrix data into Zarr ``counts`` and RNA ``countsT``.
@@ -777,7 +916,10 @@ class H5adToZarr:
         cell_selection: ArtifactRef,
         requested_rows: int | None,
     ) -> dict[str, ArtifactRef]:
-        from ..embeddings.imported import write_imported_embedding
+        from ..embeddings.imported import (
+            write_imported_coordinates,
+            write_imported_embedding,
+        )
 
         if not self.h5ad.embeddingRoles:
             return {}
@@ -814,6 +956,24 @@ class H5adToZarr:
                     resolved_dtype,
                 )
 
+            if role == "coordinates":
+                # Graph coordinates, such as a scVI latent space, which graph
+                # construction, embeddings, and mapping accept.
+                artifacts[key] = write_imported_coordinates(
+                    self.root,
+                    assay=self.analysisAssay,
+                    dimreduc_key=key,
+                    role=role,
+                    coordinates=blocks,
+                    coordinate_shape=source_shape,
+                    coordinate_dtype=dtype,
+                    source_digest=self._sourceDigest,
+                    payload_fingerprints={"data": fingerprint},
+                    source_cell_ids=cell_ids,
+                    cell_selection=cell_selection,
+                    block_rows=block_rows,
+                )
+                continue
             artifacts[key] = write_imported_embedding(
                 self.root,
                 assay=self.analysisAssay,
@@ -985,7 +1145,7 @@ class H5adToZarr:
                             missing if has_missing else None,
                         )
 
-                create_streamed_metadata_column(
+                values = create_streamed_metadata_column(
                     group,
                     "values",
                     shape=self.h5ad.nCells,
@@ -998,6 +1158,19 @@ class H5adToZarr:
                     hasMissing=has_missing,
                     profile=self.profile,
                 )
+                categories = self.h5ad._cell_column_categories(key)
+                if categories is not None:
+                    # The labels keep their source categories, order, and
+                    # colors, which exports and plots read.
+                    values.attrs.update(
+                        _categorical_attributes(
+                            dtype,
+                            categories,
+                            colors=self.h5ad._category_colors(key, categories),
+                            has_missing=has_missing,
+                            display=True,
+                        )
+                    )
             artifacts[key] = planned.ref
         return artifacts
 

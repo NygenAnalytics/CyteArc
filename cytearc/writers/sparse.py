@@ -2,7 +2,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix, issparse
 
 from ..storage.count_dtype import count_storage_dtype
 from ..storage.count_matrix import DEFAULT_COUNT_MATRIX_POLICY, CountMatrixPolicy
@@ -14,19 +14,48 @@ from ..storage.profiles import (
     resolve_storage_profile,
 )
 from ..storage.sharding import accumulate_sparse_to_shards
-from ..utils.arrays import max_window_nnz, sparse_matrix_bytes
+from ..utils.arrays import has_duplicates, max_window_nnz, sparse_matrix_bytes
 from ..utils.count_values import compressed_count_ranges
 from ..utils.logging import logger
+from ._store import decode_text
+
+
+def _identifiers(values: Any, label: str) -> np.ndarray:
+    """Return identifiers as text after rejecting missing, blank, and repeated ones.
+
+    Byte strings are decoded as UTF-8, as every reader decodes them.
+    """
+    array = np.asarray(values, dtype=object)
+    if array.ndim != 1:
+        raise ValueError(f"{label} must be one-dimensional")
+    texts = np.asarray(
+        [
+            ""
+            if value is None or (isinstance(value, float) and value != value)
+            else (decode_text(value) if isinstance(value, str | bytes) else str(value))
+            for value in array
+        ],
+        dtype=str,
+    )
+    if texts.size and bool(np.any(np.char.strip(texts) == "")):
+        raise ValueError(f"{label} must contain non-empty values")
+    if has_duplicates(texts):
+        raise ValueError(f"{label} must contain unique values")
+    return texts
 
 
 class SparseToZarr:
     """A class for converting data in a sparse matrix to a Zarr hierarchy.
 
     Args:
-        csr_mat: A CSR format sparse matrix
+        csr_mat: A cells-by-features matrix: a SciPy sparse matrix or array of
+                 any format, or a dense two-dimensional array. Other formats
+                 are converted to CSR; a CSR matrix is used as given.
         zarr_loc: Output Zarr filename with path
-        cell_ids: Cell IDs for the cells in the dataset.
-        feature_ids: Feature IDs for the features in the dataset.
+        cell_ids: Cell IDs for the cells in the dataset. They must be present
+                  and unique, as every reader requires.
+        feature_ids: Feature IDs for the features in the dataset. They must be
+                     present and unique.
         assay_name: Name for the output assay. If not provided then automatically set to RNA.
         workspace: Workspace name in the destination store. None uses the
                    legacy layout without a workspace group.
@@ -53,7 +82,8 @@ class SparseToZarr:
 
     Raises:
         ValueError: Raised if number of input cell or feature IDs does not match
-            the matrix, or if a count is NaN or infinite.
+            the matrix, if an ID is missing, blank, or repeated, if the matrix
+            is not two-dimensional, or if a count is NaN or infinite.
         FileExistsError: If ``zarr_loc`` is not empty and may not be replaced.
 
     Attributes:
@@ -93,7 +123,11 @@ class SparseToZarr:
         validate_assay_type(
             assay_type, assay="RNA" if assay_name is None else assay_name
         )
-        self.mat = csr_mat
+        if not issparse(csr_mat) and np.ndim(csr_mat) != 2:
+            raise ValueError("The count matrix must be two-dimensional")
+        # COO, CSC, and dense inputs become CSR, which the scan and the row
+        # batches read; a CSR matrix is used as given, without a copy.
+        self.mat = csr_mat if isinstance(csr_mat, csr_matrix) else csr_matrix(csr_mat)
         self.assayType = assay_type
         self.resources = resolve_budget(mem_budget, nthreads)
         self.profile = resolve_storage_profile(zarr_loc, profile)
@@ -116,6 +150,8 @@ class SparseToZarr:
             raise ValueError(
                 "ERROR: Number of feature ids are not same as number of features in the matrix"
             )
+        _identifiers(cell_ids, "Cell IDs")
+        _identifiers(feature_ids, "Feature IDs")
         # The scan reads windows beside the matrix it holds.
         held = sparse_matrix_bytes(self.mat)
         if held >= self.resources.memoryBytes:

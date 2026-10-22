@@ -283,12 +283,15 @@ def test_h5ad_reader_reports_column_order_names_the_file_lacks(
     source = _write_separator_h5ad(tmp_path / "ghost.h5ad", extra_order=("ghost",))
     reader = H5adReader(str(source), feature_name_key="feature_name")
     try:
+        # The names are those the columns import under, over which storage
+        # keys are planned: AnnData's unnamed index, which no column may be
+        # named, would import as source_index.
         assert reader._source_column_names("obs") == [
             EGFR,
             "c\\d",
             "a/b",
             "a_b",
-            "_index",
+            "source_index",
         ]
         columns, messages = _capture_warnings(lambda: dict(reader.get_cell_columns()))
     finally:

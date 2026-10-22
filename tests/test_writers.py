@@ -2541,12 +2541,16 @@ def test_to_mtx_preserves_counts_barcodes_and_features(export_assay_store, tmp_p
     barcodes = (out_dir / "barcodes.tsv").read_text().splitlines()
     assert barcodes == ["b1", "b2", "b3"]
 
+    # The feature type column keeps the assay's type in an uncompressed
+    # export too, so an import reads RNA back as RNA.
     features = [
         line.split("\t")
         for line in (out_dir / "genes.tsv").read_text().splitlines()
         if line
     ]
-    assert features == [[name, name] for name in ("g1", "g2", "g3", "g4")]
+    assert features == [
+        [name, name, "Gene Expression"] for name in ("g1", "g2", "g3", "g4")
+    ]
 
 
 def test_to_mtx_compress_writes_gzipped_matrix_market(export_assay_store, tmp_path):

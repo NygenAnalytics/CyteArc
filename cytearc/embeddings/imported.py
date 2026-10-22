@@ -1,3 +1,4 @@
+import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
@@ -119,6 +120,47 @@ def _validate_source_digest(value: bytes) -> bytes:
     if not isinstance(value, bytes) or len(value) != 32:
         raise TypeError("source_digest must contain exactly 32 bytes")
     return value
+
+
+def _source_value(value: Any, path: str) -> Any:
+    if value is None or isinstance(value, bool | str):
+        return value
+    if isinstance(value, int | float):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"{path} must be a finite number")
+        return value
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError(f"{path} must have text keys")
+        return {
+            key: _source_value(item, f"{path}[{key!r}]") for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [
+            _source_value(item, f"{path}[{index}]") for index, item in enumerate(value)
+        ]
+    raise TypeError(
+        f"{path} holds a {type(value).__name__}; source records hold text, "
+        "numbers, booleans, None, and lists or mappings of them"
+    )
+
+
+def imported_source_record(source: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a validated record of the tool that computed imported coordinates.
+
+    The record, such as ``{"tool": "scvi-tools", "version": "1.2.0",
+    "parameters": {"n_latent": 30}}``, is stored in the artifact's
+    provenance, so it is part of its identity and of its lineage.
+
+    Raises:
+        TypeError: If ``source`` is not a mapping with text keys, or holds a
+            value that is not text, a number, a boolean, None, or a list or
+            mapping of them.
+        ValueError: If it holds a non-finite number.
+    """
+    if not isinstance(source, Mapping):
+        raise TypeError("source must be a mapping")
+    return cast(dict[str, Any], _source_value(source, "source"))
 
 
 def _string_source_length(values: ImportedStringSource) -> int:
@@ -435,13 +477,26 @@ def write_imported_coordinates(
     stdev_dtype: Any | None = None,
     block_rows: int = 100_000,
     invalidate_cache: bool = False,
+    source: Mapping[str, Any] | None = None,
+    require_writable: Callable[[], None] | None = None,
 ) -> ArtifactRef:
+    """Store, or reuse, imported graph coordinates over an exact cell selection.
+
+    The artifact's identity holds the source key, role, dimensions, which
+    optional payloads are stored, the source digest, the fingerprint of each
+    payload, the fingerprint of the ordered source cell IDs, and the cell
+    selection. ``source``, a record of the tool that computed the
+    coordinates (:func:`imported_source_record`), is stored in the
+    parameters when given. ``require_writable`` is called before anything is
+    written, when no stored artifact matches.
+    """
     storage = ImportedArtifactStorage(root)
     source_digest = _validate_source_digest(source_digest)
     if not isinstance(dimreduc_key, str) or not dimreduc_key:
         raise ValueError("dimreduc_key must be a non-empty string")
     if not isinstance(role, str) or not role or role.lower() in {"umap", "tsne"}:
         raise ValueError("Imported graph coordinates require a non-layout role")
+    source_record = None if source is None else imported_source_record(source)
     block_rows = integer_argument(block_rows, "block_rows", minimum=1)
     data_source = _resolve_source(
         coordinates,
@@ -529,17 +584,20 @@ def write_imported_coordinates(
         )
         for name, shape in shapes.items()
     )
+    parameters: dict[str, Any] = {
+        "dimreduc_key": dimreduc_key,
+        "role": role.lower(),
+        "dims": dims,
+        "loadings_stored": loading_source is not None,
+        "feature_ids_stored": feature_source is not None,
+        "stdev_stored": stdev_source is not None,
+    }
+    if source_record is not None:
+        parameters["source"] = source_record
     planned = storage.plan(
         assay=assay,
         kind="imported_coordinates",
-        parameters={
-            "dimreduc_key": dimreduc_key,
-            "role": role.lower(),
-            "dims": dims,
-            "loadings_stored": loading_source is not None,
-            "feature_ids_stored": feature_source is not None,
-            "stdev_stored": stdev_source is not None,
-        },
+        parameters=parameters,
         inputs={
             "source_digest": source_digest,
             "payload_fingerprints": fingerprints,
@@ -557,6 +615,8 @@ def write_imported_coordinates(
         ),
     )
     if not planned.reused:
+        if require_writable is not None:
+            require_writable()
         with storage.transaction(planned) as group:
             _write_numeric_payload(
                 storage,

@@ -148,22 +148,22 @@ so it never reports the job as gone. On macOS, `timeout` is `gtimeout` from GNU 
 
 Run export uses the frozen cells and feature universe. `to_anndata(run=run)` holds `X` in memory;
 `cytearc.to_h5ad(..., run=run)` writes the same object, streams `X`, and needs no `anndata` package.
-Frozen text fields that repeat or have missing values are pandas categoricals in natural order
-(`d2` before `d10`) in the object and the file alike, so `adata.write_h5ad` keeps those categories.
+Label fields (`clusters`, `leiden_*`, `paris`, `cell_cycle_phase`) are categoricals of string labels
+in natural order with the run's colors in `uns["<field>_colors"]`, so `sc.tl.rank_genes_groups`
+and categorical plots work directly; other frozen text that repeats or has missing values is a
+categorical in natural order (`d2` before `d10`) too. The run's PCA is `obsm["X_pca"]` with its
+loadings in `varm["PCs"]` (Harmony: `obsm["X_pca_harmony"]`).
 `cell_type` below and in later recipes is a placeholder for your own label column, not held-out
 author labels.
 
 ```python
-adata = ds.to_anndata(run=run)               # obs: frozen fields; obsm: X_umap; X: raw counts
+# obs: frozen fields; obsm: X_umap, X_pca; varm: PCs; obsp + uns["neighbors"]: the graph
+adata = ds.to_anndata(run=run, graph=run["connectivity_map"])
 live = ds.cells.to_pandas_dataframe(["ids", "cell_type", "RNA_nCounts"]).set_index("ids")
 adata.obs = adata.obs.join(live)             # live labels are not in the run: join on cell ids
-adata.obsm["X_pca"] = np.asarray(ds.artifacts.load(run["pca"])["data"][:])  # run analysis cells
-graph = ds.graph.load(graph=run["connectivity_map"], symmetric=True, upper_only=False)
-assert graph.shape[0] == adata.n_obs
-adata.obsp["connectivities"] = graph
 adata.write_h5ad("baseline_run.h5ad")
 
-cytearc.to_h5ad(ds.RNA, "baseline_run_plain.h5ad", run=run)   # same object, streamed; no extras
+cytearc.to_h5ad(ds.RNA, "baseline_run_plain.h5ad", run=run)   # same object without the graph, streamed
 ```
 
 `adata.var_names` are feature IDs; symbols are in `adata.var["names"]`. Pass
@@ -174,9 +174,35 @@ exports (see `pipeline-runs-and-artifacts.md`).
 
 ```python
 cytearc.to_h5ad(ds.RNA, "full_assay.h5ad")              # every cell, including I False; live metadata
-cytearc.to_mtx(ds.RNA, "full_assay_mtx")                # matrix.mtx, genes.tsv, barcodes.tsv
+cytearc.to_mtx(ds.RNA, "full_assay_mtx")                # matrix.mtx, genes.tsv (3 columns), barcodes.tsv
 cytearc.to_mtx(ds.RNA, "full_assay_mtx_gz", compress=True)   # Cell Ranger 3 names, .gz
 ```
+
+### Export artifacts for Scanpy, and bring a latent space back
+
+```python
+import pandas as pd
+
+adata = ds.to_anndata(
+    cell_selection=cells,                     # the selection the artifacts cover (each must hold every cell)
+    obsm={"X_pca": pca, "X_umap": umap},      # X_pca also writes varm["PCs"]
+    obs={"leiden": leiden, "s_score": (cell_cycle, "s_score")},   # labels become categoricals
+    graph=graph,                              # obsp connectivities/distances + uns["neighbors"]
+)
+cytearc.to_h5ad(ds.RNA, "analysis.h5ad", cell_selection=cells, obsm={"X_pca": pca}, graph=graph)
+
+latent = ds.reduction.import_coordinates(    # e.g. adata.obsm["X_scVI"] from scvi-tools
+    pd.DataFrame(adata.obsm["X_scVI"], index=adata.obs_names),  # aligned by cell id
+    cell_selection=cells,
+    name="X_scVI",
+    source={"tool": "scvi-tools", "version": "1.2.0", "parameters": {"n_latent": 30}},
+)
+graph2 = ds.graph.connectivity(ds.graph.neighbors(ds.graph.ann_index(latent), k=11))
+```
+
+Raw `uint8`/`uint16` counts export as `float32` by default (arithmetic on narrow integers wraps);
+pass `dtype=` to `to_anndata` or `to_h5ad` to choose. Store columns named `_index` export as
+`source_index`, and a column whose name the export already uses gets `_2`.
 
 ### Export a gene panel or normalized values
 
@@ -254,9 +280,10 @@ contains no artifacts or pipeline runs. Use it to hand off, or before `to_mtx` o
 | Cells | the run's analysis selection | `to_h5ad(ds.RNA, path)` exports all rows |
 | Features | the full feature universe; HVG flag in `var["highly_variable_features"]`; `matrix="normed"`: HVGs only | `feature_names=` without `run` |
 | `X` | raw counts; `matrix="normed"`: the run's `normalized` artifact, float32 | |
-| `obs` | frozen fields: cell-cycle, `leiden_*`, `paris`, `clusters`, `doublet_score`, `snapshot_columns` | join `ds.cells` by `ids` |
-| `obsm` | `X_umap` | PCA: `ds.artifacts.load(run["pca"])["data"]` |
-| `obsp`, markers, run report | not exported | `ds.graph.load`, `markers.load`, `run.report(format="markdown")` |
+| `obs` | frozen fields: cell-cycle, `leiden_*`, `paris`, `clusters` (categoricals with `uns` colors), `doublet_score`, `snapshot_columns` | join `ds.cells` by `ids` |
+| `obsm`, `varm` | `X_umap`, `X_pca` (`X_pca_harmony` with Harmony), `varm["PCs"]` | other artifacts: `obsm=` |
+| `obsp` | with `graph=run["connectivity_map"]`: connectivities, distances, `uns["neighbors"]` | |
+| markers, run report | not exported | `markers.load`, `run.report(format="markdown")` |
 | MTX | `to_mtx` has no `run=` | `SubsetZarr` with run cells, then `to_mtx` |
 
 ## Parameters that matter
@@ -270,6 +297,9 @@ contains no artifacts or pipeline runs. Use it to hand off, or before `to_mtx` o
 | env `CYTEARC_SOURCE_CACHE_BYTES` | `2G` of `TMPDIR` per open composite with remote sources | lower it for a small or memory-backed `TMPDIR`; `0` reads the sources directly |
 | `to_anndata(matrix=)`, `to_h5ad(matrix=)` | `"raw"` | `"normed"`: with `run=`, the values its PCA read; `to_anndata` without `run=`, live `normed` |
 | `to_h5ad(embeddings_cols=)` | `["UMAP", "tSNE"]` live column prefixes | legacy stores only; rejected with `run=` |
+| `to_anndata`/`to_h5ad` `obsm=`, `obs=`, `graph=` | `None` | export artifacts in Scanpy's layout; each must cover every exported cell |
+| `to_anndata`/`to_h5ad` `cell_selection=` | `None` (`I` cells; `to_h5ad`: every cell) | the selection your artifacts cover; rejected with `run=` |
+| `to_anndata`/`to_h5ad` `dtype=` | stored dtype, `uint8`/`uint16` as `float32` | a smaller or integer dtype for a size-sensitive hand-off |
 | `to_mtx(compress=)` | `False` | `True` for Cell Ranger 3 file names |
 | `markers.load` / `markers.export_csv` `min_score`, `min_frac_exp` | `0.25`, `0.2` | widen or narrow the exported marker list |
 | `compare.compute_bulk(aggr_type=, feature_label=, pseudo_reps=)` | `"mean"`, `"index"`, `1` | `"sum"` and `"id"` for count models; never `pseudo_reps` above 1 for inference |
@@ -291,7 +321,8 @@ contains no artifacts or pipeline runs. Use it to hand off, or before `to_mtx` o
 
 - Every `to_anndata` call (panel, run, or full) materializes `X`; size it before exporting a
   large atlas. `to_h5ad` streams; without `run=` it writes every cell, inactive ones included.
-- Run export rejects `from_assay`, `cell_key`, `feature_names`, and `feature_indexes`.
+- Run export rejects `from_assay`, `cell_key`, `cell_selection`, `feature_names`, and
+  `feature_indexes`.
   `to_h5ad(run=)` also rejects `embeddings_cols`, `skip_recalc_nfeats=False`, and `nthreads`.
 - Run `obs` lacks live columns (author labels, QC) unless captured with `snapshot_columns`.
 - Live exports (`to_h5ad` and `to_anndata` without `run=`) keep the exported assay's membership
@@ -312,8 +343,8 @@ contains no artifacts or pipeline runs. Use it to hand off, or before `to_mtx` o
   a pending derived assay (see `data-access.md`).
 - `to_anndata` raises `ImportError` without the `anndata` package (`pip install "cytearc[extra]"`);
   `to_h5ad` needs none, with or without `run=`.
-- `to_mtx(compress=True)` on CELLxGENE stores writes gene biotypes as feature types; see
-  `data-access.md` before re-importing.
+- `to_mtx` writes one feature type per assay, so CELLxGENE biotypes do not split a re-import;
+  see `data-access.md`.
 
 ## See also
 

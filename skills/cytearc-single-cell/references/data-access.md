@@ -133,13 +133,21 @@ cytearc.MtxToZarr(reader, zarr_loc="mtx.zarr").dump()
 import h5py
 
 insp = cytearc.inspect_h5ad("data.h5ad")
+# Review the counts: matrices with counts rank first (raw/X, layers/counts, X, spliced, ...),
+# ties by estimated total; a warning lists competing count matrices. Re-inspect with
+# matrix_key="layers/counts" (or another candidate) when matrixKey is not the raw RNA counts.
 print(insp.matrixKey, insp.matrixCandidates, insp.integerLike, insp.layers, insp.suggestedAssays)
 with h5py.File("data.h5ad", "r") as h5:  # pass only keys the file has; a missing one is a KeyError
     obsm = set(h5["obsm"]) if "obsm" in h5 else set()
     obs = h5["obs"]
     obs_cols = set(obs) if isinstance(obs, h5py.Group) else set(obs.dtype.names)  # old files
 print(sorted(obsm), sorted(obs_cols))
-roles = {k: r for k, r in {"X_umap": "umap", "X_tsne": "tsne"}.items() if k in obsm}
+# "coordinates" imports a latent space (X_pca, X_scVI, ...) that graph.ann_index accepts
+roles = {
+    k: r
+    for k, r in {"X_umap": "umap", "X_tsne": "tsne", "X_scVI": "coordinates"}.items()
+    if k in obsm
+}
 kw = dict(embedding_roles=roles, cluster_keys=tuple(c for c in ("clusters",) if c in obs_cols))
 reader = cytearc.H5adReader.from_inspect(insp, **kw)
 res = cytearc.H5adToZarr(reader, zarr_loc="h5ad.zarr").dump()
@@ -173,7 +181,16 @@ reductions whose `assayUsed` you import. An active SCT assay holds corrected cou
 the default (`sct_default_assay` notice). `reduction_roles={"phate": "umap"}` overrides the
 UMAP/t-SNE-versus-coordinates role that the DimReduc key and name decide.
 
-`CSVReader`/`CSVtoZarr` (small dense CSV) and `SparseToZarr` (SciPy CSR plus IDs) also exist.
+`CSVReader`/`CSVtoZarr` (small dense CSV, ID column read as text) and `SparseToZarr` (any SciPy
+sparse or dense matrix plus unique cell and feature IDs) also exist.
+
+H5AD categoricals keep their category order, unused categories, `ordered`, and
+`uns["<col>_colors"]` (stored as `levels`, `ordered`, and `display` attributes, which plots use
+and exports restore). A var or obs index that is neither the ID nor the name column imports as
+`source_index` unless it repeats the IDs or names. Missing feature names take the feature ID.
+Repeated obs names (`anndata.concat` without `index_unique`): inspection warns, and
+`H5adReader.from_inspect(insp, duplicate_cell_ids="make_unique")` renames later ones `ID-1`, ...;
+record that choice.
 
 Repeated feature IDs (some exporters use gene symbols as IDs) raise `ValueError: ... must contain
 unique values`. Renaming them is an explicit choice: `duplicate_feature_ids="make_unique"` on
@@ -309,9 +326,10 @@ raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datas
   `analysis.artifacts.find("embedding", imported="X_umap", from_assay="RNA")` and plots work on it;
   new artifacts are written to the mount.
 - `to_pandas_dataframe(columns)` defaults to `key=None` (all rows); pass `key="I"` for active cells.
-- `to_mtx(..., compress=True)` writes the feature `feature_type` column as the 10x feature type.
-  CELLxGENE stores keep gene biotypes there, so re-import split one assay into thousands. Inspect
-  `reader.assayFeats` before `dump()` or export with `compress=False`.
+- `to_mtx` writes one feature type per exported assay in both modes: the `feature_type` column
+  when every feature shares a value, else `Gene Expression` for RNA and the assay name otherwise,
+  so CELLxGENE gene biotypes no longer split a re-import. Still inspect `reader.assayFeats` before
+  `dump()`.
 - Source column names containing `/` or `\` are stored with `_`. Reserved columns `ids`, `names`,
   `I` from a source are skipped. H5AD multi-assay import needs `assay_split_key` on `H5adToZarr`.
 - `<assay>_I` marks the cells an assay measured (after a merge of stores with different assays).

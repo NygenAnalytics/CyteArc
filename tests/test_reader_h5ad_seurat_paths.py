@@ -256,7 +256,11 @@ def _write_analysis_h5ad(path: Path) -> Path:
     [
         (["X_umap"], TypeError, "embedding_roles must be a mapping"),
         ({"": "umap"}, ValueError, "keys must be non-empty strings"),
-        ({"X_umap": "pca"}, ValueError, "values must be 'umap' or 'tsne'"),
+        (
+            {"X_umap": "pca"},
+            ValueError,
+            "values must be 'umap', 'tsne', or 'coordinates'",
+        ),
         ({"X_missing": "umap"}, KeyError, "'X_missing' was not found in obsm"),
         ({"X_sparse": "umap"}, TypeError, "must be a dense H5AD array"),
         ({"X_short": "umap"}, ValueError, r"incompatible shape \(3, 2\)"),

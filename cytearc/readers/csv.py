@@ -80,7 +80,10 @@ class CSVReader:
     Args:
         csv_fn: Path to the CSV file
         has_header: Does the CSV file has a header. (Default value: True)
-        id_column: The column number which contains row name. (Default value: None)
+        id_column: The column number which contains row name. Its values are
+                   read as text, as the file holds them, so ``001`` stays
+                   ``"001"``; a missing or empty ID raises ValueError.
+                   (Default value: None)
         rows_are_cells: If True then each row represents a cell and hence each column is a feature. If False then each
                         row is feature and each column in a cell
         sep: The column separator in the CSV file, one character. (Default value: ',')
@@ -149,6 +152,12 @@ class CSVReader:
         self.pandas_kwargs["skiprows"] = skip_rows
         self.pandas_kwargs["chunksize"] = batch_size
         self.pandas_kwargs["index_col"] = id_column
+        if id_column is not None:
+            # Cell IDs are text as the file holds them: type inference would
+            # read "001" as the number 1.
+            converters = dict(self.pandas_kwargs.get("converters") or {})
+            converters[id_column] = str
+            self.pandas_kwargs["converters"] = converters
 
         if skip_cols is None:
             self.skipCols = []
@@ -303,7 +312,12 @@ class CSVReader:
             raise ValueError("CSV file contains no data rows")
         cell_ids: np.ndarray | None = None
         if collected_cell_ids is not None:
-            cell_ids = np.asarray(collected_cell_ids)
+            # An ID that pandas reads as missing, such as an empty field, is
+            # rejected as blank.
+            cell_ids = np.asarray(
+                ["" if pd.isna(value) else value for value in collected_cell_ids],
+                dtype=str,
+            )
             require_unique_identifiers(cell_ids, "CSV cell IDs")
         if feature_ids is not None and keep_cols is not None:
             feature_ids = feature_ids[keep_cols]
