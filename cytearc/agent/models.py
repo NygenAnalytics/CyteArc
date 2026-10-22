@@ -1,7 +1,8 @@
 """Closed inputs and small decisions for the bounded RNA procedure."""
 
 import math
-from typing import Any, Literal
+import re
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -10,21 +11,50 @@ class AgentModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
 
 
+# Setting names that can carry credentials, matched at any nesting depth on the
+# lower-case name with hyphens read as underscores.
+_SECRET_SETTING = re.compile(
+    r"token|secret|passw|passphrase|header|cookie|credential|bearer|auth|signature"
+    r"|session|private|api_?key|access_?key|(?:^|_)keys?(?:_|$)|key$"
+)
+_SAFE_SETTINGS = frozenset(
+    {"max_tokens", "max_output_tokens", "openai_prompt_cache_key"}
+)
+
+
+def resolution_label(resolution: float) -> str:
+    """Format a Leiden resolution as it appears in partition option IDs."""
+    return f"{resolution:g}"
+
+
+def partition_option_id(candidate_id: str, resolution: float) -> str:
+    """Name one measured partition: its candidate and resolution label."""
+    return f"{candidate_id}:r{resolution_label(resolution)}"
+
+
+# Study text enters every decision prompt untrimmed, so each field is bounded
+# to keep a request within the fixed evidence budget.
+_ColumnName = Annotated[str, Field(min_length=1, max_length=128)]
+_GeneName = Annotated[str, Field(min_length=1, max_length=128)]
+
+
 class Study(AgentModel):
     """Supplied facts, never inferred experimental permissions."""
 
-    context: str = Field(min_length=1)
-    objective: str = Field(min_length=1)
-    organism: str | None = None
-    tissue: str | None = None
-    technicalBatchColumns: list[str] = Field(default_factory=list)
-    protectedColumns: list[str] = Field(default_factory=list)
-    sampleColumn: str | None = None
-    captureColumn: str | None = None
+    context: str = Field(min_length=1, max_length=8000)
+    objective: str = Field(min_length=1, max_length=2000)
+    organism: str | None = Field(default=None, max_length=200)
+    tissue: str | None = Field(default=None, max_length=200)
+    technicalBatchColumns: list[_ColumnName] = Field(
+        default_factory=list, max_length=16
+    )
+    protectedColumns: list[_ColumnName] = Field(default_factory=list, max_length=16)
+    sampleColumn: _ColumnName | None = None
+    captureColumn: _ColumnName | None = None
     excludedColumns: list[str] = Field(default_factory=list)
-    featureExclusions: list[str] = Field(default_factory=list)
+    featureExclusions: list[_GeneName] = Field(default_factory=list, max_length=200)
     referenceFiles: list[str] = Field(default_factory=list)
-    batchCorrectionEvidence: str | None = None
+    batchCorrectionEvidence: str | None = Field(default=None, max_length=4000)
 
     @field_validator("context", "objective")
     @classmethod
@@ -62,6 +92,12 @@ class AnalysisConfig(AgentModel):
             raise ValueError(
                 "Leiden resolutions must be distinct positive finite values"
             )
+        labels = [resolution_label(value) for value in self.resolutions]
+        if len(set(labels)) != len(labels):
+            raise ValueError(
+                "Leiden resolutions must differ within six significant digits, "
+                f"because their option labels {labels} must be distinct"
+            )
         if (self.qcPolicy == "manual") != bool(self.qcBounds):
             raise ValueError("qcBounds must be supplied only for manual QC")
         for name, (low, high) in self.qcBounds.items():
@@ -93,19 +129,10 @@ class RuntimeConfig(AgentModel):
             if isinstance(item, dict):
                 for key, child in item.items():
                     normalized = str(key).lower().replace("-", "_")
-                    if any(
-                        word in normalized
-                        for word in (
-                            "token",
-                            "secret",
-                            "password",
-                            "header",
-                            "api_key",
-                            "apikey",
-                            "authorization",
-                            "cookie",
-                        )
-                    ) and normalized not in {"max_tokens", "max_output_tokens"}:
+                    if (
+                        _SECRET_SETTING.search(normalized)
+                        and normalized not in _SAFE_SETTINGS
+                    ):
                         raise ValueError(
                             "Configure credentials on the provider, not in saved settings"
                         )

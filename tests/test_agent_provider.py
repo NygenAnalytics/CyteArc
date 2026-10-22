@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import importlib.metadata
 import json
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -26,7 +27,7 @@ from cytearc.agent.provider import (
     replay_decisions,
     visible_response,
 )
-from cytearc.agent.records import RunRecords
+from cytearc.agent.records import RecordIntegrityError, RunRecords, digest
 
 
 DISABLED_REASONING_BODY = {
@@ -592,12 +593,13 @@ def test_transport_retry_exhaustion_is_not_reset_by_implicit_reentry(
         raise httpx.ReadError("disconnected")
 
     client = scripted_model(model)
-    with pytest.raises(ProviderError, match="transport retry was exhausted"):
+    # One request plus the two bounded transient retries.
+    with pytest.raises(ProviderError, match="transport retries were exhausted"):
         run_decision(client, records)
-    assert attempts == 2
-    with pytest.raises(ProviderError, match="transport retry was exhausted"):
+    assert attempts == 3
+    with pytest.raises(ProviderError, match="transport retries were exhausted"):
         run_decision(client, records)
-    assert attempts == 2
+    assert attempts == 3
 
 
 def test_saved_invalid_response_is_rejected_after_journal_interruption(
@@ -988,11 +990,13 @@ def test_offline_replay_rejects_replacement_output_schema(records: Any) -> None:
 
 
 @pytest.mark.parametrize("altered", ["evidence", "instructions"])
+@pytest.mark.parametrize("recorded", [False, True])
 def test_offline_replay_rejects_modified_prompt_or_evidence(
-    records: Any, altered: str
+    records: Any, altered: str, recorded: bool
 ) -> None:
     run_decision(scripted_model(lambda messages, info: response()), records)
-    path = records.path / records.events()[0]["requestPath"]
+    saved = records.events()[0]
+    path = records.path / saved["requestPath"]
     request = json.loads(path.read_text())
     if altered == "evidence":
         payload = json.loads(request["userPrompt"])
@@ -1000,8 +1004,35 @@ def test_offline_replay_rejects_modified_prompt_or_evidence(
         request["userPrompt"] = json.dumps(payload)
     else:
         request["instructions"] = "Different scientific procedure"
-    path.write_text(json.dumps(request))
-    with pytest.raises(ProviderError, match="Replay evidence or prompt digest"):
+    if recorded:
+        # A consistently re-journaled request passes its file digest; replay
+        # still compares it with the digests the accepted decision froze.
+        replacement = records.write_json("calls/altered.request.json", request)
+        records.append(
+            "modelRequest",
+            **{
+                key: value
+                for key, value in saved.items()
+                if key
+                not in {
+                    "sequence",
+                    "timestamp",
+                    "kind",
+                    "previousHash",
+                    "recordHash",
+                    "requestPath",
+                    "requestSha256",
+                }
+            },
+            requestPath=replacement,
+            requestSha256=digest(request),
+        )
+        expected, message = ProviderError, "Replay evidence or prompt digest"
+    else:
+        # An edit in place no longer matches the digest its event recorded.
+        path.write_text(json.dumps(request))
+        expected, message = RecordIntegrityError, "differs from the SHA-256"
+    with pytest.raises(expected, match=message):
         replay_decisions(
             records,
             schemas={"select": Decision},
@@ -1056,3 +1087,355 @@ def test_openai_connection_errors_use_the_single_transient_retry(
     assert failure["transient"] is True
     assert failure["errorType"] == "APIConnectionError"
     assert "private" not in json.dumps(records.events())
+
+
+@pytest.fixture
+def pauses(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record backoff pauses without waiting, with jitter 0, then 1, then 0.5."""
+    from cytearc.agent import provider
+
+    delays: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        delays.append(seconds)
+
+    jitter = iter([0.0, 1.0, 0.5])
+    monkeypatch.setattr(asyncio, "sleep", pause)
+    monkeypatch.setattr(provider, "_jitter", lambda: next(jitter))
+    return delays
+
+
+def test_transient_failures_retry_twice_with_exponential_jittered_backoff(
+    records: Any, pauses: list[float]
+) -> None:
+    attempts = 0
+
+    def model(messages: Any, info: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("unavailable")
+        if attempts == 2:
+            raise ModelHTTPError(503, "fixture")
+        return response()
+
+    assert run_decision(scripted_model(model), records).choice == "baseline"
+    assert attempts == 3
+    # Retry 1 waits half of 0.5 s (jitter 0); retry 2 waits all of 1 s (jitter 1).
+    assert pauses == [0.25, 1.0]
+    failures = [row for row in records.events() if row["kind"] == "modelFailure"]
+    assert [(row["errorType"], row["transient"]) for row in failures] == [
+        ("ConnectError", True),
+        ("ModelHTTPError", True),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("retry", "retry_after", "jitter", "expected"),
+    [
+        (1, None, 0.0, 0.25),
+        (1, None, 1.0, 0.5),
+        (2, None, 0.5, 0.75),
+        (3, None, 0.0, 1.0),
+        (5, None, 1.0, 8.0),
+        (9, None, 0.0, 4.0),
+        (1, 7.0, 0.9, 7.0),
+        (2, 0.0, 0.9, 0.0),
+    ],
+)
+def test_retry_delay_doubles_to_a_cap_and_honours_retry_after(
+    retry: int, retry_after: float | None, jitter: float, expected: float
+) -> None:
+    from cytearc.agent.provider import retry_delay
+
+    assert retry_delay(retry, retry_after, jitter) == expected
+
+
+def test_retry_after_replaces_the_backoff_pause(
+    records: Any, pauses: list[float]
+) -> None:
+    attempts = 0
+
+    def model(messages: Any, info: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ModelHTTPError(503, "fixture", headers={"retry-after": "3"})
+        return response()
+
+    assert run_decision(scripted_model(model), records).choice == "baseline"
+    assert pauses == [3.0]
+
+
+def test_backoff_never_waits_past_the_decision_deadline(
+    records: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cytearc.agent import provider
+
+    monkeypatch.setattr(provider, "_jitter", lambda: 1.0)
+
+    def model(messages: Any, info: Any) -> Any:
+        raise httpx.ConnectError("unavailable")
+
+    with pytest.raises(ProviderError, match="exceeds the remaining decision deadline"):
+        run_decision(
+            scripted_model(model), records, runtime=RuntimeConfig(decisionTimeout=0.3)
+        )
+    assert sum(row["kind"] == "modelRequest" for row in records.events()) == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # Anthropic reports an overloaded service with status 529.
+        lambda: ModelHTTPError(
+            529,
+            "fixture",
+            body={"type": "error", "error": {"type": "overloaded_error"}},
+        ),
+        # Gemini reports throttling as RESOURCE_EXHAUSTED with code 429.
+        lambda: ModelHTTPError(
+            429,
+            "fixture",
+            body={
+                "error": {
+                    "code": 429,
+                    "message": "Resource has been exhausted",
+                    "status": "RESOURCE_EXHAUSTED",
+                }
+            },
+        ),
+    ],
+)
+def test_overloaded_and_resource_exhausted_responses_are_transient(
+    records: Any, pauses: list[float], error: Any
+) -> None:
+    attempts = 0
+
+    def model(messages: Any, info: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise error()
+        return response()
+
+    assert run_decision(scripted_model(model), records).choice == "baseline"
+    assert attempts == 2
+    assert records.latest("modelFailure")["transient"] is True
+    assert pauses == [0.25]
+
+
+def test_hard_quota_status_is_not_retried(records: Any) -> None:
+    def model(messages: Any, info: Any) -> Any:
+        raise ModelHTTPError(
+            429,
+            "fixture",
+            body={"error": {"status": "RESOURCE_EXHAUSTED", "code": "quota_exceeded"}},
+        )
+
+    with pytest.raises(ProviderError, match="Provider request failed"):
+        run_decision(scripted_model(model), records)
+    assert records.latest("modelFailure")["transient"] is False
+
+
+def test_validation_feedback_is_bounded_by_its_saved_size() -> None:
+    from cytearc.agent.provider import _FEEDBACK_BYTES, _bounded, _saved_size
+
+    short = ["action must be one of ['choose']", "unknown evidenceIds: ['e9']"]
+    assert _bounded(short) == short
+    quoted = '"' * 5000
+    kept = _bounded(["first", quoted, "third", "fourth"])
+    assert kept[0] == "first"
+    assert kept[1].endswith("…") and set(kept[1][:-1]) == {'"'}
+    assert kept[2:] == ["2 further validation errors omitted"]
+    # Each quote is escaped twice in a saved request: it costs four bytes.
+    assert [_saved_size('"' * count) for count in (1, 2)] == [10, 14]
+    assert _saved_size("first") + _saved_size(kept[1]) <= _FEEDBACK_BYTES
+    assert _saved_size("first") + _saved_size('"' + kept[1]) > _FEEDBACK_BYTES
+
+
+@pytest.mark.parametrize(
+    ("output", "instructions"),
+    [
+        ("context", "CONTEXT_INSTRUCTIONS"),
+        ("choice", "EXPLORE_INSTRUCTIONS"),
+        ("choice", "SELECT_INSTRUCTIONS"),
+        ("annotation", "ANNOTATE_INSTRUCTIONS"),
+    ],
+)
+def test_repair_request_overhead_fits_the_reserved_request_bytes(
+    records: Any, output: str, instructions: str
+) -> None:
+    from cytearc.agent import prompts
+    from cytearc.agent.models import AnnotationDecision, Choice, ContextDecision
+    from cytearc.agent.provider import _json
+    from cytearc.agent.workflow import _REQUEST_RESERVE
+
+    output_type, answer = {
+        "context": (ContextDecision, {"rationale": "Retain the supplied roles."}),
+        "choice": (
+            Choice,
+            {"action": "choose", "optionIds": ["c0:r0.5"], "rationale": "Measured."},
+        ),
+        "annotation": (AnnotationDecision, {"annotations": []}),
+    }[output]
+
+    def reject(value: Any) -> None:
+        # Worst-case feedback: quotes and control characters escape the most.
+        raise ValueError('\x01"\\' * 20_000)
+
+    with pytest.raises(DecisionValidationError, match="identical invalid"):
+        asyncio.run(
+            decide(
+                scripted_model(
+                    lambda messages, info: ModelResponse(
+                        parts=[ToolCallPart("decision", answer)]
+                    )
+                ),
+                decision_id="overhead",
+                stage="explore",
+                evidence={},
+                output_type=output_type,
+                validate=reject,
+                records=records,
+                runtime=RuntimeConfig(),
+                instructions=getattr(prompts, instructions),
+            )
+        )
+    repair = [row for row in records.events() if row["kind"] == "modelRequest"][1]
+    saved = records.read_reference(repair, "requestPath")
+    assert json.loads(saved["userPrompt"])["validationErrors"][0].endswith("…")
+    assert len(_json(saved).encode()) <= _REQUEST_RESERVE
+
+
+def test_oversized_request_reports_its_size_and_the_remedy(records: Any) -> None:
+    with pytest.raises(PromptTooLarge) as raised:
+        run_decision(
+            scripted_model(lambda messages, info: pytest.fail("Oversized request")),
+            records,
+            evidence={"large": "a" * 10000},
+            runtime=RuntimeConfig(maxPromptBytes=1024),
+        )
+    message = str(raised.value)
+    assert re.fullmatch(
+        r"The serialized request is \d{2},\d{3} bytes, above maxPromptBytes=1,024\. "
+        r"Resume with a larger RuntimeConfig\.maxPromptBytes, or start a new run "
+        r"with shorter study text or references",
+        message,
+    )
+    assert records.events() == []
+
+
+def _replay(records: Any) -> list[dict[str, Any]]:
+    def check(output: Any, evidence: Any) -> None:
+        validate(output)
+
+    return replay_decisions(
+        records, schemas={"select": Decision}, validators={"select": check}
+    )
+
+
+def _envelope_free(event: dict[str, Any], *fields: str) -> dict[str, Any]:
+    """An event payload without its journal envelope or the named fields."""
+    envelope = {"sequence", "timestamp", "kind", "previousHash", "recordHash"}
+    return {
+        key: value
+        for key, value in event.items()
+        if key not in envelope and key not in fields
+    }
+
+
+def test_exchanges_record_the_digest_of_every_file_they_reference(
+    records: Any,
+) -> None:
+    run_decision(scripted_model(lambda messages, info: response()), records)
+    request, saved, accepted = records.events()
+    assert request["requestSha256"] == records.file_sha256(request["requestPath"])
+    assert saved["responseSha256"] == records.file_sha256(saved["responsePath"])
+    assert accepted["responseSha256"] == saved["responseSha256"]
+    assert _replay(records) == [
+        {"decisionId": "choose-1", "stage": "select", "valid": True}
+    ]
+    # An edited saved response no longer passes offline replay.
+    path = records.path / saved["responsePath"]
+    visible = json.loads(path.read_text())
+    visible["parts"][0]["arguments"]["choice"] = "stop"
+    path.write_text(json.dumps(visible))
+    with pytest.raises(RecordIntegrityError, match="differs from the SHA-256"):
+        _replay(records)
+
+
+@pytest.mark.parametrize("fault", ["output", "unparseable", "uncited", "missing"])
+def test_replay_compares_accepted_outputs_with_their_saved_responses(
+    records: Any, fault: str
+) -> None:
+    run_decision(scripted_model(lambda messages, info: response()), records)
+    request, saved, accepted = records.events()
+    if fault != "uncited":
+        # A journal truncated after the request keeps a valid hash chain.
+        (records.path / "events" / f"{saved['sequence']:06d}.json").unlink()
+        (records.path / "events" / f"{accepted['sequence']:06d}.json").unlink()
+    if fault == "missing":
+        records.append("decisionAccepted", **_envelope_free(accepted))
+        message = "does not cite its saved response"
+    elif fault == "uncited":
+        records.append("decisionAccepted", **_envelope_free(accepted, "responseSha256"))
+        message = "does not cite its saved response"
+    else:
+        # A consistently journaled exchange still has to reproduce its output.
+        output = {**accepted["output"], "choice": "stop"}
+        visible = (
+            {"parts": [], "usage": None, "finishReason": "stop"}
+            if fault == "unparseable"
+            else records.read_json(saved["responsePath"])
+        )
+        path = records.write_json("calls/replacement.response.json", visible)
+        sha256 = records.file_sha256(path)
+        records.append(
+            "modelResponse",
+            **_envelope_free(saved, "responsePath", "responseSha256"),
+            responsePath=path,
+            responseSha256=sha256,
+        )
+        records.append(
+            "decisionAccepted",
+            **_envelope_free(accepted, "output", "responseSha256"),
+            responseSha256=sha256,
+            output=output if fault == "output" else accepted["output"],
+        )
+        message = "Accepted output differs from its saved model response"
+    with pytest.raises(ProviderError, match=message):
+        _replay(records)
+
+
+def test_unjournaled_saved_response_is_adopted_with_its_digest(
+    records: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    append = records.append
+
+    def crash_before_journal(kind: str, **payload: Any) -> Any:
+        if kind == "modelResponse":
+            raise OSError("process stopped after saving the response")
+        return append(kind, **payload)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(records, "append", crash_before_journal)
+        with pytest.raises(OSError, match="stopped after saving"):
+            run_decision(scripted_model(lambda messages, info: response()), records)
+    request = records.latest("modelRequest")
+    assert records.latest("modelResponse") is None
+    assert (records.path / request["responsePath"]).exists()
+
+    def no_provider(messages: Any, info: Any) -> Any:
+        pytest.fail("A saved response is recovered without another request")
+
+    assert run_decision(scripted_model(no_provider), records).choice == "baseline"
+    adopted = records.latest("modelResponse")
+    assert adopted["recovered"] is True
+    assert adopted["callId"] == request["callId"]
+    assert adopted["invocationId"] == request["invocationId"]
+    assert adopted["responseSha256"] == records.file_sha256(request["responsePath"])
+    accepted = records.latest("decisionAccepted")
+    assert accepted["recovered"] is True
+    assert accepted["responseSha256"] == adopted["responseSha256"]
+    assert _replay(records)[0]["valid"] is True

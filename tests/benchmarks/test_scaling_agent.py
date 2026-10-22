@@ -122,30 +122,32 @@ def _write_source(path: Path, n_cells: int) -> None:
         store.cells.insert(column, values)
 
 
-def _canonical(value: Any) -> bytes:
-    return (
-        json.dumps(
-            value, sort_keys=True, allow_nan=False, separators=(",", ":")
-        ).encode()
-        + b"\n"
-    )
-
-
 def _reference_fingerprint(
     store: Any, columns: list[str], *, replace: tuple[str, int, Any] | None = None
 ) -> str:
-    """Hash the documented canonical stream from whole-column reads.
+    """Hash the documented version 2 stream from whole-column reads.
 
-    The header binds the assay's finalized count identity and axis sizes; every
-    column then contributes its axis, name and dtype, followed by each value in
-    row order. ``replace`` substitutes one cell value, as a source edit would.
+    Every segment is length-prefixed. The header binds the format version and
+    the assay's finalized count identity and axis sizes; every column then adds
+    its axis, name, stored dtype and length, its missing-row bitmask, and its
+    values: booleans as unsigned bytes, numbers as little-endian buffers, and
+    text as UTF-8 behind its lengths. The benchmark's columns hold no missing
+    values. ``replace`` substitutes one cell value, as a source edit would.
     """
+
+    def segment(payload: bytes) -> None:
+        digest.update(len(payload).to_bytes(8, "little") + payload)
+
+    def header(value: Any) -> bytes:
+        return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
     summary = store.summary()
     descriptor = next(item for item in summary.assays if item.name == "RNA")
     digest = hashlib.sha256()
-    digest.update(
-        _canonical(
+    segment(
+        header(
             [
+                2,
                 "RNA",
                 descriptor.dataset_fingerprint,
                 summary.total_cells,
@@ -158,12 +160,25 @@ def _reference_fingerprint(
         ("features", store.get_assay("RNA").feats, ["ids", "names", "I"]),
     ):
         for column in names:
-            digest.update(_canonical([axis, column, str(table.get_dtype(column))]))
-            values = table.fetch_all(column).tolist()
+            dtype = np.dtype(table.get_dtype(column))
+            values = np.asarray(table.fetch_all(column))
             if replace is not None and (axis, column) == ("cells", replace[0]):
+                values = values.astype(object)
                 values[replace[1]] = replace[2]
-            for value in values:
-                digest.update(_canonical(value))
+            segment(header([axis, column, dtype.newbyteorder("<").str, len(values)]))
+            segment(np.packbits(np.zeros(len(values), dtype=bool)).tobytes())
+            if dtype.kind == "b":
+                segment(b"|u1")
+                segment(values.astype("|u1").tobytes())
+            elif dtype.kind in "iuf":
+                little = values.astype(dtype.newbyteorder("<"))
+                segment(little.dtype.str.encode())
+                segment(little.tobytes())
+            else:
+                texts = [str(value) for value in values]
+                segment(b"string")
+                segment(np.array([len(text) for text in texts], dtype="<i8").tobytes())
+                segment("".join(texts).encode())
     return digest.hexdigest()
 
 
@@ -186,6 +201,7 @@ def agent_sources(tmp_path_factory) -> Callable[[int], tuple[Path, dict[str, Any
                 "assay": "RNA",
                 "fingerprintColumns": columns,
                 "fingerprint": _reference_fingerprint(store, columns),
+                "fingerprintVersion": 2,
                 "contextEvidence": {"references": []},
             }
             built[n_cells] = path, prepared

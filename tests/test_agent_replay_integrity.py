@@ -16,7 +16,12 @@ from cytearc.agent.choices import native_probe_options, validate_context
 from cytearc.agent.models import ContextDecision
 from cytearc.agent.prompts import CONTEXT_INSTRUCTIONS
 from cytearc.agent.provider import decide
-from cytearc.agent.records import RecordError, RunRecords
+from cytearc.agent.records import (
+    RecordError,
+    RecordIntegrityError,
+    RunRecords,
+    digest,
+)
 from cytearc.agent.result import AnalysisRun
 from tests.test_agent_recovery import install_science
 from tests.test_agent_workflow import scripted_model
@@ -101,8 +106,20 @@ def test_replay_rejects_edited_probe_plan_without_new_work(
     else:
         assert plan["slots"][2]["parameters"]["pcaDims"] == 10
         plan["slots"][2]["parameters"]["pcaDims"] = 30
-    # Simulate an externally edited record, without bypassing replay validation.
+    # An edit in place no longer matches the digest its event recorded.
+    original = (records.path / relative).read_bytes()
     (records.path / relative).write_text(json.dumps(plan))
+    before = _files(records.path)
+    with pytest.raises(RecordIntegrityError, match="probe_plan.json"):
+        result.replay_decisions()
+    assert _files(records.path) == before
+    (records.path / relative).write_bytes(original)
+    # A consistently journaled edit still fails semantic replay validation.
+    records.append(
+        "explorationPlanned",
+        evidence=records.write_json("evidence/edited_plan.json", plan),
+        evidenceSha256=digest(plan),
+    )
     before = _files(records.path)
     with pytest.raises(RecordError, match=message):
         result.replay_decisions()
@@ -120,7 +137,21 @@ def test_replay_rejects_measured_parameters_that_disagree_with_admission(
     )
     evidence = records.read_json(event["evidence"])
     evidence["parameters"]["pcaDims"] = 30
+    # An edit in place no longer matches the digest its event recorded.
+    original = (records.path / event["evidence"]).read_bytes()
     (records.path / event["evidence"]).write_text(json.dumps(evidence))
+    before = _files(records.path)
+    with pytest.raises(RecordIntegrityError, match="candidate_c2.json"):
+        result.replay_decisions()
+    assert _files(records.path) == before
+    (records.path / event["evidence"]).write_bytes(original)
+    # A consistently journaled edit still fails semantic replay validation.
+    records.append(
+        "candidateMeasured",
+        candidateId="c2",
+        evidence=records.write_json("evidence/edited_c2.json", evidence),
+        evidenceSha256=digest(evidence),
+    )
     before = _files(records.path)
     with pytest.raises(RecordError, match="Measured candidate parameters differ"):
         result.replay_decisions()

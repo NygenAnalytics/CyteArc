@@ -12,12 +12,16 @@ import pytest
 
 from cytearc.agent.records import (
     RecordError,
+    RecordIntegrityError,
     RunLockedError,
     RunRecords,
     digest,
+    digest_field,
     process_alive,
     process_identity,
+    process_state,
     procedure_identity,
+    relative_locator,
     run_lock,
     source_lock,
 )
@@ -601,3 +605,71 @@ def test_windows_writer_lock_uses_one_nonblocking_byte_range(
         assert caught.value.__cause__ is failure or caught.value is failure
         assert (type(caught.value) is RunLockedError) is (expected is RunLockedError)
         assert fake.calls == [(fake.LK_NBLCK, 1, 0, 1)]
+
+
+def test_referenced_records_are_read_against_their_recorded_digest(
+    tmp_path: Path,
+) -> None:
+    records = RunRecords.create(tmp_path / "run", {})
+    value = {"shortlist": ["c0:r0.5"], "seed": 4444}
+    path = records.write_json("evidence/explore.json", value)
+    # The recorded digest is that of the exact bytes on disk.
+    assert records.file_sha256(path) == digest(value)
+    assert digest_field("evidence") == "evidenceSha256"
+    assert digest_field("requestPath") == "requestSha256"
+    event = records.append(
+        "stageCompleted", stage="explore", evidence=path, evidenceSha256=digest(value)
+    )
+    assert records.read_reference(event, "evidence") == value
+    (records.path / path).write_text(json.dumps({**value, "shortlist": []}))
+    with pytest.raises(RecordIntegrityError) as raised:
+        records.read_reference(event, "evidence")
+    assert str(raised.value) == (
+        "Cannot read record explore.json: its content differs from the SHA-256 "
+        "recorded when it was saved"
+    )
+    assert isinstance(raised.value, RecordError)
+    # Histories from earlier releases recorded no digest; they stay readable.
+    legacy = records.append("stageCompleted", stage="explore", evidence=path)
+    assert records.read_reference(legacy, "evidence")["shortlist"] == []
+    with pytest.raises(RecordError, match="Cannot read record absent.json"):
+        records.file_sha256("evidence/absent.json")
+
+
+def test_relative_locators_fall_back_to_absolute_paths_across_drives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "store.zarr"
+    start = tmp_path / "runs" / "rna-001"
+    assert relative_locator(target, start) == "../../store.zarr"
+
+    def across_drives(path: object, start: object = None) -> str:
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    monkeypatch.setattr(os.path, "relpath", across_drives)
+    assert relative_locator(target, start) == str(target)
+    # Joining an absolute locator onto the run directory yields the locator.
+    assert (start / relative_locator(target, start)).resolve() == target
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="Linux process identity"
+)
+def test_process_state_confirms_running_only_for_an_exact_linux_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = process_identity()
+    assert process_state(identity) == "running"
+    reused = {**identity, "startTicks": str(int(identity["startTicks"]) + 1)}
+    assert process_state(reused) == "stopped"
+    assert process_state({**identity, "bootId": "different-boot"}) == "stopped"
+    # A bare PID may have been reused, and other platforms are never probed.
+    assert process_state({"pid": os.getpid(), "platform": sys.platform}) == "unknown"
+    assert process_state({"pid": os.getpid(), "platform": "win32"}) == "unknown"
+    assert process_state({}) == "unknown"
+
+    def missing(pid: int, signal: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(os, "kill", missing)
+    assert process_state({"pid": 12345, "platform": sys.platform}) == "stopped"

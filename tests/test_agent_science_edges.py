@@ -111,7 +111,9 @@ def test_manual_qc_uses_exact_inclusive_bounds_and_preserves_live_selection() ->
         "highs": [20.0],
         "keep_bounds": True,
     }
-    assert flags["RNA_nCounts"]["outlierRows"]["missing"] == [5]
+    # Row 5 is the only missing value; counts replace saved row lists.
+    assert flags["RNA_nCounts"]["missing"] == 1
+    assert "outlierRows" not in flags["RNA_nCounts"]
     assert any("biological populations" in warning for warning in warnings)
     pd.testing.assert_frame_equal(frame, before)
 
@@ -157,8 +159,9 @@ def test_missing_metrics_and_zero_mad_are_flags_without_invented_bounds() -> Non
         )
     )
     flags = evidence._qc_flags(store, active, "RNA")
-    assert flags["RNA_nCounts"]["missing"] == 3
-    assert flags["RNA_nCounts"]["outlierRows"]["missing"] == [0, 1, 2]
+    # Every active row (0, 1 and 2) is missing; the inactive row 3 is not.
+    assert flags["RNA_nCounts"]["missing"] == 3 == int(active.sum())
+    assert "outlierRows" not in flags["RNA_nCounts"]
     assert flags["RNA_nCounts"]["low"] is flags["RNA_nCounts"]["high"] is None
     assert flags["RNA_nFeatures"]["zeroMad"]
     assert flags["RNA_nFeatures"]["lowFlags"] == 0

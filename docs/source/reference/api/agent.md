@@ -51,6 +51,12 @@ runtime settings. In a notebook with an active event loop, await `analyze_rna_as
 | `AnalysisConfig` | `assay`, `workspace`, `cellKey`, `qcPolicy`, `qcBounds`, `interactionMode`, `hvgCount`, `pcaDims`, `neighborsK`, `resolutions`, `maxCandidates`, `maxFinalists`, `scoreDoublets`, `randomSeed` |
 | `RuntimeConfig` | `maxRequests`, `maxRequestsPerDecision`, `maxPromptBytes`, `maxOutputTokens`, `decisionTimeout`, `nthreads`, `memBudget`, `modelSettings` |
 
+Study text enters every decision request untrimmed, so `Study` bounds it: at most 8,000
+characters of `context`, 2,000 of `objective`, 4,000 of `batchCorrectionEvidence`, and 200 of
+`organism` or `tissue`; column names of at most 128 characters, with at most 16 technical and
+16 protected columns; and at most 200 `featureExclusions`. Leiden resolutions must stay distinct
+at six significant digits, which name their partition options.
+
 Pydantic model fields use camel case. New runs require `maxCandidates=4` or `5` and default to
 five: four planned native representations and at most one eligible Harmony comparison. The
 baseline is 1,000 HVGs, 21 PCs, 11 neighbors, with resolutions `0.5`, `0.75`, `1.0`, `1.25`.
@@ -61,8 +67,12 @@ See [Automate an RNA analysis](../tutorials/agent-workflow) for the full procedu
 `interactionMode="lenient"` is the default. It records conservative resolutions for optional
 metadata uncertainty or model-declared acceptable ties. Strict mode leaves those questions
 pending. Essential missing facts, provider failures, invalid output after bounded repair, and
-unsupported objectives are not silently resolved. `exploration_coverage` and
-`decision_resolutions` expose the recorded trial outcomes and policy choices.
+unsupported objectives are not silently resolved. A model can declare an unsupported objective
+only in the context decision, before numerical work; later decisions that do so are repaired, so
+completed pipelines stay reusable. Correction requires caller-declared protected columns: a
+protected role the model proposes adds preservation checks but never permits correction.
+`exploration_coverage` and `decision_resolutions` expose the recorded trial outcomes and policy
+choices.
 
 ## Inspect and resume
 
@@ -87,7 +97,17 @@ store. Resume is explicit: repeating `analyze_rna` does not resume an existing d
 `resume_rna_async` is the notebook counterpart. Unchanged scientific inputs, implementation,
 and prompts are required for resume; the provider and operational settings may change.
 Relocated stores can be supplied through `source=`, subject to identity and saved-artifact
-validation.
+validation. Saved runs keep only the names and a SHA-256 of `modelSettings`, so a run whose last
+invocation supplied them resumes with an explicit `runtime=`. After a hard kill on a platform
+where the stopped process cannot be confirmed, such as Windows, pass
+`abandon_unfinished_pipeline=True` once you have confirmed it stopped; the unfinished pipeline
+then runs again under a new label.
+
+Every event records the SHA-256 of each evidence, request, or response file it references, and
+reads verify those bytes, so an edited record stops resume, replay, and reports instead of
+steering them. The source is verified once per invocation and before each numerical write.
+Analyses saved before CyteArc 1.3.0 used an earlier source fingerprint format: their reports and
+records remain readable, but numerical access asks for a new analysis.
 
 ## Use finalized results
 
@@ -100,7 +120,10 @@ and expressing fractions. These operations require the source store and verify i
 those images in the offline `report.html`; it also writes `report.md` and `annotations.csv`.
 Every saved outcome can be reported, including incomplete runs. `export(output_dir)` writes
 aligned cell clusters, UMAP coordinates, markers, annotations, and a summary into a new
-directory without recomputing the analysis.
+directory without recomputing the analysis. Model and dataset text stays inert in every output:
+`report.md` escapes Markdown and HTML so supplied links and images remain text, and every CSV
+prefixes a `'` to text cells starting with `=`, `+`, `-`, `@`, a tab, or a line break, so
+spreadsheets never run them as formulas. Numeric columns stay numeric.
 
 Run requests, events, evidence, and model exchanges live in the external run directory.
 Numerical artifacts and pipeline records remain in the CyteArc store. Annotations remain
@@ -121,7 +144,8 @@ It contains:
   the location of the core run in a nondefault workspace.
 - The exact final `pipelineConfig`, selected candidate and resolution, requested HVG count,
   PCs, neighbors, correction flag, and actual HVG count when measured.
-- The saved selection rationale and a relative locator for the external audit directory.
+- The saved selection rationale and a relative locator for the external audit directory, or
+  its absolute path when it is on another Windows drive than the store.
 
 ```python
 compact = run.compact_result
@@ -147,9 +171,15 @@ or reporting them.
 The model returns one structured choice or annotation batch. Registered options, evidence
 identifiers, frozen inputs, and scientific gates are validated by CyteArc. Default operational
 limits are 30 observed requests per run, at most three per decision invocation, a 65,536-byte
-serialized request, 4,096 output tokens, and a 120-second decision deadline. One semantic repair
-and one transient transport retry are allowed within those limits. An explicit resume can
-attempt unfinished decisions again while preserving the run-wide count and earlier failures.
+serialized request, 4,096 output tokens, and a 120-second decision deadline. Decision evidence
+is trimmed to a fixed budget that fits a 65,536-byte request, so analysis and resume refuse a
+smaller `maxPromptBytes`. One semantic repair and up to two transient transport retries are
+allowed within those limits. Before each retry the agent waits the provider's Retry-After, or a
+jittered pause that starts at 0.5 seconds and doubles up to 8 seconds, and stops instead when the
+wait would pass the decision deadline. Timeouts, connection errors, HTTP 5xx overload statuses
+including Anthropic's 529, and rate limits including Gemini `RESOURCE_EXHAUSTED` are transient;
+quota and billing errors are not. An explicit resume can attempt unfinished decisions again
+while preserving the run-wide count and earlier failures.
 
 Every decision and retry requests `thinking=False` with native reasoning effort `none` and
 the controlled extra-body values below. Conflicting caller controls are overridden without

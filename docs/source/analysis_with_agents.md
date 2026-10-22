@@ -163,17 +163,18 @@ not executed filtering. The HVG blacklist is explicit and normally excludes mito
 names matching `^mt-`, case-insensitively. Other biological gene families remain included unless
 explicitly excluded. An organism value alone does not supply missing gene definitions.
 
-Supplied sample, capture, technical-batch, and protected roles remain distinct. Inferred sample
-or capture roles are diagnostic-only and cannot establish replication or permit correction.
+Supplied sample, capture, technical-batch, and protected roles remain distinct. Inferred sample,
+capture, or protected roles are diagnostic-only and cannot establish replication or permit
+correction; an inferred protected role adds preservation checks only.
 Missing labels and masked values remain missing. Design cross-tabs, gene-family audits, bounded
 PC associations, and finalist group/QC summaries are descriptive evidence, not causal tests.
 Missing replication does not prevent descriptive population discovery.
 
-Harmony requires complete declared batch labels, protected biological metadata, experimental
-evidence separating batch from biology, and explicitly enabled doublet scoring. Unknown or
-confounded designs retain native analysis. Corrected acceptance needs an exact native pair at
-the same resolution and passes mixing, preservation, marker, and doublet gates with a `0.05`
-tolerance. Better mixing alone cannot pass those gates. Doublet scoring is never enabled
+Harmony requires complete declared batch labels, declared protected biological metadata,
+experimental evidence separating batch from biology, and explicitly enabled doublet scoring.
+Unknown or confounded designs retain native analysis. Corrected acceptance needs an exact native
+pair at the same resolution and passes mixing, preservation, marker, and doublet gates with a
+`0.05` tolerance. Better mixing alone cannot pass those gates. Doublet scoring is never enabled
 implicitly and never removes cells automatically.
 
 The default lenient interaction mode resolves only supported ambiguities through frozen,
@@ -201,9 +202,11 @@ Prototype orchestrator, standalone-agent, `AutomatedWorkflowResult`, and `Analys
 are retired. Old histories remain untouched and are not automatically migrated. Current
 resume requires unchanged scientific inputs and procedure/prompt identity, but operational
 settings and the provider can change for unfinished decisions. Visible prompts, responses,
-validation feedback, and available usage are recorded. Hidden reasoning and credentials are
-excluded. Every provider request applies the agent's reasoning-off controls; always-on providers
-cannot be guaranteed to honor them.
+validation feedback, and available usage are recorded, each bound to its event by a SHA-256.
+Hidden reasoning and credentials are excluded; model settings are saved only by name and digest.
+The Markdown report and CSV exports keep model and dataset text inert. Every provider request
+applies the agent's reasoning-off controls; always-on providers cannot be guaranteed to honor
+them.
 
 ### When to use the pipeline
 

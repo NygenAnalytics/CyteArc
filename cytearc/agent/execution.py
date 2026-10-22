@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .models import AnalysisConfig, AnalysisInputError, Candidate
+from .models import AnalysisConfig, AnalysisInputError, Candidate, partition_option_id
 from .diagnostics import finalist_composition, representation_diagnostics
 
 _SILHOUETTE_CELLS = 2_000
@@ -167,7 +167,7 @@ def summarize_candidate(
         counts = pd.Series(labels).astype(str).value_counts().sort_index()
         partitions.append(
             {
-                "optionId": f"{candidate.candidateId}:r{resolution:g}",
+                "optionId": partition_option_id(candidate.candidateId, resolution),
                 "candidateId": candidate.candidateId,
                 "resolution": resolution,
                 "score": scores.get(key),
