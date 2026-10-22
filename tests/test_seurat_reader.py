@@ -11,7 +11,13 @@ import pytest
 from scipy.sparse import csc_matrix
 
 import cytearc.readers.seurat as seurat_module
-from cytearc.readers._rds import LazyAtomicVector, R_INT_NA, RdsClosedError, RType
+from cytearc.readers._rds import (
+    LazyAtomicVector,
+    R_INT_NA,
+    RdsClosedError,
+    RdsFormatError,
+    RType,
+)
 from cytearc.readers._seurat import (
     MatrixSourceError,
     MemoryEstimate,
@@ -4235,15 +4241,49 @@ def test_metadata_columns_are_validated_by_type(
     }[case]
     path = _write_document(
         tmp_path / f"{case}.rds",
-        _seurat_document(wire, metadata=wire.data_frame([("x", column)], _CELLS)),
+        _seurat_document(
+            wire,
+            metadata=wire.data_frame(
+                [("x", column), ("kept", wire.string_vector(["a", "b", "c"]))],
+                _CELLS,
+            ),
+        ),
     )
+    # A column that is selected by name must decode.
     with pytest.raises(SeuratImportError) as error:
-        SeuratReader(path)
+        SeuratReader(path, cell_metadata=["x"])
     assert (error.value.code, error.value.objectPath, error.value.context) == (
         code,
         object_path,
         context,
     )
+    # Otherwise it is left out with a notice, and the other columns import.
+    with SeuratReader(path) as reader:
+        assert reader.cellMetadata.columnNames == ("kept",)
+        assert reader.cellMetadata.column("kept").read_block(0, 3).values == (
+            "a",
+            "b",
+            "c",
+        )
+        notices = reader.inspection.cellMetadata.notices
+        assert [
+            (notice.code, notice.objectPath, notice.context) for notice in notices
+        ] == [
+            (
+                "skipped_metadata_column",
+                object_path,
+                {"column": "x", "reason": code, "details": context},
+            )
+        ]
+        assert reader.inspection.cellMetadata.dimensions == (3, 1)
+        # Reading the column raises its decoding error.
+        with pytest.raises(SeuratImportError) as skipped:
+            reader.cellMetadata.column("x")
+        assert (
+            skipped.value.code,
+            skipped.value.objectPath,
+            skipped.value.context,
+        ) == (code, object_path, context)
 
 
 @pytest.mark.parametrize(
@@ -4392,12 +4432,31 @@ def test_identifier_indexes_respect_their_budgets(
         ),
     )
     with pytest.raises(SeuratImportError) as error:
-        SeuratReader(long_levels, matrix_limits=SourceLimits(maxMetadataBytes=8_192))
+        SeuratReader(
+            long_levels,
+            matrix_limits=SourceLimits(maxMetadataBytes=8_192),
+            cell_metadata=["x"],
+        )
     assert (error.value.code, error.value.objectPath, error.value.context) == (
         "metadata_index_limit",
         "meta.data/x/levels",
         {"requiredBytes": 9_008, "maximumBytes": 8_192},
     )
+    # Without a selection, the column that exceeds the budget is left out.
+    with SeuratReader(
+        long_levels, matrix_limits=SourceLimits(maxMetadataBytes=8_192)
+    ) as reader:
+        assert reader.cellMetadata.columnNames == ()
+        (notice,) = reader.inspection.cellMetadata.notices
+        assert (notice.code, notice.objectPath, notice.context) == (
+            "skipped_metadata_column",
+            "meta.data/x/levels",
+            {
+                "column": "x",
+                "reason": "metadata_index_limit",
+                "details": {"requiredBytes": 9_008, "maximumBytes": 8_192},
+            },
+        )
 
     monkeypatch.setattr(
         seurat_module.shutil, "disk_usage", lambda _path: SimpleNamespace(free=4_096)
@@ -4746,7 +4805,12 @@ def _assay5_with(
             "assays/RNA/cells",
             {"values": 2, "dimensions": (3, 1)},
         ),
-        ("cell-order", "assay_cell_order_conflict", "assays/RNA/cells/Dimnames/0", {}),
+        (
+            "foreign-cell",
+            "assay_cell_id_conflict",
+            "assays/RNA/cells/Dimnames/0",
+            {"missing": ("c9",)},
+        ),
         ("no-counts", "counts_layer_missing", "assays/RNA/layers", {}),
         (
             "cells-lack-layer",
@@ -4795,7 +4859,9 @@ def test_assay5_membership_is_validated(
         "integer-cells": {"cells": cell_map([1, 1, 1], _CELLS, RType.INTEGER)},
         "short-names": {"cells": cell_map([1, 1, 1], ["c1", "c2"])},
         "short-values": {"cells": cell_map([1, 1], _CELLS)},
-        "cell-order": {"cells": wire.logmap([1, 1, 1], ["c3", "c1", "c2"], ["counts"])},
+        "foreign-cell": {
+            "cells": wire.logmap([1, 1, 1], ["c3", "c9", "c2"], ["counts"])
+        },
         "no-counts": {
             "layers": [wire.matrix([0.0] * 6, (2, 3), real=True)],
             "layer_names": ("data",),
@@ -4948,10 +5014,10 @@ def _reduction_with(
             {"dimensions": (3, 2), "rowIds": 2, "columnIds": 2},
         ),
         (
-            "cell-order",
+            "foreign-cell",
             "reduction_cell_id_conflict",
             "reductions/pca/cell.embeddings/Dimnames/0",
-            {},
+            {"missing": ("c9",)},
         ),
         (
             "short-values",
@@ -5001,11 +5067,11 @@ def test_reduction_structure_is_validated(
                 [1.0] * 6, (3, 2), rows=["c1", "c2"], columns=components, real=True
             )
         },
-        "cell-order": {
+        "foreign-cell": {
             "embeddings": wire.matrix(
                 [1.0] * 6,
                 (3, 2),
-                rows=["c2", "c1", "c3"],
+                rows=["c2", "c9", "c3"],
                 columns=components,
                 real=True,
             )
@@ -5091,32 +5157,51 @@ def test_reductions_resolve_their_assay_and_report_ignored_slots(
             reductions=reductions,
         ),
     )
-    # The reduction's legacy assay is built on demand although it was not selected.
+    # The coordinates need no assay, so an unselected assay is not built; the
+    # reduction reports that it imports without it.
     with SeuratReader(path, assays=["ADT"]) as reader:
         assert reader.assayNames == ("ADT",)
         pca = reader.get_reduction("pca")
         assert pca.assayUsed == "RNA"
-        assert [(notice.code, notice.objectPath) for notice in pca.notices] == [
-            ("ignored_projected_loadings", "reductions/pca/feature.loadings.projected"),
-            ("ignored_reduction_slot", "reductions/pca/misc"),
+        assert [
+            (notice.code, notice.objectPath, notice.context) for notice in pca.notices
+        ] == [
+            (
+                "reduction_assay_unavailable",
+                "reductions/pca/assay.used",
+                {"assayUsed": "RNA", "reason": "not_selected"},
+            ),
+            (
+                "ignored_projected_loadings",
+                "reductions/pca/feature.loadings.projected",
+                {},
+            ),
+            ("ignored_reduction_slot", "reductions/pca/misc", {"rType": "VECTOR"}),
         ]
+        assert "RNA" not in reader._assayModels
 
     failed = _write_document(
         tmp_path / "failed-assay.rds",
         _seurat_document(wire, assays=[_custom_assay(wire)], reductions=reductions),
     )
     with SeuratReader(failed) as reader:
-        diagnostic = reader.inspection.reduction("pca").blockingDiagnostic
-        assert diagnostic is not None
-        # The reduction reports the failure of the assay it depends on.
-        assert (diagnostic.code, diagnostic.objectPath) == (
-            "unsupported_assay_class",
-            "assays/RNA",
+        inspection = reader.inspection.reduction("pca")
+        assert inspection.importable
+        assert (inspection.assayUsed, inspection.role) == ("RNA", "graphCoordinates")
+        # The reduction reports the failure of the assay it was computed on.
+        assert inspection.notices[0].context == {
+            "assayUsed": "RNA",
+            "reason": "unsupported_assay_class",
+        }
+        np.testing.assert_array_equal(
+            reader.get_reduction("pca").cellEmbeddings.read_rows(0, 3),
+            [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]],
         )
 
 
 def test_unexpected_parse_errors_are_wrapped_as_item_diagnostics(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     wire = _Wire()
 
@@ -5144,13 +5229,6 @@ def test_unexpected_parse_errors_are_wrapped_as_item_diagnostics(
             ],
         ),
     )
-    diagnostic = _assay_diagnostic(malformed_counts)
-    assert (diagnostic.code, diagnostic.objectPath, diagnostic.context) == (  # type: ignore[attr-defined]
-        "invalid_assay",
-        "assays/RNA",
-        {"causeType": "TypeError"},
-    )
-
     malformed_reduction = _write_document(
         tmp_path / "reduction.rds",
         _seurat_document(
@@ -5165,7 +5243,36 @@ def test_unexpected_parse_errors_are_wrapped_as_item_diagnostics(
             ),
         ),
     )
-    with SeuratReader(malformed_reduction) as reader:
+    # The parser rejects attributes that are not a pairlist, so they cannot
+    # reach an item as a bare TypeError.
+    for path, attributes_path in (
+        (malformed_counts, "$.attributes.car[0].attributes.car.attributes"),
+        (malformed_reduction, "$.attributes.cdr[4].car[0].attributes.car.attributes"),
+    ):
+        with pytest.raises(
+            RdsFormatError, match="attributes must be a pairlist, found INTEGER"
+        ) as caught:
+            SeuratReader(path)
+        assert caught.value.path == attributes_path
+
+    # An unexpected error inside an item still becomes that item's diagnostic.
+    def unexpected(*args: object, **kwargs: object) -> None:
+        raise TypeError("unexpected structure")
+
+    monkeypatch.setattr(seurat_module, "_matrix_dimnames", unexpected)
+    path = _write_document(
+        tmp_path / "unexpected.rds",
+        _seurat_document(
+            wire, reductions=wire.vector([_reduction_with(wire)], names=["pca"])
+        ),
+    )
+    diagnostic = _assay_diagnostic(path)
+    assert (diagnostic.code, diagnostic.objectPath, diagnostic.context) == (  # type: ignore[attr-defined]
+        "invalid_assay",
+        "assays/RNA",
+        {"causeType": "TypeError"},
+    )
+    with SeuratReader(path) as reader:
         diagnostic = reader.inspection.reduction("pca").blockingDiagnostic
         assert diagnostic is not None
         assert (diagnostic.code, diagnostic.objectPath, diagnostic.context) == (

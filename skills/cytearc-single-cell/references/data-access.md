@@ -147,14 +147,31 @@ print(dict(res.embeddingArtifacts), dict(res.clusterArtifacts))
 
 # Seurat RDS (an on-disk .rds; .h5seurat is not read)
 si = cytearc.inspect_seurat("pbmc.rds")
+print(si.activeAssay, [(a.name, a.importable) for a in si.assays])
+print([(r.name, r.importable, r.role, r.assayUsed) for r in si.reductions])
+# Every importable assay, so each reduction keeps its assay and loadings.
+assays = [a.name for a in si.assays if a.importable]
 reductions = [r.name for r in si.reductions if r.importable]
-with cytearc.SeuratReader("pbmc.rds", assays=[si.activeAssay], reductions=reductions) as sr:
-    out = cytearc.SeuratToZarr(sr, zarr_loc="seurat.zarr").dump()
-print(out.defaultAssay, dict(out.reductionArtifacts), out.activeIdentity, len(out.notices))
+# An "integrated" active assay holds no raw counts: name another default.
+default = None if si.activeAssay in assays else "RNA"
+with cytearc.SeuratReader("pbmc.rds", assays=assays, reductions=reductions) as sr:
+    out = cytearc.SeuratToZarr(sr, zarr_loc="seurat.zarr", default_assay=default).dump()
+print(out.defaultAssay, dict(out.reductionArtifacts), out.activeIdentity)
+print([notice.code for notice in out.notices])
 
 for path in ("dir.zarr", "mtx.zarr", "h5ad.zarr", "seurat.zarr"):
     cytearc.DataStore(path)                 # writable first open prepares the store
 ```
+
+Seurat imports in part: with the reader's default selection (no `assays`/`reductions`) an assay
+or reduction that cannot import is skipped with a `skipped_assay`/`skipped_reduction` notice, and
+a cell metadata column that cannot be decoded (list or matrix column) is left out with a
+`skipped_metadata_column` notice; anything you name must import. `cell_metadata=["a", "b"]` or
+`cell_metadata={"exclude": ["a"]}` selects columns. A reduction of an assay you leave out keeps its
+coordinates under the default assay but loses its loadings; to import fewer assays, keep the
+reductions whose `assayUsed` you import. An active SCT assay holds corrected counts, so RNA becomes
+the default (`sct_default_assay` notice). `reduction_roles={"phate": "umap"}` overrides the
+UMAP/t-SNE-versus-coordinates role that the DimReduc key and name decide.
 
 `CSVReader`/`CSVtoZarr` (small dense CSV) and `SparseToZarr` (SciPy CSR plus IDs) also exist.
 

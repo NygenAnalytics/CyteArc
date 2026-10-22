@@ -1,4 +1,5 @@
 import inspect
+from collections.abc import Mapping, Sequence
 import pickle
 import subprocess
 import sys
@@ -86,10 +87,10 @@ _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
     H5adReader: "ca5ddfbe930e729f419b42a5b7018e6a03b221c371479c26716183cb2ff08daa",
     CSVReader: "8aa6c17c876afb62765584fc7ff64d2838c66ef53095da10d7198ca60ab83851",
     MtxReader: "b0ce7fc6984e0b49abd3e1e3d65ae97194af7b7de083b1d0ea0496735a8c5dd0",
-    SeuratReader: "c51148f751a74072c2f79448a4b6a25f0dc0c52b0abfbe837fb1b9e0c667368c",
+    SeuratReader: "68678f67361080e8121eaae116ace832c1e0defc73ca36e3e3aa02d4d96718e6",
 }
 _MODULE_SIGNATURE_DIGEST = (
-    "63d01b3ffb7199003584ff37300ce5580b913756da32cd09b86ebbb7e5618382"
+    "21c4a2974e1193da7ebe9be85417b73e2525e875e885c75367a61bf484d4c171"
 )
 
 
@@ -243,6 +244,24 @@ def test_count_readers_take_the_duplicate_feature_ids_keyword():
         assert hints["duplicate_feature_ids"] is DuplicateFeatureIds
     for cls in (CSVReader, SeuratReader):
         assert "duplicate_feature_ids" not in inspect.signature(cls.__init__).parameters
+
+
+def test_seurat_reader_and_inspection_select_metadata_and_reduction_roles():
+    for function in (SeuratReader.__init__, readers_module.inspect_seurat):
+        parameters = inspect.signature(function).parameters
+        assert list(parameters)[-2:] == ["cell_metadata", "reduction_roles"]
+        for name in ("cell_metadata", "reduction_roles"):
+            assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+            assert parameters[name].default is None
+        hints = get_type_hints(function)
+        assert hints["cell_metadata"] == (
+            Sequence[str] | Mapping[str, Sequence[str]] | None
+        )
+        roles, none = get_args(hints["reduction_roles"])
+        assert none is type(None)
+        key, role = get_args(roles)
+        assert key is str
+        assert get_args(role.__value__) == ("umap", "tsne", "coordinates")
 
 
 def test_reader_module_function_signatures_are_stable():

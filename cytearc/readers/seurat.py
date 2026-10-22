@@ -4,9 +4,9 @@ import shutil
 import sqlite3
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast, overload
+from typing import Any, Literal, cast, overload
 
 import numpy as np
 from numpy.typing import NDArray
@@ -26,8 +26,8 @@ from ._rds import (
     get_attribute,
     get_slot,
     iter_attributes,
-    iter_named,
     open_rds,
+    symbol_name,
 )
 from ._seurat import (
     CellBindMatrixSource,
@@ -120,6 +120,22 @@ _ROOT_IGNORED_SLOTS = frozenset(
         "tools",
     }
 )
+# R stores NULL in an S4 slot as this symbol.
+_PSEUDO_NULL = "\x01NULL\x01"
+# bit64 stores integer64 values in R doubles; NA is the smallest int64.
+_INTEGER64_NA = int(np.iinfo(np.int64).min)
+# Classes of atomic metadata columns whose values import by their storage
+# type without a notice.
+_PLAIN_COLUMN_CLASSES = frozenset(
+    {"AsIs", "character", "double", "integer", "logical", "numeric"}
+)
+# Classes that decide how metadata decoding reads a column's values.
+_INTERPRETED_CLASSES = frozenset({"Date", "POSIXct", "factor", "integer64"})
+# Dates and date-times that ISO 8601 text can hold: years 1 to 9999.
+_DATE_DAYS = (-719_162, 2_932_896)
+_DATETIME_SECONDS = (-62_135_596_800, 253_402_300_799)
+_TSNE_KEY = re.compile(r"t[-._]?sne")
+type ReductionRole = Literal["umap", "tsne", "coordinates"]
 
 
 class SeuratImportError(ValueError):
@@ -182,6 +198,14 @@ class SeuratNotice:
 
 @dataclass(frozen=True, slots=True)
 class SeuratItemInspection:
+    """What one assay, reduction, or metadata table of a Seurat object holds.
+
+    ``assayUsed`` and ``role`` describe an importable reduction: the assay it
+    was computed on and whether it imports as a display embedding
+    (``displayEmbedding``) or as graph coordinates (``graphCoordinates``).
+    They are None for other items.
+    """
+
     name: str
     importable: bool
     sourceClass: str | None
@@ -192,6 +216,8 @@ class SeuratItemInspection:
     memoryEstimate: MemoryEstimate | None = None
     blockingDiagnostic: SeuratDiagnostic | None = None
     notices: tuple[SeuratNotice, ...] = ()
+    assayUsed: str | None = None
+    role: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,11 +321,15 @@ def _parse_cache_loader_list(value: str, *, object_path: str) -> tuple[str, ...]
 
 
 class SeuratStringVector(Sequence[str]):
-    """Validated identifiers read from an RDS character vector in bounded blocks."""
+    """Validated identifiers read from an RDS character vector in bounded blocks.
+
+    The vector may be serialized as ALTREP, such as a wrapped or deferred
+    string vector.
+    """
 
     def __init__(
         self,
-        values: LazyStringVector,
+        values: "_StringValues",
         document: RdsDocument,
         *,
         object_path: str,
@@ -318,9 +348,10 @@ class SeuratStringVector(Sequence[str]):
             raise IndexError(
                 f"identifier window [{start}, {stop}) is outside [0, {len(self)})"
             )
-        return tuple(
-            _as_text(value, object_path=f"{self.objectPath}/{start + offset}")
-            for offset, value in enumerate(self._values.read_block(start, stop))
+        return _identifier_texts(
+            self._values.read_block(start, stop),
+            object_path=self.objectPath,
+            start=start,
         )
 
     def __iter__(self) -> Iterator[str]:
@@ -456,8 +487,174 @@ class _DeferredIntegerStrings:
         return self.read_block(index, index + 1)[0]
 
 
+def _r_double_text(value: float, scipen: int) -> str:
+    """Format a double as R's ``as.character`` does.
+
+    R writes the fewest significant digits, at most 15, that give the value to
+    15 significant digits, in fixed notation unless scientific notation is
+    narrower by more than ``scipen`` characters, R's ``scipen`` option.
+    """
+    if np.isnan(value):
+        return "NaN"
+    if np.isinf(value):
+        return "Inf" if value > 0 else "-Inf"
+    if value == 0:
+        return "0"
+    mantissa, exponent = f"{abs(value):.14e}".split("e")
+    significant = len(mantissa.replace(".", "").rstrip("0"))
+    power = int(exponent)
+    negative = int(value < 0)
+    decimals = max(0, significant - power - 1)
+    fixed_width = negative + max(power, 0) + 1 + (decimals + 1 if decimals else 0)
+    scientific_width = (
+        negative + significant + int(significant > 1) + (4 if abs(power) < 100 else 5)
+    )
+    if fixed_width <= scientific_width + scipen:
+        return f"{value:.{decimals}f}"
+    return f"{value:.{significant - 1}e}"
+
+
+def _r_na_reals(values: NDArray[np.float64]) -> NDArray[np.bool_]:
+    """Return which doubles are R's ``NA_real_``, the NaN with low word 1954."""
+    words = np.ascontiguousarray(values, dtype=np.float64).view(np.uint64)
+    return np.asarray(
+        np.isnan(values) & ((words & np.uint64(0xFFFFFFFF)) == np.uint64(1954)),
+        dtype=np.bool_,
+    )
+
+
+class _DeferredRealStrings:
+    """Block-readable ``as.character`` view of a double vector (ALTREP).
+
+    R stores the ``scipen`` option with the vector and formats each element
+    when it is read; ``NA`` reads as missing and ``NaN`` as the text ``"NaN"``.
+    """
+
+    def __init__(
+        self,
+        values: "LazyAtomicVector | _CompactSequence",
+        *,
+        scipen: int,
+    ) -> None:
+        self._values = values
+        self._scipen = scipen
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def read_block(self, start: int, stop: int) -> tuple[str | None, ...]:
+        values = np.asarray(self._values.read_block(start, stop), dtype=np.float64)
+        return tuple(
+            None if missing else _r_double_text(value, self._scipen)
+            for value, missing in zip(
+                values.tolist(), _r_na_reals(values).tolist(), strict=True
+            )
+        )
+
+    def __getitem__(self, index: int) -> str | None:
+        return self.read_block(index, index + 1)[0]
+
+
+class _Integer64Values:
+    """Block-readable bit64 ``integer64`` values, which R stores in doubles."""
+
+    def __init__(self, values: LazyAtomicVector) -> None:
+        self._values = values
+        self.dtype = np.dtype(np.int64)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def read_block(self, start: int, stop: int) -> NDArray[np.int64]:
+        return self._values.read_block(start, stop).view(np.int64)
+
+
+def _temporal_block(
+    values: "LazyAtomicVector | _CompactSequence",
+    start: int,
+    stop: int,
+) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
+    """Return a window of R day or second counts and which of them are missing."""
+    raw = values.read_block(start, stop)
+    if raw.dtype.kind == "f":
+        missing = ~np.isfinite(raw)
+    else:
+        missing = raw == R_INT_NA
+    return np.where(missing, 0.0, raw.astype(np.float64)), missing
+
+
+class _DateStrings:
+    """Block-readable ISO 8601 text of R ``Date`` values, days since 1970."""
+
+    def __init__(self, values: "LazyAtomicVector | _CompactSequence") -> None:
+        self._values = values
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def read_block(self, start: int, stop: int) -> tuple[str | None, ...]:
+        days, missing = _temporal_block(self._values, start, stop)
+        # R shows a fractional day as the day that it falls in.
+        text = np.datetime_as_string(
+            np.floor(days).astype(np.int64).astype("datetime64[D]")
+        )
+        return tuple(
+            None if absent else value
+            for value, absent in zip(text.tolist(), missing.tolist(), strict=True)
+        )
+
+    def __getitem__(self, index: int) -> str | None:
+        return self.read_block(index, index + 1)[0]
+
+
+class _DateTimeStrings:
+    """Block-readable ISO 8601 UTC text of R ``POSIXct`` values.
+
+    A value is a count of seconds since 1970 in UTC. Fractional seconds are
+    kept to the microsecond.
+    """
+
+    def __init__(self, values: "LazyAtomicVector | _CompactSequence") -> None:
+        self._values = values
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def read_block(self, start: int, stop: int) -> tuple[str | None, ...]:
+        seconds, missing = _temporal_block(self._values, start, stop)
+        whole = np.floor(seconds)
+        micro = np.round((seconds - whole) * 1e6).astype(np.int64)
+        whole = whole.astype(np.int64) + micro // 1_000_000
+        micro %= 1_000_000
+        stamps = np.datetime_as_string(whole.astype("datetime64[s]"), unit="s")
+        return tuple(
+            None
+            if absent
+            else (f"{stamp}.{fraction:06d}Z" if fraction else f"{stamp}Z")
+            for stamp, fraction, absent in zip(
+                stamps.tolist(), micro.tolist(), missing.tolist(), strict=True
+            )
+        )
+
+    def __getitem__(self, index: int) -> str | None:
+        return self.read_block(index, index + 1)[0]
+
+
 type _AtomicValues = LazyAtomicVector | _CompactSequence
-type _StringValues = LazyStringVector | _DeferredIntegerStrings
+type _StringValues = (
+    LazyStringVector
+    | _DeferredIntegerStrings
+    | _DeferredRealStrings
+    | _DateStrings
+    | _DateTimeStrings
+)
+_STRING_VALUE_TYPES = (
+    LazyStringVector,
+    _DeferredIntegerStrings,
+    _DeferredRealStrings,
+    _DateStrings,
+    _DateTimeStrings,
+)
 
 _WRAPPER_ALTREP_CLASSES = frozenset(
     {
@@ -528,6 +725,20 @@ def _vector_values(node: RNode, *, object_path: str) -> tuple[RType, Any]:
             argument, LazyAtomicVector | _CompactSequence
         ):
             return RType.STRING, _DeferredIntegerStrings(argument)
+        if argument_type is RType.REAL and isinstance(
+            argument, LazyAtomicVector | _CompactSequence
+        ):
+            # R keeps the scipen option in an integer vector after the
+            # argument; without one, R's default of 0 applies.
+            info = state.value.cdr
+            scipen = (
+                int(info.value[0])
+                if info.type is RType.INTEGER
+                and isinstance(info.value, LazyAtomicVector)
+                and len(info.value) == 1
+                else 0
+            )
+            return RType.STRING, _DeferredRealStrings(argument, scipen=scipen)
     raise _error(
         f"ALTREP class {name!r} is not supported",
         object_path=object_path,
@@ -543,7 +754,7 @@ class SeuratMetadataColumn:
         *,
         name: str,
         kind: str,
-        values: _AtomicValues | _StringValues,
+        values: _AtomicValues | _Integer64Values | _StringValues,
         length: int,
         document: RdsDocument,
         source_indices: NDArray[np.int64] | None = None,
@@ -551,6 +762,7 @@ class SeuratMetadataColumn:
         level_codes: NDArray[np.int64] | None = None,
         ordered: bool = False,
         object_path: str,
+        missing_code: int = R_INT_NA,
     ) -> None:
         self.name = name
         self.kind = kind
@@ -562,6 +774,9 @@ class SeuratMetadataColumn:
         self._document = document
         self._sourceIndices = source_indices
         self._levelCodes = level_codes
+        # The value that marks a missing integer: R's NA, or bit64's for
+        # integer64 columns.
+        self._missingCode = missing_code
 
     def _ensure_open(self) -> None:
         if self._document.closed:
@@ -580,7 +795,9 @@ class SeuratMetadataColumn:
 
     def _read_atomic(self, start: int, stop: int) -> NDArray[Any]:
         values = self._values
-        if not isinstance(values, LazyAtomicVector | _CompactSequence):
+        if not isinstance(
+            values, LazyAtomicVector | _CompactSequence | _Integer64Values
+        ):
             raise TypeError(f"{self.objectPath} is not an atomic column")
         if self._sourceIndices is None:
             return values.read_block(start, stop)
@@ -594,7 +811,7 @@ class SeuratMetadataColumn:
 
     def _read_strings(self, start: int, stop: int) -> tuple[str | bytes | None, ...]:
         values = self._values
-        if not isinstance(values, LazyStringVector | _DeferredIntegerStrings):
+        if not isinstance(values, _STRING_VALUE_TYPES):
             raise TypeError(f"{self.objectPath} is not a character column")
         if self._sourceIndices is None:
             return tuple(values.read_block(start, stop))
@@ -614,7 +831,7 @@ class SeuratMetadataColumn:
 
         atomic_values = self._read_atomic(start, stop)
         if self.kind in {"integer", "factor"}:
-            atomic_missing = atomic_values == R_INT_NA
+            atomic_missing = atomic_values == self._missingCode
             if self._levelCodes is not None:
                 atomic_values = self._levelCodes[
                     np.where(atomic_missing, 0, atomic_values)
@@ -635,9 +852,24 @@ class SeuratMetadataColumn:
 
 @dataclass(frozen=True, slots=True)
 class SeuratMetadata:
+    """The columns of a cell or feature metadata table, aligned to its rows.
+
+    Attributes:
+        rowIds: Cell or feature IDs, in the order of the object's cells or of
+            the assay's features.
+        columns: Imported columns, in the table's order.
+        objectPath: Path of the table in the Seurat object.
+        notices: Columns left out because they cannot be decoded, and columns
+            whose values were converted, such as dates.
+        skippedColumns: Error of each column left out because it cannot be
+            decoded, by name; ``column`` raises it.
+    """
+
     rowIds: Sequence[str]
     columns: tuple[SeuratMetadataColumn, ...]
     objectPath: str
+    notices: tuple[SeuratNotice, ...] = ()
+    skippedColumns: Mapping[str, SeuratImportError] = field(default_factory=dict)
 
     @property
     def columnNames(self) -> tuple[str, ...]:
@@ -647,6 +879,9 @@ class SeuratMetadata:
         for column in self.columns:
             if column.name == name:
                 return column
+        error = self.skippedColumns.get(name)
+        if error is not None:
+            raise error
         raise KeyError(name)
 
 
@@ -838,6 +1073,13 @@ class _OwnedMatrixSource:
 
 @dataclass(frozen=True, slots=True)
 class SeuratAssay:
+    """An importable assay of a Seurat object.
+
+    ``umiAssay`` is set for an ``SCTAssay`` whose SCTransform models all
+    record the assay of raw counts that they were fitted to (``umi.assay``).
+    The SCT assay's own counts are corrected counts.
+    """
+
     name: str
     sourceClass: str
     counts: MatrixSource
@@ -847,6 +1089,7 @@ class SeuratAssay:
     featureMetadata: SeuratMetadata
     notices: tuple[SeuratNotice, ...]
     objectPath: str
+    umiAssay: str | None = None
 
     @property
     def dimensions(self) -> tuple[int, int]:
@@ -855,6 +1098,21 @@ class SeuratAssay:
 
 @dataclass(frozen=True, slots=True)
 class SeuratReduction:
+    """An importable reduction of a Seurat object.
+
+    Attributes:
+        role: ``displayEmbedding`` for a UMAP or t-SNE layout, otherwise
+            ``graphCoordinates``.
+        embeddingRole: ``umap`` or ``tsne`` for a display embedding, else None.
+        featureLoadings: Loadings over the features of ``assayUsed``; None
+            when the reduction has none, or when that assay is not selected
+            or cannot be imported.
+        key: The DimReduc key, such as ``PC_`` or ``UMAP_``, if it is text.
+        cellPositions: For each embedding row, the position of its cell in
+            the object's cells; None when the rows are exactly those cells in
+            order.
+    """
+
     name: str
     sourceClass: str
     role: str
@@ -864,6 +1122,9 @@ class SeuratReduction:
     assayUsed: str
     notices: tuple[SeuratNotice, ...]
     objectPath: str
+    embeddingRole: str | None = None
+    key: str | None = None
+    cellPositions: NDArray[np.int64] | None = None
 
     @property
     def dimensions(self) -> tuple[int, int]:
@@ -974,15 +1235,57 @@ def _as_text(
     return value
 
 
-def _string_values(node: RNode, *, object_path: str) -> LazyStringVector:
-    if node.type is not RType.STRING or not isinstance(node.value, LazyStringVector):
+def _plain_texts(block: tuple[Any, ...]) -> bool:
+    """Return whether ``_as_text`` returns every value of ``block`` unchanged.
+
+    The checks run over the whole block at once; ``_as_text`` then reports
+    the first value that fails one, with its path.
+    """
+    if set(map(type, block)) != {str} or not all(block):
+        return False
+    joined = "".join(block)
+    if "\x00" in joined:
+        return False
+    if joined.isascii():
+        return True
+    try:
+        joined.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _identifier_texts(
+    values: Sequence[str | bytes | None],
+    *,
+    object_path: str,
+    start: int,
+) -> tuple[str, ...]:
+    """Validate a block of identifiers whose first value has index ``start``."""
+    block = tuple(values)
+    if _plain_texts(block):
+        return cast(tuple[str, ...], block)
+    return tuple(
+        _as_text(value, object_path=f"{object_path}/{start + offset}")
+        for offset, value in enumerate(block)
+    )
+
+
+def _string_values(node: RNode, *, object_path: str) -> _StringValues:
+    """Return a character vector's values, also when R serialized it as ALTREP."""
+    value_type, values = (
+        _vector_values(node, object_path=object_path)
+        if node.type is RType.ALTREP
+        else (node.type, node.value)
+    )
+    if value_type is not RType.STRING or not isinstance(values, _STRING_VALUE_TYPES):
         raise _error(
             "expected a character vector",
             object_path=object_path,
             code="invalid_character_vector",
-            rType=node.type.name,
+            rType=value_type.name,
         )
-    return node.value
+    return values
 
 
 def _read_text_vector(
@@ -995,19 +1298,26 @@ def _read_text_vector(
     result: list[str] = []
     used_bytes = 0
     for start in range(0, len(values), _VECTOR_BLOCK_SIZE):
-        block = values.read_block(start, min(len(values), start + _VECTOR_BLOCK_SIZE))
-        for offset, value in enumerate(block):
-            text = _as_text(value, object_path=f"{object_path}/{start + offset}")
-            used_bytes += len(text.encode("utf-8")) + 8
-            if used_bytes > maximum_bytes:
-                raise _error(
-                    "text vector exceeds its metadata memory budget",
-                    object_path=object_path,
-                    code="metadata_index_limit",
-                    requiredBytes=used_bytes,
-                    maximumBytes=maximum_bytes,
-                )
-            result.append(text)
+        texts = _identifier_texts(
+            values.read_block(start, min(len(values), start + _VECTOR_BLOCK_SIZE)),
+            object_path=object_path,
+            start=start,
+        )
+        block_bytes = len("".join(texts).encode("utf-8")) + 8 * len(texts)
+        if used_bytes + block_bytes > maximum_bytes:
+            # Report the size at the first value that exceeds the budget.
+            sizes = used_bytes + np.cumsum(
+                [len(text.encode("utf-8")) + 8 for text in texts]
+            )
+            raise _error(
+                "text vector exceeds its metadata memory budget",
+                object_path=object_path,
+                code="metadata_index_limit",
+                requiredBytes=int(sizes[int(np.argmax(sizes > maximum_bytes))]),
+                maximumBytes=maximum_bytes,
+            )
+        used_bytes += block_bytes
+        result.extend(texts)
     return tuple(result)
 
 
@@ -1028,10 +1338,7 @@ def _identifier_block(
             expected=stop - start,
             actual=len(raw),
         )
-    return tuple(
-        _as_text(value, object_path=f"{object_path}/{start + offset}")
-        for offset, value in enumerate(raw)
-    )
+    return _identifier_texts(raw, object_path=object_path, start=start)
 
 
 def _identifiers_equal(left: Sequence[str], right: Sequence[str]) -> bool:
@@ -1250,31 +1557,69 @@ def _assay_storage_kind(
     )
 
 
-def _named_nodes(node: RNode, *, object_path: str) -> tuple[tuple[str, RNode], ...]:
-    try:
-        raw = tuple(iter_named(node))
-    except (TypeError, ValueError) as error:
-        if (
-            node.type is RType.VECTOR
-            and isinstance(node.value, tuple)
-            and not node.value
-            and get_attribute(node, "names") is None
-        ):
-            return ()
+def _named_entries(
+    node: RNode,
+    *,
+    object_path: str,
+) -> tuple[list[str | bytes | None], tuple[RNode, ...]]:
+    """Return the raw names and the values of a generic vector.
+
+    The names may be serialized as ALTREP. An empty vector needs no names.
+    """
+    if node.type not in {RType.VECTOR, RType.EXPRESSION} or not isinstance(
+        node.value, tuple
+    ):
         raise _error(
             "expected a named list",
             object_path=object_path,
             code="invalid_named_list",
-            cause=str(error),
-        ) from error
-    result: list[tuple[str, RNode]] = []
-    names: list[str] = []
-    for index, (name, value) in enumerate(raw):
-        normalized = _as_text(name, object_path=f"{object_path}/names/{index}")
-        result.append((normalized, value))
-        names.append(normalized)
-    _validate_unique(tuple(names), object_path=f"{object_path}/names")
-    return tuple(result)
+            cause=f"{node.type.name} is not a generic named vector",
+        )
+    values = node.value
+    names_node = get_attribute(node, "names")
+    names: _StringValues | None = None
+    if names_node is not None:
+        try:
+            names = _string_values(names_node, object_path=f"{object_path}/names")
+        except SeuratImportError as error:
+            raise _error(
+                "expected a named list",
+                object_path=object_path,
+                code="invalid_named_list",
+                cause=f"named vector at {node.path} has no character names",
+            ) from error
+    if names is None:
+        if not values:
+            return [], values
+        raise _error(
+            "expected a named list",
+            object_path=object_path,
+            code="invalid_named_list",
+            cause=f"named vector at {node.path} has no character names",
+        )
+    if len(names) != len(values):
+        raise _error(
+            "expected a named list",
+            object_path=object_path,
+            code="invalid_named_list",
+            cause=(
+                f"name count {len(names)} does not match value count "
+                f"{len(values)} at {node.path}"
+            ),
+        )
+    return list(names.read_block(0, len(names))), values
+
+
+def _named_nodes(node: RNode, *, object_path: str) -> tuple[tuple[str, RNode], ...]:
+    names, values = _named_entries(node, object_path=object_path)
+    result = tuple(
+        (_as_text(name, object_path=f"{object_path}/names/{index}"), value)
+        for index, (name, value) in enumerate(zip(names, values, strict=True))
+    )
+    _validate_unique(
+        tuple(name for name, _ in result), object_path=f"{object_path}/names"
+    )
+    return result
 
 
 def _read_integer_vector(
@@ -1316,11 +1661,42 @@ def _read_text_scalar(node: RNode, *, object_path: str) -> str:
 
 
 def _node_has_content(node: RNode) -> bool:
-    if node.is_null:
-        return False
-    if isinstance(node.value, LazyAtomicVector | LazyStringVector | tuple):
-        return len(node.value) > 0
-    return True
+    """Return whether a slot holds data.
+
+    NULL, R's NULL placeholder in an S4 slot, empty vectors, and S4 objects
+    whose slots are all empty, such as an unused JackStrawData, hold none.
+    """
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        if current.is_null or symbol_name(current) == _PSEUDO_NULL:
+            continue
+        if current.type is RType.S4:
+            pending.extend(
+                value for name, value in iter_attributes(current) if name != "class"
+            )
+            continue
+        if (
+            not isinstance(current.value, LazyAtomicVector | LazyStringVector | tuple)
+            or len(current.value) > 0
+        ):
+            return True
+    return False
+
+
+def _sct_umi_assay(node: RNode) -> str | None:
+    """Return the assay of raw counts that an SCTAssay's models were fitted to.
+
+    Each SCTModel records it in its ``umi.assay`` slot. The result is None
+    unless every model records the same one.
+    """
+    models = get_slot(node, "SCTModel.list")
+    if models is None or not isinstance(models.value, tuple):
+        return None
+    names = {_optional_text(get_slot(model, "umi.assay")) for model in models.value}
+    if len(names) != 1:
+        return None
+    return names.pop()
 
 
 def _matrix_dimensions(node: RNode, *, object_path: str) -> tuple[int, int]:
@@ -1578,12 +1954,12 @@ def _frame_row_ids(
             object_path=f"{object_path}/row.names",
             code="missing_row_names",
         )
-    if row_names.type is RType.STRING:
+    value_type, values = _vector_values(
+        row_names, object_path=f"{object_path}/row.names"
+    )
+    if value_type is RType.STRING and isinstance(values, _STRING_VALUE_TYPES):
         result = SeuratStringVector(
-            _string_values(
-                row_names,
-                object_path=f"{object_path}/row.names",
-            ),
+            values,
             document,
             object_path=f"{object_path}/row.names",
         )
@@ -1597,16 +1973,12 @@ def _frame_row_ids(
             )
         return result
     if (
-        row_names.type is RType.INTEGER
+        value_type is RType.INTEGER
         and compact_ids is not None
-        and isinstance(row_names.value, LazyAtomicVector)
-        and len(row_names.value) == 2
+        and isinstance(values, LazyAtomicVector | _CompactSequence)
+        and len(values) == 2
     ):
-        compact = _read_integer_vector(
-            row_names,
-            object_path=f"{object_path}/row.names",
-            expected_length=2,
-        )
+        compact = values.read_block(0, 2)
         if int(compact[0]) == R_INT_NA and abs(int(compact[1])) == len(compact_ids):
             return compact_ids
     raise _error(
@@ -1822,6 +2194,40 @@ def _read_factor_levels(
     return tuple(result)
 
 
+def _optional_text(node: RNode | None) -> str | None:
+    """Return the text of a vector that holds one string, otherwise None."""
+    if node is None:
+        return None
+    try:
+        return _read_text_scalar(node, object_path="$")
+    except SeuratImportError:
+        return None
+
+
+def _validate_temporal_values(
+    values: "LazyAtomicVector | _CompactSequence",
+    *,
+    bounds: tuple[int, int],
+    class_name: str,
+    object_path: str,
+) -> None:
+    """Reject dates or date-times outside the years 1 to 9999 of ISO 8601 text."""
+    lower, upper = bounds
+    for start in range(0, len(values), _VECTOR_BLOCK_SIZE):
+        block, missing = _temporal_block(
+            values, start, min(len(values), start + _VECTOR_BLOCK_SIZE)
+        )
+        invalid = ~missing & ((block < lower) | (block >= upper + 1))
+        if np.any(invalid):
+            index = int(np.flatnonzero(invalid)[0])
+            raise _error(
+                f"{class_name} column holds a value outside the years 1 to 9999",
+                object_path=f"{object_path}/{start + index}",
+                code="unsupported_metadata_value",
+                value=float(block[index]),
+            )
+
+
 def _metadata_column(
     node: RNode,
     *,
@@ -1831,14 +2237,23 @@ def _metadata_column(
     document: RdsDocument,
     object_path: str,
     maximum_metadata_bytes: int,
-) -> SeuratMetadataColumn:
+) -> tuple[SeuratMetadataColumn, tuple[SeuratNotice, ...]]:
+    """Decode one metadata column and the notices about how it was decoded.
+
+    The class attribute, not only the R storage type, decides the kind: bit64
+    ``integer64`` doubles are 64-bit integers, and ``Date`` and ``POSIXct``
+    values become ISO 8601 text. Other classes keep their storage type with a
+    notice.
+    """
     classes = _class_names(node, object_path=object_path)
     value_type, raw_values = _vector_values(node, object_path=object_path)
     levels: tuple[str, ...] = ()
     level_codes: NDArray[np.int64] | None = None
     level_count = 0
     ordered = "ordered" in classes
-    values: _AtomicValues | _StringValues
+    missing_code = R_INT_NA
+    notices: list[SeuratNotice] = []
+    values: _AtomicValues | _Integer64Values | _StringValues
     if "factor" in classes:
         if value_type is not RType.INTEGER or not isinstance(
             raw_values, LazyAtomicVector | _CompactSequence
@@ -1872,6 +2287,52 @@ def _metadata_column(
             level_codes[1:][present] = np.arange(1, len(levels) + 1)
         kind = "factor"
         values = raw_values
+    elif "integer64" in classes:
+        if value_type is not RType.REAL or not isinstance(raw_values, LazyAtomicVector):
+            raise _error(
+                "integer64 column must store its values in doubles",
+                object_path=object_path,
+                code="invalid_integer64",
+                rType=value_type.name,
+            )
+        kind = "integer"
+        values = _Integer64Values(raw_values)
+        missing_code = _INTEGER64_NA
+    elif "Date" in classes or "POSIXct" in classes:
+        class_name = "Date" if "Date" in classes else "POSIXct"
+        if value_type not in {RType.INTEGER, RType.REAL} or not isinstance(
+            raw_values, LazyAtomicVector | _CompactSequence
+        ):
+            raise _error(
+                f"{class_name} column must store numbers",
+                object_path=object_path,
+                code="unsupported_metadata_type",
+                rType=value_type.name,
+                classNames=classes,
+            )
+        _validate_temporal_values(
+            raw_values,
+            bounds=_DATE_DAYS if class_name == "Date" else _DATETIME_SECONDS,
+            class_name=class_name,
+            object_path=object_path,
+        )
+        kind = "character"
+        values = (
+            _DateStrings(raw_values)
+            if class_name == "Date"
+            else _DateTimeStrings(raw_values)
+        )
+        notices.append(
+            SeuratNotice(
+                code="converted_temporal_metadata",
+                message=(
+                    f"{class_name} metadata column {name!r} is imported as ISO "
+                    "8601 text" + ("" if class_name == "Date" else " in UTC")
+                ),
+                objectPath=object_path,
+                context={"className": class_name},
+            )
+        )
     elif value_type is RType.LOGICAL and isinstance(raw_values, LazyAtomicVector):
         kind = "logical"
         values = raw_values
@@ -1885,11 +2346,22 @@ def _metadata_column(
     ):
         kind = "real"
         values = raw_values
-    elif value_type is RType.STRING and isinstance(
-        raw_values, LazyStringVector | _DeferredIntegerStrings
-    ):
+    elif value_type is RType.STRING and isinstance(raw_values, _STRING_VALUE_TYPES):
         kind = "character"
         values = raw_values
+        if isinstance(raw_values, _DeferredRealStrings):
+            notices.append(
+                SeuratNotice(
+                    code="formatted_deferred_strings",
+                    message=(
+                        f"metadata column {name!r} holds as.character() of "
+                        "doubles, which R stores as the numbers; they are "
+                        "formatted with 15 significant digits, as R does"
+                    ),
+                    objectPath=object_path,
+                    context={},
+                )
+            )
     else:
         raise _error(
             f"metadata column uses unsupported R type {value_type.name}",
@@ -1913,7 +2385,34 @@ def _metadata_column(
             level_count=level_count,
             object_path=object_path,
         )
-    return SeuratMetadataColumn(
+    # Factors, integer64, and dates are decoded by their class; any other
+    # class is reported when its values import as their storage type.
+    unrecognized = (
+        ()
+        if _INTERPRETED_CLASSES.intersection(classes)
+        else tuple(
+            class_name
+            for class_name in classes
+            if class_name not in _PLAIN_COLUMN_CLASSES
+        )
+    )
+    if unrecognized:
+        context: dict[str, Any] = {"classNames": classes}
+        units = _optional_text(get_attribute(node, "units"))
+        if units is not None:
+            context["units"] = units
+        notices.append(
+            SeuratNotice(
+                code="classed_metadata_column",
+                message=(
+                    f"metadata column {name!r} of class {', '.join(unrecognized)} "
+                    f"is imported as its R storage type ({kind})"
+                ),
+                objectPath=object_path,
+                context=context,
+            )
+        )
+    column = SeuratMetadataColumn(
         name=name,
         kind=kind,
         values=values,
@@ -1924,6 +2423,61 @@ def _metadata_column(
         level_codes=level_codes,
         ordered=ordered,
         object_path=object_path,
+        missing_code=missing_code,
+    )
+    return column, tuple(notices)
+
+
+@dataclass(frozen=True, slots=True)
+class _ColumnSelection:
+    """Metadata columns that a caller included, or excluded."""
+
+    include: tuple[str, ...] | None = None
+    exclude: tuple[str, ...] = ()
+
+    def selects(self, name: str) -> bool:
+        if self.include is not None:
+            return name in self.include
+        return name not in self.exclude
+
+
+def _column_selection(value: Any, *, argument: str) -> _ColumnSelection | None:
+    """Validate a column selection: names to include, or a mapping of one key."""
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        if len(value) != 1 or not set(value) <= {"include", "exclude"}:
+            raise ValueError(
+                f"{argument} mapping must have exactly one key, 'include' or 'exclude'"
+            )
+        ((key, names),) = value.items()
+        selected = _selection_names(names, kind=argument)
+        if key == "include":
+            return _ColumnSelection(include=selected)
+        return _ColumnSelection(exclude=selected)
+    return _ColumnSelection(include=_selection_names(value, kind=argument))
+
+
+def _selection_names(requested: Any, *, kind: str) -> tuple[str, ...]:
+    """Return a sequence of distinct names; a lone string is not a sequence."""
+    if isinstance(requested, str | bytes):
+        raise TypeError(f"{kind} selection must be a sequence of names")
+    result = tuple(str(value) for value in requested)
+    if len(set(result)) != len(result):
+        raise ValueError(f"{kind} selection contains duplicate names")
+    return result
+
+
+def _skipped_column_notice(
+    label: str,
+    name: str | None,
+    error: SeuratImportError,
+) -> SeuratNotice:
+    return SeuratNotice(
+        code="skipped_metadata_column",
+        message=f"{label} metadata column {name!r} is not imported: {error.message}",
+        objectPath=error.objectPath,
+        context={"column": name, "reason": error.code, "details": dict(error.context)},
     )
 
 
@@ -1936,7 +2490,14 @@ def _data_frame(
     allow_compact: bool,
     scratch_dir: str | os.PathLike[str] | None,
     maximum_index_bytes: int,
+    label: str = "feature",
+    selection: _ColumnSelection | None = None,
 ) -> SeuratMetadata:
+    """Decode a metadata data.frame, each column on its own.
+
+    A column that cannot be decoded is left out with a notice, unless
+    ``selection`` includes it by name, which raises its error.
+    """
     classes = _class_names(node, object_path=object_path)
     if "data.frame" not in classes:
         raise _error(
@@ -1952,6 +2513,16 @@ def _data_frame(
             code="invalid_data_frame",
             rType=node.type.name,
         )
+    row_names = get_attribute(node, "row.names")
+    if (
+        not node.value
+        and row_names is not None
+        and isinstance(row_names.value, LazyAtomicVector | LazyStringVector)
+        and len(row_names.value) == 0
+    ):
+        # data.frame(), the prototype that an assay holds without feature
+        # metadata, has neither columns nor rows.
+        return SeuratMetadata(rowIds=target_ids, columns=(), objectPath=object_path)
     source_ids = _frame_row_ids(
         node,
         document=document,
@@ -1966,27 +2537,124 @@ def _data_frame(
         scratch_dir=scratch_dir,
         maximum_bytes=maximum_index_bytes,
     )
-    named_columns = _named_nodes(node, object_path=object_path)
-    columns = tuple(
-        _metadata_column(
-            column,
-            name=name,
-            length=len(target_ids),
-            alignment=index,
-            document=document,
-            object_path=f"{object_path}/{name}",
-            maximum_metadata_bytes=maximum_index_bytes,
+    raw_names, column_nodes = _named_entries(node, object_path=object_path)
+    if selection is not None:
+        requested = (
+            selection.include if selection.include is not None else selection.exclude
         )
-        for name, column in named_columns
-    )
+        unknown = tuple(name for name in requested if name not in raw_names)
+        if unknown:
+            raise ValueError(
+                f"{label} metadata selection names columns that {object_path} "
+                f"does not hold: {', '.join(map(repr, unknown))}"
+            )
+    columns: list[SeuratMetadataColumn] = []
+    notices: list[SeuratNotice] = []
+    skipped: dict[str, SeuratImportError] = {}
+    seen: set[str] = set()
+    for position, (raw_name, column_node) in enumerate(
+        zip(raw_names, column_nodes, strict=True)
+    ):
+        name_path = f"{object_path}/names/{position}"
+        try:
+            name = _as_text(raw_name, object_path=name_path)
+        except SeuratImportError as error:
+            if selection is None or selection.include is None:
+                notices.append(_skipped_column_notice(label, None, error))
+            continue
+        if selection is not None and not selection.selects(name):
+            continue
+        if name in seen:
+            # R reads the first of the columns that share a name.
+            notices.append(
+                _skipped_column_notice(
+                    label,
+                    name,
+                    _error(
+                        f"identifier {name!r} is duplicated",
+                        object_path=name_path,
+                        code="duplicate_id",
+                        id=name,
+                    ),
+                )
+            )
+            continue
+        seen.add(name)
+        try:
+            column, column_notices = _metadata_column(
+                column_node,
+                name=name,
+                length=len(target_ids),
+                alignment=index,
+                document=document,
+                object_path=f"{object_path}/{name}",
+                maximum_metadata_bytes=maximum_index_bytes,
+            )
+        except SeuratImportError as error:
+            if selection is not None and selection.include is not None:
+                raise
+            skipped[name] = error
+            notices.append(_skipped_column_notice(label, name, error))
+            continue
+        columns.append(column)
+        notices.extend(column_notices)
     return SeuratMetadata(
         rowIds=target_ids,
-        columns=columns,
+        columns=tuple(columns),
         objectPath=object_path,
+        notices=tuple(notices),
+        skippedColumns=skipped,
     )
 
 
 class SeuratReader:
+    """Open a serialized Seurat object.
+
+    Args:
+        source: Path, bytes, or seekable binary stream of an ``.rds`` file.
+        limits: Parser and scratch-space limits.
+        temp_dir: Directory for scratch files. None uses the system
+            temporary directory.
+        assays: Assays to read. None selects every assay, and
+            ``SeuratToZarr`` then skips, with a notice, those that cannot
+            be imported; named assays must all be importable.
+        assay_layers: Raw count layers to read, by assay.
+        reductions: Reductions to read. None selects every reduction, and
+            ``SeuratToZarr`` then skips, with a notice, those that cannot
+            be imported; named reductions must all be importable.
+        sidecar_root: Directory that sidecar files resolve inside.
+        sidecar_path_remaps: Prefixes that replace absolute sidecar paths.
+        matrix_limits: Memory limits of matrix sources and of metadata
+            indexes (``maxMetadataBytes``).
+        cell_metadata: Cell metadata columns to read. None reads every
+            column that can be decoded and leaves out the others with a
+            ``skipped_metadata_column`` notice. A sequence of names reads
+            exactly those columns, in the table's order, and raises the
+            error of one that cannot be decoded; ``{"exclude": names}``
+            reads every decodable column but those, and ``{"include":
+            names}`` equals the sequence. Unknown names raise
+            ``ValueError``.
+        reduction_roles: Import role of a reduction, by name: ``"umap"`` or
+            ``"tsne"`` makes it a display embedding and ``"coordinates"``
+            graph coordinates. A reduction that is not mapped is a display
+            embedding when it has two or three columns and its DimReduc
+            key names UMAP or t-SNE (such as ``UMAP_``, ``wnnUMAP_``,
+            ``rnaUMAP_``, or ``tSNE_``) or its name is ``umap``, ``tsne``,
+            or ``t-sne``; other reductions are graph coordinates.
+
+    A reduction needs the assay that it was computed on (``assay.used``)
+    only for its feature loadings. When that assay is not selected or
+    cannot be imported, the reduction keeps its cell coordinates and drops
+    its loadings, with a notice. Cell metadata columns decode one at a
+    time, so one that cannot be decoded, such as a list column, leaves the
+    others readable.
+
+    Sidecar files such as BPCells directories and HDF5 seeds resolve inside
+    ``sidecar_root``, which defaults to the directory of a path ``source``.
+    A reader opened from a stream refuses sidecar-backed layers unless
+    ``sidecar_root`` is given.
+    """
+
     def __init__(
         self,
         source: Any,
@@ -2000,14 +2668,13 @@ class SeuratReader:
         sidecar_path_remaps: Mapping[str | os.PathLike[str], str | os.PathLike[str]]
         | None = None,
         matrix_limits: SourceLimits = DEFAULT_LIMITS,
+        cell_metadata: Sequence[str] | Mapping[str, Sequence[str]] | None = None,
+        reduction_roles: Mapping[str, ReductionRole] | None = None,
     ) -> None:
-        """Open a serialized Seurat object.
-
-        Sidecar files such as BPCells directories and HDF5 seeds resolve inside
-        ``sidecar_root``, which defaults to the directory of a path ``source``.
-        A reader opened from a stream refuses sidecar-backed layers unless
-        ``sidecar_root`` is given.
-        """
+        self._cellMetadataSelection = _column_selection(
+            cell_metadata, argument="cell_metadata"
+        )
+        self._reductionRoles = self._role_overrides(reduction_roles)
         self._sidecarPathRemaps = sidecar_path_remaps
         self._matrixLimits = matrix_limits
         self._scratchDir = temp_dir
@@ -2382,6 +3049,14 @@ class SeuratReader:
         self._reductionNodes = dict(
             _named_nodes(reduction_list, object_path="reductions")
         )
+        unknown_roles = tuple(
+            name for name in self._reductionRoles if name not in self._reductionNodes
+        )
+        if unknown_roles:
+            raise ValueError(
+                "reduction_roles names reductions that the object does not hold: "
+                + ", ".join(map(repr, unknown_roles))
+            )
         self._load_save_seurat_cache(root)
         active_node = _require_slot(root, "active.assay", object_path="")
         self.activeAssay = _read_text_scalar(
@@ -2427,6 +3102,8 @@ class SeuratReader:
             allow_compact=False,
             scratch_dir=self._scratchDir,
             maximum_index_bytes=self._maximumIndexBytes,
+            label="cell",
+            selection=self._cellMetadataSelection,
         )
 
         self._activeIdentity: SeuratMetadataColumn
@@ -2450,6 +3127,13 @@ class SeuratReader:
             available=tuple(self._reductionNodes),
             kind="reduction",
         )
+        # None records that the caller selected every assay or reduction.
+        self.requestedAssays: tuple[str, ...] | None = (
+            None if assays is None else self._selectedAssays
+        )
+        self.requestedReductions: tuple[str, ...] | None = (
+            None if reductions is None else self._selectedReductions
+        )
         assay_inspections = tuple(
             self._inspect_assay(name) for name in self._selectedAssays
         )
@@ -2465,6 +3149,7 @@ class SeuratReader:
             objectPath="meta.data",
             dtype="mixed",
             backend=type(self._cellMetadata).__name__,
+            notices=self._cellMetadata.notices,
         )
         active_inspection = (
             SeuratItemInspection(
@@ -2511,11 +3196,27 @@ class SeuratReader:
     ) -> tuple[str, ...]:
         if requested is None:
             return available
-        if isinstance(requested, str | bytes):
-            raise TypeError(f"{kind} selection must be a sequence of names")
-        result = tuple(str(value) for value in requested)
-        if len(set(result)) != len(result):
-            raise ValueError(f"{kind} selection contains duplicate names")
+        return _selection_names(requested, kind=kind)
+
+    @staticmethod
+    def _role_overrides(
+        requested: Mapping[str, ReductionRole] | None,
+    ) -> dict[str, ReductionRole]:
+        if requested is None:
+            return {}
+        if not isinstance(requested, Mapping):
+            raise TypeError(
+                "reduction_roles must map reduction names to 'umap', 'tsne', or "
+                "'coordinates'"
+            )
+        result: dict[str, ReductionRole] = {}
+        for name, role in requested.items():
+            if role not in {"umap", "tsne", "coordinates"}:
+                raise ValueError(
+                    f"reduction role for {name!r} must be 'umap', 'tsne', or "
+                    f"'coordinates', not {role!r}"
+                )
+            result[str(name)] = role
         return result
 
     @staticmethod
@@ -2590,7 +3291,7 @@ class SeuratReader:
             scratch_dir=self._scratchDir,
             maximum_bytes=self._maximumIndexBytes,
         )
-        return _metadata_column(
+        column, _notices = _metadata_column(
             node,
             name="active.ident",
             length=len(self.cellIds),
@@ -2599,6 +3300,7 @@ class SeuratReader:
             object_path="active.ident",
             maximum_metadata_bytes=self._maximumIndexBytes,
         )
+        return column
 
     def _root_notices(self, root: RNode) -> tuple[SeuratNotice, ...]:
         notices: list[SeuratNotice] = []
@@ -2761,6 +3463,8 @@ class SeuratReader:
                     outputBytes=output_bytes,
                 ),
                 notices=reduction.notices,
+                assayUsed=reduction.assayUsed,
+                role=reduction.role,
             )
         except SeuratImportError as error:
             blocked_error = error
@@ -2925,6 +3629,17 @@ class SeuratReader:
             counts_node,
             object_path=f"{object_path}/counts",
         )
+        if source.shape[1] == 0 and len(self.cellIds) > 0:
+            # IntegrateData and data-only assays leave counts as an empty
+            # matrix and keep their values in the normalized data slot.
+            data_node = get_slot(node, "data")
+            raise _error(
+                "legacy assay holds no raw counts: its counts slot is empty",
+                object_path=f"{object_path}/counts",
+                code="counts_layer_missing",
+                dimensions=source.shape,
+                dataSlot=data_node is not None and _node_has_content(data_node),
+            )
         feature_ids, cell_ids = _matrix_dimnames(
             counts_node,
             document=self._document,
@@ -2965,7 +3680,23 @@ class SeuratReader:
             scratch_dir=self._scratchDir,
             maximum_index_bytes=self._maximumIndexBytes,
         )
-        notices: list[SeuratNotice] = []
+        classes = _class_names(node, object_path=object_path)
+        notices: list[SeuratNotice] = list(feature_metadata.notices)
+        umi_assay: str | None = None
+        if "SCTAssay" in classes:
+            umi_assay = _sct_umi_assay(node)
+            notices.append(
+                SeuratNotice(
+                    code="sct_corrected_counts",
+                    message=(
+                        f"counts of SCTAssay {name!r} are SCTransform-corrected "
+                        "counts, not the raw counts"
+                        + ("" if umi_assay is None else f" of assay {umi_assay!r}")
+                    ),
+                    objectPath=f"{object_path}/counts",
+                    context={"umiAssay": umi_assay},
+                )
+            )
         for slot_name, slot in iter_attributes(node):
             if slot_name in {"data", "scale.data"} and _node_has_content(slot):
                 notices.append(
@@ -2979,6 +3710,7 @@ class SeuratReader:
             elif slot_name not in {
                 "class",
                 "counts",
+                "key",
                 "meta.features",
             } and _node_has_content(slot):
                 notices.append(
@@ -2997,7 +3729,7 @@ class SeuratReader:
         )
         return SeuratAssay(
             name=name,
-            sourceClass=_class_names(node, object_path=object_path)[0],
+            sourceClass=classes[0],
             counts=owned,
             featureIds=feature_ids,
             cellIds=self.cellIds,
@@ -3005,6 +3737,7 @@ class SeuratReader:
             featureMetadata=feature_metadata,
             notices=tuple(notices),
             objectPath=object_path,
+            umiAssay=umi_assay,
         )
 
     def _build_logmap(self, node: RNode, *, object_path: str) -> _LogMap:
@@ -3138,6 +3871,8 @@ class SeuratReader:
             _require_slot(node, "features", object_path=object_path),
             object_path=f"{object_path}/features",
         )
+        # The assay's cells may follow any order; stitching places each layer's
+        # cells by their global positions.
         global_positions = _positions_in_target(
             cells.rowIds,
             self.cellIds,
@@ -3145,14 +3880,6 @@ class SeuratReader:
             scratch_dir=self._scratchDir,
             maximum_bytes=self._maximumIndexBytes,
         )
-        if global_positions.size > 1 and np.any(
-            global_positions[1:] <= global_positions[:-1]
-        ):
-            raise _error(
-                "Assay5 cell identifiers do not follow global cell order",
-                object_path=f"{object_path}/cells/Dimnames/0",
-                code="assay_cell_order_conflict",
-            )
         resident_index_bytes = int(global_positions.nbytes) + len(self.cellIds)
         available_count_layers = tuple(
             (layer_name, layer_value)
@@ -3328,7 +4055,7 @@ class SeuratReader:
             scratch_dir=self._scratchDir,
             maximum_index_bytes=self._maximumIndexBytes,
         )
-        notices: list[SeuratNotice] = []
+        notices: list[SeuratNotice] = list(feature_metadata.notices)
         selected_count_names = {layer_name for layer_name, _ in count_layers}
         available_count_names = {layer_name for layer_name, _ in available_count_layers}
         for layer_name, layer_value in count_layers:
@@ -3378,10 +4105,14 @@ class SeuratReader:
                 )
             )
         for slot_name, slot in iter_attributes(node):
+            # ``key`` and ``default`` (how many layers Seurat reads by
+            # default) describe the assay rather than hold its data.
             if slot_name not in {
                 "cells",
                 "class",
+                "default",
                 "features",
+                "key",
                 "layers",
                 "meta.data",
             } and _node_has_content(slot):
@@ -3419,7 +4150,16 @@ class SeuratReader:
         node: RNode,
         *,
         object_path: str,
-    ) -> SeuratRMatrix:
+        unique_rows: Sequence[str] | None = None,
+    ) -> tuple[SeuratRMatrix, bool]:
+        """Read a dense R matrix whose Dimnames hold unique identifiers.
+
+        Row identifiers equal to ``unique_rows``, which are already known to
+        be unique, skip their own uniqueness check.
+
+        Returns:
+            The matrix, and whether its rows equal ``unique_rows``.
+        """
         values = _unwrap_atomic(node, object_path=object_path)
         shape = _matrix_dimensions(node, object_path=object_path)
         rows, columns = _matrix_dimnames(
@@ -3436,19 +4176,21 @@ class SeuratReader:
                 rowIds=len(rows),
                 columnIds=len(columns),
             )
-        _validate_unique_ids(
-            rows,
-            object_path=f"{object_path}/Dimnames/0",
-            scratch_dir=self._scratchDir,
-            maximum_bytes=self._maximumIndexBytes,
-        )
+        rows_match = unique_rows is not None and _identifiers_equal(rows, unique_rows)
+        if not rows_match:
+            _validate_unique_ids(
+                rows,
+                object_path=f"{object_path}/Dimnames/0",
+                scratch_dir=self._scratchDir,
+                maximum_bytes=self._maximumIndexBytes,
+            )
         _validate_unique_ids(
             columns,
             object_path=f"{object_path}/Dimnames/1",
             scratch_dir=self._scratchDir,
             maximum_bytes=self._maximumIndexBytes,
         )
-        return SeuratRMatrix(
+        matrix = SeuratRMatrix(
             values,
             shape,
             row_ids=rows,
@@ -3456,50 +4198,98 @@ class SeuratReader:
             document=self._document,
             object_path=object_path,
         )
+        return matrix, rows_match
 
-    def _assay_for_reduction(self, name: str) -> SeuratAssay:
-        if name in self._assayModels:
-            return self._assayModels[name]
-        if name in self._assayErrors:
-            raise self._assayErrors[name]
-        node = self._assayNodes.get(name)
-        if node is None:
-            raise _error(
-                f"reduction references missing assay {name!r}",
-                object_path="reductions",
-                code="reduction_assay_missing",
-                assay=name,
-            )
-        classes = _class_names(node, object_path=f"assays/{name}")
-        storage_kind = _assay_storage_kind(
-            node,
-            classes,
-            object_path=f"assays/{name}",
-        )
-        if storage_kind == "assay5":
-            assay = self._build_assay5(name, node)
-        else:
-            assay = self._build_legacy_assay(name, node)
-        self._assayModels[name] = assay
-        return assay
+    def _embedding_role(
+        self,
+        name: str,
+        key: str | None,
+        columns: int,
+    ) -> str | None:
+        """Return ``umap`` or ``tsne`` for a display embedding, else None."""
+        override = self._reductionRoles.get(name)
+        if override is not None:
+            return None if override == "coordinates" else override
+        if columns not in {2, 3}:
+            return None
+        # The key, such as UMAP_, wnnUMAP_, or tSNE_, names the method that
+        # computed the reduction; the plain names decide when it names
+        # neither.
+        folded_key = "" if key is None else key.casefold()
+        if "umap" in folded_key:
+            return "umap"
+        if _TSNE_KEY.search(folded_key) is not None:
+            return "tsne"
+        folded_name = name.casefold()
+        if folded_name == "umap":
+            return "umap"
+        if folded_name in {"tsne", "t-sne"}:
+            return "tsne"
+        return None
 
     def _build_reduction(self, name: str, node: RNode) -> SeuratReduction:
         object_path = f"reductions/{name}"
-        embeddings = self._r_matrix(
+        embeddings, in_cell_order = self._r_matrix(
             _require_slot(node, "cell.embeddings", object_path=object_path),
             object_path=f"{object_path}/cell.embeddings",
+            unique_rows=self.cellIds,
         )
-        if not _identifiers_equal(embeddings.rowIds, self.cellIds):
-            raise _error(
-                "reduction cell identifiers do not exactly match global cell order",
+        notices: list[SeuratNotice] = []
+        cell_positions: NDArray[np.int64] | None = None
+        if not in_cell_order:
+            # A reduction of some of the cells, such as one computed on the
+            # sketch of a Seurat v5 sketch workflow, or of the cells in another
+            # order, is aligned to the object's cells by name.
+            cell_positions = _positions_in_target(
+                embeddings.rowIds,
+                self.cellIds,
                 object_path=f"{object_path}/cell.embeddings/Dimnames/0",
-                code="reduction_cell_id_conflict",
+                scratch_dir=self._scratchDir,
+                maximum_bytes=self._maximumIndexBytes,
+                missing_message="reduction cells are absent from the object's cells",
+                missing_code="reduction_cell_id_conflict",
+            )
+            notices.append(
+                SeuratNotice(
+                    code="aligned_reduction_cells",
+                    message=(
+                        f"reduction rows hold {cell_positions.size} of the object's "
+                        f"{len(self.cellIds)} cells, not all in the object's order; "
+                        "they are aligned to the cells by name"
+                    ),
+                    objectPath=f"{object_path}/cell.embeddings/Dimnames/0",
+                    context={
+                        "cells": int(cell_positions.size),
+                        "objectCells": len(self.cellIds),
+                    },
+                )
             )
         assay_used = _read_text_scalar(
             _require_slot(node, "assay.used", object_path=object_path),
             object_path=f"{object_path}/assay.used",
         )
-        assay = self._assay_for_reduction(assay_used)
+        # The coordinates need no assay; only feature loadings need the
+        # features of the assay that the reduction was computed on.
+        assay = self._assayModels.get(assay_used)
+        if assay is None:
+            if assay_used not in self._assayNodes:
+                reason = "missing"
+            elif assay_used not in self._selectedAssays:
+                reason = "not_selected"
+            else:
+                reason = self._assayErrors[assay_used].code
+            notices.append(
+                SeuratNotice(
+                    code="reduction_assay_unavailable",
+                    message=(
+                        f"assay {assay_used!r} of reduction {name!r} is not "
+                        f"imported ({reason}); the reduction imports its cell "
+                        "coordinates without it"
+                    ),
+                    objectPath=f"{object_path}/assay.used",
+                    context={"assayUsed": assay_used, "reason": reason},
+                )
+            )
 
         loadings_node = get_slot(node, "feature.loadings")
         feature_loadings: SeuratRMatrix | None = None
@@ -3519,8 +4309,21 @@ class SeuratReader:
                     object_path=f"{object_path}/feature.loadings",
                 )
             )
-            if loading_shape[0] > 0 and loading_shape[1] > 0:
-                feature_loadings = self._r_matrix(
+            has_loadings = loading_shape[0] > 0 and loading_shape[1] > 0
+            if has_loadings and assay is None:
+                notices.append(
+                    SeuratNotice(
+                        code="dropped_reduction_loadings",
+                        message=(
+                            f"feature loadings of reduction {name!r} are not "
+                            f"imported, because assay {assay_used!r} is not"
+                        ),
+                        objectPath=f"{object_path}/feature.loadings",
+                        context={"assayUsed": assay_used},
+                    )
+                )
+            elif has_loadings and assay is not None:
+                feature_loadings, _ = self._r_matrix(
                     loadings_node,
                     object_path=f"{object_path}/feature.loadings",
                 )
@@ -3568,7 +4371,6 @@ class SeuratReader:
                     object_path=f"{object_path}/stdev",
                 )
 
-        notices: list[SeuratNotice] = []
         for slot_name, slot in iter_attributes(node):
             if slot_name == "feature.loadings.projected" and _node_has_content(slot):
                 notices.append(
@@ -3596,22 +4398,21 @@ class SeuratReader:
                         context={"rType": slot.type.name},
                     )
                 )
-        normalized_name = name.casefold()
-        role = (
-            "displayEmbedding"
-            if normalized_name in {"umap", "tsne", "t-sne"}
-            else "graphCoordinates"
-        )
+        key = _optional_text(get_slot(node, "key"))
+        embedding_role = self._embedding_role(name, key, embeddings.shape[1])
         return SeuratReduction(
             name=name,
             sourceClass=_class_names(node, object_path=object_path)[0],
-            role=role,
+            role="graphCoordinates" if embedding_role is None else "displayEmbedding",
             cellEmbeddings=embeddings,
             featureLoadings=feature_loadings,
             stdev=stdev,
             assayUsed=assay_used,
             notices=tuple(notices),
             objectPath=object_path,
+            embeddingRole=embedding_role,
+            key=key,
+            cellPositions=cell_positions,
         )
 
 
@@ -3627,7 +4428,16 @@ def inspect_seurat(
     sidecar_path_remaps: Mapping[str | os.PathLike[str], str | os.PathLike[str]]
     | None = None,
     matrix_limits: SourceLimits = DEFAULT_LIMITS,
+    cell_metadata: Sequence[str] | Mapping[str, Sequence[str]] | None = None,
+    reduction_roles: Mapping[str, ReductionRole] | None = None,
 ) -> SeuratInspectResult:
+    """Report what a Seurat object holds and what of it can be imported.
+
+    The arguments are those of :class:`~cytearc.SeuratReader`. Each assay and
+    reduction reports whether it is importable, with the diagnostic that
+    blocks it and notices about what it leaves out; ``cellMetadata.notices``
+    lists the cell metadata columns that cannot be decoded.
+    """
     with SeuratReader(
         source,
         limits=limits,
@@ -3638,6 +4448,8 @@ def inspect_seurat(
         sidecar_root=sidecar_root,
         sidecar_path_remaps=sidecar_path_remaps,
         matrix_limits=matrix_limits,
+        cell_metadata=cell_metadata,
+        reduction_roles=reduction_roles,
     ) as reader:
         return reader.inspection
 

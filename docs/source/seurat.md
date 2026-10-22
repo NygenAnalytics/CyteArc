@@ -57,6 +57,34 @@ most tool slots stay behind. Graphs, clusterings, marker searches, and integrate
 rebuilt in CyteArc rather than imported from the RDS object. CyteArc does not write `.rds` or
 `.h5seurat`.
 
+An object imports in part when some of it cannot be imported:
+
+- Without `assays` or `reductions`, the reader selects everything, and `SeuratToZarr` skips an
+  assay or reduction that cannot be imported, with a `skipped_assay` or `skipped_reduction`
+  notice. An assay or reduction that you name must import.
+- A cell metadata column that cannot be decoded, such as a list column, is left out with a
+  `skipped_metadata_column` notice. `cell_metadata=["a", "b"]` reads only those columns and
+  raises for one that cannot be decoded; `cell_metadata={"exclude": ["a"]}` leaves columns out.
+  `Date` and `POSIXct` columns import as ISO 8601 text and bit64 `integer64` columns as 64-bit
+  integers.
+- The `integrated` assay of `IntegrateData` holds normalized data but no raw counts, so it
+  reports `counts_layer_missing`. When the active assay cannot be imported, pass
+  `default_assay`, such as `SeuratToZarr(reader, zarr_loc="pbmc.zarr", default_assay="RNA")`.
+  An active `SCTAssay` holds SCTransform-corrected counts, so the default assay becomes the
+  assay of raw counts that its models were fitted to, usually `RNA`, with an
+  `sct_default_assay` notice; `default_assay="SCT"` keeps it.
+- A reduction keeps its coordinates without the assay it was computed on (`assay.used`); only
+  its feature loadings need that assay. Such a reduction is stored under the default assay. A
+  reduction of some of the cells, as in the Seurat v5 sketch workflow, is aligned to the cells
+  by name and stored over a cell selection of its cells.
+- A reduction becomes a UMAP or t-SNE embedding when it has two or three columns and its key
+  names the method (`UMAP_`, `wnnUMAP_`, `tSNE_`) or it is named `umap`, `tsne`, or `t-sne`;
+  other reductions import as coordinates for graph construction.
+  `reduction_roles={"phate": "umap", "umap.layout": "coordinates"}` sets the role by name.
+
+Inspection reports each reduction's `assayUsed` and `role`, and every notice, before anything is
+written.
+
 Typical next steps are `ds.pipeline.run()`, [](tutorials/scrna_seq.ipynb), or
 [](tutorials/graph_construction.ipynb). For multimodal data, build a neighbour artifact per assay
 before calling `integration.modalities`. When you only need raw matrices, original 10x HDF5 or Matrix

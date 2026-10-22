@@ -115,6 +115,13 @@ This path does not attach to a live R session and does not read or write `.h5seu
 Sidecar matrices such as BPCells directories and HDF5 files resolve inside `sidecar_root`, which
 defaults to the directory of the `.rds` file. A reader opened from a stream needs an explicit
 `sidecar_root` before it reads sidecar-backed layers.
+Without `assays` or `reductions`, `SeuratToZarr` imports every assay and reduction that can be
+imported and reports the others as `skipped_assay` and `skipped_reduction` notices; named ones
+must import. `cell_metadata` includes or excludes cell metadata columns, and a column that cannot
+be decoded is otherwise left out with a `skipped_metadata_column` notice. `default_assay` chooses
+the store's default assay, which an active assay that is not imported, such as an `integrated`
+assay without raw counts (`counts_layer_missing`), requires. `reduction_roles` sets whether a
+reduction imports as a UMAP or t-SNE embedding or as graph coordinates.
 See [Import and export](../tutorials/import-and-export) for the worked contract and [CyteArc for Seurat users](../seurat) for
 workflow mapping.
 

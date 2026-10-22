@@ -880,6 +880,25 @@ CyteArc validates persisted data and public arguments against the following cont
   the first; stores imported from such matrices must be re-imported. HDF5 sidecars in H5AD layout
   need `encoding-type` or `h5sparse_format` and take axis names only from the index named by
   `_index`; other HDF5 sparse groups ignore `sparse_layout` and `layout` attributes.
+- Seurat partial imports: metadata columns decode one at a time, so a column that cannot be
+  decoded (a list or matrix column, an empty or repeated name) is left out with a
+  `skipped_metadata_column` notice, and `SeuratReader(cell_metadata=...)` includes or excludes
+  columns by name; a column named in an include list must decode. `integer64` columns import as
+  64-bit integers and `Date` and `POSIXct` columns as ISO 8601 text; `as.character()` of doubles
+  (a `deferred_string`) is formatted with 15 significant digits as R does. Row names, Dimnames,
+  and list names may be ALTREP. A legacy assay with an empty `counts` slot, such as
+  `IntegrateData`'s `integrated` assay, reports `counts_layer_missing`. With the default
+  selection, `SeuratToZarr` skips assays and reductions that cannot be imported, with
+  `skipped_assay` and `skipped_reduction` notices, and takes `default_assay`, which an active
+  assay that is not imported requires; an active `SCTAssay` gives way to the assay of raw counts
+  that its models were fitted to. A reduction needs its `assay.used` only for loadings: without
+  it, the coordinates import under the default assay without loadings. Reductions of some cells,
+  or of the cells in another order, align by name over a cell selection of their cells, and
+  Assay5 cells may follow any order. A reduction is a display embedding when it has two or three
+  columns and its key names UMAP or t-SNE (or it is named `umap`, `tsne`, or `t-sne`), or as
+  `reduction_roles` maps it. The RDS parser rejects attributes that are not a pairlist with
+  `RdsFormatError`, reads small values through its read-ahead window, scans character vectors in
+  bulk, and hashes compressed input while it decompresses it.
 - Exports: `to_h5ad` writes AnnData 0.2.0 encodings and omits `_index` from `column-order`;
   `to_mtx(compress=True)` adds a feature-type column.
 - Plotting: `dotplot` and `matrixplot` pool only features of one assay that share an explicit

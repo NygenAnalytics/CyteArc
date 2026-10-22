@@ -10,8 +10,8 @@ from ._storage import RandomAccessStorage
 from ._types import RType
 
 
-_STRING_DESCRIPTOR = struct.Struct("<B3xQqI")
-STRING_DESCRIPTOR_BYTES = _STRING_DESCRIPTOR.size
+STRING_DESCRIPTOR = struct.Struct("<B3xQqI")
+STRING_DESCRIPTOR_BYTES = STRING_DESCRIPTOR.size
 STRING_SOURCE_PAYLOAD = 0
 STRING_SOURCE_DECODED = 1
 
@@ -167,7 +167,7 @@ class LazyStringVector(LazyVector, Sequence[str | bytes | None]):
             STRING_DESCRIPTOR_BYTES,
             path=f"{self.path}[{index}]",
         )
-        return _STRING_DESCRIPTOR.unpack(data)
+        return STRING_DESCRIPTOR.unpack(data)
 
     def _decode(self, raw: bytes, gp: int) -> str | bytes:
         return decode_r_string(raw, gp, self.default_encoding)
@@ -182,7 +182,7 @@ class LazyStringVector(LazyVector, Sequence[str | bytes | None]):
         for block_start in range(start, stop, 1024):
             block_stop = min(stop, block_start + 1024)
             descriptors = list(
-                _STRING_DESCRIPTOR.iter_unpack(
+                STRING_DESCRIPTOR.iter_unpack(
                     self._index_storage.read_at(
                         self.descriptor_offset + block_start * STRING_DESCRIPTOR_BYTES,
                         (block_stop - block_start) * STRING_DESCRIPTOR_BYTES,
@@ -274,4 +274,4 @@ def pack_string_descriptor(
     gp: int,
 ) -> bytes:
     """Pack one internal string descriptor."""
-    return _STRING_DESCRIPTOR.pack(source, offset, length, gp)
+    return STRING_DESCRIPTOR.pack(source, offset, length, gp)

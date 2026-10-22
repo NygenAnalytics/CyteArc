@@ -32,6 +32,10 @@ class BinaryStream(Protocol):
     def close(self) -> None: ...
 
 
+class ReadableStream(Protocol):
+    def read(self, size: int = -1) -> bytes: ...
+
+
 RdsInput = str | os.PathLike[str] | BinaryStream | Buffer
 
 
@@ -355,10 +359,45 @@ def _sha256_range(file: BinaryStream, start: int, stop: int) -> str:
     return digest.hexdigest()
 
 
+class _HashingReader:
+    """Read at most ``limit`` bytes of a stream and hash each byte read.
+
+    A decoder reads its compressed input through this reader, so the input is
+    read once for both the digest and the payload.
+    """
+
+    def __init__(self, file: BinaryStream, limit: int) -> None:
+        self._file = file
+        self._remaining = limit
+        self.digest = hashlib.sha256()
+        self.error: Exception | None = None
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0 or size > self._remaining:
+            size = self._remaining
+        try:
+            data = self._file.read(size)
+        except Exception as error:
+            # A failed read of the input is not corrupt input; the caller
+            # raises it unchanged.
+            self.error = error
+            raise
+        self.digest.update(data)
+        self._remaining -= len(data)
+        return data
+
+    def finish(self) -> str:
+        """Hash the bytes that the decoder left unread and return the digest."""
+        while self._remaining:
+            if not self.read(1024 * 1024):
+                raise OSError("Input stream ended while computing its digest")
+        return self.digest.hexdigest()
+
+
 class _XzReader(io.RawIOBase):
     """Decode xz streams with a bounded decoder memory limit."""
 
-    def __init__(self, source: BinaryStream) -> None:
+    def __init__(self, source: ReadableStream) -> None:
         self._source = source
         self._decoder = lzma.LZMADecompressor(memlimit=_XZ_MEMORY_LIMIT)
         self._finished = False
@@ -402,10 +441,10 @@ class _XzReader(io.RawIOBase):
 
 def _decompressor(
     compression: RdsCompression,
-    source: BinaryStream,
+    source: ReadableStream,
 ) -> BinaryStream:
     if compression is RdsCompression.GZIP:
-        return gzip.GzipFile(fileobj=source, mode="rb")
+        return cast(BinaryStream, gzip.GzipFile(fileobj=cast(Any, source), mode="rb"))
     if compression is RdsCompression.BZIP2:
         return cast(BinaryStream, bz2.BZ2File(cast(Any, source), mode="rb"))
     if compression is RdsCompression.XZ:
@@ -436,16 +475,16 @@ def prepare_payload(
         if opened.size is None:
             raise AssertionError("seekable input size was not recorded")
         source_bytes = opened.size - opened.initial_position
-        source_sha256 = _sha256_range(
-            opened.file,
-            opened.initial_position,
-            opened.size,
-        )
         opened.file.seek(opened.initial_position)
         prefix = opened.file.read(8)
         opened.file.seek(opened.initial_position)
         compression = _detect_compression(prefix)
         if compression is RdsCompression.NONE:
+            source_sha256 = _sha256_range(
+                opened.file,
+                opened.initial_position,
+                opened.size,
+            )
             direct = RandomAccessStorage(
                 opened.file,
                 name=opened.name,
@@ -473,17 +512,21 @@ def prepare_payload(
             )
 
         spool = manager.create("payload")
-        reader = _decompressor(compression, opened.file)
+        hashed_input = _HashingReader(opened.file, source_bytes)
+        reader = _decompressor(compression, hashed_input)
         payload_bytes = 0
         payload_digest = hashlib.sha256()
         try:
             while True:
-                # Only the decoder judges the input. Spooling errors, such as
-                # a temp cap, missing scratch space, or a full disk, keep
-                # their own type instead of reading as corrupt input.
+                # Only the decoder judges the input. A failed read of the
+                # input and spooling errors, such as a temp cap, missing
+                # scratch space, or a full disk, keep their own type instead
+                # of reading as corrupt input.
                 try:
                     chunk = reader.read(1024 * 1024)
                 except Exception as error:
+                    if hashed_input.error is not None:
+                        raise hashed_input.error
                     raise RdsFormatError(
                         f"invalid {compression.value} compressed stream",
                         path="$source",
@@ -495,6 +538,7 @@ def prepare_payload(
                 payload_digest.update(chunk)
         finally:
             reader.close()
+        source_sha256 = hashed_input.finish()
         spool.flush()
         spool.seek(0)
         if opened.owned:

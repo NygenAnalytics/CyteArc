@@ -611,43 +611,62 @@ def test_writer_rejects_unselected_active_assay_before_mutating_destination(
 def test_writer_rejects_blocked_reduction_before_mutating_destination(
     tmp_path: Path,
 ) -> None:
+    # The loadings name genes g1 and g2, which ADT does not hold.
     source = _write_partial_fixture(
         tmp_path / "blocked-reduction.rds",
-        reduction_assay="missing",
+        reduction_assay="ADT",
+        reduction_loadings=True,
     )
     destination = _destination_with_sentinel()
 
-    with SeuratReader(source) as reader:
+    with SeuratReader(source, reductions=["pca"]) as reader:
         diagnostic = reader.inspection.reduction("pca").blockingDiagnostic
         assert diagnostic is not None
-        assert diagnostic.code == "reduction_assay_missing"
+        assert diagnostic.code == "loading_feature_id_conflict"
         with pytest.raises(
             ValueError,
-            match=r"pca \(reduction_assay_missing\)",
+            match=r"^Selected reductions cannot be imported: "
+            r"pca \(loading_feature_id_conflict\)$",
         ):
             _new_writer(reader, destination)
 
     _assert_destination_untouched(destination)
 
 
-def test_writer_rejects_reduction_for_unselected_assay_before_mutation(
+def test_reduction_of_an_unselected_assay_imports_under_the_default_assay(
     tmp_path: Path,
 ) -> None:
     source = _write_partial_fixture(
         tmp_path / "unselected-reduction-assay.rds",
         reduction_assay="ADT",
     )
-    destination = _destination_with_sentinel()
+    destination = MemoryStore()
 
     with SeuratReader(source, assays=["RNA"]) as reader:
-        assert reader.inspection.reduction("pca").importable
-        with pytest.raises(
-            ValueError,
-            match="Selected reductions reference assays.*pca",
-        ):
-            _new_writer(reader, destination)
+        inspection = reader.inspection.reduction("pca")
+        assert inspection.importable
+        assert inspection.assayUsed == "ADT"
+        result = _new_writer(reader, destination).dump(batch_size=1)
 
-    _assert_destination_untouched(destination)
+    ref = result.reductionArtifacts["pca"]
+    assert (ref.kind, ref.scope, ref.assay) == ("imported_coordinates", "assay", "RNA")
+    assert result.assayNames == ("RNA",)
+    assert [
+        (notice.code, notice.context)
+        for notice in result.notices
+        if notice.objectPath.startswith("reductions/")
+    ] == [
+        (
+            "reduction_assay_unavailable",
+            {"assayUsed": "ADT", "reason": "not_selected"},
+        )
+    ]
+    root = zarr.open_group(store=destination, mode="r")
+    group = artifact_group(root, ref)
+    np.testing.assert_array_equal(
+        group["data"][:], [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]
+    )
+    assert "loadings" not in group
 
 
 @pytest.mark.parametrize(

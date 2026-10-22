@@ -72,6 +72,8 @@ nitpick_ignore = [
     ("py:class", "cytearc.matrix.ChunkedArray"),
     ("py:class", "cytearc.readers.CrReader"),
     ("py:class", "cytearc.readers.h5ad._H5adAssayFeatures"),
+    ("py:class", "cytearc.readers._rds._types.RdsLimits"),
+    ("py:class", "cytearc.readers._seurat.sources.SourceLimits"),
     ("py:class", "cytearc.storage.profiles.StorageProfile"),
     ("py:obj", "cytearc.storage.profiles.StorageProfile"),
     ("py:class", "cytearc.storage.profiles.ZarrLocation"),
