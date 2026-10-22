@@ -102,6 +102,17 @@ class CellValueSpec:
 #: of them.
 CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
     {
+        "ambient_contamination": CellValueSpec(
+            "values",
+            False,
+            {
+                "observed": False,
+                "expected": False,
+                "p_values": False,
+                "expressing": True,
+                "used": True,
+            },
+        ),
         "cell_calling": CellValueSpec(
             "fdr",
             False,

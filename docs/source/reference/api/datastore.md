@@ -68,6 +68,7 @@ writable open with `min_features_per_cell=k` removes cells with at most `k` feat
 `qc.auto_filter` chooses each metric's MAD policy from what CyteArc wrote and warns when it
 falls back to a column's name; pass `metric_policies` for imported columns such as scanpy's
 `total_counts` or `pct_counts_mt`.
+
 `qc.call_cells` calls cells in an unfiltered droplet matrix with EmptyDrops
 ([Cell calling](../tutorials/cell-calling)). Import every barcode with counts, such as
 `CrH5Reader(path, is_filtered=False, filtering_cutoff=0)`: the barcodes with at most `lower`
@@ -96,6 +97,50 @@ The same computation runs on an in-memory matrix:
 .. autofunction:: cytearc.quality_control.barcode_ranks
 
 .. autofunction:: cytearc.quality_control.good_turing_proportions
+```
+
+#### Ambient RNA
+
+These methods estimate and remove ambient RNA as SoupX describes it (Young and Behjati, 2020,
+GigaScience, [doi:10.1093/gigascience/giaa151](https://doi.org/10.1093/gigascience/giaa151)); see
+[Ambient RNA removal](../tutorials/ambient-rna). `qc.ambient_profile` saves an assay-scoped
+`ambient_profile` artifact: the summed `counts` of each feature over the chosen empty droplets and
+each feature's `fraction` of them. `qc.ambient_contamination` saves an assay-scoped,
+cell-aligned `ambient_contamination` artifact over its cell selection, whose `values` hold each
+cell's contamination fraction and, for an estimate from gene sets, whose `observed`, `expected`,
+`p_values`, `expressing`, and `used` arrays hold one column per gene set, in name order. It
+records the profile, the clustering, and the resolved feature indices of each gene set. An
+estimate of exactly 0, whose cells hold no counts of their gene sets although pure soup would
+give them some, is saved as computed with a `UserWarning` that names it, its cells, the pure-soup
+count, and the one-sided 95% Poisson upper bound of the fraction, about 3 divided by that count:
+a correction with it leaves those cells uncorrected. All three methods read RNA assays of raw UMI
+counts, which CyteArc stores as unsigned integers, and raise `TypeError` for other assays.
+
+`qc.correct_ambient` writes a derived RNA assay, published atomically like the assays of
+`add_grouped_assay`. It keeps the source's features and count dtype, holds integer counts that
+never exceed the source's, and measures only the cells of the estimate: when they are not every
+cell, its membership column `<assay_label>_I` marks them and the other rows hold no counts. Its
+attributes record `ambient_source_assay`, the `ambient_contamination` and `ambient_profile`
+artifacts, `ambient_random_seed`, `ambient_corrected_cells`, and `ambient_removed_counts`. Each
+cell loses its fraction of its total, or every count of its genes that the soup holds when they
+are fewer, rounded down or up, so a cell's removed counts are its `<source>_nCounts` minus its
+`<assay_label>_nCounts`. Each gene's share of that removal is rounded at random, as in the paper,
+by systematic sampling with one draw per cell: a gene is rounded up with a probability equal to
+the fractional part of its share, so summed over cells every gene loses its share of the soup on
+average. A cell's draw depends only on `random_seed` (0 by default) and the cell's row in the
+store, so the counts are reproducible, do not depend on the memory budget, and are the same for
+a cell whichever other cells are corrected with it; another seed gives other counts and another
+assay identity. The correction streams the cells in bounded row bands.
+
+```{eval-rst}
+.. automethod:: cytearc.datastore.namespaces.QcAccessor.ambient_profile
+.. automethod:: cytearc.datastore.namespaces.QcAccessor.load_ambient_profile
+.. automethod:: cytearc.datastore.namespaces.QcAccessor.ambient_contamination
+.. automethod:: cytearc.datastore.namespaces.QcAccessor.load_ambient_contamination
+.. automethod:: cytearc.datastore.namespaces.QcAccessor.correct_ambient
+
+.. autoclass:: cytearc.quality_control.ambient.AmbientContamination
+    :members:
 ```
 
 ### `ds.features`

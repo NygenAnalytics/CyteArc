@@ -256,6 +256,41 @@ mad_hb = ds.qc.auto_filter(["RNA_percentMito"], cell_selection=cells,  # percent
 # A mostly-zero metric (percentHb in PBMC) has zero MAD and is skipped: use a fixed bound.
 ```
 
+### Ambient RNA (soup) removal
+
+SoupX-style correction (Young and Behjati 2020), tutorial
+<https://docs.nygen.io/CyteArc/tutorials/ambient-rna>. It needs the channel's unfiltered droplets:
+import the raw Cell Ranger matrix with `cytearc.CrH5Reader(path, is_filtered=False,
+filtering_cutoff=1)` and open with `min_features_per_cell=-1`. Then a selection of the cells and a
+clustering of them (`pipeline.run(cell_key=..., filtering=False)`).
+
+```python
+profile = ds.qc.ambient_profile(total_counts=(2, 10))  # or ds.qc.ambient_profile(empty_selection)
+soup = ds.qc.load_ambient_profile(profile)  # name, counts, fraction per feature
+gene_sets = {"haemoglobin": ["HBA1", "HBA2", "HBB"],  # keep genes the store has
+             "immunoglobulin": ["IGKC", "IGHM", "IGLC2", "JCHAIN"]}
+rho = ds.qc.ambient_contamination(cells, profile, gene_sets=gene_sets, clusters=clusters)
+est = ds.qc.load_ambient_contamination(rho)  # .estimate, .set_estimates, .evidence
+ds.qc.correct_ambient(rho, assay_label="RNA_soupx", random_seed=0)  # new RNA assay of integer counts
+```
+
+- `total_counts` must sit below the cells on the barcode-rank curve; the paper uses 2 to 10.
+- Gene sets must be absent from some clusters and abundant in the soup. A cluster holding one
+  expressing cell is left out of that set; `level="cluster"` raises for a cluster that expresses
+  every set. Without `clusters=`, weakly expressing cells inflate the estimate.
+- A known rate goes in `fraction=` instead of `gene_sets=`.
+- An estimate of exactly 0 (global, gene set, or cluster) warns: its cells hold no counts of their
+  gene sets although pure soup would give some, so the fraction is only bounded, below about
+  3 / expected. Correcting with it leaves those cells uncorrected; check the gene sets and profile.
+- Each gene's removal is rounded at random as in the paper (systematic sampling, one draw per
+  cell from `random_seed`): every gene, even a rare soup gene, loses its share of the soup on
+  average, and each cell loses its share rounded down or up. A seed reproduces the counts; the
+  assay records it as `ambient_random_seed`.
+- The corrected assay measures only the estimated cells (`RNA_soupx_I`): pass
+  `assay="RNA_soupx"` or `from_assay=` with a selection of those cells.
+- One profile and estimate per channel. Not implemented: SoupX's automatic estimate,
+  cluster-aggregated correction, DecontX. CellBender output imports with `CrH5Reader`.
+
 ### Doublet scores
 
 The pipeline scores doublets by default (it needs a graph and a clustering), as Scrublet does:
@@ -303,7 +338,9 @@ called_singlets = ds.select_cells(doublets, value="predicted_doublets", include=
 | `qc.doublets(threshold=)` | `None` (per sample, automatic) | The `samples` attribute shows a `thresholdMethod` of `"otsu"` (no clear valley) or an estimated rate far from the loading's; then set one score, from 0 to 1, for every sample. |
 | `qc.doublets(expected_doublet_rate=)` | `0.05` | The loading predicts another multiplet rate (about 0.8% per 1,000 cells recovered on 10x). |
 | `qc.doublets(heterotypic_fraction=)` | `0.0` | Above 0 forces that share of simulated doublets to pair two clusters; it needs two clusters and biases the score. |
-| `qc.hto_demultiplexing(positive_quantile=)` | `0.99` (Seurat's `positive.quantile`) | Raise (for example `0.999`) when doublet calls exceed the multiplet rate the loading predicts and their second tag sits near background; each quantile is its own `hto_identity` artifact. |
+| `qc.ambient_contamination(max_contamination=, fdr=)` | `1.0`, `0.05` | Keep; they decide which cells express a gene set (Poisson test against pure soup). |
+| `qc.correct_ambient(random_seed=)` | `0` | Keep fixed; change only to check that a result does not depend on the rounding draws. |
+| `qc.hto_demultiplexing(positive_quantile=)` | `0.99` (Seurat's `positive.quantile`) | Raise (for example `0.999`) when doublet calls exceed the multiplet rate the loading predicts and their second tag sits near background; each quantile is its own `hto_identity` artifact. A singlet takes its one positive tag; `max_id`, `second_id` and `margin` hold the CLR diagnostics (`ds.artifacts.load_values(ref, value="margin")`). |
 
 ## Check before moving on
 

@@ -198,12 +198,17 @@ trajectory
 mapping
 mapping_reference
 quality_control
+ambient
 cell_calling
 features
 integration_metrics
 presentation
 regulons
 ```
+
+`ambient` binds the ambient RNA methods of `ds.qc`: it streams counts, persists soup profiles and
+contamination estimates, and writes corrected assays, while `quality_control/ambient.py` owns the
+computation, after SoupX (Young and Behjati, 2020).
 
 Shared helpers under the same package include `enrichment_store`, `paris_persistence`, and `statistical_store`, which owns the layout, reuse check, writer, and reader of stored statistical-test results.
 Operation mixins have no runtime inheritance from datastore facades, no `__init__`, and no runtime imports of sibling operation mixins.
@@ -357,6 +362,19 @@ CyteArc validates persisted data and public arguments against the following cont
   Counts written by `create_zarr_count_assay` carry `complete=False` until they are finalized. A
   pending group left by a hard kill, an interruption, or a failed publication write blocks its name
   in every workspace, and repack refuses it, until `DataStore.discard_interrupted_assay` removes it.
+- Ambient RNA results are artifacts and a derived assay. `qc.ambient_profile` writes an
+  assay-scoped `ambient_profile` artifact (operation `estimate_ambient_profile`) of the summed
+  `counts` and the `fraction` of each feature over its empty droplets, which records the dataset
+  fingerprint and either the `empty_droplets` selection or the `total_counts` range.
+  `qc.ambient_contamination` writes a cell-aligned `ambient_contamination` artifact (operation
+  `estimate_ambient_contamination`) whose `values` are each cell's contamination fraction, with
+  per-gene-set evidence arrays and the global, gene-set, and cluster estimates as attributes.
+  `qc.correct_ambient` publishes a derived RNA assay with `countsT` through the derived-assay
+  transaction, which can now write a membership mask: the assay measures only the estimated cells,
+  and its attributes record the source assay, both artifacts, and the `random_seed` of its
+  rounding. Each gene's removal is rounded at random by systematic sampling, with one draw per cell
+  keyed by the seed and the cell's row in the store, so the counts do not depend on the row bands
+  and another seed gives another assay identity. Nothing earlier changes.
 - Mounted targets resolve their source's artifacts read only. A mount lists, loads, traces, and
   reuses the complete artifacts of its identity-checked source after its own, so a recipe that matches saved
   provenance reuses the source's results instead of recomputing them, and labels and embeddings

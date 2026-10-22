@@ -3,6 +3,7 @@ from functools import wraps
 from types import FunctionType
 from typing import Any, Concatenate, cast
 
+from ._operations.ambient import _AmbientOperationsMixin
 from ._operations.cell_calling import _CellCallingOperationsMixin
 from ._operations.clustering import _ClusteringOperationsMixin
 from ._operations.embeddings import _EmbeddingOperationsMixin
@@ -167,6 +168,13 @@ class MarkersAccessor(_Accessor):
 class QcAccessor(_Accessor):
     __slots__ = ()
 
+    ambient_profile = _bind(_AmbientOperationsMixin._qc_ambient_profile)
+    load_ambient_profile = _bind(_AmbientOperationsMixin._qc_load_ambient_profile)
+    ambient_contamination = _bind(_AmbientOperationsMixin._qc_ambient_contamination)
+    load_ambient_contamination = _bind(
+        _AmbientOperationsMixin._qc_load_ambient_contamination
+    )
+    correct_ambient = _bind(_AmbientOperationsMixin._qc_correct_ambient)
     filter = _bind(_QualityControlOperationsMixin._qc_filter)
     auto_filter = _bind(_QualityControlOperationsMixin._qc_auto_filter)
     feature_percentage = _bind(_QualityControlOperationsMixin._qc_feature_percentage)

@@ -9,6 +9,7 @@ from ..storage.profiles import StorageProfile, ZarrLocation
 from ..storage.refs import ArtifactRef
 from ..storage.stores import create_matrix_source
 from ..storage.validation_scope import scope_public_methods
+from ._operations.ambient import _AmbientOperationsMixin
 from ._operations.cell_calling import _CellCallingOperationsMixin
 from ._operations.features import _FeatureOperationsMixin
 from ._operations.integration_metrics import _IntegrationMetricsOperationsMixin
@@ -189,6 +190,7 @@ def _check_forwarded_options(
 class DataStore(
     _CellCallingOperationsMixin,
     _QualityControlOperationsMixin,
+    _AmbientOperationsMixin,
     _FeatureOperationsMixin,
     _TrajectoryFeatureOperationsMixin,
     _IntegrationMetricsOperationsMixin,
