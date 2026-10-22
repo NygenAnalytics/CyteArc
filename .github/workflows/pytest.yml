@@ -92,9 +92,10 @@ jobs:
         ref: ${{ github.sha }}
         fetch-depth: 0
     - name: Install system build dependencies
+      # Python 3.14 has h5py and sgtsnepi wheels; only hnswlib compiles.
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential pkg-config libhdf5-dev libfftw3-dev libmetis-dev
+        sudo apt-get install -y build-essential
     - name: Install uv
       uses: astral-sh/setup-uv@v9.0.0
       with:
@@ -165,11 +166,17 @@ jobs:
         ref: ${{ github.sha }}
         fetch-depth: 0
     - name: Install system build dependencies
-      # h5py and sgtsnepi publish no Python 3.15 wheels yet, so that row
-      # compiles them against HDF5, FFTW, and METIS.
+      # h5py and sgtsnepi publish no Python 3.15 wheels yet, so only that row
+      # compiles them against HDF5, FFTW, and METIS. The other rows install
+      # their wheels and compile only hnswlib: downloading those headers
+      # took up to 8 minutes on slow mirrors, longer than the tests.
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential pkg-config libhdf5-dev libfftw3-dev libmetis-dev
+        packages=(build-essential)
+        if [ "${{ matrix.python-version }}" = "3.15" ]; then
+          packages+=(pkg-config libhdf5-dev libfftw3-dev libmetis-dev)
+        fi
+        sudo apt-get install -y "${packages[@]}"
     - name: Install uv
       uses: astral-sh/setup-uv@v9.0.0
       with:
