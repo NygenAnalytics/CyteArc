@@ -91,8 +91,11 @@ def test_run_embedding_draws_several_frozen_colors_in_facets_and_subsets(
         ]
         scales = [scale for scale in result.scales if hasattr(scale, "palette")]
         cluster_scale, donor_scale = scales
+        # Each facet draws its cells in the seeded shuffle, each at its rank.
+        rank = np.random.default_rng(0).permutation(len(keep))
         for facet in ("d1", "d2"):
-            drawn = keep & (donor == facet)
+            cells = np.flatnonzero(keep & (donor == facet))
+            drawn = cells[np.argsort(rank[cells], kind="stable")]
             (points,) = result.axes[("clusters", facet)].collections
             np.testing.assert_allclose(points.get_offsets(), coordinates[drawn])
             np.testing.assert_allclose(
@@ -101,7 +104,7 @@ def test_run_embedding_draws_several_frozen_colors_in_facets_and_subsets(
             )
             np.testing.assert_allclose(
                 _facecolors(result, ("donor", facet)),
-                [to_rgba(donor_scale.palette[facet])] * int(drawn.sum()),
+                [to_rgba(donor_scale.palette[facet])] * len(drawn),
             )
         assert result.provenance.n_cells == int(keep.sum())
         extras = result.provenance.extras

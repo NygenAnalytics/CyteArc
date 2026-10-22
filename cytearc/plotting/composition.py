@@ -7,7 +7,12 @@ import pandas as pd
 
 from ..storage.artifacts import ArtifactRef
 from ._contracts import CategoricalScale, PlotProvenance, StudyDesign
-from ._data import _artifact_cell_selection, _fetch_cell_column, _resolve_grouping
+from ._data import (
+    _artifact_cell_selection,
+    _category_universe,
+    _fetch_cell_column,
+    _resolve_grouping,
+)
 from ._deps import require_matplotlib
 from ._display import resolve_categorical_scale
 from ._figure import (
@@ -23,6 +28,7 @@ from ._style import (
     capped_figsize,
     category_label,
     foreground_color,
+    legend_side_rows,
     resolve_category_scale,
     scatter_edgecolor,
     theme_context,
@@ -474,7 +480,25 @@ def composition(
         category_axis_label = "categories"
     if len(cats) == 0:
         raise ValueError(f"No cells selected by cell_key {cell_key!r}")
-    category_scale = resolve_category_scale(cats, categorical_scale)
+    # Default colors range over every label of the category column, so a
+    # category keeps its color whatever cells the plot shows. An artifact's
+    # labels already cover all of its cells.
+    category_scale = resolve_category_scale(
+        cats,
+        categorical_scale,
+        universe=(
+            _category_universe(store, category_by)
+            if category_by is not None
+            and (
+                categorical_scale is None
+                or (
+                    categorical_scale.order is None
+                    and categorical_scale.palette is None
+                )
+            )
+            else None
+        ),
+    )
     missing_mask = pd.isna(cats)
     cats[missing_mask] = _MISSING_CATEGORY
     cat_order: list[Any] = list(category_scale.order or ())
@@ -670,14 +694,20 @@ def composition(
                 luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
                 return "#111111" if luminance > 0.58 else "#ffffff"
 
+            # The first category sits on top, so the stack reads from the top
+            # in the legend's order.
             if sample_by is None and grouping is None:
-                bottom = 0.0
-                for cat in cat_order:
-                    val = float(
+                proportions = [
+                    float(
                         aggregate.loc[aggregate["category"] == cat, "proportion"].iloc[
                             0
                         ]
                     )
+                    for cat in cat_order
+                ]
+                top = float(sum(proportions))
+                for cat, val in zip(cat_order, proportions, strict=True):
+                    bottom = top - val
                     ax.bar(
                         0,
                         val,
@@ -699,17 +729,20 @@ def composition(
                             fontsize=7,
                             clip_on=True,
                         )
-                    bottom += val
+                    top = bottom
                 ax.set_xticks([])
                 ax.set_ylabel("proportion")
             else:
                 assert per_sample is not None and props_mat is not None
                 samples_order = list(props_mat.index)
-                bottoms = np.zeros(len(samples_order))
+                stacked_heights = np.nan_to_num(
+                    props_mat[cat_order].to_numpy(dtype=np.float64), nan=0.0
+                )
+                tops = stacked_heights.sum(axis=1)
                 x = np.arange(len(samples_order)) * (bar_width + bar_gap)
-                for cat in cat_order:
-                    heights = props_mat[cat].to_numpy(dtype=np.float64)
-                    heights = np.nan_to_num(heights, nan=0.0)
+                for column, cat in enumerate(cat_order):
+                    heights = stacked_heights[:, column]
+                    bottoms = tops - heights
                     ax.bar(
                         x,
                         heights,
@@ -734,18 +767,27 @@ def composition(
                                 fontsize=6.5,
                                 clip_on=True,
                             )
-                    bottoms += heights
+                    tops = bottoms
                 ax.set_xticks(x)
                 ax.set_xticklabels(
                     [str(s) for s in samples_order], rotation=45, ha="right"
                 )
                 ax.set_xlabel(sample_axis_label)
                 ax.set_ylabel("proportion")
+            # Stacked proportions fill the axis from zero to one.
+            ax.set_ylim(0.0, 1.0)
             if show_legend:
+                # Each legend column holds the rows that fit beside the bars.
+                rows = legend_side_rows(
+                    fig.get_figheight()
+                    if owns
+                    else ax.get_position().height * fig.get_figheight(),
+                    title=True,
+                )
                 legend_kwargs = {
                     "frameon": False,
                     "title": category_axis_label,
-                    "ncols": max(1, int(np.ceil(len(cat_order) / 20))),
+                    "ncols": max(1, int(np.ceil(len(cat_order) / rows))),
                     "columnspacing": 0.8,
                 }
                 if owns:

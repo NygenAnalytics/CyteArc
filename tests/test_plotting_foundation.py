@@ -666,14 +666,16 @@ def test_embedding_dotplot_matrixplot_on_artifacts(plot_artifacts):
     assert emb.owns_figure
     (ax,) = emb.axes.values()
     (points,) = ax.collections
-    # Unsorted cells keep layout order with their own sizes.
-    np.testing.assert_allclose(points.get_offsets(), data.coordinates)
-    np.testing.assert_allclose(points.get_sizes(), sizes)
+    # Category cells draw in the seeded shuffle, each at its rank, with their
+    # own sizes.
+    drawn = np.argsort(np.random.default_rng(0).permutation(12), kind="stable")
+    np.testing.assert_allclose(points.get_offsets(), data.coordinates[drawn])
+    np.testing.assert_allclose(points.get_sizes(), sizes[drawn])
     scale = emb.scales[1]
     assert scale.order == (1, 2, 10)
     np.testing.assert_allclose(
         _facecolor_rgba(points),
-        [to_rgba(scale.palette[label]) for label in data.labels],
+        [to_rgba(scale.palette[label]) for label in data.labels[drawn]],
     )
     legend = emb.figure.legends[0]
     assert [text.get_text() for text in legend.get_texts()] == ["1", "2", "10"]
@@ -974,10 +976,17 @@ def test_facet_shared_color_limits(synthetic_plot_store):
     assert len({ax.get_xlim() for ax in result.axes.values()}) == 1
     assert len({ax.get_ylim() for ax in result.axes.values()}) == 1
     assert _colorbar_limits(result.figure) == [pytest.approx((0.0, 11.0))]
+    # Each facet draws its cells in the seeded shuffle, each at its rank.
+    rank = np.random.default_rng(0).permutation(12)
+
+    def drawn(cells):
+        positions = np.flatnonzero(cells)
+        return positions[np.argsort(rank[cells], kind="stable")]
+
     for axis, cells in zip(result.axes.values(), (low, ~low), strict=True):
         np.testing.assert_allclose(
             _facecolor_rgba(axis.collections[0]),
-            viridis(Normalize(0.0, 11.0)(score[cells])),
+            viridis(Normalize(0.0, 11.0)(score[drawn(cells)])),
         )
     result.close()
 
@@ -999,7 +1008,7 @@ def test_facet_shared_color_limits(synthetic_plot_store):
     ):
         np.testing.assert_allclose(
             _facecolor_rgba(axis.collections[0]),
-            viridis(Normalize(*limits)(score[cells])),
+            viridis(Normalize(*limits)(score[drawn(cells)])),
         )
     panel_result.close()
 
@@ -1361,11 +1370,13 @@ def test_multi_layout_multi_color_embedding(synthetic_plot_store):
         ("colorbar", "metricA", {"vmin": 1.0, "vmax": 11.0}),
         ("colorbar", "metricB", {"vmin": 20.0, "vmax": 31.0}),
     ]
+    # Metadata colors draw their cells in the seeded shuffle, each at its rank.
+    drawn = np.argsort(np.random.default_rng(0).permutation(12), kind="stable")
     for (layout, _color), axis in result.axes.items():
         offsets = np.asarray(axis.collections[0].get_offsets())
         np.testing.assert_allclose(
             offsets[:, 0],
-            synthetic_plot_store.cells.fetch_all(f"{layout}1"),
+            synthetic_plot_store.cells.fetch_all(f"{layout}1")[drawn],
         )
     result.close()
 

@@ -398,7 +398,9 @@ def test_embedding_categorical_colors_and_scatter_sizes_are_preserved():
     )
 
     collection = result.axes["category"].collections[0]
-    np.testing.assert_array_equal(collection.get_sizes(), sizes)
+    # Cells draw in the seeded shuffle, each at its rank, with their own sizes.
+    drawn = np.argsort(np.random.default_rng(0).permutation(4), kind="stable")
+    np.testing.assert_array_equal(collection.get_sizes(), sizes[drawn])
     assert collection.get_alpha() == pytest.approx(0.4)
     assert collection.get_linewidths() == pytest.approx([0.6])
     assert collection.get_rasterized() is True
@@ -410,7 +412,7 @@ def test_embedding_categorical_colors_and_scatter_sizes_are_preserved():
             matplotlib.colors.to_rgba("#ff0000")[:3],
         ]
     )
-    np.testing.assert_allclose(collection.get_facecolors()[:, :3], expected_rgb)
+    np.testing.assert_allclose(collection.get_facecolors()[:, :3], expected_rgb[drawn])
     resolved = next(
         value for value in result.scales if isinstance(value, splt.CategoricalScale)
     )
@@ -658,8 +660,10 @@ def test_embedding_subset_keeps_normalization_and_clipping_context(
     original = store.RNA.normed(
         cell_idx=np.arange(30), feat_idx=np.asarray([0])
     ).compute()[:, 0]
+    # Clipping takes its quantiles from the three drawn cells only.
+    drawn = original[:3]
     if normalizer == "clipped":
-        original = np.clip(original, *np.percentile(original, [10, 90]))
+        drawn = np.clip(drawn, *np.percentile(drawn, [10, 90]))
     fetched = []
     fetch = module.fetch_normalized_feature_matrix
 
@@ -679,12 +683,16 @@ def test_embedding_subset_keeps_normalization_and_clipping_context(
     )
     try:
         assert len(fetched) == 1
-        np.testing.assert_array_equal(fetched[0][0], np.arange(30))
+        # The default normalizer is cell-local, so only the drawn cells are
+        # read; normalizers fitted over the cells read all of them.
+        np.testing.assert_array_equal(
+            fetched[0][0], np.arange(3) if normalizer == "clipped" else np.arange(30)
+        )
         if normalizer != "clipped":
             np.testing.assert_array_equal(fetched[0][1][:, 0], original)
         assert result.provenance.extras["color_limits"]["RNA0"] == (
-            original[:3].min(),
-            original[:3].max(),
+            drawn.min(),
+            drawn.max(),
         )
     finally:
         result.close()
@@ -717,17 +725,20 @@ def test_embedding_multi_layout_facets_include_requested_empty_panels():
     expected_keys = [(layout, "score", facet) for layout in layouts for facet in facets]
     assert list(result.axes) == expected_keys
     assert result.provenance.extras["n_layouts"] == 2
-    # Facet b holds cells 1 and 3, facet a cells 0 and 2.
-    expected_offsets = {
-        ("first", "score", "b"): [[1.0, 1.0], [3.0, 1.0]],
-        ("first", "score", "a"): [[0.0, 0.0], [2.0, 0.0]],
-        ("second", "score", "b"): [[2.0, 0.0], [0.0, 0.0]],
-        ("second", "score", "a"): [[3.0, 1.0], [1.0, 1.0]],
+    # Facet b holds cells 1 and 3, facet a cells 0 and 2; each panel draws
+    # its cells in the seeded shuffle, each at its rank.
+    rank = np.random.default_rng(0).permutation(4)
+    coordinates = {
+        "first": np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 0.0], [3.0, 1.0]]),
+        "second": np.array([[3.0, 1.0], [2.0, 0.0], [1.0, 1.0], [0.0, 0.0]]),
     }
-    for key, offsets in expected_offsets.items():
-        np.testing.assert_allclose(
-            result.axes[key].collections[0].get_offsets(), offsets
-        )
+    for layout in layouts:
+        for facet, cells in (("b", np.array([1, 3])), ("a", np.array([0, 2]))):
+            drawn = cells[np.argsort(rank[cells], kind="stable")]
+            np.testing.assert_allclose(
+                result.axes[(layout, "score", facet)].collections[0].get_offsets(),
+                coordinates[layout][drawn],
+            )
     for layout in layouts:
         child = result.provenance.extras["layout_provenance"][layout]
         assert child.extras["n_facets"] == 3
@@ -876,14 +887,16 @@ def test_embedding_facets_preserve_sizes_filters_and_target_legend():
     )
 
     assert result.owns_figure is False
-    np.testing.assert_array_equal(
-        target_axes[0].collections[0].get_sizes(),
-        sizes[:4],
-    )
-    np.testing.assert_array_equal(
-        target_axes[1].collections[0].get_sizes(),
-        sizes[4:],
-    )
+    # Each facet draws its cells, with their own sizes, in the seeded shuffle.
+    rank = np.random.default_rng(0).permutation(8)
+    for axis, cells in (
+        (target_axes[0], np.arange(4)),
+        (target_axes[1], np.arange(4, 8)),
+    ):
+        np.testing.assert_array_equal(
+            axis.collections[0].get_sizes(),
+            sizes[cells[np.argsort(rank[cells], kind="stable")]],
+        )
     assert target_axes[0].get_legend() is None
     assert target_axes[1].get_legend() is not None
     assert result.provenance.extras["highlight"]["n_highlighted"] == 4
@@ -943,9 +956,13 @@ def test_embedding_renders_non_linear_continuous_scales():
         show=False,
     )
     points = log.axes["positive"].collections[0]
-    # Doubling values sit evenly on a log scale.
+    # Doubling values sit evenly on a log scale; metadata cells draw in the
+    # seeded shuffle, each at its rank.
+    drawn = np.argsort(np.random.default_rng(0).permutation(4), kind="stable")
     np.testing.assert_allclose(
-        points.get_facecolors(), viridis([0.0, 1 / 3, 2 / 3, 1.0]), atol=1e-6
+        points.get_facecolors(),
+        viridis(np.array([0.0, 1 / 3, 2 / 3, 1.0])[drawn]),
+        atol=1e-6,
     )
     assert log.provenance.extras["color_limits"]["positive"] == (0.25, 2.0)
     log.close()
@@ -960,10 +977,10 @@ def test_embedding_renders_non_linear_continuous_scales():
     points = symlog.axes["signed"].collections[0]
     # The linear region spans 0.1% of the value range.
     norm = SymLogNorm(linthresh=0.005, vmin=-2.0, vmax=3.0)
-    expected = viridis(norm(np.array([-2.0, -0.5, 0.5, 3.0])))
+    expected = viridis(norm(np.array([-2.0, -0.5, 0.5, 3.0])[drawn]))
     assert symlog.provenance.extras["color_limits"]["signed"] == (-2.0, 3.0)
     np.testing.assert_allclose(points.get_facecolors(), expected, atol=1e-6)
-    linear = viridis(np.array([0.0, 0.3, 0.5, 1.0]))
+    linear = viridis(np.array([0.0, 0.3, 0.5, 1.0])[drawn])
     assert not np.allclose(points.get_facecolors(), linear, atol=1e-3)
     symlog.close()
 
@@ -1952,14 +1969,18 @@ def test_composition_borders_labels_and_stored_palette():
     )
 
     points = embedding.axes["category"].collections[0]
+    # Cells draw in the seeded shuffle, each at its rank.
+    drawn = np.argsort(np.random.default_rng(0).permutation(8), kind="stable")
     assert [mcolors.to_hex(color) for color in points.get_facecolors()] == [
-        "#123456" if value == "a" else "#abcdef" for value in "aaababbb"
+        "#123456" if value == "a" else "#abcdef"
+        for value in np.array(list("aaababbb"))[drawn]
     ]
     assert [text.get_text() for text in embedding.figure.legends[0].get_texts()] == [
         "Alpha",
         "Beta",
     ]
-    # Sample s0 is 3/4 a and s1 is 1/4 a; bars stack a then b.
+    # Sample s0 is 3/4 a and s1 is 1/4 a; a sits on top of b, as the legend
+    # lists them.
     bars = composition.axes["composition"].patches
     assert [mcolors.to_hex(bar.get_facecolor()) for bar in bars] == [
         "#123456",
@@ -1968,11 +1989,12 @@ def test_composition_borders_labels_and_stored_palette():
         "#abcdef",
     ]
     assert [bar.get_height() for bar in bars] == pytest.approx([0.75, 0.25, 0.25, 0.75])
+    assert [bar.get_y() for bar in bars] == pytest.approx([0.25, 0.75, 0.0, 0.0])
     assert all(bar.get_linewidth() == pytest.approx(0.8) for bar in bars)
     assert [
         (text.get_text(), text.get_position())
         for text in composition.axes["composition"].texts
-    ] == [("75%", pytest.approx((0.0, 0.375))), ("75%", pytest.approx((0.94, 0.625)))]
+    ] == [("75%", pytest.approx((0.0, 0.625))), ("75%", pytest.approx((0.94, 0.375)))]
     assert [text.get_text() for text in composition.figure.legends[0].get_texts()] == [
         "Alpha",
         "Beta",
@@ -2117,9 +2139,11 @@ def test_recipe_execution_is_headless_and_read_only(imported_plot_store):
     assert frozenset(store.cells.columns) == columns_before
     assert frozenset(store.artifacts.list()) == artifacts_before
     result = execution.outputs[0].result
+    # Metadata colors draw their cells in the seeded shuffle, each at its rank.
+    drawn = np.argsort(np.random.default_rng(0).permutation(16), kind="stable")
     np.testing.assert_allclose(
         result.axes["RNA_nCounts"].collections[0].get_offsets(),
-        np.column_stack((np.arange(16.0), np.arange(16.0) % 4)),
+        np.column_stack((np.arange(16.0), np.arange(16.0) % 4))[drawn],
     )
     assert plt.fignum_exists(result.figure.number)
     result.close()

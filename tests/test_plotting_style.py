@@ -241,8 +241,15 @@ def test_color_limits_share_one_policy():
     assert low < 0.0 < high
     with pytest.raises(ValueError, match="vcenter"):
         resolve_color_limits([1.0, 3.0], splt.ColorScale(vmin=0.5, vcenter=0.0))
+    # A log scale takes its limits from the positive values, as LogNorm masks
+    # the others, and widens a single value by a decade; explicit limits must
+    # still be positive.
+    assert resolve_color_limits([0.0, 3.0], splt.ColorScale(scale="log")) == (
+        3.0,
+        30.0,
+    )
     with pytest.raises(ValueError, match="positive values"):
-        resolve_color_limits([0.0, 3.0], splt.ColorScale(scale="log"))
+        resolve_color_limits([0.0, 3.0], splt.ColorScale(scale="log", vmin=0.0))
     with pytest.raises(ValueError, match="greater than vmin"):
         splt.ColorScale(vmin=4.0, vmax=4.0)
 

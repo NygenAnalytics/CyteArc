@@ -64,6 +64,33 @@ def test_valid_category_mask(bench) -> None:
 
 
 @lru_cache(maxsize=4)
+def _fixed_width_labels(n_cells: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return fixed-width text labels, one in a hundred blank, and the valid mask."""
+    rng = np.random.default_rng(inputs.SEED)
+    labels = GROUP_NAMES.astype(str)[rng.integers(0, len(GROUP_NAMES), n_cells)]
+    blank = rng.random(n_cells) < 0.01
+    labels[blank] = np.array(["", "   "])[rng.integers(0, 2, int(blank.sum()))]
+    return labels, ~blank
+
+
+def test_valid_category_mask_fixed_width(bench) -> None:
+    from cytearc.metadata.selection import valid_category_mask
+
+    def make(n_cells: int):
+        labels, _valid = _fixed_width_labels(n_cells)
+        return lambda: valid_category_mask(labels)
+
+    def check(n_cells: int, mask) -> None:
+        # Blank labels were planted at known cells.
+        _labels, valid = _fixed_width_labels(n_cells)
+        np.testing.assert_array_equal(mask, valid)
+
+    # Text columns read from a store, as distribution plots group by them.
+    ladder = Ladder(sizes=(250_000, 500_000, 1_000_000, 2_000_000), smoke=2_000)
+    bench("statistics.valid_category_mask_fixed_width", make, ladder, check=check)
+
+
+@lru_cache(maxsize=4)
 def _grouped_values(n_cells: int) -> tuple[np.ndarray, np.ndarray]:
     """Return zero-inflated values of one gene and the group label of each cell."""
     rng = np.random.default_rng(inputs.SEED)

@@ -387,7 +387,11 @@ def register_layout_point_size(
 
 
 def refresh_layout_point_sizes(figure: Any) -> None:
-    """Refresh marked scatter artists after figure layout is resolved."""
+    """Refresh marked scatter artists after figure layout is resolved.
+
+    The layout is resolved without rendering, so the cost does not grow with
+    the number of points.
+    """
     marked = [
         (ax, collection, specification)
         for ax in figure.axes
@@ -396,7 +400,7 @@ def refresh_layout_point_sizes(figure: Any) -> None:
     ]
     if not marked:
         return
-    figure.canvas.draw()
+    figure.draw_without_rendering()
     for ax, collection, specification in marked:
         point_size = default_point_size(
             specification.n_points,
@@ -442,10 +446,64 @@ def resolve_legend_loc(n_categories: int, legend_loc: LegendLoc = "auto") -> Leg
     return "right"
 
 
-def legend_side_columns(n_entries: int) -> int:
-    """Columns for a side legend, bounded so wide category sets stay readable."""
-    columns = int(np.ceil(max(int(n_entries), 1) / LEGEND_SIDE_ENTRIES_PER_COLUMN))
+def legend_side_columns(
+    n_entries: int,
+    *,
+    rows: int = LEGEND_SIDE_ENTRIES_PER_COLUMN,
+) -> int:
+    """Columns for a side legend, bounded so wide category sets stay readable.
+
+    ``rows`` is the most entries one column holds.
+    """
+    columns = int(np.ceil(max(int(n_entries), 1) / max(int(rows), 1)))
     return max(1, min(columns, LEGEND_SIDE_MAX_COLUMNS))
+
+
+# Side-legend height in multiples of the legend font size: each entry row,
+# the title, and the legend's own padding. Matplotlib's default spacing gives
+# rows of about 1.6 font sizes with the 5-point legend markers that CyteArc
+# draws, so these bounds slightly overestimate the height.
+_LEGEND_ROW_FONT_SIZES = 1.65
+_LEGEND_TITLE_FONT_SIZES = 1.7
+_LEGEND_PADDING_FONT_SIZES = 0.5
+# Constrained layout keeps this margin, in inches, at the figure's edges.
+_LAYOUT_EDGE_INCHES = 2 * 3.0 / 72.0
+
+
+def _legend_font_points() -> float:
+    from matplotlib.font_manager import FontProperties
+
+    from ._deps import require_matplotlib
+
+    _, mpl = require_matplotlib()
+    return float(
+        FontProperties(size=mpl.rcParams["legend.fontsize"]).get_size_in_points()
+    )
+
+
+def legend_side_height(rows: int, *, title: bool) -> float:
+    """Height in inches of a side legend with ``rows`` entry rows."""
+    fontsize = _legend_font_points()
+    font_sizes = (
+        _LEGEND_PADDING_FONT_SIZES
+        + (_LEGEND_TITLE_FONT_SIZES if title else 0.0)
+        + max(int(rows), 1) * _LEGEND_ROW_FONT_SIZES
+    )
+    return fontsize * font_sizes / 72.0 + _LAYOUT_EDGE_INCHES
+
+
+def legend_side_rows(height: float, *, title: bool) -> int:
+    """Entry rows of a side legend that fit in ``height`` inches.
+
+    The result is at least one row and at most
+    ``LEGEND_SIDE_ENTRIES_PER_COLUMN``, in the active theme's legend font.
+    """
+    fontsize = _legend_font_points()
+    fixed = _LEGEND_PADDING_FONT_SIZES + (_LEGEND_TITLE_FONT_SIZES if title else 0.0)
+    usable = (float(height) - _LAYOUT_EDGE_INCHES) * 72.0 / fontsize - fixed
+    # The tolerance keeps a height from legend_side_height at its row count.
+    rows = int(np.floor(usable / _LEGEND_ROW_FONT_SIZES + 1e-9))
+    return max(1, min(rows, LEGEND_SIDE_ENTRIES_PER_COLUMN))
 
 
 # Matplotlib lowers a legend handle box by _HANDLE_DESCENT * (handleheight -
@@ -602,25 +660,47 @@ def colormap_palette(categories: Sequence[Any], cmap: str) -> dict[Any, str]:
     }
 
 
+def _distinct_categories(values: Sequence[Any] | np.ndarray) -> list[Any]:
+    """Distinct non-missing values in order of first appearance.
+
+    Typed arrays are compared by value directly; anything else, such as a
+    list of tuples, compares as Python objects.
+    """
+    array = (
+        values if isinstance(values, np.ndarray) else np.asarray(values, dtype=object)
+    )
+    if array.dtype.kind not in "biufcUS":
+        array = np.asarray(array, dtype=object)
+    return [
+        value
+        for value in pd.unique(array.ravel()).tolist()
+        if not _is_missing_category(value)
+    ]
+
+
 def resolve_category_scale(
     observed: Sequence[Any] | np.ndarray,
     scale: CategoricalScale | None,
     *,
     context: str = "categorical_scale",
+    universe: Sequence[Any] | np.ndarray | None = None,
+    order: Sequence[Any] | None = None,
 ) -> CategoricalScale:
     """Resolve the displayed order and colors of the observed categories.
 
-    An explicit ``order`` must list every observed category and sets their
-    display order; categories it lists that no plotted cell carries are left
-    out of the display. Generated colors are assigned over the full explicit
-    order, so they stay stable when a plot shows a subset. Without an order,
-    categories sort naturally. Missing values are never categories.
+    An explicit ``scale.order`` must list every observed category and sets
+    their display order; categories it lists that no plotted cell carries are
+    left out of the display. Generated colors are assigned over the full
+    explicit order, so they stay stable when a plot shows a subset. Without an
+    explicit order, generated colors are assigned over the natural order of
+    ``universe``, every value of the plotted column or label artifact, so a
+    plot of some of its cells keeps the colors of a plot of all of them.
+    ``order``, such as requested groups, sets the display order instead and
+    must list every observed category; it never changes colors. A ``palette``
+    gives the colors of the categories it names. Missing values are never
+    categories.
     """
-    present = [
-        value
-        for value in pd.unique(np.asarray(observed, dtype=object).ravel())
-        if not _is_missing_category(value)
-    ]
+    present = _distinct_categories(observed)
     if scale is not None and scale.order is not None:
         full_order = list(scale.order)
         if len(set(full_order)) != len(full_order):
@@ -631,24 +711,48 @@ def resolve_category_scale(
                 f"{context}.order is missing observed values: "
                 + ", ".join(map(str, unlisted[:10]))
             )
-        shown = set(present)
-        order = [value for value in full_order if value in shown]
     else:
-        full_order = sort_categories(present)
-        order = list(full_order)
+        known = set(present)
+        full_order = sort_categories(
+            [
+                *present,
+                *(
+                    value
+                    for value in (
+                        () if universe is None else _distinct_categories(universe)
+                    )
+                    if value not in known
+                ),
+            ]
+        )
+    shown = set(present)
+    if order is not None:
+        unrequested = [value for value in present if value not in set(order)]
+        if unrequested:
+            raise ValueError(
+                "Requested groups are missing observed values: "
+                + ", ".join(map(str, unrequested[:10]))
+            )
+        display = list(dict.fromkeys(value for value in order if value in shown))
+    else:
+        display = [value for value in full_order if value in shown]
+    palette = scale.palette if scale is not None else None
+    explicit_order = scale is not None and scale.order is not None
     colors = categorical_color_map(
-        full_order,
-        palette=scale.palette if scale is not None else None,
+        # A palette needs the colors of the categories an explicit order lists,
+        # or else of those shown; generated colors follow the full order.
+        display if palette is not None and not explicit_order else full_order,
+        palette=palette,
         palette_name=scale.palette_name if scale is not None else "default",
     )
     labels = scale.labels if scale is not None else None
     return CategoricalScale(
-        order=tuple(order),
-        palette={value: colors[value] for value in order},
+        order=tuple(display),
+        palette={value: colors[value] for value in display},
         labels=(
             None
             if labels is None
-            else {value: str(labels.get(value, value)) for value in order}
+            else {value: str(labels.get(value, value)) for value in display}
         ),
         missing_color=scale.missing_color if scale is not None else "#bdbdbd",
         missing_label=scale.missing_label if scale is not None else "NA",
@@ -678,11 +782,15 @@ def resolve_color_limits(values: Any, scale: ColorScale) -> tuple[float, float]:
     pivot widens derived limits so a diverging map works on one-sided values.
     Tied or inverted limits keep the explicit or lower side and extend the
     other side by one unit, so a constant value takes the low end of the map.
+    A log scale takes its limits from the positive values only, as
+    Matplotlib's ``LogNorm`` masks the others, and extends tied limits by a
+    factor of ten; explicit limits must still be positive.
     """
     data = np.asarray(values, dtype=np.float64).ravel()
-    finite = data[np.isfinite(data)]
+    log = scale.scale == "log"
+    finite = data[scalable_values(data, scale)]
     if finite.size == 0:
-        low, high = 0.0, 1.0
+        low, high = (1.0, 10.0) if log else (0.0, 1.0)
     elif scale.quantiles is not None:
         low, high = (float(value) for value in np.quantile(finite, scale.quantiles))
     else:
@@ -703,12 +811,25 @@ def resolve_color_limits(values: Any, scale: ColorScale) -> tuple[float, float]:
             high = max(high, center + margin)
     elif high <= low:
         if scale.vmax is not None and scale.vmin is None:
-            low = high - 1.0
+            low = high / 10.0 if log else high - 1.0
         else:
-            high = low + 1.0
-    if scale.scale == "log" and low <= 0:
+            high = low * 10.0 if log else low + 1.0
+    if log and low <= 0:
         raise ValueError("Log color scale requires positive values")
     return low, high
+
+
+def scalable_values(values: Any, scale: ColorScale) -> np.ndarray:
+    """Mark the values a continuous scale can color.
+
+    Finite values qualify; a log scale also needs them positive. Other values
+    take the scale's missing color.
+    """
+    data = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(data)
+    if scale.scale == "log":
+        finite &= data > 0
+    return finite
 
 
 def continuous_norm(

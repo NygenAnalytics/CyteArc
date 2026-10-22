@@ -363,3 +363,50 @@ def test_dotplot_group_summary(bench) -> None:
         )
 
     bench("plotting.dotplot_group_summary", make, SUMMARY_CELLS, check=check)
+
+
+# distribution's default bound on the values behind each violin's density.
+VIOLIN_DENSITY_POINTS = 20_000
+VIOLIN_CELLS = Ladder(sizes=(250_000, 500_000, 1_000_000, 2_000_000), smoke=2_000)
+
+
+@lru_cache(maxsize=4)
+def _violin_frame(n_cells: int):
+    """Return the display frame of one gene's violins over the clusters."""
+    import pandas as pd
+
+    values, labels = _expression(n_cells)
+    return pd.DataFrame({"group": labels, "value": values[:, 0]})
+
+
+def test_violin_density_sample(bench) -> None:
+    from cytearc.plotting.distribution import _density_subsample
+
+    def make(n_cells: int):
+        frame = _violin_frame(n_cells)
+        return lambda: _density_subsample(
+            frame,
+            columns=["group"],
+            max_points=VIOLIN_DENSITY_POINTS,
+            rng=np.random.default_rng(inputs.SEED),
+        )
+
+    def check(n_cells: int, value) -> None:
+        sample, subsampled = value
+        frame = _violin_frame(n_cells)
+        counts = frame["group"].value_counts()
+        assert subsampled is bool((counts > VIOLIN_DENSITY_POINTS).any())
+        # Every sampled row is a row of the frame, in its original order.
+        assert sample.index.is_monotonic_increasing
+        assert sample.index.isin(frame.index).all()
+        kept = sample.groupby("group")["value"]
+        full = frame.groupby("group")["value"]
+        np.testing.assert_array_equal(
+            kept.size().to_numpy(),
+            np.minimum(full.size().to_numpy(), VIOLIN_DENSITY_POINTS),
+        )
+        # Each violin keeps its range.
+        np.testing.assert_array_equal(kept.min().to_numpy(), full.min().to_numpy())
+        np.testing.assert_array_equal(kept.max().to_numpy(), full.max().to_numpy())
+
+    bench("plotting.violin_density_sample", make, VIOLIN_CELLS, check=check)

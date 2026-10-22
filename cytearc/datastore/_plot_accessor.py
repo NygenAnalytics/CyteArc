@@ -367,7 +367,7 @@ class DataStorePlotAccessor:
         point_edgecolor: str | None = None,
         point_edgewidth: float | None = None,
         point_alpha: float = 1.0,
-        sort_values: bool = False,
+        sort_values: bool | None = None,
         color_scale: "ColorScale | None" = None,
         categorical_scale: "CategoricalScale | None" = None,
         default_color: str = "steelblue",
@@ -386,7 +386,7 @@ class DataStorePlotAccessor:
         frame: "FrameStyle" = "minimal",
         density_overlay: "DensityOverlay | None" = None,
         highlight: "Highlight | None" = None,
-        seed: int | None = None,
+        seed: int | None = 0,
         rasterize_threshold: int = 50_000,
         show: bool = True,
     ) -> "PlotResult":
@@ -629,6 +629,7 @@ class DataStorePlotAccessor:
             Mapping[str, Mapping[Any, Any] | Sequence[Any]] | None
         ) = None,
         annotation_scales: Mapping[str, CategoricalScale] | None = None,
+        categorical_scale: "CategoricalScale | None" = None,
         target: Any | None = None,
         figsize: tuple[float, float] | None = None,
         theme: str = "notebook",
@@ -694,6 +695,7 @@ class DataStorePlotAccessor:
         kind: "DistKind" = "violin",
         bins: int = 40,
         max_points: int | None = 10000,
+        max_density_points: int | None = 20_000,
         point_size: float = 0.8,
         point_alpha: float = 0.28,
         seed: int = 0,
@@ -726,7 +728,8 @@ class DataStorePlotAccessor:
         boxes; see :func:`cytearc.plotting.distribution` for the full
         behaviour. ``max_points`` defaults to ``10000``; explicit ``None``
         disables the point overlay for stacked violins and otherwise uses
-        ``10000``.
+        ``10000``. Each violin's density uses at most ``max_density_points``
+        values.
         """
         return self._forward(PlotResult, "distribution", locals())
 

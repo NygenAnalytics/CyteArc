@@ -154,6 +154,24 @@ def _fetch_cell_column(
     return apply_missing_mask(values, missing, labels=labels)
 
 
+def _category_universe(store: Any, column: str) -> np.ndarray:
+    """Every label a cell-metadata column holds, with masked rows as None.
+
+    Default category colors range over these labels, so a plot of some cells
+    colors each category as a plot of all of them does. Live metadata gives
+    the column's labels over all of its rows, whatever ``cell_key`` a plot
+    uses; a frozen run view gives the labels of the run's cells, the only
+    cells it holds.
+    """
+    cells = store.cells
+    if getattr(cells, "_selection_ref", None) is not None:
+        return np.asarray(cells.fetch(column, key="I"))
+    values = np.asarray(cells.fetch_all(column))
+    mask = metadata_missing_mask(cells, column)
+    missing = None if mask is None else np.asarray(mask[:], dtype=bool)
+    return apply_missing_mask(values, missing, labels=True)
+
+
 def _resolve_grouping(
     store: Any,
     *,
