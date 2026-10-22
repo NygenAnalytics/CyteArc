@@ -243,7 +243,7 @@ any changes you make after seeing the comparison as such.
 | `ChunkNotFoundError` naming `counts` or `countsT` | a partial copy or upload lost a count chunk | restore the store from a complete copy or rebuild it; never set `read_missing_chunks` |
 | Incomplete artifacts left after Ctrl-C or a killed kernel | an interrupted write keeps its slot, marked incomplete | `ds.artifacts.prune_incomplete()` lists them; once no process writes to the store, pass `dry_run=False` |
 | `ValueError` on `ds.pipeline.run(label=...)` | label already completed | new label; reuse makes it cheap |
-| `PermissionError` from a producer | store opened with `zarr_mode="r"` and no matching artifact; feature selections, WAGGR, AUCell, chromVAR, `regulons.grn`, `features.prevalent_peaks`, and cell-cycle scoring refuse even with one | reopen writable |
+| `PermissionError` from a producer | store opened with `zarr_mode="r"` and no matching artifact; WAGGR, AUCell, chromVAR, and `regulons.grn` refuse even with one | reopen writable |
 | `KeyError: 'values'` on a Paris ref | Paris stores `labels` | `ds.artifacts.load(ref)["labels"]` |
 | `ImportError` naming igraph or leidenalg from `clusters.leiden` or a pipeline Leiden stage | `backend="igraph"` or `"leidenalg"` needs GPL packages that CyteArc does not install | use the default `backend="cytearc"`; install the packages yourself (`uv pip install leidenalg`) only to match an external or earlier result |
 | Array length differs from `ds.cells.N` | payload follows the cell selection | align with `run.cells.fetch_all` or the selection mask |

@@ -303,18 +303,25 @@ def test_embedding_graph_flags_reach_the_graph_loader_as_booleans(
         graph,
         initialization,
         n_epochs=5,
-        symmetric_graph=np.True_,
+        symmetric_graph=np.False_,
         nthreads=3,
         invalidate_cache=True,
     )
 
-    assert loads == [(True, False)]
+    assert loads == [(False, False)]
     assert all(type(flag) is bool for flag in loads[0])
     parameters = store.artifacts.inspect(ref).parameters
-    assert parameters["symmetric_graph"] is True
+    assert parameters["symmetric_graph"] is False
     # The omitted flag records False: None loaded the graph as False under a
     # second identity.
     assert parameters["graph_upper_only"] is False
+    # UMAP forms the fuzzy union of the graph itself, so a graph symmetrized
+    # before it would be united twice; a numpy True is refused as True is.
+    with pytest.raises(ValueError, match="would apply that union twice"):
+        store.embeddings.umap(
+            graph, initialization, n_epochs=5, symmetric_graph=np.True_
+        )
+    assert len(loads) == 1
     # A serial layout runs on one thread whatever the request.
     assert store.artifacts.inspect(ref).execution_options["layout_threads"] == 1
     for method, flag in (
@@ -561,12 +568,13 @@ def test_ann_thread_counts_are_execution_options(
     parallel_neighbors = store.graph.neighbors(parallel, k=4)
     serial_neighbors = store.graph.neighbors(serial, k=4)
 
-    # Queries of a parallel index use the querying datastore's threads.
-    assert configured == [2, 1]
+    # Queries of a parallel or a serial index use the querying datastore's
+    # threads, which never change the neighbors.
+    assert configured == [2, 2]
     assert (
         store.artifacts.inspect(parallel_neighbors).execution_options["nthreads"] == 2
     )
-    assert store.artifacts.inspect(serial_neighbors).execution_options["nthreads"] == 1
+    assert store.artifacts.inspect(serial_neighbors).execution_options["nthreads"] == 2
     assert "nthreads" not in store.artifacts.inspect(parallel_neighbors).parameters
 
 

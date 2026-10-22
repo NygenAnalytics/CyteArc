@@ -4,6 +4,7 @@ from typing import Any
 import numpy as np
 from scipy.sparse import csr_matrix, issparse
 
+from ..utils.arguments import integer_argument
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
 from ..utils.numba import enable_dispatcher_cache, restore_numba_threads
@@ -15,6 +16,58 @@ locale.setlocale(locale.LC_NUMERIC, "C")
 # are float32, with a relative resolution of about 1.2e-7, so such a spread
 # reflects rounding rather than density.
 _EQUAL_LOG_RADIUS_SPAN = 1e-6
+# Python objects a layout holds whatever the graph size, such as its settings
+# and the fitted curve parameters, measured below 64 KiB.
+_UMAP_OBJECT_BYTES = 256 * 1024
+
+
+def umap_peak_bytes(
+    n_cells: int,
+    n_entries: int,
+    union_entries: int,
+    *,
+    densmap_edges: int = 0,
+) -> int:
+    """Estimate the bytes ``fit_transform`` holds besides its graph and coordinates.
+
+    The layout takes a COO copy of the graph's rows and forms the fuzzy union
+    of its ``n_entries`` entries through CSR copies, sums, and products that
+    SciPy sizes for the entries of both operands. It then lays out the
+    union's ``union_entries`` edges with their COO arrays and four float64
+    sampling schedules per edge. The coefficients per entry and per cell
+    bound the traced peaks of directed and symmetrized kNN and random graphs.
+
+    densMAP, given the ``densmap_edges`` KNN pairs it reads, also holds their
+    uint32 indices and float32 distances, the symmetric distance matrix of up
+    to twice as many entries, and float64 copies of the union's weights and
+    edge distances while it fits the local radii; building the distance
+    matrix holds int64 and int32 copies of the pairs.
+
+    Args:
+        n_cells: Cells of the graph.
+        n_entries: Entries of the graph that the layout receives.
+        union_entries: Entries of its fuzzy union, at most twice
+            ``n_entries``.
+        densmap_edges: KNN pairs that densMAP reads, or 0 without densMAP.
+
+    Returns:
+        The estimated peak in bytes.
+
+    Raises:
+        TypeError: If an argument is not an integer.
+        ValueError: If an argument is below its minimum.
+    """
+    cells = integer_argument(n_cells, "n_cells", minimum=1)
+    entries = integer_argument(n_entries, "n_entries", minimum=0)
+    union = integer_argument(union_entries, "union_entries", minimum=0)
+    pairs = integer_argument(densmap_edges, "densmap_edges", minimum=0)
+    layout = 24 * entries + 40 * union + 72 * cells
+    if not pairs:
+        return layout + _UMAP_OBJECT_BYTES
+    distances = 8 * pairs + 16 * pairs + 4 * (cells + 1)
+    building = 8 * pairs + 32 * pairs + 12 * (cells + 1)
+    radii = 32 * union + 16 * cells
+    return max(building, layout + distances + radii) + _UMAP_OBJECT_BYTES
 
 
 def densmap_distance_graph(
@@ -222,7 +275,13 @@ def fit_transform(
     nthreads: int,
     verbose: bool,
 ) -> tuple[np.ndarray, float, float]:
-    """Fit UMAP embedding from a fuzzy simplicial set graph."""
+    """Lay out the fuzzy union of a graph of directed membership strengths.
+
+    ``graph`` holds the directed edge weights, such as a connectivity map.
+    This function forms their fuzzy union ``w_ij + w_ji - w_ij * w_ji``
+    itself, so a graph that was already united this way would be united
+    twice, each weight ``w`` becoming ``2w - w**2``.
+    """
     import warnings
 
     from umap.umap_ import find_ab_params

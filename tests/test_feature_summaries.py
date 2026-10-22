@@ -274,7 +274,7 @@ def test_assay_score_features_is_compute_only_on_read_only_store(
     assert dict(writable.zw["RNA/featureData"].attrs) == feature_attrs
 
 
-def test_datastore_cell_cycle_read_only_guard_precedes_planning(
+def test_datastore_cell_cycle_on_a_read_only_store_refuses_before_reading_counts(
     datastore_ephemeral,
 ) -> None:
     writable = datastore_ephemeral
@@ -286,12 +286,19 @@ def test_datastore_cell_cycle_read_only_guard_precedes_planning(
         zarr_mode="r",
     )
     selection = writable.snapshot_cell_selection()
+    summaries = read_only.artifacts.list(kind="feature_summary", from_assay="RNA")
 
+    # Scoring plans first, so the feature summary that the new selection
+    # lacks is refused before the counts are read.
     with pytest.raises(
         PermissionError,
-        match="run_cell_cycle_scoring requires a DataStore opened with zarr_mode='r\\+'",
+        match="^summarize_rna_features requires a DataStore opened with "
+        "zarr_mode='r\\+'$",
     ):
         read_only.scores.cell_cycle(selection)
 
     assert set(writable.RNA.z.group_keys()) == assay_groups
     assert set(writable.cells.columns) == cell_columns
+    assert read_only.artifacts.list(kind="feature_summary", from_assay="RNA") == (
+        summaries
+    )

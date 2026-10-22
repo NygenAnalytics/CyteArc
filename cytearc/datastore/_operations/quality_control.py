@@ -139,8 +139,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         """Create or reuse cell-cycle scores without creating metadata columns.
 
         The arguments are checked first, then the cells against the assay's
-        membership, then that the store is writable, before anything is
-        saved.
+        membership. A read-only store then reuses saved scores and refuses
+        only before it computes new ones.
         """
         from ...assay.normalization import resolve_normalization_params
 
@@ -206,7 +206,6 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         self._require_measured_cells(
             assay.name, cell_selection, operation="run_cell_cycle_scoring"
         )
-        self._require_writable("run_cell_cycle_scoring")
         summary_ref = ensure_feature_summary(
             self.zw,
             assay,
@@ -250,6 +249,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         )
         if planned.reused:
             return planned.ref
+        self._require_writable("run_cell_cycle_scoring")
 
         cell_idx = read_stored_selection_indices(
             self.zw,
@@ -1776,6 +1776,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
 
         Raises:
             UnmeasuredCellsError: If the assay did not measure a selected cell.
+            PermissionError: If the selection or its feature summary must be
+                computed and the store is not opened with ``zarr_mode='r+'``.
+                A read-only store returns a saved selection.
         """
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
@@ -1793,7 +1796,6 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         self._require_measured_cells(
             assay.name, cell_selection, operation="select_prevalent_peaks"
         )
-        self._require_writable("select_prevalent_peaks")
         summary_ref = ensure_feature_summary(
             self.zw,
             assay,
@@ -1819,6 +1821,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             invalidate_cache=invalidate_cache,
         )
         if not planned.reused:
+            self._require_writable("select_prevalent_peaks")
             n_selected = feature_summary_selected_count(self.zw, cell_selection)
             summary = feature_summary_values(
                 self.zw,
@@ -1895,6 +1898,9 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
 
         Raises:
             UnmeasuredCellsError: If the assay did not measure a selected cell.
+            PermissionError: If the scores or their feature summary must be
+                computed and the store is not opened with ``zarr_mode='r+'``.
+                A read-only store returns saved scores.
         """
         if from_assay is None:
             from_assay = self._defaultAssay

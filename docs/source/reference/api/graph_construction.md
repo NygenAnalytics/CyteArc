@@ -73,6 +73,20 @@ supplied, but is not part of connectivity construction.
 `graph.neighbors` reads the coordinate ref named by the ANN artifact. Its optional `coordinates=`
 argument is only an equality check; it cannot redirect an index to different coordinates.
 
+By default `graph.ann_index` builds the hnswlib index with `ann_m=24` links per cell and a build
+candidate list of `ann_efc=200`, on one thread so that the index is reproducible. An `ann_efc`
+below `2 * ann_m` builds an index whose searches can miss every true neighbour of some cells
+between well-separated clusters. The search depth only changes queries: `graph.neighbors` searches
+`max(ann_ef, 2 * k)` candidates by default, where `ann_ef` is the index's recorded smallest depth,
+200 by default, and its own `ann_ef=` argument sets another depth. The neighbors artifact records
+the depth that the query used as its `ann_ef` unless it is `max(ann_ef, k + 1)`, the index's own
+depth as hnswlib applies it; an artifact without `ann_ef` searched that depth. A query of the
+index's depth therefore keeps the identity of earlier ones, and a changed depth computes new
+neighbors from the same index.
+Queries run on the datastore's `nthreads` threads, which never change the neighbors. Each query
+records the percentage of cells that it returned among their own nearest neighbours as
+`self_hit_rate` and warns below 99.5%; cells with identical coordinates also lower it.
+
 ## External coordinates
 
 A latent space computed by another tool, such as scVI's `X_scVI` or a Harmony correction saved

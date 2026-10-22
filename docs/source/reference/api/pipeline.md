@@ -153,7 +153,7 @@ run = ds.pipeline.run(
 | `pca` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.pca` | `dims`, `feat_scaling`, `batch_size` |
 | `harmony` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.harmony` | `batch_columns` (required), `harmony_params` (the keyword options of {py:func}`~cytearc.embeddings.fit_harmony`), `batch_size` |
 | `ann_index` | {py:meth}`~cytearc.datastore.namespaces.GraphAccessor.ann_index` | `ann_metric`, `ann_efc`, `ann_ef`, `ann_m`, `ann_parallel`, `rand_state`, `batch_size` |
-| `neighbors` | {py:meth}`~cytearc.datastore.namespaces.GraphAccessor.neighbors` | `k`, `batch_size` |
+| `neighbors` | {py:meth}`~cytearc.datastore.namespaces.GraphAccessor.neighbors` | `k`, `ann_ef`, `batch_size` |
 | `connectivity` | {py:meth}`~cytearc.datastore.namespaces.GraphAccessor.connectivity` | `local_connectivity`, `bandwidth` |
 | `embedding_initialization` | {py:meth}`~cytearc.datastore.namespaces.EmbeddingsAccessor.initialization` | `n_centroids`, `rand_state`, `batch_size`, `kmeans_sampling`, `kmeans_batch_size` |
 | `umap` | {py:meth}`~cytearc.datastore.namespaces.EmbeddingsAccessor.umap` | `umap_dims`, `spread`, `min_dist`, `n_epochs`, `repulsion_strength`, `initial_alpha`, `negative_sample_rate`, `use_density_map`, `dens_lambda`, `dens_frac`, `dens_var_shift`, `random_seed`, `parallel`, `symmetric_graph`, `graph_upper_only` |
@@ -180,6 +180,10 @@ runs. An existing run record still reopens and reports, because reopening does n
 configuration against the current recipe.
 Membership strength is computed on the saved clustering and appears as `membership_strength`: the
 fraction of each cell's graph neighbors that carry the cell's own cluster label.
+UMAP forms the fuzzy union of the graph itself, so `umap` `symmetric_graph` and
+`graph_upper_only` must stay `False`. `neighbors` `ann_ef` sets the search depth of the neighbour
+query, by default `max(200, 2 * k)` with the default index; the neighbors artifact records a depth
+other than its index's own as its `ann_ef`.
 
 `pca` `dims=0` skips the `pca` stage. The graph is then built on the normalized values of the
 selected features, one coordinate per feature: the ANN index, the neighbors, the embedding
@@ -201,10 +205,10 @@ reused without the packages.
 With `dims=0` the graph has one coordinate per highly variable gene, so the memory and time of the
 ANN index, the neighbour queries, the embedding initialization, and cluster selection scale with
 the HVG count instead of the PCA dimensions. The hnswlib index holds about
-`4 * hvg_count + 8 * ann_m + 130` bytes per cell on x86-64 Linux, about 4.5 GB for 1,000,000 cells
-with 1,000 HVGs and 8.5 GB with 2,000, and the `ann_index` and `neighbors` stages fail before they
-create or load it when it does not fit the memory budget: the run raises a
-`PipelineExecutionError` whose `__cause__` is the `MemoryError`. By default the embedding
+`4 * hvg_count + 8 * ann_m + 130` bytes per cell on x86-64 Linux, about 4.3 GB for 1,000,000 cells
+with 1,000 HVGs and 8.3 GB with 2,000 at the default `ann_m=24`, and the `ann_index` and
+`neighbors` stages fail before they create or load it when it does not fit the memory budget: the
+run raises a `PipelineExecutionError` whose `__cause__` is the `MemoryError`. By default the embedding
 initialization reads the coordinates in their stored row bands, and fits k-means in memory over
 every cell's coordinates, 4 bytes per HVG per cell, when one band holds every cell; set
 `params={"embedding_initialization": {"batch_size": ...}}` below the cell count to select the
@@ -231,7 +235,8 @@ default.
 others: `tsne_dims`, `max_iter`, and `alpha` must be integers of at least 1, `early_iter` an integer
 of at least 0, `lambda_scale` and `box_h` finite positive numbers, and `symmetric_graph` and
 `graph_upper_only` booleans; an omitted setting is checked as its `embeddings.tsne` default. The `umap`
-`symmetric_graph` and `graph_upper_only` settings must be booleans too, checked at the same time;
+`symmetric_graph` and `graph_upper_only` settings must be `False`, and a `leiden` or `tsne`
+`graph_upper_only` set to `True` needs `symmetric_graph=True`, checked at the same time;
 `embeddings.umap` no longer accepts `None` for them. The `harmony` `harmony_params` mapping gets
 the checks of `reduction.harmony` then as well: its keys are the keyword options of
 {py:func}`~cytearc.embeddings.fit_harmony` other than `nthreads`, and an unknown key, a key of an

@@ -103,6 +103,8 @@ def ensure_feature_summary(
     Counts and feature row order are immutable ambient inputs. The only direct
     provenance input is the selected-cell artifact. All computations cover the
     complete physical feature axis and never mount arrays on feature metadata.
+    A read-only ``root`` reuses a saved summary; one that must be computed
+    raises ``PermissionError`` before the counts are read.
     """
     operation = getattr(assay, "_feature_summary_operation", None)
     if log_transform and operation != "summarize_rna_features":
@@ -160,6 +162,12 @@ def ensure_feature_summary(
     )
     if planned.reused:
         return planned.ref
+    # A read-only store refuses before the counts are read, not when the
+    # computed summary is written.
+    if root.read_only:
+        raise PermissionError(
+            f"{operation} requires a DataStore opened with zarr_mode='r+'"
+        )
 
     if log_transform:
         raw_payload = cast("RNAassay", assay)._compute_feature_summary(

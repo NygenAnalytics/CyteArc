@@ -13,6 +13,42 @@ from ..utils.arguments import integer_argument
 type LeidenBackend = Literal["cytearc", "igraph", "leidenalg"]
 
 _IGRAPH_RNG_LOCK = Lock()
+# Bytes per node of the native backend's node arrays besides the row offsets
+# of its graphs: the partition, community totals and sizes, refinement and
+# aggregation records, and the strengths of the level's nodes.
+_LEIDEN_NODE_BYTES = 104
+# Python objects a native run holds whatever the graph size, such as its
+# settings and per-level records, measured below 64 KiB.
+_LEIDEN_OBJECT_BYTES = 256 * 1024
+
+
+def native_leiden_peak_bytes(n_nodes: int, union_entries: int) -> int:
+    """Estimate the bytes the native backend holds besides its input graph.
+
+    The symmetric graph ``A = W + W^T`` stores int32 columns and float64
+    weights for ``union_entries`` entries, and int64 row offsets. While the
+    backend aggregates a level it holds ``A``, the level's graph, and the
+    next aggregate, each at most the size of ``A``, beside per-node arrays.
+    The scratch each worker sizes by the largest degree of a level is not
+    included: it is small on kNN graphs but grows with a hub (see
+    ``_leiden_native``).
+
+    Args:
+        n_nodes: Nodes of the graph.
+        union_entries: Entries of ``W + W^T``, at most twice the entries of
+            ``W``.
+
+    Returns:
+        The estimated peak in bytes.
+
+    Raises:
+        TypeError: If an argument is not an integer.
+        ValueError: If an argument is below its minimum.
+    """
+    nodes = integer_argument(n_nodes, "n_nodes", minimum=1)
+    entries = integer_argument(union_entries, "union_entries", minimum=0)
+    graph_bytes = 12 * entries + 8 * (nodes + 1)
+    return 3 * graph_bytes + _LEIDEN_NODE_BYTES * nodes + _LEIDEN_OBJECT_BYTES
 
 
 def canonical_resolution(value: object) -> float:

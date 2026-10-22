@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from ...graph.arguments import graph_flag
+from ...graph.arguments import graph_flag, graph_load_flags, umap_graph_flags
 from ...graph.distances import validate_distance_provenance
 from ...graph.feature_projection import (
     graph_cell_selection,
@@ -54,6 +54,22 @@ def _check_initial_shape(ini_embed: np.ndarray, n_cells: int, n_comps: int) -> N
         )
 
 
+def _require_initialization_ref(initialization: ArtifactRef) -> None:
+    """Refuse a reference that is not an assay's embedding initialization.
+
+    Only the reference is read, so the check runs before any graph is loaded.
+    """
+    if initialization.kind != "embedding_initialization":
+        raise ValueError(
+            "initialization must be an embedding_initialization ref, not a "
+            f"{initialization.kind!r} ref; build one from the graph's "
+            "coordinates with embeddings.initialization(coordinates), or pass an "
+            "array of initial coordinates"
+        )
+    if initialization.scope != "assay" or initialization.assay is None:
+        raise ValueError("initialization must be an assay-scoped artifact")
+
+
 class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
     def _get_ini_embed(
         self,
@@ -76,10 +92,7 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
         """
         from ...embeddings.initialization import initial_embedding
 
-        if initialization.kind != "embedding_initialization":
-            raise ValueError("initialization must be an embedding_initialization ref")
-        if initialization.scope != "assay" or initialization.assay is None:
-            raise ValueError("initialization must be an assay-scoped artifact")
+        _require_initialization_ref(initialization)
         initialization_status = inspect_artifact(self.zw, initialization)
         if not initialization_status.complete:
             raise ValueError("Embedding initialization is unavailable or incomplete")
@@ -130,6 +143,8 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
         """
         if not isinstance(graph, ArtifactRef):
             raise TypeError("graph must be an ArtifactRef")
+        if isinstance(initialization, ArtifactRef):
+            _require_initialization_ref(initialization)
         cell_selection = graph_cell_selection(self.zw, graph)
         n_cells = self._get_graph_ncells_k(self._graph_location(graph))[0]
         if isinstance(initialization, ArtifactRef):
@@ -168,10 +183,13 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
 
         Args:
             graph: Explicit connectivity map or integrated graph to embed.
-            initialization: Explicit initialization artifact or coordinate array. An array must hold finite real
+            initialization: Explicit initialization artifact from
+                            `embeddings.initialization`, or a coordinate array. An array must hold finite real
                             values.
-            symmetric_graph: This parameter is forwarded to `graph.load` and is same as there. (Default value: False)
-            graph_upper_only: This parameter is forwarded to `graph.load` and is same as there. (Default value: False)
+            symmetric_graph: Forwarded to `graph.load`: if True, t-SNE embeds the fuzzy union of the directed
+                             edge weights. (Default value: False)
+            graph_upper_only: Forwarded to `graph.load`: keep the upper triangle of the symmetrized graph. It
+                              requires `symmetric_graph=True`. (Default value: False)
             tsne_dims: Number of tSNE dimensions to compute (Default value: 2)
             lambda_scale: λ rescaling parameter (Default value: 1.0)
             max_iter: Maximum number of iterations (Default value: 500)
@@ -186,11 +204,21 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             Reference to the immutable embedding artifact.
 
         Raises:
+            ValueError: If ``graph_upper_only`` is True without
+                ``symmetric_graph``, or if ``initialization`` is a reference to
+                another kind of artifact.
             ImportError: If ``sgtsnepi`` cannot be imported for a new embedding.
+            MemoryError: If loading the graph and the arrays passed to sgtsnepi
+                exceed the memory budget. sgtsnepi's own working memory is not
+                counted.
+            PermissionError: If a new embedding is needed and the store is not
+                opened with ``zarr_mode='r+'``. The check runs before the graph
+                is read.
         """
         from ...embeddings.sgtsne import (
             require_sgtsnepi,
             run_sgtsne,
+            sgtsne_input_bytes,
             sgtsne_settings,
         )
 
@@ -204,8 +232,9 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             alpha=alpha,
             box_h=box_h,
         )
-        symmetric_graph = graph_flag(symmetric_graph, "symmetric_graph")
-        graph_upper_only = graph_flag(graph_upper_only, "graph_upper_only")
+        symmetric_graph, graph_upper_only = graph_load_flags(
+            symmetric_graph, graph_upper_only
+        )
         cell_selection, n_cells, initialization_input, ini_embed = (
             self._embedding_inputs(graph, initialization, settings.tsne_dims, None)
         )
@@ -243,19 +272,32 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
                 f"{n_cells} cells"
             )
             return planned.ref
+        self._require_writable(arguments.operation)
         # Only a new embedding needs the optional backend; check it before the
         # graph and initialization are read.
         require_sgtsnepi()
+        # An initialization artifact expands to float32 coordinates.
+        initialization_itemsize = 4 if ini_embed is None else ini_embed.itemsize
+        self._require_graph_load_budget(
+            graph,
+            symmetric=symmetric_graph,
+            upper_only=graph_upper_only,
+            held_bytes=n_cells * settings.tsne_dims * initialization_itemsize,
+            working_bytes=lambda cells, entries: sgtsne_input_bytes(
+                cells, entries, settings.tsne_dims
+            ),
+            work="t-SNE",
+        )
+        if ini_embed is None:
+            assert isinstance(initialization, ArtifactRef)
+            ini_embed = self._get_ini_embed(initialization, graph, settings.tsne_dims)
+            _check_initial_shape(ini_embed, n_cells, settings.tsne_dims)
         graph_matrix = self._load_graph_artifact(
             graph,
             symmetric=symmetric_graph,
             upper_only=graph_upper_only,
             use_k=None,
         )
-        if ini_embed is None:
-            assert isinstance(initialization, ArtifactRef)
-            ini_embed = self._get_ini_embed(initialization, graph, settings.tsne_dims)
-            _check_initial_shape(ini_embed, n_cells, settings.tsne_dims)
         shutdown_checkpoint()
         raw_embedding = np.asarray(
             run_sgtsne(
@@ -314,10 +356,12 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             densmap_distance_graph,
             fit_transform,
             layout_threads,
+            umap_peak_bytes,
         )
 
-        symmetric_graph = graph_flag(symmetric_graph, "symmetric_graph")
-        graph_upper_only = graph_flag(graph_upper_only, "graph_upper_only")
+        symmetric_graph, graph_upper_only = umap_graph_flags(
+            symmetric_graph, graph_upper_only
+        )
         # Parameters are recorded canonically, so ``min_dist=1`` and
         # ``min_dist=1.0`` identify the same embedding.
         umap_dims = integer_argument(umap_dims, "umap_dims", minimum=1)
@@ -389,19 +433,39 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
                 f"Reused {umap_dims}-dimensional UMAP embedding for {n_cells} cells"
             )
             return planned.ref
+        self._require_writable(arguments.operation)
+        lineage = None
+        densmap_edges = 0
+        if effective_density_map:
+            lineage = resolve_native_graph_inputs(self.zw, graph)
+            knn_indices = as_zarr_array(
+                artifact_group(self.zw, lineage.neighbors)["indices"], name="indices"
+            )
+            densmap_edges = int(np.prod(knn_indices.shape))
+        # UMAP forms the fuzzy union of the graph, at most twice its entries,
+        # and lays out float32 coordinates.
+        self._require_graph_load_budget(
+            graph,
+            symmetric=symmetric_graph,
+            upper_only=graph_upper_only,
+            held_bytes=n_cells * umap_dims * np.dtype(np.float32).itemsize,
+            working_bytes=lambda cells, entries: umap_peak_bytes(
+                cells, entries, 2 * entries, densmap_edges=densmap_edges
+            ),
+            work="UMAP",
+        )
+        if ini_embed is None:
+            assert isinstance(initialization, ArtifactRef)
+            ini_embed = self._get_ini_embed(initialization, graph, umap_dims)
+            _check_initial_shape(ini_embed, n_cells, umap_dims)
         graph_matrix = self._load_graph_artifact(
             graph,
             symmetric=symmetric_graph,
             upper_only=graph_upper_only,
             use_k=None,
         )
-        if ini_embed is None:
-            assert isinstance(initialization, ArtifactRef)
-            ini_embed = self._get_ini_embed(initialization, graph, umap_dims)
-            _check_initial_shape(ini_embed, n_cells, umap_dims)
         densmap_kwds: dict[str, Any] = {}
-        if effective_density_map:
-            lineage = resolve_native_graph_inputs(self.zw, graph)
+        if lineage is not None:
             knn_loc = inspect_artifact(self.zw, lineage.neighbors).path
             logger.trace(f"Loading KNN dists and indices from {knn_loc}")
             validate_distance_provenance(self.zw, lineage.neighbors)
@@ -469,10 +533,15 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
 
         Args:
             graph: Explicit connectivity map or integrated graph to embed.
-            initialization: Explicit initialization artifact or coordinate array. An array must hold finite real
-                            values; UMAP optimizes a C-ordered float32 copy and leaves the caller's array unchanged.
-            symmetric_graph: This parameter is forwarded to `graph.load` and is same as there. (Default value: False)
-            graph_upper_only: This parameter is forwarded to `graph.load` and is same as there. (Default value: False)
+            initialization: Explicit initialization artifact from `embeddings.initialization`, or a coordinate
+                            array. An array must hold finite real values; UMAP optimizes a C-ordered float32 copy
+                            and leaves the caller's array unchanged.
+            symmetric_graph: Must be False. UMAP optimizes the fuzzy union of the graph's directed edge weights,
+                             ``w_ij + w_ji - w_ij * w_ji``, which it forms itself, so a graph symmetrized by
+                             `graph.load` would be united twice. True raises ``ValueError``. (Default value: False)
+            graph_upper_only: Must be False: the union of the upper triangle of the symmetrized graph is the union
+                              of the graph, so the flag has no effect of its own. True raises ``ValueError``.
+                              (Default value: False)
             umap_dims: Number of dimensions of UMAP embedding (Default value: 2)
             spread: Same as spread in UMAP package.  The effective scale of embedded points. In combination with
                     ``min_dist`` this determines how clustered/clumped the embedded points are.
@@ -507,7 +576,15 @@ class _EmbeddingOperationsMixin(_EmbeddingOperationsBase):
             Reference to the immutable embedding artifact.
 
         Raises:
-            ValueError: If densMAP finds a cell whose local radius is not finite.
+            ValueError: If ``symmetric_graph`` or ``graph_upper_only`` is True,
+                if ``initialization`` is a reference to another kind of
+                artifact, or if densMAP finds a cell whose local radius is not
+                finite.
+            MemoryError: If loading the graph and laying it out exceed the
+                memory budget. The check runs before the graph is read.
+            PermissionError: If a new embedding is needed and the store is not
+                opened with ``zarr_mode='r+'``. The check runs before the graph
+                is read.
         """
         return self._run_umap_artifact(
             graph,

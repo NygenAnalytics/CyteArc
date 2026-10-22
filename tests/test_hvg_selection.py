@@ -531,15 +531,31 @@ def test_select_hvgs_rejects_non_rna_assay(hvg_store) -> None:
         )
 
 
-def test_select_hvgs_read_only_guard_precedes_snapshot_planning(
+def test_select_hvgs_on_a_read_only_store_reuses_and_refuses_before_writing(
     hvg_store,
 ) -> None:
     store = hvg_store
     cell_selection = store.snapshot_cell_selection()
-    store.zarr_mode = "r"
+    saved = store.features.hvgs(cell_selection, show_plot=False)
+    read_only = DataStore(store.zarr_loc, default_assay="RNA", zarr_mode="r")
 
-    with pytest.raises(PermissionError, match=r"zarr_mode='r\+'"):
-        store.features.hvgs(cell_selection, show_plot=False)
+    def records() -> dict[str, list[ArtifactRef]]:
+        return {
+            kind: read_only.artifacts.list(kind=kind, from_assay="RNA")
+            for kind in ("feature_selection", "feature_summary", "metadata_snapshot")
+        }
+
+    before = records()
+    # The feature-name snapshot, the summary, and the selection are planned
+    # first, so a saved selection is returned.
+    assert read_only.features.hvgs(cell_selection, show_plot=False) == saved
+    # A selection that must be computed is refused before anything is written.
+    with pytest.raises(
+        PermissionError,
+        match=r"^select_hvgs requires a DataStore opened with zarr_mode='r\+'$",
+    ):
+        read_only.features.hvgs(cell_selection, top_n=999, show_plot=False)
+    assert records() == before
 
 
 def test_select_hvgs_requires_a_feature_name_snapshot(hvg_store) -> None:

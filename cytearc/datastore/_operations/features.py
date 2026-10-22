@@ -245,9 +245,9 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         """Create or reuse the canonical all-true feature universe.
 
         The universe is an artifact only. It is never mirrored into feature
-        metadata or registered under a mutable label.
+        metadata or registered under a mutable label. A read-only store
+        returns a saved universe and refuses only to create one.
         """
-        self._require_writable("select_all_features")
         resolved_assay = self._get_assay(from_assay)
         feature_ids_fingerprint = _ordered_feature_ids_fingerprint(resolved_assay.z)
         values = np.ones(resolved_assay.feats.N, dtype=bool)
@@ -267,6 +267,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             execution_options={},
             expected_payload_fingerprint=payload_fingerprint,
         )
+        if not planned.reused:
+            self._require_writable("select_all_features")
         _write_feature_selection(
             self.zw,
             planned,
@@ -284,8 +286,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         feature_indexes: Sequence[int] | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
-        """Persist an explicit feature mask as an immutable artifact."""
-        self._require_writable("set_feature_selection")
+        """Persist an explicit feature mask as an immutable artifact.
+
+        A read-only store returns a saved selection of the same mask and
+        refuses only to create one.
+        """
         assay = self._get_assay(from_assay)
         all_features = self._features_universe(from_assay=assay.name)
         if (mask is None) == (feature_indexes is None):
@@ -328,6 +333,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             expected_payload_fingerprint=values_fingerprint,
             invalidate_cache=invalidate_cache,
         )
+        if not planned.reused:
+            self._require_writable("set_feature_selection")
         _write_feature_selection(
             self.zw,
             planned,
@@ -347,8 +354,13 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
     ) -> ArtifactRef:
         """Select features detected in at least ``min_cells`` selected cells.
 
+        A read-only store returns a saved selection and refuses only to
+        compute one, before it reads the counts.
+
         Raises:
             UnmeasuredCellsError: If the assay did not measure a selected cell.
+            PermissionError: If the selection or its feature summary must be
+                computed and the store is not opened with ``zarr_mode='r+'``.
         """
         if isinstance(min_cells, bool) or not isinstance(min_cells, int):
             raise TypeError("min_cells must be an integer")
@@ -360,7 +372,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         self._require_measured_cells(
             assay.name, cell_selection, operation="select_detected_features"
         )
-        self._require_writable("select_detected_features")
         summary_ref = ensure_feature_summary(
             self.zw,
             assay,
@@ -380,6 +391,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             invalidate_cache=invalidate_cache,
         )
         if not planned.reused:
+            self._require_writable("select_detected_features")
             n_selected = feature_summary_selected_count(self.zw, cell_selection)
             summary = feature_summary_values(
                 self.zw,
@@ -511,7 +523,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         **plot_kwargs: Any,
     ) -> ArtifactRef:
         """Create or reuse an HVG artifact without creating a mutable alias."""
-        self._require_writable("select_hvgs")
         min_cells, top_n, n_bins, lowess_frac, keep_bounds, bin_strategy = hvg_options(
             min_cells=min_cells,
             top_n=top_n,
@@ -640,6 +651,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             invalidate_cache=invalidate_cache,
         )
         if not planned.reused:
+            self._require_writable("select_hvgs")
             cell_idx = read_stored_selection_indices(
                 self.zw,
                 cell_selection,
@@ -754,6 +766,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         )
         summary: dict[str, np.ndarray] | None = None
         if not planned.reused:
+            self._require_writable("select_hvgs")
             summary = feature_summary_values(
                 self.zw,
                 summary_ref,
@@ -885,7 +898,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         Extra keyword arguments are options of
         :func:`cytearc.plotting.highly_variable_features`, used when
         ``show_plot`` is True. Any other keyword raises ``TypeError`` before
-        anything is computed or saved.
+        anything is computed or saved. A read-only store returns a saved
+        selection and refuses only to compute one.
 
         Args:
             cell_selection: The cells whose variability is scored.
@@ -958,6 +972,9 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 flavor, a batch is missing or too small, or no gene passes
                 the filters.
             UnmeasuredCellsError: If the assay did not measure a selected cell.
+            PermissionError: If the selection, its feature summary, or its
+                feature-name snapshot must be saved and the store is not
+                opened with ``zarr_mode='r+'``, before any of them is computed.
         """
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
@@ -1021,7 +1038,8 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         self._require_measured_cells(
             assay.name, cell_selection, operation="select_hvgs"
         )
-        self._require_writable("select_hvgs")
+        # A read-only store reuses the snapshot and the selection when it
+        # holds them, and refuses before it computes either.
         feature_snapshot = snapshot_run_metadata(
             self.zw,
             table_path=f"{assay.name}/featureData",

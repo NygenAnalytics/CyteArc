@@ -191,10 +191,9 @@ class _RecordingStore:
             "buildAnnIndex",
             "build_ann_index",
             (_REDUCTION,),
+            # The index uses graph.ann_index's default search settings, as a
+            # pipeline run does.
             {
-                "ann_efc": 51,
-                "ann_ef": 51,
-                "ann_m": 55,
                 "ann_parallel": True,
                 "rand_state": 99,
                 "invalidate_cache": False,

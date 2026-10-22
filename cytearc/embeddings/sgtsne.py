@@ -60,6 +60,31 @@ def sgtsne_settings(
     )
 
 
+def sgtsne_input_bytes(n_cells: int, n_entries: int, tsne_dims: int) -> int:
+    """Estimate the bytes ``run_sgtsne`` holds of its own besides its inputs.
+
+    It passes sgtsnepi a CSR copy of the graph's float32 weights and int32
+    columns and receives the float64 embedding. The working memory of
+    sgtsnepi itself is native and is not included.
+
+    Args:
+        n_cells: Cells of the graph.
+        n_entries: Entries of the graph.
+        tsne_dims: Embedding dimensions.
+
+    Returns:
+        The estimated bytes.
+
+    Raises:
+        TypeError: If an argument is not an integer.
+        ValueError: If an argument is below its minimum.
+    """
+    cells = integer_argument(n_cells, "n_cells", minimum=1)
+    entries = integer_argument(n_entries, "n_entries", minimum=0)
+    dims = integer_argument(tsne_dims, "tsne_dims", minimum=1)
+    return 8 * entries + 4 * (cells + 1) + 8 * cells * dims
+
+
 def require_sgtsnepi() -> Callable[..., Any]:
     """Return the ``sgtsnepi`` entry point; raise ``ImportError`` if it is missing."""
     try:

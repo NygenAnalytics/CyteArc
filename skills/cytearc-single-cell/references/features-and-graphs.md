@@ -30,10 +30,14 @@ chain of artifacts, then branch or subcluster it safely. Docs: <https://docs.nyg
   `ds.graph.ann_index(normalized)` does the same outside the pipeline; WNN, mapping references
   and doublet scoring reject such graphs, SNN integrates them. Memory and time then scale with
   the HVG count, not the PCA dims: the ANN index holds about `4 * dims + 8 * ann_m + 130` bytes per
-  cell (8.5 GB at 1M cells and 2,000 HVGs), the default embedding initialization holds every cell's
-  coordinates in memory (pass `params={"embedding_initialization": {"batch_size": ...}}` below the
-  cell count for the streamed fit), and cluster selection decodes most of the normalized matrix to
-  read its 10,000-cell sample.
+  cell (8.3 GB at 1M cells and 2,000 HVGs with the default `ann_m=24`), the default embedding
+  initialization holds every cell's coordinates in memory (pass
+  `params={"embedding_initialization": {"batch_size": ...}}` below the cell count for the streamed
+  fit), and cluster selection decodes most of the normalized matrix to read its 10,000-cell sample.
+- `graph.neighbors` searches `max(200, 2 * k)` candidates by default (the index's `ann_ef` floor and
+  two per neighbour) and records the depth as its `ann_ef` only when it is not the index's own, so
+  `k` up to 100 reuses earlier neighbors; pass `ann_ef=` for another depth. A query warns when
+  fewer than 99.5% of cells find themselves among their nearest neighbours.
 - `graph.ann_index` and `graph.neighbors` check the index against `mem_budget` before they create
   or load it and raise `MemoryError` naming the bytes, cells, dimensions and limit; the index moves
   through a temporary file of about `4 * dims + 8 * ann_m + 20` bytes per cell in `TMPDIR`.

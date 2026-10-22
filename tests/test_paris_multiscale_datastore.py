@@ -10,6 +10,7 @@ from cytearc.datastore.namespaces import ClustersAccessor, GraphAccessor
 from cytearc.clustering._paris_core import ParisHierarchy
 from cytearc.clustering.paris_multiscale import PlateauForest
 from cytearc.datastore._operations.clustering import _ClusteringOperationsMixin
+from cytearc.datastore.base_datastore import BaseDataStore
 from cytearc.datastore._operations.paris_persistence import (
     estimate_paris_adaptive_cut_peak_bytes,
     estimate_paris_peak_bytes,
@@ -80,6 +81,8 @@ class _Cells:
 class _Store(_ClusteringOperationsMixin):
     clusters = property(ClustersAccessor)
     graph = property(GraphAccessor)
+    # Paris refuses a read-only store before it fits or loads a hierarchy.
+    _require_writable = BaseDataStore._require_writable
 
     def __init__(
         self,

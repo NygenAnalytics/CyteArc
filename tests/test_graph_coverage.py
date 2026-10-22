@@ -865,6 +865,10 @@ def test_run_tsne_orchestration_and_error_paths(
     monkeypatch.setattr(store, "_get_graph_ncells_k", lambda _location: (3, 2))
     monkeypatch.setattr(store, "_load_graph_artifact", load_graph)
     monkeypatch.setattr(store, "_get_ini_embed", get_initial)
+    # The mocked graph has no stored arrays to size, so the memory admission
+    # is recorded instead.
+    budget = Mock()
+    monkeypatch.setattr(store, "_require_graph_load_budget", budget)
     monkeypatch.setattr(sgtsne_module, "run_sgtsne", runner)
     monkeypatch.setattr(sgtsne_module, "require_sgtsnepi", backend)
     metadata_before = _metadata_snapshot(store.cells)
@@ -878,6 +882,19 @@ def test_run_tsne_orchestration_and_error_paths(
     )
     get_initial.assert_called_once_with(initialization_ref, graph_ref, 2)
     backend.assert_called_once_with()
+    # The memory is admitted for the symmetrized upper triangle, the float32
+    # coordinates that the initialization expands to, and sgtsnepi's inputs.
+    budget.assert_called_once()
+    assert budget.call_args.args == (graph_ref,)
+    admission = dict(budget.call_args.kwargs)
+    working_bytes = admission.pop("working_bytes")
+    assert admission == {
+        "symmetric": True,
+        "upper_only": True,
+        "held_bytes": 3 * 2 * 4,
+        "work": "t-SNE",
+    }
+    assert working_bytes(3, 6) == sgtsne_module.sgtsne_input_bytes(3, 6, 2)
     first_call = runner.call_args
     assert first_call.args[0] is graph
     np.testing.assert_array_equal(first_call.args[1], initial)

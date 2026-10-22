@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 
-from ...graph.arguments import graph_flag
+from ...graph.arguments import graph_load_flags
 from ...graph.feature_projection import graph_cell_selection
 from ...graph.kinds import require_graph_kind
 from ...metadata.artifacts import (
@@ -223,6 +223,15 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
             ),
             reuse_validator=readable_cut,
         )
+        dendrogram_plan = (
+            plan_paris_dendrogram(self.zw, hierarchy_plan.ref)
+            if fixed_cluster_count is not None
+            else None
+        )
+        # Refuse a read-only store before any hierarchy is fitted or loaded.
+        for plan in (hierarchy_plan, cut_plan, dendrogram_plan):
+            if plan is not None and not plan.reused:
+                self._require_writable(plan.provenance["operation"])
         if cut_plan.reused:
             cut_group = reused_artifact_group(self.zw, cut_plan)
             result = ParisClusteringResult(
@@ -297,8 +306,7 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
                     asdict(diagnostic) for diagnostic in result.diagnostics
                 ]
 
-        if fixed_cluster_count is not None:
-            dendrogram_plan = plan_paris_dendrogram(self.zw, hierarchy_plan.ref)
+        if dendrogram_plan is not None:
             if not dendrogram_plan.reused:
                 write_paris_dendrogram(
                     self.zw,
@@ -334,8 +342,9 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
             raise ValueError("backend must be 'cytearc', 'igraph' or 'leidenalg'")
         resolution = canonical_resolution(resolution)
         random_seed = canonical_random_seed(random_seed)
-        symmetric_graph = graph_flag(symmetric_graph, "symmetric_graph")
-        graph_upper_only = graph_flag(graph_upper_only, "graph_upper_only")
+        symmetric_graph, graph_upper_only = graph_load_flags(
+            symmetric_graph, graph_upper_only
+        )
         _graph_loc, n_cells, _k = self._clustering_graph(graph)
         graph_input = graph
         artifact_scope = graph_input.scope
@@ -397,15 +406,28 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
                 CyteArc does not install, and are kept to reproduce earlier
                 results. The ``"cytearc"`` backend uses ``self.nthreads``
                 threads, which never change its labels.
-            symmetric_graph: Forwarded to `graph.load`.
-            graph_upper_only: Forwarded to `graph.load`.
+            symmetric_graph: Forwarded to `graph.load`: if True, Leiden
+                partitions the fuzzy union of the directed edge weights.
+            graph_upper_only: Forwarded to `graph.load`: keep the upper
+                triangle of the symmetrized graph. It requires
+                ``symmetric_graph=True``.
             random_seed: Non-negative integer seed for the Leiden optimizer.
             invalidate_cache: Force a new cluster-labels artifact.
 
         Returns:
             Reference to the cluster-labels artifact.
+
+        Raises:
+            ValueError: If ``graph_upper_only`` is True without
+                ``symmetric_graph``.
+            MemoryError: If loading the graph and, for the ``"cytearc"``
+                backend, partitioning it exceed the memory budget. The check
+                runs before the graph is read.
+            PermissionError: If new labels are needed and the store is not
+                opened with ``zarr_mode='r+'``. The check runs before the graph
+                is read.
         """
-        from ...clustering.leiden import leiden_membership
+        from ...clustering.leiden import leiden_membership, native_leiden_peak_bytes
 
         prepared = self._prepare_leiden_clustering(
             graph,
@@ -419,6 +441,25 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
         if prepared.planned.reused:
             logger.info("Reused Leiden clustering artifact")
             return prepared.planned.ref
+        self._require_writable(LeidenArguments.operation)
+        # The native backend partitions W + W^T, which has the entries of a
+        # symmetrized graph and at most twice those of another. The GPL
+        # backends' own memory is not counted.
+        union_factor = (
+            1 if prepared.symmetric_graph and not prepared.graph_upper_only else 2
+        )
+        self._require_graph_load_budget(
+            prepared.graph,
+            symmetric=prepared.symmetric_graph,
+            upper_only=prepared.graph_upper_only,
+            held_bytes=0,
+            working_bytes=lambda cells, entries: (
+                native_leiden_peak_bytes(cells, union_factor * entries)
+                if prepared.backend == "cytearc"
+                else 0
+            ),
+            work="Leiden clustering",
+        )
         graph_matrix = self._load_graph_artifact(
             prepared.graph,
             symmetric=prepared.symmetric_graph,
@@ -468,7 +509,16 @@ class _ClusteringOperationsMixin(_ClusteringOperationsBase):
         ``"igraph"`` and ``"leidenalg"`` need those GPL-licensed packages,
         which CyteArc does not install, and are kept to reproduce earlier
         results. The thread count is not part of the artifact identity and
-        never changes the labels.
+        never changes the labels. ``symmetric_graph`` partitions the fuzzy
+        union of the directed edge weights, and ``graph_upper_only``, which
+        keeps its upper triangle, requires ``symmetric_graph=True``.
+
+        Raises:
+            MemoryError: If loading the graph and, for the ``"cytearc"``
+                backend, partitioning it exceed the memory budget, before the
+                graph is read.
+            PermissionError: If new labels are needed and the store is not
+                opened with ``zarr_mode='r+'``, before the graph is read.
         """
         return self._run_leiden_artifact(
             graph,
