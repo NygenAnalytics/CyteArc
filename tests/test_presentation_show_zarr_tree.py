@@ -267,6 +267,8 @@ def test_to_anndata_exports_an_empty_feature_selection() -> None:
             return_value=pd.DataFrame({"ids": ["f0", "f1"], "names": ["g0", "g1"]})
         ),
         fetch_all=Mock(return_value=np.asarray(["f0", "f1"])),
+        # Export reads column attributes to restore source categoricals.
+        _get_array=Mock(return_value=SimpleNamespace(attrs={})),
     )
     assay = SimpleNamespace(
         feats=features,
@@ -279,6 +281,8 @@ def test_to_anndata_exports_an_empty_feature_selection() -> None:
         columns=["ids"],
         active_index=Mock(return_value=np.asarray([0, 1])),
         to_pandas_dataframe=Mock(return_value=pd.DataFrame({"ids": ["c0", "c1"]})),
+        # Export reads each column, as to_h5ad does.
+        fetch_all=Mock(return_value=np.asarray(["c0", "c1"])),
         # Export reads column attributes to declare membership columns.
         _get_array=Mock(return_value=SimpleNamespace(attrs={})),
     )

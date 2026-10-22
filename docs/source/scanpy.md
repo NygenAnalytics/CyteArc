@@ -42,15 +42,29 @@ expression. See [](tutorials/graph_construction.ipynb) for the complete manual g
 ## Move data through H5AD
 
 CyteArc reads and writes H5AD, so CyteArc and Scanpy can be used at different stages of one project.
-Import an H5AD file into a CyteArc store:
+Inspect an H5AD file first, and review which matrix will become the counts:
 
 ```python
 import cytearc
 
 inspection = cytearc.inspect_h5ad("data.h5ad")
+print(inspection.matrixKey, inspection.integerLike)
+print(inspection.matrixCandidates)
+```
+
+`inspect_h5ad` ranks matrices that hold counts first, preferring `raw/X`, `layers/counts`, or
+`layers/raw_counts`, then `X`, then `spliced` counts, and ranks matrices of one kind by their
+estimated total. It warns when several matrices hold integer counts, such as the `spliced`,
+`unspliced`, `ambiguous`, and `matrix` layers of velocity data. If `matrixKey` is not the raw RNA
+counts, inspect again with the right one, for example
+`cytearc.inspect_h5ad("data.h5ad", matrix_key="layers/counts")`.
+
+Then import the file into a CyteArc store:
+
+```python
 reader = cytearc.H5adReader.from_inspect(
     inspection,
-    embedding_roles={"X_umap": "umap"},
+    embedding_roles={"X_umap": "umap", "X_scVI": "coordinates"},
     cluster_keys=("clusters",),
 )
 imported = cytearc.H5adToZarr(
@@ -66,14 +80,34 @@ ds.plots.embedding(
 ```
 
 Selected embeddings and clusterings become immutable artifacts rather than live metadata
-columns. Use their returned refs directly or inspect a payload with `ds.artifacts.load(ref)`.
+columns. Use their returned refs directly or inspect a payload with `ds.artifacts.load(ref)`. The
+`"coordinates"` role imports a latent space, such as `X_pca`, `X_scVI`, or `X_pca_harmony`, as
+coordinates that `ds.graph.ann_index` builds a graph on. Categorical `obs` columns keep their
+category order, unused categories, `ordered` flag, and the colors of `uns["<column>_colors"]`,
+which CyteArc's plots then use. A file whose cell IDs repeat, as `anndata.concat` writes without
+`index_unique`, imports with `duplicate_cell_ids="make_unique"` passed to `from_inspect`.
 
-Export to an in-memory `AnnData` object or directly to H5AD:
+Export to an in-memory `AnnData` object or directly to H5AD. Pass the artifacts that Scanpy should
+see: coordinates and embeddings go to `obsm`, labels and scores to `obs`, and a connectivity graph
+to `obsp` with `uns["neighbors"]` in Scanpy's layout:
 
 ```python
-adata = ds.to_anndata()
-cytearc.to_h5ad(ds.RNA, "analysis.h5ad")
+adata = ds.to_anndata(
+    cell_selection=cells,
+    obsm={"X_pca": pca, "X_umap": umap},
+    obs={"leiden": leiden},
+    graph=graph,
+)
+cytearc.to_h5ad(ds.RNA, "analysis.h5ad", cell_selection=cells, obsm={"X_pca": pca})
 ```
+
+Labels such as `leiden` arrive as categoricals of text labels, so `sc.tl.rank_genes_groups(adata,
+"leiden")` and `sc.pl.umap(adata, color="leiden")` work directly, and the graph lets
+`sc.tl.paga` and `sc.tl.leiden` run without `sc.pp.neighbors`. `obsm["X_pca"]` also writes the PCA
+loadings to `varm["PCs"]`. Each artifact must hold every exported cell, so export the cells of the
+selection that the analysis used with `cell_selection=`. Raw counts that CyteArc stores as `uint8`
+or `uint16` are exported as `float32`, on which arithmetic cannot wrap; pass `dtype=` to choose
+another dtype.
 
 To export a completed pipeline's frozen cells, feature universe, and result fields, pass its run:
 
@@ -82,19 +116,45 @@ adata = ds.to_anndata(run=run)
 cytearc.to_h5ad(ds.RNA, "pipeline-analysis.h5ad", run=run)
 ```
 
-Run export writes frozen UMAP coordinates to `obsm["X_umap"]` and frozen cluster labels to
-`obs["clusters"]`. A run with `umap=False` does not invent an embedding. Both calls export the same
+Run export writes frozen UMAP coordinates to `obsm["X_umap"]`, the run's PCA to `obsm["X_pca"]`,
+and its cluster labels (`clusters`, `leiden_*`, and `paris`) to `obs` as categoricals with string
+categories in natural order and the run's colors. A run with `umap=False` does not invent an
+embedding. Add the run's graph with `graph=run["connectivity_map"]`. Both calls export the same
 object: `ds.to_anndata` holds it in memory, while `cytearc.to_h5ad` streams it to disk and needs
 neither the `anndata` package nor memory for the complete matrix. `X` holds raw counts over the
-run's feature universe. Pass `matrix="normed"` to either call for the values that the run's PCA
-read: its stored normalized values, float32, over its highly variable genes only, which then
-become `var`.
+run's feature universe.
+
+`matrix="normed"` means different values with and without a run. With `run`, `X` holds the values
+that the run's PCA read: its stored normalized values, the log1p of counts scaled over its highly
+variable genes, float32, over those genes only, which then become `var`. Without `run`,
+`ds.to_anndata(matrix="normed")` holds the assay's library-size normalized values over all
+exported genes, counts scaled to 1,000 per cell without a log transform, and `cytearc.to_h5ad`
+rejects it.
 
 `ds.to_anndata()` defaults to active cells and all features. Pass `feature_indexes` or
-`feature_names` to subset features. Without `run`, `cytearc.to_h5ad` writes the full assay to disk,
-including cells with `I=False`, without first constructing an in-memory `AnnData`.
+`feature_names` to subset features. Without `run` or `cell_selection`, `cytearc.to_h5ad` writes
+the full assay to disk, including cells with `I=False`, without first constructing an in-memory
+`AnnData`.
 
-Counts and metadata transfer, but CyteArc's neighbourhood graphs, provenance records, and
-multimodal relationships do not map directly to AnnData. The exported H5AD may therefore need a
-new neighbour graph in Scanpy. See [](tutorials/import_and_export.ipynb) for format details and export
+## Bring results back from Scanpy
+
+A latent space computed with another tool re-enters the store as graph coordinates. Pass an array
+in the order of a cell selection, or a pandas DataFrame indexed by cell ID, with a record of the
+tool that made it:
+
+```python
+import pandas as pd
+
+latent = ds.reduction.import_coordinates(
+    pd.DataFrame(adata.obsm["X_scVI"], index=adata.obs_names),
+    cell_selection=cells,
+    name="X_scVI",
+    source={"tool": "scvi-tools", "version": "1.2.0"},
+)
+graph = ds.graph.connectivity(ds.graph.neighbors(ds.graph.ann_index(latent), k=11))
+leiden = ds.clusters.leiden(graph)
+```
+
+The record and fingerprints of the values and cell IDs become the artifact's identity and lineage.
+See [](tutorials/import_and_export.ipynb) for a complete round trip, format details, and export
 options.

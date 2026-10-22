@@ -1247,6 +1247,36 @@ CyteArc validates persisted data and public arguments against the following cont
 - `qc.feature_percentage` reads only the selected features and divides by the prepared
   `<assay>_nCounts` instead of summing every count of each cell (see
   {ref}`stable_identity_result_changes`).
+- H5AD categoricals keep their categories: `H5adToZarr` stores `levels`, `ordered`, and, for cell
+  columns, a categorical `display` with the colors of `uns["<column>_colors"]` on each imported
+  categorical column of at most 10,000 categories and on imported cluster labels. Exports write
+  such a column as that categorical, with its colors in `uns`. Earlier imports stored plain values
+  and are not migrated; they export as before.
+- A dataframe index that is neither the ID nor the name column no longer imports as a column named
+  `_index`: it is left out when it repeats the IDs or names, and imports as `source_index`
+  otherwise. Exports rename a store's `_index` column to `source_index` and a column whose name the
+  export already uses to `<name>_2`, with a warning, instead of raising; stores are not changed.
+- `inspect_h5ad` ranks count matrices by conventional name (`raw/X`, `layers/counts`,
+  `layers/raw_counts`, then `X`, `layers/spliced`, others, and `unspliced` and `ambiguous` last),
+  then by estimated total, samples up to 32 windows of 1,024 values across a matrix to decide
+  whether it holds counts, which must be finite, non-negative, and whole, and warns when several
+  matrices hold counts. It never takes a floating-point column as cell IDs, and when the obs
+  index repeats IDs it says so and names `duplicate_cell_ids="make_unique"`, a new keyword of
+  `H5adReader`. A missing feature name takes the feature ID.
+- `embedding_roles` accepts `"coordinates"`, which imports an `obsm` array as
+  `imported_coordinates`, and `DataStore.reduction.import_coordinates` imports an array or a
+  DataFrame aligned by cell ID, recording an optional `source` record in its parameters.
+  `write_imported_coordinates` records `source` only when given, so Seurat and earlier
+  imported coordinates keep their identities.
+- `to_anndata` and `to_h5ad` take `cell_selection`, `obsm`, `obs`, `graph`, and `dtype`. Run
+  exports write label fields with a categorical display (`clusters`, `leiden_*`, `paris`,
+  `cell_cycle_phase`) as categoricals of string labels in natural order, with the display colors,
+  where they wrote numbers before, and add the run's PCA as `obsm["X_pca"]` with `varm["PCs"]`.
+  Raw `uint8` and `uint16` counts export as `float32` unless `dtype` names another dtype.
+- `to_mtx` writes a feature-type column without compression too, one type per assay, formats
+  integer counts with NumPy, and compresses with gzip level 6; the matrix text is unchanged.
+- `CSVReader` reads its ID column as text and rejects a missing ID. `SparseToZarr` rejects missing
+  or repeated cell and feature IDs and converts COO, CSC, and dense input to CSR.
 
 Compatibility exists only where a current public facade or an explicit file-schema test says it
 does. There are no silent migrations, implicit compatibility branches, or forwarding shims for

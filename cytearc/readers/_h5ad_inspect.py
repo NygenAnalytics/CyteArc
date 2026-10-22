@@ -105,10 +105,63 @@ class _MatrixCandidate:
     encoding: str
     shape: tuple[int, int]
     integerLike: bool
+    # Total of the matrix, estimated from the sampled values.
+    estimatedTotal: float = 0.0
 
     @property
     def isSparse(self) -> bool:
         return self.encoding in {"csr", "csc"}
+
+
+# The sample that decides whether a matrix holds counts: up to this many
+# windows, spread evenly over its stored values, of up to this many values
+# each. Reading a window decompresses at most the chunks that it overlaps, so
+# inspection reads a bounded part of any file.
+_SAMPLE_WINDOWS = 32
+_SAMPLE_WINDOW_VALUES = 1024
+# Matrices whose key names counts rank by these tiers, lowest first: raw
+# counts, the canonical matrix, spliced counts, other matrices, and the
+# unspliced and ambiguous counts of velocity data.
+_COUNT_LAYER_NAMES = frozenset({"counts", "raw_counts"})
+_SECONDARY_LAYER_NAMES = frozenset({"unspliced", "ambiguous"})
+
+
+def _name_tier(key: str) -> int:
+    """Return how conventional a name for a count matrix ``key`` is."""
+    if key == "raw/X":
+        return 0
+    layer = key.removeprefix("layers/").lower() if key.startswith("layers/") else None
+    if layer in _COUNT_LAYER_NAMES:
+        return 0
+    if key == "X":
+        return 1
+    if layer == "spliced":
+        return 2
+    if layer in _SECONDARY_LAYER_NAMES:
+        return 4
+    return 3
+
+
+def _sample_windows(size: int, width: int) -> list[slice]:
+    """Return up to ``_SAMPLE_WINDOWS`` windows spread evenly over ``size`` items."""
+    if size <= 0:
+        return []
+    width = max(1, min(width, size))
+    starts = np.linspace(0, size - width, num=min(_SAMPLE_WINDOWS, size)).astype(int)
+    return [slice(start, start + width) for start in np.unique(starts).tolist()]
+
+
+def _sampled_counts(sample: np.ndarray) -> bool:
+    """Return whether sampled values are finite, non-negative, and whole."""
+    if sample.size == 0 or not np.issubdtype(sample.dtype, np.number):
+        return False
+    if np.issubdtype(sample.dtype, np.integer):
+        return bool(np.all(sample >= 0))
+    return bool(
+        np.all(np.isfinite(sample))
+        and np.all(sample >= 0)
+        and np.allclose(sample, np.round(sample), rtol=0, atol=1e-8)
+    )
 
 
 def _node_length(node: h5py.Group | h5py.Dataset | None) -> int | None:
@@ -129,30 +182,33 @@ def _node_length(node: h5py.Group | h5py.Dataset | None) -> int | None:
     return None
 
 
-def _is_integer_like(dataset: h5py.Dataset) -> bool:
-    if np.issubdtype(dataset.dtype, np.integer):
-        return True
-    sample = np.asarray(dataset[: min(101, dataset.shape[0])])
-    if sample.size == 0 or not np.issubdtype(sample.dtype, np.number):
-        return False
-    return bool(
-        np.all(np.isfinite(sample))
-        and np.allclose(sample, np.round(sample), rtol=0, atol=1e-8)
-    )
+def _sparse_counts(dataset: h5py.Dataset) -> tuple[bool, float]:
+    """Sample the stored values of a sparse matrix.
+
+    Returns whether every sampled value is a count, and the matrix total
+    that the sampled mean estimates.
+    """
+    size = int(dataset.shape[0])
+    windows = _sample_windows(size, _SAMPLE_WINDOW_VALUES)
+    if not windows:
+        return False, 0.0
+    sample = np.concatenate([np.asarray(dataset[window]) for window in windows])
+    if not _sampled_counts(sample):
+        return False, 0.0
+    return True, float(np.mean(sample, dtype=np.float64)) * size
 
 
-def _dense_is_integer_like(dataset: h5py.Dataset) -> bool:
-    if np.issubdtype(dataset.dtype, np.integer):
-        return True
-    rows = min(10, dataset.shape[0])
-    columns = min(100, dataset.shape[1])
-    sample = np.asarray(dataset[:rows, :columns])
-    if sample.size == 0 or not np.issubdtype(sample.dtype, np.number):
-        return False
-    return bool(
-        np.all(np.isfinite(sample))
-        and np.allclose(sample, np.round(sample), rtol=0, atol=1e-8)
-    )
+def _dense_counts(dataset: h5py.Dataset) -> tuple[bool, float]:
+    """Sample whole rows of a dense matrix, as :func:`_sparse_counts` samples."""
+    n_rows, n_columns = (int(extent) for extent in dataset.shape)
+    rows = max(1, _SAMPLE_WINDOW_VALUES // max(1, n_columns))
+    windows = _sample_windows(n_rows, rows)
+    if not windows or n_columns == 0:
+        return False, 0.0
+    sample = np.concatenate([np.asarray(dataset[window]) for window in windows])
+    if not _sampled_counts(sample):
+        return False, 0.0
+    return True, float(np.mean(sample, dtype=np.float64)) * n_rows * n_columns
 
 
 def _is_matrix_path(key: str) -> bool:
@@ -178,38 +234,78 @@ def _matrix_candidates(h5: h5py.File) -> list[_MatrixCandidate]:
                     f"Ignoring sparse matrix candidate without a shape attribute: {key}"
                 )
                 return
+            integer_like, total = _sparse_counts(node["data"])
             candidates.append(
                 _MatrixCandidate(
                     key=key,
                     encoding=encoding,
                     shape=shape,
-                    integerLike=_is_integer_like(node["data"]),
+                    integerLike=integer_like,
+                    estimatedTotal=total,
                 )
             )
-        elif isinstance(node, h5py.Dataset) and len(node.shape) == 2:
+        elif (
+            isinstance(node, h5py.Dataset)
+            # A null dataspace, as anndata before 0.13 writes ``X=None``, has
+            # no shape.
+            and node.shape is not None
+            and len(node.shape) == 2
+        ):
             if not np.issubdtype(node.dtype, np.number):
                 return
+            integer_like, total = _dense_counts(node)
             candidates.append(
                 _MatrixCandidate(
                     key=key,
                     encoding="dense",
                     shape=(int(node.shape[0]), int(node.shape[1])),
-                    integerLike=_dense_is_integer_like(node),
+                    integerLike=integer_like,
+                    estimatedTotal=total,
                 )
             )
 
     h5.visititems(visit)
 
-    def rank(candidate: _MatrixCandidate) -> tuple[int, int, int, int, str]:
-        # Integer-like values signal raw counts and take priority over storage
-        # layout, so a dense count matrix outranks a sparse transformed layer.
+    def rank(candidate: _MatrixCandidate) -> tuple[int, int, float, int, str]:
+        # Counts take priority over storage layout, so a dense count matrix
+        # outranks a sparse transformed layer. Among counts, a conventional
+        # name, such as layers/counts or raw/X, outranks X, which outranks
+        # spliced, other, and then unspliced or ambiguous counts; matrices of
+        # one tier rank by their estimated total, so the matrix that holds
+        # the most reads wins, and then by layout and key.
         integer = 0 if candidate.integerLike else 1
-        raw = 0 if candidate.key.startswith("raw/") else 1
-        canonical = 0 if candidate.key == "X" else 1
+        total = -candidate.estimatedTotal if candidate.integerLike else 0.0
         sparse = 0 if candidate.isSparse else 1
-        return integer, raw, canonical, sparse, candidate.key
+        return integer, _name_tier(candidate.key), total, sparse, candidate.key
 
     return sorted(candidates, key=rank)
+
+
+def _warn_competing_counts(
+    chosen: _MatrixCandidate,
+    candidates: list[_MatrixCandidate],
+    obs_length: int | None,
+) -> None:
+    """Warn when other matrices of the same cells also hold counts."""
+    if not chosen.integerLike:
+        return
+    others = [
+        candidate
+        for candidate in candidates
+        if candidate is not chosen
+        and candidate.integerLike
+        and (obs_length is None or candidate.shape[0] == obs_length)
+    ]
+    if not others:
+        return
+    described = ", ".join(
+        f"{candidate.key} (about {candidate.estimatedTotal:.3g} counts)"
+        for candidate in (chosen, *others)
+    )
+    logger.warning(
+        f"Several matrices hold integer counts: {described}. inspect_h5ad chose "
+        f"{chosen.key}; review the choice and pass matrix_key to choose another"
+    )
 
 
 def _read_column(
@@ -267,6 +363,17 @@ def _table_index(node: h5py.Group | h5py.Dataset, names: list[str]) -> str | Non
     return None
 
 
+def _is_identifier_column(values: np.ndarray | None, n_cells: int) -> bool:
+    """Return whether a column holds unique text or integers, one per cell.
+
+    Floating-point values, such as scores, are never identifiers, even when
+    every value differs.
+    """
+    if values is None or not _is_unique(values, n_cells):
+        return False
+    return values.dtype.kind in "iu" or _is_string_column(values)
+
+
 def _find_cell_ids(
     node: h5py.Group | h5py.Dataset | None,
     n_cells: int,
@@ -274,29 +381,40 @@ def _find_cell_ids(
     if node is None:
         return "_index"
     names = table_column_names(node)
-    index_key = _index_key(node)
-    if index_key is not None and index_key in names:
-        values = _read_column(node, index_key)
-        if values is not None and _is_unique(values, n_cells):
-            return index_key
-    preferred = _matching_key(names, _CELL_ID_KEYS)
-    if preferred is not None:
-        values = _read_column(node, preferred)
-        if values is not None and _is_unique(values, n_cells):
-            return preferred
+    index = _table_index(node, names)
+    if index is not None and _is_identifier_column(_read_column(node, index), n_cells):
+        return index
+    normalized = {name.lower(): name for name in names}
+    for preferred in _CELL_ID_KEYS:
+        name = normalized.get(preferred)
+        if name is not None and _is_identifier_column(
+            _read_column(node, name), n_cells
+        ):
+            return name
 
-    candidates: list[tuple[str, bool]] = []
-    for name in names:
+    # Other columns hold IDs only as text: a column of distinct numbers, such
+    # as a count per cell, is not one.
+    for name in sorted(names):
         values = _read_column(node, name)
-        if values is None or not _is_unique(values, n_cells):
-            continue
-        candidates.append((name, _is_string_column(values)))
-    if candidates:
-        candidates.sort(key=lambda item: (not item[1], item[0]))
-        return candidates[0][0]
+        if _is_unique_text(values, n_cells):
+            return name
 
-    logger.warning("No unique cell ID column found; generated IDs will be used")
+    if index is not None:
+        logger.warning(
+            f"The cell IDs in the obs index {index!r} repeat values, and no "
+            "other column holds unique text IDs. Pass "
+            "duplicate_cell_ids='make_unique' to H5adReader, also through "
+            "H5adReader.from_inspect, to rename repeated IDs"
+        )
+        return index
+    logger.warning("No cell ID column found; generated IDs will be used")
     return "_index"
+
+
+def _is_unique_text(values: np.ndarray | None, n_cells: int) -> bool:
+    return (
+        values is not None and _is_string_column(values) and _is_unique(values, n_cells)
+    )
 
 
 def _mean_text_length(values: np.ndarray) -> float:
@@ -499,6 +617,18 @@ def inspect_h5ad(
 ) -> H5adInspectResult:
     """Report the matrix and metadata layout of an H5AD file.
 
+    Candidate matrices are ranked so that the counts come first. A matrix
+    holds counts when a sample of its stored values, up to 32 windows of 1,024
+    values spread over the whole matrix, is finite, non-negative, and whole.
+    Among counts, a conventional name wins: ``raw/X``, ``layers/counts``, and
+    ``layers/raw_counts`` first, then ``X``, ``layers/spliced``, other
+    matrices, and the ``unspliced`` and ``ambiguous`` layers of velocity data
+    last. Matrices of one tier rank by their total, estimated from the
+    sample, so the one that holds the most reads wins. When other matrices of
+    the cells also hold counts, a warning lists them with their estimated
+    totals; review ``matrixKey`` and ``matrixCandidates`` and pass
+    ``matrix_key`` to choose another.
+
     Args:
         h5ad_fn: Path to the H5AD file.
         matrix_key: Optional matrix path to force (for example ``X`` or
@@ -526,6 +656,7 @@ def inspect_h5ad(
             matrix, feature_attrs_key = _select_matrix(h5, forced)
         else:
             matrix, feature_attrs_key = _select_matrix(h5, candidates)
+            _warn_competing_counts(matrix, candidates, _node_length(h5.get("obs")))
         n_cells, n_features = matrix.shape
         cell_node = h5.get("obs")
         feature_node = h5.get(feature_attrs_key)

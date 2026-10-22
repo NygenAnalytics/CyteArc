@@ -6,6 +6,7 @@ from ..utils.arrays import has_duplicates
 from ..utils.logging import logger
 
 type DuplicateFeatureIds = Literal["error", "make_unique"]
+type DuplicateCellIds = Literal["error", "make_unique"]
 
 _DUPLICATE_FEATURE_ID_OPTIONS = ("error", "make_unique")
 
@@ -52,11 +53,22 @@ def duplicate_feature_ids_option(value: Any) -> DuplicateFeatureIds:
     Raises:
         ValueError: If ``value`` is neither ``"error"`` nor ``"make_unique"``.
     """
+    return _duplicate_ids_option(value, "duplicate_feature_ids")
+
+
+def duplicate_cell_ids_option(value: Any) -> DuplicateCellIds:
+    """Return a validated ``duplicate_cell_ids`` reader argument.
+
+    Raises:
+        ValueError: If ``value`` is neither ``"error"`` nor ``"make_unique"``.
+    """
+    return _duplicate_ids_option(value, "duplicate_cell_ids")
+
+
+def _duplicate_ids_option(value: Any, option: str) -> Literal["error", "make_unique"]:
     if isinstance(value, str) and value in _DUPLICATE_FEATURE_ID_OPTIONS:
         return "error" if value == "error" else "make_unique"
-    raise ValueError(
-        f"duplicate_feature_ids must be 'error' or 'make_unique', not {value!r}"
-    )
+    raise ValueError(f"{option} must be 'error' or 'make_unique', not {value!r}")
 
 
 def _later_occurrences(texts: np.ndarray) -> np.ndarray:
@@ -101,13 +113,52 @@ def unique_feature_identifiers(
         ValueError: If a value is missing or blank, or, with
             ``duplicates="error"``, if a value repeats.
     """
+    return _unique_identifiers(
+        values,
+        label,
+        duplicates,
+        option="duplicate_feature_ids",
+        note=" Feature names are unchanged.",
+    )
+
+
+def unique_cell_identifiers(
+    values: np.ndarray,
+    label: str,
+    duplicates: DuplicateCellIds,
+) -> np.ndarray:
+    """Return cell identifiers that are present and unique.
+
+    Repeated identifiers are renamed as :func:`unique_feature_identifiers`
+    renames them, with ``-1``, ``-2``, and so on, as AnnData's
+    ``obs_names_make_unique`` names them, when ``duplicates`` is
+    ``"make_unique"``.
+
+    Raises:
+        ValueError: If a value is missing or blank, or, with
+            ``duplicates="error"``, if a value repeats. The message names the
+            ``duplicate_cell_ids`` option.
+    """
+    return _unique_identifiers(
+        values, label, duplicates, option="duplicate_cell_ids", note=""
+    )
+
+
+def _unique_identifiers(
+    values: np.ndarray,
+    label: str,
+    duplicates: Literal["error", "make_unique"],
+    *,
+    option: str,
+    note: str,
+) -> np.ndarray:
     texts = _identifier_texts(values, label)
     if not has_duplicates(texts):
         return values
     if duplicates == "error":
         raise ValueError(
             f"{label} must contain unique values; pass "
-            "duplicate_feature_ids='make_unique' to rename repeated IDs"
+            f"{option}='make_unique' to rename repeated IDs"
         )
     resolved = texts.astype(object)
     taken = set(texts.tolist())
@@ -130,7 +181,6 @@ def unique_feature_identifiers(
     )
     logger.warning(
         f"{label} repeat {len(suffixes)} values: {later.size} later occurrences "
-        f"were renamed with a numbered suffix, for example {examples}. Feature "
-        "names are unchanged."
+        f"were renamed with a numbered suffix, for example {examples}.{note}"
     )
     return resolved

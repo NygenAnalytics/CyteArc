@@ -78,7 +78,11 @@ class _RawMatrix:
 
 
 class _FrozenView:
-    """A run axis view over a table whose ``I`` column selects its rows."""
+    """A run axis view over a table whose ``I`` column selects its rows.
+
+    As a run's view does, it gives its ``clusters`` field a categorical
+    display: the run's labels with their colors.
+    """
 
     def __init__(self, frame):
         self._frame = frame
@@ -92,6 +96,18 @@ class _FrozenView:
 
     def _selected_field(self, column):
         return self.fetch_all(column)[self._selected], None
+
+    def _field_display(self, column):
+        if column != "clusters":
+            return None
+        labels = sorted(set(self._frame[column].tolist()))
+        return {
+            "kind": "categorical",
+            "categories": [
+                {"value": label, "label": str(label), "color": f"#00000{index}"}
+                for index, label in enumerate(labels)
+            ],
+        }
 
 
 def _fake_run_store(monkeypatch, cell_frame: pd.DataFrame):
@@ -112,6 +128,10 @@ def _fake_run_store(monkeypatch, cell_frame: pd.DataFrame):
                     }
                 )
             )
+
+        def __contains__(self, key):
+            # The fake run has no outputs, such as a PCA.
+            return False
 
     store = _PresentationOperationsMixin()
     assay = SimpleNamespace(
@@ -142,7 +162,12 @@ def test_to_anndata_materializes_frozen_pipeline_run_views(monkeypatch) -> None:
     np.testing.assert_array_equal(exported.X.toarray(), [[2], [6]])
     assert list(exported.obs_names) == ["c0", "c2"]
     assert exported.obs["names"].tolist() == ["frozen-a", "frozen-c"]
-    assert exported.obs["clusters"].tolist() == [1, 1]
+    # Cluster labels are categoricals of text labels, as Scanpy groups by,
+    # with the run's display colors of the exported labels.
+    assert isinstance(exported.obs["clusters"].dtype, pd.CategoricalDtype)
+    assert exported.obs["clusters"].cat.categories.tolist() == ["1"]
+    assert exported.obs["clusters"].tolist() == ["1", "1"]
+    assert exported.uns["clusters_colors"].tolist() == ["#000000"]
     assert "umap_1" not in exported.obs
     assert "X_umap" not in exported.obsm
     assert list(exported.var_names) == ["g1"]
@@ -459,7 +484,8 @@ def test_to_anndata_run_export_lifts_consecutive_umap_into_obsm(monkeypatch) -> 
     exported = store.to_anndata(run=run)
 
     assert list(exported.obs_names) == ["c0", "c2"]
-    assert exported.obs["clusters"].tolist() == [1, 1]
+    assert exported.obs["clusters"].cat.categories.tolist() == ["1"]
+    assert exported.obs["clusters"].tolist() == ["1", "1"]
     assert "umap_1" not in exported.obs
     assert "umap_2" not in exported.obs
     np.testing.assert_allclose(
@@ -504,7 +530,8 @@ def test_to_anndata_run_export_ignores_non_positive_umap_suffixes(
 
     assert "X_umap" not in exported.obsm
     assert "umap_0" in exported.obs
-    assert exported.obs["clusters"].tolist() == [1, 2]
+    assert exported.obs["clusters"].cat.categories.tolist() == ["1", "2"]
+    assert exported.obs["clusters"].tolist() == ["1", "2"]
 
 
 @pytest.mark.parametrize(
@@ -825,9 +852,15 @@ def test_run_h5ad_needs_no_anndata_and_matches_to_anndata(
     assert sparse.isspmatrix_csr(written.X)
     assert written.X.dtype == expected.X.dtype
     np.testing.assert_array_equal(written.X.toarray(), expected.X.toarray())
-    assert set(written.obsm) == {"X_umap"}
+    # The run's PCA is exported beside its UMAP, with its stored coordinates.
+    assert set(written.obsm) == {"X_umap", "X_pca"}
     assert written.obsm["X_umap"].dtype == expected.obsm["X_umap"].dtype
     np.testing.assert_array_equal(written.obsm["X_umap"], expected.obsm["X_umap"])
+    np.testing.assert_array_equal(
+        written.obsm["X_pca"],
+        np.asarray(datastore.artifacts.load(run["pca"])["data"][:]),
+    )
+    np.testing.assert_array_equal(written.obsm["X_pca"], expected.obsm["X_pca"])
     assert written.obs_names.tolist() == expected.obs_names.tolist()
     assert written.var_names.tolist() == expected.var_names.tolist()
     assert written.obs["donor"].cat.categories.tolist() == [
@@ -854,6 +887,67 @@ def test_run_h5ad_needs_no_anndata_and_matches_to_anndata(
     # The run's own tables show the stored placeholders as missing too.
     frame = run.cells.to_pandas_dataframe(["ids", "m_text"])
     np.testing.assert_array_equal(frame["m_text"].isna(), ~present)
+
+
+@pytest.mark.slow
+def test_run_export_holds_labels_as_categoricals_with_pca_and_graph(
+    exported_run, tmp_path
+) -> None:
+    from cytearc.writers.export import _natural_key
+
+    anndata = pytest.importorskip("anndata")
+    datastore, run = exported_run
+    graph = run["connectivity_map"]
+
+    exported = datastore.to_anndata(run=run, graph=graph)
+    path = tmp_path / "run_graph.h5ad"
+    cytearc.to_h5ad(datastore.RNA, str(path), run=run, graph=graph)
+    written = anndata.read_h5ad(path)
+
+    labels = [
+        field
+        for field in run.cells.columns
+        if field == "clusters" or field.startswith("leiden_")
+    ]
+    assert "clusters" in labels and len(labels) >= 2
+    for adata in (exported, written):
+        for field in labels:
+            values = [str(value) for value in run.cells.fetch(field).tolist()]
+            column = adata.obs[field]
+            # Scanpy's rank_genes_groups and categorical plots need these.
+            assert isinstance(column.dtype, pd.CategoricalDtype)
+            categories = sorted(set(values), key=_natural_key)
+            assert column.cat.categories.tolist() == categories
+            assert column.tolist() == values
+            display = run.cells._field_display(field)
+            colors = {
+                str(category["value"]): category["color"]
+                for category in display["categories"]
+            }
+            assert adata.uns[f"{field}_colors"].tolist() == [
+                colors[category] for category in categories
+            ]
+        pca = datastore.artifacts.load(run["pca"])
+        np.testing.assert_array_equal(adata.obsm["X_pca"], pca["data"][:])
+        hvg = run.features.fetch("highly_variable_features")
+        np.testing.assert_array_equal(adata.varm["PCs"][hvg], pca["loadings"][:])
+        assert not adata.varm["PCs"][~hvg].any()
+        n_cells = int(_EXPORTED_RUN_CELLS.sum())
+        assert adata.obsp["connectivities"].shape == (n_cells, n_cells)
+        assert adata.obsp["distances"].getnnz(axis=1).tolist() == [5] * n_cells
+        assert adata.uns["neighbors"]["params"]["use_rep"] == "X_pca"
+        assert adata.uns["neighbors"]["params"]["n_neighbors"] == 6
+    with pytest.raises(ValueError, match="obsm 'X_pca' names an array that the"):
+        datastore.to_anndata(run=run, obsm={"X_pca": run["pca"]})
+    with pytest.raises(ValueError, match="cell_selection cannot be provided"):
+        cytearc.to_h5ad(
+            datastore.RNA,
+            str(tmp_path / "rejected.h5ad"),
+            run=run,
+            cell_selection=run["input_cell_selection"],
+        )
+    with pytest.raises(ValueError, match="frozen run selection and assay"):
+        datastore.to_anndata(run=run, cell_selection=run["input_cell_selection"])
 
 
 @pytest.mark.slow

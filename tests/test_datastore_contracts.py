@@ -112,6 +112,7 @@ _METHODS = {
         "show_zarr_tree": DataStore.show_zarr_tree,
         "smart_label": ClustersAccessor.relabel_by_overlap,
         "to_anndata": DataStore.to_anndata,
+        "import_coordinates": ReductionAccessor.import_coordinates,
     },
     ArtifactAccessor: {"find": ArtifactAccessor.find},
 }
@@ -127,7 +128,9 @@ _SIGNATURE_DIGESTS = {
     # run_hto_demultiplexing gained the keyword-only positive_quantile: float
     # with the default 0.99. auto_filter_cells gained the keyword-only
     # metric_policies: dict[str, dict[str, str]] | None with the default None.
-    DataStore: "a7a59b4a948dc14725f9f11daf11c904c61ea21172f009fb218183412ca1a3b7",
+    # to_anndata gained the keyword-only cell_selection, obsm, obs, graph,
+    # and dtype, each None by default, and reduction.import_coordinates is new.
+    DataStore: "e7d9a83a1c4ac84af55fe61bf1fe11ee344bb6ad12bcc030e929afd47c15f3ff",
     ArtifactAccessor: "c48b4badcb3fbd03d03326278eafae0cf429ac31e5d053390e60ed9316d6b54b",
 }
 
@@ -158,7 +161,8 @@ _NAMESPACE_METHODS = [
 
 
 def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
-    assert len(_NAMESPACE_METHODS) == 74
+    # reduction.import_coordinates joined the moved methods and find.
+    assert len(_NAMESPACE_METHODS) == 75
 
 
 @pytest.mark.parametrize(

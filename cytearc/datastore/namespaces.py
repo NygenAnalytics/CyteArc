@@ -180,6 +180,9 @@ class ReductionAccessor(_Accessor):
     lsi = _bind(_GraphOperationsMixin._reduction_lsi)
     custom = _bind(_GraphOperationsMixin._reduction_custom)
     harmony = _bind(_GraphOperationsMixin._reduction_harmony)
+    import_coordinates = _bind(
+        _PresentationOperationsMixin._reduction_import_coordinates
+    )
 
 
 class RegulonsAccessor(_Accessor):

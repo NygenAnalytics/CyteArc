@@ -32,7 +32,7 @@ from ...metadata.arguments import (
     MembershipStrengthArguments,
     SmartLabelArguments,
 )
-from ...metadata.membership import exported_membership, membership_declaration
+from ...metadata.membership import exported_membership
 from ...metadata.rows import apply_missing_mask, read_metadata_missing_rows
 from ...metadata.selection import resolve_complete_labels
 from ...metadata.artifacts import (
@@ -47,11 +47,19 @@ from ...storage.selections import (
 )
 
 if TYPE_CHECKING:
-    from ...writers.export import H5adExportPlan, H5adMatrix
+    from ...writers.export import (
+        H5adCategorical,
+        H5adExportPlan,
+        H5adMatrix,
+        H5adSource,
+    )
     from ..mapping_datastore import MappingDatastore as _PresentationOperationsBase
     from ..pipeline_run import PipelineAxisView, PipelineRun
 else:
     _PresentationOperationsBase = object
+
+# The run outputs that a run export writes to obsm, under Scanpy's keys.
+_RUN_OBSM_OUTPUTS = {"pca": "X_pca", "harmony": "X_pca_harmony"}
 
 
 def _letter_suffix(position: int) -> str:
@@ -179,23 +187,107 @@ def _require_unique_layer_ids(selected_ids: np.ndarray) -> None:
 def _anndata_from_plan(anndata: Any, plan: "H5adExportPlan") -> Any:
     """Materialize an export plan as an in-memory AnnData object.
 
-    ``obs`` and ``var`` are the tables of ``cytearc.writers.export.h5ad_frame``,
-    so their categoricals are the ones that the file of the plan stores.
+    ``obs`` and ``var`` are the tables of ``cytearc.writers.export.h5ad_table``
+    and ``uns`` is ``plan_uns`` of the plan, so their categoricals, colors,
+    and declarations are the ones that the file of the plan stores.
     """
-    from ...writers.export import h5ad_frame, materialize_h5ad_matrix
+    from ...writers.export import (
+        h5ad_table,
+        materialize_h5ad_matrix,
+        plain_uns,
+        plan_uns,
+        read_obsm,
+        read_obsp,
+        read_varm,
+    )
 
     n_obs, n_vars = plan.x.shape
+    obs, colors = h5ad_table(plan.obs_index, plan.obs, n_obs)
+    var, _var_colors = h5ad_table(plan.var_index, plan.var, n_vars)
     adata = anndata(
         materialize_h5ad_matrix(plan.x),
-        obs=h5ad_frame(plan.obs_index, plan.obs, n_obs),
-        var=h5ad_frame(plan.var_index, plan.var, n_vars),
-        uns=membership_declaration(dict(plan.membership)),
+        obs=obs,
+        var=var,
+        uns=plain_uns(plan_uns(plan, obs.columns, colors)),
     )
-    for name, read in plan.obsm.items():
-        adata.obsm[name] = read()
+    for name in plan.obsm:
+        adata.obsm[name] = read_obsm(plan, name)
     for name, layer in plan.layers.items():
         adata.layers[name] = materialize_h5ad_matrix(layer, f"Layer {name!r}")
+    for name in plan.obsp:
+        adata.obsp[name] = read_obsp(plan, name)
+    for name in plan.varm:
+        adata.varm[name] = read_varm(plan, name)
     return adata
+
+
+def _run_label_categorical(
+    view: "PipelineAxisView",
+    column: str,
+) -> "H5adCategorical | None":
+    """Return how a run export writes a frozen label field, or None.
+
+    A field with a categorical display, such as ``clusters``, ``leiden_*``,
+    ``paris``, or ``cell_cycle_phase``, is a categorical whose categories are
+    its labels as text in natural order, with the display colors.
+    """
+    from ...writers.export import H5adCategorical
+
+    display = view._field_display(column)
+    if display is None or display.get("kind") != "categorical":
+        return None
+    return H5adCategorical(
+        colors={
+            str(category["value"]): str(category["color"])
+            for category in display["categories"]
+        }
+    )
+
+
+def _materialized(matrix: csr_matrix) -> Iterator[csr_matrix]:
+    yield matrix
+
+
+def _aligned_coordinates(values: Any, cell_ids: np.ndarray) -> np.ndarray:
+    """Return imported coordinates with one row per selected cell, in order.
+
+    An array must already have those rows. A DataFrame is aligned by its
+    index of cell IDs; rows of other cells are left out.
+    """
+    if isinstance(values, pd.DataFrame):
+        index = values.index.astype(str)
+        if index.has_duplicates:
+            repeated = index[index.duplicated()].unique().tolist()
+            raise ValueError(
+                f"The coordinates repeat cell IDs, such as {repeated[0]!r}"
+            )
+        positions = index.get_indexer(cell_ids)
+        absent = positions < 0
+        if absent.any():
+            raise ValueError(
+                f"The coordinates have no row for {int(absent.sum())} of the "
+                f"{cell_ids.size} selected cells, such as "
+                f"{str(cell_ids[absent][0])!r}; their index must hold the cell IDs"
+            )
+        if positions.size < len(values):
+            logger.info(
+                f"Left out {len(values) - positions.size} rows of cells outside "
+                "the cell selection"
+            )
+        array: np.ndarray = values.to_numpy()[positions]
+    else:
+        array = np.asarray(values)
+    if array.ndim != 2:
+        raise ValueError(
+            f"Imported coordinates must be two-dimensional; found {array.ndim} "
+            "dimensions"
+        )
+    if array.shape[0] != cell_ids.size:
+        raise ValueError(
+            f"Imported coordinates have {array.shape[0]} rows; the cell selection "
+            f"holds {cell_ids.size} cells"
+        )
+    return array
 
 
 class _PresentationOperationsMixin(_PresentationOperationsBase):
@@ -209,16 +301,42 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         matrix: Literal["raw", "normed"] = "raw",
         feature_indexes: Sequence[int] | None = None,
         feature_names: Sequence[str] | None = None,
+        cell_selection: ArtifactRef | None = None,
+        obsm: "Mapping[str, H5adSource] | None" = None,
+        obs: "Mapping[str, H5adSource] | None" = None,
+        graph: ArtifactRef | None = None,
+        dtype: Any | None = None,
     ) -> Any:
         """Return an assay as an in-memory AnnData object.
 
-        Cell and feature metadata are copied to ``obs`` and ``var``. Without
-        ``run``, layout coordinates remain ordinary ``obs`` columns and this
-        method does not populate ``obsm``. With ``run``, consecutive frozen
-        ``umap_*`` fields are written to ``obsm["X_umap"]`` and removed from
-        ``obs``. Cluster and QC labels stay in ``obs``. Rows that a nullable
-        column's linked missing mask flags are missing values in ``obs`` and
-        ``var``, with or without ``run``.
+        Cell and feature metadata are copied to ``obs`` and ``var``. A column
+        that keeps a source categorical's categories, as H5AD and Seurat
+        imports store them, becomes that categorical, with its category
+        order, unused categories, ``ordered`` flag, and colors in
+        ``uns["<column>_colors"]``. Rows that a nullable column's linked
+        missing mask flags are missing values in ``obs`` and ``var``, with
+        or without ``run``.
+
+        Without ``run``, the live export holds the cells of ``cell_key`` or
+        ``cell_selection``, and ``obsm``, ``obs``, and ``graph`` export
+        artifacts beside them: coordinates and embeddings in ``obsm``, such
+        as ``{"X_pca": pca, "X_umap": umap}``, where ``X_pca`` also writes the
+        PCA loadings to ``varm["PCs"]``; cell labels and scores in ``obs``,
+        labels as categoricals; and a connectivity map in ``obsp`` with
+        ``uns["neighbors"]`` in Scanpy's layout. With ``run``, consecutive
+        frozen ``umap_*`` fields are written to ``obsm["X_umap"]`` and
+        removed from ``obs``, the run's PCA is ``obsm["X_pca"]`` (and its
+        Harmony correction ``obsm["X_pca_harmony"]``), and label fields
+        (``clusters``, ``leiden_*``, ``paris``) are categoricals with string
+        categories in natural order and the run's display colors.
+
+        ``matrix="normed"`` means two different things. Without ``run``,
+        ``X`` holds the assay's ``normed`` values of the exported features:
+        for RNA, counts scaled by each cell's library size over all of its
+        features to 1,000, without a log transform. With ``run``, ``X`` holds
+        the run's stored ``normalized`` artifact, the values that its PCA
+        read: log1p of counts scaled over the highly variable features only,
+        which are then the only features.
 
         Args:
             from_assay: Name of assay to be used. If no value is provided then the default assay will be used.
@@ -230,6 +348,21 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
             matrix: Whether ``X`` contains raw counts or normalized values.
             feature_indexes: Global feature rows to export, in the requested order.
             feature_names: Feature names to export, in the requested order.
+            cell_selection: Cell-selection artifact whose cells are exported, in
+                store order; it excludes ``cell_key``. The cells of an
+                artifact's selection are those that its values cover.
+            obsm: Artifacts to export as ``obsm`` arrays, by name.
+            obs: Cell-aligned artifacts to export as ``obs`` columns, by name.
+                A pair ``(ref, name)`` names another per-cell array of the
+                artifact, such as ``(cell_cycle, "s_score")``.
+            graph: Connectivity map or integrated graph to export as
+                ``obsp["connectivities"]`` (and, for a connectivity map,
+                ``obsp["distances"]``) with ``uns["neighbors"]``. It must be
+                built over exactly the exported cells.
+            dtype: Dtype of the exported raw counts, in ``X`` and in
+                ``layers``. None keeps the stored dtype, except that
+                ``uint8`` and ``uint16`` counts become ``float32``, on which
+                arithmetic cannot wrap.
 
         Returns:
             An AnnData object.
@@ -237,6 +370,9 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         Raises:
             ImportError: If ``anndata`` is not installed.
             UnmeasuredCellsError: If normed or other-assay data has an unmeasured cell.
+            ValueError: If an artifact does not cover every exported cell, or
+                a graph does not cover exactly the exported cells.
+            OverflowError: If ``dtype`` cannot hold an exported count.
         """
         try:
             # noinspection PyPackageRequirements
@@ -246,11 +382,18 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 "DataStore.to_anndata requires anndata. "
                 "Install it with: pip install 'cytearc[extra]'"
             ) from exc
+        from ...writers.export import (
+            export_count_dtype,
+            with_artifacts,
+            with_count_dtype,
+        )
 
         if matrix not in ("raw", "normed"):
             raise ValueError("matrix must be either 'raw' or 'normed'")
         if feature_indexes is not None and feature_names is not None:
             raise ValueError("feature_indexes and feature_names are mutually exclusive")
+        if dtype is not None:
+            export_count_dtype(None, dtype)
 
         if run is not None:
             from ..pipeline_run import PipelineRun
@@ -259,7 +402,11 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 raise TypeError("run must be a PipelineRun")
             if run._owner is not self:
                 raise ValueError("run must be opened from this datastore")
-            if from_assay is not None or cell_key is not None:
+            if (
+                from_assay is not None
+                or cell_key is not None
+                or cell_selection is not None
+            ):
                 raise ValueError(
                     "Run-aware export uses the frozen run selection and assay"
                 )
@@ -267,13 +414,23 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 raise ValueError(
                     "Run-aware export uses the frozen run feature selection"
                 )
+            plan = self._h5ad_run_plan(run, matrix=matrix, layers=layers)
+            if obsm is not None or obs is not None or graph is not None:
+                plan = with_artifacts(
+                    plan,
+                    self.zw,
+                    cell_rows=np.flatnonzero(run.cells.fetch_all("I")),
+                    obsm=obsm,
+                    obs=obs,
+                    graph=graph,
+                    max_bytes=self.memoryBytes,
+                )
             return _anndata_from_plan(
-                AnnData,
-                self._h5ad_run_plan(run, matrix=matrix, layers=layers),
+                AnnData, with_count_dtype(plan, dtype, raw_x=matrix == "raw")
             )
 
-        if cell_key is None:
-            cell_key = "I"
+        if cell_key is not None and cell_selection is not None:
+            raise ValueError("cell_key and cell_selection are mutually exclusive")
         assay = self._get_assay(from_assay)
 
         if feature_indexes is not None:
@@ -324,10 +481,20 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         else:
             feat_idx = np.arange(assay.feats.N, dtype=np.int64)
 
-        cell_idx = self.cells.active_index(cell_key)
+        cells: str | ArtifactRef
+        remedy: Literal["cell_key", "cell_selection"]
+        if cell_selection is not None:
+            from ...writers.export import cell_selection_rows
+
+            cell_idx = cell_selection_rows(self.zw, cell_selection)
+            cells, remedy = cell_selection, "cell_selection"
+        else:
+            cells = "I" if cell_key is None else cell_key
+            cell_idx = self.cells.active_index(cells)
+            remedy = "cell_key"
         if matrix == "normed":
             self._require_measured_cells(
-                assay.name, cell_key, operation="to_anndata", remedy="cell_key"
+                assay.name, cells, operation="to_anndata", remedy=remedy
             )
         layer_features: dict[str, tuple[Any, np.ndarray]] = {}
         if layers is not None:
@@ -341,25 +508,10 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                     # Only the exported assay declares its membership.
                     self._require_measured_cells(
                         assay_name,
-                        cell_key,
+                        cells,
                         operation="to_anndata",
-                        remedy="cell_key",
+                        remedy=remedy,
                     )
-        declared, omitted = exported_membership(self.cells, assay.name)
-        obs = (
-            self.cells.to_pandas_dataframe(
-                [column for column in self.cells.columns if column not in omitted],
-                key=cell_key,
-            )
-            .reset_index(drop=True)
-            .set_index("ids")
-        )
-        var = (
-            assay.feats.to_pandas_dataframe(assay.feats.columns)
-            .iloc[feat_idx]
-            .rename(columns={"ids": "gene_ids"})
-            .set_index("gene_ids")
-        )
 
         if matrix == "raw":
             x = raw_csr(assay, cell_idx, feat_idx)
@@ -371,10 +523,104 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 if blocks
                 else csr_matrix((len(cell_idx), len(feat_idx)))
             )
-        adata = AnnData(x, obs=obs, var=var, uns=membership_declaration(declared))
-        for layer, (layer_assay, layer_feat_idx) in layer_features.items():
-            adata.layers[layer] = raw_csr(layer_assay, cell_idx, layer_feat_idx)
-        return adata
+        plan = self._live_anndata_plan(assay, x, cell_idx, feat_idx, layer_features)
+        if obsm is not None or obs is not None or graph is not None:
+            plan = with_artifacts(
+                plan,
+                self.zw,
+                cell_rows=cell_idx,
+                obsm=obsm,
+                obs=obs,
+                graph=graph,
+                max_bytes=self.memoryBytes,
+            )
+        return _anndata_from_plan(
+            AnnData, with_count_dtype(plan, dtype, raw_x=matrix == "raw")
+        )
+
+    def _live_anndata_plan(
+        self,
+        assay: Any,
+        x: csr_matrix,
+        cell_idx: np.ndarray,
+        feat_idx: np.ndarray,
+        layer_features: Mapping[str, tuple[Any, np.ndarray]],
+    ) -> "H5adExportPlan":
+        """Plan the in-memory export of live cells, features, and matrices.
+
+        ``obs`` is indexed by ``ids`` and ``var`` by ``gene_ids``. Column
+        names that AnnData reserves or that the index takes are renamed, and
+        columns that keep a source categorical's categories are categoricals.
+        """
+        from ...writers.export import (
+            H5adColumn,
+            H5adExportPlan,
+            H5adMatrix,
+            _live_column,
+            live_categorical,
+            unique_column_names,
+        )
+
+        declared, omitted = exported_membership(self.cells, assay.name)
+
+        def table(
+            metadata: Any,
+            index: str,
+            keys: list[str],
+            rows: np.ndarray,
+            label: str,
+        ) -> tuple[H5adColumn, tuple[H5adColumn, ...]]:
+            names = unique_column_names(index, keys, table=label)
+            return H5adColumn(
+                index, partial(_live_column, metadata, "ids", rows)
+            ), tuple(
+                H5adColumn(
+                    name,
+                    partial(_live_column, metadata, key, rows),
+                    categorical=live_categorical(metadata, key),
+                )
+                for key, name in zip(keys, names, strict=True)
+            )
+
+        obs_index, obs_columns = table(
+            self.cells,
+            "ids",
+            [
+                column
+                for column in self.cells.columns
+                if column != "ids" and column not in omitted
+            ],
+            cell_idx,
+            "obs",
+        )
+        var_index, var_columns = table(
+            assay.feats,
+            "gene_ids",
+            [column for column in assay.feats.columns if column != "ids"],
+            feat_idx,
+            "var",
+        )
+        shape = (len(cell_idx), len(feat_idx))
+        return H5adExportPlan(
+            x=H5adMatrix(
+                shape=shape, dtype=np.dtype(x.dtype), blocks=partial(_materialized, x)
+            ),
+            obs_index=obs_index,
+            obs=obs_columns,
+            var_index=var_index,
+            var=var_columns,
+            layers={
+                layer: H5adMatrix(
+                    shape=shape,
+                    dtype=np.dtype(layer_assay.rawData.dtype),
+                    blocks=partial(
+                        _materialized, raw_csr(layer_assay, cell_idx, layer_feat_idx)
+                    ),
+                )
+                for layer, (layer_assay, layer_feat_idx) in layer_features.items()
+            },
+            membership=declared,
+        )
 
     def _layer_features(
         self,
@@ -433,11 +679,21 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         run's frozen fields, with masked rows missing, encoded as
         ``"categorical"`` columns: the plan decides which text fields are
         categoricals and in what order their categories are, for the file
-        and for the object alike. Consecutive ``umap_<k>`` fields become
-        ``obsm["X_umap"]``. ``layers`` maps layer names to assays whose raw
+        and for the object alike. A field with a categorical display, such
+        as ``clusters``, ``leiden_*``, or ``paris``, is a categorical of its
+        labels as text, in natural order, with the display's colors.
+        Consecutive ``umap_<k>`` fields become ``obsm["X_umap"]``, and the
+        run's ``pca`` and ``harmony`` outputs ``obsm["X_pca"]`` and
+        ``obsm["X_pca_harmony"]``, with the PCA loadings in
+        ``varm["PCs"]``. ``layers`` maps layer names to assays whose raw
         counts are aligned to the exported features by ID.
         """
-        from ...writers.export import H5adColumn, H5adExportPlan, H5adMatrix
+        from ...writers.export import (
+            H5adColumn,
+            H5adExportPlan,
+            H5adMatrix,
+            with_artifacts,
+        )
         from ..pipeline_run import PipelineRun
 
         if matrix not in ("raw", "normed"):
@@ -480,6 +736,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 column if name is None else name,
                 partial(_frozen_field, view, column, rows),
                 "categorical",
+                None if view is features else _run_label_categorical(view, column),
             )
 
         cell_fields = [column for column in cells.columns if column != "ids"]
@@ -502,9 +759,11 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 plan_layers[layer] = _raw_count_matrix(
                     layer_assay, cell_idx, layer_feat_idx
                 )
-        return H5adExportPlan(
+        plan = H5adExportPlan(
             x=x,
-            obs_index=frozen(cells, "ids"),
+            obs_index=H5adColumn(
+                "ids", partial(_frozen_field, cells, "ids", None), "categorical"
+            ),
             obs=tuple(
                 frozen(cells, column) for column in cell_fields if column not in umap
             ),
@@ -520,6 +779,20 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 else {}
             ),
             layers=plan_layers,
+        )
+        coordinates = {
+            name: run[output]
+            for output, name in _RUN_OBSM_OUTPUTS.items()
+            if output in run
+        }
+        if not coordinates:
+            return plan
+        return with_artifacts(
+            plan,
+            self.zw,
+            cell_rows=cell_idx,
+            obsm=coordinates,
+            max_bytes=self.memoryBytes,
         )
 
     def _run_normalized_values(
@@ -579,6 +852,103 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
             ),
         )
         return values, np.asarray(selections.featureMask, dtype=bool)
+
+    @validation_scoped
+    def _reduction_import_coordinates(
+        self,
+        values: Any,
+        *,
+        cell_selection: ArtifactRef,
+        name: str,
+        from_assay: str | None = None,
+        source: Mapping[str, Any] | None = None,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Import an external latent space as graph coordinates.
+
+        The coordinates, such as an scVI latent space (``X_scVI``) or a
+        Harmony correction computed elsewhere (``X_pca_harmony``), become an
+        ``imported_coordinates`` artifact that ``graph.ann_index``,
+        ``embeddings.initialization``, and mapping accept like a PCA. Its
+        identity records ``name``, the ``source`` record, a fingerprint of
+        the values, which also serves as their source digest, and a
+        fingerprint of the ordered cell IDs, so importing the same values
+        again reuses the artifact, and lineage reports show where they came
+        from.
+
+        Args:
+            values: A two-dimensional array with one row per cell of
+                ``cell_selection``, in store order, or a pandas DataFrame
+                indexed by cell ID, whose rows are aligned to the selected
+                cells by ID; rows of other cells are left out. Integer and
+                boolean values are stored as float64.
+            cell_selection: Cell-selection artifact of the cells that the
+                coordinates describe.
+            name: Name of the coordinates, recorded as their source key, such
+                as ``"X_scVI"``.
+            from_assay: Assay that owns the artifact; the default assay when
+                None.
+            source: Record of the tool that computed the coordinates, such as
+                ``{"tool": "scvi-tools", "version": "1.2.0", "parameters":
+                {"n_latent": 30}}``, holding text, numbers, booleans, None,
+                and lists or mappings of them.
+            invalidate_cache: Write a new artifact even when one matches.
+
+        Returns:
+            Reference to the ``imported_coordinates`` artifact.
+
+        Raises:
+            TypeError: If an argument has the wrong type, or the values are
+                not numbers.
+            ValueError: If the values do not have one row per selected cell,
+                a DataFrame lacks a selected cell or repeats a cell ID, or a
+                value is not finite.
+            PermissionError: If no matching result exists and the store is
+                not opened with ``zarr_mode='r+'``.
+        """
+        from ...embeddings.imported import (
+            imported_source_record,
+            write_imported_coordinates,
+        )
+        from ...metadata.rows import read_metadata_rows_chunkwise
+        from ...storage.artifacts import fingerprint_array
+        from ...writers._store import bounded_block_rows, floating_payload_dtype
+        from ...writers.export import cell_selection_rows
+
+        if not isinstance(name, str) or not name:
+            raise ValueError("name must be a non-empty string")
+        if source is not None:
+            imported_source_record(source)
+        assay = self._get_assay(from_assay)
+        rows = cell_selection_rows(self.zw, cell_selection)
+        cell_ids = np.asarray(read_metadata_rows_chunkwise(self.cells, "ids", rows))
+        coordinates = _aligned_coordinates(values, cell_ids.astype(str))
+        dtype = floating_payload_dtype(coordinates.dtype, "Imported coordinates")
+        coordinates = np.ascontiguousarray(coordinates, dtype=dtype)
+        if coordinates.shape[1] < 1:
+            raise ValueError("Imported coordinates need at least one dimension")
+        if not bool(np.isfinite(coordinates).all()):
+            raise ValueError("Imported coordinates must hold only finite values")
+        fingerprint = fingerprint_array(coordinates)
+        return write_imported_coordinates(
+            self.zw,
+            assay=assay.name,
+            dimreduc_key=name,
+            role="coordinates",
+            coordinates=coordinates,
+            source_digest=bytes.fromhex(fingerprint),
+            payload_fingerprints={"data": fingerprint},
+            source_cell_ids=cell_ids,
+            cell_selection=cell_selection,
+            block_rows=bounded_block_rows(
+                None,
+                row_bytes=coordinates.shape[1] * dtype.itemsize,
+                memory_bytes=self.memoryBytes,
+            ),
+            invalidate_cache=invalidate_cache,
+            source=source,
+            require_writable=lambda: self._require_writable("import_coordinates"),
+        )
 
     def show_zarr_tree(self, start: str = "/", depth: int = 2) -> None:
         """Prints the Zarr hierarchy of the DataStore.

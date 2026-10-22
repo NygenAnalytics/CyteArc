@@ -73,9 +73,10 @@ _MODULE_FUNCTIONS = (
     "to_mtx",
     "write_renorm_subset_to_zarr",
 )
-# to_h5ad takes the keyword-only matrix="raw" or "normed" beside run.
+# to_h5ad takes the keyword-only matrix="raw" or "normed" beside run, and the
+# keyword-only cell_selection, obsm, obs, graph, and dtype, each None by default.
 _MODULE_SIGNATURE_DIGEST = (
-    "d2b52149156853c361e7a78b8bbeaee30788df456db0b32da6acae49677a1076"
+    "4b6d6cdd593f4f8f6b363a1e447eae26724e0f25fb57453220956fa4ac4b10c8"
 )
 
 

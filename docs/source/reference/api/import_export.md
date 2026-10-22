@@ -43,6 +43,27 @@ myst:
 ## H5AD inspection
 
 Use this before `H5adReader` when you do not know which matrix and metadata keys an H5AD file uses.
+Review the result before importing: `matrixKey` names the matrix that will become the counts, and
+`matrixCandidates` lists every candidate in rank order.
+
+`inspect_h5ad` ranks the candidate matrices so that counts come first. A matrix holds counts when a
+sample of its stored values, up to 32 windows of 1,024 values spread over the whole matrix, is
+finite, non-negative, and whole. Among counts, a conventional name wins: `raw/X`, `layers/counts`,
+and `layers/raw_counts`, then `X`, then `layers/spliced`, then other matrices, and the `unspliced`
+and `ambiguous` layers of velocity data last. Matrices of one tier rank by their total, estimated
+from the same sample, so the one that holds the most reads wins. When other matrices of the same
+cells also hold counts, a warning lists them with their estimated totals; pass `matrix_key` to
+choose another. A velocity file whose `X`, `spliced`, and `unspliced` are normalized imports its
+`matrix` layer, the total counts, rather than its `ambiguous` reads.
+
+The cell IDs are the `obs` index when it is unique, else a preferred ID column such as `cell_id` or
+`barcode` that holds unique text or integers, else the first unique text column. A column of
+distinct floating-point values, such as a score, is never chosen. When no column holds unique IDs,
+`cellIdsKey` names the index anyway and a warning says that its IDs repeat: such a file, as
+`anndata.concat` writes without `index_unique`, imports with
+`H5adReader.from_inspect(inspection, duplicate_cell_ids="make_unique")`, which renames each later
+occurrence of a repeated ID by appending `-1`, `-2`, and so on, as AnnData's
+`obs_names_make_unique` does. Only a file without an index gets generated IDs.
 
 `H5adReader` checks the matrix shape against the lengths of `obs` and `var` when it is
 constructed, and a mismatch raises `ValueError`. Overriding `matrix_key`, for example with
@@ -58,9 +79,29 @@ Unsupported group encodings and multi-dimensional columns are skipped with a war
 `H5adToZarr` keeps missing rows under a linked missing mask and stores nullable booleans as
 booleans.
 
+Categorical columns keep their categories. `H5adToZarr` stores, with each imported categorical
+column of `obs` or `var` that has at most 10,000 categories, a `levels` attribute that lists every
+category in its order, unused ones included, and an `ordered` attribute, as `SeuratToZarr` stores
+factor levels. A cell column also gets a categorical `display` attribute in that order, with the
+colors of `uns["<column>_colors"]` when the file holds a color for each category, or else
+CyteArc's palette; plots of the column show its categories in that order and colors. Exports write
+such a column as the same categorical. Imported cluster labels keep the same attributes on their
+`values` array.
+
+A dataframe index that is neither the ID nor the name column imports as metadata only when it holds
+other values: an index that repeats the IDs or the names is left out, and AnnData's unnamed index,
+which no AnnData column may be named, imports as `source_index`, or `source_index_2` and so on when
+that name is taken. A missing or blank feature name, such as a missing category, takes the
+feature's ID as the file holds it, with a warning.
+
 Pass `embedding_roles` and `cluster_keys` to select analytical H5AD values for artifact import.
 Selected `obsm` arrays and cluster labels are excluded from live metadata and returned as exact
-refs by `H5adToZarr.dump()`. Other supported `obs` columns remain literal metadata.
+refs by `H5adToZarr.dump()`. Other supported `obs` columns remain literal metadata. The role
+`"umap"` or `"tsne"` makes an `embedding` artifact, and `"coordinates"` an `imported_coordinates`
+artifact, such as of `X_pca`, `X_scVI`, or `X_pca_harmony`, which `graph.ann_index`, embedding
+initialization, and mapping accept as they accept a PCA. Coordinates computed after an import enter
+a store through {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.import_coordinates`
+({doc}`graph_construction`).
 
 CSC input is converted to temporary row storage on local disk. Pass `temp_dir` to
 `H5adReader` or `H5adReader.from_inspect` to choose its parent directory; the default uses
@@ -212,7 +253,11 @@ whose name contains either one under the name with `_` in their place and log th
 source name that is already valid keeps its name; a renamed column whose name is taken gets
 the first free `_2`, `_3`, and so on. `SeuratToZarr` raises for reserved names instead of
 skipping them.
-The H5AD, CSV, Matrix Market, and Cell Ranger readers reject missing or repeated cell IDs. All
+The H5AD, CSV, Matrix Market, and Cell Ranger readers reject missing or repeated cell IDs, and so
+does `SparseToZarr`, which also rejects missing or repeated feature IDs and converts a COO, CSC, or
+dense matrix to CSR before it scans it. `CSVReader` reads its ID column as text, as the file holds
+it, so `001` stays `"001"`. `H5adReader` renames repeated cell IDs on request
+(`duplicate_cell_ids="make_unique"`). All
 but the CSV reader also reject missing or repeated feature IDs: `CSVReader` takes its feature IDs
 from the header as pandas reads it, which names a column with a blank header
 `Unnamed: <position>` and renames each later occurrence of a repeated name by appending `.1`,
@@ -356,9 +401,13 @@ It keeps the membership column `<assay>_I` of each assay it writes, for the sele
 does not copy the membership column of an assay that `assays=` leaves out
 ([Assay membership](../developers/zarr-internals#assay-membership)).
 
-Without a `run`, `to_h5ad` and `to_mtx` export a complete assay.
+Without a `run`, `to_h5ad` and `to_mtx` export a complete assay; `to_h5ad(..., cell_selection=ref)`
+exports the cells of a cell-selection artifact instead.
 For feature-selective disk export outside a pipeline run, call `to_anndata` and use AnnData's
 writer.
+`to_mtx` writes a feature ID, name, and type column in the features file whether or not it
+compresses, `features.tsv.gz` with `compress=True` and `genes.tsv` without, so `CrDirReader`
+reads an ADT export back as ADT, and it compresses with gzip level 6.
 A Matrix Market directory holds no cell metadata, so `to_mtx` cannot say which cells an assay
 measured, and a cell that it did not measure would be written as a zero row that `MtxToZarr`
 reads back as a measured cell. `to_mtx` therefore raises
@@ -372,12 +421,66 @@ complete matrix, and it converts a dense block to CSR a bounded step of rows at 
 block's stream charges against the memory budget. It writes a temporary file in the same directory
 and moves it onto the target once complete, so a failed export leaves no partial file and keeps an
 earlier file of the same name; a replaced file keeps its permissions. Without a `run`, text without missing values is a string array and
-both indexes are stored as `_index`.
+both indexes are stored as `_index`. A column named `_index`, which AnnData reserves, as stores
+imported before this release may hold, exports as `source_index`, and a column whose name the
+export already uses, such as a `gene_short_name` beside the feature names that `to_h5ad` writes
+under that name, takes the first free `<name>_2`, with a warning; the store is not changed.
+
+A column that keeps a source categorical's `levels` and `ordered` attributes, as H5AD and Seurat
+imports store them, exports as that categorical, with its category order, unused categories, and
+`ordered` flag, and the colors of its `display` attribute as `uns["<column>_colors"]` in category
+order. A value that the levels do not list is appended to the categories with a warning.
+
+Exported raw counts take the dtype that `dtype` names. Without it they keep the stored dtype,
+except that `uint8` and `uint16` counts become `float32`: arithmetic on narrow unsigned integers
+wraps silently, as `X * 300` does in `uint16`, and `numpy.log1p` of `uint8` returns `float16`,
+while `float32` holds every such count exactly and is the dtype that Scanpy's readers return. A
+count that an explicit dtype cannot hold raises `OverflowError`.
 
 Nullable metadata columns keep a stored placeholder in each row that their linked missing mask
 flags. `to_anndata` and `to_h5ad` export those rows as missing values with or without `run`:
 numeric columns become float64 with `NaN`, boolean columns become nullable booleans, and other
 columns hold a missing value, which H5AD files store as a missing category.
+
+### Artifacts in exports
+
+`to_anndata` and `to_h5ad`, with or without a `run`, export artifacts beside the cells:
+
+```python
+adata = ds.to_anndata(
+    cell_selection=cells,
+    obsm={"X_pca": pca, "X_umap": umap},
+    obs={"leiden": leiden, "s_score": (cell_cycle, "s_score")},
+    graph=graph,
+)
+cytearc.to_h5ad(ds.RNA, "analysis.h5ad", cell_selection=cells, obsm={"X_pca": pca})
+```
+
+`obsm` takes two-dimensional per-cell arrays, such as a `reduction`, a `batch_correction`,
+`imported_coordinates`, or an `embedding`. The entry named `X_pca` also writes the loadings of a
+PCA as `varm["PCs"]`, with a row per exported feature and zeros for features that the PCA did not
+use, as Scanpy stores them; imported coordinates with a `stdev` add `uns["pca"]["variance"]`.
+`obs` takes one-dimensional per-cell arrays: labels, such as a clustering, become categoricals of
+text labels in natural order, or of the categories and colors that imported labels keep, and
+scores stay numbers. A pair `(ref, name)` exports another per-cell array of an artifact. Every
+artifact must hold every exported cell; `ValueError` names the remedy otherwise, which is to export
+the cells of its cell selection with `cell_selection=`.
+
+`graph`, a `connectivity_map` or `integrated_graph` built over exactly the exported cells, becomes
+`obsp["connectivities"]`, the fuzzy union `W + W.T - W * W.T` of its directed weights, which
+CyteArc's UMAP reads and Scanpy expects to be symmetric, and, for a connectivity map,
+`obsp["distances"]`, its KNN distances with `k` entries per cell. `uns["neighbors"]` follows
+Scanpy's layout: `connectivities_key`, `distances_key`, and `params` with `n_neighbors` (`k + 1`,
+because Scanpy counts each cell among its own neighbors), `method`, `metric`, and `use_rep` when
+the graph's coordinates are also exported in `obsm`. Exporting a graph holds about 96 bytes per
+stored edge, which is checked against the memory budget. `uns["cytearc"]["artifacts"]` records the
+reference of every exported artifact by element, such as `uns["cytearc"]["artifacts"]["obsm"]["X_pca"]`.
+
+The two meanings of `matrix="normed"` differ. Without a `run`, `to_anndata(matrix="normed")`
+exports the assay's `normed` values of the selected cells and features: for RNA, counts scaled by
+each cell's library size over all of its features to 1,000, without a log transform. A run export
+with `matrix="normed"` exports the run's stored `normalized` artifact: log1p of counts scaled over
+the highly variable features only, which are then the only features, as described below.
 
 Without `run`, `to_anndata` and `to_h5ad` export the membership column `<assay>_I` of the
 exported assay as an ordinary `obs` column and declare it in `uns["cytearc"]["assayMembership"]`,
@@ -404,19 +507,24 @@ The assay must be the exact assay object owned by the datastore that opened the 
 to a file holds exactly what {py:meth}`~cytearc.datastore.datastore.DataStore.to_anndata` returns
 for the same `run` and `matrix`, because one resolution of the run's rows, columns, and values
 serves both: the run's cells, its frozen cell fields in `obs` with the consecutive UMAP fields in
-`obsm["X_umap"]` and `clusters` in `obs`, and its frozen feature fields in `var`. `to_anndata`
-holds that object in memory; `to_h5ad` streams it into the file. The run's plan decides which text
-fields are categoricals: text that repeats or has missing values is a categorical whose categories
-are in natural order (`d2` before `d10`, with a superscript or circled digit kept as text), and text
-missing in every row is a categorical without categories. `to_anndata` returns those fields as
-pandas categoricals with exactly those categories, and the file stores the same categories and
-codes, so the object, the file, and a file that `AnnData.write_h5ad` writes from the object agree
-whatever the AnnData version. Other text is a string array, and the indexes are named `ids` and
-`gene_ids`. The export stores `X` compressed, stores distinct text as a string array,
-and leaves out the empty `layers`,
-`obsp`, `uns`, `varm`, and `varp` groups. `embeddings_cols`, feature-count recalculation, and a
-writer-specific thread override apply only to ordinary full-assay export and are rejected when
-`run` is supplied.
+`obsm["X_umap"]`, its PCA in `obsm["X_pca"]` with the loadings in `varm["PCs"]` and its Harmony
+correction, if any, in `obsm["X_pca_harmony"]`, and its frozen feature fields in `var`. `to_anndata`
+holds that object in memory; `to_h5ad` streams it into the file. The run's plan decides which
+fields are categoricals. Label fields, those with a categorical display (`clusters`, `leiden_*`,
+`paris`, and `cell_cycle_phase`), are categoricals whose categories are their labels as text in
+natural order, with the run's display colors as `uns["<field>_colors"]`, so that Scanpy's
+`rank_genes_groups(adata, "clusters")` and categorical plots work directly. Other text that repeats
+or has missing values is a categorical whose categories are in natural order (`d2` before `d10`,
+with a superscript or circled digit kept as text), and text missing in every row is a categorical
+without categories. `to_anndata` returns those fields as pandas categoricals with exactly those
+categories, and the file stores the same categories and codes, so the object, the file, and a file
+that `AnnData.write_h5ad` writes from the object agree whatever the AnnData version. Other text is a
+string array, and the indexes are named `ids` and `gene_ids`. The export stores `X` compressed,
+stores distinct text as a string array, and leaves out empty `layers`, `obsp`, `uns`, `varm`, and
+`varp` groups. `embeddings_cols`, feature-count recalculation, a cell selection, and a
+writer-specific thread override apply only to ordinary assay export and are rejected when `run` is
+supplied; `obsm`, `obs`, and `graph` add artifacts over the run's cells, such as
+`graph=run["connectivity_map"]`.
 
 With `matrix="raw"`, the default, `X` holds the raw counts of the run's cells over its feature
 universe. With `matrix="normed"`, `X` is the run's `normalized` artifact: the float32 values that
