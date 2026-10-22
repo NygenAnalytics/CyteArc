@@ -2,6 +2,7 @@
 
 import html
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -113,7 +114,14 @@ def test_unrecognized_metadata_remains_original_safe_prose(context: str) -> None
     assert " ".join(document.text) == context
     assert not document.rows
     assert not document.headings
-    assert html.unescape(markdown).strip() == context
+    # Markdown escapes every bracket, so readers see the exact original prose.
+    assert re.search(r"(?<!\\)[\[\]]", markdown) is None
+    assert _unescape_markdown(markdown).strip() == context
+
+
+def _unescape_markdown(markdown: str) -> str:
+    """Return the text a Markdown renderer displays for escaped prose."""
+    return re.sub(r"\\([!-/:-@\[-`{-~])", r"\1", html.unescape(markdown))
 
 
 def test_extremely_nested_metadata_falls_back_to_bounded_prose() -> None:

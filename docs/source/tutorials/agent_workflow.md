@@ -123,7 +123,10 @@ already fixed for that analysis.
 Resume requires matching scientific inputs and CyteArc
 procedure/prompt identity. Operational settings or the provider may change for unfinished
 choices. A relocated source must match the fingerprint and saved pipeline/artifact history.
-Prototype histories cannot be resumed.
+Prototype histories cannot be resumed. Saved runs record only the names of `modelSettings`,
+so pass `runtime=` again when resuming a run that used them. If a hard stop left a pipeline
+unfinished and the platform cannot confirm that its process stopped, as on Windows, confirm it
+yourself and resume with `abandon_unfinished_pipeline=True`.
 
 Completed results expose `run.pipeline`, `run.artifacts`, `run.get_markers()`,
 `run.plot_embedding()`, `run.plot_markers()`, and `run.annotations`. Numerical access verifies
@@ -169,9 +172,10 @@ The workflow explicitly supplies its HVG blacklist, normally excluding mitochond
 matching `^mt-` case-insensitively. HLA/H2, sex-linked, cell-cycle, and reporter features are
 preserved unless explicitly excluded. An organism name alone does not resolve gene identifiers.
 
-Harmony requires declared technical batches, complete labels, protected biological variables,
-and supplied evidence separating technical variation from biology. The current design check
-requires protected groups across technical batches. Unknown or confounded roles retain native
+Harmony requires declared technical batches, complete labels, declared protected biological
+variables, and supplied evidence separating technical variation from biology. A protected role
+the model proposes adds preservation checks but never permits correction. The current design
+check requires protected groups across technical batches. Unknown or confounded roles retain native
 analysis. A corrected finalist needs its exact native counterpart at the same resolution, plus
 measured mixing, preservation, marker, and doublet evidence. Checks use a `0.05` tolerance and
 require improvement in at least one mixing measure.

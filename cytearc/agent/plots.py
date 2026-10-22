@@ -72,11 +72,14 @@ def marker_dotplot(
     table["feature_label"] = table.feature_index.map(names)
     table["log1p_mean"] = np.log1p(table["mean"])
     present = table.loc[measured]
-    from matplotlib import pyplot as plt
+    from matplotlib import pyplot as plt, rc_context
 
     figure = None
     try:
-        with theme_context("notebook"):
+        # Gene names and cluster labels are data: a "$" must stay a literal
+        # character rather than start matplotlib mathtext. Each text keeps the
+        # setting it was created with when the figure is drawn later.
+        with theme_context("notebook"), rc_context({"text.parse_math": False}):
             figure, ax = plt.subplots(
                 figsize=(
                     min(24, max(7, len(selected) * 0.32 + 3)),

@@ -13,7 +13,7 @@ from .report_assets import (
     NYGEN_LOGO,
 )
 from .report_style import STYLE
-from .report_text import narrative_html, normalize_narrative
+from .report_text import markdown_text, narrative_html, normalize_narrative
 
 _LIMIT = 100
 _UNKNOWN = "Not recorded"
@@ -74,6 +74,15 @@ def _escape(value: Any) -> str:
     return html.escape(_text(value), quote=True)
 
 
+def _markdown_line(text: str) -> str:
+    """One line of inert Markdown; line breaks in supplied text become spaces."""
+    return markdown_text(" ".join(text.splitlines()))
+
+
+def _markdown(value: Any) -> str:
+    return _markdown_line(_text(value))
+
+
 def _number(value: Any, *, percent: bool = False) -> str:
     if value is None or not isinstance(value, (int, float)) or not math.isfinite(value):
         return _UNKNOWN
@@ -111,11 +120,11 @@ class _Content:
     def paragraph(self, value: Any, style: str = "", limit: int = 4000) -> None:
         text = _text(value, limit)
         self.html.append(f'<div class="narrative {style}">{narrative_html(text)}</div>')
-        self.markdown.extend([html.escape(normalize_narrative(text)), ""])
+        self.markdown.extend([markdown_text(normalize_narrative(text)), ""])
 
     def heading(self, title: str) -> None:
         self.html.append(f"<h3>{_escape(title)}</h3>")
-        self.markdown.extend([f"### {_escape(title)}", ""])
+        self.markdown.extend([f"### {_markdown(title)}", ""])
 
     def omitted(self, total: int) -> None:
         if total > _LIMIT:
@@ -128,7 +137,7 @@ class _Content:
         for value in values[:_LIMIT]:
             text = _text(value)
             self.html.append(f'<li class="narrative">{narrative_html(text)}</li>')
-            self.markdown.append(f"- {html.escape(normalize_narrative(text))}")
+            self.markdown.append(f"- {markdown_text(normalize_narrative(text))}")
         self.html.append("</ul>")
         self.markdown.append("")
         self.omitted(len(values))
@@ -163,11 +172,9 @@ class _Content:
                 + "</tr>"
             )
             cells = [
-                html.escape(
+                _markdown_line(
                     normalize_narrative(_text(v)) if index in prose else _text(v)
                 )
-                .replace("|", "\\|")
-                .replace("\n", " ")
                 for index, v in enumerate(row)
             ]
             self.markdown.append("| " + " | ".join(cells) + " |")
@@ -181,7 +188,7 @@ class _Content:
             + "".join(content.html)
             + "</div></details>"
         )
-        self.markdown.extend([f"### {_escape(title)}", "", *content.markdown])
+        self.markdown.extend([f"### {_markdown(title)}", "", *content.markdown])
 
 
 def _section(
@@ -216,7 +223,7 @@ def _section(
         [
             f"## {number:02}. {title}",
             "",
-            f"{state_label}: {_escape(outcome)}",
+            f"{state_label}: {_markdown(outcome)}",
             "",
             *content.markdown,
         ]
@@ -367,7 +374,7 @@ def _overview(data: dict[str, Any]) -> _Content:
     content.html.append('<dl class="facts">')
     for label, value in facts:
         content.html.append(f"<div><dt>{label}</dt><dd>{_escape(value)}</dd></div>")
-        content.markdown.append(f"- {label}: {_escape(value)}")
+        content.markdown.append(f"- {label}: {_markdown(value)}")
     content.html.append("</dl>")
     content.markdown.append("")
     context = _study_context(
@@ -1312,7 +1319,12 @@ def build_report(data: dict[str, Any]) -> tuple[str, str]:
         "</header>"
     )
     document.markdown.extend(
-        [html.escape(normalize_narrative(_text(title))), "", _escape(study_label), ""]
+        [
+            markdown_text(normalize_narrative(_text(title))),
+            "",
+            _markdown(study_label),
+            "",
+        ]
     )
     sections = [
         ("overview", "Study and input data", _overview, ("inspect", "context")),

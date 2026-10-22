@@ -16,7 +16,9 @@ decision. Otherwise continue conservatively and explain the limitation.
 Every ordinary choice must cite supplied evidenceIds. A deferred decision needs
 an actionable question, evidenceIds and deferralReason. missingEssentialInput
 must cite a supplied unresolvedFactId; missing optional information is not an
-essential fact. Unsupported objectives must not be presented as accomplished.
+essential fact. Unsupported objectives must not be presented as accomplished;
+use deferralReason unsupportedObjective only in the context decision, before
+numerical work begins.
 Return exactly one structured decision through the decision output tool.
 """
 

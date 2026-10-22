@@ -25,7 +25,8 @@ from cytearc.agent.provider import (
     ProviderError,
     RequestBudgetExceeded,
 )
-from cytearc.agent.records import RecordError, RunLockedError
+from cytearc.agent.records import RecordError, RecordIntegrityError, RunLockedError
+from cytearc.agent.workflow import PipelineProcessActive
 from cytearc.datastore.pipeline_run import PipelineExecutionError
 from cytearc.merge.metadata import _SourceConflict
 from cytearc.metadata.membership import UnmeasuredCellsError
@@ -58,6 +59,12 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
     PromptTooLarge: lambda: PromptTooLarge("The request exceeds 4096 bytes"),
     RecordError: lambda: RecordError("The run record is missing"),
     RunLockedError: lambda: RunLockedError("Another process holds the lock"),
+    RecordIntegrityError: lambda: RecordIntegrityError(
+        "Cannot read record explore.json: its content changed"
+    ),
+    PipelineProcessActive: lambda: PipelineProcessActive(
+        "The pipeline process may still be running"
+    ),
     PipelineExecutionError: lambda: PipelineExecutionError(
         RUN_ID, "pca", ValueError("bad pca")
     ),

@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import importlib.metadata
 import json
+import random
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -31,12 +32,33 @@ from pydantic_ai.tools import ToolDefinition
 
 from .models import RuntimeConfig
 from .prompts import BASE_INSTRUCTIONS
-from .records import RecordError
+from .records import RecordError, digest
 
 if TYPE_CHECKING:
     from .records import RunRecords
 
 DecisionT = TypeVar("DecisionT", bound=BaseModel)
+
+# Transient transport failures are retried at most this often per decision
+# invocation, after an exponentially growing, jittered pause.
+_TRANSIENT_RETRIES = 2
+_BACKOFF_SECONDS = 0.5
+_BACKOFF_CAP_SECONDS = 8.0
+# Repair feedback is bounded so a repair request fits the request reserve.
+_FEEDBACK_BYTES = 8192
+_TRANSIENT_STATUS = frozenset({408, 425, 500, 502, 503, 504, 529})
+_RATE_LIMIT_CODES = frozenset(
+    {
+        "rate_limit_exceeded",
+        "rate_limit_error",
+        "too_many_requests",
+        "resource_exhausted",
+        "429",
+    }
+)
+_QUOTA_CODES = frozenset(
+    {"insufficient_quota", "billing_hard_limit_reached", "quota_exceeded"}
+)
 
 
 class ProviderError(RuntimeError):
@@ -114,15 +136,51 @@ def _parse(visible: dict[str, Any], output_type: type[DecisionT]) -> DecisionT:
     return output_type.model_validate(arguments)
 
 
+def _saved_size(text: str) -> int:
+    """Bytes ``text`` occupies in a saved request, where the prompt holding it
+    is itself a JSON string, so quotes and backslashes are escaped twice."""
+    escaped = json.dumps(json.dumps(text, ensure_ascii=False), ensure_ascii=False)
+    return len(escaped.encode("utf-8", "surrogatepass"))
+
+
+def _bounded(errors: list[str]) -> list[str]:
+    """Keep validation feedback within a fixed saved size; count later errors.
+
+    The first error that does not fit is shortened to the longest prefix that
+    does, so a repair request always fits the workflow's request reserve.
+    """
+    kept: list[str] = []
+    remaining = _FEEDBACK_BYTES
+    for index, error in enumerate(errors):
+        if _saved_size(error) <= remaining:
+            kept.append(error)
+            remaining -= _saved_size(error)
+            continue
+        low, high = 0, len(error)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if _saved_size(error[:middle] + "…") <= remaining:
+                low = middle
+            else:
+                high = middle - 1
+        kept.append(error[:low] + "…")
+        if index + 1 < len(errors):
+            kept.append(f"{len(errors) - index - 1} further validation errors omitted")
+        break
+    return kept
+
+
 def _errors(exc: ValueError) -> list[str]:
     if isinstance(exc, ValidationError):
-        return [
-            f"{'.'.join(str(part) for part in item['loc']) or 'decision'}: {item['msg']}"
-            for item in exc.errors(
-                include_url=False, include_context=False, include_input=False
-            )
-        ]
-    return [str(exc)]
+        return _bounded(
+            [
+                f"{'.'.join(str(part) for part in item['loc']) or 'decision'}: {item['msg']}"
+                for item in exc.errors(
+                    include_url=False, include_context=False, include_input=False
+                )
+            ]
+        )
+    return _bounded([str(exc)])
 
 
 def _transient(exc: Exception) -> bool:
@@ -134,20 +192,17 @@ def _transient(exc: Exception) -> bool:
             error = body.get("error", body)
             if not isinstance(error, dict):
                 return False
+            # OpenAI and Anthropic name the error by code or type; Gemini
+            # reports status RESOURCE_EXHAUSTED with code 429.
             codes = {
-                str(error.get("code", "")).lower(),
-                str(error.get("type", "")).lower(),
+                str(error.get(field, "")).lower()
+                for field in ("code", "type", "status")
             }
-            if codes & {
-                "insufficient_quota",
-                "billing_hard_limit_reached",
-                "quota_exceeded",
-            }:
+            if codes & _QUOTA_CODES:
                 return False
-            return bool(
-                codes & {"rate_limit_exceeded", "rate_limit_error", "too_many_requests"}
-            )
-        return exc.status_code in {408, 425, 500, 502, 503, 504}
+            return bool(codes & _RATE_LIMIT_CODES)
+        # 529 is Anthropic's overloaded status.
+        return exc.status_code in _TRANSIENT_STATUS
     if isinstance(
         exc, httpx.TimeoutException | httpx.NetworkError | httpx.RemoteProtocolError
     ):
@@ -158,6 +213,23 @@ def _transient(exc: Exception) -> bool:
     except ImportError:
         return False
     return isinstance(exc, APIConnectionError)
+
+
+def _jitter() -> float:
+    return random.random()
+
+
+def retry_delay(retry: int, retry_after: float | None, jitter: float) -> float:
+    """Seconds to wait before transient retry ``retry`` (numbered from 1).
+
+    A provider's Retry-After wins. Otherwise the pause doubles from 0.5 s with
+    each retry, up to 8 s, and ``jitter`` in [0, 1) scales it to between half
+    and all of that bound, so clients that failed together retry apart.
+    """
+    if retry_after is not None:
+        return retry_after
+    bound = min(_BACKOFF_CAP_SECONDS, _BACKOFF_SECONDS * 2.0 ** (retry - 1))
+    return bound * (0.5 + 0.5 * jitter)
 
 
 def _error_record(exc: BaseException) -> dict[str, Any]:
@@ -273,14 +345,47 @@ def _matches(event: dict[str, Any], decision_id: str, identity: str) -> bool:
 
 
 def _read_response(
-    records: "RunRecords", request: dict[str, Any]
-) -> dict[str, Any] | None:
+    records: "RunRecords",
+    related: list[dict[str, Any]],
+    request: dict[str, Any],
+    provenance: Mapping[str, Any],
+) -> tuple[dict[str, Any], str | None] | None:
+    """Return a saved visible response and the digest its event recorded.
+
+    A crash between saving a response and journaling it leaves the file
+    unrecorded. Its digest is journaled before the response is used, so later
+    reads and replay verify the same bytes.
+    """
+    call_id = request["callId"]
+    recorded = next(
+        (
+            event
+            for event in related
+            if event["kind"] == "modelResponse" and event.get("callId") == call_id
+        ),
+        None,
+    )
+    if recorded is not None:
+        visible = records.read_reference(recorded, "responsePath")
+        return cast(dict[str, Any], visible), recorded.get("responseSha256")
     try:
-        return cast(dict[str, Any], records.read_json(request["responsePath"]))
+        visible = records.read_json(request["responsePath"])
     except RecordError as exc:
         if isinstance(exc.__cause__, FileNotFoundError):
             return None
         raise
+    sha256 = records.file_sha256(request["responsePath"])
+    # The response answers the saved request, so it keeps that provenance.
+    records.append(
+        "modelResponse",
+        **{key: request.get(key) for key in provenance},
+        callId=call_id,
+        responsePath=request["responsePath"],
+        responseSha256=sha256,
+        usage=visible.get("usage"),
+        recovered=True,
+    )
+    return cast(dict[str, Any], visible), sha256
 
 
 def _validate_response(
@@ -320,7 +425,9 @@ async def decide(
 
     A process crash after a visible response was written can be resumed without
     another provider call. A request with no persisted response still consumes an
-    observed slot because the provider may have received it.
+    observed slot because the provider may have received it. Transient transport
+    failures are retried at most twice per invocation, each after the provider's
+    Retry-After or a jittered exponential pause, and never past the deadline.
     """
     prompt = BASE_INSTRUCTIONS + "\n" + instructions
     schema = output_type.model_json_schema()
@@ -364,14 +471,16 @@ async def decide(
     for request in requests:
         call_id = request["callId"]
         current_invocation = request.get("invocationId", "standalone") == invocation_id
-        visible = _read_response(records, request)
-        if visible is not None:
+        saved = _read_response(records, related, request, provenance)
+        if saved is not None:
+            visible, response_sha256 = saved
             output, errors = _validate_response(visible, output_type, validate)
             if output is not None:
                 records.append(
                     "decisionAccepted",
                     **provenance,
                     callId=call_id,
+                    responseSha256=response_sha256,
                     output=output.model_dump(mode="json"),
                     recovered=True,
                 )
@@ -429,6 +538,7 @@ async def decide(
         allow_text_output=False,
     )
     deadline = time.monotonic() + runtime.decisionTimeout
+    delay = 0.0
     try:
         async with asyncio.timeout(runtime.decisionTimeout):
             while True:
@@ -436,10 +546,8 @@ async def decide(
                     raise DecisionValidationError(
                         "The semantic repair was rejected: " + "; ".join(feedback)
                     )
-                if transport_failures > 1:
-                    raise ProviderError(
-                        "The single transient transport retry was exhausted"
-                    )
+                if transport_failures > _TRANSIENT_RETRIES:
+                    raise ProviderError("Transient transport retries were exhausted")
                 events = records.events()
                 count = sum(event["kind"] == "modelRequest" for event in events)
                 local_count = sum(
@@ -455,6 +563,14 @@ async def decide(
                     raise RequestBudgetExceeded(
                         "Observed model request limit exhausted"
                     )
+                if delay:
+                    # Back off within the deadline; a longer wait cannot help.
+                    if delay >= deadline - time.monotonic():
+                        raise ProviderError(
+                            "The retry delay exceeds the remaining decision deadline"
+                        )
+                    await asyncio.sleep(delay)
+                    delay = 0.0
 
                 payload = {"stage": stage, "evidence": evidence}
                 if feedback:
@@ -469,9 +585,13 @@ async def decide(
                     "settings": _safe_settings(resolved, settings),
                     "softwareVersions": _versions(),
                 }
-                if len(_json(request_record).encode()) > runtime.maxPromptBytes:
+                size = len(_json(request_record).encode())
+                if size > runtime.maxPromptBytes:
                     raise PromptTooLarge(
-                        "Serialized prompt, schema and settings exceed maxPromptBytes"
+                        f"The serialized request is {size:,} bytes, above "
+                        f"maxPromptBytes={runtime.maxPromptBytes:,}. Resume with a "
+                        "larger RuntimeConfig.maxPromptBytes, or start a new run "
+                        "with shorter study text or references"
                     )
                 call_id = f"{count + 1:06d}-{uuid.uuid4().hex[:12]}"
                 request_path = f"calls/{call_id}.request.json"
@@ -482,6 +602,7 @@ async def decide(
                     **provenance,
                     callId=call_id,
                     requestPath=request_path,
+                    requestSha256=digest(request_record),
                     responsePath=response_path,
                 )
                 started = time.monotonic()
@@ -521,26 +642,23 @@ async def decide(
                             f"Provider request failed ({type(exc).__name__}); inspect recorded failure type"
                         ) from None
                     transport_failures += 1
-                    if (
-                        transport_failures <= 1
-                        and isinstance(exc, ModelHTTPError)
-                        and (delay := exc.retry_after) is not None
-                    ):
-                        if delay >= deadline - time.monotonic():
-                            raise ProviderError(
-                                "Retry-After exceeds the remaining decision deadline"
-                            ) from None
-                        await asyncio.sleep(delay)
+                    delay = retry_delay(
+                        transport_failures,
+                        exc.retry_after if isinstance(exc, ModelHTTPError) else None,
+                        _jitter(),
+                    )
                     continue
                 visible = visible_response(response)
                 # Persist before parsing or validation, allowing recovery even if
                 # a validator crashes or a subsequent journal write fails.
                 records.write_json(response_path, visible)
+                response_sha256 = digest(visible)
                 records.append(
                     "modelResponse",
                     **provenance,
                     callId=call_id,
                     responsePath=response_path,
+                    responseSha256=response_sha256,
                     elapsedSeconds=time.monotonic() - started,
                     usage=visible["usage"],
                 )
@@ -550,6 +668,7 @@ async def decide(
                         "decisionAccepted",
                         **provenance,
                         callId=call_id,
+                        responseSha256=response_sha256,
                         output=output.model_dump(mode="json"),
                         recovered=False,
                     )
@@ -582,16 +701,21 @@ def replay_decisions(
 
     Both registries are keyed by stage. A missing registry entry is an error,
     rather than silently declaring an unvalidated stage successfully replayed.
+    Each accepted output must also equal a fresh parse of the saved response
+    it cites, whose bytes are checked against their recorded digest.
     """
     events = records.events()
     requests = {
         event["callId"]: event for event in events if event["kind"] == "modelRequest"
     }
+    responses = {
+        event["callId"]: event for event in events if event["kind"] == "modelResponse"
+    }
     results = []
     for event in events:
         if event["kind"] != "decisionAccepted":
             continue
-        request = records.read_json(requests[event["callId"]]["requestPath"])
+        request = records.read_reference(requests[event["callId"]], "requestPath")
         stage = event["stage"]
         schema = schemas[stage]
         if _digest(schema.model_json_schema()) != event["schemaDigest"]:
@@ -603,6 +727,18 @@ def replay_decisions(
             or _digest(request["instructions"]) != event["promptDigest"]
         ):
             raise ProviderError("Replay evidence or prompt digest does not match")
+        response = responses.get(event["callId"])
+        if response is None or response.get("responseSha256") != event.get(
+            "responseSha256"
+        ):
+            raise ProviderError("Accepted decision does not cite its saved response")
+        try:
+            parsed = _parse(records.read_reference(response, "responsePath"), schema)
+            reproduced = parsed.model_dump(mode="json")
+        except ValueError:
+            reproduced = None
+        if reproduced != event["output"]:
+            raise ProviderError("Accepted output differs from its saved model response")
         output = schema.model_validate(event["output"])
         validators[stage](output, evidence)
         results.append(

@@ -196,3 +196,116 @@ def test_new_runs_refuse_old_search_budgets_before_creating_records(
             config=AnalysisConfig(maxCandidates=budget),
         )
     assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"extra_body": {"credentials": "not-a-real-credential"}},
+        {"extra_body": {"auth": "not-a-real-token"}},
+        {"extra_body": {"key": "not-a-real-key"}},
+        {"extra_body": {"bearer": "not-a-real-token"}},
+        {"extra_body": {"aws_access_key_id": "not-a-real-id"}},
+        {"extra_body": {"privateKey": "not-a-real-key"}},
+        {"extra_body": {"x-api-key": "not-a-real-key"}},
+        {"extra_body": [{"passwd": "not-a-real-password"}]},
+        {"extra_body": {"oauth": {"client": "not-a-real-client"}}},
+        {"extra_body": {"session": "not-a-real-session"}},
+    ],
+)
+def test_runtime_rejects_credential_names_the_earlier_denylist_missed(
+    settings: dict[str, Any],
+) -> None:
+    with pytest.raises(ValidationError, match="Configure credentials on the provider"):
+        RuntimeConfig(modelSettings=settings)
+
+
+def test_runtime_keeps_known_non_secret_settings_with_similar_names() -> None:
+    settings = {
+        "openai_prompt_cache_key": "analysis-cache",
+        "bedrock_additional_model_requests_fields": {"top_k": 4},
+        "extra_body": {"keyword_boost": 2, "monkey_patch": False},
+    }
+    assert RuntimeConfig(modelSettings=settings).modelSettings == settings
+
+
+@pytest.mark.parametrize(
+    ("resolutions", "labels"),
+    [
+        ((1.0, 1.0000001), "['1', '1']"),
+        ((0.5, 0.75, 0.7500000001), "['0.5', '0.75', '0.75']"),
+    ],
+)
+def test_resolutions_must_keep_distinct_option_labels(
+    resolutions: tuple[float, ...], labels: str
+) -> None:
+    from cytearc.agent.models import partition_option_id
+
+    # Both values would otherwise share one partition option ID.
+    assert len({partition_option_id("c0", value) for value in resolutions}) < len(
+        resolutions
+    )
+    with pytest.raises(ValidationError) as raised:
+        AnalysisConfig(resolutions=resolutions)
+    assert f"option labels {labels} must be distinct" in str(raised.value)
+    assert AnalysisConfig(resolutions=(1.0, 1.00001)).resolutions == (1.0, 1.00001)
+
+
+@pytest.mark.parametrize(
+    ("field", "limit"),
+    [
+        ("context", 8000),
+        ("objective", 2000),
+        ("organism", 200),
+        ("tissue", 200),
+        ("batchCorrectionEvidence", 4000),
+        ("sampleColumn", 128),
+        ("captureColumn", 128),
+    ],
+)
+def test_study_text_that_enters_every_prompt_is_bounded(field: str, limit: int) -> None:
+    supplied = {"context": "Observed cells", "objective": "Describe populations"}
+    with pytest.raises(ValidationError) as raised:
+        Study.model_validate({**supplied, field: "x" * (limit + 1)})
+    assert raised.value.errors()[0]["loc"] == (field,)
+    assert raised.value.errors()[0]["ctx"]["max_length"] == limit
+    accepted = Study.model_validate({**supplied, field: "x" * limit})
+    assert getattr(accepted, field) == "x" * limit
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "location"),
+    [
+        ("technicalBatchColumns", [f"batch{index}" for index in range(17)], ()),
+        ("protectedColumns", [f"group{index}" for index in range(17)], ()),
+        ("protectedColumns", ["x" * 129], (0,)),
+        ("featureExclusions", [f"GENE{index}" for index in range(201)], ()),
+        ("featureExclusions", ["G" * 129], (0,)),
+    ],
+)
+def test_study_role_and_exclusion_lists_are_bounded(
+    field: str, value: list[str], location: tuple[int, ...]
+) -> None:
+    supplied = {"context": "Observed cells", "objective": "Describe populations"}
+    with pytest.raises(ValidationError) as raised:
+        Study.model_validate({**supplied, field: value})
+    assert raised.value.errors()[0]["loc"] == (field, *location)
+
+
+def test_new_runs_and_resumes_refuse_a_prompt_limit_below_the_evidence_budget(
+    tmp_path: Any,
+) -> None:
+    from cytearc.agent import analyze_rna
+
+    destination = tmp_path / "analysis"
+    with pytest.raises(ValueError, match="maxPromptBytes must be at least 65,536"):
+        analyze_rna(
+            tmp_path,
+            run_dir=destination,
+            model="unused-model",
+            study=Study(context="Observed cells", objective="Describe populations"),
+            runtime=RuntimeConfig(maxPromptBytes=65_535),
+        )
+    assert not destination.exists()
+    # Saved runtimes with smaller limits remain readable.
+    assert RuntimeConfig(maxPromptBytes=1024).maxPromptBytes == 1024

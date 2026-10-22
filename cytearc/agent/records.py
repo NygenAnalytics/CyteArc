@@ -21,6 +21,10 @@ class RunLockedError(RecordError):
     """Another process holds the requested writer lock."""
 
 
+class RecordIntegrityError(RecordError):
+    """A referenced record no longer matches the digest its event recorded."""
+
+
 def _json_bytes(value: Any) -> bytes:
     try:
         return (
@@ -38,6 +42,23 @@ def digest(value: Any) -> str:
     return hashlib.sha256(_json_bytes(value)).hexdigest()
 
 
+def digest_field(field: str) -> str:
+    """Name the event field that records the SHA-256 of a referenced file."""
+    return field.removesuffix("Path") + "Sha256"
+
+
+def relative_locator(target: Path, start: Path) -> str:
+    """Locate ``target`` relative to ``start``, or absolutely across drives.
+
+    Windows has no relative path between two drives; such a locator is the
+    absolute target path, which readers resolve unchanged.
+    """
+    try:
+        return os.path.relpath(target, start)
+    except ValueError:
+        return str(target)
+
+
 def _reject_constant(value: str) -> None:
     raise ValueError(f"Nonfinite JSON constant: {value}")
 
@@ -51,10 +72,16 @@ def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _read(path: Path) -> Any:
+def _read(path: Path, sha256: str | None = None) -> Any:
     try:
+        payload = path.read_bytes()
+        if sha256 is not None and hashlib.sha256(payload).hexdigest() != sha256:
+            raise RecordIntegrityError(
+                f"Cannot read record {path.name}: its content differs from the "
+                "SHA-256 recorded when it was saved"
+            )
         value = json.loads(
-            path.read_text(encoding="utf-8"),
+            payload.decode("utf-8"),
             parse_constant=_reject_constant,
             object_pairs_hook=_unique_pairs,
         )
@@ -160,8 +187,27 @@ class RunRecords:
             raise RecordError("Record path escapes the run directory")
         return path
 
-    def read_json(self, relative: str | Path) -> Any:
-        return _read(self._path(relative))
+    def read_json(self, relative: str | Path, sha256: str | None = None) -> Any:
+        """Read a record, first checking its bytes against ``sha256`` if given."""
+        return _read(self._path(relative), sha256)
+
+    def read_reference(self, event: Mapping[str, Any], field: str) -> Any:
+        """Read the file an event references, verified against its recorded digest.
+
+        Events record the SHA-256 of each file they reference. Histories saved
+        before CyteArc 1.3.0 recorded none; their references are read as saved,
+        for presentation only, because resume and replay already require the
+        procedure identity of the release that wrote them.
+        """
+        return self.read_json(event[field], event.get(digest_field(field)))
+
+    def file_sha256(self, relative: str | Path) -> str:
+        """Hash the exact bytes of an existing record."""
+        path = self._path(relative)
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise RecordError(f"Cannot read record {path.name}: {exc}") from exc
 
     def write_json(
         self, relative: str | Path, value: Any, immutable: bool = True
@@ -316,34 +362,45 @@ def process_identity() -> dict[str, Any]:
     return result
 
 
-def process_alive(identity: Mapping[str, Any]) -> bool:
-    """Return false only when the recorded process is confirmed to have stopped."""
+def process_state(identity: Mapping[str, Any]) -> str:
+    """Classify a recorded process as ``stopped``, ``running`` or ``unknown``.
+
+    Only a Linux identity with its start time can confirm that the exact
+    process is still running. A bare PID that still exists may have been
+    reused, and Windows liveness is never probed, so both stay unknown.
+    """
     pid = identity.get("pid")
     if type(pid) is not int or pid <= 0 or identity.get("platform") != sys.platform:
-        return True
+        return "unknown"
     if sys.platform.startswith("linux") and identity.get("startTicks"):
         try:
             boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
             if identity.get("bootId") != boot_id:
-                return False
+                return "stopped"
             current = _linux_process(pid)
-            return (
+            running = (
                 current is not None
                 and current[0] != "Z"
                 and current[1] == identity["startTicks"]
             )
+            return "running" if running else "stopped"
         except (OSError, IndexError):
-            return True
+            return "unknown"
     if os.name == "nt":
         # os.kill(pid, 0) can terminate processes on Windows. Never use it there.
-        return True
+        return "unknown"
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return "stopped"
     except PermissionError:
-        return True
-    return True
+        return "unknown"
+    return "unknown"
+
+
+def process_alive(identity: Mapping[str, Any]) -> bool:
+    """Return false only when the recorded process is confirmed to have stopped."""
+    return process_state(identity) != "stopped"
 
 
 def procedure_identity() -> str:

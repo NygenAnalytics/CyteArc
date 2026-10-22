@@ -33,6 +33,12 @@ _LABEL_PATTERN = re.compile(
 )
 _MITO_PATTERN = r"(?i:^mt-)"
 _MAX_COLUMNS = 48
+# Longer metadata names are omitted from decision evidence; each offered name
+# is repeated in several prompt fields that cannot be trimmed.
+MAX_COLUMN_NAME = 128
+# Version 2 hashes whole columns; version 1 hashed one JSON value at a time.
+# Saved analyses with another version cannot verify their source.
+FINGERPRINT_VERSION = 2
 _NUMERICAL_ARTIFACT_KINDS = frozenset(
     {
         "feature_summary",
@@ -149,42 +155,106 @@ def _json_scalar(value: Any) -> Any:
     return str(value)
 
 
-def _feed(digest: Any, value: Any) -> None:
-    digest.update(
-        json.dumps(
-            value, sort_keys=True, allow_nan=False, separators=(",", ":")
-        ).encode()
-    )
-    digest.update(b"\n")
+def _segment(digest: Any, payload: bytes) -> None:
+    """Hash one length-prefixed segment, so adjacent segments cannot shift."""
+    digest.update(len(payload).to_bytes(8, "little"))
+    digest.update(payload)
+
+
+def _header(value: Any) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, allow_nan=False, separators=(",", ":")
+    ).encode()
+
+
+def _dtype_name(dtype: Any) -> str:
+    """Name a stored dtype the same way on little- and big-endian hosts."""
+    if isinstance(dtype, np.dtype) and dtype.kind in "biufcmMU":
+        return dtype.newbyteorder("<").str
+    return str(dtype)
+
+
+def _column_digest(digest: Any, series: pd.Series) -> None:
+    """Hash one whole metadata column: its missing mask, then its values.
+
+    Booleans, numbers and dates hash their little-endian buffers with that
+    dtype, and missing rows hash as zero behind the mask. Other values hash as
+    length-prefixed UTF-8 text, tagged with their Python types when a column
+    mixes types, so ``1`` and ``"1"`` stay distinct. The bytes do not depend
+    on the platform or on how pandas labels an equivalent text dtype.
+    """
+    missing = series.isna().to_numpy(dtype=bool)
+    _segment(digest, np.packbits(missing, bitorder="little").tobytes())
+    dtype = series.dtype
+    if isinstance(dtype, pd.BooleanDtype) or (
+        isinstance(dtype, np.dtype) and dtype.kind == "b"
+    ):
+        values = series.to_numpy(dtype=bool, na_value=False).astype("|u1")
+    elif isinstance(dtype, np.dtype) and dtype.kind in "iufcmM":
+        values = series.to_numpy()
+        if dtype.kind in "mM":
+            values = values.view(np.int64)
+        values = np.where(missing, 0, values).astype(values.dtype.newbyteorder("<"))
+    else:
+        present = series.to_numpy(dtype=object)[~missing]
+        kind = pd.api.types.infer_dtype(present, skipna=False)
+        _segment(digest, kind.encode())
+        if kind == "string":
+            texts = present.tolist()
+        else:
+            if kind.startswith("mixed"):
+                types = "\0".join(type(item).__name__ for item in present)
+                _segment(digest, types.encode())
+            texts = [
+                item.decode("utf-8", "surrogateescape")
+                if isinstance(item, bytes)
+                else str(item)
+                for item in present
+            ]
+        lengths = np.fromiter(map(len, texts), dtype="<i8", count=len(texts))
+        _segment(digest, lengths.tobytes())
+        _segment(digest, "".join(texts).encode("utf-8", "surrogatepass"))
+        return
+    _segment(digest, values.dtype.str.encode())
+    _segment(digest, np.ascontiguousarray(values).tobytes())
 
 
 def _fingerprint(store: Any, assay: str, columns: list[str]) -> str:
-    """Bind finalized core count identity, ordered axes and nullable metadata."""
+    """Bind finalized core count identity, ordered axes and nullable metadata.
+
+    Each metadata column is hashed whole; the count matrix is never read for
+    run bookkeeping.
+    """
     summary = store.summary()
     descriptor = next(item for item in summary.assays if item.name == assay)
     if not descriptor.dataset_fingerprint:
         raise AnalysisInputError("The RNA assay has no finalized dataset fingerprint")
     digest = hashlib.sha256()
-    _feed(
+    _segment(
         digest,
-        [
-            assay,
-            descriptor.dataset_fingerprint,
-            summary.total_cells,
-            descriptor.total_features,
-        ],
+        _header(
+            [
+                FINGERPRINT_VERSION,
+                assay,
+                descriptor.dataset_fingerprint,
+                summary.total_cells,
+                descriptor.total_features,
+            ]
+        ),
     )
     for axis, table, names in (
         ("cells", store.cells, columns),
         ("features", store.get_assay(assay).feats, ["ids", "names", "I"]),
     ):
         for column in names:
-            _feed(digest, [axis, column, str(table.get_dtype(column))])
-            # Metadata vectors are intentionally read one at a time. The count
-            # matrix is never materialized or scanned for run bookkeeping.
             series = table.to_pandas_dataframe([column])[column]
-            for value in series:
-                _feed(digest, _json_scalar(value))
+            _segment(
+                digest,
+                _header(
+                    [axis, column, _dtype_name(table.get_dtype(column)), len(series)]
+                ),
+            )
+            _column_digest(digest, series)
     return digest.hexdigest()
 
 
@@ -215,7 +285,11 @@ def _profile(series: pd.Series, name: str) -> dict[str, Any]:
 
 
 def _qc_flags(store: Any, active: np.ndarray, assay: str) -> dict[str, Any]:
-    """Record global outlier counts without turning flags into exclusions."""
+    """Record global outlier counts without turning flags into exclusions.
+
+    Counts and bounds are saved, not the flagged rows: those follow from the
+    recorded bounds and the verified source metadata.
+    """
     summaries: dict[str, Any] = {}
     for suffix in ("nCounts", "nFeatures", "percentMito"):
         column = f"{assay}_{suffix}"
@@ -231,11 +305,6 @@ def _qc_flags(store: Any, active: np.ndarray, assay: str) -> dict[str, Any]:
                 "high": None,
                 "lowFlags": 0,
                 "highFlags": 0,
-                "outlierRows": {
-                    "missing": np.flatnonzero(active).tolist(),
-                    "low": [],
-                    "high": [],
-                },
             }
             continue
         work = np.log1p(values[valid]) if suffix != "percentMito" else values[valid]
@@ -257,15 +326,6 @@ def _qc_flags(store: Any, active: np.ndarray, assay: str) -> dict[str, Any]:
             if high is not None
             else 0,
             "zeroMad": deviation == 0,
-            "outlierRows": {
-                "missing": np.flatnonzero(active & ~valid).tolist(),
-                "low": np.flatnonzero(valid & (values < low)).tolist()
-                if low is not None
-                else [],
-                "high": np.flatnonzero(valid & (values > high)).tolist()
-                if high is not None
-                else [],
-            },
         }
     return summaries
 
@@ -407,10 +467,18 @@ def _qc_projections(
     from cytearc.quality_control.filtering import filter_cell_metrics
 
     projections = []
-    group_data = {
-        column: store.cells.to_pandas_dataframe([column])[column]
-        for column in group_columns(roles)
-    }
+    # Each group column is converted to text once; every policy then counts
+    # its retained cells per level in one pass.
+    group_data = {}
+    for column in group_columns(roles):
+        series = store.cells.to_pandas_dataframe([column])[column]
+        text = series.astype(str)
+        missing = (series.isna() | text.str.strip().eq("")).to_numpy()
+        group_data[column] = (
+            text.to_numpy(dtype=object),
+            missing,
+            text.loc[active & ~missing].value_counts(),
+        )
     for policy in ("retain", "gentleMad5", "manual"):
         attrs = sorted(config.qcBounds) if policy == "manual" else list(flags)
         bounds: dict[str, list[float | None]] = {}
@@ -455,29 +523,23 @@ def _qc_projections(
             ).retained
         groups = {}
         if available:
-            for column, series in group_data.items():
-                missing = series.isna() | series.astype(str).str.strip().eq("")
-                counts = series.loc[active & ~missing].astype(str).value_counts()
+            for column, (text, missing, counts) in group_data.items():
+                kept = pd.Series(text[active & ~missing & retained]).value_counts()
                 rows = []
                 for value, count in counts.head(64).items():
-                    mask = (
-                        active
-                        & ~missing.to_numpy()
-                        & series.astype(str).eq(value).to_numpy()
-                    )
-                    kept = int((mask & retained).sum())
+                    retained_cells = int(kept.get(value, 0))
                     rows.append(
                         {
                             "value": str(value),
                             "inputCells": int(count),
-                            "retainedCells": kept,
-                            "removedCells": int(count) - kept,
+                            "retainedCells": retained_cells,
+                            "removedCells": int(count) - retained_cells,
                         }
                     )
                 groups[column] = {
                     "levels": rows,
-                    "missingInputCells": int((active & missing.to_numpy()).sum()),
-                    "missingRetainedCells": int((retained & missing.to_numpy()).sum()),
+                    "missingInputCells": int((active & missing).sum()),
+                    "missingRetainedCells": int((retained & missing).sum()),
                     "omittedLevels": max(0, len(counts) - 64),
                 }
         projections.append(
@@ -502,7 +564,16 @@ def _design(
     technical: list[str],
     protected: list[str],
     authorization: str | None,
+    *,
+    inferred: list[str] | None = None,
 ) -> tuple[bool, dict[str, Any], list[str]]:
+    """Decide correction eligibility from caller-declared experimental facts.
+
+    Only caller-declared ``protected`` columns satisfy the requirement for
+    protected biology. ``inferred`` protected columns proposed by a model get
+    the same label and crossing checks, so they can block correction but can
+    never permit it.
+    """
     reasons: list[str] = []
     design: dict[str, Any] = {"evidenceId": "design:correction", "crossings": []}
     if not technical:
@@ -515,6 +586,7 @@ def _design(
         reasons.append(
             "Correction has no explicitly protected biological metadata for validation."
         )
+    protected = list(dict.fromkeys([*protected, *(inferred or [])]))
     columns = list(dict.fromkeys([*technical, *protected]))
     frame = store.cells.to_pandas_dataframe(columns).loc[retained]
     for column in columns:
@@ -580,9 +652,19 @@ def _references(study: Study) -> list[dict[str, str]]:
 
 
 def inspect_source(
-    source: str | Path, study: Study, config: AnalysisConfig, runtime: RuntimeConfig
+    source: str | Path,
+    study: Study,
+    config: AnalysisConfig,
+    runtime: RuntimeConfig,
+    *,
+    inferred_protected: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Validate a local RNA source and summarize only non-held-out evidence."""
+    """Validate a local RNA source and summarize only non-held-out evidence.
+
+    ``inferred_protected`` lists model-proposed protected columns. They join
+    the preservation checks and frozen metadata, but correction eligibility
+    still requires a caller-declared protected column.
+    """
     from cytearc.assay import RNAassay
 
     store = open_store(source, config, runtime)
@@ -595,11 +677,17 @@ def inspect_source(
     if assay is None or assay not in assays:
         raise NeedsInput(f"Choose one RNA assay from {assays}.", field="assay")
     require_clean_analysis(store, assay)
+    inferred = [
+        column
+        for column in dict.fromkeys(inferred_protected or [])
+        if column not in study.protectedColumns
+    ]
+    protected = [*study.protectedColumns, *inferred]
     declared = list(
         dict.fromkeys(
             [
                 *study.technicalBatchColumns,
-                *study.protectedColumns,
+                *protected,
                 *([study.sampleColumn] if study.sampleColumn else []),
                 *([study.captureColumn] if study.captureColumn else []),
             ]
@@ -618,7 +706,6 @@ def inspect_source(
             f"Held-out annotation columns cannot define analysis roles or QC bounds: {forbidden}"
         )
     filtering, retained, limitations, flags = _filtering(store, study, config, assay)
-    outliers = {column: metrics.pop("outlierRows") for column, metrics in flags.items()}
     absent_qc = [
         f"{assay}_{suffix}"
         for suffix in ("nCounts", "nFeatures", "percentMito")
@@ -655,7 +742,13 @@ def inspect_source(
         if name not in {"I", "ids", "names", config.cellKey}
         and not is_held_out_column(name, study)
     )
-    ordered = list(dict.fromkeys([*declared, *flags, *visible]))
+    offered = [name for name in visible if len(name) <= MAX_COLUMN_NAME]
+    if len(offered) < len(visible):
+        limitations.append(
+            f"Decision evidence omits {len(visible) - len(offered)} metadata columns "
+            f"whose names exceed {MAX_COLUMN_NAME} characters."
+        )
+    ordered = list(dict.fromkeys([*declared, *flags, *offered]))
     shown = ordered[:_MAX_COLUMNS]
     if len(ordered) > len(shown):
         limitations.append(
@@ -678,6 +771,7 @@ def inspect_source(
         study.technicalBatchColumns,
         study.protectedColumns,
         study.batchCorrectionEvidence,
+        inferred=inferred,
     )
     limitations.extend(reasons)
     if study.captureColumn is None:
@@ -715,6 +809,7 @@ def inspect_source(
     return {
         "source": str(_local_source(source)),
         "fingerprint": _fingerprint(store, assay, fingerprint_columns),
+        "fingerprintVersion": FINGERPRINT_VERSION,
         "fingerprintColumns": fingerprint_columns,
         "assay": assay,
         "cellKey": config.cellKey,
@@ -724,7 +819,6 @@ def inspect_source(
         "filtering": filtering,
         "blacklist": blacklist,
         "qcFlags": flags,
-        "qcOutliers": outliers,
         "qcProjections": projections,
         "featureAudit": feature_audit,
         "resolvedRoles": roles,
@@ -734,7 +828,7 @@ def inspect_source(
             dict.fromkeys([*study.technicalBatchColumns, *declared, *shown])
         ),
         "technicalBatchColumns": list(study.technicalBatchColumns),
-        "protectedColumns": list(study.protectedColumns),
+        "protectedColumns": protected,
         "sampleColumn": study.sampleColumn,
         "captureColumn": study.captureColumn,
         "excludedColumns": excluded,
@@ -761,7 +855,7 @@ def prepare_context(
         raise AnalysisInputError(
             "Feature exclusions must use exact offered feature names"
         )
-    protected = list(study.protectedColumns)
+    inferred: list[str] = []
     for column, role in decision.columnRoles.items():
         supplied_roles = {
             entry["role"]
@@ -786,20 +880,24 @@ def prepare_context(
                 raise AnalysisInputError(
                     "A model cannot replace a supplied sample or capture column"
                 )
-        if role == "protected" and column not in protected:
-            protected.append(column)
-    # Caller-supplied sample/capture identity is authoritative. Model guesses
-    # remain suggestions in the decision record and cannot license operations.
+        if role == "protected" and column not in study.protectedColumns:
+            inferred.append(column)
+    # Caller-supplied roles are authoritative. Model guesses remain suggestions
+    # in the decision record: an inferred protected column adds preservation
+    # checks but cannot license correction.
     updated_study = study.model_copy(
         update={
-            "protectedColumns": protected,
             "featureExclusions": sorted(
                 set(study.featureExclusions) | set(decision.excludeFeatures)
             ),
         }
     )
     fresh = inspect_source(
-        prepared["source"], updated_study, config, runtime or RuntimeConfig()
+        prepared["source"],
+        updated_study,
+        config,
+        runtime or RuntimeConfig(),
+        inferred_protected=inferred,
     )
     if fresh["fingerprint"] != prepared["fingerprint"]:
         raise AnalysisInputError("Source changed while resolving context")
@@ -854,6 +952,13 @@ def verify_source(
     runtime: RuntimeConfig,
 ) -> None:
     """Reject changed axes, selections, values or nullable metadata on resume."""
+    if prepared.get("fingerprintVersion") != FINGERPRINT_VERSION:
+        raise AnalysisInputError(
+            "This analysis recorded its source fingerprint in a format that this "
+            "CyteArc release cannot verify, so its numerical results cannot be "
+            "opened. Its saved report, annotations and records remain readable; "
+            "start a new analysis to use the numerical results."
+        )
     store = open_store(source, config, runtime)
     columns = prepared["fingerprintColumns"]
     if not set(columns).issubset(store.cells.columns):

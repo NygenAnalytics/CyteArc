@@ -34,12 +34,23 @@ relocation, saved decision replay, incomplete statuses, interruption, provider b
 validation before any replacement locator is saved. Missing measurements stay distinct from
 zeroes, and policy resolutions stay separate from accepted model responses.
 
+Integrity checks cover the documented bulk source fingerprint and its version, verification
+once per invocation and before each numerical write, digests of every referenced record,
+replay of accepted outputs from their saved responses, recovery of an unjournaled response,
+credential-free saved settings, explicit abandonment of an unfinished pipeline, absolute
+locators across drives, and correction eligibility that a model-proposed protected role cannot
+grant. Provider checks cover bounded jittered backoff, transient overload and throttling
+statuses, bounded repair feedback, and the request reserve.
+
 ## Reports and exports
 
 Report checks cover offline rendering, escaped evidence, bounded image reads, embedded assets
 and their licenses, all saved outcome statuses, natural cluster ordering, and exports aligned
-with the final clustering. Report regeneration must preserve scientific records.
+with the final clustering. Report regeneration must preserve scientific records. The Markdown
+companion and every CSV stay inert: supplied links, images, and HTML remain text, and text
+cells that a spreadsheet would run as formulas are quoted. Narrative rendering stays linear on
+long backtick runs.
 
 Plot checks cover read-only access, bounded marker selection, duplicate gene names, missing
-statistics versus zero expression, fraction-to-area scaling, atomic saves, figure cleanup, and
-plot failures that preserve completed scientific status.
+statistics versus zero expression, fraction-to-area scaling, atomic saves, figure cleanup,
+gene names drawn as literal text, and plot failures that preserve completed scientific status.

@@ -127,6 +127,13 @@ def validate_choice(
         errors.extend(_deferral_errors(value, unresolved_fact_ids=unresolved_fact_ids))
         if value.deferralReason == "uncertainMetadata":
             errors.append("uncertainMetadata is a context deferral")
+        if value.deferralReason == "unsupportedObjective":
+            # The context decision accepted the objective before numerical work;
+            # a later refusal would strand the completed pipelines.
+            errors.append(
+                "unsupportedObjective is a context deferral; the objective was "
+                "accepted before numerical work began"
+            )
         if value.deferralReason == "ambiguousSelection":
             acceptable = set(value.acceptableOptionIds)
             if (

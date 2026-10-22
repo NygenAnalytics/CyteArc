@@ -410,6 +410,7 @@ identities. Export aligned labels, coordinates, markers, and annotations with
 `result.export("a-new-export-directory")`. Archive both the numerical store and external audit.
 
 Every live decision requests reasoning off and has structured validation, one semantic repair,
-one transient retry, and recorded request budgets. Provider support varies; always-on reasoning
-cannot be disabled universally. The teaching provider demonstrates workflow mechanics without
-evaluating live-model reliability or annotation accuracy.
+up to two transient retries after jittered exponential backoff, and recorded request budgets.
+Provider support varies; always-on reasoning cannot be disabled universally. The teaching
+provider demonstrates workflow mechanics without evaluating live-model reliability or
+annotation accuracy.

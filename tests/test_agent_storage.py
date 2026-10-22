@@ -1,6 +1,7 @@
 """Compact results remain immutable while external histories can be relocated."""
 
 import asyncio
+import os
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -603,3 +604,31 @@ def test_stored_result_must_be_a_json_object(completed: Any) -> None:
         "map",
     ]
     assert completed.records.latest("resultPublished") is None
+
+
+def test_history_on_another_windows_drive_uses_an_absolute_locator(
+    completed: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ntpath
+    from types import SimpleNamespace
+
+    from cytearc.agent import compact_result
+
+    def across_drives(path: object, start: object = None) -> str:
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    # No relative path joins the store and a history on another drive.
+    monkeypatch.setattr(os.path, "relpath", across_drives)
+    assert compact_result._payload(completed.result)["externalRunLocator"] == str(
+        completed.result.run_dir
+    )
+    monkeypatch.setattr(
+        compact_result,
+        "relative_locator",
+        lambda target, start: r"D:\analyses\agent-storage-test",
+    )
+    monkeypatch.setattr(compact_result, "os", SimpleNamespace(path=ntpath))
+    publish_result(completed.result)
+    stored = completed.root["agent_results/agent-storage-test"].attrs["result"]
+    assert stored["externalRunLocator"] == r"D:\analyses\agent-storage-test"
+    assert completed.result.compact_result == stored

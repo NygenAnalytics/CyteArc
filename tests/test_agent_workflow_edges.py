@@ -13,7 +13,7 @@ from pydantic_ai.models.function import FunctionModel
 from cytearc.agent import AnalysisConfig, analyze_rna, open_analysis, resume_rna
 from cytearc.agent import api, workflow
 from cytearc.agent.models import AnalysisInputError, Candidate, NeedsInput
-from cytearc.agent.records import RunRecords
+from cytearc.agent.records import RunRecords, digest
 from tests.test_agent_recovery import (
     Ref,
     Run,
@@ -879,10 +879,26 @@ def test_resume_rejects_an_empty_persisted_finalist_shortlist(
     records = RunRecords(tmp_path / "analysis")
     explored = records.read_json("evidence/explore.json")
     explored["shortlist"] = []
-    records.write_json("evidence/explore.json", explored, immutable=False)
     monkeypatch.setattr(workflow, "_complete", complete)
     calls = len(science.calls)
     observed = []
+    # An edit in place no longer matches the digest its event recorded.
+    records.write_json("evidence/explore.json", explored, immutable=False)
+    result = resume_rna(records.path, model=_model(observed))
+    assert result.status == "failed"
+    status = records.latest("status")
+    assert (status["stage"], status["errorType"]) == ("explore", "RecordIntegrityError")
+    assert status["message"] == (
+        "Cannot read record explore.json: its content differs from the SHA-256 "
+        "recorded when it was saved"
+    )
+    # A consistently journaled empty shortlist reaches the scientific gate.
+    records.append(
+        "stageCompleted",
+        stage="explore",
+        evidence=records.write_json("evidence/explore-empty.json", explored),
+        evidenceSha256=digest(explored),
+    )
     result = resume_rna(records.path, model=_model(observed))
     assert result.status == "failed"
     assert (

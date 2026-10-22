@@ -7,9 +7,12 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .records import RecordError, RunRecords
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 ANNOTATION_COLUMNS = (
     "clusterId",
@@ -21,10 +24,37 @@ ANNOTATION_COLUMNS = (
 )
 
 
+# Spreadsheet applications evaluate a cell that starts with one of these
+# characters as a formula (OWASP CSV injection guidance).
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+
+def csv_cell(value: Any) -> Any:
+    """Keep a text cell inert in spreadsheets by quoting a formula prefix.
+
+    Text starting with ``= + - @``, a tab, carriage return or line feed gains a
+    leading single quote. Numbers, including negative ones, stay numeric.
+    """
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def csv_frame(frame: "pd.DataFrame") -> "pd.DataFrame":
+    """Return a copy whose text cells cannot start a spreadsheet formula."""
+    from pandas.api.types import is_numeric_dtype
+
+    safe = frame.copy()
+    for column in safe.columns:
+        if not is_numeric_dtype(safe[column]):  # booleans count as numeric
+            safe[column] = safe[column].map(csv_cell, na_action="ignore")
+    return safe
+
+
 def stage_data(records: RunRecords, stage: str) -> Any | None:
     for event in reversed(records.events()):
         if event["kind"] == "stageCompleted" and event.get("stage") == stage:
-            return records.read_json(event["evidence"])
+            return records.read_reference(event, "evidence")
     return None
 
 
@@ -71,7 +101,7 @@ def summary(records: RunRecords) -> dict[str, Any]:
     for event in events:
         if event["kind"] not in {"candidateMeasured", "finalistMeasured"}:
             continue
-        evidence = records.read_json(event["evidence"])
+        evidence = records.read_reference(event, "evidence")
         identifier = event.get("optionId", event.get("candidateId"))
         diagnostic = {
             "kind": event["kind"],
@@ -100,7 +130,7 @@ def summary(records: RunRecords) -> dict[str, Any]:
         # request already contains those gate outcomes, even without a stage end.
         for event in reversed(events):
             if event["kind"] == "modelRequest" and event.get("stage") == "finalists":
-                request = records.read_json(event["requestPath"])
+                request = records.read_reference(event, "requestPath")
                 rejected = json.loads(request["userPrompt"])["evidence"].get(
                     "rejectedOptions", {}
                 )
@@ -220,9 +250,11 @@ def annotation_csv(rows: list[dict[str, Any]]) -> str:
     for row in rows:
         writer.writerow(
             {
-                key: json.dumps(row.get(key, []), ensure_ascii=False)
-                if key in {"supportingMarkers", "contradictingMarkers"}
-                else row.get(key, "")
+                key: csv_cell(
+                    json.dumps(row.get(key, []), ensure_ascii=False)
+                    if key in {"supportingMarkers", "contradictingMarkers"}
+                    else row.get(key, "")
+                )
                 for key in ANNOTATION_COLUMNS
             }
         )
@@ -249,7 +281,7 @@ def _report_evidence(records: RunRecords, result: dict[str, Any]) -> dict[str, A
     events = records.events()
     for event in events:
         if event["kind"] == "candidateMeasured":
-            evidence = records.read_json(event["evidence"])
+            evidence = records.read_reference(event, "evidence")
             candidates.append({**evidence, "candidateId": event["candidateId"]})
     return {
         **result,

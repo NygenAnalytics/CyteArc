@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import zarr
 
-from .records import RecordError, digest
+from .records import RecordError, digest, relative_locator
 from .rendering import stage_data
 
 if TYPE_CHECKING:
@@ -122,7 +122,7 @@ def _payload(result: "AnalysisRun") -> dict[str, Any]:
         "sourceFingerprint": prepared["fingerprint"],
         "selectedParameters": selected,
         "selectionRationale": rationale,
-        "externalRunLocator": os.path.relpath(result.run_dir, result.source),
+        "externalRunLocator": relative_locator(result.run_dir, result.source),
         "procedureIdentity": manifest["procedureIdentity"],
     }
 
@@ -141,9 +141,15 @@ def _stored(group: zarr.Group, identifier: str) -> dict[str, Any] | None:
 
 def _verify(stored: dict[str, Any], expected: dict[str, Any]) -> None:
     # The original locator is advisory. Moving the store or history never
-    # authorizes replacing an immutable scientific result.
+    # authorizes replacing an immutable scientific result. Only a Windows
+    # drive locator may be absolute: no relative path joins two drives.
     locator = stored.get("externalRunLocator")
-    if not isinstance(locator, str) or not locator or os.path.isabs(locator):
+    if (
+        not isinstance(locator, str)
+        or not locator
+        or os.path.isabs(locator)
+        and not os.path.splitdrive(locator)[0]
+    ):
         raise RecordError("Stored compact result has no valid relative history locator")
     if {key: value for key, value in stored.items() if key != "externalRunLocator"} != {
         key: value for key, value in expected.items() if key != "externalRunLocator"

@@ -77,6 +77,14 @@ it is not a disposable cache.
 authorize technical correction just by guessing a column's meaning. Missing
 replication does not block descriptive population discovery.
 
+Study text enters every decision request untrimmed, so it is bounded: `context`
+holds at most 8,000 characters, `objective` 2,000, `organism` and `tissue` 200,
+and `batchCorrectionEvidence` 4,000. Each role column name holds at most 128
+characters, with at most 16 technical and 16 protected columns, and
+`featureExclusions` lists at most 200 names of at most 128 characters. Metadata
+columns whose names exceed 128 characters are left out of decision evidence and
+reported as a limitation; the source fingerprint still covers them.
+
 References must be local UTF-8 text excerpts, with a combined 16 KiB limit.
 Reference text is frozen into evidence with content hashes. PDF parsing, web
 retrieval, and automatic bibliography lookup are outside the procedure. Context,
@@ -194,7 +202,8 @@ The procedure does not materialize the complete expression matrix.
 
 `qcPolicy="retain"` preserves the selected cohort and records QC outlier counts
 and thresholds where metrics exist. Flags do not remove cells. Missing optional
-metrics remain explicit limitations.
+metrics remain explicit limitations. The evidence saves counts and bounds rather
+than lists of flagged cells, which the bounds identify in the verified source.
 
 The evidence also projects retention under the supported global policies using
 the same nullable QC measurements. Projected removal is distinguished from the
@@ -257,9 +266,12 @@ selection validators reject unknown options and evidence IDs.
 ### Correction, uncertainty, and annotation
 
 Harmony is only offered with opt-in doublet scoring, explicit technical batch
-columns, complete categorical labels, protected biological metadata, and supplied
-experimental evidence separating technical batch from biology. The current
-design check requires protected groups to occur across all technical batches.
+columns, complete categorical labels, caller-declared protected biological
+metadata, and supplied experimental evidence separating technical batch from
+biology. The current design check requires protected groups to occur across all
+technical batches. A protected role proposed by the model is diagnostic only: it
+joins the label, crossing and preservation checks, so it can block correction,
+but it never satisfies the requirement for declared protected metadata.
 Uncertain or confounded designs remain native.
 
 A corrected finalist must have its exact native counterpart at the same
@@ -280,9 +292,15 @@ The original accepted model response remains unchanged; a separate
 
 `interactionMode="strict"` instead retains structured questions for optional
 metadata or ambiguous acceptable choices. Missing essential input remains
-`needsInput` in both modes. Unsupported objectives remain explicitly unsupported.
-Lenient mode does not authorize filtering, invent study facts, infer technical
-permission, enable doublet scoring, change feature exclusions, or enlarge budgets.
+`needsInput` in both modes. Unsupported objectives remain explicitly unsupported:
+the context decision, before any numerical work, is the only place a model can
+declare one, and the run then fails while the store stays clean for a new run.
+Later decisions that cite `unsupportedObjective` are rejected and repaired, so
+they cannot strand completed pipelines; an exhausted repair fails without an
+accepted decision, and a resume makes a fresh attempt that reuses those
+pipelines. Lenient mode does not authorize filtering, invent study facts, infer
+technical permission, enable doublet scoring, change feature exclusions, or
+enlarge budgets.
 
 Only recognized PCA/Harmony convergence failures in optional candidates can be
 skipped in lenient mode, after verifying the terminal numerical record, source
@@ -318,11 +336,31 @@ and procedure identity. Inspect/preprocessing evidence freezes source
 fingerprints, cohort policy, relevant metadata, and actual feature matches.
 Accepted resolutions of missing inputs are recorded as events; the manifest is
 not rewritten. Runtime prompts and schemas are saved with model requests, along
-with model/software identity and a safe subset of effective settings.
+with model/software identity and a safe subset of effective settings. Each
+invocation records its runtime limits, but only the names of the supplied
+`modelSettings` and a SHA-256 of their values, because settings can carry
+credentials. Resuming a run whose last invocation supplied `modelSettings`
+therefore requires an explicit `runtime=RuntimeConfig(modelSettings=...)`.
 
 Events are immutable, numbered, and integrity-checked. Evidence and visible model
-exchanges are written atomically and referenced by events. Reports and CSV files
-are derived outputs that can be regenerated.
+exchanges are written atomically and referenced by events, and each event
+records the SHA-256 of every file it references: evidence, requests, and
+responses. Reading a referenced file verifies those bytes, so a file edited
+after it was recorded stops resume, replay, and reports with a record integrity
+error instead of steering the analysis. Histories saved before CyteArc 1.3.0
+recorded no file digests; their references are read as saved for presentation,
+and resume or replay already require the procedure identity of the release that
+wrote them. The hash chain is unkeyed: it detects edits, not a forger who
+rewrites the whole history. Reports and CSV files are derived outputs that can
+be regenerated.
+
+Source fingerprints hash each frozen metadata column whole, as little-endian
+buffers for numbers and length-prefixed UTF-8 for text, together with the
+finalized count identity. A run verifies its source once per invocation and
+again before each numerical write. The fingerprint format is versioned:
+analyses saved with the earlier per-value format cannot verify their source,
+so their numerical results ask for a new analysis, while their saved reports,
+annotations, and records remain readable.
 
 Completed analyses also publish one compact attribute record at
 `agent_results/<runId>` in the local Zarr store. The `agent_results` root is marked
@@ -330,7 +368,9 @@ as owned by `cytearc.agent`; this is an agent result summary, not a core numeric
 artifact or another copy of the event history. It records the agent run ID,
 final core pipeline ID, assay, workspace, source fingerprint, procedure identity, selected
 parameters, selection rationale, and a relative locator for the full external
-audit. Selected parameters include the exact final core `pipelineConfig`,
+audit. A history on another Windows drive than the store has no relative path, so
+its locator is the absolute history path; `run.json` locates the source the same
+way. Selected parameters include the exact final core `pipelineConfig`,
 candidate ID, resolution, requested HVG count, PCs, neighbors, Harmony flag, and
 actual selected HVG count when measured.
 
@@ -356,16 +396,30 @@ contain transcripts, annotations, full evidence, or credentials.
 | `maxRequests` | 30 observed model requests across the saved run |
 | `maxRequestsPerDecision` | 3 per decision in one invocation |
 | Semantic repair | At most 1 per decision invocation |
-| Transient transport retry | At most 1 per decision invocation |
-| `maxPromptBytes` | 65,536 including serialized instructions/schema/settings |
+| Transient transport retries | At most 2 per decision invocation, after exponential backoff |
+| `maxPromptBytes` | 65,536 including serialized instructions/schema/settings; also the minimum |
 | `maxOutputTokens` | 4,096 |
 | `decisionTimeout` | 120 seconds |
 | `nthreads` | 4 |
 | `memBudget` | `"0.5"`, interpreted by core CyteArc |
 
-Repeated identical invalid outputs stop early. Existing model settings are
-preserved except explicit runtime overrides, output limits, and the agent-wide
-reasoning-off policy.
+Timeouts, connection errors, HTTP 408, 425, 500, 502, 503, 504, and 529
+(Anthropic overloaded), and rate limits reported as HTTP 429 with a rate-limit
+code (including Gemini `RESOURCE_EXHAUSTED`) are transient; a quota or billing
+code is not. Before retry `n` the agent waits the provider's Retry-After, or a
+jittered pause between half and all of `0.5 * 2**(n - 1)` seconds, capped at 8
+seconds. A pause that would pass the decision deadline stops the decision
+instead. Repeated identical invalid outputs stop early. Existing model settings
+are preserved except explicit runtime overrides, output limits, and the
+agent-wide reasoning-off policy.
+
+Decision evidence is scientific identity, so it is trimmed to a fixed budget:
+its optional detail is cut until the evidence fits 49,152 bytes as serialized in
+the saved request, leaving 16,384 bytes for instructions, schema, settings,
+provenance, and repair feedback, which is itself bounded. Analysis and resume
+therefore refuse a `maxPromptBytes` below 65,536. Untrimmable study text is
+bounded by `Study`; a request that still exceeds the limit reports its size, and
+a resume with a larger `maxPromptBytes` can send it.
 Unknown usage remains unknown. SDK-internal retries and post-response usage
 accounting mean these controls cannot guarantee a hard provider spending limit.
 Saved records exclude credentials, hidden reasoning, and opaque provider state.
@@ -471,14 +525,24 @@ If initial inspection is still pending, the replacement locator is recorded only
 after inspection succeeds. Recovery
 refuses a numerical retry while the previous process may still be alive. Linux
 process identities distinguish PID reuse; uncertain identity on other platforms
-is handled conservatively. There is no force-resume flag.
+is handled conservatively. On Windows, or with a bare process ID, liveness cannot
+be checked after a hard kill. Once you have confirmed that the process stopped,
+resume with `abandon_unfinished_pipeline=True`: the abandonment is recorded and
+the pipeline runs again under a new label. A process that Linux confirms is still
+running is never abandoned.
+
+```python
+run = resume_rna(run.run_dir, model=model, abandon_unfinished_pipeline=True)
+```
 
 `run.replay_decisions()` revalidates accepted decisions and their frozen evidence
-offline using the procedure's stage schema and validator registries. It returns
-validation results without provider calls or numerical computation. The internal
-`provider.replay_decisions` helper also accepts explicit registries for developer
-checks. Replay does not regenerate answers or promise identical new model
-responses or bitwise numerical equality across hardware.
+offline using the procedure's stage schema and validator registries. It also
+parses each saved response again and requires it to reproduce the accepted
+output. It returns validation results without provider calls or numerical
+computation. The internal `provider.replay_decisions` helper also accepts
+explicit registries for developer checks. Replay does not regenerate answers or
+promise identical new model responses or bitwise numerical equality across
+hardware.
 
 ### Numerical results, reporting, and export
 
@@ -526,7 +590,9 @@ execution or semantic replay; reading results and regenerating reports remains
 available, and numerical export still verifies the source and exact artifacts. Marker tables
 of analyses saved before CyteArc 1.0.0 are the exception: their `fold_change` column held
 sentinels, so marker reads, exports, and marker plots of such an analysis raise and ask for a
-new analysis.
+new analysis. Analyses saved before CyteArc 1.3.0 recorded their source fingerprint in an
+earlier format, so their numerical access likewise asks for a new analysis, while their
+reports and records stay readable.
 
 An `Observed source metadata:` JSON summary in supplied context is presented as
 readable field summaries and expandable category counts, preserving the
@@ -549,7 +615,8 @@ cycles through cluster ranks so that each cluster's first marker is considered
 before second markers. Every final cluster is displayed. Dot area shows the
 expressing fraction, and color shows `log(1 + mean normalized expression)` on a
 common scale. Gray crosses mean missing measurements; zero expression has no
-dot. Feature indices keep duplicate gene names distinct. Statistics come from
+dot. Feature indices keep duplicate gene names distinct, and names are drawn as
+literal text, so a `$` never starts matplotlib mathtext. Statistics come from
 the final immutable marker table, with one cluster table read at a time; no
 count matrix is read. `plot_markers(top_n=..., max_genes=...)` adjusts panel size.
 
@@ -563,7 +630,13 @@ These are ordinary navigation links and do not load remote report assets.
 Narrative text supports paragraphs, line
 breaks, lists, emphasis, and inline code, including newline escapes in saved model
 responses. Inline code preserves literal identifiers and paths. In HTML, supplied
-markup is escaped, and narrative links and images remain inactive text.
+markup is escaped, and narrative links and images remain inactive text. The
+Markdown companion escapes every model and dataset string as well: HTML is
+entity-escaped and Markdown delimiters are backslash-escaped, so gene names,
+metadata values, study text, and rationales never become links, images,
+headings, or HTML there. Their paragraphs and lists still render, and the
+report's own headings, tables, and links stay active. Inline code delimiters
+hold at most 16 backticks, which keeps rendering linear on long backtick runs.
 
 Only the exact selected finalist supplies displayed cluster counts and marker
 measurements. Missing measurements remain unknown; recorded zeroes stay zero.
@@ -589,6 +662,12 @@ gene that no other cell expresses and empty where no cell expresses it, which
 against the final clustering. Export does not rerun numerical stages or contact a
 model. Files are published atomically one at a time; an interrupted export can
 leave a partial directory, so use a new export directory for a fresh attempt.
+
+Every CSV the agent writes quotes text that a spreadsheet would run as a formula:
+a text cell starting with `=`, `+`, `-`, `@`, a tab, a carriage return, or a line
+feed gains a leading `'`, following OWASP guidance. This covers cell IDs, cluster
+labels, gene names, identities, and rationales. Numeric columns, including
+negative values, are written unchanged.
 
 ### Side effects and boundaries
 

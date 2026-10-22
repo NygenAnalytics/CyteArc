@@ -121,11 +121,9 @@ def test_inspection_and_open_do_not_mutate_source_or_expose_labels(
     assert flags["lowFlags"] == int((totals < low).sum()) == 0
     assert flags["highFlags"] == int((totals > high).sum()) == 0
     assert (flags["missing"], flags["zeroMad"]) == (0, False)
-    assert prepared["qcOutliers"]["RNA_nCounts"] == {
-        "missing": [],
-        "low": [],
-        "high": [],
-    }
+    # Counts and bounds identify flagged cells; per-cell row lists are not saved.
+    assert "qcOutliers" not in prepared
+    assert "outlierRows" not in flags
 
 
 def test_fingerprint_survives_relocation_and_rejects_metadata_edits(
@@ -288,8 +286,12 @@ def test_gentle_qc_never_filters_high_count_cells_or_groups_by_sample(
     assert options["method"] == "manual"
     assert "sample_column" not in options
     assert options["highs"][options["attrs"].index("RNA_nCounts")] is None
-    assert prepared["qcFlags"]["RNA_nCounts"]["highFlags"] == 1
-    assert prepared["qcOutliers"]["RNA_nCounts"]["high"] == [47]
+    flags = prepared["qcFlags"]["RNA_nCounts"]
+    assert flags["highFlags"] == 1
+    # The saved bound alone identifies the flagged cell; no row list is saved.
+    totals = _counts(high_count_outlier=True).sum(axis=1)
+    assert np.flatnonzero(totals > flags["high"]).tolist() == [47]
+    assert "qcOutliers" not in prepared
     assert prepared["retainedCells"] == 48
 
 

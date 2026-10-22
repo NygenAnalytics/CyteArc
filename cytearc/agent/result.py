@@ -3,6 +3,8 @@
 import json
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -12,6 +14,7 @@ from .rendering import (
     annotation_csv,
     annotations,
     atomic_text,
+    csv_frame,
     decision_resolutions,
     exploration_coverage,
     render_report,
@@ -35,6 +38,10 @@ class AnalysisRun:
         self._source = (
             Path(source).expanduser().resolve() if source is not None else None
         )
+        # Set only while one invocation derives several outputs from a single
+        # source verification; see _shared_binding.
+        self._binding: tuple[Any, "PipelineRun"] | None = None
+        self._share_binding = False
 
     @property
     def source(self) -> Path:
@@ -76,7 +83,7 @@ class AnalysisRun:
     def candidates(self) -> list[dict[str, Any]]:
         """Saved candidate measurements and their exact numerical run references."""
         return [
-            self._records.read_json(event["evidence"])
+            self._records.read_reference(event, "evidence")
             for event in self._records.events()
             if event["kind"] == "candidateMeasured"
         ]
@@ -97,7 +104,25 @@ class AnalysisRun:
 
         return replay(self._records)
 
+    @contextmanager
+    def _shared_binding(self) -> Iterator[None]:
+        """Verify the source once for every derived output of one invocation."""
+        self._share_binding = True
+        try:
+            yield
+        finally:
+            self._share_binding = False
+            self._binding = None
+
     def _bound_pipeline(self) -> tuple[Any, "PipelineRun"]:
+        if self._binding is not None:
+            return self._binding
+        binding = self._verified_pipeline()
+        if self._share_binding:
+            self._binding = binding
+        return binding
+
+    def _verified_pipeline(self) -> tuple[Any, "PipelineRun"]:
         from .evidence import open_store, verify_source
 
         final = stage_data(self._records, "finalize")
@@ -108,8 +133,10 @@ class AnalysisRun:
         study = Study.model_validate(supplied["study"])
         config = AnalysisConfig.model_validate(supplied["config"])
         invocation = self._records.latest("invocationStarted")
+        saved = invocation["runtime"] if invocation else {}
+        # Numerical access needs only the saved thread and memory settings.
         runtime = RuntimeConfig.model_validate(
-            invocation["runtime"] if invocation else {}
+            {key: saved[key] for key in ("nthreads", "memBudget") if key in saved}
         )
         prepared = stage_data(self._records, "preprocess") or stage_data(
             self._records, "inspect"
@@ -229,14 +256,17 @@ class AnalysisRun:
         result["exportedCells"] = len(frame)
         result["exportedMarkers"] = len(markers)
         directory.mkdir(parents=True, exist_ok=False)
+        # Cell IDs, cluster labels and gene names come from the dataset; text
+        # cells are quoted so spreadsheets never evaluate them as formulas.
         atomic_text(
-            directory / "clusters.csv", frame[["ids", "clusters"]].to_csv(index=False)
+            directory / "clusters.csv",
+            csv_frame(frame[["ids", "clusters"]]).to_csv(index=False),
         )
         atomic_text(
             directory / "umap.csv",
-            frame[["ids", "umap_1", "umap_2"]].to_csv(index=False),
+            csv_frame(frame[["ids", "umap_1", "umap_2"]]).to_csv(index=False),
         )
-        atomic_text(directory / "markers.csv", markers.to_csv(index=False))
+        atomic_text(directory / "markers.csv", csv_frame(markers).to_csv(index=False))
         atomic_text(directory / "annotations.csv", annotation_csv(rows))
         atomic_text(
             directory / "summary.json",

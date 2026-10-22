@@ -38,6 +38,7 @@ from .models import (
     NeedsInput,
     RuntimeConfig,
     Study,
+    partition_option_id,
 )
 from .prompts import (
     ANNOTATE_INSTRUCTIONS,
@@ -48,6 +49,7 @@ from .prompts import (
 from .provider import ProviderError, decide
 from .records import (
     RecordError,
+    RecordIntegrityError,
     RunRecords,
     digest,
     process_alive,
@@ -64,6 +66,17 @@ STAGES = (
     "finalize",
     "annotate",
 )
+# Evidence is scientific identity, so its trimming limit is fixed rather than
+# taken from the runtime. Trimmed evidence fits this many serialized request
+# bytes, which leaves _REQUEST_RESERVE for instructions, schema, settings,
+# provenance and bounded repair feedback. Runs require maxPromptBytes at least
+# this large.
+EVIDENCE_LIMIT = 65_536
+_REQUEST_RESERVE = 16_384
+
+
+class PipelineProcessActive(RuntimeError):
+    """The process that started an unfinished pipeline may still be running."""
 
 
 def stage_result(records: RunRecords, stage: str) -> Any | None:
@@ -72,7 +85,15 @@ def stage_result(records: RunRecords, stage: str) -> Any | None:
         for row in records.events()
         if row["kind"] == "stageCompleted" and row["stage"] == stage
     ]
-    return records.read_json(rows[-1]["evidence"]) if rows else None
+    return records.read_reference(rows[-1], "evidence") if rows else None
+
+
+def _reference(records: RunRecords, relative: str, value: Any) -> dict[str, str]:
+    """Save evidence and return the event fields that bind its exact bytes."""
+    return {
+        "evidence": records.write_json(relative, value),
+        "evidenceSha256": digest(value),
+    }
 
 
 def _complete(records: RunRecords, stage: str, result: Any) -> None:
@@ -80,8 +101,11 @@ def _complete(records: RunRecords, stage: str, result: Any) -> None:
     required = set(STAGES[: STAGES.index(stage)])
     if not required <= done:
         raise RuntimeError(f"Stage {stage} is missing its prerequisites")
-    path = records.write_json(f"evidence/{stage}.json", result)
-    records.append("stageCompleted", stage=stage, evidence=path)
+    records.append(
+        "stageCompleted",
+        stage=stage,
+        **_reference(records, f"evidence/{stage}.json", result),
+    )
 
 
 def _start(records: RunRecords, stage: str) -> None:
@@ -116,7 +140,7 @@ async def _decision(
     payload = {**evidence, "answers": answers} if answers else evidence
     # Evidence is scientific identity. A runtime budget change must not alter
     # saved decisions on resume; the provider separately enforces its limit.
-    payload = _bounded_evidence(payload, 65_536)
+    payload = _bounded_evidence(payload, EVIDENCE_LIMIT)
     identifier = key + (":" + digest(answers)[:12] if answers else "")
     return await decide(
         model,
@@ -135,13 +159,16 @@ def _bounded_evidence(evidence: dict[str, Any], limit: int) -> dict[str, Any]:
     """Trim optional detail deterministically, retaining options and gate inputs."""
     value: dict[str, Any] = json.loads(json.dumps(evidence, allow_nan=False))
     # Reserve room for the schema, instructions, provenance and repair feedback.
-    budget = max(256, limit - 16_384)
+    budget = max(256, limit - _REQUEST_RESERVE)
     omissions: list[dict[str, Any]] = []
     priority_columns = set(value.get("diagnosticPriorityColumns", []))
 
     def size() -> int:
+        # Measure the bytes the evidence occupies in the saved request, where
+        # the prompt is itself a JSON string, so its quotes are escaped again.
         payload = {**value, "promptOmissions": omissions} if omissions else value
-        return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        prompt = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return len(json.dumps(prompt, ensure_ascii=False).encode("utf-8"))
 
     optional = {
         "covariateAssociations",
@@ -405,7 +432,6 @@ def _pipeline(
     markers: bool = False,
     final: bool = False,
 ) -> Any:
-    verify_source(source, prepared, study, config, runtime)
     completed = _find(records, "pipelineCompleted", "operation", operation)
     if completed:
         run = store.pipeline.open(run_id=completed["runId"])
@@ -429,13 +455,19 @@ def _pipeline(
                 recovered=True,
             )
             return run
-        failed = _find(records, "pipelineFailed", "operation", operation)
-        if (not failed or failed["sequence"] < planned["sequence"]) and process_alive(
-            planned["process"]
-        ):
-            raise RuntimeError(
-                "Previous pipeline process may still be alive; refuse concurrent retry"
+        ended = any(
+            row["kind"] in {"pipelineFailed", "pipelineAbandoned"}
+            and row.get("operation") == operation
+            and row["sequence"] > planned["sequence"]
+            for row in records.events()
+        )
+        if not ended and process_alive(planned["process"]):
+            raise PipelineProcessActive(
+                "Previous pipeline process may still be alive; refuse concurrent "
+                "retry. If it has stopped, resume with abandon_unfinished_pipeline=True"
             )
+    # The source is verified before each numerical write.
+    verify_source(source, prepared, study, config, runtime)
     attempt = sum(
         row["kind"] == "pipelinePlanned" and row.get("operation") == operation
         for row in records.events()
@@ -592,10 +624,9 @@ def _measure_candidate(
     parent_candidate: Candidate | None = None,
     resolution: float | None = None,
 ) -> dict[str, Any] | None:
-    verify_source(source, prepared, study, config, runtime)
     previous = _find(records, "candidateMeasured", "candidateId", candidate.candidateId)
     if previous:
-        saved: dict[str, Any] = records.read_json(previous["evidence"])
+        saved: dict[str, Any] = records.read_reference(previous, "evidence")
         _validate_measurement(store, saved)
         return saved
     skipped = _find(records, "candidateFailed", "candidateId", candidate.candidateId)
@@ -662,11 +693,12 @@ def _measure_candidate(
                     if resolution is None
                     else config.model_copy(update={"resolutions": (resolution,)}),
                 )
-            path = records.write_json(
-                f"evidence/candidate_{candidate.candidateId}.json", summary
-            )
             records.append(
-                "candidateMeasured", candidateId=candidate.candidateId, evidence=path
+                "candidateMeasured",
+                candidateId=candidate.candidateId,
+                **_reference(
+                    records, f"evidence/candidate_{candidate.candidateId}.json", summary
+                ),
             )
             return summary
     records.append(
@@ -769,7 +801,7 @@ async def _explore(
     summaries = [measured]
     planned = records.latest("explorationPlanned")
     if planned:
-        plan = records.read_json(planned["evidence"])
+        plan = records.read_reference(planned, "evidence")
     else:
         options = native_probe_options(
             baseline,
@@ -872,8 +904,10 @@ async def _explore(
             "seed": config.randomSeed,
             "harmonyPermitted": config.maxCandidates == 5,
         }
-        path = records.write_json("evidence/probe_plan.json", plan)
-        records.append("explorationPlanned", evidence=path)
+        records.append(
+            "explorationPlanned",
+            **_reference(records, "evidence/probe_plan.json", plan),
+        )
     slots = json.loads(json.dumps(plan["slots"]))
     _coverage(records, slots)
     for slot in slots[1:]:
@@ -1011,7 +1045,7 @@ async def _explore(
         if result:
             summaries.append(result)
             partitions.update({row["optionId"]: row for row in result["partitions"]})
-            corrected = f"c4:r{selected['resolution']:g}"
+            corrected = partition_option_id("c4", selected["resolution"])
             if corrected not in partitions:
                 raise AnalysisInputError("Corrected screen lacks its pinned resolution")
             ids.append(corrected)
@@ -1035,6 +1069,16 @@ async def _explore(
     }
 
 
+def _model_settings_record(runtime: RuntimeConfig) -> dict[str, Any]:
+    """Name the supplied model settings and hash their values without saving them.
+
+    Settings can hold provider credentials, so an invocation records only the
+    top-level setting names and a SHA-256 of the complete values.
+    """
+    settings = runtime.model_dump(mode="json")["modelSettings"]
+    return {"keys": sorted(settings), "sha256": digest(settings)}
+
+
 async def run_workflow(
     records: RunRecords,
     source: Path,
@@ -1043,12 +1087,20 @@ async def run_workflow(
     config: AnalysisConfig,
     runtime: RuntimeConfig,
 ) -> None:
-    """Resume completed stages and execute the remaining fixed procedure."""
+    """Resume completed stages and execute the remaining fixed procedure.
+
+    A new inspection binds the source; a caller resuming a saved inspection
+    verifies it against ``source`` first, once per invocation. Each numerical
+    write verifies the source again.
+    """
     stage = "inspect"
     records.append(
         "invocationStarted",
         invocationId=uuid4().hex,
-        runtime=runtime.model_dump(mode="json", exclude_unset=True),
+        runtime=runtime.model_dump(
+            mode="json", exclude_unset=True, exclude={"modelSettings"}
+        ),
+        modelSettings=_model_settings_record(runtime),
         process=process_identity(),
     )
     try:
@@ -1057,7 +1109,6 @@ async def run_workflow(
             _start(records, stage)
             inspected = inspect_source(source, study, config, runtime)
             _complete(records, stage, inspected)
-        verify_source(source, inspected, study, config, runtime)
 
         stage = "context"
         context = stage_result(records, stage)
@@ -1075,7 +1126,10 @@ async def run_workflow(
                     "study": study.model_dump(
                         mode="json", exclude={"referenceFiles", "excludedColumns"}
                     ),
-                    "observations": public,
+                    # The study appears once: its text is never trimmed.
+                    "observations": {
+                        key: value for key, value in public.items() if key != "study"
+                    },
                     "evidenceIds": sorted(context_evidence_ids(columns, study)),
                     "unresolvedFactIds": [],
                     "optionOrder": [],
@@ -1106,7 +1160,6 @@ async def run_workflow(
             )
             _complete(records, stage, prepared)
         prepared = {**prepared, "source": str(source)}
-        verify_source(source, prepared, study, config, runtime)
         if records.latest("pipelinePlanned") is None:
             # A paused context decision does not reserve a clean store forever.
             require_clean_analysis(
@@ -1138,7 +1191,7 @@ async def run_workflow(
                 candidate = candidates[partition["candidateId"]]
                 existing = _find(records, "finalistMeasured", "optionId", option)
                 if existing:
-                    finalists[option] = records.read_json(existing["evidence"])
+                    finalists[option] = records.read_reference(existing, "evidence")
                     _validate_measurement(store, finalists[option])
                     continue
                 run = _pipeline(
@@ -1159,8 +1212,11 @@ async def run_workflow(
                     {key: ref.to_dict() for key, ref in run.items()}
                 )
                 evidence["resolution"] = partition["resolution"]
-                path = records.write_json(f"evidence/finalist_{index}.json", evidence)
-                records.append("finalistMeasured", optionId=option, evidence=path)
+                records.append(
+                    "finalistMeasured",
+                    optionId=option,
+                    **_reference(records, f"evidence/finalist_{index}.json", evidence),
+                )
                 finalists[option] = evidence
             rejected = {}
             eligible = set(finalists)
@@ -1340,7 +1396,13 @@ async def run_workflow(
             stage=stage,
             errorType=type(error).__name__,
             message=str(error)[:2000]
-            if isinstance(error, AnalysisInputError | ProviderError)
+            if isinstance(
+                error,
+                AnalysisInputError
+                | ProviderError
+                | RecordIntegrityError
+                | PipelineProcessActive,
+            )
             else "Execution failed. Inspect the saved model attempts and pipeline reports before resuming.",
         )
 
@@ -1464,7 +1526,7 @@ def replay(records: RunRecords) -> list[dict[str, Any]]:
             raise RecordError("Policy resolution does not match an accepted decision")
         schema = ContextDecision if original["stage"] == "context" else Choice
         value = schema.model_validate(original["output"])
-        request = records.read_json(requests[original["callId"]]["requestPath"])
+        request = records.read_reference(requests[original["callId"]], "requestPath")
         evidence = json.loads(request["userPrompt"])["evidence"]
         if (
             row["optionOrder"] != evidence["optionOrder"]
@@ -1497,7 +1559,7 @@ def _replay_exploration(records: RunRecords, config: AnalysisConfig) -> None:
     planned = records.latest("explorationPlanned")
     if planned is None:
         return
-    plan = records.read_json(planned["evidence"])
+    plan = records.read_reference(planned, "evidence")
     slots = plan["slots"]
     if len(slots) != 4 or [row["axis"] for row in slots] != [
         "baseline",
@@ -1526,7 +1588,7 @@ def _replay_exploration(records: RunRecords, config: AnalysisConfig) -> None:
     baseline_event = _find(records, "candidateMeasured", "candidateId", "c0")
     if baseline_event is None:
         raise RecordError("Probe plan lacks its measured baseline")
-    baseline_evidence = records.read_json(baseline_event["evidence"])
+    baseline_evidence = records.read_reference(baseline_event, "evidence")
     offered = native_probe_options(
         baseline,
         {
@@ -1608,7 +1670,7 @@ def _replay_exploration(records: RunRecords, config: AnalysisConfig) -> None:
             records, "candidateMeasured", "candidateId", candidate.candidateId
         )
         if event_measured:
-            measured = records.read_json(event_measured["evidence"])
+            measured = records.read_reference(event_measured, "evidence")
             if measured.get("parameters") != candidate.model_dump(
                 exclude={"candidateId", "parentId"}
             ):

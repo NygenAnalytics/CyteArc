@@ -2,15 +2,19 @@
 
 Only paragraphs, lists, emphasis, and inline code generate HTML. Links, images,
 and supplied HTML remain text. Scientific identifiers and paths stay literal.
+The Markdown companion escapes supplied text the same way, so no renderer
+turns it into a link, image, heading, or HTML.
 """
 
 import html
 import re
 
 # Relative Windows paths need another separator or a filename extension to
-# distinguish them from prose containing literal newline escapes.
+# distinguish them from prose containing literal newline escapes. A code span
+# delimiter has at most 16 backticks: matching an unbounded delimiter
+# backtracks cubically on a long run of backticks.
 _LITERAL = re.compile(
-    r"(?P<ticks>`+)(?P<code>.*?)(?P=ticks)(?!`)"
+    r"(?P<ticks>`{1,16})(?P<code>.*?)(?P=ticks)(?!`)"
     r"|(?P<path>(?<!\w)(?:[A-Za-z]:\\|\\\\|(?<!\S)\.\.?\\(?!n\\n)"
     r"|[\w.-]+\\(?=[^\s`<>\"']*(?:\\[^nr\\\s]|\.[a-zA-Z0-9]{1,8}\b)))"
     r"[^\s`<>\"']+)",
@@ -23,6 +27,25 @@ _INLINE = re.compile(
     re.DOTALL,
 )
 _LIST = re.compile(r"^( *)([-+*]|\d+[.)])\s+(.+)$")
+# Backslashes, code and emphasis delimiters, link brackets, table pipes,
+# headings and strikethrough marks; see markdown_text.
+_MARKDOWN_SPECIAL = re.compile(r"[\\`*_\[\]|#~]")
+# A line of only "-" or "=" would end a paragraph as a rule or heading.
+_MARKDOWN_RULE = re.compile(r"^([ \t]*)([-=])(?=[-= \t]*$)", re.MULTILINE)
+
+
+def markdown_text(text: str) -> str:
+    """Write supplied text as inert Markdown for the report companion.
+
+    Model and dataset text may contain Markdown links or images that a viewer
+    would fetch, so every Markdown delimiter is backslash-escaped and HTML is
+    entity-escaped. Without an unescaped ``[``, no link, image, or reference
+    definition can form. Paragraphs and lists still render. Formatting the
+    report itself adds, such as headings and its own links, is written
+    around this text and stays active.
+    """
+    escaped = _MARKDOWN_SPECIAL.sub(r"\\\g<0>", text)
+    return html.escape(_MARKDOWN_RULE.sub(r"\1\\\2", escaped))
 
 
 def normalize_narrative(text: str) -> str:

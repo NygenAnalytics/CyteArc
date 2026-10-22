@@ -1,7 +1,6 @@
 """Explicit new-run, resume, and read-only interfaces."""
 
 import asyncio
-import os
 import sys
 from collections.abc import Coroutine
 from importlib.metadata import version
@@ -10,7 +9,14 @@ from typing import Any
 from uuid import uuid4
 
 from .models import AnalysisConfig, RuntimeConfig, Study
-from .records import RunRecords, procedure_identity, run_lock, source_lock
+from .records import (
+    RunRecords,
+    procedure_identity,
+    process_state,
+    relative_locator,
+    run_lock,
+    source_lock,
+)
 from .result import AnalysisRun
 
 
@@ -23,6 +29,18 @@ def _sync(coroutine: Coroutine[Any, Any, AnalysisRun]) -> AnalysisRun:
     raise RuntimeError(
         "An event loop is running; await the corresponding async agent API"
     )
+
+
+def _require_prompt_budget(runtime: RuntimeConfig) -> None:
+    """Refuse a request limit below the fixed evidence budget plus overhead."""
+    from .workflow import EVIDENCE_LIMIT
+
+    if runtime.maxPromptBytes < EVIDENCE_LIMIT:
+        raise ValueError(
+            f"maxPromptBytes must be at least {EVIDENCE_LIMIT:,}: decision evidence "
+            "is trimmed to a fixed budget that leaves room for instructions, "
+            "schema and repair feedback within this many bytes"
+        )
 
 
 def analyze_rna(
@@ -65,6 +83,7 @@ async def analyze_rna_async(
             "older saved configurations remain readable"
         )
     operational = runtime or RuntimeConfig()
+    _require_prompt_budget(operational)
     location = Path(source).expanduser().resolve()
     run_id = uuid4().hex[:16]
     destination = (
@@ -100,7 +119,7 @@ async def analyze_rna_async(
                     "pydantic-ai-slim": version("pydantic-ai-slim"),
                     "pydantic": version("pydantic"),
                 },
-                "source": os.path.relpath(location, destination),
+                "source": relative_locator(location, destination),
                 "study": supplied.model_dump(mode="json"),
                 "config": scientific.model_dump(mode="json"),
             },
@@ -111,8 +130,7 @@ async def analyze_rna_async(
                 records, location, model, supplied, scientific, operational
             )
         finally:
-            _publish_result(result, records)
-            _report(result, records)
+            _finish(result, records)
         return result
 
 
@@ -123,11 +141,22 @@ def resume_rna(
     answers: dict[str, Any] | None = None,
     runtime: RuntimeConfig | None = None,
     source: str | Path | None = None,
+    abandon_unfinished_pipeline: bool = False,
 ) -> AnalysisRun:
-    """Resume unchanged scientific work, optionally with new operational settings."""
+    """Resume unchanged scientific work, optionally with new operational settings.
+
+    Set ``abandon_unfinished_pipeline`` only after confirming that the process
+    which started the last unfinished pipeline has stopped. Its liveness cannot
+    be checked on Windows, or when only a reusable process ID was recorded.
+    """
     return _sync(
         resume_rna_async(
-            run_dir, model=model, answers=answers, runtime=runtime, source=source
+            run_dir,
+            model=model,
+            answers=answers,
+            runtime=runtime,
+            source=source,
+            abandon_unfinished_pipeline=abandon_unfinished_pipeline,
         )
     )
 
@@ -139,8 +168,14 @@ async def resume_rna_async(
     answers: dict[str, Any] | None = None,
     runtime: RuntimeConfig | None = None,
     source: str | Path | None = None,
+    abandon_unfinished_pipeline: bool = False,
 ) -> AnalysisRun:
-    """Resume one saved run without migrating histories or changing accepted work."""
+    """Resume one saved run without migrating histories or changing accepted work.
+
+    ``abandon_unfinished_pipeline`` records that the process which started the
+    last unfinished pipeline has stopped, so its pipeline can run again under a
+    new label. A process confirmed to be running is never abandoned.
+    """
     from .evidence import open_store, verify_source
     from .workflow import run_workflow, stage_result, validate_final
 
@@ -159,8 +194,22 @@ async def resume_rna_async(
                 supplied = Study.model_validate(row["study"])
                 scientific = AnalysisConfig.model_validate(row["config"])
         previous = records.latest("invocationStarted")
+        if (
+            runtime is None
+            and previous is not None
+            and previous.get("modelSettings", {}).get("keys")
+        ):
+            raise ValueError(
+                "The previous invocation supplied modelSettings, which are not saved "
+                "because they can hold credentials. Resume with "
+                "runtime=RuntimeConfig(modelSettings=...)"
+            )
         operational = runtime or RuntimeConfig.model_validate(
             previous["runtime"] if previous else {}
+        )
+        _require_prompt_budget(operational)
+        abandoned = (
+            _unfinished_pipeline(records) if abandon_unfinished_pipeline else None
         )
         if answers:
             pending = {row["questionId"]: row for row in result.pending_questions}
@@ -221,12 +270,20 @@ async def resume_rna_async(
             if source is not None and inspected:
                 records.append(
                     "sourceRebound",
-                    source=os.path.relpath(result.source, destination),
+                    source=relative_locator(result.source, destination),
                     fingerprint=inspected["fingerprint"],
                 )
+            if abandoned is not None:
+                records.append(
+                    "pipelineAbandoned",
+                    operation=abandoned["operation"],
+                    label=abandoned["label"],
+                    plannedSequence=abandoned["sequence"],
+                    process=abandoned["process"],
+                    reason="The caller confirmed that the process stopped",
+                )
             if result.status == "completed":
-                _publish_result(result, records)
-                _report(result, records)
+                _finish(result, records)
                 return result
             try:
                 await run_workflow(
@@ -239,12 +296,32 @@ async def resume_rna_async(
                     if inspected is not None:
                         records.append(
                             "sourceRebound",
-                            source=os.path.relpath(result.source, destination),
+                            source=relative_locator(result.source, destination),
                             fingerprint=inspected["fingerprint"],
                         )
-                _publish_result(result, records)
-                _report(result, records)
+                _finish(result, records)
         return result
+
+
+def _unfinished_pipeline(records: RunRecords) -> dict[str, Any]:
+    """Return the last planned pipeline that never ended, if it may be abandoned."""
+    events = records.events()
+    planned = next(
+        (event for event in reversed(events) if event["kind"] == "pipelinePlanned"),
+        None,
+    )
+    if planned is None or any(
+        event["kind"] in {"pipelineCompleted", "pipelineFailed", "pipelineAbandoned"}
+        and event.get("label") == planned["label"]
+        for event in events
+    ):
+        raise ValueError("No unfinished pipeline attempt can be abandoned")
+    if process_state(planned["process"]) == "running":
+        raise ValueError(
+            "The process that started the unfinished pipeline is still running; "
+            "it cannot be abandoned"
+        )
+    return planned
 
 
 def _validate_relocation(store: Any, records: RunRecords) -> None:
@@ -280,6 +357,13 @@ def open_analysis(
 ) -> AnalysisRun:
     """Inspect saved outcomes without opening a provider or numerical store."""
     return AnalysisRun(run_dir, source=source)
+
+
+def _finish(result: AnalysisRun, records: RunRecords) -> None:
+    """Publish and report one invocation's outcome from a single source check."""
+    with result._shared_binding():
+        _publish_result(result, records)
+        _report(result, records)
 
 
 def _publish_result(result: AnalysisRun, records: RunRecords) -> None:

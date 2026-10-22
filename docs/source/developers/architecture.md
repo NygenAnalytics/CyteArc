@@ -1192,6 +1192,14 @@ CyteArc validates persisted data and public arguments against the following cont
   `method.cutoff.quantile`, and the quantile is recorded there, so artifacts of the default keep
   their identities and are reused without a compatibility branch, while each other quantile has
   its own artifact. `qc.hto_demultiplexing` checks the quantile before it reads the selection.
+- Agent run records: each event records the SHA-256 of every evidence, request, and response
+  file it references, and reads verify it. Histories saved before 1.3.0 recorded none; their
+  references are read as saved for presentation only, because resume and replay already require
+  the procedure identity of the release that wrote them. Agent source fingerprints are version 2,
+  hashing whole metadata columns, and inspection evidence records `fingerprintVersion`; an
+  analysis with an earlier fingerprint raises when it opens numerical results and asks for a new
+  analysis, while its reports and records stay readable. Inspection evidence no longer saves QC
+  outlier row lists, and invocations save only the names and a SHA-256 of `modelSettings`.
 
 Compatibility exists only where a current public facade or an explicit file-schema test says it
 does. There are no silent migrations, implicit compatibility branches, or forwarding shims for
