@@ -320,6 +320,7 @@ their rows follow the cell selection of their lineage rather than a recorded inp
 
 | Kind | Canonical array | Holds | Other label arrays | Other measurement arrays |
 |---|---|---|---|---|
+| `cell_calling` | `fdr` | measurements | `limited` | `total`, `log_probability`, `p_value` |
 | `cell_cycle` | `phase` | labels | | `s_score`, `g2m_score` |
 | `cluster_cut` | `labels` | labels | | |
 | `cluster_labels` | `values` | labels | | |

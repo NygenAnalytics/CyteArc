@@ -199,13 +199,19 @@ def write_cell_data_artifact(
     arrays: Mapping[str, np.ndarray],
     *,
     fingerprint_payload: bool = False,
+    attributes: Mapping[str, Any] | None = None,
 ) -> zarr.Group:
-    """Write and publish a planned cell-data artifact, or return the reused one."""
+    """Write and publish a planned cell-data artifact, or return the reused one.
+
+    ``attributes`` are stored on the artifact group before it is published.
+    """
     if planned.reused:
         return reused_artifact_group(root, planned)
     kind = planned.ref.kind
     operation = str(planned.provenance["operation"])
     with artifact_transaction(root, planned) as group:
+        if attributes is not None:
+            group.attrs.update(dict(attributes))
         for name, raw_values in arrays.items():
             values = np.asarray(raw_values)
             if values.ndim < 1:

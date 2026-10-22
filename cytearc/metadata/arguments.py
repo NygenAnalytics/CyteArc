@@ -313,6 +313,24 @@ class HtoIdentityArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class CellCallingArguments(OperationArguments):
+    operation: ClassVar[str] = "run_cell_calling"
+    artifact_kind: ClassVar[str] = "cell_calling"
+
+    cell_selection: ArtifactRef = artifact_input()
+    dataset_fingerprint: str = artifact_input()
+    lower: int = parameter()
+    # None records the knee of the barcode-rank curve and an estimated alpha.
+    retain: int | None = parameter()
+    n_iter: int = parameter()
+    alpha: float | None = parameter()
+    random_seed: int = parameter()
+    # The p-values do not depend on the thread count.
+    nthreads: int = execution()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class MembershipStrengthArguments(OperationArguments):
     operation: ClassVar[str] = "calc_membership_strength"
     artifact_kind: ClassVar[str] = "membership_strength"

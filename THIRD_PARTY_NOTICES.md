@@ -212,6 +212,7 @@ package.
 | Regulons and gene programs | SPI1 CUT&RUN peaks of experiment SRX26995709 from ChIP-Atlas, Zou et al. (2024), Nucleic Acids Research, doi:10.1093/nar/gkae358. ChIP-Atlas (c) Shinya Oki (Kyoto University) licensed under CC Attribution-Share Alike 4.0 International | CC BY-SA 4.0, <https://creativecommons.org/licenses/by-sa/4.0/> |
 | Harmony batch correction, Donor-level comparisons, Pseudobulk export | Binvignat et al. (2024), JCI Insight, doi:10.1172/jci.insight.178499, from CZ CELLxGENE Discover, <https://cellxgene.cziscience.com/collections/e1a9ca56-f2ee-435d-980a-4f49ab7a952b> | CC BY 4.0 |
 | HTO demultiplexing | Stoeckius et al. (2018), Genome Biology 19:224, doi:10.1186/s13059-018-1603-1; GEO GSE108313 (GSM2895282, GSM2895283) | GEO; no license stated |
+| Cell calling | "1k PBMCs from a Healthy Donor (v2 chemistry)", raw feature-barcode matrix, 10x Genomics, <https://www.10xgenomics.com/datasets> | CC BY 4.0 |
 | CyteBase datasets and CyteBase composite datasets | Datasets from CZ CELLxGENE Discover, each credited in its CyteBase catalog entry | The license of each dataset on CELLxGENE Discover, usually CC BY 4.0 |
 
 ## Optional packages that CyteArc does not install

@@ -42,9 +42,9 @@ _SPLIT_SAMPLE_SIZE = 1 << 20
 RAW_DROPLET_REMEDY = (
     "If this is a raw (unfiltered) droplet matrix, most of its barcodes are "
     "empty droplets, and bounds computed over them keep the empty droplets and "
-    "remove the real cells: call cells first, or import the filtered matrix "
-    "(for example Cell Ranger's filtered_feature_bc_matrix), before QC "
-    "filtering."
+    "remove the real cells: call cells first with qc.call_cells, or import the "
+    "filtered matrix (for example Cell Ranger's filtered_feature_bc_matrix), "
+    "before QC filtering."
 )
 
 

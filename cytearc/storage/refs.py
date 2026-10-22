@@ -12,6 +12,7 @@ ARTIFACT_KINDS = frozenset(
     {
         "ann_index",
         "batch_correction",
+        "cell_calling",
         "cell_cycle",
         "cell_selection",
         "cluster_cut",

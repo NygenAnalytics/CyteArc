@@ -79,6 +79,7 @@ if author:
 | Store totals below author raw `nCount_RNA`, Spearman well below 1 | Corrected counts, removed genes (for example rRNA) or another layer. |
 | 0.5% or more of cells within 5% of the minimum; a minimum or maximum just inside a round number (1,000 counts, 200 genes, 20% mito) | A hard cutoff before import: cells were already filtered. |
 | Fewer active than total cells | An earlier filter edited `I`; active ranges are truncated. |
+| Most barcodes hold fewer than 100 counts, tens of thousands of barcodes | An unfiltered droplet matrix: call cells before QC (below). |
 
 Example (10x 5K PBMC docs dataset): integer `uint32` counts and a spread ratio of 0.78 (raw UMIs),
 but `I` keeps 3,948 of 5,025 cells, and active cells sit just inside 1,000 to 15,000 counts, 500 to
@@ -89,6 +90,32 @@ measure the correction, and refiltering filtered cells mostly trims real populat
 `nCounts` bounds; use flag-only QC (a status column, nothing removed) or a gentle, audited filter
 (per-sample 5-MAD on `RNA_nFeatures` and `RNA_percentMito`). The report states what the matrix
 holds, any visible prior bounds, and why QC was gentle. Count models need raw UMIs.
+
+### Unfiltered droplet matrices: call cells first
+
+A raw droplet matrix (Cell Ranger `raw_feature_bc_matrix`) is mostly empty droplets: MAD bounds
+centre on them and remove the cells. Call cells with EmptyDrops first, then run QC and the pipeline
+on the called cells.
+
+```python
+reader = cytearc.CrH5Reader("raw_feature_bc_matrix.h5", is_filtered=False, filtering_cutoff=0)
+cytearc.CrToZarr(reader, zarr_loc="raw.zarr").dump()  # keeps the low-count ambient barcodes
+ds = cytearc.DataStore("raw.zarr", min_features_per_cell=-1)  # keep every barcode in I
+ranks = ds.qc.barcode_ranks()  # knee and inflection totals from stored totals, no count read
+cells = ds.qc.call_cells()  # EmptyDrops, FDR 0.001 -> ArtifactRef(kind="cell_selection")
+calls = ds.qc.load_cell_calls(cells)  # per barcode: total, log_probability, p_value, fdr, limited
+called = np.asarray(ds.artifacts.load(cells)["values"][:], dtype=bool)
+print(int(called.sum()), "cells; retain", calls.retain, "alpha", calls.alpha)
+auto = ds.qc.auto_filter(cell_selection=cells)  # QC on the called cells only
+ds.cells.insert("called_cell", called)  # the pipeline reads a cell key column
+```
+
+- `filtering_cutoff` defaults to 500 for unfiltered reads, which removes the ambient pool
+  (barcodes with at most `lower=100` counts); `call_cells` then raises. Import with 0.
+- Barcodes at or above `retain` (the knee total) are cells without a test. A warning names
+  `limited` barcodes that were not called: rerun with a larger `n_iter`.
+- A merged store holds one ambient pool per capture: call each capture with
+  `cell_selection=` and combine the selections.
 
 ### Distributions, default filter and candidate policies
 

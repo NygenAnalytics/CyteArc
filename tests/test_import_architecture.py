@@ -1309,6 +1309,7 @@ def test_assay_implementations_are_runtime_isolated():
 
 
 def test_datastore_operation_mixins_are_runtime_isolated():
+    from cytearc.datastore._operations.cell_calling import _CellCallingOperationsMixin
     from cytearc.datastore._operations.clustering import _ClusteringOperationsMixin
     from cytearc.datastore._operations.embeddings import _EmbeddingOperationsMixin
     from cytearc.datastore._operations.features import _FeatureOperationsMixin
@@ -1366,6 +1367,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         _IntegrationMetricsOperationsMixin,
         _PresentationOperationsMixin,
         _RegulonOperationsMixin,
+        _CellCallingOperationsMixin,
     )
     assert all("__init__" not in mixin.__dict__ for mixin in mixins)
     assert all(mixin.__bases__ == (object,) for mixin in mixins)

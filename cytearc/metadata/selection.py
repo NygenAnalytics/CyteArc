@@ -100,6 +100,16 @@ class CellValueSpec:
 #: same recorded inputs, and needs an operation revision for each of them.
 CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
     {
+        "cell_calling": CellValueSpec(
+            "fdr",
+            False,
+            {
+                "limited": True,
+                "total": False,
+                "log_probability": False,
+                "p_value": False,
+            },
+        ),
         "cell_cycle": CellValueSpec(
             "phase", True, {"s_score": False, "g2m_score": False}
         ),
