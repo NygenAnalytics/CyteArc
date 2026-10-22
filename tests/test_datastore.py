@@ -1,3 +1,4 @@
+import warnings
 from importlib import import_module, util
 
 import numpy as np
@@ -22,7 +23,6 @@ from cytearc.trajectory.results import (
     PseudotimeScoreResult,
 )
 from cytearc.storage.schema import create_cell_data
-from cytearc.utils.logging import logger
 from cytearc.writers import create_zarr_count_assay
 from tests.storage_helpers import write_count_store
 from tests.store_probes import RecordingStore
@@ -132,15 +132,12 @@ def test_fresh_import_requires_preparation_before_read_only_access():
 
 
 def _open_logging_warnings(open_store) -> tuple[DataStore, list[str]]:
-    messages: list[str] = []
-    sink = logger.add(
-        lambda message: messages.append(message.record["message"]),
-        level="WARNING",
-    )
-    try:
+    # The skipped filter is a Python warning, so a notebook shows it, and it
+    # is no longer only a log line.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         dataset = open_store()
-    finally:
-        logger.remove(sink)
+    messages = [str(warning.message) for warning in caught]
     return dataset, [message for message in messages if "Will not remove" in message]
 
 
@@ -197,6 +194,30 @@ def test_default_open_never_removes_half_of_the_active_cells(tmp_path):
     assert dataset.cells.fetch_all("I").all()
     assert len(skipped) == 1
     assert "2 of 4 active cells have at most 10 features" in skipped[0]
+
+
+def test_skipped_open_filter_warns_with_its_likely_causes(tmp_path):
+    # A raw droplet matrix: most barcodes are empty droplets with a few genes.
+    path = _feature_count_store(tmp_path / "raw.zarr", [2, 3, 1, 4, 2, 30, 40], 40)
+
+    with pytest.warns(UserWarning) as caught:
+        dataset = DataStore(path, default_assay="ADT", nthreads=1)
+
+    assert dataset.cells.fetch_all("I").all()
+    messages = [str(warning.message) for warning in caught]
+    assert messages == [
+        "5 of 7 active cells have at most 10 features in assay 'ADT'. Will not "
+        "remove low quality cells automatically, because that would remove at "
+        "least half of the active cells. A default assay with few features, such "
+        "as a small antibody panel, does this; open it with "
+        "min_features_per_cell=-1 to skip this filter. If this is a raw "
+        "(unfiltered) droplet matrix, most of its barcodes are empty droplets, "
+        "and bounds computed over them keep the empty droplets and remove the "
+        "real cells: call cells first, or import the filtered matrix (for "
+        "example Cell Ranger's filtered_feature_bc_matrix), before QC filtering."
+    ]
+    # The warning points at the code that opened the store.
+    assert caught[0].filename == __file__
 
 
 def test_open_without_active_cells_leaves_the_cell_key_unchanged():

@@ -109,7 +109,9 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
         "embedding": CellValueSpec("values", False),
         "enrichment_scores": CellValueSpec("scores", False),
         "fate_map": CellValueSpec("probabilities", False, {"valid": True}),
-        "hto_identity": CellValueSpec("values", True),
+        "hto_identity": CellValueSpec(
+            "values", True, {"max_id": True, "second_id": True, "margin": False}
+        ),
         "imported_coordinates": CellValueSpec("data", False),
         "label_transfer": CellValueSpec(
             "labels",

@@ -125,8 +125,9 @@ _SIGNATURE_DIGESTS = {
     GraphDataStore: "471d38e2eafdbd330214bdb91c0433e3e0e08a7c5f5a52a842e0cce7f075b920",
     MappingDatastore: "a4839ac0372df95f021fd8c383c1ac2aff6796c6b093e05510c71ad7e8449a72",
     # run_hto_demultiplexing gained the keyword-only positive_quantile: float
-    # with the default 0.99.
-    DataStore: "9959126fed24466262c5c3abc3bc9a8ec170ed2f17d32b508bbee1e70446b119",
+    # with the default 0.99. auto_filter_cells gained the keyword-only
+    # metric_policies: dict[str, dict[str, str]] | None with the default None.
+    DataStore: "a7a59b4a948dc14725f9f11daf11c904c61ea21172f009fb218183412ca1a3b7",
     ArtifactAccessor: "c48b4badcb3fbd03d03326278eafae0cf429ac31e5d053390e60ed9316d6b54b",
 }
 

@@ -19,10 +19,22 @@ selections, audit removals without author labels, and score doublets. Docs:
   `names`. For any other gene set use `qc.feature_percentage` (an artifact, not a column).
 - Filters never edit `I` (the live cell key): each returns a new immutable `ArtifactRef`
   (`kind="cell_selection"`). Omit `cell_selection=` to snapshot `I`; pass a selection to compose.
-- `qc.auto_filter` defaults to pooled MAD (`n_mads=3`, scaled MAD = 1.4826 * MAD), chosen by
-  column-name suffix: `nCounts`/`nFeatures` are filtered on log1p values with two-sided bounds;
-  `percentMito`/`percentRibo` on raw values with an upper bound only; other names raw and
-  two-sided. A metric with zero MAD is skipped with a warning. Bounds are exclusive.
+- `qc.auto_filter` defaults to pooled MAD (`n_mads=3`, scaled MAD = 1.4826 * MAD). Each metric's
+  policy follows what CyteArc wrote: `RNA_nCounts`/`RNA_nFeatures` are filtered on log1p values
+  with two-sided bounds; the prepared `percentMito`/`percentRibo` columns and every
+  `qc.feature_percentage` artifact on raw values with an upper bound only. Other columns, such as
+  imported scanpy `total_counts`, `n_genes_by_counts` or `pct_counts_mt`, fall back to the
+  name suffix (raw two-sided bounds for those three) with a warning: pass
+  `metric_policies={"total_counts": {"transform": "log1p", "bound_direction": "two_sided"}}`
+  (`bound_direction` also takes `"lower"` and `"upper"`). A metric with zero MAD is skipped with a
+  warning. The resolved policies are `parameters["metric_policies"]`.
+- Bounds are exclusive: `qc.filter(lows=[200])` removes a cell with exactly 200 genes, which
+  scanpy's `filter_cells(min_genes=200)` keeps; pass `keep_bounds=True` for inclusive bounds. MAD
+  bounds are always exclusive, and `min_features_per_cell=k` removes cells with at most `k`.
+- Raw droplet matrices break MAD bounds, which then center on empty droplets. A `UserWarning`
+  says so when the open skips its `min_features_per_cell` floor (at least half of the cells would
+  go), when automatic bounds remove most cells, or when the MAD bounds of counts miss a second
+  population. Call cells or import the filtered matrix before QC.
 - `parameters["resolved_bounds"]` are reported back on the raw scale: `low` and `high` are counts,
   genes or percent; never apply `expm1`. Example (10x 5K PBMC docs dataset): `RNA_nCounts` low
   3377.1 and high 18389.9 mean 3,377 to 18,390 counts.
@@ -210,9 +222,9 @@ from cytearc.metadata.selection import NamedCellArtifact
 
 names = ds.RNA.feats.fetch_all("names").astype(str)
 hb = ds.features.snapshot(from_assay="RNA", mask=np.isin(names, ["HBA1", "HBA2", "HBB"]))
-pct_hb = ds.qc.feature_percentage(cells, hb)  # kind="quality_metric"; one count pass; no column
+pct_hb = ds.qc.feature_percentage(cells, hb)  # kind="quality_metric"; reads only the 3 genes; no column
 no_rbc = ds.select_cells(pct_hb, high=5.0, cell_selection=floors)  # fixed bound, composed
-mad_hb = ds.qc.auto_filter(["RNA_percentMito"], cell_selection=cells,
+mad_hb = ds.qc.auto_filter(["RNA_percentMito"], cell_selection=cells,  # percentHb: upper bound only
                               artifact_metrics=[NamedCellArtifact("percentHb", pct_hb)])
 # A mostly-zero metric (percentHb in PBMC) has zero MAD and is skipped: use a fixed bound.
 ```
@@ -243,13 +255,15 @@ doublets = ds.qc.doublets(scaffold["clusters"], scaffold["connectivity_map"])  #
 | --- | --- | --- |
 | `qc.auto_filter(n_mads=)` | `3.0` | Raise (for example 5) when real populations sit in the tails. |
 | `qc.auto_filter(attrs=)` | the four `RNA_*` QC columns | Drop count bounds on corrected counts or when they remove high-RNA types. |
+| `qc.auto_filter(metric_policies=)` | from what CyteArc wrote, else the name suffix | Imported metrics (`total_counts`, `pct_counts_mt`), or lower-only count bounds (`"bound_direction": "lower"`). |
+| `qc.filter(keep_bounds=)` / `select_cells(keep_bounds=)` | `False` (exclusive) | `True` to keep values equal to a bound, as scanpy's `min_genes` does. |
 | `sample_column=` / `sample_artifact=` | `None` (pooled) | Several samples, captures or depths. MAD only. |
 | `min_cells_per_sample=` | `20` | Small samples; groups below it are kept unfiltered. |
 | `method=` (`min_p`, `max_p`) | `"mad"` | `"gaussian"` only to reproduce the old policy; `min_p`/`max_p` with MAD raise. |
 | `pipeline.run(filtering=False, cell_cycle=False, paris=False)` | filtering on | Scaffold run for the label-free audit. |
 | `qc.doublets(random_seed=)` | `4444` | Keep fixed; change only to test score stability. |
 | `qc.doublets(heterotypic_fraction=)` | `0.8` | `0` only for a clustering with one cluster, which raises `ValueError` above 0; it then pairs any two sampled cells. |
-| `qc.hto_demultiplexing(positive_quantile=)` | `0.99` (Seurat's `positive.quantile`) | Raise (for example `0.999`) when doublet calls exceed the multiplet rate the loading predicts and their second tag sits near background; each quantile is its own `hto_identity` artifact. |
+| `qc.hto_demultiplexing(positive_quantile=)` | `0.99` (Seurat's `positive.quantile`) | Raise (for example `0.999`) when doublet calls exceed the multiplet rate the loading predicts and their second tag sits near background; each quantile is its own `hto_identity` artifact. A singlet takes its one positive tag; `max_id`, `second_id` and `margin` hold the CLR diagnostics (`ds.artifacts.load_values(ref, value="margin")`). |
 
 ## Check before moving on
 
@@ -266,6 +280,13 @@ doublets = ds.qc.doublets(scaffold["clusters"], scaffold["connectivity_map"])  #
 ## Pitfalls
 
 - Accepting pipeline defaults without the audit above.
+- Porting scanpy thresholds unchanged: `lows=[200]` is `> 200`, not `>= 200`; use
+  `keep_bounds=True`. Imported scanpy QC columns get name-based MAD policies with a warning; pass
+  `metric_policies` rather than ignoring it.
+- Ignoring a QC `UserWarning` about empty droplets or a second population: the bounds were set
+  by the wrong population. On a raw droplet matrix, call cells or import the filtered matrix.
+- Keeping HTO calls of a tag that a warning says overlaps its background (an unused tag or a
+  failed stain): its positive calls follow the background tail.
 - Applying `expm1` to `resolved_bounds` (already raw scale), or taking integer values as raw UMIs
   (SCT-corrected counts are integers too). On corrected or pre-filtered counts, filter gently.
 - Pooling samples with different depths under one bound; use `sample_column`.

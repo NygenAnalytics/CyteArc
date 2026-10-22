@@ -288,8 +288,10 @@ raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datas
 
 - A writable open with `min_features_per_cell=k` silently removes cells with at most `k`
   default-assay features from `I` and persists it. When at least half of the active cells would
-  go, as in a small ADT panel, it keeps `I` and logs a warning. `k` must be an integer of at least
-  `-1`. Reopening with a lower value does not restore cells; `ds.cells.reset_key("I")` does.
+  go, as in a small ADT panel or a raw (unfiltered) droplet matrix, it keeps `I` and issues a
+  `UserWarning` naming both causes; on a raw matrix, call cells or import the filtered matrix
+  before QC. `k` must be an integer of at least `-1`. Reopening with a lower value does not
+  restore cells; `ds.cells.reset_key("I")` does.
 - Stores just written by a writer or `SubsetZarr` raise `Assay 'RNA' is not prepared yet. Open the
   store once with zarr_mode='r+' ...` when opened with `zarr_mode="r"`. Open once with `"r+"`; no
   rebuild is needed.

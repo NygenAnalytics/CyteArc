@@ -110,6 +110,10 @@ class CellCycleArguments(OperationArguments):
     n_bins: int = parameter()
     rand_seed: int = parameter()
     invalidate_cache: bool = execution()
+    # Genes matched by another HGNC symbol, mapped to the feature names they
+    # matched. Recorded only when a gene needed one, so scores that matched
+    # every gene by its listed name keep their identities.
+    gene_aliases: dict[str, str] | None = parameter(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)

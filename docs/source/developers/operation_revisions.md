@@ -103,3 +103,9 @@ matching. Use the operation revision registry for these changes.
 A change that moves results only by rounding or reassociation noise needs no operation revision
 when existing results remain valid. Record the affected operations, the release, and the reason
 reuse remains valid here. A user can request recomputation with `invalidate_cache=True`.
+
+- `run_feature_percentage`, 1.3.0: the denominator is the cell total that preparation stored as
+  `<assay>_nCounts`, a sequential float64 sum of the cell's counts, instead of a pairwise float64
+  sum of the counts read again. Integer counts sum exactly either way, so their percentages are
+  bit-identical. Counts with fractional values can differ in the last bits of the total, which
+  leaves every stored percentage equally valid.

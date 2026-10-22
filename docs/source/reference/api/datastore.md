@@ -60,6 +60,15 @@ See {doc}`artifacts` for supported filters and ambiguity handling.
 
 ### `ds.qc`
 
+QC bounds are exclusive: `qc.filter(["RNA_nFeatures"], lows=[200], highs=[None])` removes a
+cell with exactly 200 detected genes, which scanpy's `filter_cells(min_genes=200)` and CyteArc's
+`features.detected(min_cells=...)` keep. Pass `keep_bounds=True` to `qc.filter` or
+`select_cells` for inclusive bounds; the bounds of `qc.auto_filter` are always exclusive, and a
+writable open with `min_features_per_cell=k` removes cells with at most `k` features.
+`qc.auto_filter` chooses each metric's MAD policy from what CyteArc wrote and warns when it
+falls back to a column's name; pass `metric_policies` for imported columns such as scanpy's
+`total_counts` or `pct_counts_mt`.
+
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.QcAccessor
     :members: filter, auto_filter, feature_percentage, doublets, hto_demultiplexing

@@ -1,6 +1,7 @@
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Real
+from types import MappingProxyType
 from typing import Literal, TypedDict
 
 import numpy as np
@@ -9,14 +10,75 @@ from scipy.stats import norm
 
 from ..metadata.selection import NamedCellArtifact
 from ..utils.arrays import within_bounds
+from ..utils.warnings import warn
 
 __all__ = ["gaussian_quantile_bounds"]
 
 FilterMethod = Literal["manual", "gaussian", "mad"]
+MetricKind = Literal["counts", "features", "percentage"]
 
 _MAD_SCALE = 1.4826
 _COUNT_SUFFIXES = ("nCounts", "nFeatures")
 _PERCENT_SUFFIXES = ("percentMito", "percentRibo")
+_TRANSFORMS = ("log1p", "identity")
+_BOUND_DIRECTIONS = ("two_sided", "lower", "upper")
+# Automatic bounds that remove more than this fraction of the selected cells
+# are reported, because they were set by a population other than the cells.
+_MAJORITY_REMOVED_FRACTION = 0.5
+# A log1p metric is strongly bimodal when the best split of its values into a
+# low and a high group separates them by at least this Ashman's D; a single
+# normal population gives about 2.7 and a uniform one about 3.5.
+_BIMODAL_SEPARATION = 5.0
+# Cells beyond an upper bound form a separate population when their median
+# lies more than this many scaled MADs beyond the bound; the tail of a single
+# normal population lies about 0.2 beyond it.
+_SEPARATE_POPULATION_MADS = 3.0
+# The fewest cells that a reported population holds.
+_MIN_POPULATION_CELLS = 10
+# The most values that the bimodality check sorts.
+_SPLIT_SAMPLE_SIZE = 1 << 20
+# The remedy that warnings about empty droplets give, shared with the
+# min_features_per_cell floor of a writable DataStore open.
+RAW_DROPLET_REMEDY = (
+    "If this is a raw (unfiltered) droplet matrix, most of its barcodes are "
+    "empty droplets, and bounds computed over them keep the empty droplets and "
+    "remove the real cells: call cells first, or import the filtered matrix "
+    "(for example Cell Ranger's filtered_feature_bc_matrix), before QC "
+    "filtering."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class MetricPolicy:
+    """How MAD filtering bounds one QC metric.
+
+    Attributes:
+        transform: ``"log1p"`` bounds ``log1p`` of the values, ``"identity"``
+            the values themselves.
+        bound_direction: ``"two_sided"``, ``"lower"``, or ``"upper"``: which
+            bounds are applied.
+        percentage: Whether the metric is a percentage, whose upper bound is
+            kept within 0 to 100. Provenance does not record it.
+    """
+
+    transform: str
+    bound_direction: str
+    percentage: bool = False
+
+    def record(self) -> dict[str, str]:
+        """Return the policy as provenance records it."""
+        return {"transform": self.transform, "bound_direction": self.bound_direction}
+
+
+# The default policy of each metric kind: counts and feature counts are
+# bounded on the log1p scale from both sides, percentages from above.
+_KIND_POLICIES: Mapping[str, MetricPolicy] = MappingProxyType(
+    {
+        "counts": MetricPolicy("log1p", "two_sided"),
+        "features": MetricPolicy("log1p", "two_sided"),
+        "percentage": MetricPolicy("identity", "upper", percentage=True),
+    }
+)
 
 
 class _MadProvenance(TypedDict):
@@ -63,15 +125,137 @@ def mad_bounds(values: np.ndarray, n_mads: float) -> tuple[float, float, float]:
     return low, high, scaled_mad
 
 
-def _metric_policy(attr: str) -> dict[str, str]:
-    """Return transform and bound direction for a QC metadata column."""
+def _name_policy(attr: str) -> MetricPolicy:
+    """Return the policy that a metric's name suggests.
+
+    Names ending in ``nCounts`` or ``nFeatures`` are counts, names ending in
+    ``percentMito`` or ``percentRibo`` are percentages, and other metrics get
+    raw two-sided bounds.
+    """
     for suffix in _COUNT_SUFFIXES:
         if attr == suffix or attr.endswith(f"_{suffix}"):
-            return {"transform": "log1p", "bound_direction": "two_sided"}
+            return _KIND_POLICIES["counts"]
     for suffix in _PERCENT_SUFFIXES:
         if attr == suffix or attr.endswith(f"_{suffix}"):
-            return {"transform": "identity", "bound_direction": "upper"}
-    return {"transform": "identity", "bound_direction": "two_sided"}
+            return _KIND_POLICIES["percentage"]
+    return MetricPolicy("identity", "two_sided")
+
+
+def validate_metric_policies(
+    metric_policies: object,
+    metrics: Sequence[str],
+) -> dict[str, MetricPolicy]:
+    """Check explicit MAD policies before any metric is read.
+
+    Args:
+        metric_policies: None, or a mapping from metric names to mappings with
+            exactly the keys ``"transform"`` (``"log1p"`` or ``"identity"``)
+            and ``"bound_direction"`` (``"two_sided"``, ``"lower"``, or
+            ``"upper"``).
+        metrics: The names of the metrics being filtered.
+
+    Returns:
+        The explicit policies by metric name, without the ``percentage``
+        flag, which ``resolve_metric_policies`` sets.
+
+    Raises:
+        TypeError: If the policies or a policy is not a mapping.
+        ValueError: If a name is not filtered, or a policy has other keys or
+            values.
+    """
+    if metric_policies is None:
+        return {}
+    if not isinstance(metric_policies, Mapping):
+        raise TypeError("metric_policies must map metric names to policies")
+    unknown = [name for name in metric_policies if name not in metrics]
+    if unknown:
+        raise ValueError(
+            f"metric_policies names metrics that are not filtered: {unknown!r}"
+        )
+    policies: dict[str, MetricPolicy] = {}
+    for name, policy in metric_policies.items():
+        if not isinstance(policy, Mapping):
+            raise TypeError(
+                f"The policy of {name!r} must map 'transform' and "
+                "'bound_direction' to text"
+            )
+        if set(policy) != {"transform", "bound_direction"}:
+            raise ValueError(
+                f"The policy of {name!r} must have exactly the keys 'transform' "
+                f"and 'bound_direction'; got {sorted(map(str, policy))!r}"
+            )
+        transform, direction = policy["transform"], policy["bound_direction"]
+        if transform not in _TRANSFORMS:
+            raise ValueError(
+                f"The transform of {name!r} must be one of {list(_TRANSFORMS)!r}; "
+                f"got {transform!r}"
+            )
+        if direction not in _BOUND_DIRECTIONS:
+            raise ValueError(
+                f"The bound_direction of {name!r} must be one of "
+                f"{list(_BOUND_DIRECTIONS)!r}; got {direction!r}"
+            )
+        policies[name] = MetricPolicy(str(transform), str(direction))
+    return policies
+
+
+def resolve_metric_policies(
+    metrics: Sequence[str],
+    *,
+    kinds: Mapping[str, MetricKind],
+    explicit: Mapping[str, MetricPolicy],
+) -> dict[str, MetricPolicy]:
+    """Return the MAD policy of each metric, warning about guessed ones.
+
+    An explicit policy wins. Otherwise a metric of a known kind, one that
+    CyteArc wrote and so knows to be counts, feature counts, or a
+    percentage, gets that kind's policy. Any other metric gets the policy its
+    name suggests (``_name_policy``), and one warning names those metrics
+    and how to set their policies. A metric is a percentage, whose upper
+    bound stays within 0 to 100, when its kind or, for an unknown kind, its
+    name says so.
+
+    Args:
+        metrics: The names of the metrics being filtered.
+        kinds: The kind of each metric whose kind is known.
+        explicit: Validated explicit policies by metric name.
+    """
+    policies: dict[str, MetricPolicy] = {}
+    guessed: list[str] = []
+    for name in metrics:
+        kind = kinds.get(name)
+        default = _name_policy(name) if kind is None else _KIND_POLICIES[kind]
+        chosen = explicit.get(name)
+        if chosen is None:
+            chosen = default
+            if kind is None:
+                guessed.append(name)
+        policies[name] = MetricPolicy(
+            chosen.transform, chosen.bound_direction, default.percentage
+        )
+    if guessed:
+        described = ", ".join(
+            f"{name!r} ({_describe_policy(policies[name])})" for name in guessed
+        )
+        warn(
+            f"QC metrics {guessed!r} were not written by CyteArc's preparation or "
+            "by qc.feature_percentage, so their MAD policies come from their "
+            f"names: {described}. Pass metric_policies to set them, for example "
+            "{'transform': 'log1p', 'bound_direction': 'two_sided'} for counts "
+            "or {'transform': 'identity', 'bound_direction': 'upper'} for a "
+            "percentage."
+        )
+    return policies
+
+
+def _describe_policy(policy: MetricPolicy) -> str:
+    scale = "log1p values" if policy.transform == "log1p" else "raw values"
+    sides = {
+        "two_sided": "two-sided bounds",
+        "lower": "a lower bound",
+        "upper": "an upper bound",
+    }[policy.bound_direction]
+    return f"{scale} with {sides}"
 
 
 def validated_work_scale(
@@ -225,6 +409,88 @@ def _apply_bounds(
     return within_bounds(resolved, low, high, keep_bounds=keep_bounds)
 
 
+def _split_two_groups(values: np.ndarray) -> tuple[float, float] | None:
+    """Split values into the low and high group that best separate them.
+
+    The split maximizes the between-group sum of squares, the exact
+    one-dimensional two-means split, and only falls between distinct values.
+    More than ``_SPLIT_SAMPLE_SIZE`` values are split by an evenly strided
+    sample of them, which bounds the memory of the sort.
+
+    Returns:
+        Ashman's D, the difference of the group means over the root mean of
+        their variances, and the largest value of the low group; None when
+        every value is equal.
+    """
+    step = -(-values.size // _SPLIT_SAMPLE_SIZE)
+    ordered = np.sort(np.asarray(values[::step], dtype=float))
+    n_values = ordered.size
+    distinct = ordered[1:] > ordered[:-1]
+    if not distinct.any():
+        return None
+    prefix = np.cumsum(ordered - ordered.mean())[:-1]
+    sizes = np.arange(1, n_values)
+    score = np.where(distinct, prefix**2 / (sizes * (n_values - sizes)), -np.inf)
+    n_low = int(np.argmax(score)) + 1
+    low, high = ordered[:n_low], ordered[n_low:]
+    spread = float(np.sqrt((low.var() + high.var()) / 2))
+    separation = np.inf if spread == 0.0 else float((high.mean() - low.mean()) / spread)
+    return separation, float(ordered[n_low - 1])
+
+
+def _population_warning(
+    *,
+    attr: str,
+    group_label: str,
+    raw: np.ndarray,
+    work: np.ndarray,
+    low: float | None,
+    high: float | None,
+    high_work: float,
+    scaled_mad: float,
+) -> str | None:
+    """Describe a second population that the MAD bounds of a metric miss.
+
+    Two signs are reported for a log1p metric, such as counts of a raw
+    droplet matrix, where empty droplets set the bounds: at least
+    ``_MIN_POPULATION_CELLS`` cells above the upper bound whose median lies
+    more than ``_SEPARATE_POPULATION_MADS`` scaled MADs beyond it, and a
+    strongly bimodal metric whose low group the bounds mostly keep, when
+    each group holds at least ``_MIN_POPULATION_CELLS`` cells. Removing a low
+    group of debris below the bounds is not reported.
+    """
+    if high is not None:
+        above = work[raw >= high]
+        beyond = high_work + _SEPARATE_POPULATION_MADS * scaled_mad
+        if above.size >= _MIN_POPULATION_CELLS and float(np.median(above)) > beyond:
+            return (
+                f"{group_label}: {above.size} cells above the upper {attr!r} "
+                f"bound of {high:.6g} form a separate population (median "
+                f"{float(np.median(raw[raw >= high])):.6g}), which the MAD bounds "
+                f"remove as outliers. {RAW_DROPLET_REMEDY} Otherwise check whether "
+                "those cells are a real population that the bounds should keep."
+            )
+    split = _split_two_groups(work)
+    if split is None:
+        return None
+    separation, threshold = split
+    in_low = work <= threshold
+    n_low = int(np.count_nonzero(in_low))
+    n_high = work.size - n_low
+    if separation < _BIMODAL_SEPARATION or min(n_low, n_high) < _MIN_POPULATION_CELLS:
+        return None
+    kept = within_bounds(raw, low, high, keep_bounds=False)
+    if 2 * int(np.count_nonzero(kept & in_low)) <= n_low:
+        return None
+    return (
+        f"{group_label}: {attr!r} is strongly bimodal: {n_low} cells form a low "
+        f"population (median {float(np.median(raw[in_low])):.6g}) and {n_high} a "
+        f"high population (median {float(np.median(raw[~in_low])):.6g}), and the "
+        "MAD bounds keep most of the low population. MAD bounds assume one "
+        f"population of cells. {RAW_DROPLET_REMEDY}"
+    )
+
+
 def sample_aware_mad_mask(
     *,
     values_by_attr: dict[str, np.ndarray],
@@ -233,11 +499,16 @@ def sample_aware_mad_mask(
     n_mads: float,
     min_cells_per_sample: int,
     attrs: list[str],
+    metric_policies: Mapping[str, MetricPolicy] | None = None,
 ) -> tuple[np.ndarray, _MadProvenance]:
     """Build one cell mask from pooled or per-sample MAD bounds.
 
     Inactive cells are left ``True`` in the returned mask so callers can
     intersect with the current selection via ``update_key``.
+    ``metric_policies`` gives each metric's policy; without it, each metric
+    gets the policy its name suggests. Each group's bounds of a log1p
+    metric are checked for a second population that they miss (see
+    ``_population_warning``), with a warning that provenance does not record.
     """
     n_cells = active.shape[0]
     pooled = sample_labels is None
@@ -247,7 +518,12 @@ def sample_aware_mad_mask(
         else validated_sample_labels(sample_labels, active)
     )
     keep = np.ones(n_cells, dtype=bool)
-    policies = {attr: _metric_policy(attr) for attr in attrs}
+    resolved_policies = (
+        {attr: _name_policy(attr) for attr in attrs}
+        if metric_policies is None
+        else {attr: metric_policies[attr] for attr in attrs}
+    )
+    policies = {attr: policy.record() for attr, policy in resolved_policies.items()}
     raw_values_by_attr: dict[str, np.ndarray] = {}
     work_values_by_attr: dict[str, np.ndarray] = {}
     for attr in attrs:
@@ -264,6 +540,7 @@ def sample_aware_mad_mask(
     skip_reasons: dict[str, str] = {}
     resolved_bounds: dict[str, dict[str, dict[str, object]]] = {}
     warnings: list[str] = []
+    population_warnings: list[str] = []
 
     # Factorizing keeps first-seen order, which keeps provenance deterministic,
     # and turns per-sample label comparisons into integer comparisons.
@@ -290,10 +567,11 @@ def sample_aware_mad_mask(
             policy = policies[attr]
             transform = policy["transform"]
             direction = policy["bound_direction"]
-            is_percent = direction == "upper" and transform == "identity"
             raw = raw_values_by_attr[attr][sample_idx]
             work = work_values_by_attr[attr][sample_idx]
             low_t, high_t, scaled_mad = mad_bounds(work, n_mads)
+            low: float | None = None
+            high: float | None = None
             if scaled_mad == 0.0:
                 resolved_bounds[sample_key][attr] = {
                     "low": None,
@@ -307,40 +585,48 @@ def sample_aware_mad_mask(
                     f"{group_label}: zero MAD for '{attr}'; "
                     "retaining cells for this metric"
                 )
-                continue
-
-            low: float | None
-            high: float | None
-            if direction == "upper":
-                low = None
-                high = clamp_metric_bound(
-                    from_work_scale(high_t, transform),
-                    transform=transform,
-                    is_percent=is_percent,
-                )
             else:
-                low = clamp_metric_bound(
-                    from_work_scale(low_t, transform),
-                    transform=transform,
-                    is_percent=is_percent,
+                # A lower bound below zero already keeps every value, so only
+                # an upper bound is kept within the range of a percentage.
+                if direction != "upper":
+                    low = clamp_metric_bound(
+                        from_work_scale(low_t, transform),
+                        transform=transform,
+                        is_percent=False,
+                    )
+                if direction != "lower":
+                    high = clamp_metric_bound(
+                        from_work_scale(high_t, transform),
+                        transform=transform,
+                        is_percent=resolved_policies[attr].percentage,
+                    )
+                resolved_bounds[sample_key][attr] = {
+                    "low": low,
+                    "high": high,
+                    "skip_reason": None,
+                    "transform": transform,
+                    "bound_direction": direction,
+                    "scaled_mad": scaled_mad,
+                }
+                sample_keep &= _apply_bounds(raw, low, high)
+            if transform == "log1p":
+                message = _population_warning(
+                    attr=attr,
+                    group_label=group_label,
+                    raw=raw,
+                    work=work,
+                    low=low,
+                    high=high,
+                    high_work=high_t,
+                    scaled_mad=scaled_mad,
                 )
-                high = clamp_metric_bound(
-                    from_work_scale(high_t, transform),
-                    transform=transform,
-                    is_percent=is_percent,
-                )
-
-            resolved_bounds[sample_key][attr] = {
-                "low": low,
-                "high": high,
-                "skip_reason": None,
-                "transform": transform,
-                "bound_direction": direction,
-                "scaled_mad": scaled_mad,
-            }
-            sample_keep &= _apply_bounds(raw, low, high)
+                if message is not None:
+                    population_warnings.append(message)
 
         keep[sample_idx] = sample_keep
+
+    for message in population_warnings:
+        warn(message)
 
     provenance: _MadProvenance = {
         "mad_scale": _MAD_SCALE,
@@ -490,6 +776,43 @@ def validate_filter_bounds(
             raise ValueError("A lower bound cannot exceed its upper bound")
 
 
+def validate_bound_types(
+    attr: str,
+    dtype: np.dtype,
+    low: object,
+    high: object,
+) -> None:
+    """Check that a column's bounds can be compared with its values.
+
+    Bounds of a numeric or boolean column must be numbers, and bounds of a
+    text column must be text; None leaves a side open. Call it with bounds
+    that ``validate_filter_bounds`` accepted.
+
+    Raises:
+        TypeError: If a bound does not match the column, or the column holds
+            values that bounds cannot compare, such as dates.
+    """
+    kind = np.dtype(dtype).kind
+    bounds = [bound for bound in (low, high) if bound is not None]
+    if kind in "biuf":
+        if any(isinstance(bound, str) for bound in bounds):
+            raise TypeError(
+                f"Column {attr!r} holds numeric values, so its bounds must be "
+                f"numbers or None; got {[low, high]!r}"
+            )
+    elif kind in "OSUT":
+        if any(not isinstance(bound, str) for bound in bounds):
+            raise TypeError(
+                f"Column {attr!r} holds text, so its bounds must be text or "
+                f"None; got {[low, high]!r}"
+            )
+    elif bounds:
+        raise TypeError(
+            f"Column {attr!r} holds {np.dtype(dtype)} values, which bounds cannot "
+            "filter"
+        )
+
+
 def _require_finite_metrics(
     values_by_attr: Mapping[str, np.ndarray],
     complete: np.ndarray,
@@ -527,6 +850,7 @@ def filter_cell_metrics(
     sample_label_name: str = "sample labels",
     n_mads: float = 3.0,
     min_cells_per_sample: int = 20,
+    metric_policies: Mapping[str, MetricPolicy] | None = None,
 ) -> CellFilterResult:
     """Apply one QC filtering rule to metric rows aligned with ``active``.
 
@@ -534,8 +858,11 @@ def filter_cell_metrics(
     flagged in ``missing_by_attr`` has no recorded value for that metric. It
     never passes a filter and does not inform Gaussian or MAD bounds.
     Automatic bounds require finite metrics on the remaining active rows. MAD
-    filtering rejects an active row flagged in ``sample_missing``. The result
-    must retain at least one active row.
+    filtering rejects an active row flagged in ``sample_missing``, and takes
+    each metric's policy from ``metric_policies``, or from its name without
+    them. Manual bounds must match the type of their values. The result must
+    retain at least one active row; automatic bounds that remove more than
+    half of the active rows give a warning.
     """
     active_mask = np.asarray(active, dtype=bool)
     attrs = list(values_by_attr)
@@ -549,12 +876,9 @@ def filter_cell_metrics(
     validated_labels: np.ndarray | None = None
     if method == "manual":
         for attr, low, high in zip(attrs, lows, highs, strict=True):
-            keep &= _apply_bounds(
-                values_by_attr[attr],
-                low,
-                high,
-                keep_bounds=keep_bounds,
-            )
+            values = np.asarray(values_by_attr[attr])
+            validate_bound_types(attr, values.dtype, low, high)
+            keep &= _apply_bounds(values, low, high, keep_bounds=keep_bounds)
     elif method in ("gaussian", "mad"):
         if not complete.any():
             raise ValueError(
@@ -594,6 +918,7 @@ def filter_cell_metrics(
                 n_mads=n_mads,
                 min_cells_per_sample=min_cells_per_sample,
                 attrs=attrs,
+                metric_policies=metric_policies,
             )
             keep &= mad_keep
     else:
@@ -601,6 +926,15 @@ def filter_cell_metrics(
     retained = np.asarray(active_mask & keep, dtype=bool)
     if not retained.any():
         raise ValueError("Cell filtering removed every selected cell")
+    n_active = int(np.count_nonzero(active_mask))
+    n_removed = n_active - int(np.count_nonzero(retained))
+    if method != "manual" and n_removed > _MAJORITY_REMOVED_FRACTION * n_active:
+        warn(
+            f"Automatic QC bounds removed {n_removed} of {n_active} selected cells "
+            f"({n_removed / n_active:.0%}), so most selected cells lie outside "
+            "bounds meant to remove outliers. Check the resolved bounds and the "
+            f"metric distributions. {RAW_DROPLET_REMEDY}"
+        )
     return CellFilterResult(
         retained=retained,
         gaussian_bounds=gaussian_bounds,

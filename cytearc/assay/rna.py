@@ -561,8 +561,15 @@ class RNAassay(Assay):
         ``scalar`` holds the library-size divisor of each cell in ``cell_idx``.
         ``resident_bytes`` counts the arrays the caller holds for the call,
         including ``scalar``, ``union``, and ``local_pos``. Cells are read in
-        blocks of one on-disk row chunk.
+        blocks of one on-disk row chunk. Strictly increasing cells are read
+        from the feature-major ``countsT`` instead when its bands touch fewer
+        chunk bytes and fit the budget; both give the same raw rows, so the
+        means do not depend on the source.
         """
+        from ..storage.feature_major_rows import (
+            feature_major_row_scratch,
+            iter_feature_major_rows,
+        )
         from ..storage.parallel import stream_shards
 
         zarr_arr = cast(zarr.Array, self.rawData._backing)
@@ -576,9 +583,10 @@ class RNAassay(Assay):
             geometry, union, rows_contiguous=is_contiguous(cell_idx)
         )
         resident_bytes += sum(value.nbytes for value in out.values())
+        float_row_bytes = max(1, len(union)) * 2 * np.dtype(np.float64).itemsize
         row_bytes = (
-            max(1, len(union))
-            * (np.dtype(zarr_arr.dtype).itemsize + 2 * np.dtype(np.float64).itemsize)
+            max(1, len(union)) * np.dtype(zarr_arr.dtype).itemsize
+            + float_row_bytes
             + read_row_bytes
         )
         block_rows = max(
@@ -592,26 +600,55 @@ class RNAassay(Assay):
             ),
         )
 
-        starts = range(0, n_cells, block_rows)
-
-        def read(start: int) -> tuple[int, np.ndarray]:
-            rows = cell_idx[start : start + block_rows]
-            return start, _read_facade_block(zarr_arr, rows, union)
-
-        admission = admit_stream(
-            self.resources,
-            nBlocks=self.resources.workers,
-            blockBytes=block_rows * row_bytes,
-            decodeBytes=decode_bytes,
-            residentBytes=resident_bytes,
-            requested=self.resources.workers,
+        counts_t = self.rawDataT
+        # An RNA assay opens only with a complete countsT.
+        assert counts_t is not None
+        scratch = (
+            feature_major_row_scratch(
+                zarr_arr,
+                counts_t,
+                cell_idx,
+                union,
+                block_rows=block_rows,
+                held_bytes=resident_bytes + block_rows * float_row_bytes,
+                memory_bytes=self.resources.memoryBytes,
+            )
+            if bool(np.all(cell_idx[1:] > cell_idx[:-1]))
+            else None
         )
-        for start, raw in stream_shards(
-            starts,
-            read,
-            workers=admission.readWorkers,
-            io_concurrency=admission.ioConcurrency,
-        ):
+        blocks: Iterator[tuple[int, np.ndarray]]
+        if scratch is not None:
+            blocks = iter_feature_major_rows(
+                counts_t,
+                cell_idx,
+                union,
+                block_rows=block_rows,
+                resources=self.resources,
+                io=self.storageIo,
+                scratch_bytes=scratch,
+            )
+        else:
+            starts = range(0, n_cells, block_rows)
+
+            def read(start: int) -> tuple[int, np.ndarray]:
+                rows = cell_idx[start : start + block_rows]
+                return start, _read_facade_block(zarr_arr, rows, union)
+
+            admission = admit_stream(
+                self.resources,
+                nBlocks=self.resources.workers,
+                blockBytes=block_rows * row_bytes,
+                decodeBytes=decode_bytes,
+                residentBytes=resident_bytes,
+                requested=self.resources.workers,
+            )
+            blocks = stream_shards(
+                starts,
+                read,
+                workers=admission.readWorkers,
+                io_concurrency=admission.ioConcurrency,
+            )
+        for start, raw in blocks:
             end = start + raw.shape[0]
             normed = (sf * raw.astype(np.float64)) / scalar[start:end, None]
             if log_transform:

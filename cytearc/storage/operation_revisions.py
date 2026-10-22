@@ -47,11 +47,59 @@ class OperationRevision:
     applies: RevisionPredicate | None
 
 
+def _repeats_cell_cycle_gene(
+    kind: str,
+    parameters: Mapping[str, Any],
+    inputs: Mapping[str, Any],
+) -> bool:
+    """Select cell-cycle scores whose recorded gene indices repeat an index.
+
+    Only such scores change when repeated genes count once. A record without
+    the index lists, or with lists that hold other values, repeats none.
+    """
+    for key in ("s_gene_indices", "g2m_gene_indices"):
+        indices = parameters.get(key)
+        if not isinstance(indices, list) or not all(
+            type(index) is int for index in indices
+        ):
+            continue
+        if len(set(indices)) != len(indices):
+            return True
+    return False
+
+
 # Released revisions by operation. An operation that is not listed has no
 # revisions, so every artifact of it is revision 1. Append a revision to the
 # tuple of the operation it changes, adding the operation if needed; never
 # edit a released entry.
-_OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {}
+_OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
+    "run_cell_cycle_scoring": (
+        OperationRevision(
+            revision=2,
+            release="1.3.0",
+            change=(
+                "A gene index repeated in s_gene_indices or g2m_gene_indices, "
+                "from a repeated name or names that differ only in case, counts "
+                "once in the score; only scores that record a repeated index "
+                "change."
+            ),
+            applies=_repeats_cell_cycle_gene,
+        ),
+    ),
+    "run_hto_demultiplexing": (
+        OperationRevision(
+            revision=2,
+            release="1.3.0",
+            change=(
+                "A singlet takes the one HTO that its negative-binomial cutoff "
+                "calls positive instead of the HTO with the highest CLR value, "
+                "which is stored as the max_id diagnostic beside second_id and "
+                "margin."
+            ),
+            applies=None,
+        ),
+    ),
+}
 
 
 def _validate_registry(

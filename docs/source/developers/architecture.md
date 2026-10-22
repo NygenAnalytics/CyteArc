@@ -1200,6 +1200,47 @@ CyteArc validates persisted data and public arguments against the following cont
   analysis with an earlier fingerprint raises when it opens numerical results and asks for a new
   analysis, while its reports and records stay readable. Inspection evidence no longer saves QC
   outlier row lists, and invocations save only the names and a SHA-256 of `modelSettings`.
+- HTO demultiplexing assigns a singlet the one tag that its negative-binomial cutoff calls
+  positive, not the tag with the highest CLR value, which in unbalanced pools could be a tag
+  called negative. `hto_identity` artifacts gain the diagnostic arrays `max_id`, `second_id`
+  (labels), and `margin` (float64), which `artifacts.load_values` reads with `value=`. This is
+  revision 2 of `run_hto_demultiplexing` for every artifact; the method record keeps its fields,
+  `singlet_assignment` included, so revision 1 artifacts are superseded matches that are logged
+  and recomputed. A background cluster of only zero counts no longer aborts demultiplexing: its
+  HTO gets a cutoff of 0, with a warning. A warning also names each HTO whose positive calls
+  overlap its background, where fewer than half of its positive cells exceed the count that the
+  background fit exceeds with probability `(1 - positive_quantile) ** 3`.
+- `qc.auto_filter` takes `metric_policies`, the MAD policy of named metrics: `transform`
+  (`log1p` or `identity`) and `bound_direction` (`two_sided`, `upper`, or the new `lower`).
+  Default policies follow what CyteArc wrote: `<assay>_nCounts` and `<assay>_nFeatures` are
+  counts, an assay's `percentFeatures` columns and `quality_metric` artifacts of
+  `run_feature_percentage` are percentages. Other metrics keep the name rule of earlier releases,
+  with a warning. Default calls record the policies and bounds they recorded before, so their
+  results and identities are unchanged; a percentage artifact whose name the rule did not
+  recognize, such as `percentHb`, now records an upper bound only, a different identity. Only a
+  percentage keeps its upper bound within 0 to 100, so an explicit raw upper bound of another
+  metric is not cut to 100. Automatic filtering warns when its bounds remove more than half of the
+  selected cells, and the MAD bounds of a log1p metric warn when they miss a second population,
+  as empty droplets of a raw droplet matrix cause; provenance records neither warning.
+- A writable open that skips its `min_features_per_cell` filter because at least half of the
+  active cells would go issues a `UserWarning` that names a small antibody panel and a raw droplet
+  matrix as causes, instead of only logging it.
+- `qc.filter` checks bound types against the column before it reads metadata: a numeric or
+  boolean column takes numbers, a text column text, and other columns no bounds. A mismatch raises
+  `TypeError` naming the column instead of a NumPy comparison error. Bounds stay exclusive unless
+  `keep_bounds=True`, unlike scanpy's `filter_cells`.
+- Cell-cycle scoring and `Assay.score_features` count a repeated target feature once, at its first
+  position. The recorded `s_gene_indices` and `g2m_gene_indices` keep the repeats, and revision 2
+  of `run_cell_cycle_scoring` applies only to scores that record a repeated index, so other scores
+  keep their identities and results. A default gene that its symbol misses matches its previous
+  HGNC symbol, from `cytearc.quality_control.cell_cycle_previous_symbols`, and the artifact
+  records such matches as the `gene_aliases` parameter, which is omitted when empty. Matched
+  aliases change the recorded indices, so they change identities without a revision. S and G2M
+  scores read their genes and controls in one pass, from `countsT` when its bands touch fewer chunk
+  bytes, with bit-identical results.
+- `qc.feature_percentage` reads only the selected features and divides by the prepared
+  `<assay>_nCounts` instead of summing every count of each cell (see
+  {ref}`stable_identity_result_changes`).
 
 Compatibility exists only where a current public facade or an explicit file-schema test says it
 does. There are no silent migrations, implicit compatibility branches, or forwarding shims for

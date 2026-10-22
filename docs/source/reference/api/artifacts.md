@@ -304,7 +304,7 @@ their rows follow the cell selection of their lineage rather than a recorded inp
 | `embedding` | `values` | measurements | | |
 | `enrichment_scores` | `scores` | measurements | | |
 | `fate_map` | `probabilities` | measurements | `valid` | |
-| `hto_identity` | `values` | labels | | |
+| `hto_identity` | `values` | labels | `max_id`, `second_id` | `margin` |
 | `imported_coordinates` | `data` | measurements | | |
 | `label_transfer` | `labels` | labels | `abstention_reason`, `candidate_codes`, `vote_class_codes` | `vote_class_fractions`, `vote_fraction`, `top_two_margin`, `vote_entropy`, `nearest_distance`, `reference_distance_percentile` |
 | `membership_strength` | `values` | measurements | | |

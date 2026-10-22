@@ -1156,8 +1156,11 @@ class BaseDataStore:
 
         Active cells whose feature count is not greater than ``min_features``
         are removed, unless they are at least half of the active cells: then
-        ``I`` is kept and a warning is logged.
+        ``I`` is kept and a warning names the likely causes.
         """
+        from ..quality_control.filtering import RAW_DROPLET_REMEDY
+        from ..utils.warnings import warn
+
         from_assay = self._defaultAssay
         active = self.cells.fetch_all("I")
         n_active = int(np.count_nonzero(active))
@@ -1170,11 +1173,13 @@ class BaseDataStore:
         if n_removed == 0:
             return
         if 2 * n_removed >= n_active:
-            logger.warning(
+            warn(
                 f"{n_removed} of {n_active} active cells have at most {min_features} "
                 f"features in assay {from_assay!r}. Will not remove low quality cells "
                 "automatically, because that would remove at least half of the active "
-                "cells."
+                "cells. A default assay with few features, such as a small antibody "
+                "panel, does this; open it with min_features_per_cell=-1 to skip "
+                f"this filter. {RAW_DROPLET_REMEDY}"
             )
             return
         self.cells.update_key(~removed, key="I")
