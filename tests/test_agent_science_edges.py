@@ -35,7 +35,9 @@ class Metadata:
         return self.frame[name].dtype
 
     def to_pandas_dataframe(self, columns: list[str]) -> pd.DataFrame:
-        return self.frame[columns].copy()
+        # Built column by column, as MetaData builds it: pandas 2.2 cannot
+        # take several columns at once from a big-endian block.
+        return pd.DataFrame({column: self.frame[column].copy() for column in columns})
 
     def fetch_all(self, name: str) -> np.ndarray:
         return self.frame[name].to_numpy()
