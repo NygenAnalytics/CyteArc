@@ -610,7 +610,12 @@ def test_pca_and_lsi_implementations_live_under_embeddings():
 
     assert neighbor_sources
     assert not any("sklearn.decomposition" in source for source in neighbor_sources)
-    assert "IncrementalPCA" in reduction_source
+    assert "def _fit_gram_pca(" in reduction_source
+    assert "def _fit_randomized_pca(" in reduction_source
+    # The solvers' kernels stay in the reduction module.
+    assert not any(
+        "dsyrk" in source or "subspace_angles" in source for source in neighbor_sources
+    )
     assert "TruncatedSVD" in reduction_source
 
 

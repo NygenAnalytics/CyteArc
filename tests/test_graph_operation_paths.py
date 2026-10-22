@@ -282,7 +282,7 @@ def test_custom_reduction_loadings_must_cover_the_normalized_features(
         )
 
 
-def test_pca_shows_the_elbow_plot_only_after_a_new_fit(
+def test_pca_shows_the_stored_elbow_plot_after_a_fit_and_on_reuse(
     graph_store,
     monkeypatch,
 ) -> None:
@@ -290,17 +290,28 @@ def test_pca_shows_the_elbow_plot_only_after_a_new_fit(
     shown: list[dict[str, Any]] = []
     monkeypatch.setattr("cytearc.plotting.elbow", lambda **kwargs: shown.append(kwargs))
 
-    store.reduction.pca(refs["rna_normalized"], dims=2, show_elbow_plot=True)
+    ref = store.reduction.pca(
+        refs["rna_normalized"], dims=2, show_elbow_plot=True, invalidate_cache=True
+    )
 
     (plot,) = shown
     variance = np.asarray(plot["variance_explained"])
     assert plot["show"] is True
-    # The percentage of variance explained by each fitted component.
+    # The percentage of variance explained by each of the two components,
+    # without the extra component the fit used to plot.
+    assert variance.shape == (2,)
     assert np.all(variance > 0)
     assert np.all(np.diff(variance) <= 0)
     assert variance.sum() <= 100
-    store.reduction.pca(refs["rna_normalized"], dims=2, show_elbow_plot=True)
-    assert len(shown) == 1
+    stored = store.artifacts.load(ref)
+    np.testing.assert_array_equal(variance, 100 * stored["variance_ratio"][:])
+    # A reused fit plots the stored ratios.
+    assert (
+        store.reduction.pca(refs["rna_normalized"], dims=2, show_elbow_plot=True) == ref
+    )
+    assert len(shown) == 2
+    np.testing.assert_array_equal(shown[1]["variance_explained"], variance)
+    assert shown[1]["show"] is True
 
 
 def test_a_local_cache_directory_reuses_its_completed_staging_copy(

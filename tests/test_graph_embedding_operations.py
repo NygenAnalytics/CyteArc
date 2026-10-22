@@ -655,26 +655,58 @@ def test_run_harmony_validates_arguments_before_snapshotting_metadata(store) -> 
     assert snapshots() == before
 
 
-def test_pca_identity_records_incremental_block_rows(store) -> None:
+def _scaled_pca_input(store: DataStore, pca: ArtifactRef) -> np.ndarray:
+    """Return the standardized normalized values that ``pca`` was fitted on."""
+    normalized = store.artifacts.load(_input(store, pca, "normalized"))["data"][:]
+    scaling = store.artifacts.load(_input(store, pca, "feature_scaling"))
+    return (np.asarray(normalized, dtype=np.float64) - scaling["mean"][:]) / scaling[
+        "scale"
+    ][:]
+
+
+def test_pca_identity_and_result_do_not_depend_on_block_rows(store) -> None:
     normalized = _normalized(store)
     n_cells, n_features = store.artifacts.load(normalized)["data"].shape
     block_rows = n_features // 2
     assert 6 < block_rows < n_cells
 
-    # Blocks as wide as the features give an exact fit; narrower blocks use
-    # IncrementalPCA, whose result depends on the block size.
-    exact = store.reduction.pca(normalized, dims=5, batch_size=n_features)
-    incremental = store.reduction.pca(normalized, dims=5, batch_size=block_rows)
-
-    assert incremental != exact
-    assert "incremental_block_rows" not in store.artifacts.inspect(exact).parameters
-    assert (
-        store.artifacts.inspect(incremental).parameters["incremental_block_rows"]
-        == block_rows
+    # Blocks narrower than the features fitted IncrementalPCA before, whose
+    # result depended on the block size and whose trailing components were
+    # far from the exact ones. Every layout is now fitted exactly, so the
+    # block size changes only rounding and stays out of the identity.
+    exact = store.reduction.pca(
+        normalized, dims=5, batch_size=n_features, invalidate_cache=True
     )
-    assert store.reduction.pca(normalized, dims=5, batch_size=block_rows) == incremental
-    wider = store.reduction.pca(normalized, dims=5, batch_size=block_rows + 1)
-    assert wider not in {exact, incremental}
+    assert store.reduction.pca(normalized, dims=5, batch_size=block_rows) == exact
+    assert store.reduction.pca(normalized, dims=5, batch_size=block_rows + 1) == exact
+    narrow = store.reduction.pca(
+        normalized, dims=5, batch_size=block_rows, invalidate_cache=True
+    )
+
+    status = store.artifacts.inspect(narrow)
+    assert status.parameters == {"dims": 5, "feat_scaling": True}
+    assert (status.revision, status.is_current) == (1, True)
+    expected = _scaled_pca_input(store, narrow)
+    expected -= expected.mean(axis=0)
+    _, singular_values, axes = np.linalg.svd(expected, full_matrices=False)
+    variance = np.square(singular_values) / (n_cells - 1)
+    for ref in (exact, narrow):
+        group = store.artifacts.load(ref)
+        loadings = np.asarray(group["loadings"][:])
+        # Each component matches the exact principal axis, up to its sign.
+        np.testing.assert_allclose(
+            np.abs(loadings.T @ axes[:5].T), np.eye(5), rtol=0, atol=1e-10
+        )
+        np.testing.assert_allclose(group["variance"][:], variance[:5], rtol=1e-10)
+        np.testing.assert_allclose(
+            group["variance_ratio"][:], variance[:5] / variance.sum(), rtol=1e-10
+        )
+    np.testing.assert_allclose(
+        store.artifacts.load(narrow)["data"][:],
+        store.artifacts.load(exact)["data"][:],
+        rtol=1e-5,
+        atol=1e-5,
+    )
 
 
 def test_graph_producers_refuse_read_only_stores_before_computing(

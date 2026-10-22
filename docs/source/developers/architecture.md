@@ -699,7 +699,13 @@ CyteArc validates persisted data and public arguments against the following cont
   rows are scaled with an `(n_rows, 1)` operand. Scalar keys, other axes, ufunc keywords other
   than `dtype`, and arithmetic between two ChunkedArrays raise; zero-row reductions return NumPy
   shapes.
-- `reduction.pca` records `incremental_block_rows` for IncrementalPCA fits over several blocks.
+- `reduction.pca` fits exactly with the Gram solver up to 4096 features, for every block layout,
+  and with a randomized block Krylov solver above, which records `solver="randomized"`.
+  IncrementalPCA and the `incremental_block_rows` parameter are removed, and revision 2 of
+  `run_pca` marks the IncrementalPCA fits that recorded it as stale. PCA artifacts store the
+  `variance` and `variance_ratio` of their `dims` components, which `show_elbow_plot` reads
+  for a reused fit. Reuse does not require them, so an artifact of an earlier release is
+  still reused, and its elbow plot is replaced by a warning.
   Embedding initialization seeds its PCA and keeps rarely used streamed k-means centroids.
   Default cell-cycle genes use CENPU, PIMREG, and JPT1 (mouse Cenpu, Pimreg, Jpt1); parameter
   tuning's native doublet graphs use the candidate ANN seed.

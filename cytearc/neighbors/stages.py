@@ -117,23 +117,26 @@ class ReductionTransform:
         return np.asarray(self._transform(values))
 
     def transform_z(self, values: np.ndarray) -> np.ndarray:
-        return np.asarray((values - self.mu) / self.sigma)
+        # Dividing in place keeps one temporary per block instead of two.
+        scaled = np.asarray(np.subtract(values, self.mu))
+        scaled /= self.sigma
+        return scaled
 
     def _fit_pca(
         self,
         disable_scaling: bool,
         use_for_pca: np.ndarray,
     ) -> None:
-        from ..embeddings.reduction import fit_incremental_pca
+        from ..embeddings.reduction import fit_pca
 
         assert self.dims is not None
         scale = self.transform_z if not disable_scaling else None
-        self.loadings, self.pca = fit_incremental_pca(
+        self.loadings, self.pca = fit_pca(
             self.data,
             dims=self.dims,
-            batch_size=self.batch_size,
             use_for_pca=use_for_pca,
             scale=scale,
+            random_state=self.rand_state,
             nthreads=self.nthreads,
         )
         self.center = np.asarray(self.pca.mean_, dtype=np.float64)

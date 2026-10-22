@@ -109,3 +109,11 @@ reuse remains valid here. A user can request recomputation with `invalidate_cach
   sum of the counts read again. Integer counts sum exactly either way, so their percentages are
   bit-identical. Counts with fractional values can differ in the last bits of the total, which
   leaves every stored percentage equally valid.
+- 1.3.0, `run_pca`: a fit of a single row block used IncrementalPCA's dense SVD, and every fit
+  of up to 4096 features now uses the Gram solver, which fits of several blocks with at least as
+  many rows as features used before. Both are exact, and the Gram solver now computes the `dims`
+  leading eigenpairs instead of one more, so results move by rounding, and by float32 precision
+  for unscaled single-block fits, which IncrementalPCA computed in float32. A single-block fit of
+  more than 4096 features was exact too; such fits now use the randomized solver and record
+  `solver="randomized"`, so a new fit never reuses them. Revision 2 marks the inexact
+  IncrementalPCA fits over several blocks.

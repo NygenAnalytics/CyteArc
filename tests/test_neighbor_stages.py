@@ -79,6 +79,37 @@ def test_reduction_transform_with_loadings_reads_no_cells() -> None:
     assert data.read_count == 0
 
 
+def test_feature_standardization_divides_in_place_with_unchanged_values() -> None:
+    rng = np.random.default_rng(7)
+    values = rng.normal(size=(12, 5)).astype(np.float32)
+    original = values.copy()
+    mu = rng.normal(size=5)
+    sigma = rng.uniform(0.5, 2.0, size=5)
+    reduction = ReductionTransform(
+        data=ChunkedArray.from_numpy(values, block_size=4, nthreads=1),
+        method="custom",
+        dims=2,
+        loadings=np.ones((5, 2)),
+        use_for_pca=np.ones(12, dtype=bool),
+        mu=mu,
+        sigma=sigma,
+        batch_size=4,
+        nthreads=1,
+        rand_state=4466,
+        disable_scaling=False,
+        lsi_skip_first=False,
+        lsi_params={},
+    )
+
+    scaled = reduction.transform_z(values)
+
+    # The float64 result of subtracting and dividing, without a second copy.
+    assert scaled.dtype == np.dtype(np.float64)
+    assert scaled.flags.owndata
+    np.testing.assert_array_equal(scaled, (values - mu) / sigma)
+    np.testing.assert_array_equal(values, original)
+
+
 @pytest.mark.parametrize("disable_scaling", [False, True])
 @pytest.mark.parametrize("fit_subset", [False, True])
 @pytest.mark.parametrize("block_size", [10, 30])

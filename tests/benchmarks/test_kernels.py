@@ -280,7 +280,7 @@ def test_paris_hierarchy(bench) -> None:
 
 
 def test_gram_pca(bench) -> None:
-    from cytearc.embeddings.reduction import fit_incremental_pca
+    from cytearc.embeddings.reduction import fit_pca
     from cytearc.matrix.chunked import ChunkedArray
 
     def normalized(n_cells: int) -> np.ndarray:
@@ -295,12 +295,12 @@ def test_gram_pca(bench) -> None:
         values = normalized(n_cells)
         data = ChunkedArray.from_numpy(values, block_size=2_000)
         mask = np.ones(n_cells, dtype=bool)
-        return lambda: fit_incremental_pca(
+        return lambda: fit_pca(
             data,
             dims=inputs.N_DIMS,
-            batch_size=2_000,
             use_for_pca=mask,
             scale=None,
+            random_state=4466,
             nthreads=1,
         )
 

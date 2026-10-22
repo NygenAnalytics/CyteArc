@@ -12,8 +12,9 @@ from numpy.typing import NDArray
 from scipy.sparse import csr_matrix
 
 from ...embeddings.reduction import (
-    _gram_pca_dispatch,
     _streaming_lsi_accumulator_bytes,
+    pca_fit_resident_bytes,
+    pca_solver,
     require_materialized_lsi_budget,
 )
 from ...storage.validation_scope import validation_scoped
@@ -307,6 +308,53 @@ def _lsi_write_block_rows(
         else:
             high = middle
     return low
+
+
+# The float64 arrays of a PCA artifact that hold the variance of each
+# component and its share of the total variance of the fitted values. PCA
+# artifacts of releases before 1.3.0 have neither.
+_PCA_VARIANCE_ARRAYS = ("variance", "variance_ratio")
+
+
+def _show_pca_elbow(variance_ratio: np.ndarray) -> None:
+    """Plot the percentage of variance that each PCA component explains."""
+    from ...plotting import elbow
+
+    elbow(
+        variance_explained=100 * np.asarray(variance_ratio, dtype=np.float64),
+        show=True,
+    )
+
+
+def _require_pca_fit_budget(
+    data: ChunkedArray,
+    resources: ResourceBudget,
+    *,
+    dims: int,
+) -> None:
+    """Raise MemoryError, before the fit reads any value, for a fit over budget.
+
+    The fit holds ``pca_fit_resident_bytes`` of its solver beside one block
+    of ``data`` as it is read and transformed. The solver depends only on the
+    number of features, so a fit over budget is never switched to the other
+    solver.
+    """
+    n_features = int(data.shape[1])
+    block_rows = int(data.chunksize[0])
+    required = (
+        pca_fit_resident_bytes(n_features, block_rows, dims)
+        + data._resident_bytes()
+        + data._block_task_bytes()
+    )
+    limit = int(resources.memoryBytes)
+    if required > limit:
+        raise MemoryError(
+            f"PCA with the {pca_solver(n_features)} solver needs about "
+            f"{required} bytes to fit {dims} components of {n_features} "
+            f"features in blocks of {block_rows} rows, but the operation limit "
+            f"is {limit} bytes. Pass a smaller batch_size, select fewer "
+            "features, or raise mem_budget."
+        )
 
 
 def _read_pca_center(group: zarr.Group) -> np.ndarray:
@@ -1171,21 +1219,14 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         )
         if method == "pca":
             assert pca_selection is not None
-            n_blocks = -(-n_cells // effective_batch_size)
-            use_gram, _reason = _gram_pca_dispatch(
-                n_features,
-                effective_batch_size,
-                n_blocks,
-            )
             arguments: Any = PcaArguments(
                 normalized=normalized_ref,
                 feature_scaling=scaling_plan.ref,
                 pca_cell_selection=pca_selection,
                 dims=effective_dims,
                 feat_scaling=feat_scaling,
-                # IncrementalPCA over several blocks depends on the block size.
-                incremental_block_rows=(
-                    effective_batch_size if n_blocks > 1 and not use_gram else None
+                solver=(
+                    "randomized" if pca_solver(n_features) == "randomized" else None
                 ),
                 batch_size=effective_batch_size,
                 show_elbow_plot=show_elbow_plot,
@@ -1243,7 +1284,21 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         )
         if planned.reused:
             if show_elbow_plot and method == "pca":
-                logger.warning("PCA was not fitted so no elbow plot is available")
+                reused = reused_artifact_group(self.zw, planned)
+                # Reuse does not require the explained variance, which PCA
+                # artifacts store from release 1.3.0 on.
+                if "variance_ratio" in reused:
+                    ratio = as_zarr_array(
+                        reused["variance_ratio"], name="variance_ratio"
+                    )
+                    _show_pca_elbow(np.asarray(ratio[:]))
+                else:
+                    logger.warning(
+                        f"PCA artifact {planned.ref.artifact_id[:12]} was stored "
+                        "before release 1.3.0 without its explained variance, so "
+                        "no elbow plot is available. Pass invalidate_cache=True "
+                        "to fit it again."
+                    )
             logger.info(
                 f"Reused {method.upper()} reduction for {n_cells} cells "
                 f"with {effective_dims} dimensions"
@@ -1286,6 +1341,12 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 + (2 * n_features * float_bytes if enabled_scaling else 0)
                 + (n_features * float_bytes if method == "pca" else 0),
             )
+            if method == "pca":
+                _require_pca_fit_budget(
+                    normalized_data,
+                    self.resources,
+                    dims=effective_dims,
+                )
             if scaling_plan.reused:
                 scaling_group = reused_artifact_group(
                     self.zw,
@@ -1367,6 +1428,29 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                         transform.center,
                         operation=arguments.operation,
                     )
+                    # The variance of each component and its share of the
+                    # total, which elbow plots of a reused fit read.
+                    assert transform.pca is not None
+                    for name, variance in zip(
+                        _PCA_VARIANCE_ARRAYS,
+                        (
+                            transform.pca.explained_variance_,
+                            transform.pca.explained_variance_ratio_,
+                        ),
+                        strict=True,
+                    ):
+                        variance_array = create_zarr_dataset(
+                            reduction_group,
+                            name,
+                            (effective_dims,),
+                            "f8",
+                            (effective_dims,),
+                        )
+                        write_finite_array(
+                            variance_array,
+                            variance,
+                            operation=arguments.operation,
+                        )
                 output = create_zarr_dataset(
                     reduction_group,
                     "loadings",
@@ -1406,14 +1490,9 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                     operation=arguments.operation,
                 )
         if show_elbow_plot and method == "pca":
-            from ...plotting import elbow
-
             # A reused fit returned above, so PCA was fitted here.
             assert transform.pca is not None
-            elbow(
-                variance_explained=(100 * transform.pca.explained_variance_ratio_),
-                show=True,
-            )
+            _show_pca_elbow(transform.pca.explained_variance_ratio_)
         action = "Reused" if planned.reused else "Stored"
         logger.info(
             f"{action} {method.upper()} reduction for {n_cells} cells "
@@ -1436,6 +1515,18 @@ class _GraphOperationsMixin(_GraphOperationsBase):
     ) -> ArtifactRef:
         """Fit or reuse PCA for a normalized artifact.
 
+        Up to 4096 features, PCA is exact: one pass over the selected cells
+        accumulates their float64 covariance, whose leading eigenvectors are
+        the loadings. Wider inputs are fitted with a randomized block Krylov
+        solver that reads the selected cells once per pass, for up to 24
+        passes, and stops when the leading components move less than 0.1
+        degrees in a pass; the artifact then records ``solver="randomized"``.
+        Neither result depends on ``batch_size`` beyond rounding. Besides the
+        coordinates, ``loadings``, and ``center``, the artifact stores the
+        variance of each component (``variance``) and its share of the total
+        variance of the fitted values (``variance_ratio``) from release 1.3.0
+        on.
+
         Args:
             normalized: Normalized artifact to reduce.
             dims: Requested number of principal components. (Default: 21)
@@ -1445,19 +1536,22 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             batch_size: Number of selected cells processed per block. When
                 omitted, whole stored row bands are combined as needed to fit
                 at least ``dims + 1`` rows. An explicit smaller value is
-                expanded to that aligned minimum with a warning. Several
-                blocks narrower than the selected features, or more than 4096
-                features, are fitted with IncrementalPCA, whose result depends
-                on the block size, so the block size then joins the artifact
-                identity.
+                expanded to that aligned minimum with a warning.
             local_cache: Local staging policy for normalized data on remote
-                stores.
-            show_elbow_plot: Whether to display explained variance after a new
-                PCA fit.
+                stores. Keep ``"auto"`` on a remote store so that the passes of
+                the randomized solver read a local copy.
+            show_elbow_plot: Whether to display the explained variance of the
+                ``dims`` components, read from the stored artifact when it is
+                reused. An artifact stored before release 1.3.0 holds none, so
+                its reuse logs a warning instead.
             invalidate_cache: Force a new reduction artifact.
 
         Returns:
             Reference to the PCA reduction artifact.
+
+        Raises:
+            MemoryError: When the fit needs more than the datastore memory
+                budget, before the fit or the feature scaling starts.
         """
         return self._run_reduction_artifact(
             method="pca",
