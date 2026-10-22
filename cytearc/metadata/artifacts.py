@@ -203,7 +203,8 @@ def write_cell_data_artifact(
 ) -> zarr.Group:
     """Write and publish a planned cell-data artifact, or return the reused one.
 
-    ``attributes`` are stored on the artifact group before it is published.
+    ``attributes`` are JSON values stored on the artifact group before it is
+    published.
     """
     if planned.reused:
         return reused_artifact_group(root, planned)

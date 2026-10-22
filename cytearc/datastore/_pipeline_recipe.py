@@ -113,6 +113,9 @@ class ResolvedPipelineRecipe:
     leiden_selected: str | None
     species: str | None
     stage_params: Mapping[str, Mapping[str, Any]]
+    # The cell metadata columns whose labels split doublet scoring into
+    # samples; empty to score every cell together.
+    doublet_sample_columns: tuple[str, ...]
 
     def params_for(self, stage: str) -> dict[str, Any]:
         """Return the keyword arguments ``params`` forwards to one stage."""
@@ -139,6 +142,7 @@ class ResolvedPipelineRecipe:
             "cellCycle": self.cell_cycle,
             "paris": self.paris,
             "doublets": self.doublets,
+            "doubletSampleColumns": list(self.doublet_sample_columns),
             "markers": self.markers,
             "snapshotColumns": list(self.snapshot_columns),
             "membershipStrength": self.membership_strength,
@@ -197,8 +201,10 @@ def _resolve_leiden(
 # Keyword arguments that ``params`` may forward to each stage. The pipeline
 # supplies the artifacts a stage consumes, so only its settings appear here.
 # A setting means exactly what the same keyword means on the stage's public
-# method, and omitting it uses that method's default. Leiden ``partitions``
-# and ``selected`` configure the recipe's candidates instead.
+# method, and omitting it uses that method's default, except that a run with
+# Harmony scores doublets within its batches when ``sample_column`` is
+# omitted. Leiden ``partitions`` and ``selected`` configure the recipe's
+# candidates instead.
 _STAGE_PARAMETERS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "cell_cycle": frozenset(
@@ -304,9 +310,12 @@ _STAGE_PARAMETERS: Mapping[str, frozenset[str]] = MappingProxyType(
             {
                 "cluster_sample_fraction",
                 "max_cells_per_cluster",
+                "sample_column",
                 "simulation_ratio",
                 "heterotypic_fraction",
                 "save_k",
+                "expected_doublet_rate",
+                "threshold",
                 "smoothing_t",
                 "normalize_scores",
                 "random_seed",
@@ -603,6 +612,41 @@ def _resolve_filtering(
     }
 
 
+def _resolve_doublet_samples(
+    store: Any,
+    doublets: bool,
+    settings: Mapping[str, Any],
+    harmony_columns: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return the cell metadata columns whose labels split doublet scoring.
+
+    The doublets ``sample_column`` setting names one column. Without it, a run
+    with Harmony scores doublets within each batch, the cells that share every
+    Harmony batch label, and a run without Harmony scores every cell together.
+    """
+    if not doublets:
+        return ()
+    if "sample_column" not in settings:
+        return harmony_columns
+    column = settings["sample_column"]
+    if column is None:
+        if harmony_columns:
+            raise ValueError(
+                "A run with Harmony scores doublets within each sample on the "
+                "uncorrected PCA, so params['doublets']['sample_column'] cannot "
+                "be None; set it to the column of each cell's capture, or omit "
+                "it to use the Harmony batch columns"
+            )
+        return ()
+    if not isinstance(column, str) or not column:
+        raise TypeError(
+            "params['doublets']['sample_column'] must be a non-empty string or None"
+        )
+    if column not in store.cells.columns:
+        raise KeyError(f"Doublet sample column {column!r} was not found")
+    return (column,)
+
+
 def resolve_pipeline_recipe(
     store: Any,
     *,
@@ -773,6 +817,7 @@ def resolve_pipeline_recipe(
         "clusters",
         "membership_strength",
         "doublet_score",
+        "predicted_doublet",
         *(f"leiden_{key}" for key, _value in partitions),
     }
     collisions = set(snapshots) & ({"I", "ids", "names"} | result_fields)
@@ -811,6 +856,9 @@ def resolve_pipeline_recipe(
             "scoring needs a PCA graph; pass doublets=False or set pca_dims "
             "above 0"
         )
+    doublet_sample_columns = _resolve_doublet_samples(
+        store, doublets, doublet_params, harmony_columns
+    )
     filtering_config = _resolve_filtering(store, assay_name, filtering)
     filter_columns = tuple(filtering_config.get("attrs", ()))
     if filter_columns:
@@ -850,7 +898,6 @@ def resolve_pipeline_recipe(
         "cluster_selection",
         "membership_strength",
         "tsne",
-        "doublet_graph",
         "doublets",
         "markers",
     )
@@ -879,6 +926,7 @@ def resolve_pipeline_recipe(
         membership_strength=membership_strength,
         leiden_selected=leiden_selected,
         species=species,
+        doublet_sample_columns=doublet_sample_columns,
         stage_params=MappingProxyType(
             {
                 stage: MappingProxyType(values)

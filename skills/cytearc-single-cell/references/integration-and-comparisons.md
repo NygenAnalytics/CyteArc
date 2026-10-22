@@ -85,7 +85,9 @@ The run's input snapshot is `names`, filter columns, Harmony columns, then `snap
 order; another list or order gives a new analysis selection and recomputes everything (24
 artifacts created, then 16 reused by the Harmony run; 10x 5K PBMC docs dataset). `run.cells`
 exposes only `snapshot_columns`: read a filter or Harmony column with
-`ds.cells.fetch_all(col)[run.cells.fetch_all("I")]`. Doublet scores still use plain PCA.
+`ds.cells.fetch_all(col)[run.cells.fetch_all("I")]`. Doublets are simulated and scored within
+each batch on the plain PCA; `params={"doublets": {"sample_column": ...}}` names the capture
+column when batches are not captures.
 
 As a branch of a run, `harmony = ds.reduction.harmony(run["pca"], ["batch"])` returns a ref to pass to
 `graph.ann_index` in place of PCA (chain in `features-and-graphs.md`; keep the run's `k`). Score it

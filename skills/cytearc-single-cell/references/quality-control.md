@@ -258,22 +258,32 @@ mad_hb = ds.qc.auto_filter(["RNA_percentMito"], cell_selection=cells,  # percent
 
 ### Doublet scores
 
-The pipeline scores doublets by default (it needs a graph and a clustering). High-RNA types such as
-plasma cells score high as a whole, so never threshold globally: rank cells within their cluster
-and require co-expressed markers of two lineages.
+The pipeline scores doublets by default (it needs a graph and a clustering), as Scrublet does:
+`doublet_score` is the probability that a cell is a doublet and `predicted_doublet` the call
+above its sample's automatic threshold. Doublets form within one capture, so with several
+captures pass the capture column: `params={"doublets": {"sample_column": "sample"}}`; a Harmony
+run scores within its batch columns by default. Do not pass HTO identities: hashed samples share
+a capture. High-RNA types such as plasma cells score high as a whole, so check calls and scores
+within their cluster and require co-expressed markers of two lineages before removing cells.
 
 ```python
 scores = pd.Series(np.asarray(scaffold.cells.fetch("doublet_score")))
+called = np.asarray(scaffold.cells.fetch("predicted_doublet"))
+print(pd.Series(called).groupby(clusters).mean().round(3))  # call rate per cluster
 print(scores.groupby(clusters).median().round(2))  # compare clusters within a lineage
 spread = scores.groupby(clusters).transform(lambda s: 1.4826 * (s - s.median()).abs().median())
 relative = (scores - scores.groupby(clusters).transform("median")) / (spread + 1e-6)
 two_lineage = (((counts.CD3E > 0) & (counts.LYZ >= 5)) | ((counts.MS4A1 > 0) & (counts.LYZ >= 5))
                | ((counts.MZB1 >= 3) & (counts.CD14 > 0))).to_numpy()
-suspect = (relative.to_numpy() > 3) & two_lineage
+suspect = (called | (relative.to_numpy() > 3)) & two_lineage
 singlet = in_run.copy()
 singlet[np.flatnonzero(in_run)[suspect]] = False
 ds.cells.insert("qc_singlet", singlet, overwrite=True)  # then cell_key="qc_singlet"
-doublets = ds.qc.doublets(scaffold["clusters"], scaffold["connectivity_map"])  # explicit
+# Explicit, per capture; thresholds and estimated doublet rates per sample.
+doublets = ds.qc.doublets(scaffold["clusters"], scaffold["connectivity_map"],
+                          sample_column="sample")
+print(ds.artifacts.load(doublets).attrs["samples"])
+called_singlets = ds.select_cells(doublets, value="predicted_doublets", include=[False])
 ```
 
 ## Parameters that matter
@@ -289,8 +299,11 @@ doublets = ds.qc.doublets(scaffold["clusters"], scaffold["connectivity_map"])  #
 | `method=` (`min_p`, `max_p`) | `"mad"` | `"gaussian"` only to reproduce the old policy; `min_p`/`max_p` with MAD raise. |
 | `pipeline.run(filtering=False, cell_cycle=False, paris=False)` | filtering on | Scaffold run for the label-free audit. |
 | `qc.doublets(random_seed=)` | `4444` | Keep fixed; change only to test score stability. |
-| `qc.doublets(heterotypic_fraction=)` | `0.8` | `0` only for a clustering with one cluster, which raises `ValueError` above 0; it then pairs any two sampled cells. |
-| `qc.hto_demultiplexing(positive_quantile=)` | `0.99` (Seurat's `positive.quantile`) | Raise (for example `0.999`) when doublet calls exceed the multiplet rate the loading predicts and their second tag sits near background; each quantile is its own `hto_identity` artifact. A singlet takes its one positive tag; `max_id`, `second_id` and `margin` hold the CLR diagnostics (`ds.artifacts.load_values(ref, value="margin")`). |
+| `qc.doublets(sample_column=)` | `None` (one sample) | Cells from several captures (10x channels or lanes): doublets are then simulated and scored within each. Never HTO identities. A Harmony pipeline run uses its batch columns. |
+| `qc.doublets(threshold=)` | `None` (per sample, automatic) | The `samples` attribute shows a `thresholdMethod` of `"otsu"` (no clear valley) or an estimated rate far from the loading's; then set one score, from 0 to 1, for every sample. |
+| `qc.doublets(expected_doublet_rate=)` | `0.05` | The loading predicts another multiplet rate (about 0.8% per 1,000 cells recovered on 10x). |
+| `qc.doublets(heterotypic_fraction=)` | `0.0` | Above 0 forces that share of simulated doublets to pair two clusters; it needs two clusters and biases the score. |
+| `qc.hto_demultiplexing(positive_quantile=)` | `0.99` (Seurat's `positive.quantile`) | Raise (for example `0.999`) when doublet calls exceed the multiplet rate the loading predicts and their second tag sits near background; each quantile is its own `hto_identity` artifact. |
 
 ## Check before moving on
 

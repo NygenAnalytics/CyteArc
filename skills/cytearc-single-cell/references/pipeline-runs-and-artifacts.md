@@ -88,8 +88,8 @@ print(run.report(format="markdown"))  # config, stage table, outputs, failure or
 ### Read frozen fields
 
 `run.cells.columns` here: `I, ids, names`, then any `snapshot_columns`, then `s_score, g2m_score,
-cell_cycle_phase, umap_1, umap_2, leiden_*, paris, clusters, doublet_score`; filter and Harmony
-columns are not exposed. `run.features.columns`: `I, ids, names, highly_variable_features`. `fetch`
+cell_cycle_phase, umap_1, umap_2, leiden_*, paris, clusters, doublet_score, predicted_doublet`;
+filter and Harmony columns are not exposed. `run.features.columns`: `I, ids, names, highly_variable_features`. `fetch`
 returns analysed rows; `fetch_all` aligns to every stored cell (3,847 and 5,025 on the 10x 5K PBMC
 docs dataset, whose live `I` holds 3,948).
 

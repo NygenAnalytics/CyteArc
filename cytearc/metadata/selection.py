@@ -95,9 +95,11 @@ class CellValueSpec:
 #:
 #: The canonical array names are part of the identity of the results that
 #: read them: ``select_cells``, plot groupings, and other consumers record
-#: the artifact that they read but not which of its arrays. Changing a kind's
-#: canonical array therefore changes what those consumers compute from the
-#: same recorded inputs, and needs an operation revision for each of them.
+#: the artifact that they read but not that they read its canonical array;
+#: ``select_cells`` names only another array that ``value`` selects. Changing
+#: a kind's canonical array therefore changes what those consumers compute
+#: from the same recorded inputs, and needs an operation revision for each
+#: of them.
 CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
     {
         "cell_calling": CellValueSpec(
@@ -115,7 +117,9 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
         ),
         "cluster_cut": CellValueSpec("labels", True),
         "cluster_labels": CellValueSpec("values", True),
-        "doublet_score": CellValueSpec("values", False),
+        "doublet_score": CellValueSpec(
+            "values", False, {"raw_scores": False, "predicted_doublets": True}
+        ),
         "embedding": CellValueSpec("values", False),
         "enrichment_scores": CellValueSpec("scores", False),
         "fate_map": CellValueSpec("probabilities", False, {"valid": True}),

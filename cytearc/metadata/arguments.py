@@ -85,11 +85,17 @@ class DoubletScoreArguments(OperationArguments):
     clusters: ArtifactRef = artifact_input()
     connectivity_map: ArtifactRef = artifact_input()
     neighbors: ArtifactRef = artifact_input()
+    # The fingerprint of each selected cell's sample, or None for one sample.
+    sample_assignments_fingerprint: str | None = artifact_input()
     cluster_sample_fraction: float = parameter()
-    max_cells_per_cluster: int = parameter()
+    max_cells_per_cluster: int | None = parameter()
+    sample_columns: tuple[str, ...] = parameter()
     simulation_ratio: float = parameter()
     heterotypic_fraction: float = parameter()
+    # The neighbors used: the request, at most the largest sample's cells - 1.
     save_k: int = parameter()
+    expected_doublet_rate: float = parameter()
+    threshold: float | None = parameter()
     smoothing_t: int = parameter()
     normalize_scores: bool = parameter()
     random_seed: int = parameter()

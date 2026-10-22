@@ -709,7 +709,8 @@ def test_doublet_detection_requires_a_connectivity_graph_and_writable_store(
 def test_doublet_detection_validates_arguments_before_any_work(nullable) -> None:
     store, graph, clusters = nullable.store, nullable.graph, nullable.complete
     invalid = (
-        ({"smoothing_t": 0}, ValueError, "smoothing_t"),
+        # Zero smoothing steps keep each cell's own score.
+        ({"smoothing_t": -1}, ValueError, "smoothing_t"),
         ({"save_k": True}, TypeError, "save_k"),
         ({"max_cells_per_cluster": 0}, ValueError, "max_cells_per_cluster"),
         ({"cluster_sample_fraction": 0.0}, ValueError, "cluster_sample_fraction"),
@@ -718,6 +719,14 @@ def test_doublet_detection_validates_arguments_before_any_work(nullable) -> None
         ({"heterotypic_fraction": 1.5}, ValueError, "heterotypic_fraction"),
         ({"random_seed": -1}, ValueError, "random_seed"),
         ({"normalize_scores": 1}, TypeError, "normalize_scores"),
+        ({"expected_doublet_rate": 0.0}, ValueError, "expected_doublet_rate"),
+        ({"expected_doublet_rate": 1.0}, ValueError, "expected_doublet_rate"),
+        ({"expected_doublet_rate": True}, TypeError, "expected_doublet_rate"),
+        ({"threshold": 1.5}, ValueError, "threshold"),
+        ({"threshold": float("nan")}, ValueError, "threshold"),
+        ({"threshold": "0.2"}, TypeError, "threshold"),
+        ({"sample_column": ""}, TypeError, "sample_column"),
+        ({"sample_column": "missing_samples"}, ValueError, "sample_column"),
     )
     for options, error, name in invalid:
         with pytest.raises(error, match=name):

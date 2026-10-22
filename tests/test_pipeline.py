@@ -40,7 +40,10 @@ from cytearc.storage.artifacts import (
 )
 from cytearc.storage.pipeline_runs import load_pipeline_stage_records
 from cytearc.storage.refs import ArtifactScope
-from cytearc.storage.selections import resolve_stored_selection_artifact
+from cytearc.storage.selections import (
+    read_stored_selection_mask,
+    resolve_stored_selection_artifact,
+)
 from cytearc.utils.shutdown import ShutdownRequested, current_shutdown_token
 from tests.storage_helpers import insert_nullable_cell_column
 
@@ -2196,7 +2199,7 @@ def test_rich_pipeline_views_plots_and_markers_remain_frozen_after_live_i_drift(
     }.issubset(markers.columns)
 
 
-def test_harmony_doublets_record_an_uncorrected_internal_graph_only(
+def test_harmony_doublets_are_scored_within_each_batch_without_another_graph(
     pipeline_store,
     monkeypatch,
 ) -> None:
@@ -2231,7 +2234,22 @@ def test_harmony_doublets_record_an_uncorrected_internal_graph_only(
     )
 
     assert run["clusters"] == captured["clusters"]
-    assert captured["connectivity"] != run["connectivity_map"]
+    # Doublets form within one batch, so each batch is scored on the PCA that
+    # Harmony corrected, through the corrected graph: no other graph is built.
+    assert captured["connectivity"] == run["connectivity_map"]
+    assert captured["sample_column"] == ("pipeline_batch",)
+    rows = np.flatnonzero(
+        read_stored_selection_mask(
+            datastore.zw,
+            run["analysis_cell_selection"],
+            kind="cell_selection",
+            scope="datastore",
+            assay=None,
+            table_path="cellData",
+        )
+    )
+    (labels,) = captured["sample_labels"]
+    np.testing.assert_array_equal(labels, batch[rows])
     decision = artifact_group(datastore.zw, run["cluster_selection"])
     status = require_complete_artifact(datastore.zw, run["cluster_selection"])
     assert status.inputs is not None
@@ -2242,19 +2260,35 @@ def test_harmony_doublets_record_an_uncorrected_internal_graph_only(
     )
     assert tuple(decision.attrs["candidateKeys"]) == ("leiden_1.0",)
     assert not any(key.startswith("uncorrected_") for key in run)
-    stage = next(
-        item for item in run.report()["stages"] if item["stage"] == "doublet_graph"
-    )
-    stage_outputs = {
+    stages = {item["stage"]: item for item in run.report()["stages"]}
+    assert "doublet_graph" not in stages
+    snapshot_outputs = {
         item["outputKey"]: ArtifactRef.from_dict(item["artifact"])
-        for item in stage["outputs"]
+        for item in stages["input_snapshot"]["outputs"]
     }
-    assert set(stage_outputs) == {
-        "uncorrected_ann_index",
-        "uncorrected_neighbors",
-        "uncorrected_connectivity_map",
-    }
-    assert captured["connectivity"] == stage_outputs["uncorrected_connectivity_map"]
+    # The batches are frozen apart from the cell snapshot.
+    samples = snapshot_outputs["doublet_sample_snapshot"]
+    np.testing.assert_array_equal(
+        artifact_group(datastore.zw, samples)["pipeline_batch"][:], batch
+    )
+    doublet_status = datastore.artifacts.inspect(run["doublets"])
+    assert doublet_status.revision == 2
+    assert doublet_status.parameters["sample_columns"] == ["pipeline_batch"]
+    payload = artifact_group(datastore.zw, run["doublets"])
+    parents = payload["simulated_parents"][:]
+    assert len(parents) == 2 * len(rows)
+    # Every simulated doublet pairs two cells of one batch.
+    np.testing.assert_array_equal(
+        batch[rows][parents[:, 0]], batch[rows][parents[:, 1]]
+    )
+    assert [sample["labels"] for sample in payload.attrs["samples"]] == [
+        {"pipeline_batch": "a"},
+        {"pipeline_batch": "b"},
+    ]
+    assert run.report()["run"]["config"]["doubletSampleColumns"] == ["pipeline_batch"]
+    np.testing.assert_array_equal(
+        run.cells.fetch("predicted_doublet"), payload["predicted_doublets"][:]
+    )
 
 
 def test_paris_only_pipeline_keeps_paris_as_a_diagnostic_without_clusters(

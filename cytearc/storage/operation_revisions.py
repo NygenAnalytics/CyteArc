@@ -228,6 +228,19 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
             applies=_fitted_by_incremental_pca,
         ),
     ),
+    "run_doublet_detection": (
+        OperationRevision(
+            revision=2,
+            release="1.3.0",
+            change=(
+                "Doublets are simulated from every selected cell of each sample "
+                "and scored by Scrublet's likelihood of the simulated doublets "
+                "among each cell's neighbors in its sample, with raw scores, "
+                "per-sample thresholds, and predicted doublets."
+            ),
+            applies=None,
+        ),
+    ),
     "run_harmony": (_HARMONY2,),
     "run_marker_search": (
         OperationRevision(

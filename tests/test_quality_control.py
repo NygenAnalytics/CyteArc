@@ -632,12 +632,12 @@ def test_doublet_scores_preserve_artifacts_without_materializing_queries(
     diffusion_before = set(
         datastore.artifacts.list(kind="diffusion_operator", from_assay="RNA")
     )
-    raw_scores: list[np.ndarray] = []
+    results: list[doublets.DoubletScores] = []
     score_doublets = doublets.score_synthetic_doublets
 
     def recording_scores(*args, **kwargs):
-        raw_scores.append(np.array(score_doublets(*args, **kwargs)))
-        return raw_scores[-1].copy()
+        results.append(score_doublets(*args, **kwargs))
+        return results[-1]
 
     monkeypatch.setattr(doublets, "score_synthetic_doublets", recording_scores)
 
@@ -649,6 +649,7 @@ def test_doublet_scores_preserve_artifacts_without_materializing_queries(
         simulation_ratio=0.01,
         save_k=3,
         smoothing_t=1,
+        normalize_scores=True,
         random_seed=19,
     )
 
@@ -656,14 +657,17 @@ def test_doublet_scores_preserve_artifacts_without_materializing_queries(
     assert set(score_status.parameters) == {
         "cluster_sample_fraction",
         "max_cells_per_cluster",
+        "sample_columns",
         "simulation_ratio",
         "heterotypic_fraction",
         "save_k",
+        "expected_doublet_rate",
+        "threshold",
         "smoothing_t",
         "normalize_scores",
         "random_seed",
     }
-    assert score_status.revision == 1 and score_status.is_current
+    assert score_status.revision == 2 and score_status.is_current
     assert (
         set(
             datastore.artifacts.list(
@@ -685,11 +689,12 @@ def test_doublet_scores_preserve_artifacts_without_materializing_queries(
             "values",
         ).shape
     )
-    # Stored scores are one row-normalized diffusion step of the raw mapping
+    # Stored scores are one row-normalized diffusion step of the doublet
     # scores over the symmetrized graph, min-max scaled to [0, 1].
-    (raw,) = raw_scores
+    (result,) = results
+    raw = result.scores
     assert raw.shape == scores.shape
-    assert np.all(raw >= 0) and np.any(raw > 0)
+    assert np.all(raw > 0) and np.all(raw < 1)
     graph = datastore.graph.load(
         selected_connectivity, symmetric=True, upper_only=False
     )
@@ -699,6 +704,16 @@ def test_doublet_scores_preserve_artifacts_without_materializing_queries(
     expected = (smoothed - smoothed.min()) / (smoothed.max() - smoothed.min())
     np.testing.assert_allclose(scores, expected, rtol=1e-9, atol=1e-12)
     assert scores.min() == 0.0 and scores.max() == 1.0
+    # Smoothing and scaling leave the raw scores and the calls alone.
+    payload = artifact_group(datastore.zw, score_ref)
+    np.testing.assert_array_equal(payload["raw_scores"][:], result.raw_scores)
+    np.testing.assert_array_equal(payload["predicted_doublets"][:], result.predicted)
+    np.testing.assert_array_equal(
+        payload["simulated_scores"][:], result.simulated_scores
+    )
+    np.testing.assert_array_equal(
+        payload["simulated_parents"][:], result.simulated_parents
+    )
     assert "RNA_doublet_score__raw" not in datastore.cells.columns
     assert (
         _snapshot_store(str(Path(datastore.zarr_loc) / "cellData")) == metadata_before
@@ -734,6 +749,7 @@ def test_doublet_scores_preserve_artifacts_without_materializing_queries(
             simulation_ratio=0.01,
             save_k=3,
             smoothing_t=1,
+            normalize_scores=True,
             random_seed=19,
         )
         == score_ref
@@ -748,7 +764,7 @@ def test_doublet_scores_preserve_artifacts_without_materializing_queries(
     [
         ("query", RuntimeError, "neighbor query failed"),
         ("features", ValueError, "reference order"),
-        ("scores", RuntimeError, "mapping scores do not match"),
+        ("scores", RuntimeError, "scores do not match the selected cells"),
         ("graph", ValueError, "graph does not match"),
     ],
 )
@@ -762,7 +778,7 @@ def test_doublet_failure_leaves_no_complete_score(
     datastore = analyzed_datastore_ephemeral
     graph = _fixture_graph(datastore)
     clusters = _doublet_clusters(datastore, graph)
-    from cytearc.neighbors.stages import NeighborQueryStage
+    from cytearc.quality_control import doublets
 
     metadata_before = _snapshot_store(str(Path(datastore.zarr_loc) / "cellData"))
     scores_before = set(
@@ -775,10 +791,8 @@ def test_doublet_failure_leaves_no_complete_score(
         raise RuntimeError("neighbor query failed")
 
     if failure == "query":
-        monkeypatch.setattr(NeighborQueryStage, "query", failed_query)
+        monkeypatch.setattr(doublets, "count_simulated_neighbors", failed_query)
     else:
-        from cytearc.quality_control import doublets
-
         owner, name = {
             "features": (datastore, "_mapping_load_reference"),
             "scores": (doublets, "score_synthetic_doublets"),
@@ -791,7 +805,7 @@ def test_doublet_failure_leaves_no_complete_score(
             if failure == "features":
                 return replace(result, feature_ids=result.feature_ids[::-1])
             if failure == "scores":
-                return result[:-1]
+                return replace(result, scores=result.scores[:-1])
             return result[:-1, :-1]
 
         monkeypatch.setattr(owner, name, corrupt_result)
@@ -899,7 +913,7 @@ def test_doublet_detection_needs_two_clusters_for_heterotypic_doublets(
         raise AssertionError("a one-cluster request must fail before planning")
 
     with monkeypatch.context() as patched:
-        patched.setattr(operations, "plan_cell_data_artifact", refuse_planning)
+        patched.setattr(operations, "plan_artifact", refuse_planning)
         with pytest.raises(
             ValueError,
             match=(
@@ -910,18 +924,18 @@ def test_doublet_detection_needs_two_clusters_for_heterotypic_doublets(
                 r"any two sampled cells\.$"
             ),
         ):
-            datastore.qc.doublets(clusters, graph)
+            datastore.qc.doublets(clusters, graph, heterotypic_fraction=0.8)
 
-    # Without forced heterotypic doublets one cluster is enough.
+    # Without forced heterotypic doublets, the default, one cluster is enough.
     ref = datastore.qc.doublets(
         clusters,
         graph,
         cluster_sample_fraction=0.01,
         max_cells_per_cluster=2,
         simulation_ratio=0.01,
-        heterotypic_fraction=0.0,
         save_k=3,
         smoothing_t=1,
     )
     status = datastore.artifacts.inspect(ref)
-    assert status.complete and status.revision == 1
+    assert status.complete and status.revision == 2
+    assert status.parameters["heterotypic_fraction"] == 0.0

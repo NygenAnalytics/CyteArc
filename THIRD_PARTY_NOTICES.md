@@ -16,7 +16,19 @@ use but does not install.
 - License: BSD-3-Clause
 - Used in: `cytearc/features/scoring.py` (gene-set scoring adapted from `score_genes`),
   `cytearc/datastore/_operations/quality_control.py` (the control-set size of cell-cycle
-  scoring), and the categorical palettes in `cytearc/plotting/_style.py`.
+  scoring, and the `simulation_ratio` and `expected_doublet_rate` defaults of doublet detection,
+  those of `pp.scrublet`), and the categorical palettes in `cytearc/plotting/_style.py`.
+
+### Scrublet
+
+- Source: <https://github.com/swolock/scrublet>
+- Copyright (c) 2018 Samuel Wolock
+- License: MIT
+- Used in: `cytearc/quality_control/doublets.py`, written from the method of Wolock, Lopez and
+  Klein (2019) without its code: the doublet score from the fraction of simulated doublets among a
+  cell's neighbors with its `(d + 1) / (k + 2)` estimate, the neighbors scaled by
+  `1 + simulation_ratio`, the threshold between the two modes of the simulated doublets' scores,
+  and the estimated doublet rate.
 
 ### umap-learn
 
@@ -321,6 +333,29 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### Scrublet
+
+```text
+Copyright (c) 2018 Samuel Wolock
+
+The MIT License (MIT)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute,
+sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
+OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### chromVAR
