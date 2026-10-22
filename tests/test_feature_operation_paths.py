@@ -212,18 +212,26 @@ def test_repeated_detected_feature_selection_reuses_the_saved_artifact(
     assert store.features.detected(cells, min_cells=10) == first
 
 
-def test_hvgs_over_few_cells_skip_the_ubiquitous_gene_filter(store: DataStore) -> None:
+def test_hvgs_over_few_cells_keep_the_ubiquitous_gene_filter(store: DataStore) -> None:
     cells = _cells(store)
-    # 24 cells leave no room for max_cells = n_selected - 20 above min_cells.
+    # Of 24 cells, more than 99.5% is all 24: the default cutoff excludes only
+    # genes detected in every cell, so it is the exclusive cutoff 24.
     default = store.features.hvgs(
         cells, min_cells=5, top_n=4, n_bins=4, show_plot=False
     )
 
+    assert store.artifacts.inspect(default).parameters["max_cells"] == 24
+    assert (
+        store.features.hvgs(
+            cells, min_cells=5, top_n=4, n_bins=4, max_cells=24, show_plot=False
+        )
+        == default
+    )
     assert (
         store.features.hvgs(
             cells, min_cells=5, top_n=4, n_bins=4, max_cells=np.inf, show_plot=False
         )
-        == default
+        != default
     )
 
 

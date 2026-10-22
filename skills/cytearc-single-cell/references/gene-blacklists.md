@@ -7,10 +7,12 @@ pass today, and when to add the clonotype or haemoglobin add-ons. Docs:
 ## When to use
 
 - Before the baseline run on any new store, to see what the default blacklist matches there.
-- The store uses current HGNC or MGI histone symbols (`H2AC*`, `H3C*`, `H4C*`, `H1-*`), as CyteBase
-  datasets do. The default `^HIST` then matches nothing; only older `HIST1H*` references match.
-- Fibroblast, smooth-muscle, endothelial or tumour data, where `CCN1`/`CCN2` (CYR61/CTGF) or
-  `CCND1`/`CCND2` carry biology that the default `^CCN` hides.
+- The store's histone symbols are neither the pre-2020 `HIST1H*` names nor the current HGNC and
+  MGI ones (`H2AC*`, `H2BC*`, `H3C*`, `H4C*`, `H1-1` to `H1-6`, mouse `H1f1` to `H1f6`), which
+  the default matches since 1.3.0.
+- Tumour, islet or proliferating-tissue data, where `CCND1`/`CCND2` carry biology that the
+  default cyclin family (`^CCN[A-Z]`) hides. Before 1.3.0 the default `^CCN` also removed
+  `CCN1`/`CCN2` (CYR61/CTGF); it no longer does.
 - Plasma-cell-rich or B-cell-rich samples, mouse data, or haemoglobin genes among the top HVGs.
 
 ## Key concepts
@@ -20,9 +22,9 @@ pass today, and when to add the clonotype or haemoglobin add-ons. Docs:
 - It only removes HVG candidates. Markers, plots, gene scores and QC still see every gene.
 - The string and the matched-gene fingerprint are part of the HVG artifact identity. Changing the
   string creates new HVG, normalization, PCA and graph artifacts; the same string reuses them.
-- HVG selection also drops ubiquitous genes (`max_cells` = selected cells - 20), so most `MT-` and
-  cytosolic ribosomal genes never compete. On the 10x 5K PBMC docs dataset, unblocking either
-  family added no gene to the top 1000.
+- HVG selection also drops ubiquitous genes (`max_cells` excludes genes detected in more than
+  99.5% of the selected cells), so most `MT-` and cytosolic ribosomal genes never compete. On the
+  10x 5K PBMC docs dataset, unblocking either family added no gene to the top 1000.
 - `RNA_percentMito` and `RNA_percentRibo` were fixed at first open from the `^MT-` and
   `^RPS|^RPL|^MRPS|^MRPL` patterns; `blacklist=` never changes them. The RPS6K kinases and other
   off-targets added under 1% of `percentRibo` counts in testing, so the column needs no correction.
@@ -35,9 +37,9 @@ pass today, and when to add the clonotype or haemoglobin add-ons. Docs:
 | --- | --- | --- | --- |
 | mitochondrial | `^MT-` | none; mouse `mt-` matches | keep |
 | ribosomal | `^RPS\|^RPL\|^MRPS\|^MRPL` | also RPS6KA/B kinases, `RPS19BP1`, `L` paralogs, -AS1/-DT RNAs | exact protein symbols |
-| cellCycleCcn | `^CCN` | hits CCN1-6 (CTGF, CYR61, NOV, WISP), CCND1-3, CCNT/K/H/L; misses MKI67, TOP2A | drop; score the cell cycle instead |
+| cellCycleCcn | `^CCN[A-Z]` (before 1.3.0 `^CCN`, which also hit CCN1-6) | hits CCND1-3, CCNT/K/H/L; misses MKI67, TOP2A | drop; score the cell cycle instead |
 | hla / h2 | `^HLA-` / `^H2-` | whole MHC I and II; removal did not create donor clusters in testing | keep |
-| histone | `^HIST` | matches only pre-2020 symbols | old and current replication-dependent names |
+| histone | pre-2020 `^HIST` and the current replication-dependent symbols (before 1.3.0 only `^HIST`) | none | keep |
 | sexLinked | 10 human names | mouse `Eif2s3y`, `Zfy1/2` missed | add mouse genes |
 
 ## Recipes
@@ -78,7 +80,7 @@ print("Ensembl-like names:", int(pd.Series(names).str.match(r"ENS[A-Z]*G\d").sum
 for family, pattern in GENE_FAMILY_PATTERNS.items():
     hits = ds.RNA.feats.grep(pattern)  # stored names, matched ignoring case
     print(f"{family:13s} {len(hits):4d}", hits[:6])
-print("current histone symbols the default misses:",
+print("current histone symbols, which the default matches:",
       len(ds.RNA.feats.grep(r"^H2AC\d|^H2BC\d|^H3C\d|^H4C\d|^H1-[1-6]$")))
 print("default-only matches:",
       sorted(set(ds.RNA.feats.grep(DEFAULT_HVG_BLACKLIST)) - set(ds.RNA.feats.grep(HUMAN_BLACKLIST))))
@@ -148,10 +150,10 @@ print(frac.round(2).to_string())
 
 | Parameter | Default | Change when |
 | --- | --- | --- |
-| `features.hvgs(blacklist=)` | `DEFAULT_HVG_BLACKLIST` | Always pass a species string on current-symbol stores. |
+| `features.hvgs(blacklist=)` | `DEFAULT_HVG_BLACKLIST` | Pass a species string when the cyclin, ribosomal, sex-gene, or Ig choices matter. |
 | `params={"hvg": {"blacklist": ...}}` | default regex | Same string through `ds.pipeline.run`; new label per string. |
 | `blacklist=""` | | Diagnostics only: shows what the name filter removes. |
-| `features.hvgs(max_cells=)` | selected cells - 20 | `np.inf` lets ubiquitous genes compete; the blacklist then matters more. |
+| `features.hvgs(max_cells=)` | detection in at most 99.5% of the selected cells | `np.inf` lets ubiquitous genes compete; the blacklist then matters more. |
 
 ## Check before moving on
 
@@ -163,7 +165,9 @@ print(frac.round(2).to_string())
 
 ## Pitfalls
 
-- Trusting the default on current symbols: replication-dependent histones become HVGs unnoticed.
+- Trusting the default blacklist of a release before 1.3.0 on current symbols: replication-dependent
+  histones became HVGs unnoticed. Selections recorded with it, or with `min_cells` 20 (the earlier
+  default bounds), show as stale in lineage reports.
 - Writing `^IGHD` for D segments: it also removes the IgD constant gene. Use `^IGHD\d`.
 - `^TR[ABDG]D` also matches `TRADD`; TCR V genes such as `TRDV2`, `TRGV9` and `TRAV1-2` mark
   gamma-delta and MAIT cells. T-cell clusters did not follow TRBV usage in testing, so no TCR

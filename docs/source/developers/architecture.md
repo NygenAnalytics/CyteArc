@@ -73,6 +73,9 @@ Facade aliases do not change implementation ownership.
   Shared value-selection contracts also live here so domain, orchestration, and presentation code can use one typed contract without reversing dependencies.
   These include the nullable value contract of metadata columns (`metadata/encoding.py`), the assay-membership contract (`metadata/membership.py`), and `CELL_VALUE_NAMES`, the table of cell-aligned artifact kinds, with the reader that aligns their rows to cells (`metadata/selection.py`).
 - `assay/` owns normalization, blockwise feature-summary computation, and the RNA, ATAC, and ADT assay types.
+  `assay/hvg_statistics.py` streams the per-batch count statistics of the HVG flavors from
+  `countsT`, and `RNAassay._batch_hvg_scores` turns them into each batch's scores with the trend
+  and residual formulas of `features.variability`.
   `DataStore` owns planning and persistence of feature-summary artifacts; a bare `Assay.score_features` remains computation-only.
   `assay/normalization.py` owns the normalizer flag policy: each assay class declares the flags that its `normed` applies, and callers resolve flags through `applicable_normalization_flags` and `default_normalization_flags` instead of per-assay branches.
 - `graph/` owns graph feature projection through named artifact inputs and rejects encoded-path inputs.
@@ -98,7 +101,8 @@ They must not import those packages at module load time.
   `run_leiden_clustering` scoped to `backend == "cytearc"` (placement rule 10).
 - `trajectory/` owns pseudotime scoring, feature-profile aggregation, feature module clustering, and pseudotime result records.
 - `metrics/` owns LISI, silhouette, graph, concordance, and integration scores, including the neighbor label agreement that membership strength stores.
-- `features/` owns variability selection, LOWESS trend fitting, feature scoring, enrichment, rank and regression marker searches, group-wise statistical tests, bulk aggregation, GFF parsing, genomic intervals, coordinate-based feature construction, and the name-based gene-family registry.
+- `features/` owns variability selection (the cytearc, seurat_v3, and pearson_residuals flavors,
+  their LOWESS and LOESS trend fits, and batch-aware ranking), feature scoring, enrichment, rank and regression marker searches, group-wise statistical tests, bulk aggregation, GFF parsing, genomic intervals, coordinate-based feature construction, and the name-based gene-family registry.
   `features/genomic/` also owns genome sequence access (`sequence.py`: an indexed FASTA reader
   and GC content), gene annotations and region-to-gene windows (`annotation.py`), and motif
   matrices with MOODS-equivalent thresholds and a two-strand scanner (`motifs.py`).
@@ -1118,6 +1122,21 @@ CyteArc validates persisted data and public arguments against the following cont
   integer of at least 0, `top_n` and `n_bins` integers of at least 1, `lowess_frac` from 0 to 1,
   `keep_bounds` a boolean, and `bin_strategy` `"adaptive"` or `"fixed"`. Floats such as
   `min_cells=20.0` now raise.
+- `features.hvgs` takes `flavor` (`"cytearc"`, the earlier method and default; `"seurat_v3"`;
+  `"pearson_residuals"`) and `batch`, a cell column that it snapshots or a label artifact, and
+  combines batches by the number of batches in which a gene is highly variable, then its median
+  rank. Selections of the cytearc flavor over all selected cells keep their provenance; the other
+  flavors and batch-aware selections record `cell_selection`, `dataset_fingerprint`,
+  `feature_snapshot`, and `batch` inputs, record `flavor` and its options only for the new flavors,
+  and store `mean_nonzero`, `detected`, and with batches `batch_count` and `median_batch_rank`.
+  `min_mean`, `max_mean`, `min_var`, and `max_var` filter candidates before `top_n`; before, a
+  finite `min_var` ignored `top_n` and `max_var` applied after the cut. `min_cells` defaults to
+  None: 1% of the selected cells rounded up, from 3 to 20, and `max_cells` None excludes genes
+  detected in more than 99.5% of them, recorded as the resolved integers; before they were 20 and
+  `n_selected - 20`. The gene-family blacklist spares CCN1 to CCN6 (`^CCN[A-Z]`) and matches the
+  current histone symbols. `select_hvgs` revision 2 covers selections with a finite variance bound,
+  with `min_cells` 20 (every selection with the earlier default bounds), or with the earlier default
+  blacklist. `norm_pearson_residuals` is an RNA normalizer that takes only `renormalize_subset`.
 - `compare.compute_bulk(aggr_type="mean")` on RNA divides each cell by its library-size divisor, as `normed`
   does, which is 1 for a cell without counts. Before, such a cell made its group NaN, which was
   returned as zeros. `compare.compute_bulk` no longer replaces NaN with 0 and raises `ValueError` for a

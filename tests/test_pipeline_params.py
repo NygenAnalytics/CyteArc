@@ -326,10 +326,12 @@ def test_params_reject_invalid_sections_before_writing(
     assert _run_ids(store) == before
 
 
-# Pin CyteArc HVG parameter identities for max_cells=None (selected cells - 20)
-# and max_cells=np.inf (no cutoff) on this fixture with top_n=50.
-_AUTO_DIGEST = "a7b0106e03dbbf7441c6b96f85b235fafcae114a2bae35120336572e35ee4e2f"
-_NO_CUTOFF_DIGEST = "ec064cd0cde2532a8a0ee73070e1f3844b8042e143db85b758fced6ad818ba8c"
+# Pin CyteArc HVG parameter identities for max_cells=None (genes detected in
+# more than 99.5% of the selected cells excluded) and max_cells=np.inf (no
+# cutoff) on this fixture with top_n=50, the default min_cells (1% of the
+# selected cells, from 3 to 20), and the default blacklist of 1.3.0.
+_AUTO_DIGEST = "57929bd45c563d7206838229d44deae834440b1f9b89d5244817d735215d6014"
+_NO_CUTOFF_DIGEST = "efde872152049c8f582f39ad36802008276e91f0cf9a6489061be1cc13213133"
 
 
 def _parameter_digest(store: DataStore, ref: ArtifactRef) -> str:

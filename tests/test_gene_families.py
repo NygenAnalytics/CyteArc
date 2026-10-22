@@ -39,7 +39,9 @@ _NAMES = np.asarray(
 def test_default_blacklist_is_the_union_of_every_registered_family() -> None:
     # HVG selections record the blacklist text, so it must not drift.
     assert DEFAULT_HVG_BLACKLIST == (
-        "^MT-|^RPS|^RPL|^MRPS|^MRPL|^CCN|^HLA-|^H2-|^HIST|"
+        "^MT-|^RPS|^RPL|^MRPS|^MRPL|^CCN[A-Z]|^HLA-|^H2-|"
+        "^HIST|^H1-[1-6]$|^H1F[1-6]$|^H2AC\\d+$|^H2BC\\d+$|^H3C\\d+$|^H4C\\d+$|"
+        "^H2AW$|^H3-4$|^H4-16$|"
         "^XIST$|^DDX3Y$|^USP9Y$|^EIF1AY$|^KDM5D$|^SRY$|^ZFY$|^UTY$|^TMSB4Y$|^NLGN4Y$"
     )
     union = np.logical_or.reduce(

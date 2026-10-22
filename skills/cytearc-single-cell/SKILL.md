@@ -121,13 +121,14 @@ not thresholds.
 14. **Hold out annotation columns when they will judge the result.** Do not use author labels
     (`cell_type`, `author_cell_type`, `cell.type.*`, `singler`, `predicted.*`, ...) to choose QC,
     parameters or labels. Use them only in a final, clearly separated comparison.
-15. **Pass an explicit HVG blacklist.** On stores with current gene symbols the default blacklist
-    misses replication-dependent histones (`^HIST` matches only pre-2020 names), and its `^CCN`
-    family removes the CCN1-6 matricellular genes and non-cell-cycle cyclins. It also leaves Ig V/J
-    genes in, which can split plasma cells by light chain instead of biology. Use the species string
-    from `references/gene-blacklists.md` (`params={"hvg": {"blacklist": ...}}` in the pipeline). Add
-    the clonotype add-on only on marker evidence. A `blacklist=` string replaces the default
-    entirely, and changing it creates new HVG, PCA and graph artifacts.
+15. **Check the HVG blacklist against the species.** The default matches pre-2020 and current
+    replication-dependent histone symbols and spares the CCN1-6 matricellular genes, but its
+    cyclin family (`^CCN[A-Z]`) also removes cyclins that are not cell-cycle markers, such as
+    `CCND1` and `CCNL1`, and it leaves Ig V/J genes in, which can split plasma cells by light chain
+    instead of biology. Pass the species string from `references/gene-blacklists.md` when those
+    matter (`params={"hvg": {"blacklist": ...}}` in the pipeline). Add the clonotype add-on only
+    on marker evidence. A `blacklist=` string replaces the default entirely, and changing it
+    creates new HVG, PCA and graph artifacts.
 
 ## The analysis loop
 

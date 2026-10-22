@@ -55,9 +55,10 @@ a flag it cannot apply defaults to False, and passing True raises `ValueError`:
 |---|---|---|
 | RNA `norm_lib_size` (default) and custom normalizers | yes | yes, through `assay.scalar` |
 | RNA `norm_lib_size_log` | no, its values are already logarithms | yes |
+| RNA `norm_pearson_residuals` and other `PearsonResidualNormalizer` instances | no, residuals are signed | yes, as each cell's total in the expected counts |
 | `norm_dummy` (the generic default) of RNA, ADT, and generic assays, and custom ADT and generic normalizers | yes | no |
 | ATAC `norm_tf_idf` (default) and custom normalizers | no, ATAC values are never logged | yes, as the term-frequency denominator |
-| `norm_clr` (the ADT default) on any assay, built-in normalizers of another assay class (`norm_tf_idf` outside ATAC, library-size normalizers outside RNA), and `norm_dummy` of ATAC | no | no |
+| `norm_clr` (the ADT default) on any assay, built-in normalizers of another assay class (`norm_tf_idf` outside ATAC, library-size and Pearson residual normalizers outside RNA), and `norm_dummy` of ATAC | no | no |
 
 A custom RNA normalizer is a callable `(assay, counts)` that may read each cell's total from
 `assay.scalar` while it builds its result; `normed(log_transform=True)` returns the `log1p` of what
@@ -84,6 +85,31 @@ code. Operation revision 2 of each operation that records a normalizer (`run_nor
 `run_pseudotime_marker_search`, `run_pseudotime_aggregation`, and `run_statistical_testing`)
 applies to the results that record a normalizer defined outside CyteArc: their earlier results are
 reported stale, and planning logs one line when it computes one of them again.
+
+`cytearc.assay.norm_pearson_residuals` normalizes RNA counts to the analytic Pearson residuals of
+Lause, Berens and Kobak (2021), the values of scanpy's `normalize_pearson_residuals`, with
+`theta=100` and a clip of the square root of the number of normalized cells;
+`PearsonResidualNormalizer(theta=..., clip=...)` makes one with other values, and its options are
+part of the normalization's identity. The expected count of a gene in a cell is the cell's total
+times the gene's share of the counts of the normalized cells, and a residual whose expected count
+is 0 is 0. By default the totals are over every gene, as the residuals of the full matrix; with
+`renormalize_subset=True` they are over the selected genes, as scanpy's `recipe_pearson_residuals`
+computes them after subsetting to highly variable genes. Set it as the assay's `normMethod`, save
+the residuals of the highly variable genes with `features.normalize`, and run
+`reduction.pca(normalized, feat_scaling=False)`: residuals are already standardized.
+
+```python
+from cytearc.assay import norm_pearson_residuals
+
+ds.RNA.normMethod = norm_pearson_residuals
+hvgs = ds.features.hvgs(cells, flavor="pearson_residuals", top_n=2000)
+residuals = ds.features.normalize(cells, hvgs)
+pca = ds.reduction.pca(residuals, dims=50, feat_scaling=False)
+```
+
+Every normalized path of the assay applies the residuals while it is the `normMethod`, including
+marker search and scores, which then rank or average residuals; set the library-size normalizer
+back, `ds.RNA.normMethod = cytearc.assay.norm_lib_size`, for those steps.
 
 RNA library-size normalization divides each cell by its total, the `<assay>_nCounts` value or, with
 `renormalize_subset=True`, its sum over the selected features, and a cell whose total is zero
@@ -116,6 +142,10 @@ not check them and replaces a zero total with 1.
 
 ```{eval-rst}
 .. autofunction:: cytearc.assay.norm_dummy
+```
+
+```{eval-rst}
+.. autoclass:: cytearc.assay.PearsonResidualNormalizer
 ```
 
 ```{eval-rst}

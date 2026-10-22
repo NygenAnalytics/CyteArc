@@ -23,6 +23,7 @@ from ..utils.arrays import array_digest, regex_match_mask
 from ..utils.compute import controlled_compute
 from ..utils.logging import logger
 from .normalization import (
+    PearsonResidualNormalizer,
     NormMethod,
     check_normalization_flags,
     iter_feature_group_means,
@@ -338,11 +339,12 @@ class Assay:
         ``normed`` hands the configured normalizer the selected counts and no
         totals, so ``renormalize_subset`` never applies. It can take ``log1p``
         of the values of ``norm_dummy`` and of custom normalizers. CLR values
-        are already log ratios, and the library-size and TF-IDF normalizers
-        need totals or fitted state that this class does not hand them.
+        are already log ratios, and the library-size, Pearson residual, and
+        TF-IDF normalizers need totals or fitted state that this class does
+        not hand them.
         """
         method = self.normMethod
-        if any(
+        if isinstance(method, PearsonResidualNormalizer) or any(
             method is builtin
             for builtin in (norm_clr, norm_lib_size, norm_lib_size_log, norm_tf_idf)
         ):

@@ -9,6 +9,7 @@ from ..metadata import MetaData
 from ..utils.compute import compute_with_progress
 from .base import Assay
 from .normalization import (
+    PearsonResidualNormalizer,
     check_normalization_flags,
     inverse_document_frequency,
     norm_clr,
@@ -115,11 +116,11 @@ class ATACassay(Assay):
         ``normed`` hands every normalizer each cell's term-frequency
         denominator in ``n_term_per_doc``, so TF-IDF and custom normalizers
         take ``renormalize_subset``. ATAC values are never log transformed,
-        and the CLR, ``norm_dummy``, and library-size normalizers read no
-        term frequencies.
+        and the CLR, ``norm_dummy``, library-size, and Pearson residual
+        normalizers read no term frequencies.
         """
         method = self.normMethod
-        if any(
+        if isinstance(method, PearsonResidualNormalizer) or any(
             method is builtin
             for builtin in (norm_clr, norm_dummy, norm_lib_size, norm_lib_size_log)
         ):

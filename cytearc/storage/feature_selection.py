@@ -233,26 +233,9 @@ _FEATURE_SELECTION_CONTRACTS = {
         frozenset({"min_cells"}),
         ("values",),
     ),
-    "select_hvgs": (
-        frozenset({"feature_snapshot", "feature_summary"}),
-        frozenset(
-            {
-                "min_cells",
-                "max_cells",
-                "top_n",
-                "min_var",
-                "max_var",
-                "min_mean",
-                "max_mean",
-                "n_bins",
-                "lowess_frac",
-                "blacklist",
-                "keep_bounds",
-                "bin_strategy",
-            }
-        ),
-        ("values", "corrected_variance"),
-    ),
+    # The inputs and parameters of an HVG selection depend on its flavor and
+    # batches; see _hvg_contract.
+    "select_hvgs": (frozenset(), frozenset(), ()),
     "select_prevalent_peaks": (
         frozenset({"feature_summary"}),
         frozenset({"top_n"}),
@@ -462,6 +445,120 @@ def _hvg_optional_parameters(
     return frozenset(names)
 
 
+# The parameters that every HVG flavor records, those of the cytearc flavor's
+# trend and bounds, and those that each other flavor adds with its name.
+_HVG_COMMON_PARAMETERS = frozenset(
+    {"min_cells", "max_cells", "top_n", "blacklist", "keep_bounds"}
+)
+_HVG_TREND_PARAMETERS = frozenset(
+    {
+        "min_var",
+        "max_var",
+        "min_mean",
+        "max_mean",
+        "n_bins",
+        "lowess_frac",
+        "bin_strategy",
+    }
+)
+_HVG_FLAVOR_PARAMETERS = {
+    "seurat_v3": frozenset({"flavor", "span"}),
+    "pearson_residuals": frozenset({"flavor", "theta", "clip"}),
+}
+
+
+def _hvg_contract(
+    parameters: Mapping[str, Any],
+    inputs: Mapping[str, Any],
+    context: dict[str, str | None],
+) -> tuple[frozenset[str], frozenset[str], tuple[str, ...]]:
+    """Return the inputs, parameters, and payload of one HVG selection.
+
+    The cytearc flavor of all selected cells reads the feature summary. Other
+    flavors and batch-aware selections read the counts of the selected cells,
+    record the dataset they read and the batch labels, and store the plotted
+    statistics and, with batches, each feature's batch count and median rank.
+    """
+    flavor = parameters.get("flavor", "cytearc")
+    if flavor in _HVG_FLAVOR_PARAMETERS:
+        names = _HVG_COMMON_PARAMETERS | _HVG_FLAVOR_PARAMETERS[flavor]
+    elif "flavor" not in parameters:
+        names = _HVG_COMMON_PARAMETERS | _HVG_TREND_PARAMETERS
+    else:
+        raise ArtifactResolutionError(
+            "HVG flavor is incompatible",
+            code="corrupt_payload",
+            context=context,
+        )
+    names |= _hvg_optional_parameters(parameters, context)
+    batch = "batch" in inputs
+    if batch and isinstance(parameters.get("batch_column"), str):
+        names |= {"batch_column"}
+    if flavor == "cytearc" and not batch:
+        return (
+            frozenset({"feature_snapshot", "feature_summary"}),
+            names,
+            ("values", "corrected_variance"),
+        )
+    input_names = {"cell_selection", "dataset_fingerprint", "feature_snapshot"}
+    payload: tuple[str, ...] = (
+        "values",
+        "corrected_variance",
+        "mean_nonzero",
+        "detected",
+    )
+    if batch:
+        input_names.add("batch")
+        payload += ("batch_count", "median_batch_rank")
+    return frozenset(input_names), names, payload
+
+
+def _validate_hvg_count_inputs(
+    root: zarr.Group,
+    assay: str,
+    status: ArtifactStatus,
+    context: dict[str, str | None],
+) -> None:
+    """Check the recorded cells, dataset, and batches of a count-based HVG selection."""
+    from .identity import read_dataset_fingerprint
+
+    inputs = status.inputs or {}
+    if inputs.get("dataset_fingerprint") != read_dataset_fingerprint(
+        as_zarr_group(root[assay], name=assay)
+    ):
+        raise ArtifactResolutionError(
+            "Feature selection does not match the current prepared dataset",
+            code="corrupt_payload",
+            context=context,
+        )
+    validate_cell_selection(root, status.input_ref("cell_selection"))
+    if "batch" not in inputs:
+        return
+    batch = status.input_ref("batch")
+    if batch.kind == "metadata_snapshot":
+        column = (status.parameters or {}).get("batch_column")
+        if not isinstance(column, str):
+            raise ArtifactResolutionError(
+                "HVG batch snapshot records no batch column",
+                code="corrupt_payload",
+                context=context,
+            )
+        validate_run_metadata_snapshot(
+            root,
+            batch,
+            axis="cell",
+            assay=None,
+            table_path="cellData",
+            ordered_columns=(column,),
+        )
+    elif not inspect_artifact(root, batch).complete:
+        raise ArtifactResolutionError(
+            "HVG batch labels are missing or incomplete",
+            code="corrupt_payload",
+            context=context,
+        )
+
+
 def _validate_feature_selection_provenance(
     root: zarr.Group,
     assay: str,
@@ -495,8 +592,8 @@ def _validate_feature_selection_provenance(
                 context=context,
             )
     if status.operation == "select_hvgs":
-        parameter_names = parameter_names | _hvg_optional_parameters(
-            parameters, context
+        input_names, parameter_names, payload_names = _hvg_contract(
+            parameters, inputs, context
         )
     received_inputs = set(inputs)
     if received_inputs != input_names or set(parameters) != parameter_names:
@@ -532,6 +629,8 @@ def _validate_feature_selection_provenance(
             status.input_ref("feature_summary"),
             row_fingerprint=row_fingerprint,
         )
+    if "dataset_fingerprint" in inputs:
+        _validate_hvg_count_inputs(root, assay, status, context)
     if "feature_snapshot" in inputs:
         snapshot = status.input_ref("feature_snapshot")
         if (

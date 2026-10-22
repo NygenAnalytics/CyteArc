@@ -315,9 +315,9 @@ def test_select_hvgs_persists_effective_default_max_cells(
 ) -> None:
     store = hvg_store
     n_selected = int(np.asarray(store.cells.fetch_all("I"), dtype=bool).sum())
-    expected: int | float = n_selected - 20
-    if expected <= 0:
-        expected = np.inf
+    # Genes detected in more than 99.5% of the selected cells are excluded, and
+    # the recorded cutoff is exclusive.
+    expected = n_selected * 199 // 200 + 1
     cell_selection = store.snapshot_cell_selection()
 
     implicit = store.features.hvgs(

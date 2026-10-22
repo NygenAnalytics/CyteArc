@@ -12,7 +12,12 @@ from ..assay import RNAassay
 from ..clustering.leiden import canonical_resolution
 from ..embeddings import sgtsne
 from ..features.gene_reference import species_registry
-from ..features.variability import HVG_OPTION_NAMES, hvg_options
+from ..features.variability import (
+    HVG_FLAVOR_OPTION_NAMES,
+    HVG_OPTION_NAMES,
+    hvg_flavor_options,
+    hvg_options,
+)
 from ..graph.arguments import graph_flag
 from ..metadata.membership import require_measured_cells
 from ..quality_control.filtering import validate_filter_bounds
@@ -46,6 +51,12 @@ _HVG_OPTION_DEFAULTS: Mapping[str, Any] = MappingProxyType(
     {
         name: _keyword_default(_FeatureOperationsMixin._features_hvgs, name)
         for name in HVG_OPTION_NAMES
+    }
+)
+_HVG_FLAVOR_OPTION_DEFAULTS: Mapping[str, Any] = MappingProxyType(
+    {
+        name: _keyword_default(_FeatureOperationsMixin._features_hvgs, name)
+        for name in HVG_FLAVOR_OPTION_NAMES
     }
 )
 # The embedding dimensions, and so the run fields, of settings that omit them.
@@ -213,6 +224,11 @@ _STAGE_PARAMETERS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "blacklist",
                 "keep_bounds",
                 "bin_strategy",
+                "flavor",
+                "batch",
+                "span",
+                "theta",
+                "clip",
             }
         ),
         "normalization": frozenset({"log_transform", "renormalize_subset"}),
@@ -394,6 +410,14 @@ def _resolve_params(
                         for name, default in _HVG_OPTION_DEFAULTS.items()
                     }
                 )
+                hvg_flavor_options(
+                    **{
+                        name: value.get(name, default)
+                        for name, default in _HVG_FLAVOR_OPTION_DEFAULTS.items()
+                    }
+                )
+                if not isinstance(value.get("batch"), str | None):
+                    raise TypeError(f"{name}['batch'] must be a cell metadata column")
             elif stage in {"tsne", "umap"}:
                 # The checks of embeddings.tsne and the embeddings.umap graph
                 # flags. The stages run late, so an invalid setting would
@@ -691,6 +715,9 @@ def resolve_pipeline_recipe(
             raise ValueError("params['harmony'] needs batch_columns")
         harmony_batch_columns = harmony_params.pop("batch_columns")
     hvg_params = settings("hvg")
+    hvg_batch = hvg_params.get("batch")
+    if hvg_batch is not None and hvg_batch not in store.cells.columns:
+        raise KeyError(f"HVG batch column {hvg_batch!r} was not found")
     hvg_count = setting(hvg_params, "top_n", "hvg_count", hvg_count, HVG_COUNT_DEFAULT)
     pca_params = settings("pca")
     pca_dims = setting(pca_params, "dims", "pca_dims", pca_dims, PCA_DIMS_DEFAULT)

@@ -27,6 +27,11 @@ It uses established libraries where they fit the streaming and provenance model.
 The aim is one coherent execution path, not reimplementation for its own sake.
 
 - **Reduction and graph construction:** streamed normalization, exact covariance (Gram-matrix) PCA with a randomized block Krylov solver for more than 4,096 features ({ref}`details <pca_method>`), randomized streaming {term}`LSI`, approximate nearest-neighbour search, UMAP, {term}`densMAP`, and graph-based t-SNE through the optional `tsne` extra (see {ref}`Optional t-SNE <installation_tsne>`).
+- **Feature selection:** highly variable genes by CyteArc's mean-variance trend of normalized
+  values, by the variance-stabilizing transformation of [Seurat v3](https://doi.org/10.1016/j.cell.2019.05.031)
+  on raw counts, or by the variance of [analytic Pearson residuals](https://doi.org/10.1186/s13059-021-02451-7),
+  with batch-aware selection in the order of Seurat's `SelectIntegrationFeatures`, and Pearson
+  residual normalization.
 - **Batch correction and mapping:** CyteArc implementations of [Harmony2](https://doi.org/10.64898/2026.03.16.711825), which builds on the original [Harmony](https://doi.org/10.1038/s41592-019-0619-0) algorithm, and of [Symphony-style](https://doi.org/10.1038/s41467-021-25957-x) fixed-reference mapping, with label transfer and mapping diagnostics.
 - **Matched multi-omics:** {term}`SNN integration` and [Hao-inspired WNN](https://doi.org/10.1016/j.cell.2021.04.048) integration for two or more assays, with WNN reporting one per-cell weight per modality.
 - **Clustering:** a native, multi-threaded implementation of [Leiden](https://doi.org/10.1038/s41598-019-41695-z) community detection ({ref}`details <leiden_method>`) and a native implementation of [Paris hierarchical clustering](https://doi.org/10.48550/arXiv.1806.01664) with fixed and branch-adaptive cuts.
@@ -130,6 +135,18 @@ Agreement measured for one method is not evidence of equivalence for the rest of
   rises while cell-type purity stays at its uncorrected level.
   CyteArc's Harmony2 was written from the two papers, independently of other Harmony
   implementations, and is not expected to match them number for number.
+- Highly variable gene flavors are compared with scanpy 1.12.4 and scikit-misc 0.5.3 on the
+  892 cells and 36,601 genes of the 1k PBMC CITE-seq test fixture, selecting 2,000 genes.
+  The seurat_v3 trend matches scikit-misc's interpolated LOESS to within 1e-12 on the log10 scale,
+  so the scores agree to the 10 digits the fixture keeps; the selections differ only in 4 genes tied
+  at the last selected score (Jaccard 0.998). Pearson residual variances agree to the same digits and select
+  the same genes, with and without two batches. With two batches, seurat_v3 scores differ from
+  scanpy's `seurat_v3_paper` by up to 7e-4 and 8 selected genes differ (Jaccard 0.996), because
+  scanpy's Welford batch means break ties between genes with equal means, which moves the
+  interpolated trend. scanpy clips every batch's residuals at the square root of the first
+  batch's cell count; CyteArc clips each batch at its own, so the batch comparison passes an
+  explicit clip. The LOESS, the standardized variance, and the residuals are also checked against
+  direct NumPy computations of their published formulas.
 - Marker statistics are checked against SciPy, including continuity and large-tie corrections.
 - Paris hierarchies are compared with the scikit-network reference implementation on tie-free graphs.
 - The native Leiden backend is checked against brute-force calculations on small random graphs,
