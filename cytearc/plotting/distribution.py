@@ -44,7 +44,9 @@ from ._contracts import (
 )
 from ._data import (
     _artifact_cell_selection,
+    _category_universe,
     _cell_metadata_columns,
+    _resolve_grouping,
     fetch_normalized_feature_matrix,
     require_panel_values,
     resolve_cell_selection,
@@ -64,6 +66,7 @@ from ._style import (
     MAX_FIGURE_WIDTH_INCHES,
     apply_figure_chrome,
     capped_figsize,
+    category_label,
     continuous_norm,
     resolve_category_scale,
     resolve_color_limits,
@@ -151,6 +154,19 @@ def _fetch_series(
     )
 
 
+def _grouping_universe(store: Any, grouping: ArtifactRef | CellField) -> np.ndarray:
+    """Every label of a grouping, which default group colors range over."""
+    if isinstance(grouping, CellField):
+        return _category_universe(store, grouping.key)
+    _, _, labels, _ = _resolve_grouping(
+        store,
+        group_by=None,
+        groups=grouping,
+        cell_key="I",
+    )
+    return labels[0]
+
+
 def _subsample_frame(
     df: pd.DataFrame,
     *,
@@ -162,6 +178,47 @@ def _subsample_frame(
         return df, False
     idx = rng.choice(len(df), size=max_points, replace=False)
     return df.iloc[np.sort(idx)], True
+
+
+def _density_subsample(
+    df: pd.DataFrame,
+    *,
+    columns: list[str],
+    max_points: int | None,
+    rng: np.random.Generator,
+) -> tuple[pd.DataFrame, bool]:
+    """Bound the values behind each violin's density estimate.
+
+    A violin, one group or one half of a split group, with more than
+    ``max_points`` values keeps a seeded random ``max_points`` of them that
+    always include its smallest and largest values, so it spans the same
+    range. Smaller violins keep every value and draw no random number.
+    Returns the rows to draw, in their order, and whether any violin was
+    subsampled.
+    """
+    if max_points is None or len(df) <= max_points:
+        return df, False
+    codes = (
+        df.groupby(columns, sort=False, observed=True, dropna=False).ngroup().to_numpy()
+    )
+    counts = np.bincount(codes)
+    large = np.flatnonzero(counts > max_points)
+    if not len(large):
+        return df, False
+    values = df["value"].to_numpy(dtype=np.float64)
+    order = np.argsort(codes, kind="stable")
+    ends = np.cumsum(counts)
+    keep = np.ones(len(df), dtype=bool)
+    for code in large:
+        members = order[ends[code] - counts[code] : ends[code]]
+        member_values = values[members]
+        extremes = np.unique([np.argmin(member_values), np.argmax(member_values)])
+        chosen = rng.choice(len(members), size=max_points, replace=False)
+        chosen = chosen[~np.isin(chosen, extremes)][: max_points - len(extremes)]
+        keep[members] = False
+        keep[members[extremes]] = True
+        keep[members[chosen]] = True
+    return df.iloc[np.flatnonzero(keep)], True
 
 
 @contextmanager
@@ -194,7 +251,16 @@ def _draw_violin_or_box(
     split_order: list[Any] | None = None,
     split_palette: dict[Any, str] | None = None,
     show_legend: bool = True,
-) -> bool:
+    density_max_points: int | None = None,
+) -> tuple[bool, bool]:
+    """Draw violins or boxes with an optional point overlay.
+
+    Violins scale each body to the full width, as scanpy's do, so a group
+    whose values pile up at zero still shows the shape of the rest. Each
+    violin's density uses at most ``density_max_points`` values (see
+    :func:`_density_subsample`). Returns whether the point overlay and
+    whether any density were subsampled.
+    """
     plot_kw: dict[str, Any] = {}
     if order is not None:
         plot_kw["order"] = order
@@ -220,9 +286,16 @@ def _draw_violin_or_box(
     # group column is numeric, so the orientation is stated explicitly.
     orient = "x" if orientation == "vertical" else "y"
     collections_before = len(ax.collections)
+    density_subsampled = False
     if kind == "violin":
+        density_frame, density_subsampled = _density_subsample(
+            df,
+            columns=["group", "split"] if split else ["group"],
+            max_points=density_max_points,
+            rng=rng,
+        )
         sns.violinplot(
-            data=df,
+            data=density_frame,
             x=x_key,
             y=y_key,
             orient=orient,
@@ -230,6 +303,7 @@ def _draw_violin_or_box(
             color=None if grouped else color,
             inner=violin_inner,
             cut=0,
+            density_norm="width",
             linewidth=linewidth,
             saturation=0.9,
             split=split,
@@ -278,7 +352,7 @@ def _draw_violin_or_box(
                     else {k: v for k, v in strip_kw.items() if k == "order"}
                 ),
             )
-    return subsampled
+    return subsampled, density_subsampled
 
 
 def _sample_aggregate(
@@ -323,7 +397,13 @@ def _draw_hist(
     order: list[Any] | None,
     palette: dict[Any, str] | None,
     show_legend: bool,
+    labels: Mapping[Any, str] | None = None,
 ) -> None:
+    """Draw one histogram, or one per group on shared bins.
+
+    ``labels`` names each group in the legend; a group without one shows its
+    value.
+    """
     if group_by is None:
         vals = df["value"].to_numpy(dtype=np.float64)
         vals = vals[np.isfinite(vals)]
@@ -346,13 +426,18 @@ def _draw_hist(
             vals,
             bins=shared_bins,
             alpha=0.45,
-            label=str(g),
+            label=_group_label(labels, g),
             color=face,
             edgecolor="white",
             linewidth=0.3,
         )
     if show_legend:
         ax.legend(frameon=False, fontsize=8)
+
+
+def _group_label(labels: Mapping[Any, str] | None, group: Any) -> str:
+    """Display text of a group: its label when one is given, else its value."""
+    return str(group) if labels is None else labels.get(group, str(group))
 
 
 def _ecdf_xy(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -374,8 +459,13 @@ def _draw_ecdf(
     order: list[Any] | None,
     palette: dict[Any, str] | None,
     show_legend: bool,
+    labels: Mapping[Any, str] | None = None,
 ) -> bool:
-    """Draw ECDF. May subsample values for display; returns whether subsampled."""
+    """Draw ECDF. May subsample values for display; returns whether subsampled.
+
+    ``labels`` names each group in the legend; a group without one shows its
+    value.
+    """
     subsampled = False
     if group_by is None:
         vals = df["value"].to_numpy(dtype=np.float64)
@@ -402,7 +492,7 @@ def _draw_ecdf(
                 y,
                 where="post",
                 linewidth=1.2,
-                label=str(g),
+                label=_group_label(labels, g),
                 color=line_color,
             )
     if show_legend:
@@ -876,6 +966,7 @@ def distribution(
     kind: DistKind = "violin",
     bins: int = 40,
     max_points: int | None = 10000,
+    max_density_points: int | None = 20_000,
     point_size: float = 0.8,
     point_alpha: float = 0.28,
     seed: int = 0,
@@ -925,6 +1016,21 @@ def distribution(
     violin and box panels share their value scale by default. Stacked violins
     keep independent scales unless ``share_y=True``. With horizontal
     orientation, the same option shares the x-axis value scale.
+
+    Every violin, including each half of a split violin, is scaled to the
+    full width, as in scanpy, so a group whose values pile up at zero still
+    shows its shape. A violin with more than ``max_density_points`` values
+    estimates its density, and draws its quartiles, from a seeded random
+    ``max_density_points`` of them that keeps its smallest and largest value,
+    which bounds the cost on large datasets; ``None`` uses every value.
+    Smaller violins use every value, and ``provenance.notes`` gains
+    ``"subsampled_density"`` when any violin was subsampled.
+
+    Default group colors are assigned over every label of the grouping column
+    or artifact, so a group keeps its color whatever ``groups`` or
+    ``subset_by`` select. Tick and legend labels follow
+    ``CategoricalScale.labels``, from ``categorical_scale``, ``split_scale``,
+    or the column's stored display.
 
     Set ``sample_by`` or ``study_design`` to summarize cells within biological
     samples before plotting. A study design's ``subject_by`` or ``pair_by``
@@ -1066,6 +1172,8 @@ def distribution(
                 "stats_results cannot be combined with split_by because the "
                 "statistical result has no split-category identity"
             )
+    if max_density_points is not None and max_density_points < 2:
+        raise ValueError("max_density_points must be None or at least 2")
     if violin_linewidth < 0:
         raise ValueError("violin_linewidth must be non-negative")
     if not 0 <= violin_alpha <= 1 or not 0 <= point_alpha <= 1:
@@ -1393,17 +1501,22 @@ def distribution(
         raise ValueError("No cells remain after distribution selections")
     group_scale: CategoricalScale | None = None
     if has_grouping:
-        # Requested groups set the order; a caller's scale still sets colors.
+        assert grouping is not None
+        # Requested groups set the order; a caller's scale still sets colors,
+        # and default colors range over every label of the grouping.
         group_scale = resolve_category_scale(
             groups_arr[selection_mask],
-            (
-                categorical_scale
-                if groups is None
-                else replace(
-                    categorical_scale or CategoricalScale(),
-                    order=tuple(group_order or ()),
+            categorical_scale,
+            universe=(
+                _grouping_universe(store, grouping)
+                if categorical_scale is None
+                or (
+                    categorical_scale.order is None
+                    and categorical_scale.palette is None
                 )
+                else None
             ),
+            order=None if groups is None else group_order,
         )
         group_order = list(group_scale.order or ())
     else:
@@ -1452,10 +1565,17 @@ def distribution(
     split_palette: dict[Any, str] | None = None
     resolved_split_scale: CategoricalScale | None = None
     if split_arr is not None:
+        assert split_by is not None
         resolved_split_scale = resolve_category_scale(
             split_arr,
             split_scale,
             context="split_scale",
+            universe=(
+                _category_universe(store, split_by)
+                if split_scale is None
+                or (split_scale.order is None and split_scale.palette is None)
+                else None
+            ),
         )
         split_order = list(resolved_split_scale.order or ())
         if len(split_order) != 2:
@@ -1530,6 +1650,13 @@ def distribution(
 
     rng = np.random.default_rng(seed)
     any_subsampled = False
+    any_density_subsampled = False
+    # Ticks and legends show each category's display label.
+    group_labels = (
+        None
+        if group_scale is None
+        else {value: category_label(group_scale, value) for value in group_order or ()}
+    )
     y_limits: list[tuple[float, float]] = []
     panel_tables: list[tuple[str, pd.DataFrame]] = []
     with theme_context(theme):
@@ -1579,7 +1706,7 @@ def distribution(
                         lo=lo,
                         hi=hi,
                     )
-                subsampled = _draw_violin_or_box(
+                subsampled, density_subsampled = _draw_violin_or_box(
                     ax,
                     sns,
                     df,
@@ -1602,16 +1729,23 @@ def distribution(
                         and split_order is not None
                         and panel_index == n_panels - 1
                     ),
+                    density_max_points=max_density_points,
                 )
                 any_subsampled = any_subsampled or subsampled
+                any_density_subsampled = any_density_subsampled or density_subsampled
                 if split_order is not None and show_legend:
                     legend = ax.get_legend()
                     if legend is not None:
+                        assert resolved_split_scale is not None
+                        split_labels = {
+                            str(value): category_label(resolved_split_scale, value)
+                            for value in split_order
+                        }
                         handles, labels = ax.get_legend_handles_labels()
                         legend.remove()
                         ax.legend(
                             handles,
-                            labels,
+                            [split_labels.get(text, text) for text in labels],
                             title=split_by or "split",
                             frameon=False,
                             loc="upper left",
@@ -1624,7 +1758,15 @@ def distribution(
                     else:
                         ax.set_yticks([])
                 else:
+                    assert group_labels is not None
                     category_axis = "x" if orientation == "vertical" else "y"
+                    set_ticks = (
+                        ax.set_xticks if orientation == "vertical" else ax.set_yticks
+                    )
+                    set_ticks(
+                        range(len(group_labels)),
+                        [group_labels[value] for value in group_order or ()],
+                    )
                     ax.tick_params(axis=category_axis, labelrotation=45)
                     ticks = (
                         ax.get_xticklabels()
@@ -1643,6 +1785,7 @@ def distribution(
                     order=None if not has_grouping else list(group_order or []),
                     palette=palette,
                     show_legend=show_legend,
+                    labels=group_labels,
                 )
             else:
                 subsampled = _draw_ecdf(
@@ -1655,6 +1798,7 @@ def distribution(
                     order=None if not has_grouping else list(group_order or []),
                     palette=palette,
                     show_legend=show_legend,
+                    labels=group_labels,
                 )
                 any_subsampled = any_subsampled or subsampled
                 ax.set_ylabel("ECDF")
@@ -1930,6 +2074,8 @@ def distribution(
     notes = ["distribution", kind]
     if any_subsampled:
         notes.append("subsampled_display")
+    if any_density_subsampled:
+        notes.append("subsampled_density")
 
     resolved_color_scale: ColorScale | None = None
     if render_limits is not None:
@@ -1984,6 +2130,7 @@ def distribution(
             notes=tuple(notes),
             extras={
                 "max_points": resolved_max_points,
+                "max_density_points": max_density_points,
                 "seed": seed,
                 "grouping": (
                     None
@@ -2039,7 +2186,7 @@ def distribution(
                 "vmax": render_limits[1] if render_limits is not None else None,
                 "violin_inner": violin_inner,
                 "italicize_features": italicize_features,
-                "approximate": any_subsampled,
+                "approximate": any_subsampled or any_density_subsampled,
                 "normalization": (
                     None
                     if value_artifact is not None

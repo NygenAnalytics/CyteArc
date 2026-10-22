@@ -1283,17 +1283,27 @@ def test_raster_honors_nullable_color_and_subset_masks():
 def test_embedding_raster_uses_one_effective_missing_color():
     from matplotlib.colors import to_hex
 
+    columns = _layout_columns()
+    # Three cells have no value to color.
+    columns["score"][:3] = np.nan
     result = splt.embedding_raster(
-        _layout_store(_layout_columns()),
+        _layout_store(columns),
         layout_key="U",
+        color_by="score",
         color_scale=splt.ColorScale(missing_color="pink"),
         missing_color="#123456",
         pixels=16,
         show=False,
     )
 
-    image = result.axes["U"].get_images()[0]
-    assert to_hex(image.cmap.get_bad()) == "#123456"
+    image, missing = result.axes["score"].get_images()
+    # Empty pixels show the background; pixels holding only cells without a
+    # value take the explicit missing color.
+    assert image.cmap.get_bad()[3] == 0.0
+    overlay = missing.get_array()
+    painted = overlay[..., 3] > 0
+    assert painted.any()
+    assert {to_hex(color) for color in overlay[painted]} == {"#123456"}
     assert result.scales[0].missing_color == "#123456"
     assert result.provenance.extras["missing_color"] == "#123456"
     result.close()
@@ -1341,7 +1351,8 @@ def test_embedding_raster_uses_frozen_continuous_display_defaults():
     assert image.cmap.name == "magma"
     assert image.get_clim() == (0.0, 3.0)
     assert result.legends[0].extras == {"vmin": 0.0, "vmax": 3.0}
-    assert result.provenance.extras["missing_color"] == "white"
+    # Cells without a value take the scale's grey; empty pixels stay blank.
+    assert result.provenance.extras["missing_color"] == "#bdbdbd"
     result.close()
 
 
@@ -1363,11 +1374,20 @@ def test_raster_missing_pixels_default_white():
     )
     fig, ax = plt.subplots()
     im = draw_raster_canvas(ax, canvas)
-    bad = np.asarray(im.cmap.get_bad())
-    # RGBA for the bad/missing color should be opaque white.
-    np.testing.assert_allclose(bad[:3], [1.0, 1.0, 1.0], atol=1e-5)
+    # Empty pixels are transparent, so they show the white axes background.
+    assert im.cmap.get_bad()[3] == 0.0
     face = np.asarray(matplotlib.colors.to_rgba(ax.get_facecolor()))
     np.testing.assert_allclose(face[:3], [1.0, 1.0, 1.0], atol=1e-5)
+    fig.canvas.draw()
+    rendered = np.asarray(fig.canvas.buffer_rgba())
+    box = ax.get_window_extent()
+    height = rendered.shape[0]
+    inside = rendered[
+        int(height - box.y1) + 3 : int(height - box.y0) - 3,
+        int(box.x0) + 3 : int(box.x1) - 3,
+        :3,
+    ]
+    assert inside.size and (inside == 255).all()
     plt.close(fig)
 
 

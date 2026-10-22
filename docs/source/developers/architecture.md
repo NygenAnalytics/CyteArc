@@ -906,7 +906,12 @@ CyteArc validates persisted data and public arguments against the following cont
   `marker_heatmap` clusters unclipped z-scores. Continuous color limits follow one policy across
   plots, category scales show only observed categories, `compose_results` keeps panel and raster
   colorbars and honors log scales, and plot functions close the figures they created when they
-  raise. `distribution` reports a missing pair value with the `compare.test` message.
+  raise. `distribution` reports a missing pair value with the `compare.test` message. Default
+  category colors range over every value of the colored column or label artifact, so subsets keep
+  their colors. Embeddings draw categories and unsorted continuous colors in a seeded shuffle
+  (`seed=0`, `None` keeps stored order) and sort feature colors high on top; they settle layout
+  without rendering points, and on-data labels move at most about one label height and stay
+  nearest their own cluster.
 - The agent uses typed inputs, explicit resume, immutable saved decisions, and external audit
   records.
 - Removed public API: `cytearc.system_call`, `cytearc.get_log_level`, `cytearc.GffReader`,

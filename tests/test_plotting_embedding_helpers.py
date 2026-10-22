@@ -398,9 +398,11 @@ def test_stored_continuous_display_sets_the_color_scale_unless_clipped():
     stored = splt_embedding(store, layout_key="umap", color_by="score", show=False)
     points = stored.axes["score"].collections[0]
     assert stored.provenance.extras["color_limits"]["score"] == (-5.0, 5.0)
+    # Metadata colors draw in the seeded shuffle: each cell at its rank.
+    drawn = np.argsort(np.random.default_rng(0).permutation(40), kind="stable")
     np.testing.assert_allclose(
         points.get_facecolors(),
-        _colormap("magma")(Normalize(-5.0, 5.0)(score)),
+        _colormap("magma")(Normalize(-5.0, 5.0)(score[drawn])),
         atol=1e-6,
     )
     stored.close()

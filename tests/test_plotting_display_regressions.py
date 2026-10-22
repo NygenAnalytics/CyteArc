@@ -669,12 +669,13 @@ def test_plot_errors_close_the_figures_they_created():
         ok=rng.normal(size=30),
     )
     before = set(plt.get_fignums())
+    # A log scale masks zero counts, but an explicit limit must be positive.
     with pytest.raises(ValueError, match="positive values"):
         splt.embedding(
             store,
             layout_key="UMAP",
             color_by="counts",
-            color_scale=splt.ColorScale(scale="log", scope="panel"),
+            color_scale=splt.ColorScale(scale="log", scope="panel", vmin=0.0),
             show=False,
         )
     with pytest.raises(ValueError, match="No finite values"):
@@ -771,12 +772,16 @@ def test_multi_layout_names_layouts_and_shares_category_colors():
         assert list(palette) == [f"c{index}" for index in range(11)]
         # Eleven categories use the 20-color table.
         assert palette["c1"] == "#aec7e8"
-        # Both layouts color each drawn cell from the one shared palette; TSNE
-        # leaves out the cells whose coordinates are missing.
-        drawn = {"UMAP": clusters, "TSNE": clusters[clusters != "c10"]}
+        # Both layouts color each drawn cell from the one shared palette, in
+        # the seeded drawing order every panel shares; TSNE leaves out the
+        # cells whose coordinates are missing.
+        rank = np.random.default_rng(0).permutation(110)
+        placed = {"UMAP": np.ones(110, dtype=bool), "TSNE": clusters != "c10"}
         for (layout, _), axis in titled.axes.items():
+            cells = np.flatnonzero(placed[layout])
+            drawn = clusters[cells[np.argsort(rank[cells], kind="stable")]]
             colors = [to_hex(color) for color in axis.collections[0].get_facecolors()]
-            assert colors == [palette[cluster] for cluster in drawn[layout]]
+            assert colors == [palette[cluster] for cluster in drawn]
     finally:
         titled.close()
         untitled.close()

@@ -49,6 +49,7 @@ from ._style import (
     apply_figure_chrome,
     capped_figsize,
     continuous_norm,
+    foreground_color,
     resolve_color_limits,
     scatter_edgecolor,
     size_legend_layout,
@@ -110,7 +111,7 @@ def _draw_feature_group_brackets(
     if grouped_ranges and not swap_axes:
         from matplotlib.transforms import ScaledTranslation
 
-        ax.figure.canvas.draw()
+        ax.figure.draw_without_rendering()
         renderer = ax.figure.canvas.get_renderer()
         axes_width = max(float(ax.get_window_extent(renderer).width), 1.0)
         label_width = max(
@@ -264,6 +265,90 @@ def _group_order(
     return _label_order(observed, requested, name="group order", noun="groups")
 
 
+def _group_tick_labels(
+    groups: Sequence[str],
+    scale: CategoricalScale | None,
+) -> list[str]:
+    """Display text of each group label, through the scale's category labels.
+
+    Group labels are text, so a scale's labels apply by the text of their
+    category.
+    """
+    if scale is None or scale.labels is None:
+        return list(groups)
+    by_text = {str(value): str(label) for value, label in scale.labels.items()}
+    return [by_text.get(group, group) for group in groups]
+
+
+def _feature_rows(
+    feature_pairs: Sequence[tuple[str | None, str | FeatureRef]],
+    resolved_features: Sequence[Any],
+    present: set[tuple[str | None, str]],
+    feature_order: Sequence[Any] | None,
+) -> list[tuple[str | None, str]]:
+    """One row per requested feature and bracket group, in input order.
+
+    A feature listed under two groups keeps a row in each. ``feature_order``
+    reorders rows by feature label.
+    """
+    rows = [
+        row
+        for row in dict.fromkeys(
+            (_feature_group_key(group), feature.label)
+            for (group, _), feature in zip(
+                feature_pairs,
+                resolved_features,
+                strict=True,
+            )
+        )
+        if row in present
+    ]
+    if feature_order is None:
+        return rows
+    label_order = _label_order(
+        list(dict.fromkeys(label for _, label in rows)),
+        feature_order,
+        name="feature_order",
+        noun="features",
+    )
+    return [row for label in label_order for row in rows if row[1] == label]
+
+
+def _draw_dendrogram(
+    ax: Any,
+    linkage: np.ndarray,
+    *,
+    side: str,
+    color: str,
+) -> Any:
+    """Draw a linkage's dendrogram beside a heatmap's leaves.
+
+    ``side`` is ``"top"`` for the column leaves or ``"right"`` for the row
+    leaves. The dendrogram's leaves align with the heatmap cells.
+    """
+    from matplotlib.collections import LineCollection
+    from scipy.cluster.hierarchy import dendrogram
+
+    tree = dendrogram(linkage, no_plot=True)
+    # SciPy places leaf k at 10 * k + 5.
+    leaves = (np.asarray(tree["icoord"], dtype=np.float64) - 5.0) / 10.0
+    heights = np.asarray(tree["dcoord"], dtype=np.float64)
+    if side == "top":
+        inset = ax.inset_axes([0.0, 1.02, 1.0, 0.14])
+        segments = np.stack((leaves, heights), axis=-1)
+        inset.set_xlim(ax.get_xlim())
+        inset.set_ylim(0.0, max(float(heights.max()), 1e-12))
+    else:
+        inset = ax.inset_axes([1.02, 0.0, 0.14, 1.0])
+        segments = np.stack((heights, leaves), axis=-1)
+        inset.set_ylim(ax.get_ylim())
+        inset.set_xlim(0.0, max(float(heights.max()), 1e-12))
+    inset.add_collection(LineCollection(list(segments), colors=color, linewidths=0.8))
+    inset.set_axis_off()
+    inset.set_gid(f"{side}-dendrogram")
+    return inset
+
+
 def _group_axis_labels(df: pd.DataFrame, roles: tuple[str, ...]) -> pd.Series:
     """Label each row's group from its role-named grouping columns."""
     if len(roles) == 1:
@@ -406,29 +491,12 @@ def dotplot(
             strict=True,
         )
     )
-    present_rows = set(plot_df["row"])
-    feature_rows = [
-        row
-        for row in dict.fromkeys(
-            (_feature_group_key(group), feature.label)
-            for (group, _), feature in zip(
-                feature_pairs,
-                resolved_features,
-                strict=True,
-            )
-        )
-        if row in present_rows
-    ]
-    if feature_order is not None:
-        label_order = _label_order(
-            list(dict.fromkeys(label for _, label in feature_rows)),
-            feature_order,
-            name="feature_order",
-            noun="features",
-        )
-        feature_rows = [
-            row for label in label_order for row in feature_rows if row[1] == label
-        ]
+    feature_rows = _feature_rows(
+        feature_pairs,
+        resolved_features,
+        set(plot_df["row"]),
+        feature_order,
+    )
     resolved_feature_order = [label for _, label in feature_rows]
     resolved_group_order = _group_order(
         list(dict.fromkeys(plot_df["group_label"].tolist())),
@@ -515,15 +583,25 @@ def dotplot(
                 fontstyle=("italic" if italicize_features else "normal"),
             )
             ax.set_yticks(range(len(resolved_group_order)))
-            ax.set_yticklabels(_wrap_tick_labels(resolved_group_order, label_wrap))
+            ax.set_yticklabels(
+                _wrap_tick_labels(
+                    _group_tick_labels(resolved_group_order, categorical_scale),
+                    label_wrap,
+                )
+            )
             ax.set_xlim(-0.5, len(resolved_feature_order) - 0.5)
             ax.set_ylim(-0.5, len(resolved_group_order) - 0.5)
+            # The first group reads at the top, as in the unswapped plot.
+            ax.invert_yaxis()
             ax.set_xlabel("")
             ax.set_ylabel(" / ".join(group_keys))
         else:
             ax.set_xticks(range(len(resolved_group_order)))
             ax.set_xticklabels(
-                _wrap_tick_labels(resolved_group_order, label_wrap),
+                _wrap_tick_labels(
+                    _group_tick_labels(resolved_group_order, categorical_scale),
+                    label_wrap,
+                ),
                 rotation=45,
                 ha="right",
             )
@@ -605,7 +683,8 @@ def dotplot(
                 )
         apply_figure_chrome(fig, theme)
         if not size_scale_is_explicit:
-            fig.canvas.draw()
+            # The panel's final size needs the layout, not rendered pixels.
+            fig.draw_without_rendering()
             size_scale = _default_dot_size_scale(
                 ax,
                 n_x=(
@@ -764,6 +843,7 @@ def matrixplot(
     ]
     | None = None,
     annotation_scales: Mapping[str, CategoricalScale] | None = None,
+    categorical_scale: CategoricalScale | None = None,
     target: Any | None = None,
     figsize: tuple[float, float] | None = None,
     theme: str = "notebook",
@@ -773,14 +853,22 @@ def matrixplot(
     """Heatmap of mean expression or detection fraction by group.
 
     Rows follow the feature input order and columns follow the group order of
-    :func:`dotplot`: a stored display order, otherwise natural order. Set
-    explicit orders, compared as text, or enable hierarchical clustering
-    independently for either axis.
+    :func:`dotplot`: ``categorical_scale`` or a stored display order,
+    otherwise natural order. Set explicit orders, compared as text, or enable
+    hierarchical clustering independently for either axis; a clustered axis
+    draws its dendrogram beside the matrix. Group ticks show
+    ``categorical_scale.labels`` or the stored display labels.
     ``value="mean"`` colors by average expression; ``value="fraction"`` colors
     by the share of measured cells above ``expression_cutoff``.
     ``standardize="feature"`` applies only to means. ``sample_by`` has the same
     equal-sample weighting behavior as :func:`dotplot`, and shared feature
     labels follow the same pooling rule.
+
+    As in :func:`dotplot`, a mapping of group names to features draws one row
+    per feature and group, so a feature listed under two groups keeps a row in
+    each, and brackets each group's rows. The matrix table is then indexed by
+    ``feature_group`` and ``feature``. Grouped rows keep their groups, so they
+    cannot be clustered.
     """
     _, mpl = require_matplotlib()
     if value not in ("mean", "fraction"):
@@ -790,6 +878,12 @@ def matrixplot(
     if standardize == "feature" and value != "mean":
         raise ValueError("standardize='feature' applies only to value='mean'")
     validate_linkage(cluster_method, cluster_metric)
+    grouped_features = isinstance(features, Mapping)
+    if grouped_features and cluster_features:
+        raise ValueError(
+            "cluster_features would mix the rows of feature groups; pass features "
+            "as a list to cluster them, or order grouped rows with feature_order"
+        )
     color_scale = color_scale or ColorScale(cmap="viridis")
     if color_scale.scale != "linear":
         raise NotImplementedError(
@@ -822,41 +916,56 @@ def matrixplot(
     if standardize == "feature":
         aggregate = _standardize_feature(aggregate)
     color_values = "zscore" if standardize == "feature" else value
+    if isinstance(group_by, str):
+        categorical_scale = resolve_categorical_scale(
+            store,
+            group_by,
+            categorical_scale,
+        )
     plot_df = aggregate.copy()
     plot_df["group_label"] = _group_axis_labels(plot_df, _group_roles(group_keys))
-    summarized_features = set(plot_df["feature"].tolist())
-    observed_feature_order = [
-        feature
-        for feature in dict.fromkeys(feature.label for feature in resolved_features)
-        if feature in summarized_features
-    ]
-    if feature_order is not None:
-        observed_feature_order = _label_order(
-            observed_feature_order,
-            feature_order,
-            name="feature_order",
-            noun="features",
+    plot_df["row"] = list(
+        zip(
+            (_feature_group_key(value) for value in plot_df["feature_group"]),
+            plot_df["feature"],
+            strict=True,
         )
+    )
+    feature_rows = _feature_rows(
+        feature_pairs,
+        resolved_features,
+        set(plot_df["row"]),
+        feature_order,
+    )
     observed_group_order = _group_order(
         list(dict.fromkeys(plot_df["group_label"].tolist())),
         group_order,
-        (
-            resolve_categorical_scale(store, group_by, None)
-            if isinstance(group_by, str)
-            else None
-        ),
+        categorical_scale,
     )
-    mat = plot_df.pivot_table(
-        index="feature",
-        columns="group_label",
-        values=color_values,
-        observed=False,
-    ).reindex(index=observed_feature_order, columns=observed_group_order)
+    # One matrix row per feature and bracket group, as in dotplot.
+    row_positions = {row: index for index, row in enumerate(feature_rows)}
+    column_positions = {
+        label: index for index, label in enumerate(observed_group_order)
+    }
+    values = np.full((len(feature_rows), len(observed_group_order)), np.nan)
+    values[
+        plot_df["row"].map(row_positions).to_numpy(dtype=np.int64),
+        plot_df["group_label"].map(column_positions).to_numpy(dtype=np.int64),
+    ] = plot_df[color_values].to_numpy(dtype=np.float64)
+    mat = pd.DataFrame(
+        values,
+        index=(
+            pd.MultiIndex.from_tuples(feature_rows, names=["feature_group", "feature"])
+            if grouped_features
+            else pd.Index([label for _, label in feature_rows], name="feature")
+        ),
+        columns=pd.Index(observed_group_order, name="group"),
+    )
     row_annotation_values = normalize_annotations(
-        list(mat.index),
+        [label for _, label in feature_rows],
         row_annotations,
         axis_name="row",
-    )
+    ).set_axis(mat.index, axis=0)
     column_annotation_values = normalize_annotations(
         list(mat.columns),
         column_annotations,
@@ -864,7 +973,7 @@ def matrixplot(
     )
     mat, row_linkage, column_linkage = order_heatmap(
         mat,
-        row_order=None if feature_order is None else observed_feature_order,
+        row_order=None if feature_order is None else list(mat.index),
         column_order=None if group_order is None else observed_group_order,
         cluster_rows=cluster_features,
         cluster_columns=cluster_groups,
@@ -872,12 +981,18 @@ def matrixplot(
         metric=cluster_metric,
     )
     # Name the axes by role, as the aggregate table names its columns.
-    mat = mat.rename_axis(index="feature", columns="group")
-    resolved_feature_order = list(mat.index)
+    mat = mat.rename_axis(
+        index=["feature_group", "feature"] if grouped_features else "feature",
+        columns="group",
+    )
+    resolved_rows = list(mat.index)
+    resolved_feature_order = [
+        row[1] if grouped_features else row for row in resolved_rows
+    ]
     resolved_group_order = list(mat.columns)
-    row_annotation_values = row_annotation_values.reindex(
-        resolved_feature_order
-    ).rename_axis("feature")
+    row_annotation_values = row_annotation_values.reindex(resolved_rows).rename_axis(
+        mat.index.names
+    )
     column_annotation_values = column_annotation_values.reindex(
         resolved_group_order
     ).rename_axis("group")
@@ -923,7 +1038,11 @@ def matrixplot(
             interpolation="nearest",
         )
         ax.set_xticks(range(len(resolved_group_order)))
-        ax.set_xticklabels(resolved_group_order, rotation=45, ha="right")
+        ax.set_xticklabels(
+            _group_tick_labels(resolved_group_order, categorical_scale),
+            rotation=45,
+            ha="right",
+        )
         ax.set_yticks(range(len(resolved_feature_order)))
         ax.set_yticklabels(resolved_feature_order)
         annotation_xlim, annotation_ylim = draw_annotation_strips(
@@ -935,6 +1054,25 @@ def matrixplot(
         )
         ax.set_xlim(annotation_xlim)
         ax.set_ylim(annotation_ylim)
+        # Clustered axes show their hierarchy beside the matrix.
+        dendrogram_color = foreground_color(theme)
+        if column_linkage is not None:
+            axes["column_dendrogram"] = _draw_dendrogram(
+                ax, column_linkage, side="top", color=dendrogram_color
+            )
+        if row_linkage is not None:
+            axes["row_dendrogram"] = _draw_dendrogram(
+                ax, row_linkage, side="right", color=dendrogram_color
+            )
+        bracket_count = (
+            _draw_feature_group_brackets(
+                ax,
+                [group for group, _ in resolved_rows],
+                swap_axes=False,
+            )
+            if grouped_features
+            else 0
+        )
         colorbar_label = (
             "Mean expression"
             if value == "mean" and standardize == "none"
@@ -1035,6 +1173,7 @@ def matrixplot(
                 "assays": sorted(assays),
                 "feature_order": resolved_feature_order,
                 "group_order": resolved_group_order,
+                "feature_group_brackets": bracket_count,
                 "cluster_features": row_linkage is not None,
                 "cluster_groups": column_linkage is not None,
                 "cluster_method": cluster_method,

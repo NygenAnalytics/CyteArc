@@ -42,9 +42,14 @@ artifact refs. Docs: <https://docs.nygen.io/CyteArc/tutorials/plotting>,
   `CategoricalScale(order, palette, labels, missing_color, missing_label, palette_name)`,
   `Highlight(by, groups, indices, color, dim_alpha, ...)`, `DensityOverlay`, `SizeScale`,
   `StudyDesign`.
-- Plots are display. `max_points` thins only the overlaid points in `distribution`; violins use
-  every cell and `provenance.notes` gains `"subsampled_display"`. Take numbers from
+- Plots are display. `max_points` thins only the overlaid points in `distribution`, and
+  `provenance.notes` gains `"subsampled_display"`; a violin estimates its density from at most
+  `max_density_points` (20000) values, adding `"subsampled_density"`. Take numbers from
   `result.tables` or artifacts, never from pixels or UMAP distances.
+- Default category colors range over every value of the column or label artifact, so `groups=`,
+  `subset_by=` or `cell_key=` keep each category's color. Embeddings draw categories, and
+  continuous colors they do not sort, in a seeded shuffle (`seed=0`; `seed=None` keeps stored
+  order), and draw gene colors high on top. `provenance.extras["draw_order"]` records the order.
 
 ## Recipes
 
@@ -55,8 +60,9 @@ columns. When author labels are held out, plot only labels you assigned.
 
 Run scripts as `MPLBACKEND=Agg python script.py`, or call `matplotlib.use("Agg")` before
 importing pyplot. `save` infers the format (png, pdf, svg, tif) from the suffix, keeps the exact
-inch size, and uses a white background. The exact size can clip a legend outside the axes
-(`legend_loc="right"`, many categories): save those with `exact_size=False`, a tight crop.
+inch size, and uses a white background. Side legends fit figures that CyteArc creates; a legend
+beside axes you passed as `target=` can reach past your figure, so save that figure with
+`bbox_inches="tight"` or `exact_size=False`, a tight crop.
 
 ```python
 import matplotlib.pyplot as plt
@@ -191,6 +197,7 @@ r = ds.plots.matrixplot(
     features=["CD3D", "MS4A1", "LYZ"], groups=run["clusters"], cluster_groups=True, show=False
 )
 r.tables["matrix"]  # the drawn values: index "feature" (rows), columns "group"
+r.axes["column_dendrogram"]  # clustered axes draw their dendrogram beside the matrix
 r.close()
 r = ds.plots.marker_heatmap(marker=run["markers"], topn=3, show=False)
 r.tables["markers"].head()  # group, rank, feature_index, score, feature
@@ -247,11 +254,13 @@ plt.close(fig)
 | `normalization` | `NormalizationSpec()` (assay normalization, no transform) | `transform="log1p"` for gene panels of RNA library-size values; CLR (ADT), `norm_lib_size_log`, and ATAC values raise, so use `NormalizationSpec()` or `source="raw"` for them. Run mode colors genes only when it is passed. |
 | `color_scale` | auto per feature | `quantiles=(0.0, 0.99)` to stop outliers washing out a gene. |
 | `categorical_scale` | default palette | Fix `order` or `palette` (dict) to keep colors identical; `palette_name` is only `"default"` or `"colorblind"`. |
-| `sort_values` | `False` | `True` draws high values last for expression panels. |
+| `sort_values` | `None` (genes high on top) | `True` also sorts metadata colors; `False` shuffles gene colors too. |
+| `seed` (embedding) | `0` | `None` draws cells in stored order, so the last sample covers the others. |
 | `legend_loc` | `"auto"` | `"right"`, `"on_data"` or `"none"` to force placement. |
 | `max_points` (distribution) | `10000` | `0` for no points; `None` gives no points for stacked violins. |
+| `max_density_points` (distribution) | `20000` | `None` for exact densities of very large groups. |
 | `rasterize_threshold` | `50000` | Lower for smaller vector files. |
-| `save(dpi=, exact_size=)` | figure dpi (300 for TIFF), `True` | `exact_size=False` for a tight crop and for legends outside the axes. |
+| `save(dpi=, exact_size=)` | figure dpi (300 for TIFF), `True` | `exact_size=False` for a tight crop and for legends beside `target=` axes. |
 
 ## Check before moving on
 

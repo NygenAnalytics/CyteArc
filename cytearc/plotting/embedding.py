@@ -23,13 +23,13 @@ from ._contracts import (
 )
 from ._data import (
     _artifact_cell_selection,
+    _category_universe,
     _cell_column_values,
     _cell_metadata_columns,
     _fetch_cell_column,
     _resolve_grouping,
     _resolve_layout,
     fetch_normalized_feature_matrix,
-    has_finite_values,
     resolve_cell_selection,
     unmeasured_cell_counts,
     unmeasured_extras,
@@ -47,14 +47,18 @@ from ._figure import (
     close_figures_on_error,
     normalize_axes_target,
 )
+from ._labels import place_layout_labels, register_layout_labels
 from ..utils.arguments import clip_fraction_argument
 from ..utils.arrays import sort_categories
 from ._style import (
     DEFAULT_PANEL_INCHES,
     DEFAULT_RASTERIZE_THRESHOLD,
+    LEGEND_SIDE_ENTRIES_PER_COLUMN,
+    LEGEND_SIDE_MAX_COLUMNS,
     LEGEND_SIDE_MAX_ENTRIES,
     FrameStyle,
     LegendLoc,
+    _is_missing_category,
     apply_figure_chrome,
     category_label,
     continuous_norm,
@@ -62,6 +66,8 @@ from ._style import (
     default_point_size,
     finish_embedding_axes,
     legend_side_columns,
+    legend_side_height,
+    legend_side_rows,
     padded_square_limits,
     panel_area_inches,
     refresh_layout_point_sizes,
@@ -69,6 +75,7 @@ from ._style import (
     resolve_category_scale,
     resolve_color_limits,
     resolve_legend_loc,
+    scalable_values,
     scatter_edgecolor,
     scatter_edges,
     theme_context,
@@ -155,14 +162,51 @@ def _color_labels(
 def _embedding_panel_keys(
     labels: Sequence[str],
     facets: Sequence[Any],
+    *,
+    faceted: bool = False,
 ) -> list[Hashable]:
+    """Key each panel by its color label, and by its facet when faceted.
+
+    A faceted panel of cells whose facet value is missing has the facet None.
+    """
     panel_keys: list[Hashable] = []
     for label in labels:
         for facet in facets:
-            panel_keys.append(label if facet is None else (label, facet))
+            panel_keys.append((label, facet) if faceted else label)
     if len(set(panel_keys)) != len(panel_keys):
         return [(index, key) for index, key in enumerate(panel_keys)]
     return panel_keys
+
+
+# Faceted embeddings wrap each color's facets at this many columns by default.
+MAX_FACET_COLUMNS = 4
+
+
+def _block_slots(
+    n_blocks: int,
+    block_size: int,
+    n_columns: int,
+) -> list[int]:
+    """Grid slots, row by row, that start each block of panels on a new row."""
+    rows_per_block = int(np.ceil(block_size / n_columns))
+    return [
+        block * rows_per_block * n_columns + index
+        for block in range(n_blocks)
+        for index in range(block_size)
+    ]
+
+
+def _facet_title(facet_by: str, facet: Any, missing_label: str) -> str:
+    """Name a facet panel, with ``missing_label`` for cells without a facet value."""
+    return f"{facet_by}={missing_label if _is_missing_category(facet) else facet}"
+
+
+def _facet_missing_label(store: Any, facet_by: str) -> str:
+    """The label of a missing facet value: the stored display's, or ``NA``."""
+    display = stored_display_metadata(store, facet_by)
+    if display is not None and display["kind"] == "categorical":
+        return categorical_display_scale(display).missing_label
+    return CategoricalScale().missing_label
 
 
 def _layout_panel_key(layout: str, panel_key: Hashable) -> Hashable:
@@ -238,16 +282,24 @@ def _embedding_multiple_layouts(
         subset_by=subset_by,
         cell_key=cell_key,
     )
-    child_panel_keys = _embedding_panel_keys(labels, facets)
+    child_panel_keys = _embedding_panel_keys(
+        labels, facets, faceted=facet_by is not None
+    )
     panel_keys = [
         _layout_panel_key(layout, panel_key)
         for layout in layout_keys
         for panel_key in child_panel_keys
     ]
-    resolved_columns = n_columns if n_columns is not None else len(child_panel_keys)
-    resolved_columns = max(1, min(resolved_columns, len(panel_keys)))
+    slots: list[int] | None = None
+    if n_columns is None:
+        # Each layout starts a row and wraps its panels at four columns.
+        resolved_columns = max(1, min(len(child_panel_keys), MAX_FACET_COLUMNS))
+        slots = _block_slots(len(layout_keys), len(child_panel_keys), resolved_columns)
+    else:
+        resolved_columns = max(1, min(n_columns, len(panel_keys)))
     if figsize is None and target is None:
-        nrows = int(np.ceil(len(panel_keys) / resolved_columns))
+        positions = range(len(panel_keys)) if slots is None else slots
+        nrows = max(positions, default=0) // resolved_columns + 1
         figsize = (
             DEFAULT_PANEL_INCHES * resolved_columns + 0.4,
             DEFAULT_PANEL_INCHES * nrows + 0.2,
@@ -259,6 +311,7 @@ def _embedding_multiple_layouts(
             panel_keys=panel_keys,
             figsize=figsize,
             n_columns=resolved_columns,
+            slots=slots,
         )
 
     children: list[tuple[str, PlotResult]] = []
@@ -575,6 +628,22 @@ def _prefetch_feature_colors(
                 expanded_color[selection] = color
                 color = expanded_color
             colors[slots[position]] = (color, resolved[position].label, False, False)
+
+
+def _color_category_universe(
+    store: Any,
+    item: str | ArtifactRef | FeatureRef | CellField | None,
+    values: np.ndarray,
+) -> np.ndarray:
+    """Every category of a categorical color, which default colors range over.
+
+    A label artifact's values already cover all of its cells; a metadata
+    column's categories come from all of its rows.
+    """
+    if isinstance(item, ArtifactRef):
+        return np.asarray(values)
+    assert isinstance(item, str | CellField)
+    return _category_universe(store, item if isinstance(item, str) else item.key)
 
 
 def _resolve_highlight_mask(
@@ -1021,15 +1090,27 @@ def _categorical_legend_block(
     return title, handles, omitted
 
 
-def _side_legend_kwargs(title: str | None, handles: list[Any]) -> dict[str, Any]:
+def _side_legend_kwargs(
+    title: str | None,
+    handles: list[Any],
+    *,
+    rows: int,
+) -> dict[str, Any]:
+    """Legend keywords that hold at most ``rows`` entries per column."""
     return {
         "handles": handles,
         "title": title,
         "frameon": False,
         "borderaxespad": 0,
-        "ncols": legend_side_columns(len(handles)),
+        "ncols": legend_side_columns(len(handles), rows=rows),
         "columnspacing": 0.8,
     }
+
+
+def _side_legend_rows(entries: int, rows: int) -> int:
+    """Rows of a side legend of ``entries`` entries, at most ``rows`` per column."""
+    shown = min(entries, rows * LEGEND_SIDE_MAX_COLUMNS)
+    return int(np.ceil(shown / legend_side_columns(shown, rows=rows)))
 
 
 def _add_on_data_labels(
@@ -1042,6 +1123,14 @@ def _add_on_data_labels(
     theme: str,
     max_labels: int,
 ) -> list[Any]:
+    """Label the most populous categories at their cells' medians.
+
+    Labels start at their cluster's median, as scanpy places them. Once the
+    panel's layout is final, overlapping labels move apart by at most about
+    one label height and stay nearer their own median than any other
+    cluster's (see :func:`~cytearc.plotting._labels.separate_labels`).
+    Returns the categories left unlabelled beyond ``max_labels``.
+    """
     from matplotlib import patheffects
 
     text_color = "#f5f5f5" if theme == "dark" else "#222222"
@@ -1063,19 +1152,7 @@ def _add_on_data_labels(
         )
     candidates.sort(key=lambda item: (-item[3], str(item[0])))
     omitted = [value for value, _, _, _ in candidates[max_labels:]]
-    chosen = candidates[:max_labels]
-    if chosen:
-        yrange = max(float(np.ptp(yy)), 1e-12)
-        minimum_gap = 0.035 * yrange
-        ordered = sorted(chosen, key=lambda item: item[2])
-        adjusted: list[tuple[Any, float, float, int]] = []
-        previous_y = -np.inf
-        for value, xpos, ypos, count in ordered:
-            adjusted_y = max(ypos, previous_y + minimum_gap)
-            adjusted.append((value, xpos, adjusted_y, count))
-            previous_y = adjusted_y
-        chosen = adjusted
-    for value, xpos, ypos, _ in chosen:
+    texts = [
         ax.text(
             xpos,
             ypos,
@@ -1086,7 +1163,16 @@ def _add_on_data_labels(
             color=text_color,
             path_effects=[patheffects.withStroke(linewidth=2.0, foreground=stroke)],
             zorder=5,
+            # Labels sit on the data; they never reshape the figure layout.
+            in_layout=False,
         )
+        for value, xpos, ypos, _ in candidates[:max_labels]
+    ]
+    register_layout_labels(
+        ax,
+        texts,
+        np.asarray([(xpos, ypos) for _, xpos, ypos, _ in candidates]),
+    )
     return omitted
 
 
@@ -1094,9 +1180,39 @@ def _no_automatic_scale(values: np.ndarray, scale: ColorScale) -> bool:
     """Whether a continuous color has neither a value nor an explicit limit.
 
     Such a color, such as a feature whose assay measured none of the drawn
-    cells, gets no colorbar; its points take the scale's missing color.
+    cells, gets no colorbar; its points take the scale's missing color. A log
+    scale counts only positive values.
     """
-    return scale.vmin is None and scale.vmax is None and not has_finite_values(values)
+    return (
+        scale.vmin is None
+        and scale.vmax is None
+        and not scalable_values(_numeric(values), scale).any()
+    )
+
+
+def _numeric(values: np.ndarray) -> np.ndarray:
+    """Values as floats, with any value that is not a number as NaN."""
+    numeric = pd.to_numeric(pd.Series(np.asarray(values).ravel()), errors="coerce")
+    return np.asarray(numeric, dtype=np.float64)
+
+
+def _panel_draw_order(
+    rank: np.ndarray | None,
+    sort_keys: np.ndarray | None,
+) -> np.ndarray | None:
+    """Positions of a panel's cells in drawing order, or None for stored order.
+
+    ``rank`` holds each cell's place in the seeded shuffle, or is None to keep
+    the stored order. With ``sort_keys``, cells draw by increasing key, so the
+    highest values sit on top, and ties draw in shuffle (or stored) order.
+    """
+    if sort_keys is not None:
+        if rank is None:
+            return np.argsort(sort_keys, kind="stable")
+        return np.lexsort((rank, sort_keys))
+    if rank is None:
+        return None
+    return np.argsort(rank, kind="stable")
 
 
 def _placeholder_limits(scale: ColorScale) -> tuple[float, float]:
@@ -1115,34 +1231,24 @@ def _draw_continuous(
     ss: np.ndarray,
     *,
     limits: tuple[float, float],
-    cmap_name: str | None,
-    vcenter: float | None,
-    scale: str,
-    missing_color: str,
+    color_scale: ColorScale,
     default_color: str,
     edgecolor: str,
     edgewidth: float,
     alpha: float,
     label: str,
     is_uniform: bool,
-    sort_values: bool,
-    rng: np.random.Generator | None,
     add_colorbar: bool,
     rasterized: bool,
     plt: Any,
     mpl: Any,
 ) -> Any:
-    finite = np.isfinite(vnum)
-    order_idx = np.arange(len(vnum))
-    if sort_values and finite.any():
-        order_idx = np.argsort(np.where(finite, vnum, -np.inf))
-    elif rng is not None:
-        order_idx = rng.permutation(len(vnum))
-    xx = xx[order_idx]
-    yy = yy[order_idx]
-    vnum = vnum[order_idx]
-    ss = ss[order_idx]
-    finite = finite[order_idx]
+    """Scatter continuous values in the given order.
+
+    Values the scale cannot color, such as NaN or, on a log scale, values
+    that are not positive, take the scale's missing color.
+    """
+    drawable = scalable_values(vnum, color_scale)
     edges, lw = scatter_edges(edgecolor, edgewidth)
 
     if is_uniform or len(xx) == 0:
@@ -1161,14 +1267,14 @@ def _draw_continuous(
         mpl,
         vmin=limits[0],
         vmax=limits[1],
-        vcenter=vcenter,
-        scale=scale,
+        vcenter=color_scale.vcenter,
+        scale=color_scale.scale,
     )
-    cmap = plt.get_cmap(cmap_name or "viridis")
+    cmap = plt.get_cmap(color_scale.cmap or "viridis")
     face = np.empty((len(vnum), 4))
-    face[:] = mpl.colors.to_rgba(missing_color)
-    if finite.any():
-        face[finite] = cmap(norm(vnum[finite]))
+    face[:] = mpl.colors.to_rgba(color_scale.missing_color)
+    if drawable.any():
+        face[drawable] = cmap(norm(vnum[drawable]))
     collection = ax.scatter(
         xx,
         yy,
@@ -1197,16 +1303,26 @@ def _draw_continuous(
     return collection
 
 
-def _soft_clip(values: np.ndarray, clip_fraction: float) -> np.ndarray:
-    """Clip finite values to their quantiles; ``embedding`` validated the fraction."""
+def _soft_clip(
+    values: np.ndarray,
+    clip_fraction: float,
+    drawn: np.ndarray | None = None,
+) -> np.ndarray:
+    """Clip finite values to the quantiles of the drawn cells' finite values.
+
+    ``drawn`` marks the cells the plot shows, all of them by default, so
+    hidden cells never move the clip limits; ``embedding`` validated the
+    fraction.
+    """
     if clip_fraction <= 0:
         return values
     v = np.asarray(values, dtype=np.float64).copy()
     finite = np.isfinite(v)
-    if not finite.any():
+    reference = v[finite if drawn is None else finite & drawn]
+    if not reference.size:
         return v
-    lo = float(np.percentile(v[finite], 100 * clip_fraction))
-    hi = float(np.percentile(v[finite], 100 - 100 * clip_fraction))
+    lo = float(np.percentile(reference, 100 * clip_fraction))
+    hi = float(np.percentile(reference, 100 - 100 * clip_fraction))
     v[finite & (v < lo)] = lo
     v[finite & (v > hi)] = hi
     return v
@@ -1235,7 +1351,7 @@ def embedding(
     point_edgecolor: str | None = None,
     point_edgewidth: float | None = None,
     point_alpha: float = 1.0,
-    sort_values: bool = False,
+    sort_values: bool | None = None,
     color_scale: ColorScale | None = None,
     categorical_scale: CategoricalScale | None = None,
     default_color: str = "steelblue",
@@ -1254,7 +1370,7 @@ def embedding(
     frame: FrameStyle = "minimal",
     density_overlay: DensityOverlay | None = None,
     highlight: Highlight | None = None,
-    seed: int | None = None,
+    seed: int | None = 0,
     rasterize_threshold: int = DEFAULT_RASTERIZE_THRESHOLD,
     show: bool = True,
 ) -> PlotResult:
@@ -1262,10 +1378,12 @@ def embedding(
 
     ``color_by`` accepts a cell-metadata column, a gene name, or a list of
     either. With several genes, CyteArc draws one panel per gene. With
-    ``facet_by``, each gene becomes a row and each facet level a column.
-    Color limits for a gene are shared across facets so panels stay comparable.
-    Multiple ``layout_key`` values produce the cartesian product of layouts and
-    colors in one figure.
+    ``facet_by``, each gene becomes a row of facet panels that wraps at four
+    columns, and cells without a facet value get their own panel, titled with
+    the facet column's missing label (``NA`` by default). Color limits for a
+    gene are shared across facets so panels stay comparable. Multiple
+    ``layout_key`` values produce the cartesian product of layouts and colors
+    in one figure, one layout per row of panels.
 
     Common choices:
 
@@ -1276,17 +1394,38 @@ def embedding(
     - ``legend_loc``: ``"auto"`` puts a side legend when there are few
       categories, labels on the clusters for medium category counts, and a
       wrapped side legend for larger sets. Use ``"right"``, ``"on_data"``, or
-      ``"none"`` to force a placement.
+      ``"none"`` to force a placement. On-data labels sit at their cells'
+      median and move apart by at most about one label height, never closer
+      to another cluster's median than to their own. A side legend lists the
+      categories that fit beside the figure, the most frequent first.
     - ``frame``: ``"minimal"`` (default) keeps an L-shaped axes edge without
       UMAP tick labels. ``"none"`` removes the box. ``"axes"`` keeps UMAP1 /
       UMAP2 labels on the outer panels.
     - ``point_size``: leave as ``None`` to size markers from the cell count.
       Pass a number (matplotlib marker area) or ``point_sizes`` for per-cell
       sizes such as mapping confidence.
-    - ``sort_values=True``: for continuous colors, draw high values last so
-      expressing cells sit on top of the cloud.
+    - ``sort_values``: whether continuous colors draw high values last, so
+      expressing cells sit on top of the cloud. The default, ``None``, sorts
+      gene and other feature colors and shuffles the rest; ``True`` sorts
+      every continuous color and ``False`` none.
+    - ``seed``: categorical colors, and continuous colors that are not
+      sorted, draw their cells in a shuffled order, so cells stored last, such
+      as the last sample of a merged store, do not cover the others. Each cell
+      draws at its rank in ``numpy.random.default_rng(seed).permutation(n)``
+      over the ``n`` cells of the layout, so the order is reproducible and the
+      same in every panel. ``None`` draws cells in stored order.
+    - ``missing_color``: the color of cells without a value. It replaces the
+      missing color of whichever categorical or continuous scale applies.
+    - ``clip_fraction``: clip continuous values to these quantiles of the
+      drawn cells, for example ``0.01`` for the 1st to 99th percentile.
     - ``theme``: ``"notebook"`` or ``"paper"`` for white figures; ``"dark"``
       for dark notebook themes.
+
+    Default category colors are assigned over every value of the colored
+    column or label artifact, not only the drawn cells, so a category keeps
+    its color in plots of different subsets or groups. A stored display or a
+    ``categorical_scale`` order or palette sets them instead. A log
+    ``ColorScale`` draws values that are not positive in its missing color.
 
     Returns a :class:`PlotResult`. Access ``.figure`` in notebooks, or call
     ``.save(...)`` / ``.close()`` when you own the figure.
@@ -1395,7 +1534,6 @@ def embedding(
     color_scale_was_explicit = color_scale is not None
     categorical_scale_was_explicit = categorical_scale is not None
     color_scale = color_scale or ColorScale(cmap="viridis", scope="feature")
-    resolved_missing_color = missing_color or "#bdbdbd"
 
     n = len(x)
     if n == 0:
@@ -1480,12 +1618,7 @@ def embedding(
                 else stored_scale
             )
         elif display["kind"] == "categorical" and not categorical_scale_was_explicit:
-            stored_categorical = categorical_display_scale(display)
-            stored_categorical_scales[index] = (
-                stored_categorical
-                if missing_color is None
-                else replace(stored_categorical, missing_color=missing_color)
-            )
+            stored_categorical_scales[index] = categorical_display_scale(display)
     subset_vals = (
         _selected_metadata_column(
             store,
@@ -1554,7 +1687,7 @@ def embedding(
         normalization=normalization,
         cell_indices=artifact_cell_indices,
         unmeasured=unmeasured,
-        selection=selection_mask if clip_fraction == 0 else None,
+        selection=selection_mask,
     )
     if clip_fraction > 0:
         clipped: list[tuple[np.ndarray, str, bool, bool]] = []
@@ -1563,10 +1696,16 @@ def embedding(
                 clipped.append((vals, label, is_cat, is_uniform))
             else:
                 clipped.append(
-                    (_soft_clip(vals, clip_fraction), label, is_cat, is_uniform)
+                    (
+                        _soft_clip(vals, clip_fraction, base_mask),
+                        label,
+                        is_cat,
+                        is_uniform,
+                    )
                 )
         color_cache = clipped
 
+    facet_missing_label = CategoricalScale().missing_label
     if facet_by is not None:
         assert facet_values is not None
         if groups is not None and group_order is not None:
@@ -1575,17 +1714,26 @@ def embedding(
             facets = list(facet_order)
         else:
             facets = sort_categories(list(pd.unique(facet_values[base_mask])))
+        if any(_is_missing_category(facet) for facet in facets):
+            facet_missing_label = _facet_missing_label(store, facet_by)
     else:
         facets = [None]
 
     labels = [label for _, label, _, _ in color_cache]
-    panel_keys = _embedding_panel_keys(labels, facets)
+    panel_keys = _embedding_panel_keys(labels, facets, faceted=facet_by is not None)
 
     n_colors = len(color_cache)
     n_facets = len(facets)
-    if n_columns is None:
-        n_columns = n_facets if facet_by is not None else min(n_colors, 4)
+    slots: list[int] | None = None
+    if n_columns is None and facet_by is not None:
+        # Each color starts a row of facets that wraps at four columns.
+        n_columns = min(n_facets, MAX_FACET_COLUMNS)
+        slots = _block_slots(n_colors, n_facets, n_columns)
+    elif n_columns is None:
+        n_columns = min(n_colors, 4)
     n_columns = max(1, min(n_columns, len(panel_keys)))
+    positions = list(range(len(panel_keys))) if slots is None else slots
+    nrows = max(positions, default=0) // n_columns + 1
 
     xlim, ylim = padded_square_limits(x[base_mask], y[base_mask])
     edgecolor = point_edgecolor or scatter_edgecolor(theme)
@@ -1623,24 +1771,36 @@ def embedding(
                 categorical_scale
                 if categorical_scale_was_explicit
                 else stored_categorical_scales.get(color_index)
-            ) or CategoricalScale(missing_color=resolved_missing_color)
-            if (
-                groups is not None
-                and group_order is not None
+            ) or CategoricalScale()
+            if missing_color is not None:
+                source = replace(source, missing_color=missing_color)
+            requested = (
+                group_order
+                if groups is not None
                 and facet_by is None
                 and color_index == groups_color_index
                 and (source.order is None or not categorical_scale_was_explicit)
-            ):
-                # Requested groups order the legend unless a caller's scale does.
-                source = replace(source, order=tuple(group_order))
+                else None
+            )
             # Categories come from every selected cell, so layouts that cannot
-            # place some cells still share one order and palette.
+            # place some cells still share one order and palette. Requested
+            # groups order the legend unless a caller's scale does.
             categorical_maps[color_index] = resolve_category_scale(
                 np.asarray(vals)[selection_mask],
                 source,
+                universe=(
+                    _color_category_universe(store, color_items[color_index], vals)
+                    if source.order is None and source.palette is None
+                    else None
+                ),
+                order=requested,
             )
             continue
         active_color_scale = stored_color_scales.get(color_index, color_scale)
+        if missing_color is not None:
+            active_color_scale = replace(
+                active_color_scale, missing_color=missing_color
+            )
         resolved_color_scales[color_index] = active_color_scale
         if active_color_scale.scope != "panel":
             if shared_limits is not None and color_scale_was_explicit:
@@ -1662,9 +1822,26 @@ def embedding(
         )
         for color_index, scale in categorical_maps.items()
     }
-    needs_side_legend = any(loc == "right" for loc in legend_locs.values())
+    # Side legends list each drawn category and a missing entry when needed.
+    side_legend_missing = {
+        color_index: bool(
+            pd.isna(np.asarray(color_cache[color_index][0])[selection_mask]).any()
+        )
+        for color_index, loc in legend_locs.items()
+        if loc == "right"
+    }
+    side_legend_entries = {
+        color_index: len(categorical_maps[color_index].order or ()) + int(missing)
+        for color_index, missing in side_legend_missing.items()
+    }
+    with theme_context(theme):
+        side_legend_heights = {
+            color_index: legend_side_height(
+                _side_legend_rows(entries, LEGEND_SIDE_ENTRIES_PER_COLUMN), title=True
+            )
+            for color_index, entries in side_legend_entries.items()
+        }
     if figsize is None and target is None:
-        nrows = int(np.ceil(len(panel_keys) / n_columns))
         needs_top_cbar = any(
             (not is_cat) and (not is_uniform)
             for _, _, is_cat, is_uniform in color_cache
@@ -1672,17 +1849,17 @@ def embedding(
         panel = DEFAULT_PANEL_INCHES
         side_columns = max(
             (
-                legend_side_columns(len(scale.order or ()))
-                for color_index, scale in categorical_maps.items()
-                if legend_locs[color_index] == "right"
+                legend_side_columns(min(entries, LEGEND_SIDE_MAX_ENTRIES))
+                for entries in side_legend_entries.values()
             ),
             default=0,
         )
         width = panel * n_columns + (
-            0.95 * side_columns + 0.4 if needs_side_legend else 0.25
+            0.95 * side_columns + 0.4 if side_legend_entries else 0.25
         )
         height = panel * nrows + (0.55 if needs_top_cbar else 0.2)
-        figsize = (width, height)
+        # The figure grows so that its side legends fit beside the panels.
+        figsize = (width, max(height, sum(side_legend_heights.values(), 0.0)))
 
     legends: list[LegendSpec] = []
     categorical_scales: list[Any] = []
@@ -1712,7 +1889,14 @@ def embedding(
             extras = {"vmin": limits[0], "vmax": limits[1]}
         legends.append(LegendSpec(kind="colorbar", label=label, extras=extras))
 
-    rng = np.random.default_rng(seed) if seed is not None else None
+    # Each cell's rank in the seeded shuffle, the same in every panel.
+    rank = None if seed is None else np.random.default_rng(seed).permutation(n)
+    feature_colors = [
+        isinstance(item, FeatureRef)
+        or (isinstance(item, str) and item not in metadata_columns)
+        for item in color_items
+    ]
+    draw_orders: dict[str, str] = {}
     # None for a panel without a finite value to scale.
     panel_limit_map: dict[str, tuple[float, float] | None] = {}
     panel_point_sizes: dict[str, float] = {}
@@ -1720,20 +1904,43 @@ def embedding(
     omitted_labels: dict[str, list[Any]] = {}
     omitted_legend_entries: dict[str, list[str]] = {}
     sized_artists: list[tuple[str, Any]] = []
-    legend_blocks: list[tuple[str | None, list[Any]]] = []
+    labelled_panels = False
+    legend_blocks: list[tuple[str | None, list[Any], int]] = []
 
     with theme_context(theme):
         fig, axes, owns = normalize_axes_target(
-            target, panel_keys=panel_keys, figsize=figsize, n_columns=n_columns
+            target,
+            panel_keys=panel_keys,
+            figsize=figsize,
+            n_columns=n_columns,
+            slots=slots,
         )
         panel_i = 0
         for color_index, (vals, label, is_cat, is_uniform) in enumerate(color_cache):
+            sorts_values = (
+                not is_cat
+                and not is_uniform
+                and (
+                    feature_colors[color_index]
+                    if sort_values is None
+                    else bool(sort_values)
+                )
+            )
+            draw_orders[display_key(color_index, label)] = (
+                "stored"
+                if is_uniform
+                else "sorted"
+                if sorts_values
+                else "stored"
+                if rank is None
+                else "shuffled"
+            )
             for fac_i, fac in enumerate(facets):
                 panel_key = panel_keys[panel_i]
                 ax = axes[panel_key]
                 if facet_values is None:
                     mask = base_mask.copy()
-                elif pd.isna(fac):
+                elif _is_missing_category(fac):
                     mask = base_mask & pd.isna(facet_values)
                 else:
                     mask = base_mask & (facet_values == fac)
@@ -1772,21 +1979,25 @@ def embedding(
                 if mask.sum() == 0:
                     ax.set_axis_off()
                     ax.set_title(
-                        f"{label} | {facet_by}={fac} (empty)"
-                        if fac is not None
+                        f"{label} | "
+                        f"{_facet_title(facet_by, fac, facet_missing_label)} (empty)"
+                        if facet_by is not None
                         else f"{label} (empty)"
                     )
                     panel_i += 1
                     continue
 
+                panel_rank = None if rank is None else rank[mask]
                 if is_cat:
                     category_scale = categorical_maps[color_index]
+                    order = _panel_draw_order(panel_rank, None)
+                    drawn = slice(None) if order is None else order
                     base_artist = _draw_categorical(
                         ax,
-                        xx,
-                        yy,
-                        vv,
-                        ss,
+                        xx[drawn],
+                        yy[drawn],
+                        vv[drawn],
+                        ss[drawn],
                         scale=category_scale,
                         edgecolor=edgecolor,
                         edgewidth=active_edgewidth,
@@ -1805,24 +2016,37 @@ def embedding(
                             theme=theme,
                             max_labels=max_on_data_labels,
                         )
+                        labelled_panels = True
                         if omitted:
                             omitted_labels[str(panel_key)] = omitted
                     elif panel_legend == "right" and fac_i == n_facets - 1:
                         selected_values = np.asarray(vals)[selection_mask]
+                        missing = side_legend_missing[color_index]
+                        # Owned figures share their height among side legends;
+                        # a caller's axes hold its legend beside them.
+                        rows = legend_side_rows(
+                            fig.get_figheight()
+                            * side_legend_heights[color_index]
+                            / sum(side_legend_heights.values())
+                            if owns
+                            else ax.get_position().height * fig.get_figheight(),
+                            title=True,
+                        )
                         legend_title, handles, omitted = _categorical_legend_block(
                             mpl,
                             scale=category_scale,
                             label=label,
-                            missing=bool(pd.isna(selected_values).any()),
+                            missing=missing,
                             edgecolor=edgecolor,
                             values=selected_values,
+                            max_entries=rows * LEGEND_SIDE_MAX_COLUMNS - int(missing),
                         )
                         if owns:
                             # Figure legends are placed together after drawing.
-                            legend_blocks.append((legend_title, handles))
+                            legend_blocks.append((legend_title, handles, rows))
                         else:
                             ax.legend(
-                                **_side_legend_kwargs(legend_title, handles),
+                                **_side_legend_kwargs(legend_title, handles, rows=rows),
                                 loc="upper left",
                                 bbox_to_anchor=(1.02, 1.0),
                             )
@@ -1835,9 +2059,7 @@ def embedding(
                         color_index,
                         color_scale,
                     )
-                    vnum = pd.to_numeric(pd.Series(vv), errors="coerce").to_numpy(
-                        dtype=np.float64
-                    )
+                    vnum = _numeric(vv)
                     panel_unscaled = False
                     if is_uniform:
                         limits = (0.0, 1.0)
@@ -1865,26 +2087,38 @@ def embedding(
                             or fac_i == n_facets - 1
                         )
                     )
+                    # Uniform panels keep stored order; sorted panels draw
+                    # values the scale cannot color first.
+                    order = (
+                        None
+                        if is_uniform
+                        else _panel_draw_order(
+                            panel_rank,
+                            np.where(
+                                scalable_values(vnum, active_color_scale),
+                                vnum,
+                                -np.inf,
+                            )
+                            if sorts_values
+                            else None,
+                        )
+                    )
+                    drawn = slice(None) if order is None else order
                     base_artist = _draw_continuous(
                         ax,
                         fig,
-                        xx,
-                        yy,
-                        vnum,
-                        ss,
+                        xx[drawn],
+                        yy[drawn],
+                        vnum[drawn],
+                        ss[drawn],
                         limits=limits,
-                        cmap_name=active_color_scale.cmap,
-                        vcenter=active_color_scale.vcenter,
-                        scale=active_color_scale.scale,
-                        missing_color=active_color_scale.missing_color,
+                        color_scale=active_color_scale,
                         default_color=default_color,
                         edgecolor=edgecolor,
                         edgewidth=active_edgewidth,
                         alpha=base_alpha,
                         label=label,
                         is_uniform=is_uniform,
-                        sort_values=sort_values,
-                        rng=rng,
                         add_colorbar=add_cb,
                         rasterized=rasterized,
                         plt=plt,
@@ -1947,16 +2181,14 @@ def embedding(
 
                 if not show_titles:
                     title = None
-                elif fac is None:
+                elif facet_by is None:
                     # A labelled colorbar already names the panel.
                     title = None if (not is_cat and add_cb) else label
                 else:
-                    title = (
-                        f"{label} | {facet_by}={fac}" if label else f"{facet_by}={fac}"
-                    )
-                col = panel_i % n_columns
-                row = panel_i // n_columns
-                nrows = int(np.ceil(len(panel_keys) / n_columns))
+                    facet_title = _facet_title(facet_by, fac, facet_missing_label)
+                    title = f"{label} | {facet_title}" if label else facet_title
+                col = positions[panel_i] % n_columns
+                row = positions[panel_i] // n_columns
                 finish_embedding_axes(
                     ax,
                     xlim=xlim,
@@ -1968,9 +2200,9 @@ def embedding(
                 )
                 panel_i += 1
         if len(legend_blocks) == 1:
-            legend_title, handles = legend_blocks[0]
+            legend_title, handles, rows = legend_blocks[0]
             fig.legend(
-                **_side_legend_kwargs(legend_title, handles),
+                **_side_legend_kwargs(legend_title, handles, rows=rows),
                 loc="outside right center",
             )
         elif legend_blocks:
@@ -1978,14 +2210,17 @@ def embedding(
                 fig,
                 [
                     (legend_title, handles, [str(h.get_label()) for h in handles])
-                    for legend_title, handles in legend_blocks
+                    for legend_title, handles, _ in legend_blocks
                 ],
+                rows=min(rows for _, _, rows in legend_blocks),
             )
         apply_figure_chrome(fig, theme)
-        if sized_artists:
-            # Constrained layout settles over two draws before sizes are final.
-            fig.canvas.draw()
+        if sized_artists or labelled_panels:
+            # Constrained layout settles over two passes before sizes and
+            # labels are final. Neither pass renders the points.
+            fig.draw_without_rendering()
             refresh_layout_point_sizes(fig)
+            place_layout_labels(fig)
             for key, base_artist in sized_artists:
                 panel_point_sizes[key] = float(base_artist.get_sizes()[0])
                 panel_edgewidths[key] = float(
@@ -1995,12 +2230,16 @@ def embedding(
     if color_scale.scope == "panel":
         color_limits = panel_limit_map
     else:
-        # A color without a value among the drawn cells, such as a feature
-        # whose assay measured none of them, has no limits.
+        # A color without a value among the drawn cells that its scale can
+        # color, such as a feature whose assay measured none of them, has no
+        # limits.
         color_limits = {
             display_key(index, labels[index]): (
                 limits
-                if has_finite_values(np.asarray(color_cache[index][0])[base_mask])
+                if scalable_values(
+                    _numeric(np.asarray(color_cache[index][0])[base_mask]),
+                    resolved_color_scales[index],
+                ).any()
                 else None
             )
             for index, limits in limit_map.items()
@@ -2073,6 +2312,8 @@ def embedding(
                     None if layout_selection is None else layout_selection.to_dict()
                 ),
                 "sort_values": sort_values,
+                "seed": seed,
+                "draw_order": draw_orders,
                 "color_scale_scope": color_scale.scope,
                 "color_limits": color_limits,
                 "facet_by": facet_by,

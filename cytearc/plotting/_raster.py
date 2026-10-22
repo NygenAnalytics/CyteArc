@@ -17,7 +17,11 @@ from ._style import continuous_norm, resolve_color_limits, square_axis_limits
 
 @dataclass(frozen=True, slots=True)
 class RasterCanvas:
-    """Rasterized embedding panel."""
+    """Rasterized embedding panel.
+
+    ``missing`` marks pixels that hold cells of which none has a color value,
+    or is None when there are none.
+    """
 
     image: np.ndarray  # float (H, W), NaN where empty
     counts: np.ndarray  # int (H, W)
@@ -26,6 +30,7 @@ class RasterCanvas:
     vmax: float
     n_cells: int
     n_blocks: int
+    missing: np.ndarray | None = None
 
 
 class _MissingMaskRows:
@@ -161,7 +166,8 @@ def raster_from_metadata(
     """Two-pass raster of metadata columns via ``MetaData.iter_row_blocks``.
 
     Pass 1: bounds and color limits (exact min/max, or approximate quantiles via
-    reservoir sampling). Pass 2: accumulate mean color per pixel.
+    reservoir sampling). Pass 2: accumulate mean color per pixel. A pixel
+    whose cells all lack a color value stays NaN and is marked ``missing``.
     """
     if pixels < 8:
         raise ValueError("pixels must be >= 8")
@@ -284,6 +290,8 @@ def raster_from_metadata(
 
     sums = np.zeros((pixels, pixels), dtype=np.float64)
     counts = np.zeros((pixels, pixels), dtype=np.int64)
+    # Every placed cell, with or without a color value.
+    occupied = np.zeros(pixels * pixels, dtype=np.int64)
 
     # --- Pass 2: accumulate ---
     for block in cells.iter_row_blocks(
@@ -324,6 +332,10 @@ def raster_from_metadata(
         if color_key is None:
             np.add.at(counts, (iy_img, ix), 1)
         else:
+            occupied += np.bincount(
+                iy_img * pixels + ix,
+                minlength=pixels * pixels,
+            )
             c = np.asarray(
                 _raster_block_values(missing_masks, block, color_key),
                 dtype=np.float64,
@@ -334,12 +346,14 @@ def raster_from_metadata(
 
     image = np.full((pixels, pixels), np.nan, dtype=np.float64)
     nonzero = counts > 0
+    missing: np.ndarray | None = None
     if color_key is None:
         image[nonzero] = np.log1p(counts[nonzero])
         vmin = 0.0
         vmax = float(image[nonzero].max()) if nonzero.any() else 1.0
     else:
         image[nonzero] = sums[nonzero] / counts[nonzero]
+        missing = (occupied.reshape(pixels, pixels) > 0) & ~nonzero
     return RasterCanvas(
         image=image,
         counts=counts,
@@ -348,6 +362,7 @@ def raster_from_metadata(
         vmax=vmax,
         n_cells=n_cells,
         n_blocks=n_blocks,
+        missing=missing if missing is not None and missing.any() else None,
     )
 
 
@@ -356,32 +371,48 @@ def draw_raster_canvas(
     canvas: RasterCanvas,
     *,
     cmap: str = "viridis",
-    missing_color: str = "white",
+    missing_color: str = "#bdbdbd",
     vcenter: float | None = None,
 ) -> Any:
-    """Draw a ``RasterCanvas`` onto a matplotlib axes; return the mappable."""
+    """Draw a ``RasterCanvas`` onto a matplotlib axes; return the mappable.
+
+    Empty pixels stay transparent and show the axes background. Pixels whose
+    cells all lack a color value take ``missing_color``, as such cells do in
+    a scatter.
+    """
     _, mpl = require_matplotlib()
     data = canvas.image.copy()
-    cmap_obj = mpl.colormaps.get_cmap(cmap).with_extremes(bad=missing_color)
+    cmap_obj = mpl.colormaps.get_cmap(cmap).with_extremes(bad=(0.0, 0.0, 0.0, 0.0))
     norm = continuous_norm(
         mpl,
         vmin=canvas.vmin,
         vmax=canvas.vmax,
         vcenter=vcenter,
     )
+    extent = [
+        canvas.extent[0],
+        canvas.extent[1],
+        canvas.extent[2],
+        canvas.extent[3],
+    ]
     im = ax.imshow(
         data,
         origin="upper",
-        extent=[
-            canvas.extent[0],
-            canvas.extent[1],
-            canvas.extent[2],
-            canvas.extent[3],
-        ],
+        extent=extent,
         cmap=cmap_obj,
         norm=norm,
         aspect="equal",
         interpolation="nearest",
     )
-    ax.set_facecolor(missing_color)
+    if canvas.missing is not None:
+        overlay = np.zeros((*canvas.missing.shape, 4), dtype=np.float64)
+        overlay[canvas.missing] = mpl.colors.to_rgba(missing_color)
+        missing_image = ax.imshow(
+            overlay,
+            origin="upper",
+            extent=extent,
+            aspect="equal",
+            interpolation="nearest",
+        )
+        missing_image.set_gid("missing-values")
     return im

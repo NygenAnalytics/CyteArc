@@ -13,7 +13,9 @@ import pandas as pd
 from ..storage.validation_scope import validation_scope
 from ._contracts import CategoricalScale, ColorScale, PlotProvenance, SizeScale
 from ._deps import require_matplotlib
+from ._labels import place_layout_labels
 from ._style import (
+    LEGEND_SIDE_ENTRIES_PER_COLUMN,
     LegendMarkerBoxes,
     continuous_norm,
     legend_side_columns,
@@ -299,8 +301,14 @@ def normalize_axes_target(
     panel_keys: Sequence[Hashable],
     figsize: tuple[float, float] | None,
     n_columns: int | None = None,
+    slots: Sequence[int] | None = None,
 ) -> tuple[Any, dict[Hashable, Any], bool]:
-    """Return (figure, axes_map, owns_figure)."""
+    """Return (figure, axes_map, owns_figure).
+
+    A new figure fills a grid of ``n_columns`` row by row, or places each
+    panel in its ``slots`` entry, a distinct grid position counted row by row.
+    Grid positions without a panel are removed.
+    """
     plt, _ = require_matplotlib()
     keys = list(panel_keys)
     if not keys:
@@ -319,15 +327,19 @@ def normalize_axes_target(
             return fig, {keys[0]: ax}, True
         ncols = n_columns if n_columns is not None else min(len(keys), 4)
         ncols = max(1, min(ncols, len(keys)))
-        nrows = int(np.ceil(len(keys) / ncols))
+        positions = list(range(len(keys))) if slots is None else list(slots)
+        nrows = max(positions) // ncols + 1
         fig, axs = plt.subplots(
             nrows, ncols, figsize=figsize, squeeze=False, layout="constrained"
         )
-        mapping: dict[Hashable, Any] = {}
-        for i, key in enumerate(keys):
-            mapping[key] = axs[i // ncols, i % ncols]
-        for j in range(len(keys), nrows * ncols):
-            fig.delaxes(axs[j // ncols, j % ncols])
+        mapping: dict[Hashable, Any] = {
+            key: axs[position // ncols, position % ncols]
+            for key, position in zip(keys, positions, strict=True)
+        }
+        occupied = set(positions)
+        for j in range(nrows * ncols):
+            if j not in occupied:
+                fig.delaxes(axs[j // ncols, j % ncols])
         return fig, mapping, True
 
     if figsize is not None:
@@ -448,7 +460,8 @@ def _merged_legend_block(blocks: Sequence[_BoxedLegendBlock]) -> _BoxedLegendBlo
 def _legend_blocks_overlap(figure: Any, legends: Sequence[Any]) -> bool:
     if len(legends) < 2:
         return False
-    figure.canvas.draw()
+    # Legend extents need the resolved layout, not rendered pixels.
+    figure.draw_without_rendering()
     renderer = figure.canvas.get_renderer()
     boxes = [legend.get_window_extent(renderer) for legend in legends]
     return any(
@@ -461,22 +474,30 @@ def _legend_blocks_overlap(figure: Any, legends: Sequence[Any]) -> bool:
 def _place_legend_blocks(
     figure: Any,
     blocks: Sequence[_LegendBlock],
+    *,
+    rows: int = LEGEND_SIDE_ENTRIES_PER_COLUMN,
 ) -> None:
-    """Draw outside legend blocks, merging them when separate blocks collide."""
+    """Draw outside legend blocks, merging them when separate blocks collide.
+
+    Each legend column holds at most ``rows`` entries.
+    """
     _place_boxed_legend_blocks(
         figure,
         [(title, handles, labels, None) for title, handles, labels in blocks],
+        rows=rows,
     )
 
 
 def _place_boxed_legend_blocks(
     figure: Any,
     blocks: Sequence[_BoxedLegendBlock],
+    *,
+    rows: int = LEGEND_SIDE_ENTRIES_PER_COLUMN,
 ) -> None:
     """Draw outside legend blocks in the handle boxes their markers need.
 
     Blocks that collide merge into one legend whose boxes hold the largest
-    marker of every block.
+    marker of every block. Each legend column holds at most ``rows`` entries.
     """
     if not blocks:
         return
@@ -496,7 +517,7 @@ def _place_boxed_legend_blocks(
                 title=title,
                 frameon=False,
                 loc=slot,
-                ncols=legend_side_columns(len(handles)),
+                ncols=legend_side_columns(len(handles), rows=rows),
                 **(boxes.legend_kwargs() if boxes is not None else {}),
             )
         )
@@ -510,7 +531,7 @@ def _place_boxed_legend_blocks(
             title=title,
             frameon=False,
             loc="outside right center",
-            ncols=legend_side_columns(len(handles)),
+            ncols=legend_side_columns(len(handles), rows=rows),
             **(boxes.legend_kwargs() if boxes is not None else {}),
         )
 
@@ -798,6 +819,7 @@ def compose_results(
         if shared_legends:
             _render_shared_legends(figure, children)
         refresh_layout_point_sizes(figure)
+        place_layout_labels(figure)
     remaining_axes = set(figure.axes)
     axes: dict[Hashable, Any] = {
         (namespace, key): ax

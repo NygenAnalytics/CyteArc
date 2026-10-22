@@ -165,18 +165,33 @@ def valid_category_mask(
 
     ``missing_mask`` carries the explicit missingness stored alongside typed
     metadata columns, whose placeholder values may otherwise look valid.
+    A typed NumPy array is checked by its dtype: integers and booleans are
+    always valid, floats and complex numbers unless NaN, and fixed-width text
+    or bytes unless empty or whitespace. Other values, such as an object
+    array, are checked one by one.
     """
-    array = np.asarray(values, dtype=object)
+    array = (
+        values if isinstance(values, np.ndarray) else np.asarray(values, dtype=object)
+    )
     if array.ndim != 1:
         raise ValueError("category values must be one-dimensional")
-    valid = np.fromiter(
-        (
-            not _is_missing_label(value) and not _is_blank_label(value)
-            for value in array
-        ),
-        dtype=bool,
-        count=array.size,
-    )
+    kind = array.dtype.kind
+    if kind in "biu":
+        valid = np.ones(array.shape, dtype=bool)
+    elif kind in "fc":
+        valid = ~np.isnan(array)
+    elif kind in "US":
+        # Text strips the same whitespace as str.strip and bytes.strip.
+        valid = ~((np.strings.str_len(array) == 0) | np.strings.isspace(array))
+    else:
+        valid = np.fromiter(
+            (
+                not _is_missing_label(value) and not _is_blank_label(value)
+                for value in array.astype(object, copy=False)
+            ),
+            dtype=bool,
+            count=array.size,
+        )
     if missing_mask is not None:
         missing = np.asarray(missing_mask, dtype=bool)
         if missing.shape != array.shape:

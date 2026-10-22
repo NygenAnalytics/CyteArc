@@ -273,10 +273,11 @@ def embedding_raster(
     ``color_by`` must be continuous metadata, not a gene. Pass
     ``CellField(key, kind="continuous")`` when an integer column should be
     treated as continuous. Categorical colors are not supported here.
-    Empty pixels use a white background by default. Set
-    ``ColorScale.missing_color`` or use ``missing_color`` as an explicit
-    override. Pass ``subset_by`` to keep cells marked ``True`` in a boolean
-    cell-metadata column.
+    Empty pixels show the axes background, white in the light themes. A
+    pixel whose cells all lack a color value takes the missing color, as such
+    cells do in :func:`embedding`: ``ColorScale.missing_color``, grey by
+    default, or ``missing_color`` as an explicit override. Pass ``subset_by``
+    to keep cells marked ``True`` in a boolean cell-metadata column.
     """
     require_matplotlib()
     if (layout_key is None) == (layout is None):
@@ -350,16 +351,9 @@ def embedding_raster(
 
     if color_scale is None:
         if stored_display is not None and stored_display["kind"] == "continuous":
-            color_scale = replace(
-                continuous_display_scale(stored_display),
-                missing_color="white",
-            )
+            color_scale = continuous_display_scale(stored_display)
         else:
-            color_scale = ColorScale(
-                cmap="viridis",
-                quantiles=(0.01, 0.99),
-                missing_color="white",
-            )
+            color_scale = ColorScale(cmap="viridis", quantiles=(0.01, 0.99))
     if missing_color is not None:
         color_scale = replace(color_scale, missing_color=missing_color)
     effective_missing_color = color_scale.missing_color

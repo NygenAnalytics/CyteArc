@@ -75,6 +75,41 @@ of `marker_heatmap`: one row per feature (index `feature`) and one column per gr
 column per group of the marker search. The annotation tables of both are indexed by the same
 labels.
 
+Default category colors are assigned over every value of the colored column or label artifact, not
+only over the plotted cells, so `groups`, `subset_by`, or a `cell_key` subset never recolors a
+category: Alpha keeps its color in an embedding, a violin, and a composition of any of its subsets.
+A stored display, or the `order` or `palette` of a `CategoricalScale`, sets the colors instead.
+Tick and legend labels in every plot, including violins, histograms, dot plots, and matrix plots,
+show `CategoricalScale.labels` or the stored display labels.
+
+Embeddings draw categorical colors, and continuous colors they do not sort, in a seeded shuffle, so
+cells stored last, such as the last sample of a merged store, do not cover the others. Each cell
+draws at its rank in `numpy.random.default_rng(seed).permutation(n)` over the `n` cells of the
+layout, so the order is reproducible and the same in every panel; `seed=None` keeps the stored
+order. Gene and other feature colors draw high values on top by default, as in scanpy;
+`sort_values=False` shuffles them too, and `sort_values=True` also sorts metadata colors.
+`provenance.extras["draw_order"]` records each color's order. On-data labels start at their
+cluster's median and, once the layout is final, move apart by at most about one label height
+without coming closer to another cluster's median than to their own. Side legends list the
+categories that fit beside the figure, which grows to hold them when CyteArc sizes it. Embeddings
+settle their layout and point sizes without rendering the points, so the scatter is drawn only when
+the figure is shown or saved.
+
+`missing_color` replaces the missing color of whichever scale an embedding uses, and a log
+`ColorScale` draws values that are not positive in that color instead of raising. `clip_fraction`
+takes its quantiles from the drawn cells. Cells without a `facet_by` value get their own facet,
+titled with the facet column's missing label, and facets wrap at four columns, each color or layout
+starting a new row. `embedding_raster` paints a pixel whose cells all lack a value in the missing
+color, while empty pixels show the axes background.
+
+Violins scale every body, including each half of a split violin, to the full width, as in scanpy.
+A violin estimates its density from at most `max_density_points` values, a seeded sample that keeps
+its smallest and largest value. Stacked compositions draw the first category on top, in the
+legend's order. With `swap_axes=True`, dot plots list the first group at the top. A clustered matrix
+plot draws the dendrogram of each clustered axis beside the matrix, and a mapping of feature groups
+draws one bracketed row per feature and group, indexing `tables["matrix"]` by `feature_group` and
+`feature`.
+
 Plots treat rows that a nullable metadata column or label artifact flags in its linked missing mask
 as missing, never as their stored placeholder. Dot plots and matrix plots leave those cells out of
 every group and report their number as `dropped_group_cells`. Composition plots count a missing
