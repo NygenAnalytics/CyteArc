@@ -26,6 +26,17 @@ def test_read_gmt_parses_sets_and_ignores_descriptions(tmp_path):
     )
 
 
+def test_read_gmt_ignores_a_utf8_byte_order_mark(tmp_path):
+    path = tmp_path / "bom.gmt"
+    # Some editors start UTF-8 files with a byte order mark.
+    path.write_bytes(b"\xef\xbb\xbfSET_A\tdescription\tCD3D\tCD3E\nSET_B\t-\tMS4A1\n")
+
+    result = read_gmt(path)
+
+    assert result["source"].tolist() == ["SET_A", "SET_A", "SET_B"]
+    assert result["target"].tolist() == ["CD3D", "CD3E", "MS4A1"]
+
+
 @pytest.mark.parametrize(
     "contents, match",
     [

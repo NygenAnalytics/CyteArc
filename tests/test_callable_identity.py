@@ -280,25 +280,43 @@ _NORMALIZER_OPERATIONS = {
 
 @pytest.mark.parametrize(("operation", "kind"), sorted(_NORMALIZER_OPERATIONS.items()))
 def test_every_operation_that_records_a_normalizer_scopes_the_revision(operation, kind):
-    assert OPERATION_REVISIONS[operation] == (_NORMALIZER_CODE,)
+    # run_marker_search is at revision 2 for every marker table of 1.3.0, so
+    # the normalizer revision is its revision 3; the other operations have
+    # only the normalizer revision, at 2.
+    entries = OPERATION_REVISIONS[operation]
+    if operation == "run_marker_search":
+        assert len(entries) == 2
+        assert (entries[0].revision, entries[0].release) == (2, "1.3.0")
+        assert entries[0].applies is None
+        normalizer = entries[1]
+        assert normalizer.revision == 3
+        assert (normalizer.release, normalizer.change, normalizer.applies) == (
+            _NORMALIZER_CODE.release,
+            _NORMALIZER_CODE.change,
+            _NORMALIZER_CODE.applies,
+        )
+        base, scoped = 2, 3
+    else:
+        assert entries == (_NORMALIZER_CODE,)
+        base, scoped = 1, 2
     assert _NORMALIZER_CODE.release == "1.3.0"
     external = callable_identity(_normalizer())
     legacy = {"module": "__main__", "qualname": "normalize"}
     for method, revision in (
-        (external, 2),
-        ({"external_hook": True, **external}, 2),
-        (legacy, 2),
-        ({"module": "lab.norms", "qualname": "scaled"}, 2),
-        (callable_identity(norm_lib_size), 1),
-        ({"module": "cytearc", "qualname": "norm"}, 1),
-        (callable_identity(norm_clr), 1),
-        ({"module": 3, "qualname": "normalize"}, 1),
-        (None, 1),
-        ("norm_lib_size", 1),
+        (external, scoped),
+        ({"external_hook": True, **external}, scoped),
+        (legacy, scoped),
+        ({"module": "lab.norms", "qualname": "scaled"}, scoped),
+        (callable_identity(norm_lib_size), base),
+        ({"module": "cytearc", "qualname": "norm"}, base),
+        (callable_identity(norm_clr), base),
+        ({"module": 3, "qualname": "normalize"}, base),
+        (None, base),
+        ("norm_lib_size", base),
     ):
         parameters = {"normalization_method": method}
         assert effective_revision(operation, kind, parameters, {}) == revision
-    assert effective_revision(operation, kind, {}, {}) == 1
+    assert effective_revision(operation, kind, {}, {}) == base
 
     # A new artifact that records a custom normalizer records the revision.
     root = zarr.open_group(store=MemoryStore(), mode="w")
@@ -312,7 +330,7 @@ def test_every_operation_that_records_a_normalizer_scopes_the_revision(operation
         inputs={},
         execution_options={},
     )
-    assert planned.provenance["revision"] == 2
+    assert planned.provenance["revision"] == scoped
     with artifact_transaction(root, planned) as group:
         group.attrs["note"] = "payload"
-    assert inspect_artifact(root, planned.ref).revision == 2
+    assert inspect_artifact(root, planned.ref).revision == scoped

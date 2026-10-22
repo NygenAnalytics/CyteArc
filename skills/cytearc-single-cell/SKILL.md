@@ -104,8 +104,10 @@ not thresholds.
 10. **Payload names differ by kind.** Leiden labels, embeddings, doublet and strength scores live
     under `values`; Paris (`cluster_cut`) under `labels`; PCA under `data`. `markers.load` returns
     string `group_id` while Leiden labels are integers.
-11. **`markers.load` defaults hide genes.** `min_score=0.25, min_frac_exp=0.2`; pass `-1` for both
-    to see negatives and full panels.
+11. **`markers.load` defaults hide genes.** They keep `frac_exp >= 0.2`, `auc >= 0.6` and
+    `p_value_adjusted <= 0.05`; pass `min_frac_exp=None, min_auc=None, max_p_adj=None` to see
+    negatives and full panels. Do not filter on `score`: it is capped by group size and group
+    count, so it hides perfect markers of small groups and fine partitions.
 12. **Labels are hypotheses.** Name a cluster only with two or more specific positive markers plus
     low lineage-negative markers and a plausible QC and doublet profile. Keep `unresolved` for
     mixed, doublet-like or marker-poor clusters.

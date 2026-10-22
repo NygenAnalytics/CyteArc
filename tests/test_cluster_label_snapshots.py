@@ -130,7 +130,7 @@ def _snapshots(ds: DataStore) -> list[ArtifactRef]:
 
 
 def _marker_groups(ds: DataStore, markers: ArtifactRef) -> set[str]:
-    table = ds.markers.load(markers, min_score=0, min_frac_exp=0)
+    table = ds.markers.load(markers, min_frac_exp=None, min_auc=None, max_p_adj=None)
     return set(table["group_id"])
 
 
@@ -174,7 +174,9 @@ def test_snapshot_on_a_mount_finds_disease_markers_within_one_cell_type(
     }
     np.testing.assert_array_equal(_labels(ds, labels), t_disease)
     assert _marker_groups(ds, markers) == {"covid", "normal"}
-    covid = ds.markers.load(markers, group_id="covid", min_score=0, min_frac_exp=0)
+    covid = ds.markers.load(
+        markers, group_id="covid", min_frac_exp=None, min_auc=None, max_p_adj=None
+    )
     top = covid.sort_values("score", ascending=False)["feature_name"]
     assert set(top[: len(COVID_GENES)]) == COVID_GENES
     assert _store_files(store_path) == source_before

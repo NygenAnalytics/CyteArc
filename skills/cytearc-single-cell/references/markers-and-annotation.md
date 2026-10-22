@@ -18,16 +18,32 @@ labels. Docs: <https://docs.nygen.io/CyteArc/tutorials/annotation>, <https://doc
   `ArtifactRef(kind="marker_table")`. `run["markers"]` is the table for `run["clusters"]`.
 - Columns: `score` (CyteArc specificity, 0 to 1, summing to 1 across groups for each gene; near
   1/n_groups means ubiquitous), `mean`/`mean_rest`, `frac_exp`/`frac_exp_rest`, `fold_change`,
-  `auc`, two-sided Mann-Whitney `p_value` and `p_value_adjusted` (BH within each group). They are
-  one-versus-rest statistics over cells, not replicate-aware differential expression.
+  `auc`, two-sided Mann-Whitney `p_value`, `p_value_adjusted` (BH within each group) and
+  `neg_log10_p_value` (no underflow where `p_value` reaches 0). They are one-versus-rest
+  statistics over cells, not replicate-aware differential expression.
+- `score` is capped by group size and number of groups: a marker with distinct values in an
+  `n`-cell group and zeros elsewhere scores `(n + 3) / (n + 1 + 2 * n_groups)`, 0.14 for 10 cells
+  among 40 groups. Compare scores within one partition; judge separation across partitions or
+  group sizes with `auc`.
+- p-values are exact for a group that can be split from the rest in at most 100,000 ways (2 cells
+  among at most 447, 5 among at most 28); larger groups use the tie-corrected normal approximation.
+- A group of 1 cell is skipped with a warning; its cells stay in every other group's rest and
+  `markers.load` gives it no rows.
 - `fold_change` is `mean / mean_rest` of the normalized values that the search ranks, with no
   pseudocount: `inf` when no other cell expresses the gene, `NaN` when no cell does (or a mean is
-  negative, from signed counts). Every other column is finite. With `log_transform=True` or CLR
-  (ADT) it compares log-scale means, so compare it only within one assay and normalization.
-  Tables missing `fold_change_policy` metadata raise `ValueError` on load; rerun `markers.search`.
-- `markers.load` returns a DataFrame with a string `group_id`, rows sorted by `score` within each
-  group and groups in natural order (`"2"` before `"10"`). Defaults `min_score=0.25`,
-  `min_frac_exp=0.2` hide most genes; pass `-1` for both to get every gene for every group.
+  negative, from signed counts). Every other column is finite, except `neg_log10_p_value` of a
+  revision 1 table. With `log_transform=True` or CLR (ADT) it compares log-scale means, so compare
+  it only within one assay and normalization. Tables missing `fold_change_policy` metadata raise
+  `ValueError` on load; rerun `markers.search`.
+- Tables of revision 1 (before release 1.3.0, without `p_value_policy`) still load, also from
+  read-only stores: five-decimal statistics, asymptotic p-values for every group, and
+  `neg_log10_p_value` derived as `-log10(p_value)`, `inf` where `p_value` is 0. On a writable
+  store, `markers.search` recomputes them at revision 2.
+- `markers.load` returns a DataFrame with a string `group_id`, rows sorted by `sort_by` (default
+  `"score"`; also `"auc"`, `"p_value"`, `"fold_change"`) within each group and groups in natural
+  order (`"2"` before `"10"`). Default filters keep `frac_exp >= 0.2`, `auc >= 0.6` and
+  `p_value_adjusted <= 0.05`; `min_score` is `None`. Pass `None` to a filter to drop it, and
+  `min_frac_exp=None, min_auc=None, max_p_adj=None` for every gene of every group.
 - A label is a hypothesis. It needs named positive markers, low lineage-negative markers and a
   plausible QC and doublet profile. Keep an explicit `unresolved` label instead of forcing a name.
 - Doublet scores rise with RNA content, so plasma cells and other high-RNA types score high as
@@ -53,12 +69,14 @@ clusters, markers = run["clusters"], run["markers"]
 # Another partition needs its own table (one pass over counts):
 markers_res1 = ds.markers.search(run["leiden_1.0"], features=run["feature_universe"])
 
-top = ds.markers.load(marker=markers)  # min_score=0.25, min_frac_exp=0.2
+top = ds.markers.load(marker=markers)  # frac_exp >= 0.2, auc >= 0.6, p_value_adjusted <= 0.05
 print(top.groupby("group_id", sort=False).head(8)
       .groupby("group_id", sort=False)["feature_name"].agg(", ".join))
 one = ds.markers.load(marker=markers, group_id=3)  # an int matches the label "3"
 print(one[["feature_name", "score", "frac_exp", "frac_exp_rest", "auc", "p_value_adjusted"]].head())
-everything = ds.markers.load(marker=markers, min_score=-1, min_frac_exp=-1)  # all genes x groups
+by_auc = ds.markers.load(marker=markers, min_auc=0.8, sort_by="auc")  # small groups and fine cuts
+everything = ds.markers.load(  # all genes x groups, negative markers included
+    marker=markers, min_frac_exp=None, min_auc=None, max_p_adj=None)
 # ds.markers.export_csv(markers, "markers.csv") writes marker names per group, wide format
 ```
 
@@ -246,8 +264,11 @@ case (`Cd3e`, `Ptprc`, `Mki67`), and panel lookups are exact, so convert the pan
 
 | Parameter | Default | Change when |
 |---|---|---|
-| `min_score` (`markers.load`) | `0.25` | `-1` to see negatives and weak genes; raise for a short list |
-| `min_frac_exp` (`markers.load`) | `0.2` | `-1` with `min_score=-1` for complete panel tables |
+| `min_auc` (`markers.load`) | `0.6` | `None` to see negative markers (AUC below 0.5); `0.8` for a short, specific list |
+| `max_p_adj` (`markers.load`) | `0.05` | `None` for complete panel tables, with `min_frac_exp=None, min_auc=None` |
+| `min_frac_exp` (`markers.load`) | `0.2` | `None` for negatives and rare-cell genes |
+| `min_score` (`markers.load`) | `None` | A value only within one partition; it hides small groups' markers |
+| `sort_by` (`markers.load`) | `"score"` | `"auc"` for small groups or many groups; `"p_value"`, `"fold_change"` |
 | `features` (`markers.search`) | required | `run["feature_universe"]` tests every gene; an HVG ref limits the search |
 | `log_transform` (`markers.search`) | `False` | `True` ranks `log1p` of the assay normalizer's values; ADT CLR, ATAC TF-IDF and `norm_lib_size_log` raise |
 | `tmin` (AUCell, WAGGR) | `5` | Lower for short sets; sources with fewer matched targets are dropped |
@@ -266,13 +287,16 @@ case (`Cd3e`, `Ptprc`, `Mki67`), and panel lookups are exact, so convert the pan
 
 ## Pitfalls
 
-- Default `markers.load` filters hide negative markers. `group_id` is a string while Leiden labels
-  are integers; convert before joining.
+- Default `markers.load` filters (`auc >= 0.6`) hide negative markers. `group_id` is a string
+  while Leiden labels are integers; convert before joining.
 - Direct calls do not reuse pipeline outputs: `markers.search(run["clusters"], ...)` and
   `scores.cell_cycle(...)` write new artifacts and reread counts. Read the run's refs instead.
 - Ambient genes (HBB, LYZ, S100A8, JCHAIN, immunoglobulins) show nonzero `frac_exp` in most
   clusters. Use `score` and `auc`, not detection alone, and leave them out of co-detection checks.
-- Small groups inflate `fold_change` and can pass `min_score` with odd genes; check group size.
+- Small groups score low: `score` is capped by group size, so a perfect marker of a 10-cell
+  group can score 0.14 and a `min_score` filter hides it; filter and sort by `auc` instead. Small
+  groups also inflate `fold_change`, and a 2-cell group's best exact p-value is about
+  `2 / C(n_cells, 2)`; check group size.
   A descending sort by `fold_change` puts genes exclusive to a group first (`inf`) however faint
   they are, and `NaN` last; read `frac_exp` before trusting an `inf`. Use `np.isfinite` before
   averaging fold changes or taking their logarithm.

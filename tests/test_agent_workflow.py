@@ -446,7 +446,11 @@ def test_real_measurements_summarize_frozen_partitions_and_declared_roles(
     supported = 0
     for row in finalist["clusters"]:
         table = store.markers.load(
-            run["markers"], group_id=row["clusterId"], min_score=-1, min_frac_exp=-1
+            run["markers"],
+            group_id=row["clusterId"],
+            min_frac_exp=None,
+            min_auc=None,
+            max_p_adj=None,
         )
         qualifying = table[(table["score"] >= 0.25) & (table["frac_exp"] >= 0.2)]
         assert row["qualifyingMarkerCount"] == len(qualifying)

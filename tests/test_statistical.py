@@ -1371,3 +1371,241 @@ def test_welch_zero_variance_reports_pooled_degrees_of_freedom():
     assert tied.loc[0, "p_value"] == 1.0
     # With one varying group the Welch degrees of freedom equal its n - 1.
     assert one_varies.loc[0, "df"] == pytest.approx(3.0)
+
+
+# compare.test prepares one design for all of its keys. The flow below is the
+# per-array flow that compare_group_distributions ran before designs were
+# prepared once: it filters labels, orders groups, and aggregates samples by
+# their labels for every array, then runs the shared test functions. Results
+# of both paths must agree bit for bit.
+
+
+def _per_array_comparison(
+    values,
+    groups,
+    *,
+    test="auto",
+    posthoc=None,
+    adjustment="none",
+    samples=None,
+    pairs=None,
+    comparisons=None,
+    sample_stat="mean",
+    expression_cutoff=0.0,
+    group_order=None,
+    alternative="two-sided",
+):
+    from cytearc.features import statistical as stats
+    from cytearc.metadata.selection import valid_category_mask
+
+    values = np.asarray(values, dtype=np.float64)
+    groups = np.asarray(groups, dtype=object)
+    if comparisons is not None:
+        comparisons = tuple(
+            (stats.native_value(left), stats.native_value(right))
+            for left, right in comparisons
+        )
+    valid = valid_category_mask(groups)
+    values, groups = values[valid], groups[valid]
+    samples = None if samples is None else np.asarray(samples, dtype=object)[valid]
+    pairs = None if pairs is None else np.asarray(pairs, dtype=object)[valid]
+    order = stats.resolve_group_order(groups, group_order=group_order)
+    if group_order is not None:
+        keep = pd.Series(groups, dtype=object).isin(order).to_numpy()
+        values, groups = values[keep], groups[keep]
+        samples = None if samples is None else samples[keep]
+        pairs = None if pairs is None else pairs[keep]
+    aggregated = None
+    if samples is not None:
+        columns = {"value": values, "group": groups, "sample": samples}
+        if pairs is not None:
+            columns["pair"] = pairs
+        frame = pd.DataFrame(columns)
+        frame = frame.loc[valid_category_mask(frame["sample"].to_numpy(dtype=object))]
+        grouped = frame.groupby(["sample", "group"], observed=False, sort=False)[
+            "value"
+        ]
+        if sample_stat == "mean":
+            by_sample = grouped.mean()
+        elif sample_stat == "median":
+            by_sample = grouped.median()
+        else:
+            by_sample = grouped.apply(
+                lambda value: float(
+                    np.mean(value.to_numpy(dtype=np.float64) > float(expression_cutoff))
+                )
+            )
+        aggregated = by_sample.rename("value").reset_index()
+        if pairs is not None:
+            first = frame.groupby("sample", observed=False, sort=False)["pair"].first()
+            aggregated["pair"] = aggregated["sample"].map(first)
+        values = aggregated["value"].to_numpy(dtype=np.float64)
+        groups = aggregated["group"].to_numpy(dtype=object)
+    if group_order is None:
+        surviving = set(stats.resolve_group_order(groups))
+        present = [group for group in order if group in surviving]
+    else:
+        present = stats.resolve_group_order(groups, group_order=order)
+    if test == "auto":
+        if pairs is not None:
+            test = "wilcoxon"
+        else:
+            test = "mann_whitney" if len(present) == 2 else "kruskal_wallis"
+    adjust = stats._maybe_adjust
+    if test == "wilcoxon":
+        table = stats._wilcoxon_signed_rank(aggregated, present, comparisons)
+        return adjust(table, adjustment), None, None
+    if test in ("welch", "t_test"):
+        table = stats._welch_ttest(
+            values, groups, present, comparisons, alternative=alternative
+        )
+        return adjust(table, adjustment), None, None
+    if test == "one_way_anova":
+        return (
+            adjust(stats._one_way_anova(values, groups, present), adjustment),
+            None,
+            None,
+        )
+    if test == "mann_whitney":
+        table, method = stats._mann_whitney(values, groups, present, comparisons)
+        return adjust(table, adjustment), None, method
+    omnibus = adjust(stats._kruskal_wallis(values, groups, present), adjustment)
+    if posthoc == "dunn":
+        dunn = stats._dunn_posthoc(values, groups, present, comparisons)
+        return omnibus, adjust(dunn, adjustment), None
+    return omnibus, None, None
+
+
+def _comparison_designs():
+    """Designs of every test, with missing labels, orders, samples, and pairs."""
+    rng = np.random.default_rng(2024)
+    n = 120
+    three = np.array(["b", "a", "c"], dtype=object)[rng.integers(0, 3, n)]
+    three[[3, 17, 40]] = None
+    three[5] = np.nan
+    three[8] = ""
+    two = np.where(rng.random(n) < 0.45, "x", "y").astype(object)
+    two[[2, 9]] = None
+    keys = [rng.poisson(rng.uniform(0.2, 4.0), n).astype(float) for _ in range(3)]
+    keys += [rng.normal(size=n), np.zeros(n)]
+    small = np.array(["s", "t"], dtype=object)[np.arange(9) % 2]
+    small_keys = [rng.poisson(2.0, 9).astype(float) for _ in range(2)]
+    samples = np.array(
+        [f"{group}{i % 4}" for i, group in enumerate(three)], dtype=object
+    )
+    samples[[11, 12]] = None
+    two_samples = np.array(
+        [f"{group}{i % 5}" for i, group in enumerate(two)], dtype=object
+    )
+    donors = np.arange(n) % 6
+    condition = np.where(rng.random(n) < 0.5, "pre", "post").astype(object)
+    condition[:12] = np.array(["pre", "post"] * 6, dtype=object)
+    paired = {
+        "samples": np.array(
+            [f"d{donor}_{state}" for donor, state in zip(donors, condition)],
+            dtype=object,
+        ),
+        "pairs": np.array([f"d{donor}" for donor in donors], dtype=object),
+    }
+    return [
+        ("mw_cells", keys, two, {"test": "mann_whitney"}),
+        ("auto_two", keys, two, {}),
+        ("mw_exact", small_keys, small, {"test": "mann_whitney"}),
+        (
+            "kw_dunn",
+            keys,
+            three,
+            {
+                "test": "kruskal_wallis",
+                "posthoc": "dunn",
+                "comparisons": [("c", "a"), ("b", "c")],
+                "adjustment": "fdr_bh",
+            },
+        ),
+        ("kw_order", keys, three, {"group_order": ["c", "b", "a"]}),
+        ("two_of_three", keys, three, {"group_order": ["c", "a"]}),
+        ("welch", keys, two, {"test": "welch", "alternative": "less"}),
+        ("anova", keys, three, {"test": "one_way_anova"}),
+        ("sample_mean", keys, three, {"samples": samples}),
+        (
+            "sample_median",
+            keys,
+            three,
+            {"samples": samples, "sample_stat": "median", "posthoc": "dunn"},
+        ),
+        (
+            "sample_fraction",
+            keys,
+            two,
+            {
+                "samples": two_samples,
+                "sample_stat": "fraction",
+                "expression_cutoff": 1.0,
+            },
+        ),
+        ("wilcoxon", keys, condition, {"test": "wilcoxon", **paired}),
+        ("wilcoxon_order", keys, condition, {"group_order": ["post", "pre"], **paired}),
+    ]
+
+
+@pytest.mark.parametrize("design", _comparison_designs(), ids=lambda design: design[0])
+def test_prepared_designs_compare_arrays_bit_identically(design):
+    from cytearc.features.statistical import prepare_group_comparison
+
+    _, keys, groups, options = design
+    prepared = prepare_group_comparison(groups, **options)
+    for values in keys:
+        expected_table, expected_posthoc, expected_method = _per_array_comparison(
+            values, groups, **options
+        )
+        for result in (
+            prepared.compare(values),
+            compare_group_distributions(values, groups, **options),
+        ):
+            pd.testing.assert_frame_equal(
+                result.table, expected_table, check_exact=True
+            )
+            if expected_posthoc is None:
+                assert result.posthoc_table is None
+            else:
+                pd.testing.assert_frame_equal(
+                    result.posthoc_table, expected_posthoc, check_exact=True
+                )
+            assert result.p_value_method == expected_method
+
+
+def test_prepared_designs_validate_groups_once_and_values_per_array(monkeypatch):
+    from cytearc.features import statistical
+    from cytearc.features.statistical import prepare_group_comparison
+
+    groups = np.array(["a", "b", None, "a", "b", "b"], dtype=object)
+    with pytest.raises(ValueError, match="groups must be one-dimensional"):
+        prepare_group_comparison(groups.reshape(2, 3))
+    with pytest.raises(ValueError, match="samples length must match values"):
+        prepare_group_comparison(groups, samples=np.array(["s"] * 5, dtype=object))
+    with pytest.raises(ValueError, match="pairs length must match values"):
+        prepare_group_comparison(
+            groups,
+            samples=np.array(["s"] * 6, dtype=object),
+            pairs=np.array(["p"] * 4, dtype=object),
+        )
+
+    design = prepare_group_comparison(groups, test="mann_whitney")
+    calls = []
+    original = statistical._valid_group_mask
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(statistical, "_valid_group_mask", counting)
+    for values in (np.arange(6.0), np.arange(6.0)[::-1], np.ones(6)):
+        design.compare(values)
+    # Comparing arrays checks no labels again.
+    assert calls == []
+    with pytest.raises(ValueError, match="values must be one-dimensional"):
+        design.compare(np.ones((2, 3)))
+    with pytest.raises(ValueError, match="groups length must match values"):
+        design.compare(np.ones(5))
+    with pytest.raises(ValueError, match="only finite entries"):
+        design.compare(np.array([1.0, np.nan, 1.0, 2.0, 3.0, 4.0]))

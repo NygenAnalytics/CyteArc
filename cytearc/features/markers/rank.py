@@ -1,39 +1,92 @@
+from typing import Literal
+
 import numpy as np
 import pandas as pd
 from numba import njit, prange
 from scipy.special import ndtr
 
 __all__ = [
+    "MARKER_SORT_KEYS",
+    "MarkerSortKey",
     "_batch_stats",
+    "_exact_marker_p_values",
+    "_exact_marker_p_values_gene_major",
     "_marker_stats_batch",
     "_marker_stats_gene_major",
+    "_rank_sum_null_counts",
     "batch_rank_scratch_bytes",
+    "exact_batch_p_values",
+    "exact_rank_scratch_bytes",
+    "exact_two_sided_p_value",
     "gene_major_rank_scratch_bytes",
     "mannwhitneyu_from_ranks",
+    "marker_sort_key",
     "sort_marker_results",
     "tie_sum",
 ]
 
+MarkerSortKey = Literal["score", "auc", "p_value", "fold_change"]
+# Each statistic that orders a marker table, best first.
+MARKER_SORT_KEYS: tuple[MarkerSortKey, ...] = ("score", "auc", "p_value", "fold_change")
 
-def sort_marker_results(df: pd.DataFrame) -> pd.DataFrame:
-    """Order markers by descending score, then p-value, then feature.
+
+def _descending(frame: pd.DataFrame, column: str) -> np.ndarray:
+    return np.asarray(np.negative(frame[column].to_numpy(dtype=np.float64)))
+
+
+def marker_sort_key(sort_by: object) -> MarkerSortKey:
+    """Return ``sort_by`` when it names a marker order.
+
+    Raises:
+        ValueError: If ``sort_by`` is not one of ``MARKER_SORT_KEYS``.
+    """
+    if isinstance(sort_by, str) and sort_by in MARKER_SORT_KEYS:
+        return sort_by
+    raise ValueError(
+        "sort_by must be one of "
+        + ", ".join(repr(key) for key in MARKER_SORT_KEYS)
+        + f"; got {sort_by!r}"
+    )
+
+
+def sort_marker_results(
+    df: pd.DataFrame, sort_by: MarkerSortKey = "score"
+) -> pd.DataFrame:
+    """Order markers best first by one statistic, with deterministic ties.
+
+    ``sort_by`` orders by descending ``score``, ``auc``, or ``fold_change``,
+    or by ascending ``p_value``. Ties fall to the ascending p-value, except
+    for ``"p_value"`` itself, whose ties fall to the descending AUC, so that
+    positive markers precede negative ones of equal significance. A table
+    with ``neg_log10_p_value`` orders p-values that are equal, such as those
+    that underflow to 0, by it too. Remaining ties fall to the feature name,
+    when the table has one, and then to the feature index: the
+    ``feature_index`` column, or the row index when there is none. NaN fold
+    changes come last and infinite ones first.
 
     A stable NumPy lexsort gives the same order as the equivalent pandas sort,
-    including NaNs last, without factorizing every key column.
+    without factorizing every key column.
+
+    Raises:
+        ValueError: If ``sort_by`` is not one of ``MARKER_SORT_KEYS``.
     """
+    sort_by = marker_sort_key(sort_by)
     frame = df if "feature_index" in df.columns else df.assign(feature_index=df.index)
-    tie = "feature_name" if "feature_name" in frame.columns else "feature_index"
-    keys = frame[tie].to_numpy()
-    if keys.dtype == object:
-        keys = keys.astype(str)
-    order = np.lexsort(
-        (
-            keys,
-            frame["p_value"].to_numpy(dtype=np.float64),
-            -frame["score"].to_numpy(dtype=np.float64),
-        )
-    )
-    return frame.iloc[order]
+    # np.lexsort sorts by its last key first.
+    keys: list[np.ndarray] = [frame["feature_index"].to_numpy()]
+    if "feature_name" in frame.columns:
+        names = frame["feature_name"].to_numpy()
+        keys.append(names.astype(str) if names.dtype == object else names)
+    significance = [frame["p_value"].to_numpy(dtype=np.float64)]
+    if "neg_log10_p_value" in frame.columns:
+        significance.insert(0, _descending(frame, "neg_log10_p_value"))
+    if sort_by == "p_value":
+        keys.append(_descending(frame, "auc"))
+        keys.extend(significance)
+    else:
+        keys.extend(significance)
+        keys.append(_descending(frame, sort_by))
+    return frame.iloc[np.lexsort(tuple(keys))]
 
 
 def tie_sum(values: np.ndarray) -> float:
@@ -267,6 +320,23 @@ def _argsort_positive(
         order[:n] = source[:n]
 
 
+@njit(cache=True, nogil=True, inline="always")
+def _library_size_value(
+    count: float,
+    total: float,
+    size_factor: float,
+    log_transform: bool,
+) -> np.float32:
+    """Return one library-size value as the gene-major kernel ranks it.
+
+    The value is computed in float64 and rounded once to float32.
+    """
+    exact = size_factor * np.float64(count) / total
+    if log_transform:
+        exact = np.log1p(exact)
+    return np.float32(exact)
+
+
 @njit(cache=True, nogil=True)
 def _gene_major_feature(
     counts: np.ndarray,
@@ -302,10 +372,7 @@ def _gene_major_feature(
         count = counts[c]
         if count == 0:
             continue
-        exact = size_factor * np.float64(count) / totals[c]
-        if log_transform:
-            exact = np.log1p(exact)
-        value = np.float32(exact)
+        value = _library_size_value(count, totals[c], size_factor, log_transform)
         if value > 0.0:
             grp = int_indices[c]
             nz_values[n_nz] = value
@@ -592,11 +659,256 @@ def _batch_stats(
             raise ValueError(
                 f"Feature {labels[column]!r} contains non-finite normalized values"
             )
-    kernel_dtype = np.float32 if values.dtype == np.float32 else np.float64
     out = _marker_stats_batch(
-        np.ascontiguousarray(values, dtype=kernel_dtype),
+        _kernel_values(values),
         int_indices,
         group_counts.astype(np.float64),
         float(n_total),
     )
     return np.asarray(out)
+
+
+def _kernel_values(values: np.ndarray) -> np.ndarray:
+    """Return values as the dense kernels rank them: float32 kept, else float64."""
+    kernel_dtype = np.float32 if values.dtype == np.float32 else np.float64
+    return np.ascontiguousarray(values, dtype=kernel_dtype)
+
+
+def exact_batch_p_values(
+    data: np.ndarray,
+    int_indices: np.ndarray,
+    group_sizes: np.ndarray,
+    exact_groups: np.ndarray,
+    max_size: int,
+) -> np.ndarray:
+    """Return exact p-values of cells-by-features values, ranked as ``_batch_stats`` ranks them.
+
+    Returns:
+        Features-by-groups p-values of ``exact_groups``, NaN for other groups.
+    """
+    values = np.asarray(data)
+    out = np.full((values.shape[1], len(group_sizes)), np.nan)
+    _exact_marker_p_values(
+        _kernel_values(values),
+        int_indices,
+        np.asarray(group_sizes, dtype=np.int64),
+        exact_groups,
+        max_size,
+        out,
+    )
+    return out
+
+
+# Exact Mann-Whitney p-values. Midranks are multiples of one half, so doubled
+# midranks are integers and the null distribution of a group's doubled rank
+# sum can be counted exactly, ties included.
+
+
+@njit(cache=True, nogil=True)
+def _rank_sum_null_counts(
+    values: np.ndarray,
+    multiplicities: np.ndarray,
+    max_size: int,
+    width: int,
+) -> np.ndarray:
+    """Count the subsets of each size up to ``max_size`` by their rank sum.
+
+    ``values`` holds the distinct doubled midranks of the pooled observations
+    and ``multiplicities`` how many observations share each. Row ``k`` of the
+    result counts the ``k``-subsets of the observations by the sum of their
+    doubled midranks, from 0 to ``width - 1``; when ``width`` exceeds the sum
+    of the ``max_size`` largest doubled midranks, row ``k`` holds all
+    ``C(n, k)`` subsets. Choosing ``t`` of ``m`` tied observations can be
+    done in ``C(m, t)`` ways, so a tie adds its observations at once.
+    """
+    counts = np.zeros((max_size + 1, width), dtype=np.int64)
+    counts[0, 0] = 1
+    for position in range(values.shape[0]):
+        value = values[position]
+        tied = multiplicities[position]
+        # Larger subsets first, so that each reads counts without this value.
+        for size in range(max_size, 0, -1):
+            target = counts[size]
+            ways = 1
+            for taken in range(1, min(tied, size) + 1):
+                ways = ways * (tied - taken + 1) // taken
+                shift = taken * value
+                source = counts[size - taken]
+                for total in range(width - shift):
+                    target[total + shift] += ways * source[total]
+    return counts
+
+
+@njit(cache=True, nogil=True)
+def exact_two_sided_p_value(distribution: np.ndarray, observed: int) -> float:
+    """Return the two-sided p-value of ``observed`` under counted sums.
+
+    ``distribution`` counts the splits of the null by their doubled rank sum.
+    The p-value doubles the smaller tail, as SciPy's permutation tests do,
+    and is at most 1.
+    """
+    lower = 0
+    upper = 0
+    total = 0
+    for value in range(distribution.shape[0]):
+        count = distribution[value]
+        total += count
+        if value <= observed:
+            lower += count
+        if value >= observed:
+            upper += count
+    return min(1.0, 2.0 * min(lower, upper) / total)
+
+
+@njit(cache=True, nogil=True)
+def _exact_feature_p_values(
+    values: np.ndarray,
+    int_indices: np.ndarray,
+    group_sizes: np.ndarray,
+    exact_groups: np.ndarray,
+    max_size: int,
+    out: np.ndarray,
+) -> None:
+    """Write exact two-sided Mann-Whitney p-values of one feature's groups.
+
+    Each group of ``exact_groups`` is compared with the rest of the cells
+    through the smaller of the two, which holds at most ``max_size`` cells:
+    its doubled rank sum is ranked against every split of the pooled doubled
+    midranks into sides of the same sizes, ties included. ``out`` receives
+    one p-value per group of ``exact_groups`` and keeps its other entries.
+    """
+    n_cells = values.shape[0]
+    order = np.argsort(values)
+    doubled = np.empty(n_cells, dtype=np.int64)
+    distinct = np.empty(n_cells, dtype=np.int64)
+    multiplicities = np.empty(n_cells, dtype=np.int64)
+    n_distinct = 0
+    start = 0
+    while start < n_cells:
+        stop = start
+        value = values[order[start]]
+        while stop + 1 < n_cells and values[order[stop + 1]] == value:
+            stop += 1
+        # Twice the midrank of sorted positions start to stop, counted from 1.
+        rank = start + stop + 2
+        for position in range(start, stop + 1):
+            doubled[order[position]] = rank
+        distinct[n_distinct] = rank
+        multiplicities[n_distinct] = stop - start + 1
+        n_distinct += 1
+        start = stop + 1
+    sums = np.zeros(group_sizes.shape[0], dtype=np.int64)
+    for cell in range(n_cells):
+        sums[int_indices[cell]] += doubled[cell]
+    # No subset of max_size observations sums past the max_size largest.
+    width = 1
+    remaining = max_size
+    position = n_distinct - 1
+    while remaining > 0:
+        taken = min(remaining, multiplicities[position])
+        width += taken * distinct[position]
+        remaining -= taken
+        position -= 1
+    counts = _rank_sum_null_counts(
+        distinct[:n_distinct], multiplicities[:n_distinct], max_size, width
+    )
+    # The doubled ranks of all cells sum to n_cells * (n_cells + 1).
+    total = n_cells * (n_cells + 1)
+    for index in range(exact_groups.shape[0]):
+        group = exact_groups[index]
+        size = group_sizes[group]
+        observed = sums[group]
+        if n_cells - size < size:
+            # The rest is the smaller side, and its sum mirrors the group's.
+            size = n_cells - size
+            observed = total - observed
+        out[group] = exact_two_sided_p_value(counts[size], observed)
+
+
+@njit(cache=True, nogil=True)
+def _exact_marker_p_values(
+    data: np.ndarray,
+    int_indices: np.ndarray,
+    group_sizes: np.ndarray,
+    exact_groups: np.ndarray,
+    max_size: int,
+    out: np.ndarray,
+) -> None:
+    """Write exact p-values of each feature of cells-by-features values.
+
+    Values are ranked as the dense kernel ranks them; row ``f`` of ``out``
+    receives the p-values of feature ``f``.
+    """
+    for feature in range(data.shape[1]):
+        _exact_feature_p_values(
+            data[:, feature],
+            int_indices,
+            group_sizes,
+            exact_groups,
+            max_size,
+            out[feature],
+        )
+
+
+@njit(cache=True, nogil=True)
+def _exact_marker_p_values_gene_major(
+    raw: np.ndarray,
+    totals: np.ndarray,
+    size_factor: float,
+    log_transform: bool,
+    int_indices: np.ndarray,
+    group_sizes: np.ndarray,
+    exact_groups: np.ndarray,
+    max_size: int,
+    destination_rows: np.ndarray,
+    out: np.ndarray,
+) -> None:
+    """Write exact p-values of the library-size values of feature-major counts.
+
+    Each row with a non-negative ``destination_rows`` entry is ranked as
+    the float32 values that the gene-major kernel ranks, with zero for a
+    zero count, and its p-values go to that row of ``out``. The kernel has
+    validated the values already.
+    """
+    n_cells = raw.shape[1]
+    values = np.empty(n_cells, dtype=np.float32)
+    for row in range(raw.shape[0]):
+        destination = destination_rows[row]
+        if destination < 0:
+            continue
+        counts = raw[row]
+        for cell in range(n_cells):
+            count = counts[cell]
+            values[cell] = (
+                _library_size_value(count, totals[cell], size_factor, log_transform)
+                if count != 0
+                else np.float32(0.0)
+            )
+        _exact_feature_p_values(
+            values,
+            int_indices,
+            group_sizes,
+            exact_groups,
+            max_size,
+            out[destination],
+        )
+
+
+def exact_rank_scratch_bytes(*, n_cells: int, n_groups: int, max_size: int) -> int:
+    """Return what one exact p-value call holds while it ranks one feature.
+
+    It holds the order, doubled midranks, distinct midranks, and their
+    multiplicities for every cell, a float32 value of every cell for
+    library-size counts, the doubled rank sum of every group, and the counts
+    of subsets of up to ``max_size`` cells by doubled rank sums, which reach
+    at most ``2 * max_size * n_cells``.
+    """
+    cells = max(0, int(n_cells))
+    size = max(0, int(max_size))
+    int64 = np.dtype(np.int64).itemsize
+    counts = (size + 1) * (2 * size * cells + 1) * int64
+    return (
+        cells * (4 * int64 + np.dtype(np.float32).itemsize)
+        + max(0, int(n_groups)) * int64
+        + counts
+    )

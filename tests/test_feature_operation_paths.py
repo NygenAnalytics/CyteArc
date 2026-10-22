@@ -452,33 +452,52 @@ def test_make_bulk_rejects_other_group_sources(store: DataStore) -> None:
         store.compare.compute_bulk(3.5)  # type: ignore[arg-type]
 
 
-def test_make_bulk_treats_fewer_than_one_pseudo_replicate_as_one(
-    store: DataStore,
+@pytest.mark.parametrize(
+    ("pseudo_reps", "error", "message"),
+    [
+        (0, ValueError, "pseudo_reps must be at least 1"),
+        (-3, ValueError, "pseudo_reps must be at least 1"),
+        (1.5, TypeError, "pseudo_reps must be an integer"),
+        (True, TypeError, "pseudo_reps must be an integer"),
+    ],
+)
+def test_make_bulk_rejects_fewer_than_one_pseudo_replicate(
+    store: DataStore, pseudo_reps: Any, error: type[Exception], message: str
 ) -> None:
-    cells = _cells(store)
-    pd.testing.assert_frame_equal(
-        store.compare.compute_bulk("grp3", cell_selection=cells, pseudo_reps=0),
-        store.compare.compute_bulk("grp3", cell_selection=cells, pseudo_reps=1),
-    )
+    # Values below 1 were silently treated as 1.
+    with pytest.raises(error, match=message):
+        store.compare.compute_bulk(
+            "grp3", cell_selection=_cells(store), pseudo_reps=pseudo_reps
+        )
 
 
-def test_make_bulk_gives_zero_profiles_to_empty_pseudo_replicates(
+def test_make_bulk_leaves_out_empty_pseudo_replicates(
     store: DataStore,
 ) -> None:
     labels = np.array(["solo"] + ["rest"] * (N_CELLS - 1), dtype=object)
     store.cells.insert("solo_group", labels, overwrite=True)
+    options = {
+        "from_assay": "ADT",
+        "cell_selection": _cells(store),
+        "pseudo_reps": 2,
+        "remove_empty_features": False,
+    }
 
-    bulk = store.compare.compute_bulk(
-        "solo_group",
-        from_assay="ADT",
-        cell_selection=_cells(store),
-        pseudo_reps=2,
-        remove_empty_features=False,
+    bulk, n_cells = store.compare.compute_bulk(
+        "solo_group", return_n_cells=True, **options
+    )
+    kept = store.compare.compute_bulk(
+        "solo_group", remove_empty_columns=False, **options
     )
 
-    assert bulk.columns.tolist() == ["rest_Rep1", "rest_Rep2", "solo_Rep1", "solo_Rep2"]
-    assert bulk["solo_Rep2"].eq(0).all()
+    # One cell fills one of its two pseudo-replicates; the other has no cells
+    # and is left out instead of being returned as zeros.
+    assert bulk.columns.tolist() == ["rest_Rep1", "rest_Rep2", "solo_Rep1"]
+    assert n_cells.to_dict() == {"rest_Rep1": 12, "rest_Rep2": 11, "solo_Rep1": 1}
     assert not bulk["solo_Rep1"].eq(0).all()
+    assert kept.columns.tolist() == [*bulk.columns, "solo_Rep2"]
+    assert kept["solo_Rep2"].isna().all()
+    pd.testing.assert_frame_equal(kept[bulk.columns], bulk)
 
 
 def _statistical_tests(
@@ -701,6 +720,65 @@ def test_statistical_result_edited_outside_cytearc_is_recomputed(
     pd.testing.assert_frame_equal(second.tables[key], first.tables[key])
 
 
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"grouping": "grp3", "test": "kruskal_wallis", "posthoc": "dunn"},
+        {"grouping": "grp", "test": "mann_whitney"},
+        {"grouping": "grp", "test": "welch", "alternative": "greater"},
+        {"grouping": "cond", "sample_by": "sample", "sample_stat": "median"},
+    ],
+    ids=["dunn", "mann-whitney", "welch", "samples"],
+)
+def test_statistical_tests_validate_their_design_once_for_every_key(
+    store: DataStore, monkeypatch: pytest.MonkeyPatch, options: dict[str, Any]
+) -> None:
+    from cytearc.features import statistical
+
+    keys = [f"design_key_{index}" for index in range(6)]
+    rng = np.random.default_rng(23)
+    for key in keys:
+        store.cells.insert(key, rng.poisson(3.0, N_CELLS).astype(float), overwrite=True)
+    prepared: list[str] = []
+    checked = {"labels": 0}
+    original_prepare = features_module.prepare_group_comparison
+    original_mask = statistical._valid_group_mask
+
+    def counting_prepare(*args: Any, **kwargs: Any) -> Any:
+        prepared.append(kwargs["test"])
+        return original_prepare(*args, **kwargs)
+
+    def counting_mask(*args: Any, **kwargs: Any) -> Any:
+        checked["labels"] += 1
+        return original_mask(*args, **kwargs)
+
+    monkeypatch.setattr(features_module, "prepare_group_comparison", counting_prepare)
+    monkeypatch.setattr(statistical, "_valid_group_mask", counting_mask)
+    grouping = options.pop("grouping")
+    common = {"grouping": grouping, "skip_save": True, "adjustment": "none"}
+    singles = {
+        key: _statistical_tests(store, keys=key, **common, **options) for key in keys
+    }
+    per_call = checked["labels"] / len(keys)
+    checked["labels"] = 0
+    combined = _statistical_tests(store, keys=keys, **common, **options)
+
+    # One call validates its labels as often as a call with one key does,
+    # and prepares one design.
+    assert checked["labels"] == per_call
+    assert len(prepared) == len(keys) + 1
+    for key in keys:
+        pd.testing.assert_frame_equal(
+            combined.tables[key], singles[key].tables[key], check_exact=True
+        )
+        if options.get("posthoc"):
+            pd.testing.assert_frame_equal(
+                combined.posthoc_tables[key],
+                singles[key].posthoc_tables[key],
+                check_exact=True,
+            )
+
+
 def test_statistical_values_that_change_during_a_call_abort_it(
     store: DataStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -740,7 +818,10 @@ def test_statistical_results_with_undefined_statistics_are_not_saved(
     value: float,
     message: str,
 ) -> None:
-    original = features_module.compare_group_distributions
+    from cytearc.features.statistical import GroupComparisonDesign
+
+    # compare.test compares each key's values with one prepared design.
+    original = GroupComparisonDesign.compare
 
     def undefined(*args: Any, **kwargs: Any) -> Any:
         result = original(*args, **kwargs)
@@ -748,7 +829,7 @@ def test_statistical_results_with_undefined_statistics_are_not_saved(
         table[column] = value
         return dataclasses.replace(result, table=table)
 
-    monkeypatch.setattr(features_module, "compare_group_distributions", undefined)
+    monkeypatch.setattr(GroupComparisonDesign, "compare", undefined)
     key = f"undefined_{column}"
     store.cells.insert(key, VALUES, overwrite=True)
     saved = set(store.artifacts.list(kind="statistical_tests", scope="datastore"))

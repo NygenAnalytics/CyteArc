@@ -325,6 +325,13 @@ normalization that returns NaN, raises `ValueError` naming the group and the fea
 means also raise `ValueError` when a selected cell's `<assay>_nCounts` total is negative or not
 finite. Cells whose group or sub-group label is recorded as missing join no group, as values in
 `null_vals` do. Group values that would produce the same column name raise an error.
+A bulk column without cells, such as a group and sub-group combination that no cell has or a
+pseudo-replicate of a group with fewer cells than `pseudo_reps`, is left out rather than returned
+as a profile of zeros; `remove_empty_columns=False` keeps such columns as NaN.
+`return_n_cells=True` appends an int64 Series named `n_cells` with the number of cells of each
+returned column, after the fractions when `return_fraction=True`, so a downstream count model can
+weight or drop small pseudobulk samples. `pseudo_reps` must be an integer of at least 1 and
+`feature_label` one of `"index"`, `"id"`, or `"name"`; other values raise before anything is read.
 `add_grouped_assay(groups, assay_label=...)` similarly accepts a
 pseudotime-aggregation ref or an explicit feature metadata column when constructing a new assay.
 An aggregation ref groups only the features it clustered, and missing metadata values never form a
@@ -496,10 +503,47 @@ natural order, so `"1_2"` precedes `"1_10"` and `"2_T"` precedes `"B cell"`.
 `markers.export_csv` uses the same column order. An unknown `group_id` raises an error.
 Fresh marker results include score, expression fractions, fold change, AUC, two-sided Mann-Whitney p-values, and Benjamini-Hochberg values adjusted within each one-versus-rest group over tested features.
 These are cell-level marker statistics, not replicate-aware differential expression.
+Statistics are stored at full float64 precision. `neg_log10_p_value` holds `-log10` of the
+p-value; for the normal approximation it is computed in log space, so it stays finite and keeps
+its order where `p_value` underflows to 0, near a z statistic of 38. A group whose cells can be
+split from the other cells in at most 100,000 ways, such as a group of two cells among at most 447,
+gets exact p-values from the permutation null of its rank sum, ties included, as `compare.test`
+does; other groups keep the tie- and continuity-corrected normal approximation. A group of fewer
+than two cells cannot be compared with the rest: `markers.search` skips it with a warning that
+names it, records it in the table's `skipped_groups` metadata, keeps its cells in the rest of every
+other group, and `markers.load` gives it no rows. A clustering without any group of at least two
+cells and at least two other cells raises `ValueError` naming the groups.
+
+A marker table of operation revision 1, written before release 1.3.0, records neither
+`neg_log10_p_value` nor `p_value_policy`. `markers.load`, `markers.export_csv`, and
+`marker_heatmap` still read it, from read-only stores too, under an explicit policy: its
+statistics keep the five-decimal rounding they were stored with, except for the p-values, which
+come from the tie- and continuity-corrected normal approximation for every group, the p-value
+policy that the readers report as `asymptotic_tie_and_continuity_corrected`. Its
+`neg_log10_p_value` is derived as `-log10(p_value)`, and is `inf` where `p_value` underflowed to
+0. The filters and `sort_by` apply as to any table. `markers.search` never reuses such a table: on
+a writable store it recomputes it at revision 2, and on a read-only store it raises
+`PermissionError`. A table without `p_value_policy` that does not have exactly the revision 1
+columns, or that records `skipped_groups`, raises `ValueError`.
+
+`markers.load` and `markers.export_csv` keep a row that passes every filter that is not `None`:
+`min_frac_exp=0.2`, `min_auc=0.6`, and `max_p_adj=0.05` by default, on `frac_exp`, `auc`, and
+`p_value_adjusted`. `min_score` defaults to `None`. `score` is a group's share of the mean dense
+ranks summed over all groups, so a gene that is uniform across groups scores `1/n_groups`, and a
+gene with distinct values in the `n` cells of one group and zero elsewhere scores
+`(n + 3) / (n + 1 + 2 * n_groups)`. A fixed score threshold therefore hides perfect markers of
+small groups and of fine partitions:
+LILRA4 in the plasmacytoid dendritic cells of a 60-group partition of 1,000 PBMCs has an AUC of 1.0
+and a score of 0.125. Pass `None` for every filter to read every tested feature, negative markers
+included. `sort_by` orders the rows of each group: `"score"` (the default), `"auc"`, or
+`"fold_change"` descending, or `"p_value"` ascending. Ties fall to the p-value, with
+`neg_log10_p_value` ordering p-values that underflow to 0, except that ties in `"p_value"` fall to
+the AUC so that positive markers come first; then to the feature name and index.
 `fold_change` is the group's `mean` divided by `mean_rest`, the means of the values that the
 search ranks. It is `inf` for a feature that no other cell expresses, so such features sort above
 every finite ratio, and `NaN` when both means are 0 or either is negative, as signed counts can
-give. Every other statistic is finite. The ranked values are the assay's normalized values, such
+give. Every other statistic is finite, except the derived `neg_log10_p_value` of a revision 1
+table. The ranked values are the assay's normalized values, such
 as library-size normalized RNA counts, log-scale with `log_transform=True`, CLR values of ADT
 counts, which are log-scale too, or TF-IDF values of ATAC counts. No pseudocount is added, and
 fold changes compare only within one assay and normalization. Marker tables record this policy in

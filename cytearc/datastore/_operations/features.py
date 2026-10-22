@@ -63,6 +63,7 @@ from ...assay.normalization import (
 )
 from ...features.enrichment.net import AmbiguousTargets
 from ...features.enrichment.results import EnrichmentResult
+from ...features.markers.rank import MarkerSortKey, marker_sort_key
 from ...features.markers.table import (
     MARKER_ADJUSTMENT_METHOD,
     MARKER_ADJUSTMENT_SCOPE,
@@ -70,11 +71,17 @@ from ...features.markers.table import (
     MARKER_CONTINUITY_CORRECTION,
     MARKER_FOLD_CHANGE_POLICY,
     MARKER_METHOD,
+    MARKER_P_VALUE_POLICY,
+    MARKER_REVISION_1_P_VALUE_POLICY,
     MARKER_STAT_COLUMNS,
     MARKER_TIE_CORRECTION,
+    MarkerFilter,
+    MarkerSlot,
     RankMarkerResult,
+    _describe_groups,
     _validate_marker_slot,
-    load_marker_table,
+    _validate_rank_marker_groups,
+    rank_marker_tested_groups,
 )
 from ...features.statistical import (
     MANN_WHITNEY_P_VALUE_POLICY,
@@ -85,8 +92,8 @@ from ...features.statistical import (
     StatisticalTestResult,
     build_statistical_result,
     choose_statistical_method,
-    compare_group_distributions,
     distinct_label_keys,
+    prepare_group_comparison,
     reject_missing_statistical_values,
     require_subjects_across_conditions,
     resolve_statistical_request,
@@ -1841,14 +1848,30 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             nthreads = self.nthreads
         group_ids, group_sizes = np.unique(labels, return_counts=True)
         n_selected = int(len(labels))
+        for group_id in group_ids:
+            _validate_marker_group_name(str(group_id))
+        tested = _validate_rank_marker_groups(group_ids, group_sizes)
         # The distinct values of one array have distinct string forms.
-        expected_group_cell_counts: dict[str, tuple[int, int]] = {}
-        for group_id, group_size in zip(group_ids, group_sizes, strict=True):
-            group_name = str(group_id)
-            _validate_marker_group_name(group_name)
-            expected_group_cell_counts[group_name] = (
-                int(group_size),
-                n_selected - int(group_size),
+        expected_group_cell_counts = {
+            str(group_id): (int(group_size), n_selected - int(group_size))
+            for group_id, group_size in zip(
+                group_ids[tested], group_sizes[tested], strict=True
+            )
+        }
+        expected_skipped_groups = {
+            str(group_id): int(group_size)
+            for group_id, group_size in zip(
+                group_ids[~tested], group_sizes[~tested], strict=True
+            )
+        }
+        if expected_skipped_groups:
+            warn(
+                f"markers.search skips {len(expected_skipped_groups)} groups that "
+                "have fewer than two cells, or fewer than two other cells, which "
+                "a one-versus-rest test cannot compare: "
+                + _describe_groups(group_ids[~tested], group_sizes[~tested])
+                + ". Their cells stay in the rest of every other group, and "
+                "markers.load gives them no rows."
             )
         expected_feature_index = np.flatnonzero(feature_values)
         resolved_feature_names = (
@@ -1892,6 +1915,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     candidate,
                     resolved_feature_names,
                     expected_group_cell_counts=expected_group_cell_counts,
+                    expected_skipped_groups=expected_skipped_groups,
                     workers=io_workers,
                 )
             except (IndexError, KeyError, TypeError, ValueError):
@@ -1973,7 +1997,9 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 feature_names=resolved_feature_names,
                 feature_ids=resolved_feature_ids,
             )
-        logger.info(f"Stored marker results for {len(markers.group_ids)} clusters")
+        logger.info(
+            f"Stored marker results for {len(markers.tested_group_ids)} clusters"
+        )
         logger.debug(
             f"Saved marker results to {artifact_path(planned.ref)} "
             f"in {time.perf_counter() - t_save:.1f}s"
@@ -2075,9 +2101,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         feature_names: np.ndarray,
         feature_ids: np.ndarray,
     ) -> None:
-        """Write the marker tables of every group, each straight from the result.
+        """Write the marker table of every tested group, each straight from the result.
 
-        Concurrent writers each finish one group's stored table at a time.
+        Concurrent writers each finish one group's stored table at a time. The
+        slot records the cell count of each skipped group in its
+        ``skipped_groups`` attribute.
         """
         from ...storage.arrays import create_metadata_column
         from ...storage.stores import run_concurrently
@@ -2089,6 +2117,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         if last_feature >= len(feature_names):
             raise ValueError("Marker feature indices must index feature_names")
         n_cells = int(markers.group_sizes.sum())
+        tested = rank_marker_tested_groups(markers.group_sizes)
         group.attrs.update(
             {
                 "stat_columns": list(MARKER_STAT_COLUMNS),
@@ -2099,6 +2128,15 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 "adjustment_method": MARKER_ADJUSTMENT_METHOD,
                 "adjustment_scope": MARKER_ADJUSTMENT_SCOPE,
                 "fold_change_policy": MARKER_FOLD_CHANGE_POLICY,
+                "p_value_policy": MARKER_P_VALUE_POLICY,
+                "skipped_groups": {
+                    str(group_id): int(n_group)
+                    for group_id, n_group in zip(
+                        markers.group_ids[~tested],
+                        markers.group_sizes[~tested],
+                        strict=True,
+                    )
+                },
             }
         )
         columns: dict[str, tuple[np.ndarray, Any]] = {
@@ -2133,7 +2171,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             + [
                 cluster_writer(group_id, int(n_group))
                 for group_id, n_group in zip(
-                    markers.group_ids, markers.group_sizes, strict=True
+                    markers.group_ids[tested], markers.group_sizes[tested], strict=True
                 )
             ],
             workers=workers,
@@ -2211,8 +2249,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         marker: ArtifactRef,
         *,
         group_id: str | int | None = None,
-        min_score: float = 0.25,
-        min_frac_exp: float = 0.2,
+        min_score: float | None = None,
+        min_frac_exp: float | None = 0.2,
+        min_auc: float | None = 0.6,
+        max_p_adj: float | None = 0.05,
+        sort_by: MarkerSortKey = "score",
     ) -> pd.DataFrame:
         """Return marker features from `markers.search`.
 
@@ -2220,32 +2261,75 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         the artifact are returned in one long table with a ``group_id`` column.
         Groups follow the natural order of their labels, as in plots: numeric
         labels come first by value, so ``'2'`` precedes ``'10'``, and other
-        labels follow in natural text order.
+        labels follow in natural text order. Rows of a group follow
+        ``sort_by``.
         Pass a specific ``group_id`` to return markers for that group only.
         For a wide export of marker names only, use ``markers.export_csv``.
 
+        A row is kept when it passes every filter that is not ``None``. By
+        default, a marker is expressed in at least 20% of its group's cells,
+        has an AUC of at least 0.6 against the rest of the cells, and an
+        adjusted p-value of at most 0.05. ``score``, a group's share of the
+        summed mean dense ranks, falls as groups multiply and is capped by the
+        group's size, so it ranks markers by default but filters none: a
+        perfect marker of a small group, or of one group of many, can score
+        far below 0.25. Pass ``None`` for every filter to get every tested
+        feature of every group. A group that ``markers.search`` skipped
+        because it had fewer than two cells gives no rows, with a warning.
+
+        A table of operation revision 1, written before release 1.3.0, records
+        neither ``neg_log10_p_value`` nor ``p_value_policy``. It loads, from
+        a read-only store too, with the statistics it stored: rounded to five
+        decimals, except for the p-values, which come from the tie- and
+        continuity-corrected normal approximation, the p-value policy
+        ``"asymptotic_tie_and_continuity_corrected"`` that the load logs.
+        Its ``neg_log10_p_value`` is derived as ``-log10(p_value)``, +inf
+        where ``p_value`` underflowed to 0, and the filters and ``sort_by``
+        apply as to any table. ``markers.search`` never reuses such a table:
+        on a writable store it recomputes it at revision 2.
+
         Args:
             marker: Exact marker-table artifact returned by ``markers.search``.
-            group_id: One stored group label, or ``None`` for all groups. An
-                integer is matched by its string form.
-            min_score: This value dictates how specific the feature value has to be in a group before it is
-                       considered a marker for that group. The value has to be greater than 0 but less than or equal to
-                       1 (Default value: 0.25)
-            min_frac_exp: Minimum fraction of cells in a group that must have a non-zero value for a gene to be
-                          considered a marker for that group.
+            group_id: One group label, or ``None`` for all groups. An integer
+                is matched by its string form.
+            min_score: Smallest ``score`` kept, or ``None`` (default) to keep
+                every score.
+            min_frac_exp: Smallest fraction of the group's cells with a
+                nonzero value, ``frac_exp``, kept (default 0.2), or ``None``.
+            min_auc: Smallest ``auc`` kept (default 0.6): the probability that
+                a cell of the group ranks above a cell of the rest, ties
+                counting one half. ``None`` also keeps negative markers, whose
+                AUC is below 0.5.
+            max_p_adj: Largest ``p_value_adjusted`` kept (default 0.05), or
+                ``None``.
+            sort_by: Statistic that orders the rows of each group, best
+                first: ``"score"`` (default), ``"auc"``, or ``"fold_change"``
+                descending, or ``"p_value"`` ascending. Ties fall to the
+                p-value (to the AUC for ``"p_value"``), then to the feature
+                name and index.
+
         Returns:
             Pandas dataframe with marker statistics and a string ``group_id``
-            column. ``fold_change`` may be +inf or NaN.
+            column. ``fold_change`` may be +inf or NaN, and the
+            ``neg_log10_p_value`` of a table of revision 1 may be +inf.
 
         Raises:
+            TypeError: If a filter is neither ``None`` nor a real number.
             ValueError: If ``group_id`` is not a group of the marker artifact,
-                or the table records no ``fold_change_policy``.
+                a filter is NaN, ``sort_by`` is not one of the orders above,
+                the table records no ``fold_change_policy``, or it breaks the
+                layout of its revision.
         """
         tables = self._filtered_marker_tables(
             marker,
             group_id=group_id,
-            min_score=min_score,
-            min_frac_exp=min_frac_exp,
+            filters=MarkerFilter(
+                min_score=min_score,
+                min_frac_exp=min_frac_exp,
+                min_auc=min_auc,
+                max_p_adj=max_p_adj,
+            ),
+            sort_by=sort_by,
         )
         if not tables:
             raise ValueError("Marker artifact contains no groups")
@@ -2256,12 +2340,30 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         marker: ArtifactRef,
         *,
         group_id: str | int | None,
-        min_score: float,
-        min_frac_exp: float,
+        filters: MarkerFilter,
+        sort_by: MarkerSortKey,
     ) -> dict[str, pd.DataFrame]:
-        """Load and filter each requested marker group in natural label order."""
+        """Load, sort, and filter each requested marker group in natural label order.
+
+        The slot's metadata and feature index are read once for every group.
+        """
+        marker_sort_key(sort_by)
         _assay, g = self._resolve_marker_group(marker)
-        gids = sort_categories(g.group_keys())
+        feature_names = np.asarray(
+            as_zarr_array(g["feature_names"], name="feature_names")[:]
+        ).astype(str)
+        # The canonical reader rejects statistics that break their contract,
+        # tables without the fold-change policy, and layouts of no revision.
+        slot = MarkerSlot.read(g, len(feature_names))
+        if slot.p_value_policy == MARKER_REVISION_1_P_VALUE_POLICY:
+            logger.info(
+                f"Marker table {marker.artifact_id} is of operation revision 1: "
+                "its statistics keep five decimals, its p-values follow "
+                f"p_value_policy {MARKER_REVISION_1_P_VALUE_POLICY!r}, and "
+                "neg_log10_p_value is derived from p_value. markers.search "
+                "recomputes it at revision 2 on a writable store."
+            )
+        gids = sort_categories([*g.group_keys(), *slot.skipped_groups])
         if group_id is not None:
             requested = str(group_id)
             if requested not in gids:
@@ -2270,24 +2372,20 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     f"available groups: {', '.join(gids)}"
                 )
             gids = [requested]
-
-        feature_names = np.asarray(
-            as_zarr_array(g["feature_names"], name="feature_names")[:]
-        ).astype(str)
+        skipped = [gid for gid in gids if gid in slot.skipped_groups]
+        if skipped:
+            warn(
+                "markers.search skipped groups with fewer than two cells, or "
+                "fewer than two other cells, so they have no marker rows: "
+                + _describe_groups(
+                    np.asarray(skipped),
+                    np.asarray([slot.skipped_groups[gid] for gid in skipped]),
+                )
+            )
         tables: dict[str, pd.DataFrame] = {}
         for gid in gids:
-            # The canonical reader rejects statistics that break their
-            # contract and tables without the current fold-change policy.
-            frame = load_marker_table(
-                g,
-                as_zarr_group(g[gid], name=gid),
-                feature_names,
-                group_id=gid,
-            )
-            keep = (frame["score"].to_numpy() >= min_score) & (
-                frame["frac_exp"].to_numpy() >= min_frac_exp
-            )
-            tables[gid] = frame.loc[keep].reset_index(drop=True)
+            frame = slot.table(gid, feature_names, sort_by=sort_by)
+            tables[gid] = frame.loc[filters.keep(frame)].reset_index(drop=True)
         return tables
 
     @validation_scoped
@@ -2296,32 +2394,50 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         marker: ArtifactRef,
         csv_filename: str,
         *,
-        min_score: float = 0.25,
-        min_frac_exp: float = 0.2,
+        min_score: float | None = None,
+        min_frac_exp: float | None = 0.2,
+        min_auc: float | None = 0.6,
+        max_p_adj: float | None = 0.05,
+        sort_by: MarkerSortKey = "score",
     ) -> None:
         """Export markers of each cluster/group to a CSV file where each column
-        contains the marker names sorted by score (descending order, highest
-        first). Columns follow the natural order of the group labels, as in
-        ``markers.load``. This function does not export the scores of markers as
-        they can be obtained using `markers.load` function.
+        contains the marker names in ``sort_by`` order, best first. Columns
+        follow the natural order of the group labels, as in ``markers.load``,
+        and a group that ``markers.search`` skipped has an empty column. This
+        function does not export the statistics of markers, as
+        ``markers.load`` returns them. A table of operation revision 1 exports
+        as ``markers.load`` reads it: with its five-decimal statistics, its
+        asymptotic p-values, and its derived ``neg_log10_p_value``.
 
         Args:
             marker: Exact marker-table artifact returned by ``markers.search``.
             csv_filename: Required parameter. Name, with path, of CSV file where the marker table is to be saved.
-            min_score: This value dictates how specific the feature value has to be in a group before it is
-                       considered a marker for that group. The value has to be greater than 0 but less than or equal to
-                       1 (Default value: 0.25)
-            min_frac_exp: Minimum fraction of cells in a group that must have a non-zero value for a gene to be
-                          considered a marker for that group.
+            min_score: Smallest ``score`` kept, or ``None`` (default) to keep
+                every score, as for ``markers.load``.
+            min_frac_exp: Smallest ``frac_exp`` kept (default 0.2), or
+                ``None``.
+            min_auc: Smallest ``auc`` kept (default 0.6), or ``None``.
+            max_p_adj: Largest ``p_value_adjusted`` kept (default 0.05), or
+                ``None``.
+            sort_by: Statistic that orders each column, as for
+                ``markers.load``.
 
         Raises:
-            ValueError: If the marker table records no ``fold_change_policy``.
+            TypeError: If a filter is neither ``None`` nor a real number.
+            ValueError: If a filter is NaN, ``sort_by`` is unknown, or the
+                marker table records no ``fold_change_policy`` or breaks the
+                layout of its revision.
         """
         tables = self._filtered_marker_tables(
             marker,
             group_id=None,
-            min_score=min_score,
-            min_frac_exp=min_frac_exp,
+            filters=MarkerFilter(
+                min_score=min_score,
+                min_frac_exp=min_frac_exp,
+                min_auc=min_auc,
+                max_p_adj=max_p_adj,
+            ),
+            sort_by=sort_by,
         )
         markers_table = {
             group_id: table["feature_name"].reset_index(drop=True)
@@ -2665,11 +2781,18 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         return_fraction: bool = False,
         feature_label: Literal["index", "id", "name"] = "index",
         remove_empty_features: bool = True,
+        remove_empty_columns: bool = True,
+        return_n_cells: bool = False,
         pseudo_reps: int = 1,
         null_vals: list[Any] | None = None,
         secondary_null_vals: list[Any] | None = None,
         random_seed: int = 4466,
-    ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> (
+        pd.DataFrame
+        | tuple[pd.DataFrame, pd.DataFrame]
+        | tuple[pd.DataFrame, pd.Series]
+        | tuple[pd.DataFrame, pd.DataFrame, pd.Series]
+    ):
         """Merge data from cells to create a bulk profile.
 
         With ``aggr_type='mean'``, cells are normalized with the assay's
@@ -2681,6 +2804,14 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         Cells whose group or sub-group label is missing join no group, like
         cells whose value is in ``null_vals``. Missing labels are ``NaN``,
         ``None``, blank text, and values flagged by a linked missing mask.
+
+        Each bulk column is one group, one group and sub-group combination
+        (``f"{group}_{subgroup}"``), or one pseudo-replicate of either
+        (``"_Rep1"``, ``"_Rep2"``, ...). A column without cells, such as a
+        combination that no cell has or a pseudo-replicate of a group with
+        fewer cells than ``pseudo_reps``, is left out, so that no empty
+        column passes for a measured profile of zeros. With
+        ``remove_empty_columns=False`` such columns are kept and hold NaN.
 
         Args:
             groups: Explicit clustering artifact or user-owned metadata column
@@ -2696,25 +2827,38 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 metadata column used to sub-group cells.
             aggr_type: Type of aggregation to be used. Can be either 'mean' or 'sum'. (Default value: 'mean')
             return_fraction: Return the fraction of cells expressing a gene in each group. (Default value: False)
-            feature_label: The column in feature metadata table to use as row labels. (Default value: 'index')
+            feature_label: The feature metadata that labels the rows: the
+                feature's position (``'index'``, the default), its ``'id'``,
+                or its ``'name'``.
             pseudo_reps: Within each group, randomly split cells into this many
-                pseudo-replicates. Values greater than 1 produce descriptive
-                resamples of the same cells, not independent biological
-                replicates. (Default value: 1)
+                pseudo-replicates, an integer of at least 1. Values greater
+                than 1 produce descriptive resamples of the same cells, not
+                independent biological replicates. (Default value: 1)
             remove_empty_features: Remove features that are not expressed in any cell. (Default value: True)
+            remove_empty_columns: Leave out bulk columns without cells
+                (default). With False they are kept and hold NaN.
+            return_n_cells: Also return the number of cells of each bulk
+                column. (Default value: False)
             null_vals: Primary group values to skip.
             secondary_null_vals: Secondary group values to skip.
                                  These values will be skipped.
             random_seed: Seed used when assigning cells to pseudo-replicates.
 
         Returns:
-            A pandas dataframe containing the bulk profile. If `return_fraction` is True, then a tuple of two dataframes
-            is returned. The second dataframe contains the fraction of cells expressing each feature in each group.
+            A features-by-columns dataframe of the bulk profiles. With
+            ``return_fraction`` or ``return_n_cells``, a tuple that starts
+            with it and follows with, in this order, a dataframe of the
+            fraction of each column's cells that express each feature, and
+            an int64 Series named ``n_cells`` of each column's number of
+            cells, indexed by the column names.
 
         Raises:
-            ValueError: If two groups produce the same column name, for
-                example groups ``'a_b'`` with sub-group ``'c'`` and ``'a'``
-                with sub-group ``'b_c'``.
+            TypeError: If ``pseudo_reps`` is not an integer.
+            ValueError: If ``aggr_type``, ``feature_label``, or
+                ``pseudo_reps`` is not one of the values above, which is
+                checked before anything is read, or two groups produce the
+                same column name, for example groups ``'a_b'`` with
+                sub-group ``'c'`` and ``'a'`` with sub-group ``'b_c'``.
             UnmeasuredCellsError: If the assay did not measure a cell that is read.
         """
 
@@ -2763,8 +2907,17 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 return np.asarray(resolved.labels)[rows], None, live_idx, valid[rows]
             return resolved.labels, resolved.cell_selection, resolved.cell_idx, valid
 
-        if pseudo_reps < 1:
-            pseudo_reps = 1
+        from ...features.aggregation import (
+            aggregate_bulk_profiles,
+            bulk_column_rows,
+            bulk_frames,
+            bulk_read_cells,
+            validate_bulk_options,
+        )
+
+        pseudo_reps = validate_bulk_options(
+            aggr_type=aggr_type, feature_label=feature_label, pseudo_reps=pseudo_reps
+        )
         if pseudo_reps > 1:
             logger.warning(
                 "compare.compute_bulk with pseudo_reps > 1 randomly splits cells within each "
@@ -2772,12 +2925,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                 "biological replicates and must not be used as such for "
                 "differential expression."
             )
-        from ...features.aggregation import (
-            aggregate_bulk_profiles,
-            bulk_column_rows,
-            bulk_frames,
-            bulk_read_cells,
-        )
 
         live_idx = (
             self.cells.active_index("I").astype(np.int64, copy=False)
@@ -2815,16 +2962,18 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             pseudo_reps=pseudo_reps,
             random_seed=random_seed,
         )
+        n_cells = {name: len(rows) for name, rows in column_rows.items()}
+        filled = {name: rows for name, rows in column_rows.items() if len(rows)}
         # The cells whose counts aggregation reads.
         self._require_measured_cells(
             assay.name,
-            bulk_read_cells(assay, aggr_type, active_idx, column_rows),
+            bulk_read_cells(assay, aggr_type, active_idx, filled),
             operation="make_bulk",
             remedy="cell_selection",
         )
         values, fractions = aggregate_bulk_profiles(
             assay,
-            column_rows,
+            filled,
             active_idx,
             aggr_type=aggr_type,
             return_fraction=return_fraction,
@@ -2836,9 +2985,12 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             values,
             fractions,
             assay.feats,
+            n_cells=n_cells,
             remove_empty_features=remove_empty_features,
+            remove_empty_columns=remove_empty_columns,
             feature_label=feature_label,
             return_fraction=return_fraction,
+            return_n_cells=return_n_cells,
         )
 
     def _statistical_design_columns(
@@ -3313,6 +3465,21 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             # Fail before computing when the result cannot be written.
             self._require_writable("run_statistical_testing")
 
+        # The design is validated and encoded once, before any value is read,
+        # and then compares each key's values.
+        design = prepare_group_comparison(
+            selection.groups,
+            test=effective_method,
+            posthoc=posthoc,
+            adjustment="none",
+            samples=selection.samples,
+            pairs=selection.pairs,
+            comparisons=request.comparisons,
+            sample_stat=sample_stat,
+            expression_cutoff=expression_cutoff,
+            group_order=present,
+            alternative=alternative,
+        )
         outcomes: dict[str, GroupComparisonResult] = {}
         computed_value_fingerprints: list[str] = []
         for key_label, values in zip(
@@ -3325,20 +3492,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             strict=True,
         ):
             computed_value_fingerprints.append(value_fingerprint(values))
-            outcomes[key_label] = compare_group_distributions(
-                values,
-                selection.groups,
-                test=effective_method,
-                posthoc=posthoc,
-                adjustment="none",
-                samples=selection.samples,
-                pairs=selection.pairs,
-                comparisons=request.comparisons,
-                sample_stat=sample_stat,
-                expression_cutoff=expression_cutoff,
-                group_order=present,
-                alternative=alternative,
-            )
+            outcomes[key_label] = design.compare(values)
 
         computed_fingerprints = tuple(computed_value_fingerprints)
         if current_value_fingerprints is None:

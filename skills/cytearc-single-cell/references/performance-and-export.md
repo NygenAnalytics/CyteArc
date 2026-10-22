@@ -235,18 +235,17 @@ ds.cells.to_pandas_dataframe(["ids", "cell_type"], key="I").to_csv("cells.csv", 
 Raw counts per population x sample plus a design table, for DESeq2, edgeR or another count model.
 
 ```python
-bulk = ds.compare.compute_bulk(
+bulk, n_cells = ds.compare.compute_bulk(
     "cell_type", secondary_groups="sample_id",        # one column per population x sample
     cell_selection=run["analysis_cell_selection"],
     aggr_type="sum", feature_label="id",              # raw counts; Ensembl ids are unique
+    return_n_cells=True,                              # cells per column; pairs without cells drop
 )
 cells = ds.cells.to_pandas_dataframe(["cell_type", "sample_id", "donor_id", "condition"])
 cells = cells[np.asarray(run.cells.fetch_all("I"), dtype=bool)]
 assert cells.groupby("sample_id")[["donor_id", "condition"]].nunique().eq(1).all().all()
 cells["column"] = cells["cell_type"].astype(str) + "_" + cells["sample_id"].astype(str)
-by_column = cells.groupby("column")
-design = by_column.first().assign(n_cells=by_column.size()).reindex(bulk.columns)  # empty -> NaN
-design["n_cells"] = design["n_cells"].fillna(0).astype(int)
+design = cells.groupby("column").first().reindex(bulk.columns).assign(n_cells=n_cells)
 keep = design["n_cells"] >= 10                        # choose a floor and report what you drop
 assert np.allclose(bulk.to_numpy(), np.round(bulk.to_numpy()))
 bulk.loc[:, keep].round().astype("int64").to_csv("pseudobulk_counts.csv")
@@ -254,8 +253,9 @@ design.loc[keep].to_csv("pseudobulk_design.csv")
 print(design[keep].groupby(["cell_type", "condition"])["donor_id"].nunique().unstack(fill_value=0))
 ```
 
-`compare.compute_bulk` emits every group x subgroup pair (all-zero when empty), named `f"{group}_{subgroup}"`;
-a name collision raises. Sums are exact: integral counts sum in an integer dtype (uint64 for unsigned
+`compare.compute_bulk` emits one column per group x subgroup pair with cells, named
+`f"{group}_{subgroup}"`; `remove_empty_columns=False` keeps pairs without cells as NaN, never zeros,
+and `return_n_cells=True` appends the cells per column. A name collision raises. Sums are exact: integral counts sum in an integer dtype (uint64 for unsigned
 counts, int64 for signed and bool counts) and floating-point counts in float64. Means average each
 group's rows of `normed`, so a cell without counts adds zeros and still counts toward its group.
 Model one population at a time with donor-level terms; with repeated samples per donor, include the
@@ -301,8 +301,9 @@ contains no artifacts or pipeline runs. Use it to hand off, or before `to_mtx` o
 | `to_anndata`/`to_h5ad` `cell_selection=` | `None` (`I` cells; `to_h5ad`: every cell) | the selection your artifacts cover; rejected with `run=` |
 | `to_anndata`/`to_h5ad` `dtype=` | stored dtype, `uint8`/`uint16` as `float32` | a smaller or integer dtype for a size-sensitive hand-off |
 | `to_mtx(compress=)` | `False` | `True` for Cell Ranger 3 file names |
-| `markers.load` / `markers.export_csv` `min_score`, `min_frac_exp` | `0.25`, `0.2` | widen or narrow the exported marker list |
+| `markers.load` / `markers.export_csv` `min_frac_exp`, `min_auc`, `max_p_adj`, `min_score`, `sort_by` | `0.2`, `0.6`, `0.05`, `None`, `"score"` | widen (`None`) or narrow the exported marker list; `sort_by="auc"` for small groups |
 | `compare.compute_bulk(aggr_type=, feature_label=, pseudo_reps=)` | `"mean"`, `"index"`, `1` | `"sum"` and `"id"` for count models; never `pseudo_reps` above 1 for inference |
+| `compare.compute_bulk(remove_empty_columns=, return_n_cells=)` | `True`, `False` | `return_n_cells=True` to drop or weight small pseudobulk samples |
 | `SubsetZarr(reset_cell_filter=)` | `True` (new `I` all true) | `False` to carry `I` over |
 | `SubsetZarr(overwrite_existing_file=)`, importers' `overwrite=` | `False` (destination must be empty) | `True` to replace an earlier output that no `DataStore` has opened |
 
@@ -329,8 +330,8 @@ contains no artifacts or pipeline runs. Use it to hand off, or before `to_mtx` o
   column (`<assay>_I`) and declare it in `uns["cytearc"]["assayMembership"]`, so `H5adToZarr`
   imports it back as membership and the store can be merged again. Other assays' membership
   columns are not exported. Run exports declare none.
-- `markers.export_csv` writes names only, filtered by `min_score`/`min_frac_exp`; use
-  `markers.load(marker=ref)` for statistics. Pass the exact marker ref, never a guess.
+- `markers.export_csv` writes names only, filtered and ordered as `markers.load` filters and
+  orders them; use `markers.load(marker=ref)` for statistics. Pass the exact marker ref, never a guess.
 - Remote costs for a few thousand cells on a Hugging Face mount: open 10 to 20 s, a new mount a
   few minutes, the pipeline about a minute (cell cycle, HVG, normalization and markers each
   re-read `countsT`), exports seconds to tens of seconds. A 4-gene panel export still reads every

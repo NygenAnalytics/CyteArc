@@ -237,9 +237,11 @@ def test_reuse_returns_persisted_without_recompute(
 ):
     ds = datastore_ephemeral
     _insert_group_columns(ds)
-    features_module = pytest.importorskip("cytearc.datastore._operations.features")
+    from cytearc.features.statistical import GroupComparisonDesign
+
     calls = {"n": 0}
-    original = features_module.compare_group_distributions
+    # compare.test compares each key's values with one prepared design.
+    original = GroupComparisonDesign.compare
     original_fetch = ds.RNA.normed
     fetch_calls = {"n": 0}
 
@@ -251,7 +253,7 @@ def test_reuse_returns_persisted_without_recompute(
         fetch_calls["n"] += 1
         return original_fetch(*args, **kwargs)
 
-    monkeypatch.setattr(features_module, "compare_group_distributions", counting)
+    monkeypatch.setattr(GroupComparisonDesign, "compare", counting)
     monkeypatch.setattr(ds.RNA, "normed", counting_fetch)
     grouping = _active_metadata_grouping(ds, "stat_group2")
     ds.compare.test(["MALAT1"], **grouping)
@@ -1299,14 +1301,15 @@ def test_statistical_testing_read_only_fails_before_compute(
     datastore_ephemeral,
     monkeypatch,
 ):
-    from cytearc.datastore._operations import features as features_module
+    from cytearc.features.statistical import GroupComparisonDesign
 
     ds = datastore_ephemeral
     _insert_group_columns(ds)
     grouping = _active_metadata_grouping(ds, "stat_group2")
     read_only = _read_only_store(ds)
     calls = {"compare": 0, "normed": 0}
-    original_compare = features_module.compare_group_distributions
+    # compare.test compares each key's values with one prepared design.
+    original_compare = GroupComparisonDesign.compare
     original_normed = read_only.RNA.normed
 
     def counting_compare(*args, **kwargs):
@@ -1317,11 +1320,7 @@ def test_statistical_testing_read_only_fails_before_compute(
         calls["normed"] += 1
         return original_normed(*args, **kwargs)
 
-    monkeypatch.setattr(
-        features_module,
-        "compare_group_distributions",
-        counting_compare,
-    )
+    monkeypatch.setattr(GroupComparisonDesign, "compare", counting_compare)
     monkeypatch.setattr(read_only.RNA, "normed", counting_normed)
 
     with pytest.raises(PermissionError, match=r"zarr_mode='r\+'"):

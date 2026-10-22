@@ -800,7 +800,10 @@ def test_mounted_store_computes_markers_without_writing_source(tmp_path):
 
     assert markers.kind == "marker_table"
     assert ds.artifacts.inspect(markers).complete
-    assert set(ds.markers.load(markers)["group_id"]) == {"a", "b"}
+    # Two cells per group give exact p-values of at least 1/3, which the
+    # default adjusted p-value filter hides, so read every row.
+    table = ds.markers.load(markers, min_frac_exp=None, min_auc=None, max_p_adj=None)
+    assert set(table["group_id"]) == {"a", "b"}
     assert _snapshot_store_files(source) == source_before
     assert "markers" not in zarr.open_group(target, mode="r")["RNA"]
 

@@ -486,9 +486,9 @@ CyteArc validates persisted data and public arguments against the following cont
   sizes, the ascending feature index, and the features-by-groups rank statistics instead of one
   DataFrame per group, and raises `IndexError` for a cell or feature index past the end of `countsT`
   instead of ranking an unwritten column as a cell. A `RankMarkerResult` requires at least two
-  groups of at least two cells and at least one feature, as a saved marker table does, and its
-  `table` method gives the ranked table of one group, with the string `group_id`, that a saved
-  marker table reads back. Feature-stream plans charge what Zarr holds while it reads a band
+  groups, at least one of them tested (at least two cells, and at least two other cells, as a
+  saved marker table needs), and at least one feature; its `table` method gives the ranked table
+  of one tested group, with the string `group_id`, that a saved marker table reads back. Feature-stream plans charge what Zarr holds while it reads a band
   (`ArrayGeometry.readBytes`) and the streams' band indices, and size read-group destinations by the
   selected cells, so tight budgets admit fewer reads in flight and budgets that fitted only
   uncharged read buffers raise `MemoryError`. The marker search also reserves its result, the stored
@@ -1297,6 +1297,47 @@ CyteArc validates persisted data and public arguments against the following cont
   integer counts with NumPy, and compresses with gzip level 6; the matrix text is unchanged.
 - `CSVReader` reads its ID column as text and rejects a missing ID. `SparseToZarr` rejects missing
   or repeated cell and feature IDs and converts COO, CSC, and dense input to CSR.
+- `run_marker_search` is at operation revision 2, so marker tables of earlier releases are
+  recomputed rather than reused. Tables store their statistics at full float64 precision instead
+  of rounding them to five decimals, which kept one or two significant digits of ATAC TF-IDF
+  means. `MARKER_STAT_COLUMNS` ends with `neg_log10_p_value`, `-log10` of the p-value, taken in log
+  space for the normal approximation so that it neither underflows nor ties where `p_value` reaches
+  0. A group that can be split from the other cells in at most 100,000 ways gets exact p-values
+  from the permutation null of its rank sum, ties included, by the counting kernel that the exact
+  Mann-Whitney test of `compare.test` shares; slots record that policy as `p_value_policy`. A group
+  of fewer than two cells, or with fewer than two other cells, is skipped with a warning naming it
+  instead of failing the search; the slot records each skipped group's cell count in
+  `skipped_groups`, its cells stay in the rest of every tested group, and `markers.load` gives it
+  no rows. `RankMarkerResult` gains `exact_p_values`, `tested_group_ids`, and
+  `skipped_group_ids`.
+- Marker tables of revision 1 stay loadable under an explicit read policy. A slot without
+  `p_value_policy` must store exactly `MARKER_REVISION_1_STAT_COLUMNS`, the columns before
+  `neg_log10_p_value`, and record no `skipped_groups`. `load_marker_table`, `markers.load`,
+  `markers.export_csv`, and `marker_heatmap` read it with the five-decimal statistics and the
+  asymptotic p-values it stored; `MarkerSlot.p_value_policy` reports
+  `MARKER_REVISION_1_P_VALUE_POLICY`, `"asymptotic_tie_and_continuity_corrected"`, which
+  `markers.load` logs, and `neg_log10_p_value` is derived as `-log10(p_value)`, `+inf` where the
+  p-value underflowed to 0, before the filters and `sort_by` apply. The reuse validator rejects
+  that layout, so `markers.search` recomputes such a table at revision 2 on a writable store and
+  never reuses it, even under current provenance. Any other slot without `p_value_policy`, and any
+  table without `fold_change_policy`, raises `ValueError`.
+- `markers.load` and `markers.export_csv` filter by default on `frac_exp >= 0.2`, `auc >= 0.6`,
+  and `p_value_adjusted <= 0.05`; `min_score` defaults to `None` because the score falls with the
+  number of groups and is capped by a group's size, and `None` disables any filter. They read the
+  slot's metadata and feature index once for all groups, and `sort_by` orders rows by `"score"`,
+  `"auc"`, `"fold_change"`, or `"p_value"` with deterministic ties, as
+  `cytearc.features.sort_marker_results(table, sort_by)` does.
+- `compare.compute_bulk` leaves out bulk columns without cells, which it returned as zeros, keeps
+  them as NaN with `remove_empty_columns=False`, and with `return_n_cells=True` appends the cells
+  of each column. It raises for a `pseudo_reps` below 1, which it treated as 1, and for an unknown
+  `feature_label`, which fell back to positions.
+- `compare.test` validates and encodes its design once per call, through
+  `prepare_group_comparison`, instead of once per key; `compare_group_distributions` gives each
+  array the same result, bit for bit.
+- `read_gmt` drops a UTF-8 byte order mark. `create_bed_from_coord_ids` parses ids with
+  `parse_coordinate_ids`, so chromosome names may contain `:` and other id forms raise
+  `ValueError` naming the id. `binary_search` raises `ValueError` for ranges that are not sorted by
+  start, for which it returned wrong overlaps.
 
 Compatibility exists only where a current public facade or an explicit file-schema test says it
 does. There are no silent migrations, implicit compatibility branches, or forwarding shims for

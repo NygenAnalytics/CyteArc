@@ -131,7 +131,8 @@ print("V/J genes among HVGs:", sum(bool(re.match(CLONOTYPE_ADDON, g, re.I)) for 
 print(clonal.groupby("group_id")["feature_name"].agg(", ".join))  # clusters led by V genes
 panel = ["JCHAIN", "MZB1", "IGKC", "IGLC2", "IGHA1", "IGHG1", "IGHM", "MKI67",
          "HBB", "HBA1", "ALAS2", "CA1", "AHSP", "SLC4A1"]
-markers = ds.markers.load(marker=run_fixed["markers"], min_score=-1, min_frac_exp=-1)
+markers = ds.markers.load(
+    marker=run_fixed["markers"], min_frac_exp=None, min_auc=None, max_p_adj=None)
 frac = markers[markers["feature_name"].isin(panel)].pivot_table(
     index="group_id", columns="feature_name", values="frac_exp")
 print(frac.round(2).to_string())
@@ -174,8 +175,8 @@ print(frac.round(2).to_string())
   add-on is recommended; consider `^TR[AB]V` only when a cluster is led by one TRAV/TRBV pair.
 - `^HB` also removes `HBEGF`. Small clusters (under about 50 cells) move with any HVG change;
   compare across Leiden seeds before attributing a change to the blacklist.
-- Run `groupby(...).head` on default-filtered marker tables; on a full table (`min_score=-1`) it
-  crashed pandas 3.0 with a segmentation fault in testing.
+- Run `groupby(...).head` on default-filtered marker tables; on a full table (every filter
+  `None`) it crashed pandas 3.0 with a segmentation fault in testing.
 - A blacklist never fixes QC: high `percentMito` cells or red-cell contamination need filtering.
 
 ## See also

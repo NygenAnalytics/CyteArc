@@ -209,19 +209,31 @@ def test_marker_table_writes(bench, tmp_path) -> None:
             cluster = slot[str(group)]
             assert cluster.attrs["n_group"] == size
             assert cluster.attrs["n_reference"] == total - size
-            # Statistics round to five decimals; the z statistic becomes its
-            # two-sided p-value, which is then adjusted within the group.
+            # Statistics keep full precision; the z statistic becomes its
+            # two-sided p-value, which is then adjusted within the group, and
+            # -log10 of the p-value comes from its log-space survival function.
             rank = result.statistics[:, position]
-            p_values = 2.0 * stats.norm.sf(np.abs(rank[:, 6]))
+            z = np.abs(rank[:, 6])
+            p_values = 2.0 * stats.norm.sf(z)
+            neg_log10 = -(np.log(2.0) + stats.norm.logsf(z)) / np.log(10.0)
             expected = np.column_stack(
                 [
-                    np.round(rank[:, :6], 5),
+                    rank[:, :6],
                     p_values,
-                    np.round(rank[:, 7], 5),
+                    rank[:, 7],
                     _benjamini_hochberg(p_values),
                 ]
             )
-            np.testing.assert_allclose(cluster["stats"][:], expected, rtol=1e-12)
+            stored = cluster["stats"][:]
+            assert stored.shape == (len(names), 10)
+            np.testing.assert_allclose(stored[:, :9], expected, rtol=1e-12, atol=0)
+            # A p-value of 1 stores 0, so compare near-zero values absolutely.
+            np.testing.assert_allclose(
+                stored[:, 9],
+                np.where(neg_log10 > 0.0, neg_log10, 0.0),
+                rtol=1e-12,
+                atol=1e-15,
+            )
 
     # run_marker_search writes one table per cluster; large clusterings hold
     # hundreds of clusters. Writing the three feature columns is a fixed cost.

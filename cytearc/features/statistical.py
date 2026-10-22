@@ -61,7 +61,12 @@ from ..metadata.selection import (
 from ..storage.artifacts import fingerprint_array, fingerprint_strings, provenance_hash
 from ..storage.refs import ArtifactRef
 from ..utils.warnings import warn
-from .markers.rank import mannwhitneyu_from_ranks, tie_sum
+from .markers.rank import (
+    _rank_sum_null_counts,
+    exact_two_sided_p_value,
+    mannwhitneyu_from_ranks,
+    tie_sum,
+)
 from .values import ResolvedFeature
 
 TestMethod = Literal[
@@ -143,6 +148,7 @@ __all__ = [
     "ANOVA_COLUMNS",
     "DUNN_COLUMNS",
     "DesignFingerprints",
+    "GroupComparisonDesign",
     "GroupComparisonResult",
     "KRUSKAL_WALLIS_COLUMNS",
     "MANN_WHITNEY_COLUMNS",
@@ -162,6 +168,7 @@ __all__ = [
     "distinct_label_keys",
     "native_value",
     "pool_adjust",
+    "prepare_group_comparison",
     "reject_missing_statistical_values",
     "require_subjects_across_conditions",
     "resolve_group_order",
@@ -531,76 +538,139 @@ def aggregate_samples(
         pair_array = np.asarray(pairs, dtype=object)
         if pair_array.shape != value_array.shape:
             raise ValueError("pairs length must match values")
+    design = _SampleDesign.prepare(
+        group_array,
+        sample_array,
+        pair_array,
+        sample_stat=sample_stat,
+        expression_cutoff=expression_cutoff,
+    )
+    return design.table(design.aggregate(value_array))
 
-    columns: dict[str, np.ndarray] = {
-        "value": value_array,
-        "group": group_array,
-        "sample": sample_array,
-    }
-    if pair_array is not None:
-        columns["pair"] = pair_array
-    frame = pd.DataFrame(columns)
-    valid = _valid_group_mask(frame["sample"].to_numpy(dtype=object, copy=False))
-    frame = frame.loc[valid].copy()
-    if frame.empty:
-        raise ValueError("No selected cells have a valid sample value")
-    sample_group_counts = frame.groupby(
-        "sample",
-        observed=False,
-        sort=False,
-    )["group"].nunique(dropna=False)
-    if (sample_group_counts != 1).any():
-        samples_in_multiple_groups = sample_group_counts[
-            sample_group_counts != 1
-        ].index[:5]
-        examples = ", ".join(repr(sample) for sample in samples_in_multiple_groups)
-        raise ValueError(
-            "Each sample must belong to exactly one group; samples observed in "
-            f"multiple groups include {examples}. Use distinct sample ids per "
-            "condition and pair_by to identify repeated subjects."
-        )
-    if pair_array is not None:
-        valid_pairs = _valid_group_mask(
-            frame["pair"].to_numpy(dtype=object, copy=False)
-        )
-        if not np.all(valid_pairs):
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _SampleDesign:
+    """The validated samples of a design, ready to aggregate value arrays.
+
+    Attributes:
+        keep: Which rows of the design have a valid sample.
+        codes: The sample of each kept row, numbered in first-seen order.
+        sizes: Number of kept rows of each sample.
+        frame: One row per sample, in first-seen order, with its ``sample``
+            and ``group``, and for a paired design its ``pair``.
+        sample_stat: Aggregation of each sample's values.
+        expression_cutoff: Detection cutoff of ``"fraction"``.
+    """
+
+    keep: np.ndarray
+    codes: np.ndarray
+    sizes: np.ndarray
+    frame: pd.DataFrame
+    sample_stat: SampleStatistic
+    expression_cutoff: float
+
+    @classmethod
+    def prepare(
+        cls,
+        groups: np.ndarray,
+        samples: np.ndarray,
+        pairs: np.ndarray | None,
+        *,
+        sample_stat: SampleStatistic,
+        expression_cutoff: float,
+    ) -> "_SampleDesign":
+        """Validate the samples of aligned group, sample, and pair labels."""
+        columns: dict[str, np.ndarray] = {"group": groups, "sample": samples}
+        if pairs is not None:
+            columns["pair"] = pairs
+        frame = pd.DataFrame(columns)
+        keep = _valid_group_mask(samples)
+        frame = frame.loc[keep]
+        if frame.empty:
+            raise ValueError("No selected cells have a valid sample value")
+        sample_group_counts = frame.groupby(
+            "sample",
+            observed=False,
+            sort=False,
+        )["group"].nunique(dropna=False)
+        if (sample_group_counts != 1).any():
+            samples_in_multiple_groups = sample_group_counts[
+                sample_group_counts != 1
+            ].index[:5]
+            examples = ", ".join(repr(sample) for sample in samples_in_multiple_groups)
             raise ValueError(
-                "pairs must contain a valid pair value for every cell with a "
-                "valid sample"
+                "Each sample must belong to exactly one group; samples observed in "
+                f"multiple groups include {examples}. Use distinct sample ids per "
+                "condition and pair_by to identify repeated subjects."
             )
-        pair_counts = frame.groupby(
-            "sample",
-            observed=False,
-            sort=False,
-        )["pair"].nunique(dropna=False)
-        if (pair_counts != 1).any():
-            raise ValueError("Each sample must map to exactly one pair key")
-    grouped = frame.groupby(
-        ["sample", "group"],
-        observed=False,
-        sort=False,
-    )["value"]
-    if sample_stat == "mean":
-        values_by_group = grouped.mean()
-    elif sample_stat == "median":
-        values_by_group = grouped.median()
-    elif sample_stat == "fraction":
-        values_by_group = grouped.apply(
-            lambda value: float(
-                np.mean(value.to_numpy(dtype=np.float64) > float(expression_cutoff))
+        if pairs is not None:
+            valid_pairs = _valid_group_mask(
+                frame["pair"].to_numpy(dtype=object, copy=False)
             )
+            if not np.all(valid_pairs):
+                raise ValueError(
+                    "pairs must contain a valid pair value for every cell with a "
+                    "valid sample"
+                )
+            pair_counts = frame.groupby(
+                "sample",
+                observed=False,
+                sort=False,
+            )["pair"].nunique(dropna=False)
+            if (pair_counts != 1).any():
+                raise ValueError("Each sample must map to exactly one pair key")
+        if sample_stat not in ("mean", "median", "fraction"):
+            raise ValueError("sample_stat must be 'mean', 'median', or 'fraction'")
+        # Each sample has one group, so its first-seen order is that of the
+        # (sample, group) pairs, which grouping by both keys follows.
+        codes, _ = pd.factorize(frame["sample"], sort=False)
+        table = (
+            frame.groupby(["sample", "group"], observed=False, sort=False)
+            .size()
+            .reset_index()
+            .loc[:, ["sample", "group"]]
         )
-    else:
-        raise ValueError("sample_stat must be 'mean', 'median', or 'fraction'")
-    out = values_by_group.rename("value").reset_index()
-    if pair_array is not None:
-        pair_for_sample = frame.groupby(
-            "sample",
-            observed=False,
-            sort=False,
-        )["pair"].first()
-        out["pair"] = out["sample"].map(pair_for_sample)
-    return out
+        if pairs is not None:
+            pair_for_sample = frame.groupby(
+                "sample",
+                observed=False,
+                sort=False,
+            )["pair"].first()
+            table["pair"] = table["sample"].map(pair_for_sample)
+        codes = codes.astype(np.int64, copy=False)
+        return cls(
+            keep=keep,
+            codes=codes,
+            sizes=np.bincount(codes, minlength=len(table)),
+            frame=table,
+            sample_stat=sample_stat,
+            expression_cutoff=float(expression_cutoff),
+        )
+
+    def aggregate(self, values: np.ndarray) -> np.ndarray:
+        """Return each sample's summary of the design's values, in sample order.
+
+        Means and medians are pandas' grouped means and medians of each
+        sample's values in row order; a fraction is the share of a sample's
+        values above ``expression_cutoff``.
+        """
+        kept = values[self.keep]
+        if self.sample_stat == "fraction":
+            above = np.bincount(
+                self.codes,
+                weights=kept > self.expression_cutoff,
+                minlength=len(self.sizes),
+            )
+            return np.asarray(above / self.sizes)
+        grouped = pd.Series(kept).groupby(self.codes, sort=False)
+        summary = grouped.mean() if self.sample_stat == "mean" else grouped.median()
+        return np.asarray(summary.to_numpy(dtype=np.float64))
+
+    def table(self, summaries: np.ndarray) -> pd.DataFrame:
+        """Return the sample table of :func:`aggregate_samples` for summaries."""
+        out = self.frame.copy()
+        out.insert(2, "value", summaries)
+        return out
 
 
 def _require_two_group_comparisons(
@@ -647,9 +717,9 @@ def _mann_whitney_exact_p_value(ranks: np.ndarray, n_1: int) -> float:
 
     Every split of the pooled midranks into groups of the observed sizes is
     equally likely under the null. Doubled midranks are integers, so the null
-    distribution of the doubled rank sum is counted exactly, ties included.
-    The two-sided p-value doubles the smaller tail, as SciPy's permutation
-    tests do.
+    distribution of the doubled rank sum is counted exactly, ties included,
+    by the kernel that marker search shares. The two-sided p-value doubles
+    the smaller tail, as SciPy's permutation tests do.
     """
     doubled = np.rint(np.asarray(ranks, dtype=np.float64) * 2.0).astype(np.int64)
     n_2 = len(doubled) - n_1
@@ -661,16 +731,9 @@ def _mann_whitney_exact_p_value(ranks: np.ndarray, n_1: int) -> float:
     )
     # No subset of ``size`` values sums past the ``size`` largest values.
     width = int(np.sort(doubled)[len(doubled) - size :].sum()) + 1
-    counts = np.zeros((size + 1, width), dtype=np.int64)
-    counts[0, 0] = 1
-    for index, value in enumerate(doubled):
-        for chosen in range(min(size, index + 1), 0, -1):
-            counts[chosen, value:] += counts[chosen - 1, : width - value]
-    distribution = counts[size]
-    n_splits = int(distribution.sum())
-    lower = int(distribution[: observed + 1].sum())
-    upper = int(distribution[observed:].sum())
-    return min(1.0, 2.0 * min(lower, upper) / n_splits)
+    values, multiplicities = np.unique(doubled, return_counts=True)
+    counts = _rank_sum_null_counts(values, multiplicities.astype(np.int64), size, width)
+    return float(exact_two_sided_p_value(counts[size], observed))
 
 
 def _mann_whitney(
@@ -1024,6 +1087,142 @@ def compare_group_distributions(
         raise ValueError("groups length must match values")
     if not np.isfinite(values).all():
         raise ValueError("values must contain only finite entries")
+    return prepare_group_comparison(
+        groups,
+        test=test,
+        posthoc=posthoc,
+        adjustment=adjustment,
+        samples=samples,
+        pairs=pairs,
+        comparisons=comparisons,
+        sample_stat=sample_stat,
+        expression_cutoff=expression_cutoff,
+        group_order=group_order,
+        alternative=alternative,
+    ).compare(values)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class GroupComparisonDesign:
+    """A validated design that compares value arrays across its groups.
+
+    :func:`prepare_group_comparison` validates and encodes the groups,
+    samples, and pairs of a design once; :meth:`compare` then tests one value
+    array with only the work that depends on the values. Comparing many
+    arrays over one design, as ``ds.compare.test`` does for its keys,
+    therefore repeats no validation, and each array gets the result that
+    :func:`compare_group_distributions` gives it.
+
+    Attributes:
+        test: The test that runs, never ``"auto"``.
+        posthoc: The post-hoc test, or None.
+        adjustment: The correction within each returned table.
+        comparisons: Restricted pairwise comparisons, or None.
+        alternative: Direction of the Welch alternative hypothesis.
+        n_values: Length of every value array.
+        rows: Positions of the values with a valid group in ``present``.
+        groups: The group of each compared observation: each value at
+            ``rows``, or each sample of a sample-level design.
+        present: The compared groups, in contrast order.
+        samples: The samples that aggregate the values at ``rows``, or None.
+    """
+
+    test: str
+    posthoc: PosthocMethod | None
+    adjustment: AdjustmentMethod
+    comparisons: tuple[tuple[Any, Any], ...] | None
+    alternative: Alternative
+    n_values: int
+    rows: np.ndarray
+    groups: np.ndarray
+    present: tuple[Any, ...]
+    samples: _SampleDesign | None
+
+    def compare(self, values: np.ndarray) -> GroupComparisonResult:
+        """Compare one value array, aligned with the design's groups.
+
+        Raises:
+            ValueError: If ``values`` is not one-dimensional, does not align
+                with the groups, or holds a non-finite value.
+        """
+        values = np.asarray(values, dtype=np.float64)
+        if values.ndim != 1:
+            raise ValueError("values must be one-dimensional")
+        if values.shape != (self.n_values,):
+            raise ValueError("groups length must match values")
+        if not np.isfinite(values).all():
+            raise ValueError("values must contain only finite entries")
+        observations = values[self.rows]
+        if self.samples is not None:
+            observations = self.samples.aggregate(observations)
+        present = list(self.present)
+        if self.test == "wilcoxon":
+            # Only paired designs use the Wilcoxon test, so they have samples.
+            assert self.samples is not None
+            table = _wilcoxon_signed_rank(
+                self.samples.table(observations), present, self.comparisons
+            )
+            return GroupComparisonResult(_maybe_adjust(table, self.adjustment))
+        if self.test in ("welch", "t_test"):
+            table = _welch_ttest(
+                observations,
+                self.groups,
+                present,
+                self.comparisons,
+                alternative=self.alternative,
+            )
+            return GroupComparisonResult(_maybe_adjust(table, self.adjustment))
+        if self.test == "one_way_anova":
+            table = _one_way_anova(observations, self.groups, present)
+            return GroupComparisonResult(_maybe_adjust(table, self.adjustment))
+        if self.test == "mann_whitney":
+            table, p_value_method = _mann_whitney(
+                observations, self.groups, present, self.comparisons
+            )
+            return GroupComparisonResult(
+                _maybe_adjust(table, self.adjustment),
+                p_value_method=p_value_method,
+            )
+        if self.posthoc == "dunn":
+            omnibus = _kruskal_wallis(observations, self.groups, present)
+            posthoc_table = _dunn_posthoc(
+                observations, self.groups, present, self.comparisons
+            )
+            return GroupComparisonResult(
+                _maybe_adjust(omnibus, self.adjustment),
+                _maybe_adjust(posthoc_table, self.adjustment),
+            )
+        table = _kruskal_wallis(observations, self.groups, present)
+        return GroupComparisonResult(_maybe_adjust(table, self.adjustment))
+
+
+def prepare_group_comparison(
+    groups: np.ndarray,
+    *,
+    test: TestMethod = "auto",
+    posthoc: PosthocMethod | None = None,
+    adjustment: AdjustmentMethod = "none",
+    samples: np.ndarray | None = None,
+    pairs: np.ndarray | None = None,
+    comparisons: Sequence[tuple[Any, Any]] | None = None,
+    sample_stat: SampleStatistic = "mean",
+    expression_cutoff: float = 0.0,
+    group_order: Sequence[Any] | None = None,
+    alternative: Alternative = "two-sided",
+) -> GroupComparisonDesign:
+    """Validate and encode a group comparison once for many value arrays.
+
+    The options mean what they mean for :func:`compare_group_distributions`,
+    and every check of that function that does not read the values runs
+    here. ``samples`` and ``pairs`` align with ``groups``.
+
+    Returns:
+        The design, whose :meth:`GroupComparisonDesign.compare` tests one
+        value array.
+    """
+    groups = np.asarray(groups, dtype=object)
+    if groups.ndim != 1:
+        raise ValueError("groups must be one-dimensional")
     if posthoc not in (None, "dunn"):
         raise ValueError("posthoc must be 'dunn' or None")
     if adjustment not in ("fdr_bh", "bonferroni", "holm", "none"):
@@ -1032,15 +1231,16 @@ def compare_group_distributions(
         raise ValueError(
             f"alternative must be 'two-sided', 'less', or 'greater'; got {alternative!r}"
         )
+    pairwise: tuple[tuple[Any, Any], ...] | None = None
     if comparisons is not None:
-        comparisons = tuple(
+        pairwise = tuple(
             (native_value(left), native_value(right)) for left, right in comparisons
         )
-        if len(comparisons) == 0:
+        if len(pairwise) == 0:
             raise ValueError("comparisons must be non-empty when provided")
     if samples is not None:
         samples = np.asarray(samples, dtype=object)
-        if samples.shape != values.shape:
+        if samples.shape != groups.shape:
             raise ValueError("samples length must match values")
     elif sample_stat != "mean" or expression_cutoff != 0.0:
         raise ValueError(
@@ -1051,7 +1251,7 @@ def compare_group_distributions(
         raise ValueError("expression_cutoff is only used with sample_stat='fraction'")
     if pairs is not None:
         pairs = np.asarray(pairs, dtype=object)
-        if pairs.shape != values.shape:
+        if pairs.shape != groups.shape:
             raise ValueError("pairs length must match values")
     if pairs is not None and test not in ("auto", "wilcoxon"):
         raise ValueError(
@@ -1081,9 +1281,9 @@ def compare_group_distributions(
         ordered_check = [native_value(value) for value in group_order]
         if len(set(ordered_check)) != len(ordered_check):
             raise ValueError("group_order must not contain duplicate labels")
-    if comparisons is not None:
+    if pairwise is not None:
         seen_pairs: set[tuple[Any, Any]] = set()
-        for left, right in comparisons:
+        for left, right in pairwise:
             pair = (native_value(left), native_value(right))
             if pair[0] == pair[1]:
                 raise ValueError("comparisons must reference two distinct groups")
@@ -1096,29 +1296,17 @@ def compare_group_distributions(
     if samples is None:
         warn(_CELL_LEVEL_WARNING)
 
-    valid = _valid_group_mask(groups)
-    values = values[valid]
-    groups = groups[valid]
-    if samples is not None:
-        samples = samples[valid]
-    if pairs is not None:
-        pairs = pairs[valid]
-    if len(values) == 0:
+    rows = np.flatnonzero(_valid_group_mask(groups))
+    if len(rows) == 0:
         raise ValueError("No values remain after dropping missing groups")
-
-    pre_aggregation_order = resolve_group_order(groups, group_order=group_order)
+    kept = groups[rows]
+    pre_aggregation_order = resolve_group_order(kept, group_order=group_order)
     if group_order is not None:
-        selected = (
-            pd.Series(groups, dtype=object).isin(pre_aggregation_order).to_numpy()
-        )
-        values = values[selected]
-        groups = groups[selected]
-        if samples is not None:
-            samples = samples[selected]
-        if pairs is not None:
-            pairs = pairs[selected]
+        selected = pd.Series(kept, dtype=object).isin(pre_aggregation_order).to_numpy()
+        rows = rows[selected]
+        kept = kept[selected]
 
-    aggregated: pd.DataFrame | None = None
+    sample_design: _SampleDesign | None = None
     if samples is not None or pairs is not None:
         if pairs is not None and samples is None:
             raise ValueError(
@@ -1126,26 +1314,23 @@ def compare_group_distributions(
                 "aggregated sample data"
             )
         assert samples is not None
-        aggregated = aggregate_samples(
-            values,
-            groups,
-            samples,
+        sample_design = _SampleDesign.prepare(
+            kept,
+            samples[rows],
+            None if pairs is None else pairs[rows],
             sample_stat=sample_stat,
             expression_cutoff=expression_cutoff,
-            pairs=pairs,
         )
-        values = aggregated["value"].to_numpy(dtype=np.float64)
-        groups = aggregated["group"].to_numpy(dtype=object)
-        pairs = aggregated["pair"].to_numpy(dtype=object) if pairs is not None else None
+        kept = sample_design.frame["group"].to_numpy(dtype=object)
 
     if group_order is None:
-        surviving = set(resolve_group_order(groups))
+        surviving = set(resolve_group_order(kept))
         present = [group for group in pre_aggregation_order if group in surviving]
     else:
-        present = resolve_group_order(groups, group_order=pre_aggregation_order)
-    if comparisons is not None:
+        present = resolve_group_order(kept, group_order=pre_aggregation_order)
+    if pairwise is not None:
         present_set = set(present)
-        for left, right in comparisons:
+        for left, right in pairwise:
             if (
                 native_value(left) not in present_set
                 or native_value(right) not in present_set
@@ -1178,56 +1363,26 @@ def compare_group_distributions(
         )
     if posthoc == "dunn" and test != "kruskal_wallis":
         raise ValueError("posthoc='dunn' requires test='kruskal_wallis'")
-    if comparisons is not None and (
+    if pairwise is not None and (
         test == "one_way_anova" or (test == "kruskal_wallis" and posthoc is None)
     ):
         raise ValueError(
             "comparisons is only supported by pairwise tests or "
             "kruskal_wallis with posthoc='dunn'"
         )
-
-    if test == "wilcoxon":
-        if pairs is None:
-            raise ValueError(
-                "wilcoxon requires sample aggregation with samples and pairs"
-            )
-        assert aggregated is not None
-        table = _wilcoxon_signed_rank(aggregated, present, comparisons)
-        return GroupComparisonResult(
-            _maybe_adjust(table, adjustment),
-        )
-    if test in ("welch", "t_test"):
-        table = _welch_ttest(
-            values,
-            groups,
-            present,
-            comparisons,
-            alternative=alternative,
-        )
-        return GroupComparisonResult(
-            _maybe_adjust(table, adjustment),
-        )
-    if test == "one_way_anova":
-        table = _one_way_anova(values, groups, present)
-        return GroupComparisonResult(
-            _maybe_adjust(table, adjustment),
-        )
-    if test == "mann_whitney":
-        table, p_value_method = _mann_whitney(values, groups, present, comparisons)
-        return GroupComparisonResult(
-            _maybe_adjust(table, adjustment),
-            p_value_method=p_value_method,
-        )
-    if posthoc == "dunn":
-        omnibus = _kruskal_wallis(values, groups, present)
-        posthoc_table = _dunn_posthoc(values, groups, present, comparisons)
-        return GroupComparisonResult(
-            _maybe_adjust(omnibus, adjustment),
-            _maybe_adjust(posthoc_table, adjustment),
-        )
-    table = _kruskal_wallis(values, groups, present)
-    return GroupComparisonResult(
-        _maybe_adjust(table, adjustment),
+    if test == "wilcoxon" and pairs is None:
+        raise ValueError("wilcoxon requires sample aggregation with samples and pairs")
+    return GroupComparisonDesign(
+        test=test,
+        posthoc=posthoc,
+        adjustment=adjustment,
+        comparisons=pairwise,
+        alternative=alternative,
+        n_values=len(groups),
+        rows=rows,
+        groups=kept,
+        present=tuple(present),
+        samples=sample_design,
     )
 
 

@@ -24,8 +24,12 @@ from ..storage.budget import ResourceBudget
 from ..storage.feature_stream import FeatureCellBand, map_feature_cell_bands
 from ..storage.geometry import array_geometry
 from ..storage.io_policy import DEFAULT_STORAGE_IO_POLICY, StorageIoPolicy
+from ..utils.arguments import integer_argument
 from ..utils.compute import controlled_compute
 from ..utils.progress import iter_progress
+
+BULK_AGGREGATIONS = ("mean", "sum")
+BULK_FEATURE_LABELS = ("index", "id", "name")
 
 
 @njit(cache=True, nogil=True, parallel=True, error_model="numpy")
@@ -214,6 +218,32 @@ def aggregate_normalized_groups(
     return sums.T
 
 
+def validate_bulk_options(
+    *,
+    aggr_type: object,
+    feature_label: object,
+    pseudo_reps: object,
+) -> int:
+    """Check the options of a bulk aggregation before any cell is read.
+
+    Returns:
+        ``pseudo_reps`` as a Python integer.
+
+    Raises:
+        TypeError: If ``pseudo_reps`` is not an integer.
+        ValueError: If ``aggr_type`` is not ``"mean"`` or ``"sum"``,
+            ``feature_label`` is not ``"index"``, ``"id"``, or ``"name"``, or
+            ``pseudo_reps`` is less than 1.
+    """
+    if aggr_type not in BULK_AGGREGATIONS:
+        raise ValueError("ERROR: `aggr_type` can only be either 'sum' or 'mean'")
+    if feature_label not in BULK_FEATURE_LABELS:
+        raise ValueError(
+            f"feature_label must be 'index', 'id', or 'name'; got {feature_label!r}"
+        )
+    return integer_argument(pseudo_reps, "pseudo_reps", minimum=1)
+
+
 def _bulk_replicates(cells: NDArray[Any], n_reps: int, seed: int) -> list[NDArray[Any]]:
     """Split one group's cells into ``n_reps`` pseudo-replicates.
 
@@ -239,7 +269,12 @@ def bulk_column_rows(
     pseudo_reps: int,
     random_seed: int,
 ) -> dict[str, NDArray[Any]]:
-    """Return the global cell indices of each bulk column, keyed by column name."""
+    """Return the global cell indices of each bulk column, keyed by column name.
+
+    Every combination of a group with a sub-group, and every pseudo-replicate,
+    gets a column, so a column holds no cells when a group has no cells of a
+    sub-group or fewer cells than ``pseudo_reps``.
+    """
     if null_vals is None:
         null_vals = []
     if secondary_null_vals is None:
@@ -325,7 +360,10 @@ def aggregate_bulk_profiles(
     resources: ResourceBudget,
     nthreads: int,
 ) -> tuple[dict[str, NDArray[Any]], dict[str, NDArray[Any]]]:
-    """Return each bulk column's feature profile and expressing fractions."""
+    """Return each bulk column's feature profile and expressing fractions.
+
+    Every column of ``column_rows`` holds at least one cell.
+    """
     vals: dict[str, NDArray[Any]] = {}
     fracs: dict[str, NDArray[Any]] = {}
     codes = bulk_codes(cell_idx, column_rows)
@@ -386,11 +424,6 @@ def aggregate_bulk_profiles(
             desc="Aggregating pseudo-replicates",
             total=len(column_rows),
         ):
-            if len(idx) == 0:
-                vals[col_name] = np.zeros(assay.feats.N)
-                if return_fraction:
-                    fracs[col_name] = np.zeros(assay.feats.N)
-                continue
             if aggr_type == "sum":
                 vals[col_name] = controlled_compute(
                     assay.rawData[idx].sum(axis=0, dtype=sum_dtype), nthreads
@@ -411,12 +444,46 @@ def bulk_frames(
     fracs: Mapping[str, NDArray[Any]],
     features: MetaData,
     *,
+    n_cells: Mapping[str, int],
     remove_empty_features: bool,
+    remove_empty_columns: bool,
     feature_label: str,
     return_fraction: bool,
-) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
-    """Return the bulk profiles, and fractions on request, as frames."""
-    vals_df = pd.DataFrame(vals)
+    return_n_cells: bool,
+) -> (
+    pd.DataFrame
+    | tuple[pd.DataFrame, pd.DataFrame]
+    | tuple[pd.DataFrame, pd.Series]
+    | tuple[pd.DataFrame, pd.DataFrame, pd.Series]
+):
+    """Return the bulk profiles, and fractions and cell counts on request, as frames.
+
+    ``n_cells`` lists every bulk column, in order, with its number of cells;
+    ``vals`` and ``fracs`` hold the profiles of the columns with cells.
+    Columns without cells are left out, or with ``remove_empty_columns=False``
+    kept as NaN, and cell counts form an int64 Series named ``n_cells`` over
+    the returned columns. The fractions and cell counts follow the profiles in
+    the returned tuple.
+    """
+    columns = [
+        name for name, count in n_cells.items() if count or not remove_empty_columns
+    ]
+
+    def frame(profiles: Mapping[str, NDArray[Any]]) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                name: profiles[name] if n_cells[name] else np.full(features.N, np.nan)
+                for name in columns
+            }
+        )
+
+    vals_df = frame(vals)
+    counts = pd.Series(
+        [int(n_cells[name]) for name in columns],
+        index=columns,
+        dtype=np.int64,
+        name="n_cells",
+    )
 
     empty_idx = None
     if remove_empty_features:
@@ -436,10 +503,10 @@ def bulk_frames(
             drop=True,
         )
 
-    if return_fraction:
-        fracs_df = pd.DataFrame(fracs)
-        if empty_idx is not None:
-            fracs_df = fracs_df[empty_idx]
-        fracs_df.set_index(vals_df.index, inplace=True, drop=True)
-        return vals_df, fracs_df
-    return vals_df
+    if not return_fraction:
+        return (vals_df, counts) if return_n_cells else vals_df
+    fracs_df = frame(fracs)
+    if empty_idx is not None:
+        fracs_df = fracs_df[empty_idx]
+    fracs_df.set_index(vals_df.index, inplace=True, drop=True)
+    return (vals_df, fracs_df, counts) if return_n_cells else (vals_df, fracs_df)

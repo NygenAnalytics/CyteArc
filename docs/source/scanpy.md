@@ -38,7 +38,10 @@ of normalization, log transformation, and then HVG selection.
 
 CyteArc marker search reports AUC, two-sided Mann-Whitney p-values, and within-group
 Benjamini-Hochberg adjustment over tested features. It is not replicate-aware differential
-expression. See [](tutorials/graph_construction.ipynb) for the complete manual graph chain and
+expression. By default `markers.load` keeps genes detected in at least 20% of a group's cells,
+with an AUC of at least 0.6 and an adjusted p-value of at most 0.05, and orders them by
+CyteArc's specificity score; `sort_by="auc"` or `sort_by="p_value"` orders them more like
+`rank_genes_groups`, which sorts by its z score. See [](tutorials/graph_construction.ipynb) for the complete manual graph chain and
 [](tutorials/scrna_seq.ipynb) for stage-by-stage biological interpretation.
 
 ## Move data through H5AD

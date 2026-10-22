@@ -33,7 +33,11 @@ def marker_dotplot(
     marker = run["markers"]
     for group in groups:
         frame = store.markers.load(
-            marker=marker, group_id=group, min_score=-1, min_frac_exp=-1
+            marker=marker,
+            group_id=group,
+            min_frac_exp=None,
+            min_auc=None,
+            max_p_adj=None,
         )
         candidates = frame.loc[(frame.score >= 0.25) & (frame.frac_exp >= 0.2)]
         for rank, row in enumerate(candidates.head(top_n).itertuples(index=False)):
@@ -51,7 +55,11 @@ def marker_dotplot(
     columns = ["group_id", "feature_index", "score", "mean", "frac_exp"]
     for group in groups:
         frame = store.markers.load(
-            marker=marker, group_id=group, min_score=-1, min_frac_exp=-1
+            marker=marker,
+            group_id=group,
+            min_frac_exp=None,
+            min_auc=None,
+            max_p_adj=None,
         )
         pieces.append(frame.loc[frame.feature_index.isin(selected), columns].copy())
         del frame

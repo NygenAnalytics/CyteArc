@@ -9,7 +9,7 @@ import cytearc.features.markers.search as marker_search_module
 from cytearc.datastore.namespaces import MarkersAccessor
 from cytearc.assay import norm_lib_size
 from cytearc.datastore.datastore import DataStore
-from scipy.stats import linregress
+from scipy.stats import PermutationMethod, linregress
 from scipy.stats import mannwhitneyu
 
 from cytearc.features.markers import (
@@ -539,10 +539,14 @@ def test_marker_groups_use_natural_order_and_string_ids(
     )
     natural = [str(value) for value in range(12)]
 
-    table = store.markers.load(marker=marker, min_score=-1, min_frac_exp=-1)
+    table = store.markers.load(
+        marker=marker, min_frac_exp=None, min_auc=None, max_p_adj=None
+    )
     assert list(dict.fromkeys(table["group_id"])) == natural
     assert all(isinstance(value, str) for value in table["group_id"])
-    one = store.markers.load(marker=marker, group_id=10, min_score=-1, min_frac_exp=-1)
+    one = store.markers.load(
+        marker=marker, group_id=10, min_frac_exp=None, min_auc=None, max_p_adj=None
+    )
     assert set(one["group_id"]) == {"10"}
     pd.testing.assert_frame_equal(
         one,
@@ -552,7 +556,9 @@ def test_marker_groups_use_natural_order_and_string_ids(
         store.markers.load(marker=marker, group_id=12)
 
     out_file = tmp_path / "markers.csv"
-    store.markers.export_csv(marker, str(out_file), min_score=-1, min_frac_exp=-1)
+    store.markers.export_csv(
+        marker, str(out_file), min_frac_exp=None, min_auc=None, max_p_adj=None
+    )
     assert list(pd.read_csv(out_file).columns) == natural
 
 
@@ -598,14 +604,18 @@ def test_marker_readers_accept_mixed_digit_and_text_labels(
     )
     expected = ["1_10", "2_T", "B cell"]
 
-    table = store.markers.load(marker=marker, min_score=-1, min_frac_exp=-1)
+    table = store.markers.load(
+        marker=marker, min_frac_exp=None, min_auc=None, max_p_adj=None
+    )
     assert list(dict.fromkeys(table["group_id"])) == expected
     one = store.markers.load(
-        marker=marker, group_id="2_T", min_score=-1, min_frac_exp=-1
+        marker=marker, group_id="2_T", min_frac_exp=None, min_auc=None, max_p_adj=None
     )
     assert set(one["group_id"]) == {"2_T"}
     out_file = tmp_path / "markers.csv"
-    store.markers.export_csv(marker, str(out_file), min_score=-1, min_frac_exp=-1)
+    store.markers.export_csv(
+        marker, str(out_file), min_frac_exp=None, min_auc=None, max_p_adj=None
+    )
     assert list(pd.read_csv(out_file).columns) == expected
 
 
@@ -708,13 +718,15 @@ def test_saved_marker_refs_keep_feature_specific_results_addressable(
     assert first != second
     first_table = store.markers.load(
         marker=first,
-        min_score=-1,
-        min_frac_exp=-1,
+        min_frac_exp=None,
+        min_auc=None,
+        max_p_adj=None,
     )
     second_table = store.markers.load(
         marker=second,
-        min_score=-1,
-        min_frac_exp=-1,
+        min_frac_exp=None,
+        min_auc=None,
+        max_p_adj=None,
     )
     assert set(first_table["feature_index"]) == set(first_indices)
     assert set(second_table["feature_index"]) == set(second_indices)
@@ -1470,15 +1482,17 @@ def test_find_markers_by_rank_slow_path_returns_groupwise_statistics():
     assert group_b.loc[10, "fold_change"] == 0.0
     assert np.isnan(group_b.loc[11, "fold_change"])
     in_a = np.array([True, True, False, False])
+    # Two groups of two cells split in six ways, so their p-values come from
+    # the exact permutation null, ties included.
     for feature, column in ((10, 0), (12, 2)):
         expected = mannwhitneyu(
             data[in_a, column],
             data[~in_a, column],
             alternative="two-sided",
-            method="asymptotic",
-            use_continuity=True,
+            method=PermutationMethod(n_resamples=np.inf),
         ).pvalue
         assert group_a.loc[feature, "p_value"] == pytest.approx(expected, rel=1e-12)
+        assert group_a.loc[feature, "p_value"] == 2 / 6
     # A feature tied in every cell has no rank variance, so nothing to test.
     assert group_a.loc[[11, 13], "p_value"].tolist() == [1.0, 1.0]
     # Two complementary groups run the same test, mirrored.
@@ -1707,9 +1721,11 @@ def test_rank_marker_result_finishes_one_stored_table_per_group():
 
         assert stored.shape == (3, len(MARKER_STAT_COLUMNS))
         np.testing.assert_array_equal(stored[:, 6], p_values)
-        rounded = [index for index in range(8) if index != 6]
-        np.testing.assert_array_equal(stored[:, rounded], np.round(rank[:, rounded], 5))
+        # Statistics are stored at full precision, not rounded.
+        kept = [index for index in range(8) if index != 6]
+        np.testing.assert_array_equal(stored[:, kept], rank[:, kept])
         np.testing.assert_array_equal(stored[:, 8], adjust_pvalues(p_values, "fdr_bh"))
+        np.testing.assert_allclose(stored[:, 9], -np.log10(p_values), rtol=1e-12)
     with pytest.raises(ValueError, match="no group 2"):
         result.stored_statistics(2)
     statistics = np.array(result.statistics)
@@ -1739,8 +1755,13 @@ def test_rank_marker_result_finishes_one_stored_table_per_group():
             },
             "at least two populated groups",
         ),
-        ({"group_sizes": np.array([1, 40])}, "at least two cells in every group"),
-        ({"group_sizes": np.array([-3, 40])}, "at least two cells in every group"),
+        # The group of 40 cells has one other cell, so no group is tested.
+        (
+            {"group_sizes": np.array([1, 40])},
+            r"a group of at least two cells and at least two other cells; the "
+            r"groups are '1' \(1 cell\), '4' \(40 cells\)",
+        ),
+        ({"group_sizes": np.array([-3, 40])}, "at least one cell each"),
         ({"feature_index": np.array([7, 5, 10])}, "ascending unique"),
         # Differences of unsigned indices wrap instead of turning negative.
         ({"feature_index": np.array([7, 5, 10], dtype=np.uint64)}, "ascending unique"),
@@ -1946,6 +1967,7 @@ def _make_canonical_marker_slot(columns=None):
 
     from cytearc.features.markers.table import (
         MARKER_FOLD_CHANGE_POLICY,
+        MARKER_P_VALUE_POLICY,
         MARKER_STAT_COLUMNS,
     )
 
@@ -1961,6 +1983,7 @@ def _make_canonical_marker_slot(columns=None):
         "p_value": np.array([0.04, 0.01]),
         "auc": np.array([0.6, 0.9]),
         "p_value_adjusted": np.array([0.04, 0.02]),
+        "neg_log10_p_value": -np.log10([0.04, 0.01]),
     }
     root = zarr.open_group(store=MemoryStore(), mode="w")
     slot = root.create_group("slot")
@@ -1974,6 +1997,8 @@ def _make_canonical_marker_slot(columns=None):
             "adjustment_method": "fdr_bh",
             "adjustment_scope": "within_group_all_tested_features",
             "fold_change_policy": MARKER_FOLD_CHANGE_POLICY,
+            "p_value_policy": MARKER_P_VALUE_POLICY,
+            "skipped_groups": {},
         }
     )
     slot.create_array("feature_index", data=np.array([0, 1], dtype=np.int32))
@@ -2119,14 +2144,14 @@ def test_rank_marker_result_refuses_to_store_fold_changes_outside_the_policy() -
     poisoned.stored_statistics(4)
 
 
-def test_stored_fold_changes_survive_rounding_of_the_means() -> None:
+def test_stored_fold_changes_agree_with_full_precision_means() -> None:
     result = _rank_result()
     statistics = np.array(result.statistics)
-    # Means below the rounding unit: a positive mean beside a rest mean of 0,
-    # a ratio over a tiny rest mean, and a tiny negative mean.
+    # Means that five decimals rounded away: a positive mean beside a rest
+    # mean of 0, a ratio over a tiny rest mean, and a tiny negative mean.
     statistics[:, 0, [1, 2, 5]] = [
         [1e-7, 0.0, np.inf],
-        [0.4, 1e-7, 4e6],
+        [0.4, 1e-7, 0.4 / 1e-7],
         [-1e-7, 0.5, np.nan],
     ]
     stored = RankMarkerResult(
@@ -2136,10 +2161,11 @@ def test_stored_fold_changes_survive_rounding_of_the_means() -> None:
         statistics=statistics,
     ).stored_statistics(1)
 
-    np.testing.assert_array_equal(stored[:, 1], [0.0, 0.4, -0.0])
-    assert np.signbit(stored[2, 1])
-    np.testing.assert_array_equal(stored[:, 2], [0.0, 0.0, 0.5])
-    np.testing.assert_array_equal(stored[:, 5], [np.inf, 4e6, np.nan])
+    np.testing.assert_array_equal(stored[:, 1], [1e-7, 0.4, -1e-7])
+    np.testing.assert_array_equal(stored[:, 2], [0.0, 1e-7, 0.5])
+    np.testing.assert_array_equal(stored[:, 5], [np.inf, 0.4 / 1e-7, np.nan])
+    # A finite fold change is exactly the ratio of the stored means.
+    assert stored[1, 5] == stored[1, 1] / stored[1, 2]
 
 
 def test_canonical_marker_reader_rejects_all_nan_adjusted_values():
@@ -2217,12 +2243,29 @@ _MARKER_PAYLOAD_CORRUPTIONS = {
         "must contain marker rows",
     ),
     "stats-rows": (
-        lambda _, cluster: _replace_node(cluster, "stats", np.zeros((3, 9))),
+        lambda _, cluster: _replace_node(cluster, "stats", np.zeros((3, 10))),
         "do not align with feature_index",
     ),
     "stats-integer": (
-        lambda _, cluster: _replace_node(cluster, "stats", np.zeros((2, 9), int)),
+        lambda _, cluster: _replace_node(cluster, "stats", np.zeros((2, 10), int)),
         "floating dtype",
+    ),
+    # Tables of earlier releases have nine columns.
+    "stats-columns": (
+        lambda _, cluster: _replace_node(cluster, "stats", np.zeros((2, 9))),
+        "do not match stat_columns",
+    ),
+    "skipped-groups-missing": (
+        lambda slot, _: slot.attrs.__delitem__("skipped_groups"),
+        "skipped_groups metadata",
+    ),
+    "skipped-groups-count": (
+        lambda slot, _: slot.attrs.update({"skipped_groups": {"7": 0}}),
+        "skipped_groups metadata",
+    ),
+    "skipped-groups-list": (
+        lambda slot, _: slot.attrs.update({"skipped_groups": ["7"]}),
+        "skipped_groups metadata",
     ),
 }
 
@@ -2419,7 +2462,8 @@ def test_marker_cache_reuse_revalidates_canonical_payload(
         store.zw[artifact_path(new_ref)].attrs["fold_change_policy"]
         == MARKER_FOLD_CHANGE_POLICY
     )
-    assert status.revision == 1 and status.is_current
+    # Marker search is at operation revision 2.
+    assert status.revision == 2 and status.is_current
     assert "schema_version" not in status.parameters
     assert "algorithm_version" not in status.parameters
     assert "correction_method" not in status.parameters
@@ -2436,7 +2480,7 @@ def test_marker_tables_without_fold_change_policy_are_neither_reused_nor_read(
     store, clusters, features, saved = _saved_marker_table(marker_table, tmp_path)
     del store.zw[artifact_path(saved)].attrs["fold_change_policy"]
     status = store.artifacts.inspect(saved)
-    assert status.complete and status.revision == 1 and status.is_current
+    assert status.complete and status.revision == 2 and status.is_current
 
     with pytest.raises(
         ValueError, match="Recompute it from the same clustering and feature selection"
@@ -2467,13 +2511,15 @@ def test_marker_tables_without_fold_change_policy_are_neither_reused_nor_read(
     assert calls == 1
     assert recomputed != saved
     current = store.artifacts.inspect(recomputed)
-    assert current.revision == 1 and current.is_current
+    assert current.revision == 2 and current.is_current
     assert "fold_change_policy" not in current.parameters
     assert (
         store.zw[artifact_path(recomputed)].attrs["fold_change_policy"]
         == MARKER_FOLD_CHANGE_POLICY
     )
-    assert not store.markers.load(recomputed, min_score=-1, min_frac_exp=-1).empty
+    assert not store.markers.load(
+        recomputed, min_frac_exp=None, min_auc=None, max_p_adj=None
+    ).empty
 
 
 @pytest.mark.parametrize(
@@ -2652,7 +2698,12 @@ def test_find_markers_by_rank_rejects_invalid_group_sizes():
             feat_idx=np.array([0]),
             nthreads=1,
         )
-    with pytest.raises(ValueError, match="at least two cells in every group"):
+    # The group of two cells has one other cell, so no group can be tested.
+    with pytest.raises(
+        ValueError,
+        match=r"at least two other cells; the groups are '0' \(1 cell\), "
+        r"'1' \(2 cells\)\. Merge small groups",
+    ):
         find_markers_by_rank(
             Assay(np.array([0, 1, 1])),
             groups=np.array([0, 1, 1]),
@@ -3193,14 +3244,19 @@ def test_library_size_marker_means_are_float32_rounded_float64_values(
 
 
 def _reference_stored_stats(statistics: np.ndarray) -> np.ndarray:
-    """Finish one group's kernel statistics the way marker tables always have."""
-    from scipy.special import ndtr
+    """Finish one group's kernel statistics as marker tables of revision 2 do.
 
-    stored = np.empty((statistics.shape[0], 9))
-    for column in range(8):
-        stored[:, column] = np.round(statistics[:, column], 5)
+    The statistics are kept at full precision, and these groups are too large
+    for exact p-values, so the p-values come from the z statistics.
+    """
+    from scipy.special import log_ndtr, ndtr
+
+    stored = np.empty((statistics.shape[0], 10))
+    stored[:, :8] = statistics
     stored[:, 6] = 2.0 * ndtr(-np.abs(statistics[:, 6]))
     stored[:, 8] = adjust_pvalues(stored[:, 6], "fdr_bh")
+    neg_log10 = -(np.log(2.0) + log_ndtr(-np.abs(statistics[:, 6]))) / np.log(10.0)
+    stored[:, 9] = np.where(neg_log10 > 0.0, neg_log10, 0.0)
     return stored
 
 
@@ -3228,16 +3284,20 @@ def test_stored_marker_tables_are_the_reference_statistics(
     stored = _stored_marker_stats(store, ref)
     assert sorted(stored) == group_ids.tolist()
     for position, group_id in enumerate(group_ids):
-        np.testing.assert_array_equal(
-            stored[group_id], _reference_stored_stats(reference[:, position])
-        )
+        expected = _reference_stored_stats(reference[:, position])
+        if method_name == "norm_clr":
+            # Tables keep full precision, and the search sums the logarithms
+            # of the CLR geometric means in another order than this reference.
+            np.testing.assert_allclose(stored[group_id], expected, rtol=1e-14, atol=0)
+        else:
+            np.testing.assert_array_equal(stored[group_id], expected)
 
 
 def test_marker_tables_keep_infinite_and_undefined_fold_changes(
     marker_table, tmp_path
 ) -> None:
     store, *_, ref = _saved_marker_table(marker_table, tmp_path)
-    markers = store.markers.load(ref, min_score=-1, min_frac_exp=-1)
+    markers = store.markers.load(ref, min_frac_exp=None, min_auc=None, max_p_adj=None)
     fold_change = markers.set_index(["feature_name", "group_id"])["fold_change"]
 
     # No cell expresses RNA0, and only group g0 expresses RNA1.

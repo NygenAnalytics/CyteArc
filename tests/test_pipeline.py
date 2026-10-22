@@ -2183,8 +2183,9 @@ def test_rich_pipeline_views_plots_and_markers_remain_frozen_after_live_i_drift(
     raster.close()
     markers = datastore.markers.load(
         marker=reopened["markers"],
-        min_score=0,
-        min_frac_exp=0,
+        min_frac_exp=None,
+        min_auc=None,
+        max_p_adj=None,
     )
     assert {
         "group_id",
