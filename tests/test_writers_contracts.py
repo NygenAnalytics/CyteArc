@@ -61,7 +61,7 @@ _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
     SparseToZarr: "93e2b19b931a3fb26315a5bcc32ed45da2633cfa38ae177c832e37236e09b1e2",
     CSVtoZarr: "b005b7bd9fccc8d0c1ad987954f7f7d6de909987b42d577f4f416ccd9b5835de",
     SubsetZarr: "76fd6326d68a545065ce07fed9411ec7f02d3f080041db627c3623bda5fe4ed8",
-    SeuratToZarr: "ae7e55e7c2e34d71b6fc1755babb987f2957e05cfd255d026327b989e1ec0c6d",
+    SeuratToZarr: "41388ff31e4a94002511aee322870ab234b3fc74d184a48538dbb921ae2f28af",
 }
 _MODULE_FUNCTIONS = (
     "create_zarr_count_assay",
@@ -118,6 +118,15 @@ def test_writer_class_and_method_signatures_are_stable():
     for cls, names in _PUBLIC_CLASS_METHODS.items():
         methods = {name: getattr(cls, name) for name in names}
         assert signature_digest(methods) == _PUBLIC_CLASS_SIGNATURE_DIGESTS[cls]
+
+
+def test_seurat_writer_takes_a_keyword_default_assay():
+    parameters = inspect.signature(SeuratToZarr.__init__).parameters
+    assert list(parameters)[-2:] == ["overwrite", "default_assay"]
+    parameter = parameters["default_assay"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is None
+    assert get_type_hints(SeuratToZarr.__init__)["default_assay"] == str | None
 
 
 def test_writer_module_function_signatures_are_stable():

@@ -1,7 +1,7 @@
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast, overload
 
 import numpy as np
 import zarr
@@ -11,6 +11,8 @@ from ..metadata.membership import membership_attributes
 from ..readers import SeuratReader
 from ..readers.seurat import (
     SeuratAssay,
+    SeuratDiagnostic,
+    SeuratItemInspection,
     SeuratMetadata,
     SeuratMetadataColumn,
     SeuratMembership,
@@ -59,11 +61,15 @@ class SeuratImportResult:
 
     Attributes:
         assayNames: Assay groups written to the destination store.
-        defaultAssay: Active assay selected from the Seurat object.
+        defaultAssay: Default assay of the store: ``default_assay``, or else
+            the Seurat object's active assay, except that an active SCTAssay
+            gives way to the assay of raw counts that its models were fitted
+            to.
         cellSelection: Artifact for the imported cell filter column.
         activeIdentity: Imported Seurat active identity as immutable cluster labels.
         reductionArtifacts: Imported reductions keyed by result name.
-        notices: Non-fatal import notices collected from the reader.
+        notices: Non-fatal import notices, from the reader and of the assays
+            and reductions that the import skipped.
     """
 
     assayNames: tuple[str, ...]
@@ -106,6 +112,47 @@ def _decode_text(value: str | bytes | None) -> str:
     return "" if value is None else decode_text(value)
 
 
+def _consecutive_runs(positions: np.ndarray) -> Iterator[tuple[int, int, int]]:
+    """Yield (offset, start, stop) for each run of consecutive positions.
+
+    ``positions`` must not be empty.
+    """
+    breaks = np.flatnonzero(np.diff(positions) != 1) + 1
+    starts = np.concatenate(([0], breaks)).tolist()
+    stops = np.concatenate((breaks, [positions.size])).tolist()
+    for offset, stop in zip(starts, stops, strict=True):
+        yield int(offset), int(positions[offset]), int(positions[stop - 1]) + 1
+
+
+class _CellIdsAt(Sequence[str]):
+    """The IDs at given positions of a cell ID sequence, read in runs."""
+
+    def __init__(self, ids: Sequence[str], positions: np.ndarray) -> None:
+        self._ids = ids
+        self._positions = positions
+
+    def __len__(self) -> int:
+        return int(self._positions.size)
+
+    @overload
+    def __getitem__(self, key: int) -> str: ...
+
+    @overload
+    def __getitem__(self, key: slice) -> tuple[str, ...]: ...
+
+    def __getitem__(self, key: int | slice) -> str | tuple[str, ...]:
+        if isinstance(key, int):
+            return self._ids[int(self._positions[key])]
+        positions = self._positions[key]
+        if not positions.size:
+            return ()
+        return tuple(
+            value
+            for _offset, start, stop in _consecutive_runs(positions)
+            for value in self._ids[start:stop]
+        )
+
+
 class SeuratToZarr:
     """Convert a serialized Seurat object into a CyteArc Zarr store.
 
@@ -130,6 +177,25 @@ class SeuratToZarr:
         io: Optional explicit read, compute, and write widths. Unset values
             stay under automatic planning.
         overwrite: Replace an existing CyteArc store that no ``DataStore`` has opened.
+        default_assay: Default assay of the store, one of the imported assays.
+            None uses the Seurat object's active assay, except that an active
+            ``SCTAssay``, whose counts are SCTransform-corrected, gives way to
+            the assay of raw counts that its models were fitted to when that
+            assay is imported, with an ``sct_default_assay`` notice. An active
+            assay that is not imported, such as the ``integrated`` assay of
+            ``IntegrateData``, which holds no raw counts, requires it.
+
+    The import writes the assays and reductions that the reader selected.
+    With the reader's default selection (``assays`` or ``reductions`` None),
+    an assay or reduction that cannot be imported is skipped with a
+    ``skipped_assay`` or ``skipped_reduction`` notice; one that the caller
+    named raises instead. A reduction is stored under the assay that it was
+    computed on (``assay.used``) when that assay is imported, otherwise under
+    the default assay, without feature loadings. A reduction of only some of
+    the cells, or of the cells in another order, is aligned to the cells by
+    name and stored over a cell selection of its cells. A display embedding
+    (UMAP or t-SNE) becomes an ``embedding`` artifact and any other reduction
+    ``imported_coordinates``.
 
     Construction prepares every selected assay's counts and reads them once.
     Each assay stores its counts in the dtype that
@@ -139,6 +205,9 @@ class SeuratToZarr:
 
     Raises:
         FileExistsError: If ``zarr_loc`` is not empty and may not be replaced.
+        ValueError: If the default assay is not imported, or a selected assay
+            or reduction cannot be imported; an assay raises its own
+            ``SeuratImportError``, which is a ``ValueError``.
     """
 
     def __init__(
@@ -154,6 +223,7 @@ class SeuratToZarr:
         io: StorageIoPolicy | None = None,
         *,
         overwrite: bool = False,
+        default_assay: str | None = None,
     ) -> None:
         from ..storage.budget import resolve_budget
         from ..storage.schema import (
@@ -165,19 +235,24 @@ class SeuratToZarr:
 
         resources = resolve_budget(mem_budget, nthreads)
         inspection = reader.inspection
-        assay_names = tuple(reader.assayNames)
+        selection_notices: list[SeuratNotice] = []
+        assay_names = self._importable_names(
+            inspection.assays,
+            explicit=reader.requestedAssays is not None,
+            kind="assay",
+            notices=selection_notices,
+        )
         for assay_name in assay_names:
             validate_assay_name(assay_name)
-        if inspection.activeAssay not in assay_names:
-            raise ValueError(
-                f"Active assay {inspection.activeAssay!r} is not selected for import"
-            )
+        resolved_default = self._default_assay(
+            reader, assay_names, default_assay, selection_notices
+        )
 
         assays = tuple(reader.get_assay(name) for name in assay_names)
         blocked_reductions = tuple(
             item for item in inspection.reductions if not item.importable
         )
-        if blocked_reductions:
+        if blocked_reductions and reader.requestedReductions is not None:
             details = ", ".join(
                 f"{item.name} "
                 f"({item.blockingDiagnostic.code if item.blockingDiagnostic is not None else 'unsupported'})"
@@ -185,19 +260,25 @@ class SeuratToZarr:
             )
             raise ValueError(f"Selected reductions cannot be imported: {details}")
         reductions = tuple(
-            reader.get_reduction(item.name) for item in inspection.reductions
-        )
-        imported_assays = set(assay_names)
-        missing_reduction_assays = tuple(
-            reduction.name
-            for reduction in reductions
-            if reduction.assayUsed not in imported_assays
-        )
-        if missing_reduction_assays:
-            raise ValueError(
-                "Selected reductions reference assays that are not selected for "
-                f"import: {', '.join(missing_reduction_assays)}"
+            reader.get_reduction(name)
+            for name in self._importable_names(
+                inspection.reductions,
+                explicit=False,
+                kind="reduction",
+                notices=selection_notices,
             )
+        )
+        # A reduction whose assay is not imported has no loadings, and its
+        # coordinates are stored under the default assay.
+        imported_assays = set(assay_names)
+        reduction_assays = {
+            reduction.name: (
+                reduction.assayUsed
+                if reduction.assayUsed in imported_assays
+                else resolved_default
+            )
+            for reduction in reductions
+        }
         active_identity = reader.activeIdentity
         self._validate_metadata_names(reader.cellMetadata, "cell")
         # The membership column name of every imported assay is reserved,
@@ -211,7 +292,9 @@ class SeuratToZarr:
                 + ", ".join(conflicts)
                 + ". CyteArc reserves the cell column '<assay>_I' of every imported "
                 "assay for the membership of that assay; rename the metadata "
-                "column in the Seurat object or leave the assay out of the import."
+                "column in the Seurat object, leave it out with "
+                "SeuratReader(cell_metadata={'exclude': [...]}), or leave the "
+                "assay out of the import."
             )
         for assay in assays:
             self._validate_metadata_names(
@@ -267,14 +350,23 @@ class SeuratToZarr:
         self.profile = resolve_storage_profile(zarr_loc, profile)
         self.io = io
         self.assayNames = assay_names
-        self.defaultAssay = inspection.activeAssay
+        self.defaultAssay = resolved_default
         self._assays = assays
         self._reductions = reductions
+        self._reductionAssays = reduction_assays
         self._activeIdentity = active_identity
         self._cellMetadataKeys = cell_metadata_keys
         self._featureMetadataKeys = feature_metadata_keys
         self._sourceDigest = source_digest
-        self._notices = self._collect_notices(inspection.notices, assays, reductions)
+        self._notices = self._collect_notices(
+            (
+                *inspection.notices,
+                *selection_notices,
+                *inspection.cellMetadata.notices,
+            ),
+            assays,
+            reductions,
+        )
         self._lastImportPlans: dict[str, Any] = {}
         self._lastDenseBatchRows: dict[str, int] = {}
         # Every assay's dtype and layout are resolved, and a layout that does
@@ -335,16 +427,22 @@ class SeuratToZarr:
 
     @staticmethod
     def _validate_metadata_name(name: str, axis: str) -> None:
+        # Cell metadata columns can be left out of the import.
+        remedy = (
+            f"; leave it out with SeuratReader(cell_metadata={{'exclude': [{name!r}]}})"
+            if axis == "cell"
+            else ""
+        )
         if name in {"", ".", ".."}:
             raise ValueError(
-                f"{axis} metadata column {name!r} cannot name a Zarr array"
+                f"{axis} metadata column {name!r} cannot name a Zarr array{remedy}"
             )
         if not is_reserved_metadata_name(metadata_column_key(name)):
             return
         if name in RESERVED_METADATA_COLUMNS:
-            raise ValueError(f"{axis} metadata column {name!r} is reserved")
+            raise ValueError(f"{axis} metadata column {name!r} is reserved{remedy}")
         raise ValueError(
-            f"{axis} metadata column {name!r} uses CyteArc's internal prefix"
+            f"{axis} metadata column {name!r} uses CyteArc's internal prefix{remedy}"
         )
 
     @classmethod
@@ -364,6 +462,100 @@ class SeuratToZarr:
             *root_notices,
             *(notice for assay in assays for notice in assay.notices),
             *(notice for reduction in reductions for notice in reduction.notices),
+        )
+
+    @staticmethod
+    def _importable_names(
+        items: tuple[SeuratItemInspection, ...],
+        *,
+        explicit: bool,
+        kind: str,
+        notices: list[SeuratNotice],
+    ) -> tuple[str, ...]:
+        """Return the names of the selected items to import.
+
+        A selection that the caller named keeps every name, so that an item
+        that cannot be imported raises; the default selection skips such an
+        item with a notice.
+        """
+        names: list[str] = []
+        for item in items:
+            if item.importable or explicit:
+                names.append(item.name)
+                continue
+            diagnostic = cast(SeuratDiagnostic, item.blockingDiagnostic)
+            notices.append(
+                SeuratNotice(
+                    code=f"skipped_{kind}",
+                    message=(
+                        f"{kind} {item.name!r} is not imported: {diagnostic.message}"
+                    ),
+                    objectPath=diagnostic.objectPath,
+                    context={
+                        "reason": diagnostic.code,
+                        "details": dict(diagnostic.context),
+                    },
+                )
+            )
+        return tuple(names)
+
+    @staticmethod
+    def _default_assay(
+        reader: SeuratReader,
+        assay_names: tuple[str, ...],
+        requested: str | None,
+        notices: list[SeuratNotice],
+    ) -> str:
+        """Resolve the store's default assay among the imported assays."""
+        if requested is not None:
+            if not isinstance(requested, str):
+                raise TypeError("default_assay must be an assay name or None")
+            if requested not in assay_names:
+                if requested in reader.assayNames:
+                    # Selected, but skipped because it cannot be imported.
+                    reader.get_assay(requested)
+                raise ValueError(
+                    f"default_assay {requested!r} is not imported; pass one of "
+                    f"the imported assays {list(assay_names)}"
+                )
+            return requested
+        active = reader.inspection.activeAssay
+        if active in assay_names:
+            umi_assay = reader.get_assay(active).umiAssay
+            if umi_assay is None or umi_assay not in assay_names:
+                return active
+            # SCTransform-corrected counts are not raw counts, which CyteArc
+            # analyses expect of the default assay.
+            notices.append(
+                SeuratNotice(
+                    code="sct_default_assay",
+                    message=(
+                        f"active assay {active!r} holds SCTransform-corrected "
+                        f"counts, so the default assay is {umi_assay!r}, whose "
+                        "raw counts its models were fitted to; pass "
+                        f"default_assay={active!r} to keep the active assay"
+                    ),
+                    objectPath="active.assay",
+                    context={"activeAssay": active, "defaultAssay": umi_assay},
+                )
+            )
+            return umi_assay
+        if active in reader.assayNames and assay_names:
+            diagnostic = cast(
+                SeuratDiagnostic, reader.inspection.assay(active).blockingDiagnostic
+            )
+            raise ValueError(
+                f"Active assay {active!r} cannot be imported ({diagnostic.code}: "
+                f"{diagnostic.message}); pass default_assay naming one of the "
+                f"imported assays {list(assay_names)}"
+            )
+        if active in reader.assayNames:
+            # Nothing else imports, so the active assay's own error explains.
+            reader.get_assay(active)
+        raise ValueError(
+            f"Active assay {active!r} is not selected for import; select it, or "
+            f"pass default_assay naming one of the imported assays "
+            f"{list(assay_names)}"
         )
 
     def dump(self, batch_size: int | None = None) -> SeuratImportResult:
@@ -971,10 +1163,20 @@ class SeuratToZarr:
         matrix: SeuratRMatrix,
         block_rows: int,
         dtype: np.dtype[Any],
+        rows: np.ndarray | None = None,
     ) -> Iterator[np.ndarray]:
+        """Yield the matrix in row blocks, in the order of ``rows`` if given."""
         for start in range(0, matrix.shape[0], block_rows):
             stop = min(start + block_rows, matrix.shape[0])
-            yield np.asarray(matrix.read_rows(start, stop), dtype=dtype)
+            if rows is None:
+                yield np.asarray(matrix.read_rows(start, stop), dtype=dtype)
+                continue
+            block = np.empty((stop - start, matrix.shape[1]), dtype=dtype)
+            for offset, run_start, run_stop in _consecutive_runs(rows[start:stop]):
+                block[offset : offset + run_stop - run_start] = matrix.read_rows(
+                    run_start, run_stop
+                )
+            yield block
 
     @staticmethod
     def _vector_blocks(
@@ -992,9 +1194,10 @@ class SeuratToZarr:
         matrix: SeuratRMatrix,
         block_rows: int,
         dtype: np.dtype[Any],
+        rows: np.ndarray | None = None,
     ) -> str:
         return fingerprint_row_blocks(
-            cls._matrix_blocks(matrix, block_rows, dtype),
+            cls._matrix_blocks(matrix, block_rows, dtype, rows),
             tuple(matrix.shape),
             dtype,
             label="Reduction payload",
@@ -1040,6 +1243,47 @@ class SeuratToZarr:
         )
         return self._bounded_block_rows(requested_rows, row_bytes=row_bytes)
 
+    def _reduction_cells(
+        self,
+        reduction: SeuratReduction,
+        cell_selection: ArtifactRef,
+    ) -> tuple[ArtifactRef, Sequence[str], np.ndarray | None]:
+        """Return a reduction's cell selection, cell IDs, and row order.
+
+        Rows are stored in the order of the object's cells. A reduction of
+        only some of the cells is stored over a selection of those cells; the
+        row order is None when the rows already follow the cells.
+        """
+        positions = reduction.cellPositions
+        if positions is None:
+            return cell_selection, self.reader.cellIds, None
+        order = np.argsort(positions, kind="stable")
+        ordered_positions = positions[order]
+        if ordered_positions.size < len(self.reader.cellIds):
+            from ..storage.selections import resolve_generated_selection_artifact
+
+            selected = np.zeros(len(self.reader.cellIds), dtype=bool)
+            selected[ordered_positions] = True
+            cell_selection, _values = resolve_generated_selection_artifact(
+                self.root,
+                scope="datastore",
+                kind="cell_selection",
+                values=selected,
+                row_ids=cast(zarr.Array, self.cellData["ids"]),
+                operation="import_reduction_cells",
+                parameters={"source": "seurat", "dimreduc_key": reduction.name},
+                inputs={
+                    "source_digest": self._sourceDigest,
+                    "cell_selection": cell_selection,
+                },
+                source_column="seurat",
+            )
+        return (
+            cell_selection,
+            _CellIdsAt(self.reader.cellIds, ordered_positions),
+            order,
+        )
+
     def _write_reductions(
         self,
         cell_selection: ArtifactRef,
@@ -1054,32 +1298,38 @@ class SeuratToZarr:
         for reduction in self._reductions:
             block_rows = self._reduction_block_rows(reduction, requested_rows)
             coordinate_dtype = self._floating_dtype(reduction.cellEmbeddings.dtype)
+            reduction_selection, cell_ids, row_order = self._reduction_cells(
+                reduction, cell_selection
+            )
             coordinate_fingerprint = self._fingerprint_matrix(
                 reduction.cellEmbeddings,
                 block_rows,
                 coordinate_dtype,
+                row_order,
             )
 
             def coordinate_blocks(
                 matrix: SeuratRMatrix = reduction.cellEmbeddings,
                 rows: int = block_rows,
                 dtype: np.dtype[Any] = coordinate_dtype,
+                order: np.ndarray | None = row_order,
             ) -> Iterator[np.ndarray]:
-                return self._matrix_blocks(matrix, rows, dtype)
+                return self._matrix_blocks(matrix, rows, dtype, order)
 
-            if reduction.role == "displayEmbedding":
+            assay = self._reductionAssays[reduction.name]
+            if reduction.embeddingRole is not None:
                 ref = write_imported_embedding(
                     self.root,
-                    assay=reduction.assayUsed,
+                    assay=assay,
                     dimreduc_key=reduction.name,
-                    role="umap" if reduction.name.casefold() == "umap" else "tsne",
+                    role=reduction.embeddingRole,
                     coordinates=coordinate_blocks,
                     coordinate_shape=reduction.cellEmbeddings.shape,
                     coordinate_dtype=coordinate_dtype,
                     source_digest=self._sourceDigest,
                     payload_fingerprints={"values": coordinate_fingerprint},
-                    source_cell_ids=self.reader.cellIds,
-                    cell_selection=cell_selection,
+                    source_cell_ids=cell_ids,
+                    cell_selection=reduction_selection,
                     block_rows=block_rows,
                 )
             else:
@@ -1131,7 +1381,7 @@ class SeuratToZarr:
 
                 ref = write_imported_coordinates(
                     self.root,
-                    assay=reduction.assayUsed,
+                    assay=assay,
                     dimreduc_key=reduction.name,
                     role=reduction.role,
                     coordinates=coordinate_blocks,
@@ -1139,8 +1389,8 @@ class SeuratToZarr:
                     coordinate_dtype=coordinate_dtype,
                     source_digest=self._sourceDigest,
                     payload_fingerprints=payload_fingerprints,
-                    source_cell_ids=self.reader.cellIds,
-                    cell_selection=cell_selection,
+                    source_cell_ids=cell_ids,
+                    cell_selection=reduction_selection,
                     loadings=loading_blocks,
                     loadings_shape=loading_shape,
                     loadings_dtype=loading_dtype,

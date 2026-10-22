@@ -1134,13 +1134,25 @@ def test_pairlist_and_named_vector_helpers_reject_malformed_graphs() -> None:
         + wire.integer(5)
         + wire.integer_vector([1])
     )
-    with open_rds(io.BytesIO(wire.document(integer_attributes))) as document:
-        with pytest.raises(
-            TypeError, match=r"^expected a pairlist at \$\.attributes, found INTEGER$"
-        ):
-            get_attribute(document.root, "names")
-        with pytest.raises(TypeError, match="^INTEGER is not a generic named vector$"):
-            list(iter_named(document.root))
+    # The parser rejects attributes that are not a pairlist, so the helpers
+    # below never see them in a parsed document.
+    with pytest.raises(
+        RdsFormatError,
+        match=r"^attributes must be a pairlist, found INTEGER at \$\.attributes "
+        r"\(byte 35\)$",
+    ):
+        open_rds(io.BytesIO(wire.document(integer_attributes)))
+    malformed = RNode(
+        RType.INTEGER,
+        attributes=RNode(RType.INTEGER, path="$.attributes"),
+        path="$",
+    )
+    with pytest.raises(
+        TypeError, match=r"^expected a pairlist at \$\.attributes, found INTEGER$"
+    ):
+        get_attribute(malformed, "names")
+    with pytest.raises(TypeError, match="^INTEGER is not a generic named vector$"):
+        list(iter_named(malformed))
 
     names = wire.pair(
         wire.string_vector([b"only"]), wire.nil(), tag=wire.symbol("names")
@@ -1776,3 +1788,402 @@ def test_vector_children_are_counted_against_max_objects() -> None:
     assert caught.value.path == "$"
     with open_rds(io.BytesIO(payload), limits=RdsLimits(max_objects=6)) as document:
         assert len(document.root.value) == 5
+
+
+def _describe(node: RNode) -> object:
+    """Return a node tree as plain values, for comparing two parses."""
+    value = node.value
+    if isinstance(value, LazyAtomicVector):
+        content: object = value.read_block(0, len(value)).tolist()
+    elif isinstance(value, LazyStringVector):
+        content = value.read_block(0, len(value))
+    elif isinstance(value, tuple):
+        content = [_describe(child) for child in value]
+    elif isinstance(value, PairValue):
+        content = (_describe(value.car), _describe(value.cdr))
+    elif isinstance(value, RNode):
+        content = _describe(value)
+    else:
+        content = value
+    return (
+        node.type.name,
+        node.gp,
+        node.object,
+        node.path,
+        node.offset,
+        None if node.attributes is None else _describe(node.attributes),
+        None if node.tag is None else _describe(node.tag),
+        content,
+    )
+
+
+def _mixed_payload(wire: Wire, elements: int) -> bytes:
+    """A list of named integer vectors, reals, and a character vector."""
+    names = wire.pair(
+        wire.string_vector([b"value"]), wire.nil(), tag=wire.symbol("names")
+    )
+    children = [
+        wire.integer(wire.flags(RType.INTEGER, attributes=True))
+        + wire.integer(1)
+        + wire.integer(index)
+        + names
+        for index in range(elements)
+    ]
+    children.append(wire.real_vector([0.5 * index for index in range(500)]))
+    children.append(
+        wire.string_vector([f"cell-{index}".encode() for index in range(elements)])
+    )
+    return wire.document(wire.vector(children))
+
+
+def test_small_wire_reads_come_from_the_read_ahead_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cytearc.readers._rds import _parser
+
+    wire = Wire()
+    payload = _mixed_payload(wire, 2_000)
+    original = RandomAccessStorage.read_at
+
+    def parse() -> tuple[object, int]:
+        reads = 0
+
+        def counted(storage, offset, size, **kwargs):
+            nonlocal reads
+            reads += 1
+            return original(storage, offset, size, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(RandomAccessStorage, "read_at", counted)
+            document = open_rds(io.BytesIO(payload))
+            parse_reads = reads
+        with document:
+            return _describe(document.root), parse_reads
+
+    buffered, buffered_reads = parse()
+    # Without the window and the bulk string scan, as the parser read before,
+    # every integer and header is its own storage read.
+    monkeypatch.setattr(_parser, "_BUFFERED_READ_BYTES", 0)
+    monkeypatch.setattr(
+        _parser._WireReader, "scan_char_elements", lambda *args, **kwargs: 0
+    )
+    unbuffered, unbuffered_reads = parse()
+
+    assert buffered == unbuffered
+    content = buffered[-1]
+    assert isinstance(content, list)
+    assert content[-1][-1] == [f"cell-{index}" for index in range(2_000)]
+    assert content[0][-1] == [0]
+    assert len(payload) < 4 * 65_536
+    # The header probe and one read per 64 KiB window, against several reads
+    # per element without the window.
+    assert buffered_reads <= 8
+    assert unbuffered_reads > 10_000
+
+
+def _character_elements(wire: Wire, count: int) -> list[bytes]:
+    """CHARSXP elements of every encoding flag, NA, empty, and one long string."""
+    elements: list[bytes] = []
+    for index in range(count):
+        kind = index % 6
+        if kind == 0:
+            elements.append(wire.char(f"cell-{index}".encode(), gp=1 << 6))
+        elif kind == 1:
+            elements.append(wire.char("gène-é".encode(), gp=1 << 3))
+        elif kind == 2:
+            elements.append(wire.char("caf\xe9".encode("latin-1"), gp=1 << 2))
+        elif kind == 3:
+            elements.append(wire.char(b"\xff\x00raw", gp=1 << 1))
+        elif kind == 4:
+            elements.append(wire.char(None))
+        else:
+            elements.append(wire.char(b"", gp=0))
+    # A string longer than the read-ahead window.
+    elements[count // 2] = wire.char(b"x" * 70_000, gp=1 << 6)
+    return elements
+
+
+def _character_payload(wire: Wire, elements: list[bytes]) -> bytes:
+    return wire.document(
+        wire.integer(RType.STRING) + wire.integer(len(elements)) + b"".join(elements)
+    )
+
+
+def _without_bulk_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cytearc.readers._rds import _parser
+
+    monkeypatch.setattr(
+        _parser._WireReader, "scan_char_elements", lambda *args, **kwargs: 0
+    )
+
+
+@pytest.mark.parametrize("byte_order", ["xdr", "little", "big"])
+def test_bulk_string_scan_matches_the_checked_parse(
+    byte_order: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cytearc.readers._rds import _parser
+
+    wire = Wire("native" if byte_order == "little" else "xdr")
+    payload = _character_payload(wire, _character_elements(wire, 20_000))
+    if byte_order == "big":
+        payload = b"B\n" + payload[2:]
+    starts = 0
+    original_start = _parser._Parser._start_object
+
+    def counted_start(parser, path, depth):
+        nonlocal starts
+        starts += 1
+        return original_start(parser, path, depth)
+
+    def parse() -> tuple[list[str | bytes | None], bytes, int]:
+        nonlocal starts
+        starts = 0
+        with monkeypatch.context() as patch:
+            patch.setattr(_parser._Parser, "_start_object", counted_start)
+            document = open_rds(io.BytesIO(payload))
+        with document:
+            strings = document.root.value
+            descriptors = strings._index_storage.read_at(
+                strings.descriptor_offset, len(strings) * 24
+            )
+            return strings.read_block(0, len(strings)), descriptors, starts
+
+    values, descriptors, scanned_starts = parse()
+    _without_bulk_scan(monkeypatch)
+    checked_values, checked_descriptors, checked_starts = parse()
+
+    assert values == checked_values
+    assert descriptors == checked_descriptors
+    assert values[:6] == ["cell-0", "gène-é", "café", b"\xff\x00raw", None, ""]
+    assert values[10_000] == "x" * 70_000
+    # The scan opens no parser object per element.
+    assert scanned_starts == 1
+    assert checked_starts == 20_001
+
+
+def test_bulk_string_scan_keeps_the_temporary_storage_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wire = Wire()
+    elements = [wire.char(f"cell-{index}".encode()) for index in range(20_000)]
+    payload = _character_payload(wire, elements)
+    # The 20,000 descriptors take 480,000 bytes of temporary storage.
+    limits = RdsLimits(max_temp_bytes=400_000)
+
+    def failure() -> tuple[str, int, int, str]:
+        with pytest.raises(RdsLimitError) as caught:
+            open_rds(io.BytesIO(payload), limits=limits)
+        error = caught.value
+        return error.limit, error.actual, error.maximum, error.path
+
+    scanned = failure()
+    _without_bulk_scan(monkeypatch)
+    assert scanned == failure() == ("max_temp_bytes", 480_000, 400_000, "$")
+
+
+@pytest.mark.parametrize(
+    ("case", "error_type", "message"),
+    [
+        ("attributes", RdsFormatError, "CHAR node cannot have attributes"),
+        ("tag", RdsFormatError, "CHAR node cannot have a tag"),
+        ("reference", RdsFormatError, "character vector element has type REFERENCE"),
+        ("unknown-type", RdsFormatError, "unknown R node type 127"),
+        ("negative-length", RdsFormatError, "invalid string length -2"),
+        ("long-string", RdsLimitError, "max_string_bytes exceeded: 9 > 8"),
+        ("truncated-bytes", RdsFormatError, "unexpected end of stream while skipping"),
+        ("truncated-header", RdsFormatError, "unexpected end of stream"),
+        ("depth", RdsLimitError, "max_depth exceeded: 1 > 0"),
+    ],
+)
+def test_bulk_string_scan_reports_malformed_elements_as_the_checked_parse(
+    case: str,
+    error_type: type[Exception],
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wire = Wire()
+    elements = [wire.char(f"ok-{index}".encode()) for index in range(9_000)]
+    malformed = {
+        "attributes": wire.integer(wire.flags(RType.CHAR, attributes=True))
+        + wire.integer(1)
+        + b"x"
+        + wire.nil(),
+        "tag": wire.integer(wire.flags(RType.CHAR, tag=True)) + wire.integer(1) + b"x",
+        "reference": wire.integer((1 << 8) | RType.REFERENCE),
+        "unknown-type": wire.integer(0x7F) + wire.integer(1) + b"x",
+        "negative-length": wire.integer(wire.flags(RType.CHAR)) + wire.integer(-2),
+        "long-string": wire.char(b"too-long!"),
+        "truncated-bytes": wire.integer(wire.flags(RType.CHAR)) + wire.integer(5),
+        "truncated-header": wire.integer(wire.flags(RType.CHAR)),
+        "depth": None,
+    }[case]
+    limits = RdsLimits(max_string_bytes=8, max_depth=0 if case == "depth" else 512)
+    if malformed is not None:
+        # The malformed element sits in the second scan block.
+        elements[8_500] = malformed
+        if case.startswith("truncated"):
+            elements = elements[:8_501]
+    payload = _character_payload(wire, elements)
+
+    def failure() -> tuple[type[Exception], str, str, int | None]:
+        with pytest.raises(error_type, match=message) as caught:
+            open_rds(io.BytesIO(payload), limits=limits)
+        error = caught.value
+        assert isinstance(error, RdsFormatError | RdsLimitError)
+        return type(error), error.message, error.path, error.offset
+
+    scanned = failure()
+    _without_bulk_scan(monkeypatch)
+    assert scanned == failure()
+    assert scanned[2] == {"depth": "$[0]", "truncated-header": "$[8500].length"}.get(
+        case, "$[8500]"
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "found", "path"),
+    [
+        ("altrep", "ALTREP", "$.attributes"),
+        ("character", "STRING", "$.attributes"),
+        ("language", "LANGUAGE", "$.attributes"),
+        # The pairlist ends in an integer vector instead of NULL.
+        ("improper", "INTEGER", "$.attributes.cdr"),
+    ],
+)
+def test_attributes_that_are_not_a_pairlist_are_malformed_input(
+    case: str,
+    found: str,
+    path: str,
+) -> None:
+    wire = Wire()
+    attributes = {
+        "altrep": wire.integer(RType.ALTREP)
+        + wire.pair(wire.symbol("wrap_integer"), wire.nil())
+        + wire.integer_vector([1])
+        + wire.nil(),
+        "character": wire.string_vector([b"names"]),
+        "language": wire.pair(
+            wire.symbol("f"),
+            wire.nil(),
+            tag=wire.symbol("names"),
+            r_type=RType.LANGUAGE,
+        ),
+        "improper": wire.pair(
+            wire.string_vector([b"value"]),
+            wire.integer_vector([2]),
+            tag=wire.symbol("names"),
+        ),
+    }[case]
+    payload = wire.document(
+        wire.integer(wire.flags(RType.INTEGER, attributes=True))
+        + wire.integer(1)
+        + wire.integer(7)
+        + attributes
+    )
+    with pytest.raises(
+        RdsFormatError, match=rf"^attributes must be a pairlist, found {found} at "
+    ) as caught:
+        open_rds(io.BytesIO(payload))
+    assert caught.value.path == path
+
+
+def test_a_mutated_attribute_header_is_malformed_input() -> None:
+    wire = Wire()
+    names = wire.pair(
+        wire.string_vector([b"value"]), wire.nil(), tag=wire.symbol("names")
+    )
+    vector = wire.integer(wire.flags(RType.INTEGER, attributes=True)) + wire.integer(1)
+    payload = wire.document(vector + wire.integer(7) + names)
+    with open_rds(io.BytesIO(payload)) as document:
+        assert get_attribute(document.root, "names").value[0] == "value"
+    # The fuzzer's type@offset=0xee mutation: the attribute pairlist header
+    # becomes an ALTREP header, which then parses its cells as ALTREP fields.
+    offset = len(wire.header()) + len(vector) + 4
+    mutated = payload[:offset] + struct.pack(">i", 0xEE) + payload[offset + 4 :]
+    with pytest.raises(
+        RdsFormatError, match=r"^attributes must be a pairlist, found ALTREP at "
+    ) as caught:
+        open_rds(io.BytesIO(mutated))
+    assert (caught.value.path, caught.value.offset) == ("$.attributes", offset)
+
+
+class _CountingStream(io.BytesIO):
+    """A stream that counts the bytes read from it."""
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self.bytesRead = 0
+
+    def read(self, size: int | None = -1) -> bytes:
+        data = super().read(size)
+        self.bytesRead += len(data)
+        return data
+
+
+@pytest.mark.parametrize(
+    "compress",
+    [
+        gzip.compress,
+        bz2.compress,
+        lzma.compress,
+        zstandard.ZstdCompressor().compress,
+        # The decoders stop at trailing bytes that do not form a stream, so the
+        # digest reads the rest itself.
+        lambda data: bz2.compress(data) + b"\x01" * 100_000,
+        lambda data: lzma.compress(data) + b"\x01" * 200_000,
+    ],
+    ids=["gzip", "bzip2", "xz", "zstd", "bzip2-trailing", "xz-trailing"],
+)
+def test_compressed_input_is_read_once_for_its_digest_and_payload(
+    compress: Callable[[bytes], bytes],
+) -> None:
+    wire = Wire()
+    payload = wire.document(
+        wire.string_vector([f"cell-{index}".encode() for index in range(5_000)])
+    )
+    compressed = compress(payload)
+    stream = _CountingStream(b"lead" + compressed)
+    stream.seek(4)
+    with open_rds(stream) as document:
+        assert document.source.source_sha256 == hashlib.sha256(compressed).hexdigest()
+        assert document.source.payload_sha256 == hashlib.sha256(payload).hexdigest()
+        assert document.source.source_bytes == len(compressed)
+        assert document.root.value[4_999] == "cell-4999"
+    # The format probe reads eight bytes; then the decoder and the digest
+    # share one pass over the input.
+    assert stream.bytesRead == 8 + len(compressed)
+    assert stream.tell() == 4
+
+
+def test_compressed_input_shorter_than_its_reported_size_is_rejected() -> None:
+    class _Overstated(io.BytesIO):
+        def seek(self, offset: int, whence: int = 0) -> int:
+            position = super().seek(offset, whence)
+            return position + 10 if whence == io.SEEK_END else position
+
+    wire = Wire()
+    stream = _Overstated(gzip.compress(wire.document(wire.integer_vector([1, 2]))))
+    with pytest.raises(
+        OSError, match="^Input stream ended while computing its digest$"
+    ):
+        open_rds(stream)
+    assert stream.tell() == 0
+    assert not stream.closed
+
+
+def test_a_failed_read_of_compressed_input_is_not_reported_as_corrupt_input() -> None:
+    class _Disconnecting(io.BytesIO):
+        def read(self, size: int | None = -1) -> bytes:
+            if self.tell() >= 8:
+                raise OSError("device disconnected")
+            return super().read(size)
+
+    wire = Wire()
+    stream = _Disconnecting(
+        gzip.compress(wire.document(wire.integer_vector(list(range(1_000)))))
+    )
+    with pytest.raises(OSError, match="^device disconnected$") as caught:
+        open_rds(stream)
+    assert not isinstance(caught.value, RdsFormatError)
+    assert stream.tell() == 0

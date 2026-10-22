@@ -13,6 +13,7 @@ from types import FrameType
 from typing import cast
 
 from ._lazy import (
+    STRING_DESCRIPTOR,
     STRING_SOURCE_DECODED,
     STRING_SOURCE_PAYLOAD,
     LazyAtomicVector,
@@ -101,6 +102,20 @@ _KNOWN_ALTREP = {
     "wrap_real",
     "wrap_string",
 }
+# The wire reader fetches this many bytes ahead of the parse position.
+_READ_AHEAD_BYTES = 64 * 1024
+# Reads up to this size come from the read-ahead window; a larger read goes to
+# the storage directly instead of evicting the window.
+_BUFFERED_READ_BYTES = 16 * 1024
+# Character vector elements described per bulk scan of the wire.
+_STRING_SCAN_BLOCK = 8_192
+_INT32 = {order: struct.Struct(f"{order}i") for order in "<>"}
+_FLOAT64 = {order: struct.Struct(f"{order}d") for order in "<>"}
+# A CHARSXP element starts with its flags and its length.
+_CHAR_HEADER = {order: struct.Struct(f"{order}ii") for order in "<>"}
+# The type byte with the attribute and tag bits of a flags word: an element
+# that a bulk scan accepts is a CHARSXP without either.
+_CHAR_FLAG_MASK = 0xFF | (1 << 9) | (1 << 10)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,19 +168,19 @@ class _WireReader:
     def remaining(self) -> int:
         return self.end - self.position
 
-    def _fill_buffer(self) -> None:
-        count = min(64 * 1024, self.remaining())
+    def _fill_buffer(self, *, path: str) -> None:
+        count = min(_READ_AHEAD_BYTES, self.remaining())
         if count <= 0:
             self._buffer = b""
             self._buffer_start = self.position
             return
         self._buffer_start = self.position
-        self._buffer = self.storage.read_at(self.position, count)
+        self._buffer = self.storage.read_at(self.position, count, path=path)
 
     def read_byte(self, *, path: str) -> int:
         relative = self.position - self._buffer_start
         if relative < 0 or relative >= len(self._buffer):
-            self._fill_buffer()
+            self._fill_buffer(path=path)
             relative = 0
         if not self._buffer:
             raise RdsFormatError(
@@ -189,12 +204,79 @@ class _WireReader:
         if size == 0:
             return b""
         relative = self.position - self._buffer_start
-        if 0 <= relative and relative + size <= len(self._buffer):
-            result = self._buffer[relative : relative + size]
-        else:
-            result = self.storage.read_at(self.position, size, path=path)
+        if relative < 0 or relative + size > len(self._buffer):
+            if size > _BUFFERED_READ_BYTES:
+                result = self.storage.read_at(self.position, size, path=path)
+                self.position += size
+                return result
+            # The window then starts here and holds the whole read, because
+            # the payload has at least ``size`` more bytes.
+            self._fill_buffer(path=path)
+            relative = 0
         self.position += size
-        return result
+        return self._buffer[relative : relative + size]
+
+    def scan_char_elements(
+        self,
+        count: int,
+        *,
+        max_length: int,
+        descriptors: bytearray,
+        path: str,
+    ) -> int:
+        """Describe up to ``count`` binary CHARSXP elements in one pass.
+
+        Each element's descriptor is appended to ``descriptors`` and its bytes
+        are skipped. The scan stops before an element that is not a CHARSXP
+        without tag or attributes, whose length is below -1 or above
+        ``max_length``, or whose bytes run past the payload, so the checked
+        parse reports that element.
+
+        Returns:
+            The number of elements described.
+        """
+        order = ">" if self.encoding is RdsEncoding.XDR else self.byte_order
+        unpack_header = _CHAR_HEADER[cast(str, order)].unpack_from
+        pack_descriptor = STRING_DESCRIPTOR.pack
+        char_type = int(RType.CHAR)
+        end = self.end
+        window = self._buffer
+        # ``relative`` indexes the element header in the window, whose
+        # elements' bytes start ``data_base`` bytes into the payload.
+        data_base = self._buffer_start + 8
+        relative = self.position - self._buffer_start
+        window_end = len(window) - 8
+        scanned = 0
+        while scanned < count:
+            if relative < 0 or relative > window_end:
+                self.position = data_base - 8 + relative
+                self._fill_buffer(path=path)
+                window = self._buffer
+                data_base = self._buffer_start + 8
+                relative = 0
+                window_end = len(window) - 8
+                if window_end < 0:
+                    break
+            flags, length = unpack_header(window, relative)
+            if flags & _CHAR_FLAG_MASK != char_type or length < -1:
+                break
+            if length < 0:
+                descriptors += pack_descriptor(0, 0, -1, (flags >> 12) & 0xFFFF)
+                relative += 8
+            else:
+                data_start = data_base + relative
+                if length > max_length or length > end - data_start:
+                    break
+                descriptors += pack_descriptor(
+                    STRING_SOURCE_PAYLOAD,
+                    data_start,
+                    length,
+                    (flags >> 12) & 0xFFFF,
+                )
+                relative += 8 + length
+            scanned += 1
+        self.position = data_base - 8 + relative
+        return scanned
 
     def skip(self, size: int, *, path: str) -> int:
         if size < 0:
@@ -247,7 +329,7 @@ class _WireReader:
                 path=path,
                 offset=offset,
             )
-        return int(struct.unpack(f"{order}i", self.read_exact(4, path=path))[0])
+        return int(_INT32[order].unpack(self.read_exact(4, path=path))[0])
 
     def read_real(self, *, path: str) -> float:
         offset = self.position
@@ -281,7 +363,7 @@ class _WireReader:
                 path=path,
                 offset=offset,
             )
-        return float(struct.unpack(f"{order}d", self.read_exact(8, path=path))[0])
+        return float(_FLOAT64[order].unpack(self.read_exact(8, path=path))[0])
 
     def read_ascii_string(self, length: int, *, path: str) -> bytes:
         if length == 0:
@@ -637,9 +719,7 @@ class _Parser:
                 offset=offset,
             )
         if info.has_attributes:
-            node.attributes = self._null_to_none(
-                self._parse_node(f"{path}.attributes", depth + 1)
-            )
+            node.attributes = self._parse_attributes(f"{path}.attributes", depth + 1)
         return node
 
     def _singleton(self, r_type: RType, *, path: str, offset: int) -> RNode:
@@ -687,9 +767,9 @@ class _Parser:
         enclosure = self._parse_node(f"{path}.enclosure", depth + 1)
         frame = self._parse_node(f"{path}.frame", depth + 1)
         hash_table = self._parse_node(f"{path}.hashTable", depth + 1)
-        attributes = self._parse_node(f"{path}.attributes", depth + 1)
+        attributes = self._parse_attributes(f"{path}.attributes", depth + 1)
         node.value = EnvironmentValue(locked == 1, enclosure, frame, hash_table)
-        node.attributes = self._null_to_none(attributes)
+        node.attributes = attributes
         return node
 
     def _parse_pair(
@@ -711,7 +791,7 @@ class _Parser:
         index = 0
         while True:
             attributes = (
-                self._parse_node(f"{cell_path}.attributes", cell_depth + 1)
+                self._parse_attributes(f"{cell_path}.attributes", cell_depth + 1)
                 if cell_info.has_attributes
                 else None
             )
@@ -723,7 +803,7 @@ class _Parser:
             car = self._parse_node(f"{cell_path}.car", cell_depth + 1)
             cell = RNode(
                 cell_info.type,
-                attributes=self._null_to_none(attributes),
+                attributes=attributes,
                 tag=self._null_to_none(tag),
                 object=cell_info.object,
                 gp=cell_info.gp,
@@ -778,7 +858,7 @@ class _Parser:
     ) -> RNode:
         altrep_info = self._parse_node(f"{path}.info", depth + 1)
         state = self._parse_node(f"{path}.state", depth + 1)
-        attributes = self._parse_node(f"{path}.attributes", depth + 1)
+        attributes = self._parse_attributes(f"{path}.attributes", depth + 1)
         class_name, package_name = self._altrep_names(altrep_info)
         return RNode(
             RType.ALTREP,
@@ -789,7 +869,7 @@ class _Parser:
                 package_name=package_name,
                 known=class_name in _KNOWN_ALTREP,
             ),
-            attributes=self._null_to_none(attributes),
+            attributes=attributes,
             object=info.object,
             gp=info.gp,
             path=path,
@@ -898,7 +978,29 @@ class _Parser:
         decoded_storage: RandomAccessStorage | None = None
         decoded_writer: BufferedTempWriter | None = None
 
-        for index in range(length):
+        scanned = 0
+        if self.reader.encoding is not RdsEncoding.ASCII and depth < self._maximumDepth:
+            # Well-formed binary elements are described in bulk. The checked
+            # loop below parses the first element that the scan stops at,
+            # which reports it, and every ASCII element. The children check
+            # above admits every element against max_objects.
+            while scanned < length:
+                requested = min(length - scanned, _STRING_SCAN_BLOCK)
+                block = bytearray()
+                count = self.reader.scan_char_elements(
+                    requested,
+                    max_length=self.limits.max_string_bytes,
+                    descriptors=block,
+                    path=path,
+                )
+                self._objects += count
+                scanned += count
+                if count:
+                    descriptor_writer.write(bytes(block), path=f"{path}[{scanned - 1}]")
+                if count < requested:
+                    break
+
+        for index in range(scanned, length):
             item_path = f"{path}[{index}]"
             item_offset = self._start_object(item_path, depth + 1)
             flags = self.reader.read_int(path=item_path)
@@ -1142,9 +1244,7 @@ class _Parser:
         if repetition_position is not None:
             repetitions.nodes[repetition_position] = node
         if has_attributes:
-            node.attributes = self._null_to_none(
-                self._parse_node(f"{path}.attributes", depth + 1)
-            )
+            node.attributes = self._parse_attributes(f"{path}.attributes", depth + 1)
         node.tag = self._null_to_none(self._parse_node(f"{path}.tag", depth + 1))
         car_marker = self.reader.read_int(path=f"{path}.car.marker")
         car = self._parse_bytecode_language(
@@ -1233,6 +1333,24 @@ class _Parser:
                 path=path,
                 offset=offset,
             )
+
+    def _parse_attributes(self, path: str, depth: int) -> RNode | None:
+        """Parse an attribute list, which R writes as a pairlist or NULL.
+
+        Any other node would only fail later, when its attributes or slots
+        are read, so it is rejected here as malformed input.
+        """
+        attributes = self._null_to_none(self._parse_node(path, depth))
+        cell = attributes
+        while cell is not None and not cell.is_null:
+            if cell.type is not RType.PAIRLIST:
+                raise RdsFormatError(
+                    f"attributes must be a pairlist, found {cell.type.name}",
+                    path=cell.path,
+                    offset=cell.offset,
+                )
+            cell = cell.value.cdr
+        return attributes
 
     @staticmethod
     def _null_to_none(node: RNode | None) -> RNode | None:
