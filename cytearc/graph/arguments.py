@@ -155,9 +155,9 @@ class PcaArguments(OperationArguments):
     batch_size: int = execution()
     show_elbow_plot: bool = execution()
     invalidate_cache: bool = execution(False)
-    # Rows per block when IncrementalPCA fits several blocks, whose result
-    # depends on the block size. Exact fits leave it unset.
-    incremental_block_rows: int | None = parameter(None, omit_if_none=True)
+    # "randomized" when more than 4096 features are fitted with the randomized
+    # solver, whose result approximates the exact one. Exact fits leave it unset.
+    solver: Literal["randomized"] | None = parameter(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)

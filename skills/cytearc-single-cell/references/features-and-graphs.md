@@ -135,11 +135,12 @@ The blacklist affects HVG selection only; marker search still tests every gene.
 
 ```python
 pca_30 = ds.reduction.pca(normalized, dims=30)  # more PCs than needed; local, no count pass
-scores = np.asarray(ds.artifacts.load(pca_30)["data"])  # cells x dims; also "loadings", "center"
-share = scores.var(axis=0, ddof=1)
-share = share / share.sum()
-print(np.round(np.cumsum(share)[[9, 14, 20, 29]], 3))  # share of the 30-PC variance at 10/15/21/30
-splt.elbow(share, show=False).save("pca_elbow.png")
+pca_arrays = ds.artifacts.load(pca_30)  # "data" (cells x dims), "loadings", "center", ...
+# Each PC's share of the total variance. PCA stored before release 1.3.0 has no
+# "variance_ratio"; refit it with invalidate_cache=True.
+share = np.asarray(pca_arrays["variance_ratio"][:])
+print(np.round(np.cumsum(share)[[9, 14, 20, 29]], 3))  # cumulative share at 10/15/21/30 PCs
+splt.elbow(100 * share, show=False).save("pca_elbow.png")
 ```
 
 An elbow is a hint, not a rule. Too few PCs merge populations; too many restore noise.
@@ -281,8 +282,9 @@ minimum seed ARI was 0.78. The parent had no FOXP3 group.
   cells (10x 5K PBMC docs dataset), yet every cell has `k` out-edges; use `symmetric=True`.
 - Passing a feature selection to UMAP, clustering or markers on a graph: graph consumers take the
   graph ref. `graph.neighbors(coordinates=)` only checks equality; it cannot retarget an index.
-- `show_elbow_plot=True` draws only on a new PCA fit. More than 4096 features or several narrow
-  blocks switch PCA to IncrementalPCA, and `batch_size` then joins the artifact identity.
+- Normalizing the whole universe for PCA. The normalized artifact is dense, and more than 4096
+  features switch PCA to its randomized solver, which reads the values once per pass and records
+  `solver="randomized"`. Select HVGs first. `batch_size` changes PCA results only by rounding.
 - Subclustering on the parent graph, or carrying subcluster IDs across artifacts. Rebuild inside
   the subset, join on the cell axis, and keep the parent labels. `select_cells(include=[])`
   raises; integer cluster artifacts need integer `include` values.

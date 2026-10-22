@@ -26,7 +26,7 @@ CyteArc implements a computational stage itself when an external implementation 
 It uses established libraries where they fit the streaming and provenance model.
 The aim is one coherent execution path, not reimplementation for its own sake.
 
-- **Reduction and graph construction:** streamed normalization, covariance (Gram-matrix) PCA with an incremental fallback, randomized streaming {term}`LSI`, approximate nearest-neighbour search, UMAP, {term}`densMAP`, and graph-based t-SNE through the optional `tsne` extra (see {ref}`Optional t-SNE <installation_tsne>`).
+- **Reduction and graph construction:** streamed normalization, exact covariance (Gram-matrix) PCA with a randomized block Krylov solver for more than 4,096 features ({ref}`details <pca_method>`), randomized streaming {term}`LSI`, approximate nearest-neighbour search, UMAP, {term}`densMAP`, and graph-based t-SNE through the optional `tsne` extra (see {ref}`Optional t-SNE <installation_tsne>`).
 - **Batch correction and mapping:** CyteArc implementations of [Harmony2](https://doi.org/10.64898/2026.03.16.711825), which builds on the original [Harmony](https://doi.org/10.1038/s41592-019-0619-0) algorithm, and of [Symphony-style](https://doi.org/10.1038/s41467-021-25957-x) fixed-reference mapping, with label transfer and mapping diagnostics.
 - **Matched multi-omics:** {term}`SNN integration` and [Hao-inspired WNN](https://doi.org/10.1016/j.cell.2021.04.048) integration for two or more assays, with WNN reporting one per-cell weight per modality.
 - **Clustering:** a native, multi-threaded implementation of [Leiden](https://doi.org/10.1038/s41598-019-41695-z) community detection ({ref}`details <leiden_method>`) and a native implementation of [Paris hierarchical clustering](https://doi.org/10.48550/arXiv.1806.01664) with fixed and branch-adaptive cuts.
@@ -39,6 +39,51 @@ The aim is one coherent execution path, not reimplementation for its own sake.
   motif deviations with MOODS-equivalent motif matching, cistromes from motifs or CUT&RUN and
   ChIP-seq peaks, region-to-gene links from paired RNA and ATAC, regulon specificity and
   connection specificity, and co-expression gene programs.
+
+(pca_method)=
+
+## Principal component analysis
+
+`reduction.pca` and the pipeline's PCA stage stream the normalized values of the selected cells
+in row blocks and never hold the whole matrix. With `feat_scaling=True`, each feature is first
+standardized with its mean and population standard deviation over the normalized cells. The
+solver depends only on the number of features, so the result does not depend on the memory
+budget, and the block size changes it only by rounding.
+
+- **Up to 4,096 features**, PCA is exact. One pass over the cells accumulates the float64
+  covariance matrix with symmetric rank updates, and LAPACK's eigensolver returns its leading
+  `dims` eigenvectors as the loadings. The covariance takes at most 128 MiB at this width, and the
+  eigensolver's cost grows with the cube of the feature count: on two threads it took 0.35 s for
+  2,000 features, 5.6 s for 4,096, and 38 s for 8,192.
+- **Above 4,096 features**, a randomized block Krylov solver fits the components. It applies
+  the covariance to a block of `dims + max(10, dims)` Gaussian vectors, seeded by a fixed seed,
+  and keeps every product in its basis, following the randomized range finder of
+  [Halko, Martinsson and Tropp](https://doi.org/10.1137/090771806) with the block Krylov space of
+  [Musco and Musco](https://doi.org/10.48550/arXiv.1504.05477), which converges in far fewer
+  passes than subspace iteration when the trailing variances are close. The Rayleigh-Ritz
+  projection of the covariance onto the basis gives the components and their variances. Each
+  pass reads the selected cells once; the solver stops when the leading `dims` components move
+  less than 0.1 degrees between two passes, and warns if they still move after 24 passes. The
+  artifact records `solver="randomized"`.
+- **Data passes.** The Gram solver reads the normalized values once and the randomized solver
+  once per pass. Writing the coordinates reads them once more. The scaling statistics come from
+  the moments that `features.normalize` stores beside the values. On a remote store, the default
+  `local_cache="auto"` stages the normalized values locally, so the passes read a local copy.
+
+A PCA artifact stores the variance of each of its `dims` components and that variance's share
+of the total variance of the fitted values, as `variance` and `variance_ratio`, and
+`show_elbow_plot=True` plots the shares for a new or a reused fit. Artifacts stored before
+release 1.3.0 have neither array; they are still reused, and their elbow plot is replaced by a
+warning. Signs follow scikit-learn's `svd_flip` convention: the largest loading of each component
+is positive.
+
+On the pancreas example (3,696 cells, standardized log-normalized values), the randomized solver
+took 11 to 14 passes for 5,000 or 17,750 features and 21 or 50 components. It stayed within 0.035
+degrees of the exact subspace, and its variance shares within a relative 2e-7 of the exact ones.
+The IncrementalPCA fit that CyteArc used before release 1.3.0 for wide or narrowly blocked
+inputs put its trailing components up to 89 degrees from the exact subspace, with variance
+shares off by 10 to 21%. Those fits recorded `incremental_block_rows`, and lineage reports mark
+them as stale.
 
 (leiden_method)=
 

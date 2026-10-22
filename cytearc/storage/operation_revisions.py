@@ -68,6 +68,18 @@ def _repeats_cell_cycle_gene(
     return False
 
 
+def _fitted_by_incremental_pca(
+    _kind: str,
+    parameters: Mapping[str, Any],
+    _inputs: Mapping[str, Any],
+) -> bool:
+    """Select the PCA artifacts that IncrementalPCA fitted over several blocks.
+
+    Those fits, and only those, recorded ``incremental_block_rows``.
+    """
+    return "incremental_block_rows" in parameters
+
+
 # Released revisions by operation. An operation that is not listed has no
 # revisions, so every artifact of it is revision 1. Append a revision to the
 # tuple of the operation it changes, adding the operation if needed; never
@@ -97,6 +109,19 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
                 "margin."
             ),
             applies=None,
+        ),
+    ),
+    "run_pca": (
+        OperationRevision(
+            revision=2,
+            release="1.3.0",
+            change=(
+                "IncrementalPCA fits over several row blocks, which recorded "
+                "incremental_block_rows, left trailing components and variance "
+                "ratios inexact; PCA now fits every block layout exactly up to "
+                "4096 features and with a randomized solver above."
+            ),
+            applies=_fitted_by_incremental_pca,
         ),
     ),
 }

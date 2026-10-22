@@ -284,9 +284,14 @@ Direct marker, WAGGR, AUCell, and pseudotime feature analyses likewise require e
 Graph-derived methods require a graph ref and project feature selections through its named lineage edges.
 They do not accept a separate feature selection.
 
+Normalize a selection such as the highly variable genes rather than the whole feature universe.
+The normalized artifact is a dense float32 matrix of every selected cell and feature, so the
+27,998 genes of 3,696 cells take 414 MB before compression, and `reduction.pca` of more than 4096
+features uses its randomized solver, which reads the normalized values once per pass.
+
 ```python
 cells = ds.snapshot_cell_selection("I")
-features = ds.features.universe(from_assay="RNA")
+features = ds.features.hvgs(cells, top_n=2000, show_plot=False)
 normalized = ds.features.normalize(cells, features)
 diffusion = ds.imputation.diffusion(graph_ref, t=2)
 imputed = ds.imputation.compute_imputed("CD4", diffusion)

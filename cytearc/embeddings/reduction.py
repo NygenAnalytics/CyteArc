@@ -1,18 +1,44 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
 from ..matrix import ChunkedArray
 from ..utils.arguments import integer_argument
 from ..utils.logging import logger
+from ..utils.warnings import warn
 
+type PcaSolver = Literal["gram", "randomized"]
+
+# PCA is exact up to this many features. The Gram solver's p x p float64
+# covariance then takes at most 128 MiB, no more than one block of a
+# normalized matrix at the default chunk target, and the dense
+# eigendecomposition, whose cost grows as p**3, takes seconds. Wider inputs
+# use the randomized solver, whose memory and cost grow linearly with p.
 _GRAM_PCA_MAX_FEATURES = 4096
+# The randomized solver's block of starting vectors holds the fitted
+# components and at least as many more, and never fewer than this many more.
+_RANDOMIZED_PCA_MIN_OVERSAMPLES = 10
+# The randomized solver stops once its leading subspace moves less than this
+# many degrees between two passes, by when it is typically a third of that
+# angle or less from the exact subspace, or after the last pass.
+_RANDOMIZED_PCA_TOLERANCE_DEGREES = 0.1
+_RANDOMIZED_PCA_MAX_PASSES = 24
+# A new basis direction smaller than this, relative to the largest variance,
+# is rounding error of the orthogonalization and is left out.
+_RANDOMIZED_PCA_NEGLIGIBLE = 1e-10
 
 
 @dataclass(frozen=True, slots=True)
-class _GramPcaModel:
+class _PcaModel:
+    """A fitted PCA with scikit-learn's attribute names.
+
+    ``components_`` holds one principal axis per row, in decreasing order of
+    explained variance. ``n_passes_`` counts the passes the fit read over its
+    input rows.
+    """
+
     components_: np.ndarray
     explained_variance_: np.ndarray
     explained_variance_ratio_: np.ndarray
@@ -21,249 +47,412 @@ class _GramPcaModel:
     n_components_: int
     n_features_in_: int
     n_samples_seen_: int
+    solver_: PcaSolver
+    n_passes_: int
 
 
-def _mutable_fit_block(block: np.ndarray) -> np.ndarray:
-    values = np.asarray(block)
-    if values.flags.owndata and values.flags.writeable and values.flags.c_contiguous:
-        return values
-    return np.array(values, copy=True, order="C")
+def pca_solver(n_features: int) -> PcaSolver:
+    """Return the solver that PCA uses for ``n_features`` features."""
+    return "gram" if int(n_features) <= _GRAM_PCA_MAX_FEATURES else "randomized"
 
 
-def _gram_pca_dispatch(
-    n_features: int,
-    block_rows: int,
-    n_blocks: int,
-) -> tuple[bool, str | None]:
-    if n_blocks <= 1:
-        return False, "the input has only one row block"
-    if n_features > block_rows:
-        return (
-            False,
-            f"{n_features} features exceed {block_rows} rows per block",
-        )
-    if n_features > _GRAM_PCA_MAX_FEATURES:
-        return (
-            False,
-            f"{n_features} features exceed the {_GRAM_PCA_MAX_FEATURES}-feature limit",
-        )
-    return True, None
+def _randomized_pca_width(n_features: int, dims: int) -> int:
+    """Return the number of columns of each block of the randomized solver."""
+    oversamples = max(_RANDOMIZED_PCA_MIN_OVERSAMPLES, int(dims))
+    return min(int(n_features), int(dims) + oversamples)
 
 
-def _fit_sklearn_incremental_pca(
-    data: ChunkedArray,
-    *,
-    dims: int,
-    batch_size: int,
-    row_mask: np.ndarray | None,
-    scale: Callable[[np.ndarray], np.ndarray] | None,
-    nthreads: int,
-) -> tuple[np.ndarray, Any]:
-    from sklearn.decomposition import IncrementalPCA
+def pca_fit_resident_bytes(n_features: int, block_rows: int, dims: int) -> int:
+    """Return the bytes a PCA fit holds beside one streamed block of its input.
 
-    model = IncrementalPCA(
-        n_components=dims + 1,
-        batch_size=batch_size,
+    Every block is held as two float64 copies at once while it is scaled or
+    copied to the solver's memory order, and the fitted components as three.
+    The Gram solver adds its p x p covariance and the eigensolver's
+    workspace. The randomized solver adds its basis, allocated for the last
+    pass, the projection of the covariance onto it with the eigensolver's copy,
+    and a few blocks of vectors that orthogonalize the next block.
+    """
+    itemsize = np.dtype(np.float64).itemsize
+    p, rows, dims = int(n_features), int(block_rows), int(dims)
+    held = 2 * rows * p + 4 * p + 3 * p * dims
+    if pca_solver(p) == "gram":
+        return itemsize * (held + p * p + 32 * p)
+    width = _randomized_pca_width(p, dims)
+    capacity = min(p, width * _RANDOMIZED_PCA_MAX_PASSES)
+    return itemsize * (
+        held
+        + rows * width
+        + p * capacity
+        + 2 * capacity * capacity
+        + (32 + 3 * dims) * capacity
+        + 7 * p * width
     )
-    end_reservoir: np.ndarray | None = None
-    carry_over: np.ndarray | None = None
-    for block in data._stream_blocks(
-        nthreads=nthreads,
-        msg="Fitting PCA",
-        prefetch=None,
-        row_mask=row_mask,
-    ):
-        if scale is not None:
-            block = scale(block)
-        if carry_over is not None:
-            block = np.vstack((carry_over, block))
-            carry_over = None
-        if len(block) < (dims + 1):
-            carry_over = block
-            continue
-        if end_reservoir is None:
-            end_reservoir = block
-            continue
-        # partial_fit centers its input in place, so a failed update is not
-        # retried with the same block.
-        model.partial_fit(_mutable_fit_block(block), check_input=False)
-        # Release the block before the stream reads the next one.
-        del block
-
-    # Callers select at least dims + 1 rows, so a batch is always reserved.
-    assert end_reservoir is not None
-    fit_batch = (
-        end_reservoir if carry_over is None else np.vstack((end_reservoir, carry_over))
-    )
-    model.partial_fit(_mutable_fit_block(fit_batch), check_input=False)
-    return model.components_[:-1, :].T, model
 
 
-def _fit_gram_pca(
-    data: ChunkedArray,
+class _FittedRows:
+    """Stream the selected rows of the values that PCA fits as float64 blocks.
+
+    Unscaled values keep their means, and products of values far from zero
+    cancel when the means are removed afterwards. Unscaled blocks are
+    therefore shifted by the first block's means, and a fit corrects its
+    products for the small ``offset`` of the final means from that shift.
+    Scaled values are already centered. The first pass also counts the rows
+    and sums each column of the unshifted values. Blocks have the memory
+    ``order`` that the solver's products read without a copy.
+    """
+
+    def __init__(
+        self,
+        data: ChunkedArray,
+        *,
+        row_mask: np.ndarray | None,
+        scale: Callable[[np.ndarray], np.ndarray] | None,
+        nthreads: int,
+        resident_bytes: int,
+        order: Literal["C", "F"],
+    ) -> None:
+        self.data = data
+        self.row_mask = row_mask
+        self.scale = scale
+        self.nthreads = nthreads
+        self.resident_bytes = resident_bytes
+        self.order = order
+        self.n_features = int(data.shape[1])
+        self.column_sum = np.zeros(self.n_features, dtype=np.float64)
+        self.n_rows = 0
+        self.passes = 0
+        self.shift: np.ndarray | None = None
+
+    def blocks(self, message: str) -> Iterator[np.ndarray]:
+        """Yield the blocks of one pass, read ahead within the memory budget."""
+        first_pass = self.passes == 0
+        self.passes += 1
+        for block in self.data._stream_blocks(
+            nthreads=self.nthreads,
+            msg=message,
+            prefetch=None,
+            row_mask=self.row_mask,
+            resident_bytes=self.resident_bytes,
+        ):
+            if self.scale is not None:
+                values = np.asarray(
+                    self.scale(block), dtype=np.float64, order=self.order
+                )
+            else:
+                # A copy, because a NumPy-backed block can view its source.
+                values = np.array(block, dtype=np.float64, order=self.order)
+            del block
+            if first_pass:
+                self.column_sum += values.sum(axis=0, dtype=np.float64)
+                self.n_rows += len(values)
+            if self.scale is None:
+                if self.shift is None:
+                    self.shift = values.mean(axis=0)
+                values -= self.shift
+            yield values
+            # Release the block before the stream reads the next one.
+            del values
+
+    @property
+    def mean(self) -> np.ndarray:
+        return self.column_sum / self.n_rows
+
+    @property
+    def offset(self) -> np.ndarray:
+        """The final column means minus the shift of the streamed blocks."""
+        return self.mean if self.shift is None else self.mean - self.shift
+
+
+def _finite_total_variance(total_variance: float) -> float:
+    """Return the total variance of finite values, raising for any other value.
+
+    Constant values have no variance and give components of zero variance,
+    and rounding of a variance near zero is clipped to it.
+    """
+    if not np.isfinite(total_variance):
+        raise ValueError("PCA input must have finite variance")
+    return max(total_variance, 0.0)
+
+
+def _pca_model(
+    rows: _FittedRows,
     *,
-    dims: int,
-    row_mask: np.ndarray | None,
-    scale: Callable[[np.ndarray], np.ndarray] | None,
-    nthreads: int,
-) -> tuple[np.ndarray, _GramPcaModel]:
-    from scipy.linalg import blas, eigh
+    vectors: np.ndarray,
+    eigenvalues: np.ndarray,
+    total_variance: float,
+    solver: PcaSolver,
+) -> _PcaModel:
+    """Return the model of eigenpairs in decreasing order of eigenvalue."""
     from sklearn.utils.extmath import svd_flip
-    from threadpoolctl import ThreadpoolController, threadpool_limits
 
-    n_features = data.shape[1]
+    variance = np.clip(np.asarray(eigenvalues, dtype=np.float64), 0.0, None)
+    components = np.array(vectors.T, dtype=np.float64, copy=True, order="C")
+    _, components = svd_flip(None, components, u_based_decision=False)
+    return _PcaModel(
+        components_=components,
+        explained_variance_=variance,
+        explained_variance_ratio_=(
+            variance / total_variance if total_variance > 0 else np.zeros_like(variance)
+        ),
+        singular_values_=np.sqrt(variance * (rows.n_rows - 1)),
+        mean_=rows.mean,
+        n_components_=len(variance),
+        n_features_in_=rows.n_features,
+        n_samples_seen_=rows.n_rows,
+        solver_=solver,
+        n_passes_=rows.passes,
+    )
+
+
+def _fit_gram_pca(rows: _FittedRows, *, dims: int, nthreads: int) -> _PcaModel:
+    """Fit exact PCA from the covariance that one pass accumulates."""
+    from scipy.linalg import blas, eigh
+    from threadpoolctl import ThreadpoolController
+
+    n_features = rows.n_features
     controller = ThreadpoolController()
-    n_components = dims + 1
     gram = np.zeros(
         (n_features, n_features),
         dtype=np.float64,
         order="F",
     )
-    column_sum = np.zeros(n_features, dtype=np.float64)
-    n_samples_seen = 0
-    # Unscaled values keep their means, and the Gram matrix of values far
-    # from zero minus n * mean * mean^T cancels. Their rank updates
-    # accumulate deviations from the first block's means instead, so the
-    # correction subtracts only the small difference from the final means.
-    # Scaled values are already centered.
-    shift: np.ndarray | None = None
+    for values in rows.blocks("Fitting PCA"):
+        # The block stream clamps BLAS to one thread per reader for its
+        # whole lifetime; the rank update runs here, between blocks.
+        with controller.limit(limits=nthreads, user_api="blas"):
+            gram = blas.dsyrk(
+                1.0,
+                values,
+                beta=1.0,
+                c=gram,
+                trans=1,
+                lower=0,
+                overwrite_c=1,
+            )
+        del values
 
-    with threadpool_limits(limits=nthreads):
-        for block in data._stream_blocks(
-            nthreads=nthreads,
-            msg="Fitting PCA",
-            prefetch=None,
-            row_mask=row_mask,
-        ):
-            if scale is not None:
-                block = scale(block)
-                values = np.asfortranarray(block, dtype=np.float64)
-            else:
-                # A copy, because a NumPy-backed block can view its source.
-                values = np.array(block, dtype=np.float64, order="F")
-            column_sum += values.sum(axis=0, dtype=np.float64)
-            if scale is None:
-                if shift is None:
-                    shift = values.mean(axis=0)
-                values -= shift
+    gram = blas.dsyr(
+        -float(rows.n_rows),
+        rows.offset,
+        lower=0,
+        a=gram,
+        overwrite_a=1,
+    )
+    gram /= rows.n_rows - 1
+    total_variance = _finite_total_variance(float(np.trace(gram)))
+    eigenvalues, eigenvectors = eigh(
+        gram,
+        lower=False,
+        subset_by_index=(n_features - dims, n_features - 1),
+        overwrite_a=True,
+        check_finite=False,
+        driver="evr",
+    )
+    return _pca_model(
+        rows,
+        vectors=eigenvectors[:, ::-1],
+        eigenvalues=eigenvalues[::-1],
+        total_variance=total_variance,
+        solver="gram",
+    )
+
+
+def _fit_randomized_pca(
+    rows: _FittedRows,
+    *,
+    dims: int,
+    random_state: int,
+    nthreads: int,
+) -> _PcaModel:
+    """Fit PCA with a streamed randomized block Krylov solver.
+
+    The solver follows the randomized range finder of Halko, Martinsson and
+    Tropp (2011, SIAM Review 53:217) on the covariance ``C`` of the fitted
+    values, and keeps every power of ``C`` applied to its random starting
+    block in its basis, a block Krylov space (Rokhlin, Szlam and Tygert 2009;
+    Musco and Musco 2015), which converges in far fewer passes than subspace
+    iteration when the trailing eigenvalues are close. Each pass multiplies
+    the newest block of the basis by ``C`` while it streams the rows, so the
+    centered matrix is never formed, and the Rayleigh-Ritz projection of
+    ``C`` onto the basis gives the components and their variances. The fit
+    stops once the leading ``dims``-dimensional subspace moves less than
+    ``_RANDOMIZED_PCA_TOLERANCE_DEGREES`` between two passes, or once the
+    basis spans every feature or a subspace that ``C`` maps into itself, where
+    the projection is exact, and warns when the last pass comes first.
+    """
+    from scipy.linalg import eigh, qr, subspace_angles
+    from threadpoolctl import ThreadpoolController
+
+    n_features = rows.n_features
+    controller = ThreadpoolController()
+    width = _randomized_pca_width(n_features, dims)
+    capacity = min(n_features, width * _RANDOMIZED_PCA_MAX_PASSES)
+    tolerance = np.radians(_RANDOMIZED_PCA_TOLERANCE_DEGREES)
+    basis = np.empty((n_features, capacity), dtype=np.float64, order="F")
+    starting = np.random.default_rng(random_state).standard_normal((n_features, width))
+    basis[:, :width] = np.linalg.qr(starting)[0]
+    del starting
+    # The projection of the covariance onto the basis. A pass adds the
+    # column block of its newest basis block and, by symmetry, the row block.
+    projected = np.zeros((capacity, capacity), dtype=np.float64)
+    start, stop = 0, width
+    total_variance = 0.0
+    previous: np.ndarray | None = None
+    change = np.inf
+    pass_number = 0
+    # Every pass ends the loop or adds a block to the basis.
+    while True:
+        pass_number += 1
+        newest = basis[:, start:stop]
+        product = np.zeros((n_features, stop - start), dtype=np.float64)
+        squares = 0.0
+        for values in rows.blocks(f"Fitting PCA (pass {pass_number})"):
             # The block stream clamps BLAS to one thread per reader for its
-            # whole lifetime; the rank update runs here, between blocks.
+            # whole lifetime; the products run here, between blocks.
             with controller.limit(limits=nthreads, user_api="blas"):
-                gram = blas.dsyrk(
-                    1.0,
-                    values,
-                    beta=1.0,
-                    c=gram,
-                    trans=1,
-                    lower=0,
-                    overwrite_c=1,
-                )
-            n_samples_seen += len(values)
-            del block, values
+                product += values.T @ (values @ newest)
+                if pass_number == 1:
+                    flat = values.ravel(order="K")
+                    squares += float(flat @ flat)
+            del values
+        n_rows = rows.n_rows
+        offset = rows.offset
+        if pass_number == 1:
+            total_variance = _finite_total_variance(
+                (squares - n_rows * float(offset @ offset)) / (n_rows - 1)
+            )
+        product -= n_rows * np.outer(offset, offset @ newest)
+        product /= n_rows - 1
 
-        mean = column_sum / n_samples_seen
-        gram = blas.dsyr(
-            -float(n_samples_seen),
-            mean if shift is None else mean - shift,
-            lower=0,
-            a=gram,
-            overwrite_a=1,
+        projected[:stop, start:stop] = basis[:, :stop].T @ product
+        diagonal = projected[start:stop, start:stop]
+        projected[start:stop, start:stop] = (diagonal + diagonal.T) / 2
+        projected[start:stop, :start] = projected[:start, start:stop].T
+        # The leading Ritz pairs, in increasing order.
+        ritz_values, ritz_vectors = eigh(
+            projected[:stop, :stop], subset_by_index=(stop - dims, stop - 1)
         )
-        gram /= n_samples_seen - 1
-        total_variance = float(np.trace(gram))
-        if not np.isfinite(total_variance) or total_variance <= 0:
-            raise ValueError("PCA input must have positive finite variance")
+        leading = ritz_vectors[:, ::-1]
+        if previous is not None:
+            padded = np.zeros_like(leading)
+            padded[: len(previous)] = previous
+            change = float(subspace_angles(padded, leading)[0])
+        if change <= tolerance or stop == n_features:
+            break
+        if pass_number == _RANDOMIZED_PCA_MAX_PASSES:
+            warn(
+                f"PCA's randomized solver stopped after {pass_number} passes "
+                f"while its leading {dims} components still moved "
+                f"{np.degrees(change):.2g} degrees in the last pass. Fit fewer "
+                "dims or select fewer features."
+            )
+            break
+        previous = leading
+        # The next block is the product's part outside the basis,
+        # orthogonalized twice. Where the product barely leaves the basis, that
+        # part is rounding error and not orthogonal to the basis, so a pivoted
+        # QR keeps only the larger directions, which are orthogonalized once
+        # more after they are normalized.
+        known = basis[:, :stop]
+        residual = product - known @ (known.T @ product)
+        residual -= known @ (known.T @ residual)
+        directions, triangle, _ = qr(residual, mode="economic", pivoting=True)
+        negligible = _RANDOMIZED_PCA_NEGLIGIBLE * float(ritz_values[-1])
+        kept = int(np.count_nonzero(np.abs(np.diag(triangle)) > negligible))
+        kept = min(kept, capacity - stop)
+        if kept == 0:
+            # The product lies in the basis, so the basis spans an invariant
+            # subspace and its Rayleigh-Ritz pairs are exact.
+            break
+        directions = directions[:, :kept]
+        directions -= known @ (known.T @ directions)
+        basis[:, stop : stop + kept] = np.linalg.qr(directions)[0]
+        start, stop = stop, stop + kept
+        del newest, product, known, residual, directions, triangle
 
-        eigenvalues, eigenvectors = eigh(
-            gram,
-            lower=False,
-            subset_by_index=(
-                n_features - n_components,
-                n_features - 1,
-            ),
-            overwrite_a=True,
-            check_finite=False,
-            driver="evr",
-        )
-
-    eigenvalues = np.clip(eigenvalues[::-1], 0.0, None)
-    components = np.array(
-        eigenvectors[:, ::-1].T,
-        dtype=np.float64,
-        copy=True,
-        order="C",
+    logger.debug(
+        f"Fitted PCA of {n_features} features with the randomized solver in "
+        f"{rows.passes} passes over {n_rows} rows, a basis of {stop} vectors "
+        f"in blocks of {width}, with a last change of "
+        f"{np.degrees(change):.2g} degrees"
     )
-    _, components = svd_flip(
-        None,
-        components,
-        u_based_decision=False,
+    return _pca_model(
+        rows,
+        vectors=basis[:, :stop] @ leading,
+        eigenvalues=ritz_values[::-1],
+        total_variance=total_variance,
+        solver="randomized",
     )
-    model = _GramPcaModel(
-        components_=components,
-        explained_variance_=eigenvalues,
-        explained_variance_ratio_=eigenvalues / total_variance,
-        singular_values_=np.sqrt(eigenvalues * (n_samples_seen - 1)),
-        mean_=mean,
-        n_components_=n_components,
-        n_features_in_=n_features,
-        n_samples_seen_=n_samples_seen,
-    )
-    return model.components_[:-1, :].T, model
 
 
-def fit_incremental_pca(
+def fit_pca(
     data: ChunkedArray,
     *,
     dims: int,
-    batch_size: int,
     use_for_pca: np.ndarray,
     scale: Callable[[np.ndarray], np.ndarray] | None,
+    random_state: int,
     nthreads: int,
-) -> tuple[np.ndarray, Any]:
-    """Fit streaming PCA and return loadings with the fitted model.
+) -> tuple[np.ndarray, _PcaModel]:
+    """Fit PCA over streamed row blocks and return loadings with the model.
 
     ``use_for_pca`` is a boolean vector over the rows of ``data`` that
     selects at least ``dims + 1`` rows, and ``data`` has at least
     ``dims + 1`` columns. The reduction operation checks both before it fits.
-    """
-    selected_samples = int(np.count_nonzero(use_for_pca))
-    subset_samples = selected_samples != data.shape[0]
-    row_mask = use_for_pca if subset_samples else None
-    n_features = data.shape[1]
-    block_rows = data.chunksize[0]
-    use_gram, fallback_reason = _gram_pca_dispatch(
-        n_features,
-        block_rows,
-        data.numblocks[0],
-    )
-    if use_gram:
-        accumulator_mib = n_features * n_features * 8 / (1024**2)
-        logger.debug(
-            "Fitting PCA with the Gram covariance solver "
-            f"({n_features} features, {block_rows} rows per block, "
-            f"{accumulator_mib:.0f} MiB accumulator)"
-        )
-        return _fit_gram_pca(
-            data,
-            dims=dims,
-            row_mask=row_mask,
-            scale=scale,
-            nthreads=nthreads,
-        )
 
-    logger.debug(
-        "Fitting PCA with the IncrementalPCA solver "
-        f"({n_features} features, {block_rows} rows per block; "
-        f"falling back because {fallback_reason})"
-    )
-    return _fit_sklearn_incremental_pca(
+    Up to 4,096 features the fit is exact: one pass accumulates the float64
+    covariance of the selected rows, whose leading eigenvectors are the
+    loadings. Wider inputs use the randomized block Krylov solver, which
+    reads the selected rows once per pass, for up to 24 passes, from vectors
+    seeded by ``random_state``. Neither result depends on the block size
+    beyond rounding. Constant values give components of zero variance, and
+    values that are not finite raise ValueError.
+    """
+    from threadpoolctl import threadpool_limits
+
+    selected_samples = int(np.count_nonzero(use_for_pca))
+    row_mask = use_for_pca if selected_samples != data.shape[0] else None
+    n_features = int(data.shape[1])
+    block_rows = int(data.chunksize[0])
+    solver = pca_solver(n_features)
+    rows = _FittedRows(
         data,
-        dims=dims,
-        batch_size=batch_size,
         row_mask=row_mask,
         scale=scale,
         nthreads=nthreads,
+        resident_bytes=pca_fit_resident_bytes(n_features, block_rows, dims),
+        # The rank update reads Fortran-ordered blocks; the randomized
+        # solver's products read scaled blocks as they come.
+        order="F" if solver == "gram" else "C",
     )
+    with threadpool_limits(limits=nthreads):
+        if solver == "gram":
+            accumulator_mib = n_features * n_features * 8 / (1024**2)
+            logger.debug(
+                "Fitting PCA with the Gram covariance solver "
+                f"({n_features} features, {block_rows} rows per block, "
+                f"{accumulator_mib:.0f} MiB accumulator)"
+            )
+            model = _fit_gram_pca(rows, dims=dims, nthreads=nthreads)
+        else:
+            logger.debug(
+                "Fitting PCA with the randomized solver "
+                f"({n_features} features, {block_rows} rows per block, "
+                f"blocks of {_randomized_pca_width(n_features, dims)} vectors)"
+            )
+            model = _fit_randomized_pca(
+                rows,
+                dims=dims,
+                random_state=random_state,
+                nthreads=nthreads,
+            )
+            logger.info(
+                f"Fitted PCA of {n_features} features with the randomized solver "
+                f"in {model.n_passes_} passes over the data. At most "
+                f"{_GRAM_PCA_MAX_FEATURES} features, such as highly variable "
+                "genes, are fitted exactly in one pass."
+            )
+    return model.components_.T, model
 
 
 def fit_lsi(

@@ -732,25 +732,46 @@ def test_new_reduction_rejects_normalized_shape_that_disagrees_with_lineage(
         dataset.reduction.pca(normalized, dims=2, local_cache=False)
 
 
-def test_reused_pca_warns_that_no_elbow_plot_is_available():
+def test_reused_pca_shows_the_stored_elbow_plot_or_warns_without_one(monkeypatch):
     from cytearc.utils.logging import logger
 
     dataset, _, normalized = _normalized_qc_dataset()
     pca = dataset.reduction.pca(normalized, dims=2, local_cache=False)
+    shown: list[dict] = []
+    monkeypatch.setattr("cytearc.plotting.elbow", lambda **kwargs: shown.append(kwargs))
     messages: list[str] = []
-    sink = logger.add(
-        lambda message: messages.append(message.record["message"]),
-        level="WARNING",
-    )
-    try:
-        reused = dataset.reduction.pca(
-            normalized, dims=2, local_cache=False, show_elbow_plot=True
-        )
-    finally:
-        logger.remove(sink)
 
-    assert reused == pca
-    assert "PCA was not fitted so no elbow plot is available" in messages
+    def reuse_with_plot() -> ArtifactRef:
+        sink = logger.add(
+            lambda message: messages.append(message.record["message"]),
+            level="WARNING",
+        )
+        try:
+            return dataset.reduction.pca(
+                normalized, dims=2, local_cache=False, show_elbow_plot=True
+            )
+        finally:
+            logger.remove(sink)
+
+    assert reuse_with_plot() == pca
+    # The reused artifact's stored ratios are plotted, with no warning.
+    assert messages == []
+    (plot,) = shown
+    np.testing.assert_array_equal(
+        plot["variance_explained"],
+        100 * dataset.artifacts.load(pca)["variance_ratio"][:],
+    )
+    assert plot["show"] is True
+    # An artifact stored before the ratios were saved is still reused, and its
+    # missing plot is reported.
+    del artifact_group(dataset.zw, pca)["variance_ratio"]
+    assert reuse_with_plot() == pca
+    assert len(shown) == 1
+    assert messages == [
+        f"PCA artifact {pca.artifact_id[:12]} was stored before release 1.3.0 "
+        "without its explained variance, so no elbow plot is available. Pass "
+        "invalidate_cache=True to fit it again."
+    ]
 
 
 def test_pca_streams_scaling_statistics_when_normalized_sums_are_absent():

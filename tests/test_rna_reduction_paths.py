@@ -19,7 +19,7 @@ import cytearc.trajectory.pseudotime as pseudotime_module
 from cytearc.assay.normalization import norm_dummy
 from cytearc.assay.rna import _hvg_stats_gene_major_kernel
 from cytearc.datastore.datastore import DataStore
-from cytearc.embeddings.reduction import fit_incremental_pca, fit_lsi
+from cytearc.embeddings.reduction import fit_lsi, fit_pca
 from cytearc.matrix import ChunkedArray
 from cytearc.trajectory import (
     random_walk_laplacian_transpose,
@@ -255,42 +255,75 @@ def test_hvgs_of_cells_without_counts_have_no_corrected_variance(
         (24, np.r_[[True], np.zeros(7, dtype=bool), np.ones(16, dtype=bool)]),
     ],
 )
-def test_incremental_pca_fits_rows_of_short_blocks_once(
-    n_rows: int, selected: np.ndarray | None
+@pytest.mark.parametrize("n_features", [10, 4097])
+def test_pca_fits_rows_of_short_blocks_once(
+    n_rows: int, selected: np.ndarray | None, n_features: int
 ) -> None:
-    values = np.random.default_rng(13).normal(size=(n_rows, 10))
+    values = np.random.default_rng(13).normal(size=(n_rows, n_features))
     mask = np.ones(n_rows, dtype=bool) if selected is None else selected
 
-    _loadings, model = fit_incremental_pca(
+    _loadings, model = fit_pca(
         ChunkedArray.from_numpy(values, block_size=8),
         dims=2,
-        batch_size=8,
         use_for_pca=mask,
         scale=None,
+        random_state=4466,
         nthreads=1,
     )
 
-    # Ten features exceed eight rows per block, so IncrementalPCA fits.
+    # Ten features exceed eight rows per block, which the Gram solver fits
+    # exactly; more than 4096 features use the randomized solver, which reads
+    # the rows once per pass but counts them once.
+    assert model.solver_ == ("gram" if n_features == 10 else "randomized")
     assert model.n_samples_seen_ == int(mask.sum())
     np.testing.assert_allclose(model.mean_, values[mask].mean(axis=0))
 
 
-@pytest.mark.parametrize("value", [1.0, np.nan])
-def test_gram_pca_rejects_input_without_positive_finite_variance(
-    value: float,
+# NumPy warns about the invalid differences of infinite values before the
+# fit raises.
+@pytest.mark.filterwarnings("ignore:invalid value encountered:RuntimeWarning")
+@pytest.mark.parametrize("n_features", [6, 4097])
+@pytest.mark.parametrize("value", [np.nan, np.inf])
+def test_pca_rejects_input_without_finite_variance(
+    value: float, n_features: int
 ) -> None:
-    values = np.ones((24, 6))
+    values = np.ones((24, n_features))
     values[5, 2] = value
 
-    with pytest.raises(ValueError, match="positive finite variance"):
-        fit_incremental_pca(
+    with pytest.raises(ValueError, match="PCA input must have finite variance"):
+        fit_pca(
             ChunkedArray.from_numpy(values, block_size=8),
             dims=2,
-            batch_size=8,
             use_for_pca=np.ones(24, dtype=bool),
             scale=None,
+            random_state=4466,
             nthreads=1,
         )
+
+
+@pytest.mark.parametrize("n_features", [6, 4097])
+@pytest.mark.parametrize("block_size", [8, 24])
+def test_pca_of_constant_input_has_components_of_zero_variance(
+    n_features: int, block_size: int
+) -> None:
+    # Constant values, such as normalized values of identical cells, have no
+    # variance to explain; a mapping reference may still project onto them.
+    values = np.ones((24, n_features))
+
+    loadings, model = fit_pca(
+        ChunkedArray.from_numpy(values, block_size=block_size),
+        dims=2,
+        use_for_pca=np.ones(24, dtype=bool),
+        scale=None,
+        random_state=4466,
+        nthreads=1,
+    )
+
+    np.testing.assert_array_equal(model.explained_variance_, np.zeros(2))
+    np.testing.assert_array_equal(model.explained_variance_ratio_, np.zeros(2))
+    np.testing.assert_array_equal(model.mean_, np.ones(n_features))
+    np.testing.assert_allclose(loadings.T @ loadings, np.eye(2), atol=1e-12)
+    np.testing.assert_array_equal((values - model.mean_) @ loadings, 0.0)
 
 
 @pytest.mark.parametrize(

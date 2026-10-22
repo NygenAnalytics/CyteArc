@@ -291,13 +291,13 @@ def _run_pca(store, refs, monkeypatch):
 def _run_pca_loadings(store, refs, monkeypatch):
     import cytearc.embeddings.reduction as reduction
 
-    fit = reduction.fit_incremental_pca
+    fit = reduction.fit_pca
 
     def poisoned_fit(*args, **kwargs):
         loadings, model = fit(*args, **kwargs)
         return _poison(loadings, 2), model
 
-    monkeypatch.setattr(reduction, "fit_incremental_pca", poisoned_fit)
+    monkeypatch.setattr(reduction, "fit_pca", poisoned_fit)
     return store.reduction.pca(refs["normalized"], dims=3, invalidate_cache=True)
 
 

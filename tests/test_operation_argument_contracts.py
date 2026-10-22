@@ -166,8 +166,8 @@ _CONTRACTS = (
         },
         model_only={
             **_classified("resolved_input", "feature_scaling"),
-            # Set only when IncrementalPCA fits several blocks.
-            **_classified("derived", "incremental_block_rows"),
+            # Set only when the randomized solver fits more than 4096 features.
+            **_classified("derived", "solver"),
         },
     ),
     OperationContract(
