@@ -7,6 +7,7 @@ from pandas.api.types import is_numeric_dtype
 
 from ..assay.normalization import clr_values
 from ..utils.arguments import float_argument
+from ..utils.warnings import warn
 
 __all__ = ["hto_demux"]
 
@@ -21,8 +22,18 @@ _CUTOFF_DISTRIBUTION = "negative_binomial_nb2"
 _DEFAULT_POSITIVE_QUANTILE = 0.99
 _CUTOFF_LOCATION = 0
 _CUTOFF_COMPARISON = "strictly_greater"
+# The method record keeps the singlet rule that revision 1 recorded, so stored
+# artifacts of revision 1 are superseded matches of revision 2, which assigns
+# each singlet the one tag called positive (see run_hto_demultiplexing in
+# storage/operation_revisions.py). The CLR argmax is now a stored diagnostic.
 _SINGLET_ASSIGNMENT = "clr_argmax"
 _RESERVED_IDENTITIES = frozenset({"Negative", "Singlet", "Doublet"})
+# A positive population is separated from its background when at least this
+# fraction of the cells called positive have counts that the background
+# distribution exceeds with probability (1 - positive_quantile) ** 3, one in a
+# million for the default quantile.
+_SEPARATED_POSITIVE_FRACTION = 0.5
+_STRICT_TAIL_POWER = 3
 
 
 def _validated_positive_quantile(value: object) -> float:
@@ -250,14 +261,70 @@ def _negative_binomial_cutoff(
     return int(cutoff)
 
 
+def _strict_background_cutoff(mu: float, alpha: float, quantile: float) -> float:
+    """Return the count that a valid background fit exceeds very rarely.
+
+    The background exceeds it with probability ``(1 - quantile) ** 3``, one in
+    a million for the default quantile. The tail is floored at the smallest
+    normal float, so a quantile near 1 still gives a finite tail.
+    """
+    from scipy.stats import nbinom
+
+    tail = max((1.0 - quantile) ** _STRICT_TAIL_POWER, np.finfo(float).tiny)
+    return float(nbinom.isf(tail, n=1 / alpha, p=1 / (1 + alpha * mu)))
+
+
+def _warn_unseparated_htos(
+    hto_counts: pd.DataFrame,
+    positive_calls: pd.DataFrame,
+    strict_cutoffs: pd.Series,
+    positive_quantile: float,
+) -> None:
+    """Warn about HTOs whose positive calls overlap their background.
+
+    An HTO with a stained population has most of its positive cells far above
+    the background, beyond the strict cutoff. When fewer than half of them
+    are, its positive and background counts overlap: the calls follow the
+    tail of the background, as in pure background or an unused tag.
+    """
+    n_positive = positive_calls.sum(axis=0)
+    # Each strict cutoff is at least its cutoff, so strong counts are positive.
+    n_strong = (hto_counts > strict_cutoffs).sum(axis=0)
+    overlapping = [
+        f"{name!r} ({int(n_strong[name])} of {int(n_positive[name])} positive cells)"
+        for name in hto_counts.columns
+        if n_positive[name] > 0
+        and n_strong[name] < _SEPARATED_POSITIVE_FRACTION * n_positive[name]
+    ]
+    if overlapping:
+        tail = (1.0 - positive_quantile) ** _STRICT_TAIL_POWER
+        warn(
+            "Positive and background HTO counts overlap for "
+            + ", ".join(overlapping)
+            + ": fewer than half of the cells called positive have counts that "
+            f"the background fit exceeds with probability {tail:.3g}, so these "
+            "calls may be background, as in an unused tag or pure background. "
+            "Check the HTO count distributions; a tag without a separated "
+            "positive population cannot be demultiplexed."
+        )
+
+
 def _positive_hto_calls(
     hto_counts: pd.DataFrame,
     cluster_labels: np.ndarray,
     *,
     positive_quantile: float = _DEFAULT_POSITIVE_QUANTILE,
 ) -> pd.DataFrame:
+    """Call each count positive when it exceeds its HTO's background cutoff.
+
+    A background cluster that holds only zero counts has no negative-binomial
+    fit; its cutoff is 0, so every nonzero count of that HTO is positive, and
+    a warning says so. A warning also names the HTOs whose positive calls
+    overlap their background (see ``_warn_unseparated_htos``).
+    """
     background_clusters = _background_clusters(hto_counts, cluster_labels)
     cutoffs: dict[str, int] = {}
+    strict_cutoffs: dict[str, float] = {}
     for hto_name in hto_counts.columns:
         background = hto_counts.loc[
             cluster_labels == background_clusters[hto_name],
@@ -269,9 +336,15 @@ def _positive_hto_calls(
                 "at least two cells"
             )
         if not np.any(background > 0):
-            raise ValueError(
-                f"Background cluster for HTO {hto_name!r} contains only zero counts"
+            warn(
+                f"Background cluster for HTO {hto_name!r} contains only zero "
+                "counts, so its cutoff is 0 and every nonzero count of this HTO "
+                "is called positive, including a few background counts in cells "
+                "outside that cluster."
             )
+            cutoffs[hto_name] = 0
+            strict_cutoffs[hto_name] = 0.0
+            continue
         mu, alpha = _fit_negative_binomial_parameters(background, hto_name)
         try:
             cutoffs[hto_name] = _negative_binomial_cutoff(mu, alpha, positive_quantile)
@@ -279,13 +352,22 @@ def _positive_hto_calls(
             raise ValueError(
                 f"Negative-binomial cutoff is invalid for HTO {hto_name!r}"
             ) from exc
-    return hto_counts > pd.Series(cutoffs)
+        strict_cutoffs[hto_name] = _strict_background_cutoff(
+            mu, alpha, positive_quantile
+        )
+    positive_calls = hto_counts > pd.Series(cutoffs)
+    _warn_unseparated_htos(
+        hto_counts, positive_calls, pd.Series(strict_cutoffs), positive_quantile
+    )
+    return positive_calls
 
 
-def _classify_hto_identities(
-    normalized: pd.DataFrame,
-    positive_calls: pd.DataFrame,
-) -> pd.Series:
+def _classify_hto_identities(positive_calls: pd.DataFrame) -> pd.Series:
+    """Return each cell's identity from its positive calls.
+
+    A cell with no positive HTO is ``Negative``, one with several is
+    ``Doublet``, and a singlet takes the one HTO called positive.
+    """
     positive_count = positive_calls.sum(axis=1)
     identities = positive_count.map(
         lambda count: (
@@ -293,8 +375,43 @@ def _classify_hto_identities(
         )
     )
     singlets = positive_count == 1
-    identities.loc[singlets] = normalized.loc[singlets].idxmax(axis=1)
+    identities.loc[singlets] = positive_calls.loc[singlets].idxmax(axis=1)
     return identities
+
+
+def _hto_diagnostics(normalized: pd.DataFrame) -> pd.DataFrame:
+    """Return each cell's two highest CLR tags and the margin between them.
+
+    ``max_id`` and ``second_id`` name the HTOs with the highest and the second
+    highest CLR value, ties going to the earlier HTO, and ``margin`` is the
+    difference of their values, as Seurat reports ``maxID``, ``secondID``,
+    and ``margin``. With one HTO, ``second_id`` is empty and ``margin`` NaN.
+    """
+    values = normalized.to_numpy()
+    names = normalized.columns.to_numpy(dtype=object)
+    rows = np.arange(values.shape[0])
+    order = np.argsort(-values, axis=1, kind="stable")
+    first = order[:, 0]
+    if values.shape[1] > 1:
+        second = order[:, 1]
+        second_id = names[second]
+        margin = values[rows, first] - values[rows, second]
+    else:
+        second_id = np.full(values.shape[0], "", dtype=object)
+        margin = np.full(values.shape[0], np.nan)
+    return pd.DataFrame(
+        {"max_id": names[first], "second_id": second_id, "margin": margin},
+        index=normalized.index,
+    )
+
+
+def _hto_clr_diagnostics(hto_counts: pd.DataFrame) -> pd.DataFrame:
+    """Return the CLR diagnostics of ``_hto_diagnostics`` for raw HTO counts.
+
+    The counts are validated and normalized as ``hto_demux`` does, and the
+    diagnostics depend on nothing else, so they match its identities.
+    """
+    return _hto_diagnostics(_clr_normalize(_validated_hto_counts(hto_counts)))
 
 
 def hto_demux(
@@ -308,6 +425,18 @@ def hto_demux(
 
     A count is positive when it exceeds the ``positive_quantile`` quantile of
     the negative-binomial distribution fitted to its HTO's background cluster.
+    A cell with no positive HTO is ``Negative``, one with several is
+    ``Doublet``, and a singlet takes the one HTO called positive. Seurat's
+    ``HTODemux`` instead names a singlet after its highest normalized (CLR)
+    value, which in unbalanced pools can be an HTO that the cutoff called
+    negative.
+
+    A background cluster that holds only zero counts gets a cutoff of 0, so
+    every nonzero count of that HTO is positive, with a warning. A warning
+    also names each HTO whose positive calls overlap its background: fewer
+    than half of its positive cells have counts that the background fit
+    exceeds with probability ``(1 - positive_quantile) ** 3``. Such calls,
+    for example of an unused tag or of pure background, may be background.
 
     Args:
         hto_counts: A dataframe containing the raw HTO counts for each cell.
@@ -336,4 +465,4 @@ def hto_demux(
     positive_calls = _positive_hto_calls(
         counts, cluster_labels, positive_quantile=quantile
     )
-    return _classify_hto_identities(normalized, positive_calls)
+    return _classify_hto_identities(positive_calls)

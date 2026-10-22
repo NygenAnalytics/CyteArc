@@ -17,12 +17,19 @@ from ...graph.feature_projection import (
 )
 from ...graph.kinds import require_graph_kind
 from ...quality_control.cell_cycle import assign_cell_cycle_phase
+from ...quality_control.cell_cycle_genes import match_gene_names
 from ...quality_control.filtering import (
+    MetricKind,
+    MetricPolicy,
     filter_cell_metrics,
+    resolve_metric_policies,
+    validate_bound_types,
     validate_cell_filter_sources,
     validate_filter_bounds,
+    validate_metric_policies,
 )
 from ...quality_control.hto import (
+    _hto_clr_diagnostics,
     _hto_demux_method,
     _validated_positive_quantile,
     hto_demux,
@@ -170,24 +177,29 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             assay.feats.fetch_all("names") if feature_names is None else feature_names
         )
         # Names match without case sensitivity; a name shared by several
-        # features selects all of them.
-        by_name: dict[str, list[int]] = {}
-        for index, name in enumerate(names):
-            by_name.setdefault(str(name).upper(), []).append(index)
+        # features selects all of them, and a renamed gene that its listed
+        # symbol misses matches by another HGNC symbol.
+        gene_aliases: dict[str, str] = {}
 
         def indices_for(targets: list[str], label: str) -> list[int]:
-            unmatched = sum(target.upper() not in by_name for target in targets)
-            if unmatched:
+            match = match_gene_names(names, targets)
+            if match.unmatched:
                 logger.warning(
-                    f"{unmatched} of {len(targets)} {label} were not found in "
-                    "the assay feature names"
+                    f"{len(match.unmatched)} of {len(targets)} {label} were not "
+                    "found in the assay feature names"
                 )
-            indices = [
-                index for target in targets for index in by_name.get(target.upper(), ())
-            ]
-            if not indices:
+            if not match.indices:
                 raise ValueError(f"None of the {label} match the assay feature names")
-            return indices
+            if match.aliases:
+                logger.info(
+                    f"{len(match.aliases)} of {len(targets)} {label} matched another "
+                    "HGNC symbol of the same gene: "
+                    + ", ".join(
+                        f"{gene!r} as {name!r}" for gene, name in match.aliases.items()
+                    )
+                )
+                gene_aliases.update(match.aliases)
+            return match.indices
 
         s_gene_indices = indices_for(s_genes, "s_genes")
         g2m_gene_indices = indices_for(g2m_genes, "g2m_genes")
@@ -213,6 +225,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             n_bins=n_bins,
             rand_seed=rand_seed,
             invalidate_cache=invalidate_cache,
+            gene_aliases=gene_aliases or None,
         )
         record = arguments.to_record()
         inputs = dict(record.inputs)
@@ -251,17 +264,12 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             summary_ref,
             n_selected=n_cells,
         )
-        s_score = assay._score_feature_indices(
-            np.asarray(s_gene_indices, dtype=np.int64),
-            cell_idx,
-            summary["avg"],
-            ctrl_size=control_size,
-            n_bins=n_bins,
-            rand_seed=rand_seed,
-            log_transform=log_transform,
-        )
-        g2m_score = assay._score_feature_indices(
-            np.asarray(g2m_gene_indices, dtype=np.int64),
+        # One pass reads the S and G2M genes and their controls.
+        s_score, g2m_score = assay._score_feature_sets(
+            [
+                np.asarray(s_gene_indices, dtype=np.int64),
+                np.asarray(g2m_gene_indices, dtype=np.int64),
+            ],
             cell_idx,
             summary["avg"],
             ctrl_size=control_size,
@@ -304,20 +312,30 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         pass its bounds. The fingerprint of such a column's missing-value mask
         is also recorded in provenance.
 
+        Bounds are exclusive unless ``keep_bounds`` is True: ``lows=[200]``
+        keeps cells whose value is greater than 200 and removes a cell with
+        exactly 200. Scanpy's ``filter_cells(min_genes=200)`` and CyteArc's
+        ``features.detected`` keep values equal to their thresholds; pass
+        ``keep_bounds=True`` for the same inclusive bounds.
+
         Args:
             attrs: Names of distinct columns to be used for filtering
             lows: Lower bounds, in the same order as ``attrs``. Each bound is a
-                finite number, text for a text column, or None.
+                finite number for a numeric or boolean column, text for a text
+                column, or None.
             highs: Upper bounds, in the same order as ``attrs``. A lower bound
                 cannot exceed its upper bound.
             cell_selection: Optional prior cell-selection artifact.
-            keep_bounds: Retain values exactly equal to a bound.
+            keep_bounds: Retain values exactly equal to a bound, which makes
+                both bounds inclusive.
 
         Returns:
             A complete datastore-scoped ``cell_selection`` artifact.
 
         Raises:
-            TypeError: If a bound or ``keep_bounds`` has an invalid type.
+            TypeError: If a bound or ``keep_bounds`` has an invalid type, or a
+                bound does not match its column, such as text for a numeric
+                column. Bound types are checked before any column is read.
             ValueError: If a bound is invalid, the input selection is empty,
                 or no cell passes the filter.
             UnmeasuredCellsError: If a column's assay did not measure a selected cell.
@@ -334,6 +352,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         if missing:
             joined = ", ".join(repr(attr) for attr in missing)
             raise KeyError(f"Cell metadata columns not found: {joined}")
+        for attr, low, high in zip(attrs, lows, highs, strict=True):
+            validate_bound_types(attr, self.cells.get_dtype(attr), low, high)
         self._require_measured_metric_cells(
             attrs, [], cell_selection, operation="filter_cells"
         )
@@ -767,6 +787,32 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         )
         return list(dict.fromkeys(assays))
 
+    def _metric_kinds(
+        self,
+        attrs: Sequence[str],
+        artifact_metrics: Sequence[NamedCellArtifact],
+    ) -> dict[str, MetricKind]:
+        """Return the kind of each QC metric whose kind CyteArc wrote.
+
+        Preparation writes ``<assay>_nCounts`` (counts), ``<assay>_nFeatures``
+        (feature counts), and the percentage columns that the assay records in
+        its ``percentFeatures`` attribute, as ``_metric_assays`` finds them,
+        never by parsing a name. A ``quality_metric`` artifact written by
+        ``qc.feature_percentage`` is a percentage. Other metrics are left out.
+        """
+        written: dict[str, MetricKind] = {}
+        for name in self.assay_names:
+            written[f"{name}_nCounts"] = "counts"
+            written[f"{name}_nFeatures"] = "features"
+            for column in self._get_assay(name)._percent_features():
+                written[column] = "percentage"
+        kinds = {attr: written[attr] for attr in attrs if attr in written}
+        for source in artifact_metrics:
+            status = self._artifacts_inspect(source.artifact)
+            if status.operation == "run_feature_percentage":
+                kinds[source.name] = "percentage"
+        return kinds
+
     def _require_measured_metric_cells(
         self,
         attrs: Sequence[str],
@@ -803,20 +849,37 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         sample_artifact: NamedCellArtifact | None = None,
         n_mads: float = 3.0,
         min_cells_per_sample: int = 20,
+        metric_policies: dict[str, dict[str, str]] | None = None,
     ) -> ArtifactRef:
         """Create an immutable automatically filtered cell selection.
 
-        Defaults to median absolute deviation (MAD) bounds. Counts and feature
-        counts use log1p and two-sided bounds; mitochondrial and ribosomal
-        percentages use upper bounds. Other metrics use two-sided raw bounds.
+        Defaults to median absolute deviation (MAD) bounds. Each metric's
+        policy sets the scale of its bounds and which bounds apply:
+
+        - Counts and feature counts use log1p values and two-sided bounds.
+        - Percentages use raw values and an upper bound only, kept within 0
+          to 100.
+        - ``metric_policies`` sets the policy of named metrics explicitly.
+
+        The kind of a metric comes from what CyteArc wrote, not from its name:
+        the ``<assay>_nCounts`` and ``<assay>_nFeatures`` columns and the
+        percentage columns that an assay's preparation wrote, and the
+        ``quality_metric`` artifacts of ``qc.feature_percentage``, which are
+        percentages. Any other metric, such as an imported ``total_counts``
+        or ``pct_counts_mt`` column, gets the policy that its name suggests:
+        counts for names ending in ``nCounts`` or ``nFeatures``, percentages
+        for names ending in ``percentMito`` or ``percentRibo``, and raw
+        two-sided bounds otherwise, with a warning that names those metrics.
+        The resolved policies are recorded as ``metric_policies``.
+
+        Bounds are exclusive: a cell whose value equals a bound is removed.
+        MAD thresholds are pooled unless a sample source is supplied. Use
+        ``method="gaussian"`` for pooled median/std Gaussian quantiles instead.
 
         Requested columns are read from current cell metadata when this method
         is called. Exact quality-metric artifacts can be supplied alongside
         metadata metrics. Metadata values are fingerprinted and artifact
         references are stored in provenance.
-
-        MAD thresholds are pooled unless a sample source is supplied. Use
-        ``method="gaussian"`` for pooled median/std Gaussian quantiles instead.
 
         These are the pipeline filtering rules. A cell whose metric is recorded
         as missing never passes and does not inform the bounds; the
@@ -824,6 +887,14 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         provenance.
         Non-finite metrics among the remaining active cells, missing sample
         labels among active cells, and an empty result raise ``ValueError``.
+
+        Bounds assume one population of cells. A warning says when automatic
+        bounds remove more than half of the selected cells, or when the MAD
+        bounds of a log1p metric miss a second population: a separate group
+        of cells above the upper bound, or a strongly bimodal metric whose
+        low group the bounds keep. Both happen when empty droplets of a raw,
+        unfiltered droplet matrix set the bounds; call cells or import the
+        filtered matrix first.
 
         Args:
             attrs: Column names to be used for filtering.
@@ -838,11 +909,23 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             n_mads: Number of scaled MADs used for bounds.
             min_cells_per_sample: Groups with fewer active cells than this are
                 retained without MAD filtering and emit a warning.
+            metric_policies: MAD policies of named metrics (MAD only). Each
+                maps ``"transform"`` to ``"log1p"`` or ``"identity"`` and
+                ``"bound_direction"`` to ``"two_sided"``, ``"lower"``, or
+                ``"upper"``, for example
+                ``{"total_counts": {"transform": "log1p",
+                "bound_direction": "lower"}}``. Unnamed metrics keep their
+                default policies.
 
         Returns:
             A complete datastore-scoped ``cell_selection`` artifact.
 
         Raises:
+            TypeError: If ``metric_policies`` or one of its policies is not a
+                mapping.
+            ValueError: If ``metric_policies`` names a metric that is not
+                filtered, holds an unknown key or value, or is given with
+                ``method="gaussian"``.
             UnmeasuredCellsError: If a metric's assay did not measure a selected cell.
         """
         if method not in ("mad", "gaussian"):
@@ -854,6 +937,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 raise ValueError(
                     "n_mads and min_cells_per_sample apply only to method='mad'"
                 )
+            if metric_policies is not None:
+                raise ValueError("metric_policies apply only to method='mad'")
         available = set(self.cells.columns)
         if attrs is None:
             attrs = []
@@ -875,6 +960,10 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             joined = ", ".join(repr(attr) for attr in missing)
             raise KeyError(f"Cell metadata columns not found: {joined}")
         if method == "mad":
+            explicit_policies = validate_metric_policies(
+                metric_policies,
+                [*attrs_list, *(source.name for source in metric_artifacts)],
+            )
             return self._auto_filter_cells_mad(
                 attrs=attrs_list,
                 artifact_metrics=metric_artifacts,
@@ -886,6 +975,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 sample_artifact=resolved_sample_artifact,
                 n_mads=n_mads,
                 min_cells_per_sample=min_cells_per_sample,
+                explicit_policies=explicit_policies,
             )
 
         self._require_measured_metric_cells(
@@ -962,6 +1052,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         sample_artifact: NamedCellArtifact | None,
         n_mads: float,
         min_cells_per_sample: int,
+        explicit_policies: dict[str, MetricPolicy],
     ) -> ArtifactRef:
         if min_p != 0.01 or max_p != 0.99:
             raise ValueError(
@@ -1016,6 +1107,11 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         values_by_attr, missing_by_attr, missing_fingerprints = (
             self._read_filter_metrics(attrs, artifact_metrics, prior, active_idx)
         )
+        policies = resolve_metric_policies(
+            list(values_by_attr),
+            kinds=self._metric_kinds(attrs, artifact_metrics),
+            explicit=explicit_policies,
+        )
         result = filter_cell_metrics(
             values_by_attr,
             missing_by_attr,
@@ -1023,6 +1119,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             method="mad",
             n_mads=resolved_n_mads,
             min_cells_per_sample=int(min_cells_per_sample),
+            metric_policies=policies,
             **sample_options,
         )
         parameters: dict[str, Any] = {
@@ -1198,7 +1295,25 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
 
         The method follows Seurat's ``HTODemux``: a count is positive when it
         exceeds the ``positive_quantile`` quantile of the negative-binomial
-        distribution fitted to its HTO's background cluster.
+        distribution fitted to its HTO's background cluster. A cell with no
+        positive HTO is ``Negative``, one with several is ``Doublet``, and a
+        singlet takes the one HTO called positive. Unlike ``HTODemux``, which
+        names a singlet after its highest normalized (CLR) value, a singlet is
+        therefore never assigned an HTO that its cutoff called negative.
+
+        The artifact's ``values`` array holds the identities. Diagnostic arrays
+        hold, for each cell, the HTOs with the highest and the second highest
+        CLR value (``max_id`` and ``second_id``, Seurat's ``maxID`` and
+        ``secondID``) and the difference of those values (``margin``). With one
+        HTO, ``second_id`` is empty and ``margin`` is NaN.
+
+        A background cluster that holds only zero counts gets a cutoff of 0, so
+        every nonzero count of that HTO is positive, with a warning. A warning
+        also names each HTO whose positive calls overlap its background: fewer
+        than half of its positive cells have counts that the background fit
+        exceeds with probability ``(1 - positive_quantile) ** 3``, one in a
+        million for the default. Such calls, for example of an unused tag or
+        of pure background, may be background.
 
         Args:
             from_assay: HTO assay name (default: ``'HTO'``).
@@ -1283,14 +1398,20 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             inputs=record.inputs,
             execution_options=record.execution_options,
             cell_selection=cell_selection,
-            arrays={"values": ((n_cells,), None)},
+            arrays={
+                "values": ((n_cells,), None),
+                "max_id": ((n_cells,), None),
+                "second_id": ((n_cells,), None),
+                "margin": ((n_cells,), "f"),
+            },
             invalidate_cache=invalidate_cache,
         )
         if planned.reused:
             return planned.ref
         self._require_writable("run_hto_demultiplexing")
         matrix_bytes = n_cells * assay.feats.N * np.dtype(np.float64).itemsize
-        estimated_peak_bytes = 6 * matrix_bytes + 16 * n_cells
+        # Per cell: the cluster label, the identity, and the three diagnostics.
+        estimated_peak_bytes = 6 * matrix_bytes + 40 * n_cells
         if estimated_peak_bytes > self.memoryBytes:
             raise MemoryError(
                 "HTO demultiplexing needs an estimated "
@@ -1299,17 +1420,27 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
                 f"memory budget of {self.memoryBytes / (1024**2):.1f} MiB. "
                 "Use a smaller explicit cell selection or a larger memory budget."
             )
-        counts = controlled_compute(assay.rawData[cell_index, :], self.nthreads)
+        counts = pd.DataFrame(
+            controlled_compute(assay.rawData[cell_index, :], self.nthreads),
+            columns=assay.feats.fetch_all("ids"),
+        )
         hto_idents = hto_demux(
-            pd.DataFrame(counts, columns=assay.feats.fetch_all("ids")),
+            counts,
             random_seed=random_seed,
             positive_quantile=positive_quantile,
         )
-        values = np.asarray(hto_idents.values)
+        diagnostics = _hto_clr_diagnostics(counts)
         write_cell_data_artifact(
             self.zw,
             planned,
-            {"values": values},
+            {
+                "values": np.asarray(hto_idents.values),
+                "max_id": np.asarray(diagnostics["max_id"].to_numpy()),
+                "second_id": np.asarray(diagnostics["second_id"].to_numpy()),
+                "margin": np.asarray(
+                    diagnostics["margin"].to_numpy(), dtype=np.float64
+                ),
+            },
         )
         return planned.ref
 
@@ -1721,9 +1852,26 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         expression of S and G2M phase genes respectively. Following steps are
         taken for each phase:
 
+        - Gene names match feature names without case, and a name matches
+          every feature with it. A gene that its listed symbol misses matches
+          by another HGNC symbol of the same gene in
+          ``cytearc.quality_control.cell_cycle_previous_symbols``, such as
+          FAM64A for PIMREG; the artifact records such genes as
+          ``gene_aliases`` and the log names them. A gene matched more than
+          once counts once.
         - Normalized expression is log1p transformed when `log_transform` is True.
-        - Genes are ranked into `n_bins` bins by mean expression across selected cells.
-        - A control set of genes is identified by sampling genes from same expression bins where phase's genes are present.
+        - Every feature's mean over the selected cells sets its expression
+          bin, as in scanpy's ``score_genes``: with ``N`` features a bin holds
+          ``k = round(N / (n_bins - 1))`` of them, and a feature whose mean
+          ranks ``r`` (from 1, tied means sharing the lowest rank) falls in bin
+          ``r // k``. All features with a mean of 0 share the lowest bin,
+          which can leave the next bins empty.
+        - For each bin that holds a phase gene, ``ctrl_size`` control genes
+          are drawn from all genes of the bin (the whole bin when it holds no
+          more), and phase genes among them are dropped. Controls are drawn
+          once per bin rather than for each phase gene as in Tirosh et al.
+          (2016), and the S and G2M draws each start from
+          ``RandomState(rand_seed)``.
         - The average expression of phase genes (Ep) and control genes (Ec) is calculated per cell.
         - A phase score is calculated as ``Ep - Ec``.
         - G1 is assigned when both scores are negative.

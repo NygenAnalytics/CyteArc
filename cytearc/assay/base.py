@@ -67,6 +67,84 @@ def _percentage(part: np.ndarray, total: np.ndarray) -> np.ndarray:
     return percentages
 
 
+def _score_index_sets(
+    assay: "Assay",
+    feature_sets: Sequence[np.ndarray],
+    cell_idx: np.ndarray,
+    feature_avg: np.ndarray,
+    *,
+    ctrl_size: int,
+    n_bins: int,
+    rand_seed: int,
+    log_transform: bool,
+) -> list[np.ndarray]:
+    """Score feature index sets of ``assay``, as ``_score_feature_sets`` says."""
+    from ..features.scoring import binned_sampling
+    from .rna import RNAassay
+
+    log_transform, _ = check_normalization_flags(
+        assay, log_transform=log_transform, renormalize_subset=False
+    )
+    cell_idx = np.asarray(cell_idx, dtype=np.int64)
+    feature_avg = np.asarray(feature_avg, dtype=np.float64)
+    if feature_avg.shape != (assay.feats.N,):
+        raise ValueError(
+            f"feature_avg must have shape ({assay.feats.N},), got {feature_avg.shape}"
+        )
+    groups: list[tuple[np.ndarray, np.ndarray]] = []
+    for feature_idx in feature_sets:
+        requested = np.asarray(feature_idx, dtype=np.int64)
+        # A repeated feature counts once, at its first position, so a set
+        # without repeats keeps its order and its sums.
+        _, first = np.unique(requested, return_index=True)
+        target = requested[np.sort(first)]
+        control = np.asarray(
+            binned_sampling(
+                pd.Series(feature_avg),
+                target.tolist(),
+                ctrl_size,
+                n_bins,
+                rand_seed,
+            ),
+            dtype=np.int64,
+        )
+        if len(control) == 0:
+            raise ValueError(
+                "No control features were sampled. Reduce n_bins or increase ctrl_size."
+            )
+        groups.append((target, control))
+    if isinstance(assay, RNAassay) and uses_library_size_normalization(assay):
+        means = assay._mean_normed_feature_groups(
+            cell_idx,
+            {
+                f"{role}{index}": indices
+                for index, pair in enumerate(groups)
+                for role, indices in zip(("target", "control"), pair, strict=True)
+            },
+            log_transform=log_transform,
+        )
+        return [
+            np.asarray(means[f"target{index}"] - means[f"control{index}"])
+            for index in range(len(groups))
+        ]
+    if len(cell_idx) == 0:
+        # An empty selection has no scores and is not normalized, because
+        # CLR would divide by its zero cell count.
+        return [np.zeros(0, dtype=np.float64) for _ in groups]
+
+    def calc_mean(index: np.ndarray) -> np.ndarray:
+        values = assay.normed(
+            cell_idx=cell_idx,
+            feat_idx=np.sort(index),
+            log_transform=log_transform,
+        )
+        return np.asarray(values.mean(axis=1).compute())
+
+    return [
+        np.asarray(calc_mean(target) - calc_mean(control)) for target, control in groups
+    ]
+
+
 class Assay:
     """A generic Assay class that contains methods to calculate feature level
     statistics and stream normalized values for downstream computation.
@@ -480,20 +558,33 @@ class Assay:
     ) -> np.ndarray:
         """Compute selected-feature count percentages in bounded row blocks.
 
-        Both totals accumulate in float64 for every count dtype.
+        Only the selected features are read, feature-major from ``countsT``
+        when that touches fewer chunk bytes. The denominator is each cell's
+        prepared total, ``<assay>_nCounts``, the float64 sum of all its counts
+        that preparation recorded, so the full matrix is never read. Sums are
+        float64 for every count dtype.
         """
+        from ..metadata.selection import NormalizationSpec
+        from .normalization import feature_value_blocks
+
+        totals = self._cell_count_totals(cell_index)
         values = np.empty(len(cell_index), dtype=np.float64)
-        offset = 0
-        selected = self.rawData[cell_index, :]
-        for block in selected.stream_blocks(
+        _, blocks = feature_value_blocks(
+            self,
+            feature_index,
+            cell_index,
+            NormalizationSpec(source="raw"),
             nthreads=self.nthreads,
-            msg=f"({self.name}) Computing selected-feature percentages",
-        ):
+            resident_bytes=values.nbytes + totals.nbytes,
+            scratch_bytes_per_row=np.dtype(np.float64).itemsize,
+        )
+        offset = 0
+        for block in blocks:
             counts = np.asarray(block)
-            denominator = counts.sum(axis=1, dtype=np.float64)
-            numerator = counts[:, feature_index].sum(axis=1, dtype=np.float64)
             stop = offset + len(counts)
-            values[offset:stop] = _percentage(numerator, denominator)
+            values[offset:stop] = _percentage(
+                counts.sum(axis=1, dtype=np.float64), totals[offset:stop]
+            )
             offset = stop
         return values
 
@@ -827,6 +918,11 @@ class Assay:
         randomly sampled selected feature set in given cells (as marked by
         cell_key)
 
+        Names match features without case, and a name matches every feature
+        with that name. A feature matched more than once, by a repeated name
+        or by names that differ only in case, counts once in the score.
+        Controls are drawn by expression bin as ``binned_sampling`` describes.
+
         Args:
             feature_names: Names (as in 'names' column of the feature attribute table) of features to
                            be used for scoring
@@ -898,61 +994,54 @@ class Assay:
         """Score feature indexes against controls using supplied feature means.
 
         ``log_transform`` scores ``log1p`` of the normalized values, as
-        ``normed(log_transform=True)`` returns them.
+        ``normed(log_transform=True)`` returns them. A feature repeated in
+        ``feature_idx`` counts once (see ``_score_feature_sets``).
         """
-        from ..features.scoring import binned_sampling
-        from .rna import RNAassay
-
-        log_transform, _ = check_normalization_flags(
-            self, log_transform=log_transform, renormalize_subset=False
+        (scores,) = _score_index_sets(
+            self,
+            [feature_idx],
+            cell_idx,
+            feature_avg,
+            ctrl_size=ctrl_size,
+            n_bins=n_bins,
+            rand_seed=rand_seed,
+            log_transform=log_transform,
         )
-        feature_idx = np.asarray(feature_idx, dtype=np.int64)
-        cell_idx = np.asarray(cell_idx, dtype=np.int64)
-        feature_avg = np.asarray(feature_avg, dtype=np.float64)
-        if feature_avg.shape != (self.feats.N,):
-            raise ValueError(
-                f"feature_avg must have shape ({self.feats.N},), got "
-                f"{feature_avg.shape}"
-            )
-        control_idx = np.asarray(
-            binned_sampling(
-                pd.Series(feature_avg),
-                feature_idx.tolist(),
-                ctrl_size,
-                n_bins,
-                rand_seed,
-            ),
-            dtype=np.int64,
+        return scores
+
+    def _score_feature_sets(
+        self,
+        feature_sets: Sequence[np.ndarray],
+        cell_idx: np.ndarray,
+        feature_avg: np.ndarray,
+        *,
+        ctrl_size: int,
+        n_bins: int,
+        rand_seed: int,
+        log_transform: bool = False,
+    ) -> list[np.ndarray]:
+        """Score each set of feature indexes against its own controls.
+
+        A feature repeated within a set counts once, at its first position,
+        so an index listed twice does not weigh twice. Each set draws its
+        controls from the supplied feature means with ``binned_sampling`` and
+        its own ``RandomState(rand_seed)``, as separate calls do. Library-size
+        normalized RNA reads the features of every set and its controls in one
+        pass over their union; other normalizations read each set apart.
+
+        Returns:
+            The scores of each set, in the order of ``feature_sets``.
+        """
+        return _score_index_sets(
+            self,
+            feature_sets,
+            cell_idx,
+            feature_avg,
+            ctrl_size=ctrl_size,
+            n_bins=n_bins,
+            rand_seed=rand_seed,
+            log_transform=log_transform,
         )
-
-        if len(control_idx) == 0:
-            raise ValueError(
-                "No control features were sampled. Reduce n_bins or increase ctrl_size."
-            )
-        if isinstance(self, RNAassay) and uses_library_size_normalization(self):
-            means = self._mean_normed_feature_groups(
-                cell_idx,
-                {
-                    "target": feature_idx,
-                    "control": control_idx,
-                },
-                log_transform=log_transform,
-            )
-            return np.asarray(means["target"] - means["control"])
-        if len(cell_idx) == 0:
-            # An empty selection has no scores and is not normalized, because
-            # CLR would divide by its zero cell count.
-            return np.zeros(0, dtype=np.float64)
-
-        def calc_mean(index: np.ndarray) -> np.ndarray:
-            values = self.normed(
-                cell_idx=cell_idx,
-                feat_idx=np.sort(index),
-                log_transform=log_transform,
-            )
-            return np.asarray(values.mean(axis=1).compute())
-
-        return np.asarray(calc_mean(feature_idx) - calc_mean(control_idx))
 
     def __repr__(self) -> str:
         assay_name = str(self.__class__).split(".")[-1][:-2]

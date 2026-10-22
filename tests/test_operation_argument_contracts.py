@@ -217,10 +217,11 @@ _CONTRACTS = (
             "s_genes": "s_gene_indices",
             "ctrl_size": "control_size",
         },
-        model_only=_classified(
-            "resolved_input",
-            "feature_summary",
-        ),
+        model_only={
+            **_classified("resolved_input", "feature_summary"),
+            # The previous HGNC symbols that gene matching used.
+            **_classified("derived", "gene_aliases"),
+        },
         signature_only=_classified("routing", "from_assay"),
     ),
     OperationContract(

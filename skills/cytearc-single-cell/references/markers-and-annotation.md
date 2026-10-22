@@ -252,7 +252,7 @@ case (`Cd3e`, `Ptprc`, `Mki67`), and panel lookups are exact, so convert the pan
 | `log_transform` (`markers.search`) | `False` | `True` ranks `log1p` of the assay normalizer's values; ADT CLR, ATAC TF-IDF and `norm_lib_size_log` raise |
 | `tmin` (AUCell, WAGGR) | `5` | Lower for short sets; sources with fewer matched targets are dropped |
 | `n_up` (AUCell) | `None` (5% of universe) | Fix it when comparing runs; changes the score scale |
-| `s_genes` / `g2m_genes` | built-in human and mouse lists | Other species or naming schemes |
+| `s_genes` / `g2m_genes` | built-in human and mouse lists | Other species or naming schemes. Names match without case; a renamed gene missing under its 2019 symbol matches its previous HGNC symbol (`parameters["gene_aliases"]`, for example PIMREG as `Fam64a`), and a gene listed twice counts once. |
 
 ## Check before moving on
 

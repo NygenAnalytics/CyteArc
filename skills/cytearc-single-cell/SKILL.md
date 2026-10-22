@@ -70,7 +70,8 @@ not thresholds.
 1. **Inspect read-only first.** `cytearc.DataStore(path, zarr_mode="r")` writes nothing. A writable
    open (the default) prepares new stores and permanently removes from `I` the cells with at most
    `min_features_per_cell` (default 10) default-assay features, unless that would remove at least
-   half of the active cells. Reopen existing stores and mounts with
+   half of the active cells; then a `UserWarning` names a small panel or a raw droplet matrix as
+   the likely cause. Reopen existing stores and mounts with
    `cytearc.DataStore(path, min_features_per_cell=-1)`, which keeps every cell.
 2. **Never filter by editing `I`.** Keep the `cell_selection` ref a filter returns and pass it on, or
    insert a boolean column and use `cell_key=`. `ds.cells.reset_key("I")` undoes an accidental

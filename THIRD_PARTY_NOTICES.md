@@ -140,6 +140,10 @@ use but does not install.
   datasets are credited below.
 - **GEO GSE245108**: hashtag counts in `tests/seurat_hto_5_5_1_golden.json`, from Zhang et al.
   (2024), Nature Immunology, doi:10.1038/s41590-024-01782-4.
+- **HGNC** (<https://www.genenames.org>), CC0 1.0: the previous symbols of the default cell-cycle
+  genes in `cytearc/quality_control/cell_cycle_genes.py` (`cell_cycle_previous_symbols`), from the
+  HGNC REST service in October 2026. Seal et al. (2023), Nucleic Acids Research,
+  doi:10.1093/nar/gkac888.
 - **Color palettes** in `cytearc/plotting/_style.py`: the 10- and 20-color sets are Tableau 10 and
   20 as distributed with matplotlib (the 10-color set with Scanpy's colorblind substitutions), the
   28-color set is from Zeileis, Hornik, and Murrell (2009), Computational Statistics & Data

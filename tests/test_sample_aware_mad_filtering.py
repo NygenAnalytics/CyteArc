@@ -14,7 +14,7 @@ from cytearc.metadata.artifacts import (
 from cytearc.metadata.selection import NamedCellArtifact
 from cytearc.quality_control.filtering import (
     _apply_bounds,
-    _metric_policy,
+    _name_policy,
     clamp_metric_bound,
     filter_cell_metrics,
     gaussian_quantile_bounds,
@@ -213,21 +213,24 @@ def test_apply_bounds_compares_text_with_an_open_side(dtype):
 
 def test_metric_policy_defaults_and_custom_attrs():
     for attr in ("RNA_nCounts", "nFeatures", "ADT_nCounts"):
-        assert _metric_policy(attr) == {
+        assert _name_policy(attr).record() == {
             "transform": "log1p",
             "bound_direction": "two_sided",
         }
+        assert not _name_policy(attr).percentage
     for attr in ("RNA_percentMito", "percentRibo"):
-        assert _metric_policy(attr) == {
+        assert _name_policy(attr).record() == {
             "transform": "identity",
             "bound_direction": "upper",
         }
+        assert _name_policy(attr).percentage
     # Only a whole suffix after "_" names a QC metric.
     for attr in ("custom_score", "RNAnCounts", "percentMito_ratio"):
-        assert _metric_policy(attr) == {
+        assert _name_policy(attr).record() == {
             "transform": "identity",
             "bound_direction": "two_sided",
         }
+        assert not _name_policy(attr).percentage
 
 
 @pytest.mark.parametrize("attr", ["RNA_nCounts", "RNA_nFeatures"])

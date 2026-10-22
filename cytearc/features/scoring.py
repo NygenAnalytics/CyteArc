@@ -13,25 +13,40 @@ def binned_sampling(
     n_bins: int,
     rand_seed: int,
 ) -> list[str]:
-    """Score a set of genes [Satija15]_. The score is the average expression of
-    a set of genes subtracted with the average expression of a reference set of
-    genes. The reference set is randomly sampled from the `gene_pool` for each
-    binned expression value.
+    """Sample the control features of a gene-set score by expression bin.
 
-    This reproduces the approach in Seurat [Satija15]_ and has been implemented
-    for Scanpy by Davide Cittaro.
+    A gene-set score is the mean expression of the set's features minus the
+    mean of these controls. The binning and the draw are those of scanpy's
+    ``score_genes``, from which this function is adapted; they are not
+    Seurat's ``AddModuleScore``:
 
-    This function is adapted from Scanpy's `score_genes`.
+    - With ``N`` features, a bin holds ``k = round(N / (n_bins - 1))``
+      features. Features are ranked by value, NaN counting as 0, with tied
+      values sharing the lowest of their ranks, and a feature of rank ``r``
+      (from 1) falls in bin ``r // k``. Bin 0 holds ``k - 1`` ranks and the
+      top bin the remainder, so there are about ``n_bins`` bins.
+    - Tied values share one bin, however many there are. Every feature with
+      the lowest value, such as a mean of 0, shares the lowest bin, which on
+      sparse data can hold thousands of features and leave the next bins
+      empty.
+    - For each bin that holds a feature of the set, in increasing order,
+      ``ctrl_size`` features are drawn without replacement from all of the
+      bin's features, or the whole bin when it holds no more. One
+      ``RandomState(rand_seed)`` makes the draws, and drawn features of the
+      set are then dropped. Controls are drawn once per bin, so a bin with
+      several features of the set gives ``ctrl_size`` controls in all,
+      whereas Tirosh et al. (2016) draw controls for each gene of the set.
 
     Args:
-        values: The values for the features.
-        feature_list: The list of features to use for score calculation.
+        values: The values for the features, such as their mean expression.
+        feature_list: The features of the set; a repeated feature counts once.
         ctrl_size: Number of reference features to be sampled from each bin.
         n_bins: Number of bins for sampling.
         rand_seed: The seed to use for the random number generation.
 
     Returns:
-        A list of sampled features.
+        The control features, in the order of ``values``, without the
+        features of the set.
     """
     if isinstance(ctrl_size, (bool, np.bool_)) or not isinstance(
         ctrl_size, (int, np.integer)

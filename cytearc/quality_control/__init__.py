@@ -1,5 +1,6 @@
 from .cell_cycle import assign_cell_cycle_phase
 from .cell_cycle_genes import (
+    cell_cycle_previous_symbols,
     g2m_phase_genes,
     g2m_phase_genes_mouse,
     s_phase_genes,
@@ -11,6 +12,7 @@ from .hto import hto_demux
 
 __all__ = [
     "assign_cell_cycle_phase",
+    "cell_cycle_previous_symbols",
     "g2m_phase_genes",
     "g2m_phase_genes_mouse",
     "gaussian_quantile_bounds",

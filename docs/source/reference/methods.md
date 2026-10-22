@@ -75,7 +75,9 @@ Validation is method-specific.
 Agreement measured for one method is not evidence of equivalence for the rest of the package, and none of these comparisons establish biological ground truth.
 
 - HTO demultiplexing is checked against Seurat 5.5.1 `HTODemux` calls with k-means clustering and
-  the default `positive.quantile` of 0.99.
+  the default `positive.quantile` of 0.99, on a pool where every singlet's highest CLR value is its
+  positive tag. CyteArc names a singlet by its one positive tag, while `HTODemux` names it by its
+  highest CLR value, so the two can differ in strongly unbalanced pools.
 - Symphony-style query correction is checked against a golden fixture generated with the R Symphony 0.1.3 `mapQuery` implementation, including a case with nonzero correction.
 - Harmony2's ridge regression solves, batch pruning, stabilized cluster assignment update, and
   clustering objective are checked against direct dense calculations from the published equations.
