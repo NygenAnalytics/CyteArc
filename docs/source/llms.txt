@@ -17,6 +17,7 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 - [PBMC analysis](tutorials/scrna-seq/): interpret a prepared PBMC run with marker evidence
 - [Quality control](tutorials/quality-control/): modality-aware and sample-aware filtering
 - [Cell calling](tutorials/cell-calling/): EmptyDrops calls cells in an unfiltered droplet matrix before quality control
+- [Ambient RNA removal](tutorials/ambient-rna/): soup profile from empty droplets, contamination from marker gene sets, and corrected counts
 - [Highly variable genes](tutorials/feature-selection/): feature-set diagnostics
 - [Dimensionality reduction](tutorials/dimensionality-reduction/): PCA dimensions and layout comparison
 - [Neighborhood graph](tutorials/graph-construction/): granular normalization, reduction, neighbours, and graphs

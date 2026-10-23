@@ -38,6 +38,14 @@ The aim is one coherent execution path, not reimplementation for its own sake.
 - **Trajectory analysis:** memory-aware [Population Balance Analysis](https://doi.org/10.1073/pnas.1714723115), supervised terminal-state fate probabilities, pseudotime aggregation and modules, and [MAGIC-style graph diffusion](https://doi.org/10.1016/j.cell.2018.05.061) for imputation.
 - **Statistics and diagnostics:** marker AUC, the [Mann-Whitney U test](https://doi.org/10.1214/aoms/1177730491) with [Benjamini-Hochberg](https://doi.org/10.1111/j.2517-6161.1995.tb02031.x) correction, [Scrublet](https://doi.org/10.1016/j.cels.2018.11.005) doublet scores and calls simulated within each sample, cluster separability, and integration metrics informed by the [scIB benchmark](https://doi.org/10.1038/s41592-021-01336-8).
 - **Gene sets, protein, and sample tags:** [AUCell](https://doi.org/10.1038/nmeth.4463) and [WAGGR](https://doi.org/10.1093/bioadv/vbac016) activity scores, CITE-seq processing, and [cell-hashing](https://doi.org/10.1186/s13059-018-1603-1) demultiplexing.
+- **Ambient RNA:** a CyteArc implementation of [SoupX](https://doi.org/10.1093/gigascience/giaa151)
+  from its paper: the soup profile of empty droplets, contamination fractions from marker gene
+  sets with cluster-level exclusion, and the removal of soup counts from each cell, rounded at
+  random as in the paper with seeded [systematic sampling](https://doi.org/10.1214/aoms/1177729988)
+  so that every gene loses its share of the soup on average ({ref}`ambient_rna`). The paper's
+  automatic estimate, its hierarchical cell-level model, and its correction of cluster-aggregated
+  counts are not implemented, nor is DecontX; corrected counts from CellBender import as a Cell
+  Ranger HDF5 file.
 - **Regulons and chromatin activity:** [GRNBoost2](https://doi.org/10.1093/bioinformatics/bty916)
   co-expression networks and [SCENIC](https://doi.org/10.1038/nmeth.4463) cisTarget pruning
   ([pySCENIC](https://doi.org/10.1038/s41596-020-0336-2)), [chromVAR](https://doi.org/10.1038/nmeth.4401)
@@ -175,6 +183,16 @@ Agreement measured for one method is not evidence of equivalence for the rest of
   and calls of doublets added to synthetic counts of one and of two captures, that no simulated
   doublet pairs cells of two samples, and the neighbor counts against exact nearest neighbors.
 - Symphony-style query correction is checked against a golden fixture generated with the R Symphony 0.1.3 `mapQuery` implementation, including a case with nonzero correction.
+- Ambient RNA removal is compared with SoupX 1.6.2 on the 10x Genomics PBMC 1k (v2) and 10k (v3)
+  samples. With the same empty-droplet range the soup profiles are identical, the global,
+  per-gene-set, and per-cluster contamination fractions agree to within 2e-8, the tolerance of
+  SoupX's fit, and the same cells measure each gene set. Before rounding, the removal of each
+  gene from each cell matches SoupX's cell-level subtraction to within 1e-12 counts. CyteArc then
+  rounds each removal at random, as the paper does, with systematic sampling seeded by
+  `random_seed`, so a seed reproduces the counts. Summed over the cells, the removal of the genes
+  in each band of soup ranks, from the 10 most abundant soup genes to those beyond rank 5,000,
+  stays within 2.5% of the removal before rounding on PBMC 1k and within 0.4% on PBMC 10k, and
+  each gene's deviation from it has the binomial spread of its rounding.
 - Harmony2's ridge regression solves, batch pruning, stabilized cluster assignment update, and
   clustering objective are checked against direct dense calculations from the published equations.
   A synthetic benchmark in which two groups of batches share no cell types checks that batch mixing

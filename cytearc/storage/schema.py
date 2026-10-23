@@ -206,7 +206,7 @@ class DerivedAssayTransaction:
         assay_name: str,
         workspace: str | None,
         operation: str,
-        membership: str | None = None,
+        membership: str | np.ndarray | None = None,
     ) -> None:
         self.root = root
         self.assay_name = assay_name
@@ -239,6 +239,15 @@ class DerivedAssayTransaction:
         if self._created_group:
             raise RuntimeError("The derived assay counts were already created")
         _validate_dimensions(n_cells, len(feat_ids))
+        if (
+            self.membership is not None
+            and not isinstance(self.membership, str)
+            and np.shape(self.membership) != (n_cells,)
+        ):
+            raise ValueError(
+                f"A membership mask needs one value per cell ({n_cells}); got "
+                f"shape {np.shape(self.membership)}"
+            )
         # These raise before this call creates anything, so its cleanup never
         # touches an assay that another writer created.
         validate_new_assay(self.root, self.assay_name, self.workspace)
@@ -272,16 +281,24 @@ class DerivedAssayTransaction:
         return counts
 
     def _write_membership(
-        self, source: str, n_cells: int, profile: StorageProfile
+        self, source: str | np.ndarray, n_cells: int, profile: StorageProfile
     ) -> None:
-        """Copy cell column ``source`` into the pending assay's membership column."""
+        """Write the pending assay's membership column.
+
+        ``source`` names a boolean cell column to copy, or holds one boolean
+        per cell, which is chunked like the cell table's ``I`` column.
+        """
         cells = as_zarr_group(
             self.root[_cell_data_path(self.workspace)], name="cellData"
         )
-        values = as_zarr_array(cells[source], name=source)
-        rows = max(1, int(values.chunks[0]))
-        # The copy streams one source chunk at a time and never replaces a
-        # column.
+        values: zarr.Array | np.ndarray
+        if isinstance(source, str):
+            values = as_zarr_array(cells[source], name=source)
+            rows = max(1, int(values.chunks[0]))
+        else:
+            values = np.asarray(source, dtype=bool)
+            rows = max(1, int(as_zarr_array(cells["I"], name="I").chunks[0]))
+        # The copy streams one chunk at a time and never replaces a column.
         create_streamed_metadata_column(
             cells,
             assay_membership_column(self.assay_name),
@@ -345,7 +362,7 @@ def derived_assay_transaction(
     workspace: str | None,
     *,
     operation: str,
-    membership: str | None = None,
+    membership: str | np.ndarray | None = None,
 ) -> Iterator[DerivedAssayTransaction]:
     """Create a derived assay atomically with respect to assay scans.
 
@@ -360,8 +377,8 @@ def derived_assay_transaction(
         assay_name: Name of the assay to create.
         workspace: Workspace name. None uses the legacy layout.
         operation: Name of the operation recorded in the pending marker.
-        membership: Optional name of the boolean cell column that marks the
-            cells the new assay measured.
+        membership: Optional cells that the new assay measured: the name of a
+            boolean cell column to copy, or one boolean per cell.
     """
     validate_new_assay(root, assay_name, workspace)
     _require_free_membership_name(root, assay_name, workspace)

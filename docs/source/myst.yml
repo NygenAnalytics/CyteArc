@@ -35,6 +35,8 @@ project:
       title: Quality control
     - file: tutorials/cell_calling.ipynb
       title: Cell calling
+    - file: tutorials/ambient_rna.ipynb
+      title: Ambient RNA removal
     - file: tutorials/feature_selection.ipynb
       title: Highly variable genes
     - file: tutorials/dimensionality_reduction.ipynb

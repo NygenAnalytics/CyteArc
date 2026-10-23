@@ -1309,6 +1309,7 @@ def test_assay_implementations_are_runtime_isolated():
 
 
 def test_datastore_operation_mixins_are_runtime_isolated():
+    from cytearc.datastore._operations.ambient import _AmbientOperationsMixin
     from cytearc.datastore._operations.cell_calling import _CellCallingOperationsMixin
     from cytearc.datastore._operations.clustering import _ClusteringOperationsMixin
     from cytearc.datastore._operations.embeddings import _EmbeddingOperationsMixin
@@ -1355,6 +1356,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         assert operation_imports.issubset(allowed_operation_helpers)
 
     mixins = (
+        _AmbientOperationsMixin,
         _EmbeddingOperationsMixin,
         _ClusteringOperationsMixin,
         _TrajectoryOperationsMixin,

@@ -181,10 +181,10 @@ _NAMESPACE_METHODS = [
 
 
 def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
-    # reduction.import_coordinates, artifacts.prune_incomplete, and
-    # qc.call_cells, qc.load_cell_calls, and qc.barcode_ranks joined the moved
-    # methods and find.
-    assert len(_NAMESPACE_METHODS) == 79
+    # reduction.import_coordinates, artifacts.prune_incomplete, the five
+    # ambient RNA methods of qc, and qc.call_cells, qc.load_cell_calls, and
+    # qc.barcode_ranks joined the moved methods and find.
+    assert len(_NAMESPACE_METHODS) == 84
     assert {"call_cells", "load_cell_calls", "barcode_ranks"} <= {
         name for namespace, _, name, _ in _NAMESPACE_METHODS if namespace == "qc"
     }
@@ -390,6 +390,7 @@ def test_mapping_datastore_private_mixin_order_is_stable():
 
 
 def test_datastore_private_mixin_order_is_stable():
+    from cytearc.datastore._operations.ambient import _AmbientOperationsMixin
     from cytearc.datastore._operations.cell_calling import _CellCallingOperationsMixin
     from cytearc.datastore._operations.features import _FeatureOperationsMixin
     from cytearc.datastore._operations.integration_metrics import (
@@ -407,6 +408,7 @@ def test_datastore_private_mixin_order_is_stable():
     assert DataStore.__bases__ == (
         _CellCallingOperationsMixin,
         _QualityControlOperationsMixin,
+        _AmbientOperationsMixin,
         _FeatureOperationsMixin,
         _TrajectoryFeatureOperationsMixin,
         _IntegrationMetricsOperationsMixin,
@@ -414,10 +416,11 @@ def test_datastore_private_mixin_order_is_stable():
         _RegulonOperationsMixin,
         MappingDatastore,
     )
-    assert DataStore.mro()[:9] == [
+    assert DataStore.mro()[:10] == [
         DataStore,
         _CellCallingOperationsMixin,
         _QualityControlOperationsMixin,
+        _AmbientOperationsMixin,
         _FeatureOperationsMixin,
         _TrajectoryFeatureOperationsMixin,
         _IntegrationMetricsOperationsMixin,

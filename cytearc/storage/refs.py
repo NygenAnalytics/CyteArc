@@ -10,6 +10,8 @@ _ARTIFACT_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 ARTIFACT_KINDS = frozenset(
     {
+        "ambient_contamination",
+        "ambient_profile",
         "ann_index",
         "batch_correction",
         "cell_calling",
