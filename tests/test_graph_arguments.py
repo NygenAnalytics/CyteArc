@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import fields
+from dataclasses import fields, replace
 
 import numpy as np
 import pytest
@@ -163,6 +163,7 @@ def test_stage_models_chain_logical_artifact_refs() -> None:
         nthreads=4,
         batch_size=100,
     )
+    deeper = replace(neighbors, ann_ef=30)
     connectivity = ConnectivityMapArguments(
         neighbors=_ref("neighbors", "5"),
         local_connectivity=1.0,
@@ -173,7 +174,22 @@ def test_stage_models_chain_logical_artifact_refs() -> None:
     assert scaling.to_record().parameters == {"enabled": True}
     assert neighbors.to_record().inputs["ann_index"]["kind"] == "ann_index"
     # Queries of a fixed index return the same neighbors on any thread count.
+    # A query of its index's own depth records no ann_ef, so it keeps the
+    # identity that queries had before they chose a depth; another depth is
+    # recorded as its resolved integer.
     assert neighbors.to_record().parameters == {"k": 15, "distance_metric": "l2"}
+    assert deeper.to_record().parameters == {
+        "k": 15,
+        "distance_metric": "l2",
+        "ann_ef": 30,
+    }
+    assert _identity(deeper) != _identity(neighbors)
+    for model in (neighbors, deeper):
+        assert model.to_record().execution_options == {
+            "nthreads": 4,
+            "batch_size": 100,
+            "invalidate_cache": False,
+        }
     assert connectivity.to_record().parameters == {
         "local_connectivity": 1.0,
         "bandwidth": 1.5,

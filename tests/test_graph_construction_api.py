@@ -772,7 +772,8 @@ def test_ann_index_rejects_invalid_runtime_parameters(graph_store) -> None:
         ({"ann_efc": 1.5}, TypeError, "ann_efc must be an integer"),
         ({"ann_ef": True}, TypeError, "ann_ef must be an integer"),
         ({"ann_m": 1}, ValueError, "at least two"),
-        ({"rand_state": 0}, ValueError, "rand_state must be at least 1"),
+        # Seed 0 is valid, as for Leiden, UMAP, and LSI.
+        ({"rand_state": -1}, ValueError, "rand_state must be at least 0"),
         ({"batch_size": 0}, ValueError, "batch_size must be at least 1"),
     ):
         with pytest.raises(error, match=match):
@@ -830,7 +831,10 @@ def test_cache_identity_distinguishes_parameters_from_execution_options(
         dims=11,
         local_cache="auto",
     )
-    reused_ann = datastore.graph.ann_index(lineage.coordinates)
+    # The fixture's index records ann_efc=50, ann_ef=50, and ann_m=48.
+    reused_ann = datastore.graph.ann_index(
+        lineage.coordinates, ann_efc=50, ann_ef=50, ann_m=48
+    )
     reused_neighbors = datastore.graph.neighbors(
         lineage.ann_index,
         k=11,
@@ -851,6 +855,8 @@ def test_cache_identity_distinguishes_parameters_from_execution_options(
     assert reused_neighbors == lineage.neighbors
     assert changed_neighbors != lineage.neighbors
     assert invalidated_reduction != lineage.coordinates
+    # The query searched max(50, 2 * 3) candidates, the index's own depth of
+    # 50, so it records no ann_ef.
     assert datastore.artifacts.inspect(changed_neighbors).parameters == {
         "k": 3,
         "distance_metric": "l2",
@@ -1130,10 +1136,7 @@ def test_lsi_and_custom_reduction_have_distinct_public_methods(graph_store) -> N
     assert custom_status.parameters["feat_scaling"] is False
 
 
-def test_graph_chain_matches_released_knn_golden(
-    analyzed_datastore_ephemeral,
-) -> None:
-    datastore = analyzed_datastore_ephemeral
+def _released_knn_reduction(datastore) -> ArtifactRef:
     cell_selection = datastore.qc.auto_filter(method="gaussian")
     features = datastore.features.snapshot(
         from_assay="RNA",
@@ -1145,13 +1148,25 @@ def test_graph_chain_matches_released_knn_golden(
         features,
         invalidate_cache=True,
     )
-    reduction = datastore.reduction.pca(
+    return datastore.reduction.pca(
         normalized,
         dims=11,
         invalidate_cache=True,
     )
+
+
+def test_graph_chain_matches_released_knn_golden(
+    analyzed_datastore_ephemeral,
+) -> None:
+    datastore = analyzed_datastore_ephemeral
+    reduction = _released_knn_reduction(datastore)
+    # The released neighbors came from the index settings that were the
+    # defaults then, ann_efc=50, ann_ef=50, and ann_m=48.
     ann = datastore.graph.ann_index(
         reduction,
+        ann_efc=50,
+        ann_ef=50,
+        ann_m=48,
         invalidate_cache=True,
     )
     neighbors = datastore.graph.neighbors(
@@ -1172,6 +1187,37 @@ def test_graph_chain_matches_released_knn_golden(
         rtol=0,
         atol=1e-3,
     )
+
+
+def test_default_graph_chain_is_closer_to_exact_knn_than_the_released_one(
+    analyzed_datastore_ephemeral,
+) -> None:
+    from sklearn.neighbors import NearestNeighbors
+
+    datastore = analyzed_datastore_ephemeral
+    reduction = _released_knn_reduction(datastore)
+    neighbors = datastore.graph.neighbors(
+        datastore.graph.ann_index(reduction, invalidate_cache=True),
+        k=11,
+        invalidate_cache=True,
+    )
+    found = datastore.artifacts.load(neighbors)["indices"][:]
+    coordinates = datastore.artifacts.load(reduction)["data"][:]
+    exact = (
+        NearestNeighbors(n_neighbors=12)
+        .fit(coordinates)
+        .kneighbors(coordinates, return_distance=False)[:, 1:]
+    )
+
+    def missed_rows(indices: np.ndarray) -> int:
+        return sum(
+            set(row) != set(truth) for row, truth in zip(indices, exact, strict=True)
+        )
+
+    # The released settings missed true neighbours of four cells, two of them
+    # their nearest; the default settings miss one neighbour of one cell.
+    assert missed_rows(np.load(full_path("knn_indices.npy"))) == 4
+    assert missed_rows(found) <= 1
 
 
 def test_connectivity_rebuild_requires_named_distance_metric(graph_store) -> None:

@@ -18,7 +18,7 @@ from ..features.variability import (
     hvg_flavor_options,
     hvg_options,
 )
-from ..graph.arguments import graph_flag
+from ..graph.arguments import graph_load_flags, umap_graph_flags
 from ..metadata.membership import require_measured_cells
 from ..quality_control.filtering import validate_filter_bounds
 from ..utils.arguments import integer_argument
@@ -75,8 +75,9 @@ _TSNE_SETTING_DEFAULTS: Mapping[str, Any] = MappingProxyType(
         for name in inspect.signature(sgtsne.sgtsne_settings).parameters
     }
 )
-# The embeddings.tsne and embeddings.umap keywords that graph_flag checks.
-_EMBEDDING_GRAPH_FLAGS = ("symmetric_graph", "graph_upper_only")
+# The graph-loading keywords of embeddings.tsne, embeddings.umap, and
+# clusters.leiden, which graph_load_flags and umap_graph_flags check.
+_GRAPH_FLAGS = ("symmetric_graph", "graph_upper_only")
 # Automatic filtering applies the rules of ``qc.auto_filter``, so its
 # options default to that method's defaults. MAD filtering keeps the default
 # quantiles, and Gaussian filtering keeps the default MAD options.
@@ -245,7 +246,7 @@ _STAGE_PARAMETERS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "batch_size",
             }
         ),
-        "neighbors": frozenset({"k", "batch_size"}),
+        "neighbors": frozenset({"k", "ann_ef", "batch_size"}),
         "connectivity": frozenset({"local_connectivity", "bandwidth"}),
         "embedding_initialization": frozenset(
             {
@@ -418,13 +419,14 @@ def _resolve_params(
                 )
                 if not isinstance(value.get("batch"), str | None):
                     raise TypeError(f"{name}['batch'] must be a cell metadata column")
-            elif stage in {"tsne", "umap"}:
-                # The checks of embeddings.tsne and the embeddings.umap graph
-                # flags. The stages run late, so an invalid setting would
-                # otherwise fail only after the stages before them.
-                for flag in _EMBEDDING_GRAPH_FLAGS:
-                    if flag in value:
-                        graph_flag(value[flag], flag)
+            elif stage in {"tsne", "umap", "leiden"}:
+                # The checks of the graph flags of embeddings.tsne,
+                # embeddings.umap, and clusters.leiden, and of the numeric
+                # embeddings.tsne settings. These stages run late, so an
+                # invalid setting would otherwise fail only after the stages
+                # before them.
+                check_flags = umap_graph_flags if stage == "umap" else graph_load_flags
+                check_flags(*(value.get(flag, False) for flag in _GRAPH_FLAGS))
                 if stage == "tsne":
                     sgtsne.sgtsne_settings(
                         **{

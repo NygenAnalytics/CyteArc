@@ -464,8 +464,14 @@ CyteArc validates persisted data and public arguments against the following cont
 - Producers that cannot reuse a saved result raise `PermissionError` on a read-only store before
   computing or writing. This covers every artifact producer, including marker search,
   `clusters.relabel_by_overlap`, membership strength, cell filters and selections, graph, embedding, trajectory,
-  and mapping producers, and derived assays. `mapping.run` and `mapping.build_reference` refuse a
-  read-only store before planning.
+  and mapping producers, and derived assays. Leiden, Paris, UMAP, and t-SNE refuse before they read
+  the graph. `features.universe`, `features.snapshot`, `features.detected`, `features.hvgs`,
+  `features.prevalent_peaks`, `scores.cell_cycle`, `mapping.build_reference`, and `mapping.run`
+  plan first, so a read-only store returns a result that it holds; a feature summary that must be
+  computed is refused before the counts are read. `mapping.build_reference` raises this
+  `PermissionError` where it raised `ValueError` before planning, and `mapping.run` raises it where
+  it raised `ValueError`. WAGGR, AUCell, chromVAR, and `regulons.grn` still refuse a read-only
+  store before planning.
 - Public arguments are validated before any artifact is written: `graph.load(use_k=...)`,
   `reduction.lsi` `skip_first` and `rand_state`, `reduction.custom` loadings, `reduction.harmony`
   parameters, `integration.modalities(chunk_size=...)`, `features.hvgs` keywords, `embeddings.umap` array
@@ -1111,7 +1117,47 @@ CyteArc validates persisted data and public arguments against the following cont
   distance zero, so rows sum to `bandwidth * log2(k + 1)`.
 - UMAP identities record only machine-independent settings. `nthreads` controls execution, and
   `symmetric_graph` and `graph_upper_only` accept only booleans.
-- ANN thread counts control execution; `ann_parallel` identifies a parallel index.
+- ANN thread counts control execution; `ann_parallel` identifies a parallel index. A serial index is
+  still built on one thread, while `graph.neighbors` queries any index on the datastore's
+  `nthreads`, which never changes the neighbors.
+- `graph.ann_index` defaults to `ann_m=24`, `ann_efc=200`, and `ann_ef=200` (before, 48, 50, and
+  50). An `ef_construction` below `2 * M` built indices whose searches missed every true neighbour
+  of some cells between well-separated clusters, 4.5% of 200,000 clustered cells (recall 0.916).
+  On about 1,000,000 cells (Tabula Sapiens and a lupus PBMC atlas at 21 and 50 PCs, and a
+  clustered mixture), the earlier defaults gave recall@11 of 0.896 to 0.991, with up to 0.92% of
+  cells without a true neighbour. The new defaults keep recall@11 and recall@30 at or above 0.995
+  and such cells below 0.05% on four of the five sets, and reach recall@30 of 0.988 on 50-PC
+  PBMCs, whose remaining misses lie within 1% of the exact k-th distance. The search depth of 200
+  is the larger gain on homogeneous cells; `ann_m` 24 matched 32 there and builds faster in less
+  memory. The serial build takes about three times as long as with the earlier defaults.
+  Defaults record their own values, so default graphs, and the pipeline's, get new identities,
+  and explicit settings keep theirs. The index's `ann_ef` (default 200) is the smallest default
+  search depth of its queries; it never changes the index. `graph.neighbors` takes `ann_ef`, by
+  default `max(index ann_ef, 2 * k)`, never fewer than `k + 1`. Its identity records the depth it
+  used as the parameter `ann_ef` only when that differs from `max(index ann_ef, k + 1)`, the depth
+  of the index's own `ann_ef` as hnswlib applies it, which every earlier query searched. This is
+  the one canonical rule: a neighbors artifact without `ann_ef` searched its index's depth. An
+  earlier neighbors artifact whose depth is unchanged, such as a default query of `k` up to 25 on
+  an index of `ann_ef` 50, or up to 100 on one of 200, therefore keeps its identity and is reused,
+  on a read-only store too.
+  An explicit `ann_ef` equal to that depth names the same artifact. A query whose depth grew, such
+  as `k` of 30 at depth 60, records the depth and is computed again from the same index. Mapping
+  projections still query with the index's `ann_ef`. A query whose `self_hit_rate` is below
+  99.5% warns.
+- `embeddings.umap` forms the fuzzy union of the graph itself, so `symmetric_graph=True`, which
+  united an already symmetrized graph a second time (each weight `w` became `2w - w**2`), and
+  `graph_upper_only=True`, which left the union unchanged, raise `ValueError`. UMAP embeddings
+  saved with `symmetric_graph=True` stay loadable but can no longer be requested; recompute them
+  without the flag. `clusters.leiden`, `embeddings.tsne`, and the pipeline's `leiden` and `tsne`
+  settings refuse `graph_upper_only=True` without `symmetric_graph=True`, which loaded the graph
+  unchanged under a second identity. No accepted request computes anything new, so neither change
+  needs an operation revision.
+- `graph.ann_index` and `embeddings.initialization` accept `rand_state=0`.
+- `embeddings.umap` and `embeddings.tsne` check that an initialization reference is an
+  assay-scoped `embedding_initialization` before they read the graph, and name
+  `embeddings.initialization`; they read the initialization before the graph.
+- SNN integration refuses connectivity maps of different `k` before it plans or loads any of them,
+  naming the remedy; before, it failed after loading them.
 - densMAP over equal local radii adds no density term and returns the UMAP layout of the same seed
   instead of NaN coordinates; a non-finite radius raises `ValueError`.
 - t-SNE has one backend, the optional `sgtsnepi` package, and `embeddings.tsne` never runs an `sgtsne`
@@ -1168,6 +1214,14 @@ CyteArc validates persisted data and public arguments against the following cont
 - `graph.ann_index` and `graph.neighbors` check the hnswlib index against the memory budget before
   they build or load it. An index without a recorded `ann_m` raises `ValueError` asking to re-run
   `graph.ann_index`.
+- Leiden clustering, UMAP, t-SNE, and `graph.connectivity` check the graph or neighbor matrices
+  they load, and what they compute beside them, against the memory budget before they read them,
+  and raise `MemoryError` naming the bytes, the cells, the edges, and the limit. The estimates
+  live in the domain packages (`neighbors.graph.graph_load_memory` and
+  `connectivity_peak_bytes`, `embeddings.umap.umap_peak_bytes`,
+  `clustering.leiden.native_leiden_peak_bytes`, `embeddings.sgtsne.sgtsne_input_bytes`); the
+  native Leiden estimate leaves out the per-worker scratch that a hub raises, and the t-SNE one
+  the working memory of `sgtsnepi`.
 - `run_cluster_selection` reads its sampled coordinates under the memory budget and raises
   `MemoryError` before reading when they do not fit.
 - Dotplot size legends draw `SizeScale.areas` exactly, without the 180 pt² cap, and composite size

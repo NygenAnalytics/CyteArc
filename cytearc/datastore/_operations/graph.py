@@ -45,10 +45,16 @@ from ...graph.feature_projection import (
 from ...graph.kinds import require_graph_kind
 from ...matrix import ChunkedArray
 from ...metadata.rows import apply_missing_mask
+from ...neighbors.graph import (
+    GraphLoadMemory,
+    connectivity_peak_bytes,
+    graph_load_memory,
+)
 from ...neighbors.index import (
     ann_index_file_bytes,
     ann_index_peak_bytes,
     ann_query_block_bytes,
+    query_search_depth,
 )
 from ...neighbors.stages import (
     AnnIndexStage,
@@ -118,11 +124,17 @@ from ...utils.arguments import integer_argument
 from ...utils.logging import logger
 from ...utils.moments import ColumnMoments
 from ...utils.shutdown import shutdown_checkpoint
+from ...utils.warnings import warn
 
 if TYPE_CHECKING:
     from ..base_datastore import BaseDataStore as _GraphOperationsBase
 else:
     _GraphOperationsBase = object
+
+# A neighbor query warns when fewer cells than this, in percent, find
+# themselves among their nearest neighbors. An exact search finds every cell
+# whose coordinates no other cell shares.
+_MIN_SELF_HIT_RATE = 99.5
 
 
 def _row_block(
@@ -585,6 +597,25 @@ def _require_integration_budget(
         )
 
 
+def _require_graph_budget(
+    resources: ResourceBudget,
+    *,
+    required: int,
+    work: str,
+    n_cells: int,
+    n_edges: int,
+) -> None:
+    """Raise MemoryError, before a graph or neighbor matrix is read, over budget."""
+    limit = int(resources.memoryBytes)
+    if required <= limit:
+        return
+    raise MemoryError(
+        f"{work} of {n_cells} cells needs about {required} bytes in memory "
+        f"for a graph of {n_edges} edges, but the operation limit is {limit} "
+        "bytes. Raise mem_budget."
+    )
+
+
 def _requested_block_rows(
     source: CoordinateSource,
     requested: int | None,
@@ -648,6 +679,46 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         return (
             int(cast(int | float | str, graph_group.attrs["n_cells"])),
             int(cast(int | float | str, graph_group.attrs["n_neighbors"])),
+        )
+
+    def _require_graph_load_budget(
+        self,
+        graph: ArtifactRef,
+        *,
+        symmetric: bool,
+        upper_only: bool,
+        held_bytes: int,
+        working_bytes: Callable[[int, int], int],
+        work: str,
+    ) -> None:
+        """Raise MemoryError before a consumer of ``graph`` loads it, over budget.
+
+        The estimate reads only the shapes of the stored arrays. The consumer
+        holds ``held_bytes`` throughout and needs ``working_bytes(n_cells,
+        max_entries)`` beside the loaded graph, given the graph's cells and
+        the most entries of the loaded matrix.
+        """
+        graph_loc = self._graph_location(graph)
+        group = as_zarr_group(self.zw[graph_loc], name=graph_loc)
+        n_cells = self._get_graph_ncells_k(graph_loc)[0]
+        edges = as_zarr_array(group["edges"], name="edges")
+        weights = as_zarr_array(group["weights"], name="weights")
+        n_edges = int(edges.shape[0])
+        load: GraphLoadMemory = graph_load_memory(
+            n_cells,
+            n_edges,
+            symmetric=symmetric,
+            upper_only=upper_only,
+            edge_itemsize=np.dtype(edges.dtype).itemsize,
+            weight_itemsize=np.dtype(weights.dtype).itemsize,
+        )
+        working = working_bytes(n_cells, load.maxEntries)
+        _require_graph_budget(
+            self.resources,
+            required=held_bytes + max(load.peakBytes, load.heldBytes + working),
+            work=work,
+            n_cells=n_cells,
+            n_edges=n_edges,
         )
 
     def _store_to_sparse(self, graph_loc: str, use_k: int | None) -> csr_matrix:
@@ -2017,7 +2088,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             else integer_argument(batch_size, "batch_size", minimum=1)
         )
         requested_clusters = integer_argument(n_centroids, "n_centroids", minimum=1)
-        resolved_rand_state = integer_argument(rand_state, "rand_state", minimum=1)
+        resolved_rand_state = integer_argument(rand_state, "rand_state", minimum=0)
         resolved_kmeans_sampling = _sampling_fraction(
             kmeans_sampling,
             "kmeans_sampling",
@@ -2154,7 +2225,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         Args:
             coordinates: Coordinate artifact to cluster, such as a reduction.
             n_centroids: Requested number of K-means centroids.
-            rand_state: K-means random seed.
+            rand_state: Non-negative K-means random seed.
             batch_size: Number of cells processed per block.
             kmeans_sampling: Fraction of cells considered during centroid seeding.
             kmeans_batch_size: Number of cells per internal K-means update.
@@ -2184,15 +2255,43 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         coordinates: ArtifactRef,
         *,
         ann_metric: str = "l2",
-        ann_efc: int = 50,
-        ann_ef: int = 50,
-        ann_m: int = 48,
+        ann_efc: int = 200,
+        ann_ef: int = 200,
+        ann_m: int = 24,
         ann_parallel: bool = False,
         rand_state: int = 4466,
         batch_size: int | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
-        """Build or reuse an approximate nearest-neighbor index.
+        """Build or reuse an approximate nearest-neighbor (hnswlib HNSW) index.
+
+        The index holds every cell in memory, about
+        ``4 * dims + 8 * ann_m + 130`` bytes per cell on x86-64 Linux.
+
+        Args:
+            coordinates: Reduction, batch-correction, imported-coordinate, or
+                normalized artifact whose rows are indexed.
+            ann_metric: Distance metric, ``"l2"`` or ``"cosine"``.
+            ann_efc: Candidate list size while the index is built
+                (``ef_construction``). Keep it at least ``2 * ann_m``: a smaller
+                list builds a graph in which searches on well-separated
+                clusters can miss a cell's true neighbours.
+            ann_ef: The smallest search depth (hnswlib ``ef``) of the index's
+                queries. ``graph.neighbors`` searches ``max(ann_ef, 2 * k)``
+                candidates unless it is given its own ``ann_ef``. It does not
+                change the index, only the queries that read it.
+            ann_m: Links per cell in each layer of the index (``M``); the
+                lowest layer keeps twice as many. At least two.
+            ann_parallel: Insert the cells on the datastore's threads. A
+                parallel index can differ from run to run, so it is identified
+                separately from a serial one, which is reproducible.
+            rand_state: Non-negative seed of the index's layer assignment.
+            batch_size: Coordinate rows added per block; by default the
+                stored row band.
+            invalidate_cache: Force a new index artifact.
+
+        Returns:
+            Reference to the ANN index artifact.
 
         Raises:
             MemoryError: If the index exceeds the memory budget.
@@ -2206,7 +2305,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         resolved_ann_efc = integer_argument(ann_efc, "ann_efc", minimum=1)
         resolved_ann_ef = integer_argument(ann_ef, "ann_ef", minimum=1)
         resolved_ann_m = integer_argument(ann_m, "ann_m", minimum=1)
-        resolved_rand_state = integer_argument(rand_state, "rand_state", minimum=1)
+        resolved_rand_state = integer_argument(rand_state, "rand_state", minimum=0)
         if resolved_ann_m < 2:
             raise ValueError("ann_m must be at least two")
         if not isinstance(ann_parallel, bool):
@@ -2329,10 +2428,41 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         *,
         coordinates: ArtifactRef | None = None,
         k: int = 11,
+        ann_ef: int | None = None,
         batch_size: int | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Query an ANN artifact and persist compact neighbor matrices.
+
+        Every cell is queried against the index for itself and its ``k``
+        nearest other cells, on the datastore's ``nthreads`` threads; the
+        neighbors do not depend on the thread count. The share of cells that
+        the search returns among their own neighbours is recorded as
+        ``self_hit_rate``, in percent, and a rate below 99.5% warns that the
+        index or the search depth is too small for these coordinates.
+
+        Args:
+            ann_index: ANN index artifact to query.
+            coordinates: Optional check that the index was built on these
+                coordinates; it cannot redirect the query.
+            k: Neighbors per cell, excluding the cell itself; at most one
+                fewer than the cells.
+            ann_ef: Search depth (hnswlib ``ef``) of the query. By default
+                ``max(index_ef, 2 * k)``, where ``index_ef`` is the
+                ``ann_ef`` that the index records, 200 by default. The search
+                never covers fewer than ``k + 1`` candidates. The artifact
+                records the depth it used as its ``ann_ef`` unless that is
+                ``max(index_ef, k + 1)``, the depth of the index's own
+                ``ann_ef`` as hnswlib applies it; an artifact without
+                ``ann_ef`` searched that depth, so a default query with
+                ``2 * k`` at most ``index_ef`` keeps the identity of earlier
+                queries.
+            batch_size: Coordinate rows queried per block; by default the
+                stored row band.
+            invalidate_cache: Force a new neighbors artifact.
+
+        Returns:
+            Reference to the neighbors artifact.
 
         Raises:
             MemoryError: If the query exceeds the memory budget.
@@ -2351,6 +2481,9 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         if coordinates is not None and coordinates != stored_coordinates:
             raise ValueError("coordinates do not match the ANN artifact input")
         requested_k = integer_argument(k, "k", minimum=1)
+        requested_ef = (
+            None if ann_ef is None else integer_argument(ann_ef, "ann_ef", minimum=1)
+        )
         resolved_batch_size = (
             None
             if batch_size is None
@@ -2375,17 +2508,30 @@ class _GraphOperationsMixin(_GraphOperationsBase):
         ann_metric = ann_parameters.get("ann_metric")
         if ann_metric not in {"l2", "cosine"}:
             raise ValueError("ANN artifact has no supported distance metric")
-        ann_ef = ann_parameters.get("ann_ef")
-        if isinstance(ann_ef, bool) or not isinstance(ann_ef, int) or ann_ef < 1:
+        index_ef = ann_parameters.get("ann_ef")
+        if isinstance(index_ef, bool) or not isinstance(index_ef, int) or index_ef < 1:
             raise ValueError(
                 "ANN artifact has no valid ann_ef search depth. Re-run graph.ann_index."
             )
-        ann_parallel = ann_parameters.get("ann_parallel")
-        if not isinstance(ann_parallel, bool):
+        # A complete index record names ann_parallel, although queries of a
+        # serial and of a parallel index alike use every datastore thread.
+        if not isinstance(ann_parameters.get("ann_parallel"), bool):
             raise ValueError(
                 "ANN artifact has no ann_parallel record. Re-run graph.ann_index."
             )
-        query_threads = self.nthreads if ann_parallel else 1
+        search_depth = query_search_depth(
+            effective_k, index_ef=index_ef, requested=requested_ef
+        )
+        # The identity records the depth only when it is not the one that the
+        # index's own ann_ef gives, which every query searched before queries
+        # chose a depth, so a query of that depth keeps their identity.
+        index_depth = query_search_depth(
+            effective_k, index_ef=index_ef, requested=index_ef
+        )
+        recorded_depth = None if search_depth == index_depth else search_depth
+        # Each cell's search is independent, so any thread count returns the
+        # same neighbors.
+        query_threads = self.nthreads
         payload = validate_ann_index_contract(
             artifact_group(self.zw, ann_ref),
             str(ann_metric),
@@ -2397,6 +2543,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             coordinates=stored_coordinates,
             k=effective_k,
             distance_metric=str(ann_metric),
+            ann_ef=recorded_depth,
             nthreads=query_threads,
             batch_size=effective_batch_size,
             invalidate_cache=invalidate_cache,
@@ -2433,7 +2580,10 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             )
             data = coordinate_source.data
             scratch = ann_query_block_bytes(
-                int(data.chunksize[0]), effective_k, ef=ann_ef, nthreads=query_threads
+                int(data.chunksize[0]),
+                effective_k,
+                ef=search_depth,
+                nthreads=query_threads,
             ) + _float32_copy_bytes(data, dims)
             # The uint32 indices and float32 distances of every cell.
             results = n_cells * effective_k * 8
@@ -2468,7 +2618,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             )
             ann_idx = AnnIndexStage.configure(
                 ann_idx,
-                ef=ann_ef,
+                ef=search_depth,
                 threads=query_threads,
             )
             query = NeighborQueryStage(
@@ -2511,6 +2661,7 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 )
             # The index is released before the results are written.
             del query, ann_idx
+            self_hit_rate = 100.0 * (n_cells - missed_self_hits) / n_cells
             with artifact_transaction(self.zw, planned) as group:
                 array_profile = resolve_storage_profile(group.store)
                 zarr_format = _group_zarr_format(group)
@@ -2545,8 +2696,16 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 )
                 group.attrs["n_cells"] = n_cells
                 group.attrs["n_neighbors"] = effective_k
-                group.attrs["self_hit_rate"] = (
-                    100.0 * (n_cells - missed_self_hits) / n_cells
+                group.attrs["self_hit_rate"] = self_hit_rate
+            if self_hit_rate < _MIN_SELF_HIT_RATE:
+                warn(
+                    f"Only {self_hit_rate:.2f}% of cells found themselves among "
+                    f"their {effective_k + 1} nearest neighbours in the ANN index "
+                    f"(below {_MIN_SELF_HIT_RATE}%), so the search likely missed "
+                    "true neighbours of other cells as well. Rebuild the index with "
+                    "graph.ann_index and a larger ann_efc or ann_m, or query it "
+                    "with a larger ann_ef. Cells with identical coordinates also "
+                    "lower this rate."
                 )
         action = "Reused" if planned.reused else "Stored"
         logger.info(f"{action} {effective_k} neighbors for each of {n_cells} cells")
@@ -2613,6 +2772,14 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             from ...neighbors.graph import build_connectivity_arrays
 
             self._require_writable("build_connectivity_map")
+            # Admit the conversion before the neighbor matrices are read.
+            _require_graph_budget(
+                self.resources,
+                required=connectivity_peak_bytes(n_cells, n_neighbors),
+                work="Building the connectivity map",
+                n_cells=n_cells,
+                n_edges=n_cells * n_neighbors,
+            )
             distance_values = np.asarray(
                 as_zarr_array(
                     group["distances"],
@@ -2701,7 +2868,10 @@ class _GraphOperationsMixin(_GraphOperationsBase):
 
         Args:
             graph: Connectivity-map or integrated-graph artifact.
-            symmetric: If True, makes the graph symmetric by adding it to its transpose.
+            symmetric: If True, returns the fuzzy union of the directed edge
+                weights, ``A + A^T - A * A^T`` with ``*`` the elementwise
+                product, so a pair of cells joined in both directions keeps
+                ``a + b - a * b`` rather than the sum of its two weights.
             upper_only: If True, then only the values from upper triangular of the matrix are returned. This is only
                        used when symmetric is True.
             use_k: Number of top k-nearest neighbours to keep in the graph. It must be an integer from 1 to the
@@ -2906,6 +3076,27 @@ class _GraphOperationsMixin(_GraphOperationsBase):
                 )
         if len(set(assays)) != len(assays):
             raise ValueError("Assay integration requires unique assay sources")
+        neighbor_counts = (
+            [
+                self._get_graph_ncells_k(self._graph_location(source))[1]
+                for source in captured_sources
+            ]
+            if method == "snn"
+            else []
+        )
+        if len(set(neighbor_counts)) > 1:
+            counts = ", ".join(
+                f"{assay_name}: {count}"
+                for assay_name, count in zip(assays, neighbor_counts, strict=True)
+            )
+            raise ValueError(
+                "SNN integration needs graphs with the same number of neighbors "
+                f"per cell, but they have {counts}. Rebuild the connectivity "
+                "maps from neighbors of one k, such as "
+                f"graph.neighbors(ann_index, k={min(neighbor_counts)}), or "
+                "integrate the neighbors artifacts with method='wnn', which "
+                "keeps the smallest k."
+            )
         for assay_name in assays:
             # Two or more sources share the selection, so it is set.
             assert shared_selection is not None
@@ -2986,10 +3177,6 @@ class _GraphOperationsMixin(_GraphOperationsBase):
 
         modality_weights: np.ndarray | None = None
         if method == "snn":
-            neighbor_counts = [
-                self._get_graph_ncells_k(self._graph_location(source))[1]
-                for source in captured_sources
-            ]
             # Loaded graphs use int32 CSR indices unless their edges or
             # cells exceed its range.
             index_itemsize = np.dtype(

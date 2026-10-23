@@ -1026,7 +1026,12 @@ def test_build_mapping_reference_validates_arguments_before_reading(
         artifact_id="b" * 64,
     )
 
-    with pytest.raises(ValueError, match="requires a read-write store"):
+    # A read-only store plans first: it refuses to write a missing reference.
+    with pytest.raises(
+        PermissionError,
+        match="^build_mapping_reference requires a DataStore opened with "
+        "zarr_mode='r\\+'$",
+    ):
         read_only.mapping.build_reference(mapping_source.neighbors)
     for arguments, error, message in (
         ({"neighbors": "neighbors"}, TypeError, "neighbors must be an ArtifactRef"),
@@ -1045,6 +1050,11 @@ def test_build_mapping_reference_validates_arguments_before_reading(
         with pytest.raises(error, match=message):
             datastore.mapping.build_reference(**arguments)
     assert datastore.artifacts.list(kind="mapping_reference", from_assay="RNA") == []
+
+    # Once the reference is saved, a read-only store returns it.
+    built = datastore.mapping.build_reference(mapping_source.neighbors)
+    reopened = DataStore(datastore.zarr_loc, default_assay="RNA", zarr_mode="r")
+    assert reopened.mapping.build_reference(mapping_source.neighbors) == built
 
 
 def _source_groups(datastore, source: MappingStoreSource) -> dict[str, zarr.Group]:

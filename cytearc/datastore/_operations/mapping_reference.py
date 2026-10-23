@@ -67,9 +67,15 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
         *,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
-        """Package a scaled-PCA neighbor chain as an immutable artifact."""
-        if self.zarr_mode != "r+":
-            raise ValueError("Building a mapping reference requires a read-write store")
+        """Package a scaled-PCA neighbor chain as an immutable artifact.
+
+        A read-only store returns a saved reference of the same chain and
+        refuses only to write a new one.
+
+        Raises:
+            PermissionError: If the reference must be written and the store
+                is not opened with ``zarr_mode='r+'``.
+        """
         if not isinstance(neighbors, ArtifactRef):
             raise TypeError("neighbors must be an ArtifactRef")
         if not isinstance(invalidate_cache, bool):
@@ -435,6 +441,7 @@ class _MappingReferenceOperationsMixin(_MappingReferenceOperationsBase):
             reuse_validator=valid_reference,
         )
         if not planned.reused:
+            self._require_writable("build_mapping_reference")
             with artifact_transaction(self.zw, planned) as group:
                 write_artifact_mapping_reference_from_sources(
                     group,

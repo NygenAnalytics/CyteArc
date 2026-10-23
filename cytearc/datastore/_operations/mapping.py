@@ -266,10 +266,14 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         A query cell whose raw counts are zero in every reference feature that
         the query measured is recorded as uninformative. It keeps a projection
         row but is excluded from label transfer, mapping scores, Symphony
-        query-batch statistics, and ``queryScaledDispersion``.
+        query-batch statistics, and ``queryScaledDispersion``. A read-only
+        query store returns a saved projection of the same request.
 
         Raises:
             UnmeasuredCellsError: If the query assay did not measure a selected cell.
+            PermissionError: If the projection or its overlap selection must be
+                written and the query store is not opened with
+                ``zarr_mode='r+'``, before any query cell is projected.
         """
         if not isinstance(reference, MappingReference):
             raise TypeError("reference must be a MappingReference")
@@ -310,13 +314,12 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         assay = self._get_assay(assay_name)
         if not isinstance(assay, RNAassay):
             raise TypeError("Mapping currently supports RNA query assays only")
-        # After the argument and assay checks, and before the write check, so
-        # a read-only store refuses unmeasured cells as a writable one does.
+        # After the argument and assay checks, so a read-only store refuses
+        # unmeasured cells as a writable one does. A read-only store reuses a
+        # saved projection and refuses only before it would write.
         self._require_measured_cells(
             assay_name, cell_selection, operation="run_mapping"
         )
-        if self.zarr_mode != "r+":
-            raise ValueError("Mapping requires a read-write query datastore")
         validated_cells = validate_stored_selection_integrity(
             self.zw,
             cell_selection,
@@ -412,6 +415,8 @@ class _MappingOperationsMixin(_MappingOperationsBase):
             execution_options={},
             expected_payload_fingerprint=fingerprint_array(feature_mask),
         )
+        if not selection_plan.reused:
+            self._require_writable("run_mapping")
         _write_feature_selection(
             self.zw,
             selection_plan,
@@ -438,6 +443,7 @@ class _MappingOperationsMixin(_MappingOperationsBase):
         )
         if projection_plan.reused:
             return projection_plan.ref
+        self._require_writable("run_mapping")
 
         writer = ProjectionWriter(
             self.zw,

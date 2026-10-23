@@ -119,6 +119,42 @@ def ann_index_file_bytes(n_cells: int, dims: int, m: int) -> int:
     )
 
 
+def query_search_depth(
+    k: int,
+    *,
+    index_ef: int,
+    requested: int | None = None,
+) -> int:
+    """Return the hnswlib search depth ``ef`` of a self-query for ``k`` neighbors.
+
+    Without a ``requested`` depth the query searches ``max(index_ef, 2 * k)``
+    candidates: the smallest depth that its index records, 200 by default, or
+    two per neighbor, whichever is larger. hnswlib never searches fewer
+    candidates than it returns, and a self-query returns the cell itself
+    beside its ``k`` neighbors, so the depth is at least ``k + 1``. The result
+    is the depth that the search uses.
+
+    Args:
+        k: Neighbors per cell, excluding the cell itself.
+        index_ef: The index's recorded ``ann_ef``.
+        requested: An explicit depth, or None for the default.
+
+    Returns:
+        The search depth as a Python integer.
+
+    Raises:
+        TypeError: If an argument is not an integer.
+        ValueError: If an argument is below one.
+    """
+    neighbors = integer_argument(k, "k", minimum=1)
+    floor = integer_argument(index_ef, "index_ef", minimum=1)
+    if requested is None:
+        depth = max(floor, 2 * neighbors)
+    else:
+        depth = integer_argument(requested, "ann_ef", minimum=1)
+    return max(depth, neighbors + 1)
+
+
 def ann_query_block_bytes(rows: int, k: int, *, ef: int, nthreads: int) -> int:
     """Estimate the bytes one block of a neighbor query holds beside the block.
 

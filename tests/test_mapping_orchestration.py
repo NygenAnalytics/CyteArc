@@ -545,7 +545,11 @@ def test_mapping_guards_precede_query_writes(
         zarr_mode="r",
     )
     read_only_before = _snapshot_store(read_only.zarr_loc)
-    with pytest.raises(ValueError, match="read-write query datastore"):
+    # A read-only query store plans first and refuses before it would write.
+    with pytest.raises(
+        PermissionError,
+        match="^run_mapping requires a DataStore opened with zarr_mode='r\\+'$",
+    ):
         read_only.mapping.run(reference, reference.cell_selection)
     assert _snapshot_store(read_only.zarr_loc) == read_only_before
 

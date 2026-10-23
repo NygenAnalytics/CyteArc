@@ -129,7 +129,9 @@ _SIGNATURE_DIGESTS = {
     # run_leiden_clustering gained the native backend: backend is now
     # Literal["cytearc", "igraph", "leidenalg"] with the default "cytearc".
     # The inherited constructor takes min_features_per_cell: int | None.
-    GraphDataStore: "d0ea800dbb35d3e9cfb8a389e89e25a23e4b3ac20d65d58585792004a2c83d7a",
+    # build_ann_index defaults to ann_efc=200, ann_ef=200, and ann_m=24, and
+    # query_neighbors gained the keyword ann_ef: int | None = None.
+    GraphDataStore: "a848c56b3f6b98c9a5a90a26af7a86b46294cb313a14734a2eee403188b5ab33",
     MappingDatastore: "a4839ac0372df95f021fd8c383c1ac2aff6796c6b093e05510c71ad7e8449a72",
     # run_hto_demultiplexing gained the keyword-only positive_quantile: float
     # with the default 0.99. auto_filter_cells gained the keyword-only

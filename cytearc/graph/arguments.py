@@ -28,6 +28,50 @@ def graph_flag(value: object, name: str) -> bool:
     raise TypeError(f"{name} must be a boolean")
 
 
+def graph_load_flags(
+    symmetric_graph: object,
+    graph_upper_only: object,
+) -> tuple[bool, bool]:
+    """Return the graph-loading flags of a graph consumer as Python bools.
+
+    ``graph_upper_only`` keeps the upper triangle of the symmetrized graph, so
+    it applies only with ``symmetric_graph``. Alone it would change nothing
+    and record an identical result under a second identity, so it raises.
+    """
+    symmetric = graph_flag(symmetric_graph, "symmetric_graph")
+    upper_only = graph_flag(graph_upper_only, "graph_upper_only")
+    if upper_only and not symmetric:
+        raise ValueError(
+            "graph_upper_only=True applies only with symmetric_graph=True; pass "
+            "symmetric_graph=True as well, or leave graph_upper_only False"
+        )
+    return symmetric, upper_only
+
+
+def umap_graph_flags(
+    symmetric_graph: object,
+    graph_upper_only: object,
+) -> tuple[bool, bool]:
+    """Check the graph-loading flags of ``embeddings.umap``; both must be False.
+
+    UMAP optimizes the fuzzy union ``w_ij + w_ji - w_ij * w_ji`` of the
+    graph's edge weights, which it forms itself. A graph that
+    ``symmetric_graph`` already symmetrized would be united twice, and the
+    union of its upper triangle is the union of the graph, so neither flag
+    has a correct effect of its own.
+    """
+    symmetric = graph_flag(symmetric_graph, "symmetric_graph")
+    upper_only = graph_flag(graph_upper_only, "graph_upper_only")
+    if symmetric or upper_only:
+        raise ValueError(
+            "embeddings.umap symmetrizes the graph itself with the fuzzy union "
+            "w_ij + w_ji - w_ij * w_ji, so symmetric_graph=True would apply that "
+            "union twice and graph_upper_only=True would change nothing; leave "
+            "both False"
+        )
+    return symmetric, upper_only
+
+
 def parameter(
     default: Any = MISSING,
     *,
@@ -218,6 +262,8 @@ class AnnIndexArguments(OperationArguments):
     coordinates: ArtifactRef = artifact_input()
     ann_metric: str = parameter()
     ann_efc: int = parameter()
+    # The smallest default search depth of the index's queries, which
+    # graph.neighbors and mapping projections read from this record.
     ann_ef: int = parameter()
     ann_m: int = parameter()
     rand_state: int = parameter()
@@ -243,6 +289,11 @@ class NeighborQueryArguments(OperationArguments):
     nthreads: int = execution()
     batch_size: int = execution()
     invalidate_cache: bool = execution(False)
+    # The search depth (hnswlib ``ef``) the query used, as the resolved
+    # integer, when it differs from the depth the index records, which
+    # hnswlib raises to k + 1. Absent, the query searched the index's depth,
+    # as every query did before queries chose their own.
+    ann_ef: int | None = parameter(None, omit_if_none=True)
 
 
 @dataclass(frozen=True, slots=True)

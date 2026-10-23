@@ -855,7 +855,7 @@ def test_query_neighbors_raises_before_loading_the_index_over_budget(
     monkeypatch.setattr(graph_operations, "load_ann_index", recorded)
     reads = _record_coordinate_reads(monkeypatch)
     # build_ann_index's default ann_m.
-    index_bytes = ann_index_peak_bytes(N_CELLS, 5, 48, nthreads=1)
+    index_bytes = ann_index_peak_bytes(N_CELLS, 5, 24, nthreads=1)
     store.resources = ResourceBudget(index_bytes, 1)
 
     with pytest.raises(MemoryError) as caught:
@@ -867,12 +867,12 @@ def test_query_neighbors_raises_before_loading_the_index_over_budget(
     # results or the copy that loads the index through a temporary file.
     payload = int(artifact_group(store.zw, ann_index)["ann_idx_bytes"].shape[0])
     assert required >= index_bytes + N_CELLS * 7 * 8 + max(
-        ann_query_block_bytes(N_CELLS, 7, ef=50, nthreads=1),
+        ann_query_block_bytes(N_CELLS, 7, ef=200, nthreads=1),
         _ann_index_transfer_bytes(payload),
     )
     for size in (
         f"Querying 7 neighbors of {N_CELLS} cells with 5 dimensions",
-        f"{index_bytes} of them for the hnswlib index with ann_m=48",
+        f"{index_bytes} of them for the hnswlib index with ann_m=24",
         f"operation limit is {index_bytes} bytes",
     ):
         assert size in message
@@ -888,7 +888,7 @@ def test_query_neighbors_raises_before_loading_the_index_over_budget(
     assert len(loads) == 1
     assert reads == ["Identifying neighbors"]
     assert held and not any(held)
-    scratch = ann_query_block_bytes(N_CELLS, 7, ef=50, nthreads=1)
+    scratch = ann_query_block_bytes(N_CELLS, 7, ef=200, nthreads=1)
     assert _reserved_bytes(reports) == [index_bytes + N_CELLS * 7 * 8 + scratch]
 
 

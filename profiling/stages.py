@@ -1629,11 +1629,10 @@ def _run_analysis(
             kind="reduction",
             assay=workflow.assayName,
         )
+        # The index and its queries use graph.ann_index's and graph.neighbors'
+        # default search settings, as a pipeline run does.
         ref = store.graph.ann_index(
             reduction,
-            ann_efc=min(100, max(workflow.k * 3, 50)),
-            ann_ef=min(100, max(workflow.k * 3, 50)),
-            ann_m=min(max(48, int(workflow.dims * 1.5)), 64),
             ann_parallel=workflow.annParallel,
             rand_state=workflow.graphSeed,
             invalidate_cache=invalidateCache,

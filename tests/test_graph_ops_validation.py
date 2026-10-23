@@ -251,7 +251,8 @@ def test_query_neighbors_rejects_malformed_ann_lineage_before_loading() -> None:
             {"ann_metric": "l2", "ann_ef": True, "ann_parallel": False},
             "ann_ef search depth",
         ),
-        # The query's thread count follows the recorded ann_parallel flag.
+        # A complete index record names ann_parallel, although queries of
+        # any index use every datastore thread.
         ({"ann_metric": "l2", "ann_ef": 50}, "ann_parallel record"),
         (
             {"ann_metric": "l2", "ann_ef": 50, "ann_parallel": 1},
