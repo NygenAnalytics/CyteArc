@@ -36,7 +36,7 @@ The aim is one coherent execution path, not reimplementation for its own sake.
 - **Matched multi-omics:** {term}`SNN integration` and [Hao-inspired WNN](https://doi.org/10.1016/j.cell.2021.04.048) integration for two or more assays, with WNN reporting one per-cell weight per modality.
 - **Clustering:** a native, multi-threaded implementation of [Leiden](https://doi.org/10.1038/s41598-019-41695-z) community detection ({ref}`details <leiden_method>`) and a native implementation of [Paris hierarchical clustering](https://doi.org/10.48550/arXiv.1806.01664) with fixed and branch-adaptive cuts.
 - **Trajectory analysis:** memory-aware [Population Balance Analysis](https://doi.org/10.1073/pnas.1714723115), supervised terminal-state fate probabilities, pseudotime aggregation and modules, and [MAGIC-style graph diffusion](https://doi.org/10.1016/j.cell.2018.05.061) for imputation.
-- **Statistics and diagnostics:** marker AUC, the [Mann-Whitney U test](https://doi.org/10.1214/aoms/1177730491) with [Benjamini-Hochberg](https://doi.org/10.1111/j.2517-6161.1995.tb02031.x) correction, doublet scores, cluster separability, and integration metrics informed by the [scIB benchmark](https://doi.org/10.1038/s41592-021-01336-8).
+- **Statistics and diagnostics:** marker AUC, the [Mann-Whitney U test](https://doi.org/10.1214/aoms/1177730491) with [Benjamini-Hochberg](https://doi.org/10.1111/j.2517-6161.1995.tb02031.x) correction, [Scrublet](https://doi.org/10.1016/j.cels.2018.11.005) doublet scores and calls simulated within each sample, cluster separability, and integration metrics informed by the [scIB benchmark](https://doi.org/10.1038/s41592-021-01336-8).
 - **Gene sets, protein, and sample tags:** [AUCell](https://doi.org/10.1038/nmeth.4463) and [WAGGR](https://doi.org/10.1093/bioadv/vbac016) activity scores, CITE-seq processing, and [cell-hashing](https://doi.org/10.1186/s13059-018-1603-1) demultiplexing.
 - **Regulons and chromatin activity:** [GRNBoost2](https://doi.org/10.1093/bioinformatics/bty916)
   co-expression networks and [SCENIC](https://doi.org/10.1038/nmeth.4463) cisTarget pruning
@@ -119,6 +119,42 @@ the same seed. They are kept to reproduce results computed with them; `"igraph"`
 default before `"cytearc"`. The backend is part of a clustering's artifact identity, so results of
 different backends are never reused for one another.
 
+(doublet_method)=
+
+## Doublet detection
+
+`qc.doublets` and the pipeline's doublet stage follow
+[Scrublet](https://doi.org/10.1016/j.cels.2018.11.005) (Wolock, Lopez and Klein, 2019). Doublets
+form only among the cells of one capture, so each sample, the cells that share a label of
+`sample_column`, is simulated and scored on its own; without a sample column every cell is one
+sample. A sample of `n` cells simulates `round(simulation_ratio * n)` doublets, at least one, by
+adding the counts of two of its cells drawn at random, so cell types parent doublets as often as
+they occur. With `heterotypic_fraction` above 0, that share of the doublets draws its second parent
+from the cells outside its first parent's cluster. The doublets are normalized like the graph's
+cells, their library size the sum of their parents', and projected onto the graph's PCA without
+refitting it.
+
+Each cell and simulated doublet is then scored on its `k = round(save_k * (1 + r))` nearest
+neighbors among the sample's cells and simulated doublets, with `r` simulated doublets per cell, so
+that about `save_k` of them are cells where doublets are as dense as cells. These neighbors come
+from an hnswlib index of the sample, built with the settings of the graph's ANN index, on one thread
+unless that index was parallel. With `d` simulated doublets among the neighbors, `q = (d + 1) /
+(k + 2)` estimates their fraction, and `q / ((1 - q) r)` how much denser doublets are than singlets
+around the cell. Bayes' rule with the prior `expected_doublet_rate` gives the score, the probability
+that the cell is a doublet. `raw_scores` keeps `d / k`.
+
+The scores of a sample's simulated doublets are bimodal: doublets of two cells of one type, which
+look like a singlet, score low and the others high. The threshold is the minimum between the two
+modes, the method of [Prewitt and Mendelsohn](https://doi.org/10.1111/j.1749-6632.1965.tb11715.x)
+as described by [Glasbey](https://doi.org/10.1006/cgip.1993.1040): their histogram of 256
+equal-width bins is smoothed with a running mean of three bins until it has two maxima, and the
+threshold is the center of the lowest bin between them. When it never has two,
+[Otsu's threshold](https://doi.org/10.1109/TSMC.1979.4310076) of the same histogram is used. A cell
+whose score is above its sample's threshold, or above `threshold` when one is given, is a predicted
+doublet. The fraction of simulated doublets above the threshold is the detectable doublet fraction,
+and the fraction of cells called doublets divided by it is Scrublet's estimate of the sample's
+doublet rate. Doublets of two cells of one type cannot be told from singlets this way.
+
 ## Validation
 
 Validation is method-specific.
@@ -128,6 +164,16 @@ Agreement measured for one method is not evidence of equivalence for the rest of
   the default `positive.quantile` of 0.99, on a pool where every singlet's highest CLR value is its
   positive tag. CyteArc names a singlet by its one positive tag, while `HTODemux` names it by its
   highest CLR value, so the two can differ in strongly unbalanced pools.
+- Doublet detection is compared with scanpy 1.12.4 `pp.scrublet` on the mouse pancreas sample
+  of 3,696 cells with 300 doublets of two cell types and 60 of one type added, each the sum of two
+  cells' counts. Over seeds 0 to 3, CyteArc ranks the doublets at AUROC 0.939 to 0.945 (0.971 to
+  0.974 for those of two types) and Scrublet at 0.913 to 0.919 (0.953 to 0.958). CyteArc's
+  automatic thresholds call 221 to 223 cells, 211 to 213 of the 300 doublets of two types and 9 or
+  10 singlets, and estimate a doublet rate of 0.09, the rate of the added doublets; Scrublet's
+  call 241 to 252 cells, 222 to 229 of them and 17 to 22 singlets. Scores correlate across seeds at Spearman 0.92
+  to 0.95 for CyteArc and 0.95 for Scrublet; the two methods' scores at 0.64. Tests check scores
+  and calls of doublets added to synthetic counts of one and of two captures, that no simulated
+  doublet pairs cells of two samples, and the neighbor counts against exact nearest neighbors.
 - Symphony-style query correction is checked against a golden fixture generated with the R Symphony 0.1.3 `mapQuery` implementation, including a case with nonzero correction.
 - Harmony2's ridge regression solves, batch pruning, stabilized cluster assignment update, and
   clustering objective are checked against direct dense calculations from the published equations.

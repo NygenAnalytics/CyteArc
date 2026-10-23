@@ -145,8 +145,11 @@ _SIGNATURE_DIGESTS = {
     # min_auc: float | None = 0.6, max_p_adj: float | None = 0.05, and
     # sort_by: MarkerSortKey = "score"; make_bulk gained the keyword-only
     # remove_empty_columns: bool = True and return_n_cells: bool = False, and
-    # returns their tuple shapes.
-    DataStore: "4c62bcd8e62a6c9a12f9c4b3bd16d7789933fd6d50a2b79ce1bfcca3da646abf",
+    # returns their tuple shapes. run_doublet_detection gained sample_column,
+    # expected_doublet_rate, and threshold, with new defaults for the parent
+    # pool, simulation_ratio, heterotypic_fraction, save_k, smoothing_t, and
+    # normalize_scores; select_cells gained value.
+    DataStore: "10267b25dd0748137875d8d2df092819a063f57dc22abdc7222e3892df1b403e",
     # artifacts.prune_incomplete(*, dry_run: bool = True) -> list[str] was added.
     ArtifactAccessor: "6d4befabbbc91b00684038f44e0b3063905c84437587be0994c26370efa2570c",
 }

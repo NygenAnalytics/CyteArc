@@ -240,11 +240,12 @@ def test_params_doublets_on_one_selected_cluster_name_the_pipeline_settings(
     params_store,
 ):
     store = params_store
-    # At this resolution the k=15 graph of the fixture is one Leiden cluster.
+    # At this resolution the k=15 graph of the fixture is one Leiden cluster,
+    # which forced heterotypic doublets cannot pair.
     params = _params(
         neighbors={"k": 15},
         leiden={"partitions": [0.0001], "selected": 0.0001},
-        doublets=True,
+        doublets={"heterotypic_fraction": 0.8},
     )
 
     with pytest.raises(PipelineExecutionError) as caught:

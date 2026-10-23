@@ -1172,7 +1172,11 @@ def test_composite_consumers_admit_source_scratch_before_count_reads(
             )["score"]
         if operation == "doublets":
             return _load_parent_counts(
-                current.RNA.rawData, rows[:1], current.resources, 0
+                current.RNA.rawData,
+                rows[:1],
+                np.arange(values.shape[1]),
+                current.resources,
+                0,
             ).toarray()
         stream = AlignedFeatureStream(
             current.RNA,

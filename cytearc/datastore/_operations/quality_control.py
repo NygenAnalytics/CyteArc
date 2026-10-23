@@ -1,3 +1,4 @@
+import json
 from collections.abc import Iterable, Sequence
 from numbers import Real
 from typing import TYPE_CHECKING, Any, Literal
@@ -47,6 +48,7 @@ from ...metadata.arguments import (
 )
 from ...metadata.membership import measured_selection
 from ...metadata.rows import (
+    apply_missing_mask,
     metadata_missing_mask,
     read_metadata_missing_rows,
     read_metadata_missing_rows_chunkwise,
@@ -54,11 +56,19 @@ from ...metadata.rows import (
 )
 from ...metadata.selection import (
     NamedCellArtifact,
+    cell_value_array,
+    cell_value_spec,
     grouping_value_name,
     require_complete_cluster_labels,
     resolve_cell_aligned_artifact,
+    valid_category_mask,
 )
 from ...storage.validation_scope import validation_scoped
+from ...storage.artifact_writer import (
+    ArrayRequirement,
+    AttributeRequirement,
+    plan_artifact,
+)
 from ...storage.artifacts import (
     artifact_group,
     artifact_path,
@@ -87,6 +97,7 @@ from ...utils.compute import controlled_compute
 from ...utils.logging import logger
 
 if TYPE_CHECKING:
+    from ...quality_control.doublets import DoubletSampleResult
     from ..mapping_datastore import MappingDatastore as _QualityControlOperationsBase
 else:
     _QualityControlOperationsBase = object
@@ -118,6 +129,100 @@ def _validated_real(
             bound += f" and <= {high:g}"
         raise ValueError(f"{name} must be a finite number {bound}")
     return resolved
+
+
+def _doublet_sample_columns(sample_column: object) -> tuple[str, ...]:
+    """Return the cell metadata columns that split doublet detection into samples."""
+    if sample_column is None:
+        return ()
+    columns = (
+        (sample_column,)
+        if isinstance(sample_column, str)
+        else tuple(sample_column)
+        if isinstance(sample_column, Sequence)
+        else ()
+    )
+    if not columns or not all(isinstance(column, str) and column for column in columns):
+        raise TypeError(
+            "sample_column must be a non-empty string, a sequence of them, or None"
+        )
+    if len(set(columns)) != len(columns):
+        raise ValueError("sample_column must not repeat a column")
+    return columns
+
+
+def _doublet_sample_codes(
+    columns: tuple[str, ...],
+    labels: Sequence[np.ndarray],
+    n_cells: int,
+) -> tuple[np.ndarray, list[dict[str, str]], str | None]:
+    """Group the selected cells into samples by their label in every column.
+
+    Returns each cell's sample code, numbering the samples in sorted label
+    order; each sample's labels by column; and the fingerprint of the cells'
+    samples. Without columns every cell is in one sample without labels, and
+    the fingerprint is None.
+    """
+    if not columns:
+        return np.zeros(n_cells, dtype=np.int64), [{}], None
+    names_by_column = []
+    codes_by_column = []
+    for column, values in zip(columns, labels, strict=True):
+        array = np.asarray(values, dtype=object)
+        if array.shape != (n_cells,):
+            raise ValueError(
+                f"Sample column {column!r} must hold one label per selected cell"
+            )
+        missing = int(np.count_nonzero(~valid_category_mask(array)))
+        if missing:
+            raise ValueError(
+                f"Sample column {column!r} has no label for {missing} selected "
+                "cells. Doublets are simulated within each sample, so every "
+                "selected cell needs one"
+            )
+        names, codes = np.unique(array.astype(str), return_inverse=True)
+        names_by_column.append(names)
+        codes_by_column.append(codes.reshape(-1))
+    combinations, codes = np.unique(
+        np.column_stack(codes_by_column), axis=0, return_inverse=True
+    )
+    samples = [
+        {
+            column: str(names[code])
+            for column, names, code in zip(columns, names_by_column, row, strict=True)
+        }
+        for row in combinations
+    ]
+    rendered = np.asarray([json.dumps(sample) for sample in samples])
+    codes = codes.reshape(-1).astype(np.int64, copy=False)
+    return codes, samples, fingerprint_strings(rendered[codes])
+
+
+def _doublet_sample_text(labels: dict[str, str]) -> str:
+    return (
+        "(" + ", ".join(f"{column}={value!r}" for column, value in labels.items()) + ")"
+    )
+
+
+def _doublet_sample_summary(
+    labels: dict[str, str],
+    outcome: "DoubletSampleResult",
+) -> dict[str, Any]:
+    """Describe one sample's doublet simulation and calls as JSON values."""
+    plan = outcome.plan
+    return {
+        "labels": labels,
+        "cells": plan.cells,
+        "simulatedDoublets": plan.simulated,
+        "neighbors": plan.neighbors,
+        "adjustedNeighbors": plan.adjusted_neighbors,
+        "heterotypicFraction": outcome.heterotypic_fraction,
+        "threshold": outcome.threshold,
+        "thresholdMethod": outcome.threshold_method,
+        "predictedDoublets": outcome.predicted,
+        "detectableDoubletFraction": outcome.detectable_fraction,
+        "estimatedDoubletRate": outcome.estimated_doublet_rate,
+    }
 
 
 class _QualityControlOperationsMixin(_QualityControlOperationsBase):
@@ -426,12 +531,15 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         cell_selection: ArtifactRef | None = None,
         keep_bounds: bool = False,
         invalidate_cache: bool = False,
+        value: str | None = None,
     ) -> ArtifactRef:
         """Select cells from one numeric or categorical artifact vector.
 
         Numeric values use optional bounds. Categorical values use ``include``.
         The artifact is read from its kind's canonical array, for example
-        ``phase`` of a ``cell_cycle`` artifact or ``labels`` of a ``cluster_cut``.
+        ``phase`` of a ``cell_cycle`` artifact or ``labels`` of a ``cluster_cut``,
+        or from the other per-cell array that ``value`` names, such as
+        ``predicted_doublets`` of a ``doublet_score`` artifact.
         The artifact must identify its source cell selection in provenance. By
         default the new selection is composed with that source selection. An
         explicit ``cell_selection`` may narrow it further, but cannot add cells
@@ -446,6 +554,8 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             cell_selection: Optional prior selection to intersect.
             keep_bounds: Retain values exactly equal to either bound.
             invalidate_cache: Create a fresh result instead of reusing a match.
+            value: The per-cell array of ``values`` to read, or None for its
+                canonical array. A selection records any other array.
 
         Returns:
             A complete datastore-scoped ``cell_selection`` artifact.
@@ -457,6 +567,13 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             raise TypeError("values must be an ArtifactRef")
         if not isinstance(keep_bounds, bool):
             raise TypeError("keep_bounds must be a boolean")
+        # The canonical array is read and recorded as before; any other array
+        # is named in the selection's parameters.
+        value_name: str | None = None
+        if value is not None:
+            value_name, _categorical = cell_value_array(values.kind, value)
+            if value_name == cell_value_spec(values.kind).name:
+                value_name = None
 
         raw_include: tuple[str | int | float | bool, ...] | None = None
         if include is not None:
@@ -503,12 +620,13 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             raise TypeError("cell_selection must be an ArtifactRef")
         # The one reader of cell-aligned artifacts checks the kind, the cell
         # selection that the artifact records, and that cell_selection lies
-        # within it, and reads the canonical array for exactly those cells,
+        # within it, and reads the requested array for exactly those cells,
         # once what it holds fits the memory budget, as load_cell_values does.
         aligned = resolve_cell_aligned_artifact(
             self.zw,
             values,
             cell_selection=cell_selection,
+            value_name=value_name,
             max_bytes=self.memoryBytes,
         )
         source_selection = aligned.source_cell_selection
@@ -603,6 +721,14 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             "source_cell_selection": source_selection,
             "prior_cell_selection": prior_selection,
         }
+        parameters: dict[str, Any] = {
+            "low": resolved_low,
+            "high": resolved_high,
+            "include": resolved_include,
+            "keep_bounds": keep_bounds,
+        }
+        if value_name is not None:
+            parameters["value"] = value_name
         ref, stored = resolve_generated_selection_artifact(
             self.zw,
             scope="datastore",
@@ -611,12 +737,7 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             row_ids=prior.row_ids,
             row_ids_fingerprint=prior.row_ids_fingerprint,
             operation="select_cells",
-            parameters={
-                "low": resolved_low,
-                "high": resolved_high,
-                "include": resolved_include,
-                "keep_bounds": keep_bounds,
-            },
+            parameters=parameters,
             inputs=inputs,
             source_column="artifact",
             invalidate_cache=invalidate_cache,
@@ -1453,24 +1574,34 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         cluster_values: np.ndarray,
         connectivity: ArtifactRef,
         feature_snapshot: ArtifactRef | None = None,
-        cluster_sample_fraction: float = 0.05,
-        max_cells_per_cluster: int = 100,
-        simulation_ratio: float = 1.0,
-        heterotypic_fraction: float = 0.8,
-        save_k: int = 5,
-        smoothing_t: int = 2,
-        normalize_scores: bool = True,
+        sample_column: str | Sequence[str] | None = None,
+        sample_labels: Sequence[np.ndarray] | None = None,
+        cluster_sample_fraction: float = 1.0,
+        max_cells_per_cluster: int | None = None,
+        simulation_ratio: float = 2.0,
+        heterotypic_fraction: float = 0.0,
+        save_k: int = 30,
+        expected_doublet_rate: float = 0.05,
+        threshold: float | None = None,
+        smoothing_t: int = 0,
+        normalize_scores: bool = False,
         random_seed: int = 4444,
         invalidate_cache: bool = False,
         one_cluster_remedy: str = _ONE_CLUSTER_DOUBLET_REMEDY,
     ) -> ArtifactRef:
-        """Create doublet scores without creating metadata columns.
+        """Create doublet scores and calls without creating metadata columns.
 
+        ``sample_column`` names one cell metadata column, or several, and
+        ``sample_labels`` holds their labels for the selected cells, one array
+        per column: the cells that share every label form one sample.
         ``one_cluster_remedy`` ends the error raised when
         ``heterotypic_fraction`` is above 0 and every cell has the same
         cluster label, so a caller can name the settings that it exposes.
         """
         from ...quality_control.doublets import (
+            DoubletIndexSettings,
+            minmax_doublet_scores,
+            plan_doublet_samples,
             score_synthetic_doublets,
             smooth_doublet_scores,
         )
@@ -1478,32 +1609,55 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
 
         require_graph_kind(connectivity)
         # Arguments are checked before any reference, score, or artifact work.
-        _validated_real(
+        fraction = _validated_real(
             cluster_sample_fraction,
             "cluster_sample_fraction",
             low=0.0,
             high=1.0,
             include_low=False,
         )
-        integer_argument(max_cells_per_cluster, "max_cells_per_cluster", minimum=1)
-        _validated_real(
+        cap = (
+            None
+            if max_cells_per_cluster is None
+            else integer_argument(
+                max_cells_per_cluster, "max_cells_per_cluster", minimum=1
+            )
+        )
+        ratio = _validated_real(
             simulation_ratio, "simulation_ratio", low=0.0, include_low=False
         )
-        _validated_real(heterotypic_fraction, "heterotypic_fraction", low=0.0, high=1.0)
-        integer_argument(save_k, "save_k", minimum=1)
-        integer_argument(smoothing_t, "smoothing_t", minimum=1)
-        integer_argument(random_seed, "random_seed", minimum=0)
+        heterotypic = _validated_real(
+            heterotypic_fraction, "heterotypic_fraction", low=0.0, high=1.0
+        )
+        neighbors_k = integer_argument(save_k, "save_k", minimum=1)
+        rate = _validated_real(
+            expected_doublet_rate, "expected_doublet_rate", low=0.0, include_low=False
+        )
+        if rate >= 1:
+            raise ValueError(
+                "expected_doublet_rate must be a finite number > 0 and < 1"
+            )
+        cutoff = (
+            None
+            if threshold is None
+            else _validated_real(threshold, "threshold", low=0.0, high=1.0)
+        )
+        smoothing = integer_argument(smoothing_t, "smoothing_t", minimum=0)
+        seed = integer_argument(random_seed, "random_seed", minimum=0)
         if not isinstance(normalize_scores, bool):
             raise TypeError("normalize_scores must be a boolean")
+        columns = _doublet_sample_columns(sample_column)
+        if len(columns) != (0 if sample_labels is None else len(sample_labels)):
+            raise ValueError("Pass one array of sample labels per sample column")
         labels = np.asarray(cluster_values)
         if labels.ndim != 1:
             raise ValueError("Cluster values must contain one label per selected cell")
         # Forced heterotypic doublets need a partner outside the first
         # parent's cluster, so one cluster fails before any planning.
-        if heterotypic_fraction > 0 and len(np.unique(labels)) < 2:
+        if heterotypic > 0 and len(np.unique(labels)) < 2:
             raise ValueError(
                 "Doublet detection with heterotypic_fraction="
-                f"{float(heterotypic_fraction):g} pairs cells from two different "
+                f"{heterotypic:g} pairs cells from two different "
                 "clusters, but every selected cell has the same cluster label. "
                 f"{one_cluster_remedy}"
             )
@@ -1526,7 +1680,18 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         )
         neighbors = lineage.neighbors
         coordinates = lineage.coordinates
-        if coordinates.kind != "reduction":
+        if coordinates.kind == "batch_correction":
+            # Within one sample there is no batch to correct, so samples are
+            # scored on the PCA that the correction started from.
+            if not columns:
+                raise ValueError(
+                    "Doublet detection on a batch-corrected graph needs "
+                    "sample_column, the column of each cell's capture: doublets "
+                    "are then simulated and scored within each sample, on the "
+                    "PCA that the correction started from. To score every cell "
+                    "together, pass an uncorrected PCA graph"
+                )
+        elif coordinates.kind != "reduction":
             raise ValueError("Doublet detection requires an uncorrected PCA graph")
         active_idx = read_stored_selection_indices(
             self.zw,
@@ -1539,25 +1704,49 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         if len(labels) != len(active_idx):
             raise ValueError("Cluster values must contain one label per selected cell")
         n_active = len(active_idx)
+        codes, samples, assignments = _doublet_sample_codes(
+            columns, sample_labels or (), n_active
+        )
+        sizes = np.bincount(codes, minlength=len(samples))
+        small = [sample for sample, size in zip(samples, sizes) if size < 2]
+        if small:
+            raise ValueError(
+                "Doublets are simulated within each sample, from pairs of its "
+                f"cells, but sample {_doublet_sample_text(small[0])} has one "
+                "selected cell. Score a cell selection without such samples, "
+                "or pass a sample column that groups them with the rest of "
+                "their capture"
+            )
+        plans = plan_doublet_samples(
+            sizes, simulation_ratio=ratio, n_neighbors=neighbors_k
+        )
         arguments = DoubletScoreArguments(
             clusters=clusters,
             connectivity_map=connectivity,
             neighbors=neighbors,
-            cluster_sample_fraction=cluster_sample_fraction,
-            max_cells_per_cluster=max_cells_per_cluster,
-            simulation_ratio=simulation_ratio,
-            heterotypic_fraction=heterotypic_fraction,
-            save_k=save_k,
-            smoothing_t=smoothing_t,
+            sample_assignments_fingerprint=assignments,
+            cluster_sample_fraction=fraction,
+            max_cells_per_cluster=cap,
+            sample_columns=columns,
+            simulation_ratio=ratio,
+            heterotypic_fraction=heterotypic,
+            # Each sample counts at most its other cells, so the neighbors
+            # recorded are the most that any sample uses.
+            save_k=max(plan.neighbors for plan in plans),
+            expected_doublet_rate=rate,
+            threshold=cutoff,
+            smoothing_t=smoothing,
             normalize_scores=normalize_scores,
-            random_seed=random_seed,
+            random_seed=seed,
             invalidate_cache=invalidate_cache,
         )
         record = arguments.to_record()
         inputs = dict(record.inputs)
         if feature_snapshot is not None:
             inputs["feature_snapshot"] = feature_snapshot
-        planned = plan_cell_data_artifact(
+        inputs["cell_selection"] = cell_selection
+        n_simulated = sum(plan.simulated for plan in plans)
+        planned = plan_artifact(
             self.zw,
             scope="assay",
             assay=assay_name,
@@ -1566,9 +1755,23 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             parameters=record.parameters,
             inputs=inputs,
             execution_options=record.execution_options,
-            cell_selection=cell_selection,
-            arrays={"values": ((n_active,), "f")},
             invalidate_cache=invalidate_cache,
+            required_arrays=(
+                ArrayRequirement("values", shape=(n_active,), dtype=np.float64),
+                ArrayRequirement("raw_scores", shape=(n_active,), dtype=np.float64),
+                ArrayRequirement(
+                    "predicted_doublets", shape=(n_active,), dtype=np.bool_
+                ),
+                ArrayRequirement(
+                    "simulated_scores", shape=(n_simulated,), dtype=np.float64
+                ),
+                ArrayRequirement(
+                    "simulated_parents", shape=(n_simulated, 2), dtype=np.int64
+                ),
+            ),
+            required_attributes=(
+                AttributeRequirement("samples", expected_types=(list,)),
+            ),
         )
         if planned.reused:
             return planned.ref
@@ -1596,58 +1799,111 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
             raise ValueError(
                 "Doublet features do not match the mapping reference order"
             )
-
-        raw_scores = score_synthetic_doublets(
+        # Each sample's index follows the settings of the graph's ANN index,
+        # which records every one of them.
+        ann = self._artifacts_inspect(reference.ann_index).parameters or {}
+        index = DoubletIndexSettings(
+            metric=reference.ann_metric,
+            m=ann["ann_m"],
+            ef_construction=ann["ann_efc"],
+            ef=ann["ann_ef"],
+            parallel=ann["ann_parallel"],
+        )
+        totals = (
+            None
+            if reference.normalization_parameters["renormalize_subset"]
+            else source_assay._cell_count_totals(active_idx)
+        )
+        result = score_synthetic_doublets(
             source_assay,
             reference,
             active_idx,
             labels,
+            codes,
             feature_indices,
-            cluster_sample_fraction=cluster_sample_fraction,
-            max_cells_per_cluster=max_cells_per_cluster,
-            simulation_ratio=simulation_ratio,
-            heterotypic_fraction=heterotypic_fraction,
-            save_k=save_k,
-            random_seed=random_seed,
+            totals,
+            index=index,
+            cluster_sample_fraction=fraction,
+            max_cells_per_cluster=cap,
+            simulation_ratio=ratio,
+            heterotypic_fraction=heterotypic,
+            n_neighbors=neighbors_k,
+            expected_doublet_rate=rate,
+            threshold=cutoff,
+            random_seed=seed,
             resources=self.resources,
         )
         del reference
-        if raw_scores.shape != (n_active,):
-            raise RuntimeError("Doublet mapping scores do not match the selected cells")
-        graph_group = artifact_group(self.zw, connectivity)
-        edges = as_zarr_array(graph_group["edges"], name="edges")
-        weights = as_zarr_array(graph_group["weights"], name="weights")
-        # Loading, symmetrizing and row-normalizing may hold several sparse copies.
-        graph_bytes = (
-            int(edges.nbytes)
-            + int(weights.nbytes)
-            + 8 * int(weights.shape[0]) * (weights.dtype.itemsize + 8)
-            + 128 * (n_active + 1)
+        if result.scores.shape != (n_active,):
+            raise RuntimeError("Doublet scores do not match the selected cells")
+        for sample, outcome in zip(samples, result.samples, strict=True):
+            if outcome.heterotypic_fraction < heterotypic:
+                logger.warning(
+                    f"Every parent cell of sample {_doublet_sample_text(sample)} "
+                    "has the same cluster label, so its doublets pair any two "
+                    f"of its cells instead of forcing heterotypic_fraction="
+                    f"{heterotypic:g} of them to pair two clusters"
+                )
+        values = result.scores
+        if smoothing:
+            graph_group = artifact_group(self.zw, connectivity)
+            edges = as_zarr_array(graph_group["edges"], name="edges")
+            weights = as_zarr_array(graph_group["weights"], name="weights")
+            # Loading, symmetrizing and row-normalizing may hold several
+            # sparse copies.
+            graph_bytes = (
+                int(edges.nbytes)
+                + int(weights.nbytes)
+                + 8 * int(weights.shape[0]) * (weights.dtype.itemsize + 8)
+                + 128 * (n_active + 1)
+            )
+            admit_stream(
+                self.resources,
+                nBlocks=1,
+                blockBytes=graph_bytes,
+                residentBytes=active_idx.nbytes
+                + labels.nbytes
+                + 3 * result.scores.nbytes
+                + result.simulated_scores.nbytes
+                + result.simulated_parents.nbytes
+                + feature_ids.nbytes
+                + feature_indices.nbytes,
+                requested=1,
+            )
+            graph = self._load_graph_artifact(
+                connectivity, symmetric=True, upper_only=False, use_k=None
+            )
+            if graph.shape != (n_active, n_active):
+                raise ValueError("Doublet graph does not match the selected cells")
+            values = smooth_doublet_scores(
+                graph,
+                values,
+                power=smoothing,
+                normalize=normalize_scores,
+            )
+        elif normalize_scores:
+            values = minmax_doublet_scores(values)
+        write_cell_data_artifact(
+            self.zw,
+            planned,
+            {
+                "values": values,
+                "raw_scores": result.raw_scores,
+                "predicted_doublets": result.predicted,
+                "simulated_scores": result.simulated_scores,
+                "simulated_parents": result.simulated_parents,
+            },
+            attributes={
+                "samples": [
+                    _doublet_sample_summary(sample, outcome)
+                    for sample, outcome in zip(samples, result.samples, strict=True)
+                ]
+            },
         )
-        admit_stream(
-            self.resources,
-            nBlocks=1,
-            blockBytes=graph_bytes,
-            residentBytes=active_idx.nbytes
-            + labels.nbytes
-            + raw_scores.nbytes
-            + feature_ids.nbytes
-            + feature_indices.nbytes,
-            requested=1,
+        logger.info(
+            f"Stored doublet scores: {int(result.predicted.sum())} of {n_active} "
+            f"cells called doublets in {len(samples)} sample(s)"
         )
-        graph = self._load_graph_artifact(
-            connectivity, symmetric=True, upper_only=False, use_k=None
-        )
-        if graph.shape != (n_active, n_active):
-            raise ValueError("Doublet graph does not match the selected cells")
-        scores = smooth_doublet_scores(
-            graph,
-            raw_scores,
-            power=smoothing_t,
-            normalize=normalize_scores,
-        )
-        write_cell_data_artifact(self.zw, planned, {"values": scores})
-        logger.info("Stored doublet scores")
         return planned.ref
 
     @validation_scoped
@@ -1657,26 +1913,111 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         graph: ArtifactRef,
         *,
         from_assay: str | None = None,
-        cluster_sample_fraction: float = 0.05,
-        max_cells_per_cluster: int = 100,
-        simulation_ratio: float = 1.0,
-        heterotypic_fraction: float = 0.8,
-        save_k: int = 5,
-        smoothing_t: int = 2,
-        normalize_scores: bool = True,
+        cluster_sample_fraction: float = 1.0,
+        max_cells_per_cluster: int | None = None,
+        sample_column: str | None = None,
+        simulation_ratio: float = 2.0,
+        heterotypic_fraction: float = 0.0,
+        save_k: int = 30,
+        expected_doublet_rate: float = 0.05,
+        threshold: float | None = None,
+        smoothing_t: int = 0,
+        normalize_scores: bool = False,
         random_seed: int = 4444,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
-        """Compute doublet scores from explicit cluster and graph artifacts.
+        """Score and call doublets from simulated doublets, within each sample.
+
+        Doublets are simulated by adding the counts of two cells of one
+        sample, every cell of the sample by default, so their cell types are
+        as common as in the sample. They are normalized like the graph's
+        cells and projected onto its PCA. Every cell and simulated doublet is
+        then scored on its ``k`` nearest neighbors among the cells and
+        simulated doublets of its own sample, with ``k = round(save_k * (1 +
+        r))`` for ``r`` simulated doublets per cell: the score is the
+        probability that the cell is a doublet given the fraction of
+        simulated doublets among those neighbors and ``expected_doublet_rate``,
+        Scrublet's doublet score (Wolock, Lopez and Klein, 2019). A cell is a
+        predicted doublet when its score is above its sample's threshold:
+        ``threshold``, or the minimum between the two modes of the sample's
+        simulated-doublet scores (Otsu's threshold when they are not
+        bimodal).
+
+        The ``doublet_score`` artifact holds, for each cell of the graph's
+        selection, the score in ``values``, the fraction of simulated
+        doublets among its neighbors in ``raw_scores``, and the call in
+        ``predicted_doublets``; ``ds.select_cells(ref,
+        value="predicted_doublets", include=[False])`` keeps the predicted
+        singlets. ``simulated_scores`` holds the score of each simulated
+        doublet and ``simulated_parents`` the positions of its two parents
+        among the selected cells, sample after sample. The ``samples``
+        attribute lists each sample's labels, cells, simulated doublets,
+        neighbors, threshold and its method, calls, the fraction of simulated
+        doublets above the threshold, and Scrublet's estimate of the doublet
+        rate.
+
+        Args:
+            clusters: Cluster labels over the graph's cell selection. They
+                matter only with ``heterotypic_fraction`` above 0 or a parent
+                pool smaller than every cell.
+            graph: A connectivity map built on a PCA reduction. A map built on
+                a Harmony correction of one needs ``sample_column``.
+            from_assay: The RNA assay of the graph; required for an
+                integrated graph.
+            cluster_sample_fraction: The fraction of each cluster of a sample
+                that may parent doublets, drawn at random.
+            max_cells_per_cluster: The most cells of each cluster of a sample
+                that may parent doublets, or None for no limit. A limit makes
+                rare clusters parent more doublets than their share of cells.
+            sample_column: A cell metadata column naming each cell's capture
+                (10x channel or lane), or None to treat every cell as one
+                sample. Doublets form only within one capture, so they are
+                simulated from, and scored against, cells of the same sample.
+                Cells hashed into one capture share it: do not pass hashtag
+                identities.
+            simulation_ratio: Simulated doublets per cell of each sample.
+            heterotypic_fraction: The share of simulated doublets forced to
+                pair cells of two clusters; 0 pairs any two cells of a
+                sample.
+            save_k: The neighbors that the scaling above starts from. A
+                sample counts at most its other cells, and the artifact
+                records the most that any sample uses.
+            expected_doublet_rate: The prior doublet rate of each sample,
+                above 0 and below 1.
+            threshold: The doublet score from 0 to 1 above which a cell is a
+                predicted doublet in every sample, or None to choose one per
+                sample.
+            smoothing_t: Diffuse ``values`` this many steps over the graph; 0
+                keeps each cell's own score.
+            normalize_scores: Scale ``values`` to [0, 1]. Neither option
+                changes ``raw_scores``, the calls, or the thresholds.
+            random_seed: The seed of the simulation and of each sample's
+                neighbor index.
+            invalidate_cache: Create a fresh result instead of reusing a match.
+
+        Returns:
+            A complete assay-scoped ``doublet_score`` artifact.
 
         Raises:
-            ValueError: If ``heterotypic_fraction`` is above 0 with one cluster.
+            ValueError: If ``heterotypic_fraction`` is above 0 with one
+                cluster, a sample has fewer than two cells or a missing
+                label, or an argument is out of range.
             UnmeasuredCellsError: If the assay did not measure a cell of the graph.
+            MemoryError: If a sample's simulation or neighbor index exceeds
+                the memory budget.
         """
         if not isinstance(graph, ArtifactRef):
             raise TypeError("graph must be an ArtifactRef")
         if not isinstance(clusters, ArtifactRef):
             raise TypeError("clusters must be an ArtifactRef")
+        if sample_column is not None and (
+            not isinstance(sample_column, str) or not sample_column
+        ):
+            raise TypeError("sample_column must be a non-empty string or None")
+        if sample_column is not None and sample_column not in self.cells.columns:
+            raise ValueError(
+                f"sample_column '{sample_column}' not found in cell metadata"
+            )
         assay_name = from_assay or graph.assay
         if assay_name is None:
             raise ValueError("from_assay is required for an integrated graph")
@@ -1733,17 +2074,42 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         value_name = grouping_value_name(clusters.kind)
         require_complete_cluster_labels(cluster_group, value_name, name="clusters")
         cluster_values = artifact_values(cluster_group, value_name)
+        sample_labels = None
+        if sample_column is not None:
+            rows = read_stored_selection_indices(
+                self.zw,
+                graph_selection,
+                kind="cell_selection",
+                scope="datastore",
+                assay=None,
+                table_path="cellData",
+            )
+            sample_labels = [
+                apply_missing_mask(
+                    np.asarray(
+                        read_metadata_rows_chunkwise(self.cells, sample_column, rows)
+                    ),
+                    read_metadata_missing_rows_chunkwise(
+                        self.cells, sample_column, rows
+                    ),
+                    labels=True,
+                )
+            ]
         ref = self._run_doublet_detection_artifact(
             source_assay=assay,
             cell_selection=graph_selection,
             clusters=clusters,
             cluster_values=cluster_values,
             connectivity=graph,
+            sample_column=sample_column,
+            sample_labels=sample_labels,
             cluster_sample_fraction=cluster_sample_fraction,
             max_cells_per_cluster=max_cells_per_cluster,
             simulation_ratio=simulation_ratio,
             heterotypic_fraction=heterotypic_fraction,
             save_k=save_k,
+            expected_doublet_rate=expected_doublet_rate,
+            threshold=threshold,
             smoothing_t=smoothing_t,
             normalize_scores=normalize_scores,
             random_seed=random_seed,

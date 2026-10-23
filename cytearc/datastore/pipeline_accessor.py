@@ -3,6 +3,7 @@ from typing import Any
 
 import numpy as np
 
+from ..metadata.rows import apply_missing_mask
 from ..storage.artifacts import ArtifactRef, artifact_group
 from ..storage.pipeline_runs import (
     PipelineOutputRecord,
@@ -11,6 +12,7 @@ from ..storage.pipeline_runs import (
     create_pipeline_run_record,
 )
 from ..storage.selections import (
+    read_stored_selection_indices,
     resolve_stored_selection_artifact,
     snapshot_run_metadata,
 )
@@ -28,7 +30,7 @@ from ._pipeline_cluster_selection import (
     run_cluster_selection,
 )
 from ._pipeline_fields import build_pipeline_fields
-from ._pipeline_filtering import filter_pipeline_selection
+from ._pipeline_filtering import filter_pipeline_selection, snapshot_column_values
 from ._pipeline_ledger import (
     PipelineCallback,
     PipelineEvent as PipelineEvent,
@@ -167,7 +169,9 @@ class PipelineAccessor:
           ``doublets=False`` and no Harmony batch columns.
         - ``harmony``: ``batch_columns`` plus ``harmony_params`` (the keyword
           options of ``cytearc.embeddings.harmony.fit_harmony``) and
-          ``batch_size``, or False.
+          ``batch_size``, or False. A run with Harmony scores doublets within
+          each batch, the cells that share every batch label, unless
+          ``doublets`` names another ``sample_column``.
         - ``leiden``: ``partitions``, an optional ``selected`` resolution that
           becomes the saved clustering in place of the silhouette choice, and
           Leiden settings; or a bool.
@@ -281,9 +285,11 @@ class PipelineAccessor:
         feature_snapshot: ArtifactRef
         frozen_feature_names: np.ndarray
         all_features: ArtifactRef
+        doublet_samples: ArtifactRef | None = None
 
         def input_snapshot_stage() -> Sequence[tuple[str, ArtifactRef]]:
             nonlocal cell_snapshot, feature_snapshot, frozen_feature_names, all_features
+            nonlocal doublet_samples
             input_selection = resolve_stored_selection_artifact(
                 store.zw,
                 table_path="cellData",
@@ -319,12 +325,24 @@ class PipelineAccessor:
             )
             artifacts["input_cell_selection"] = input_selection
             artifacts["feature_universe"] = all_features
-            return (
+            outputs = [
                 ("input_cell_selection", input_selection),
                 ("cell_snapshot", cell_snapshot),
                 ("feature_snapshot", feature_snapshot),
                 ("feature_universe", all_features),
-            )
+            ]
+            if recipe.doublet_sample_columns:
+                # Doublet samples are frozen apart from the cell snapshot, so
+                # they leave the identities of the stages that read it alone.
+                doublet_samples = snapshot_run_metadata(
+                    store.zw,
+                    table_path="cellData",
+                    id_column="ids",
+                    columns=recipe.doublet_sample_columns,
+                    axis="cell",
+                )
+                outputs.append(("doublet_sample_snapshot", doublet_samples))
+            return tuple(outputs)
 
         ledger.run("input_snapshot", input_snapshot_stage)
 
@@ -407,8 +425,7 @@ class PipelineAccessor:
             # refused Harmony and doublet scoring, which need a PCA graph.
             ledger.skip("pca")
             coordinates = artifacts["normalized"]
-        # The uncorrected coordinates: the PCA that Harmony corrects and that
-        # the doublet graph of a corrected run is built on.
+        # The uncorrected coordinates: the PCA that Harmony corrects.
         reduction = coordinates
         if recipe.harmony_batch_columns:
 
@@ -566,47 +583,47 @@ class PipelineAccessor:
         else:
             ledger.skip("tsne")
 
-        doublet_graph = artifacts["connectivity_map"]
-        if recipe.doublets and recipe.harmony_batch_columns:
-
-            def doublet_graph_stage() -> Sequence[tuple[str, ArtifactRef]]:
-                nonlocal doublet_graph
-                ann = store._graph_ann_index(
-                    reduction, **recipe.params_for("ann_index")
-                )
-                neighbors = store._graph_neighbors(
-                    ann,
-                    coordinates=reduction,
-                    k=recipe.neighbors_k,
-                    **recipe.params_for("neighbors"),
-                )
-                graph = store._graph_connectivity(
-                    neighbors, **recipe.params_for("connectivity")
-                )
-                doublet_graph = graph
-                return (
-                    ("uncorrected_ann_index", ann),
-                    ("uncorrected_neighbors", neighbors),
-                    ("uncorrected_connectivity_map", graph),
-                )
-
-            ledger.run("doublet_graph", doublet_graph_stage)
-        else:
-            ledger.skip("doublet_graph")
-
         if recipe.doublets:
 
             def doublet_stage() -> Sequence[tuple[str, ArtifactRef]]:
                 clusters = artifacts["clusters"]
+                settings = recipe.params_for("doublets")
+                # The recipe resolved the sample columns, Harmony's included.
+                settings.pop("sample_column", None)
+                sample_labels = None
+                if doublet_samples is not None:
+                    rows = read_stored_selection_indices(
+                        store.zw,
+                        analysis_selection,
+                        kind="cell_selection",
+                        scope="datastore",
+                        assay=None,
+                        table_path="cellData",
+                    )
+                    snapshot = artifact_group(store.zw, doublet_samples)
+                    sample_labels = []
+                    for column in recipe.doublet_sample_columns:
+                        values, missing = snapshot_column_values(snapshot, column)
+                        sample_labels.append(
+                            apply_missing_mask(
+                                values[rows],
+                                None if missing is None else missing[rows],
+                                labels=True,
+                            )
+                        )
+                # With Harmony the graph is the corrected one: samples are
+                # scored on the PCA that it corrected, so no other graph is built.
                 ref = store._run_doublet_detection_artifact(
                     source_assay=assay_obj,
                     cell_selection=analysis_selection,
                     clusters=clusters,
                     cluster_values=cluster_label_values(store.zw, clusters),
-                    connectivity=doublet_graph,
+                    connectivity=artifacts["connectivity_map"],
                     feature_snapshot=feature_snapshot,
+                    sample_column=recipe.doublet_sample_columns or None,
+                    sample_labels=sample_labels,
                     one_cluster_remedy=_ONE_CLUSTER_DOUBLET_REMEDY,
-                    **recipe.params_for("doublets"),
+                    **settings,
                 )
                 artifacts["doublets"] = ref
                 return (("doublets", ref),)

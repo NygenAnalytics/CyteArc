@@ -70,9 +70,14 @@ calling thread, so each stage keeps its own wall time, sampled resident memory, 
 receipt.
 
 Harmony is enabled by a non-empty `harmony_batch_columns` sequence. The main graph then uses the
-Harmony coordinates. When doublet scoring is enabled, its graph branch still uses the uncorrected
-PCA coordinates. The branch artifacts appear in their stage receipt, not as convenience entries in
-the run's top-level output mapping.
+Harmony coordinates. Doublets form only within one capture, so when doublet scoring is enabled with
+Harmony, doublets are simulated and scored within each batch, the cells that share every Harmony
+batch label, on the PCA coordinates that Harmony corrected; no other graph is built.
+`params["doublets"]["sample_column"]` names the column of each cell's capture instead, and cannot be
+None with Harmony. Without Harmony, doublets are scored within each sample of that column, or
+across every cell when it is omitted. The input snapshot stage freezes the sample labels as its
+`doublet_sample_snapshot` output, apart from the cell snapshot that other stages read, and the run
+configuration records the columns as `doubletSampleColumns`.
 
 Boolean stage options disable that stage when set to `False`. `True` uses that stage's defaults.
 A mapping configures the stage. `None` is rejected. An empty filtering mapping uses the same
@@ -117,7 +122,8 @@ run = ds.pipeline.run(
 `params` configures the run with one mapping. Each key names a stage, and its value holds the
 keyword arguments the pipeline forwards to that stage's function. The pipeline still supplies the
 artifacts each stage consumes. A setting has exactly the meaning of the same keyword on the method
-in the table below, and omitting it uses that method's default.
+in the table below, and omitting it uses that method's default, with one exception: a run with
+Harmony scores doublets within its batches when `doublets` omits `sample_column`.
 
 Settings are JSON values, so a run configuration can be saved and passed again; infinity and NaN are
 never settings. Some settings spell a derived default as `None`: `hvg` `min_cells`, 1% of the
@@ -161,7 +167,7 @@ run = ds.pipeline.run(
 | `leiden` | {py:meth}`~cytearc.datastore.namespaces.ClustersAccessor.leiden` | `partitions`, `selected`, `backend`, `random_seed`, `symmetric_graph`, `graph_upper_only` |
 | `membership_strength` | {py:meth}`~cytearc.datastore.namespaces.ClustersAccessor.membership_strength` | none; a bool |
 | `paris` | Paris clustering | `n_clusters`, `min_cluster_size` |
-| `doublets` | {py:meth}`~cytearc.datastore.namespaces.QcAccessor.doublets` | `cluster_sample_fraction`, `max_cells_per_cluster`, `simulation_ratio`, `heterotypic_fraction`, `save_k`, `smoothing_t`, `normalize_scores`, `random_seed` |
+| `doublets` | {py:meth}`~cytearc.datastore.namespaces.QcAccessor.doublets` | `cluster_sample_fraction`, `max_cells_per_cluster`, `sample_column`, `simulation_ratio`, `heterotypic_fraction`, `save_k`, `expected_doublet_rate`, `threshold`, `smoothing_t`, `normalize_scores`, `random_seed` |
 | `markers` | marker search | none; a bool |
 | `species` | recorded with the run | a species key such as `homo_sapiens` or `mus_musculus` |
 
@@ -214,13 +220,16 @@ every cell's coordinates, 4 bytes per HVG per cell, when one band holds every ce
 `params={"embedding_initialization": {"batch_size": ...}}` below the cell count to select the
 streamed fit, which holds a sample of the cells and one block of coordinates at a time.
 
-The `doublets` stage forces each simulated doublet, with probability `heterotypic_fraction` (0.8
-by default), to pair parents from two different clusters, so it needs a saved clustering with two
-or more clusters. The silhouette choice never saves a partition with one cluster, but `leiden`
+The `doublets` stage simulates doublets from any two cells of a sample by default. With
+`params["doublets"]["heterotypic_fraction"]` above 0, it forces that share of the simulated
+doublets to pair parents from two different clusters, so it needs a saved clustering with two or
+more clusters. The silhouette choice never saves a partition with one cluster, but `leiden`
 `selected` can. The stage then fails with a `PipelineExecutionError` that names the settings to
 change: select a partition with two or more clusters, set
 `params["doublets"]["heterotypic_fraction"]` to 0 to simulate doublets from any two sampled cells,
-or pass `doublets=False`.
+or pass `doublets=False`. A run with doublets has the frozen cell fields `doublet_score` and
+`predicted_doublet`, the call of each cell
+([Doublet detection](../reference/methods#doublet-method)).
 
 Unknown sections or settings, settings without a JSON value such as infinity, and `True` for a stage
 that always runs are rejected before a run record is created; `hvg` settings also get the checks of

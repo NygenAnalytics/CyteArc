@@ -1209,7 +1209,32 @@ CyteArc validates persisted data and public arguments against the following cont
 - A stored statistical-test result is reused only when it records every attribute that the request
   determines, `sample_by`, `pair_by`, and `summary_scope` included.
 - Doublet simulation meets its heterotypic fraction (`simulate_doublet_pairs` loses `max_tries`),
-  and `qc.doublets` raises `ValueError` when every selected cell has one cluster label.
+  and `qc.doublets` raises `ValueError` when every selected cell has one cluster label and
+  `heterotypic_fraction` is above 0.
+- `qc.doublets` follows Scrublet (revision 2 of `run_doublet_detection`, for every artifact). Each
+  sample of the new `sample_column` simulates doublets from its own cells, every cell by default
+  (`cluster_sample_fraction=1.0`, `max_cells_per_cluster=None`), and scores its cells and doublets
+  on an hnswlib index of the sample's PCA rows and doublets only, with the graph's ANN settings.
+  The former pool of 5% of each cluster, at most 100 cells, reused every parent dozens of times
+  and made rare clusters parent as many doublets as common ones. The artifact keeps the doublet
+  probability in `values` and adds `raw_scores`, `predicted_doublets`, `simulated_scores`,
+  `simulated_parents`, and a `samples` attribute with each sample's threshold, its method, calls,
+  and estimated doublet rate; `CELL_VALUE_NAMES` lists `raw_scores` and the label array
+  `predicted_doublets`, which `select_cells(value=...)` reads. Provenance records
+  `sample_columns`, `expected_doublet_rate`, and `threshold` parameters and the
+  `sample_assignments_fingerprint` input; `save_k` is recorded as the neighbors used, at most the
+  largest sample's cells minus 1, so larger requests share one artifact. Defaults change:
+  `simulation_ratio=2.0`, `heterotypic_fraction=0.0`, `save_k=30`, `smoothing_t=0` (0 is now
+  allowed and keeps each cell's score), and `normalize_scores=False`; smoothing and scaling change
+  `values` only. Doublets whose parents have ten or fewer features are scored like the others,
+  and a doublet's library size for unrenormalized references is the sum of its parents'
+  `<assay>_nCounts`. A Harmony-corrected graph is accepted with `sample_column`, and its samples
+  are scored on the PCA it corrected. The pipeline scores a Harmony run within its batches on
+  the corrected graph, without the former `doublet_graph` stage and its `uncorrected_*`
+  artifacts, freezes the sample labels as the input stage's `doublet_sample_snapshot`, records
+  `doubletSampleColumns` in its configuration, and adds the frozen cell field
+  `predicted_doublet`. `select_cells` gains `value`, recorded only when it names another array
+  than the canonical one, so existing selections keep their identities.
 - `lisi_batch_mixing_score` ignores declared categories that no cell has, so labels from one
   observed batch raise `ValueError` instead of returning NaN or 1.0.
 - `mapping_calibration` counts every cell with a known label in its coverage, cells without evidence

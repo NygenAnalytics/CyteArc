@@ -244,9 +244,13 @@ _CONTRACTS = (
         constructor=_QualityControlOperationsMixin._run_doublet_detection_artifact,
         aliases={
             "graph": "connectivity_map",
+            # The pipeline's Harmony runs record several columns.
+            "sample_column": "sample_columns",
         },
         signature_only=_classified("routing", "from_assay"),
-        model_only=_classified("resolved_input", "neighbors"),
+        model_only=_classified(
+            "resolved_input", "neighbors", "sample_assignments_fingerprint"
+        ),
     ),
     OperationContract(
         TrajectoryAccessor.fate,

@@ -324,7 +324,7 @@ their rows follow the cell selection of their lineage rather than a recorded inp
 | `cell_cycle` | `phase` | labels | | `s_score`, `g2m_score` |
 | `cluster_cut` | `labels` | labels | | |
 | `cluster_labels` | `values` | labels | | |
-| `doublet_score` | `values` | measurements | | |
+| `doublet_score` | `values` | measurements | `predicted_doublets` | `raw_scores` |
 | `embedding` | `values` | measurements | | |
 | `enrichment_scores` | `scores` | measurements | | |
 | `fate_map` | `probabilities` | measurements | `valid` | |
@@ -346,10 +346,12 @@ run's frozen fields, such as `run.cells.fetch(column)`. Only a snapshot whose re
 selection is malformed raises `ArtifactResolutionError` with code `corrupt_payload`.
 
 The canonical array of each kind is part of the identity of the results that read it. Consumers
-such as `select_cells` record the artifact that they read but not which of its arrays, so changing
-a kind's canonical array in this table would change what they compute from the same recorded
-inputs. Such a change needs an operation revision for each consumer
-([Operation revisions](../developers/operation-revisions)).
+such as `select_cells` record the artifact that they read but not that they read its canonical
+array, so changing a kind's canonical array in this table would change what they compute from the
+same recorded inputs. Such a change needs an operation revision for each consumer
+([Operation revisions](../developers/operation-revisions)). `select_cells(value=...)` reads another
+per-cell array of the table and records its name, so a selection of the canonical array keeps its
+identity.
 
 `cell_selection=` reads the cells of a selection that the artifact's own selection contains; any
 other selection raises `ValueError`. Values come back in cell table order. A row that the artifact
@@ -369,8 +371,10 @@ subset = ds.artifacts.load_values(clusters_ref, cell_selection=t_cells)
 ```
 
 `select_cells`, artifact groupings and colors in plots, and pseudotime source and sink labels read
-the same canonical arrays, and every reader refuses a kind that the table does not list, whichever
-array it is asked for. Label consumers, such as `snapshot_cluster_labels`, `compare.compute_bulk`, and
+the same canonical arrays, `select_cells` another one when `value=` names it, and every reader
+refuses a kind that the table does not list, whichever array it is asked for. For example,
+`ds.select_cells(doublet_ref, value="predicted_doublets", include=[False])` keeps the cells that
+doublet detection did not call doublets. Label consumers, such as `snapshot_cluster_labels`, `compare.compute_bulk`, and
 `clusters.relabel_by_overlap`, accept the kinds whose canonical array holds labels.
 
 ```{eval-rst}

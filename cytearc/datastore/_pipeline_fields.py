@@ -260,14 +260,25 @@ def build_pipeline_fields(
     if "doublets" in artifacts:
         ref = artifacts["doublets"]
         values = artifact_array(store.zw, ref, "values")
-        fields.append(
-            _field(
-                key="doublet_score",
-                axis="cells",
-                ref=ref,
-                source_value="values",
-                dtype=values.dtype,
-                display=continuous_array_display(values),
+        calls = artifact_array(store.zw, ref, "predicted_doublets")
+        fields.extend(
+            (
+                _field(
+                    key="doublet_score",
+                    axis="cells",
+                    ref=ref,
+                    source_value="values",
+                    dtype=values.dtype,
+                    display=continuous_array_display(values),
+                ),
+                _field(
+                    key="predicted_doublet",
+                    axis="cells",
+                    ref=ref,
+                    source_value="predicted_doublets",
+                    dtype=calls.dtype,
+                    display=categorical_array_display(calls),
+                ),
             )
         )
     fields.extend(

@@ -280,7 +280,7 @@ contains no artifacts or pipeline runs. Use it to hand off, or before `to_mtx` o
 | Cells | the run's analysis selection | `to_h5ad(ds.RNA, path)` exports all rows |
 | Features | the full feature universe; HVG flag in `var["highly_variable_features"]`; `matrix="normed"`: HVGs only | `feature_names=` without `run` |
 | `X` | raw counts; `matrix="normed"`: the run's `normalized` artifact, float32 | |
-| `obs` | frozen fields: cell-cycle, `leiden_*`, `paris`, `clusters` (categoricals with `uns` colors), `doublet_score`, `snapshot_columns` | join `ds.cells` by `ids` |
+| `obs` | frozen fields: cell-cycle, `leiden_*`, `paris`, `clusters` (categoricals with `uns` colors), `doublet_score`, `predicted_doublet`, `snapshot_columns` | join `ds.cells` by `ids` |
 | `obsm`, `varm` | `X_umap`, `X_pca` (`X_pca_harmony` with Harmony), `varm["PCs"]` | other artifacts: `obsm=` |
 | `obsp` | with `graph=run["connectivity_map"]`: connectivities, distances, `uns["neighbors"]` | |
 | markers, run report | not exported | `markers.load`, `run.report(format="markdown")` |

@@ -382,6 +382,22 @@ over the pooled selection. Supplying `sample_column` estimates MAD bounds separa
 are retained with a warning, including small pooled selections. Pass `method="gaussian"`
 explicitly to use the former pooled Gaussian policy and configure its `min_p` and `max_p`
 quantiles. Changing these probabilities with either MAD path raises an error.
+{py:meth}`cytearc.datastore.namespaces.QcAccessor.doublets` scores and calls doublets the way
+Scrublet does, within each sample of `sample_column`, the column of each cell's capture: doublets
+are simulated from pairs of the sample's own cells and every cell is scored against its sample's
+cells and simulated doublets only, so no doublet pairs cells of two captures. Each sample gets its
+own automatic threshold on its simulated doublets' scores, or the given `threshold`. The
+`doublet_score` artifact holds the score in `values`, the fraction of simulated doublets among a
+cell's neighbors in `raw_scores`, and the calls in `predicted_doublets`; its `samples` attribute
+lists each sample's threshold, calls, and estimated doublet rate
+([Doublet detection](../reference/methods#doublet-method)):
+
+```python
+doublets = ds.qc.doublets(cluster_ref, graph_ref, sample_column="sample")
+singlets = ds.select_cells(doublets, value="predicted_doublets", include=[False])
+ds.artifacts.load(doublets).attrs["samples"]  # thresholds and calls per sample
+```
+
 `qc.filter` and `qc.auto_filter` apply the same rules as pipeline filtering. A cell whose
 metric is recorded as missing in a nullable column or artifact never passes a filter and does not
 inform automatic bounds. MAD filtering rejects missing sample labels among active cells. Automatic
@@ -391,8 +407,10 @@ every filter raises when no cell remains.
 exact cell-aligned artifact, or retains categorical values with `include=[...]`, and composes the
 result with its stored source selection. It reads the kind's canonical array
 ({ref}`cell_aligned_kinds`), such as `values` of a quality metric, `phase` of a cell-cycle
-artifact, `labels` of a Paris cut, or `pseudotime` of a pseudotime artifact, and refuses a kind
-that is not cell-aligned. An explicit
+artifact, `labels` of a Paris cut, or `pseudotime` of a pseudotime artifact, or the other per-cell
+array that `value=` names, such as `predicted_doublets` of a doublet score, and refuses a kind
+that is not cell-aligned. The selection records the name of an array other than the canonical one.
+An explicit
 `cell_selection=` may narrow, but never widen, that source selection. Cells whose value the
 artifact records as missing are never selected, and a selection that retains no cell raises.
 Doublet detection, `markers.search`, `clusters.membership_strength`, and `clusters.relabel_by_overlap` reject label
