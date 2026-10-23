@@ -35,7 +35,8 @@ the chunks that hold them; a selection of at least one cell in
 ``_DENSE_SELECTION`` streams the column once.
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from functools import partial
 from typing import Any, Literal
 
 import numpy as np
@@ -135,11 +136,28 @@ def resolve_assay_membership(table: Any, assay: str) -> str | None:
     )
 
 
+def _column_arrays(table: Any) -> tuple[list[str], Callable[[str], Any]]:
+    """Return a table's column names and a way to open each column's array.
+
+    A ``MetaData`` table lists its columns once and reuses the arrays that the
+    listing opened; another table lists its columns and opens each one.
+    """
+    list_members = getattr(table, "_members", None)
+    if not callable(list_members):
+        return list(table.columns), table._get_array
+    members = list_members()
+    opened = dict(members)
+    return table._public_column_names(members), partial(
+        table._opened_array, opened=opened
+    )
+
+
 def membership_columns(table: Any) -> dict[str, str]:
     """Return the membership column of each assay that a cell table records."""
     found: dict[str, str] = {}
-    for name in table.columns:
-        attributes = getattr(table._get_array(name), "attrs", {})
+    names, column_array = _column_arrays(table)
+    for name in names:
+        attributes = getattr(column_array(name), "attrs", {})
         if attributes.get("role") != ASSAY_MEMBERSHIP_ROLE:
             continue
         assay = attributes.get("assay")

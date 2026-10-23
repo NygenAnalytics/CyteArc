@@ -500,3 +500,99 @@ def test_match_motifs_rejects_invalid_inputs(
 
     with IndexedFasta(fasta) as genome, pytest.raises(ValueError, match=match):
         match_motifs([region], genome, motifs, background=background)
+
+
+def _records_network(hits, region_names: np.ndarray, motifs: list[Motif]):
+    """The earlier network, built one record per hit."""
+    import pandas as pd
+
+    by_motif = hits.tocsc()
+    rows = []
+    for column, motif in enumerate(motifs):
+        regions = by_motif.indices[
+            by_motif.indptr[column] : by_motif.indptr[column + 1]
+        ]
+        for region in np.sort(regions):
+            rows.append((motif.motifId, region_names[region], motif.name))
+    return pd.DataFrame.from_records(rows, columns=["source", "target", "motif_name"])
+
+
+def _assert_identical_networks(actual, expected) -> None:
+    import pandas as pd
+
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    assert actual.dtypes.tolist() == expected.dtypes.tolist()
+    for column in expected.columns:
+        assert [type(value) for value in actual[column].array] == [
+            type(value) for value in expected[column].array
+        ]
+
+
+@pytest.mark.parametrize("density", [0.0, 0.35, 1.0])
+@pytest.mark.parametrize(
+    "motif_ids",
+    [["M2", "M10", "M1"], [3, 1, 2], [np.str_("M1"), "M2", 7]],
+    ids=["text", "numbers", "mixed"],
+)
+def test_match_motifs_network_matches_one_record_per_hit(
+    tmp_path, monkeypatch, density, motif_ids
+):
+    from scipy.sparse import csr_matrix
+
+    fasta = tmp_path / "genome.fa"
+    fasta.write_text(">chr1\n" + "ACGT" * 50 + "\n>chr2\n" + "TTGCA" * 20 + "\n")
+    # Regions arrive unsorted and repeat one coordinate.
+    regions = ["chr2:5-25", "chr1:0-40", "chr1:100-160", "chr1:0-40", "chr2:60-99"]
+    names = ["Arnt", None, "Ahr"]
+    motifs = [
+        Motif(motif_id, name, np.eye(4)[[0, 1, 2]] + 0.1)
+        for motif_id, name in zip(motif_ids, names, strict=True)
+    ]
+    rng = np.random.default_rng(len(regions))
+    hits = csr_matrix(rng.random((len(regions), len(motifs))) < density)
+    # The network is assembled from the scan's matches alone.
+    monkeypatch.setattr(motif_module, "scan_motif_matches", lambda *_a, **_k: hits)
+
+    with IndexedFasta(fasta) as genome:
+        network = match_motifs(regions, genome, motifs, background="even")
+
+    expected = _records_network(
+        hits, np.asarray(regions, dtype=object).astype(str), motifs
+    )
+    assert len(network) == hits.nnz
+    _assert_identical_networks(network, expected)
+
+
+def test_match_motifs_network_matches_records_of_a_real_scan(tmp_path, monkeypatch):
+    rng = np.random.default_rng(29)
+    genome = "".join(rng.choice(list("ACGTN"), p=[0.24] * 4 + [0.04], size=6000))
+    fasta = tmp_path / "genome.fa"
+    fasta.write_text(
+        ">chr1\n"
+        + "\n".join(genome[i : i + 60] for i in range(0, len(genome), 60))
+        + "\n"
+    )
+    starts = rng.permutation(np.arange(0, 5800, 100))[:40]
+    regions = [f"chr1:{start}-{start + 150}" for start in starts]
+    motifs = [
+        Motif(f"MA{index:04d}.1", f"TF{index}", rng.integers(0, 20, size=(width, 4)))
+        for index, width in enumerate([5, 6, 6, 7, 8, 9])
+    ]
+    scans = []
+    original_scan = motif_module.scan_motif_matches
+
+    def recorded_scan(*args, **kwargs):
+        scans.append(original_scan(*args, **kwargs))
+        return scans[-1]
+
+    monkeypatch.setattr(motif_module, "scan_motif_matches", recorded_scan)
+    with IndexedFasta(fasta) as fasta_genome:
+        network = match_motifs(regions, fasta_genome, motifs, p_value=1e-2)
+
+    (hits,) = scans
+    # The planted p-value matches some but not all motif-region pairs.
+    assert 0 < hits.nnz < hits.shape[0] * hits.shape[1]
+    expected = _records_network(
+        hits, np.asarray(regions, dtype=object).astype(str), motifs
+    )
+    _assert_identical_networks(network, expected)

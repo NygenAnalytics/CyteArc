@@ -679,6 +679,231 @@ def test_make_digraph_warns_when_a_merge_repeats_a_child() -> None:
     ]
 
 
+def _tree_signature(graph: nx.DiGraph, n_leaves: int) -> tuple[object, ...]:
+    """Return a tree's nodes, edges, attributes, and parents, in order and typed.
+
+    A leaf node, which holds a single-cell cluster, compares by value only:
+    CoalesceTree keys it with the label that pandas' ``idxmin`` returns, an
+    int or a NumPy integer depending on whether pandas keeps a RangeIndex.
+    """
+    nodes = list(graph.nodes)
+    return (
+        [(node, "leaf" if node < n_leaves else type(node)) for node in nodes],
+        [
+            ((parent, type(parent)), (child, type(child)))
+            for parent, child in graph.edges
+        ],
+        [
+            [(name, value, type(value)) for name, value in graph.nodes[node].items()]
+            for node in nodes
+        ],
+        [[(parent, type(parent)) for parent in graph.pred[node]] for node in nodes],
+        dict(graph.graph),
+    )
+
+
+def _stored_tree_arrays(graph: nx.DiGraph) -> list[np.ndarray]:
+    """Return the arrays that the coalesced-tree artifact stores for a tree."""
+    return [
+        nx.to_pandas_edgelist(graph).values,
+        np.asarray([(node, data["nleaves"]) for node, data in graph.nodes(data=True)]),
+        np.asarray(
+            [
+                str(data.get("partition_id", -1))
+                for _node, data in graph.nodes(data=True)
+            ]
+        ),
+    ]
+
+
+def _assert_coalesces_like_the_full_graph(
+    dendrogram: np.ndarray, clusters: np.ndarray
+) -> nx.DiGraph:
+    from cytearc.clustering.cluster_tree import coalesce_dendrogram
+
+    expected = CoalesceTree(make_digraph(dendrogram), clusters)
+    actual = coalesce_dendrogram(dendrogram, clusters)
+
+    n_leaves = len(dendrogram) + 1
+    assert _tree_signature(actual, n_leaves) == _tree_signature(expected, n_leaves)
+    assert all(type(node) is np.int64 for node in actual.nodes if node < n_leaves)
+    for stored, reference in zip(
+        _stored_tree_arrays(actual), _stored_tree_arrays(expected), strict=True
+    ):
+        assert stored.dtype == reference.dtype
+        np.testing.assert_array_equal(stored, reference)
+    return actual
+
+
+def _caterpillar_linkage(n_leaves: int) -> np.ndarray:
+    """Return a linkage that adds one leaf at a time, so its depth is n_leaves - 1."""
+    rows = [[0, 1, 1.0, 2]]
+    for leaf in range(2, n_leaves):
+        rows.append([n_leaves + leaf - 2, leaf, float(leaf), leaf + 1])
+    return np.asarray(rows, dtype=np.float64)
+
+
+def _paris_linkage(n_leaves: int, seed: int) -> np.ndarray:
+    """Return a compatibility dendrogram of a Paris fit with disconnected parts."""
+    from cytearc.clustering.paris import fit_paris_hierarchy, hierarchy_to_dendrogram
+
+    rng = np.random.default_rng(seed)
+    groups = rng.integers(0, 6, size=n_leaves)
+    rows, columns = np.nonzero(
+        (groups[:, None] == groups[None, :]) & (rng.random((n_leaves,) * 2) < 0.2)
+    )
+    weights = rng.uniform(0.1, 1.0, size=rows.size)
+    graph = csr_matrix((weights, (rows, columns)), shape=(n_leaves, n_leaves))
+    hierarchy = fit_paris_hierarchy(graph, nthreads=1)
+    return hierarchy_to_dendrogram(hierarchy, compatibility=True)
+
+
+def _random_monophyletic_labels(
+    dendrogram: np.ndarray, n_clusters: int, rng: np.random.Generator
+) -> np.ndarray:
+    """Split the root into random subtrees and label each subtree's leaves."""
+    n_leaves = dendrogram.shape[0] + 1
+    children = dendrogram[:, :2].astype(np.int64)
+    heads = [2 * n_leaves - 2]
+    while len(heads) < n_clusters:
+        splittable = [head for head in heads if head >= n_leaves]
+        head = splittable[int(rng.integers(len(splittable)))]
+        heads.remove(head)
+        heads.extend(int(child) for child in children[head - n_leaves])
+    labels = np.empty(n_leaves, dtype=np.int64)
+    # Spread label values past the set table so set order is not sorted order.
+    values = rng.permutation(np.arange(n_clusters) * 37 + 5)
+    for value, head in zip(values, heads, strict=True):
+        stack = [head]
+        while stack:
+            node = stack.pop()
+            if node < n_leaves:
+                labels[node] = value
+            else:
+                stack.extend(children[node - n_leaves].tolist())
+    return labels
+
+
+@pytest.mark.parametrize(
+    ("linkage", "n_clusters"),
+    [
+        ("balanced", 1),
+        ("balanced", 4),
+        # Five of eight leaves keep more than half the nodes, so the tree
+        # iterates the full graph's node order rather than its node set.
+        ("balanced", 5),
+        ("balanced", 8),
+        ("caterpillar", 1),
+        ("caterpillar", 7),
+        ("caterpillar", 150),
+        ("caterpillar", 300),
+        ("paris", 1),
+        ("paris", 6),
+        ("paris", 40),
+        ("paris", 230),
+        ("paris", 640),
+    ],
+)
+@pytest.mark.parametrize("dtype", [np.int32, np.int64, np.uint16, str])
+def test_coalesced_dendrogram_matches_the_full_graph_tree(
+    linkage: str, n_clusters: int, dtype: type
+) -> None:
+    dendrogram = {
+        "balanced": _balanced_linkage,
+        "caterpillar": lambda: _caterpillar_linkage(300),
+        "paris": lambda: _paris_linkage(640, seed=n_clusters),
+    }[linkage]()
+    rng = np.random.default_rng(n_clusters)
+    labels = _random_monophyletic_labels(dendrogram, n_clusters, rng)
+
+    tree = _assert_coalesces_like_the_full_graph(dendrogram, labels.astype(dtype))
+
+    assert len(_partition_ids(tree)) == n_clusters
+    assert tree.number_of_nodes() == 2 * n_clusters - 1
+
+
+def test_coalesced_dendrogram_matches_the_paris_cuts_the_plot_reads() -> None:
+    from cytearc.clustering.paris import (
+        fit_paris_hierarchy,
+        fixed_cut,
+        hierarchy_to_dendrogram,
+    )
+
+    rng = np.random.default_rng(3)
+    points = np.repeat(rng.normal(size=(5, 2)) * 10, 120, axis=0)
+    points += rng.normal(size=points.shape)
+    distances = np.linalg.norm(points[:, None] - points[None, :], axis=2)
+    graph = csr_matrix(np.exp(-distances) * (distances < 2.0))
+    hierarchy = fit_paris_hierarchy(graph, nthreads=1)
+    dendrogram = hierarchy_to_dendrogram(hierarchy, compatibility=True)
+    # A cut never joins components, so it keeps at least as many clusters.
+    n_components = len(hierarchy.component_roots)
+    assert n_components > 1
+    for n_clusters in (1, n_components, n_components + 4, n_components + 15, 300):
+        labels = fixed_cut(hierarchy, n_clusters).astype(np.int32)
+        _assert_coalesces_like_the_full_graph(dendrogram, labels)
+
+
+@pytest.mark.parametrize(
+    "clusters",
+    [
+        np.asarray([0, 1, 0, 1, 2, 2, 3, 3]),
+        # Two clusters are not monophyletic; both trees name the first in
+        # set order.
+        np.asarray([7, 5, 7, 5, 2, 2, 3, 3], dtype=np.int32),
+        np.asarray([1, 1, 2, 2, 2, 3, 3, 3]),
+    ],
+)
+def test_coalesced_dendrogram_rejects_clusters_like_the_full_graph(clusters) -> None:
+    from cytearc.clustering.cluster_tree import coalesce_dendrogram
+
+    dendrogram = _balanced_linkage()
+    with pytest.raises(ValueError, match="not monophyletic") as expected:
+        CoalesceTree(make_digraph(dendrogram), clusters)
+    with pytest.raises(ValueError, match="not monophyletic") as actual:
+        coalesce_dendrogram(dendrogram, clusters)
+
+    assert str(actual.value) == str(expected.value)
+
+
+@pytest.mark.parametrize(
+    ("dendrogram", "clusters", "message"),
+    [
+        (np.zeros((0, 4)), np.zeros(1), r"shape \(n_leaves - 1, 4\)"),
+        (np.zeros((2, 3)), np.zeros(3), r"shape \(n_leaves - 1, 4\)"),
+        (_balanced_linkage(), np.zeros(7), "one label per dendrogram leaf"),
+        (np.asarray([[0, -1, 1, 2]]), np.zeros(2), "two earlier nodes"),
+        (np.asarray([[0, 3, 1, 2], [1, 2, 1, 2]]), np.zeros(3), "two earlier nodes"),
+        (np.asarray([[0, 0, 0.5, 2], [1, 3, 1, 3]]), np.zeros(3), "two earlier nodes"),
+        (np.asarray([[0, 1, 1, 2], [2, 3, 1, 4]]), np.zeros(3), "leaf counts"),
+    ],
+)
+def test_coalesced_dendrogram_rejects_invalid_linkages(
+    dendrogram, clusters, message
+) -> None:
+    from cytearc.clustering.cluster_tree import coalesce_dendrogram
+
+    with pytest.raises(ValueError, match=message):
+        coalesce_dendrogram(dendrogram, clusters)
+
+
+def test_artifact_cluster_tree_stores_the_full_graph_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _refs, _backing = _artifact_cluster_tree_store(monkeypatch)
+
+    prepared = _prepare_artifact_tree(store)
+
+    # The store's hierarchy materializes as the balanced linkage.
+    expected = CoalesceTree(make_digraph(_balanced_linkage()), prepared["clusters"])
+    assert _tree_signature(prepared["graph"], 8) == _tree_signature(expected, 8)
+    stored = store.zw[artifact_path(_artifact_ref_at(prepared["coalesced_location"]))]
+    edges, nodes, partitions = _stored_tree_arrays(expected)
+    np.testing.assert_array_equal(stored["edgelist"][:], edges)
+    np.testing.assert_array_equal(stored["nodelist"][:], nodes)
+    np.testing.assert_array_equal(stored["partition_id"][:], partitions)
+
+
 def test_artifact_cluster_tree_cache_hit_is_compute_free_and_read_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -696,6 +921,11 @@ def test_artifact_cluster_tree_cache_hit_is_compute_free_and_read_only(
     monkeypatch.setattr(
         cluster_tree_module,
         "CoalesceTree",
+        fail_recompute,
+    )
+    monkeypatch.setattr(
+        cluster_tree_module,
+        "coalesce_dendrogram",
         fail_recompute,
     )
     monkeypatch.setattr(
@@ -717,7 +947,7 @@ def test_artifact_cluster_tree_invalidation_forces_cache_miss(
 ) -> None:
     store, _refs, _backing = _artifact_cluster_tree_store(monkeypatch)
     prepared = _prepare_artifact_tree(store)
-    original_coalesce = cluster_tree_module.CoalesceTree
+    original_coalesce = cluster_tree_module.coalesce_dendrogram
     original_materialize = paris_module.hierarchy_to_dendrogram
     calls = {"coalesce": 0, "dendrogram": 0}
 
@@ -729,7 +959,7 @@ def test_artifact_cluster_tree_invalidation_forces_cache_miss(
         calls["dendrogram"] += 1
         return original_materialize(*args, **kwargs)
 
-    monkeypatch.setattr(cluster_tree_module, "CoalesceTree", track_coalesce)
+    monkeypatch.setattr(cluster_tree_module, "coalesce_dendrogram", track_coalesce)
     monkeypatch.setattr(
         paris_module,
         "hierarchy_to_dendrogram",
@@ -774,7 +1004,7 @@ def test_artifact_cluster_tree_does_not_reuse_incomplete_or_malformed_cache(
     else:
         del store.zw[artifact_path(dendrogram_ref)]["data"]
 
-    original_coalesce = cluster_tree_module.CoalesceTree
+    original_coalesce = cluster_tree_module.coalesce_dendrogram
     original_materialize = paris_module.hierarchy_to_dendrogram
     calls = {"coalesce": 0, "dendrogram": 0}
 
@@ -786,7 +1016,7 @@ def test_artifact_cluster_tree_does_not_reuse_incomplete_or_malformed_cache(
         calls["dendrogram"] += 1
         return original_materialize(*args, **kwargs)
 
-    monkeypatch.setattr(cluster_tree_module, "CoalesceTree", track_coalesce)
+    monkeypatch.setattr(cluster_tree_module, "coalesce_dendrogram", track_coalesce)
     monkeypatch.setattr(
         paris_module,
         "hierarchy_to_dendrogram",

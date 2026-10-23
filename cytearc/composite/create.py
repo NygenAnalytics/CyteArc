@@ -462,6 +462,64 @@ def _fit_count_layout(
         )
 
 
+_FNV_OFFSET = np.uint64(0xCBF29CE484222325)
+_FNV_PRIME = np.uint64(0x100000001B3)
+
+
+def _text_hashes(values: np.ndarray) -> np.ndarray:
+    """Hash fixed-width text to 64 bits with FNV-1a over its code points."""
+    codes = values.view(np.uint32).reshape(values.size, -1)
+    hashes = np.full(values.size, _FNV_OFFSET, dtype=np.uint64)
+    for column in codes.T:
+        hashes ^= column
+        hashes *= _FNV_PRIME
+    return hashes
+
+
+def _require_unique_cell_ids(
+    ids: zarr.Array,
+    resources: ResourceBudget,
+    *,
+    resident_bytes: int,
+) -> None:
+    """Raise when two composite cell IDs are equal.
+
+    A source can repeat an ID, and a source name that ends in an underscore
+    can give two sources one prefixed ID, as ``a`` with ``_x`` and ``a_``
+    with ``x`` both give ``a___x``. IDs are hashed one chunk at a time, so
+    the check holds 17 bytes per cell rather than the IDs, and only IDs whose
+    hashes repeat are read again and compared.
+    """
+    n_cells = int(ids.shape[0])
+    block_rows = max(1, min(n_cells, int(ids.chunks[0])))
+    hash_bytes = np.dtype(np.uint64).itemsize
+    needed = (
+        resident_bytes
+        + n_cells * (2 * hash_bytes + np.dtype(bool).itemsize)
+        + block_rows * (int(ids.dtype.itemsize) + 2 * hash_bytes)
+    )
+    if needed > resources.memoryBytes:
+        raise MemoryError("Composite cell identity validation exceeds mem_budget")
+    hashes = np.empty(n_cells, dtype=np.uint64)
+    for start in range(0, n_cells, block_rows):
+        stop = min(n_cells, start + block_rows)
+        hashes[start:stop] = _text_hashes(np.asarray(ids[start:stop]))
+    order = np.argsort(hashes)
+    hashes.sort()
+    repeated = np.unique(hashes[1:][hashes[1:] == hashes[:-1]])
+    for value in repeated:
+        first = int(np.searchsorted(hashes, value, side="left"))
+        stop = int(np.searchsorted(hashes, value, side="right"))
+        rows = np.sort(order[first:stop])
+        seen: set[str] = set()
+        for start in range(0, rows.size, block_rows):
+            selected = rows[start : start + block_rows]
+            for text in np.asarray(ids.get_orthogonal_selection(selected)).tolist():
+                if text in seen:
+                    raise ValueError("Composite cell IDs are not unique")
+                seen.add(text)
+
+
 def create_composite(
     sources: Mapping[str, "DataStore"],
     *,
@@ -710,13 +768,11 @@ def create_composite(
         if metadata_cache is not None:
             metadata_cache.close()
             metadata_cache = None
-        ids = as_zarr_array(cells["ids"], name="ids")
-        if resident + 3 * ids.size * ids.dtype.itemsize > resources.memoryBytes:
-            raise MemoryError("Composite cell identity validation exceeds mem_budget")
-        values = np.asarray(ids[:])
-        if np.unique(values).size != values.size:
-            raise ValueError("Composite cell IDs are not unique")
-        del values
+        _require_unique_cell_ids(
+            as_zarr_array(cells["ids"], name="ids"),
+            resources,
+            resident_bytes=resident,
+        )
         create_assay_counts(
             root,
             assay,

@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from functools import partial
 from typing import Any
 
@@ -34,6 +34,7 @@ from .rows import (
 )
 
 _RESERVED_COLUMNS = ("I", "ids", "names")
+_RESERVED_COLUMN_SET = frozenset(_RESERVED_COLUMNS)
 
 
 class CaseInsensitiveIndex:
@@ -107,20 +108,84 @@ class MetaData:
             )
         return KeyError(message)
 
-    def _column_names(self) -> list[str]:
+    def _members(self) -> list[tuple[str, zarr.Array | zarr.Group]]:
+        """Return every member of the table with its node, in listing order.
+
+        The listing reads each child's metadata once, concurrently, so callers
+        reuse these arrays and their attributes rather than open each again.
+        """
+        return list(self._group.members())
+
+    @classmethod
+    def _public_column_names(
+        cls, members: Iterable[tuple[str, zarr.Array | zarr.Group]]
+    ) -> list[str]:
         # Zarr lists members in no particular order, so sort them.
         names = sorted(
             column
-            for column in self._group.keys()
-            if self._is_public(column) and column not in _RESERVED_COLUMNS
+            for column, _node in members
+            if cls._is_public(column) and column not in _RESERVED_COLUMNS
         )
         return [*_RESERVED_COLUMNS, *names]
+
+    def _column_names(self) -> list[str]:
+        return self._public_column_names(self._members())
 
     def _has_column(self, column: str) -> bool:
         # Looking up one column avoids listing and opening every column.
         return column in _RESERVED_COLUMNS or (
             self._is_public(column) and column in self._group
         )
+
+    def _opened_array(
+        self,
+        column: str,
+        opened: Mapping[str, zarr.Array | zarr.Group],
+    ) -> zarr.Array:
+        """Return a public column's array, reusing ``opened``.
+
+        ``opened`` maps member names to nodes that were already opened, such
+        as those of :meth:`_members`; a column missing from it is opened here.
+        Raises as :meth:`_get_array` does for a column that the table does not
+        hold or that is a nested group.
+        """
+        node = opened.get(column) if self._is_public(column) else None
+        if node is None:
+            return self._get_array(column)
+        if isinstance(node, zarr.Group):
+            raise nested_group_error(column)
+        return as_zarr_array(node, name=column)
+
+    def _opened_column(
+        self,
+        column: str,
+        opened: Mapping[str, zarr.Array | zarr.Group],
+    ) -> tuple[zarr.Array, zarr.Array | None]:
+        """Return a column's array and linked missing mask, reusing ``opened``."""
+        array = self._opened_array(column, opened)
+        mask = linked_missing_mask(
+            self._group, column, label=f"Column {column!r}", values=array, opened=opened
+        )
+        return array, mask
+
+    def _open_listed_column(
+        self, column: str, opened: dict[str, zarr.Array | zarr.Group]
+    ) -> bool:
+        """Return whether ``column`` is one of :attr:`columns`, opening it once.
+
+        A public member is opened into ``opened``. The reserved columns are
+        listed whether or not the table holds them.
+        """
+        # A set lookup refuses a name that cannot be hashed, as listing did.
+        reserved = column in _RESERVED_COLUMN_SET
+        if not self._is_public(column):
+            return False
+        if column not in opened:
+            try:
+                opened[column] = self._group[column]
+            except KeyError:
+                return reserved
+        return True
 
     def _get_array(self, column: str) -> zarr.Array:
         """Return the array of a public column.

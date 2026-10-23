@@ -497,6 +497,221 @@ def _fit_component(
     )
 
 
+def _fit_components(
+    graph: csr_matrix,
+    leaf_ids: np.ndarray,
+    components: np.ndarray,
+    *,
+    first_component: int,
+    next_node: int,
+    total_weight: float,
+    round_diagnostics: list[ParisRoundDiagnostics],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int] | None:
+    """Fit the connected components of a block-diagonal graph together.
+
+    ``components`` numbers each vertex's component from zero, in fit order.
+    Every component makes the merges, with the heights, that fitting it alone
+    makes: a reciprocal-neighbor round reads only a component's own edges,
+    and contraction keeps the relative order of its vertices and the order of
+    its sums. Merges are returned component by component and numbered from
+    ``next_node``, as fitting the components in turn numbers them, and so are
+    the roots and the round diagnostics, whose timings are split evenly
+    between the components that a round fits. Returns None, and records
+    nothing, when a round fits no pair of a component or makes a non-finite
+    height; fitting the components in turn then raises as it would.
+    """
+    n_components = int(components[-1]) + 1
+    logical_ids = np.asarray(leaf_ids, dtype=np.int64)
+    volumes = np.asarray(graph.sum(axis=1)).ravel().astype(np.float64, copy=False)
+    sizes = np.ones(logical_ids.size, dtype=np.int64)
+    contraction_values = np.full(
+        (min(get_num_threads(), logical_ids.size), logical_ids.size),
+        np.nan,
+        dtype=np.float64,
+    )
+    active = np.bincount(components, minlength=n_components)
+    rounds = np.zeros(n_components, dtype=np.int64)
+    merge_components: list[np.ndarray] = []
+    child_blocks: list[np.ndarray] = []
+    height_blocks: list[np.ndarray] = []
+    size_blocks: list[np.ndarray] = []
+    diagnostics: list[ParisRoundDiagnostics] = []
+    node = next_node
+
+    while np.any(active > 1):
+        fitting = np.flatnonzero(active > 1)
+        active_edges = np.bincount(
+            components, weights=np.diff(graph.indptr), minlength=n_components
+        ).astype(np.int64)
+        scan_start = time.perf_counter()
+        n_workers = min(contraction_values.shape[0], logical_ids.size)
+        nearest, between_weights = _nearest_neighbors(
+            graph.indptr,
+            graph.indices,
+            graph.data,
+            volumes,
+            logical_ids,
+            n_workers,
+        )
+        first, second = _reciprocal_pairs(nearest)
+        scan_seconds = time.perf_counter() - scan_start
+        merges = np.bincount(components[first], minlength=n_components)
+        if np.any(merges[fitting] == 0):
+            return None
+
+        merge_count = first.size
+        new_ids = np.arange(node, node + merge_count, dtype=np.int64)
+        first_ids = logical_ids[first]
+        second_ids = logical_ids[second]
+        children = np.column_stack(
+            (np.minimum(first_ids, second_ids), np.maximum(first_ids, second_ids))
+        )
+        # Fitting the components in turn warns about any overflow once.
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            heights = (volumes[first] / total_weight) * (
+                volumes[second] / between_weights[first]
+            )
+        if not np.isfinite(heights).all():
+            return None
+        merge_components.append(components[first])
+        child_blocks.append(children)
+        height_blocks.append(heights)
+        size_blocks.append(sizes[first] + sizes[second])
+
+        sort_start = time.perf_counter()
+        mapping = np.empty(logical_ids.size, dtype=graph.indices.dtype)
+        new_logical_ids, new_volumes, new_sizes = _prepare_contraction_groups(
+            logical_ids,
+            volumes,
+            sizes,
+            first,
+            second,
+            new_ids,
+            mapping,
+        )
+        # Contraction keeps the unmerged vertices in order, then one vertex
+        # for each pair.
+        unmerged = np.ones(logical_ids.size, dtype=bool)
+        unmerged[first] = False
+        unmerged[second] = False
+        new_components = np.concatenate((components[unmerged], components[first]))
+        sort_seconds = time.perf_counter() - sort_start
+        contract_start = time.perf_counter()
+        (
+            graph,
+            contraction_remap_seconds,
+            contraction_filter_seconds,
+            contraction_build_seconds,
+            contraction_cleanup_seconds,
+        ) = _contract_graph(
+            graph,
+            mapping,
+            new_logical_ids.size,
+            contraction_values,
+        )
+        contract_seconds = time.perf_counter() - contract_start
+
+        share = 1.0 / fitting.size
+        for component in fitting.tolist():
+            diagnostics.append(
+                ParisRoundDiagnostics(
+                    component=first_component + component,
+                    round_index=int(rounds[component]),
+                    active_vertices=int(active[component]),
+                    active_edges=int(active_edges[component]),
+                    merges=int(merges[component]),
+                    scan_seconds=scan_seconds * share,
+                    sort_seconds=sort_seconds * share,
+                    contraction_seconds=contract_seconds * share,
+                    contraction_remap_seconds=contraction_remap_seconds * share,
+                    contraction_filter_seconds=contraction_filter_seconds * share,
+                    contraction_build_seconds=contraction_build_seconds * share,
+                    contraction_cleanup_seconds=contraction_cleanup_seconds * share,
+                )
+            )
+        rounds[fitting] += 1
+        active -= merges
+        node += merge_count
+        logical_ids = new_logical_ids
+        volumes = new_volumes
+        sizes = new_sizes
+        components = new_components
+
+    # One vertex is left in each component; renumber the merges component by
+    # component, keeping each component's round order.
+    roots = np.empty(n_components, dtype=np.int64)
+    roots[components] = logical_ids
+    order = np.argsort(np.concatenate(merge_components), kind="stable")
+    renumbered = np.empty(order.size, dtype=np.int64)
+    renumbered[order] = np.arange(next_node, next_node + order.size, dtype=np.int64)
+    children = np.concatenate(child_blocks)[order]
+    merged_children = children >= next_node
+    children[merged_children] = renumbered[children[merged_children] - next_node]
+    merged_roots = roots >= next_node
+    roots[merged_roots] = renumbered[roots[merged_roots] - next_node]
+    round_diagnostics.extend(
+        sorted(diagnostics, key=lambda item: (item.component, item.round_index))
+    )
+    return (
+        children,
+        np.concatenate(height_blocks)[order],
+        np.concatenate(size_blocks)[order],
+        roots,
+        next_node + order.size,
+    )
+
+
+def _component_block(
+    canonical: csr_matrix,
+    leaf_ids: np.ndarray,
+    positions: np.ndarray,
+) -> csr_matrix:
+    """Return the graph of whole components, in the order of ``leaf_ids``.
+
+    Each component's vertices are ascending in ``leaf_ids``, so every row keeps
+    its sorted indices and its values, as indexing rows and columns with the
+    component's vertices keeps them. ``positions`` is a scratch array with one
+    entry per vertex.
+    """
+    rows = canonical[leaf_ids]
+    positions[leaf_ids] = np.arange(leaf_ids.size)
+    return csr_matrix(
+        (
+            rows.data,
+            positions[rows.indices].astype(rows.indices.dtype, copy=False),
+            rows.indptr,
+        ),
+        shape=(leaf_ids.size, leaf_ids.size),
+        copy=False,
+    )
+
+
+def _component_batches(
+    component_sizes: np.ndarray,
+    max_vertices: int,
+) -> list[tuple[int, int]]:
+    """Group consecutive components into runs of at most ``max_vertices``.
+
+    A component larger than that is a run of its own.
+    """
+    batches: list[tuple[int, int]] = []
+    first = 0
+    vertices = 0
+    for index, size in enumerate(component_sizes.tolist()):
+        if vertices and vertices + size > max_vertices:
+            batches.append((first, index))
+            first = index
+            vertices = 0
+        vertices += size
+    batches.append((first, component_sizes.size))
+    return batches
+
+
+# Components are fitted together until they hold this many vertices, so that
+# graphs of many small components pay the per-round overhead once per batch.
+_COMPONENT_BATCH_VERTICES = 4096
+
+
 def fit_paris_hierarchy(
     graph: spmatrix,
     *,
@@ -520,11 +735,15 @@ def fit_paris_hierarchy(
     component_mins = np.full(n_components, n_leaves, dtype=np.int64)
     np.minimum.at(component_mins, labels, np.arange(n_leaves, dtype=np.int64))
     component_order = np.argsort(component_mins, kind="stable")
-    vertices_by_component = np.argsort(labels, kind="stable")
-    component_counts = np.bincount(labels, minlength=n_components)
+    # Vertices in fit order: by component, ascending within each, so every
+    # component and every run of consecutive components is one slice.
+    component_rank = np.empty(n_components, dtype=np.int64)
+    component_rank[component_order] = np.arange(n_components, dtype=np.int64)
+    vertices_by_component = np.argsort(component_rank[labels], kind="stable")
+    component_sizes = np.bincount(labels, minlength=n_components)[component_order]
     component_offsets = np.empty(n_components + 1, dtype=np.int64)
     component_offsets[0] = 0
-    np.cumsum(component_counts, out=component_offsets[1:])
+    np.cumsum(component_sizes, out=component_offsets[1:])
     component_seconds = time.perf_counter() - component_start
 
     requested_threads = get_num_threads() if nthreads is None else max(1, int(nthreads))
@@ -534,44 +753,83 @@ def fit_paris_hierarchy(
     child_blocks: list[np.ndarray] = []
     height_blocks: list[np.ndarray] = []
     size_blocks: list[np.ndarray] = []
-    component_roots: list[int] = []
-    component_sizes: list[int] = []
+    component_roots = np.empty(n_components, dtype=np.int64)
     round_diagnostics: list[ParisRoundDiagnostics] = []
+    positions: np.ndarray | None = None
     next_node = n_leaves
+
+    def component_block(leaf_ids: np.ndarray) -> csr_matrix:
+        # Only a graph of several components needs the scratch positions.
+        nonlocal positions
+        if positions is None:
+            positions = np.empty(n_leaves, dtype=np.int64)
+        return _component_block(canonical, leaf_ids, positions)
+
+    def fit_one(component_index: int) -> None:
+        nonlocal next_node
+        start_offset = component_offsets[component_index]
+        end_offset = component_offsets[component_index + 1]
+        leaf_ids = vertices_by_component[start_offset:end_offset]
+        if leaf_ids.size == 1:
+            component_roots[component_index] = leaf_ids[0]
+            return
+        if leaf_ids.size == n_leaves:
+            component_graph = canonical
+        else:
+            component_graph = component_block(leaf_ids)
+        (
+            component_children,
+            component_heights,
+            component_merge_sizes,
+            component_root,
+            next_node,
+        ) = _fit_component(
+            component_graph,
+            leaf_ids,
+            component=component_index,
+            next_node=next_node,
+            total_weight=total_weight,
+            round_diagnostics=round_diagnostics,
+        )
+        child_blocks.extend(component_children)
+        height_blocks.extend(component_heights)
+        size_blocks.extend(component_merge_sizes)
+        component_roots[component_index] = component_root
+
     try:
-        for component_index, component_label in enumerate(component_order):
-            start_offset = component_offsets[component_label]
-            end_offset = component_offsets[component_label + 1]
-            leaf_ids = vertices_by_component[start_offset:end_offset].astype(
-                np.int64,
-                copy=False,
-            )
-            component_sizes.append(leaf_ids.size)
-            if leaf_ids.size == 1:
-                component_roots.append(int(leaf_ids[0]))
-                continue
-            if leaf_ids.size == n_leaves:
-                component_graph = canonical
-            else:
-                component_graph = canonical[leaf_ids][:, leaf_ids].tocsr()
-            (
-                component_children,
-                component_heights,
-                component_merge_sizes,
-                component_root,
-                next_node,
-            ) = _fit_component(
-                component_graph,
-                leaf_ids,
-                component=component_index,
-                next_node=next_node,
-                total_weight=total_weight,
-                round_diagnostics=round_diagnostics,
-            )
-            child_blocks.extend(component_children)
-            height_blocks.extend(component_heights)
-            size_blocks.extend(component_merge_sizes)
-            component_roots.append(component_root)
+        for first, stop in _component_batches(
+            component_sizes,
+            _COMPONENT_BATCH_VERTICES,
+        ):
+            batch_sizes = component_sizes[first:stop]
+            if stop - first > 1 and np.any(batch_sizes > 1):
+                leaf_ids = vertices_by_component[
+                    component_offsets[first] : component_offsets[stop]
+                ]
+                fitted = _fit_components(
+                    component_block(leaf_ids),
+                    leaf_ids,
+                    np.repeat(np.arange(stop - first, dtype=np.int64), batch_sizes),
+                    first_component=first,
+                    next_node=next_node,
+                    total_weight=total_weight,
+                    round_diagnostics=round_diagnostics,
+                )
+                if fitted is not None:
+                    (
+                        batch_children,
+                        batch_heights,
+                        batch_merge_sizes,
+                        batch_roots,
+                        next_node,
+                    ) = fitted
+                    child_blocks.append(batch_children)
+                    height_blocks.append(batch_heights)
+                    size_blocks.append(batch_merge_sizes)
+                    component_roots[first:stop] = batch_roots
+                    continue
+            for component_index in range(first, stop):
+                fit_one(component_index)
     finally:
         set_num_threads(previous_threads)
 
@@ -600,21 +858,20 @@ def fit_paris_hierarchy(
     _raise_to_child_heights(children[:offset], heights[:offset], n_leaves)
 
     if synthetic_count:
-        root = component_roots[0]
-        root_size = component_sizes[0]
-        for component_root, component_size in zip(
-            component_roots[1:],
-            component_sizes[1:],
-            strict=True,
-        ):
-            children[offset] = (root, component_root)
-            root_size += component_size
-            heights[offset] = np.inf
-            sizes[offset] = root_size
-            synthetic_joins[offset] = True
-            root = next_node
-            next_node += 1
-            offset += 1
+        # Each join adds the next component's root to the join before it.
+        joins = slice(offset, offset + synthetic_count)
+        children[joins, 0] = np.concatenate(
+            (
+                component_roots[:1],
+                np.arange(next_node, next_node + synthetic_count - 1),
+            )
+        )
+        children[joins, 1] = component_roots[1:]
+        heights[joins] = np.inf
+        sizes[joins] = np.cumsum(component_sizes)[1:]
+        synthetic_joins[joins] = True
+        next_node += synthetic_count
+        offset += synthetic_count
 
     if offset != n_leaves - 1 or next_node != 2 * n_leaves - 1:
         raise RuntimeError(
@@ -632,7 +889,7 @@ def fit_paris_hierarchy(
         children=children,
         heights=heights,
         sizes=sizes,
-        component_roots=np.asarray(component_roots, dtype=index_dtype),
+        component_roots=component_roots.astype(index_dtype),
         synthetic_joins=synthetic_joins,
         n_leaves=n_leaves,
         total_weight=total_weight,

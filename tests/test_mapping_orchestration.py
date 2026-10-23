@@ -974,6 +974,43 @@ def test_symphony_mapping_validates_batches_and_persists_diagnostics(
     assert len(files) == 2 and all(file.closed for file in files)
 
 
+def test_symphony_mapping_matches_gathered_query_offsets(
+    mapping_source,
+    reference_store,
+    tmp_path,
+    monkeypatch,
+):
+    reference = _symphony_reference(reference_store, mapping_source)
+    n_cells = reference.selected_cell_count
+    batches = pd.DataFrame({"donor": np.where(np.arange(n_cells) % 3, "a", "b")})
+
+    def gathered_correction(coordinates, assignments, batch_codes, model, correction):
+        # The earlier correction gathered one offset matrix for every row.
+        return coordinates - np.einsum(
+            "nk,nkd->nd", assignments, correction.batch_offsets[batch_codes]
+        )
+
+    results = []
+    for name, correct in (
+        ("batched", mapping_operations.apply_query_correction),
+        ("gathered", gathered_correction),
+    ):
+        monkeypatch.setattr(mapping_operations, "apply_query_correction", correct)
+        query = _copied_query(reference_store, tmp_path / f"{name}.zarr")
+        for query_batches in (batches, None):
+            result_ref = query.mapping.run(
+                reference, reference.cell_selection, query_batches=query_batches
+            )
+            results.append(query.mapping.load_result(result_ref, reference=reference))
+
+    batched, gathered = results[:2], results[2:]
+    for actual, expected in zip(batched, gathered, strict=True):
+        assert actual.diagnostics == expected.diagnostics
+        np.testing.assert_array_equal(actual.indices, expected.indices)
+        np.testing.assert_array_equal(actual.distances, expected.distances)
+        np.testing.assert_array_equal(actual.uninformative, expected.uninformative)
+
+
 def test_projection_cache_tracks_exact_references(
     mapping_source,
     reference_store,

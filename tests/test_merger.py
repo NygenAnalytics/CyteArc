@@ -2442,29 +2442,29 @@ def test_dataset_merge_resumes_after_partial_counts_band(tmp_path, monkeypatch):
     import cytearc.merge.writer as merge_writer
 
     path = str(tmp_path / "partial_band.zarr")
-    original = merge_writer.accumulate_sparse_to_shards
+    # Counts are written densely when the feature mapping is injective and
+    # through sparse bands otherwise; whichever writer runs is interrupted.
+    writers = ("accumulate_sparse_to_shards", "write_dense_from_row_batches")
+    originals = {name: getattr(merge_writer, name) for name in writers}
 
-    def fail_after_persisting(dst, data_stream, **kwargs):
-        rows = original(dst, data_stream, **kwargs)
-        assert rows > 0
-        assert int(np.asarray(dst[:]).sum()) > 0
-        raise RuntimeError("simulated partial counts band")
+    def fail_after_persisting(write):
+        def interrupted(dst, data_stream, **kwargs):
+            rows = write(dst, data_stream, **kwargs)
+            assert rows > 0
+            assert int(np.asarray(dst[:]).sum()) > 0
+            raise RuntimeError("simulated partial counts band")
 
-    monkeypatch.setattr(
-        merge_writer,
-        "accumulate_sparse_to_shards",
-        fail_after_persisting,
-    )
+        return interrupted
+
+    for name in writers:
+        monkeypatch.setattr(merge_writer, name, fail_after_persisting(originals[name]))
     with pytest.raises(RuntimeError, match="partial counts band"):
         _merge_two_rna(
             zarr_path=path,
             overwrite=False,
         ).dump()
-    monkeypatch.setattr(
-        merge_writer,
-        "accumulate_sparse_to_shards",
-        original,
-    )
+    for name in writers:
+        monkeypatch.setattr(merge_writer, name, originals[name])
 
     interrupted = zarr.open_group(path, mode="r+")
     interrupted.create_group("sentinel")
@@ -2681,9 +2681,11 @@ def test_dataset_merge_metadata_admission_shrinks_under_budget(monkeypatch):
     assert updated.columns == metadata_plan.columns
 
 
+@pytest.mark.parametrize("write", ["dense", "sparse"])
 def test_dataset_merge_sparse_write_respects_admitted_batch_geometry(
     tmp_path,
     monkeypatch,
+    write,
 ):
     import cytearc.merge.writer as merge_writer
 
@@ -2722,10 +2724,10 @@ def test_dataset_merge_sparse_write_respects_admitted_batch_geometry(
         zarr_loc="memory://right",
     )
 
-    dense_rows: list[int] = []
-    coo_rows: list[int] = []
+    batches: dict[str, list[int]] = {"dense": [], "sparse": []}
     batch_rows: list[int] = []
     original_remap = merge_writer.remap_block_to_coo
+    original_scatter = merge_writer.scatter_block_dense
     original_batch = merge_writer.resolve_sparse_import_batch
 
     def tracking_remap(block, order_map, n_feats, nthreads, destination_dtype=None):
@@ -2736,8 +2738,12 @@ def test_dataset_merge_sparse_write_respects_admitted_batch_geometry(
             nthreads,
             destination_dtype,
         )
-        dense_rows.append(int(result.shape[0]))
-        coo_rows.append(int(result.shape[0]))
+        batches["sparse"].append(int(result.shape[0]))
+        return result
+
+    def tracking_scatter(block, order_map, n_feats, destination_dtype):
+        result = original_scatter(block, order_map, n_feats, destination_dtype)
+        batches["dense"].append(int(result.shape[0]))
         return result
 
     def tracking_batch(*args, **kwargs):
@@ -2745,8 +2751,15 @@ def test_dataset_merge_sparse_write_respects_admitted_batch_geometry(
         batch_rows.append(int(plan.batchRows))
         return plan
 
+    def refused_dense_write(*args, **kwargs):
+        raise MemoryError("dense write refused")
+
     monkeypatch.setattr(merge_writer, "remap_block_to_coo", tracking_remap)
+    monkeypatch.setattr(merge_writer, "scatter_block_dense", tracking_scatter)
     monkeypatch.setattr(merge_writer, "resolve_sparse_import_batch", tracking_batch)
+    if write == "sparse":
+        # Unique feature IDs write densely unless the dense write is refused.
+        monkeypatch.setattr(merge_writer, "plan_dense_write", refused_dense_write)
 
     DataStoreMerge(
         datasets=[left, right],
@@ -2762,11 +2775,10 @@ def test_dataset_merge_sparse_write_respects_admitted_batch_geometry(
 
     assert batch_rows
     admitted = max(batch_rows)
-    assert dense_rows
-    assert coo_rows
-    assert all(rows <= admitted for rows in dense_rows)
-    assert all(rows <= admitted for rows in coo_rows)
-    assert sum(coo_rows) == n_left + n_right
+    assert batches[write]
+    assert batches["sparse" if write == "dense" else "dense"] == []
+    assert all(rows <= admitted for rows in batches[write])
+    assert sum(batches[write]) == n_left + n_right
     completed = zarr.open_group(path, mode="r")
     assert _rows_by_id(completed) == {
         **{f"left__c{i}": row.tolist() for i, row in enumerate(left_counts)},
@@ -4523,6 +4535,32 @@ def test_row_plan_segments_and_identity_checks_cover_every_cell_once():
         verify_merged_cell_ids(shorter, plan, tables)
 
 
+@pytest.mark.parametrize(
+    "source_ids",
+    [
+        np.asarray(["AAAC-1", "G", "", "ünï-2"]),
+        np.asarray(["AAAC-1", "G", "", "ünï-2"], dtype=np.dtypes.StringDType()),
+        np.asarray([], dtype="U5"),
+        # Other values format themselves one at a time.
+        np.asarray(["AAAC-1", 7, b"raw", None], dtype=object),
+    ],
+    ids=["fixed", "variable", "empty", "objects"],
+)
+@pytest.mark.parametrize("dtype", ["U16", "U6", np.dtypes.StringDType()])
+def test_prefixed_cell_ids_format_each_source_id_after_its_name(source_ids, dtype):
+    from cytearc.merge.row_plan import prefixed_cell_ids
+
+    expected = np.empty(source_ids.size, dtype=np.dtype(dtype))
+    for index, value in enumerate(source_ids):
+        expected[index] = f"src__{value}"
+
+    merged = prefixed_cell_ids("src", source_ids, dtype)
+
+    # A narrower dtype truncates every ID alike.
+    assert merged.dtype == expected.dtype
+    assert merged.tolist() == expected.tolist()
+
+
 def test_validate_cell_metadata_reports_a_missing_or_incomplete_group():
     import cytearc.merge.metadata as merge_metadata
     from cytearc.merge.row_plan import build_row_plan
@@ -5104,3 +5142,352 @@ def test_merge_rejects_counts_in_cells_outside_the_assay():
         merger.dump()
     with pytest.raises(GroupNotFoundError):
         zarr.open_group(destination, mode="r")
+
+
+def _sparse_band_write_assay_counts(
+    root,
+    assay_name,
+    workspace,
+    assays,
+    row_plan,
+    alignment,
+    *,
+    resources,
+    additionalResidentBytes=0,
+    io=None,
+):
+    """Write counts as merges did before: each batch read alone, then COO bands."""
+    import cytearc.merge.writer as merge_writer
+    from cytearc.merge.row_plan import iter_row_plan_segments
+    from cytearc.storage.identity import CountSummary, finalize_counts
+    from cytearc.storage.schema import load_count_array
+    from cytearc.storage.sharding import (
+        accumulate_sparse_to_shards,
+        resolve_sparse_import_batch,
+    )
+
+    destination = load_count_array(root, assay_name, workspace)
+    summary = CountSummary(destination)
+    requirements = merge_writer._merge_import_requirements(
+        assays,
+        row_plan,
+        alignment,
+        destination.dtype,
+        resources=resources,
+        additionalResidentBytes=additionalResidentBytes,
+    )
+    plan = resolve_sparse_import_batch(
+        (destination,),
+        nRows=row_plan.nCells,
+        resources=resources,
+        maxWindowNnz=requirements.maxWindowNnz,
+        sourceDtype=requirements.sourceDtype,
+        residentBytes=requirements.residentBytes,
+        extraProducerBytes=requirements.extraProducerBytes,
+    )
+
+    def batches():
+        for segment in iter_row_plan_segments(row_plan, segment_rows=plan.batchRows):
+            assay = assays[segment.sourceIdx]
+            if assay is None or int(assay.feats.N) == 0:
+                yield merge_writer.empty_block_coo(
+                    int(segment.localRows.size), alignment.nFeats
+                )
+                continue
+            yield merge_writer.remap_block_to_coo(
+                assay.rawData[np.asarray(segment.localRows, dtype=np.int64), :],
+                alignment.featOrderMap[segment.sourceIdx],
+                alignment.nFeats,
+                resources.workers,
+                np.dtype(destination.dtype),
+            )
+
+    counter = accumulate_sparse_to_shards(
+        destination,
+        batches(),
+        resources=resources,
+        residentBytes=requirements.residentBytes,
+        producerReserveBytes=plan.producerReserveBytes,
+        io=io,
+        countSummary=summary,
+    )
+    finalize_counts(destination, summary=summary)
+    root[merge_writer._matrix_group_path(assay_name, workspace)].attrs["complete"] = (
+        True
+    )
+    return counter
+
+
+def _store_files(path) -> dict[str, bytes]:
+    from pathlib import Path
+
+    root = Path(path)
+    return {
+        str(file.relative_to(root)): file.read_bytes()
+        for file in sorted(root.rglob("*"))
+        if file.is_file()
+    }
+
+
+# Rows of each source's 16-row count chunks, which the row plan keeps together.
+_SOURCE_BLOCK_ROWS = 16
+
+
+def _count_sources(scenario: str) -> tuple[list, dict]:
+    """Return two sources with chunked counts, and the merge options of a scenario."""
+    rng = np.random.default_rng(len(scenario))
+    n_left, n_right = 37, 29
+    dtypes = {
+        "float": (np.float32, np.float64),
+        "names": (np.uint8, np.uint16),
+    }.get(scenario, (np.uint16, np.uint16))
+    left_counts = rng.integers(0, 9, size=(n_left, 7)).astype(dtypes[0])
+    right_counts = rng.integers(0, 300, size=(n_right, 9)).astype(dtypes[1])
+    left_counts[rng.random(left_counts.shape) < 0.5] = 0
+    right_counts[rng.random(right_counts.shape) < 0.5] = 0
+    if scenario == "float":
+        # A negative zero merges as zero; fractions keep their bits.
+        left_counts[0, :3] = [-0.0, 2.5, 0.5]
+        right_counts[1, :2] = [-0.0, -1.25]
+    left_ids = [f"id_{i}" for i in range(7)]
+    right_ids = [f"id_{i}" for i in range(4, 13)]
+    left_names = [f"G{i}" for i in range(7)]
+    right_names = [f"G{i}" for i in range(4, 13)]
+    options: dict = {"feature_key": "ids"}
+    if scenario == "names":
+        # Two right features share a name, so the merge sums them.
+        right_names[2] = right_names[1]
+        options = {"feature_key": "names"}
+    assays = [
+        _MergeAssay(
+            "RNA",
+            counts,
+            [f"c{i}" for i in range(len(counts))],
+            feature_ids,
+            feature_names,
+            block_size=_SOURCE_BLOCK_ROWS,
+        )
+        for counts, feature_ids, feature_names in (
+            (left_counts, left_ids, left_names),
+            (right_counts, right_ids, right_names),
+        )
+    ]
+    sources = [
+        _MergeDataStore([assay], zarr_loc=f"memory://{label}")
+        for assay, label in zip(assays, ("left", "right"), strict=True)
+    ]
+    if scenario == "missing":
+        # The right source lacks ADT, which the merge fills with zeros.
+        adt = _MergeAssay(
+            "ADT",
+            rng.integers(0, 50, size=(n_left, 3)).astype(np.uint16),
+            [f"c{i}" for i in range(n_left)],
+            ["p0", "p1", "p2"],
+            ["P0", "P1", "P2"],
+            block_size=_SOURCE_BLOCK_ROWS,
+        )
+        sources[0] = _MergeDataStore([assays[0], adt], zarr_loc="memory://left")
+    return sources, options
+
+
+@pytest.mark.parametrize(
+    ("scenario", "refused", "shard_rows", "dense", "whole_blocks"),
+    [
+        ("ids", (), "narrow", True, True),
+        ("ids", (), "wide", True, True),
+        # Holding blocks in the dense write is refused, so it reads batches.
+        ("ids", ("held_dense",), "narrow", True, False),
+        ("ids", ("dense",), "narrow", False, True),
+        ("ids", ("dense", "held_sparse"), "narrow", False, False),
+        ("names", (), "narrow", False, True),
+        ("names", (), "wide", False, True),
+        ("names", ("held_sparse",), "narrow", False, False),
+        ("float", (), "narrow", True, True),
+        ("float", (), "wide", True, True),
+        ("missing", (), "narrow", True, True),
+    ],
+)
+def test_merged_counts_match_the_sparse_band_write_byte_for_byte(
+    tmp_path, monkeypatch, scenario, refused, shard_rows, dense, whole_blocks
+):
+    import cytearc.merge.writer as merge_writer
+
+    # Narrow destination shards cut each source block into several batches;
+    # wide ones take whole blocks.
+    policy = (
+        CountMatrixPolicy(unitBytes=128, chunkBytes=64)
+        if shard_rows == "narrow"
+        else CountMatrixPolicy(unitBytes=1 << 20, chunkBytes=1 << 18)
+    )
+
+    def merge(path):
+        sources, options = _count_sources(scenario)
+        DataStoreMerge(
+            datasets=sources,
+            zarr_path=str(path),
+            names=["left", "right"],
+            prepend_text="",
+            seed=3,
+            overwrite=True,
+            mem_budget=64 * 1024 * 1024,
+            nthreads=1,
+            policy=policy,
+            **options,
+        ).dump()
+        return _store_files(path)
+
+    reads: list[int] = []
+    calls = {"plan_dense_write": 0, "scatter_block_dense": 0, "remap_block_to_coo": 0}
+    real = {
+        name: getattr(merge_writer, name)
+        for name in (
+            "controlled_compute",
+            "plan_dense_write",
+            "resolve_sparse_import_batch",
+            "scatter_block_dense",
+            "remap_block_to_coo",
+        )
+    }
+
+    def read(array, nthreads):
+        values = real["controlled_compute"](array, nthreads)
+        if hasattr(array, "compute"):
+            reads.append(int(values.shape[0]))
+        return values
+
+    def dense_write(*args, **kwargs):
+        calls["plan_dense_write"] += 1
+        # The first dense plan holds blocks whenever a block spans batches.
+        if "dense" in refused or (
+            "held_dense" in refused and calls["plan_dense_write"] == 1
+        ):
+            raise MemoryError("refused dense write")
+        return real["plan_dense_write"](*args, **kwargs)
+
+    def sparse_plan(*args, **kwargs):
+        # Only the plan that holds blocks names its batch rows.
+        if "batchRows" in kwargs and "held_sparse" in refused:
+            raise MemoryError("refused held blocks")
+        return real["resolve_sparse_import_batch"](*args, **kwargs)
+
+    def counted(name):
+        def call(*args, **kwargs):
+            calls[name] += 1
+            return real[name](*args, **kwargs)
+
+        return call
+
+    monkeypatch.setattr(merge_writer, "controlled_compute", read)
+    monkeypatch.setattr(merge_writer, "plan_dense_write", dense_write)
+    monkeypatch.setattr(merge_writer, "resolve_sparse_import_batch", sparse_plan)
+    for name in ("scatter_block_dense", "remap_block_to_coo"):
+        monkeypatch.setattr(merge_writer, name, counted(name))
+    actual = merge(tmp_path / "merged.zarr")
+    monkeypatch.undo()
+    monkeypatch.setattr(
+        merge_datasets, "write_assay_counts", _sparse_band_write_assay_counts
+    )
+    expected = merge(tmp_path / "reference.zarr")
+
+    # Every file of the stores is equal, counts chunks and summaries included.
+    assert actual.keys() == expected.keys()
+    assert [name for name in actual if actual[name] != expected[name]] == []
+    assert any(name.startswith("RNA/counts/") for name in actual)
+    assert (calls["scatter_block_dense"] > 0) == dense
+    assert (calls["remap_block_to_coo"] > 0) == (not dense)
+    # Every source row is read once, and a held block in one piece.
+    assert sum(reads) == 37 + 29 + (37 if scenario == "missing" else 0)
+    blocks = 3 + 2 + (3 if scenario == "missing" else 0)
+    assert (len(reads) == blocks) == whole_blocks
+
+
+def test_scattered_dense_rows_check_casts_like_sparse_coordinates():
+    from cytearc.merge.writer import remap_block_to_coo, scatter_block_dense
+
+    order_map = np.asarray([3, 0, 2])
+    integers = np.asarray([[1, 0, 7], [0, 0, 255]], dtype=np.uint16)
+    np.testing.assert_array_equal(
+        scatter_block_dense(integers, order_map, 4, np.dtype(np.uint8)),
+        remap_block_to_coo(integers, order_map, 4, 1, np.dtype(np.uint8)).toarray(),
+    )
+    with pytest.raises(OverflowError, match="exceed the destination dtype"):
+        scatter_block_dense(integers + 1, order_map, 4, np.dtype(np.uint8))
+    with pytest.raises(OverflowError, match="exceed the destination dtype"):
+        remap_block_to_coo(integers + 1, order_map, 4, 1, np.dtype(np.uint8))
+    floats = np.asarray([[-0.0, np.nan, 1.5]], dtype=np.float32)
+    scattered = scatter_block_dense(floats, order_map, 4, np.dtype(np.float64))
+    expected = remap_block_to_coo(floats, order_map, 4, 1, np.dtype(np.float64))
+    assert scattered.dtype == expected.dtype == np.float64
+    # Sparse coordinates drop a negative zero, so it is written as zero, and
+    # NaN keeps its bits.
+    assert scattered.tobytes() == expected.toarray().tobytes()
+    assert not np.signbit(scattered[0, 3])
+    # Runs of consecutive merged columns copy as slices, and a shuffled map
+    # of many runs scatters column by column, to the same rows.
+    rng = np.random.default_rng(5)
+    block = rng.integers(0, 4, size=(6, 90)).astype(np.uint16)
+    for columns in (np.r_[100:130, 0:50, 140:150], rng.permutation(150)[:90]):
+        np.testing.assert_array_equal(
+            scatter_block_dense(block, columns, 150, np.dtype(np.uint32)),
+            remap_block_to_coo(block, columns, 150, 1, np.dtype(np.uint32)).toarray(),
+        )
+
+
+@pytest.mark.parametrize("feature_key", ["ids", "names"])
+def test_merge_reads_each_source_chunk_once_under_narrow_shards(
+    tmp_path, monkeypatch, feature_key
+):
+    from collections import Counter
+
+    from zarr.storage import LocalStore
+
+    from cytearc import DataStore
+    from tests.storage_helpers import write_count_store
+
+    rng = np.random.default_rng(7)
+    sources = []
+    for name, n_cells in (("left", 300), ("right", 260)):
+        counts = rng.integers(0, 5, size=(n_cells, 40)).astype(np.uint16)
+        write_count_store(str(tmp_path / f"{name}.zarr"), {"RNA": counts}, "uint16")
+        sources.append(
+            DataStore(str(tmp_path / f"{name}.zarr"), default_assay="RNA", nthreads=1)
+        )
+    source_chunks = [source.RNA.rawData.chunksize[0] for source in sources]
+    fetched: Counter = Counter()
+    get = LocalStore.get
+
+    async def record(store, key, *args, **kwargs):
+        if key.startswith("RNA/counts/c") and store.root.name in {
+            "left.zarr",
+            "right.zarr",
+        }:
+            fetched[(store.root.name, key, repr(args), repr(kwargs))] += 1
+        return await get(store, key, *args, **kwargs)
+
+    monkeypatch.setattr(LocalStore, "get", record)
+    merger = DataStoreMerge(
+        datasets=sources,
+        zarr_path=str(tmp_path / "merged.zarr"),
+        names=["left", "right"],
+        prepend_text="",
+        nthreads=1,
+        overwrite=True,
+        feature_key=feature_key,
+        # Shards of a few rows split every source chunk into many batches.
+        policy=CountMatrixPolicy(unitBytes=1024, chunkBytes=512),
+    )
+    shard_rows = merger.plan().assays[0].shards[0]
+    assert shard_rows < min(source_chunks)
+    merger.dump()
+
+    # Each block of a source chunk's rows is read once, so no part of a chunk
+    # is fetched twice.
+    assert fetched
+    assert max(fetched.values()) == 1
+    merged = zarr.open_group(str(tmp_path / "merged.zarr"), mode="r")
+    expected = {
+        f"{name}__cell{index}": row.tolist()
+        for name, source in zip(("left", "right"), sources, strict=True)
+        for index, row in enumerate(np.asarray(source.RNA.rawData.compute()))
+    }
+    assert _rows_by_id(merged) == expected

@@ -1209,7 +1209,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
     ) -> dict[str, Any]:
         from networkx import DiGraph, to_pandas_edgelist
 
-        from ...clustering.cluster_tree import CoalesceTree, make_digraph
+        from ...clustering.cluster_tree import coalesce_dendrogram
         from ...clustering.paris import hierarchy_to_dendrogram
         from .paris_persistence import (
             load_hierarchy_group,
@@ -1350,7 +1350,7 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 dendrogram = hierarchy_to_dendrogram(hierarchy, compatibility=True)
                 if persist:
                     write_paris_dendrogram(self.zw, dendrogram_plan, dendrogram)
-            subgraph = CoalesceTree(make_digraph(dendrogram), clusters)
+            subgraph = coalesce_dendrogram(dendrogram, clusters)
             if persist:
                 edge_list = to_pandas_edgelist(subgraph).values
                 node_list = []

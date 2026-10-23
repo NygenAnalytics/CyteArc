@@ -279,6 +279,88 @@ def test_paris_hierarchy(bench) -> None:
     bench("clustering.paris_hierarchy", make, GRAPH_CELLS, check=check)
 
 
+# Integrated graphs can split into many small islands.
+ISLAND_CELLS = 10
+
+
+def _islands(n_cells: int):
+    """Return rings of ``ISLAND_CELLS`` cells with chords, under shuffled ids."""
+    from scipy import sparse
+
+    rng = np.random.default_rng(inputs.SEED)
+    starts = np.arange(0, n_cells, ISLAND_CELLS)
+    offsets = np.arange(ISLAND_CELLS)
+    rows = (starts[:, None] + offsets).ravel()
+    ring = (starts[:, None] + (offsets + 1) % ISLAND_CELLS).ravel()
+    chord = (starts[:, None] + (offsets + 3) % ISLAND_CELLS).ravel()
+    order = rng.permutation(n_cells)
+    graph = sparse.csr_matrix(
+        (
+            rng.uniform(0.1, 1.0, size=2 * rows.size),
+            (order[np.r_[rows, rows]], order[np.r_[ring, chord]]),
+        ),
+        shape=(n_cells, n_cells),
+    )
+    return graph, order.reshape(-1, ISLAND_CELLS)
+
+
+def test_paris_hierarchy_of_many_components(bench) -> None:
+    from cytearc.clustering._paris_core import fit_paris_hierarchy
+
+    def make(n_cells: int):
+        graph, _islands_cells = _islands(n_cells)
+        return lambda: fit_paris_hierarchy(graph, nthreads=1)
+
+    def check(n_cells: int, hierarchy) -> None:
+        graph, island_cells = _islands(n_cells)
+        n_leaves = hierarchy.n_leaves
+        n_islands = island_cells.shape[0]
+        # Islands meet only in the synthetic joins that end the hierarchy.
+        assert hierarchy.synthetic_joins.tolist() == (
+            [False] * (n_leaves - n_islands) + [True] * (n_islands - 1)
+        )
+        leaves: dict[int, frozenset[int]] = {
+            leaf: frozenset([leaf]) for leaf in range(n_leaves)
+        }
+        merges: dict[frozenset[int], list[tuple[frozenset[int], float]]] = {}
+        island_of = dict.fromkeys(range(n_leaves), frozenset())
+        for cells in island_cells.tolist():
+            for cell in cells:
+                island_of[cell] = frozenset(cells)
+        for index, (left, right) in enumerate(hierarchy.children.tolist()):
+            leaves[n_leaves + index] = leaves[left] | leaves[right]
+            if not hierarchy.synthetic_joins[index]:
+                island = island_of[next(iter(leaves[left]))]
+                assert leaves[n_leaves + index] <= island
+                merges.setdefault(island, []).append(
+                    (leaves[n_leaves + index], float(hierarchy.heights[index]))
+                )
+        # A sampled island merges as it does fitted alone, at heights scaled
+        # by its share of the total edge weight.
+        for cells in island_cells[:: max(1, n_islands // 8)]:
+            members = np.sort(cells)
+            alone = fit_paris_hierarchy(graph[members][:, members], nthreads=1)
+            scale = alone.total_weight / hierarchy.total_weight
+            expected = []
+            local: dict[int, frozenset[int]] = {
+                index: frozenset([int(cell)]) for index, cell in enumerate(members)
+            }
+            for index, (left, right) in enumerate(alone.children.tolist()):
+                local[members.size + index] = local[left] | local[right]
+                expected.append(
+                    (local[members.size + index], alone.heights[index] * scale)
+                )
+            actual = merges[frozenset(cells.tolist())]
+            assert [clade for clade, _ in actual] == [clade for clade, _ in expected]
+            np.testing.assert_allclose(
+                [height for _, height in actual],
+                [height for _, height in expected],
+                rtol=1e-12,
+            )
+
+    bench("clustering.paris_hierarchy_of_islands", make, GRAPH_CELLS, check=check)
+
+
 def test_gram_pca(bench) -> None:
     from cytearc.embeddings.reduction import fit_pca
     from cytearc.matrix.chunked import ChunkedArray

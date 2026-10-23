@@ -207,9 +207,23 @@ def apply_query_correction(
         raise ValueError("Query assignments have incompatible cluster count")
     if correction.batch_offsets.shape[1:] != (model.n_clusters, model.n_dims):
         raise ValueError("Query correction has incompatible reference dimensions")
-    query_offsets = np.einsum(
-        "nk,nkd->nd", assignments, correction.batch_offsets[batch_codes]
-    )
+    offsets = correction.batch_offsets
+    codes = np.asarray(batch_codes)
+    batches = np.unique(codes)
+    # Each batch's rows use one (clusters, dims) offset matrix, so no row
+    # gathers its own copy of it. einsum sums over the clusters in order, as
+    # it did over gathered matrices, so every offset keeps its value.
+    if batches.size == 1:
+        query_offsets = np.einsum("nk,kd->nd", assignments, offsets[batches[0]])
+    else:
+        query_offsets = np.empty(
+            (codes.size, model.n_dims), dtype=np.result_type(assignments, offsets)
+        )
+        for batch in batches:
+            rows = codes == batch
+            query_offsets[rows] = np.einsum(
+                "nk,kd->nd", assignments[rows], offsets[batch]
+            )
     corrected = coordinates - query_offsets
     if not np.all(np.isfinite(corrected)):
         raise ValueError("Query correction produced non-finite coordinates")

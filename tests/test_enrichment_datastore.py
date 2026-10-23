@@ -306,6 +306,32 @@ def test_aucell_returns_ref_ignores_weights_and_restores_threads(
     assert cached == ref
 
 
+def test_aucell_cache_hit_builds_no_gene_set_index(
+    datastore_ephemeral,
+    monkeypatch,
+) -> None:
+    from cytearc.features.enrichment import aucell
+
+    _cells, selection, features, _targets, net = _configure_enrichment_inputs(
+        datastore_ephemeral
+    )
+    build = aucell.build_gene_set_index
+    built: list[int] = []
+
+    def counted(network, rank_feature_index):
+        built.append(len(network.edge_source_index))
+        return build(network, rank_feature_index)
+
+    monkeypatch.setattr(aucell, "build_gene_set_index", counted)
+    options = {"features": features, "tmin": 3, "n_up": 4, "tie_seed": 5}
+
+    ref = datastore_ephemeral.scores.aucell(net, selection, **options)
+    # Only scoring reads the gene-set index; the cache key needs the network.
+    assert built == [6]
+    assert datastore_ephemeral.scores.aucell(net, selection, **options) == ref
+    assert built == [6]
+
+
 def test_enrichment_refuses_inconsistent_counts_identity(datastore_ephemeral) -> None:
     _cells, selection, features, _targets, net = _configure_enrichment_inputs(
         datastore_ephemeral

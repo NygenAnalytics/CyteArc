@@ -143,6 +143,19 @@ def decode_bp128(
         return np.empty(0, dtype=np.uint32)
     first_block = start // 128
     final_block = (stop - 1) // 128
+    local_start = start - first_block * 128
+    word_starts = expanded[first_block : final_block + 1]
+    word_counts = expanded[first_block + 1 : final_block + 2] - word_starts
+    window_starts = (
+        None if start_values is None else start_values[first_block : final_block + 1]
+    )
+    if _decodes_in_bulk(word_counts, transform, window_starts):
+        decoded = _decode_bp128_blocks(
+            packed, word_starts, word_counts // 4, transform, window_starts
+        )
+        return decoded[local_start : local_start + stop - start]
+    # A window holding a malformed block, or a start that the transform
+    # cannot add, decodes block by block and fails at the first such block.
     decoded_blocks: list[NDArray[np.uint32]] = []
     for block in range(first_block, final_block + 1):
         word_start = int(expanded[block])
@@ -178,8 +191,106 @@ def decode_bp128(
             values = decoded.astype(np.uint32)
         decoded_blocks.append(values)
     combined = np.concatenate(decoded_blocks)
-    local_start = start - first_block * 128
     return combined[local_start : local_start + stop - start]
+
+
+# Blocks unpacked together. About 40 bytes per value, so a decode works in
+# at most about 1.3 MB beside its output.
+_BULK_DECODE_BLOCKS = 256
+
+
+def _decodes_in_bulk(
+    word_counts: NDArray[np.uint64],
+    transform: str,
+    starts: NDArray[Any] | None,
+) -> bool:
+    """Return whether a window's blocks decode in bulk to the same outcome.
+
+    Each block must hold whole vectors of at most 32 bits, and each start
+    must be one that the transform adds exactly: a nonnegative ``d1`` start,
+    and a ``d1z`` start within int64. Other windows decode block by block,
+    which fails at the first block that cannot decode.
+    """
+    if np.any(word_counts % 4) or np.any(word_counts > 128):
+        return False
+    if starts is None:
+        return True
+    if transform == "d1":
+        return starts.dtype.kind == "u" or bool(starts.min() >= 0)
+    return starts.dtype.kind == "i" or bool(starts.max() <= np.iinfo(np.int64).max)
+
+
+def _unpack_bp128_blocks(
+    words: NDArray[np.uint64],
+    word_starts: NDArray[np.int64],
+    bits: NDArray[np.int64],
+) -> NDArray[np.uint64]:
+    """Unpack blocks of 128 values at once, as ``_unpack_bp128_block`` does.
+
+    ``words`` holds the blocks' packed words, then four zero words that a
+    block of width zero reads. Value ``4 j + lane`` of a block takes its
+    ``bits`` bits from bit ``j * bits`` of that lane's word sequence.
+    """
+    positions = np.arange(32, dtype=np.int64) * bits[:, np.newaxis]
+    shifts = positions & 31
+    rows = word_starts[:, np.newaxis] + 4 * (positions >> 5)
+    low = rows[:, :, np.newaxis] + np.arange(4, dtype=np.int64)
+    values = words[low] >> shifts.astype(np.uint64)[:, :, np.newaxis]
+    crossing = shifts + bits[:, np.newaxis] > 32
+    values[crossing] |= (
+        words[low[crossing] + 4]
+        << (np.uint64(32) - shifts[crossing].astype(np.uint64))[:, np.newaxis]
+    )
+    masks = np.left_shift(np.uint64(1), bits.astype(np.uint64)) - np.uint64(1)
+    values &= masks[:, np.newaxis, np.newaxis]
+    return values.reshape(-1, 128)
+
+
+def _decode_bp128_blocks(
+    packed: NDArray[Any],
+    word_starts: NDArray[np.uint64],
+    bits: NDArray[np.uint64],
+    transform: str,
+    starts: NDArray[Any] | None,
+) -> NDArray[np.uint32]:
+    """Decode whole blocks in bulk, value for value as block by block."""
+    n_blocks = word_starts.size
+    output = np.empty((n_blocks, 128), dtype=np.uint32)
+    for first in range(0, n_blocks, _BULK_DECODE_BLOCKS):
+        chunk = slice(first, min(n_blocks, first + _BULK_DECODE_BLOCKS))
+        low = int(word_starts[chunk.start])
+        high = int(word_starts[chunk.stop - 1]) + 4 * int(bits[chunk.stop - 1])
+        words = np.zeros(high - low + 4, dtype=np.uint64)
+        words[: high - low] = np.asarray(packed[low:high], dtype=np.uint32)
+        values = _unpack_bp128_blocks(
+            words,
+            (word_starts[chunk] - np.uint64(low)).astype(np.int64),
+            bits[chunk].astype(np.int64),
+        )
+        if transform == "m1":
+            values += np.uint64(1)
+            if np.any(values > np.iinfo(np.uint32).max):
+                raise MatrixSourceError("BP128 m1 decode overflows uint32")
+        elif transform == "d1":
+            # Unsigned deltas wrap modulo 2**32, as when fragment starts
+            # restart at a chromosome boundary inside one block.
+            assert starts is not None
+            np.cumsum(values, axis=1, dtype=np.uint64, out=values)
+            values += starts[chunk].astype(np.uint64)[:, np.newaxis]
+            values &= np.uint64(0xFFFFFFFF)
+        elif transform == "d1z":
+            assert starts is not None
+            deltas = (values >> np.uint64(1)).astype(np.int64) ^ -(
+                (values & np.uint64(1)).astype(np.int64)
+            )
+            decoded = np.cumsum(deltas, axis=1, dtype=np.int64)
+            decoded += starts[chunk].astype(np.int64)[:, np.newaxis]
+            if np.any(decoded < 0) or np.any(decoded > np.iinfo(np.uint32).max):
+                raise MatrixSourceError("BP128 d1z decode leaves uint32 range")
+            output[chunk] = decoded
+            continue
+        output[chunk] = values
+    return output.reshape(-1)
 
 
 class _BPArrayStore(Protocol):
@@ -704,13 +815,23 @@ class BPCellsMatrixSource(CompressedMatrixSource):
             column_names=column_names,
             limits=limits,
         )
-        validate_minor_indexes(
-            self._read_indexes,
-            nnz,
-            shape[0] if cells_compressed else shape[1],
-            limits,
-            label="BPCells index",
-        )
+        self._indexBound = shape[0] if cells_compressed else shape[1]
+        self._indexesValidated = False
+        # Checking packed indexes decodes every one of them, so it waits for
+        # the first read of entries rather than slowing inspection.
+        if self._indexReader is None:
+            self._validate_indexes()
+
+    def _validate_indexes(self) -> None:
+        if not self._indexesValidated:
+            validate_minor_indexes(
+                self._read_indexes,
+                self.nnz,
+                self._indexBound,
+                self._limits,
+                label="BPCells index",
+            )
+            self._indexesValidated = True
 
     def _optional_names(
         self,
@@ -743,6 +864,7 @@ class BPCellsMatrixSource(CompressedMatrixSource):
     def _read_entries(
         self, start: int, stop: int
     ) -> tuple[NDArray[Any], NDArray[np.int64]]:
+        self._validate_indexes()
         if self._valueReader is not None:
             values = self._valueReader.read(start, stop)
         else:

@@ -160,7 +160,11 @@ full-axis cell and feature metadata snapshots. Frozen `run.features["I"]` is bac
 immutable feature selection rather than the live feature `I` column. Stored selection integrity
 compares its Boolean payload and current ordered row-ID fingerprint, not the later value of the
 source metadata column. Frozen run views therefore survive live `I` changes but fail if row
-identities are replaced or reordered.
+identities are replaced or reordered. Every check computes the current fingerprint from the IDs'
+stored bytes: it reads their metadata document and encoded chunk objects, and decodes and hashes
+the IDs again only when those bytes differ from the ones that a previous check in the process
+fingerprinted (`cytearc.storage.content_stamps`). An in-place chunk write, a rewritten or deleted
+chunk, and a rewritten array are therefore detected wherever they were made.
 
 Each completed or failed stage stores exact nested artifact-plan dispositions and sampled
 process-tree RSS metrics. Artifact reuse comes from planning receipts, never timestamp inference.

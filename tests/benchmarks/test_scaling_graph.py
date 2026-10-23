@@ -28,8 +28,9 @@ pytestmark = pytest.mark.benchmark
 
 # Seurat's CITE-seq WNN vignette keeps 18 protein components.
 PROTEIN_DIMS = 18
-# WNN scores every cell in a Python loop, so its ladder stops earlier.
-WNN_CELLS = Ladder(sizes=(500, 1_000, 2_000, 4_000), smoke=200)
+# Components of a third, chromatin modality, as a TEA-seq integration adds.
+ATAC_DIMS = 10
+WNN_CELLS = Ladder(sizes=(2_000, 4_000, 8_000, 16_000), smoke=200)
 SNN_CELLS = Ladder(sizes=(2_000, 4_000, 8_000, 16_000), smoke=300)
 PARIS_CELLS = Ladder(sizes=(4_000, 8_000, 16_000, 32_000), smoke=600)
 # A user-requested cluster count above the eight drawn groups.
@@ -217,6 +218,60 @@ def test_wnn_two_modalities(bench) -> None:
             )
 
     bench("integration.wnn_two_modalities", make, WNN_CELLS, check=check)
+
+
+@lru_cache(maxsize=8)
+def _chromatin_modality(n_cells: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return chromatin coordinates of the RNA cells and their neighbours."""
+    _coordinates, labels = inputs.labelled_coordinates(n_cells)
+    rng = np.random.default_rng(inputs.SEED + 2)
+    centers = rng.normal(0.0, 2.0, size=(inputs.N_GROUPS, ATAC_DIMS))
+    values = centers[labels] + rng.normal(size=(n_cells, ATAC_DIMS))
+    values = values.astype(np.float32)
+    indices, _distances = _nearest_other_cells(values)
+    return values, indices.astype(np.uint32)
+
+
+def test_wnn_three_modalities(bench) -> None:
+    from cytearc.neighbors import integration
+
+    def modalities(n_cells: int) -> list[tuple[str, np.ndarray, np.ndarray]]:
+        values, indices = _chromatin_modality(n_cells)
+        return [*_wnn_modalities(n_cells), ("ATAC", indices, values)]
+
+    def make(n_cells: int):
+        scored = modalities(n_cells)
+        return lambda: integration._wnn_integration_many(scored, 1)
+
+    def check(n_cells: int, value) -> None:
+        graph, modality_weights = value
+        scored = modalities(n_cells)
+        k = inputs.N_NEIGHBORS
+        # The per-cell NumPy loop that the compiled kernels replaced scores
+        # the same graph and weights, bit for bit.
+        columns = np.empty(n_cells * k, dtype=np.uint32)
+        weights = np.empty(n_cells * k, dtype=np.float32)
+        expected = np.empty((n_cells, 3), dtype=np.float32)
+        embeddings = [values for _name, _indices, values in scored]
+        integration._integrate_cells(
+            [indices for _name, indices, _values in scored],
+            embeddings,
+            [integration._inverse_row_norms(values) for values in embeddings],
+            k,
+            columns,
+            weights,
+            expected,
+        )
+        np.testing.assert_array_equal(graph.row, np.repeat(np.arange(n_cells), k))
+        np.testing.assert_array_equal(graph.col, columns)
+        assert graph.data.tobytes() == weights.tobytes()
+        assert modality_weights.tobytes() == expected.tobytes()
+        _coordinates, truth = inputs.labelled_coordinates(n_cells)
+        # All three modalities agree on the drawn groups.
+        selected = graph.col.reshape(n_cells, k)
+        assert np.mean(truth[selected] == truth[:, None]) > 0.99
+
+    bench("integration.wnn_three_modalities", make, WNN_CELLS, check=check)
 
 
 def _connectivity(indices: np.ndarray, distances: np.ndarray) -> sparse.csr_matrix:
@@ -533,7 +588,11 @@ def _coalesced_reference(
 
 
 def test_coalesced_cluster_tree(bench) -> None:
-    from cytearc.clustering.cluster_tree import CoalesceTree, make_digraph
+    from cytearc.clustering.cluster_tree import (
+        CoalesceTree,
+        coalesce_dendrogram,
+        make_digraph,
+    )
     from cytearc.clustering.paris import fixed_cut, hierarchy_to_dendrogram
 
     def tree_inputs(n_cells: int) -> tuple[np.ndarray, np.ndarray]:
@@ -545,10 +604,15 @@ def test_coalesced_cluster_tree(bench) -> None:
 
     def make(n_cells: int):
         dendrogram, clusters = tree_inputs(n_cells)
-        return lambda: CoalesceTree(make_digraph(dendrogram), clusters)
+        return lambda: coalesce_dendrogram(dendrogram, clusters)
 
     def check(n_cells: int, tree) -> None:
         dendrogram, clusters = tree_inputs(n_cells)
+        # The tree of a graph of every node holds the same nodes, edges, and
+        # attributes in the same order.
+        full = CoalesceTree(make_digraph(dendrogram), clusters)
+        assert list(tree.nodes(data=True)) == list(full.nodes(data=True))
+        assert list(tree.edges) == list(full.edges)
         nodes, edges, holding = _coalesced_reference(dendrogram, clusters)
         assert len(holding) == FIXED_CLUSTERS
         assert set(tree.nodes) == nodes

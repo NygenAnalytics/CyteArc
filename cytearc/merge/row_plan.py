@@ -152,6 +152,9 @@ def iter_row_plan_segments(
 
 def prefixed_cell_ids(name: str, source_ids: np.ndarray, dtype: Any) -> np.ndarray:
     """Return source cell IDs prefixed with ``{name}__`` in the merged dtype."""
+    if source_ids.dtype.kind in "UT":
+        # Text concatenates in one pass, as each value formats itself.
+        return np.asarray(np.char.add(f"{name}__", source_ids), dtype=np.dtype(dtype))
     merged = np.empty(source_ids.size, dtype=np.dtype(dtype))
     for index, value in enumerate(source_ids):
         merged[index] = f"{name}__{value}"

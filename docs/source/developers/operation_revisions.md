@@ -117,3 +117,9 @@ reuse remains valid here. A user can request recomputation with `invalidate_cach
   more than 4096 features was exact too; such fits now use the randomized solver and record
   `solver="randomized"`, so a new fit never reuses them. Revision 2 marks the inexact
   IncrementalPCA fits over several blocks.
+- `compare.compute_bulk` and `regulons.profiles`, 1.3.0: an assay read from `counts`, such as ATAC,
+  ADT, or RNA with another normalizer, sums and counts every bulk column in one pass over its raw
+  rows, and adds floating-point counts in float64 in row order within each column instead of one
+  block of stored rows at a time. Integer counts, including integer-valued floating-point counts,
+  sum exactly either way, and expressing fractions are unchanged; fractional floating-point counts
+  can differ in the last bits. Neither operation stores its result, so no stored result is reused.

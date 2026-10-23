@@ -6081,3 +6081,239 @@ def test_mapping_values_raise_matrix_source_errors(case: str) -> None:
     spec, message = _MAPPING_VALUES[case]
     with pytest.raises(MatrixSourceError, match=re.escape(message)):
         matrix_source_from_slots(spec, object_path="assays/RNA/counts")
+
+
+def _blockwise_bp128(
+    data: NDArray[Any],
+    indexes: NDArray[Any],
+    count: int,
+    *,
+    transform: str = "plain",
+    starts: NDArray[Any] | None = None,
+    start: int = 0,
+    stop: int | None = None,
+) -> NDArray[np.uint32]:
+    """Decode one block at a time, as BP128 decoding did before bulk decoding."""
+    from cytearc.readers._seurat.bpcells import _unpack_bp128_block
+
+    stop = count if stop is None else stop
+    expanded = np.asarray(indexes).astype(np.uint64)
+    packed = np.asarray(data)
+    blocks: list[NDArray[np.uint32]] = []
+    for block in range(start // 128, (stop - 1) // 128 + 1):
+        word_start, word_stop = int(expanded[block]), int(expanded[block + 1])
+        if (word_stop - word_start) % 4:
+            raise MatrixSourceError("not divisible by four")
+        values = _unpack_bp128_block(
+            packed[word_start:word_stop], (word_stop - word_start) // 4
+        )
+        if transform == "m1":
+            widened = values.astype(np.uint64) + 1
+            if np.any(widened > np.iinfo(np.uint32).max):
+                raise MatrixSourceError("BP128 m1 decode overflows uint32")
+            values = widened.astype(np.uint32)
+        elif transform == "d1":
+            assert starts is not None
+            unsigned = np.cumsum(values.astype(np.uint64), dtype=np.uint64)
+            unsigned += np.uint64(int(starts[block]))
+            values = (unsigned & np.uint64(0xFFFFFFFF)).astype(np.uint32)
+        elif transform == "d1z":
+            assert starts is not None
+            encoded = values.astype(np.uint64)
+            deltas = (encoded >> np.uint64(1)).astype(np.int64) ^ -(
+                (encoded & np.uint64(1)).astype(np.int64)
+            )
+            decoded = np.cumsum(deltas, dtype=np.int64)
+            decoded += int(starts[block])
+            if np.any(decoded < 0) or np.any(decoded > np.iinfo(np.uint32).max):
+                raise MatrixSourceError("BP128 d1z decode leaves uint32 range")
+            values = decoded.astype(np.uint32)
+        blocks.append(values)
+    local_start = start - (start // 128) * 128
+    return np.concatenate(blocks)[local_start : local_start + stop - start]
+
+
+def _bp128_stream(n_values: int, transform: str, seed: int) -> NDArray[np.uint32]:
+    """Return values whose blocks span every bit width, including zero."""
+    rng = np.random.default_rng(seed)
+    widths = rng.integers(0, 33, size=-(-n_values // 128))
+    widths[::7] = 0
+    if transform == "d1z":
+        widths = np.minimum(widths, 20)
+    high = np.left_shift(np.uint64(1), widths.astype(np.uint64)) - np.uint64(1)
+    values = (
+        rng.integers(0, 2**63, size=(widths.size, 128), dtype=np.uint64)
+        % (high[:, None] + np.uint64(1))
+    ).astype(np.uint32)
+    if transform == "m1":
+        values = np.minimum(values, np.iinfo(np.uint32).max - 1) + 1
+    elif transform == "d1z":
+        # Starts far from zero keep every signed delta inside uint32.
+        values = values + np.uint32(2**31)
+        values[:, 0] = np.uint32(2**31)
+    return values.reshape(-1)[:n_values]
+
+
+@pytest.mark.parametrize("transform", ["plain", "m1", "d1", "d1z"])
+@pytest.mark.parametrize("n_values", [1, 127, 128, 129, 70_000, 140_001])
+def test_bulk_bp128_decode_matches_block_by_block(transform, n_values) -> None:
+    values = _bp128_stream(n_values, transform, seed=n_values)
+    data, indexes, offsets, starts = _encode_bp128(values, transform)
+    if transform not in {"d1", "d1z"}:
+        starts = None
+    rng = np.random.default_rng(n_values + 1)
+    windows = [(0, n_values)] + [
+        tuple(sorted(rng.integers(0, n_values + 1, size=2))) for _ in range(6)
+    ]
+    for start, stop in windows:
+        if start == stop:
+            continue
+        decoded = decode_bp128(
+            data,
+            indexes,
+            n_values,
+            index_offsets=offsets,
+            transform=transform,
+            starts=starts,
+            start=start,
+            stop=stop,
+        )
+        expected = _blockwise_bp128(
+            data,
+            indexes,
+            n_values,
+            transform=transform,
+            starts=starts,
+            start=start,
+            stop=stop,
+        )
+        assert decoded.dtype == np.uint32
+        np.testing.assert_array_equal(decoded, expected)
+        if transform != "d1":
+            np.testing.assert_array_equal(decoded, values[start:stop])
+
+
+def test_bulk_bp128_d1_wraps_modulo_32_bits_like_block_by_block() -> None:
+    # Fragment starts restart at a chromosome boundary inside one block.
+    values = np.r_[
+        np.arange(2**32 - 200, 2**32 - 100, dtype=np.uint64),
+        np.arange(0, 156, dtype=np.uint64),
+    ].astype(np.uint32)
+    data, indexes, offsets, starts = _encode_bp128(values, "d1")
+    for start_dtype in (np.uint32, np.uint64, np.int64):
+        block_starts = starts.astype(start_dtype)
+        decoded = decode_bp128(
+            data, indexes, values.size, transform="d1", starts=block_starts
+        )
+        np.testing.assert_array_equal(decoded, values)
+        np.testing.assert_array_equal(
+            decoded,
+            _blockwise_bp128(
+                data, indexes, values.size, transform="d1", starts=block_starts
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("transform", "starts"),
+    [
+        # A negative d1 start, and a d1z start past int64, fail as they did.
+        ("d1", np.asarray([0, -1], dtype=np.int64)),
+        ("d1z", np.asarray([0, 2**63], dtype=np.uint64)),
+    ],
+)
+def test_bulk_bp128_decode_leaves_unaddable_starts_to_block_by_block(
+    transform, starts
+) -> None:
+    # Zero deltas decode the first block to its start, zero, so the second
+    # block's start is the first value that cannot be added.
+    values = np.zeros(256, dtype=np.uint32)
+    data, indexes, _offsets, _starts = _encode_bp128(values, "plain")
+
+    with pytest.raises(OverflowError) as expected:
+        _blockwise_bp128(data, indexes, 256, transform=transform, starts=starts)
+    with pytest.raises(OverflowError) as actual:
+        decode_bp128(data, indexes, 256, transform=transform, starts=starts)
+
+    assert str(actual.value) == str(expected.value)
+
+
+def test_bp128_decode_reports_the_first_failing_block() -> None:
+    # Block zero overflows m1 and block one is malformed: block zero fails.
+    maximum_block = _pack_bp128_block(
+        np.full(128, np.iinfo(np.uint32).max, dtype=np.uint32)
+    )
+    data = np.r_[maximum_block, np.zeros(3, dtype=np.uint32)]
+    indexes = np.asarray([0, maximum_block.size, data.size], dtype=np.uint32)
+
+    with pytest.raises(MatrixSourceError, match="m1 decode overflows"):
+        decode_bp128(data, indexes, 256, transform="m1")
+    with pytest.raises(MatrixSourceError, match="not divisible by four"):
+        decode_bp128(data, indexes, 256, transform="m1", start=128)
+
+
+def test_bpcells_indexes_are_validated_at_the_first_read_of_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cytearc.readers._seurat.bpcells as bpcells_module
+
+    values = np.asarray([[1, 0, 2, 0], [3, 4, 0, 5], [0, 6, 7, 8]], dtype=np.uint32)
+    payload = _bpcells_payload(values, packed=True, version=2, storage_order="col")
+    arrays = {
+        name: value
+        for name, value in payload.items()
+        if name not in {"version", "storage_order", "row_names", "col_names"}
+    }
+    # Feature index 3 lies outside the three features of the matrix.
+    _, rows, _ = _matrix_arrays(values, "col")
+    rows[-1] = 3
+    (
+        arrays["index_data"],
+        arrays["index_idx"],
+        arrays["index_idx_offsets"],
+        arrays["index_starts"],
+    ) = _encode_bp128(rows, "d1z")
+    decoded: list[tuple[int, int]] = []
+    original_decode = bpcells_module.decode_bp128
+
+    def counted_decode(*args: Any, **kwargs: Any) -> NDArray[np.uint32]:
+        decoded.append((kwargs["start"], kwargs["stop"]))
+        return original_decode(*args, **kwargs)
+
+    monkeypatch.setattr(bpcells_module, "decode_bp128", counted_decode)
+
+    def memory(index_arrays: dict[str, Any]) -> BPCellsMemoryMatrixSource:
+        return BPCellsMemoryMatrixSource(
+            payload["version"],
+            {**arrays, **index_arrays},
+            shape=values.shape,
+            storage_order="col",
+        )
+
+    corrupt = memory({})
+    # Opening a matrix decodes no stored entry.
+    assert decoded == []
+    with pytest.raises(
+        MatrixSourceError, match="BPCells index contains an out-of-range"
+    ):
+        corrupt.read_cells(0, 1)
+    with pytest.raises(
+        MatrixSourceError, match="BPCells index contains an out-of-range"
+    ):
+        corrupt.read_cells(0, 4)
+
+    valid = memory(
+        dict(
+            zip(
+                ("index_data", "index_idx", "index_idx_offsets", "index_starts"),
+                _encode_bp128(_matrix_arrays(values, "col")[1], "d1z"),
+                strict=True,
+            )
+        )
+    )
+    decoded.clear()
+    np.testing.assert_array_equal(valid.read_cells(1, 3).toarray(), values.T[1:3])
+    # The first read checks every index once; later reads decode only theirs.
+    checked = decoded.copy()
+    np.testing.assert_array_equal(valid.read_cells(0, 4).toarray(), values.T)
+    assert decoded[len(checked) :] == [(0, 8), (0, 8)]

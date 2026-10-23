@@ -25,11 +25,11 @@ from ..storage.feature_stream import FeatureCellBand, map_feature_cell_bands
 from ..storage.geometry import array_geometry
 from ..storage.io_policy import DEFAULT_STORAGE_IO_POLICY, StorageIoPolicy
 from ..utils.arguments import integer_argument
-from ..utils.compute import controlled_compute
-from ..utils.progress import iter_progress
 
 BULK_AGGREGATIONS = ("mean", "sum")
 BULK_FEATURE_LABELS = ("index", "id", "name")
+# Features that one parallel task of a raw row aggregation adds.
+_RAW_FEATURE_CHUNK = 256
 
 
 @njit(cache=True, nogil=True, parallel=True, error_model="numpy")
@@ -53,6 +53,102 @@ def _accumulate_group_counts(
                 values[feature, group] += np.float64(count) * size_factor / scalars[i]
             if fractions is not None and count > 0:
                 fractions[feature, group] += 1
+
+
+@njit(cache=True, nogil=True, parallel=True)
+def _accumulate_group_rows(
+    block: np.ndarray,
+    group_codes: np.ndarray,
+    sums: np.ndarray | None,
+    positives: np.ndarray | None,
+) -> None:
+    """Add each row of ``block`` to its group's sums and positive-value counts.
+
+    ``sums`` and ``positives`` are groups-by-features. Chunks of features run
+    in parallel and own disjoint entries, and each entry adds the rows in
+    order, so the results do not depend on the thread count.
+    """
+    n_rows, n_features = block.shape
+    n_chunks = (n_features + _RAW_FEATURE_CHUNK - 1) // _RAW_FEATURE_CHUNK
+    for chunk in prange(n_chunks):  # type: ignore[no-untyped-call, attr-defined]
+        first = chunk * _RAW_FEATURE_CHUNK
+        last = min(first + _RAW_FEATURE_CHUNK, n_features)
+        for row in range(n_rows):
+            group = group_codes[row]
+            for feature in range(first, last):
+                value = block[row, feature]
+                if sums is not None:
+                    sums[group, feature] += value
+                if positives is not None and value > 0:
+                    positives[group, feature] += 1
+
+
+def _kernel_counts(values: np.ndarray) -> np.ndarray:
+    """Return a block of counts with the same values in a dtype Numba reads.
+
+    Numba reads native byte order and no float16; float32 holds every
+    float16 value exactly.
+    """
+    dtype = values.dtype.newbyteorder("=")
+    if dtype == np.float16:
+        dtype = np.dtype(np.float32)
+    return np.asarray(values, dtype=dtype)
+
+
+def aggregate_raw_groups(
+    raw: ChunkedArray,
+    group_codes: np.ndarray,
+    n_groups: int,
+    *,
+    sums: bool,
+    positives: bool,
+    nthreads: int,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Sum each group's raw rows and count their positive values in one pass.
+
+    ``raw`` holds one row per entry of ``group_codes``, the group of the row.
+    Each group adds its rows in order: integer counts in the integer dtype
+    that NumPy gives their sum, which is exact, and floating counts in
+    float64.
+
+    Args:
+        raw: Raw counts with cells as rows.
+        group_codes: The group of each row, from 0 to ``n_groups - 1``.
+        n_groups: Number of groups.
+        sums: Whether to sum the rows of each group.
+        positives: Whether to count each group's positive values.
+        nthreads: Worker count for streaming row blocks.
+
+    Returns:
+        Groups-by-features sums and int64 counts of positive values, each
+        None when it is not requested.
+    """
+    codes = np.asarray(group_codes, dtype=np.int64)
+    if codes.shape != (raw.shape[0],) or np.any((codes < 0) | (codes >= n_groups)):
+        raise ValueError("Bulk group codes must align with raw rows")
+    dtype = np.empty(0, dtype=raw.dtype).sum().dtype
+    if dtype.kind == "f":
+        dtype = np.dtype(np.float64)
+    shape = (n_groups, raw.shape[1])
+    totals = np.zeros(shape, dtype=dtype) if sums else None
+    counts = np.zeros(shape, dtype=np.int64) if positives else None
+    held = sum(array.nbytes for array in (totals, counts) if array is not None)
+    start = 0
+    for block in raw._stream_blocks(
+        nthreads=nthreads,
+        msg="Aggregating raw groups",
+        prefetch=None,
+        row_mask=None,
+        resident_bytes=held + codes.nbytes,
+    ):
+        values = _kernel_counts(np.asarray(block))
+        del block
+        stop = start + len(values)
+        _accumulate_group_rows(values, codes[start:stop], totals, counts)
+        start = stop
+        # The stream only reserves the blocks it reads, not one kept here.
+        del values
+    return totals, counts
 
 
 def _require_finite_groups(
@@ -417,19 +513,24 @@ def aggregate_bulk_profiles(
                 group_names=list(column_rows),
             )
             vals = {name: means[:, i] for i, name in enumerate(column_rows)}
-        # Raw sums are exact: integer counts keep NumPy's integer accumulator.
-        sum_dtype = np.float64 if assay.rawData.dtype.kind == "f" else None
-        for col_name, idx in iter_progress(
-            column_rows.items(),
-            desc="Aggregating pseudo-replicates",
-            total=len(column_rows),
-        ):
-            if aggr_type == "sum":
-                vals[col_name] = controlled_compute(
-                    assay.rawData[idx].sum(axis=0, dtype=sum_dtype), nthreads
-                )
-            if return_fraction:
-                fracs[col_name] = (assay.rawData[idx] > 0).mean(axis=0).compute()
+        if column_rows and (aggr_type == "sum" or return_fraction):
+            # One pass over the raw rows of the selected cells sums every
+            # column and counts its positive values. Raw sums are exact:
+            # integer counts keep NumPy's integer accumulator.
+            included = codes >= 0
+            sums, positives = aggregate_raw_groups(
+                assay.rawData[cell_idx[included]],
+                codes[included],
+                len(column_rows),
+                sums=aggr_type == "sum",
+                positives=return_fraction,
+                nthreads=nthreads,
+            )
+            for i, (name, idx) in enumerate(column_rows.items()):
+                if sums is not None:
+                    vals[name] = sums[i]
+                if positives is not None:
+                    fracs[name] = positives[i] / len(idx)
     return vals, fracs
 
 

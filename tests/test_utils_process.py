@@ -138,6 +138,186 @@ def test_process_tree_rss_sums_only_root_and_descendants(tmp_path: Path) -> None
     assert read_process_tree_rss_bytes(100, proc_root=proc_root) == 60 * 1024
 
 
+def _write_proc_tree(
+    proc_root: Path,
+    processes: dict[int, tuple[int, str | None, dict[int, list[int]]]],
+) -> None:
+    """Write status and per-thread children files of fake processes.
+
+    Each process maps to its parent, its VmRSS line (None for a process, such
+    as a zombie, that reports none), and the children of each of its threads.
+    """
+    for pid, (parent, rss, threads) in processes.items():
+        directory = proc_root / str(pid)
+        (directory / "task").mkdir(parents=True)
+        status = f"Name:\tp{pid}\nPPid:\t{parent}\n" + ("" if rss is None else rss)
+        (directory / "status").write_text(status)
+        for tid, children in threads.items():
+            (directory / "task" / str(tid)).mkdir()
+            listed = "".join(f"{child} " for child in children)
+            (directory / "task" / str(tid) / "children").write_text(listed)
+
+
+_PROC_TREES = {
+    "chain": {
+        100: (1, "VmRSS:\t10 kB\n", {100: [101]}),
+        101: (100, "VmRSS:\t20 kB\n", {101: [102]}),
+        102: (101, "VmRSS:\t30 kB\n", {102: []}),
+        200: (1, "VmRSS:\t999 kB\n", {200: [201]}),
+        201: (200, "VmRSS:\t5 kB\n", {201: []}),
+    },
+    # Children forked by different threads are listed by those threads.
+    "threads": {
+        100: (1, "VmRSS:\t1 mB\n", {100: [101], 105: [102, 103], 106: []}),
+        101: (100, "VmRSS:\t2 kB\n", {101: []}),
+        102: (100, "VmRSS:\t3 kB\n", {102: [104]}),
+        103: (100, None, {103: []}),
+        104: (102, "VmRSS:\t4 kB\n", {104: []}),
+        300: (1, "VmRSS:\t7 kB\n", {300: []}),
+    },
+    "leaf_root": {
+        100: (1, "VmRSS:\t6 kB\n", {100: []}),
+        101: (1, "VmRSS:\t9 kB\n", {101: []}),
+    },
+    "no_measurement": {
+        100: (1, None, {100: [101]}),
+        101: (100, None, {101: []}),
+    },
+}
+
+
+@pytest.mark.parametrize("name", sorted(_PROC_TREES))
+def test_process_tree_walk_finds_what_the_parent_scan_finds(
+    tmp_path: Path, name: str
+) -> None:
+    proc_root = tmp_path / "proc"
+    _write_proc_tree(proc_root, _PROC_TREES[name])
+
+    walked = read_process_tree_rss_bytes(100, proc_root=proc_root)
+    scanned = read_process_tree_rss_bytes(
+        100,
+        proc_root=proc_root,
+        list_pids=process_module._default_list_pids,
+    )
+    assert walked == scanned
+    assert process_module._tree_pids_by_children(proc_root, 100) == (
+        process_module._tree_pids_by_scan(
+            proc_root,
+            100,
+            {},
+            process_module._default_list_pids,
+            process_module._default_read_text,
+        )
+    )
+
+
+def test_process_tree_walk_reads_only_the_tree(tmp_path: Path, monkeypatch) -> None:
+    proc_root = tmp_path / "proc"
+    _write_proc_tree(proc_root, _PROC_TREES["threads"])
+    read: list[str] = []
+
+    def read_text(path: Path) -> str:
+        read.append(path.parent.name)
+        return path.read_text()
+
+    def no_listing(_root: Path) -> list[int]:
+        raise AssertionError("the walk must not list every process")
+
+    monkeypatch.setattr(process_module, "_default_list_pids", no_listing)
+    total = read_process_tree_rss_bytes(100, proc_root=proc_root, read_text=read_text)
+
+    assert total == 1024**2 + (2 + 3 + 4) * 1024
+    assert sorted(read) == ["100", "101", "102", "103", "104"]
+
+
+def test_process_tree_walk_skips_processes_and_threads_that_exited(
+    tmp_path: Path,
+) -> None:
+    proc_root = tmp_path / "proc"
+    _write_proc_tree(
+        proc_root,
+        {
+            100: (1, "VmRSS:\t10 kB\n", {100: [101, 102, 100]}),
+            101: (100, "VmRSS:\t20 kB\n", {101: []}),
+        },
+    )
+    # A thread that exited after the listing leaves no directory to read.
+    (proc_root / "100" / "task" / "107").write_text("")
+    # A children file that cannot be read as text is passed over.
+    (proc_root / "101" / "task" / "108" / "children").mkdir(parents=True)
+
+    # Process 102 exited: it has no status and no threads, and the root's own
+    # PID among its children does not loop.
+    assert read_process_tree_rss_bytes(100, proc_root=proc_root) == 30 * 1024
+    assert process_module._tree_pids_by_children(proc_root, 100) == {100, 101, 102}
+
+
+def test_process_tree_rss_is_unavailable_when_processes_cannot_be_listed() -> None:
+    def listing(_root: Path) -> list[int]:
+        raise PermissionError("no /proc listing")
+
+    assert read_process_tree_rss_bytes(100, list_pids=listing) is None
+
+
+def test_process_tree_falls_back_to_the_parent_scan_without_children_files(
+    tmp_path: Path,
+) -> None:
+    proc_root = tmp_path / "proc"
+    _write_proc_tree(proc_root, _PROC_TREES["chain"])
+    # A kernel without CONFIG_PROC_CHILDREN lists threads without the file.
+    (proc_root / "100" / "task" / "100" / "children").unlink()
+
+    assert process_module._tree_pids_by_children(proc_root, 100) is None
+    assert read_process_tree_rss_bytes(100, proc_root=proc_root) == 60 * 1024
+
+
+@pytest.mark.parametrize("listed", [b"101 x ", b"\xff101 "], ids=["text", "binary"])
+def test_process_tree_falls_back_to_the_parent_scan_for_unreadable_lists(
+    tmp_path: Path, listed: bytes
+) -> None:
+    proc_root = tmp_path / "proc"
+    _write_proc_tree(proc_root, _PROC_TREES["chain"])
+    (proc_root / "100" / "task" / "100" / "children").write_bytes(listed)
+
+    assert process_module._tree_pids_by_children(proc_root, 100) is None
+    assert read_process_tree_rss_bytes(100, proc_root=proc_root) == 60 * 1024
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux lists children in /proc")
+def test_process_tree_walk_matches_the_parent_scan_on_this_host() -> None:
+    import subprocess
+
+    code = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "print(child.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    processes = [
+        subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE),
+        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"]),
+    ]
+    try:
+        assert processes[0].stdout is not None
+        grandchild = int(processes[0].stdout.readline())
+        proc_root = Path("/proc")
+        walked = process_module._tree_pids_by_children(proc_root, os.getpid())
+        scanned = process_module._tree_pids_by_scan(
+            proc_root,
+            os.getpid(),
+            {},
+            process_module._default_list_pids,
+            process_module._default_read_text,
+        )
+        assert walked is not None
+        assert {os.getpid(), grandchild, *(p.pid for p in processes)} <= walked
+        assert walked == scanned
+    finally:
+        for process in processes:
+            process.kill()
+            process.wait()
+
+
 def test_process_tree_rss_skips_malformed_status_lines() -> None:
     statuses = {
         100: "Name:\tpython\nno separator here\nPPid:\t1\nVmRSS:\t10 kB\n",

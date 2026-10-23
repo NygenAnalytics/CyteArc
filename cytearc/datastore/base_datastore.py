@@ -66,6 +66,8 @@ def sanitize_hierarchy(
     assay_name: str,
     workspace: str | None,
     matrix_root: zarr.Group | None = None,
+    *,
+    assay_group: zarr.Group | None = None,
 ) -> bool:
     """Test if an assay node in zarr object was created properly.
 
@@ -74,16 +76,20 @@ def sanitize_hierarchy(
         assay_name: String value with name of assay.
         workspace: Workspace name (None for legacy layout without ``matrices/``).
         matrix_root: Optional root that owns count matrices. Defaults to ``z``.
+        assay_group: The assay's group, already opened below the root or
+            workspace, so it is not read again; read from ``z`` when None.
 
     Returns:
         True if assay_name is present in z and contains `counts` and `featureData` child nodes else raises error
     """
     matrix_root = z if matrix_root is None else matrix_root
-    zw = z if workspace is None else as_zarr_group(z[workspace], name=workspace)
-    assay_zw = as_zarr_group(
-        _child(zw, assay_name, f"ERROR: {assay_name} not found in zarr file"),
-        name=assay_name,
-    )
+    if assay_group is None:
+        zw = z if workspace is None else as_zarr_group(z[workspace], name=workspace)
+        assay_group = as_zarr_group(
+            _child(zw, assay_name, f"ERROR: {assay_name} not found in zarr file"),
+            name=assay_name,
+        )
+    assay_zw = assay_group
     _child(assay_zw, "featureData", f"ERROR: 'featureData' not found in {assay_name}")
     if workspace is None:
         matrix_assay = (
@@ -314,12 +320,24 @@ class BaseDataStore:
 
     @property
     def zw(self) -> zarr.Group:
-        """Return the active root or workspace Zarr group."""
+        """Return the active root or workspace Zarr group.
+
+        A workspace group is opened once for its root and name, as the root
+        group is: its members are read from the store on each access, and
+        CyteArc writes its attributes through this group, or opens the group
+        again after writing them elsewhere.
+        """
         if self.workspace is None:
-            ret_val: zarr.Group = self.z
-        else:
-            ret_val: zarr.Group = self.z[self.workspace]  # type: ignore
-        return ret_val
+            return self.z
+        cached = self.__dict__.get("_workspaceGroup")
+        if cached is None or cached[0] is not self.z or cached[1] != self.workspace:
+            cached = (self.z, self.workspace, self.z[self.workspace])
+            self.__dict__["_workspaceGroup"] = cached
+        return cast(zarr.Group, cached[2])
+
+    def _refresh_workspace_group(self) -> None:
+        """Open the workspace group again after its attributes were written elsewhere."""
+        self.__dict__.pop("_workspaceGroup", None)
 
     @validation_scoped
     def _artifacts_inspect(self, ref: ArtifactRef) -> ArtifactStatus:
@@ -790,11 +808,13 @@ class BaseDataStore:
         def check(name: str) -> Callable[[], bool]:
             def run() -> bool:
                 validate_assay_name(name)
+                # The listing opened the assay group; it is not read again.
                 return sanitize_hierarchy(
                     self.z,
                     name,
                     self.workspace,
                     matrix_root=self._matrix_root_for_assay(name),
+                    assay_group=assays[name],
                 )
 
             return run
@@ -805,13 +825,24 @@ class BaseDataStore:
         return assays
 
     def _matrix_root_for_assay(self, assay_name: str) -> zarr.Group | None:
-        """Return the local or mounted root that owns one assay's counts."""
+        """Return the local or mounted root that owns one assay's counts.
+
+        Published counts never move, so each assay's root is looked up once per
+        root group.
+        """
+        roots = self.__dict__.setdefault("_matrixRoots", {})
+        known = roots.get(assay_name)
+        if known is not None and known[0] is self.z and known[1] == self.workspace:
+            return cast(zarr.Group | None, known[2])
         prefix = "" if self.workspace is None else "matrices/"
         try:
             self.z[f"{prefix}{assay_name}/counts"]
         except KeyError:
-            return self._matrix_z
-        return self.z
+            root = self._matrix_z
+        else:
+            root = self.z
+        roots[assay_name] = (self.z, self.workspace, root)
+        return root
 
     def _load_default_assay(self, assay_name: str | None = None) -> str:
         """This function sets a given assay name as defaultAssay attribute. If
@@ -1336,7 +1367,8 @@ class BaseDataStore:
 
         clip_fraction = clip_fraction_argument(clip_fraction)
         cell_idx = self.cells.active_index(cell_key)
-        if k not in self.cells.columns:
+        # One lookup answers whether ``k`` is a column, without listing them all.
+        if not self.cells._has_column(k):
             assay = self._get_assay(from_assay)
             feat_idx = assay.feats.get_index_by([k], "names")
             if len(feat_idx) == 0:

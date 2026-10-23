@@ -106,13 +106,19 @@ def select_pseudotime_component(
             f"The selected graph has {n_components} connected components with sizes {sizes}"
         )
 
-    retained_component = min(
-        range(n_components),
-        key=lambda component_id: (
-            -sizes[component_id],
-            int(selected_cell_indices[component_labels == component_id].min()),
-        ),
-    )
+    # The largest component is kept; a tie goes to the one holding the
+    # smallest selected cell index, then to the lowest component label.
+    counts = np.asarray(sizes)
+    largest = np.flatnonzero(counts == counts.max())
+    retained_component = int(largest[0])
+    if largest.size > 1:
+        smallest_index = np.full(n_components, np.iinfo(np.int64).max, dtype=np.int64)
+        np.minimum.at(
+            smallest_index,
+            component_labels,
+            np.asarray(selected_cell_indices, dtype=np.int64),
+        )
+        retained_component = int(largest[np.argmin(smallest_index[largest])])
     return np.asarray(component_labels == retained_component, dtype=bool), sizes
 
 

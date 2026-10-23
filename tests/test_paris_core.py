@@ -467,3 +467,216 @@ def test_merge_distances_must_stay_finite() -> None:
     with np.errstate(over="ignore"):
         with pytest.raises(ValueError, match="merge distances must be finite"):
             fit_paris_hierarchy(_bridged_pairs(1e-200))
+
+
+def _componentwise_reference(graph: csr_matrix) -> dict[str, object]:
+    """Fit one component at a time from its own indexed graph, as before batching."""
+    from scipy.sparse.csgraph import connected_components
+
+    canonical = canonicalize_paris_graph(graph)
+    n_leaves = canonical.shape[0]
+    total_weight = float(canonical.data.sum(dtype=np.float64))
+    n_components, labels = connected_components(
+        canonical, directed=False, return_labels=True
+    )
+    component_mins = np.full(n_components, n_leaves, dtype=np.int64)
+    np.minimum.at(component_mins, labels, np.arange(n_leaves, dtype=np.int64))
+    vertices_by_component = np.argsort(labels, kind="stable")
+    offsets = np.r_[0, np.cumsum(np.bincount(labels, minlength=n_components))]
+    child_blocks: list[np.ndarray] = []
+    height_blocks: list[np.ndarray] = []
+    size_blocks: list[np.ndarray] = []
+    roots: list[int] = []
+    sizes: list[int] = []
+    rounds: list[paris_core.ParisRoundDiagnostics] = []
+    next_node = n_leaves
+    for index, label in enumerate(np.argsort(component_mins, kind="stable")):
+        leaf_ids = vertices_by_component[offsets[label] : offsets[label + 1]]
+        sizes.append(leaf_ids.size)
+        if leaf_ids.size == 1:
+            roots.append(int(leaf_ids[0]))
+            continue
+        component_graph = canonical[leaf_ids][:, leaf_ids].tocsr()
+        children, heights, merge_sizes, root, next_node = paris_core._fit_component(
+            component_graph,
+            leaf_ids,
+            component=index,
+            next_node=next_node,
+            total_weight=total_weight,
+            round_diagnostics=rounds,
+        )
+        child_blocks.extend(children)
+        height_blocks.extend(heights)
+        size_blocks.extend(merge_sizes)
+        roots.append(root)
+    children = np.concatenate(child_blocks).astype(np.int64)
+    heights = np.concatenate(height_blocks)
+    merge_sizes = np.concatenate(size_blocks)
+    paris_core._raise_to_child_heights(children, heights, n_leaves)
+    root, root_size = roots[0], sizes[0]
+    joins = []
+    for component_root, component_size in zip(roots[1:], sizes[1:], strict=True):
+        root_size += component_size
+        joins.append((root, component_root, root_size))
+        root = next_node
+        next_node += 1
+    if joins:
+        children = np.vstack([children, [join[:2] for join in joins]])
+        heights = np.r_[heights, np.full(len(joins), np.inf)]
+        merge_sizes = np.r_[merge_sizes, [join[2] for join in joins]]
+    return {
+        "children": children,
+        "heights": heights,
+        "sizes": merge_sizes,
+        "component_roots": np.asarray(roots),
+        "synthetic_joins": np.r_[
+            np.zeros(n_leaves - 1 - len(joins), dtype=bool),
+            np.ones(len(joins), dtype=bool),
+        ],
+        "rounds": [
+            (item.component, item.round_index, item.active_vertices)
+            + (item.active_edges, item.merges)
+            for item in rounds
+        ],
+        "total_weight": total_weight,
+    }
+
+
+def _assert_matches_componentwise_fit(graph: csr_matrix, nthreads: int = 2) -> None:
+    hierarchy = fit_paris_hierarchy(graph, nthreads=nthreads)
+    expected = _componentwise_reference(graph)
+
+    for name in ("children", "heights", "sizes", "component_roots", "synthetic_joins"):
+        # Exact equality: the same merges, in the same order, at the same heights.
+        np.testing.assert_array_equal(getattr(hierarchy, name), expected[name])
+    assert hierarchy.total_weight == expected["total_weight"]
+    assert hierarchy.diagnostics is not None
+    assert [
+        (item.component, item.round_index, item.active_vertices)
+        + (item.active_edges, item.merges)
+        for item in hierarchy.diagnostics.rounds
+    ] == expected["rounds"]
+    for round_ in hierarchy.diagnostics.rounds:
+        phases = (
+            round_.contraction_remap_seconds,
+            round_.contraction_filter_seconds,
+            round_.contraction_build_seconds,
+            round_.contraction_cleanup_seconds,
+        )
+        assert all(seconds >= 0 for seconds in phases)
+        assert sum(phases) <= round_.contraction_seconds + 1e-9
+
+
+def _islands(sizes: list[int], *, seed: int, unit_weights: bool = False) -> csr_matrix:
+    """Return a graph of connected islands of the given sizes, with shuffled ids."""
+    rng = np.random.default_rng(seed)
+    rows: list[int] = []
+    columns: list[int] = []
+    start = 0
+    for size in sizes:
+        members = np.arange(start, start + size)
+        if size > 1:
+            # A ring keeps each island connected; chords add structure.
+            rows.extend(members.tolist())
+            columns.extend(np.roll(members, 1).tolist())
+            chords = rng.integers(0, size, size=(size, 2))
+            rows.extend(members[chords[:, 0]].tolist())
+            columns.extend(members[chords[:, 1]].tolist())
+        start += size
+    permutation = rng.permutation(start)
+    row_ids = permutation[np.asarray(rows, dtype=np.int64)]
+    column_ids = permutation[np.asarray(columns, dtype=np.int64)]
+    # A few repeated weights make similarities tie, which logical ids break.
+    weights = (
+        np.ones(row_ids.size)
+        if unit_weights
+        else rng.choice([0.25, 0.5, 1.0, 0.3125], size=row_ids.size)
+        * rng.choice([1.0, 1.0, 1.0, 1.7], size=row_ids.size)
+    )
+    return csr_matrix((weights, (row_ids, column_ids)), shape=(start, start))
+
+
+@pytest.mark.parametrize("unit_weights", [False, True], ids=["weighted", "unit"])
+@pytest.mark.parametrize(
+    "sizes",
+    [
+        [10] * 300,
+        # Islands of every small size, with isolated vertices between them.
+        [1, 2, 3, 1, 5, 8, 13, 1, 21, 34, 2, 2, 55, 1] * 40,
+        # A component larger than a batch among small ones.
+        [3] * 50 + [5000] + [4, 1, 7] * 30,
+        [2] * 2100,
+    ],
+    ids=["tens", "mixed", "giant", "pairs"],
+)
+def test_batched_components_fit_exactly_as_one_at_a_time(sizes, unit_weights):
+    graph = _islands(sizes, seed=len(sizes), unit_weights=unit_weights)
+
+    _assert_matches_componentwise_fit(graph)
+
+
+def test_batched_components_match_across_thread_counts_and_directed_input():
+    rng = np.random.default_rng(17)
+    graph = _islands([6, 1, 9, 4, 30, 2] * 60, seed=17)
+    # Unequal weights in the two directions are summed by canonicalization.
+    directed = graph.multiply(rng.uniform(0.5, 2.0, size=graph.shape)).tocsr()
+    for nthreads in (1, 3, 8):
+        _assert_matches_componentwise_fit(directed, nthreads=nthreads)
+
+
+def test_batched_components_raise_as_one_at_a_time_on_overflow():
+    from scipy.sparse import block_diag
+
+    # The bridged pairs' root distance overflows, between ordinary islands.
+    graph = block_diag(
+        [_islands([4] * 5, seed=5), _bridged_pairs(1e-200), _islands([3] * 4, seed=6)],
+        format="csr",
+    )
+
+    with np.errstate(over="ignore"):
+        with pytest.raises(ValueError, match="merge distances must be finite"):
+            _componentwise_reference(graph)
+        with pytest.raises(ValueError, match="merge distances must be finite"):
+            fit_paris_hierarchy(graph, nthreads=2)
+
+
+def test_batched_components_refit_one_at_a_time_when_a_round_stalls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scanned: list[int] = []
+    real_scan = paris_core._nearest_neighbors
+
+    def stalled_scan(indptr, indices, data, volumes, logical_ids, n_workers):
+        # The batch holds nine vertices; finding no pair there stalls it.
+        scanned.append(volumes.size)
+        if volumes.size > 3:
+            return (
+                np.full(volumes.size, -1, dtype=np.int64),
+                np.zeros(volumes.size, dtype=np.float64),
+            )
+        return real_scan(indptr, indices, data, volumes, logical_ids, n_workers)
+
+    monkeypatch.setattr(paris_core, "_nearest_neighbors", stalled_scan)
+    graph = _islands([3, 1, 2, 3], seed=2)
+
+    hierarchy = fit_paris_hierarchy(graph, nthreads=1)
+
+    monkeypatch.setattr(paris_core, "_nearest_neighbors", real_scan)
+    expected = _componentwise_reference(graph)
+    np.testing.assert_array_equal(hierarchy.children, expected["children"])
+    np.testing.assert_array_equal(hierarchy.heights, expected["heights"])
+    assert hierarchy.diagnostics is not None
+    assert [
+        (item.component, item.round_index, item.active_vertices)
+        + (item.active_edges, item.merges)
+        for item in hierarchy.diagnostics.rounds
+    ] == expected["rounds"]
+    # Each island was then fitted alone.
+    assert scanned[0] == 9 and max(scanned[1:]) <= 3
+
+
+def test_component_batches_hold_consecutive_runs_up_to_the_vertex_budget():
+    batches = paris_core._component_batches(np.asarray([3, 4, 2, 9, 1, 1, 5]), 7)
+
+    assert batches == [(0, 2), (2, 3), (3, 4), (4, 7)]
+    assert paris_core._component_batches(np.asarray([8]), 7) == [(0, 1)]
