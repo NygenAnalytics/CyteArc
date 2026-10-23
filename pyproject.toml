@@ -194,6 +194,9 @@ docs-modal = [
 ]
 
 [tool.uv]
+# uv 0.13.4 no longer trusts the eMudhra emSign ECC Root CA - G3, whose
+# intermediate certificates were compromised.
+required-version = ">=0.13.4"
 cache-keys = [
     { file = "pyproject.toml" },
     { git = { commit = true, tags = true } },

@@ -56,6 +56,8 @@ uv run python -m tests.download_fixtures --with-h5ad
 
 Python 3.13 or newer is required (`requires-python >=3.13`).
 `.python-version` makes 3.13 the default interpreter for `uv sync` and `uv run`, matching the Modal images.
+uv 0.13.4 or newer is required (`required-version` in `pyproject.toml`), because older releases trust the eMudhra emSign ECC Root CA - G3, whose intermediate certificates were compromised.
+Update uv with `UV_SYSTEM_CERTS=true uv self update`, which checks the download against the operating system's certificates.
 
 Two markers select the expensive parts of the suite: `slow` for tests that build neighbourhood graphs or run iterative numerical workflows, and `integration` for tests that need live network access.
 While iterating, skip both:
