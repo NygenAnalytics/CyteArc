@@ -213,6 +213,12 @@ package.
 | `seurat_assay5_synthetic.rds` | `tests/data/synthetic.rds` from <https://github.com/harryhaller001/readseurat> at commit 8a688b47df27f90e98a4c57ddd9e47c0e5ded01e | MIT, Copyright (c) 2026 harryhaller001 |
 | `seurat_v4_1_3_pbmc_mye.rds` | `pbmc10k_mye_small_velocyto.rds` by Hua Yichao, SeuratExtend example data (Zenodo, doi:10.5281/zenodo.10944066), derived from 10x Genomics PBMC data | CC0 1.0; the underlying 10x Genomics data are CC BY 4.0 |
 
+The Seurat import tutorial also uses `seurat_v4_1_3_pbmc_mye.rds` and embeds a 581-byte
+compressed synthetic RDS with three cells and two genes. The synthetic object was authored
+for CyteArc using the repository's R serialization helpers. It demonstrates skipped list
+metadata, an active SCT assay and an explicitly assigned coordinate role; it contains no
+third-party observations and is licensed under BSD-3-Clause, as in `LICENSE`.
+
 ## Data that tutorials download from their publishers
 
 | Tutorial | Source | License or terms |

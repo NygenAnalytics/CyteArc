@@ -1,3 +1,4 @@
+import itertools
 from dataclasses import replace
 
 import numpy as np
@@ -344,26 +345,20 @@ def test_feature_transpose_read_errors_propagate(feature_store, monkeypatch):
     from zarr.core.array import AsyncArray
 
     read = AsyncArray.get_orthogonal_selection
+    countsT_reads = itertools.count()
 
     async def failing_read(array, *args, **kwargs):
-        if array.path == "RNA/countsT":
+        # Only the first read fails. The runner raises a single error as it is
+        # and groups several, so concurrent failing reads would race.
+        if array.path == "RNA/countsT" and next(countsT_reads) == 0:
             raise OSError("requested gene chunk is unavailable")
         return await read(array, *args, **kwargs)
 
     monkeypatch.setattr(AsyncArray, "get_orthogonal_selection", failing_read)
-    with pytest.raises(BaseExceptionGroup) as raised:
+    with pytest.raises(OSError, match="^requested gene chunk is unavailable$"):
         fetch_normalized_feature_matrix(
             store, [resolve_feature(store, "gene7")], np.arange(store.cells.N)
         )
-    assert (
-        raised.value.subgroup(
-            lambda error: (
-                isinstance(error, OSError)
-                and str(error) == "requested gene chunk is unavailable"
-            )
-        )
-        is not None
-    )
 
 
 def test_feature_reads_use_numpy_backing_without_storage_geometry(
