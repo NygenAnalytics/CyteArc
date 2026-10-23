@@ -183,7 +183,11 @@ once, which took about 26 seconds on a recent laptop. Later processes load the c
 from Numba's on-disk cache, about 0.4 seconds for their first call, and later calls in the same
 process add only a few milliseconds of overhead. The cache needs a writable directory
 (`NUMBA_CACHE_DIR` sets one). Graph construction and UMAP use the same cache: CyteArc enables it
-for the umap-learn kernels they call, which umap-learn compiles without one. A densMAP layout
+for the umap-learn kernels they call, which umap-learn compiles without one, and for the kernels
+that importing umap-learn compiles, most of them pynndescent's. A warm cache imports umap-learn in
+about a second instead of compiling those kernels again, which took 5 to 30 seconds in every new
+process, and processes that import it at once compile each kernel once and load it from the
+process that compiled it. A densMAP layout
 still compiles one kernel each time it runs, because umap-learn creates that kernel inside its
 layout function.
 To build the cache into a deployment image, run a small analysis with `NUMBA_CACHE_DIR` set while

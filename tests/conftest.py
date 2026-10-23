@@ -16,12 +16,49 @@ os.environ["MPLBACKEND"] = "Agg"
 if int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1")) > 1:
     os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
+import functools
 import sys
 
 import pytest
 from threadpoolctl import threadpool_limits
 
 from cytearc.utils import configure_output, logger
+
+
+def _lock_numba_cache_files() -> None:
+    """Make each Numba cache save and load atomic across test processes.
+
+    Numba saves a compiled overload by reading the function's cache index,
+    naming the data file after the first number free in that copy, and writing
+    the index and then the data, without a lock. xdist workers that first
+    compile two signatures of one kernel at the same time can take the same
+    number and leave the index pointing one signature at the other's machine
+    code, so every later load of that signature fails to unbox its arguments.
+    CI starts each run with an empty cache, where this happened. Saves hold
+    each cache directory's lock and loads share it, in every process.
+    """
+    from numba.core.caching import IndexDataCacheFile
+
+    from cytearc.utils.numba import cache_directory_lock
+
+    if getattr(IndexDataCacheFile.save, "_cytearc_locked", False):
+        return
+
+    def locked(method, *, shared):
+        @functools.wraps(method)
+        def run(self, *args, **kwargs):
+            with cache_directory_lock(self._cache_path, shared=shared):
+                return method(self, *args, **kwargs)
+
+        run._cytearc_locked = True
+        return run
+
+    IndexDataCacheFile.save = locked(IndexDataCacheFile.save, shared=False)
+    IndexDataCacheFile.load = locked(IndexDataCacheFile.load, shared=True)
+
+
+# Before collection imports any kernel.
+_lock_numba_cache_files()
 
 pytest_plugins = [
     "tests.fixtures_agent",
