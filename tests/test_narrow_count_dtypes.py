@@ -643,16 +643,27 @@ REFERENCE_REMEDY = (
 
 @pytest.mark.parametrize(("name", "value"), UNSUPPORTED_FIELDS)
 def test_strict_loaders_reject_records_with_unsupported_fields(tmp_path, name, value):
-    for validate, record in (
-        (validate_marker_parameters, _MARKER_RECORD),
-        (validate_aggregation_parameters, _AGGREGATION_RECORD),
-        (_normalization_parameters, _REFERENCE_RECORD),
+    for validate, record, message in (
+        (
+            validate_marker_parameters,
+            _MARKER_RECORD,
+            "^Pseudotime-marker parameters does not match its persisted contract$",
+        ),
+        (
+            validate_aggregation_parameters,
+            _AGGREGATION_RECORD,
+            "^Pseudotime-aggregation parameters does not match its persisted contract$",
+        ),
+        (
+            _normalization_parameters,
+            _REFERENCE_RECORD,
+            f"^Unsupported reference normalization parameters: {name}. "
+            f"{REFERENCE_REMEDY}$",
+        ),
     ):
         validate(record)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             validate({**record, name: value})
-    with pytest.raises(ValueError, match=f"parameters: {name}. {REFERENCE_REMEDY}$"):
-        _normalization_parameters({**_REFERENCE_RECORD, name: value})
 
     # A pseudotime-marker record with unsupported metadata fails to load
     # with a request to recompute it.

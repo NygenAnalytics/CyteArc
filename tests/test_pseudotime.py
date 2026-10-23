@@ -81,7 +81,7 @@ def test_source_sink_vector_supports_one_sided_supervision():
     labels = pd.Series(["source", "source", "other", "other"])
     vector = _make_source_sink_vector(labels, ["source"], [])
 
-    assert np.array_equal(vector, [-1.0, -1.0, 1.0, 1.0])
+    np.testing.assert_array_equal(vector, [-1.0, -1.0, 1.0, 1.0])
     assert vector.sum() == pytest.approx(0.0)
 
 
@@ -272,7 +272,7 @@ def test_largest_component_selection_is_deterministic_on_ties():
     )
 
     assert sizes == [3, 3]
-    assert np.array_equal(retained, [False, False, False, True, True, True])
+    np.testing.assert_array_equal(retained, [False, False, False, True, True, True])
     with pytest.raises(ValueError, match="connected components"):
         _select_pseudotime_component(
             csr_matrix(adjacency),
@@ -378,7 +378,9 @@ def test_truncated_pba_operator_matches_dense_svd_reference():
         * (right_t[nonzero_modes, :] @ source_sink)
     )
 
-    assert np.allclose(actual, expected, rtol=1e-6, atol=1e-8)
+    # ARPACK converges to machine precision, and the smallest nonzero singular
+    # value, about 0.08, amplifies its rounding about tenfold.
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=0)
 
 
 def test_truncated_pba_logs_svd_stage_start():
@@ -400,12 +402,10 @@ def test_truncated_pba_logs_svd_stage_start():
     finally:
         logger.remove(sink)
 
-    assert any(
-        "Pseudotime scoring: calculating SVD" in msg
-        and "k=3" in msg
-        and "shape=(6, 6)" in msg
-        for msg in messages
-    )
+    # A path of six cells has five edges each way and six diagonal entries.
+    assert messages == [
+        "Pseudotime scoring: calculating SVD (shape=(6, 6), nnz=16, k=3)"
+    ]
 
 
 def test_dense_pba_reference_orders_a_path_from_source_to_sink():
@@ -732,13 +732,9 @@ def test_trajectory_loaders_do_not_depend_on_live_normalization_settings(
     pseudotime_markers,
     pseudotime_aggregation,
     pseudotime_scoring,
-    few_features,
+    detected_features,
     monkeypatch,
 ):
-    search_before = datastore.trajectory.markers(
-        pseudotime_scoring,
-        features=few_features,
-    )
     marker_before = datastore.trajectory.load_markers(pseudotime_markers)
     aggregation_before = datastore.trajectory.load_aggregation(pseudotime_aggregation)
     monkeypatch.setattr(datastore.RNA, "sf", float(datastore.RNA.sf) * 2.0)
@@ -755,15 +751,16 @@ def test_trajectory_loaders_do_not_depend_on_live_normalization_settings(
         aggregation_before.feature_clusters,
     )
 
-    # A new search does follow the live size factor.
+    # A new search with the arguments of the stored one does follow the live
+    # size factor.
     rerun = datastore.trajectory.markers(
         pseudotime_scoring,
-        features=few_features,
+        features=detected_features,
     )
-    assert rerun != search_before
+    assert rerun != pseudotime_markers
     size_factors = [
         (datastore.artifacts.inspect(ref).parameters or {})["size_factor"]
-        for ref in (search_before, rerun)
+        for ref in (pseudotime_markers, rerun)
     ]
     assert size_factors[1] == 2.0 * size_factors[0]
 
@@ -1235,7 +1232,7 @@ def test_feature_cluster_scatter_honors_custom_unassigned_value():
         0,
     )
 
-    assert np.array_equal(values, [0, 1, 0, 2, 0])
+    np.testing.assert_array_equal(values, [0, 1, 0, 2, 0])
     with pytest.raises(ValueError, match="misaligned"):
         _scatter_feature_clusters(3, np.array([0, 1]), np.array([1]), 0)
     with pytest.raises(ValueError, match="conflicts"):
@@ -1492,6 +1489,8 @@ def test_aggregation_and_marker_search_respect_memory_budget(tmp_path):
         ss_vec=source_sink,
         n_singular_vals=5,
     )
+    # Every cell is scored, so both analyses read the counts of all 4000 cells.
+    assert datastore.trajectory.load_pseudotime(pseudotime).valid.all()
 
     for run in (
         lambda: datastore.trajectory.aggregation(

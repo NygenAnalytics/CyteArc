@@ -3,7 +3,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
-from weakref import WeakKeyDictionary
 
 import numpy as np
 
@@ -25,7 +24,10 @@ class _LabelLayout:
     centres: np.ndarray
 
 
-_LAYOUT_LABELS: WeakKeyDictionary[Any, _LabelLayout] = WeakKeyDictionary()
+# Each panel's Axes holds its labels' layout, which then lives as long as the
+# panel. The labels refer to their Axes and figure, so a registry outside the
+# figure would keep every closed figure alive.
+_LAYOUT_ATTRIBUTE = "_cytearc_layout_labels"
 
 
 def _feasible_fraction(
@@ -174,9 +176,13 @@ def register_layout_labels(
     ``centres`` lists every drawn cluster's centre in data coordinates, the
     labelled clusters first in the order of ``texts``.
     """
-    _LAYOUT_LABELS[ax] = _LabelLayout(
-        texts=tuple(texts),
-        centres=np.asarray(centres, dtype=np.float64).reshape(-1, 2),
+    setattr(
+        ax,
+        _LAYOUT_ATTRIBUTE,
+        _LabelLayout(
+            texts=tuple(texts),
+            centres=np.asarray(centres, dtype=np.float64).reshape(-1, 2),
+        ),
     )
 
 
@@ -190,7 +196,7 @@ def place_layout_labels(figure: Any) -> None:
     marked = [
         (ax, layout)
         for ax in figure.axes
-        if (layout := _LAYOUT_LABELS.get(ax)) is not None and layout.texts
+        if (layout := getattr(ax, _LAYOUT_ATTRIBUTE, None)) is not None and layout.texts
     ]
     if not marked:
         return

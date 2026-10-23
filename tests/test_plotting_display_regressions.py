@@ -30,12 +30,14 @@ def _summary_store(groups) -> _ArrayStore:
     )
 
 
-@pytest.fixture
-def feature_plot_store(tmp_path):
+@pytest.fixture(scope="module")
+def feature_plot_store(tmp_path_factory):
+    # The tests only read the store, so they share one. Zarr keeps no chunk
+    # cache, so each test still counts every chunk that its plots read.
     from cytearc import DataStore
     from tests.storage_helpers import write_count_store
 
-    path = str(tmp_path / "summary.zarr")
+    path = str(tmp_path_factory.mktemp("feature_plots") / "summary.zarr")
     rng = np.random.default_rng(32)
     write_count_store(
         path,
@@ -729,11 +731,22 @@ def test_mean_contours_skip_panels_without_signal():
             flat, x, y, overlay=overlay, values=np.zeros(3_000), **limits
         )
         assert len(flat.collections) == 0
-        # The same cells with values rising along x do draw contours.
+        # The same cells with values rising along x do draw contours, at the
+        # default five positive levels.
         embedding_module._draw_density_overlay(
             signal, x, y, overlay=overlay, values=np.clip(x, 0, None), **limits
         )
-        assert len(signal.collections) == 1
+        (contours,) = signal.collections
+        assert len(contours.levels) == 5
+        assert np.all(contours.levels > 0)
+        # The local mean of max(x, 0) near x is x, so each level's contour
+        # begins within one grid pixel of x = level.
+        pixel = (x.max() - x.min()) / overlay.pixels
+        np.testing.assert_allclose(
+            [path.vertices[:, 0].min() for path in contours.get_paths()],
+            contours.levels,
+            atol=pixel,
+        )
     finally:
         plt.close(figure)
 

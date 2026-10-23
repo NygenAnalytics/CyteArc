@@ -929,6 +929,7 @@ def test_cytebase_alias_datasets_and_lineage_locations():
     # CyteBase is the separate cytebase package; cytebase.py only keeps the
     # earlier names of the example-data downloads in datasets.py.
     assert (_CYTEARC_ROOT / "cytebase.py").is_file()
+    assert _runtime_import_modules(_CYTEARC_ROOT / "cytebase.py") == {"datasets"}
     assert not (_CYTEARC_ROOT / "cytebase").exists()
     assert (_CYTEARC_ROOT / "datasets.py").is_file()
     assert not (_CYTEARC_ROOT / "lineage.py").exists()

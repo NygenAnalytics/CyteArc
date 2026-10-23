@@ -193,7 +193,10 @@ def test_wnn_two_modalities(bench) -> None:
         weights = graph.data.reshape(n_cells, k)
         own_rows = np.hstack([indices for _name, indices, _ in modalities])
         # Every edge is a distinct candidate from the cell's own neighbour rows.
-        assert (columns[:, :, None] == own_rows[:, None, :]).any(axis=2).all()
+        np.testing.assert_array_equal(
+            (columns[:, :, None] == own_rows[:, None, :]).any(axis=2),
+            np.ones((n_cells, k), dtype=bool),
+        )
         ordered = np.sort(columns, axis=1)
         assert np.all(ordered[:, 1:] != ordered[:, :-1])
         assert np.all((weights > 0) & (weights <= 1))
@@ -336,7 +339,10 @@ def test_snn_merge(bench) -> None:
         columns = merged.col.reshape(n_cells, k)
         weights = merged.data.reshape(n_cells, k)
         own_rows = np.hstack([graph.indices.reshape(n_cells, k) for graph in graphs])
-        assert (columns[:, :, None] == own_rows[:, None, :]).any(axis=2).all()
+        np.testing.assert_array_equal(
+            (columns[:, :, None] == own_rows[:, None, :]).any(axis=2),
+            np.ones((n_cells, k), dtype=bool),
+        )
         assert np.mean(truth[columns] == truth[:, None]) > 0.99
         for row in _checked_rows(n_cells):
             best = _snn_reference_row(row, graphs)

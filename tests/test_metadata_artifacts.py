@@ -727,11 +727,11 @@ def test_imputation_batches_preserve_requested_columns_and_stream_rows(
         store.imputation.compute_imputed([metadata_name, "duplicate"], diffusion)
 
 
-def test_get_imputed_accepts_array_like_feature_names(
-    datastore,
-    connectivity_graph,
-) -> None:
-    diffusion = datastore.imputation.diffusion(connectivity_graph, t=2)
+def test_get_imputed_accepts_array_like_feature_names(graph_store) -> None:
+    # The module's graph serves as well as a larger one, and its private copy
+    # keeps this diffusion operator out of the session datastore.
+    datastore, graph = graph_store
+    diffusion = datastore.imputation.diffusion(graph, t=2)
     names = [str(name) for name in datastore.RNA.feats.fetch_all("names")[:3]]
     expected = datastore.imputation.compute_imputed(names, diffusion)
 

@@ -157,8 +157,11 @@ def test_plateau_statistics_ignore_binary_refinement() -> None:
 
     assert first_forest.representatives.size == 1
     assert second_forest.representatives.size == 1
-    assert np.array_equal(first_events.cross_edges, second_events.cross_edges)
-    assert np.array_equal(first_events.volumes, second_events.volumes)
+    # The one event is the root: all four edges cross it, and its volume is 2m.
+    assert first_events.cross_edges.tolist() == [4]
+    assert first_events.volumes.tolist() == [8]
+    np.testing.assert_array_equal(second_events.cross_edges, first_events.cross_edges)
+    np.testing.assert_array_equal(second_events.volumes, first_events.volumes)
 
 
 def test_modularity_split_gain_matches_scalar_delta_q() -> None:
@@ -205,7 +208,7 @@ def test_split_gate_vetoes_exact_non_positive_gain_splits() -> None:
     assert guarded.labels.tolist() == [1, 1, 1, 1, 2, 2, 2, 2]
     assert [item.selected_node for item in guarded.diagnostics] == [10, 13]
     assert coarsened.labels.tolist() == [1] * 8
-    assert np.array_equal(permissive.labels, unguarded.labels)
+    np.testing.assert_array_equal(permissive.labels, unguarded.labels)
 
 
 def test_guard_reduces_erdos_renyi_null_fragmentation() -> None:

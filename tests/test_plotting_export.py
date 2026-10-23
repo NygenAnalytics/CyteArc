@@ -120,12 +120,20 @@ def test_export_crops_only_without_exact_size(embedding_store, tmp_path):
     )
 
     exact = result.save(tmp_path / "exact.png", dpi=100)
+    # Saving laid the figure out. A crop spans the drawn artists and
+    # Matplotlib's padding around them instead of the 3 by 2 inch figure.
+    figure = result.figure
+    tight = figure.get_tightbbox(figure.canvas.get_renderer()).padded(
+        matplotlib.rcParams["savefig.pad_inches"]
+    )
     cropped = result.save(tmp_path / "cropped.png", dpi=100, exact_size=False)
 
     with Image.open(exact) as image:
         assert image.size == (300, 200)
     with Image.open(cropped) as image:
-        assert image.size != (300, 200)
+        assert image.size == pytest.approx(
+            (tight.width * 100, tight.height * 100), abs=1
+        )
     result.close()
 
 

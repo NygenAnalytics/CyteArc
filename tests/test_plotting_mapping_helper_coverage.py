@@ -868,9 +868,9 @@ def test_mapping_reference_metadata_is_recursively_frozen_and_thawed() -> None:
     frozen_list = frozen["list"]
     assert frozen_list == [1, {"tuple": (2, 3)}]
     assert frozen_list != "not-a-list"
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="does not support item assignment"):
         frozen["size_factor"] = 2.0  # type: ignore[index]
-    with pytest.raises(AttributeError):
+    with pytest.raises(AttributeError, match="has no attribute 'append'"):
         frozen_list.append(4)  # type: ignore[attr-defined]
     assert reference.normalization_parameters == {
         "size_factor": 1_000.0,

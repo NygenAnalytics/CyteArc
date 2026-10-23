@@ -42,9 +42,11 @@ def _ref(
 
 @pytest.fixture(scope="module")
 def mapping_source(tmp_path_factory) -> MappingStoreSource:
+    # These load contracts are checked on the plain reference only.
     return build_mapping_store(
         tmp_path_factory.mktemp("mapping_artifact") / "reference.zarr",
         with_references=True,
+        with_symphony=False,
     )
 
 
@@ -826,7 +828,9 @@ def test_binding_rejects_handles_that_differ_from_their_stored_artifact(
 def test_label_reads_reject_a_handle_with_another_cell_count(reference) -> None:
     labels, usable = reference._fetch_cell_labels("ids")
     np.testing.assert_array_equal(labels, reference.fetch_cell_column("ids"))
-    assert usable.all()
+    np.testing.assert_array_equal(
+        usable, np.ones(reference.selected_cell_count, dtype=bool)
+    )
 
     forged = replace(reference, selected_cell_count=reference.selected_cell_count + 1)
     # Label reads skip the binding check, so the selection size guards them.

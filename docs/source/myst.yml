@@ -101,6 +101,8 @@ project:
     children:
     - file: tutorials/import_and_export.ipynb
       title: Import and export
+    - file: tutorials/seurat_import.ipynb
+      title: Seurat import
     - file: scanpy.md
       title: Scanpy users
     - file: seurat.md

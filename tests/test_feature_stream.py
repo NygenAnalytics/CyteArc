@@ -143,7 +143,10 @@ def test_feature_stream_budgets_an_edge_chunk_at_its_nominal_size() -> None:
     assert plan.geometry.nominalChunkBytes() == 60
     assert len(plan.blocks) == 1
 
-    with pytest.raises(MemoryError):
+    with pytest.raises(
+        MemoryError,
+        match="One index of the selection does not fit the operation budget",
+    ):
         plan_feature_stream(array, resources=ResourceBudget(60, 1), **kwargs)
 
 
@@ -334,7 +337,8 @@ def test_sparse_feature_selection_reads_only_selected_rows() -> None:
     row_sets = []
 
     def capture(band):  # type: ignore[no-untyped-def]
-        row_sets.append(band.rows)
+        wanted = feat_idx[(feat_idx >= band.featStart) & (feat_idx < band.featEnd)]
+        row_sets.append((band.rows, wanted - band.featStart, len(band.values)))
         rows = band.featStart + band.featureRows()
         dest[np.ix_(rows, band.selectedDestinations)] = band.values[
             :, band.selectedLocal
@@ -349,7 +353,11 @@ def test_sparse_feature_selection_reads_only_selected_rows() -> None:
             resources=ResourceBudget(8 * 1024 * 1024, 2),
         )
     )
-    assert row_sets and all(rows is not None for rows in row_sets)
+    # Each band holds the selected rows of its feature group and no others.
+    assert row_sets
+    for rows, wanted, read in row_sets:
+        np.testing.assert_array_equal(rows, wanted)
+        assert read == len(wanted)
     np.testing.assert_array_equal(dest[feat_idx], values.T[feat_idx][:, cell_idx])
     assert not np.delete(dest, feat_idx, axis=0).any()
 
@@ -552,7 +560,7 @@ def test_map_feature_read_groups_early_close_does_not_block() -> None:
     iterator.close()
     # Closing joins every thread the stream started, and the stream stays closed.
     assert _stream_threads(before) == []
-    with pytest.raises(StopIteration):
+    with pytest.raises(StopIteration, match="^$"):
         next(iterator)
 
 
@@ -573,7 +581,7 @@ def test_map_feature_cell_bands_early_close_does_not_block() -> None:
     assert _stream_threads(before)
     bands.close()
     assert _stream_threads(before) == []
-    with pytest.raises(StopIteration):
+    with pytest.raises(StopIteration, match="^$"):
         next(bands)
 
 
@@ -650,20 +658,33 @@ def test_feature_stream_plans_reject_malformed_requests() -> None:
 
 def test_handoff_waits_for_room_and_stops_waiting_once_closed() -> None:
     import asyncio
+    import time
 
     from cytearc.storage.feature_stream import iter_bounded_handoff
 
+    delivered: list[int] = []
+
     def run(deliver, _stop):  # type: ignore[no-untyped-def]
+        async def tracked(item: int) -> None:
+            await deliver(item)
+            delivered.append(item)
+
         async def produce() -> None:
             # One slot: the later items wait until the first is taken, and
             # whichever still waits when the consumer closes stops waiting.
-            await asyncio.gather(deliver(1), deliver(2), deliver(3))
+            await asyncio.gather(tracked(1), tracked(2), tracked(3))
 
         asyncio.run(produce())
 
     stream = iter_bounded_handoff(in_flight=1, run=run)
     assert next(stream) == 1
+    # While the consumer holds the first item, past several of the producer's
+    # polls for its release, no delivery returns: the first waits for the
+    # release and the others for room.
+    time.sleep(0.2)
+    assert delivered == []
     stream.close()
+    assert sorted(delivered) == [1, 2, 3]
 
 
 def test_cell_major_bands_visit_every_feature_group_of_a_band_first() -> None:
@@ -916,21 +937,33 @@ def _traced_stream_peak(mapper, counts_t, **kwargs) -> tuple[int, dict[str, obje
     return peak - base, metrics
 
 
-@pytest.mark.parametrize("mapper_name", ["read_groups", "cell_bands"])
-@pytest.mark.parametrize("budget", [8_000_000, 40_000_000])
-def test_feature_streams_reserve_every_traced_buffer(
-    mapper_name: str, budget: int, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from cytearc.storage import feature_stream
+@pytest.fixture(scope="module")
+def traced_counts_t() -> tuple[zarr.Array, np.ndarray]:
+    """Return a countsT of 100,000 cells and 64 features, and 70,000 of its cells.
 
-    mapper = getattr(feature_stream, f"map_feature_{mapper_name}")
+    The streams only read it, so the tests that trace them share it.
+    """
     rng = np.random.default_rng(0)
     values = rng.poisson(0.3, size=(100_000, 64)).astype(np.uint16)
     # Four read groups of 16 features over four sharded bands of 25,000 cells.
     counts_t = _counts_t_with_plan(
         values, policy=CountMatrixPolicy(unitBytes=3_200_000, chunkBytes=800_000)
     )
-    cell_idx = np.sort(rng.choice(100_000, 70_000, replace=False))
+    return counts_t, np.sort(rng.choice(100_000, 70_000, replace=False))
+
+
+@pytest.mark.parametrize("mapper_name", ["read_groups", "cell_bands"])
+@pytest.mark.parametrize("budget", [8_000_000, 40_000_000])
+def test_feature_streams_reserve_every_traced_buffer(
+    mapper_name: str,
+    budget: int,
+    monkeypatch: pytest.MonkeyPatch,
+    traced_counts_t: tuple[zarr.Array, np.ndarray],
+) -> None:
+    from cytearc.storage import feature_stream
+
+    mapper = getattr(feature_stream, f"map_feature_{mapper_name}")
+    counts_t, cell_idx = traced_counts_t
     # Every pool worker keeps its finished work item until it takes its next
     # one, as a descheduled worker can, so a buffer that a worker still
     # references after the stream released it shows up in the trace. One

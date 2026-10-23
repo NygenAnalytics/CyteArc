@@ -1165,6 +1165,18 @@ def test_pairlist_and_named_vector_helpers_reject_malformed_graphs() -> None:
             ValueError, match=r"^name count 1 does not match value count 2 at \$$"
         ):
             list(iter_named(document.root))
+    integer_names = wire.pair(
+        wire.integer_vector([1]), wire.nil(), tag=wire.symbol("names")
+    )
+    for unnamed in (
+        wire.vector([wire.integer_vector([1])]),
+        wire.vector([wire.integer_vector([1])], attributes=integer_names),
+    ):
+        with open_rds(io.BytesIO(wire.document(unnamed))) as document:
+            with pytest.raises(
+                ValueError, match=r"^named vector at \$ has no character names$"
+            ):
+                list(iter_named(document.root))
 
     # The parser never builds these graphs; the helpers still reject them.
     first = RNode(RType.PAIRLIST, path="$first")

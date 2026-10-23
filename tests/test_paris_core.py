@@ -1,3 +1,4 @@
+import numba
 import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
@@ -57,7 +58,8 @@ def test_merge_distances_match_aggregated_graph_weights() -> None:
         left_volume = float(volumes[left_members].sum())
         right_volume = float(volumes[right_members].sum())
         expected = (left_volume / total_weight) * (right_volume / between_weight)
-        assert hierarchy.heights[merge_index] == pytest.approx(expected)
+        # Only the order of the float sums differs, which moves a few ulps.
+        assert hierarchy.heights[merge_index] == pytest.approx(expected, rel=1e-12)
         members[hierarchy.n_leaves + merge_index] = np.concatenate(
             (left_members, right_members)
         )
@@ -84,11 +86,11 @@ def test_output_is_identical_across_thread_counts() -> None:
     reference = fit_paris_hierarchy(graph, nthreads=1)
     for nthreads in (2, 4, 8):
         result = fit_paris_hierarchy(graph, nthreads=nthreads)
-        assert np.array_equal(result.children, reference.children)
-        assert np.array_equal(result.heights, reference.heights)
-        assert np.array_equal(result.sizes, reference.sizes)
-        assert np.array_equal(result.component_roots, reference.component_roots)
-        assert np.array_equal(result.synthetic_joins, reference.synthetic_joins)
+        np.testing.assert_array_equal(result.children, reference.children)
+        np.testing.assert_array_equal(result.heights, reference.heights)
+        np.testing.assert_array_equal(result.sizes, reference.sizes)
+        np.testing.assert_array_equal(result.component_roots, reference.component_roots)
+        np.testing.assert_array_equal(result.synthetic_joins, reference.synthetic_joins)
 
 
 @pytest.mark.parametrize("n_vertices", [45, 61, 77])
@@ -109,6 +111,14 @@ def test_tied_clique_heights_stay_monotone_through_rounding(n_vertices) -> None:
         0.0,
     )
     assert np.all(child_heights.max(axis=1) <= hierarchy.heights)
+    # Exactly, clusters of s and t vertices merge at (s / n) * ((n - 1) / s),
+    # which is (n - 1) / n; three roundings leave each within 2 eps of it.
+    np.testing.assert_allclose(
+        hierarchy.heights,
+        (n_vertices - 1) / n_vertices,
+        rtol=2 * np.finfo(np.float64).eps,
+        atol=0,
+    )
     collapse_equal_height_plateaus(hierarchy)
 
 
@@ -166,9 +176,9 @@ def test_parallel_contraction_matches_scipy_reference() -> None:
         values,
     )
 
-    assert np.array_equal(contracted.indptr, expected.indptr)
-    assert np.array_equal(contracted.indices, expected.indices)
-    assert np.array_equal(contracted.data, expected.data)
+    np.testing.assert_array_equal(contracted.indptr, expected.indptr)
+    np.testing.assert_array_equal(contracted.indices, expected.indices)
+    np.testing.assert_array_equal(contracted.data, expected.data)
     assert contracted.has_canonical_format
     assert np.isnan(values).all()
 
@@ -178,9 +188,9 @@ def test_parallel_contraction_matches_scipy_reference() -> None:
         n_vertices,
         values,
     )
-    assert np.array_equal(repeated.indptr, contracted.indptr)
-    assert np.array_equal(repeated.indices, contracted.indices)
-    assert np.array_equal(repeated.data, contracted.data)
+    np.testing.assert_array_equal(repeated.indptr, contracted.indptr)
+    np.testing.assert_array_equal(repeated.indices, contracted.indices)
+    np.testing.assert_array_equal(repeated.data, contracted.data)
 
 
 def test_ties_use_smallest_logical_tree_id() -> None:
@@ -209,7 +219,7 @@ def test_canonicalization_sums_duplicates_sorts_and_removes_diagonal() -> None:
 
     assert canonical.has_sorted_indices
     assert canonical.diagonal().tolist() == [0.0, 0.0, 0.0]
-    assert np.array_equal(
+    np.testing.assert_array_equal(
         canonical.toarray(),
         np.asarray(
             [
@@ -278,8 +288,20 @@ def test_components_isolates_and_synthetic_joins_are_explicit() -> None:
 
     assert hierarchy.component_roots.tolist() == [5, 6, 4]
     assert hierarchy.synthetic_joins.tolist() == [False, False, True, True]
-    assert np.isinf(raw[hierarchy.synthetic_joins, 2]).all()
-    assert np.all(compatibility[hierarchy.synthetic_joins, 2] == 0)
+    # Symmetrization doubles the weights, so each pair merges at
+    # (volume / 20) * (volume / weight). The second pair then joins the first,
+    # and the isolate joins that join, both synthetically.
+    expected = np.asarray(
+        [
+            [0, 1, 0.2, 2],
+            [2, 3, 0.3, 2],
+            [5, 6, np.inf, 4],
+            [7, 4, np.inf, 5],
+        ]
+    )
+    np.testing.assert_array_equal(raw, expected)
+    expected[hierarchy.synthetic_joins, 2] = 0.0
+    np.testing.assert_array_equal(compatibility, expected)
     assert hierarchy.children.dtype == np.int32
     assert hierarchy.sizes.dtype == np.int32
     assert hierarchy.heights.dtype == np.float64
@@ -470,7 +492,12 @@ def test_merge_distances_must_stay_finite() -> None:
 
 
 def _componentwise_reference(graph: csr_matrix) -> dict[str, object]:
-    """Fit one component at a time from its own indexed graph, as before batching."""
+    """Fit one component at a time from its own indexed graph, as before batching.
+
+    A fit does not depend on the thread count, so the reference fits on one
+    thread: each of its many small fits would otherwise start the thread pool
+    twice a round, and those starts took far longer than the work.
+    """
     from scipy.sparse.csgraph import connected_components
 
     canonical = canonicalize_paris_graph(graph)
@@ -490,25 +517,30 @@ def _componentwise_reference(graph: csr_matrix) -> dict[str, object]:
     sizes: list[int] = []
     rounds: list[paris_core.ParisRoundDiagnostics] = []
     next_node = n_leaves
-    for index, label in enumerate(np.argsort(component_mins, kind="stable")):
-        leaf_ids = vertices_by_component[offsets[label] : offsets[label + 1]]
-        sizes.append(leaf_ids.size)
-        if leaf_ids.size == 1:
-            roots.append(int(leaf_ids[0]))
-            continue
-        component_graph = canonical[leaf_ids][:, leaf_ids].tocsr()
-        children, heights, merge_sizes, root, next_node = paris_core._fit_component(
-            component_graph,
-            leaf_ids,
-            component=index,
-            next_node=next_node,
-            total_weight=total_weight,
-            round_diagnostics=rounds,
-        )
-        child_blocks.extend(children)
-        height_blocks.extend(heights)
-        size_blocks.extend(merge_sizes)
-        roots.append(root)
+    previous_threads = numba.get_num_threads()
+    numba.set_num_threads(1)
+    try:
+        for index, label in enumerate(np.argsort(component_mins, kind="stable")):
+            leaf_ids = vertices_by_component[offsets[label] : offsets[label + 1]]
+            sizes.append(leaf_ids.size)
+            if leaf_ids.size == 1:
+                roots.append(int(leaf_ids[0]))
+                continue
+            component_graph = canonical[leaf_ids][:, leaf_ids].tocsr()
+            children, heights, merge_sizes, root, next_node = paris_core._fit_component(
+                component_graph,
+                leaf_ids,
+                component=index,
+                next_node=next_node,
+                total_weight=total_weight,
+                round_diagnostics=rounds,
+            )
+            child_blocks.extend(children)
+            height_blocks.extend(heights)
+            size_blocks.extend(merge_sizes)
+            roots.append(root)
+    finally:
+        numba.set_num_threads(previous_threads)
     children = np.concatenate(child_blocks).astype(np.int64)
     heights = np.concatenate(height_blocks)
     merge_sizes = np.concatenate(size_blocks)
@@ -542,9 +574,14 @@ def _componentwise_reference(graph: csr_matrix) -> dict[str, object]:
     }
 
 
-def _assert_matches_componentwise_fit(graph: csr_matrix, nthreads: int = 2) -> None:
+def _assert_matches_componentwise_fit(
+    graph: csr_matrix,
+    nthreads: int = 2,
+    expected: dict[str, object] | None = None,
+) -> None:
     hierarchy = fit_paris_hierarchy(graph, nthreads=nthreads)
-    expected = _componentwise_reference(graph)
+    if expected is None:
+        expected = _componentwise_reference(graph)
 
     for name in ("children", "heights", "sizes", "component_roots", "synthetic_joins"):
         # Exact equality: the same merges, in the same order, at the same heights.
@@ -620,8 +657,12 @@ def test_batched_components_match_across_thread_counts_and_directed_input():
     graph = _islands([6, 1, 9, 4, 30, 2] * 60, seed=17)
     # Unequal weights in the two directions are summed by canonicalization.
     directed = graph.multiply(rng.uniform(0.5, 2.0, size=graph.shape)).tocsr()
+    # The reference does not depend on the thread count of the fit it checks.
+    expected = _componentwise_reference(directed)
     for nthreads in (1, 3, 8):
-        _assert_matches_componentwise_fit(directed, nthreads=nthreads)
+        _assert_matches_componentwise_fit(
+            directed, nthreads=nthreads, expected=expected
+        )
 
 
 def test_batched_components_raise_as_one_at_a_time_on_overflow():

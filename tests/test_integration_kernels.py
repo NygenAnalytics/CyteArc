@@ -220,6 +220,53 @@ def test_wnn_kernels_match_on_duplicate_cells_and_ties(l2_normalize):
     _assert_matches_legacy(modalities, l2_normalize=l2_normalize)
 
 
+def test_kernel_affinity_of_a_bandwidth_within_rounding_keeps_the_nearest():
+    nearest = 2.0
+    # The tolerance of a nearest distance of two, 2**-48.
+    tolerance = 8.0 * np.finfo(np.float64).eps * nearest
+    distances = np.array([2.0, np.nextafter(2.0, 3.0), 2.5, 1.0])
+
+    # A bandwidth within the tolerance keeps, at full affinity, the neighbours
+    # at the nearest distance up to rounding, at any scale of the embedding.
+    for scale in (1.0, 1e-6, 1e6):
+        np.testing.assert_array_equal(
+            integration._kernel_affinity(
+                distances * scale, nearest * scale, tolerance * scale
+            ),
+            [1.0, 1.0, 0.0, 1.0],
+        )
+    # Just above it, the affinity decays from the nearest distance.
+    np.testing.assert_allclose(
+        integration._kernel_affinity(
+            distances, nearest, np.nextafter(tolerance, np.inf)
+        ),
+        [1.0, np.exp(-0.125), 0.0, 1.0],
+        rtol=1e-12,
+        atol=0,
+    )
+    np.testing.assert_allclose(
+        integration._kernel_affinity(distances, nearest, 0.5),
+        [1.0, np.exp(-(2.0**-50)), np.exp(-1.0), 1.0],
+        rtol=1e-15,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("l2_normalize", [True, False])
+@pytest.mark.parametrize(
+    "dtype", [np.float64, np.dtype(">f8")], ids=["kernels", "per-cell"]
+)
+def test_wnn_matches_the_loop_where_every_bandwidth_is_degenerate(dtype, l2_normalize):
+    rng = np.random.default_rng(5)
+    modalities = _modalities(rng, 40, (6, 6), (3, 2), dtype)
+    # Every cell of the second modality has the same coordinates, so all its
+    # neighbour distances and bandwidths are zero. Big-endian coordinates are
+    # scored one cell at a time.
+    modalities[1][2][:] = 1.0
+
+    _assert_matches_legacy(modalities, l2_normalize=l2_normalize)
+
+
 @pytest.mark.parametrize("l2_normalize", [True, False])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_wnn_kernels_match_on_wide_and_single_coordinates(dtype, l2_normalize):

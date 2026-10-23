@@ -661,10 +661,11 @@ def test_inspection_skips_a_null_x(tmp_path) -> None:
 def test_inspection_samples_values_across_the_whole_matrix(tmp_path) -> None:
     import cytearc.readers._h5ad_inspect as inspection_module
 
-    # Whole values first, fractions after them: the first 101 values, which
-    # inspection used to read, are all whole.
+    # Whole values first, fractions after them: neither the first 101 values,
+    # which inspection used to read, nor the first window of 1,024 sparse
+    # values or 20 dense rows holds a fraction.
     values = np.ones((40, 50), dtype=np.float32)
-    values[20:] = 0.5
+    values[21:] = 0.5
     dense = values.copy()
     dense[:10] = 0
     path = tmp_path / "sampled.h5ad"
@@ -681,12 +682,14 @@ def test_inspection_samples_values_across_the_whole_matrix(tmp_path) -> None:
         )
 
     with h5py.File(path, "r") as h5:
-        candidates = {
-            candidate.key: candidate
-            for candidate in inspection_module._matrix_candidates(h5)
-        }
-    assert candidates["X"].integerLike is False
-    assert candidates["layers/dense"].integerLike is False
+        candidates = inspection_module._matrix_candidates(h5)
+    # Matrices without counts estimate no total and rank by their name.
+    assert candidates == [
+        inspection_module._MatrixCandidate("X", "csr", (40, 50), integerLike=False),
+        inspection_module._MatrixCandidate(
+            "layers/dense", "dense", (40, 50), integerLike=False
+        ),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -694,8 +697,12 @@ def test_inspection_samples_values_across_the_whole_matrix(tmp_path) -> None:
     [
         (np.asarray([1, 2, 3], dtype=np.int32), True, 6.0),
         (np.asarray([1, -2, 3], dtype=np.int32), False, 0.0),
+        (np.asarray([0.0, 2.0, 4.0]), True, 6.0),
         (np.asarray([1.0, 2.0, np.nan]), False, 0.0),
+        # Infinity is non-negative, and rounds to itself.
+        (np.asarray([1.0, 2.0, np.inf]), False, 0.0),
         (np.asarray([1.0, 2.0, -3.0]), False, 0.0),
+        (np.asarray([1.0, 2.5]), False, 0.0),
         (np.asarray([], dtype=np.float32), False, 0.0),
     ],
 )
@@ -720,6 +727,10 @@ def test_sample_windows_spread_over_the_values() -> None:
     assert len(windows) == 32
     assert windows[0] == slice(0, 1024)
     assert windows[-1] == slice(100_000 - 1024, 100_000)
+    # Every window holds 1,024 values, and they start at the multiples of
+    # 98,976 / 31, rounded down.
+    assert {window.stop - window.start for window in windows} == {1024}
+    assert set(np.diff([window.start for window in windows]).tolist()) == {3192, 3193}
 
 
 def test_dense_matrix_without_columns_holds_no_counts(tmp_path) -> None:
@@ -802,6 +813,8 @@ def test_sampled_values_must_be_numbers() -> None:
     from cytearc.readers._h5ad_inspect import _sampled_counts
 
     assert _sampled_counts(np.asarray([True, False])) is False
+    # Stored text is not counts, even when it spells whole numbers.
+    assert _sampled_counts(np.asarray([b"1", b"2"])) is False
     assert _sampled_counts(np.asarray([], dtype=np.float32)) is False
     assert _sampled_counts(np.asarray([0, 3], dtype=np.uint8)) is True
 
@@ -819,7 +832,28 @@ def test_inspection_without_counts_warns_about_no_competition(tmp_path) -> None:
         inspection = inspect_h5ad(path)
 
     assert inspection.integerLike is False
-    assert not any("Several matrices" in message for message in messages)
+    assert (inspection.matrixKey, inspection.matrixCandidates) == (
+        "X",
+        ("X", "layers/scaled"),
+    )
+    assert messages == []
+
+    # Counts in a layer that the features do not describe cannot be chosen,
+    # so they do not compete with the chosen matrix either.
+    with h5py.File(path, "r+") as h5:
+        h5["layers"].create_dataset("counts", data=rng.poisson(2, size=(6, 5)))
+    with _warnings() as messages:
+        inspection = inspect_h5ad(path)
+
+    assert inspection.integerLike is False
+    assert (inspection.matrixKey, inspection.matrixCandidates) == (
+        "X",
+        ("layers/counts", "X", "layers/scaled"),
+    )
+    assert [message.rstrip() for message in messages] == [
+        "Ignoring matrix candidate layers/counts: feature metadata group `var` "
+        "length 4 does not match feature count 5"
+    ]
 
 
 def test_tables_without_an_index_import_every_column(tmp_path) -> None:

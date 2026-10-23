@@ -1192,9 +1192,9 @@ def test_marker_record_keeps_the_code_digest_of_a_custom_normalizer() -> None:
 
 def test_marker_record_of_an_assay_without_size_factor_is_valid() -> None:
     # Only RNA assays set a size factor; other assays record None.
-    validated = validate_marker_parameters({**_MARKER_RECORD, "size_factor": None})
+    record = {**_MARKER_RECORD, "size_factor": None}
 
-    assert validated["size_factor"] is None
+    assert validate_marker_parameters(record) == record
 
 
 def test_aggregation_record_accepts_only_supported_ann_spaces() -> None:

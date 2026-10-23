@@ -30,17 +30,25 @@ def _open_toy_copy(toy_crdir_writer, destination) -> DataStore:
     )
 
 
+@pytest.fixture(scope="module")
+def prepared_toy_store(toy_crdir_writer, tmp_path_factory):
+    """A copy of the toy store, prepared once, that the stores below copy."""
+    location = tmp_path_factory.mktemp("prepared_toy") / "toy.zarr"
+    _open_toy_copy(toy_crdir_writer, location)
+    return location
+
+
 @pytest.fixture
-def export_store(toy_crdir_writer, tmp_path):
+def export_store(prepared_toy_store, tmp_path):
     """A copy of the toy store that a test may change."""
-    return _open_toy_copy(toy_crdir_writer, tmp_path / "toy.zarr")
+    return _open_toy_copy(prepared_toy_store, tmp_path / "toy.zarr")
 
 
 @pytest.fixture(scope="module")
-def shared_export_store(toy_crdir_writer, tmp_path_factory):
+def shared_export_store(prepared_toy_store, tmp_path_factory):
     """A copy of the toy store for tests that only read it."""
     return _open_toy_copy(
-        toy_crdir_writer, tmp_path_factory.mktemp("shared_export") / "toy.zarr"
+        prepared_toy_store, tmp_path_factory.mktemp("shared_export") / "toy.zarr"
     )
 
 

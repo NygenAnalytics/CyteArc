@@ -7,7 +7,11 @@ from scipy.sparse import csr_matrix, issparse
 from ..utils.arguments import integer_argument
 from ..utils.compute import process_thread_limit
 from ..utils.logging import logger
-from ..utils.numba import enable_dispatcher_cache, restore_numba_threads
+from ..utils.numba import (
+    enable_dispatcher_cache,
+    import_umap,
+    restore_numba_threads,
+)
 from ..utils.progress import tqdm_params as default_tqdm_params
 
 locale.setlocale(locale.LC_NUMERIC, "C")
@@ -181,6 +185,8 @@ def simplicial_set_embedding(
     """Run UMAP simplicial-set embedding with optional densMAP."""
     import numba
     from sklearn.utils import check_random_state
+
+    import_umap()
     from umap import layouts as umap_layouts
     from umap.layouts import optimize_layout_euclidean
     from umap.umap_ import make_epochs_per_sample
@@ -284,6 +290,7 @@ def fit_transform(
     """
     import warnings
 
+    import_umap()
     from umap.umap_ import find_ab_params
 
     with warnings.catch_warnings():

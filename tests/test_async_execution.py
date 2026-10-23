@@ -109,7 +109,7 @@ def test_io_results_do_not_travel_through_the_io_loop_future() -> None:
         active._io_loops.submit = recorded  # type: ignore[method-assign]
         value = await active.io(read())
         # The I/O loop thread finishes with the read before it reports it.
-        return bool(np.all(value == 1)), submitted[0].result() is None
+        return value.tolist() == [1.0] * 8, submitted[0].result() is None
 
     assert runner.run(operation) == (True, True)
 
@@ -813,9 +813,13 @@ def test_compute_workers_apply_local_numba_cap() -> None:
 
         await asyncio.gather(*[active.compute(probe) for _ in range(4)])
 
+    caller_threads = numba.get_num_threads()
+    # The caller may run several Numba threads, so a cap of one shows.
+    assert caller_threads >= 2
+    assert runner.plan.threadsPerComputeWorker == 1
     runner.run(operation)
-    assert observed
-    assert all(threads == 1 for threads in observed)
+    assert observed == [1] * 4
+    assert numba.get_num_threads() == caller_threads
 
 
 def test_writer_completes_when_numba_and_many_compute_workers() -> None:
@@ -1036,11 +1040,11 @@ def test_io_releases_completed_results_before_the_outer_read_finishes():
                 references.append(weakref.ref(values))
                 del values
             await asyncio.sleep(0)
-            assert all(reference() is None for reference in references)
+            return [reference() is None for reference in references]
 
-        await active.io(read())
+        return await active.io(read())
 
-    runner.run(operation)
+    assert runner.run(operation) == [True] * 3
 
 
 def test_io_failure_drains_sibling_encoders_before_releasing_buffers():
@@ -1143,8 +1147,10 @@ def test_completed_io_releases_payloads_without_cyclic_collection():
     async def operation(runner):
         for _ in range(6):
             values = await runner.io(produce())
+            np.testing.assert_array_equal(values, np.ones(1024))
             del values
             await asyncio.sleep(0)
+        assert len(references) == 6
         # The I/O loop thread drops its finished task just after handing over
         # the result. Give it that moment; cyclic collection stays disabled, so
         # a payload held by a reference cycle is still never freed.

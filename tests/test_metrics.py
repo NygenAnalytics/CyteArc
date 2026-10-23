@@ -86,7 +86,7 @@ def test_compute_lisi_single_category_is_one():
         perplexity=1,
     )
 
-    assert np.allclose(scores[:, 0], 1.0)
+    np.testing.assert_array_equal(scores, np.ones((4, 1)))
 
 
 def test_compute_lisi_uses_all_stored_neighbors():
@@ -102,7 +102,9 @@ def test_compute_lisi_uses_all_stored_neighbors():
         perplexity=1,
     )
 
-    assert np.allclose(scores[:, 0], 1.8)
+    # Every row weighs cells 0, 1 and 2 equally, labelled 1, 0 and 0, so its
+    # inverse Simpson index is 1 / (1/9 + 4/9).
+    np.testing.assert_allclose(scores, np.full((4, 1), 1.8), rtol=1e-15)
 
 
 def test_compute_lisi_rejects_missing_labels():
@@ -145,7 +147,7 @@ def test_compute_lisi_handles_more_categories_than_neighbors():
         perplexity=1,
     )
 
-    assert np.allclose(scores[:, 0], 3.0)
+    np.testing.assert_array_equal(scores, np.full((4, 1), 3.0))
 
 
 def test_compute_lisi_caps_perplexity_to_neighbor_capacity():
@@ -156,7 +158,7 @@ def test_compute_lisi_caps_perplexity_to_neighbor_capacity():
     capped = compute_lisi(distances, indices, metadata, ["batch"], perplexity=2)
     oversized = compute_lisi(distances, indices, metadata, ["batch"], perplexity=30)
 
-    assert np.allclose(oversized, capped)
+    np.testing.assert_array_equal(oversized, capped)
 
 
 @pytest.mark.parametrize("perplexity", [0.5, np.inf, np.nan])
@@ -191,8 +193,9 @@ def test_neighbor_probabilities_calibrate_diffuse_and_concentrated_rows():
     )
     calibrated_perplexity = np.exp(-np.sum(probabilities * log_probabilities, axis=1))
 
-    assert np.allclose(probabilities.sum(axis=1), 1.0)
-    assert np.allclose(calibrated_perplexity, 2.0, rtol=1e-7)
+    np.testing.assert_allclose(probabilities.sum(axis=1), 1.0, rtol=1e-15)
+    # The search stops within tol of the target entropy log(2).
+    np.testing.assert_allclose(calibrated_perplexity, 2.0, rtol=1e-8)
 
 
 def test_compute_lisi_rejects_invalid_neighbor_distances():
@@ -422,9 +425,9 @@ def test_cluster_similarity_is_symmetric_with_unit_diagonal():
 
     similarities = calculate_weighted_cluster_similarity(graph, labels)
 
-    assert np.allclose(similarities, similarities.T)
-    assert np.allclose(np.diag(similarities), 1)
-    assert similarities[0, 1] > 0
+    # Each cluster holds a weight of 2 within itself and shares 0.2 + 0.3 with
+    # the other, so their weighted Jaccard index is 0.5 / (2.5 + 2.5 - 0.5).
+    np.testing.assert_array_equal(similarities, [[1.0, 1 / 9], [1 / 9, 1.0]])
 
 
 def test_weighted_cluster_similarity_validates_graph_and_labels():
@@ -468,7 +471,7 @@ def test_streamed_knn_similarity_matches_csr_similarity():
     )
     materialized = calculate_weighted_cluster_similarity(graph, labels)
 
-    assert np.allclose(streamed, materialized)
+    np.testing.assert_array_equal(streamed, materialized)
 
 
 def test_streamed_knn_similarity_validates_structure():
@@ -628,7 +631,7 @@ def test_top_k_distances_accept_all_candidates():
         k=2,
     )
 
-    assert np.allclose(np.sort(distances[0]), [1.0, 2.0])
+    np.testing.assert_array_equal(np.sort(distances, axis=1), [[1.0, 2.0]])
 
 
 @pytest.mark.parametrize(
@@ -694,7 +697,7 @@ def test_top_k_cosine_distances_handle_opposite_and_zero_vectors():
         metric="cosine",
     )
 
-    assert np.allclose(
+    np.testing.assert_array_equal(
         np.sort(distances, axis=1),
         np.array(
             [
@@ -713,7 +716,7 @@ def test_top_k_inner_product_distances_are_clipped_at_zero():
         metric="ip",
     )
 
-    assert np.allclose(
+    np.testing.assert_array_equal(
         np.sort(distances, axis=1),
         np.array(
             [
@@ -1278,6 +1281,9 @@ def test_silhouette_accepts_streamed_neighbors_instead_of_a_graph():
 
     assert streamed.shape == (2,)
     assert np.all(streamed > 0.9)
+    # With two clusters the nearest cluster is the other one either way, so
+    # the same seed draws the same cells as with the complete graph.
+    np.testing.assert_array_equal(streamed, _silhouette(labels, data, sample_size=3))
 
 
 def test_silhouette_scoring_validates_inputs():

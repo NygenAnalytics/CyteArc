@@ -131,19 +131,28 @@ def test_stream_shards_serial_backend_runs_inline():
 
 
 def test_nested_stream_shards_run_serial():
-    inner_context = []
+    inner_calls = []
+    lock = threading.Lock()
 
     def outer(value):
         assert in_shard_context() is True
+        worker = threading.get_ident()
 
         def inner(item):
-            inner_context.append(in_shard_context())
-            return item
+            # A nested stream runs inline on the worker of its outer item.
+            with lock:
+                inner_calls.append(
+                    (value, item, in_shard_context(), threading.get_ident() == worker)
+                )
+            return 10 * value + item
 
         return list(stream_shards([0, 1, 2], inner, workers=8))
 
-    list(stream_shards([0, 1], outer, workers=8))
-    assert inner_context and all(inner_context)
+    assert list(stream_shards([0, 1], outer, workers=8)) == [[0, 1, 2], [10, 11, 12]]
+    for value in (0, 1):
+        assert [call for call in inner_calls if call[0] == value] == [
+            (value, item, True, True) for item in (0, 1, 2)
+        ]
 
 
 def test_stream_shards_preserves_order():
@@ -161,7 +170,7 @@ def test_stream_shards_bounds_and_restores_io_concurrency():
 
         out = list(stream_shards(range(4), fn, workers=2, io_concurrency=3))
         assert out == [0, 1, 2, 3]
-        assert seen and all(s == 3 for s in seen)
+        assert seen == [3] * 4
         assert zarr.config.get("async.concurrency") == 7
 
 
@@ -173,8 +182,10 @@ def test_stream_shards_config_neutral_without_io():
             seen.append(zarr.config.get("async.concurrency"))
             return x
 
-        list(stream_shards(range(4), fn, workers=2))
-        assert seen and all(s == 5 for s in seen)
+        assert list(stream_shards(range(4), fn, workers=2)) == [0, 1, 2, 3]
+        # Every item runs under the caller's setting, which stays in place.
+        assert seen == [5] * 4
+        assert zarr.config.get("async.concurrency") == 5
 
 
 def test_stream_shards_cancels_unconsumed_work():
@@ -272,8 +283,8 @@ def test_stream_blocks_matches_serial_materialization():
     data = rng.standard_normal((35, 6)).astype(np.float32)
     serial = np.vstack(list(_toy_chunked(data, 10, 1).stream_blocks(nthreads=1)))
     parallel = np.vstack(list(_toy_chunked(data, 10, 4).stream_blocks(nthreads=4)))
-    assert np.array_equal(serial, data)
-    assert np.array_equal(serial, parallel)
+    np.testing.assert_array_equal(serial, data)
+    np.testing.assert_array_equal(parallel, serial)
 
 
 def test_reductions_bit_identical_across_threads():
@@ -281,25 +292,25 @@ def test_reductions_bit_identical_across_threads():
     data = rng.standard_normal((37, 5)).astype(np.float32)
     ca1 = _toy_chunked(data, 10, 1)
     ca4 = _toy_chunked(data, 10, 4)
-    assert np.array_equal(
-        np.asarray(ca1.sum(axis=0).compute(1)),
+    np.testing.assert_array_equal(
         np.asarray(ca4.sum(axis=0).compute(4)),
+        np.asarray(ca1.sum(axis=0).compute(1)),
     )
-    assert np.array_equal(
-        np.asarray(ca1.var(axis=0).compute(1)),
+    np.testing.assert_array_equal(
         np.asarray(ca4.var(axis=0).compute(4)),
+        np.asarray(ca1.var(axis=0).compute(1)),
     )
     m1, s1 = ca1.mean_and_std(nthreads=1)
     m4, s4 = ca4.mean_and_std(nthreads=4)
-    assert np.array_equal(m1, m4)
-    assert np.array_equal(s1, s4)
+    np.testing.assert_array_equal(m4, m1)
+    np.testing.assert_array_equal(s4, s1)
 
 
 def test_compute_matches_source_across_threads():
     rng = np.random.default_rng(2)
     data = rng.standard_normal((40, 4)).astype(np.float32)
-    assert np.array_equal(_toy_chunked(data, 8, 1).compute(1), data)
-    assert np.array_equal(_toy_chunked(data, 8, 5).compute(5), data)
+    np.testing.assert_array_equal(_toy_chunked(data, 8, 1).compute(1), data)
+    np.testing.assert_array_equal(_toy_chunked(data, 8, 5).compute(5), data)
 
 
 def test_stream_counts_the_consumed_block_toward_its_limit():

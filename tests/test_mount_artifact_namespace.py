@@ -92,6 +92,21 @@ def _prepared_import(tmp_path: Path, location: str | Store, **options):
     return imported
 
 
+@pytest.fixture(scope="module")
+def small_import(tmp_path_factory) -> SimpleNamespace:
+    """A small prepared import, which each test copies before it changes it."""
+    root = tmp_path_factory.mktemp("small_import")
+    location = str(root / "source.zarr")
+    return SimpleNamespace(location=location, imported=_prepared_import(root, location))
+
+
+def _copied_import(small_import: SimpleNamespace, tmp_path: Path):
+    """Copy the small import to ``tmp_path``; its artifacts keep their IDs."""
+    source = str(tmp_path / "source.zarr")
+    shutil.copytree(small_import.location, source)
+    return source, small_import.imported
+
+
 def _mount(source: str, target: Path, **options) -> DataStore:
     return mount_datastore(
         source,
@@ -191,7 +206,13 @@ def test_mount_lists_inspects_loads_and_traces_source_artifacts(published, tmp_p
     for ref in published.assay_artifacts + published.datastore_artifacts:
         assert mounted.artifacts.inspect(ref).complete
     markers = published.outputs["markers"]
-    assert set(mounted.artifacts.load(markers).group_keys())
+    source_markers = zarr.open_group(published.location, mode="r")[
+        artifact_path(markers)
+    ]
+    assert set(source_markers.group_keys())
+    assert set(mounted.artifacts.load(markers).group_keys()) == set(
+        source_markers.group_keys()
+    )
     pd.testing.assert_frame_equal(mounted.markers.load(markers), published.markers)
     assert _complete_lineage(mounted, markers) == published.lineage
     summary = mounted.summary()
@@ -200,7 +221,9 @@ def test_mount_lists_inspects_loads_and_traces_source_artifacts(published, tmp_p
     # Runs and their labels stay with the store that holds them.
     assert summary.pipeline_run_counts["total"] == 0
     assert mounted.pipeline.list_runs() == ()
-    with pytest.raises(KeyError):
+    with pytest.raises(
+        KeyError, match="No completed pipeline run has label 'published'"
+    ):
         mounted.pipeline.open(label="published")
     assert not is_remote_datastore(None, mounted.zw)
     assert metadata_workers(mounted.zw) == 1
@@ -397,7 +420,9 @@ def test_read_only_reopen_resolves_source_artifacts(published, branched):
         reopened.markers.load(reopened.pipeline.open(label="branch")["markers"]),
         branched.mounted.markers.load(branched.run["markers"]),
     )
-    with pytest.raises(PermissionError):
+    with pytest.raises(
+        PermissionError, match=r"requires a DataStore opened with zarr_mode='r\+'$"
+    ):
         reopened.markers.search(
             published.imported.clusterArtifacts["cell_type"],
             features=published.outputs["highly_variable_features"],
@@ -519,10 +544,9 @@ def test_local_cache_follows_the_store_that_holds_the_normalized_artifact(
     ],
 )
 def test_partial_shard_reads_of_source_artifacts_go_to_the_source(
-    tmp_path, codec_pipeline
+    small_import, tmp_path, codec_pipeline
 ):
-    source = str(tmp_path / "source.zarr")
-    imported = _prepared_import(tmp_path, source)
+    source, imported = _copied_import(small_import, tmp_path)
     path = f"{artifact_path(imported.embeddingArtifacts['X_umap'])}/sharded"
     values = np.arange(1, 65, dtype=np.float32).reshape(16, 4)
     zarr.open_group(source, mode="r+").create_array(
@@ -537,9 +561,10 @@ def test_partial_shard_reads_of_source_artifacts_go_to_the_source(
         np.testing.assert_array_equal(array[:], values)
 
 
-def test_store_protocol_routes_each_key_to_the_store_that_holds_it(tmp_path):
-    source = str(tmp_path / "source.zarr")
-    imported = _prepared_import(tmp_path, source)
+def test_store_protocol_routes_each_key_to_the_store_that_holds_it(
+    small_import, tmp_path
+):
+    source, imported = _copied_import(small_import, tmp_path)
     target = tmp_path / "target.zarr"
     mounted = _mount(source, target)
     selection = mounted.select_cells(
@@ -615,9 +640,10 @@ def test_store_protocol_routes_each_key_to_the_store_that_holds_it(tmp_path):
     assert sync(store.exists(source_key))
 
 
-def test_group_origins_follow_the_stores_after_misses_and_deletes(tmp_path):
-    source = str(tmp_path / "source.zarr")
-    imported = _prepared_import(tmp_path, source)
+def test_group_origins_follow_the_stores_after_misses_and_deletes(
+    small_import, tmp_path
+):
+    source, imported = _copied_import(small_import, tmp_path)
     target = tmp_path / "target.zarr"
     mounted = _mount(source, target)
     store = mounted.z.store

@@ -2,6 +2,7 @@
 
 import os
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -132,10 +133,23 @@ def test_read_only_opens_never_filter_or_record(tmp_path):
     root = zarr.open_group(location, mode="r+")
     del root["cellData"].attrs[CELL_FILTER_ATTR]
 
-    reader = _open(location, zarr_mode="r", min_features_per_cell=4)
+    # A writable open would remove the two cells with at most two features.
+    reader = _open(location, zarr_mode="r", min_features_per_cell=2)
 
-    assert reader.cells.fetch_all("I").all()
+    assert reader.cells.fetch_all("I").tolist() == [True] * 6
     assert _filter_record(location) is None
+    # The next writable open still filters the store, which holds no record.
+    writer = _open(location, min_features_per_cell=2)
+    assert writer.cells.fetch_all("I").tolist() == [False] * 2 + [True] * 4
+    assert _filter_record(location) == {"assay": "RNA", "threshold": 2}
+
+
+@pytest.fixture(scope="module")
+def prepared_template(tmp_path_factory) -> Path:
+    """A store prepared without filtering, which tests copy and then change."""
+    location = _fresh(tmp_path_factory.mktemp("prepared") / "store.zarr")
+    _open(location, min_features_per_cell=-1)
+    return Path(location)
 
 
 @pytest.mark.parametrize(
@@ -149,9 +163,9 @@ def test_read_only_opens_never_filter_or_record(tmp_path):
         {"assay": "RNA", "threshold": 1, "extra": 0},
     ],
 )
-def test_a_malformed_filter_record_fails_closed(tmp_path, record):
-    location = _fresh(tmp_path / "store.zarr")
-    _open(location, min_features_per_cell=-1)
+def test_a_malformed_filter_record_fails_closed(prepared_template, tmp_path, record):
+    location = str(tmp_path / "store.zarr")
+    shutil.copytree(prepared_template, location)
     zarr.open_group(location, mode="r+")["cellData"].attrs[CELL_FILTER_ATTR] = record
 
     with pytest.raises(ValueError, match="minFeaturesPerCell attribute is malformed"):
@@ -327,11 +341,7 @@ _CHILD = textwrap.dedent(
         return original(self, patterns)
 
     base.Assay.prepare = paused
-    try:
-        ds = DataStore(location, default_assay="RNA", nthreads=1)
-    except RuntimeError as error:
-        print("REFUSED", error, flush=True)
-        sys.exit(3)
+    ds = DataStore(location, default_assay="RNA", nthreads=1)
     print("OPENED", int(ds.cells.fetch_all("I").sum()), flush=True)
     """
 )
@@ -376,15 +386,14 @@ def test_concurrent_first_opens_in_separate_processes_prepare_once(tmp_path):
     holder = _child(location, "hold")
     try:
         _wait_for(holder, "PREPARING")
-        # A second process that opens the fresh import meanwhile is refused
+        # This test's process opens the fresh import meanwhile and is refused
         # with the claim's owner, instead of preparing the same columns.
-        second = _child(location, "open")
-        stdout, _ = second.communicate(timeout=120)
-        assert second.returncode == 3
-        assert stdout.startswith(
-            f"REFUSED This store is being prepared by another process (process "
-            f"{holder.pid} on host "
-        )
+        with pytest.raises(
+            RuntimeError,
+            match=r"^This store is being prepared by another process \(process "
+            rf"{holder.pid} on host ",
+        ):
+            _open(location)
         assert zarr.open_group(location, mode="r")["RNA"].attrs["prepared"] is False
         Path(location + ".release").touch()
         stdout, stderr = holder.communicate(timeout=120)
@@ -398,25 +407,25 @@ def test_concurrent_first_opens_in_separate_processes_prepare_once(tmp_path):
 
 @pytest.mark.skipif(not hasattr(signal, "SIGKILL"), reason="needs SIGKILL")
 def test_a_killed_preparation_names_its_claim_until_it_is_removed(tmp_path):
-    import shutil
-
     location = _fresh(tmp_path / "store.zarr")
     killed = _child(location, "kill")
     killed.communicate(timeout=120)
     assert killed.returncode == -signal.SIGKILL
 
-    refused = _child(location, "open")
-    stdout, _ = refused.communicate(timeout=120)
-    assert refused.returncode == 3
-    assert f"process {killed.pid} on host " in stdout
-    assert stdout.rstrip().endswith(
+    # This test's process is refused, and the refusal names the claim.
+    with pytest.raises(
+        RuntimeError, match="^This store is being prepared by another process"
+    ) as refused:
+        _open(location)
+    assert f"process {killed.pid} on host " in str(refused.value)
+    assert str(refused.value).endswith(
         f"remove file://{location}/{PREPARATION_CLAIM} and open the store again."
     )
 
     # The operator confirms that the process stopped and removes the claim.
+    # The next open is the store's first preparation, with its default filter.
     shutil.rmtree(Path(location) / PREPARATION_CLAIM)
-    opened = _child(location, "open")
-    stdout, stderr = opened.communicate(timeout=120)
-    assert opened.returncode == 0, stderr
-    assert stdout.splitlines()[-1] == "OPENED 6"
+    with pytest.warns(UserWarning, match="Will not remove low quality cells"):
+        opened = _open(location)
+    assert int(opened.cells.fetch_all("I").sum()) == 6
     assert _residue(location) == []

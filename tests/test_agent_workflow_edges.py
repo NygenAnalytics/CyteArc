@@ -403,9 +403,22 @@ def test_completed_resume_rejects_changed_final_artifact_mapping(
     assert len(science.calls) == 3
 
 
-@pytest.mark.parametrize("missing", ["native", "resolution", "capacity"])
+_UNMATCHED = "^A corrected finalist needs its matched native partition$"
+
+
+@pytest.mark.parametrize(
+    ("missing", "message"),
+    [
+        ("native", _UNMATCHED),
+        ("resolution", _UNMATCHED),
+        (
+            "capacity",
+            "^Shortlist exceeds the finalist budget including required native control$",
+        ),
+    ],
+)
 def test_corrected_shortlist_requires_exact_native_control_within_budget(
-    missing: str,
+    missing: str, message: str
 ) -> None:
     native = Candidate(candidateId="c0", hvgCount=20, pcaDims=4, neighborsK=7)
     corrected = native.model_copy(
@@ -421,7 +434,7 @@ def test_corrected_shortlist_requires_exact_native_control_within_budget(
     elif missing == "resolution":
         partitions["c0:r0.5"]["resolution"] = 1.0
     config = AnalysisConfig(maxFinalists=1 if missing == "capacity" else 2)
-    with pytest.raises(AnalysisInputError, match="budget|matched native"):
+    with pytest.raises(AnalysisInputError, match=message):
         workflow._shortlist(["c1:r0.5"], partitions, candidates, config)
 
 
@@ -541,9 +554,12 @@ def test_correction_selection_uses_matched_measured_evidence(
     selection = selection_evidence[0]
     if scenario == "marker-harm":
         assert selection["eligibleOptions"] == ["c0:r0.5"]
-        assert "markerSupportFraction" in " ".join(
-            selection["rejectedOptions"]["c4:r0.5"]
-        )
+        # The marker harm is the corrected finalist's only failed gate.
+        assert selection["rejectedOptions"] == {
+            "c4:r0.5": [
+                "markerSupportFraction worsened by more than 0.05 after correction."
+            ]
+        }
     else:
         assert selection["eligibleOptions"] == ["c0:r0.5", "c4:r0.5"]
         assert selection["rejectedOptions"] == {}
@@ -810,9 +826,24 @@ def test_harmony_offer_requires_every_gate_in_the_active_workflow(
         for row in observed
         if row["payload"]["evidence"].get("decisionKind") == "nativeShortlist"
     )
-    assert bool(shortlist["experiments"]) is expected
-    assert all(
-        row["candidate"]["useHarmony"] for row in shortlist["experiments"].values()
+    # The only offer is the baseline's matched correction at its resolution.
+    assert shortlist["experiments"] == (
+        {
+            "c0:r0.5:harmony": {
+                "candidate": {
+                    "candidateId": "c4",
+                    "parentId": "c0",
+                    "hvgCount": 20,
+                    "pcaDims": 4,
+                    "neighborsK": 7,
+                    "useHarmony": True,
+                },
+                "nativeOptionId": "c0:r0.5",
+                "resolution": 0.5,
+            }
+        }
+        if expected
+        else {}
     )
     assert len(science.calls) == 3
 

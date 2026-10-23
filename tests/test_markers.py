@@ -1,5 +1,7 @@
 import inspect
+import math
 import shutil
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -302,25 +304,32 @@ def test_tie_correction_survives_more_than_two_million_tied_values():
 
     ranked = pd.DataFrame({"feature": values}).rank(method="average")
     from_ranks = mannwhitneyu_from_ranks(ranked, groups, group_set)["feature"]
-    cell_major = _p_values(
-        _batch_stats(values[:, None], groups, group_counts, n_total)
-    )[0]
-    gene_major = _p_values(
-        _gene_major_stats(
-            values.astype(np.uint32)[None, :],
-            np.ones(n_total),
-            1.0,
-            False,
-            groups,
-            group_counts,
-            n_total,
-        )
-    )[0]
+    cell_major = _batch_stats(values[:, None], groups, group_counts, n_total)
+    gene_major = _gene_major_stats(
+        values.astype(np.uint32)[None, :],
+        np.ones(n_total),
+        1.0,
+        False,
+        groups,
+        group_counts,
+        n_total,
+    )
 
-    # The feature is confined to one group's four cells, so separation is maximal.
-    assert (from_ranks.to_numpy() < 1e-100).all()
-    assert (cell_major < 1e-100).all()
-    assert (gene_major < 1e-100).all()
+    # The feature is confined to one group's four cells, so separation is
+    # maximal: U is 4 * n_zeros, twice its null mean. Python's integers give
+    # the tie-corrected variance without wrapping.
+    variance = Fraction(4 * n_zeros, 12) * (
+        n_total + 1 - Fraction(n_zeros**3 - n_zeros, n_total * (n_total - 1))
+    )
+    z = (2 * n_zeros - 0.5) / math.sqrt(variance)
+    for statistics in (cell_major, gene_major):
+        # The float64 tie term nearly cancels n_total + 1, which moves z by
+        # about 1e-11 of its value.
+        np.testing.assert_allclose(statistics[0, :, 6], [z, -z], rtol=1e-10)
+        np.testing.assert_array_equal(statistics[0, :, 7], [1.0, 0.0])
+        # A z of about 1483 puts the two-sided p-value below the float64 range.
+        np.testing.assert_array_equal(_p_values(statistics)[0], [0.0, 0.0])
+    np.testing.assert_array_equal(from_ranks.to_numpy(), [0.0, 0.0])
 
 
 def test_mannwhitneyu_from_ranks_returns_one_for_zero_variance():
@@ -354,8 +363,8 @@ def test_batch_stats_distinguishes_zero_fold_change_from_undefined_ratios():
     # Only group 0 expresses feature 1: infinite there, a true 0 in group 1.
     assert stats[1, 0, 5] == np.inf
     assert stats[1, 1, 5] == 0.0
-    assert np.array_equal(stats[2, :, 5], [1.0, 1.0])
-    assert np.array_equal(_p_values(stats)[0], [1.0, 1.0])
+    np.testing.assert_array_equal(stats[2, :, 5], [1.0, 1.0])
+    np.testing.assert_array_equal(_p_values(stats)[0], [1.0, 1.0])
 
 
 def test_exclusive_marker_ranks_above_every_finite_fold_change() -> None:
@@ -1106,7 +1115,7 @@ def test_find_markers_by_regression_handles_expression_threshold():
         log_transform=None,
     )
 
-    assert result.loc["correlated", "r_value"] == pytest.approx(1.0)
+    assert result.loc["correlated", "r_value"] == pytest.approx(1.0, rel=1e-12)
     assert result.loc["correlated", "p_value"] < 1e-10
     # Two expressing cells meet min_cells=2, so that feature is tested.
     expected = linregress(np.arange(4.0), [0.0, 1.0, 2.0, 0.0])
@@ -1118,10 +1127,8 @@ def test_find_markers_by_regression_handles_expression_threshold():
     )
     # Benjamini-Hochberg over the two tested features.
     smaller, larger = sorted(result.loc[["correlated", "at_threshold"], "p_value"])
-    assert result.loc["at_threshold", "p_value_adjusted"] == pytest.approx(larger)
-    assert result.loc["correlated", "p_value_adjusted"] == pytest.approx(
-        min(2 * smaller, larger)
-    )
+    assert result.loc["at_threshold", "p_value_adjusted"] == larger
+    assert result.loc["correlated", "p_value_adjusted"] == min(2 * smaller, larger)
     assert result.loc["too_sparse", "r_value"] == 0.0
     assert np.isnan(result.loc["too_sparse", "p_value"])
     assert np.isnan(result.loc["too_sparse", "p_value_adjusted"])
@@ -1171,7 +1178,9 @@ def test_regression_r_does_not_depend_on_the_value_scale():
 
         np.testing.assert_array_equal(status, np.zeros(data.shape[1]))
         np.testing.assert_array_equal(r_vals, np.full(data.shape[1], r_vals[0]))
-        assert r_vals[0] == pytest.approx(linregress(regressor, values).rvalue)
+        assert r_vals[0] == pytest.approx(
+            linregress(regressor, values).rvalue, rel=1e-12
+        )
     # scipy's r does not change at a scale where its own sums stay normal.
     tiny = linregress(regressor, values * 2.0**-60).rvalue
     assert tiny == pytest.approx(linregress(regressor, values).rvalue, rel=1e-12)
@@ -1340,8 +1349,8 @@ def test_find_markers_by_regression_two_cell_batches_are_unadjusted():
         regressor=np.array([0.0, 1.0]),
         min_cells=1,
     )
-    assert result.loc["a", "r_value"] == pytest.approx(1.0)
-    assert result.loc["c", "r_value"] == pytest.approx(-1.0)
+    assert result.loc["a", "r_value"] == 1.0
+    assert result.loc["c", "r_value"] == -1.0
     assert "p_value_adjusted" in result.columns
     assert result.loc["b", "r_value"] == 0.0
     assert result["p_value"].isna().all()
@@ -1477,7 +1486,7 @@ def test_find_markers_by_rank_slow_path_returns_groupwise_statistics():
     # Features 10 and 12 are exclusive to one group, and no cell expresses 11.
     assert group_a.loc[10, "fold_change"] == np.inf
     assert np.isnan(group_a.loc[11, "fold_change"])
-    assert group_a.loc[13, "fold_change"] == pytest.approx(1.0)
+    assert group_a.loc[13, "fold_change"] == 1.0
     assert group_b.loc[12, "fold_change"] == np.inf
     assert group_b.loc[10, "fold_change"] == 0.0
     assert np.isnan(group_b.loc[11, "fold_change"])
@@ -2027,9 +2036,9 @@ def test_canonical_marker_reader_accepts_reordered_named_columns():
     )
 
     assert loaded["feature_name"].tolist() == ["g1", "g0"]
-    assert loaded["score"].tolist() == pytest.approx([0.8, 0.4])
-    assert loaded["auc"].tolist() == pytest.approx([0.9, 0.6])
-    assert loaded["p_value_adjusted"].tolist() == pytest.approx([0.02, 0.04])
+    assert loaded["score"].tolist() == [0.8, 0.4]
+    assert loaded["auc"].tolist() == [0.9, 0.6]
+    assert loaded["p_value_adjusted"].tolist() == [0.02, 0.04]
 
 
 def test_canonical_marker_reader_rejects_missing_stats_array():
@@ -2331,38 +2340,18 @@ def test_marker_slot_rejects_a_group_replaced_after_enumeration(monkeypatch):
     assert isinstance(slot["1"], zarr.Array)
 
 
-@pytest.fixture(scope="module")
-def pbmc_marker_table(datastore_zarr_root, tmp_path_factory):
-    """Return a PBMC store with a two-group marker table over eight features."""
-    location = tmp_path_factory.mktemp("pbmc_markers") / "data.zarr"
-    shutil.copytree(datastore_zarr_root, location)
-    store = DataStore(str(location), default_assay="RNA")
-    clusters = _cluster_labels(store, np.arange(len(store.cells.active_index("I"))) % 2)
-    feature_mask = np.zeros(store.RNA.feats.N, dtype=bool)
-    feature_mask[:8] = True
-    arguments = {
-        "clusters": clusters,
-        "from_assay": "RNA",
-        "features": store.features.snapshot(from_assay="RNA", mask=feature_mask),
-        "nthreads": 1,
-    }
-    return location, arguments, store.markers.search(**arguments)
-
-
 def test_marker_cache_reuses_an_intact_payload(
-    pbmc_marker_table, tmp_path, monkeypatch
+    marker_table, tmp_path, monkeypatch
 ) -> None:
     import cytearc.features.markers as marker_algorithms
 
-    location, arguments, saved = pbmc_marker_table
-    shutil.copytree(location, tmp_path / "data.zarr")
-    store = DataStore(str(tmp_path / "data.zarr"), default_assay="RNA")
+    store, clusters, features, saved = _saved_marker_table(marker_table, tmp_path)
     monkeypatch.setattr(
         marker_algorithms, "find_markers_by_rank", _refuse_marker_search
     )
 
     # The corruptions below are recomputed only because this copy is reused.
-    assert store.markers.search(**arguments) == saved
+    assert store.markers.search(clusters, features=features) == saved
 
 
 @pytest.mark.parametrize(
@@ -2379,7 +2368,7 @@ def test_marker_cache_reuses_an_intact_payload(
     ],
 )
 def test_marker_cache_reuse_revalidates_canonical_payload(
-    pbmc_marker_table,
+    marker_table,
     tmp_path,
     monkeypatch,
     corruption,
@@ -2391,9 +2380,7 @@ def test_marker_cache_reuse_revalidates_canonical_payload(
     )
     from cytearc.storage.artifacts import artifact_path
 
-    location, arguments, old_ref = pbmc_marker_table
-    shutil.copytree(location, tmp_path / "data.zarr")
-    store = DataStore(str(tmp_path / "data.zarr"), default_assay="RNA")
+    store, clusters, features, old_ref = _saved_marker_table(marker_table, tmp_path)
     old_artifact = store.zw[artifact_path(old_ref)]
     first_group_name = sorted(old_artifact.group_keys())[0]
     first_group = old_artifact[first_group_name]
@@ -2447,7 +2434,7 @@ def test_marker_cache_reuse_revalidates_canonical_payload(
         "find_markers_by_rank",
         tracked_marker_search,
     )
-    new_ref = store.markers.search(**arguments)
+    new_ref = store.markers.search(clusters, features=features)
     status = store.artifacts.inspect(new_ref)
     assert calls == 1
     assert new_ref != old_ref
@@ -2764,9 +2751,8 @@ def test_pseudotime_bh_excludes_untested_features():
     )
     assert np.isfinite(result.loc["tested", "p_value"])
     assert np.isnan(result.loc["untested", "p_value"])
-    assert result.loc["tested", "p_value_adjusted"] == pytest.approx(
-        float(adjust_pvalues(np.array([result.loc["tested", "p_value"]]), "fdr_bh")[0])
-    )
+    # A family of one tested feature leaves its p-value unadjusted.
+    assert result.loc["tested", "p_value_adjusted"] == result.loc["tested", "p_value"]
     assert np.isnan(result.loc["untested", "p_value_adjusted"])
 
 
@@ -3306,10 +3292,23 @@ def test_marker_tables_keep_infinite_and_undefined_fold_changes(
     statistics = markers.drop(columns=["group_id", "feature_name", "fold_change"])
     assert np.isfinite(statistics.to_numpy(dtype=np.float64)).all()
     assert not (markers["fold_change"] < 0).any()
+    # Only group g2 expresses RNA9 as well; every other ratio is defined.
     infinite = markers.loc[np.isposinf(markers["fold_change"])]
-    assert (infinite["mean_rest"] == 0).all()
+    assert sorted(zip(infinite["feature_name"], infinite["group_id"])) == [
+        ("RNA1", "g0"),
+        ("RNA9", "g2"),
+    ]
+    np.testing.assert_array_equal(infinite["mean_rest"], [0.0, 0.0])
+    assert (infinite["mean"] > 0).all()
     undefined = markers.loc[np.isnan(markers["fold_change"])]
-    assert ((undefined["mean"] == 0) & (undefined["mean_rest"] == 0)).all()
+    assert sorted(zip(undefined["feature_name"], undefined["group_id"])) == [
+        ("RNA0", "g0"),
+        ("RNA0", "g1"),
+        ("RNA0", "g2"),
+    ]
+    np.testing.assert_array_equal(
+        undefined[["mean", "mean_rest"]].to_numpy(), np.zeros((3, 2))
+    )
     # The table round-trips through CSV, infinite and NaN values included.
     markers.to_csv(tmp_path / "markers.csv", index=False)
     pd.testing.assert_frame_equal(

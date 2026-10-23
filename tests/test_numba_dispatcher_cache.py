@@ -1,9 +1,13 @@
 """On-disk caching of Numba kernels that third-party packages compile without it."""
 
+import importlib
 import json
 import math
+import os
 import subprocess
 import sys
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,12 +17,18 @@ import numba
 import numpy as np
 import pytest
 from numba.core.caching import FunctionCache, IndexDataCacheFile, NullCache
+from numba.core.dispatcher import Dispatcher
 from scipy import sparse
 
 from cytearc.embeddings.umap import fit_transform
 from cytearc.neighbors.graph import build_connectivity_arrays
 from cytearc.utils.logging import logger
-from cytearc.utils.numba import enable_dispatcher_cache
+from cytearc.utils.numba import (
+    _caching_import_time_kernels,
+    _has_cache_entry,
+    cache_directory_lock,
+    enable_dispatcher_cache,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 UMAP_KERNELS = {
@@ -231,6 +241,261 @@ def test_a_corrupt_cache_entry_is_compiled_again(cache_dir: Path) -> None:
     assert any("cache entry cannot be read" in message for message in messages)
 
 
+# A package whose decorators fix the signatures of two kernels, which then
+# compile while the package imports, as pynndescent's do.
+_PROBE_PACKAGE = "cytearc_import_time_kernels"
+_PROBE_SOURCE = """
+import numba
+
+
+@numba.njit("float64(float64)")
+def double(value):
+    return 2.0 * value
+
+
+@numba.njit(["int64(int64)", "float64(float64)"])
+def triple(value):
+    return 3 * value
+
+
+@numba.njit
+def increment(value):
+    return value + 1
+"""
+
+
+@pytest.fixture
+def probe_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Return the directory that holds an importable copy of the probe package."""
+    root = tmp_path / "packages"
+    (root / _PROBE_PACKAGE).mkdir(parents=True)
+    (root / _PROBE_PACKAGE / "__init__.py").write_text(_PROBE_SOURCE)
+    monkeypatch.syspath_prepend(str(root))
+    yield root
+    sys.modules.pop(_PROBE_PACKAGE, None)
+
+
+def _import_probe() -> Any:
+    sys.modules.pop(_PROBE_PACKAGE, None)
+    with _caching_import_time_kernels(frozenset({_PROBE_PACKAGE})):
+        return importlib.import_module(_PROBE_PACKAGE)
+
+
+def test_kernels_that_compile_while_their_package_imports_get_a_cache(
+    cache_dir: Path, probe_package: Path
+) -> None:
+    compile_kernel = Dispatcher.compile
+
+    module = _import_probe()
+
+    assert Dispatcher.compile is compile_kernel
+    for kernel, signatures in ((module.double, 1), (module.triple, 2)):
+        assert Path(kernel.stats.cache_path).is_relative_to(cache_dir)
+        assert (compiled(kernel), loaded(kernel)) == (signatures, 0)
+    # A kernel that compiles at its first call compiles after the import.
+    assert isinstance(module.increment._cache, NullCache)
+    # Imported again, as by a later process, the kernels load their code.
+    later = _import_probe()
+    for kernel, signatures in ((later.double, 1), (later.triple, 2)):
+        assert (compiled(kernel), loaded(kernel)) == (0, signatures)
+    assert later.double(2.5) == 5.0
+    assert (later.triple(3), later.triple(1.5)) == (9, 4.5)
+
+
+def test_only_this_threads_compilations_of_the_packages_get_a_cache(
+    cache_dir: Path, probe_package: Path
+) -> None:
+    def identity(value):
+        return value
+
+    # A function of the package, compiled by this thread and by another.
+    identity.__module__ = _PROBE_PACKAGE
+    kernels: dict[str, Any] = {}
+    with _caching_import_time_kernels(frozenset({_PROBE_PACKAGE})):
+        thread = threading.Thread(
+            target=lambda: kernels.update(
+                thread=numba.njit("float64(float64)")(identity)
+            )
+        )
+        thread.start()
+        thread.join()
+        kernels["this thread"] = numba.njit("float64(float64)")(identity)
+        kernels["other package"] = numba.njit("boolean(float64)")(is_nan)
+
+    assert isinstance(kernels["thread"]._cache, NullCache)
+    assert isinstance(kernels["other package"]._cache, NullCache)
+    assert Path(kernels["this thread"].stats.cache_path).is_relative_to(cache_dir)
+
+
+def test_compilation_is_restored_when_the_import_fails() -> None:
+    compile_kernel = Dispatcher.compile
+
+    with pytest.raises(RuntimeError, match="^import failed$"):
+        with _caching_import_time_kernels(frozenset({_PROBE_PACKAGE})):
+            raise RuntimeError("import failed")
+
+    assert Dispatcher.compile is compile_kernel
+
+
+def test_package_kernels_compile_uncached_without_a_cache_directory(
+    no_cache_locator, probe_package: Path
+) -> None:
+    with debug_messages() as messages:
+        module = _import_probe()
+
+    assert isinstance(module.double._cache, NullCache)
+    assert isinstance(module.triple._cache, NullCache)
+    assert (module.double(1.5), module.triple(2)) == (3.0, 6)
+    assert sum("so each process compiles it" in message for message in messages) == 2
+
+
+def test_imports_compile_as_before_without_numbas_dispatcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A Numba release that moves its dispatcher leaves imports as they were.
+    monkeypatch.setitem(sys.modules, "numba.core.dispatcher", None)
+    ran = False
+
+    with debug_messages() as messages:
+        with _caching_import_time_kernels(frozenset({_PROBE_PACKAGE})):
+            ran = True
+
+    assert ran
+    (message,) = messages
+    assert message.startswith("Numba kernels compile uncached while importing: ")
+
+
+def test_an_object_without_a_numba_cache_has_no_cache_entry() -> None:
+    assert not _has_cache_entry(object(), "float64(float64)")
+
+
+_IMPORTING_PROCESS = """
+import importlib
+import json
+import sys
+import time
+
+import numba
+
+from cytearc.utils.numba import _caching_import_time_kernels
+
+# Start importing with the other processes.
+time.sleep(max(0.0, float(sys.argv[2]) - time.time()))
+with _caching_import_time_kernels(frozenset({sys.argv[1]})):
+    module = importlib.import_module(sys.argv[1])
+kernels = (module.double, module.triple)
+print(json.dumps({
+    "compiled": sum(sum(kernel.stats.cache_misses.values()) for kernel in kernels),
+    "loaded": sum(sum(kernel.stats.cache_hits.values()) for kernel in kernels),
+    "values": [module.double(2.5), module.triple(3), module.triple(1.5)],
+}))
+"""
+
+
+def test_processes_that_import_at_once_compile_each_kernel_once(
+    tmp_path: Path, probe_package: Path
+) -> None:
+    env = {
+        **os.environ,
+        "NUMBA_CACHE_DIR": str(tmp_path / "cache"),
+        "PYTHONPATH": os.pathsep.join(
+            [str(probe_package), os.environ.get("PYTHONPATH", "")]
+        ),
+    }
+    start = time.time() + 3.0
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", _IMPORTING_PROCESS, _PROBE_PACKAGE, str(start)],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(3)
+    ]
+    results = []
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=300)
+        assert process.returncode == 0, stderr
+        results.append(json.loads(stdout.splitlines()[-1]))
+
+    # Each of the three signatures compiles in one process and loads in two.
+    assert sum(result["compiled"] for result in results) == 3
+    assert sum(result["loaded"] for result in results) == 6
+    assert all(result["values"] == [5.0, 9, 4.5] for result in results)
+
+
+def _lockable_by_another_process(directory: Path, *, shared: bool) -> bool:
+    """Whether another process could take the directory's lock without waiting."""
+    code = (
+        "import fcntl, sys\n"
+        "handle = open(sys.argv[1], 'a')\n"
+        "mode = fcntl.LOCK_SH if sys.argv[2] == 'shared' else fcntl.LOCK_EX\n"
+        "fcntl.flock(handle, mode | fcntl.LOCK_NB)\n"
+    )
+    lock_file = directory / ".cytearc-numba.lock"
+    mode = "shared" if shared else "exclusive"
+    process = subprocess.run(
+        [sys.executable, "-c", code, str(lock_file), mode], capture_output=True
+    )
+    return process.returncode == 0
+
+
+def test_cache_directory_lock_shares_reads_and_excludes_writes(tmp_path: Path) -> None:
+    pytest.importorskip("fcntl")
+
+    with cache_directory_lock(str(tmp_path)):
+        assert not _lockable_by_another_process(tmp_path, shared=True)
+        # The thread that holds the lock enters again without waiting.
+        with cache_directory_lock(str(tmp_path), shared=True):
+            with cache_directory_lock(str(tmp_path)):
+                pass
+        assert not _lockable_by_another_process(tmp_path, shared=True)
+    with cache_directory_lock(str(tmp_path), shared=True):
+        assert _lockable_by_another_process(tmp_path, shared=True)
+        assert not _lockable_by_another_process(tmp_path, shared=False)
+    assert _lockable_by_another_process(tmp_path, shared=False)
+
+
+def test_a_cache_directory_that_cannot_be_locked_runs_unlocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fcntl = pytest.importorskip("fcntl")
+    ran = []
+
+    # A directory that holds no lock file.
+    missing = tmp_path / "missing"
+    with debug_messages() as opened:
+        with cache_directory_lock(str(missing)):
+            ran.append("missing")
+    # A filesystem that refuses locks.
+    with monkeypatch.context() as patch:
+
+        def refuse(handle: Any, operation: int) -> None:
+            raise OSError(37, "No locks available")
+
+        patch.setattr(fcntl, "flock", refuse)
+        with debug_messages() as refused:
+            with cache_directory_lock(str(tmp_path)):
+                ran.append("refused")
+    # A system without flock, such as Windows.
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    with debug_messages() as unsupported:
+        with cache_directory_lock(str(tmp_path)):
+            ran.append("unsupported")
+
+    assert ran == ["missing", "refused", "unsupported"]
+    (message,) = opened
+    assert message.startswith(
+        f"Numba cache lock {missing / '.cytearc-numba.lock'} cannot be opened: "
+    )
+    assert [message.rstrip() for message in refused] == [
+        f"Numba cache lock {tmp_path / '.cytearc-numba.lock'} cannot be taken: "
+        "[Errno 37] No locks available"
+    ]
+    assert unsupported == []
+
+
 def _knn(n_cells: int = 60, k: int = 6) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(0)
     indices = np.stack(
@@ -265,7 +530,7 @@ def _layout(graph: sparse.coo_matrix, *, parallel: bool) -> np.ndarray:
 
 def _umap_kernel(name: str) -> Any:
     module, attribute = UMAP_KERNELS[name]
-    return getattr(sys.modules[module], attribute)
+    return getattr(importlib.import_module(module), attribute)
 
 
 def run_umap_kernels() -> dict[str, Any]:
@@ -308,7 +573,7 @@ def _fresh_umap_kernels(monkeypatch: pytest.MonkeyPatch) -> None:
         fresh = type(kernel)(
             kernel.py_func, locals=kernel.locals, targetoptions=kernel.targetoptions
         )
-        monkeypatch.setattr(sys.modules[module], attribute, fresh)
+        monkeypatch.setattr(importlib.import_module(module), attribute, fresh)
 
 
 def test_connectivity_and_umap_layouts_cache_their_umap_learn_kernels() -> None:
@@ -345,13 +610,17 @@ import json
 import sys
 
 import numba
-import umap.layouts
-import umap.umap_
 
+from cytearc.utils.numba import import_umap
 from tests.test_numba_dispatcher_cache import run_umap_kernels
 
-# The kernels compiled with cache=True have their caches by now, so only the
-# caches enabled from here on, those of the umap-learn kernels, use this one.
+# This process imports umap-learn while the first process compiles the
+# kernels that umap-learn calls, and waits until it has saved them.
+import_umap()
+sys.stdin.readline()
+# The kernels that the import compiled have their caches by now, so only the
+# caches enabled from here on, those of the kernels umap-learn calls, use this
+# one.
 numba.config.CACHE_DIR = sys.argv[1]
 print(json.dumps(run_umap_kernels()))
 """
@@ -361,20 +630,28 @@ print(json.dumps(run_umap_kernels()))
 def test_a_later_process_loads_the_umap_learn_kernels_from_disk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # This process compiles the kernels as a first process does, into a cache
-    # directory of their own.
-    _fresh_umap_kernels(monkeypatch)
-    monkeypatch.setattr(numba.config, "CACHE_DIR", str(tmp_path))
-    first = run_umap_kernels()
-
-    process = subprocess.run(
+    later_process = subprocess.Popen(
         [sys.executable, "-c", _LATER_PROCESS, str(tmp_path)],
-        check=True,
         cwd=REPOSITORY_ROOT,
-        capture_output=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
     )
-    later = json.loads(process.stdout.splitlines()[-1])
+    try:
+        # This process compiles the kernels as a first process does, into a
+        # cache directory of their own.
+        _fresh_umap_kernels(monkeypatch)
+        monkeypatch.setattr(numba.config, "CACHE_DIR", str(tmp_path))
+        first = run_umap_kernels()
+    except BaseException:
+        later_process.kill()
+        later_process.communicate()
+        raise
+    # The later process reads the cache only once the kernels are saved.
+    stdout, stderr = later_process.communicate("\n")
+    assert later_process.returncode == 0, stderr
+    later = json.loads(stdout.splitlines()[-1])
 
     for result in (first, later):
         assert set(result["cachePaths"]) == set(UMAP_KERNELS)
@@ -387,5 +664,66 @@ def test_a_later_process_loads_the_umap_learn_kernels_from_disk(
     # epoch included, and computes the same graph and serial layout.
     assert later["compiled"] == dict.fromkeys(UMAP_KERNELS, 0)
     assert later["loaded"] == dict.fromkeys(UMAP_KERNELS, 1)
+    for name in ("edges", "weights", "layout"):
+        assert later[name] == first[name], name
+
+
+_UMAP_IMPORT_PROCESS = """
+import json
+import sys
+
+from numba.core.dispatcher import Dispatcher
+
+from cytearc.utils.numba import import_umap
+
+import_umap()
+# The kernels whose signatures umap-learn and pynndescent fix, which compiled
+# while they imported.
+kernels = {
+    id(value): value
+    for name, module in list(sys.modules.items())
+    if name.partition(".")[0] in ("pynndescent", "umap")
+    for value in vars(module).values()
+    if isinstance(value, Dispatcher) and not value._can_compile
+}.values()
+
+from tests.test_numba_dispatcher_cache import run_umap_kernels
+
+result = run_umap_kernels()
+print(json.dumps({
+    **{name: result[name] for name in ("edges", "weights", "layout")},
+    "kernels": len(kernels),
+    "uncached": sum(kernel._cache.cache_path is None for kernel in kernels),
+    "compiled": sum(sum(kernel.stats.cache_misses.values()) for kernel in kernels),
+    "loaded": sum(sum(kernel.stats.cache_hits.values()) for kernel in kernels),
+}))
+"""
+
+
+@pytest.mark.slow
+def test_a_later_process_loads_the_kernels_that_importing_umap_compiles(
+    tmp_path: Path,
+) -> None:
+    env = {**os.environ, "NUMBA_CACHE_DIR": str(tmp_path)}
+    results = []
+    for _ in range(2):
+        process = subprocess.run(
+            [sys.executable, "-c", _UMAP_IMPORT_PROCESS],
+            cwd=REPOSITORY_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert process.returncode == 0, process.stderr
+        results.append(json.loads(process.stdout.splitlines()[-1]))
+    first, later = results
+
+    assert first["kernels"] == later["kernels"] > 0
+    assert first["uncached"] == later["uncached"] == 0
+    assert first["compiled"] > 0
+    assert first["loaded"] == 0
+    # The later process compiles none of them and computes the same graph and
+    # layout with the machine code it loaded.
+    assert (later["compiled"], later["loaded"]) == (0, first["compiled"])
     for name in ("edges", "weights", "layout"):
         assert later[name] == first[name], name

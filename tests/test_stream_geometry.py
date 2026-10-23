@@ -277,7 +277,14 @@ def test_selected_row_cost_admits_only_touched_chunks_within_each_shard() -> Non
     # them in one shard alongside its two row chunks.
     assert wide - narrow == 4 * geometry.nominalChunkBytes()
     minimum = narrow + 1
-    with pytest.raises(MemoryError):
+    admitted = admit_stream(
+        ResourceBudget(minimum, 1), nBlocks=1, blockBytes=1, decodeBytes=narrow
+    )
+    assert admitted.reservedBytes == minimum
+    with pytest.raises(
+        MemoryError,
+        match=f"needs about {minimum} bytes, but only {minimum - 1} bytes are available",
+    ):
         admit_stream(
             ResourceBudget(minimum - 1, 1),
             nBlocks=1,

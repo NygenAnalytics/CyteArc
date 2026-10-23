@@ -111,8 +111,8 @@ def test_equal_height_binary_refinements_have_the_same_cut() -> None:
 
     assert len(first_forest.representatives) == 3
     assert len(second_forest.representatives) == 3
-    assert np.array_equal(first_result.labels, [1, 1, 1, 1, 2, 2])
-    assert np.array_equal(second_result.labels, first_result.labels)
+    np.testing.assert_array_equal(first_result.labels, [1, 1, 1, 1, 2, 2])
+    np.testing.assert_array_equal(second_result.labels, first_result.labels)
 
 
 def test_adaptive_score_is_optimal_over_small_event_antichains() -> None:
@@ -257,7 +257,7 @@ def test_strict_multiway_folding_selects_the_nearest_valid_ancestor() -> None:
     result = adaptive_cut(hierarchy, 3)
 
     assert result.n_clusters == 1
-    assert np.array_equal(result.labels, np.ones(6, dtype=np.int32))
+    np.testing.assert_array_equal(result.labels, np.ones(6, dtype=np.int32))
     diagnostic = result.diagnostics[0]
     assert diagnostic.forced
     assert diagnostic.blocking_child_count == 1
@@ -294,7 +294,7 @@ def test_labels_are_contiguous_read_only_and_cover_every_leaf() -> None:
     assert result.labels.dtype == np.int32
     assert set(result.labels) == set(range(1, result.n_clusters + 1))
     assert not result.labels.flags.writeable
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="^assignment destination is read-only$"):
         result.labels[0] = 99
 
 
@@ -308,7 +308,11 @@ def test_hierarchy_validation_allows_one_ulp_height_roundoff() -> None:
 
     forest = collapse_equal_height_plateaus(hierarchy)
 
-    assert forest.representatives.size == 2
+    # The heights differ, so the child stays an event of its own below the
+    # root, and both keep their fitted heights.
+    assert forest.representatives.tolist() == [3, 4]
+    assert forest.heights.tolist() == [child_height, parent_height]
+    assert forest.child_refs.tolist() == [-1, -2, 0, -3]
 
 
 def test_hierarchy_validation_rejects_more_than_one_ulp_height_inversion() -> None:

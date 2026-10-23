@@ -509,7 +509,9 @@ def test_module_merges_hold_the_rows_of_both_sources(merged, merged_in_workspace
 
 def test_merge_keeps_the_assay_class_of_each_source_assay(tmp_path):
     counts = {"RNA": _COUNTS, "ADT": _COUNTS[:, :2] * 3, "ATAC": _COUNTS % 2}
-    sources = [_open(_write_source(MemoryStore(), counts)) for _ in _NAMES]
+    # A merge only reads its sources, so one store serves as both.
+    source = _open(_write_source(MemoryStore(), counts))
+    sources = [source, source]
     destination = str(tmp_path / "merged.zarr")
 
     _merge(sources, destination).dump()
@@ -906,10 +908,37 @@ def test_merge_by_name_sums_signed_counts_in_a_wider_dtype(tmp_path):
 
 def test_merge_by_name_keeps_uint64_counts_it_cannot_widen(tmp_path):
     sources = _named_sources(np.array([[3, 2, 1], [0, 4, 2]]), "uint64")
-    merger = _merge(sources, str(tmp_path / "merged.zarr"), feature_key="names")
+    destination = str(tmp_path / "merged.zarr")
+    merger = _merge(sources, destination, feature_key="names")
 
-    # No wider integer exists; a sum that overflows raises while it is written.
+    # No wider integer exists, so the sums are stored as uint64.
     assert merger.plan().assays[0].dtype == "uint64"
+    merger.dump()
+    assert zarr.open_group(destination, mode="r")["RNA/counts"].dtype == np.uint64
+    assert _rows_by_cell(destination) == {
+        "left__c0": [5, 1],
+        "left__c1": [4, 2],
+        "right__c0": [3, 3],
+        "right__c1": [0, 6],
+    }
+    # A sum that overflows raises while it is written: the two features that
+    # this left source names A sum to 2**64.
+    overflowing = _open(
+        _write_source(
+            MemoryStore(),
+            {"RNA": np.array([[2**63, 2**63, 1], [0, 4, 2]], dtype=np.uint64)},
+            names=["A", "A", "B"],
+            dtype="uint64",
+        )
+    )
+    merger = _merge(
+        [overflowing, sources[1]], str(tmp_path / "overflow.zarr"), feature_key="names"
+    )
+    assert merger.plan().assays[0].dtype == "uint64"
+    with pytest.raises(
+        OverflowError, match="^Duplicate sparse values exceed supported integer dtypes$"
+    ):
+        merger.dump()
 
 
 # Repacking

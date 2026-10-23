@@ -651,9 +651,10 @@ def test_select_cells_plots_and_trajectories_read_the_canonical_array(
 def test_cell_value_specs_are_immutable_and_exact() -> None:
     spec = CELL_VALUE_NAMES["cell_cycle"]
     assert spec == CellValueSpec("phase", True, {"s_score": False, "g2m_score": False})
-    with pytest.raises(TypeError):
+    read_only = "'mappingproxy' object does not support item assignment"
+    with pytest.raises(TypeError, match=read_only):
         spec.alternatives["phase"] = True  # type: ignore[index]
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match=read_only):
         CELL_VALUE_NAMES["normalized"] = spec  # type: ignore[index]
     with pytest.raises(ValueError, match="cannot also be an alternative"):
         CellValueSpec("values", False, {"values": False})

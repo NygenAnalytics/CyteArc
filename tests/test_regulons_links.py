@@ -50,10 +50,11 @@ def test_region_gene_links_match_scipy_and_sklearn():
     gene_a = links[links["gene"] == "A"]
     regressor = GradientBoostingRegressor(random_state=666, **GBM_PARAMETERS)
     regressor.fit(access[["r0", "r1", "r2", "r5"]].to_numpy(), expression["A"])
-    np.testing.assert_allclose(gene_a["importance"], regressor.feature_importances_)
+    # Both fits run the same seeded regressor on the same values.
+    np.testing.assert_array_equal(gene_a["importance"], regressor.feature_importances_)
     assert gene_a.set_index("region").loc["r0", "importance"] > 0.5
     # A constant gene has no importance.
-    assert (links[links["gene"] == "C"]["importance"] == 0).all()
+    assert links.loc[links["gene"] == "C", "importance"].tolist() == [0.0]
 
 
 def test_region_gene_links_without_importance():

@@ -431,7 +431,8 @@ def test_numeric_batch_columns_and_a_private_generator() -> None:
     second = fit_harmony(values, metadata, n_clusters=3, random_state=7)
 
     after = np.random.get_state()
-    assert state[0] == after[0] and np.array_equal(state[1], after[1])
+    assert state[0] == after[0]
+    np.testing.assert_array_equal(after[1], state[1])
     assert state[2:] == after[2:]
     assert first.batch_levels == (("0", "1", "2"),)
     np.testing.assert_array_equal(first.corrected, second.corrected)
@@ -454,7 +455,7 @@ def test_a_cancelling_cluster_keeps_a_zero_centroid() -> None:
         rtol=0,
         atol=1e-12,
     )
-    assert np.all(result.centroids == 0.0)
+    np.testing.assert_array_equal(result.centroids, np.zeros((2, 1)))
 
 
 def test_an_exactly_zero_objective_converges_without_warnings() -> None:

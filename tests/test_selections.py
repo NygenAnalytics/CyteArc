@@ -790,6 +790,23 @@ def test_changed_or_invalidated_selection_creates_another_random_artifact() -> N
     assert (
         len({first.artifact_id, changed_ref.artifact_id, invalidated.artifact_id}) == 3
     )
+    # Each artifact keeps its own values; the invalidated request writes one
+    # with the provenance of the first, which stays complete beside it.
+    for ref, expected in (
+        (first, values),
+        (changed_ref, changed),
+        (invalidated, values),
+    ):
+        assert inspect_artifact(root, ref).complete
+        np.testing.assert_array_equal(root[artifact_path(ref)]["values"][:], expected)
+    first_status = inspect_artifact(root, first)
+    invalidated_status = inspect_artifact(root, invalidated)
+    assert invalidated_status.parameters == first_status.parameters == {"top_n": 2}
+    assert invalidated_status.inputs == first_status.inputs
+    assert (
+        inspect_artifact(root, changed_ref).inputs["values_fingerprint"]
+        != first_status.inputs["values_fingerprint"]
+    )
 
 
 def test_integer_selection_payload_is_not_reused() -> None:
@@ -974,10 +991,12 @@ def test_metadata_snapshot_reuse_rejects_a_payload_of_another_shape(
     )
 
 
-def test_filter_and_hvg_return_artifacts_without_metadata_aliases(
-    datastore_ephemeral,
-) -> None:
-    datastore = datastore_ephemeral
+def test_filter_and_hvg_return_artifacts_without_metadata_aliases(tmp_path) -> None:
+    from tests.qc_helpers import open_small_store, write_small_store
+
+    # 96 cells and 80 genes, most of which are neither rare nor ubiquitous.
+    write_small_store(tmp_path / "small.zarr")
+    datastore = open_small_store(tmp_path / "small.zarr")
     cell_column = datastore.zw["cellData"]["I"]
     cell_values_before = np.asarray(cell_column[:], dtype=bool).copy()
     cell_attrs_before = dict(cell_column.attrs)

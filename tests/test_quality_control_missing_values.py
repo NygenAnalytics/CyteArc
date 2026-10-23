@@ -203,10 +203,10 @@ def test_integer_qc_metrics_exclude_missing_values_from_gaussian_bounds():
     np.testing.assert_array_equal(result.retained, [True, True, True, False])
     bounds = result.gaussian_bounds["counts"]
     # Median 2 and population deviation sqrt(2/3) of the three recorded values.
-    assert bounds["low"] == pytest.approx(0.10054491479716932)
-    assert bounds["high"] == pytest.approx(3.8994550852028307)
+    assert bounds["low"] == pytest.approx(0.10054491479716932, rel=1e-12)
+    assert bounds["high"] == pytest.approx(3.8994550852028307, rel=1e-12)
     assert (bounds["low"], bounds["high"]) == pytest.approx(
-        reference_gaussian_bounds(np.array([1, 2, 3]))
+        reference_gaussian_bounds(np.array([1, 2, 3])), rel=1e-12
     )
 
 

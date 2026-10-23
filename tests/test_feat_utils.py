@@ -38,6 +38,7 @@ def test_fit_lowess_returns_per_feature_corrections():
     assert np.all(np.isfinite(corrected))
     assert np.all(corrected > 0)
     np.testing.assert_array_equal(corrected, explicit_adaptive)
+    assert fixed.shape == (n_genes,)
     assert np.all(np.isfinite(fixed))
     assert np.all(fixed > 0)
 
@@ -132,13 +133,23 @@ def test_fit_lowess_adaptive_calibrates_the_lower_quartile():
     np.testing.assert_allclose(corrected, np.exp(offsets + 0.2), rtol=0.005)
 
 
+def _curved_tail_trend() -> tuple[np.ndarray, np.ndarray]:
+    means = np.sort(np.exp(np.random.default_rng(41).normal(0, 2, 5_000)))
+    return means, means**1.4 * np.sqrt(1 + (means / 100) ** 2)
+
+
+@pytest.fixture(scope="module")
+def curved_tail_baseline() -> np.ndarray:
+    """Fit the curved trend once for the tests that place an outlier in it."""
+    return fit_lowess(*_curved_tail_trend(), n_bins=200, lowess_frac=0.1)
+
+
 @pytest.mark.parametrize("multiplier", [4.0, 1e-12])
 def test_fit_lowess_adaptive_protects_curved_tails_from_isolated_outliers(
-    multiplier,
+    multiplier, curved_tail_baseline
 ):
-    means = np.sort(np.exp(np.random.default_rng(41).normal(0, 2, 5_000)))
-    variance = means**1.4 * np.sqrt(1 + (means / 100) ** 2)
-    baseline = fit_lowess(means, variance, n_bins=200, lowess_frac=0.1)
+    means, variance = _curved_tail_trend()
+    baseline = curved_tail_baseline
     variance[-1] *= multiplier
 
     corrected = fit_lowess(means, variance, n_bins=200, lowess_frac=0.1)
@@ -206,7 +217,8 @@ def test_fit_lowess_adaptive_is_invariant_to_order_and_units():
     )
     scaled = fit_lowess(mean_expr * 1000, variance * 1e6, n_bins=200, lowess_frac=0.1)
 
-    np.testing.assert_allclose(permuted, corrected[order], rtol=1e-7)
+    # The fit sorts the genes first, so their order changes no step of it.
+    np.testing.assert_array_equal(permuted, corrected[order])
     np.testing.assert_allclose(scaled, corrected, rtol=1e-7)
 
 
@@ -247,7 +259,11 @@ def test_fit_lowess_adaptive_accepts_a_stopped_line_search_only_at_the_optimum(
 
     means = np.exp(np.random.default_rng(17).normal(0, 2, 2_000))
     variance = means**1.4
-    expected = fit_lowess(means, variance, n_bins=200, lowess_frac=0.1)
+    # A refused stop fails at the first window, so only an accepted one needs
+    # the complete fit to compare against.
+    expected = (
+        fit_lowess(means, variance, n_bins=200, lowess_frac=0.1) if accepted else None
+    )
     minimize = scipy.optimize.minimize
 
     def stopped_minimize(*args, **kwargs):

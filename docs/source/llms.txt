@@ -61,6 +61,7 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 ## Data management
 
 - [Import and export](tutorials/import-and-export/): source formats, saved Seurat import, and output contracts
+- [Seurat import](tutorials/seurat-import/): selective RDS import, metadata notices, coordinate roles, and raw-count defaults
 - [Scanpy users](scanpy/): workflow mapping and H5AD exchange
 - [Seurat users](seurat/): workflow mapping, RDS import, and WNN differences
 - [Data model comparison](scanpy-and-seurat/): how objects, selections, and saved results differ between tools

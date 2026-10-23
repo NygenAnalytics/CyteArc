@@ -194,20 +194,22 @@ def test_load_reference_rejects_unexpected_header(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "row",
+    ("row", "message"),
     [
-        "ENSG00000000001\tGENEA\n",
-        "ENSG00000000001\tGENEA\t1\textra\n",
+        ("ENSG00000000001\tGENEA\n", "not enough values to unpack"),
+        ("ENSG00000000001\tGENEA\t1\textra\n", "too many values to unpack"),
     ],
     ids=["missing-column", "extra-column"],
 )
-def test_load_reference_rejects_malformed_rows(tmp_path: Path, row: str) -> None:
+def test_load_reference_rejects_malformed_rows(
+    tmp_path: Path, row: str, message: str
+) -> None:
     (tmp_path / "homo_sapiens.tsv").write_text(
         f"geneId\tsymbol\tchromosome\n{row}",
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=message):
         load_reference("homo_sapiens", cacheDir=tmp_path)
 
 

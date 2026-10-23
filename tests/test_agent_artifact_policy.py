@@ -77,14 +77,31 @@ def test_only_selected_assay_complete_numerical_results_are_considered() -> None
         SimpleNamespace(kind="normalized", assay="ATAC", complete=True),
         SimpleNamespace(kind="normalized", assay="RNA", complete=False),
     ]
+    queries = []
 
     def list_artifacts(*, from_assay: str, complete_only: bool) -> list[Any]:
-        assert complete_only
-        return [row for row in rows if row.assay == from_assay and row.complete]
+        queries.append((from_assay, complete_only))
+        return [
+            row
+            for row in rows
+            if row.assay == from_assay and (row.complete or not complete_only)
+        ]
 
-    require_clean_analysis(
-        SimpleNamespace(artifacts=SimpleNamespace(list=list_artifacts)), "RNA"
+    store = SimpleNamespace(
+        artifacts=SimpleNamespace(
+            list=list_artifacts,
+            inspect=lambda ref: SimpleNamespace(operation="run_normalization"),
+        )
     )
+    assert require_clean_analysis(store, "RNA") is None
+    # The same kind of result blocks the assay whose complete result it is.
+    with pytest.raises(
+        AnalysisInputError,
+        match=r"^Prior complete numerical artifacts for RNA assay 'ATAC' are "
+        r"unsupported \(normalized, operation 'run_normalization'\)\. ",
+    ):
+        require_clean_analysis(store, "ATAC")
+    assert queries == [("RNA", True), ("ATAC", True)]
 
 
 @pytest.mark.parametrize(

@@ -10,7 +10,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import RendererAgg
-from matplotlib.colors import LogNorm, to_hex, to_rgba
+from matplotlib.colors import LogNorm, Normalize, to_hex, to_rgba
 
 import cytearc.plotting as splt
 from cytearc.plotting._style import (
@@ -516,8 +516,10 @@ def _grid_slots(result):
 
 
 def test_facets_wrap_at_four_columns_and_start_each_color_on_a_new_row():
-    n = 36
-    facet = np.repeat(np.asarray([f"f{index}" for index in range(6)], dtype=object), 6)
+    # Five facets fill a row of four and wrap the fifth onto the next row.
+    n = 30
+    facets = [f"f{index}" for index in range(5)]
+    facet = np.repeat(np.asarray(facets, dtype=object), 6)
     store = _store(
         {
             "U1": np.arange(n, dtype=float),
@@ -537,7 +539,7 @@ def test_facets_wrap_at_four_columns_and_start_each_color_on_a_new_row():
         **options,
     )
     explicit = splt.embedding(
-        store, color_by=splt.CellField("a", kind="continuous"), n_columns=6, **options
+        store, color_by=splt.CellField("a", kind="continuous"), n_columns=5, **options
     )
     two_layouts = _store(
         {
@@ -548,32 +550,36 @@ def test_facets_wrap_at_four_columns_and_start_each_color_on_a_new_row():
             "facet": facet,
         }
     )
-    layouts = splt.embedding(
-        two_layouts, layout_key=["U", "V"], facet_by="facet", show=False
-    )
-    # An explicit column count fills the grid row by row.
-    filled = splt.embedding(
-        two_layouts, layout_key=["U", "V"], facet_by="facet", n_columns=5, show=False
-    )
+    layout_options = {"layout_key": ["U", "V"], "facet_by": "facet", "show": False}
+    layouts = splt.embedding(two_layouts, **layout_options)
+    # An explicit column count fills the grid row by row, even when it is the
+    # default four.
+    filled = splt.embedding(two_layouts, n_columns=4, **layout_options)
     try:
+        positions = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0)]
         filled_slots = _grid_slots(filled)
-        assert [filled_slots[("V", "cells", f)] for f in ("f0", "f3", "f4")] == [
+        assert [filled_slots[("U", "cells", f)] for f in facets] == positions
+        assert [filled_slots[("V", "cells", f)] for f in facets] == [
             (1, 1),
-            (1, 4),
+            (1, 2),
+            (1, 3),
             (2, 0),
+            (2, 1),
         ]
         slots = _grid_slots(wrapped)
-        facets = [f"f{index}" for index in range(6)]
-        positions = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1)]
         assert [slots[("a", f)] for f in facets] == positions
         assert [slots[("b", f)] for f in facets] == [
             (row + 2, column) for row, column in positions
         ]
         # Unused grid cells are removed, and the figure is four panels wide.
-        assert len(wrapped.figure.axes) == 12 + 2
+        assert len(wrapped.figure.axes) == 10 + 2
         assert wrapped.figure.get_figwidth() == pytest.approx(4 * 3.2 + 0.25)
-        assert {column for _, column in _grid_slots(explicit).values()} == set(range(6))
+        explicit_slots = _grid_slots(explicit)
+        assert [explicit_slots[("a", f)] for f in facets] == [
+            (0, column) for column in range(5)
+        ]
         layout_slots = _grid_slots(layouts)
+        assert [layout_slots[("U", "cells", f)] for f in facets] == positions
         assert [layout_slots[("V", "cells", f)] for f in facets] == [
             (row + 2, column) for row, column in positions
         ]
@@ -631,6 +637,13 @@ def test_missing_color_replaces_the_active_scale_missing_color():
         }
     )
     red = to_rgba("#ff0000")
+    palette = {"a": "#0000ff", "b": "#00ff00"}
+    # Scores 5 to 19 span magma and categories take their palette colors; the
+    # missing cells are colored red below.
+    expected = {
+        "score": plt.get_cmap("magma")(Normalize(5.0, 19.0)(score)),
+        "cat": np.asarray([to_rgba(palette.get(v, "#000000")) for v in category]),
+    }
     plots = {
         "score": splt.embedding(
             store,
@@ -644,21 +657,21 @@ def test_missing_color_replaces_the_active_scale_missing_color():
             store,
             layout_key="U",
             color_by="cat",
-            categorical_scale=splt.CategoricalScale(
-                palette={"a": "#0000ff", "b": "#00ff00"}
-            ),
+            categorical_scale=splt.CategoricalScale(palette=palette),
             missing_color="#ff0000",
             show=False,
         ),
     }
     try:
-        for key, values in (("score", score), ("cat", category)):
+        # Five scores and three categories are missing.
+        for key, n_missing in (("score", 5), ("cat", 3)):
             points = plots[key].axes[key].collections[0]
             cells = np.asarray(points.get_offsets())[:, 0].astype(int)
-            missing = np.asarray([value is None or value != value for value in values])
-            colors = points.get_facecolors()
-            assert np.allclose(colors[missing[cells]], red)
-            assert not np.any(np.all(np.isclose(colors[~missing[cells]], red), axis=1))
+            np.testing.assert_array_equal(np.sort(cells), np.arange(n))
+            colors = expected[key].copy()
+            colors[:n_missing] = red
+            np.testing.assert_array_equal(points.get_facecolors(), colors[cells])
+        assert plots["score"].provenance.extras["color_limits"]["score"] == (5.0, 19.0)
         assert plots["score"].scales[0].missing_color == "#ff0000"
         assert plots["cat"].scales[-1].missing_color == "#ff0000"
     finally:

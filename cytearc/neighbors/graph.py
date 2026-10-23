@@ -6,7 +6,7 @@ from numba import jit, njit, prange
 from scipy.sparse import coo_matrix, csr_matrix
 
 from ..utils.arguments import integer_argument
-from ..utils.numba import enable_dispatcher_cache
+from ..utils.numba import enable_dispatcher_cache, import_umap
 from ..utils.progress import iter_progress
 
 # Python objects a graph load or a connectivity conversion holds whatever the
@@ -149,6 +149,7 @@ def smooth_knn_chunk(
     bandwidth: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Convert one KNN distance block into fuzzy graph edges."""
+    import_umap()
     from umap.umap_ import compute_membership_strengths, smooth_knn_dist
 
     # umap-learn compiles both kernels without an on-disk cache.
@@ -322,7 +323,7 @@ def _count_shared_neighbors(indices: np.ndarray, out: np.ndarray) -> None:
     _count_sorted_shared_neighbors(indices, ordered, out)
 
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def calc_snn(indices: np.ndarray) -> np.ndarray:
     """Calculate shared-neighbor fractions for a KNN index matrix."""
     ncells, nk = indices.shape

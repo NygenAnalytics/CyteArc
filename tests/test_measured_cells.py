@@ -774,7 +774,9 @@ def test_display_reads_show_unmeasured_cells_as_missing(measured) -> None:
 
     values = store.get_cell_vals("RNA", "I", "RNA0")
     np.testing.assert_array_equal(values, matrix[:, 0])
-    assert np.isnan(store.get_cell_vals("RNA", "adt_cells", "RNA0")).all()
+    np.testing.assert_array_equal(
+        store.get_cell_vals("RNA", "adt_cells", "RNA0"), np.full(_N_ADT, np.nan)
+    )
     clipped = store.get_cell_vals("RNA", "I", "RNA0", clip_fraction=0.1)
     assert np.isnan(clipped[~membership]).all()
     # A cell metadata column is read as it is stored.
@@ -1077,9 +1079,10 @@ def test_display_values_of_measured_cells_ignore_unmeasured_cells(measured) -> N
         fetch_normalized_feature_matrix(store, [peak], mixed)[:, 0], expected
     )
     # A read of unmeasured cells only has no value to show.
-    assert np.isnan(
-        fetch_normalized_feature_matrix(store, [peak], np.flatnonzero(~membership))
-    ).all()
+    np.testing.assert_array_equal(
+        fetch_normalized_feature_matrix(store, [peak], np.flatnonzero(~membership)),
+        np.full((_N_ADT, 1), np.nan),
+    )
     values = store.get_cell_vals("ATAC", "I", "ATAC30")
     assert np.isnan(values[~membership]).all()
     np.testing.assert_allclose(values[membership], alone, rtol=1e-12)
@@ -1374,8 +1377,12 @@ def test_store_check_leaves_cells_of_another_type_to_the_operation(
 ) -> None:
     store = _open(partial_rna)
     rows = list(range(store.cells.N))
-    with pytest.raises(UnmeasuredCellsError):
+    with pytest.raises(UnmeasuredCellsError) as raised:
         require_measured_cells(store.cells, "RNA", rows, operation="probe")
+    assert (raised.value.unmeasured, raised.value.selected) == (
+        _N_OTHER,
+        _N_RNA + _N_OTHER,
+    )
 
     # The store's check reads a selection, a column name, or an array; the
     # operation's own argument checks judge a value of another type.

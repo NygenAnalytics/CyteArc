@@ -154,7 +154,7 @@ def test_h5ad_cell_id_source_reads_ids_by_position(tmp_path) -> None:
         assert text([ids[0], ids[-1]]) == ["c0", "c2"]
         assert text(ids[1:3]) == ["c1", "c2"]
         assert text(ids) == ["c0", "c1", "c2"]
-        with pytest.raises(IndexError):
+        with pytest.raises(IndexError, match="^range object index out of range$"):
             ids[3]
         with pytest.raises(ValueError, match="only contiguous reads"):
             ids[::2]
@@ -741,6 +741,15 @@ def test_subset_by_a_cell_key_without_selected_cells_writes_no_cells() -> None:
     assert root["cellData/ids"].shape == (0,)
     assert root["RNA/counts"].shape == (0, 3)
     assert root["RNA/countsT"].shape == (3, 0)
+    # The features are kept, and both orientations are complete, so the store
+    # opens as one without cells.
+    np.testing.assert_array_equal(root["RNA/featureData/ids"][:], ["f1", "f2", "f3"])
+    assert root["RNA/counts"].attrs["complete"] is True
+    assert root["RNA/countsT"].attrs["complete"] is True
+    subset = DataStore(
+        destination, default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+    assert (subset.cells.N, subset.assay_names, subset.RNA.feats.N) == (0, ["RNA"], 3)
 
 
 @pytest.mark.parametrize(

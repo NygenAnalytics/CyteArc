@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import tarfile
 from pathlib import Path
@@ -904,14 +905,33 @@ def test_live_zarr_archive_download(tmp_path, monkeypatch):
     from cytearc import datasets
 
     monkeypatch.delenv("CYTEARC_CYTEBASE_LOCAL", raising=False)
+    listed = []
+    list_files = datasets._bucket_files
+
+    def recorded(*args, **kwargs):
+        files = list_files(*args, **kwargs)
+        listed.extend(files)
+        return files
+
+    monkeypatch.setattr(datasets, "_bucket_files", recorded)
     dataset_path = datasets.connect("cytearc_docs").download_dataset(
         "tenx_5K_pbmc_rnaseq",
         tmp_path,
         zarr=True,
     )
 
-    assert (dataset_path / "data.zarr.tar.gz").is_file()
-    assert (dataset_path / "data.zarr").is_dir()
+    # Only the archive is downloaded, and no staging directory is left.
+    assert dataset_path == tmp_path / "tenx_5K_pbmc_rnaseq"
+    assert sorted(path.name for path in tmp_path.iterdir()) == [dataset_path.name]
+    assert sorted(path.name for path in dataset_path.iterdir()) == [
+        "data.zarr",
+        "data.zarr.tar.gz",
+    ]
+    (remote,) = [file for file in listed if file.path.endswith("/data.zarr.tar.gz")]
+    assert (dataset_path / "data.zarr.tar.gz").stat().st_size == remote.size
+    # The extracted directory is the root group of a Zarr store.
+    metadata = json.loads((dataset_path / "data.zarr" / "zarr.json").read_text())
+    assert (metadata["zarr_format"], metadata["node_type"]) == (3, "group")
 
 
 def test_datasets_exports_the_example_repository_api():

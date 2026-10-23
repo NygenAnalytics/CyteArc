@@ -8,7 +8,8 @@ description: Translate a Seurat workflow to CyteArc and import a saved Seurat ob
 This guide maps familiar Seurat stages to CyteArc's store-backed API. Use the workflow map
 below to find the equivalent task, or try the {ref}`Quick start <quickstart>` to inspect a prepared
 result. For optional background on how CyteArc stores and reuses results, see
-[](scanpy_and_seurat.md).
+[](scanpy_and_seurat.md). Follow [](tutorials/seurat_import.ipynb) for an executed import
+with metadata selection, coordinate roles and partial-import notices.
 
 ## Workflow map
 
@@ -82,8 +83,9 @@ An object imports in part when some of it cannot be imported:
   other reductions import as coordinates for graph construction.
   `reduction_roles={"phate": "umap", "umap.layout": "coordinates"}` sets the role by name.
 
-Inspection reports each reduction's `assayUsed` and `role`, and every notice, before anything is
-written.
+Inspection reports each reduction's `assayUsed` and `role`, along with input notices, before
+anything is written. Review the writer's returned notices too: choices made during import,
+including the SCT-to-RNA default-assay change, are reported there.
 
 Typical next steps are `ds.pipeline.run()`, [](tutorials/scrna_seq.ipynb), or
 [](tutorials/graph_construction.ipynb). For multimodal data, build a neighbour artifact per assay
@@ -91,5 +93,5 @@ before calling `integration.modalities`. When you only need raw matrices, origin
 Market counts are still preferable to an RDS export.
 
 To return to Seurat, write H5AD or Matrix Market from CyteArc and convert or import it with the tools
-used by your R workflow. See [](tutorials/import_and_export.ipynb) for the full Seurat import contract
-and the other format paths.
+used by your R workflow. See [](tutorials/seurat_import.ipynb) for the Seurat import examples
+and [](tutorials/import_and_export.ipynb) for H5AD and Matrix Market export.

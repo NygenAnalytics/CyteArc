@@ -1,3 +1,4 @@
+import dataclasses
 import math
 import warnings
 
@@ -93,20 +94,17 @@ def test_mann_whitney_matches_scipy_and_marker_ranks():
     )
     assert table.loc[0, "n_1"] == len(left)
     assert table.loc[0, "n_2"] == len(right)
-    assert np.isclose(table.loc[0, "u_statistic"], float(u_scipy))
-    assert np.isclose(table.loc[0, "p_value"], float(p_scipy))
-    assert np.isclose(table.loc[0, "mean_1"], float(np.mean(left)))
-    assert np.isclose(
-        table.loc[0, "mean_difference"],
-        float(np.mean(left) - np.mean(right)),
-    )
+    assert table.loc[0, "u_statistic"] == float(u_scipy)
+    assert table.loc[0, "p_value"] == pytest.approx(float(p_scipy), rel=1e-12)
+    assert table.loc[0, "mean_1"] == float(np.mean(left))
+    assert table.loc[0, "mean_difference"] == float(np.mean(left) - np.mean(right))
     ranked = pd.DataFrame({"feature": pd.Series(values).rank(method="average")})
     reference = mannwhitneyu_from_ranks(
         ranked,
         groups,
         np.array([g1, g2], dtype=object),
     )
-    assert np.isclose(table.loc[0, "p_value"], float(reference.loc[g1, "feature"]))
+    assert table.loc[0, "p_value"] == float(reference.loc[g1, "feature"])
 
 
 def test_mann_whitney_small_samples_use_exact_null():
@@ -219,8 +217,10 @@ def test_kruskal_matches_scipy():
         values[groups == "g1"],
         values[groups == "g2"],
     )
-    assert np.isclose(table.loc[0, "kruskal_statistic"], float(expected_stat))
-    assert np.isclose(table.loc[0, "p_value"], float(expected_p))
+    assert table.loc[0, "kruskal_statistic"] == pytest.approx(
+        float(expected_stat), rel=1e-12
+    )
+    assert table.loc[0, "p_value"] == pytest.approx(float(expected_p), rel=1e-12)
     assert table.loc[0, "df"] == 2
 
 
@@ -287,11 +287,7 @@ def test_dunn_preserves_omnibus_and_posthoc():
         groups,
         test="kruskal_wallis",
     ).table
-    assert np.isclose(
-        result.table.loc[0, "kruskal_statistic"],
-        omnibus.loc[0, "kruskal_statistic"],
-    )
-    assert np.isclose(result.table.loc[0, "p_value"], omnibus.loc[0, "p_value"])
+    pd.testing.assert_frame_equal(result.table, omnibus, check_exact=True)
 
 
 @pytest.mark.parametrize("adjustment", ["fdr_bh", "bonferroni", "holm"])
@@ -342,9 +338,8 @@ def test_group_order_determines_contrast_direction():
     assert forward.loc[0, "group_2"] == "control"
     assert reversed_order.loc[0, "group_1"] == "control"
     assert reversed_order.loc[0, "group_2"] == "treated"
-    assert np.isclose(
-        forward.loc[0, "mean_difference"],
-        -reversed_order.loc[0, "mean_difference"],
+    assert (
+        forward.loc[0, "mean_difference"] == -reversed_order.loc[0, "mean_difference"]
     )
     assert forward.loc[0, "p_value"] == reversed_order.loc[0, "p_value"]
 
@@ -401,7 +396,7 @@ def test_dunn_comparisons_restricts_pairs():
     expected = reference[
         (reference["group_1"] == "g0") & (reference["group_2"] == "g2")
     ]
-    assert np.isclose(table.loc[0, "z"], expected["z"].iloc[0])
+    assert table.loc[0, "z"] == pytest.approx(expected["z"].iloc[0], rel=1e-12)
 
 
 def test_dunn_accepts_numpy_comparison_sequence():
@@ -611,13 +606,13 @@ def test_aggregate_samples_semantics():
     assert len(mean_frame) == 16
     for _, row in mean_frame.iterrows():
         cells = values[(groups == row["group"]) & (samples == row["sample"])]
-        assert np.isclose(row["value"], float(np.mean(cells)))
+        assert row["value"] == float(np.mean(cells))
     for _, row in median_frame.iterrows():
         cells = values[(groups == row["group"]) & (samples == row["sample"])]
-        assert np.isclose(row["value"], float(np.median(cells)))
+        assert row["value"] == float(np.median(cells))
     for _, row in frac_frame.iterrows():
         cells = values[(groups == row["group"]) & (samples == row["sample"])]
-        assert np.isclose(row["value"], float(np.mean(cells > 1.0)))
+        assert row["value"] == float(np.mean(cells > 1.0))
 
 
 @pytest.mark.parametrize(
@@ -1012,14 +1007,14 @@ def test_welch_matches_scipy_two_sided():
     )
     assert table.loc[0, "n_1"] == len(a)
     assert table.loc[0, "n_2"] == len(b)
-    assert np.isclose(table.loc[0, "t_statistic"], float(expected_stat))
+    assert table.loc[0, "t_statistic"] == pytest.approx(float(expected_stat), rel=1e-12)
     var_a = float(np.var(a, ddof=1))
     var_b = float(np.var(b, ddof=1))
     expected_df = (var_a / len(a) + var_b / len(b)) ** 2 / (
         (var_a / len(a)) ** 2 / (len(a) - 1) + (var_b / len(b)) ** 2 / (len(b) - 1)
     )
-    assert np.isclose(table.loc[0, "df"], expected_df)
-    assert np.isclose(table.loc[0, "p_value"], float(expected_p))
+    assert table.loc[0, "df"] == pytest.approx(expected_df, rel=1e-12)
+    assert table.loc[0, "p_value"] == pytest.approx(float(expected_p), rel=1e-12)
     assert table.columns.tolist() == [
         "group_1",
         "group_2",
@@ -1070,12 +1065,15 @@ def test_welch_alternative_less_and_greater():
         equal_var=False,
         alternative="greater",
     ).pvalue
-    assert np.isclose(less_table.loc[0, "p_value"], float(expected_less_p))
-    assert np.isclose(greater_table.loc[0, "p_value"], float(expected_greater_p))
-    assert np.isclose(
-        greater_table.loc[0, "p_value"] + less_table.loc[0, "p_value"],
-        1.0,
+    assert less_table.loc[0, "p_value"] == pytest.approx(
+        float(expected_less_p), rel=1e-12
     )
+    assert greater_table.loc[0, "p_value"] == pytest.approx(
+        float(expected_greater_p), rel=1e-12
+    )
+    assert greater_table.loc[0, "p_value"] + less_table.loc[
+        0, "p_value"
+    ] == pytest.approx(1.0, rel=1e-12)
     assert two_sided_table.loc[0, "p_value"] <= max(
         less_table.loc[0, "p_value"],
         greater_table.loc[0, "p_value"],
@@ -1121,8 +1119,8 @@ def test_one_way_anova_matches_scipy():
         values[groups == "g1"],
         values[groups == "g2"],
     )
-    assert np.isclose(table.loc[0, "f_statistic"], float(expected_stat))
-    assert np.isclose(table.loc[0, "p_value"], float(expected_p))
+    assert table.loc[0, "f_statistic"] == pytest.approx(float(expected_stat), rel=1e-12)
+    assert table.loc[0, "p_value"] == pytest.approx(float(expected_p), rel=1e-12)
     assert table.loc[0, "df_between"] == 2
     assert table.loc[0, "df_within"] == 117
 
@@ -1163,8 +1161,8 @@ def test_one_way_anova_group_order_filters_values_and_degrees_of_freedom():
         values[groups == "c"],
     )
 
-    assert table.loc[0, "f_statistic"] == pytest.approx(float(expected_stat))
-    assert table.loc[0, "p_value"] == pytest.approx(float(expected_p))
+    assert table.loc[0, "f_statistic"] == pytest.approx(float(expected_stat), rel=1e-12)
+    assert table.loc[0, "p_value"] == pytest.approx(float(expected_p), rel=1e-12)
     assert table.loc[0, "df_between"] == 2
     assert table.loc[0, "df_within"] == 9
 
@@ -1231,9 +1229,7 @@ def test_group_order_controls_welch_direction():
     assert forward.loc[0, "group_2"] == "A"
     assert reversed_order.loc[0, "group_1"] == "A"
     assert reversed_order.loc[0, "group_2"] == "B"
-    assert forward.loc[0, "t_statistic"] == pytest.approx(
-        -reversed_order.loc[0, "t_statistic"]
-    )
+    assert forward.loc[0, "t_statistic"] == -reversed_order.loc[0, "t_statistic"]
     assert forward.loc[0, "mean_difference"] > 0
     assert reversed_order.loc[0, "mean_difference"] < 0
     assert forward.loc[0, "p_value"] == reversed_order.loc[0, "p_value"]
@@ -1247,8 +1243,11 @@ def test_statistical_test_result_is_frozen():
         grouping=None,
         group_field=CellField("grp"),
     )
-    with pytest.raises(AttributeError):
+    with pytest.raises(
+        dataclasses.FrozenInstanceError, match="^cannot assign to field 'method'$"
+    ):
         result.method = "kruskal_wallis"
+    assert result.method == "mann_whitney"
 
 
 def test_statistical_test_result_identity_defaults_are_optional():
@@ -1370,7 +1369,7 @@ def test_welch_zero_variance_reports_pooled_degrees_of_freedom():
     assert tied.loc[0, "df"] == 5.0
     assert tied.loc[0, "p_value"] == 1.0
     # With one varying group the Welch degrees of freedom equal its n - 1.
-    assert one_varies.loc[0, "df"] == pytest.approx(3.0)
+    assert one_varies.loc[0, "df"] == pytest.approx(3.0, rel=1e-12)
 
 
 # compare.test prepares one design for all of its keys. The flow below is the

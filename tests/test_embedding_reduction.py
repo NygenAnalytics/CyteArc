@@ -613,7 +613,9 @@ def test_pca_fit_resident_bytes_bound_the_traced_peak(
     )
     scale = _standardizer(values) if scaled else None
     # A first fit imports the solvers, so the traced fit allocates only arrays.
-    _fit(values, block_size=block_size, dims=10, scale=scale)
+    # The solver depends only on the feature count, so a few rows take the
+    # same path.
+    _fit(values[:20], block_size=block_size, dims=10, scale=scale)
     data = ChunkedArray.from_numpy(values, block_size=block_size)
 
     tracemalloc.start()
@@ -837,6 +839,12 @@ def test_streaming_lsi_never_stacks_all_input_blocks(monkeypatch):
     )
 
     assert loadings.shape == (values.shape[1], 3)
+    # The default basis, cut to the 12 features, spans them all, so the
+    # streamed solve recovers the exact singular vectors.
+    _, _, right_vectors = np.linalg.svd(values, full_matrices=False)
+    np.testing.assert_allclose(
+        np.abs(loadings.T @ right_vectors[1:4].T), np.eye(3), atol=1e-12
+    )
 
 
 def test_streaming_lsi_reserves_accumulators_and_block_temporaries():

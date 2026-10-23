@@ -394,6 +394,72 @@ def test_handoff_end_marker_retries_when_the_queue_empties_meanwhile(
     assert queues[0].full.is_set() and queues[0].ended.is_set()
 
 
+def test_closing_the_handoff_waits_for_a_producer_still_running() -> None:
+    import time
+
+    finished = threading.Event()
+
+    def run(deliver: Any, stop: threading.Event) -> None:
+        asyncio.run(deliver("first"))
+        # The producer runs on past several of the consumer's 50 ms waits for
+        # its end marker, after the consumer asked it to stop.
+        assert stop.wait(5)
+        time.sleep(0.2)
+        finished.set()
+
+    stream = iter_bounded_handoff(in_flight=1, run=run)
+    assert next(stream) == "first"
+    stream.close()
+    # Closing returns only once the producer has stopped.
+    assert finished.is_set()
+
+
+def test_ordered_units_wait_for_their_turn_when_a_later_unit_loads_first() -> None:
+    from contextlib import asynccontextmanager
+
+    loaded: list[int] = []
+    computed: list[str] = []
+
+    @asynccontextmanager
+    async def load(runner: AsyncStorageRunner, idx: int, unit: str) -> Any:
+        if idx == 0:
+            # The first unit finishes loading only after the second has.
+            async with asyncio.timeout(5):
+                while 1 not in loaded:
+                    await asyncio.sleep(0.001)
+        loaded.append(idx)
+        yield SimpleNamespace(readSec=0.0, value=unit)
+
+    def process(item: Any) -> str:
+        computed.append(item.value)
+        return item.value
+
+    plan = plan_operation(
+        ResourceBudget(64 * 1024 * 1024, 2),
+        WorkShape(nUnits=3, unitBytes=1024, ordered=True),
+        StorageIoPolicy(readWorkers=3),
+    )
+    assert plan.readWorkers == 3
+    results = list(
+        feature_stream.stream_units(
+            ["a", "b", "c"],
+            load,
+            process,
+            plan=plan,
+            unitKind="testUnit",
+            orderedCompute=True,
+            progress=None,
+            metrics=None,
+            details={},
+        )
+    )
+
+    assert sorted(loaded) == [0, 1, 2]
+    assert loaded.index(1) < loaded.index(0)
+    # Units are processed and handed off in their order, not in load order.
+    assert computed == results == ["a", "b", "c"]
+
+
 def _band(destination: zarr.Array, values: np.ndarray) -> SparseWriteBand:
     coo = coo_matrix(values)
     return SparseWriteBand(

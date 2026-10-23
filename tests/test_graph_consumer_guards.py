@@ -7,6 +7,7 @@ flags and initialization references are checked first too, and SNN
 integration refuses graphs of different k before loading any of them.
 """
 
+import functools
 import shutil
 from pathlib import Path
 
@@ -572,8 +573,8 @@ def test_snn_integration_of_graphs_with_one_k_still_runs(writable) -> None:
 # Estimates against measured peaks
 
 
-def _knn_graph(n_cells: int, k: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
-    """Return the indices and distances of a kNN graph of random points."""
+@functools.lru_cache(maxsize=None)
+def _knn_graph_cached(n_cells: int, k: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
     from sklearn.neighbors import NearestNeighbors
 
     values = np.random.default_rng(seed).normal(size=(n_cells, 8))
@@ -581,6 +582,16 @@ def _knn_graph(n_cells: int, k: int, seed: int) -> tuple[np.ndarray, np.ndarray]
         NearestNeighbors(n_neighbors=k + 1).fit(values).kneighbors(values)
     )
     return indices[:, 1:].astype(np.uint32), distances[:, 1:].astype(np.float32)
+
+
+def _knn_graph(n_cells: int, k: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return the indices and distances of a kNN graph of random points.
+
+    Parametrizations share a graph, whose search takes seconds, so it is built
+    once and every call gets its own copies.
+    """
+    indices, distances = _knn_graph_cached(n_cells, k, seed)
+    return indices.copy(), distances.copy()
 
 
 def _stored(indices: np.ndarray, distances: np.ndarray) -> tuple[np.ndarray, ...]:
@@ -591,8 +602,8 @@ def _stored(indices: np.ndarray, distances: np.ndarray) -> tuple[np.ndarray, ...
     )
 
 
-def _random_stored(n_cells: int, k: int, seed: int) -> tuple[np.ndarray, ...]:
-    """A directed graph whose edges are almost never mutual."""
+@functools.lru_cache(maxsize=None)
+def _random_stored_cached(n_cells: int, k: int, seed: int) -> tuple[np.ndarray, ...]:
     rng = np.random.default_rng(seed)
     edges = np.empty((n_cells * k, 2), dtype=np.uint32)
     edges[:, 0] = np.repeat(np.arange(n_cells, dtype=np.uint32), k)
@@ -600,6 +611,12 @@ def _random_stored(n_cells: int, k: int, seed: int) -> tuple[np.ndarray, ...]:
         [rng.choice(n_cells, size=k, replace=False) for _ in range(n_cells)]
     )
     return edges, rng.random(n_cells * k).astype(np.float32)
+
+
+def _random_stored(n_cells: int, k: int, seed: int) -> tuple[np.ndarray, ...]:
+    """A directed graph whose edges are almost never mutual, copied from a cache."""
+    edges, weights = _random_stored_cached(n_cells, k, seed)
+    return edges.copy(), weights.copy()
 
 
 def _graph_reader(edges: np.ndarray, weights: np.ndarray, n_cells: int):

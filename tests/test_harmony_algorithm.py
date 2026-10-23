@@ -272,8 +272,8 @@ def test_block_elimination_matches_dense_solve(layout: str) -> None:
         np.testing.assert_allclose(
             coefficients[kept, cluster, :], expected, rtol=1e-10, atol=1e-12
         )
-        dropped = np.flatnonzero(~active[:, cluster])
-        assert np.all(coefficients[dropped, cluster, :] == 0.0)
+    # The one pruned level, 5 in cluster 1, has zero coefficients.
+    np.testing.assert_array_equal(coefficients[~active], np.zeros((1, dims)))
 
 
 def test_pruned_levels_match_the_restricted_dense_solve() -> None:
@@ -299,7 +299,7 @@ def test_pruned_levels_match_the_restricted_dense_solve() -> None:
     coefficients = solve_cluster_regressions(statistics, penalties, active, design)
 
     assert not active[2].any() and np.delete(active, 2, axis=0).all()
-    assert np.all(coefficients[2] == 0.0)
+    np.testing.assert_array_equal(coefficients[2], np.zeros((n_clusters, dims)))
     kept = np.delete(np.arange(design.n_levels), 2)
     for cluster in range(n_clusters):
         expected = _dense_coefficients(
@@ -367,7 +367,8 @@ def test_one_column_solve_is_exact_for_tiny_fixed_penalties(penalty: float) -> N
         )
         error = np.max(np.abs(coefficients[kept, cluster, :] - exact))
         assert error <= 1e-12 * np.max(np.abs(exact))
-        assert np.all(coefficients[~active[:, cluster], cluster, :] == 0.0)
+    # The one pruned level, 2 in cluster 0, has zero coefficients.
+    np.testing.assert_array_equal(coefficients[~active], np.zeros((1, dims)))
 
 
 def test_one_column_fit_with_a_tiny_fixed_penalty_keeps_the_input_scale() -> None:
@@ -1012,13 +1013,15 @@ def test_cells_that_cancel_exactly_leave_a_zero_centroid() -> None:
     inverse_norms = np.empty(n_cells)
     update_inverse_norms(cells, inverse_norms, np.empty(64))
     assert inverse_norms[10] == inverse_norms[11]
-    assert np.all(cells[10] * inverse_norms[10] + cells[11] * inverse_norms[11] == 0.0)
+    np.testing.assert_array_equal(
+        cells[10] * inverse_norms[10] + cells[11] * inverse_norms[11], np.zeros(dims)
+    )
     workspace = ClusteringWorkspace.allocate(64, n_clusters, dims, 2)
 
     centroids, norms = cosine_centroids(cells, inverse_norms, assignments, workspace)
 
     # A zero centroid and a zero norm, so the objective sees y . S = 0.
-    assert np.all(centroids[:, 4] == 0.0)
+    np.testing.assert_array_equal(centroids[:, 4], np.zeros(dims))
     assert norms[4] == 0.0
     np.testing.assert_allclose(
         centroids[:, :4], _cosine_centroids(cells, assignments)[:, :4], atol=1e-12

@@ -77,7 +77,7 @@ def _wedge_covering(pie, degrees):
     radians = np.deg2rad(degrees)
     probes = reach * np.column_stack((np.cos(radians), np.sin(radians)))
     covering = np.array([path.contains_points(probes) for path in paths])
-    assert (covering.sum(axis=0) == 1).all()
+    np.testing.assert_array_equal(covering.sum(axis=0), np.ones(radians.size))
     return covering.argmax(axis=0)
 
 
@@ -297,6 +297,8 @@ def test_cluster_tree_keeps_a_single_category_categorical():
         ] * 2
         directions = np.arange(0.05, 360, 0.1)
         for pie in pies:
-            assert (_wedge_covering(pie, directions) == 0).all()
+            np.testing.assert_array_equal(
+                _wedge_covering(pie, directions), np.zeros(directions.size)
+            )
     finally:
         result.close()

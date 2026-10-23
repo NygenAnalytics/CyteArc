@@ -349,7 +349,7 @@ def test_auto_cut_persists_typed_hierarchy_and_reuses_diagnostics() -> None:
     second = _run_paris(store, min_cluster_size=2)
     assert second.ref == first.ref
     assert second.hierarchy_artifact_id == generation_id
-    assert np.array_equal(second.labels, first.labels)
+    np.testing.assert_array_equal(second.labels, first.labels)
     assert second.diagnostics == first.diagnostics
     assert store.load_graph_calls == 1
     assert store.cells.writes == []
@@ -483,7 +483,7 @@ def test_incomplete_adaptive_cache_is_recomputed() -> None:
     assert second.ref is not None
     second_cut = second.ref
 
-    assert np.array_equal(second.labels, first.labels)
+    np.testing.assert_array_equal(second.labels, first.labels)
     assert second_cut != first_cut
     assert "labels" in store.zw[artifact_path(second_cut)]
     assert second.hierarchy_artifact_id == first.hierarchy_artifact_id
@@ -944,7 +944,7 @@ def test_structurally_incomplete_hierarchy_is_refitted(damage: str) -> None:
 
     assert second.hierarchy_artifact_id != first.hierarchy_artifact_id
     assert second.ref != first.ref
-    assert np.array_equal(second.labels, first.labels)
+    np.testing.assert_array_equal(second.labels, first.labels)
     assert store.load_graph_calls == 2
 
 
@@ -966,7 +966,7 @@ def test_cut_with_unknown_diagnostic_fields_fails_closed() -> None:
 
     assert second.ref != first.ref
     assert second.hierarchy_artifact_id == first.hierarchy_artifact_id
-    assert np.array_equal(second.labels, first.labels)
+    np.testing.assert_array_equal(second.labels, first.labels)
     assert second.diagnostics == first.diagnostics
 
 

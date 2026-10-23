@@ -291,7 +291,7 @@ def test_symmetric_csr_matches_scipy(seed):
         np.testing.assert_array_equal(graph.indptr, expected.indptr, err_msg=name)
         np.testing.assert_array_equal(graph.indices, expected.indices, err_msg=name)
         restored = np.ldexp(graph.weights, graph.weight_exponent)
-        assert np.array_equal(restored, expected.data), name
+        np.testing.assert_array_equal(restored, expected.data, err_msg=name)
         assert graph.has_offdiagonal, name
         assert 1.0 <= graph.mean_weight < 2.0, name
         assert graph.total_strength == int(graph.strengths.sum()), name
@@ -299,7 +299,7 @@ def test_symmetric_csr_matches_scipy(seed):
         # The same arrays for several workers and forced parallel loops.
         parallel = build_leiden_graph(variant, 4, 1)
         np.testing.assert_array_equal(parallel.indices, graph.indices, err_msg=name)
-        assert np.array_equal(parallel.weights, graph.weights), name
+        np.testing.assert_array_equal(parallel.weights, graph.weights, err_msg=name)
         np.testing.assert_array_equal(parallel.strengths, graph.strengths)
 
 
@@ -397,6 +397,8 @@ def test_best_move_matches_brute_force(seed):
             used[0],
             shift,
         )
+        # Each call clears the slots it used, so the next one starts empty.
+        np.testing.assert_array_equal(keys, EMPTY_SLOT)
         options = _brute_force_options(A, labels, v, gamma)
         scale = max(1.0, strengths[v])
         if sizes[labels[v]] == 1:
@@ -411,7 +413,6 @@ def test_best_move_matches_brute_force(seed):
         expected = existing[0] if existing else NEW_COMMUNITY
         assert target == expected
         assert gain == pytest.approx(best, rel=1e-9, abs=1e-12 * scale)
-    assert np.all(keys == EMPTY_SLOT)
 
 
 def _move_arrays(edges: list[tuple[int, int, float]], n: int) -> tuple:
@@ -562,7 +563,13 @@ def test_merge_nodes_subset_matches_brute_force(seed):
             np.empty(width, dtype=np.float64),
         )
         outside = ~in_subset
-        assert np.all(refined[outside] == -5) and np.all(rsize[outside] == -5)
+        # The kernel writes its state only at the members, and rlist only in
+        # their range of positions.
+        np.testing.assert_array_equal(refined[outside], -5)
+        np.testing.assert_array_equal(rsize[outside], -5)
+        np.testing.assert_array_equal(kref[outside], -5)
+        np.testing.assert_array_equal(eext[outside], np.nan)
+        np.testing.assert_array_equal(rlist[members.size :], -5)
         assert count == _brute_force_merge_check(
             graph, labels, members, null_coef, refined, rsize, kref, eext
         )
@@ -632,7 +639,7 @@ def test_aggregation_matches_membership_products(seed):
         outputs.append((ragg, new_q, new_labels, indptr, indices, weights))
     for other in outputs[1:]:
         for first, second in zip(outputs[0], other):
-            assert np.array_equal(first, second)
+            np.testing.assert_array_equal(second, first)
     ragg, new_q, new_labels, indptr, indices, weights = outputs[0]
     n_agg = indptr.shape[0] - 1
     for row in range(n_agg):
@@ -688,7 +695,7 @@ def test_counter_based_random_numbers():
     assert len(keys) == 27
     assert len({derive_key(np.uint64(key), entity) for entity in range(200)}) == 200
     draws = np.array([uniform01(np.uint64(key), counter) for counter in range(20_000)])
-    assert np.array_equal(
+    np.testing.assert_array_equal(
         draws, [uniform01(np.uint64(key), counter) for counter in range(20_000)]
     )
     assert draws.min() >= 0.0 and draws.max() < 1.0
@@ -709,7 +716,7 @@ def test_counter_based_random_numbers():
             min_items,
         )
         counts[n_workers] = np.diff(start)
-        assert np.array_equal(np.sort(order), np.arange(n))
+        np.testing.assert_array_equal(np.sort(order), np.arange(n))
         for group in range(64):
             assert np.all(np.diff(order[start[group] : start[group + 1]]) > 0)
     np.testing.assert_array_equal(counts[1], counts[4])
@@ -1095,11 +1102,12 @@ def test_gpl_backends_ignore_nthreads(monkeypatch):
     def fake_igraph_membership(graph, resolution, random_seed):
         # CyteArc does not install igraph; only the dispatch is tested.
         calls.append((resolution, random_seed))
-        return np.ones(graph.shape[0], dtype=np.int64)
+        return np.arange(1, graph.shape[0] + 1, dtype=np.int64)
 
     monkeypatch.setattr(leiden_module, "_igraph_membership", fake_igraph_membership)
     labels = leiden_membership(_RING, 1.0, 1, backend="igraph", nthreads=2)
-    assert labels.shape == (12,)
+    # The backend's labels come back unchanged, for the whole graph.
+    np.testing.assert_array_equal(labels, np.arange(1, 13))
     assert calls == [(1.0, 1)]
 
 
@@ -1462,9 +1470,11 @@ def test_guards_stay_silent_on_ordinary_graphs():
         native_leiden_membership(knn_graph(2000, 10), 1.0, 1, None)
         native_leiden_membership(planted(4, 50, 0.3, 0.01, 5)[0], 1.0, 1, None)
         native_leiden_membership(ring_of_cliques(30, 5), 1.0, 1, None, **FORCED)
-    assert messages
+    # Every run logged through to its end, so silence is not a lost log.
+    assert sum("native Leiden finished" in message for message in messages) == 3
     assert not any("stopped at its cap" in message for message in messages)
     assert not any("refinement retry" in message for message in messages)
+    assert not any("end=safety-stop" in message for message in messages)
 
 
 def test_adversarial_star():
@@ -1548,7 +1558,11 @@ def test_subnormal_weights_give_identical_labels():
 
 @pytest.fixture(scope="module")
 def leiden_store_template(datastore_zarr_root, tmp_path_factory):
-    """A copy of the 1K PBMC store with a small-k graph, built once."""
+    """A copy of the 1K PBMC store with a small-k graph, built once.
+
+    These tests need a graph, not a choice of genes, and selecting HVGs took
+    half of the build, so the graph uses the 100 most often detected genes.
+    """
     from cytearc.datastore.datastore import DataStore
     from tests.fixtures_datastore import build_neighbourhood_graph
 
@@ -1556,14 +1570,10 @@ def leiden_store_template(datastore_zarr_root, tmp_path_factory):
     shutil.copytree(datastore_zarr_root, path)
     datastore = DataStore(str(path), default_assay="RNA")
     cells = datastore.qc.auto_filter()
-    features = datastore.features.hvgs(
-        cells,
+    detected = np.asarray(datastore.RNA.feats.fetch_all("nCells"))
+    features = datastore.features.snapshot(
         from_assay="RNA",
-        top_n=100,
-        show_plot=False,
-        min_cells=int(0.01 * datastore.cells.N),
-        max_cells=np.inf,
-        blacklist="^MT-|^RPS|^RPL|^MRPS|^MRPL|^CCN|^HLA-|^H2-|^HIST",
+        feature_indexes=np.sort(np.argsort(-detected, kind="stable")[:100]).tolist(),
     )
     graph = build_neighbourhood_graph(
         datastore,
@@ -1600,11 +1610,14 @@ def test_datastore_uses_the_native_backend_by_default(leiden_store):
     ref = datastore.clusters.leiden(graph)
     assert datastore.artifacts.inspect(ref).parameters["backend"] == "cytearc"
     labels = _stored_labels(datastore, ref)
-    n_cells = datastore.graph.load(graph).shape[0]
-    assert labels.shape == (n_cells,)
+    W = datastore.graph.load(graph)
+    assert labels.shape == (W.shape[0],)
     assert labels.dtype.kind == "i"
     assert labels.min() == 1
-    assert np.array_equal(np.unique(labels), np.arange(1, labels.max() + 1))
+    np.testing.assert_array_equal(np.unique(labels), np.arange(1, labels.max() + 1))
+    # The stored labels are the native backend's, at the default resolution
+    # and seed; its labels do not depend on the thread count.
+    np.testing.assert_array_equal(labels, native_leiden_membership(W, 1.0, 4444, 1))
 
 
 def test_datastore_thread_count_is_not_part_of_the_identity(leiden_store):

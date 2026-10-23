@@ -9,7 +9,7 @@ and scores doublets alone, and that the scores are stable across seeds.
 
 import math
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
@@ -542,6 +542,37 @@ def _open_synthetic(synthetic: _SyntheticDoublets, tmp_path: Path) -> SimpleName
     return SimpleNamespace(store=store, graph=graph, clusters=clusters)
 
 
+def _scored(
+    synthetic: _SyntheticDoublets, directory: Path, *requests: dict[str, Any]
+) -> _SyntheticDoublets:
+    """Copy a synthetic store with the doublets of each request scored.
+
+    Tests that score the same doublets in their copies reuse these results
+    instead of computing them again.
+    """
+    opened = _open_synthetic(synthetic, directory)
+    for options in requests:
+        opened.store.qc.doublets(opened.clusters, opened.graph, **options)
+    return replace(synthetic, path=directory / "data.zarr")
+
+
+@pytest.fixture(scope="module")
+def one_capture_scored(one_capture, tmp_path_factory) -> _SyntheticDoublets:
+    """One capture with its doublets scored with the default options."""
+    return _scored(one_capture, tmp_path_factory.mktemp("one_capture_scored"), {})
+
+
+@pytest.fixture(scope="module")
+def two_captures_scored(two_captures, tmp_path_factory) -> _SyntheticDoublets:
+    """Two captures with doublets scored per sample and pooled, by default."""
+    return _scored(
+        two_captures,
+        tmp_path_factory.mktemp("two_captures_scored"),
+        {"sample_column": "sample"},
+        {},
+    )
+
+
 def _payload(store: DataStore, ref: ArtifactRef) -> Any:
     return artifact_group(store.zw, ref)
 
@@ -573,11 +604,12 @@ def _assert_recovered(payload: Any, truth: np.ndarray, samples: np.ndarray) -> N
         cutoffs[members] = sample["threshold"]
         assert sample["thresholdMethod"] == "minimum"
         assert sample["predictedDoublets"] == int(calls[members].sum())
-        assert np.isclose(
-            sample["estimatedDoubletRate"],
+        # The attributes keep the floats exactly, so the estimate is exactly
+        # Scrublet's ratio of the recorded calls and detectable fraction.
+        assert sample["estimatedDoubletRate"] == (
             sample["predictedDoublets"]
             / sample["cells"]
-            / sample["detectableDoubletFraction"],
+            / sample["detectableDoubletFraction"]
         )
         # Scrublet's estimate is near the injected doublet rate.
         injected = np.mean(truth[members] != 0)
@@ -588,14 +620,15 @@ def _assert_recovered(payload: Any, truth: np.ndarray, samples: np.ndarray) -> N
 
 @pytest.mark.slow
 def test_doublets_recover_injected_heterotypic_doublets_of_one_capture(
-    one_capture, tmp_path
+    one_capture_scored, tmp_path
 ):
-    opened = _open_synthetic(one_capture, tmp_path)
+    opened = _open_synthetic(one_capture_scored, tmp_path)
 
+    # The scores that the template computed with these options are reused.
     ref = opened.store.qc.doublets(opened.clusters, opened.graph)
 
     payload = _payload(opened.store, ref)
-    _assert_recovered(payload, one_capture.truth, one_capture.samples)
+    _assert_recovered(payload, one_capture_scored.truth, one_capture_scored.samples)
     assert payload.attrs["samples"][0]["labels"] == {}
     raw = payload["raw_scores"][:]
     assert np.all((raw >= 0) & (raw <= 1))
@@ -606,25 +639,28 @@ def test_doublets_recover_injected_heterotypic_doublets_of_one_capture(
 
 @pytest.mark.slow
 def test_per_sample_doublets_recover_injected_doublets_of_two_captures(
-    two_captures, tmp_path
+    two_captures_scored, tmp_path
 ):
-    opened = _open_synthetic(two_captures, tmp_path)
+    opened = _open_synthetic(two_captures_scored, tmp_path)
     store = opened.store
 
+    # The template's scores, per sample and pooled, are reused.
     per_sample = _payload(
         store, store.qc.doublets(opened.clusters, opened.graph, sample_column="sample")
     )
 
-    _assert_recovered(per_sample, two_captures.truth, two_captures.samples)
+    _assert_recovered(
+        per_sample, two_captures_scored.truth, two_captures_scored.samples
+    )
     # Pooled, doublets of two captures form where no cell can be, so they
     # score above the doublets of one capture and blur the threshold.
     pooled = _payload(store, store.qc.doublets(opened.clusters, opened.graph))
     parents = pooled["simulated_parents"][:]
-    samples = two_captures.samples
+    samples = two_captures_scored.samples
     across = samples[parents[:, 0]] != samples[parents[:, 1]]
     simulated = pooled["simulated_scores"][:]
     assert np.median(simulated[across]) > np.median(simulated[~across])
-    heterotypic = two_captures.truth == 1
+    heterotypic = two_captures_scored.truth == 1
     assert (
         per_sample["predicted_doublets"][:][heterotypic].mean()
         >= pooled["predicted_doublets"][:][heterotypic].mean()
@@ -633,9 +669,9 @@ def test_per_sample_doublets_recover_injected_doublets_of_two_captures(
 
 @pytest.mark.slow
 def test_per_sample_doublets_pair_and_score_cells_of_one_sample_only(
-    two_captures, tmp_path, monkeypatch
+    two_captures_scored, tmp_path, monkeypatch
 ):
-    opened = _open_synthetic(two_captures, tmp_path)
+    opened = _open_synthetic(two_captures_scored, tmp_path)
     store = opened.store
     captured: list[tuple[np.ndarray, int]] = []
     count_neighbors = doublets.count_simulated_neighbors
@@ -645,13 +681,15 @@ def test_per_sample_doublets_pair_and_score_cells_of_one_sample_only(
         return count_neighbors(points, n_observed, *args, **kwargs)
 
     monkeypatch.setattr(doublets, "count_simulated_neighbors", capture)
+    # The template holds these scores; scoring them again shows each sample's
+    # neighbor index.
     per_sample = store.qc.doublets(
-        opened.clusters, opened.graph, sample_column="sample"
+        opened.clusters, opened.graph, sample_column="sample", invalidate_cache=True
     )
 
     payload = _payload(store, per_sample)
     parents = payload["simulated_parents"][:]
-    samples = two_captures.samples
+    samples = two_captures_scored.samples
     # Doublets never pair parents of two samples.
     np.testing.assert_array_equal(samples[parents[:, 0]], samples[parents[:, 1]])
     summaries = payload.attrs["samples"]
@@ -692,9 +730,10 @@ def test_per_sample_doublets_pair_and_score_cells_of_one_sample_only(
 
 @pytest.mark.slow
 def test_doublet_scores_are_stabler_across_seeds_than_with_a_capped_pool(
-    one_capture, tmp_path
+    one_capture_scored, tmp_path
 ):
-    opened = _open_synthetic(one_capture, tmp_path)
+    # The template holds the scores of the default seed 4444 and pool.
+    opened = _open_synthetic(one_capture_scored, tmp_path)
     store = opened.store
 
     def scores(seed: int, **options: Any) -> np.ndarray:
@@ -791,10 +830,11 @@ def test_save_k_is_capped_by_the_largest_sample_before_planning(
 
 @pytest.mark.slow
 def test_predicted_doublets_select_singlets_and_options_keep_calls(
-    two_captures, tmp_path
+    two_captures_scored, tmp_path
 ):
-    opened = _open_synthetic(two_captures, tmp_path)
+    opened = _open_synthetic(two_captures_scored, tmp_path)
     store = opened.store
+    # The template's per-sample scores are reused.
     ref = store.qc.doublets(opened.clusters, opened.graph, sample_column="sample")
     payload = _payload(store, ref)
     scores = payload["values"][:]
@@ -856,9 +896,10 @@ def test_predicted_doublets_select_singlets_and_options_keep_calls(
 
 @pytest.mark.slow
 def test_a_harmony_graph_scores_each_sample_on_the_pca_it_corrected(
-    two_captures, tmp_path
+    two_captures_scored, tmp_path
 ):
-    opened = _open_synthetic(two_captures, tmp_path)
+    # The template holds the per-sample scores of the uncorrected graph.
+    opened = _open_synthetic(two_captures_scored, tmp_path)
     store = opened.store
     correction = store.reduction.harmony(_graph_pca(store, opened.graph), ["sample"])
     corrected_neighbors = store.graph.neighbors(

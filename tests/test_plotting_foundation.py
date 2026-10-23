@@ -254,7 +254,10 @@ def test_retired_mapping_plots_are_absent(name):
 
     assert name not in splt.__all__
     assert name not in ALLOWED_PLOTS
-    with pytest.raises(AttributeError):
+    with pytest.raises(
+        AttributeError,
+        match=f"^module 'cytearc.plotting' has no attribute '{name}'$",
+    ):
         getattr(splt, name)
 
 
@@ -1277,9 +1280,10 @@ def test_normalization_spec_supports_raw_and_log1p(datastore):
         cell_idx,
         normalization=splt.NormalizationSpec(transform="log1p"),
     )
-    assert np.array_equal(raw, expected_raw)
-    assert np.allclose(raw_logged, np.log1p(raw))
-    assert np.allclose(logged, np.log1p(normalized))
+    # Both sources take the logarithm of the same float64 values.
+    np.testing.assert_array_equal(raw, expected_raw)
+    np.testing.assert_array_equal(raw_logged, np.log1p(raw))
+    np.testing.assert_array_equal(logged, np.log1p(normalized))
 
 
 def test_figsize_rejected_with_caller_owned_target(synthetic_plot_store):
@@ -1843,7 +1847,9 @@ def test_split_violin_dodges_points_by_split_level(synthetic_plot_store):
             expected = np.sort(values[(groups == group) & (split == level)])
             np.testing.assert_allclose(np.sort(drawn[:, 1]), expected)
             # Dodging puts each level's points on its own side of the group.
-            assert np.all(np.sign(drawn[:, 0] - position) == side)
+            np.testing.assert_array_equal(
+                np.sign(drawn[:, 0] - position), np.full(len(expected), side)
+            )
     # The points add no legend entries of their own.
     assert [text.get_text() for text in ax.get_legend().get_texts()] == [
         "left",
@@ -2221,8 +2227,18 @@ def test_sample_fraction_distribution_drops_missing_sample_ids(
     )
 
     table = result.tables["metricA"]
-    assert {"sample", "group", "value", "display_value", "nCells"} <= set(table)
-    assert table["value"].between(0, 1).all()
+    # Cell 0 has no sample. A cell counts when metricA exceeds 5, which the
+    # values 4 and 5 of cells 4 and 5 do not.
+    assert list(zip(table["sample"], table["group"], table["nCells"], strict=True)) == [
+        ("s1", "group10", 2),
+        ("s2", "group10", 1),
+        ("s2", "group2", 2),
+        ("s3", "group1", 1),
+        ("s3", "group2", 2),
+        ("s4", "group1", 3),
+    ]
+    np.testing.assert_array_equal(table["value"], [1.0, 1.0, 0.0, 0.0, 1.0, 0.0])
+    np.testing.assert_array_equal(table["display_value"], table["value"])
     assert result.provenance.n_samples == 4
     assert result.provenance.extras["dropped_sample_cells"] == 1
     assert result.axes["metricA"].get_ylabel() == "Sample fraction > 5"
@@ -2501,7 +2517,19 @@ def test_per_sample_composition_uses_foreign_panel_and_condition_summary(
     assert result.owns_figure is False
     assert result.figure is figure
     assert set(result.tables) == {"aggregate", "per_sample", "summary"}
-    assert set(result.tables["summary"]["condition"]) == {"control", "treated"}
+    # Each condition holds a sample of 1/3 and one of 2/3 of each category, so
+    # every summary mean is 1/2 and its standard error 1/6.
+    summary = result.tables["summary"]
+    assert list(zip(summary["category"], summary["condition"], strict=True)) == [
+        ("A", "control"),
+        ("A", "treated"),
+        ("B", "control"),
+        ("B", "treated"),
+    ]
+    np.testing.assert_allclose(
+        summary[["mean_proportion", "lower", "upper"]], [[0.5, 1 / 3, 2 / 3]] * 4
+    )
+    assert summary["n_samples"].tolist() == [2] * 4
     assert result.provenance.extras["uncertainty"] == "se"
     assert any(legend.kind == "marker" for legend in result.legends)
     assert (

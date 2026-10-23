@@ -147,8 +147,8 @@ def test_interpolated_loess_blends_vertex_fits_with_cubic_hermite_polynomials() 
     # The root cell spans the data widened by 0.5% of their range, and every
     # leaf holds at most 12 points; a point at a split vertex is in the lower
     # cell.
-    assert vertices[0] == pytest.approx(x[0] - 0.005 * (x[-1] - x[0]))
-    assert vertices[-1] == pytest.approx(x[-1] + 0.005 * (x[-1] - x[0]))
+    assert vertices[0] == pytest.approx(x[0] - 0.005 * (x[-1] - x[0]), rel=1e-12)
+    assert vertices[-1] == pytest.approx(x[-1] + 0.005 * (x[-1] - x[0]), rel=1e-12)
     cells = np.searchsorted(vertices, x, side="left") - 1
     assert np.bincount(cells).max() <= 12
 
@@ -163,7 +163,9 @@ def test_loess_vertices_never_split_tied_values() -> None:
 
 def test_loess_handles_ties_tiny_inputs_and_empty_windows() -> None:
     np.testing.assert_array_equal(fit_loess(np.empty(0), np.empty(0)), np.empty(0))
-    assert fit_loess(np.array([2.0]), np.array([5.0]))[0] == pytest.approx(5.0)
+    assert fit_loess(np.array([2.0]), np.array([5.0]))[0] == pytest.approx(
+        5.0, rel=1e-12
+    )
     # More ties than the window holds: the fit is the mean of the ties.
     x = np.r_[np.zeros(8), np.arange(1.0, 3.0)]
     y = np.r_[np.arange(8.0), 10.0, 20.0]
@@ -248,7 +250,7 @@ def test_seurat_v3_standardized_variance_matches_clipped_z_scores() -> None:
     )
     assert standardized[0] == standardized[1] == 0
     # Only the outlier of gene 20 lies above its clip.
-    assert np.array_equal(np.argwhere(counts > clips), [[7, 20]])
+    np.testing.assert_array_equal(np.argwhere(counts > clips), [[7, 20]])
     with pytest.raises(ValueError, match="at least two cells"):
         seurat_v3_standardized_variance(squares, expected, 1)
     with pytest.raises(ValueError, match="positive mean"):
@@ -387,8 +389,14 @@ def test_selection_with_no_candidate_names_every_filter() -> None:
 
 
 def test_selection_warns_when_fewer_candidates_than_top_n_pass() -> None:
-    messages = _warnings(lambda: _select(top_n=10, min_var=2))
-    assert any("Only 3 features passed" in message for message in messages)
+    selections: list[np.ndarray] = []
+    messages = _warnings(lambda: selections.append(_select(top_n=10, min_var=2)))
+    assert messages == [
+        "Only 3 features passed the HVG candidate filters, fewer than top_n=10; "
+        "all of them are selected"
+    ]
+    # The variances 10, 8, and 6 lie above 2**2 = 4.
+    np.testing.assert_array_equal(selections, [[True, True, True, False, False]])
 
 
 def test_nan_scores_never_pass_the_candidate_filters() -> None:
@@ -434,14 +442,30 @@ def test_batch_ranking_warns_and_fails_loudly() -> None:
             scores, candidates, top_n=2, batch_names=["left", "right"]
         )
     )
-    assert any("Batch 'left' has 1 HVG candidates" in message for message in messages)
+    assert messages == [
+        "Batch 'left' has 1 HVG candidates, fewer than top_n=2; all of them count "
+        "as highly variable in it"
+    ]
 
+    rankings = []
     messages = _warnings(
-        lambda: combine_batch_rankings(
-            scores, np.array([[True, False, False]] * 2), top_n=2
+        lambda: rankings.append(
+            combine_batch_rankings(
+                scores, np.array([[True, False, False]] * 2), top_n=2
+            )
         )
     )
-    assert any("Only 1 features are highly variable" in message for message in messages)
+    # Unnamed batches are named by their position.
+    assert messages == [
+        *(
+            f"Batch '{batch}' has 1 HVG candidates, fewer than top_n=2; all of them "
+            "count as highly variable in it"
+            for batch in (0, 1)
+        ),
+        "Only 1 features are highly variable in some batch, fewer than top_n=2; "
+        "all of them are selected",
+    ]
+    np.testing.assert_array_equal(rankings[0].selected, [True, False, False])
     with pytest.raises(ValueError, match="in any batch"):
         combine_batch_rankings(scores, np.zeros(scores.shape, dtype=bool), top_n=2)
 
@@ -498,17 +522,16 @@ def test_batch_selection_without_candidates_names_every_filter(
 
 
 def test_hvg_options_take_a_flavor_default_min_cells() -> None:
-    assert (
-        hvg_options(
-            min_cells=None,
-            top_n=5,
-            n_bins=20,
-            lowess_frac=0.2,
-            keep_bounds=False,
-            bin_strategy="fixed",
-        ).min_cells
-        is None
+    options = hvg_options(
+        min_cells=None,
+        top_n=5,
+        n_bins=20,
+        lowess_frac=0.2,
+        keep_bounds=False,
+        bin_strategy="fixed",
     )
+    # None is kept for the flavor to resolve, and the other options as given.
+    assert options == (None, 5, 20, 0.2, False, "fixed")
 
 
 _FLAVOR_DEFAULTS: dict[str, Any] = {
@@ -1206,7 +1229,9 @@ def test_small_selections_keep_a_band_of_detection_counts(datastore_ephemeral) -
     store.cells.insert("small", keep, overwrite=True)
     cells = store.snapshot_cell_selection("small")
 
-    ref = store.features.hvgs(cells, top_n=1000, show_plot=False)
+    # The detection bounds do not depend on the trend, so a coarse trend of
+    # few bins, which fits far faster than the default one, selects the genes.
+    ref = store.features.hvgs(cells, top_n=1000, n_bins=20, show_plot=False)
 
     parameters = inspect_artifact(store.zw, ref).parameters
     assert (parameters["min_cells"], parameters["max_cells"]) == (3, 41)

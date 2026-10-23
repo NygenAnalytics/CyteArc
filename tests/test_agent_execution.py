@@ -91,8 +91,11 @@ def _matched() -> tuple[dict[str, Any], dict[str, Any]]:
 def test_harmony_accepts_only_complete_matched_improvement() -> None:
     native, corrected = _matched()
     assert validate_harmony(native, corrected) == []
+    # A gain of 0.04 is not more than 0.05; nothing else about the pair changed.
     corrected["metrics"]["mixing"]["batch"] = 0.34
-    assert any("No batch" in value for value in validate_harmony(native, corrected))
+    assert validate_harmony(native, corrected) == [
+        "No batch mixing measure improved by more than 0.05."
+    ]
 
 
 @pytest.mark.parametrize(
@@ -171,8 +174,12 @@ def test_diagnostic_sampling_is_bounded_stable_and_bound_to_the_gate() -> None:
 
     first = _diagnostic_indices(50000, 4444)
     assert len(first) == 10000
-    assert np.array_equal(first, _diagnostic_indices(50000, 4444))
-    assert len(np.unique(first)) == len(first)
+    np.testing.assert_array_equal(first, _diagnostic_indices(50000, 4444))
+    # Distinct rows of the population, in storage order.
+    assert np.all(np.diff(first) > 0)
+    assert 0 <= first[0] and first[-1] < 50000
+    # A population within the bound is used whole.
+    np.testing.assert_array_equal(_diagnostic_indices(7, 4444), np.arange(7))
     with pytest.raises(ValueError, match="limited to 10000"):
         _diagnostic_graph(
             None,
@@ -183,7 +190,9 @@ def test_diagnostic_sampling_is_bounded_stable_and_bound_to_the_gate() -> None:
         )
     native, corrected = _matched()
     corrected["diagnosticScope"]["cellIdsSha256"] = "another_sample"
-    assert any("sample" in reason for reason in validate_harmony(native, corrected))
+    assert validate_harmony(native, corrected) == [
+        "Correction diagnostics do not share the same frozen sample and method."
+    ]
 
 
 @pytest.mark.parametrize("unscoreable", [True, False])
@@ -232,6 +241,21 @@ def test_candidate_summary_caps_silhouette_and_preserves_unscoreable_partitions(
         AnalysisConfig(),
     )
     assert evidence["silhouetteSampleCells"] == 2000
-    assert len(evidence["partitions"]) == 1
-    assert evidence["partitions"][0]["score"] == (None if unscoreable else 0.3)
-    assert bool(evidence["limitations"]) is unscoreable
+    # The partition is reported with its full-cohort counts either way.
+    assert evidence["partitions"] == [
+        {
+            "optionId": "c0:r0.5",
+            "candidateId": "c0",
+            "resolution": 0.5,
+            "score": None if unscoreable else 0.3,
+            "count": 4000,
+            "clusterCount": 1,
+            "clusterCounts": {"0": 4000},
+            "clusterCountsTruncated": False,
+        }
+    ]
+    assert evidence["limitations"] == (
+        ["No clustering candidate is silhouette-scoreable: one cluster"]
+        if unscoreable
+        else []
+    )

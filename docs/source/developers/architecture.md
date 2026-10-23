@@ -67,7 +67,10 @@ These calls do not create module-load cycles.
   It also owns streamed column moments (`utils/moments.py`) and the one warning helper (`utils/warnings.py`), which points each warning at the caller's code.
   `utils/numba.py` gives third-party Numba kernels compiled without a cache, such as umap-learn's,
   an on-disk cache with its own files for each set of compile options, once per process and before
-  their first use.
+  their first use. `import_umap` imports umap-learn so that the kernels its import compiles, most of
+  them pynndescent's, get that cache too. A lock on each cache directory, which every process
+  shares, keeps those caches' saves atomic, so processes that import at once compile each kernel
+  once.
   Zarr-specific helpers belong in `storage`, not `utils`.
 
 Facade aliases do not change implementation ownership.
