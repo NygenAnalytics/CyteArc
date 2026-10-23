@@ -81,7 +81,10 @@ tsne = [
 test = [
     "pytest>=7.0",
     "pytest-cov>=4",
-    "pytest-xdist>=3",
+    # Workers run every test in their main thread from 3.6 on. Earlier
+    # releases can start a worker's session in another thread, where the
+    # real SIGINT that the interrupt tests send never reaches the test.
+    "pytest-xdist>=3.6",
     "anndata>=0.12",
     "scikit-network>=0.33.3",
     "rdata>=1.1.0",
