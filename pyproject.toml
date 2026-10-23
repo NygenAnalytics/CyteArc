@@ -38,11 +38,15 @@ dependencies = [
     "networkx>=3",
     "numba>=0.61",
     "numcodecs>=0.16",
-    "numpy>=2.1",
+    # numpy 2.2.0 to 2.2.5 bundle OpenBLAS 0.3.28, which crashes once a
+    # process raises its BLAS threads above the count BLAS started with, as
+    # fits with nthreads do under OMP_NUM_THREADS=1.
+    "numpy>=2.1,!=2.2.0,!=2.2.1,!=2.2.2,!=2.2.3,!=2.2.4,!=2.2.5",
     "packaging",
     "pandas>=2.2.3",
     "scikit-learn>=1.5.2",
-    "scipy>=1.15,!=1.17.0",
+    # scipy 1.15.0 to 1.16.1 bundle the same OpenBLAS release.
+    "scipy>=1.16.2,!=1.17.0",
     "statsmodels>=0.14.5",
     "threadpoolctl>=3.5.0",
     "tqdm>=4.60",
