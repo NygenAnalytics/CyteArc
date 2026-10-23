@@ -14,13 +14,7 @@ _DOI_LINK = re.compile(
     r"""(?:https?://(?:dx\.)?doi\.org/|\bdoi:)(10\.\d{4,9}/[^\s)<>\]"']+)""",
     re.IGNORECASE,
 )
-_AGENT_PAGES = {
-    "analysis_with_agents.md",
-    "tutorials/agent_workflow.md",
-    "tutorials/garrido_trigo_agents.md",
-    "developers/agent_decisions.md",
-    "reference/api/agent.md",
-}
+_AGENT_PAGES = {"analysis_with_agents.md"}
 
 
 def _project() -> dict:
@@ -140,9 +134,7 @@ def test_navigation_prioritizes_remote_workflows_and_preserves_tutorials() -> No
         if path.suffix in {".md", ".ipynb"}
     ]
     for tutorial in tutorials:
-        page = tutorial.relative_to(_DOCS_SOURCE).as_posix()
-        if page not in _AGENT_PAGES:
-            assert page in published
+        assert tutorial.relative_to(_DOCS_SOURCE).as_posix() in published
 
 
 def test_focused_scanpy_and_seurat_guides_are_reachable() -> None:
@@ -169,13 +161,8 @@ def test_agent_pages_are_withheld_and_their_sources_are_retained() -> None:
 
 
 def test_public_documentation_does_not_link_to_withheld_agent_pages() -> None:
-    targets = {
-        page.removesuffix(".md")
-        for page in _AGENT_PAGES
-        if not page.startswith("reference/api/")
-    }
+    targets = {page.removesuffix(".md") for page in _AGENT_PAGES}
     targets.update(target.replace("_", "-") for target in list(targets))
-    targets.add("api/agent.html")
     sources = [
         path
         for path in _DOCS_SOURCE.rglob("*")
@@ -188,9 +175,6 @@ def test_public_documentation_does_not_link_to_withheld_agent_pages() -> None:
         contents = _source_text(source)
         for target in targets:
             assert target not in contents, (source, target)
-
-    api_index = (_DOCS_SOURCE / "reference" / "api" / "index.md").read_text()
-    assert "agent" not in api_index.splitlines()
 
 
 def test_installation_uses_one_environment_for_install_and_runtime() -> None:

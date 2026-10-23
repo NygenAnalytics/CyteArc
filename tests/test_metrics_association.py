@@ -119,6 +119,21 @@ def test_eta_squared_rejects_non_numeric_values() -> None:
     assert result["reason"] == "nonNumeric"
 
 
+def test_eta_squared_of_constant_values_is_not_computed() -> None:
+    # Constant values leave no variance for the groups to explain.
+    result = eta_squared(
+        np.array([2.0, 2.0, 2.0, 2.0, np.nan]),
+        np.array(["a", "a", "b", "b", "b"]),
+    )
+
+    assert result == {
+        "status": "notComputed",
+        "reason": "zeroVariance",
+        "rowsUsed": 4,
+        "rowsMissing": 1,
+    }
+
+
 def test_spearman_rho_perfect_monotone() -> None:
     left = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     right = np.array([2.0, 4.0, 6.0, 8.0, 10.0])
@@ -167,6 +182,19 @@ def test_spearman_rho_rejects_non_numeric_values() -> None:
     result = spearman_rho(np.array(["a", "b", "c"]), np.array([1.0, 2.0, 3.0]))
     assert result["status"] == "notComputed"
     assert result["reason"] == "nonNumeric"
+
+
+def test_spearman_rho_of_a_constant_column_is_not_computed() -> None:
+    result = spearman_rho(
+        np.array([1.0, 1.0, 1.0, 1.0]), np.array([1.0, 2.0, 3.0, 4.0])
+    )
+
+    assert result == {
+        "status": "notComputed",
+        "reason": "zeroVariance",
+        "rowsUsed": 4,
+        "rowsMissing": 0,
+    }
 
 
 def test_association_pair_dispatches_kinds() -> None:

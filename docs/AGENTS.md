@@ -4,8 +4,8 @@ These instructions cover documentation sources, notebook execution, and site bui
 
 - Author executable pages as tracked `.ipynb` files in `docs/source/`. Each notebook is the
   page's sole source and contains its prose, code, outputs, and execution metadata.
-- Keep prose guides and API references in Markdown. Excluded agent pages retain their
-  source-only MyST Markdown.
+- Keep prose guides and API references in Markdown. The excluded `analysis_with_agents.md`
+  guide retains its source-only MyST Markdown.
 - Explain each logical step in notebook code with a comment. Put comments on their own lines,
   with a blank line before each comment unless it starts the code cell.
 - MyST builds guides and tutorials. Sphinx builds only `docs/source/reference/api/`.
@@ -18,7 +18,7 @@ These instructions cover documentation sources, notebook execution, and site bui
 Use Node.js 24 and install the Python tools:
 
 ```bash
-uv sync --group docs-modal --extra agent --extra docs --extra test --extra extra
+uv sync --group docs-modal --extra docs --extra test --extra extra
 make -C docs html
 ```
 

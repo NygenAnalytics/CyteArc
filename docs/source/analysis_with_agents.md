@@ -8,8 +8,8 @@ description: Use CyteArc safely in an autonomous or AI-assisted single-cell anal
 This page is a routing and reasoning guide for an AI agent that uses CyteArc to analyse data.
 It does not replace the workflow tutorials or define one correct analysis.
 The study question, experimental design, and user instructions remain authoritative.
-For an executable prepared-store-to-finalization example with saved decisions and reports,
-see [](tutorials/agent_workflow.md).
+For step-by-step recipes, read the `cytearc-single-cell` skill in the repository's `skills/`
+directory.
 
 ## Scope and authority
 
@@ -97,116 +97,6 @@ Before the first mutating operation, make a short execution record containing:
 
 Update this record before changing the cohort, inputs, or decision criteria.
 This prospective boundary makes unintended writes and retrospective justifications visible.
-`cytearc.agent` saves the immutable request, scientific policy, measured evidence, structured
-decisions, validation outcomes, and final references in an external run directory. A compact
-completed result in the local store links to the selected core pipeline and that audit.
-The caller still owns the scientific question and unit of inference.
-
-### When to use the automated agent workflow
-
-Use `analyze_rna` with a prepared local CyteArc RNA store, a configured Pydantic AI model, and a
-`Study`. Input conversion and mounting happen separately. The agent analyzes one selected RNA
-assay, even when other modalities coexist. Automated multimodal integration, HTO assignment,
-subclustering, differential-expression hypothesis testing, and causal inference are outside this
-workflow; ordinary CyteArc APIs remain available for separate analyses.
-
-```python
-from cytearc.agent import AnalysisConfig, Study, analyze_rna
-
-result = analyze_rna(
-    "study.zarr",
-    model=model,
-    study=Study(
-        context="One paragraph describing the study design and metadata roles.",
-        objective="Describe populations and uncertainty relevant to the study.",
-        excludedColumns=["author_annotation"],
-    ),
-    config=AnalysisConfig(assay="RNA"),
-)
-print(result.status)
-report_path = result.report()
-```
-
-Use `await analyze_rna_async(...)` inside a notebook event loop. Unless `run_dir` is supplied,
-the full audit and report go to `agent_runs/<runId>` under the current working directory.
-`AnalysisRun.status` records `running`, `needsInput`, `completed`, `failed`, or `interrupted`.
-An incomplete persisted outcome is inspectable rather than being presented as a completed
-analysis. `open_analysis` reads saved results, and `resume_rna` explicitly continues compatible
-unfinished work. See [Agent analysis API reference](/api/agent.html) and the executable
-[](tutorials/agent_workflow.md) for the complete interface.
-
-During development, new analyses reject prior complete numerical artifacts, including inherited
-mount artifacts. Imported labels and embeddings are permitted. Existing analysis output is not
-deleted. Prepare a clean input separately when necessary; same-run execution and resume can
-reuse the artifacts they created. The input identity, consumed metadata, and CyteArc procedure
-identity are checked before execution and resume.
-
-The scientific procedure is fixed. It freezes the cohort and feature policy, then measures the
-baseline and three independent native probes: HVGs, PCs, and neighbors. Each alternative changes
-one setting from the same baseline. Baseline defaults are 1,000 HVGs, 21 PCs, 11 neighbors, and
-four Leiden resolutions. The model chooses among feasible PC probes, shortlists at most two
-measured partitions, compares their markers and diagnostics, and selects one finalist. An
-eligible optional fifth representation can test Harmony against its exact native counterpart.
-Finalization pins the selected recipe, adds UMAP, and reuses its completed markers.
-
-All graphs, clusters, markers, and final coordinates use the full retained cohort. PC/covariate
-and correction diagnostics read at most 10,000 cells; silhouette assessment uses at most 2,000.
-Same-resolution parent comparisons use aligned full-cohort labels. Infeasible, identical-HVG,
-or failed probes remain visible in `exploration_coverage`. The model cannot replace required
-feasible native probes with an early declaration that defaults are adequate. Seven normal
-pipeline invocations suffice without Harmony, or eight with it; recovery may add invocations.
-These are search limits, not elapsed-time or provider-spending guarantees.
-
-Default QC retains the supplied cohort and flags outliers. Additional global manual or gentle
-MAD filtering requires caller configuration. Projected retention under alternative policies is
-not executed filtering. The HVG blacklist is explicit and normally excludes mitochondrial
-names matching `^mt-`, case-insensitively. Other biological gene families remain included unless
-explicitly excluded. An organism value alone does not supply missing gene definitions.
-
-Supplied sample, capture, technical-batch, and protected roles remain distinct. Inferred sample,
-capture, or protected roles are diagnostic-only and cannot establish replication or permit
-correction; an inferred protected role adds preservation checks only.
-Missing labels and masked values remain missing. Design cross-tabs, gene-family audits, bounded
-PC associations, and finalist group/QC summaries are descriptive evidence, not causal tests.
-Missing replication does not prevent descriptive population discovery.
-
-Harmony requires complete declared batch labels, declared protected biological metadata,
-experimental evidence separating batch from biology, and explicitly enabled doublet scoring.
-Unknown or confounded designs retain native analysis. Corrected acceptance needs an exact native
-pair at the same resolution and passes mixing, preservation, marker, and doublet gates with a
-`0.05` tolerance. Better mixing alone cannot pass those gates. Doublet scoring is never enabled
-implicitly and never removes cells automatically.
-
-The default lenient interaction mode resolves only supported ambiguities through frozen,
-recorded conservative policies. Optional unknown facts stay unknown. Model-declared acceptable
-ties prefer native analysis, then frozen candidate/resolution order. This is not evidence of
-biological superiority. Strict mode keeps those questions pending; essential missing input
-blocks both modes. Provider failure, exhausted request budgets, and invalid structured output
-after one bounded semantic repair remain failures. No unbounded scientific repair loop runs.
-
-Every final cluster receives an annotation record in batches of at most eight. A named identity
-requires at least two observed qualifying supporting markers; unassigned identities remain
-valid outcomes. This validates the cited measurements, not the correctness of the proposed
-identity or every narrative claim. Author labels and explicitly excluded columns are held out
-from decision evidence. Marker support is the fraction of clusters with at least one qualifying
-marker, not a biological-coherence score. Confidence is qualitative.
-
-Complete audit records remain external. Numerical artifacts and pipeline ledgers remain in the
-store. The compact `agent_results/<runId>` summary links the final configuration and selection
-rationale to the external audit; `result.compact_result` reads it after source verification.
-It is not a replacement for full evidence, annotations, or core provenance. The workflow does
-not overwrite live `I`, feature metadata, or annotation columns. Report generation is offline
-and supports every saved outcome; report errors do not downgrade scientific completion.
-
-Prototype orchestrator, standalone-agent, `AutomatedWorkflowResult`, and `AnalysisError` APIs
-are retired. Old histories remain untouched and are not automatically migrated. Current
-resume requires unchanged scientific inputs and procedure/prompt identity, but operational
-settings and the provider can change for unfinished decisions. Visible prompts, responses,
-validation feedback, and available usage are recorded, each bound to its event by a SHA-256.
-Hidden reasoning and credentials are excluded; model settings are saved only by name and digest.
-The Markdown report and CSV exports keep model and dataset text inert. Every provider request
-applies the agent's reasoning-off controls; always-on providers cannot be guaranteed to honor
-them.
 
 ### When to use the pipeline
 
@@ -216,8 +106,7 @@ columns. It scores enabled Leiden resolutions in the same coordinates that built
 Harmony coordinates or, with `pca_dims=0`, the normalized values), persists the decision as
 `run["cluster_selection"]`, and exposes the selected Leiden candidate ref as `run["clusters"]`.
 Paris remains `run["paris"]` for diagnosis. Silhouette supplies a reproducible baseline, not
-validation or ground truth. The agent uses this pipeline for numerical execution, compares its
-measured alternatives, and pins its final chosen resolution.
+validation or ground truth.
 
 Use `run.cells` and `run.features` for frozen inspection. Keep presentation and storage mutation on
 the datastore: `ds.plots.embedding(run=run, ...)`, `ds.markers.load(marker=run["markers"], ...)`,
@@ -362,11 +251,7 @@ Classify the problem before retrying:
 - **Scientific ambiguity:** preserve branches, seek another independent form of evidence, narrow the claim, or report that the available design does not resolve the alternatives.
 
 In a granular workflow, retry the lowest failed stage. A failed pipeline run is not resumable;
-start a new run, which can reuse matching complete artifacts from the earlier attempt. An automated
-agent workflow validates its exact request and stage history before reusing completed work or
-resuming an interruption. Explicit questions require grounded answers through `resume_rna`.
-Changed scientific inputs or CyteArc procedure identity require a new run. Provider and operational
-settings may change for unfinished decisions, with the new invocation recorded.
+start a new run, which can reuse matching complete artifacts from the earlier attempt.
 
 ## Progress and deterministic comparisons
 
@@ -395,8 +280,4 @@ A useful handoff reports:
 
 Artifact provenance records how CyteArc produced a result.
 It does not replace this study-level reasoning record.
-For an automated run, the result's plotting, markers, and report helpers resolve the exact final
-artifacts from the authoritative stage history. The result is a small address, not a second saved
-copy of requests, reports, decisions, or finalization state. The HTML report is a replaceable
-presentation of that history.
 See [](reference/methods.md) for the implemented methods and current boundaries.

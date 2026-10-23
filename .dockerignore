@@ -68,7 +68,4 @@ cellxgene_cytebase/datasets
 cytebase_analysis
 cytearc/cytebase/collection
 cytearc/cytebase/README.md
-cytearc/agent/*.md
-!cytearc/agent/README.md
-!cytearc/agent/VALIDATION.md
 performance_reconfig.md

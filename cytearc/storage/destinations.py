@@ -35,9 +35,7 @@ _METADATA_DOCUMENTS = frozenset({"zarr.json", ".zgroup", ".zattrs", ".zmetadata"
 _ARRAY_DOCUMENTS = frozenset({"zarr.json", ".zarray", ".zattrs"})
 _CHUNK_ENTRY = re.compile(r"c|\d+(\.\d+)*")
 # Groups that CyteArc writes besides assays, at the root or in a workspace.
-_CYTEARC_GROUPS = frozenset(
-    {"cellData", "matrices", "artifacts", "pipeline", "agent_results"}
-)
+_CYTEARC_GROUPS = frozenset({"cellData", "matrices", "artifacts", "pipeline"})
 
 
 def _enclosing_store(path: Path) -> Path | None:
