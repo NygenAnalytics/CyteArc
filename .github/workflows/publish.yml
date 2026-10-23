@@ -73,7 +73,7 @@ jobs:
       uses: astral-sh/setup-uv@v9.0.0
       with:
         python-version: "3.14"
-        version: "0.13.0"
+        version: "0.13.5"
     - name: Require clean git state before build
       run: |
         echo "::group::git status --porcelain=v1"
@@ -170,7 +170,7 @@ jobs:
       uses: astral-sh/setup-uv@v9.0.0
       with:
         python-version: ${{ matrix.python-version }}
-        version: "0.13.0"
+        version: "0.13.5"
     - name: Download the distribution packages
       uses: actions/download-artifact@v8
       with:
