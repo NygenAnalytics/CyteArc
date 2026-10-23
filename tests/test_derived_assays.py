@@ -116,7 +116,7 @@ def test_add_grouped_assay_failure_leaves_store_openable_and_retryable(tmp_path)
     original = _corrupt(shard)
 
     # A damaged count shard fails the read after the new assay was created.
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Stored and computed checksum do not match"):
         store.add_grouped_assay("module", assay_label="MODULES")
 
     root = zarr.open_group(str(path), mode="r")
@@ -175,7 +175,8 @@ def test_add_melded_assay_failure_is_rolled_back(tmp_path):
         "renormalization": False,
     }
 
-    with pytest.raises(ValueError):
+    # The damaged count shard fails the read of the gene scores.
+    with pytest.raises(ValueError, match="Stored and computed checksum do not match"):
         store.add_melded_assay(**arguments)
 
     root = zarr.open_group(str(path), mode="r")
@@ -309,13 +310,13 @@ def test_derived_assays_measure_the_cells_of_their_source_assay(tmp_path, partia
         assert not _stored_counts(reopened, label)[~_MEMBERS].any()
 
 
-@pytest.mark.parametrize("writer", ["subset", "merge", "mount"])
-def test_writers_refuse_a_source_with_a_pending_derived_assay(tmp_path, writer):
-    from cytearc.datastore.datastore import mount_datastore
-    from cytearc.merge import DataStoreMerge
-    from cytearc.writers import SubsetZarr
+@pytest.fixture(scope="module")
+def pending_source(tmp_path_factory) -> Iterator[tuple[Path, DataStore]]:
+    """A store whose derived assay a hard kill left pending.
 
-    path = tmp_path / "rna.zarr"
+    The writers that read it refuse it without a change, so it is written once.
+    """
+    path = tmp_path_factory.mktemp("pending_source") / "rna.zarr"
     store = _write_store(path, _counts())
     store.RNA.feats.insert("module", np.repeat([1, 2], 6), overwrite=True)
     # A hard kill inside the transaction never runs its cleanup; keep the
@@ -326,6 +327,19 @@ def test_writers_refuse_a_source_with_a_pending_derived_assay(tmp_path, writer):
     context.__enter__().create_counts(
         store.cells.N, ["group_1"], ["group_1"], np.float64
     )
+    yield path, store
+    del context
+
+
+@pytest.mark.parametrize("writer", ["subset", "merge", "mount"])
+def test_writers_refuse_a_source_with_a_pending_derived_assay(
+    pending_source, tmp_path, writer
+):
+    from cytearc.datastore.datastore import mount_datastore
+    from cytearc.merge import DataStoreMerge
+    from cytearc.writers import SubsetZarr
+
+    path, store = pending_source
     destination = tmp_path / "out.zarr"
     operation, subject = {
         "subset": ("subset", "The source store"),
@@ -1013,9 +1027,15 @@ def test_grouped_assay_from_aggregation_ignores_unclustered_features(
     copy = tmp_path / "copy.zarr"
     shutil.copytree(datastore.zarr_loc, copy)
     store = DataStore(str(copy), default_assay="RNA")
+    # Three hundred of the detected features aggregate quickly, and a minimum
+    # mean expression leaves most of them unclustered.
+    detected = np.flatnonzero(
+        store.artifacts.load(source.feature_selection)["values"][:]
+    )
     aggregation = store.trajectory.aggregation(
         source.pseudotime,
-        features=source.feature_selection,
+        features=store.features.snapshot(feature_indexes=detected[:300]),
+        min_exp=0.05,
         n_clusters=15,
         window_size=50,
         chunk_size=10,
@@ -1023,6 +1043,8 @@ def test_grouped_assay_from_aggregation_ignores_unclustered_features(
     )
     loaded = store.trajectory.load_aggregation(aggregation)
     clusters = sorted(set(loaded.feature_clusters.tolist()))
+    # The loaded aggregation lists only the features that it clustered.
+    assert 15 <= len(loaded.feature_indices) < 300
     assert 0 not in clusters
 
     with pytest.raises(ValueError, match="exclude_values"):

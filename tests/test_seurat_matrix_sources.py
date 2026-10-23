@@ -6252,6 +6252,61 @@ def test_bp128_decode_reports_the_first_failing_block() -> None:
         decode_bp128(data, indexes, 256, transform="m1", start=128)
 
 
+@pytest.mark.parametrize("transform", ["plain", "m1", "d1", "d1z"])
+def test_block_by_block_bp128_decode_matches_the_bulk_decode(monkeypatch, transform):
+    import cytearc.readers._seurat.bpcells as bpcells_module
+
+    # Only windows that cannot decode in bulk take the block-by-block path,
+    # and each of those fails at some block; here every window takes it.
+    values = _bp128_stream(1000, transform, seed=7)
+    data, indexes, offsets, starts = _encode_bp128(values, transform)
+    if transform not in {"d1", "d1z"}:
+        starts = None
+    windows = [(0, 1000), (121, 143), (127, 513), (999, 1000)]
+    bulk = [
+        decode_bp128(
+            data,
+            indexes,
+            1000,
+            index_offsets=offsets,
+            transform=transform,
+            starts=starts,
+            start=start,
+            stop=stop,
+        )
+        for start, stop in windows
+    ]
+    monkeypatch.setattr(bpcells_module, "_decodes_in_bulk", lambda *_args: False)
+    for (start, stop), expected in zip(windows, bulk, strict=True):
+        decoded = decode_bp128(
+            data,
+            indexes,
+            1000,
+            index_offsets=offsets,
+            transform=transform,
+            starts=starts,
+            start=start,
+            stop=stop,
+        )
+        assert decoded.dtype == np.uint32
+        np.testing.assert_array_equal(decoded, expected)
+        if transform != "d1":
+            np.testing.assert_array_equal(decoded, values[start:stop])
+
+    # A d1z start that takes a value below zero fails as in bulk.
+    negative = _pack_bp128_block(np.r_[np.uint32(1), np.zeros(127, dtype=np.uint32)])
+    with pytest.raises(
+        MatrixSourceError, match="^BP128 d1z decode leaves uint32 range$"
+    ):
+        decode_bp128(
+            negative,
+            np.asarray([0, negative.size], dtype=np.uint32),
+            1,
+            transform="d1z",
+            starts=np.asarray([0], dtype=np.uint32),
+        )
+
+
 def test_bpcells_indexes_are_validated_at_the_first_read_of_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

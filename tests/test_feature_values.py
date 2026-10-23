@@ -315,14 +315,12 @@ def test_feature_reads_accept_eager_normalized_values(feature_store, monkeypatch
     )
 
 
+# The other fixtures already read counts or hold a membership mask.
+@pytest.mark.parametrize("feature_store", ["columns"], indirect=True)
 def test_feature_reads_plan_counts_when_transpose_buffers_do_not_fit(
     feature_store, monkeypatch
 ):
-    store, measured, geometry = feature_store
-    if geometry != "columns":
-        pytest.skip(
-            "The selected fixture already uses counts or holds a membership mask"
-        )
+    store, _, _ = feature_store
     cells = np.arange(store.cells.N)
     expected = store.RNA.normed(cells, np.array([7])).compute(nthreads=1)
     budget = ResourceBudget(8_000, 1)
@@ -336,12 +334,9 @@ def test_feature_reads_plan_counts_when_transpose_buffers_do_not_fit(
     assert {report.unitKind for report in reports} == {"countsRowBlock"}
 
 
+@pytest.mark.parametrize("feature_store", ["columns"], indirect=True)
 def test_feature_transpose_read_errors_propagate(feature_store, monkeypatch):
-    store, _, geometry = feature_store
-    if geometry != "columns":
-        pytest.skip(
-            "The selected fixture already uses counts or holds a membership mask"
-        )
+    store, _, _ = feature_store
     from zarr.core.array import AsyncArray
 
     read = AsyncArray.get_orthogonal_selection

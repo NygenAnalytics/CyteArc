@@ -245,7 +245,10 @@ def test_a_local_cache_path_is_opened_as_it_is_written(tmp_path: Path) -> None:
     # Before, Zarr read the string as a URL and opened, with mode "w", and so
     # emptied, <tmp>/run.
     staged = create_or_open_staged_normed_array(str(cache), (2, 3))
+    staged[:] = np.arange(6).reshape(2, 3)
     staged.attrs["complete"] = True
-    assert (tmp_path / "run" / "keep.txt").is_file()
+    assert (cache / "zarr.json").is_file()
+    assert _files(tmp_path / "run") == {"keep.txt": b"\0"}
     reopened = create_or_open_staged_normed_array(str(cache), (2, 3))
     assert reopened.attrs["complete"] is True
+    np.testing.assert_array_equal(reopened[:], np.arange(6).reshape(2, 3))

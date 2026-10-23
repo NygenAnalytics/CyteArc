@@ -108,8 +108,9 @@ def test_repack_store_round_trip(toy_crdir_writer, tmp_path):
         dst_assay = dst[assay_name]
         assert src_assay.attrs.get("is_assay") is True
         assert "counts" in dst_assay
-        assert src_assay["counts"].shape == dst_assay["counts"].shape
-        assert (src_assay["counts"][...] == dst_assay["counts"][...]).all()
+        np.testing.assert_array_equal(
+            dst_assay["counts"][...], src_assay["counts"][...]
+        )
         # The copy keeps the identities that saved artifacts are bound to.
         assert dst_assay["counts"].dtype == src_assay["counts"].dtype
         assert (

@@ -23,7 +23,7 @@ def dummy_metadata(tmp_path):
 
 def test_metadata_attrs(dummy_metadata):
     assert dummy_metadata.N == 9
-    assert np.all(dummy_metadata.index == np.array(range(9)))
+    np.testing.assert_array_equal(dummy_metadata.index, np.arange(9))
 
 
 def test_metadata_fetch(dummy_metadata):
@@ -75,8 +75,13 @@ def test_metadata_insert_encodes_none_as_missing_text(dummy_metadata):
 
 
 def test_metadata_active_index(dummy_metadata):
-    a = np.array([0, 1, 2, 3, 6, 7, 8])
-    assert np.all(dummy_metadata.active_index(key="I") == a)
+    dummy_metadata.insert("tail", np.arange(9) >= 6)
+
+    active = dummy_metadata.active_index(key="I")
+    # Positions are global row indices, as integers that index other columns.
+    np.testing.assert_array_equal(active, [0, 1, 2, 3, 6, 7, 8])
+    assert active.dtype.kind == "i"
+    np.testing.assert_array_equal(dummy_metadata.active_index(key="tail"), [6, 7, 8])
 
 
 def test_metadata_partial_float_fill_does_not_cast_uninitialized_values(dummy_metadata):

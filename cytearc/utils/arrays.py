@@ -377,5 +377,5 @@ def rolling_window(a: np.ndarray, w: int) -> np.ndarray:
     if _rollingWindowImpl is None:
         from numba import jit
 
-        _rollingWindowImpl = jit(nopython=True)(_rolling_window_kernel)
+        _rollingWindowImpl = jit(nopython=True, cache=True)(_rolling_window_kernel)
     return np.asarray(_rollingWindowImpl(a, w))

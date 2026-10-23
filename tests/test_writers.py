@@ -500,8 +500,12 @@ def test_h5ad_import_returns_cold_loadable_analytical_artifacts(
     assert set(result.clusterArtifacts) == {"leiden"}
     assert {ref.kind for ref in result.embeddingArtifacts.values()} == {"embedding"}
     assert result.clusterArtifacts["leiden"].kind == "cluster_labels"
-    with pytest.raises(TypeError):
-        result.embeddingArtifacts["alias"] = result.embeddingArtifacts["X_umap"]  # type: ignore[index]
+    # The result's artifact mappings are read-only views.
+    for artifacts in (result.embeddingArtifacts, result.clusterArtifacts):
+        with pytest.raises(
+            TypeError, match="^'mappingproxy' object does not support item assignment$"
+        ):
+            artifacts["alias"] = result.cellSelection  # type: ignore[index]
 
     root = zarr.open_group(str(destination), mode="r")
     cells = root["cellData"]
@@ -1810,14 +1814,27 @@ def test_v2_fixture_read_only(datastore):
 _TOY_RNA_COUNTS = np.array([[5, 0, 0, 2], [3, 3, 0, 7], [3, 3, 0, 7]])
 
 
+@pytest.fixture(scope="module")
+def prepared_toy_store(toy_crdir_writer, tmp_path_factory):
+    """A copy of the toy store, prepared once, that tests copy before opening."""
+    import shutil
+
+    from cytearc.datastore.datastore import DataStore
+
+    location = tmp_path_factory.mktemp("prepared_toy") / "export_toy.zarr"
+    shutil.copytree(toy_crdir_writer, location)
+    DataStore(str(location), default_assay="RNA", min_features_per_cell=0, nthreads=1)
+    return location
+
+
 @pytest.fixture
-def export_assay_store(toy_crdir_writer, tmp_path):
+def export_assay_store(prepared_toy_store, tmp_path):
     import shutil
 
     from cytearc.datastore.datastore import DataStore
 
     destination = tmp_path / "export_toy.zarr"
-    shutil.copytree(toy_crdir_writer, destination)
+    shutil.copytree(prepared_toy_store, destination)
     return DataStore(
         str(destination),
         default_assay="RNA",

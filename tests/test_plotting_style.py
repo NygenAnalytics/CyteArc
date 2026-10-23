@@ -52,8 +52,12 @@ def test_palette_for_n_falls_back_to_evenly_spaced_hues():
 @pytest.mark.parametrize("palette_name", ["default", "colorblind"])
 @pytest.mark.parametrize("size", [8, 30, 110])
 def test_palette_for_n_never_recycles_colors(size, palette_name):
+    from matplotlib.colors import to_hex
+
     colors = palette_for_n(size, palette_name=palette_name)
-    assert len(set(colors)) == size
+    assert len(colors) == size
+    # Tables spell hex codes in either case, so compare the colors themselves.
+    assert len({to_hex(color) for color in colors}) == size
 
 
 def test_side_legend_columns_stay_page_sized():

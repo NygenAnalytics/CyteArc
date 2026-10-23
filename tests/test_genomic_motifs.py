@@ -285,7 +285,7 @@ def test_reverse_complement_matrix_scores_the_other_strand():
     rc = reverse_complement_matrix(matrix)
     rc_score = sum(rc[row, code] for row, code in enumerate(sequence))
 
-    assert rc_score == pytest.approx(forward_score)
+    assert rc_score == pytest.approx(forward_score, rel=1e-12)
 
 
 def _brute_force_matches(sequences, matrices, thresholds):
@@ -477,7 +477,7 @@ def test_match_motifs_finds_planted_sites_on_both_strands(tmp_path, bg):
     assert network["target"].tolist() == ["chr1:0-300", "chr1:450-700"]
     assert set(network["source"]) == {"M1"} and set(network["motif_name"]) == {"POU"}
     frequencies = nucleotide_frequencies(sequences)
-    assert frequencies.sum() == pytest.approx(1.0)
+    assert frequencies.sum() == pytest.approx(1.0, rel=1e-12)
     assert np.all(frequencies > 0.2)
 
 

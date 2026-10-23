@@ -547,19 +547,21 @@ def test_embedding_feature_matrix_prefetch_batches_feature_slots(monkeypatch):
     assert prefetched[2][1:] == ("gene_b", False, False)
 
 
-@pytest.mark.parametrize("source", ["raw", "assay"])
-@pytest.mark.parametrize("facet", [False, True])
-def test_embedding_reads_only_displayed_independent_features(
-    tmp_path, monkeypatch, source, facet
-):
+@pytest.fixture(scope="module")
+def partially_measured_store(tmp_path_factory):
+    """Thirty cells and four RNA features; RNA did not measure cells 6 and 27.
+
+    The cells carry an ``xy`` layout, a ``keep`` flag on the first nine and a
+    ``group`` that is "B" on every third cell. The tests that use the store
+    only read it, so they share it rather than each writing their own.
+    """
     import zarr
 
     from cytearc import DataStore
     from cytearc.metadata.membership import membership_attributes
     from tests.storage_helpers import write_count_store
 
-    module = import_module("cytearc.plotting.embedding")
-    path = str(tmp_path / "cells.zarr")
+    path = str(tmp_path_factory.mktemp("partially_measured") / "cells.zarr")
     counts = np.random.default_rng(54).integers(0, 20, size=(30, 4), dtype=np.uint16)
     counts[[6, 27]] = 0
     write_count_store(path, {"RNA": counts}, "uint16")
@@ -576,6 +578,16 @@ def test_embedding_reads_only_displayed_independent_features(
         "group": np.where(np.arange(30) % 3 == 0, "B", "A"),
     }.items():
         store.cells.insert(name, values)
+    return store
+
+
+@pytest.mark.parametrize("source", ["raw", "assay"])
+@pytest.mark.parametrize("facet", [False, True])
+def test_embedding_reads_only_displayed_independent_features(
+    partially_measured_store, monkeypatch, source, facet
+):
+    module = import_module("cytearc.plotting.embedding")
+    store = partially_measured_store
     fetched = []
     fetch = module.fetch_normalized_feature_matrix
 
@@ -634,16 +646,18 @@ def test_embedding_reads_only_displayed_independent_features(
         result.close()
 
 
-@pytest.mark.parametrize("normalizer", ["clr", "custom", "clipped"])
-def test_embedding_subset_keeps_normalization_and_clipping_context(
-    tmp_path, monkeypatch, normalizer
-):
+@pytest.fixture(scope="module")
+def three_kept_cells_store(tmp_path_factory):
+    """Thirty cells of four RNA features, each count at least one.
+
+    The cells carry an ``xy`` layout and a ``keep`` flag on the first three.
+    Tests share the store and change its normalizer only through
+    ``monkeypatch``, which restores it.
+    """
     from cytearc import DataStore
-    from cytearc.assay.normalization import norm_clr
     from tests.storage_helpers import write_count_store
 
-    module = import_module("cytearc.plotting.embedding")
-    path = str(tmp_path / "cells.zarr")
+    path = str(tmp_path_factory.mktemp("three_kept_cells") / "cells.zarr")
     counts = np.random.default_rng(54).integers(1, 20, size=(30, 4), dtype=np.uint16)
     write_count_store(path, {"RNA": counts}, "uint16")
     store = DataStore(path, min_features_per_cell=-1, nthreads=1)
@@ -653,10 +667,25 @@ def test_embedding_subset_keeps_normalization_and_clipping_context(
         "keep": np.arange(30) < 3,
     }.items():
         store.cells.insert(name, values)
+    return store
+
+
+@pytest.mark.parametrize("normalizer", ["clr", "custom", "clipped"])
+def test_embedding_subset_keeps_normalization_and_clipping_context(
+    three_kept_cells_store, monkeypatch, normalizer
+):
+    from cytearc.assay.normalization import norm_clr
+
+    module = import_module("cytearc.plotting.embedding")
+    store = three_kept_cells_store
     if normalizer == "clr":
-        store.RNA.normMethod = norm_clr
+        monkeypatch.setattr(store.RNA, "normMethod", norm_clr)
     elif normalizer == "custom":
-        store.RNA.normMethod = lambda _assay, values: values / values.mean(axis=0)
+        monkeypatch.setattr(
+            store.RNA,
+            "normMethod",
+            lambda _assay, values: values / values.mean(axis=0),
+        )
     original = store.RNA.normed(
         cell_idx=np.arange(30), feat_idx=np.asarray([0])
     ).compute()[:, 0]
@@ -897,8 +926,12 @@ def test_embedding_facets_preserve_sizes_filters_and_target_legend():
             axis.collections[0].get_sizes(),
             sizes[cells[np.argsort(rank[cells], kind="stable")]],
         )
+    # One legend of both categories sits beside the last facet.
     assert target_axes[0].get_legend() is None
-    assert target_axes[1].get_legend() is not None
+    assert [text.get_text() for text in target_axes[1].get_legend().get_texts()] == [
+        "a",
+        "b",
+    ]
     assert result.provenance.extras["highlight"]["n_highlighted"] == 4
     result.close()
     assert plt.fignum_exists(figure.number)
@@ -1589,8 +1622,11 @@ def test_stacked_violin_can_share_value_scale():
     shared.close()
 
     independent = _stacked(store, ["metric", "metric2"])
-    limits = [axis.get_ylim() for axis in independent.axes.values()]
-    assert limits[0] != pytest.approx(limits[1])
+    # Otherwise each row spans its own values, 0 to 11 and 0 to 110.
+    assert [axis.get_ylim() for axis in independent.axes.values()] == [
+        pytest.approx((-0.55, 11.55)),
+        pytest.approx((-5.5, 115.5)),
+    ]
     independent.close()
 
 
@@ -2259,7 +2295,7 @@ def test_stacked_violin_mean_color_constant_row():
     )
     try:
         table = result.tables["constant"]
-        assert (table["display_value"] == 0).all()
+        np.testing.assert_array_equal(table["display_value"], np.zeros(12))
         # Tied means follow the shared limit policy: the tied value takes the
         # low end and the colourbar still renders a unit range.
         assert result.provenance.extras["vmin"] == pytest.approx(0.0)

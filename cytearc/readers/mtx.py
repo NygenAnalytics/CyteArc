@@ -1527,12 +1527,18 @@ class _MtxEngine:
             mmap.close()
 
     def release(self) -> None:
+        prepared = self._csrDirectory is not None
         for array in (self._csrData, self._csrIndices, self._csrIndptr):
             self._close_array(array)
         self._csrData = None
         self._csrIndices = None
         self._csrIndptr = None
-        gc.collect()
+        if prepared:
+            # A view of the prepared rows that a reference cycle still holds
+            # keeps its file mapped, which Windows cannot remove. Without
+            # prepared rows nothing is mapped, and a full collection would
+            # walk every object of the process.
+            gc.collect()
         if self._csrFinalizer is not None:
             self._csrFinalizer.detach()
             self._csrFinalizer = None

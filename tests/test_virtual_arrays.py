@@ -120,20 +120,25 @@ def test_chunked_arrays_read_virtual_arrays_through_their_reader(virtual):
 
 
 @pytest.mark.parametrize(
-    ("rows", "columns"),
+    ("rows", "columns", "extent"),
     (
-        (slice(None), np.array([9, 10])),
-        (slice(None), np.array([10, 11])),
-        (np.array([11, 12]), slice(None)),
+        (slice(None), np.array([9, 10]), 10),
+        (slice(None), np.array([10, 11]), 10),
+        (np.array([11, 12]), slice(None), 12),
     ),
 )
-def test_read_selection_rejects_out_of_range_index_runs(plain, rows, columns):
-    with pytest.raises(IndexError):
+def test_read_selection_rejects_out_of_range_index_runs(plain, rows, columns, extent):
+    # Zarr's bounds check names the length of the axis that the run leaves.
+    with pytest.raises(
+        IndexError, match=f"^index out of bounds for dimension with length {extent}$"
+    ):
         read_selection(plain, rows, columns)
 
 
 def test_chunked_arrays_reject_out_of_range_columns(plain):
-    with pytest.raises(IndexError):
+    with pytest.raises(
+        IndexError, match="^index out of bounds for dimension with length 10$"
+    ):
         ChunkedArray(plain, cols=np.array([9, 10])).compute()
 
 
@@ -230,24 +235,46 @@ def test_sharded_reads_never_send_index_arrays_on_both_axes_to_zarr(monkeypatch)
     monkeypatch.setattr(zarr.Array, "get_orthogonal_selection", record)
     # Zarr reads negative indices and boolean masks itself.
     for name, (rows, columns) in INDEX_ARRAYS.items():
-        if name not in ("negative", "masks"):
-            read_selection(array, rows, columns)
-
-    assert selections
-    assert not any(
-        all(isinstance(axis, np.ndarray) for axis in selection)
-        for selection in selections
-    )
+        if name in ("negative", "masks"):
+            continue
+        selections.clear()
+        np.testing.assert_array_equal(
+            read_selection(array, rows, columns), BANDED[rows][:, columns]
+        )
+        # Every read of a band slices one axis and indexes the other.
+        assert selections, name
+        for selection in selections:
+            assert {type(axis) for axis in selection} == {slice, np.ndarray}, name
 
 
 @pytest.mark.parametrize(
-    ("rows", "columns"),
+    ("rows", "columns", "message"),
     (
-        (np.array([0, 40]), np.array([1, 3])),
-        (np.array([0, 2]), np.array([3, 36])),
-        (np.array([-41, 2]), np.array([1, 3])),
-        (np.array([0, 2], dtype=np.uint64), np.array([1, 2**63], dtype=np.uint64)),
-        (np.ones(39, dtype=bool), np.array([1, 3])),
+        (
+            np.array([0, 40]),
+            np.array([1, 3]),
+            "index out of bounds for dimension with length 40",
+        ),
+        (
+            np.array([0, 2]),
+            np.array([3, 36]),
+            "index out of bounds for dimension with length 36",
+        ),
+        (
+            np.array([-41, 2]),
+            np.array([1, 3]),
+            "index out of bounds for dimension with length 40",
+        ),
+        (
+            np.array([0, 2], dtype=np.uint64),
+            np.array([1, 2**63], dtype=np.uint64),
+            "index out of bounds for dimension with length 36",
+        ),
+        (
+            np.ones(39, dtype=bool),
+            np.array([1, 3]),
+            "Boolean array has the wrong length for dimension; expected 40, got 39",
+        ),
     ),
     ids=(
         "row past the end",
@@ -257,8 +284,10 @@ def test_sharded_reads_never_send_index_arrays_on_both_axes_to_zarr(monkeypatch)
         "short row mask",
     ),
 )
-def test_read_selection_rejects_index_arrays_outside_the_axes(banded, rows, columns):
-    with pytest.raises(IndexError):
+def test_read_selection_rejects_index_arrays_outside_the_axes(
+    banded, rows, columns, message
+):
+    with pytest.raises(IndexError, match=f"^{message}$"):
         read_selection(banded, rows, columns)
 
 

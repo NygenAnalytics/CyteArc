@@ -1,5 +1,6 @@
 """On-disk caching of Numba kernels that third-party packages compile without it."""
 
+import importlib
 import json
 import math
 import subprocess
@@ -265,7 +266,7 @@ def _layout(graph: sparse.coo_matrix, *, parallel: bool) -> np.ndarray:
 
 def _umap_kernel(name: str) -> Any:
     module, attribute = UMAP_KERNELS[name]
-    return getattr(sys.modules[module], attribute)
+    return getattr(importlib.import_module(module), attribute)
 
 
 def run_umap_kernels() -> dict[str, Any]:
@@ -308,7 +309,7 @@ def _fresh_umap_kernels(monkeypatch: pytest.MonkeyPatch) -> None:
         fresh = type(kernel)(
             kernel.py_func, locals=kernel.locals, targetoptions=kernel.targetoptions
         )
-        monkeypatch.setattr(sys.modules[module], attribute, fresh)
+        monkeypatch.setattr(importlib.import_module(module), attribute, fresh)
 
 
 def test_connectivity_and_umap_layouts_cache_their_umap_learn_kernels() -> None:
@@ -350,6 +351,10 @@ import umap.umap_
 
 from tests.test_numba_dispatcher_cache import run_umap_kernels
 
+# Importing umap-learn compiles pynndescent's kernels, which takes about as
+# long as the first process takes to compile umap-learn's, so this process
+# imports it meanwhile and waits until the first process has saved them.
+sys.stdin.readline()
 # The kernels compiled with cache=True have their caches by now, so only the
 # caches enabled from here on, those of the umap-learn kernels, use this one.
 numba.config.CACHE_DIR = sys.argv[1]
@@ -361,20 +366,28 @@ print(json.dumps(run_umap_kernels()))
 def test_a_later_process_loads_the_umap_learn_kernels_from_disk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # This process compiles the kernels as a first process does, into a cache
-    # directory of their own.
-    _fresh_umap_kernels(monkeypatch)
-    monkeypatch.setattr(numba.config, "CACHE_DIR", str(tmp_path))
-    first = run_umap_kernels()
-
-    process = subprocess.run(
+    later_process = subprocess.Popen(
         [sys.executable, "-c", _LATER_PROCESS, str(tmp_path)],
-        check=True,
         cwd=REPOSITORY_ROOT,
-        capture_output=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
     )
-    later = json.loads(process.stdout.splitlines()[-1])
+    try:
+        # This process compiles the kernels as a first process does, into a
+        # cache directory of their own.
+        _fresh_umap_kernels(monkeypatch)
+        monkeypatch.setattr(numba.config, "CACHE_DIR", str(tmp_path))
+        first = run_umap_kernels()
+    except BaseException:
+        later_process.kill()
+        later_process.communicate()
+        raise
+    # The later process reads the cache only once the kernels are saved.
+    stdout, stderr = later_process.communicate("\n")
+    assert later_process.returncode == 0, stderr
+    later = json.loads(stdout.splitlines()[-1])
 
     for result in (first, later):
         assert set(result["cachePaths"]) == set(UMAP_KERNELS)

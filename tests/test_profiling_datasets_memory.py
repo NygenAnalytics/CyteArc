@@ -74,11 +74,19 @@ def test_write_from_memory_selects_exact_source_rows(tmp_path: Path) -> None:
             shape=(60, 20),
         )[rows]
         expected_ids = h5["obs/_index"][:][rows]
+        source_dtypes = [
+            h5[f"X/{name}"].dtype for name in ("data", "indices", "indptr")
+        ]
     with h5py.File(sample_path, "r") as h5:
-        assert np.array_equal(h5["X/data"][:], expected.data)
-        assert np.array_equal(h5["X/indices"][:], expected.indices)
-        assert np.array_equal(h5["X/indptr"][:], expected.indptr)
-        assert np.array_equal(h5["obs/_index"][:], expected_ids)
+        np.testing.assert_array_equal(h5["X/data"][:], expected.data)
+        np.testing.assert_array_equal(h5["X/indices"][:], expected.indices)
+        np.testing.assert_array_equal(h5["X/indptr"][:], expected.indptr)
+        np.testing.assert_array_equal(h5["obs/_index"][:], expected_ids)
+        # The sample keeps the source dtypes, not the int32 indices in memory.
+        assert (memory.indices.dtype, source_dtypes[1]) == (np.int32, np.int64)
+        assert [
+            h5[f"X/{name}"].dtype for name in ("data", "indices", "indptr")
+        ] == source_dtypes
     assert written.nnz == expected.nnz
     assert written.sourceRowsSha256 == ordered_source_row_digest(rows)
     assert written.finalSourceRow == int(rows[-1])
@@ -213,7 +221,7 @@ def test_prepare_records_identity_and_skips_without_source_io(sample_preparation
     shutil.rmtree(app._WORK)
     skipped = app.prepare_datasets.local(config.model_dump())
     assert skipped["uploaded"] == []
-    assert len(skipped["skipped"]) == 2
+    assert [item["nRows"] for item in skipped["skipped"]] == [10, 25]
     assert skipped["sourceOrigin"] == "not-needed"
     assert skipped["sourceSha256"] == source_sha
     assert not app._WORK.exists()

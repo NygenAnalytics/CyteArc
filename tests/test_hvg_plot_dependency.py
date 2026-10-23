@@ -78,3 +78,8 @@ def test_hvgs_without_matplotlib_and_without_a_plot_do_not_warn(
         warnings.simplefilter("error")
         ref = _hvgs(store, show_plot=False)
     assert ref.kind == "feature_selection"
+    # The selection was saved once and holds its top_n genes.
+    assert (
+        store.artifacts.list(kind="feature_selection", from_assay="RNA").count(ref) == 1
+    )
+    assert np.count_nonzero(store.artifacts.load(ref)["values"][:]) == 8

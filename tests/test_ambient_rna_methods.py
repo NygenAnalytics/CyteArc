@@ -207,7 +207,10 @@ def test_expressing_cells_apply_benjamini_hochberg_within_each_gene_set():
 
 
 def test_expressing_cells_of_no_cells_are_empty():
-    assert expressing_cells(np.zeros((0, 2))).shape == (0, 2)
+    expressing = expressing_cells(np.zeros((0, 2)))
+
+    # A boolean mask, as callers invert and index with it.
+    assert expressing.shape == (0, 2) and expressing.dtype == np.bool_
 
 
 @pytest.mark.parametrize(
@@ -240,7 +243,7 @@ def test_estimation_cells_leave_out_expressing_cells_and_their_clusters():
 
 def test_estimation_cells_of_no_cells_are_empty():
     used = estimation_cells(np.zeros((0, 1), dtype=bool), np.array([], dtype=str))
-    assert used.shape == (0, 1)
+    assert used.shape == (0, 1) and used.dtype == np.bool_
 
 
 def test_estimation_cells_validate_their_arguments():
@@ -651,14 +654,17 @@ def test_removal_rounds_the_continuous_allocation_by_systematic_sampling(seed):
 
     removal = _removed(counts, corrected)
     continuous = _continuous_removal(counts, fractions, soup)
-    assert (corrected <= counts).all() and (corrected >= 0).all()
+    # No gene gains counts or loses more than the cell holds.
+    assert removal.min() >= 0 and (removal <= counts).all()
     # Each gene loses its continuous removal rounded down or up, and each cell
-    # its target rounded down or up.
+    # its target rounded down or up: floor(target + u) for its draw u, as the
+    # sum of its genes' losses telescopes.
     assert np.abs(removal - continuous).max() < 1
     soup_counts = (counts * (soup > 0)).sum(axis=1)
     targets = np.minimum(fractions * counts.sum(axis=1), soup_counts)
     lost = removal.sum(axis=1)
-    assert ((lost == np.floor(targets)) | (lost == np.ceil(targets))).all()
+    draws = np.array([_draw(seed, int(key)) for key in keys])
+    np.testing.assert_array_equal(lost, np.floor(targets + draws))
     np.testing.assert_array_equal(removal[:, soup == 0], 0)
     np.testing.assert_array_equal(lost[:2], [0, soup_counts[1]])
     np.testing.assert_array_equal(corrected[30:32], counts[30:32])

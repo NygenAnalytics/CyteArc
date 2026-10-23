@@ -316,7 +316,7 @@ def test_cell_metadata_columns_that_cannot_be_decoded_are_skipped(
         with pytest.raises(SeuratImportError) as error:
             metadata.column("l")
         assert error.value.code == "unsupported_metadata_type"
-        with pytest.raises(KeyError):
+        with pytest.raises(KeyError, match="^'missing'$"):
             metadata.column("missing")
         result = _writer(reader, destination).dump(batch_size=1)
 
@@ -1220,7 +1220,8 @@ def test_the_skill_recipe_imports_cite_seq_and_integrated_objects(
     root = zarr.open_group(str(tmp_path / "cite.zarr"), mode="r")
     apca = artifact_group(root, artifacts["apca"])
     assert apca["feature_ids"][:].tolist() == ["p1", "p2", "p3"]
-    np.testing.assert_allclose(
+    # The loadings are the R doubles themselves.
+    np.testing.assert_array_equal(
         apca["loadings"][:], [[0.5, 0.8], [0.6, 0.9], [0.7, 1.0]]
     )
 
@@ -1388,6 +1389,39 @@ def test_reductions_of_some_cells_or_another_order_align_to_the_cells(
     values = ds.artifacts.load_values(umap)
     assert values.cell_ids.tolist() == ["c2", "c4"]
     np.testing.assert_array_equal(values.values, [[6.0, 8.0], [5.0, 7.0]])
+
+
+def test_assay5_slots_report_data_only_when_they_hold_it(tmp_path: Path) -> None:
+    wire = _Wire()
+    assay = wire.s4(
+        [
+            (
+                "layers",
+                wire.vector(
+                    [wire.matrix([1, 2, 3, 4, 5, 6], (2, 3))], names=["counts"]
+                ),
+            ),
+            ("cells", wire.logmap([1, 1, 1], _CELLS, ["counts"])),
+            ("features", wire.logmap([1, 1], _GENES, ["counts"])),
+            ("meta.data", wire.data_frame([], 2)),
+            ("key", wire.string_vector(["rna_"])),
+            ("default", wire.integer_vector([1])),
+            # R stores NULL in an S4 slot as a placeholder symbol.
+            ("assay.orig", wire.symbol("\x01NULL\x01")),
+            ("misc", wire.vector([wire.integer_vector([1])], names=["x"])),
+            ("class", wire.string_vector(["Assay5"])),
+        ]
+    )
+    path = _write(tmp_path / "assay5-slots.rds", _seurat(wire, assays={"RNA": assay}))
+
+    with SeuratReader(path) as reader:
+        rna = reader.get_assay("RNA")
+        assert [
+            (notice.code, notice.objectPath, notice.context) for notice in rna.notices
+        ] == [("ignored_assay_slot", "assays/RNA/misc", {"rType": "VECTOR"})]
+        np.testing.assert_array_equal(
+            rna.counts.read_cells(0, 3).toarray(), [[1, 2], [3, 4], [5, 6]]
+        )
 
 
 def test_assay5_cells_in_another_order_are_placed_by_name(tmp_path: Path) -> None:
@@ -1559,7 +1593,9 @@ def test_malformed_attributes_fail_as_malformed_input_not_a_type_error(
         RdsFormatError, match="attributes must be a pairlist, found ALTREP"
     ):
         SeuratReader(path)
-    with pytest.raises(RdsFormatError):
+    with pytest.raises(
+        RdsFormatError, match="attributes must be a pairlist, found ALTREP"
+    ):
         cytearc.inspect_seurat(io.BytesIO(mutated))
 
 

@@ -234,7 +234,17 @@ def test_select_hvgs_recomputes_when_background_quantile_changes(
 ) -> None:
     store = hvg_store
     cells = store.snapshot_cell_selection()
-    existing = store.features.hvgs(cells, show_plot=False)
+    # Every adaptive selection records the quantile; a coarse trend of few
+    # bins fits far faster than the default one, and records it the same way.
+    options = {
+        "min_cells": 0,
+        "max_cells": np.inf,
+        "top_n": 5,
+        "n_bins": 20,
+        "blacklist": "",
+        "show_plot": False,
+    }
+    existing = store.features.hvgs(cells, **options)
     group = store.zw[artifact_path(existing)]
     provenance = dict(group.attrs["provenance"])
     parameters = dict(provenance["parameters"])
@@ -246,10 +256,10 @@ def test_select_hvgs_recomputes_when_background_quantile_changes(
     stored_attributes = dict(group.attrs)
     stored_scores = np.asarray(group["corrected_variance"][:])
 
-    selected = store.features.hvgs(cells, show_plot=False)
+    selected = store.features.hvgs(cells, **options)
 
     assert selected != existing
-    assert store.features.hvgs(cells, show_plot=False) == selected
+    assert store.features.hvgs(cells, **options) == selected
     if stored_quantile is None:
         with pytest.raises(ArtifactResolutionError, match="variance quantile"):
             store.features.resolve("RNA", existing)

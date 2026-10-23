@@ -343,7 +343,9 @@ def test_cluster_selection_result_is_strictly_immutable() -> None:
         result.sample_indices.setflags(write=True)
     with pytest.raises(ValueError, match="cannot set WRITEABLE flag"):
         result.scores.setflags(write=True)
-    with pytest.raises(TypeError):
+    with pytest.raises(
+        TypeError, match="^'mappingproxy' object does not support item assignment$"
+    ):
         result.sample_definition["sampleSize"] = 1
     with pytest.raises(FrozenInstanceError):
         result.selected_key = "invalid"

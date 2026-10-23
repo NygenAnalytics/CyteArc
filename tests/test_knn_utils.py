@@ -1,14 +1,17 @@
 import functools
 import json
+import random
 import sys
 import warnings
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
 from scipy.sparse import coo_matrix, csr_matrix
 from sklearn.metrics import adjusted_rand_score
 
+import cytearc.clustering.leiden as leiden_module
 from cytearc.clustering.leiden import leiden_membership
 from cytearc.neighbors.graph import (
     build_connectivity_arrays,
@@ -147,8 +150,12 @@ def test_igraph_membership_requires_igraph(monkeypatch):
     assert "pip install igraph" in str(error.value)
 
 
-def test_leidenalg_membership_requires_leidenalg(monkeypatch):
-    monkeypatch.setitem(sys.modules, "leidenalg", None)
+@pytest.mark.parametrize("missing", ["igraph", "leidenalg"])
+def test_leidenalg_membership_requires_leidenalg_and_igraph(monkeypatch, missing):
+    # CyteArc installs neither package, so a stand-in igraph lets the import
+    # of leidenalg itself fail.
+    monkeypatch.setitem(sys.modules, "igraph", ModuleType("igraph"))
+    monkeypatch.setitem(sys.modules, missing, None)
     graph = _simple_knn_graph(10)
 
     with pytest.raises(ImportError, match="leidenalg") as error:
@@ -160,6 +167,144 @@ def test_leidenalg_membership_requires_leidenalg(monkeypatch):
         )
 
     assert "pip install leidenalg" in str(error.value)
+
+
+def _gpl_graph() -> csr_matrix:
+    # Two weighted edges and an explicit zero, which no backend receives.
+    return csr_matrix(
+        (np.array([0.5, 0.0, 2.0]), (np.array([0, 1, 2]), np.array([1, 2, 3]))),
+        shape=(4, 4),
+    )
+
+
+def _fake_igraph(
+    calls: list[tuple[str, object]], *, error: Exception | None = None
+) -> ModuleType:
+    """Return an igraph stand-in that records how a backend builds and seeds it."""
+    igraph = ModuleType("igraph")
+    igraph.generator = None
+
+    class Graph:
+        def __init__(self, n=0, edges=(), directed=False):
+            self.es = {}
+            calls.append(("Graph", (n, [tuple(map(int, e)) for e in edges], directed)))
+
+        def add_vertices(self, n):
+            calls.append(("add_vertices", n))
+
+        def add_edges(self, edges):
+            calls.append(("add_edges", [tuple(map(int, edge)) for edge in edges]))
+
+        def community_leiden(self, *, weights, **options):
+            # The seeded generator is installed, under the lock, for the call.
+            calls.append(("community_leiden", (weights.tolist(), options)))
+            calls.append(
+                (
+                    "generator",
+                    (
+                        leiden_module._IGRAPH_RNG_LOCK.locked(),
+                        igraph.generator.getstate(),
+                    ),
+                )
+            )
+            if error is not None:
+                raise error
+            return SimpleNamespace(membership=[1, 1, 0, 0])
+
+    def set_random_number_generator(generator):
+        igraph.generator = generator
+
+    igraph.Graph = Graph
+    igraph.set_random_number_generator = set_random_number_generator
+    return igraph
+
+
+def test_igraph_membership_clusters_the_stored_edges_with_a_seeded_generator(
+    monkeypatch,
+):
+    calls: list[tuple[str, object]] = []
+    igraph = _fake_igraph(calls)
+    monkeypatch.setitem(sys.modules, "igraph", igraph)
+    graph = _gpl_graph()
+
+    labels = leiden_membership(graph, resolution=0.7, random_seed=11, backend="igraph")
+
+    np.testing.assert_array_equal(labels, [2, 2, 1, 1])
+    assert calls == [
+        ("Graph", (4, [(0, 1), (2, 3)], False)),
+        (
+            "community_leiden",
+            (
+                [0.5, 2.0],
+                {
+                    "objective_function": "modularity",
+                    "resolution": 0.7,
+                    "n_iterations": 2,
+                },
+            ),
+        ),
+        ("generator", (True, random.Random(11).getstate())),
+    ]
+    # igraph's default generator, the seedable random module, is restored.
+    assert igraph.generator is random
+    # The explicit zero is dropped from a copy, not from the caller's graph.
+    assert graph.nnz == 3
+    assert not leiden_module._IGRAPH_RNG_LOCK.locked()
+
+
+def test_igraph_membership_restores_the_generator_when_clustering_fails(monkeypatch):
+    calls: list[tuple[str, object]] = []
+    igraph = _fake_igraph(calls, error=RuntimeError("community_leiden failed"))
+    monkeypatch.setitem(sys.modules, "igraph", igraph)
+
+    with pytest.raises(RuntimeError, match="^community_leiden failed$"):
+        leiden_membership(_gpl_graph(), resolution=0.7, random_seed=3, backend="igraph")
+
+    assert calls[-1] == ("generator", (True, random.Random(3).getstate()))
+    assert igraph.generator is random
+    assert not leiden_module._IGRAPH_RNG_LOCK.locked()
+
+
+def test_leidenalg_membership_finds_a_weighted_partition_from_the_seed(monkeypatch):
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setitem(sys.modules, "igraph", _fake_igraph(calls))
+    leidenalg = ModuleType("leidenalg")
+    leidenalg.RBConfigurationVertexPartition = object()
+
+    def find_partition(graph, partition_type, **options):
+        calls.append(
+            (
+                "find_partition",
+                (
+                    partition_type is leidenalg.RBConfigurationVertexPartition,
+                    graph.es["weight"].tolist(),
+                    options,
+                ),
+            )
+        )
+        return SimpleNamespace(membership=[0, 0, 1, 2])
+
+    leidenalg.find_partition = find_partition
+    monkeypatch.setitem(sys.modules, "leidenalg", leidenalg)
+
+    labels = leiden_membership(
+        _gpl_graph(), resolution=1.5, random_seed=8, backend="leidenalg"
+    )
+
+    np.testing.assert_array_equal(labels, [1, 1, 2, 3])
+    assert calls == [
+        ("Graph", (0, [], False)),
+        ("add_vertices", 4),
+        ("add_edges", [(0, 1), (2, 3)]),
+        (
+            "find_partition",
+            (
+                True,
+                [0.5, 2.0],
+                {"weights": "weight", "resolution_parameter": 1.5, "seed": 8},
+            ),
+        ),
+    ]
 
 
 def _powered_transition(graph: csr_matrix, power: int) -> coo_matrix:

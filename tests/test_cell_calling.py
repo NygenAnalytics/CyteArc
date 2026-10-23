@@ -146,6 +146,41 @@ def _reference_p_values(
     return (exceeded + 1) / (n_iter + 1), exceeded == 0
 
 
+def _dirichlet_multinomial_molecules(
+    rng: np.random.Generator,
+    totals: np.ndarray,
+    proportions: np.ndarray,
+    precision: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Draw Dirichlet-multinomial count vectors one molecule at a time.
+
+    The Polya urn draws them exactly: molecule m of a droplet, counting from
+    0, is a fresh draw from ``proportions`` with probability precision /
+    (precision + m), and otherwise takes the feature of one of the droplet's
+    m earlier molecules, chosen uniformly. It is feature j with probability
+    (precision * p_j + c_j) / (precision + m), where c_j of the earlier
+    molecules are feature j, as the Dirichlet-multinomial gives. The cost is
+    a few draws per molecule, not a draw per feature and droplet.
+
+    Returns:
+        The droplet and the feature of each molecule.
+    """
+    owner = np.repeat(np.arange(len(totals)), totals)
+    first = np.repeat(np.cumsum(totals) - totals, totals)
+    earlier = np.arange(len(owner)) - first
+    fresh = rng.random(len(owner)) * (precision + earlier) < precision
+    features = rng.choice(len(proportions), size=len(owner), p=proportions)
+    # A copy points at an earlier molecule, which may be a copy itself.
+    source = np.where(
+        fresh,
+        np.arange(len(owner)),
+        first + (rng.random(len(owner)) * earlier).astype(np.int64),
+    )
+    while not np.array_equal(source[source], source):
+        source = source[source]
+    return owner, features[source]
+
+
 def _droplets(
     seed: int = 0,
     *,
@@ -157,29 +192,32 @@ def _droplets(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Simulate empty droplets of an ambient profile and cells of four types.
 
-    Empty droplets draw their proportions from a Dirichlet of the ambient
-    profile and the given precision, as the Dirichlet-multinomial model
-    assumes. Cells of four marker-enriched profiles hold 1,000 to 6,000
-    counts, and small cells 150 to 400, near the ambient level.
+    Empty droplets draw their counts from the Dirichlet-multinomial of the
+    ambient profile and the given precision, as the model assumes. Cells of
+    four marker-enriched profiles hold 1,000 to 6,000 counts, and small cells
+    150 to 400, near the ambient level.
     """
     rng = np.random.default_rng(seed)
     ambient = rng.gamma(0.3, 1.0, n_features)
     ambient /= ambient.sum()
-    rows = []
-    for total in np.maximum(1, rng.lognormal(math.log(12), 0.9, n_empty)).astype(int):
-        rows.append(rng.multinomial(total, rng.dirichlet(ambient * precision)))
+    totals = np.maximum(1, rng.lognormal(math.log(12), 0.9, n_empty)).astype(int)
+    counts = np.zeros((n_empty + n_cells + n_small, n_features), dtype=np.int64)
+    molecules = _dirichlet_multinomial_molecules(rng, totals, ambient, precision)
+    np.add.at(counts, molecules, 1)
     profiles = []
     for _ in range(4):
         profile = ambient.copy()
         markers = rng.choice(n_features, 25, replace=False)
         profile[markers] += rng.gamma(2.0, 1.0, 25) * 0.03
         profiles.append(profile / profile.sum())
-    for index in range(n_cells):
-        rows.append(rng.multinomial(int(rng.integers(1000, 6000)), profiles[index % 4]))
-    for index in range(n_small):
-        rows.append(rng.multinomial(int(rng.integers(150, 400)), profiles[index % 4]))
+    for index, row in enumerate(range(n_empty, n_empty + n_cells)):
+        total = int(rng.integers(1000, 6000))
+        counts[row] = rng.multinomial(total, profiles[index % 4])
+    for index, row in enumerate(range(n_empty + n_cells, len(counts))):
+        total = int(rng.integers(150, 400))
+        counts[row] = rng.multinomial(total, profiles[index % 4])
     truth = np.r_[np.zeros(n_empty, dtype=bool), np.ones(n_cells + n_small, dtype=bool)]
-    return np.asarray(rows, dtype=np.int64), truth, ambient
+    return counts, truth, ambient
 
 
 @pytest.fixture(scope="module")
@@ -662,7 +700,9 @@ def test_empty_drops_reports_every_barcode(droplets) -> None:
     assert np.isnan(result.p_value[~tested]).all()
     assert np.isnan(result.fdr[~tested]).all()
     assert not result.limited[~tested].any()
-    assert (result.p_value[retained] == 0).all()
+    # Exactly the barcodes at or above retain are cells with p-value 0.
+    assert retained.any()
+    np.testing.assert_array_equal(result.p_value == 0, retained)
     assert not result.limited[retained].any()
     assert np.isfinite(result.log_probability[tested]).all()
     simulated = tested & ~retained
@@ -720,8 +760,10 @@ def test_empty_drops_takes_alpha_retain_and_barcodes(droplets) -> None:
     totals = counts.sum(axis=1)
 
     assert (result.alpha, result.retain, result.lower) == (50.0, 500, 60)
-    assert (result.p_value[totals >= 500] == 0).all()
-    assert np.isfinite(result.p_value[(totals > 60) & (totals < 500)]).all()
+    # Barcodes above lower are tested, and those at or above retain are cells.
+    assert (totals >= 500).any()
+    np.testing.assert_array_equal(result.p_value == 0, totals >= 500)
+    np.testing.assert_array_equal(np.isfinite(result.p_value), totals > 60)
     table = result.to_pandas()
     assert table.index.name == "barcode"
     assert table.index.tolist() == barcodes[totals > 60].tolist()
@@ -795,8 +837,12 @@ def test_is_cell_checks_its_threshold(droplets) -> None:
     result = empty_drops(counts, n_iter=50, retain=300, nthreads=1)
 
     np.testing.assert_array_equal(result.is_cell(1.0), np.isfinite(result.fdr))
-    for value, error in ((0.0, ValueError), (1.5, ValueError), ("0.1", TypeError)):
-        with pytest.raises(error):
+    for value, error, message in (
+        (0.0, ValueError, "fdr must be greater than 0 and at most 1"),
+        (1.5, ValueError, "fdr must be greater than 0 and at most 1"),
+        ("0.1", TypeError, "fdr must be a real number"),
+    ):
+        with pytest.raises(error, match=message):
             result.is_cell(value)
 
 
@@ -806,7 +852,10 @@ def test_empty_drops_retains_every_barcode_above_lower_plus_one(droplets) -> Non
     tested = counts.sum(axis=1) > 100
 
     assert result.retain == 101
-    assert (result.p_value[tested] == 0).all() and (result.fdr[tested] == 0).all()
+    # Every tested barcode is retained, and the others are not tested.
+    expected = np.where(tested, 0.0, np.nan)
+    np.testing.assert_array_equal(result.p_value, expected)
+    np.testing.assert_array_equal(result.fdr, expected)
     assert not result.limited.any()
     np.testing.assert_array_equal(result.is_cell(), tested)
     np.testing.assert_array_equal(np.isfinite(result.log_probability), tested)

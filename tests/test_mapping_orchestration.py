@@ -671,16 +671,22 @@ def test_query_projection_reproduces_stored_reference_coordinates(
 
     assert stream.feature_coverage == 1.0
     assert projected.shape == stored.shape
+    # The stored coordinates are float32, so they agree to a few float32
+    # epsilons of their largest magnitude.
     np.testing.assert_allclose(
         projected,
         stored,
         rtol=0,
-        atol=1e-4 * float(np.abs(stored).max()),
+        atol=1e-6 * float(np.abs(stored).max()),
     )
 
 
-@pytest.mark.parametrize("method", ["pca", "symphony"])
-def test_subset_fitted_pca_center_survives_mapping_reference_reload(tmp_path, method):
+@pytest.fixture(scope="module")
+def subset_fitted_pca(tmp_path_factory) -> tuple[Path, ArtifactRef]:
+    """A 30-cell store whose PCA is fitted on its first 15 cells only.
+
+    Each test copies the store before it adds to it.
+    """
     from scipy.sparse import csr_matrix
 
     from cytearc.writers import SparseToZarr
@@ -688,16 +694,16 @@ def test_subset_fitted_pca_center_survives_mapping_reference_reload(tmp_path, me
     rng = np.random.default_rng(42)
     counts = rng.integers(10, 80, size=(30, 6), dtype=np.uint16)
     counts[:15, :3] += 300
-    path = str(tmp_path / "reference.zarr")
+    path = tmp_path_factory.mktemp("subset_fitted_pca") / "reference.zarr"
     SparseToZarr(
         csr_matrix(counts),
-        path,
+        str(path),
         cell_ids=[f"c{i}" for i in range(len(counts))],
         feature_ids=[f"g{i}" for i in range(counts.shape[1])],
         nthreads=1,
     ).dump()
     datastore = DataStore(
-        path, default_assay="RNA", min_features_per_cell=0, nthreads=1
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
     )
     cells = datastore.snapshot_cell_selection("I")
     datastore.cells.insert("pca_fit", np.arange(len(counts)) < 15)
@@ -707,13 +713,26 @@ def test_subset_fitted_pca_center_survives_mapping_reference_reload(tmp_path, me
     reduction = datastore.reduction.pca(
         normalized, dims=3, pca_cell_selection=fit_cells, local_cache=False
     )
+    return path, reduction
+
+
+@pytest.mark.parametrize("method", ["pca", "symphony"])
+def test_subset_fitted_pca_center_survives_mapping_reference_reload(
+    subset_fitted_pca, tmp_path, method
+):
+    source, reduction = subset_fitted_pca
+    path = str(tmp_path / "reference.zarr")
+    shutil.copytree(source, path)
+    datastore = DataStore(path, default_assay="RNA", nthreads=1)
+    n_cells = datastore.cells.N
+    assert n_cells == 30
     reduction_group = artifact_group(datastore.zw, reduction)
     expected = np.asarray(reduction_group["data"][:])
     center = np.asarray(reduction_group["center"][:])
     assert np.linalg.norm(center) > 0.5
     coordinates = reduction
     if method == "symphony":
-        datastore.cells.insert("batch", np.where(np.arange(len(counts)) % 2, "a", "b"))
+        datastore.cells.insert("batch", np.where(np.arange(n_cells) % 2, "a", "b"))
         coordinates = datastore.reduction.harmony(
             reduction, ["batch"], harmony_params={"n_clusters": 2}
         )
@@ -729,7 +748,7 @@ def test_subset_fitted_pca_center_survives_mapping_reference_reload(tmp_path, me
         np.testing.assert_array_equal(reference.model.center, center)
         stream = AlignedFeatureStream(
             query_assay=reference_store.RNA,
-            query_cell_indices=np.arange(len(counts)),
+            query_cell_indices=np.arange(n_cells),
             reference_feature_ids=reference.feature_ids,
             reference_normalized_means=reference.model.feature_means,
             reference_normalization_parameters=reference.normalization_parameters,
@@ -753,7 +772,7 @@ def test_subset_fitted_pca_center_survives_mapping_reference_reload(tmp_path, me
         result = query.mapping.load_result(
             result_ref, reference=reference, load_arrays=True
         )
-        np.testing.assert_array_equal(result.indices[:, 0], np.arange(len(counts)))
+        np.testing.assert_array_equal(result.indices[:, 0], np.arange(n_cells))
         np.testing.assert_allclose(result.distances[:, 0], 0, atol=1e-5)
 
 
@@ -796,19 +815,21 @@ def test_self_mapping_recovers_the_reference_graph_and_labels(
     assert float(np.median(distances[:, 0])) < 1e-4
     # The reference PCA is fitted on z-scored features, so a query that is the
     # reference has to disperse exactly like it. This anchors the diagnostic:
-    # values well below 1 mean the query occupies a narrower region.
+    # values well below 1 mean the query occupies a narrower region. The bound
+    # is far inside the 1.6% that a variance-denominator slip would cause.
     assert loaded.diagnostics["queryScaledDispersion"] == pytest.approx(
         1.0,
-        abs=0.02,
+        abs=1e-6,
     )
 
     agreement = indices[:, 1:] == reference_indices[:, : available_k - 1]
     assert agreement.mean() > 0.9
+    # Both graphs measure float32 distances between the same cells.
     np.testing.assert_allclose(
         distances[:, 1:][agreement],
         reference_distances[:, : available_k - 1][agreement],
-        rtol=1e-4,
-        atol=1e-4,
+        rtol=1e-5,
+        atol=1e-6,
     )
     assert len(np.unique(indices)) > 0.9 * reference.selected_cell_count
 
@@ -1084,7 +1105,8 @@ def test_zero_overlap_query_cells_are_uninformative(
     evidence = transfer.evidence
     assert evidence["abstained"].to_numpy()[expected].all()
     reasons = evidence["abstentionReason"].to_numpy()
-    assert (reasons[expected] == "uninformative_cell").all()
+    # Exactly the cells without overlap abstain as uninformative.
+    np.testing.assert_array_equal(reasons == "uninformative_cell", expected)
     assert evidence["voteFraction"].isna().to_numpy()[expected].all()
     assert evidence["voteFraction"].notna().to_numpy()[~expected].all()
     assert pd.notna(labels[~expected]).any()

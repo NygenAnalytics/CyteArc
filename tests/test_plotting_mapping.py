@@ -514,10 +514,13 @@ def test_mapping_plot_families_use_query_result_and_reference_semantics(
     )
     table = calibration.tables["calibration"]
     assert {"coverage", "accuracy", "accuracyLower", "accuracyUpper"} <= set(table)
-    assert calibration.tables["calibration"]["coverage"].between(0, 1).all()
-    # Every cell the transfer labels is labelled correctly at any threshold.
-    assert (table["accuracy"] == 1.0).all()
-    assert table["nAccepted"].max() == 5
+    # Every informative cell has vote fraction 1, so the sampled thresholds
+    # collapse to 1.0 beside the chosen 0.75. Both keep the five labelled cells
+    # of the six known ones, and each of them is labelled correctly.
+    np.testing.assert_array_equal(table["threshold"], [0.75, 1.0])
+    np.testing.assert_array_equal(table["nAccepted"], [5, 5])
+    np.testing.assert_array_equal(table["coverage"], [5 / 6, 5 / 6])
+    np.testing.assert_array_equal(table["accuracy"], [1.0, 1.0])
     for plot in (evidence, confusion, calibration):
         assert plot.provenance.extras["label_transfer"] == transfer.to_dict()
     assert evidence.provenance.extras["threshold_fraction"] == 0.5
@@ -683,7 +686,23 @@ def test_mapping_calibration_allows_genuine_zero_accuracy(
         show=False,
     )
 
-    assert (plot.tables["calibration"]["accuracy"] == 0).all()
+    from scipy.stats import binomtest
+
+    # Each of the five labelled cells contradicts its known label, so both the
+    # sampled vote fraction 1.0 and the transfer's own 0.5 keep all five at
+    # zero accuracy, with the Wilson interval of no successes in five.
+    table = plot.tables["calibration"]
+    np.testing.assert_array_equal(table["threshold"], [0.5, 1.0])
+    np.testing.assert_array_equal(table["nAccepted"], [5, 5])
+    np.testing.assert_array_equal(table["coverage"], [5 / 6, 5 / 6])
+    np.testing.assert_array_equal(table["accuracy"], [0.0, 0.0])
+    interval = binomtest(0, 5).proportion_ci(method="wilson")
+    np.testing.assert_allclose(table["accuracyLower"], [interval.low] * 2, atol=1e-15)
+    np.testing.assert_allclose(table["accuracyUpper"], [interval.high] * 2)
+    # The curve is drawn at zero, inside the padded limits.
+    axis = plot.axes["mapping_calibration"]
+    np.testing.assert_array_equal(axis.lines[0].get_ydata(), [0.0, 0.0])
+    assert axis.get_ylim() == (-0.02, 1.02)
     plot.close()
 
 

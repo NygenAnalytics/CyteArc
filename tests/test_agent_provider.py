@@ -27,7 +27,12 @@ from cytearc.agent.provider import (
     replay_decisions,
     visible_response,
 )
-from cytearc.agent.records import RecordIntegrityError, RunRecords, digest
+from cytearc.agent.records import (
+    RecordError,
+    RecordIntegrityError,
+    RunRecords,
+    digest,
+)
 
 
 DISABLED_REASONING_BODY = {
@@ -130,8 +135,10 @@ def test_repairs_combined_errors_once(records: Any) -> None:
         return response("invented", ["fiction"]) if len(prompts) == 1 else response()
 
     assert run_decision(scripted_model(model), records).choice == "baseline"
-    assert "not a registered option" in prompts[1]
-    assert "unknown evidence identifier" in prompts[1]
+    # Both semantic errors reach the single repair request together.
+    assert json.loads(prompts[1])["validationErrors"] == [
+        "choice is not a registered option; unknown evidence identifier"
+    ]
     assert sum(event["kind"] == "modelRequest" for event in records.events()) == 2
 
 
@@ -146,19 +153,26 @@ def test_structural_errors_are_aggregated(records: Any) -> None:
             else response()
         )
 
-    run_decision(scripted_model(model), records)
-    errors = json.loads(prompts[-1])["validationErrors"]
-    assert len(errors) == 2
-    assert any("choice" in error for error in errors)
-    assert any("evidenceIds" in error for error in errors)
+    assert run_decision(scripted_model(model), records).choice == "baseline"
+    # Both missing fields reach one repair request, named by their locations.
+    expected = ["choice: Field required", "evidenceIds: Field required"]
+    assert len(prompts) == 2
+    assert json.loads(prompts[-1])["validationErrors"] == expected
+    assert records.latest("decisionRejected")["errors"] == expected
 
 
 @pytest.mark.parametrize(
-    "parts",
-    [[], [ToolCallPart("decision", '{"choice":"base')]],
+    ("parts", "structural"),
+    [
+        (
+            [],
+            "Return exactly one decision output tool call; no other tools are available",
+        ),
+        ([ToolCallPart("decision", '{"choice":"base')], "decision: Invalid JSON: "),
+    ],
 )
 def test_truncated_response_gets_actionable_feedback_with_unchanged_limits(
-    records: Any, parts: list[Any]
+    records: Any, parts: list[Any], structural: str
 ) -> None:
     prompts = []
     settings = []
@@ -179,7 +193,9 @@ def test_truncated_response_gets_actionable_feedback_with_unchanged_limits(
     assert "output-token limit" in feedback[0]
     assert "finishReason=length" in feedback[0]
     assert "complete, concise decision tool call" in feedback[0]
-    assert len(feedback) >= 2  # The original structural failure is still available.
+    # The original structural failure follows the truncation guidance.
+    assert len(feedback) == 2
+    assert feedback[1].startswith(structural)
     assert len(settings) == 2
     assert settings[0] == settings[1]
     assert settings[0]["max_tokens"] == 4096
@@ -205,11 +221,12 @@ def test_repeated_truncation_remains_a_bounded_operational_failure(
         run_decision(scripted_model(model), records)
     assert sum(event["kind"] == "modelRequest" for event in records.events()) == 2
     assert not any(event["kind"] == "decisionAccepted" for event in records.events())
-    assert all(
-        "output-token limit" in event["errors"][0]
-        for event in records.events()
-        if event["kind"] == "decisionRejected"
-    )
+    rejected = [
+        event for event in records.events() if event["kind"] == "decisionRejected"
+    ]
+    # Each of the two responses was rejected, truncation guidance first.
+    assert len(rejected) == 2
+    assert all("output-token limit" in event["errors"][0] for event in rejected)
 
 
 def test_valid_decision_is_not_discarded_only_for_length_finish_reason(
@@ -233,7 +250,9 @@ def test_stops_repeated_invalid_response(records: Any) -> None:
     assert sum(event["kind"] == "modelRequest" for event in records.events()) == 2
 
 
-def test_transport_then_semantic_repair_uses_three_requests(records: Any) -> None:
+def test_transport_then_semantic_repair_uses_three_requests(
+    records: Any, pauses: list[float]
+) -> None:
     attempts = 0
 
     def model(messages: Any, info: Any) -> Any:
@@ -247,6 +266,8 @@ def test_transport_then_semantic_repair_uses_three_requests(records: Any) -> Non
 
     assert run_decision(scripted_model(model), records).choice == "baseline"
     assert attempts == 3
+    # Only the transport failure backs off; the semantic repair does not.
+    assert pauses == [0.25]
     assert "private.invalid" not in json.dumps(records.events())
     assert "credential" not in json.dumps(records.events())
 
@@ -411,8 +432,14 @@ def test_visible_only_sanitizer_and_unknown_usage() -> None:
             metadata={"client": "private"},
         )
     )
-    assert saved["usage"] is None
-    assert len(saved["parts"]) == 2
+    assert saved == {
+        "parts": [
+            {"kind": "text", "text": "visible"},
+            {"kind": "tool", "name": "decision", "arguments": {"choice": "baseline"}},
+        ],
+        "usage": None,
+        "finishReason": None,
+    }
     serialized = json.dumps(saved)
     assert "private" not in serialized
     assert "hidden" not in serialized
@@ -479,7 +506,9 @@ def test_output_tool_contract_is_repaired_without_executing_tools(
 
     assert run_decision(scripted_model(model), records).choice == "baseline"
     assert len(prompts) == 2
-    assert "exactly one decision output tool call" in prompts[1]["validationErrors"][0]
+    assert prompts[1]["validationErrors"] == [
+        "Return exactly one decision output tool call; no other tools are available"
+    ]
 
 
 def test_provider_accepts_json_string_tool_arguments(records: Any) -> None:
@@ -583,7 +612,7 @@ def test_different_invalid_repairs_exhaust_semantic_budget(records: Any) -> None
 
 
 def test_transport_retry_exhaustion_is_not_reset_by_implicit_reentry(
-    records: Any,
+    records: Any, pauses: list[float]
 ) -> None:
     attempts = 0
 
@@ -597,9 +626,12 @@ def test_transport_retry_exhaustion_is_not_reset_by_implicit_reentry(
     with pytest.raises(ProviderError, match="transport retries were exhausted"):
         run_decision(client, records)
     assert attempts == 3
+    assert pauses == [0.25, 1.0]
     with pytest.raises(ProviderError, match="transport retries were exhausted"):
         run_decision(client, records)
     assert attempts == 3
+    # Reentry neither requests nor waits again.
+    assert pauses == [0.25, 1.0]
 
 
 def test_saved_invalid_response_is_rejected_after_journal_interruption(
@@ -625,7 +657,7 @@ def test_saved_invalid_response_is_rejected_after_journal_interruption(
         return response()
 
     assert run_decision(scripted_model(repaired), records).choice == "baseline"
-    assert "registered option" in observed[0]["validationErrors"][0]
+    assert observed[0]["validationErrors"] == ["choice is not a registered option"]
     assert len([e for e in records.events() if e["kind"] == "decisionRejected"]) == 1
 
 
@@ -643,7 +675,6 @@ def test_corrupt_saved_response_is_not_treated_as_an_unanswered_request(
         )
     event = next(e for e in records.events() if e["kind"] == "modelRequest")
     (records.path / event["responsePath"]).write_text("{truncated")
-    from cytearc.agent.records import RecordError
 
     with pytest.raises(RecordError, match="Cannot read record"):
         run_decision(
@@ -692,7 +723,7 @@ def test_effective_output_limit_and_saved_settings_are_explicit(
 
 @pytest.mark.parametrize("stage", ["context", "explore", "assess", "annotate"])
 def test_all_decisions_disable_reasoning_through_repair_and_transport_retry(
-    records: Any, monkeypatch: pytest.MonkeyPatch, stage: str
+    records: Any, monkeypatch: pytest.MonkeyPatch, pauses: list[float], stage: str
 ) -> None:
     supplied_settings = {
         "thinking": "high",
@@ -758,6 +789,7 @@ def test_all_decisions_disable_reasoning_through_repair_and_transport_retry(
     )
     assert result.choice == "baseline"
     assert len(observed) == 3
+    assert pauses == [0.25]
     for settings in observed:
         assert settings["thinking"] is False
         assert settings["openai_reasoning_effort"] == "none"
@@ -1066,7 +1098,7 @@ def test_unclassified_errors_are_not_retried_without_the_optional_openai_sdk(
 
 
 def test_openai_connection_errors_use_the_single_transient_retry(
-    records: Any,
+    records: Any, pauses: list[float]
 ) -> None:
     openai = pytest.importorskip("openai")
     attempts = 0
@@ -1083,6 +1115,7 @@ def test_openai_connection_errors_use_the_single_transient_retry(
 
     assert run_decision(scripted_model(model), records).choice == "baseline"
     assert attempts == 2
+    assert pauses == [0.25]
     failure = records.latest("modelFailure")
     assert failure["transient"] is True
     assert failure["errorType"] == "APIConnectionError"
@@ -1439,3 +1472,34 @@ def test_unjournaled_saved_response_is_adopted_with_its_digest(
     assert accepted["recovered"] is True
     assert accepted["responseSha256"] == adopted["responseSha256"]
     assert _replay(records)[0]["valid"] is True
+
+
+def test_corrupt_unjournaled_response_is_not_treated_as_an_unanswered_request(
+    records: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    append = records.append
+
+    def crash_before_journal(kind: str, **payload: Any) -> Any:
+        if kind == "modelResponse":
+            raise OSError("process stopped after saving the response")
+        return append(kind, **payload)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(records, "append", crash_before_journal)
+        with pytest.raises(OSError, match="stopped after saving"):
+            run_decision(scripted_model(lambda messages, info: response()), records)
+    request = records.latest("modelRequest")
+    response_path = records.path / request["responsePath"]
+    response_path.write_text("{truncated")
+
+    # Only a missing response file means the request went unanswered.
+    with pytest.raises(
+        RecordError, match=f"^Cannot read record {re.escape(response_path.name)}: "
+    ) as raised:
+        run_decision(
+            scripted_model(lambda messages, info: pytest.fail("Corruption must stop")),
+            records,
+        )
+    assert isinstance(raised.value.__cause__, json.JSONDecodeError)
+    assert records.latest("modelResponse") is None
+    assert response_path.read_text() == "{truncated"

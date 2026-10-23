@@ -110,8 +110,13 @@ def test_zero_weight_neighbors_support_membership_and_snn(zero_weight_graphs):
     labels = store.artifacts.load(clusters)["values"][:]
     assert np.unique(labels[:9]).size == np.unique(labels[9:]).size == 1
     assert labels[0] != labels[9]
+    # Eight of each cell's eleven neighbors share its cluster, kept to three
+    # decimals.
+    strength = np.full(18, round(8 / 11, 3))
     membership = store.clusters.membership_strength(clusters, graph)
-    np.testing.assert_allclose(store.artifacts.load(membership)["values"][:], 0.727)
+    np.testing.assert_array_equal(
+        store.artifacts.load(membership)["values"][:], strength
+    )
     assert store.clusters.membership_strength(clusters, graph) == membership
     assert store.integration.compute_graph_connectivity("annotation", graph) == 0.5
     assert set(store.cells.columns) == columns
@@ -121,7 +126,9 @@ def test_zero_weight_neighbors_support_membership_and_snn(zero_weight_graphs):
     np.testing.assert_array_equal(np.diff(store.graph.load(integrated).indptr), 11)
     assert store.integration.compute_graph_connectivity("annotation", integrated) == 0.5
     membership = store.clusters.membership_strength(clusters, integrated)
-    np.testing.assert_allclose(store.artifacts.load(membership)["values"][:], 0.727)
+    np.testing.assert_array_equal(
+        store.artifacts.load(membership)["values"][:], strength
+    )
 
 
 def test_connectivity_rebuilds_compact_cached_graph(zero_weight_graphs):

@@ -151,7 +151,9 @@ def test_previous_symbols_name_one_gene_each():
     assert not {"CDC2", "TS", "CCNL1", "CDC25", "SD"} & set(symbols)
     previous = set(symbols) - set(cell_cycle_previous_symbols)
     assert not previous & defaults
-    with pytest.raises(TypeError):
+    with pytest.raises(
+        TypeError, match="'mappingproxy' object does not support item assignment"
+    ):
         cell_cycle_previous_symbols["CDK1"] = ("CDC2",)  # type: ignore[index]
 
 

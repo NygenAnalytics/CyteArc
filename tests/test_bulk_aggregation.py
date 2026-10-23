@@ -85,25 +85,43 @@ def test_bulk_rejects_misaligned_groups_and_scalars(codes, scalars, message):
         )
 
 
+def _reopen(path, *, workers=1):
+    """Open a written bulk store afresh, so no test sees another's assay state."""
+    return DataStore(
+        path, default_assay="RNA", min_features_per_cell=0, nthreads=workers
+    )
+
+
+@pytest.fixture(scope="module")
+def grouped_counts_store(tmp_path_factory):
+    """Write the grouped counts that every aggregation and worker count reads.
+
+    Bulk profiles only read the store, so it is written once.
+    """
+    counts = np.random.default_rng(71).integers(0, 200, (7, 24), dtype=np.uint16)
+    counts[:, -1] = 0
+    store, _ = _bulk_store(tmp_path_factory.mktemp("grouped_counts"), counts)
+    store.cells.insert("selected", np.arange(7) != 5)
+    store.snapshot_cell_selection("selected")
+    store.cells.insert("group", np.array(["a", "a", "b", "skip", "a", "b", "b"]))
+    store.cells.insert("secondary", np.array(["x", "y", "x", "x", "x", "y", "y"]))
+    return str(store.zarr_loc), counts
+
+
 @pytest.mark.parametrize("keep_empty", [False, True])
 @pytest.mark.parametrize("aggregation", ["sum", "mean"])
 @pytest.mark.parametrize("replicates", [1, 3])
 @pytest.mark.parametrize("workers", [1, 4])
 def test_bulk_counts_t_matches_selected_groups_and_empty_replicates(
-    tmp_path,
+    grouped_counts_store,
     aggregation,
     replicates,
     workers,
     keep_empty,
 ):
-    counts = np.random.default_rng(71).integers(0, 200, (7, 24), dtype=np.uint16)
-    counts[:, -1] = 0
-    store, _ = _bulk_store(tmp_path, counts, workers=workers)
-    selected = np.arange(7) != 5
-    store.cells.insert("selected", selected)
+    path, counts = grouped_counts_store
+    store = _reopen(path, workers=workers)
     cells = store.snapshot_cell_selection("selected")
-    store.cells.insert("group", np.array(["a", "a", "b", "skip", "a", "b", "b"]))
-    store.cells.insert("secondary", np.array(["x", "y", "x", "x", "x", "y", "y"]))
     actual, fractions = store.compare.compute_bulk(
         "group",
         cell_selection=cells,
@@ -190,12 +208,21 @@ def test_bulk_mean_uses_stored_totals_and_averages_zero_total_cells_as_zero(
     np.testing.assert_array_equal(fractions["b"], 0.5)
 
 
+@pytest.fixture(scope="module")
+def two_cell_store(tmp_path_factory):
+    """Write two cells of one group once; each test sets its normalizer."""
+    counts = np.array([[100, 10], [200, 20]], dtype=np.uint32)
+    store, _ = _bulk_store(tmp_path_factory.mktemp("two_cells"), counts)
+    store.cells.insert("group", np.array(["a", "a"]))
+    return str(store.zarr_loc), counts
+
+
 @pytest.mark.parametrize("normalizer", [norm_lib_size_log, lambda assay, raw: raw + 7])
 @pytest.mark.parametrize("replicates", [1, 3])
-def test_bulk_mean_retains_other_normalizers(tmp_path, normalizer, replicates):
-    counts = np.array([[100, 10], [200, 20]], dtype=np.uint32)
-    store, cells = _bulk_store(tmp_path, counts)
-    store.cells.insert("group", np.array(["a", "a"]))
+def test_bulk_mean_retains_other_normalizers(two_cell_store, normalizer, replicates):
+    path, counts = two_cell_store
+    store = _reopen(path)
+    cells = store.snapshot_cell_selection("all_cells")
     store.RNA.normMethod = normalizer
     normalized = store.RNA.normed(
         cell_idx=np.arange(2), feat_idx=np.arange(2)
@@ -382,10 +409,32 @@ def test_bulk_mean_fits_non_rna_normalization_once(tmp_path):
 
 
 def test_bulk_rejects_unknown_aggregation(tmp_path):
+    from cytearc.features.aggregation import aggregate_bulk_profiles, bulk_read_cells
+
     store, cells = _bulk_store(tmp_path, np.ones((2, 3), dtype=np.uint16))
     store.cells.insert("group", np.array(["a", "a"]))
     with pytest.raises(ValueError, match="aggr_type"):
         store.compare.compute_bulk("group", cell_selection=cells, aggr_type="median")
+
+    # The aggregation functions refuse it too, without reading a cell.
+    cell_idx = np.arange(2, dtype=np.int64)
+    column_rows = {"a": cell_idx}
+    read = bulk_read_cells(store.RNA, "median", cell_idx, column_rows)
+    assert read.dtype == np.int64
+    np.testing.assert_array_equal(read, [])
+    with pytest.raises(
+        ValueError, match=r"^ERROR: `aggr_type` can only be either 'sum' or 'mean'$"
+    ):
+        aggregate_bulk_profiles(
+            store.RNA,
+            column_rows,
+            cell_idx,
+            aggr_type="median",
+            return_fraction=True,
+            cells=store.cells,
+            resources=store.resources,
+            nthreads=1,
+        )
 
 
 @pytest.mark.parametrize(
@@ -703,21 +752,58 @@ def _column_profiles(raw, column_rows, *, aggr_type, return_fraction):
     return vals, fracs
 
 
+@pytest.fixture(scope="module")
+def grouped_adt_stores(tmp_path_factory):
+    """Write the grouped ADT counts of a dtype once, for both aggregations.
+
+    Bulk profiles only read the store, so each dtype's store is shared, with
+    its pseudo-replicate columns and their per-column sums and fractions.
+    """
+    from cytearc.features.aggregation import bulk_column_rows
+
+    stores = {}
+
+    def open_store(dtype):
+        if dtype not in stores:
+            rng = np.random.default_rng(17)
+            counts = rng.poisson(0.8, size=(60, 9)).astype(dtype)
+            counts[:, 0] += 1
+            store, cells = _non_rna_store(tmp_path_factory.mktemp("adt"), counts)
+            groups = rng.choice(["a", "b", "c", "d"], size=60)
+            donors = rng.choice(["x", "y"], size=60)
+            store.cells.insert("group", groups)
+            store.cells.insert("donor", donors)
+            column_rows = bulk_column_rows(
+                groups,
+                sorted(set(groups)),
+                np.ones(60, dtype=bool),
+                np.arange(60, dtype=np.int64),
+                secondary=(donors, ["x", "y"]),
+                null_vals=None,
+                secondary_null_vals=None,
+                pseudo_reps=2,
+                random_seed=4466,
+            )
+            filled = {name: rows for name, rows in column_rows.items() if len(rows)}
+            expected = _column_profiles(
+                store.ADT.rawData, filled, aggr_type="sum", return_fraction=True
+            )
+            stores[dtype] = (store, cells, filled, expected)
+        return stores[dtype]
+
+    return open_store
+
+
 @pytest.mark.parametrize("aggregation", ["sum", "mean"])
 @pytest.mark.parametrize(
     "dtype", [np.uint8, np.uint32, np.int32, np.float32, np.float64], ids=str
 )
-def test_non_rna_bulk_matches_the_per_column_aggregation(tmp_path, dtype, aggregation):
-    from cytearc.features.aggregation import aggregate_bulk_profiles, bulk_column_rows
+def test_non_rna_bulk_matches_the_per_column_aggregation(
+    grouped_adt_stores, dtype, aggregation
+):
+    from cytearc.features.aggregation import aggregate_bulk_profiles
 
-    rng = np.random.default_rng(17)
-    counts = rng.poisson(0.8, size=(60, 9)).astype(dtype)
-    counts[:, 0] += 1
-    store, cells = _non_rna_store(tmp_path, counts)
-    groups = rng.choice(["a", "b", "c", "d"], size=60)
-    donors = rng.choice(["x", "y"], size=60)
-    store.cells.insert("group", groups)
-    store.cells.insert("donor", donors)
+    store, cells, filled, (expected_vals, expected_fracs) = grouped_adt_stores(dtype)
     options = {
         "cell_selection": cells,
         "secondary_groups": "donor",
@@ -731,26 +817,10 @@ def test_non_rna_bulk_matches_the_per_column_aggregation(tmp_path, dtype, aggreg
         "group", return_fraction=True, **options
     )
 
-    cell_idx = np.arange(60, dtype=np.int64)
-    column_rows = bulk_column_rows(
-        groups,
-        sorted(set(groups)),
-        np.ones(60, dtype=bool),
-        cell_idx,
-        secondary=(donors, ["x", "y"]),
-        null_vals=None,
-        secondary_null_vals=None,
-        pseudo_reps=2,
-        random_seed=4466,
-    )
-    filled = {name: rows for name, rows in column_rows.items() if len(rows)}
-    expected_vals, expected_fracs = _column_profiles(
-        store.ADT.rawData, filled, aggr_type=aggregation, return_fraction=True
-    )
     actual_vals, actual_fracs = aggregate_bulk_profiles(
         store.ADT,
         filled,
-        cell_idx,
+        np.arange(60, dtype=np.int64),
         aggr_type=aggregation,
         return_fraction=True,
         cells=store.cells,

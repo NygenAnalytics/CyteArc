@@ -591,24 +591,42 @@ def test_iter_normed_feature_wise_uses_base_path_when_ineligible(monkeypatch):
     cells.insert("RNA_nCounts", values.sum(axis=1).astype(np.float64), overwrite=True)
     assay = RNAassay(root, "RNA", cells, workspace=None, nthreads=1)
     assay.sf = 1000.0
-    called = {"base": False}
+    calls = []
 
     def fake_base(self, *args, **kwargs):
-        called["base"] = True
-        if False:
-            yield None
+        calls.append((self, args, kwargs))
+        yield "first batch"
+        yield "second batch"
 
     monkeypatch.setattr(Assay, "iter_normed_feature_wise", fake_base)
-    list(
+    cell_idx = np.arange(values.shape[0], dtype=np.int64)
+    feat_idx = np.arange(values.shape[1], dtype=np.int64)
+    batches = list(
         assay.iter_normed_feature_wise(
-            cell_idx=np.arange(values.shape[0], dtype=np.int64),
-            feat_idx=np.arange(values.shape[1], dtype=np.int64),
+            cell_idx=cell_idx,
+            feat_idx=feat_idx,
             batch_size=2,
             msg=None,
             renormalize_subset=True,
         )
     )
-    assert called["base"] is True
+    # The base path yields every batch, and it receives every argument.
+    assert batches == ["first batch", "second batch"]
+    ((receiver, args, kwargs),) = calls
+    assert receiver is assay
+    np.testing.assert_array_equal(args[0], cell_idx)
+    np.testing.assert_array_equal(args[1], feat_idx)
+    assert args[2:] == (2, None)
+    assert kwargs == {
+        "as_dataframe": True,
+        "scratch_itemsize": 0,
+        "resident_bytes": 0,
+        "log_transform": False,
+        "renormalize_subset": True,
+    }
+    # An eligible request streams countsT instead.
+    assert len(list(assay.iter_normed_feature_wise(cell_idx, feat_idx, 2, None))) == 2
+    assert len(calls) == 1
 
 
 def test_renormalize_subset_path_batches_features():
@@ -1147,7 +1165,10 @@ def test_assess_counts_t_reuse_outcomes(tmp_path):
         root, "RNA", None, n_cells=3, n_features=4, dtype="uint32"
     )
     assert layout.outcome == "invalid"
-    assert layout.reason
+    assert layout.reason == (
+        "countsT is incomplete or does not match finalized counts. Rebuild into a "
+        "fresh destination with repack_store(..., data_only=True)."
+    )
 
 
 def test_assess_counts_t_reuse_keeps_non_default_unit(tmp_path):
@@ -1193,6 +1214,10 @@ def test_assess_counts_t_reuse_keeps_non_default_unit(tmp_path):
         root, "RNA", None, n_cells=3, n_features=4, dtype="uint32"
     )
     assert missing.outcome == "invalid"
+    assert missing.reason == (
+        "count matrix layout metadata is missing. Rebuild the store with "
+        "repack_zarr or write_counts_t."
+    )
 
 
 def test_subset_preserves_gene_activity_alias(tmp_path):

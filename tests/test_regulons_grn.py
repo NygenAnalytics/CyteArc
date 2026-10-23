@@ -57,8 +57,10 @@ def test_grn_matches_a_direct_arboreto_style_fit(rule):
     regressor.fit(expression[:, :4], expression[:, 5], monitor=monitor)
     expected = regressor.feature_importances_ * len(regressor.estimators_)
     observed = links.set_index("TF")["importance"].reindex(tf_names, fill_value=0.0)
-    np.testing.assert_allclose(observed.to_numpy(), expected)
-    assert (links["target"] == "G1").all()
+    # Both fits run the same seeded regressor on the same values.
+    np.testing.assert_array_equal(observed.to_numpy(), expected)
+    # Every factor contributes to G1, the one target asked for.
+    assert links["target"].tolist() == ["G1"] * len(tf_names)
 
 
 def test_grn_leaves_each_factor_out_of_its_own_model():
@@ -72,8 +74,9 @@ def test_grn_leaves_each_factor_out_of_its_own_model():
         expression, names, ["TF1"], targets=["TF1"], seed=1, parameters=_FAST
     )
 
-    assert "TF1" not in set(links["TF"])
-    assert set(links["TF"]) <= {"TF0", "TF2", "TF3"}
+    # Every other factor predicts TF1, and TF1 does not predict itself.
+    assert sorted(links["TF"]) == ["TF0", "TF2", "TF3"]
+    assert links["target"].tolist() == ["TF1"] * 3
     assert alone.empty
     assert list(alone.columns) == list(links.columns)
 
@@ -153,17 +156,20 @@ def test_grn_rejects_invalid_requests(kwargs, message):
 
 
 @pytest.mark.parametrize(
-    "kwargs",
+    ("kwargs", "message"),
     [
-        {"subsample": 1.0},
-        {"maxFeatures": 0.0},
-        {"earlyStopWindow": 0},
-        {"learningRate": 0.0},
-        {"earlyStopping": "never"},
+        (
+            {"subsample": 1.0},
+            r"subsample must be in \(0, 1\) so out-of-bag early stopping applies",
+        ),
+        ({"maxFeatures": 0.0}, r"maxFeatures must be in \(0, 1\]"),
+        ({"earlyStopWindow": 0}, "earlyStopWindow must be at least 1"),
+        ({"learningRate": 0.0}, r"learningRate must be in \(0, 1\]"),
+        ({"earlyStopping": "never"}, "earlyStopping must be 'stage' or 'consecutive'"),
     ],
 )
-def test_grn_parameters_reject_invalid_settings(kwargs):
-    with pytest.raises(ValueError):
+def test_grn_parameters_reject_invalid_settings(kwargs, message):
+    with pytest.raises(ValueError, match=message):
         GrnParameters(**kwargs)
 
 

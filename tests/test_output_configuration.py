@@ -90,7 +90,7 @@ def test_reconfiguration_tolerates_a_stale_cytearc_handler(capsys):
 
 @pytest.mark.parametrize("setting", ["progress", "timestamps"])
 def test_configure_output_requires_boolean_settings(setting):
-    with pytest.raises(TypeError, match=setting):
+    with pytest.raises(TypeError, match=f"^{setting} must be a bool$"):
         configure_output(**{setting: 1})
 
 
@@ -101,7 +101,7 @@ def test_loading_tolerates_an_already_removed_default_handler():
 
     # An application, like this test session, may remove Loguru's default
     # handler 0 before CyteArc's logging module loads.
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="^There is no existing handler with id 0$"):
         logger.remove(0)
     spec = importlib.util.spec_from_file_location(
         "cytearc_logging_copy", cytearc_logging.__file__

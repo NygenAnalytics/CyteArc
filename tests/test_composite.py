@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import re
 import shutil
 import tracemalloc
 from contextlib import contextmanager
@@ -671,7 +672,10 @@ def test_reopen_rejects_unavailable_or_changed_source(sources, tmp_path, failure
     create_composite(sources, at=path, features="intersection")
     if failure == "missing":
         (tmp_path / "a.zarr").rename(tmp_path / "missing.zarr")
-        with pytest.raises(FileNotFoundError):
+        # The error names the source that moved, not some other missing file.
+        with pytest.raises(
+            FileNotFoundError, match=re.escape(str((tmp_path / "a.zarr").resolve()))
+        ):
             DataStore(str(path))
     else:
         root = zarr.open_group(str(tmp_path / "a.zarr"), mode="r+")
@@ -1124,27 +1128,20 @@ def test_creation_and_virtual_reads_fit_measured_buffer_budget(tmp_path):
         np.testing.assert_array_equal(actual, expected)
 
 
-@pytest.mark.parametrize("operation", ["scoring", "doublets", "mapping"])
-def test_composite_consumers_admit_source_scratch_before_count_reads(
-    tmp_path, monkeypatch, operation
-):
-    from zarr.core.array import AsyncArray
-
-    from cytearc.assay import norm_lib_size
-    from cytearc.mapping.features import AlignedFeatureStream
-    from cytearc.quality_control.doublets import _load_parent_counts
-    from cytearc.storage.artifacts import callable_identity
-
+@pytest.fixture(scope="module")
+def consumer_composite(tmp_path_factory):
+    """A 1024-cell source and its composite, which the consumer tests only read."""
     values = np.random.default_rng(123).integers(
         1, 30, size=(1024, 1024), dtype=np.uint16
     )
+    directory = tmp_path_factory.mktemp("consumer_composite")
     source = _write_source(
-        tmp_path / "source.zarr",
+        directory / "source.zarr",
         values,
         [f"g{column:04d}" for column in range(values.shape[1])],
         policy=CountMatrixPolicy(4 * 1024**2, 2 * 1024**2),
     )
-    destination = tmp_path / "joint.zarr"
+    destination = directory / "joint.zarr"
     joint = create_composite(
         {"a": source},
         at=destination,
@@ -1155,6 +1152,26 @@ def test_composite_consumers_admit_source_scratch_before_count_reads(
     order = np.array(
         [int(value.split("__c")[1]) for value in joint.cells.fetch_all("ids")]
     )
+    source_root = str(source.z.store.root)
+    joint.z.store.close()
+    source.z.store.close()
+    return values, source_root, destination, order
+
+
+@pytest.mark.parametrize("operation", ["scoring", "doublets", "mapping"])
+def test_composite_consumers_admit_source_scratch_before_count_reads(
+    consumer_composite, monkeypatch, operation
+):
+    from zarr.core.array import AsyncArray
+
+    from cytearc.assay import norm_lib_size
+    from cytearc.mapping.features import AlignedFeatureStream
+    from cytearc.quality_control.doublets import _load_parent_counts
+    from cytearc.storage.artifacts import callable_identity
+
+    values, source_root, destination, order = consumer_composite
+    # Each operation reads through its own store, so none inherits another's state.
+    joint = DataStore(str(destination), mem_budget="32M", nthreads=1)
     rows = np.arange(len(values))
     columns = np.array([0])
     scalar = np.ones(len(rows))
@@ -1196,7 +1213,6 @@ def test_composite_consumers_admit_source_scratch_before_count_reads(
 
     requests = []
     original_getitem = AsyncArray.getitem
-    source_root = str(source.z.store.root)
 
     async def recorded_getitem(self, selection, *args, **kwargs):
         if str(getattr(self.store, "root", "")) == source_root and self.path in {
@@ -1423,11 +1439,15 @@ def test_pipeline_matches_materialized_counts_and_reopens(tmp_path, monkeypatch)
             actual_values = actual_group[key][:]
             expected_values = expected_group[key][:]
             if actual_values.dtype.kind == "f":
+                # The two layouts sum their chunks in different orders, so float64
+                # results differ by rounding, which the iterative variance fit
+                # carries to a few parts in 1e9; the PCA centers are zero up to
+                # rounding.
                 np.testing.assert_allclose(
                     actual_values,
                     expected_values,
                     rtol=1e-7,
-                    atol=1e-8,
+                    atol=1e-12,
                     err_msg=f"{name}/{key}",
                 )
             else:
@@ -1614,7 +1634,9 @@ def test_composite_store_mutations_preserve_bindings_and_sources(
     } == source_digests
 
 
-def test_composite_store_lifecycle_and_routing_contracts(composite_adapter, sources):
+def test_composite_store_lifecycle_and_routing_contracts(
+    composite_adapter, sources, composite_sources
+):
     from zarr.abc.store import _store_supports_sync_io
 
     from cytearc.storage.stores import is_remote_datastore
@@ -1635,9 +1657,12 @@ def test_composite_store_lifecycle_and_routing_contracts(composite_adapter, sour
             joint.RNA.matrixGroup["counts"][:],
         )
     assert not store._store._is_open
-    for source in sources.values():
+    # Closing the composite leaves the borrowed sources open and intact.
+    for name, source in sources.items():
         assert source.z.store._is_open
-        assert source.RNA.matrixGroup["counts"][0, 0] >= 0
+        np.testing.assert_array_equal(
+            source.RNA.matrixGroup["counts"][:], composite_sources[name][1]
+        )
 
 
 def test_composite_shard_padding_and_missing_array_metadata(composite_adapter, sources):
@@ -1684,6 +1709,66 @@ def test_composite_shard_padding_and_missing_array_metadata(composite_adapter, s
         building.close()
 
 
+def _copy_bound_composite(template, destination):
+    """Copy a composite and its sources, binding the copy to the copied sources.
+
+    Creation is deterministic and records sources only by their locations, so
+    the copy equals a composite created at ``destination``.
+    """
+    for entry in ("a.zarr", "b.zarr", "joint.zarr"):
+        shutil.copytree(template / entry, destination / entry)
+    root = zarr.open_group(str(destination / "joint.zarr"), mode="r+")
+    record = copy.deepcopy(root.attrs["composite"])
+    for binding in record["sources"]:
+        binding["location"] = str((destination / f"{binding['name']}.zarr").resolve())
+    root.attrs["composite"] = record
+    return destination / "joint.zarr"
+
+
+@pytest.fixture(scope="module")
+def saved_composite_template(composite_sources, tmp_path_factory):
+    """The composite of ``composite_adapter``, created once for tests to copy."""
+    import cytearc.composite.create as creation
+
+    directory = tmp_path_factory.mktemp("saved_composite")
+    sources = {}
+    for name, (source, _, _) in composite_sources.items():
+        shutil.copytree(source, directory / f"{name}.zarr")
+        sources[name] = DataStore(
+            str(directory / f"{name}.zarr"), nthreads=1, mem_budget="64M"
+        )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(creation, "DEFAULT_COUNT_MATRIX_POLICY", CountMatrixPolicy(48, 8))
+        joint = create_composite(
+            sources,
+            at=directory / "joint.zarr",
+            features="union",
+            rows={"a": [0, 1, 2, 3], "b": [0, 1, 2]},
+        )
+    expected = joint.RNA.matrixGroup["counts"][:]
+    joint.z.store.close()
+    for source in sources.values():
+        source.z.store.close()
+    # A rebound copy opens as a valid composite, so a test's rejection comes from
+    # the contract that the test breaks.
+    check = _copy_bound_composite(directory, tmp_path_factory.mktemp("rebound"))
+    reopened = DataStore(str(check), nthreads=1)
+    np.testing.assert_array_equal(reopened.RNA.matrixGroup["counts"][:], expected)
+    reopened.z.store.close()
+    return directory
+
+
+@pytest.fixture
+def saved_composite(saved_composite_template, tmp_path):
+    """A writable copy of the template composite and its own source stores."""
+    path = _copy_bound_composite(saved_composite_template, tmp_path)
+    sources = {
+        name: DataStore(str(tmp_path / f"{name}.zarr"), nthreads=1, mem_budget="64M")
+        for name in ("a", "b")
+    }
+    return path, sources
+
+
 @pytest.mark.parametrize(
     "problem,message",
     [
@@ -1703,9 +1788,9 @@ def test_composite_shard_padding_and_missing_array_metadata(composite_adapter, s
     ],
 )
 def test_composite_reopen_rejects_invalid_saved_contract(
-    composite_adapter, sources, problem, message
+    saved_composite, problem, message
 ):
-    path = composite_adapter.z.store.root
+    path, sources = saved_composite
     root = zarr.open_group(path, mode="r+")
     record = copy.deepcopy(root.attrs["composite"])
     if problem == "record":

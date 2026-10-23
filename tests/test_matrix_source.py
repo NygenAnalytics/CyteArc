@@ -6,19 +6,21 @@ import pytest
 import zarr
 from obstore.store import MemoryStore as ObjectMemoryStore
 from zarr.abc.store import Store
-from zarr.codecs import BloscCodec, ZstdCodec
-from zarr.storage import ObjectStore
+from zarr.storage import MemoryStore, ObjectStore
 
 from cytearc.datastore.datastore import DataStore, mount_datastore
 from cytearc.storage.artifacts import ArtifactRef, artifact_group, artifact_path
 from cytearc.storage.budget import ResourceBudget
 from cytearc.storage.io_policy import StorageIoPolicy
+from cytearc.storage.layout import get_compressors
+from cytearc.storage.profiles import resolve_storage_profile
 from cytearc.storage.sharding import write_counts_t
 from cytearc.storage.stores import (
     MATRIX_SOURCE_ATTR,
     create_matrix_source,
     is_remote_datastore,
     resolve_matrix_source,
+    zarr_root_path,
 )
 from tests.fixtures_datastore import build_neighbourhood_graph
 from cytearc.storage.schema import create_cell_data
@@ -264,7 +266,7 @@ def test_mount_honors_storage_io_limits_without_changing_workers(
                 lambda: super(ColumnStore, self).set(key, value, byte_range),
             )
 
-    source = ColumnStore(delay=0.005)
+    source = ColumnStore()
     counts = _write_source_store(source, workspace=None)
     root = zarr.open_group(source, mode="r+")
     values = np.arange(len(counts), dtype=np.float64)
@@ -272,6 +274,9 @@ def test_mount_honors_storage_io_limits_without_changing_workers(
         root["cellData"].create_array(
             f"copy_{index}", data=values + index, chunks=(len(values),)
         )
+    # Every operation of the mount waits, which makes the column copies
+    # overlap observably; writing the source needs no delay.
+    source.probe.delay = 0.005
     source.reset()
     target = ColumnStore(delay=0.005)
     make = stores_module.make_store
@@ -928,45 +933,114 @@ def test_dataset_fingerprint_fast_path_reads_no_identifiers(
         source, target, required_transposes=frozenset({"RNA"}), workspace=None
     )
 
-    read_array = zarr.Array.__getitem__
+    import zarr.core.array as zarr_array
 
-    def reject_identifier_reads(array, selection):
-        if array.path.endswith(("cellData/ids", "featureData/ids")):
-            raise AssertionError(f"Fast path read identifiers at {array.path}")
-        return read_array(array, selection)
+    read_selection = zarr_array._get_selection
 
-    monkeypatch.setattr(zarr.Array, "__getitem__", reject_identifier_reads)
-    _, workspace = resolve_matrix_source(zarr.open_group(target, mode="r"))
+    # Every Zarr read, synchronous or not and of any selection, passes here.
+    async def reject_identifier_reads(store_path, *args, **kwargs):
+        if store_path.path.endswith(("cellData/ids", "featureData/ids")):
+            raise AssertionError(f"Fast path read identifiers at {store_path.path}")
+        return await read_selection(store_path, *args, **kwargs)
+
+    monkeypatch.setattr(zarr_array, "_get_selection", reject_identifier_reads)
+    resolved = resolve_matrix_source(zarr.open_group(target, mode="r"))
+
+    assert resolved is not None
+    source_root, workspace = resolved
     assert workspace is None
+    assert source_root.store.read_only
+    assert zarr_root_path(source_root) == source
+    # The guard sees a read of the identifiers.
+    with pytest.raises(AssertionError, match="read identifiers at cellData/ids"):
+        source_root["cellData/ids"][:]
 
 
-def test_source_open_does_not_change_target_profile(default_sources, tmp_path):
-    source = str(tmp_path / "source.zarr")
+def _codec_settings(compressors) -> list[tuple[str, dict]]:
+    """Name each codec with its settings, without the item size Blosc infers."""
+    return [
+        (
+            type(codec).__name__,
+            {
+                name: value
+                for name, value in codec.to_dict()["configuration"].items()
+                if name != "typesize"
+            },
+        )
+        for codec in compressors
+    ]
+
+
+def test_source_open_does_not_change_target_profile(monkeypatch, tmp_path):
+    from cytearc.storage import stores as stores_module
+
+    # An object store source holds its tables in the cloud profile.
+    remote_store = ObjectStore(store=ObjectMemoryStore())
+    _write_source_store(remote_store, workspace=None)
+    location = "s3://atlas/source.zarr"
+    real_make_store = stores_module.make_store
+
+    def fake_make_store(loc, *, storage_options=None, read_only=False):
+        if loc == location:
+            return remote_store
+        return real_make_store(
+            loc, storage_options=storage_options, read_only=read_only
+        )
+
+    monkeypatch.setattr(stores_module, "make_store", fake_make_store)
     target = str(tmp_path / "target.zarr")
-    _copy_source(default_sources, source)
 
     create_matrix_source(
-        source, target, required_transposes=frozenset({"RNA"}), workspace=None
+        location, target, required_transposes=frozenset({"RNA"}), workspace=None
     )
-    target_ids = zarr.open_group(target, mode="r")["cellData/ids"]
-    assert isinstance(target_ids.compressors[0], BloscCodec)
+
+    source_root = zarr.open_group(store=remote_store, mode="r")
+    assert _codec_settings(source_root["cellData/ids"].compressors) == (
+        _codec_settings(get_compressors("cloud"))
+    )
+    # The local target writes every table it copies with its own profile.
+    target_root = zarr.open_group(target, mode="r")
+    for path in (
+        "cellData/ids",
+        "cellData/names",
+        "cellData/I",
+        "RNA/featureData/ids",
+        "RNA/featureData/I",
+    ):
+        assert _codec_settings(target_root[path].compressors) == (
+            _codec_settings(get_compressors("fast_local"))
+        ), path
 
 
-def test_mount_profile_applies_to_store_target(default_sources, tmp_path):
+@pytest.mark.parametrize(
+    ("make_target", "profile"),
+    [
+        (lambda: ObjectStore(store=ObjectMemoryStore()), "fast_local"),
+        (MemoryStore, "cloud"),
+    ],
+    ids=["object_store", "memory_store"],
+)
+def test_mount_profile_applies_to_store_target(
+    default_sources, tmp_path, make_target, profile
+):
     source = str(tmp_path / "source.zarr")
     _copy_source(default_sources, source)
-    target_store = ObjectStore(store=ObjectMemoryStore())
+    target_store = make_target()
+    # Each store defaults to the other profile, so only the request selects it.
+    assert resolve_storage_profile(target_store) != profile
 
     ds = mount_datastore(
         source,
         at=target_store,
         default_assay="RNA",
         min_features_per_cell=1,
-        zarrProfile="cloud",
+        zarrProfile=profile,
     )
 
-    target_ids = ds.z["cellData/ids"]
-    assert isinstance(target_ids.compressors[0], ZstdCodec)
+    assert ds.storageProfile == profile
+    assert _codec_settings(ds.z["cellData/ids"].compressors) == (
+        _codec_settings(get_compressors(profile))
+    )
 
 
 def test_mounted_datastore_reads_remote_counts_and_persists_summary_locally(
@@ -1082,20 +1156,19 @@ def test_mounted_store_build_mapping_reference(tmp_path):
         at=target,
         default_assay="RNA",
     )
+    cells = ds.snapshot_cell_selection()
     features = ds.features.hvgs(
-        ds.snapshot_cell_selection(),
+        cells,
         top_n=50,
         show_plot=False,
         bin_strategy="fixed",
     )
-    graph = build_neighbourhood_graph(
-        ds,
-        features=features,
-        k=3,
-        dims=5,
-        n_centroids=10,
+    # A reference is built from the neighbors of a reduction; it needs no
+    # connectivity graph or embedding initialization.
+    reduction = ds.reduction.pca(ds.features.normalize(cells, features), dims=5)
+    neighbors = ds.graph.neighbors(
+        ds.graph.ann_index(reduction), coordinates=reduction, k=3
     )
-    neighbors = ArtifactRef.from_dict(ds.artifacts.inspect(graph).inputs["neighbors"])
     reference_ref = ds.mapping.build_reference(neighbors)
     reference = ds.mapping.load_reference(reference_ref)
     assert reference.method == "pca"

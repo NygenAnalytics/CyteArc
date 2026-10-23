@@ -131,8 +131,9 @@ def test_internal_missing_columns_are_not_public_metadata():
     )
 
     metadata = MetaData(group)
-    assert "label" in metadata.columns
-    assert "__cytearc_missing__label" not in metadata.columns
+    # The mask is stored beside the column, but only the column is public.
+    assert "__cytearc_missing__label" in group
+    assert metadata.columns == ["I", "ids", "names", "label"]
 
 
 def test_empty_assay_schema_accepts_blockwise_feature_metadata():

@@ -591,8 +591,15 @@ def sixty_groups(tmp_path_factory):
     return store, marker, counts, labels
 
 
+@pytest.fixture(scope="module")
+def sixty_groups_table(sixty_groups) -> pd.DataFrame:
+    """Every row of the fine partition's marker table, read once."""
+    store, marker, _, _ = sixty_groups
+    return store.markers.load(marker, **EVERY_ROW)
+
+
 def test_default_filters_keep_every_group_marker_of_a_fine_partition(
-    sixty_groups, tmp_path
+    sixty_groups, sixty_groups_table, tmp_path
 ) -> None:
     store, marker, counts, labels = sixty_groups
     values = _library_size_values(store, counts)
@@ -617,7 +624,7 @@ def test_default_filters_keep_every_group_marker_of_a_fine_partition(
         marker, min_score=0.25, min_frac_exp=0.2, min_auc=None, max_p_adj=None
     ).empty
 
-    full = store.markers.load(marker, **EVERY_ROW)
+    full = sixty_groups_table
     expected = full[
         (full["frac_exp"] >= 0.2)
         & (full["auc"] >= 0.6)
@@ -632,9 +639,11 @@ def test_default_filters_keep_every_group_marker_of_a_fine_partition(
 
 
 @pytest.mark.parametrize("sort_by", ["score", "auc", "p_value", "fold_change"])
-def test_marker_readers_order_each_group_by_sort_by(sixty_groups, sort_by) -> None:
+def test_marker_readers_order_each_group_by_sort_by(
+    sixty_groups, sixty_groups_table, sort_by
+) -> None:
     store, marker, _, _ = sixty_groups
-    full = store.markers.load(marker, **EVERY_ROW)
+    full = sixty_groups_table
     ordered = store.markers.load(marker, sort_by=sort_by, **EVERY_ROW)
 
     for group in ("g00", "g31", "g59"):
@@ -707,11 +716,13 @@ def test_marker_tables_store_full_precision_means_of_small_values(tmp_path) -> N
 
 
 def test_marker_search_records_revision_2_and_recomputes_revision_1_tables(
-    sixty_groups, tmp_path, monkeypatch
+    small_groups, tmp_path, monkeypatch
 ) -> None:
     import shutil
 
-    store, marker, _, _ = sixty_groups
+    # Every search of these groups warns that it skips the single cell of a.
+    store, _, _, _, markers = small_groups
+    marker = markers["RNA"]
     shutil.copytree(store.zarr_loc, tmp_path / "copy.zarr")
     copy = DataStore(
         str(tmp_path / "copy.zarr"),
@@ -726,13 +737,17 @@ def test_marker_search_records_revision_2_and_recomputes_revision_1_tables(
     features = ArtifactRef.from_dict(inputs["feature_selection"])
     status = copy.artifacts.inspect(marker)
     assert status.revision == 2 and status.is_current
-    assert copy.markers.search(clusters, features=features) == marker
+    with pytest.warns(UserWarning, match="skips 1 groups"):
+        assert copy.markers.search(clusters, features=features) == marker
 
     # A table that an earlier release wrote records no revision.
     monkeypatch.setattr(
         operation_revisions, "OPERATION_REVISIONS", MappingProxyType({})
     )
-    earlier = copy.markers.search(clusters, features=features, invalidate_cache=True)
+    with pytest.warns(UserWarning, match="skips 1 groups"):
+        earlier = copy.markers.search(
+            clusters, features=features, invalidate_cache=True
+        )
     assert earlier != marker
     assert copy.artifacts.inspect(earlier).revision == 1
     monkeypatch.undo()
@@ -749,7 +764,8 @@ def test_marker_search_records_revision_2_and_recomputes_revision_1_tables(
 
     monkeypatch.setattr(marker_algorithms, "find_markers_by_rank", tracked)
     # Planning prefers the current table over the revision 1 one.
-    assert copy.markers.search(clusters, features=features) == marker
+    with pytest.warns(UserWarning, match="skips 1 groups"):
+        assert copy.markers.search(clusters, features=features) == marker
     superseded = copy.artifacts.inspect(earlier)
     assert superseded.revision == 1 and not superseded.is_current
     assert superseded.current_revision == 2

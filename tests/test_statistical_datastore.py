@@ -329,9 +329,9 @@ def test_groups_control_contrast_direction(datastore_ephemeral):
     )
     assert forward.tables["MALAT1"]["group_1"].iloc[0] == "g2"
     assert backward.tables["MALAT1"]["group_1"].iloc[0] == "g0"
-    assert np.isclose(
-        forward.tables["MALAT1"]["mean_difference"].iloc[0],
-        -backward.tables["MALAT1"]["mean_difference"].iloc[0],
+    assert (
+        forward.tables["MALAT1"]["mean_difference"].iloc[0]
+        == -backward.tables["MALAT1"]["mean_difference"].iloc[0]
     )
     assert forward.artifact is not None
     assert backward.artifact is not None
@@ -664,7 +664,9 @@ def test_run_statistical_testing_normalization_option(datastore_ephemeral):
     counts = ds.RNA.rawData[np.asarray(ds.cells.active_index("I")), :][
         :, [int(np.flatnonzero(ds.RNA.feats.fetch_all("names") == "MALAT1")[0])]
     ].compute()[:, 0]
-    assert raw.loc[0, "mean_1"] == pytest.approx(counts[groups2 == "g0"].mean())
+    assert raw.loc[0, "mean_1"] == pytest.approx(
+        counts[groups2 == "g0"].mean(), rel=1e-12
+    )
 
 
 def test_run_statistical_testing_skip_save(datastore_ephemeral):
@@ -780,8 +782,14 @@ def test_int_and_bool_group_labels_roundtrip(datastore_ephemeral):
     bool_group = loaded_bool.tables["MALAT1"]["group_1"]
     assert pd.api.types.is_integer_dtype(int_group)
     assert pd.api.types.is_bool_dtype(bool_group)
-    assert int_group.iloc[0] in (0, 1)
-    assert bool_group.iloc[0] in (True, False)
+    # The groups keep the order in which the cells first show them.
+    for loaded, computed, labels in (
+        (loaded_int, int_result, [0, 1]),
+        (loaded_bool, bool_result, [True, False]),
+    ):
+        table = loaded.tables["MALAT1"]
+        assert table.loc[0, ["group_1", "group_2"]].tolist() == labels
+        assert table.to_dict("records") == computed.tables["MALAT1"].to_dict("records")
 
 
 def test_auto_counts_surviving_groups_after_dropout(datastore_ephemeral):
@@ -799,7 +807,14 @@ def test_auto_counts_surviving_groups_after_dropout(datastore_ephemeral):
     )
     assert result.method == "mann_whitney"
     assert result.n_groups == 2
-    assert set(result.tables["MALAT1"]["group_1"]) <= {"g0", "g1"}
+    # The cells of g2 have no sample, so two samples of g0 and of g1 remain.
+    table = result.tables["MALAT1"]
+    assert table.loc[0, ["group_1", "group_2", "n_1", "n_2"]].tolist() == [
+        "g0",
+        "g1",
+        2,
+        2,
+    ]
 
 
 def test_explicit_test_rejects_filtered_requested_group(datastore_ephemeral):
@@ -1066,7 +1081,9 @@ def test_plotting_distribution_annotates_welch_brackets(datastore_ephemeral):
         **grouping,
     )
     texts = [text.get_text() for text in annotated.axes["MALAT1"].texts]
-    assert any(text.startswith("p=") for text in texts)
+    # One bracket shows the adjusted p-value of the pair, to two digits.
+    p_value = result.tables["MALAT1"].loc[0, "p_value_adjusted"]
+    assert texts == [f"p={p_value:.2g}"]
     assert len(annotated.axes["MALAT1"].lines) > baseline_lines
     assert annotated.owns_figure == baseline.owns_figure
     assert annotated.provenance.extras.get("stats_annotated") is True
@@ -1203,7 +1220,10 @@ def test_statistical_selection_honors_metadata_missing_mask(datastore_ephemeral)
     )
 
     assert result.n_cells == int((~missing[active]).sum())
-    assert any(text.get_text().startswith("p=") for text in figure.axes["MALAT1"].texts)
+    p_value = result.tables["MALAT1"].loc[0, "p_value_adjusted"]
+    assert [text.get_text() for text in figure.axes["MALAT1"].texts] == [
+        f"p={p_value:.2g}"
+    ]
     figure.close()
 
 
@@ -1214,7 +1234,11 @@ def test_statistical_testing_excludes_missing_artifact_labels(tmp_path):
 
     ds, imported, codes, missing = import_nullable_cluster_h5ad(tmp_path)
     clusters = imported.clusterArtifacts["clusters"]
-    assert np.all(np.asarray(ds.artifacts.load(clusters)["values"][:])[missing] == 0)
+    # The 40 missing labels store the placeholder 0, which is also a group.
+    assert missing.sum() == 40
+    np.testing.assert_array_equal(
+        ds.artifacts.load(clusters)["values"][:], np.where(missing, 0, codes)
+    )
 
     result = ds.compare.test(
         ["G0"],
@@ -1447,6 +1471,7 @@ def test_statistical_value_fingerprints_match_single_key_fetch(
     cells = np.asarray(ds.cells.active_index("I"), dtype=np.int64)
     monkeypatch.setattr(ds, "memoryBytes", 2 * 4 * 8 * len(cells))
 
+    fingerprints = {}
     for normalization in (None, NormalizationSpec(source="raw", transform="log1p")):
         result = ds.compare.test(
             keys,
@@ -1454,6 +1479,7 @@ def test_statistical_value_fingerprints_match_single_key_fetch(
             skip_save=True,
             **grouping,
         )
+        fingerprints[normalization] = result.value_fingerprints
         # The former path fetched and fingerprinted one key at a time.
         single_key = tuple(
             value_fingerprint(
@@ -1472,9 +1498,8 @@ def test_statistical_value_fingerprints_match_single_key_fetch(
         assert result.value_fingerprints == single_key
 
     # Pin the persisted fingerprints of these fixture values in CyteArc's
-    # hash domain.
-    default = ds.compare.test(keys, skip_save=True, **grouping)
-    assert default.value_fingerprints == (
+    # hash domain. None is the default normalization of compare.test.
+    assert fingerprints[None] == (
         "48156de27bcd45a67a3ef7fa87f643f582ddf2ef6a9e1a38f1699e8721cabd53",
         "9bd3446fae2d32fc0b991982797db821620759db503e22839233dce9103e7441",
         "062c10d5654826ca43452d9ba21e2887777b9633a846f0b6289d3cca4e6d4821",
@@ -1504,7 +1529,7 @@ def test_sample_level_mann_whitney_records_p_value_method(datastore_ephemeral):
         assert (table.loc[0, "n_1"], table.loc[0, "n_2"]) == (3, 3)
         # Exact p-values are multiples of 1 / C(6, 3), at least 2 / 20.
         scaled = table.loc[0, "p_value"] * 20
-        assert scaled == pytest.approx(round(scaled))
+        assert scaled == pytest.approx(round(scaled), rel=1e-12)
         assert table.loc[0, "p_value"] >= 0.1
     assert sample_level.artifact is not None
     assert ds.compare.load_tests(sample_level.artifact).p_value_method == "exact"

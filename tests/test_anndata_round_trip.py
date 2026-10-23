@@ -161,7 +161,9 @@ def test_live_export_holds_artifacts_in_scanpy_layout(analysis, tmp_path) -> Non
     np.testing.assert_array_equal(connectivities.toarray(), union)
     np.testing.assert_array_equal(connectivities.toarray(), connectivities.T.toarray())
     np.testing.assert_array_equal(exported.obsp["distances"].toarray(), distances)
-    assert (exported.obsp["distances"].getnnz(axis=1) == 5).all()
+    np.testing.assert_array_equal(
+        exported.obsp["distances"].getnnz(axis=1), np.full(_N_CELLS, 5)
+    )
     assert exported.uns["neighbors"] == {
         "connectivities_key": "connectivities",
         "distances_key": "distances",
@@ -360,7 +362,7 @@ def test_imported_coordinates_feed_graph_construction(analysis) -> None:
             pd.DataFrame(np.zeros((1, 3), dtype=np.float32), index=["elsewhere"]),
         ]
     )
-    assert (frame.dtypes == np.float32).all()
+    assert frame.dtypes.tolist() == [np.dtype(np.float32)] * 3
     source = {"tool": "scvi-tools", "version": "1.2.0", "parameters": {"n": [3]}}
 
     ref = store.reduction.import_coordinates(
@@ -536,11 +538,10 @@ def multimodal(tmp_path_factory):
         location, default_assay="RNA", min_features_per_cell=0, nthreads=1
     )
     cells = store.snapshot_cell_selection("I")
+    # The export reads only the graphs, so each assay's graph uses all of its
+    # features.
     features = {
-        "RNA": store.features.hvgs(
-            cells, top_n=20, min_cells=0, max_cells=np.inf, show_plot=False
-        ),
-        "ADT": store.features.universe(from_assay="ADT"),
+        assay: store.features.universe(from_assay=assay) for assay in ("RNA", "ADT")
     }
     graphs = {}
     for assay, selected in features.items():

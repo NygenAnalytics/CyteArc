@@ -254,7 +254,20 @@ def test_coefficient_estimability_detects_continuous_alias() -> None:
         technicals={"batch": batch},
         technicalKinds={"batch": "categorical"},
     )
-    assert result["coefficientEstimable"] is False
+    # The intercept and the b2 indicator span the dose, so it adds no rank.
+    assert result == {
+        "status": "ok",
+        "coefficientEstimable": False,
+        "partiallyEstimable": False,
+        "rankDeficient": True,
+        "rankTechnical": 2,
+        "rankWithCoefficient": 2,
+        "coefficientDf": 1,
+        "estimableDf": 0,
+        "residualDf": 2,
+        "rowsUsed": 4,
+        "encodedColumns": 3,
+    }
 
 
 def test_coefficient_estimability_without_technicals() -> None:
@@ -264,7 +277,21 @@ def test_coefficient_estimability_without_technicals() -> None:
         technicals={},
         technicalKinds={},
     )
-    assert result["coefficientEstimable"] is True
+    # The intercept alone is the technical design, and the ctrl indicator
+    # raises its rank by the one degree of freedom of the coefficient.
+    assert result == {
+        "status": "ok",
+        "coefficientEstimable": True,
+        "partiallyEstimable": False,
+        "rankDeficient": False,
+        "rankTechnical": 1,
+        "rankWithCoefficient": 2,
+        "coefficientDf": 1,
+        "estimableDf": 1,
+        "residualDf": 2,
+        "rowsUsed": 4,
+        "encodedColumns": 2,
+    }
 
 
 def test_coefficient_estimability_gates_when_columns_reach_rows() -> None:

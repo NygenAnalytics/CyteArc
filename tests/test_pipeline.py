@@ -771,14 +771,34 @@ def test_pipeline_interruption_is_durable_before_callbacks(
 ) -> None:
     datastore = pipeline_store
     events: list[PipelineEvent] = []
+    # The store's records as each interruption callback saw them. The emitter
+    # logs and drops callback errors, so the test checks them after the run.
+    observed: dict[str, tuple[bool, str, bool]] = {}
+
+    def observe(event: PipelineEvent) -> None:
+        events.append(event)
+        if event.kind in {"stage_interrupted", "pipeline_interrupted"}:
+            (stored,) = datastore.pipeline.list_runs(status="interrupted")
+            report = stored.report()
+            pca = next(stage for stage in report["stages"] if stage["stage"] == "pca")
+            observed[event.kind] = (
+                report["run"]["complete"],
+                pca["status"],
+                pca["complete"],
+            )
 
     def interrupt_pca(self, *_args, **_kwargs):
         raise KeyboardInterrupt("stop pipeline")
 
     monkeypatch.setattr(type(datastore), "_reduction_pca", interrupt_pca)
     with pytest.raises(KeyboardInterrupt, match="stop pipeline"):
-        datastore.pipeline.run(callback=events.append, **_minimal_run_options())
+        datastore.pipeline.run(callback=observe, **_minimal_run_options())
 
+    # Both callbacks found the interrupted stage and run already committed.
+    assert observed == {
+        "stage_interrupted": (True, "interrupted", True),
+        "pipeline_interrupted": (True, "interrupted", True),
+    }
     interrupted = datastore.pipeline.list_runs(status="interrupted")
     assert len(interrupted) == 1
     report = interrupted[0].report()
@@ -1007,7 +1027,9 @@ def test_pooled_mad_defaults_match_pipeline_and_preserve_gaussian_option(
         np.testing.assert_array_equal(*masks)
         assert masks[0][healthy]
         assert not masks[0][high_mito]
-        assert np.all(masks[0][low_count_cells] == (method == "gaussian"))
+        np.testing.assert_array_equal(
+            masks[0][low_count_cells], np.full(30, method == "gaussian")
+        )
         if method == "mad":
             bounds = store.artifacts.inspect(direct).parameters["resolved_bounds"][
                 "all"
@@ -1266,7 +1288,7 @@ def test_cluster_selection_records_invalid_candidates_ties_and_reuse(
         "sample contains fewer than two clusters"
     )
     assert tuple(group.attrs["tieOrder"]) == ("invalid", "first", "second")
-    np.testing.assert_allclose(group["scores"][:], [np.nan, 0.25, 0.25])
+    np.testing.assert_array_equal(group["scores"][:], [np.nan, 0.25, 0.25])
 
     reused, reused_key, reused_selected = _select_clusters(store, lineage, candidates)
     assert sample_calls == 2
@@ -1754,7 +1776,7 @@ def test_cluster_selection_scores_harmony_coordinates_not_pca(
         artifact_group(root, lineage["coordinates"])["data"][:],
         dtype=np.float64,
     )
-    np.testing.assert_allclose(seen[0], harmony_values)
+    np.testing.assert_array_equal(seen[0], harmony_values)
 
     with pytest.raises(
         ValueError,

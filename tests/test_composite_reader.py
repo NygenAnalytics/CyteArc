@@ -147,8 +147,11 @@ def test_composite_count_prefill_overlaps_sources_and_preserves_preparation(
             results.append((tables, counts[:], counts.attrs["content_fingerprint"]))
         finally:
             joint.z.store.close()
-            for source in sources.values():
-                assert source.RNA.matrixGroup["counts"][0, 0] >= 0
+            # Closing the composite leaves the borrowed sources open and intact.
+            for name, source in sources.items():
+                np.testing.assert_array_equal(
+                    source.RNA.matrixGroup["counts"][:], prefill_sources[name][1]
+                )
                 source.z.store.close()
     before, after = results
     assert before[0].keys() == after[0].keys()
@@ -562,6 +565,15 @@ def test_composite_indexed_copy_accepts_negative_indices(indexed_copy):
     np.testing.assert_array_equal(output, expected)
 
 
+# The index vectors of an indexed copy, in argument order, as its errors name them.
+_INDEX_VECTORS = (
+    "Source row",
+    "Source column",
+    "Destination row",
+    "Destination column",
+)
+
+
 @pytest.mark.parametrize(
     "vector,index",
     ((0, 3), (0, -4), (1, 4), (1, -5), (2, 5), (2, -6), (3, 6), (3, -7)),
@@ -573,9 +585,11 @@ def test_composite_indexed_copy_rejects_invalid_indices_before_writes(
     output = np.full((5, 6), 17, dtype=values.dtype)
     indices = [np.array([0, 1]) for _ in range(4)]
     indices[vector][1] = index
-    with pytest.raises(IndexError):
+    with pytest.raises(
+        IndexError, match=f"{_INDEX_VECTORS[vector]} index is out of bounds"
+    ):
         indexed_copy(values, output, *indices)
-    assert np.all(output == 17)
+    np.testing.assert_array_equal(output, np.full((5, 6), 17))
 
 
 @pytest.mark.parametrize("vector", range(4))
@@ -584,9 +598,11 @@ def test_composite_indexed_copy_rejects_uint64_max_before_writes(indexed_copy, v
     output = np.full((5, 6), 17, dtype=values.dtype)
     indices = [np.array([0, 1]) for _ in range(4)]
     indices[vector] = np.array([0, np.iinfo(np.uint64).max], dtype=np.uint64)
-    with pytest.raises(IndexError):
+    with pytest.raises(
+        IndexError, match=f"{_INDEX_VECTORS[vector]} index is out of bounds"
+    ):
         indexed_copy(values, output, *indices)
-    assert np.all(output == 17)
+    np.testing.assert_array_equal(output, np.full((5, 6), 17))
 
 
 @pytest.mark.parametrize("axis", (0, 1))
@@ -599,7 +615,7 @@ def test_composite_indexed_copy_rejects_mismatched_lengths_before_writes(
     indices[axis + 2] = np.array([0])
     with pytest.raises(ValueError, match="lengths must match"):
         indexed_copy(values, output, *indices)
-    assert np.all(output == 17)
+    np.testing.assert_array_equal(output, np.full((5, 6), 17))
 
 
 def test_composite_indexed_copy_accepts_signed_sources_and_unsigned_destinations(
@@ -809,20 +825,28 @@ def test_profiled_composite_keeps_its_scratch_and_records_its_reads(reader_joint
 
 
 @pytest.mark.parametrize(
-    "selection,error",
+    "selection,error,message",
     (
-        (np.array([[0]]), ValueError),
-        (np.array([0.5]), TypeError),
-        (np.array([10_000]), IndexError),
-        (np.array([-10_000]), IndexError),
+        (np.array([[0]]), ValueError, "Array selections must be one-dimensional"),
+        (np.array([0.5]), TypeError, "Array selections must contain integers"),
+        (
+            np.array([10_000]),
+            IndexError,
+            "Array selection contains an out-of-range index",
+        ),
+        (
+            np.array([-10_000]),
+            IndexError,
+            "Array selection contains an out-of-range index",
+        ),
     ),
 )
 def test_composite_array_reader_rejects_invalid_selection(
-    reader_joint, source_reads, selection, error
+    reader_joint, source_reads, selection, error, message
 ):
     joint, _ = reader_joint
     reader = virtual_array_reader(joint.RNA.matrixGroup["counts"])
-    with pytest.raises(error):
+    with pytest.raises(error, match=message):
         sync(reader.read(selection, slice(None)))
     assert not source_reads
 
@@ -914,14 +938,16 @@ def test_composite_array_reader_rejects_corrupt_mapping_before_source_reads(
     assert not source_reads
 
 
+# Intersection features occur in every source.
+@pytest.mark.parametrize("reader_joint", ["union"], indirect=True)
 def test_composite_array_reader_keeps_absent_source_features_zero(
     reader_joint, source_reads
 ):
     joint, _ = reader_joint
     reader = virtual_array_reader(joint.RNA.matrixGroup["counts"])
     absent = np.flatnonzero(reader._mappings["featureColumns"][0] == -1)
-    if not len(absent):
-        pytest.skip("Intersection features occur in every source")
+    # Source a holds g00 to g31 of the union's g00 to g32.
+    assert joint.RNA.feats.fetch_all("ids")[absent].tolist() == ["g32"]
     cells = np.flatnonzero(reader._mappings["rowSources"][:] == 0)
     values = sync(reader.read(cells, absent))
     np.testing.assert_array_equal(values, np.zeros((len(cells), len(absent))))
@@ -1371,8 +1397,14 @@ def test_composite_creation_caches_metadata_handles_without_caching_payloads(
         for path in ("cellData", "RNA/featureData"):
             for name, array in joint.z[path].arrays():
                 tables[path, name] = array[:], dict(array.attrs)
-        assert joint.cells._get_missing_mask_array("orig_nullable") is not None
-        assert joint.RNA.feats._get_missing_mask_array("quality") is not None
+        # The sources left every fourth cell score and every fifth gene missing.
+        rows = [int(value.split("__c")[1]) for value in joint.cells.fetch_all("ids")]
+        genes = [int(value[1:]) for value in joint.RNA.feats.fetch_all("ids")]
+        missing_cells = joint.cells._get_missing_mask_array("orig_nullable")
+        missing_genes = joint.RNA.feats._get_missing_mask_array("quality")
+        assert missing_cells is not None and missing_genes is not None
+        np.testing.assert_array_equal(missing_cells[:], np.remainder(rows, 4) == 0)
+        np.testing.assert_array_equal(missing_genes[:], np.remainder(genes, 5) == 0)
         assert joint.cells._get_array("orig_status").attrs["levels"] == [
             "case",
             "control",
@@ -1407,11 +1439,13 @@ def test_composite_creation_caches_metadata_handles_without_caching_payloads(
     assert after[3] == before[3]
 
 
-@pytest.fixture
-def segmented_metadata_source(tmp_path):
+@pytest.fixture(scope="module")
+def segmented_metadata_template(tmp_path_factory):
+    """Write the segmented source once; each test opens its own copy of it."""
+    path = tmp_path_factory.mktemp("segmented_metadata") / "source.zarr"
     values = np.arange(96 * 16, dtype=np.uint16).reshape(96, 16) % 31
     source = _write_source(
-        tmp_path / "source.zarr",
+        path,
         values,
         [f"g{index:02d}" for index in range(16)],
         policy=CountMatrixPolicy(512, 128),
@@ -1433,8 +1467,21 @@ def segmented_metadata_source(tmp_path):
         "quality", [None if index % 5 == 0 else float(index) for index in range(16)]
     )
     source.cells._get_array("nullable").attrs["description"] = "Nullable score"
+    source.z.store.close()
+    return path, values
+
+
+@pytest.fixture
+def segmented_metadata_source(segmented_metadata_template, tmp_path):
+    template, values = segmented_metadata_template
+    path = tmp_path / "source.zarr"
+    shutil.copytree(template, path)
+    # The options that _write_source opens its sources with.
+    source = DataStore(
+        str(path), min_features_per_cell=-1, nthreads=1, mem_budget="64M"
+    )
     assert source.RNA.rawData.chunksize[0] < 32
-    return source, values
+    return source, values.copy()
 
 
 @pytest.mark.parametrize("selected_rows", (None, (35,)))
@@ -1493,8 +1540,13 @@ def test_composite_creation_reuses_only_selected_encoded_metadata_chunks(
             np.testing.assert_array_equal(np.sort(order), expected_rows)
             counts = joint.RNA.matrixGroup["counts"]
             np.testing.assert_array_equal(counts[:], expected_counts[order])
-            assert joint.cells._get_missing_mask_array("orig_nullable") is not None
-            assert joint.RNA.feats._get_missing_mask_array("quality") is not None
+            # The source left every fourth cell score and every fifth gene missing.
+            genes = [int(value[1:]) for value in joint.RNA.feats.fetch_all("ids")]
+            missing_cells = joint.cells._get_missing_mask_array("orig_nullable")
+            missing_genes = joint.RNA.feats._get_missing_mask_array("quality")
+            assert missing_cells is not None and missing_genes is not None
+            np.testing.assert_array_equal(missing_cells[:], order % 4 == 0)
+            np.testing.assert_array_equal(missing_genes[:], np.remainder(genes, 5) == 0)
             results.append(
                 (requests.copy(), tables, counts.attrs["content_fingerprint"])
             )

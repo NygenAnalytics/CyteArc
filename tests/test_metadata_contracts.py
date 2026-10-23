@@ -160,10 +160,16 @@ def test_metadata_fetch_reads_only_the_requested_column():
     group.create_array("added", data=np.ones(3))
     np.testing.assert_array_equal(table.fetch_all("added"), np.ones(3))
     del group["added"]
-    with pytest.raises(KeyError):
+    with pytest.raises(
+        KeyError, match=r"^'added does not exist in the metadata columns\.'$"
+    ):
         table.fetch_all("added")
     group.create_array("nested/hidden", data=np.ones(3))
-    with pytest.raises(KeyError):
+    with pytest.raises(
+        KeyError,
+        match="nested/hidden does not exist in the metadata columns. .*look for "
+        "'nested_hidden' or a numbered variant",
+    ):
         table.fetch_all("nested/hidden")
 
 

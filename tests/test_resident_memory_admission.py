@@ -516,7 +516,9 @@ def test_ann_index_transfer_bytes_bound_the_traced_copies(tmp_path) -> None:
 @pytest.mark.slow
 @pytest.mark.parametrize(
     ("n_cells", "dims", "clusters", "working_mib"),
-    [(10_000, 50, 200, 4), (5_000, 20, 10, 1)],
+    # The distance chunks, and so the peak, do not depend on the dimensions,
+    # which only slow the distances down.
+    [(10_000, 10, 200, 4), (5_000, 20, 10, 1)],
     ids=["many-clusters", "small-chunks"],
 )
 def test_silhouette_workspace_estimate_bounds_the_traced_peak(

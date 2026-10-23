@@ -1,3 +1,6 @@
+import shutil
+from pathlib import Path
+
 import numpy as np
 import pytest
 import zarr
@@ -22,6 +25,22 @@ from tests.qc_helpers import (
     open_qc_store,
     fresh_qc_store,
 )
+
+
+@pytest.fixture(scope="module")
+def labelled_template(tmp_path_factory) -> Path:
+    """The labelled QC store, written once; tests open copies of it."""
+    path = tmp_path_factory.mktemp("labelled") / "store.zarr"
+    create_labelled_qc_store(path)
+    return path
+
+
+def _labelled_copy(template: Path, path: Path) -> DataStore:
+    """Open a copy of the labelled store as ``create_labelled_qc_store`` opens it."""
+    shutil.copytree(template, path)
+    return DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
 
 
 def test_first_preparation_replaces_incorrect_summaries_and_column_attributes():
@@ -54,11 +73,13 @@ def test_construction_retry_finishes_interrupted_transpose():
         finalize_writer_counts_t(root, "RNA", None, nthreads=1)
 
 
-def test_merge_preserves_feature_annotations_and_missing_flags(tmp_path):
+def test_merge_preserves_feature_annotations_and_missing_flags(
+    labelled_template, tmp_path
+):
     from cytearc.merge import DataStoreMerge
 
-    left = create_labelled_qc_store(tmp_path / "left")
-    right = create_labelled_qc_store(tmp_path / "right")
+    left = _labelled_copy(labelled_template, tmp_path / "left")
+    right = _labelled_copy(labelled_template, tmp_path / "right")
     for store in (left, right):
         features = store.RNA.z["featureData"]
         features.create_array("label", data=np.array(["a", "", "c", "d", "e", "f"]))
@@ -135,11 +156,11 @@ def test_separate_metadata_handle_cannot_replace_protected_columns(table, column
 
 @pytest.mark.parametrize("operation", ["mount", "repack"])
 def test_unchanged_copy_preserves_percentage_proof_and_missing_values(
-    tmp_path, operation
+    labelled_template, tmp_path, operation
 ):
     source = tmp_path / "source.zarr"
     target = tmp_path / "target.zarr"
-    original = create_labelled_qc_store(source)
+    original = _labelled_copy(labelled_template, source)
     if operation == "mount":
         mount_datastore(str(source), str(target))
     else:
@@ -165,8 +186,10 @@ def test_unchanged_copy_preserves_percentage_proof_and_missing_values(
     )
 
 
-def test_subset_maps_missing_flags_and_recomputes_statistics(tmp_path):
-    source = create_labelled_qc_store(tmp_path / "source.zarr")
+def test_subset_maps_missing_flags_and_recomputes_statistics(
+    labelled_template, tmp_path
+):
+    source = _labelled_copy(labelled_template, tmp_path / "source.zarr")
     target = tmp_path / "subset.zarr"
     rows = np.array([5, 1, 3])
     writer = SubsetZarr(str(target), [source.RNA], cell_idx=rows, nthreads=1)
@@ -187,10 +210,12 @@ def test_subset_maps_missing_flags_and_recomputes_statistics(tmp_path):
     )
 
 
-def test_data_only_rebuild_discards_broken_generated_metadata(tmp_path):
+def test_data_only_rebuild_discards_broken_generated_metadata(
+    labelled_template, tmp_path
+):
     source = tmp_path / "source.zarr"
     target = tmp_path / "rebuilt.zarr"
-    original = create_labelled_qc_store(source)
+    original = _labelled_copy(labelled_template, source)
     root = zarr.open_group(str(source), mode="r+")
     root["cellData/RNA_nCounts"][:] = 999
     root["cellData/RNA_nCounts"].attrs["missing_mask"] = "missing-array"
@@ -275,9 +300,12 @@ def test_first_preparation_discards_imported_percentages_with_warning():
     discarded = [message for message in messages if "Discarding existing" in message]
     assert len(discarded) == 1
     assert "'RNA_percentMito'" in discarded[0]
-    mito = store.cells.fetch_all("RNA_percentMito")
-    assert not np.any(mito == 42.0)
-    assert np.isnan(mito[4])
+    # The column is derived from the counts; the empty fifth cell has none.
+    totals = QC_VALUES.sum(axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        expected = 100 * QC_VALUES[:, 0] / totals
+    assert np.isnan(expected[4])
+    np.testing.assert_array_equal(store.cells.fetch_all("RNA_percentMito"), expected)
 
 
 def test_prepared_store_explains_how_to_add_a_missing_percentage():
@@ -320,11 +348,18 @@ def test_first_preparation_publishes_identity_with_the_prepared_flag(monkeypatch
         return await original_set(self, key, value, *args, **kwargs)
 
     monkeypatch.setattr(store_type, "set", recording_set)
-    open_qc_store(storage)
+    store = open_qc_store(storage)
 
-    prepared = [attrs for attrs in documents if attrs.get("prepared") is True]
-    assert prepared
-    assert all(
-        attrs.get("dataset_fingerprint") and attrs.get("counts_fingerprint")
-        for attrs in prepared
-    )
+    identity = {
+        "dataset_fingerprint": read_dataset_fingerprint(store.RNA.z),
+        "counts_fingerprint": store.RNA.z["counts"].attrs["content_fingerprint"],
+    }
+    published = [attrs.get("prepared") for attrs in documents].index(True)
+    # No write carries the identity before the flag, and the write that sets
+    # the flag carries both fingerprints, as every later write keeps them.
+    for attrs in documents[:published]:
+        assert attrs["prepared"] is False
+        assert not identity.keys() & attrs.keys()
+    for attrs in documents[published:]:
+        assert attrs["prepared"] is True
+        assert {key: attrs.get(key) for key in identity} == identity

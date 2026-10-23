@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from obstore.store import MemoryStore
 from pydantic import ValidationError
 
 from profiling.config import (
@@ -242,12 +243,28 @@ def test_modal_names_are_fixed() -> None:
 
 def test_result_exists_skips_when_object_present(monkeypatch):
     config = load_profiling_config(_EXAMPLE_CONFIG)
-    monkeypatch.setattr(
-        "profiling.results.object_exists",
-        lambda uri: uri.endswith("/results/10000/createStore.json"),
-    )
+    store = MemoryStore()
+    store.put("cytearc-profiling/results/10000/createStore.json", b"{}")
+    opened: list[str] = []
+
+    def open_object(uri: str) -> tuple[MemoryStore, str]:
+        opened.append(uri)
+        return store, uri.removeprefix("s3://example-bucket/")
+
+    monkeypatch.setattr("profiling.r2.open_r2_object", open_object)
     assert result_exists(config, 10_000, "createStore") is True
+    # Another stage, another size, and a run tag each name a missing object.
     assert result_exists(config, 10_000, "filterCells") is False
+    assert result_exists(config, 25_000, "createStore") is False
+    tagged = config.model_copy(update={"runTag": "rerun"})
+    assert result_exists(tagged, 10_000, "createStore") is False
+    prefix = "s3://example-bucket/cytearc-profiling/results"
+    assert opened == [
+        f"{prefix}/10000/createStore.json",
+        f"{prefix}/10000/filterCells.json",
+        f"{prefix}/25000/createStore.json",
+        f"{prefix}/rerun/10000/createStore.json",
+    ]
 
 
 def test_stage_run_result_json_shape():

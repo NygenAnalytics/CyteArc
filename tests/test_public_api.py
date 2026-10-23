@@ -153,6 +153,22 @@ _EXPECTED_PLOTTING_EXPORTS = (
 )
 
 
+# Each facade with one of its lazy exports, for the reload check.
+_RELOADED_FACADES = (
+    ("cytearc", "MappingResult"),
+    ("cytearc.features", "fit_lowess"),
+    ("cytearc.readers", "CSVReader"),
+    ("cytearc.writers", "CSVtoZarr"),
+    ("cytearc.merge", "DataStoreMerge"),
+    ("cytearc.utils", "clean_array"),
+    ("cytearc.neighbors", "calc_snn"),
+    ("cytearc.clustering", "straight_cut"),
+    ("cytearc.embeddings", "initial_embedding"),
+    ("cytearc.trajectory", "PseudotimeScoreResult"),
+    ("cytearc.plotting", "embedding"),
+)
+
+
 def _run_probe(source: str) -> dict[str, object]:
     result = subprocess.run(
         [sys.executable, "-c", source],
@@ -205,7 +221,9 @@ def cold_import_probe() -> dict[str, object]:
 
     Each step records its observation before the next step imports more: the
     bare import, the zarr warning filter, module attributes, then a star
-    import of the exports.
+    import of the exports. Last, after every other observation, each facade is
+    reloaded over a replaced export; a reload discards every bound export, so
+    the earlier imports do not change its outcome.
     """
     lazy_names = [*_EXPECTED_EXPORTS, *_EXPECTED_MODULE_ATTRIBUTES]
     return _run_probe(
@@ -278,9 +296,24 @@ module_attributes = {{
 namespace = {{}}
 exec("from cytearc import *", namespace)
 bound = sorted(name for name in namespace if not name.startswith("__"))
+
+reload_failures = []
+for module_name, export_name in {_RELOADED_FACADES!r}:
+    try:
+        module = importlib.import_module(module_name)
+        original = getattr(module, export_name)
+        setattr(module, export_name, object())
+        importlib.reload(module)
+        if export_name in vars(module):
+            reload_failures.append([module_name, export_name, "still bound"])
+        elif getattr(module, export_name) is not original:
+            reload_failures.append([module_name, export_name, "another object"])
+    except Exception as error:
+        reload_failures.append([module_name, export_name, repr(error)])
 print(json.dumps({{
     "bare": bare,
     "moduleAttributes": module_attributes,
+    "reloadFailures": reload_failures,
     "starImport": {{"bound": bound}},
     "zarrWarning": zarr_warning,
 }}))
@@ -628,39 +661,12 @@ def test_unbounded_diffusion_operator_is_absent():
     assert not hasattr(diffusion, "diffusion_operator")
 
 
-def test_lazy_facades_clear_cached_exports_on_reload():
-    subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            """
-import importlib
-
-cases = (
-    ("cytearc", "MappingResult"),
-    ("cytearc.features", "fit_lowess"),
-    ("cytearc.readers", "CSVReader"),
-    ("cytearc.writers", "CSVtoZarr"),
-    ("cytearc.merge", "DataStoreMerge"),
-    ("cytearc.utils", "clean_array"),
-    ("cytearc.neighbors", "calc_snn"),
-    ("cytearc.clustering", "straight_cut"),
-    ("cytearc.embeddings", "initial_embedding"),
-    ("cytearc.trajectory", "PseudotimeScoreResult"),
-    ("cytearc.plotting", "embedding"),
-)
-
-for module_name, export_name in cases:
-    module = importlib.import_module(module_name)
-    original = getattr(module, export_name)
-    setattr(module, export_name, object())
-    importlib.reload(module)
-    assert export_name not in vars(module), (module_name, export_name)
-    assert getattr(module, export_name) is original, (module_name, export_name)
-""",
-        ],
-        check=True,
-    )
+def test_lazy_facades_clear_cached_exports_on_reload(
+    cold_import_probe: dict[str, object],
+):
+    # After a reload, no facade keeps a replaced export bound, and each
+    # resolves the original object again.
+    assert cold_import_probe["reloadFailures"] == []
 
 
 def test_lazy_facade_imports_submodules_and_exports_on_first_access(

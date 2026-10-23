@@ -15,8 +15,9 @@ def test_fix_knn_query_removes_leading_self_matches():
     )
 
     assert missed_self_hits == 0
-    assert np.array_equal(fixed_indices, [[1, 2], [5, 6]])
-    assert np.allclose(fixed_distances, [[0.2, 0.4], [0.3, 0.6]])
+    np.testing.assert_array_equal(fixed_indices, [[1, 2], [5, 6]])
+    # The kept distances are copied, not recomputed.
+    np.testing.assert_array_equal(fixed_distances, [[0.2, 0.4], [0.3, 0.6]])
 
 
 def test_fix_knn_query_handles_each_self_neighbor_case():
@@ -44,7 +45,7 @@ def test_fix_knn_query_handles_each_self_neighbor_case():
     )
 
     assert missed_self_hits == 1
-    assert np.array_equal(
+    np.testing.assert_array_equal(
         fixed_indices,
         np.array(
             [
@@ -54,7 +55,7 @@ def test_fix_knn_query_handles_each_self_neighbor_case():
             ]
         ),
     )
-    assert np.allclose(
+    np.testing.assert_array_equal(
         fixed_distances,
         np.array(
             [
@@ -64,8 +65,8 @@ def test_fix_knn_query_handles_each_self_neighbor_case():
             ]
         ),
     )
-    assert np.array_equal(indices, original_indices)
-    assert np.array_equal(distances, original_distances)
+    np.testing.assert_array_equal(indices, original_indices)
+    np.testing.assert_array_equal(distances, original_distances)
 
 
 def test_fix_knn_query_removes_only_the_first_repeated_self_label():
@@ -80,7 +81,7 @@ def test_fix_knn_query_removes_only_the_first_repeated_self_label():
 
     assert missed_self_hits == 0
     np.testing.assert_array_equal(fixed_indices, [[8, 3, 9]])
-    np.testing.assert_allclose(fixed_distances, [[0.1, 0.2, 0.3]])
+    np.testing.assert_array_equal(fixed_distances, [[0.1, 0.2, 0.3]])
 
 
 @pytest.mark.parametrize(

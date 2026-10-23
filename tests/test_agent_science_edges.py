@@ -116,7 +116,10 @@ def test_manual_qc_uses_exact_inclusive_bounds_and_preserves_live_selection() ->
     # Row 5 is the only missing value; counts replace saved row lists.
     assert flags["RNA_nCounts"]["missing"] == 1
     assert "outlierRows" not in flags["RNA_nCounts"]
-    assert any("biological populations" in warning for warning in warnings)
+    assert warnings == [
+        "QC thresholds may remove low-complexity biological populations; "
+        "inspect retention before interpretation."
+    ]
     pd.testing.assert_frame_equal(frame, before)
 
 
@@ -298,9 +301,14 @@ def test_context_metadata_cap_preserves_declared_roles_and_reports_remote_reads(
     )
     assert len(prepared["contextEvidence"]["columns"]) == 48
     assert "extra59" in prepared["contextEvidence"]["columns"]
-    assert any("48 of" in item for item in prepared["limitations"])
-    assert any("remote count blocks" in item for item in prepared["limitations"])
-    assert any("RNA_percentMito" in item for item in prepared["limitations"])
+    # 60 extra columns, batch, condition and two QC metrics are offered.
+    assert {
+        "Context shows 48 of 64 metadata columns; explicit study roles take priority.",
+        "The local mount may fetch remote count blocks; remote counts are not "
+        "hydrated by this procedure.",
+        "Optional QC outlier flags are unavailable for missing columns: "
+        "['RNA_percentMito'].",
+    } <= set(prepared["limitations"])
 
 
 def test_fingerprinting_handles_nullable_bytes_and_nonfinite_metadata() -> None:
@@ -597,10 +605,35 @@ def test_incomplete_diagnostics_are_missing_evidence_not_correction_support(
         "cLISI": None,
         "graphConnectivity": None,
     }
-    assert any("unavailable" in item for item in result["limitations"])
+    # Each missing measure is reported together with its cause.
+    if failure == "graph":
+        expected = [
+            "Bounded correction diagnostics unavailable: RuntimeError: "
+            "Coordinate graph unavailable",
+            "Batch mixing for batch is non-finite or unavailable.",
+            "Biological preservation for condition is non-finite or unavailable.",
+            "Graph connectivity for condition is non-finite or unavailable.",
+        ]
+    else:
+        cause = (
+            "unavailable: AnalysisInputError: Diagnostic sample lacks complete "
+            "coverage of the frozen metadata levels"
+        )
+        expected = [
+            f"Batch mixing for batch {cause}",
+            f"Biological preservation for condition {cause}",
+            f"Graph connectivity for condition {cause}",
+        ]
+    if failure == "omitted-level":
+        expected.insert(
+            0,
+            "Correction and doublet diagnostics estimate the cohort on at most "
+            "10000 deterministic coordinate rows; rare populations may be absent "
+            "from that sample. Sample composition uses the full retained cohort.",
+        )
+    assert result["limitations"] == expected
     if failure == "omitted-level":
         assert result["diagnosticScope"]["sampleCells"] == 2
-        assert any("rare populations" in item for item in result["limitations"])
         assert result["clusters"][1]["doubletScoreMedian"] is None
         # Sample support remains full-cohort even when the coordinate sample
         # misses an entire cluster.
@@ -632,27 +665,50 @@ def test_sample_support_rejects_missing_or_unaligned_sample_identity(
         return
     result = execution.finalist_evidence(store, run, candidate, prepared, config)
     assert result["metrics"]["crossUnitSupport"] is None
-    assert result["requiredSampleSupport"]
-    assert any(
-        "Cross-unit support is unavailable" in item for item in result["limitations"]
-    )
+    assert result["requiredSampleSupport"] is True
+    assert result["limitations"] == [
+        "Cross-unit support is unavailable for a single sample."
+        if failure == "single"
+        else "Cross-unit support is unavailable because sample labels are missing."
+    ]
+
+
+_NO_GAIN = "No batch mixing measure improved by more than 0.05."
+_NO_BATCH_VALUE = "Batch mixing evidence is unavailable for batch."
 
 
 @pytest.mark.parametrize(
-    ("damage", "message"),
+    ("damage", "reasons"),
     [
-        ("native", "one native and one Harmony"),
-        ("batch", "technical batch mixing is missing"),
-        ("batch-value", "Batch mixing evidence is unavailable"),
-        ("protection", "biological protection evidence is missing"),
-        ("protection-value", "Biological protection cLISI is unavailable"),
-        ("coherence", "Matched markerSupportFraction evidence is unavailable"),
-        ("specificity", "Matched marker specificity evidence is unavailable"),
-        ("specificity-harm", "Marker specificity worsened"),
+        ("native", ["Correction requires one native and one Harmony finalist."]),
+        (
+            "batch",
+            ["Matched technical batch mixing is missing.", _NO_BATCH_VALUE, _NO_GAIN],
+        ),
+        # Missing mixing evidence also leaves no measured gain.
+        ("batch-value", [_NO_BATCH_VALUE, _NO_GAIN]),
+        (
+            "protection",
+            [
+                "Matched biological protection evidence is missing.",
+                "Biological protection cLISI is unavailable for condition.",
+                "Biological protection graphConnectivity is unavailable for condition.",
+            ],
+        ),
+        (
+            "protection-value",
+            ["Biological protection cLISI is unavailable for condition."],
+        ),
+        ("coherence", ["Matched markerSupportFraction evidence is unavailable."]),
+        ("specificity", ["Matched marker specificity evidence is unavailable."]),
+        (
+            "specificity-harm",
+            ["Marker specificity worsened by more than 0.05 after correction."],
+        ),
     ],
 )
 def test_correction_gate_rejects_missing_or_wrong_direction_metrics(
-    damage: str, message: str
+    damage: str, reasons: list[str]
 ) -> None:
     native, corrected = _matched()
     if damage == "native":
@@ -671,9 +727,8 @@ def test_correction_gate_rejects_missing_or_wrong_direction_metrics(
         corrected["metrics"]["markerSpecificityMedian"] = None
     else:
         corrected["metrics"]["markerSpecificityMedian"] = 0.6
-    assert any(
-        message in reason for reason in execution.validate_harmony(native, corrected)
-    )
+    # The matched pair is otherwise admissible, so only this damage is reported.
+    assert execution.validate_harmony(native, corrected) == reasons
 
 
 @pytest.mark.parametrize(

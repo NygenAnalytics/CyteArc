@@ -261,38 +261,63 @@ def test_matrix_source_must_be_a_store_location_that_holds_assays(
     assert not target.exists()
 
 
+def _store_files(path: Path) -> dict[str, bytes]:
+    return {
+        str(file.relative_to(path)): file.read_bytes()
+        for file in sorted(path.rglob("*"))
+        if file.is_file()
+    }
+
+
+@pytest.fixture(scope="module")
+def unresolvable_composites(tmp_path_factory) -> dict[str, Path]:
+    """Composites whose one source is missing or no longer matches its identity.
+
+    A refused operation writes nothing, which each test checks, so the tests
+    share the composites instead of building one each.
+    """
+    from cytearc.composite import create_composite
+
+    composites = {}
+    for source_failure in ("missing", "identity"):
+        base = tmp_path_factory.mktemp(f"composite_{source_failure}")
+        source_path = base / "source.zarr"
+        source = _open(
+            _write_store(source_path, {"RNA": _COUNTS}),
+            nthreads=1,
+            mem_budget="64M",
+        )
+        joint_path = base / "joint.zarr"
+        create_composite(
+            {"source": source},
+            at=joint_path,
+            features="intersection",
+            nthreads=1,
+            mem_budget="64M",
+        )
+        if source_failure == "missing":
+            source_path.rename(base / "unavailable.zarr")
+        else:
+            root = zarr.open_group(source_path, mode="r+")
+            root["RNA"].attrs["dataset_fingerprint"] = "changed-source"
+        composites[source_failure] = joint_path
+    return composites
+
+
 @pytest.mark.parametrize("operation", ["mount", "matrix_source", "repack"])
 @pytest.mark.parametrize("source_failure", ["missing", "identity"])
 @pytest.mark.parametrize("existing_destination", [False, True])
 def test_composite_refused_before_resolving_sources(
+    unresolvable_composites: dict[str, Path],
     tmp_path: Path,
     operation: str,
     source_failure: str,
     existing_destination: bool,
 ) -> None:
-    from cytearc.composite import create_composite
     from cytearc.tools.repack_zarr import repack_store
 
-    source_path = tmp_path / "source.zarr"
-    source = _open(
-        _write_store(source_path, {"RNA": _COUNTS}),
-        nthreads=1,
-        mem_budget="64M",
-    )
-    joint_path = tmp_path / "joint.zarr"
-    create_composite(
-        {"source": source},
-        at=joint_path,
-        features="intersection",
-        nthreads=1,
-        mem_budget="64M",
-    )
-    if source_failure == "missing":
-        source_path.rename(tmp_path / "unavailable.zarr")
-    else:
-        root = zarr.open_group(source_path, mode="r+")
-        root["RNA"].attrs["dataset_fingerprint"] = "changed-source"
-
+    joint_path = unresolvable_composites[source_failure]
+    joint_before = _store_files(joint_path)
     target = tmp_path / "target.zarr"
     if existing_destination:
         target.mkdir()
@@ -312,6 +337,7 @@ def test_composite_refused_before_resolving_sources(
         assert (target / "sentinel").read_text() == "keep"
     else:
         assert not target.exists()
+    assert _store_files(joint_path) == joint_before
 
 
 class _FailingTarget(WrapperStore[Store]):

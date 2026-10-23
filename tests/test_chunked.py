@@ -33,34 +33,44 @@ class TestChunkedArrayParity:
         assert ca.numblocks[0] == int(np.ceil(dense.shape[0] / stream_rows))
         blocks = list(ca.stream_blocks(nthreads=1))
         assert len(blocks) == ca.numblocks[0]
-        assert np.array_equal(np.vstack(blocks), dense)
+        np.testing.assert_array_equal(np.vstack(blocks), dense)
 
     def test_compute(self, backed_pair):
         ca, dense = backed_pair
-        assert np.array_equal(ca.compute(), dense)
+        computed = ca.compute()
+        assert computed.dtype == dense.dtype
+        np.testing.assert_array_equal(computed, dense)
 
     @pytest.mark.parametrize("axis", [0, 1])
     def test_reductions(self, backed_pair, axis):
         ca, dense = backed_pair
-        assert np.allclose(ca.sum(axis=axis).compute(), dense.sum(axis))
-        assert np.allclose(ca.mean(axis=axis).compute(), dense.mean(axis))
-        assert np.allclose(ca.var(axis=axis).compute(), dense.var(axis))
-        assert np.allclose(ca.sum(axis=axis - 2).compute(), dense.sum(axis))
+        # Sums and means of the small integer counts are exact in any order.
+        sums = ca.sum(axis=axis).compute()
+        assert sums.dtype == dense.sum(axis).dtype
+        np.testing.assert_array_equal(sums, dense.sum(axis))
+        np.testing.assert_array_equal(ca.mean(axis=axis).compute(), dense.mean(axis))
+        # Column variances merge the moments of the row blocks, so they round
+        # differently from NumPy's two passes over the whole matrix.
+        np.testing.assert_allclose(
+            ca.var(axis=axis).compute(), dense.var(axis), rtol=1e-13
+        )
+        np.testing.assert_array_equal(ca.sum(axis=axis - 2).compute(), dense.sum(axis))
 
     def test_count_nonzero_and_argmax(self, backed_pair):
         ca, dense = backed_pair
-        assert np.array_equal(
+        np.testing.assert_array_equal(
             np.asarray(ca.count_nonzero(axis=1)), np.count_nonzero(dense, axis=1)
         )
-        assert np.array_equal(np.asarray(ca.argmax(axis=1)), dense.argmax(1))
+        np.testing.assert_array_equal(np.asarray(ca.argmax(axis=1)), dense.argmax(1))
         with pytest.raises(NotImplementedError, match="argmax\\(axis=0\\)"):
             ca.argmax(axis=0).compute()
 
     def test_mean_and_std_matches_numpy_and_rejects_other_axes(self, backed_pair):
         ca, dense = backed_pair
         mean, std = ca.mean_and_std(axis=0)
-        np.testing.assert_allclose(mean, dense.mean(axis=0))
-        np.testing.assert_allclose(std, dense.std(axis=0))
+        np.testing.assert_array_equal(mean, dense.mean(axis=0))
+        # The deviations merge across row blocks, unlike NumPy's two passes.
+        np.testing.assert_allclose(std, dense.std(axis=0), rtol=1e-13)
         with pytest.raises(
             NotImplementedError, match="mean_and_std only supports axis=0"
         ):
@@ -69,12 +79,16 @@ class TestChunkedArrayParity:
     def test_boolean_comparison_reduction(self, backed_pair):
         ca, dense = backed_pair
         assert (ca > 0).dtype == np.dtype(bool)
-        assert np.array_equal((ca > 0).sum(axis=0).compute(), (dense > 0).sum(0))
+        np.testing.assert_array_equal(
+            (ca > 0).sum(axis=0).compute(), (dense > 0).sum(0)
+        )
 
     def test_scalar_reductions_weight_the_short_final_block(self, backed_pair):
         ca, dense = backed_pair
-        assert np.allclose(ca.mean().compute(), dense.mean())
-        assert np.allclose(ca.var().compute(), dense.var())
+        np.testing.assert_array_equal(ca.mean().compute(), dense.mean())
+        # The variance pools the moments of the blocks, which NumPy sums in
+        # another order.
+        np.testing.assert_allclose(ca.var().compute(), dense.var(), rtol=1e-12)
         assert ca.count_nonzero().compute() == np.count_nonzero(dense)
 
     def test_fancy_subset(self, backed_pair):
@@ -85,8 +99,8 @@ class TestChunkedArrayParity:
         sub = ca[:, fidx][cidx, :]
         ref = dense[:, fidx][cidx, :]
         assert sub.shape == ref.shape
-        assert np.array_equal(sub.compute(), ref)
-        assert np.allclose(sub.sum(axis=1).compute(), ref.sum(1))
+        np.testing.assert_array_equal(sub.compute(), ref)
+        np.testing.assert_array_equal(sub.sum(axis=1).compute(), ref.sum(1))
 
     def test_lib_size_normalization(self, backed_pair):
         ca, dense = backed_pair
@@ -95,8 +109,8 @@ class TestChunkedArrayParity:
         scalar[scalar == 0] = 1
         normed = 1e4 * sub / scalar.reshape(-1, 1)
         ref = 1e4 * dense / scalar.reshape(-1, 1)
-        assert np.allclose(normed.compute(), ref)
-        assert np.allclose(np.log1p(normed).compute(), np.log1p(ref))
+        np.testing.assert_array_equal(normed.compute(), ref)
+        np.testing.assert_array_equal(np.log1p(normed).compute(), np.log1p(ref))
 
     def test_clr_with_axis0_inside_expression(self, backed_pair):
         ca, dense = backed_pair
@@ -108,7 +122,8 @@ class TestChunkedArrayParity:
         f = np.exp(np.log1p(sub).sum(axis=0) / len(sub))
         clr = np.log1p(sub / f)
         ref_f = np.exp(np.log1p(ref).sum(0) / ref.shape[0])
-        assert np.allclose(clr.compute(), np.log1p(ref / ref_f))
+        # The column sums add the row blocks' sums, which NumPy adds row by row.
+        np.testing.assert_allclose(clr.compute(), np.log1p(ref / ref_f), rtol=1e-13)
 
     def test_column_subset_after_ops(self, backed_pair):
         ca, dense = backed_pair
@@ -117,7 +132,7 @@ class TestChunkedArrayParity:
         normed = np.log1p(1e4 * ca / scalar.reshape(-1, 1))
         ref = np.log1p(1e4 * dense / scalar.reshape(-1, 1))
         cols = np.array([3, 10, 25, 40])
-        assert np.allclose(normed[:, cols].compute(), ref[:, cols])
+        np.testing.assert_array_equal(normed[:, cols].compute(), ref[:, cols])
 
     def test_column_subset_after_two_dimensional_row_broadcast(self, backed_pair):
         ca, dense = backed_pair
@@ -125,7 +140,7 @@ class TestChunkedArrayParity:
         transformed = ca * row_values
         cols = np.array([3, 10, 25, 40])
 
-        np.testing.assert_allclose(
+        np.testing.assert_array_equal(
             transformed[:, cols].compute(),
             (dense * row_values)[:, cols],
         )
@@ -133,8 +148,8 @@ class TestChunkedArrayParity:
     def test_from_numpy(self, backed_pair):
         _, dense = backed_pair
         ca = ChunkedArray.from_numpy(dense.astype(float), block_size=50, nthreads=2)
-        assert np.array_equal(ca.compute(), dense.astype(float))
-        assert np.allclose(ca.sum(axis=0).compute(), dense.sum(0))
+        np.testing.assert_array_equal(ca.compute(), dense.astype(float))
+        np.testing.assert_array_equal(ca.sum(axis=0).compute(), dense.sum(0))
 
 
 class TestNumpySemantics:
@@ -179,7 +194,10 @@ class TestNumpySemantics:
         np.testing.assert_array_equal(
             ca[rows, cols].compute(), values[np.ix_(rows, cols)]
         )
-        with pytest.raises(IndexError):
+        with pytest.raises(
+            IndexError,
+            match="size of axis is 4 but size of corresponding boolean axis is 2",
+        ):
             ca[np.array([True, False])]
 
     def test_operands_that_numpy_cannot_broadcast_are_rejected(self):
@@ -262,8 +280,18 @@ class TestNumpySemantics:
     def test_scalar_and_non_integer_keys_are_rejected(self):
         values = np.arange(6, dtype=np.float64).reshape(2, 3)
         ca = ChunkedArray.from_numpy(values)
-        for key in (1, (slice(None), 1), np.int64(0), [[0]], np.array([0.5])):
-            with pytest.raises(IndexError):
+        scalar = "ChunkedArray keys must be slices or one-dimensional index arrays"
+        for key, message in (
+            (1, scalar),
+            ((slice(None), 1), scalar),
+            (np.int64(0), scalar),
+            ([[0]], scalar),
+            (
+                np.array([0.5]),
+                "ChunkedArray index arrays must hold integers or booleans",
+            ),
+        ):
+            with pytest.raises(IndexError, match=message):
                 ca[key]
         np.testing.assert_array_equal(ca[[1]].compute(), values[[1]])
         np.testing.assert_array_equal(ca[1:2, [2, 0]].compute(), values[1:2, [2, 0]])
@@ -271,9 +299,14 @@ class TestNumpySemantics:
 
     def test_unsupported_ufunc_keywords_are_rejected(self):
         ca = ChunkedArray.from_numpy(np.ones((2, 2)))
-        with pytest.raises(TypeError):
+        # NumPy raises once the matrix declines the ufunc call.
+        with pytest.raises(
+            TypeError, match=r"NotImplemented from __array_ufunc__\(<ufunc 'log1p'>"
+        ):
             np.log1p(ca, where=np.zeros((2, 2), dtype=bool))
-        with pytest.raises(TypeError):
+        with pytest.raises(
+            TypeError, match=r"NotImplemented from __array_ufunc__\(<ufunc 'add'>"
+        ):
             np.add(ca, 1, casting="unsafe")
         assert np.log1p(ca, dtype=np.float32).compute().dtype == np.float32
 
@@ -395,7 +428,7 @@ class TestPublicApiCompat:
         )
         counts = datastore.RNA.matrixGroup["counts"]
         expected = counts.get_orthogonal_selection((cidx, fidx)).mean(axis=0)
-        np.testing.assert_allclose(out, expected.reshape(1, -1))
+        np.testing.assert_array_equal(out, expected.reshape(1, -1))
 
     def test_normed_mean_axis1_compute(self, datastore):
         # Pattern from the pseudotime dynamics vignette.
@@ -425,7 +458,7 @@ class TestPublicApiCompat:
             assay.normMethod = original
         counts = assay.matrixGroup["counts"].get_orthogonal_selection((cells, features))
         expected = np.log2(counts / counts.sum(axis=1, keepdims=True) * 1000 + 1)
-        np.testing.assert_allclose(out, expected)
+        np.testing.assert_array_equal(out, expected)
 
 
 def test_a_scalar_variance_holds_no_array_per_column():
@@ -450,8 +483,11 @@ def test_a_scalar_variance_holds_no_array_per_column():
 class TestTransposedReads:
     """Row blocks read from a stored transpose match those read from rows."""
 
-    @pytest.fixture
-    def counts_pair(self):
+    # Writing the hundreds of small chunks of the pair takes seconds, and the
+    # tests only read it, so they share one.
+    @pytest.fixture(scope="class")
+    @classmethod
+    def counts_pair(cls):
         from zarr.storage import MemoryStore
 
         from cytearc.storage.count_matrix import CountMatrixPolicy

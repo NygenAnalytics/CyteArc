@@ -124,7 +124,7 @@ def test_rescale_array_trims_extreme_values():
     assert bound == pytest.approx(8.14572, rel=1e-5)
     trimmed = rescale_array(values, frac=0.9)
     assert trimmed is values
-    np.testing.assert_allclose(trimmed, [-bound, -1.0, 0.0, 1.0, bound])
+    np.testing.assert_array_equal(trimmed, [-bound, -1.0, 0.0, 1.0, bound])
 
 
 def test_rescale_array_requires_an_upper_quantile_above_one_half():
@@ -269,20 +269,25 @@ def test_progress_iterator_releases_consumed_values():
 
 def test_progress_iterator_closes_source_on_early_exit():
     closed = False
+    produced: list[object] = []
 
     def source():
         nonlocal closed
         try:
-            yield object()
-            yield object()
+            for _ in range(2):
+                produced.append(object())
+                yield produced[-1]
         finally:
             closed = True
 
     stream = iter_progress(source(), total=2, disable=True)
-    next(stream)
+    assert next(stream) is produced[0]
+    assert not closed
     stream.close()
 
+    # Closing the stream closes the source before it produces its second item.
     assert closed
+    assert len(produced) == 1
 
 
 def test_rolling_window_smoothes_along_rows():
@@ -297,20 +302,18 @@ def test_rolling_window_smoothes_along_rows():
             [7.0, 8.0],
         ]
     )
-    assert np.array_equal(smoothed, expected)
+    np.testing.assert_array_equal(smoothed, expected)
 
 
 def test_rolling_window_even_and_oversized_windows():
     data = np.arange(5, dtype=float).reshape(-1, 1)
 
-    assert np.array_equal(rolling_window(np.array([[7.0]]), w=1), [[7.0]])
-    assert np.array_equal(
-        rolling_window(data, w=2).ravel(),
-        [0.5, 1.5, 2.5, 3.5, 4.0],
+    np.testing.assert_array_equal(rolling_window(np.array([[7.0]]), w=1), [[7.0]])
+    np.testing.assert_array_equal(
+        rolling_window(data, w=2), [[0.5], [1.5], [2.5], [3.5], [4.0]]
     )
-    assert np.array_equal(
-        rolling_window(data, w=20).ravel(),
-        [1.0, 1.5, 2.0, 2.5, 3.0],
+    np.testing.assert_array_equal(
+        rolling_window(data, w=20), [[1.0], [1.5], [2.0], [2.5], [3.0]]
     )
     for window_size in (0, -1):
         with pytest.raises(ValueError, match="greater than zero"):
@@ -351,7 +354,7 @@ def test_permute_into_chunks_preserves_all_indices():
         chunk.tolist() for chunk in expected
     ]
     merged = np.concatenate(chunks)
-    assert np.array_equal(np.sort(merged), np.arange(10))
+    np.testing.assert_array_equal(np.sort(merged), np.arange(10))
 
 
 @pytest.mark.parametrize(

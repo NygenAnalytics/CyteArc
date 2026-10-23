@@ -198,7 +198,11 @@ def test_z_is_missing_when_background_deviations_do_not_vary():
         counts, build_chromvar_model(annotation, counts.sum(axis=0), background)
     )
 
-    assert np.isfinite(deviations).all()
+    # Each background deviation equals the set's own, so their difference is
+    # 0 up to the rounding of a mean of 50 values, and its zero spread leaves
+    # no z-score.
+    np.testing.assert_allclose(deviations, np.zeros((3, 1)), rtol=0, atol=1e-14)
+    assert z.shape == (3, 1)
     assert np.isnan(z).all()
 
 

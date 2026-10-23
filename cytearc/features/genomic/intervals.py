@@ -34,7 +34,7 @@ def create_bed_from_coord_ids(ids: Iterable[str]) -> pd.DataFrame:
     return df.sort_values(by=[0, 1])
 
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def binary_search(ranges: np.ndarray, queries: np.ndarray) -> np.ndarray:
     """Find the positions of the ranges that each query interval overlaps.
 

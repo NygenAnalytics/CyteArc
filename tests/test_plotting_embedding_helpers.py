@@ -173,33 +173,48 @@ def test_hotspot_filter_retains_only_the_strongest_component():
 
 
 def test_density_and_highlight_draw_helpers_return_early_without_points():
-    ax = SimpleNamespace()
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_rgba
+    from matplotlib.contour import ContourSet
 
+    density = {
+        "overlay": DensityOverlay(),
+        "values": None,
+        "xlim": (0.0, 1.0),
+        "ylim": (0.0, 1.0),
+        "theme": "light",
+    }
+    highlight = {
+        "highlight": Highlight(indices=(0,)),
+        "edgecolor": "black",
+        "rasterized": False,
+    }
+    # Both helpers return before they use this axes, which cannot draw.
+    ax = SimpleNamespace()
+    _draw_density_overlay(ax, np.array([0.0, 1.0]), np.array([0.0, 1.0]), **density)
     assert (
+        _draw_highlight(ax, np.array([]), np.array([]), np.array([]), **highlight)
+        is None
+    )
+
+    # Three points are enough to contour, and one point to highlight.
+    figure, axis = plt.subplots()
+    try:
         _draw_density_overlay(
-            ax,
-            np.array([0.0, 1.0]),
-            np.array([0.0, 1.0]),
-            overlay=DensityOverlay(),
-            values=None,
-            xlim=(0.0, 1.0),
-            ylim=(0.0, 1.0),
-            theme="light",
+            axis, np.array([0.0, 0.5, 1.0]), np.array([0.0, 0.5, 1.0]), **density
         )
-        is None
-    )
-    assert (
-        _draw_highlight(
-            ax,
-            np.array([]),
-            np.array([]),
-            np.array([]),
-            highlight=Highlight(indices=()),
-            edgecolor="black",
-            rasterized=False,
+        (contours,) = axis.collections
+        assert isinstance(contours, ContourSet)
+        drawn = _draw_highlight(
+            axis, np.array([0.5]), np.array([0.25]), np.array([4.0]), **highlight
         )
-        is None
-    )
+        np.testing.assert_array_equal(drawn.get_offsets(), [[0.5, 0.25]])
+        # The default highlight is red, 1.5 times the point size, black haloed.
+        np.testing.assert_array_equal(drawn.get_sizes(), [6.0])
+        np.testing.assert_array_equal(drawn.get_facecolors(), [to_rgba("#d62728")])
+        np.testing.assert_array_equal(drawn.get_edgecolors(), [to_rgba("black")])
+    finally:
+        plt.close(figure)
 
 
 class _Cells:
@@ -371,9 +386,9 @@ def test_seeded_continuous_embedding_draws_cells_in_a_reproducible_shuffle():
     coordinates = np.column_stack(
         (store.cells.fetch_all("umap1"), store.cells.fetch_all("umap2"))
     )
-    # Every cell is drawn once, in a seeded order other than the stored one.
-    np.testing.assert_allclose(np.sort(first, axis=0), np.sort(coordinates, axis=0))
-    assert not np.allclose(first, coordinates)
+    # Every cell is drawn once, at its rank in the seeded permutation.
+    rank = np.random.default_rng(5).permutation(40)
+    np.testing.assert_array_equal(first, coordinates[np.argsort(rank, kind="stable")])
     np.testing.assert_array_equal(first, drawn_order(5))
     assert not np.array_equal(first, drawn_order(6))
 

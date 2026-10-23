@@ -2,6 +2,7 @@
 
 import os
 import io
+import re
 import sys
 import threading
 from pathlib import Path
@@ -77,8 +78,13 @@ def test_rna_feature_stats_log_rss_without_proc(tmp_path, monkeypatch):
         logger.remove(sink)
 
     bands = [message for message in messages if "feature stats band" in message]
-    assert bands
-    assert all(message.rstrip().endswith("rss n/a") for message in bands), bands
+    # The three cells and three features are one stored chunk, read as one band.
+    assert len(bands) == 1, bands
+    assert re.search(
+        r"\(RNA\) feature stats band 0:3 cells 0:3: "
+        r"read \d+\.\ds compute \d+\.\ds rss n/a$",
+        bands[0].rstrip(),
+    ), bands
 
 
 def test_process_tree_sampler_starts_no_thread_without_proc(tmp_path, monkeypatch):
@@ -252,11 +258,26 @@ def test_process_tree_walk_skips_processes_and_threads_that_exited(
     assert process_module._tree_pids_by_children(proc_root, 100) == {100, 101, 102}
 
 
-def test_process_tree_rss_is_unavailable_when_processes_cannot_be_listed() -> None:
+def test_process_tree_rss_is_unavailable_when_processes_cannot_be_listed(
+    tmp_path: Path,
+) -> None:
+    proc_root = tmp_path / "proc"
+    _write_proc_tree(proc_root, _PROC_TREES["leaf_root"])
+
     def listing(_root: Path) -> list[int]:
         raise PermissionError("no /proc listing")
 
-    assert read_process_tree_rss_bytes(100, list_pids=listing) is None
+    # The root's status can be read, so only the failed listing leaves the
+    # tree unmeasured.
+    assert (
+        read_process_tree_rss_bytes(
+            100, proc_root=proc_root, list_pids=process_module._default_list_pids
+        )
+        == 6 * 1024
+    )
+    assert (
+        read_process_tree_rss_bytes(100, proc_root=proc_root, list_pids=listing) is None
+    )
 
 
 def test_process_tree_falls_back_to_the_parent_scan_without_children_files(

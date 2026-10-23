@@ -499,6 +499,7 @@ def test_highly_variable_features_accepts_empty_feature_arrays():
 def test_diagnostic_default_show_closes_all_owned_results():
     import matplotlib.pyplot as plt
 
+    existing = set(plt.get_fignums())
     results = [
         splt.qc(_qc_data(), max_points=0),
         splt.elbow([1.0, 0.5, 0.25]),
@@ -508,3 +509,12 @@ def test_diagnostic_default_show_closes_all_owned_results():
 
     assert all(result.owns_figure for result in results)
     assert all(not plt.fignum_exists(result.figure.number) for result in results)
+    # No figure the plots opened stays open, and the results keep their tables.
+    assert set(plt.get_fignums()) == existing
+    qc, elbow, graph, features = (result.tables for result in results)
+    np.testing.assert_array_equal(qc["summary"]["median"], [11.5, 21.5, 5.0, 9.0])
+    np.testing.assert_array_equal(
+        elbow["variance_explained"]["variance_explained"], [1.0, 0.5, 0.25]
+    )
+    assert graph["node_degrees"]["degree"].tolist() == [1, 2, 1]
+    assert features["features"]["selected"].tolist() == [False, True, False, True]

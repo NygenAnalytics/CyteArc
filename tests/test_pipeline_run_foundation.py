@@ -1623,7 +1623,9 @@ def test_pipeline_records_reject_extra_persisted_fields() -> None:
     )
     root[f"pipeline/runs/{record.run_id}"].attrs["unexpected"] = True
 
-    with pytest.raises(ValueError, match="extra"):
+    with pytest.raises(
+        ValueError, match=r"do not match the contract: extra \['unexpected'\]"
+    ):
         load_pipeline_run_record(root, record.run_id)
 
 

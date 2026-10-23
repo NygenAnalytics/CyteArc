@@ -3,6 +3,7 @@ import stat
 import warnings
 import zipfile
 from pathlib import Path
+from typing import NamedTuple
 
 import h5py
 import numpy as np
@@ -14,6 +15,7 @@ from zarr.storage import MemoryStore
 from cytearc import DataStore
 from cytearc.readers import CrH5Reader, MtxCandidate, MtxReader, inspect_mtx
 from cytearc.storage.count_matrix import CountMatrixPolicy
+from cytearc.utils.count_values import CountValueRange
 from cytearc.writers import CrToZarr, MtxToZarr
 
 
@@ -654,7 +656,11 @@ def test_prefixed_dragen_triplet_and_ambiguous_candidates(tmp_path: Path) -> Non
         matrix_name="second_matrix.mtx",
         prefix="second_",
     )
-    assert len(inspect_mtx(tmp_path)) == 2
+    # The triplet in the subdirectory is not a candidate of this directory.
+    assert [Path(found.matrixPath).name for found in inspect_mtx(tmp_path)] == [
+        "sample_matrix.mtx.gz",
+        "second_matrix.mtx",
+    ]
     with pytest.raises(ValueError, match="requires one"):
         from cytearc.readers import CrDirReader
 
@@ -1418,6 +1424,8 @@ def _layout_values() -> np.ndarray:
 
 
 _LAYOUT_FEATURE_TYPES = ["Gene Expression"] * 10 + ["Antibody Capture"] * 2
+# The feature groups of _LAYOUT_FEATURE_TYPES: genes, then antibodies.
+_LAYOUT_GROUPS = np.repeat([0, 1], [10, 2])
 
 
 def _layout_coordinates(
@@ -1481,10 +1489,13 @@ def _layout_reader(
     )
 
 
-def _import_counts(reader: MtxReader, lines_in_mem: int) -> list[zarr.Group]:
-    """Import the reader twice; an unordered matrix is sorted again for the
-    second import, in blocks of at most ``lines_in_mem`` entries."""
-    stores = [MemoryStore(), MemoryStore()]
+def _import_counts(
+    reader: MtxReader, lines_in_mem: int, *, imports: int = 2
+) -> list[zarr.Group]:
+    """Import the reader ``imports`` times and close it; an unordered matrix is
+    sorted again for every later import, in blocks of at most ``lines_in_mem``
+    entries."""
+    stores = [MemoryStore() for _ in range(imports)]
     try:
         for store in stores:
             MtxToZarr(
@@ -1500,6 +1511,41 @@ def _import_counts(reader: MtxReader, lines_in_mem: int) -> list[zarr.Group]:
     return [zarr.open_group(store=store, mode="r") for store in stores]
 
 
+class _SortedLayout(NamedTuple):
+    """What the reader of the cell-major matrix plans, and its import."""
+
+    cellNames: list[str]
+    matrixDtype: np.dtype
+    windowNnz: list[int]
+    countValueRanges: list[CountValueRange]
+    imported: zarr.Group
+
+
+@pytest.fixture(scope="module")
+def sorted_layout(tmp_path_factory: pytest.TempPathFactory):
+    """Return the cell-major matrix that every coordinate order is compared with.
+
+    Nothing changes it, so it is read and imported once for each filtering mode.
+    """
+    cache: dict[bool, _SortedLayout] = {}
+
+    def reference(is_filtered: bool) -> _SortedLayout:
+        if is_filtered not in cache:
+            directory = tmp_path_factory.mktemp("sorted") / "cellMajor"
+            reader = _layout_reader(directory, "cellMajor", is_filtered=is_filtered)
+            assert reader.coordinateOrder == "cellMajor"
+            cache[is_filtered] = _SortedLayout(
+                reader.cell_names(),
+                reader.matrix_dtype,
+                [reader.max_window_nnz(rows) for rows in (1, 4, 30)],
+                reader.count_value_ranges(0, _LAYOUT_GROUPS),
+                _import_counts(reader, lines_in_mem=7, imports=1)[0],
+            )
+        return cache[is_filtered]
+
+    return reference
+
+
 @pytest.mark.parametrize("is_filtered", [True, False], ids=["filtered", "cutoff"])
 @pytest.mark.parametrize(
     ("layout", "order"),
@@ -1512,27 +1558,21 @@ def _import_counts(reader: MtxReader, lines_in_mem: int) -> list[zarr.Group]:
 )
 def test_every_coordinate_order_imports_the_counts_of_the_sorted_matrix(
     tmp_path: Path,
+    sorted_layout,
     layout: str,
     order: str,
     is_filtered: bool,
 ) -> None:
-    sorted_reader = _layout_reader(
-        tmp_path / "sorted", "cellMajor", is_filtered=is_filtered
-    )
+    reference = sorted_layout(is_filtered)
     reader = _layout_reader(tmp_path / layout, layout, is_filtered=is_filtered)
-    assert sorted_reader.coordinateOrder == "cellMajor"
     assert reader.coordinateOrder == order
-    groups = np.repeat([0, 1], [10, 2])
     # Planning sees the summed entries, the kept cells, and their counts.
-    assert reader.cell_names() == sorted_reader.cell_names()
-    assert reader.matrix_dtype == sorted_reader.matrix_dtype == np.uint16
-    for rows in (1, 4, 30):
-        assert reader.max_window_nnz(rows) == sorted_reader.max_window_nnz(rows)
-    assert reader.count_value_ranges(0, groups) == (
-        sorted_reader.count_value_ranges(0, groups)
-    )
+    assert reader.cell_names() == reference.cellNames
+    assert reader.matrix_dtype == reference.matrixDtype == np.uint16
+    assert [reader.max_window_nnz(rows) for rows in (1, 4, 30)] == reference.windowNnz
+    assert reader.count_value_ranges(0, _LAYOUT_GROUPS) == reference.countValueRanges
 
-    expected = _import_counts(sorted_reader, lines_in_mem=7)[0]
+    expected = reference.imported
     imports = _import_counts(reader, lines_in_mem=7)
 
     values = _layout_values()
@@ -1585,7 +1625,8 @@ def test_the_scan_finds_the_coordinate_order_across_its_chunks(
     monkeypatch.setattr(_MtxEngine, "_scan_matrix", scan_in_small_chunks)
     reader = _layout_reader(tmp_path / layout, layout, is_filtered=True)
     assert reader.coordinateOrder == order
-    observed, _again = _import_counts(reader, lines_in_mem=7)
+    # Only construction scans the matrix, so one import shows what it found.
+    (observed,) = _import_counts(reader, lines_in_mem=7, imports=1)
 
     values = _layout_values()
     np.testing.assert_array_equal(observed["RNA/counts"][:], values[:, :10])
@@ -1822,6 +1863,44 @@ def test_unclosed_reader_unmaps_its_rows_where_mapped_files_stay(
     gc.collect()
     assert all(mapping.closed for mapping in maps)
     assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+
+
+@pytest.mark.parametrize(
+    ("coordinates", "order"),
+    [
+        # Sorted by cell, then feature: batches stream from the file itself.
+        ([(1, 1, 3), (2, 1, 1), (1, 2, 2)], "cellMajor"),
+        # Sorted by feature: the reader prepares rows by cell first.
+        ([(1, 1, 3), (1, 2, 2), (2, 1, 1)], "featureMajor"),
+    ],
+)
+def test_released_rows_are_collected_only_when_they_were_prepared(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    coordinates: list[tuple[int, int, int]],
+    order: str,
+) -> None:
+    from types import SimpleNamespace
+
+    import cytearc.readers.mtx as mtx_module
+
+    collections: list[None] = []
+    monkeypatch.setattr(
+        mtx_module, "gc", SimpleNamespace(collect=lambda: collections.append(None))
+    )
+    _write_mex(tmp_path, coordinates, n_features=2, n_cells=2)
+    reader = MtxReader(inspect_mtx(tmp_path)[0], temp_dir=str(tmp_path))
+    try:
+        assert reader.coordinateOrder == order
+        batches = [batch.toarray() for batch in reader.consume(2, lines_in_mem=3)]
+    finally:
+        reader.close()
+
+    np.testing.assert_array_equal(np.vstack(batches), [[3, 1], [2, 0]])
+    assert not list(tmp_path.glob("cytearc-mtx-csr-*"))
+    # A full collection walks every object of the process. Only prepared rows,
+    # whose views may still map their files, need one before their removal.
+    assert bool(collections) == (order == "featureMajor")
 
 
 def test_interrupted_construction_removes_the_sorted_rows(

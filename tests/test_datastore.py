@@ -1,4 +1,5 @@
 import warnings
+from functools import cache
 from importlib import import_module, util
 
 import numpy as np
@@ -1035,28 +1036,40 @@ def test_get_assay_rejects_unknown_and_non_assay_names(toy_store_path) -> None:
     assert store._get_assay(None) is store.RNA
 
 
-def _store_with_assay(name: str) -> MemoryStore:
+def _write_qc_assay(root: zarr.Group, assay: str) -> None:
     from tests.storage_helpers import finalize_test_counts
     from cytearc.writers.counts_t import finalize_writer_counts_t
 
+    n_cells, n_features = QC_VALUES.shape
+    counts = create_zarr_count_assay(
+        root,
+        assay,
+        None,
+        n_cells,
+        feat_ids=np.array([f"{assay}{i}" for i in range(n_features)]),
+        feat_names=QC_FEATURE_NAMES,
+        dtype="uint32",
+    )
+    counts[:] = QC_VALUES
+    finalize_test_counts(counts)
+    finalize_writer_counts_t(root, assay, None, assay_type="RNA")
+
+
+@cache
+def _rna_store_contents() -> dict:
+    """Write the cells and the RNA assay of every named-assay store once."""
     store = MemoryStore()
     root = zarr.open_group(store=store, mode="w")
-    n_cells, n_features = QC_VALUES.shape
-    ids = np.array([f"c{i}" for i in range(n_cells)])
+    ids = np.array([f"c{i}" for i in range(QC_VALUES.shape[0])])
     create_cell_data(root, None, ids=ids, names=ids)
-    for assay in ("RNA", name):
-        counts = create_zarr_count_assay(
-            root,
-            assay,
-            None,
-            n_cells,
-            feat_ids=np.array([f"{assay}{i}" for i in range(n_features)]),
-            feat_names=QC_FEATURE_NAMES,
-            dtype="uint32",
-        )
-        counts[:] = QC_VALUES
-        finalize_test_counts(counts)
-        finalize_writer_counts_t(root, assay, None, assay_type="RNA")
+    _write_qc_assay(root, "RNA")
+    return dict(store._store_dict)
+
+
+def _store_with_assay(name: str) -> MemoryStore:
+    # Memory stores replace whole values on write, so copies share no state.
+    store = MemoryStore(dict(_rna_store_contents()))
+    _write_qc_assay(zarr.open_group(store=store, mode="r+"), name)
     return store
 
 
@@ -1232,23 +1245,33 @@ def test_int_and_float_resolution_share_identity(
 
 class TestToyDataStore:
     def test_toy_crdir_metadata(self, toy_crdir_ds):
-        assert np.all(
-            toy_crdir_ds.RNA.feats.fetch_all("ids") == ["g1", "g2", "g3", "g4"]
+        # Each feature type of the directory becomes an assay, with its
+        # features in file order.
+        assert toy_crdir_ds.assay_names == ["ADT", "HTO", "RNA"]
+        for assay, ids in (
+            ("RNA", ["g1", "g2", "g3", "g4"]),
+            ("ADT", ["a1", "a2", "a3"]),
+            ("HTO", ["h1"]),
+        ):
+            feats = toy_crdir_ds.get_assay(assay).feats
+            np.testing.assert_array_equal(feats.fetch_all("ids"), ids)
+            np.testing.assert_array_equal(feats.fetch_all("names"), ids)
+        np.testing.assert_array_equal(
+            toy_crdir_ds.cells.fetch_all("ids"), ["b1", "b2", "b3"]
         )
-        assert np.all(toy_crdir_ds.ADT.feats.fetch_all("ids") == ["a1", "a2", "a3"])
-        assert np.all(toy_crdir_ds.HTO.feats.fetch_all("ids") == ["h1"])
-        assert np.all(toy_crdir_ds.cells.fetch_all("ids") == ["b1", "b2", "b3"])
 
     def test_toy_crdir_rawdata(self, toy_crdir_ds):
-        assert np.all(
-            toy_crdir_ds.RNA.rawData.compute()
-            == [[5, 0, 0, 2], [3, 3, 0, 7], [3, 3, 0, 7]]
+        np.testing.assert_array_equal(
+            toy_crdir_ds.RNA.rawData.compute(),
+            [[5, 0, 0, 2], [3, 3, 0, 7], [3, 3, 0, 7]],
         )
-        assert np.all(
-            toy_crdir_ds.ADT.rawData.compute()
-            == [[30, 40, 30], [30, 50, 20], [0, 50, 20]]
+        np.testing.assert_array_equal(
+            toy_crdir_ds.ADT.rawData.compute(),
+            [[30, 40, 30], [30, 50, 20], [0, 50, 20]],
         )
-        assert np.all(toy_crdir_ds.HTO.rawData.compute() == [[200], [100], [100]])
+        np.testing.assert_array_equal(
+            toy_crdir_ds.HTO.rawData.compute(), [[200], [100], [100]]
+        )
 
 
 class TestDataStore:
@@ -1584,7 +1607,7 @@ class TestDataStore:
             "values",
         )
         unique = np.unique(labels)
-        assert np.array_equal(unique, np.arange(1, unique.size + 1))
+        np.testing.assert_array_equal(unique, np.arange(1, unique.size + 1))
         assert unique.size >= 2
         # Leiden maximises modularity, so that is the main check: the default
         # backend's labels score 0.752-0.759 on this graph over many seeds.
@@ -1602,7 +1625,7 @@ class TestDataStore:
             "labels",
         ).astype(np.int32)
         assert labels.ndim == 1
-        assert np.array_equal(np.unique(labels), np.arange(1, 11))
+        np.testing.assert_array_equal(np.unique(labels), np.arange(1, 11))
         assert np.bincount(labels)[1:].min() > 0
 
     def test_paris_adaptive_values(self, paris_clustering_auto, datastore):
@@ -1612,7 +1635,7 @@ class TestDataStore:
         ).astype(np.int32)
         unique = np.unique(labels)
         assert labels.ndim == 1
-        assert np.array_equal(unique, np.arange(1, unique.size + 1))
+        np.testing.assert_array_equal(unique, np.arange(1, unique.size + 1))
         assert np.bincount(labels)[1:].min() >= 10
 
     def test_run_cell_cycle_scoring(self, cell_cycle_scoring, datastore):
@@ -1664,11 +1687,16 @@ class TestDataStore:
         assert np.isfinite(markers.score).all()
         # fold_change is a ratio of means: +inf only where no other cell
         # expresses the feature, and NaN only where no cell does.
-        fold_change = markers.fold_change.to_numpy()
-        assert not (fold_change < 0).any()
-        assert (markers.mean_rest[np.isposinf(fold_change)] == 0).all()
-        undefined = markers[np.isnan(fold_change)]
-        assert ((undefined["mean"] == 0) & (undefined.mean_rest == 0)).all()
+        means = markers["mean"].to_numpy()
+        rest_means = markers.mean_rest.to_numpy()
+        assert (means >= 0).all() and (rest_means >= 0).all()
+        expected = np.divide(
+            means,
+            rest_means,
+            out=np.where(means > 0, np.inf, np.nan),
+            where=rest_means > 0,
+        )
+        np.testing.assert_array_equal(markers.fold_change.to_numpy(), expected)
         assert markers.p_value.between(0, 1).all()
 
     def test_get_markers_all_groups(self, marker_search, paris_clustering, datastore):
@@ -1746,6 +1774,8 @@ class TestDataStore:
     def test_get_imputed(self, connectivity_graph, datastore):
         feature_name = "CD4"
         diffusion = datastore.imputation.diffusion(connectivity_graph, t=2)
+        # The same request reuses the stored operator.
+        assert datastore.imputation.diffusion(connectivity_graph, t=2) == diffusion
         values = datastore.imputation.compute_imputed(
             feature_name=feature_name,
             diffusion=diffusion,
@@ -1936,7 +1966,8 @@ class TestDataStore:
         )
         assert result.data.shape[0] == valid_features.sum()
         clusters = np.asarray(agg_group["cluster_values"][:])
-        assigned = clusters[test_values[valid_features].astype(int)]
+        valid_indices = test_values[valid_features].astype(int)
+        assigned = clusters[valid_indices]
         assert assigned.min() >= 1
         assert assigned.max() <= 15
         assert len(np.unique(assigned)) == 15
@@ -1944,7 +1975,11 @@ class TestDataStore:
             result.feature_clusters,
             assigned,
         )
-        assert np.all(clusters[test_values[~valid_features].astype(int)] == -1)
+        # Every other feature of the assay, selected but invalid or never
+        # selected, holds the unassigned value -1.
+        expected_clusters = np.full(datastore.RNA.feats.N, -1)
+        expected_clusters[valid_indices] = assigned
+        np.testing.assert_array_equal(clusters, expected_clusters)
 
         def fail_if_recomputed(*_args, **_kwargs):
             raise AssertionError("pseudotime aggregation should have been reused")
@@ -1978,7 +2013,8 @@ class TestDataStore:
             .mean(axis=1)
             .compute()
         )
-        assert np.allclose(expected, test_values)
+        # Both are float64 means of the same values, summed in another order.
+        np.testing.assert_allclose(test_values, expected, rtol=1e-12)
 
     def test_make_bulk(self, leiden_clustering, datastore):
         from scipy import sparse
@@ -2188,17 +2224,18 @@ class TestDataStore:
     def test_adaptive_hvg_stats_reuse_single_matrix_pass(
         self,
         auto_filter_cells,
+        mark_hvgs,
         datastore,
         monkeypatch,
     ):
         assay = datastore.RNA
-        fixed = datastore.features.hvgs(
-            auto_filter_cells,
-            show_plot=False,
-            bin_strategy="fixed",
-        )
-        fixed_summary = ArtifactRef.from_dict(
-            datastore.artifacts.inspect(fixed).inputs["feature_summary"]
+        fixed_status = datastore.artifacts.inspect(mark_hvgs)
+        fixed_summary = ArtifactRef.from_dict(fixed_status.inputs["feature_summary"])
+        # mark_hvgs is a fixed-bin selection over the same cells.
+        assert fixed_status.parameters["bin_strategy"] == "fixed"
+        assert (
+            datastore.artifacts.inspect(fixed_summary).input_ref("cell_selection")
+            == auto_filter_cells
         )
 
         def fail_matrix_pass(*args, **kwargs):

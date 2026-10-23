@@ -2040,6 +2040,50 @@ def test_inspect_h5ad_rejects_matrices_without_matching_feature_groups(tmp_path)
         inspect_h5ad(str(tmp_path / "inspected.h5ad"), matrix_key="layers/counts")
 
 
+def test_inspect_h5ad_ignores_matrices_whose_rows_differ_from_obs(tmp_path):
+    from loguru import logger
+
+    def build(h5):
+        # raw/X ranks first and matches raw/var, but holds three cells.
+        _write_sparse_group(h5, "raw/X", np.array([[1, 0], [0, 2], [3, 0]], np.uint16))
+        h5.create_group("raw/var").create_dataset(
+            "gene_ids", data=np.array([b"r1", b"r2"])
+        )
+        _write_sparse_group(h5, "X", np.array([[1, 0], [0, 2]], np.uint16))
+        h5.create_group("var").create_dataset("gene_ids", data=np.array([b"a", b"b"]))
+        h5.create_group("obs").create_dataset("_index", data=np.array([b"c0", b"c1"]))
+
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="WARNING"
+    )
+    try:
+        inspection = _inspect_file(tmp_path, build)
+    finally:
+        logger.remove(sink)
+    assert (inspection.matrixKey, inspection.featureAttrsKey) == ("X", "var")
+    assert inspection.featureIdsKey == "gene_ids"
+    assert messages == [
+        "Ignoring matrix candidate raw/X: 3 rows do not match obs length 2"
+    ]
+
+
+def test_inspect_h5ad_names_features_by_text_only(tmp_path):
+    def build(h5):
+        _write_sparse_group(h5, "X", np.array([[1, 0], [0, 2]], np.uint16))
+        h5.create_group("obs").create_dataset("_index", data=np.array([b"c0", b"c1"]))
+        var = h5.create_group("var")
+        var.create_dataset("gene_ids", data=np.array([b"ENSG1", b"ENSG2"]))
+        # A conventional name column of numbers names no feature; the varied
+        # text column does.
+        var.create_dataset("gene_symbols", data=np.array([7, 9]))
+        var.create_dataset("display", data=np.array([b"CD3E", b"MS4A1"]))
+
+    inspection = _inspect_file(tmp_path, build)
+    assert inspection.featureIdsKey == "gene_ids"
+    assert inspection.featureNameKey == "display"
+
+
 def test_inspect_h5ad_drops_a_split_key_whose_length_differs(tmp_path):
     def build(h5):
         _write_sparse_group(h5, "X", np.array([[1, 0], [0, 2]], np.uint16))

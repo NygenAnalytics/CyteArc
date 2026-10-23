@@ -322,7 +322,7 @@ def _count_shared_neighbors(indices: np.ndarray, out: np.ndarray) -> None:
     _count_sorted_shared_neighbors(indices, ordered, out)
 
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def calc_snn(indices: np.ndarray) -> np.ndarray:
     """Calculate shared-neighbor fractions for a KNN index matrix."""
     ncells, nk = indices.shape

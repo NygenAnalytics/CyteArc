@@ -366,7 +366,7 @@ def test_pipeline_run_record_rejects_inconsistent_states() -> None:
     for key in ("stageOrder", "outputs", "fields"):
         raw = _running_run().to_dict()
         raw[key] = "bad"
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError, match=f"^run {key} must be a sequence$"):
             PipelineRunRecord.from_dict(raw)
     raw = _running_run().to_dict()
     raw["status"] = "unknown"
@@ -856,7 +856,9 @@ def test_pipeline_record_storage_rejects_torn_and_invalid_queries() -> None:
         run_id="1" * 64,
         started_at_ns=10,
     )
-    with pytest.raises(FileExistsError):
+    with pytest.raises(
+        FileExistsError, match=f"^Pipeline run already exists: {record.run_id}$"
+    ):
         run_storage.create_pipeline_run_record(
             root,
             recipe="basic",
