@@ -50,6 +50,9 @@ These instructions apply to the whole repository.
 - Do not commit credentials, local object-store endpoints, private bucket names, generated
   benchmark configs, or result identifiers.
 - Avoid em dashes in public prose, prompts, docstrings, and comments.
+- Keep builds and tests off the network where you can. Check in small resources, such as
+  citation metadata, instead of fetching them, and fetch only resources large enough to bloat
+  Git, such as datasets.
 - Do not copy, translate, or port code from GPL, LGPL, or AGPL projects, from projects under
   non-commercial or no-derivatives terms, or from projects without a license, and do not work from
   their source to match their implementation. Implement methods from their papers, and validate

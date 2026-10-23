@@ -10,6 +10,10 @@ import yaml
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _DOCS_SOURCE = _REPOSITORY_ROOT / "docs" / "source"
 _MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+_DOI_LINK = re.compile(
+    r"""(?:https?://(?:dx\.)?doi\.org/|\bdoi:)(10\.\d{4,9}/[^\s)<>\]"']+)""",
+    re.IGNORECASE,
+)
 _AGENT_PAGES = {
     "analysis_with_agents.md",
     "tutorials/agent_workflow.md",
@@ -233,3 +237,34 @@ def test_trajectory_tutorials_use_source_sink_sign_convention() -> None:
         contents = _source_text(_DOCS_SOURCE / "tutorials" / tutorial)
         assert "source_sink_vector[source] = -1.0 / source.sum()" in contents
         assert "source_sink_vector[sink] = 1.0 / sink.sum()" in contents
+
+
+def test_every_linked_doi_has_a_local_citation() -> None:
+    # MyST looks up each DOI that references.bib lacks on doi.org during every
+    # build, and a strict build fails whenever one lookup does.
+    bibliography = (_DOCS_SOURCE / "references.bib").read_text()
+    recorded = {
+        doi.lower()
+        for doi in re.findall(
+            r"^\s*doi\s*=\s*\{([^}]+)\}", bibliography, re.IGNORECASE | re.MULTILINE
+        )
+    }
+    excluded = _project()["exclude"]
+    linked = {
+        match.group(1).rstrip(".,;").lower(): page
+        for path in sorted(_DOCS_SOURCE.rglob("*"))
+        if path.suffix in {".md", ".ipynb"}
+        and not any(
+            fnmatch(page := path.relative_to(_DOCS_SOURCE).as_posix(), pattern)
+            for pattern in excluded
+        )
+        for match in _DOI_LINK.finditer(_source_text(path))
+    }
+    missing = {doi: page for doi, page in linked.items() if doi not in recorded}
+
+    assert linked
+    assert not missing, (
+        "Add the BibTeX of each DOI to docs/source/references.bib, for example "
+        "from `curl -L -H 'Accept: application/x-bibtex' https://doi.org/<doi>`: "
+        f"{missing}"
+    )

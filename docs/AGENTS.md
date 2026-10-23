@@ -9,6 +9,8 @@ These instructions cover documentation sources, notebook execution, and site bui
 - Explain each logical step in notebook code with a comment. Put comments on their own lines,
   with a blank line before each comment unless it starts the code cell.
 - MyST builds guides and tutorials. Sphinx builds only `docs/source/reference/api/`.
+- Give every DOI a page links an entry in `docs/source/references.bib`. MyST otherwise looks
+  the DOI up on doi.org during each build, and `tests/test_docs_structure.py` checks this.
 - `docs/source/developers/contributing.md` describes the authoring workflow.
 
 ## Setup and rendering
