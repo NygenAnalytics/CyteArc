@@ -251,7 +251,9 @@ class AnalysisRun:
             row["clusterId"] for row in rows
         }:
             raise ValueError("Annotations do not cover the exported frozen clusters")
-        markers = store.markers.load(marker=run["markers"], min_score=0, min_frac_exp=0)
+        markers = store.markers.load(
+            marker=run["markers"], min_frac_exp=None, min_auc=None, max_p_adj=None
+        )
         result = summary(self._records)
         result["exportedCells"] = len(frame)
         result["exportedMarkers"] = len(markers)

@@ -88,7 +88,8 @@ for name, ref in leiden.items():
     evidence.loc[name, "weak_cells"] = (strength < 0.5).mean()
     per_cluster_strength = pd.Series(strength).groupby(values[name]).mean()
     evidence.loc[name, "min_cluster_strength"] = per_cluster_strength.min()
-    found = ds.markers.load(marker=ds.markers.search(ref, features=run["feature_universe"]))
+    found = ds.markers.load(  # specific markers; auc does not shrink with group size or count
+        marker=ds.markers.search(ref, features=run["feature_universe"]), min_auc=0.8)
     n_markers = found["group_id"].value_counts().reindex(
         [str(g) for g in np.unique(values[name])], fill_value=0)
     evidence.loc[name, "clusters_lt3_markers"] = int((n_markers < 3).sum())
@@ -146,7 +147,9 @@ Combine the evidence; no single score decides.
 2. Nesting: prefer a candidate that refines the coarser one (`nested_frac` near 1, `clusters.relabel_by_overlap`
    shows "2a", "2b"). A non-nested jump, where many cells change parent, is a reason to reject it.
 3. Markers: every cluster a finer candidate adds needs its own specific markers (about 3 or more
-   at default `markers.load` filters, named genes, not only ribosomal, mitochondrial or ambient).
+   with `auc >= 0.8` at the other default `markers.load` filters, named genes, not only ribosomal,
+   mitochondrial or ambient). Do not count markers by `score`, which falls as clusters multiply
+   and shrink, and would bias the choice towards coarse partitions.
 4. Graph support: added clusters keep high mean membership strength and few weak cells, so
    most of their cells' neighbours share their label.
 5. QC and doublets: a split explained by counts, mito or doublet score is not a cell type. Keep it

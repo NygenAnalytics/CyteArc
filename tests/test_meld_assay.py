@@ -234,6 +234,23 @@ def test_create_bed_from_coord_ids_sorts_intervals():
     assert bed.index.tolist() == [1, 2, 0]
 
 
+def test_create_bed_from_coord_ids_parses_ids_by_their_last_colon():
+    # A chromosome name may contain a colon; the last one starts the span.
+    bed = create_bed_from_coord_ids(["chr2:1-5", "HLA:A:300-400"])
+    assert bed.values.tolist() == [["HLA:A", 300, 400], ["chr2", 1, 5]]
+    assert bed.index.tolist() == [1, 0]
+    assert bed[1].dtype == np.int64 and bed[2].dtype == np.int64
+
+    # Signac-style ids, and spans that end before they start, name themselves.
+    with pytest.raises(
+        ValueError,
+        match=r"Feature 1 \('chr1-100-200'\) is not a chrom:start-end interval",
+    ):
+        create_bed_from_coord_ids(["chr1:1-50", "chr1-100-200"])
+    with pytest.raises(ValueError, match=r"Feature 0 \('chr1:200-100'\)"):
+        create_bed_from_coord_ids(["chr1:200-100"])
+
+
 def test_binary_search_finds_overlapping_ranges():
     ranges = np.array([[0, 10], [10, 20], [20, 30], [30, 40]], dtype=np.int64)
     queries = np.array([[5, 8], [15, 18], [25, 28], [8, 32]], dtype=np.int64)
@@ -242,6 +259,28 @@ def test_binary_search_finds_overlapping_ranges():
 
     # Each row is the half-open range of overlapping interval positions.
     np.testing.assert_array_equal(hits, [[0, 1], [1, 2], [2, 3], [0, 4]])
+
+
+@pytest.mark.parametrize("compiled", [True, False], ids=["jit", "python"])
+def test_binary_search_requires_ranges_sorted_by_start(compiled):
+    search = binary_search if compiled else binary_search.py_func
+    ranges = np.array([[0, 10], [10, 20], [20, 30]], dtype=np.int64)
+    queries = np.array([[25, 26], [5, 8], [40, 50]], dtype=np.int64)
+    # Queries may come in any order, and ranges may share a start.
+    hits = search(ranges, queries)
+    np.testing.assert_array_equal(hits, [[2, 3], [0, 1], [-1, -1]])
+    tied = np.array([[0, 10], [0, 5], [10, 20]], dtype=np.int64)
+    np.testing.assert_array_equal(
+        search(tied, np.array([[2, 3], [5, 8]], dtype=np.int64)), [[0, 2], [0, 1]]
+    )
+
+    # Unsorted ranges gave wrong overlaps without an error.
+    with pytest.raises(ValueError, match="ranges must be sorted by start"):
+        search(ranges[[2, 0, 1]], queries)
+    with pytest.raises(ValueError, match="ranges must hold one start and end"):
+        search(np.zeros((2, 3), dtype=np.int64), queries)
+    with pytest.raises(ValueError, match="queries must hold one start and end"):
+        search(ranges, np.array([[1, 2, 3]], dtype=np.int64))
 
 
 def test_get_feature_mappings_builds_sparse_overlap_matrix():

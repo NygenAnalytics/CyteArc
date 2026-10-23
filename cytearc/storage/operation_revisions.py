@@ -137,6 +137,14 @@ _NORMALIZER_CODE = OperationRevision(
     ),
     applies=_records_normalizer_outside_cytearc,
 )
+# run_marker_search records the same change as its revision 3, after the
+# marker table revision of the same release.
+_NORMALIZER_CODE_AFTER_MARKER_TABLES = OperationRevision(
+    revision=3,
+    release=_NORMALIZER_CODE.release,
+    change=_NORMALIZER_CODE.change,
+    applies=_NORMALIZER_CODE.applies,
+)
 
 
 def _finite_number(value: object) -> bool:
@@ -221,7 +229,20 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
         ),
     ),
     "run_harmony": (_HARMONY2,),
-    "run_marker_search": (_NORMALIZER_CODE,),
+    "run_marker_search": (
+        OperationRevision(
+            revision=2,
+            release="1.3.0",
+            change=(
+                "Marker tables store full-precision statistics and "
+                "neg_log10_p_value, give exact p-values to groups that can be "
+                "split from the other cells in at most 100,000 ways, and skip "
+                "groups of fewer than two cells instead of failing"
+            ),
+            applies=None,
+        ),
+        _NORMALIZER_CODE_AFTER_MARKER_TABLES,
+    ),
     "run_normalization": (_NORMALIZER_CODE,),
     "run_pseudotime_aggregation": (_NORMALIZER_CODE,),
     "run_pseudotime_marker_search": (_NORMALIZER_CODE,),

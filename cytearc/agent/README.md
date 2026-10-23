@@ -553,7 +553,7 @@ report_path = run.report()  # Return report.html after regenerating reports/CSV.
 pipeline = run.pipeline  # Verified, read-only final core PipelineRun.
 print(run.artifacts)  # Exact final core ArtifactRef objects.
 print(run.compact_result)  # Verified compact store summary, or None if absent.
-markers = run.get_markers(min_score=0.25, min_frac_exp=0.2)
+markers = run.get_markers(min_auc=0.7, sort_by="auc")  # markers.load filters
 plot = run.plot_embedding(show=False)
 plot.close()
 markers = run.plot_markers()  # Saved means and expressing fractions; no count reads.

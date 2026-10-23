@@ -399,9 +399,10 @@ def test_values_that_are_not_logarithms_are_logged_when_asked(
     )
     status = store.artifacts.inspect(markers)
     assert status.parameters["normalization"]["log_transform"] is True
-    # A normalizer defined outside CyteArc, as the custom one is, records the
-    # revision that identifies it by its code.
-    assert status.revision == (1 if normalizer is norm_dummy else 2)
+    # Marker search is at operation revision 2, and a normalizer defined outside
+    # CyteArc, as the custom one is, adds revision 3, which identifies it by its
+    # code.
+    assert status.revision == (2 if normalizer is norm_dummy else 3)
     scores = assay.score_features([f"{assay_name}0"], "I", 2, 2, 7, log_transform=True)
     controls = binned_sampling(pd.Series(expected.mean(axis=0)), [0], 2, 2, 7)
     np.testing.assert_allclose(
@@ -466,15 +467,16 @@ def test_saved_results_are_current_across_normalizers(store, monkeypatch) -> Non
     unlogged_markers = store.markers.search(clusters, features=features)
 
     # Results of scaled_by_totals, a normalizer defined outside CyteArc,
-    # record the revision that identifies it by its code; the others record
-    # none.
+    # record the revision that identifies it by its code: revision 2 of
+    # run_normalization and revision 3 of run_marker_search, whose tables are
+    # all at least at revision 2. Library-size normalization records none.
     for ref, revision in (
         (library_size, 1),
-        (library_markers, 1),
+        (library_markers, 2),
         (custom, 2),
         (unlogged, 2),
-        (custom_markers, 2),
-        (unlogged_markers, 2),
+        (custom_markers, 3),
+        (unlogged_markers, 3),
     ):
         status = store.artifacts.inspect(ref)
         assert status.revision == revision and status.is_current

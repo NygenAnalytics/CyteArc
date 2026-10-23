@@ -246,7 +246,8 @@ def build_graph(cell_selection, top_n=1000, dims=21, k=11):
     return ds.graph.connectivity(ds.graph.neighbors(ds.graph.ann_index(pca), k=k))
 
 parent, parent_markers = run["clusters"], run["markers"]  # or your chosen Leiden ref and its table
-table = ds.markers.load(marker=parent_markers, min_score=-1, min_frac_exp=-1)
+table = ds.markers.load(  # every gene of every group
+    marker=parent_markers, min_frac_exp=None, min_auc=None, max_p_adj=None)
 cd3e = table[table["feature_name"] == "CD3E"].set_index("group_id")["frac_exp"]
 lineage_ids = sorted(int(g) for g in cd3e.index[cd3e > 0.5])  # a T gate; confirm with markers
 sub_cells = ds.select_cells(parent, include=lineage_ids)  # frozen, over every store cell

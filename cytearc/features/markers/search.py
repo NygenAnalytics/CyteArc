@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Any
 
 import numba
@@ -24,18 +25,62 @@ from ...utils.numba import restore_numba_threads
 from ..statistical import adjust_pvalues
 from .rank import (
     _batch_stats,
+    _exact_marker_p_values_gene_major,
     _marker_stats_gene_major,
     batch_rank_scratch_bytes,
+    exact_batch_p_values,
+    exact_rank_scratch_bytes,
     gene_major_rank_scratch_bytes,
 )
 from .regression import _REG_OK, _REG_SENTINEL, _regression_batch_results
 from .table import (
     RankMarkerResult,
     _validate_rank_marker_groups,
+    exact_marker_groups,
     stored_table_bytes,
 )
 
 __all__ = ["find_markers_by_rank", "find_markers_by_regression"]
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _ExactPValues:
+    """The groups of a search whose p-values are exact, and their p-values.
+
+    Attributes:
+        groups: Positions of the exact groups.
+        sizes: Number of cells in every group.
+        max_size: Cells on the smaller side of the largest exact comparison.
+        out: Features-by-groups p-values, NaN outside the exact groups.
+    """
+
+    groups: np.ndarray
+    sizes: np.ndarray
+    max_size: int
+    out: np.ndarray
+
+    @classmethod
+    def plan(cls, group_sizes: np.ndarray, n_features: int) -> "_ExactPValues | None":
+        """Return the exact p-values that a search of these groups computes."""
+        exact = exact_marker_groups(group_sizes)
+        if not exact.any():
+            return None
+        sizes = np.asarray(group_sizes, dtype=np.int64)
+        n_cells = int(sizes.sum())
+        return cls(
+            groups=np.flatnonzero(exact).astype(np.int64),
+            sizes=sizes,
+            max_size=int(np.minimum(sizes, n_cells - sizes)[exact].max()),
+            out=np.full((n_features, len(sizes)), np.nan),
+        )
+
+    def scratch_bytes(self) -> int:
+        """Return what one exact call holds beside the p-values."""
+        return exact_rank_scratch_bytes(
+            n_cells=int(self.sizes.sum()),
+            n_groups=len(self.sizes),
+            max_size=self.max_size,
+        )
 
 
 # Normalizations whose values the rank search computes from raw-count batches.
@@ -87,6 +132,12 @@ def find_markers_by_rank(
     library-size kernel uses as many threads as fit that budget, splitting
     each read group's features over them or ranking whole read groups at once.
 
+    Every cell is ranked, but only groups with at least two cells, and at
+    least two other cells, are tested; the result lists the others as
+    skipped. A tested group that can be split from the other cells in at most
+    ``MANN_WHITNEY_EXACT_MAX_SPLITS`` ways, as for ``compare.test``, also gets
+    exact p-values from the same pass over the values.
+
     Args:
         assay: Assay whose features are ranked.
         groups: Group label of each cell in ``cell_idx``.
@@ -104,11 +155,11 @@ def find_markers_by_rank(
     Raises:
         IndexError: If a cell or feature index is past the end of the assay.
         ValueError: If the indices are empty, negative, or repeated, or do not
-            align with ``groups``, there are fewer than two groups, a group has
-            fewer than two cells, or a library-size normalized value or the
-            total of a selected cell (its ``<assay>_nCounts`` value, or with
-            ``renormalize_subset`` its sum over the tested features) is
-            negative or not finite.
+            align with ``groups``, there are fewer than two groups, no group
+            has at least two cells and at least two other cells, or a
+            library-size normalized value or the total of a selected cell (its
+            ``<assay>_nCounts`` value, or with ``renormalize_subset`` its sum
+            over the tested features) is negative or not finite.
         MemoryError: If the library-size kernel cannot rank one read group
             with one thread within the memory budget.
     """
@@ -137,14 +188,16 @@ def find_markers_by_rank(
     group_ids, codes = np.unique(groups, return_inverse=True)
     codes = codes.astype(np.int64, copy=False)
     group_sizes = np.bincount(codes, minlength=len(group_ids))
-    _validate_rank_marker_groups(group_sizes)
+    _validate_rank_marker_groups(group_ids, group_sizes)
     feature_index = np.sort(feat_idx)
     statistics = np.zeros((len(feature_index), len(group_ids), 8), dtype=np.float64)
+    exact = _ExactPValues.plan(group_sizes, len(feature_index))
     # The search holds these until the last group's stored table is written.
     held_bytes = (
         codes.nbytes
         + feature_index.nbytes
         + statistics.nbytes
+        + (0 if exact is None else exact.out.nbytes)
         + writers * stored_table_bytes(len(feature_index))
     )
     adapter = rank_marker_adapter(assay)
@@ -159,6 +212,7 @@ def find_markers_by_rank(
             nthreads=nthreads,
             held_bytes=held_bytes,
             norm_params=norm_params,
+            exact=exact,
         )
     else:
         _rank_counts_t(
@@ -172,12 +226,14 @@ def find_markers_by_rank(
             nthreads=nthreads,
             held_bytes=held_bytes,
             norm_params=norm_params,
+            exact=exact,
         )
     return RankMarkerResult(
         group_ids=group_ids,
         group_sizes=group_sizes,
         feature_index=feature_index,
         statistics=statistics,
+        exact_p_values=None if exact is None else exact.out,
     )
 
 
@@ -193,8 +249,13 @@ def _rank_counts_t(
     nthreads: int,
     held_bytes: int,
     norm_params: dict[str, Any],
+    exact: _ExactPValues | None,
 ) -> None:
-    """Rank ``countsT`` read groups with the threads the budget admits."""
+    """Rank ``countsT`` read groups with the threads the budget admits.
+
+    With ``exact``, each read group also gets the exact p-values of the exact
+    groups, computed one feature at a time on the thread that ranks it.
+    """
     from ...storage.budget import ResourceBudget, resolve_budget
     from ...storage.feature_stream import (
         FeatureReadGroup,
@@ -264,11 +325,14 @@ def _rank_counts_t(
             max_threads=threads,
             max_calls=min(width, (io.computeWorkers if io else None) or width),
         )
-        compute_bytes = calls * gene_major_rank_scratch_bytes(
-            n_cells=n_cells,
-            n_groups=n_groups,
-            n_features=group_features,
-            nthreads=threads,
+        compute_bytes = calls * (
+            gene_major_rank_scratch_bytes(
+                n_cells=n_cells,
+                n_groups=n_groups,
+                n_features=group_features,
+                nthreads=threads,
+            )
+            + (0 if exact is None else exact.scratch_bytes())
         )
     else:
         state_bytes = 0
@@ -295,6 +359,13 @@ def _rank_counts_t(
                 nthreads=threads,
             )
         )
+        if exact is not None:
+            # The exact pass's copy of the values, its p-values, and its
+            # scratch, after the dense kernel has released its own.
+            compute_bytes += (
+                group_features * (n_cells + n_groups) * np.dtype(np.float64).itemsize
+                + exact.scratch_bytes()
+            )
 
     def process_group(group: FeatureReadGroup) -> None:
         local_dest = dest_of[group.featStart : group.featEnd]
@@ -318,6 +389,19 @@ def _rank_counts_t(
                     "negative or non-finite library-size normalized value; "
                     "library-size normalization requires finite non-negative "
                     "counts"
+                )
+            if exact is not None:
+                _exact_marker_p_values_gene_major(
+                    group.values,
+                    totals,
+                    size_factor,
+                    log_transform,
+                    codes,
+                    exact.sizes,
+                    exact.groups,
+                    exact.max_size,
+                    local_dest,
+                    exact.out,
                 )
             return
         selected = local_dest >= 0
@@ -344,6 +428,10 @@ def _rank_counts_t(
             n_cells,
             feature_labels=feature_index[rows],
         )
+        if exact is not None:
+            exact.out[rows] = exact_batch_p_values(
+                values, codes, exact.sizes, exact.groups, exact.max_size
+            )
 
     logger.debug(
         f"Marker search read groups: features={len(feature_index)} "
@@ -448,8 +536,13 @@ def _rank_normed_batches(
     nthreads: int,
     held_bytes: int,
     norm_params: dict[str, Any],
+    exact: _ExactPValues | None,
 ) -> None:
-    """Rank normalized feature batches with the dense kernel on this thread."""
+    """Rank normalized feature batches with the dense kernel on this thread.
+
+    With ``exact``, each batch also gets the exact p-values of the exact
+    groups.
+    """
     worker_limit = getattr(
         getattr(assay, "resources", None),
         "workers",
@@ -463,22 +556,27 @@ def _rank_normed_batches(
     set_num_threads(threads)
     n_cells = len(codes)
     n_groups = len(group_sizes)
+    # The dense kernel's C-order float64 copy of each value, and its
+    # statistics of each feature spread over the feature's cells; the exact
+    # pass copies the values after the kernel and adds one p-value per group.
+    scratch_itemsize = 8 + -(-64 * n_groups // n_cells)
+    resident_bytes = held_bytes + batch_rank_scratch_bytes(
+        n_cells=n_cells,
+        n_groups=n_groups,
+        n_features=0,
+        nthreads=threads,
+    )
+    if exact is not None:
+        scratch_itemsize += -(-8 * n_groups // n_cells)
+        resident_bytes += exact.scratch_bytes()
     start = 0
     for batch in assay.iter_normed_feature_wise(
         cell_idx=cell_idx,
         feat_idx=feature_index,
         batch_size=None,
         msg="Finding markers",
-        # The dense kernel's C-order float64 copy of each value, and its
-        # statistics of each feature spread over the feature's cells.
-        scratch_itemsize=8 + -(-64 * n_groups // n_cells),
-        resident_bytes=held_bytes
-        + batch_rank_scratch_bytes(
-            n_cells=n_cells,
-            n_groups=n_groups,
-            n_features=0,
-            nthreads=threads,
-        ),
+        scratch_itemsize=scratch_itemsize,
+        resident_bytes=resident_bytes,
         **norm_params,
     ):
         if isinstance(batch, pd.DataFrame):
@@ -499,6 +597,10 @@ def _rank_normed_batches(
             n_cells,
             feature_labels=np.asarray(labels),
         )
+        if exact is not None:
+            exact.out[start:stop] = exact_batch_p_values(
+                values, codes, exact.sizes, exact.groups, exact.max_size
+            )
         start = stop
     if start != len(feature_index):
         raise RuntimeError("Normalized feature batches must cover every feature")

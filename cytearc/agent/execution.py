@@ -371,7 +371,11 @@ def finalist_evidence(
         # One group table at a time avoids loading all feature-by-cluster
         # results together. Empty supported-marker lists remain explicit.
         frame = store.markers.load(
-            run["markers"], group_id=str(group), min_score=-1, min_frac_exp=-1
+            run["markers"],
+            group_id=str(group),
+            min_frac_exp=None,
+            min_auc=None,
+            max_p_adj=None,
         )
         qualifying = frame[(frame["score"] >= 0.25) & (frame["frac_exp"] >= 0.2)]
         supported += int(not qualifying.empty)

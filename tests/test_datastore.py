@@ -2309,7 +2309,9 @@ class TestDataStore:
         )
         assert ref.kind == "marker_table"
 
-        markers = datastore.markers.load(marker=ref, min_score=0, min_frac_exp=0)
+        markers = datastore.markers.load(
+            marker=ref, min_frac_exp=None, min_auc=None, max_p_adj=None
+        )
         hvgs = np.asarray(
             read_feature_selection_indices(datastore.zw, "RNA", mark_hvgs)
         )
@@ -2330,9 +2332,9 @@ class TestDataStore:
         for group, rows in markers.groupby("group_id"):
             fraction = np.asarray(expressed[labels == group].mean(axis=0)).ravel()
             columns = [position[feature] for feature in rows["feature_index"]]
-            # Stored fractions are rounded to five decimals.
+            # Stored fractions keep full precision.
             np.testing.assert_allclose(
-                rows["frac_exp"], np.round(fraction[columns], 5), rtol=0, atol=1e-6
+                rows["frac_exp"], fraction[columns], rtol=1e-12, atol=0
             )
 
     def test_streaming_feature_stats_matches_three_pass(self, datastore):

@@ -92,8 +92,9 @@ def test_marker_panel_uses_frozen_groups_and_rank_round_robin() -> None:
             == {
                 "marker": run["markers"],
                 "group_id": call["group_id"],
-                "min_score": -1,
-                "min_frac_exp": -1,
+                "min_frac_exp": None,
+                "min_auc": None,
+                "max_p_adj": None,
             }
             for call in store.calls
         )

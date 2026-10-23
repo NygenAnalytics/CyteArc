@@ -147,7 +147,9 @@ def read_gmt(path: str | os.PathLike[str]) -> pd.DataFrame:
     """Read gene sets from a tab-separated GMT file.
 
     The first field is used as the source name, the second description field is
-    ignored, and each remaining non-empty field becomes one target row.
+    ignored, and each remaining non-empty field becomes one target row. A UTF-8
+    byte order mark at the start of the file, which some editors write, is not
+    part of the first source name.
 
     Args:
         path: Path to a GMT file with at least three fields per non-empty line.
@@ -156,7 +158,7 @@ def read_gmt(path: str | os.PathLike[str]) -> pd.DataFrame:
         A DataFrame with ``source`` and ``target`` columns.
     """
     records: list[tuple[str, str]] = []
-    with open(path, encoding="utf-8") as handle:
+    with open(path, encoding="utf-8-sig") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             line = raw_line.rstrip("\r\n")
             if not line.strip():

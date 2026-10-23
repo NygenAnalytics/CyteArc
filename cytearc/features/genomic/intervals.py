@@ -6,6 +6,7 @@ from numba import jit
 from scipy.sparse import coo_matrix, csc_matrix
 
 from ...utils.logging import logger
+from .sequence import parse_coordinate_ids
 
 __all__ = [
     "binary_search",
@@ -16,23 +17,48 @@ __all__ = [
 
 
 def create_bed_from_coord_ids(ids: Iterable[str]) -> pd.DataFrame:
-    """Create a three-column BED dataframe from `chrom:start-end` strings."""
-    ser = pd.Series(list(ids), dtype="object")
-    chrom_rest = ser.str.split(":", expand=True)
-    start_end = chrom_rest[1].str.split("-", expand=True)
-    df = pd.DataFrame(
-        {
-            0: chrom_rest[0].to_numpy(),
-            1: start_end[0].astype(np.int64).to_numpy(),
-            2: start_end[1].astype(np.int64).to_numpy(),
-        }
-    )
+    """Create a three-column BED dataframe from ``chrom:start-end`` strings.
+
+    Ids are read by :func:`~cytearc.features.genomic.sequence.parse_coordinate_ids`,
+    so the chromosome is the text before the last ``:`` and may contain
+    ``:`` itself. Rows are sorted by chromosome and start, and each keeps the
+    position of its id as its index.
+
+    Raises:
+        ValueError: If an id is not ``chrom:start-end`` with non-negative
+            integer bounds and ``start < end``, such as a Signac-style
+            ``chrom-start-end`` id. The error names the id.
+    """
+    chroms, starts, ends = parse_coordinate_ids(ids)
+    df = pd.DataFrame({0: chroms, 1: starts, 2: ends})
     return df.sort_values(by=[0, 1])
 
 
 @jit(nopython=True)
 def binary_search(ranges: np.ndarray, queries: np.ndarray) -> np.ndarray:
-    """Find overlapping range positions for sorted query intervals."""
+    """Find the positions of the ranges that each query interval overlaps.
+
+    Both arguments are two-dimensional arrays that hold one half-open
+    ``[start, end)`` interval per row. The search needs ``ranges`` sorted by
+    start, as the rows of one chromosome of :func:`create_bed_from_coord_ids`
+    are; queries may come in any order.
+
+    Returns:
+        One row per query: the position of the first range it overlaps and
+        one past the last, or ``[-1, -1]`` when it overlaps none. Ranges
+        between the two need not overlap the query.
+
+    Raises:
+        ValueError: If either array does not have two columns, or ``ranges``
+            are not sorted by start.
+    """
+    if ranges.shape[1] != 2:
+        raise ValueError("ranges must hold one start and end per row")
+    if queries.shape[1] != 2:
+        raise ValueError("queries must hold one start and end per row")
+    for row in range(1, ranges.shape[0]):
+        if ranges[row, 0] < ranges[row - 1, 0]:
+            raise ValueError("ranges must be sorted by start")
     max_len = (ranges[:, 1] - ranges[:, 0]).max()
     n = queries.shape[0]
     ret_val = np.full((n, 2), 0)

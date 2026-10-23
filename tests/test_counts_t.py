@@ -285,18 +285,20 @@ def test_marker_results_on_strip_counts_t():
     np.testing.assert_allclose(table["mean_rest"], outside.mean(axis=0), rtol=1e-6)
     np.testing.assert_array_equal(table["frac_exp"], (inside > 0).mean(axis=0))
     np.testing.assert_array_equal(table["frac_exp_rest"], (outside > 0).mean(axis=0))
+    # Two groups of two cells split in six ways, so their p-values come from
+    # the exact permutation null, ties included.
     tests = [
         stats.mannwhitneyu(
             inside[:, feature],
             outside[:, feature],
             alternative="two-sided",
-            method="asymptotic",
+            method=stats.PermutationMethod(n_resamples=np.inf),
         )
         for feature in range(4)
     ]
     np.testing.assert_allclose(table["auc"], [test.statistic / 4 for test in tests])
     np.testing.assert_allclose(
-        table["p_value"], [test.pvalue for test in tests], rtol=1e-5
+        table["p_value"], [test.pvalue for test in tests], rtol=1e-12
     )
 
 

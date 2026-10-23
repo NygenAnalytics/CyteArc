@@ -138,8 +138,13 @@ _SIGNATURE_DIGESTS = {
     # dtype, each None by default, reduction.import_coordinates is new, and
     # min_features_per_cell: int | None = None. select_hvgs gained flavor,
     # batch, span, theta, and clip, and its min_cells defaults to None, the
-    # flavor's own default.
-    DataStore: "0836d1d9cd40c5df4a205048fc0ff4c6f59b22bc790187ed77fdd813b9ceef47",
+    # flavor's own default. get_markers and export_markers_to_csv take
+    # min_score: float | None = None, min_frac_exp: float | None = 0.2,
+    # min_auc: float | None = 0.6, max_p_adj: float | None = 0.05, and
+    # sort_by: MarkerSortKey = "score"; make_bulk gained the keyword-only
+    # remove_empty_columns: bool = True and return_n_cells: bool = False, and
+    # returns their tuple shapes.
+    DataStore: "4c62bcd8e62a6c9a12f9c4b3bd16d7789933fd6d50a2b79ce1bfcca3da646abf",
     # artifacts.prune_incomplete(*, dry_run: bool = True) -> list[str] was added.
     ArtifactAccessor: "6d4befabbbc91b00684038f44e0b3063905c84437587be0994c26370efa2570c",
 }
