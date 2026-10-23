@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 import tracemalloc
 
 import numpy as np
@@ -508,6 +511,84 @@ def test_pca_agrees_across_thread_counts(
         np.testing.assert_allclose(other_loadings, loadings, rtol=0, atol=1e-10)
         np.testing.assert_allclose(
             other_model.explained_variance_, model.explained_variance_, rtol=1e-12
+        )
+
+
+# Fits PCA with four BLAS threads in a process whose BLAS started with one, as
+# it does under OMP_NUM_THREADS=1 on many clusters.
+_FIT_AFTER_ONE_THREAD_BLAS_START = """
+import sys
+
+import numpy as np
+# Loads scipy's BLAS, so the check below sees it.
+import scipy.linalg
+from threadpoolctl import threadpool_info
+
+from cytearc.embeddings.reduction import fit_pca
+from cytearc.matrix import ChunkedArray
+
+values_path, block_size, output_path = sys.argv[1:]
+started = {
+    info["num_threads"] for info in threadpool_info() if info["user_api"] == "blas"
+}
+assert started <= {1}, started
+values = np.load(values_path)
+loadings, model = fit_pca(
+    ChunkedArray.from_numpy(values, block_size=int(block_size)),
+    dims=10,
+    use_for_pca=np.ones(len(values), dtype=bool),
+    scale=None,
+    random_state=4466,
+    nthreads=4,
+)
+np.savez(
+    output_path,
+    loadings=loadings,
+    variance=model.explained_variance_,
+    passes=model.n_passes_,
+)
+"""
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("n_features", [600, _WIDE_FEATURES])
+def test_pca_raises_blas_threads_above_the_starting_count(
+    wide_values: np.ndarray, n_features: int, tmp_path
+) -> None:
+    # OpenBLAS 0.3.28, which numpy 2.2.0 to 2.2.5 and scipy 1.15.0 to 1.16.1
+    # bundle, crashes in this fit, so pyproject.toml excludes those releases.
+    if n_features == _WIDE_FEATURES:
+        values, block_size = wide_values, 64
+    else:
+        values, block_size = _spectrum_values(2000, n_features, 5), 1000
+    np.save(tmp_path / "values.npy", values)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-X",
+            "faulthandler",
+            "-c",
+            _FIT_AFTER_ONE_THREAD_BLAS_START,
+            str(tmp_path / "values.npy"),
+            str(block_size),
+            str(tmp_path / "fit.npz"),
+        ],
+        env={**os.environ, "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1"},
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=600,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr[-3000:]
+    loadings, model = _fit(values, block_size=block_size, dims=10)
+    with np.load(tmp_path / "fit.npz") as fit:
+        assert int(fit["passes"]) == model.n_passes_
+        np.testing.assert_allclose(fit["loadings"], loadings, rtol=0, atol=1e-10)
+        np.testing.assert_allclose(
+            fit["variance"], model.explained_variance_, rtol=1e-12
         )
 
 
