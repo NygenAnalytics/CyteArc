@@ -18,15 +18,6 @@ import numpy as np
 import pytest
 
 import cytearc
-from cytearc.agent.models import AnalysisInputError, NeedsInput
-from cytearc.agent.provider import (
-    DecisionValidationError,
-    PromptTooLarge,
-    ProviderError,
-    RequestBudgetExceeded,
-)
-from cytearc.agent.records import RecordError, RecordIntegrityError, RunLockedError
-from cytearc.agent.workflow import PipelineProcessActive
 from cytearc.datastore.pipeline_run import PipelineExecutionError
 from cytearc.merge.metadata import _SourceConflict
 from cytearc.metadata.membership import UnmeasuredCellsError
@@ -51,20 +42,6 @@ from cytearc.utils.shutdown import ShutdownRequest, ShutdownRequested
 RUN_ID = "a" * 64
 
 SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
-    AnalysisInputError: lambda: AnalysisInputError("No column names the donors"),
-    NeedsInput: lambda: NeedsInput("Which column holds the donor?", field="donor"),
-    ProviderError: lambda: ProviderError("The model returned no decision"),
-    DecisionValidationError: lambda: DecisionValidationError("The repair failed"),
-    RequestBudgetExceeded: lambda: RequestBudgetExceeded("No requests remain"),
-    PromptTooLarge: lambda: PromptTooLarge("The request exceeds 4096 bytes"),
-    RecordError: lambda: RecordError("The run record is missing"),
-    RunLockedError: lambda: RunLockedError("Another process holds the lock"),
-    RecordIntegrityError: lambda: RecordIntegrityError(
-        "Cannot read record explore.json: its content changed"
-    ),
-    PipelineProcessActive: lambda: PipelineProcessActive(
-        "The pipeline process may still be running"
-    ),
     PipelineExecutionError: lambda: PipelineExecutionError(
         RUN_ID, "pca", ValueError("bad pca")
     ),

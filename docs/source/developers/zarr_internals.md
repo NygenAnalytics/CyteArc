@@ -233,7 +233,7 @@ before they read their source. A destination without keys is created with mode `
 refuses keys that appear after the check. With `overwrite=True` a destination that holds keys is replaced with
 mode `"w"` only when its root group holds no prepared assay and no `matrixSource`, and every
 top-level member is a group that CyteArc writes: `cellData`, `matrices`, `artifacts`, `pipeline`,
-`agent_results`, an assay group (`is_assay`), a pending derived assay, or a workspace group that
+an assay group (`is_assay`), a pending derived assay, or a workspace group that
 holds only such members; inside them, every key is Zarr metadata or an array's chunks. Any other
 key, such as a `.DS_Store` file or a root array, and keys without a root group are refused with
 `FileExistsError`. Every source that a writer reads is prepared, and `SubsetZarr` also refuses a

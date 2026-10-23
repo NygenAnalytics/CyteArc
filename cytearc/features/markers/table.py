@@ -564,8 +564,7 @@ def _canonical_slot(
             "from the same clustering and feature selection with "
             "ds.markers.search; for a pipeline run, "
             'ds.markers.search(run["clusters"], '
-            'features=run["feature_universe"]). A saved agent result keeps '
-            "the table that it read, so run that analysis again"
+            'features=run["feature_universe"])'
         )
     revision_1 = "p_value_policy" not in slot_group.attrs
     for name, expected in _MARKER_METADATA.items():

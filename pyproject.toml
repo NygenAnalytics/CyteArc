@@ -58,11 +58,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-agent = [
-    "pydantic-ai-slim[openai]>=2.51.0",
-    # cytearc.agent.provider classifies httpx transport errors.
-    "httpx>=0.28.1",
-]
 extra = [
     "anndata>=0.12",
     # kneed 0.8.0 opens its VERSION file relative to the working directory,
@@ -88,7 +83,8 @@ test = [
     "anndata>=0.12",
     "scikit-network>=0.33.3",
     "rdata>=1.1.0",
-    "pydantic-ai-slim[openai]>=2.51.0",
+    # The Hugging Face store tests build HTTP errors with httpx, which
+    # huggingface-hub 2.0 no longer installs.
     "httpx>=0.28.1",
     "polars>=1.20",
     # CI runs t-SNE on Linux x86_64, where sgtsnepi has wheels.
@@ -262,8 +258,6 @@ ignore_missing_imports = true
 module = [
     "numba",
     "numba.*",
-    "pydantic_ai",
-    "pydantic_ai.*",
     "sgtsnepi",
     "igraph",
     "leidenalg",

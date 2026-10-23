@@ -61,7 +61,6 @@ def _lock_numba_cache_files() -> None:
 _lock_numba_cache_files()
 
 pytest_plugins = [
-    "tests.fixtures_agent",
     "tests.fixtures_downloader",
     "tests.fixtures_readers",
     "tests.fixtures_datastore",

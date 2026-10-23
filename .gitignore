@@ -41,9 +41,6 @@ benchmarks/.env.*
 profiling/.env
 profiling/.env.*
 !profiling/.env.example
-cytearc/agent/.env
-cytearc/agent/.env.*
-!cytearc/agent/.env.example
 /profiling/config.toml
 /profiling/config.*.toml
 !/profiling/config.example.toml
@@ -65,7 +62,6 @@ cellxgene_cytebase/datasets/
 modal_cytearc/
 notebook/
 PR/
-cytearc/agent/*.md
 .cache/
 review/
 cytearc/cytebase/collection/

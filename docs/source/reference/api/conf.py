@@ -24,7 +24,7 @@ autodoc_type_aliases = {
     "DataStorePlotAccessor": "cytearc.datastore.plot_accessor.DataStorePlotAccessor",
 }
 master_doc = "index"
-exclude_patterns = ["_build", "**.ipynb_checkpoints", "agent.md"]
+exclude_patterns = ["_build", "**.ipynb_checkpoints"]
 myst_enable_extensions = ["colon_fence"]
 myst_all_links_external = True
 pygments_style = "sphinx"

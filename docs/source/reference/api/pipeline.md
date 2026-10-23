@@ -304,8 +304,7 @@ Persisted cluster selection is intentionally pipeline-only. The fixed recipe own
 set, deterministic sampling policy, and run-ledger decision. Granular callers can evaluate their
 own partitions with public APIs such as `evaluate_cluster_separability` in `cytearc.metrics`. There
 is no public "best clustering" function and no separate `DataStore` persistence method that could
-imply the pipeline policy outside a run. The agent orchestrator is a separate multi-metric
-workflow and does not replace this baseline.
+imply the pipeline policy outside a run.
 
 ## Durable outputs and frozen views
 
@@ -354,8 +353,7 @@ adata = ds.to_anndata(run=run)
 The marker table of a run saved before CyteArc 1.0.0 cannot be read, because its `fold_change`
 column held sentinels: `markers.load` raises and names
 `ds.markers.search(run["clusters"], features=run["feature_universe"])`, which recomputes the
-table for the run's clusters. A saved agent result keeps the table that it read, so its analysis
-must be run again.
+table for the run's clusters.
 
 ## Open, list, and report runs
 

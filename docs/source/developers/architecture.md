@@ -230,33 +230,12 @@ time in recipe order on the calling thread. DataStore-owned plotting, marker
 loading, and export consume narrow frozen-run views. Completed runs can be reopened by their
 immutable label or exact run ID.
 
-`agent/` owns the optional bounded single-RNA workflow. Its lazy facade exposes `analyze_rna`,
-`resume_rna`, their asynchronous counterparts, `open_analysis`, `AnalysisRun`, `Study`,
-`AnalysisConfig`, and `RuntimeConfig`. `workflow.py` defines fixed stages and calls existing
-`DataStore.pipeline` operations through `execution.py`. Agent-local evidence, diagnostics,
-pure choice validators, prompts, and structured provider requests remain separate from core
-numerical ownership. Prototype orchestrator and standalone-agent packages are retired.
-
-`records.py` owns the external immutable request, events, measured evidence, visible decisions,
-validation outcomes, and recovery references. The default directory is
-`Path.cwd() / "agent_runs" / <runId>`; callers may choose another new external location.
-`compact_result.py` publishes one immutable agent-owned summary under the local store's
-`agent_results/<runId>`, linking the verified final core pipeline/configuration to the external
-audit. It neither adds a core artifact type nor duplicates the stage history. `result.py`
-exposes the saved analysis, and `rendering.py` derives reports for complete and incomplete
-outcomes without provider calls or numerical recomputation.
-
 ### Presentation
 
 `plotting/` owns the reusable plotting APIs.
 It has no import dependency on `datastore`.
 The removed `cytearc.plots`, `cytearc.plotting._legacy`, and `DataStore.plot_*` APIs must not be restored.
 New plots should return the established plotting result types, accept documented data contracts, and use narrow adapters instead of adding storage-path knowledge.
-
-The single-RNA agent uses the core embedding accessor for the exact final UMAP.
-`agent/plots.py` adds a bounded marker panel from saved final marker statistics, with no count
-matrix reads. These views return existing public `PlotResult` and provenance types. They
-introduce no core plotting API or module-load dependency from plotting to datastore.
 
 `DataStore.plots` is a thin, store-bound accessor over the canonical store-first functions in `cytearc.plotting`.
 The accessor imports concrete plot implementations only when a method is called, so this convenience namespace does not reverse the dependency from plotting to datastore.
@@ -265,7 +244,7 @@ The accessor imports concrete plot implementations only when a method is called,
 
 ### Lazy and eager facades
 
-The lazy facades in `cytearc`, `agent`, `features` and its subpackages, `readers`, `writers`, `merge`, `utils`, `neighbors`, `clustering`, `embeddings`, `trajectory`, `regulons`, and `plotting` are architectural boundaries, not temporary deprecation shims.
+The lazy facades in `cytearc`, `features` and its subpackages, `readers`, `writers`, `merge`, `utils`, `neighbors`, `clustering`, `embeddings`, `trajectory`, `regulons`, and `plotting` are architectural boundaries, not temporary deprecation shims.
 Their documented 1.x exports preserve stable import paths and defer optional or expensive implementations until an export is accessed.
 All of them use one private helper, `cytearc._facade`: an export wins over a same-named submodule, resolving an export never replaces a bound value, and only `readers`, `writers`, `merge`, and `utils` present the objects they own under the facade's `__module__`.
 `cytebase` is a plain module that keeps the earlier public names of the example downloads, re-exported from `datasets`, through CyteArc 1.x.
@@ -648,8 +627,7 @@ CyteArc validates persisted data and public arguments against the following cont
   prepared data in place is outside the contract and is not detected.
 - Minimum versions rise to scipy 1.15, statsmodels 0.14.5 (earlier releases fail to import
   with scipy 1.16), threadpoolctl 3.5 (earlier releases cannot see the OpenBLAS in NumPy and
-  SciPy wheels, so BLAS thread limits had no effect), huggingface-hub 2.0, and, for the `agent`
-  and `test` extras, pydantic-ai-slim 2.51.
+  SciPy wheels, so BLAS thread limits had no effect), and huggingface-hub 2.0.
 - Count layout: plans whose countsT chunks fell below half the chunk target (awkward cell counts
   such as primes) now use whole-target chunks, so stores written with those plans fail layout replay
   and must be re-imported. Count assays require Zarr format 3. Every count writer admits its layout
@@ -917,10 +895,10 @@ CyteArc validates persisted data and public arguments against the following cont
   Source names that are already valid keep their name; a renamed column whose name is taken
   gets the first free `_2`, `_3`, and so on, in source order. Reserved names are checked after
   renaming. Matrix Market feature-reference columns with separators are renamed instead of
-  rejected. `inspect_h5ad` and the agent manifest see such columns, the manifest reports stored
-  names, and `uns/batch_condition` columns map to stored names. CyteBase `obs_summary` uses
-  stored names while `h5ad_keys` keeps source names. The original name is not recorded in the
-  store, and `to_h5ad` exports the stored names. `DataStoreMerge` rejects a `source_column` or
+  rejected. `inspect_h5ad` sees such columns, and `uns/batch_condition` columns map to stored
+  names. CyteBase `obs_summary` uses stored names while `h5ad_keys` keeps source names. The
+  original name is not recorded in the store, and `to_h5ad` exports the stored names.
+  `DataStoreMerge` rejects a `source_column` or
   `prepend_text` with a separator or the mask prefix, at construction and again when planning,
   and run snapshots and stored selections treat `\` like `/` and name the `_` spelling. H5AD
   listing keeps a nested group visible when resolved names do not cover all of it, so the reader
@@ -968,8 +946,11 @@ CyteArc validates persisted data and public arguments against the following cont
   (`seed=0`, `None` keeps stored order) and sort feature colors high on top; they settle layout
   without rendering points, and on-data labels move at most about one label height and stay
   nearest their own cluster.
-- The agent uses typed inputs, explicit resume, immutable saved decisions, and external audit
-  records.
+- `cytearc.agent`, the bounded single-RNA agent workflow, is removed together with the `agent`
+  extra and its pydantic-ai dependency. AI-assisted analyses call the public API, guided by the
+  skills in `skills/`. CyteArc neither reads nor migrates the run directories and the
+  `agent_results` groups that earlier releases wrote, and writer destinations no longer count
+  `agent_results` among the groups that CyteArc writes.
 - Removed public API: `cytearc.system_call`, `cytearc.get_log_level`, `cytearc.GffReader`,
   `cytearc.coordinate_melding`, `cytearc.utils.iter_column_blocks`, `cytearc.utils.rss_peak_tracker`,
   `cytearc.matrix.Block`, `ChunkedArray.blocks`, `map_blocks`, `dot`, `std`, `chunks`, and
@@ -1080,8 +1061,6 @@ CyteArc validates persisted data and public arguments against the following cont
 - Exports that cannot declare membership refuse unmeasured cells: `to_mtx`, and `to_anndata` layers
   of an assay other than the exported one. `to_h5ad` and `to_anndata` without layers declare
   membership.
-- The agent asks for a `cellKey` of measured cells (`NeedsInput`) during source inspection, before
-  any model decision.
 - `cytearc.metadata.selection.CELL_VALUE_NAMES` names the canonical per-cell array of every
   cell-aligned artifact kind and replaces `GROUPING_VALUE_NAMES`. Readers no longer fall back to a
   `values` array, and other kinds raise `ValueError`. `select_cells` accepts `pseudotime` artifacts.
@@ -1337,14 +1316,6 @@ CyteArc validates persisted data and public arguments against the following cont
   `method.cutoff.quantile`, and the quantile is recorded there, so artifacts of the default keep
   their identities and are reused without a compatibility branch, while each other quantile has
   its own artifact. `qc.hto_demultiplexing` checks the quantile before it reads the selection.
-- Agent run records: each event records the SHA-256 of every evidence, request, and response
-  file it references, and reads verify it. Histories saved before 1.3.0 recorded none; their
-  references are read as saved for presentation only, because resume and replay already require
-  the procedure identity of the release that wrote them. Agent source fingerprints are version 2,
-  hashing whole metadata columns, and inspection evidence records `fingerprintVersion`; an
-  analysis with an earlier fingerprint raises when it opens numerical results and asks for a new
-  analysis, while its reports and records stay readable. Inspection evidence no longer saves QC
-  outlier row lists, and invocations save only the names and a SHA-256 of `modelSettings`.
 - HTO demultiplexing assigns a singlet the one tag that its negative-binomial cutoff calls
   positive, not the tag with the highest CLR value, which in unbalanced pools could be a tag
   called negative. `hto_identity` artifacts gain the diagnostic arrays `max_id`, `second_id`

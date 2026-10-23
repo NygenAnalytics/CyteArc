@@ -1,6 +1,6 @@
 ---
 name: cytearc-single-cell
-description: Analyze single-cell data with core CyteArc, the out-of-core Zarr DataStore library with immutable artifacts and pipeline runs. Covers opening, converting and mounting stores (including public CyteBase datasets opened by their hf:// URIs), QC with removal audits, HVG/PCA/neighbour graphs, Leiden/Paris clustering, UMAP, markers and cautious annotation, batch correction and donor-level comparisons, headless plotting, provenance and export. Use when a task involves a CyteArc .zarr store, a CyteBase dataset, cytearc.DataStore, ds.pipeline, or converting H5AD/10x/MTX/Seurat data for CyteArc. Does not cover cytearc.agent (the automated agent package); for CyteBase catalog search in depth, use the cytebase skill.
+description: Analyze single-cell data with core CyteArc, the out-of-core Zarr DataStore library with immutable artifacts and pipeline runs. Covers opening, converting and mounting stores (including public CyteBase datasets opened by their hf:// URIs), QC with removal audits, HVG/PCA/neighbour graphs, Leiden/Paris clustering, UMAP, markers and cautious annotation, batch correction and donor-level comparisons, headless plotting, provenance and export. Use when a task involves a CyteArc .zarr store, a CyteBase dataset, cytearc.DataStore, ds.pipeline, or converting H5AD/10x/MTX/Seurat data for CyteArc. For CyteBase catalog search in depth, use the cytebase skill.
 license: BSD-3-Clause
 compatibility: Requires Python 3.13+ and cytearc 1.0.0rc1 or newer (pip install "cytearc[extra]>=1.0.0rc1"; CyteBase datasets need network access, and searching their catalog needs the separate cytebase package; add the tsne extra for t-SNE and the regulons extra for cisTarget ranking databases).
 metadata:
@@ -12,7 +12,6 @@ metadata:
 CyteArc streams Zarr-backed count matrices in bounded blocks and records every computation as an
 immutable, content-addressed artifact. This skill encodes how to drive core CyteArc for single-cell
 RNA analysis: which calls to make, in what order, what evidence to check, and what not to do.
-It does not use or describe `cytearc.agent`.
 
 Read this file first. Then open only the reference modules you need (index below). Paths in this
 skill are relative to the skill directory. The maintained copy lives in the CyteArc repository at

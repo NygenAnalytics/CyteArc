@@ -11,9 +11,6 @@ project:
   - reference/api/**
   - '**/cytearc_datasets/**'
   - analysis_with_agents.md
-  - tutorials/agent_workflow.md
-  - tutorials/garrido_trigo_agents.md
-  - developers/agent_decisions.md
   static_files:
   - llms.txt
   - ../build/api

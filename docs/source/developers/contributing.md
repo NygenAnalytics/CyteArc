@@ -82,7 +82,7 @@ For full CI parity, also run the visual regression step (or see `AGENTS.md`):
 ### Performance benchmarks
 
 `tests/benchmarks/` times the operations that dominate large runs and projects each timing onto production sizes, such as one and ten million cells.
-`test_kernels.py` covers compute kernels, `test_stages.py` the `DataStore` stages, `test_cold_start.py` the import and compilation cost of a new process, and the `test_scaling_*.py` files readers, graphs, features, plotting, merge and export, identity checks, and the agent.
+`test_kernels.py` covers compute kernels, `test_stages.py` the `DataStore` stages, `test_cold_start.py` the import and compilation cost of a new process, and the `test_scaling_*.py` files readers, graphs, features, plotting, merge and export, and identity checks.
 Every benchmark also checks its result against an independent reference.
 A normal test run executes each benchmark once at a small size, without timing it.
 Timed runs need a quiet machine and their own process:
@@ -127,14 +127,14 @@ To change an operation's outputs:
 
 Author executable tutorials and the quick start as `.ipynb` files under `docs/source/`.
 Each tracked notebook is the page's sole source, containing prose, code, outputs, and execution
-metadata. Edit it directly. Prose guides and API references remain Markdown; excluded agent pages
+metadata. Edit it directly. Prose guides and API references remain Markdown; excluded pages
 retain their source-only MyST Markdown. MyST renders the main site; Sphinx builds the API
 reference from `docs/source/reference/api/`.
 
 Use Node.js 24 and install the Python tools:
 
 ```bash
-uv sync --group docs-modal --extra agent --extra docs --extra test --extra extra
+uv sync --group docs-modal --extra docs --extra test --extra extra
 ```
 
 ### Execute affected notebooks

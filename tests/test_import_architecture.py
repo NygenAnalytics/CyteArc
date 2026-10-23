@@ -323,7 +323,7 @@ _FRESH_IMPORT_BASE = (
     "sklearn.cluster",
     "zarr",
 )
-_FRESH_IMPORT_FORBIDDEN_IN_BASE = ("cytearc", "matplotlib", "seaborn", "pydantic_ai")
+_FRESH_IMPORT_FORBIDDEN_IN_BASE = ("cytearc", "matplotlib", "seaborn")
 _FRESH_IMPORT_PROBE = """
 import importlib
 import json
@@ -739,33 +739,6 @@ def test_internal_modules_do_not_use_moved_symbols_from_hybrid_facades():
     assert _moved_symbol_imports() == set()
 
 
-_FRESH_IMPORT_CHECKS["agent_facade"] = """
-import cytearc
-
-assert "cytearc.agent" not in sys.modules
-assert not loaded("pydantic_ai"), loaded("pydantic_ai")
-
-import cytearc.agent as agent
-
-runtime_modules = (
-    "cytearc.agent.evidence",
-    "cytearc.agent.execution",
-    "cytearc.agent.provider",
-    "cytearc.agent.workflow",
-    "cytearc.datastore",
-    "pydantic_ai",
-)
-for public_name in (None, "Study", "analyze_rna", "AnalysisRun"):
-    if public_name is not None:
-        getattr(agent, public_name)
-    assert not loaded(*runtime_modules), (public_name, loaded(*runtime_modules))
-"""
-
-
-def test_agent_facade_defers_numerical_and_provider_imports(fresh_import_errors):
-    _assert_fresh_import_check(fresh_import_errors, "agent_facade")
-
-
 _UNIX_ONLY_MODULES = frozenset(
     {"fcntl", "grp", "pty", "pwd", "resource", "termios", "tty"}
 )
@@ -788,8 +761,8 @@ def _load_time_imports(tree: ast.Module) -> list[tuple[int, str]]:
 
 
 def test_unix_only_modules_are_imported_only_at_call_time():
-    # Windows lacks these modules. A call-time import behind a platform check,
-    # as in cytearc.agent.records, keeps every module importable there.
+    # Windows lacks these modules. A call-time import that falls back when one
+    # is missing, as in cytearc.utils.numba, keeps every module importable there.
     violations = sorted(
         (path.relative_to(_CYTEARC_ROOT).as_posix(), lineno, module)
         for path in _CYTEARC_ROOT.rglob("*.py")
@@ -797,54 +770,6 @@ def test_unix_only_modules_are_imported_only_at_call_time():
         if module.split(".")[0] in _UNIX_ONLY_MODULES
     )
     assert violations == []
-
-
-def test_agent_support_modules_keep_narrow_dependencies():
-    # Decisions stay independent of execution, the provider cannot reach CyteArc
-    # computation, and reports can be regenerated without opening a store.
-    allowed_imports = {
-        "models": set(),
-        "choices": {"agent.models"},
-        "prompts": set(),
-        "records": set(),
-        "provider": {"agent.models", "agent.prompts", "agent.records"},
-        "rendering": {"agent.records", "agent.report_charts", "agent.report_html"},
-        "report_html": {
-            "agent.report_assets",
-            "agent.report_style",
-            "agent.report_text",
-        },
-        "report_assets": set(),
-        "report_charts": set(),
-        "report_style": set(),
-        "report_text": set(),
-    }
-    for name, allowed in allowed_imports.items():
-        path = _CYTEARC_ROOT / "agent" / f"{name}.py"
-        assert _runtime_import_modules(path) <= allowed, name
-
-
-def test_core_packages_do_not_import_cytearc_agent():
-    assert not {
-        (relative, module)
-        for relative, imports in _root_imports_by_path().items()
-        if not relative.startswith("agent/")
-        for module in imports
-        if module == "agent" or module.startswith("agent.")
-    }
-
-
-def test_agent_internal_modules_import_concrete_owners():
-    violations: set[tuple[str, str]] = set()
-    agent_root = _CYTEARC_ROOT / "agent"
-    for path in agent_root.rglob("*.py"):
-        if path.name == "__init__.py":
-            continue
-        for module in _runtime_import_modules(path):
-            if module == "agent":
-                violations.add((path.relative_to(agent_root).as_posix(), module))
-
-    assert violations == set()
 
 
 def test_compatibility_only_modules_are_removed():
@@ -904,6 +829,7 @@ def test_compatibility_only_modules_are_removed():
 def test_retired_root_import_paths_do_not_resolve():
     for module_name in (
         "cytearc._types",
+        "cytearc.agent",
         "cytearc.chunked",
         "cytearc.downloader",
         "cytearc.harmony",
