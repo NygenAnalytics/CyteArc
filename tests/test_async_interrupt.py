@@ -31,6 +31,10 @@ def _runner() -> AsyncStorageRunner:
 
 @pytest.mark.skipif(not hasattr(signal, "SIGINT"), reason="needs SIGINT")
 def test_an_interrupted_notebook_cell_stops_its_operation_before_it_returns():
+    # Only the main thread receives KeyboardInterrupt. Elsewhere, the SIGINT
+    # below would interrupt whatever the main thread runs, such as the test
+    # runner, instead of this cell.
+    assert threading.current_thread() is threading.main_thread()
     events: list[str] = []
     first_unit = threading.Event()
 
