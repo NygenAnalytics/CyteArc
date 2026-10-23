@@ -165,18 +165,41 @@ jobs:
       with:
         ref: ${{ github.sha }}
         fetch-depth: 0
-    - name: Install system build dependencies
+    - name: Resolve system build dependencies
+      id: apt
       # h5py and sgtsnepi publish no Python 3.15 wheels yet, so only that row
       # compiles them against HDF5, FFTW, and METIS. The other rows install
-      # their wheels and compile only hnswlib: downloading those headers
-      # took up to 8 minutes on slow mirrors, longer than the tests.
+      # their wheels and compile only hnswlib.
       run: |
         sudo apt-get update
         packages=(build-essential)
         if [ "${{ matrix.python-version }}" = "3.15" ]; then
           packages+=(pkg-config libhdf5-dev libfftw3-dev libmetis-dev)
         fi
-        sudo apt-get install -y "${packages[@]}"
+        echo "packages=${packages[*]}" >> "$GITHUB_OUTPUT"
+        # The archive names carry the package versions, so the key changes
+        # when a version does.
+        archives=$(apt-get install --print-uris -qq -y "${packages[@]}" | awk '{print $2}' | sort | sha256sum | cut -c1-16)
+        echo "archives=$archives" >> "$GITHUB_OUTPUT"
+    - name: Restore the downloaded system packages
+      # The 3.15 row downloads 17 MB of packages, which took up to 11 minutes
+      # on a slow mirror, longer than the tests. A changed version restores the
+      # latest earlier cache, so only the changed packages download.
+      if: matrix.python-version == '3.15'
+      uses: actions/cache@v6
+      with:
+        path: ~/apt-archives
+        key: apt-ubuntu-26.04-${{ steps.apt.outputs.archives }}
+        restore-keys: apt-ubuntu-26.04-
+    - name: Install system build dependencies
+      run: |
+        options=(-o Dir::Cache::archives="$HOME/apt-archives" -o APT::Keep-Downloaded-Packages=true)
+        mkdir -p ~/apt-archives/partial
+        sudo apt-get install -y "${options[@]}" ${{ steps.apt.outputs.packages }}
+        # Drop the versions that the mirrors no longer serve, and leave the
+        # archives readable for the cache to save.
+        sudo apt-get autoclean "${options[@]}"
+        sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
     - name: Install uv
       uses: astral-sh/setup-uv@v9.0.0
       with:
