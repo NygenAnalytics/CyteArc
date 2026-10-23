@@ -11,9 +11,13 @@ from numpy.typing import NDArray
 
 from ...features.variability import (
     DEFAULT_HVG_BLACKLIST,
+    DEFAULT_LOESS_SPAN,
+    DEFAULT_PEARSON_THETA,
     _ADAPTIVE_QUANTILE,
+    hvg_flavor_options,
     hvg_options,
-    resolve_hvg_max_cells,
+    resolve_hvg_detection_bounds,
+    select_batch_highly_variable_features,
 )
 from ...assay.feature_summary import (
     ensure_feature_summary,
@@ -41,9 +45,12 @@ from ...storage.feature_selection import (
     _ordered_feature_ids_fingerprint,
     _write_feature_selection,
 )
+from ...storage.arrays import linked_missing_mask
+from ...storage.identity import read_dataset_fingerprint
 from ...storage.selections import (
     read_stored_selection_indices,
     snapshot_run_metadata,
+    validate_run_metadata_snapshot,
     validate_stored_selection_integrity,
 )
 from ...storage.types import as_zarr_array, as_zarr_group
@@ -107,11 +114,16 @@ from ...metadata.selection import (
     FeatureRef,
     NormalizationSpec,
     StudyDesign,
+    grouping_value_name,
     resolve_complete_labels,
     resolve_grouping,
     valid_category_mask,
 )
-from ...metadata.rows import read_metadata_missing_rows, read_metadata_rows
+from ...metadata.rows import (
+    read_array_rows_chunkwise,
+    read_metadata_missing_rows,
+    read_metadata_rows,
+)
 from ...utils.arguments import float_argument, integer_argument
 from ...utils.arrays import (
     array_digest,
@@ -120,6 +132,7 @@ from ...utils.arrays import (
     sort_categories,
 )
 from ...utils.logging import logger
+from ...utils.warnings import warn
 from .enrichment_store import (
     _ENRICHMENT_LAYOUT,
     _EnrichmentScorer,
@@ -185,6 +198,34 @@ def _validate_marker_group_name(name: str) -> None:
 
 def _group_assignment_digest(values: np.ndarray) -> str:
     return array_digest(np.asarray(values).astype(str))
+
+
+def _matplotlib_available() -> bool:
+    """Return whether matplotlib, an optional dependency, can be imported."""
+    try:
+        import matplotlib  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _hvg_batch_argument(batch: object, columns: Sequence[str]) -> None:
+    """Check the ``batch`` of ``features.hvgs`` before anything is written.
+
+    Raises:
+        TypeError: If ``batch`` is not None, a column name, or an ArtifactRef.
+        KeyError: If the column is not in the cell metadata.
+        ValueError: If the artifact holds no categorical cell labels.
+    """
+    if batch is None:
+        return
+    if isinstance(batch, str):
+        if batch not in columns:
+            raise KeyError(f"Batch column {batch!r} is not in the cell metadata")
+        return
+    if not isinstance(batch, ArtifactRef):
+        raise TypeError("batch must be a cell metadata column name or an ArtifactRef")
+    grouping_value_name(batch.kind)
 
 
 class _FeatureOperationsMixin(_FeatureOperationsBase):
@@ -354,6 +395,86 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             )
         return planned.ref
 
+    def _hvg_batch_codes(
+        self,
+        batch: str | ArtifactRef,
+        cell_selection: ArtifactRef,
+        *,
+        invalidate_cache: bool,
+    ) -> tuple[ArtifactRef, str | None, np.ndarray, list[str]]:
+        """Freeze the batch labels of the selected cells and code them.
+
+        A column name is snapshotted, so the selection records the labels it
+        read; a label artifact is recorded as it is. Returns the recorded
+        input, the column name or None, each selected cell's batch code, and
+        the batch names in code order.
+
+        Raises:
+            ValueError: If a selected cell has no batch label, or a batch has
+                fewer than two selected cells.
+        """
+        if isinstance(batch, str):
+            source = snapshot_run_metadata(
+                self.zw,
+                table_path="cellData",
+                id_column="ids",
+                columns=(batch,),
+                axis="cell",
+                invalidate_cache=invalidate_cache,
+            )
+            snapshot = validate_run_metadata_snapshot(
+                self.zw,
+                source,
+                axis="cell",
+                assay=None,
+                table_path="cellData",
+                ordered_columns=(batch,),
+            )
+            values = as_zarr_array(snapshot[batch], name=batch)
+            cell_idx = read_stored_selection_indices(
+                self.zw,
+                cell_selection,
+                kind="cell_selection",
+                scope="datastore",
+                assay=None,
+                table_path="cellData",
+            )
+            labels = np.asarray(read_array_rows_chunkwise(values, cell_idx))
+            mask = linked_missing_mask(snapshot, batch, values=values)
+            missing = (
+                None
+                if mask is None
+                else np.asarray(read_array_rows_chunkwise(mask, cell_idx), dtype=bool)
+            )
+            column: str | None = batch
+        else:
+            source = batch
+            resolved = resolve_grouping(
+                self.zw, self.cells, batch, cell_selection=cell_selection
+            )
+            labels, missing, column = resolved.labels, resolved.missing_mask, None
+        unlabelled = int((~valid_category_mask(labels, missing_mask=missing)).sum())
+        if unlabelled:
+            raise ValueError(
+                f"The batch labels miss {unlabelled} selected cells; select the "
+                "labelled cells with select_cells before selecting highly "
+                "variable genes by batch"
+            )
+        names, codes = np.unique(np.asarray(labels).astype(str), return_inverse=True)
+        sizes = np.bincount(codes, minlength=len(names))
+        small = [
+            f"{str(name)!r} ({size})" for name, size in zip(names, sizes) if size < 2
+        ]
+        if small:
+            raise ValueError(
+                "Batch-aware HVG selection scores every batch on its own, so every "
+                "batch needs at least two selected cells; these have fewer: "
+                + ", ".join(small)
+                + ". Leave their cells out with select_cells or merge them into "
+                "other batches."
+            )
+        return source, column, codes.astype(np.int64), [str(name) for name in names]
+
     def _select_hvgs_artifact(
         self,
         *,
@@ -361,7 +482,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         cell_selection: ArtifactRef,
         feature_names: np.ndarray,
         feature_snapshot: ArtifactRef,
-        min_cells: int = 20,
+        min_cells: int | None = None,
         top_n: int = 1000,
         min_var: float = -np.inf,
         max_var: float = np.inf,
@@ -374,6 +495,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         show_plot: bool = True,
         max_cells: float | None = None,
         bin_strategy: Literal["fixed", "adaptive"] = "adaptive",
+        flavor: Literal["cytearc", "seurat_v3", "pearson_residuals"] = "cytearc",
+        batch: str | ArtifactRef | None = None,
+        span: float = DEFAULT_LOESS_SPAN,
+        theta: float = DEFAULT_PEARSON_THETA,
+        clip: float | None = None,
         invalidate_cache: bool = False,
         **plot_kwargs: Any,
     ) -> ArtifactRef:
@@ -387,20 +513,221 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             keep_bounds=keep_bounds,
             bin_strategy=bin_strategy,
         )
+        options = hvg_flavor_options(
+            flavor=flavor,
+            max_cells=max_cells,
+            min_mean=min_mean,
+            max_mean=max_mean,
+            min_var=min_var,
+            max_var=max_var,
+            n_bins=n_bins,
+            lowess_frac=lowess_frac,
+            bin_strategy=bin_strategy,
+            span=span,
+            theta=theta,
+            clip=clip,
+        )
+        _hvg_batch_argument(batch, self.cells.columns)
         blacklist_fingerprint = (
             fingerprint_array(regex_match_mask(feature_names, blacklist))
             if blacklist
             else None
         )
+        n_selected = feature_summary_selected_count(self.zw, cell_selection)
+        min_cells, max_cells_int = resolve_hvg_detection_bounds(
+            min_cells,
+            max_cells,
+            n_selected=n_selected,
+            keep_bounds=keep_bounds,
+            flavor=options.flavor,
+        )
+        parameters: dict[str, Any] = {
+            **({} if options.flavor == "cytearc" else {"flavor": options.flavor}),
+            "min_cells": min_cells,
+            "max_cells": max_cells_int,
+            "top_n": top_n,
+        }
+        if options.flavor == "cytearc":
+            parameters.update(
+                min_var=min_var,
+                max_var=max_var,
+                min_mean=min_mean,
+                max_mean=max_mean,
+                n_bins=n_bins,
+                lowess_frac=lowess_frac,
+            )
+        parameters["blacklist"] = blacklist
+        if blacklist_fingerprint is not None:
+            parameters["blacklist_fingerprint"] = blacklist_fingerprint
+        parameters["keep_bounds"] = keep_bounds
+        if options.flavor == "cytearc":
+            parameters["bin_strategy"] = bin_strategy
+            if bin_strategy == "adaptive":
+                parameters.update(
+                    variance_estimator="regularized_local_quantile",
+                    variance_quantile=_ADAPTIVE_QUANTILE,
+                )
+        elif options.flavor == "seurat_v3":
+            parameters["span"] = options.span
+        else:
+            parameters.update(theta=options.theta, clip=options.clip)
+        feature_ids_fingerprint = _ordered_feature_ids_fingerprint(assay.z)
+        execution_options = {
+            "show_plot": show_plot,
+            "plot_kwargs": plot_kwargs,
+            "nthreads": assay.nthreads,
+            "invalidate_cache": invalidate_cache,
+        }
+        if options.flavor == "cytearc" and batch is None:
+            return self._select_hvgs_from_summary(
+                assay=assay,
+                cell_selection=cell_selection,
+                feature_names=feature_names,
+                feature_snapshot=feature_snapshot,
+                parameters=parameters,
+                execution_options=execution_options,
+                n_selected=n_selected,
+                min_var=min_var,
+                max_var=max_var,
+                min_mean=min_mean,
+                max_mean=max_mean,
+                show_plot=show_plot,
+                invalidate_cache=invalidate_cache,
+                plot_kwargs=plot_kwargs,
+            )
+        inputs: dict[str, Any] = {
+            "cell_selection": cell_selection,
+            "dataset_fingerprint": read_dataset_fingerprint(assay.z),
+            "feature_snapshot": feature_snapshot,
+        }
+        names = ["all"]
+        if batch is not None:
+            source, column, codes, names = self._hvg_batch_codes(
+                batch, cell_selection, invalidate_cache=invalidate_cache
+            )
+            inputs["batch"] = source
+            if column is not None:
+                parameters["batch_column"] = column
+        elif n_selected < 2:
+            raise ValueError(
+                f"flavor={options.flavor!r} needs at least two selected cells"
+            )
+        payload_names: tuple[str, ...] = (
+            "values",
+            "corrected_variance",
+            "mean_nonzero",
+            "detected",
+        )
+        if batch is not None:
+            payload_names += ("batch_count", "median_batch_rank")
+        planned = _feature_selection_plan(
+            self.zw,
+            assay=assay.name,
+            n_features=assay.feats.N,
+            ordered_feature_ids_fingerprint=feature_ids_fingerprint,
+            operation="select_hvgs",
+            parameters=parameters,
+            inputs=inputs,
+            execution_options=execution_options,
+            payload_names=payload_names,
+            invalidate_cache=invalidate_cache,
+        )
+        if not planned.reused:
+            cell_idx = read_stored_selection_indices(
+                self.zw,
+                cell_selection,
+                kind="cell_selection",
+                scope="datastore",
+                assay=None,
+                table_path="cellData",
+            ).astype(np.int64, copy=False)
+            if batch is None:
+                codes = np.zeros(len(cell_idx), dtype=np.int64)
+            scores = assay._batch_hvg_scores(
+                cell_idx,
+                codes,
+                len(names),
+                flavor=options.flavor,
+                n_bins=n_bins,
+                lowess_frac=lowess_frac,
+                bin_strategy=bin_strategy,
+                span=options.span,
+                theta=options.theta,
+                clip=options.clip,
+            )
+            ranking = select_batch_highly_variable_features(
+                scores.scores,
+                scores.mean_nonzero,
+                scores.detected,
+                feature_names,
+                min_cells=min_cells,
+                max_cells=max_cells_int,
+                top_n=top_n,
+                min_var=min_var,
+                max_var=max_var,
+                min_mean=min_mean,
+                max_mean=max_mean,
+                blacklist=blacklist,
+                keep_bounds=keep_bounds,
+                batch_names=names,
+            )
+            logger.info(f"{int(ranking.selected.sum())} genes marked as HVGs")
+            payload = {
+                "values": ranking.selected,
+                "corrected_variance": scores.scores.mean(axis=0),
+                "mean_nonzero": scores.pooled_mean_nonzero,
+                "detected": scores.detected,
+                "batch_count": ranking.batch_count.astype(np.float64),
+                "median_batch_rank": ranking.median_rank,
+            }
+            _write_feature_selection(
+                self.zw,
+                planned,
+                ordered_feature_ids_fingerprint=feature_ids_fingerprint,
+                payload=payload,
+                payload_names=payload_names,
+            )
+        if show_plot:
+            from ...plotting import highly_variable_features
+
+            highly_variable_features(
+                mean_nonzero=_feature_selection_values(
+                    self.zw, planned.ref, "mean_nonzero"
+                ),
+                corrected_variance=_feature_selection_values(
+                    self.zw, planned.ref, "corrected_variance"
+                ),
+                n_cells=_feature_selection_values(self.zw, planned.ref, "detected"),
+                selected=_feature_selection_values(self.zw, planned.ref),
+                show=True,
+                **plot_kwargs,
+            )
+        return planned.ref
+
+    def _select_hvgs_from_summary(
+        self,
+        *,
+        assay: RNAassay,
+        cell_selection: ArtifactRef,
+        feature_names: np.ndarray,
+        feature_snapshot: ArtifactRef,
+        parameters: dict[str, Any],
+        execution_options: dict[str, Any],
+        n_selected: int,
+        min_var: float,
+        max_var: float,
+        min_mean: float,
+        max_mean: float,
+        show_plot: bool,
+        invalidate_cache: bool,
+        plot_kwargs: dict[str, Any],
+    ) -> ArtifactRef:
+        """Select the cytearc flavor's HVGs of all selected cells from their summary."""
         summary_ref = ensure_feature_summary(
             self.zw,
             assay,
             cell_selection,
             invalidate_cache=invalidate_cache,
-        )
-        n_selected = feature_summary_selected_count(self.zw, cell_selection)
-        max_cells_int = resolve_hvg_max_cells(
-            max_cells, n_selected=n_selected, min_cells=min_cells
         )
         feature_ids_fingerprint = _ordered_feature_ids_fingerprint(assay.z)
         planned = _feature_selection_plan(
@@ -409,43 +736,12 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             n_features=assay.feats.N,
             ordered_feature_ids_fingerprint=feature_ids_fingerprint,
             operation="select_hvgs",
-            parameters={
-                "min_cells": min_cells,
-                "max_cells": max_cells_int,
-                "top_n": top_n,
-                "min_var": min_var,
-                "max_var": max_var,
-                "min_mean": min_mean,
-                "max_mean": max_mean,
-                "n_bins": n_bins,
-                "lowess_frac": lowess_frac,
-                "blacklist": blacklist,
-                **(
-                    {"blacklist_fingerprint": blacklist_fingerprint}
-                    if blacklist_fingerprint is not None
-                    else {}
-                ),
-                "keep_bounds": keep_bounds,
-                "bin_strategy": bin_strategy,
-                **(
-                    {
-                        "variance_estimator": "regularized_local_quantile",
-                        "variance_quantile": _ADAPTIVE_QUANTILE,
-                    }
-                    if bin_strategy == "adaptive"
-                    else {}
-                ),
-            },
+            parameters=parameters,
             inputs={
                 "feature_summary": summary_ref,
                 "feature_snapshot": feature_snapshot,
             },
-            execution_options={
-                "show_plot": show_plot,
-                "plot_kwargs": plot_kwargs,
-                "nthreads": assay.nthreads,
-                "invalidate_cache": invalidate_cache,
-            },
+            execution_options=execution_options,
             payload_names=("values", "corrected_variance"),
             invalidate_cache=invalidate_cache,
         )
@@ -459,31 +755,26 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             values, corrected_variance = assay._select_hvgs(
                 summary,
                 n_selected=n_selected,
-                min_cells=min_cells,
-                max_cells=max_cells_int,
-                top_n=top_n,
+                min_cells=parameters["min_cells"],
+                max_cells=parameters["max_cells"],
+                top_n=parameters["top_n"],
                 min_var=min_var,
                 max_var=max_var,
                 min_mean=min_mean,
                 max_mean=max_mean,
-                n_bins=n_bins,
-                lowess_frac=lowess_frac,
-                blacklist=blacklist,
-                keep_bounds=keep_bounds,
-                bin_strategy=bin_strategy,
+                n_bins=parameters["n_bins"],
+                lowess_frac=parameters["lowess_frac"],
+                blacklist=parameters["blacklist"],
+                keep_bounds=parameters["keep_bounds"],
+                bin_strategy=parameters["bin_strategy"],
                 feature_names=feature_names,
             )
-            selected_values = np.asarray(values, dtype=bool)
-            if not selected_values.any():
-                raise ValueError(
-                    "HVG selection contains no features; adjust the HVG filters"
-                )
             _write_feature_selection(
                 self.zw,
                 planned,
                 ordered_feature_ids_fingerprint=feature_ids_fingerprint,
                 payload={
-                    "values": selected_values,
+                    "values": np.asarray(values, dtype=bool),
                     "corrected_variance": corrected_variance,
                 },
                 payload_names=("values", "corrected_variance"),
@@ -513,7 +804,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         cell_selection: ArtifactRef,
         *,
         from_assay: str | None = None,
-        min_cells: int = 20,
+        min_cells: int | None = None,
         top_n: int = 1000,
         min_var: float = -np.inf,
         max_var: float = np.inf,
@@ -526,22 +817,144 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
         show_plot: bool = True,
         max_cells: float | None = None,
         bin_strategy: Literal["fixed", "adaptive"] = "adaptive",
+        flavor: Literal["cytearc", "seurat_v3", "pearson_residuals"] = "cytearc",
+        batch: str | ArtifactRef | None = None,
+        span: float = DEFAULT_LOESS_SPAN,
+        theta: float = DEFAULT_PEARSON_THETA,
+        clip: float | None = None,
         invalidate_cache: bool = False,
         **plot_kwargs: Any,
     ) -> ArtifactRef:
         """Persist highly variable genes as an immutable feature selection.
+
+        Every flavor scores each gene's variability among the selected cells,
+        keeps the candidates that pass the filters below, and selects the
+        ``top_n`` candidates with the highest scores, ties broken by lower
+        feature index, or every candidate when fewer pass. The filters apply
+        before the ranking, so they never shrink the selection below
+        ``top_n`` while enough candidates pass. ``flavor`` sets the score:
+
+        - ``"cytearc"`` (default): the variance of library-size normalized
+          values, ``sf * count / total`` with the assay's size factor
+          (1,000 by default) and no logarithm, divided by an
+          expression-dependent background, the lower quartile of the
+          variances of genes with a similar mean (``fit_lowess``). A
+          corrected variance of 1 lies on the background.
+        - ``"seurat_v3"``: the variance-stabilizing transformation of Stuart
+          et al. (2019) on raw counts, scanpy's ``flavor="seurat_v3"``. A
+          local quadratic regression of log10 variance on log10 mean with
+          ``span`` gives each gene an expected variance, counts are
+          standardized with it and clipped ``sqrt(n)`` standard deviations
+          above the mean, and the score is the variance of the standardized
+          values.
+        - ``"pearson_residuals"``: the variance of analytic Pearson residuals
+          of the raw counts with overdispersion ``theta``, clipped at
+          ``clip`` or ``sqrt(n)``, Lause, Berens and Kobak (2021), scanpy's
+          experimental ``flavor="pearson_residuals"``. The expected count of
+          a gene in a cell is the cell's prepared total times the gene's
+          share of the counts.
+
+        seurat_v3 and pearson_residuals read the counts and the prepared cell
+        totals and ignore the assay's ``normMethod``. Each passes over the
+        counts twice, seurat_v3 reading again only genes with a count above
+        their clip.
+
+        With ``batch``, every batch is scored on its own, each batch's
+        ``top_n`` candidates are highly variable in it, and genes are
+        selected by the number of batches in which they are highly variable,
+        most first, then by their median rank in those batches. This is the
+        order of Seurat's ``SelectIntegrationFeatures`` and of scanpy's
+        ``flavor="seurat_v3_paper"``; scanpy's ``flavor="seurat_v3"`` sorts by
+        median rank first. The stored ``corrected_variance`` is then the mean
+        score over the batches, and the selection also stores each gene's
+        ``batch_count`` and ``median_batch_rank`` (NaN for a gene that no
+        batch ranks among its ``top_n``).
+
+        The artifact holds the ``values`` mask and each gene's
+        ``corrected_variance`` (the flavor's score). seurat_v3,
+        pearson_residuals, and batch-aware selections also store each gene's
+        ``mean_nonzero`` and ``detected`` count, which their plot shows.
 
         Extra keyword arguments are options of
         :func:`cytearc.plotting.highly_variable_features`, used when
         ``show_plot`` is True. Any other keyword raises ``TypeError`` before
         anything is computed or saved.
 
+        Args:
+            cell_selection: The cells whose variability is scored.
+            from_assay: The RNA assay; the default assay when None.
+            min_cells: Keep genes detected in at least this many selected
+                cells. None uses the flavor's default: for cytearc, 1% of
+                the selected cells rounded up, at least 3 and at most 20, and
+                never more than a fifth of the cells; for the other flavors,
+                0.
+            top_n: The number of genes to select, and with ``batch`` the
+                number that each batch ranks as highly variable.
+            min_var: cytearc only. The log2 of the smallest corrected
+                variance to keep: a gene stays only if its corrected variance
+                exceeds ``2**min_var``. ``-np.inf`` sets no bound.
+            max_var: cytearc only. The log2 of the largest corrected variance
+                to keep, ``2**max_var``. ``np.inf`` sets no bound.
+            min_mean: cytearc only. The log2 of the smallest mean normalized
+                value to keep, where the mean is over the selected cells in
+                which the gene is detected, not over all of them: a gene
+                stays only if that mean exceeds ``2**min_mean``.
+                ``min_mean=0`` keeps genes whose mean over detected cells
+                exceeds 1 normalized count. ``-np.inf`` sets no bound.
+            max_mean: cytearc only. The log2 of the largest such mean,
+                ``2**max_mean``. ``np.inf`` sets no bound.
+            n_bins: cytearc only. The number of points at which the adaptive
+                background is evaluated, or of bins of the fixed one.
+            lowess_frac: cytearc only. The background's window radius as a
+                fraction of the log-mean range.
+            blacklist: A case-insensitive regular expression; genes whose
+                names match it from their start are never selected. The
+                default excludes every family of
+                ``cytearc.features.gene_families``; ``""`` excludes none.
+            keep_bounds: Keep genes equal to a bound, which every bound
+                excludes otherwise.
+            show_plot: Plot the mean-variance diagnostic. Without matplotlib,
+                a warning says so and the selection is returned unplotted.
+            max_cells: Keep genes detected in fewer than this many selected
+                cells (at most this many with ``keep_bounds``). None uses
+                the flavor's default: for cytearc, exclude genes detected in
+                more than 99.5% of the selected cells; for the other
+                flavors, no bound. ``np.inf`` sets no bound.
+            bin_strategy: cytearc only. ``"adaptive"`` local quantile
+                regression or ``"fixed"`` LOWESS over the minimum-variance
+                gene of each bin.
+            flavor: ``"cytearc"``, ``"seurat_v3"``, or
+                ``"pearson_residuals"``.
+            batch: A cell metadata column, whose current values are
+                snapshotted, or a label artifact such as a clustering or HTO
+                identities, whose labels are the batches. Every selected cell
+                needs a label, and every batch at least two selected cells.
+                The detection bounds count the detections over every selected
+                cell; the mean and variance bounds apply within each batch.
+            span: seurat_v3 only. The fraction of genes in each local fit of
+                the trend.
+            theta: pearson_residuals only. The negative binomial
+                overdispersion.
+            clip: pearson_residuals only. The largest absolute residual; None
+                clips at the square root of each batch's cell count.
+            invalidate_cache: Compute again even when a matching selection
+                exists.
+            **plot_kwargs: Options of the plot.
+
+        Returns:
+            The reference of the ``feature_selection`` artifact. Its
+            provenance records the resolved ``min_cells`` and ``max_cells``.
+
         Raises:
+            TypeError: If an option has the wrong type or a keyword is unknown.
+            ValueError: If an option is invalid or does not apply to the
+                flavor, a batch is missing or too small, or no gene passes
+                the filters.
             UnmeasuredCellsError: If the assay did not measure a selected cell.
         """
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
-        # The snapshot below writes, so the options are checked first; the
+        # The snapshots below write, so the options are checked first; the
         # artifact method checks them again.
         hvg_options(
             min_cells=min_cells,
@@ -551,6 +964,29 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             keep_bounds=keep_bounds,
             bin_strategy=bin_strategy,
         )
+        hvg_flavor_options(
+            flavor=flavor,
+            max_cells=max_cells,
+            min_mean=min_mean,
+            max_mean=max_mean,
+            min_var=min_var,
+            max_var=max_var,
+            n_bins=n_bins,
+            lowess_frac=lowess_frac,
+            bin_strategy=bin_strategy,
+            span=span,
+            theta=theta,
+            clip=clip,
+        )
+        _hvg_batch_argument(batch, self.cells.columns)
+        if show_plot and not _matplotlib_available():
+            warn(
+                "features.hvgs draws its mean-variance plot with matplotlib, which "
+                "is not installed, so it returns the selection without the plot; "
+                "install it with pip install 'cytearc[extra]', or pass "
+                "show_plot=False"
+            )
+            show_plot = False
         if plot_kwargs:
             import inspect
 
@@ -611,6 +1047,11 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             show_plot=show_plot,
             max_cells=max_cells,
             bin_strategy=bin_strategy,
+            flavor=flavor,
+            batch=batch,
+            span=span,
+            theta=theta,
+            clip=clip,
             invalidate_cache=invalidate_cache,
             **plot_kwargs,
         )

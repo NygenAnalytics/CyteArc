@@ -148,7 +148,7 @@ class PipelineAccessor:
         forwards to that stage's function, so one mapping can configure a run:
 
         ``{"filtering": {"method": "manual", "lows": [...], "highs": [...]},
-        "hvg": {"min_mean": 0.01, "keep_bounds": True}, "pca": {"dims": 30},
+        "hvg": {"flavor": "seurat_v3", "top_n": 2000}, "pca": {"dims": 30},
         "umap": {"n_epochs": 400}, "leiden": {"partitions": [0.8, 1.0],
         "selected": 1.0}, "tsne": {"max_iter": 800}}``
 
@@ -159,7 +159,10 @@ class PipelineAccessor:
           mapping of settings, or a bool that switches the stage.
         - ``hvg``, ``normalization``, ``pca``, ``ann_index``, ``neighbors``,
           ``connectivity``, ``embedding_initialization``: settings for stages
-          that always run. ``pca`` ``dims=0`` skips PCA and builds the graph
+          that always run. The ``hvg`` settings are the keywords of
+          ``features.hvgs``, whose ``min_mean``, ``max_mean``, ``min_var``,
+          and ``max_var`` are log2 values; its ``batch`` names a cell
+          metadata column. ``pca`` ``dims=0`` skips PCA and builds the graph
           on the normalized values of the selected features; it requires
           ``doublets=False`` and no Harmony batch columns.
         - ``harmony``: ``batch_columns`` plus ``harmony_params`` (the keyword

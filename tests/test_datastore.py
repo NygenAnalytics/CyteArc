@@ -2158,7 +2158,11 @@ class TestDataStore:
         n_selected = int(
             artifact_values(artifact_group(datastore.zw, selection), "values").sum()
         )
-        expected_max = n_selected - 20
+        # Genes detected in more than 99.5% of the selected cells are excluded
+        # through an exclusive cutoff, and min_cells is 1% of the cells
+        # rounded up, from 3 to 20.
+        expected_max = n_selected * 199 // 200 + 1
+        expected_min = min(20, max(3, -(-n_selected // 100)))
         default_ref = datastore.features.hvgs(
             selection,
             show_plot=False,
@@ -2166,7 +2170,7 @@ class TestDataStore:
         )
         default_parameters = datastore.artifacts.inspect(default_ref).parameters
         assert default_parameters["max_cells"] == expected_max
-        assert default_parameters["min_cells"] == 20
+        assert default_parameters["min_cells"] == expected_min
         assert default_parameters["top_n"] == 10
         assert default_parameters["bin_strategy"] == "adaptive"
 

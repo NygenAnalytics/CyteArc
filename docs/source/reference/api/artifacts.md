@@ -87,7 +87,7 @@ ATAC summaries persist `prevalence` and `document_frequency`.
 | manual selection | `all_features` | supplied values fingerprint |
 | RNA or ATAC summary | `cell_selection` | normalizer settings |
 | detected features | `feature_summary` | `min_cells` |
-| highly variable genes | `feature_summary` | resolved variability settings |
+| highly variable genes | `feature_summary` and `feature_snapshot`; for the seurat_v3 and pearson_residuals flavors and with batches, `cell_selection`, `dataset_fingerprint`, `feature_snapshot`, and the `batch` labels | resolved variability settings, including the resolved `min_cells` and `max_cells` |
 | prevalent peaks | `feature_summary` | `top_n` |
 | mapping overlap | mapping reference and query `all_features` | exact inputs |
 

@@ -47,6 +47,18 @@ chain of artifacts, then branch or subcluster it safely. Docs: <https://docs.nyg
   and custom normalizers. Recorded flags are the resolved ones.
 - Count passes: a new cell selection costs one pass for the feature summary (`features.hvgs`,
   `features.detected`) and one per `features.normalize`; later stages read local artifacts.
+  `flavor="seurat_v3"` and `flavor="pearson_residuals"`, and any `batch=` selection, read the
+  counts twice instead and need no feature summary.
+- `features.hvgs` flavors: `"cytearc"` (default) divides the variance of normalized values by a
+  lower-quartile mean-variance trend; `"seurat_v3"` is scanpy's/Seurat's raw-count VST (LOESS
+  span 0.3); `"pearson_residuals"` scores analytic Pearson residuals (`theta=100`, clip `sqrt(n)`).
+  The two count flavors ignore `normMethod` and have no detection bounds unless you pass them.
+  `batch=` (a cell column or label artifact) scores every batch on its own and keeps the genes
+  highly variable in the most batches, ties broken by median rank (Seurat's order).
+- Detection bounds of the cytearc flavor: `min_cells` defaults to 1% of the selected cells
+  (3 to 20) and `max_cells` excludes genes detected in more than 99.5% of them; artifacts record
+  the resolved integers. `min_mean`/`max_mean` are log2 means over the cells where a gene is
+  detected and `min_var`/`max_var` log2 corrected variances; all four filter before `top_n`.
 
 ## Recipes
 
@@ -130,6 +142,31 @@ print(int(shared.sum()), "of the 1000 baseline HVGs kept")
 
 `blacklist=""` disables the name filter; `max_cells=np.inf` disables the ubiquitous-gene filter.
 The blacklist affects HVG selection only; marker search still tests every gene.
+
+### Other flavors and batch-aware selection
+
+```python
+seurat = ds.features.hvgs(cells, flavor="seurat_v3", top_n=2000, show_plot=False)
+residual = ds.features.hvgs(cells, flavor="pearson_residuals", top_n=2000, show_plot=False)
+# "sample_id" is your batch column; a label artifact such as an HTO identity also works.
+by_batch = ds.features.hvgs(cells, flavor="seurat_v3", batch="sample_id", top_n=2000,
+                            show_plot=False)
+group = ds.artifacts.load(by_batch)  # also "batch_count" and "median_batch_rank" per gene
+print(np.bincount(np.asarray(group["batch_count"][:], dtype=int)))  # genes HV in 0, 1, ... batches
+for ref in (seurat, residual, by_batch):
+    other = np.asarray(ds.artifacts.load(ref)["values"][:], dtype=bool)
+    print(int((other & selected).sum()), "shared with the default HVGs")
+
+# Pearson residual normalization of the residual HVGs, PCA without rescaling.
+ds.RNA.normMethod = cytearc.assay.norm_pearson_residuals
+pca_residual = ds.reduction.pca(ds.features.normalize(cells, residual), dims=30,
+                                feat_scaling=False)
+ds.RNA.normMethod = cytearc.assay.norm_lib_size  # markers and scores on normalized values
+```
+
+Every batch needs labels for all selected cells and at least two cells; tiny batches raise
+`ValueError` naming them. The count flavors' artifacts store `mean_nonzero` and `detected` for the
+plot instead of a `feature_summary` input, so read those arrays for a headless plot of them.
 
 ### Choose PCA dimensions
 
@@ -256,7 +293,9 @@ minimum seed ARI was 0.78. The parent had no FOXP3 group.
 | --- | --- | --- |
 | `features.hvgs(top_n=)` / `hvg_count` | `1000` | Weak or rare populations (raise); noisy programs dominate (lower). |
 | `features.hvgs(blacklist=)` | `DEFAULT_HVG_BLACKLIST` | A family dominates the HVGs or is the question; what to add: `gene-blacklists.md`. |
-| `features.hvgs(min_cells=, max_cells=)` | `20`, `None` (= selected cells - 20) | Tiny subsets; `max_cells=np.inf` keeps ubiquitous genes. |
+| `features.hvgs(min_cells=, max_cells=)` | `None`, `None`: 1% of the selected cells (3 to 20) and detection in at most 99.5% of them; none for the count flavors | Outlier-driven genes (raise `min_cells`); `max_cells=np.inf` keeps ubiquitous genes. |
+| `features.hvgs(flavor=)` | `"cytearc"` | Parity with scanpy/Seurat (`"seurat_v3"`), or a residual workflow (`"pearson_residuals"`). |
+| `features.hvgs(batch=)` | `None` | Samples or donors drive the HVGs; pass the sample column. |
 | `reduction.pca(dims=)` / `pca_dims` | `21` | After a variance and stability check; `0` in the pipeline means no PCA (graph on normalized values; pass `doublets=False`; memory and time scale with the HVG count). |
 | `reduction.pca(pca_cell_selection=)` | `None` | Fit on a subset (for example one batch) and project all cells. |
 | `graph.neighbors(k=)` / `neighbors_k` | `11` (clamped to cells - 1) | Larger data or smoother graphs (15 to 30); smaller to resolve rare groups. |

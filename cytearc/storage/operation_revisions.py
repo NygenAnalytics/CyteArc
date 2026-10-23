@@ -21,6 +21,7 @@ See ``docs/source/developers/operation_revisions.md`` for when a change needs
 a revision and how to add one.
 """
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -137,6 +138,44 @@ _NORMALIZER_CODE = OperationRevision(
     applies=_records_normalizer_outside_cytearc,
 )
 
+
+def _finite_number(value: object) -> bool:
+    """Return whether a recorded value is a finite number, not a special float."""
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+# The default HVG blacklist before 1.3.0. Its ``^CCN`` also removed CCN1 to
+# CCN6, and its ``^HIST`` missed the current histone symbols.
+_HVG_BLACKLIST_BEFORE_1_3 = (
+    "^MT-|^RPS|^RPL|^MRPS|^MRPL|^CCN|^HLA-|^H2-|^HIST|"
+    "^XIST$|^DDX3Y$|^USP9Y$|^EIF1AY$|^KDM5D$|^SRY$|^ZFY$|^UTY$|^TMSB4Y$|^NLGN4Y$"
+)
+
+
+def _hvg_selection_1_3(
+    kind: str, parameters: Mapping[str, Any], inputs: Mapping[str, Any]
+) -> bool:
+    """Select HVG selections that the candidate filters and defaults of 1.3.0 change.
+
+    A finite ``min_var`` or ``max_var`` now filters candidates before
+    ``top_n``. Every selection with the earlier default detection bounds
+    records ``min_cells`` 20; those bounds did not scale with the selected
+    cells, and the ``max_cells`` they recorded cannot be told from a value
+    passed explicitly. Selections with the earlier default blacklist excluded
+    CCN1 to CCN6 and kept the current histone symbols.
+    """
+    variance_bound = _finite_number(parameters.get("min_var")) or _finite_number(
+        parameters.get("max_var")
+    )
+    earlier_bounds = parameters.get("min_cells") == 20
+    earlier_blacklist = parameters.get("blacklist") == _HVG_BLACKLIST_BEFORE_1_3
+    return variance_bound or earlier_bounds or earlier_blacklist
+
+
 # Released revisions by operation. An operation that is not listed has no
 # revisions, so every artifact of it is revision 1. Append a revision to the
 # tuple of the operation it changes, adding the operation if needed; never
@@ -189,6 +228,19 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
     "run_statistical_testing": (_NORMALIZER_CODE,),
     "summarize_atac_features": (_NORMALIZER_CODE,),
     "summarize_rna_features": (_NORMALIZER_CODE,),
+    "select_hvgs": (
+        OperationRevision(
+            revision=2,
+            release="1.3.0",
+            change=(
+                "min_var and max_var filter HVG candidates before top_n, and the "
+                "default min_cells, max_cells, and blacklist changed; affects "
+                "selections with a finite min_var or max_var, min_cells 20, or "
+                "the earlier default blacklist"
+            ),
+            applies=_hvg_selection_1_3,
+        ),
+    ),
 }
 
 

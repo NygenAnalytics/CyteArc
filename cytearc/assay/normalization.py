@@ -477,6 +477,113 @@ norm_tf_idf.artifact_identity = (  # type: ignore[attr-defined]
 )
 
 
+def _pearson_residual_block(
+    counts: np.ndarray,
+    totals: np.ndarray,
+    *,
+    fractions: np.ndarray,
+    theta: float,
+    clip: float,
+) -> NDArray[np.float64]:
+    """Return the clipped Pearson residuals of one block of cells in float64."""
+    expected = np.asarray(totals, dtype=np.float64).reshape(-1, 1) * fractions
+    residuals: NDArray[np.float64] = np.subtract(counts, expected, dtype=np.float64)
+    positive = expected > 0
+    residuals[positive] /= np.sqrt(
+        expected[positive] + expected[positive] * expected[positive] / theta
+    )
+    # An expected count of 0, of a cell or a feature without counts, gives 0.
+    residuals[~positive] = 0.0
+    np.clip(residuals, -clip, clip, out=residuals)
+    return residuals
+
+
+class PearsonResidualNormalizer:
+    """Analytic Pearson residuals of RNA counts, a normalizer for ``normMethod``.
+
+    The residuals are those of Lause, Berens and Kobak (2021), Genome Biology
+    22:258, which scanpy's ``normalize_pearson_residuals`` computes. The
+    expected count of a feature in a cell is ``mu = n_c * p_g``: the cell's
+    total, which ``normed`` hands the normalizer in ``assay.scalar``, times
+    the feature's share of the counts of the normalized cells, its sum over
+    them divided by the sum of their totals. The residual
+    ``(x - mu) / sqrt(mu + mu**2 / theta)`` is clipped to ``[-clip, clip]``,
+    ``sqrt(n)`` over ``n`` normalized cells by default, and is 0 where
+    ``mu`` is 0. By default the totals are over every feature, so the
+    residuals of selected features are those of the full matrix;
+    ``renormalize_subset=True`` takes the totals over the selected features,
+    as scanpy's ``recipe_pearson_residuals`` does after subsetting to highly
+    variable genes. Residuals are already standardized, so they are never
+    log transformed, and PCA should not rescale them
+    (``reduction.pca(normalized, feat_scaling=False)``).
+
+    Use ``cytearc.assay.norm_pearson_residuals`` for ``theta=100`` and the
+    default clip, or construct one with other values.
+
+    Args:
+        theta: The negative binomial overdispersion, greater than 0.
+        clip: The largest absolute residual, at least 0, or None for the
+            square root of the number of normalized cells.
+    """
+
+    def __init__(self, theta: float = 100.0, clip: float | None = None) -> None:
+        from ..utils.arguments import float_argument
+
+        self.theta = float_argument(theta, "theta")
+        if self.theta <= 0:
+            raise ValueError("theta must be greater than 0")
+        self.clip = None if clip is None else float_argument(clip, "clip")
+        if self.clip is not None and self.clip < 0:
+            raise ValueError("clip must be at least 0")
+        clip_identity = "sqrt-n" if self.clip is None else repr(self.clip)
+        self.artifact_identity = (
+            f"cytearc.assay.pearson_residuals:theta={self.theta!r}:clip={clip_identity}"
+        )
+
+    def __repr__(self) -> str:
+        return f"PearsonResidualNormalizer(theta={self.theta!r}, clip={self.clip!r})"
+
+    def __call__(self, assay: "Assay", counts: ChunkedArray) -> ChunkedArray:
+        totals = getattr(assay, "scalar", None)
+        if totals is None:
+            raise ValueError(
+                "Pearson residuals need each cell's total, which only an RNA "
+                "assay's normed provides"
+            )
+        cell_totals = np.asarray(totals, dtype=np.float64)
+        n_cells = len(counts)
+        if isinstance(counts, ChunkedArray):
+            feature_totals = np.asarray(
+                counts.sum(axis=0, dtype=np.float64).compute(
+                    nthreads=getattr(assay, "nthreads", None),
+                    msg=f"({getattr(assay, 'name', '')}) Summing features for "
+                    "Pearson residuals",
+                ),
+                dtype=np.float64,
+            )
+        else:
+            feature_totals = np.asarray(counts, dtype=np.float64).sum(axis=0)
+        grand_total = float(cell_totals.sum())
+        fractions = (
+            feature_totals / grand_total
+            if grand_total > 0
+            else np.zeros_like(feature_totals)
+        ).reshape(1, -1)
+        residuals = partial(
+            _pearson_residual_block,
+            fractions=fractions,
+            theta=self.theta,
+            clip=float(np.sqrt(n_cells)) if self.clip is None else self.clip,
+        )
+        if isinstance(counts, ChunkedArray):
+            return counts._binary(residuals, cell_totals.reshape(-1, 1), "left")
+        return cast(ChunkedArray, residuals(np.asarray(counts), cell_totals))
+
+
+norm_pearson_residuals = PearsonResidualNormalizer()
+"""Analytic Pearson residuals with ``theta=100``, clipped at ``sqrt(n)``."""
+
+
 _LOG_TRANSFORM = "log_transform"
 _RENORMALIZE_SUBSET = "renormalize_subset"
 

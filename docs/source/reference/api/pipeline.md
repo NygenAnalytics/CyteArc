@@ -120,9 +120,10 @@ artifacts each stage consumes. A setting has exactly the meaning of the same key
 in the table below, and omitting it uses that method's default.
 
 Settings are JSON values, so a run configuration can be saved and passed again; infinity and NaN are
-never settings. Some settings spell a derived default as `None`: `hvg` `max_cells`, which excludes
-genes detected in at least the number of selected cells minus 20; `batch_size` of every stage that
-takes it; `cell_cycle` `ctrl_size` and `log_transform`; `paris` `min_cluster_size`; and
+never settings. Some settings spell a derived default as `None`: `hvg` `min_cells`, 1% of the
+selected cells rounded up, from 3 to 20, for the default flavor; `hvg` `max_cells`, which for the
+default flavor excludes genes detected in more than 99.5% of the selected cells; `batch_size` of
+every stage that takes it; `cell_cycle` `ctrl_size` and `log_transform`; `paris` `min_cluster_size`; and
 `normalization` `log_transform` and `renormalize_subset`, whose defaults follow the assay's
 normalizer ({doc}`assays`). The run records `params` as given, and each artifact records the values
 its method resolved.
@@ -131,7 +132,7 @@ its method resolved.
 run = ds.pipeline.run(
     params={
         "filtering": {"method": "manual", "attrs": ["RNA_nCounts"], "lows": [500], "highs": [20000]},
-        "hvg": {"min_mean": 0.01, "max_mean": 5.0, "keep_bounds": True},
+        "hvg": {"flavor": "seurat_v3", "top_n": 2000},
         "pca": {"dims": 30},
         "neighbors": {"k": 15},
         "umap": {"n_epochs": 400, "min_dist": 1.0, "spread": 2.0, "parallel": True},
@@ -147,7 +148,7 @@ run = ds.pipeline.run(
 | --- | --- | --- |
 | `filtering` | the `filtering` option | the filtering mapping above, or a bool |
 | `cell_cycle` | cell-cycle scoring | `s_genes`, `g2m_genes`, `ctrl_size`, `log_transform`, `n_bins`, `rand_seed` |
-| `hvg` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.hvgs` | `top_n`, `min_cells`, `max_cells`, `min_mean`, `max_mean`, `min_var`, `max_var`, `n_bins`, `lowess_frac`, `blacklist`, `keep_bounds`, `bin_strategy` |
+| `hvg` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.hvgs` | `top_n`, `flavor`, `batch` (a cell metadata column), `min_cells`, `max_cells`, `min_mean`, `max_mean`, `min_var`, `max_var` (the last four are log2 values), `n_bins`, `lowess_frac`, `blacklist`, `keep_bounds`, `bin_strategy`, `span`, `theta`, `clip` |
 | `normalization` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.normalize` | `log_transform`, `renormalize_subset` |
 | `pca` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.pca` | `dims`, `feat_scaling`, `batch_size` |
 | `harmony` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.harmony` | `batch_columns` (required), `harmony_params` (the keyword options of {py:func}`~cytearc.embeddings.fit_harmony`), `batch_size` |
@@ -219,10 +220,13 @@ or pass `doublets=False`.
 
 Unknown sections or settings, settings without a JSON value such as infinity, and `True` for a stage
 that always runs are rejected before a run record is created; `hvg` settings also get the checks of
-`features.hvgs` then. `min_cells` must be an integer of at least 0, `top_n` and `n_bins` integers of
-at least 1, `lowess_frac` a finite number from 0 to 1 for either `bin_strategy`, `keep_bounds` a
-boolean, and `bin_strategy` `"adaptive"` or `"fixed"`; an omitted setting is checked as its
-`features.hvgs` default.
+`features.hvgs` then. `min_cells` must be None or an integer of at least 0, `top_n` and `n_bins`
+integers of at least 1, `lowess_frac` a finite number from 0 to 1 for either `bin_strategy`,
+`keep_bounds` a boolean, `bin_strategy` `"adaptive"` or `"fixed"`, `flavor` `"cytearc"`,
+`"seurat_v3"`, or `"pearson_residuals"`, `span` greater than 0 and at most 1, `theta` positive, and
+`clip` None or at least 0; the options of one flavor keep their defaults under another, and
+`batch` must name a cell metadata column. An omitted setting is checked as its `features.hvgs`
+default.
 `tsne` settings get the checks of `embeddings.tsne` then too, because the stage runs after most
 others: `tsne_dims`, `max_iter`, and `alpha` must be integers of at least 1, `early_iter` an integer
 of at least 0, `lambda_scale` and `box_h` finite positive numbers, and `symmetric_graph` and

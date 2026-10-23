@@ -234,7 +234,7 @@ case (`Cd3e`, `Ptprc`, `Mki67`), and panel lookups are exact, so convert the pan
 | Cycling (a state) | MKI67, TOP2A | label as a state, not a type |
 | Immune, macrophage | PTPRC; C1QA, CD68 (macrophage) | |
 | Epithelium, gut | EPCAM, KRT8, KRT18; LGR5, OLFM4 (stem) | goblet MUC2; colonocyte CA1 |
-| Fibroblast | PDGFRA, COL1A1, DCN | subtypes vary by tissue, e.g. APOD or CCN2 (CTGF) high; `^CCN` is in the default HVG blacklist, markers still test it |
+| Fibroblast | PDGFRA, COL1A1, DCN | subtypes vary by tissue, e.g. APOD or CCN2 (CTGF) high; HVG selection keeps CCN1-6 since 1.3.0 (`^CCN[A-Z]`), and markers test every gene |
 | Endothelium | PECAM1, VWF, CDH5 | |
 | Smooth muscle, pericyte | ACTA2, MYH11, DES; RGS5 (pericyte) | ACTA2 also on myofibroblasts |
 | Keratinocyte, melanocyte | KRT5, KRT14 (basal), KRT10 (suprabasal); PMEL, MLANA (melanocyte) | |

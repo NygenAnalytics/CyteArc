@@ -118,6 +118,18 @@ use but does not install.
   `duplicate_feature_ids="make_unique"`, which follows `make_index_unique`, the function behind
   `var_names_make_unique`).
 
+### netlib loess (dloess)
+
+- Source: <https://www.netlib.org/a/dloess>, the local regression code that R's `loess` and
+  scikit-misc's `loess` wrap
+- Copyright (c) 1989, 1992 by AT&T; William S. Cleveland, Eric Grosse, and Ming-Jen Shyu
+- License: the netlib dloess permission notice, reproduced below
+- Used in: `cytearc/features/variability.py` (`fit_loess(surface="interpolate")`, which places the
+  vertices of its k-d tree as dloess does: the bounding interval widened by 0.5% of the data range,
+  cells of at most `floor(0.2 * span * n)` points, and median splits moved off tied values). The
+  rules were written in Python from that description, not translated from the Fortran, and are
+  checked against the fitted values of scikit-misc 0.5.3.
+
 ## Fonts
 
 ### Inter
@@ -135,9 +147,11 @@ use but does not install.
   `tests/test_genomic_motifs.py`. Rauluseviciute et al. (2024), Nucleic Acids Research,
   doi:10.1093/nar/gkad1059.
 - **10x Genomics**, CC BY 4.0: `tests/seurat_wnn_5_5_1_golden.json` holds Seurat 5.5.1 outputs on
-  principal components of 300 cells of the `tenx_8K_pbmc_citeseq` dataset, and the reference
-  images in `tests/visual/showcase/` are rendered from the 1k PBMC CITE-seq test fixture. Both
-  datasets are credited below.
+  principal components of 300 cells of the `tenx_8K_pbmc_citeseq` dataset,
+  `tests/scanpy_hvg_1_12_4_golden.json` holds scanpy 1.12.4 highly variable gene selections and
+  scores computed from the RNA counts of the 1k PBMC CITE-seq test fixture by
+  `scripts/export_scanpy_hvg_golden.py`, and the reference images in `tests/visual/showcase/` are
+  rendered from the same fixture. Both datasets are credited below.
 - **GEO GSE245108**: hashtag counts in `tests/seurat_hto_5_5_1_golden.json`, from Zhang et al.
   (2024), Nature Immunology, doi:10.1038/s41590-024-01782-4.
 - **HGNC** (<https://www.genenames.org>), CC0 1.0: the previous symbols of the default cell-cycle
@@ -609,6 +623,22 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### netlib loess (dloess)
+
+```text
+The authors of this software are Cleveland, Grosse, and Shyu.
+Copyright (c) 1989, 1992 by AT&T.
+Permission to use, copy, modify, and distribute this software for any
+purpose without fee is hereby granted, provided that this entire notice
+is included in all copies of any software which is or includes a copy
+or modification of this software and in all copies of the supporting
+documentation for such software.
+THIS SOFTWARE IS BEING PROVIDED "AS IS", WITHOUT ANY EXPRESS OR IMPLIED
+WARRANTY.  IN PARTICULAR, NEITHER THE AUTHORS NOR AT&T MAKE ANY
+REPRESENTATION OR WARRANTY OF ANY KIND CONCERNING THE MERCHANTABILITY
+OF THIS SOFTWARE OR ITS FITNESS FOR ANY PARTICULAR PURPOSE.
 ```
 
 ### Inter

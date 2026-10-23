@@ -136,8 +136,10 @@ _SIGNATURE_DIGESTS = {
     # metric_policies: dict[str, dict[str, str]] | None with the default None.
     # to_anndata gained the keyword-only cell_selection, obsm, obs, graph, and
     # dtype, each None by default, reduction.import_coordinates is new, and
-    # min_features_per_cell: int | None = None.
-    DataStore: "ec33c086bc6b81d8e318f39e09e7bbdc1bb28e226733e86b11aeb3ff63bb6b5d",
+    # min_features_per_cell: int | None = None. select_hvgs gained flavor,
+    # batch, span, theta, and clip, and its min_cells defaults to None, the
+    # flavor's own default.
+    DataStore: "0836d1d9cd40c5df4a205048fc0ff4c6f59b22bc790187ed77fdd813b9ceef47",
     # artifacts.prune_incomplete(*, dry_run: bool = True) -> list[str] was added.
     ArtifactAccessor: "6d4befabbbc91b00684038f44e0b3063905c84437587be0994c26370efa2570c",
 }

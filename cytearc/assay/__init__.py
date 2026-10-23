@@ -18,6 +18,7 @@ from .classification import lookup_persisted_assay_type as lookup_persisted_assa
 from .classification import preset_assay_types as preset_assay_types
 from .classification import resolve_persisted_assay_type as resolve_persisted_assay_type
 from .normalization import NormMethod as NormMethod
+from .normalization import PearsonResidualNormalizer as PearsonResidualNormalizer
 from .normalization import (
     lib_size_feature_stream_eligible as lib_size_feature_stream_eligible,
 )
@@ -25,6 +26,7 @@ from .normalization import norm_clr as norm_clr
 from .normalization import norm_dummy as norm_dummy
 from .normalization import norm_lib_size as norm_lib_size
 from .normalization import norm_lib_size_log as norm_lib_size_log
+from .normalization import norm_pearson_residuals as norm_pearson_residuals
 from .normalization import norm_tf_idf as norm_tf_idf
 from .persistence import _read_block as _read_block
 from .rna import RNAassay as RNAassay
