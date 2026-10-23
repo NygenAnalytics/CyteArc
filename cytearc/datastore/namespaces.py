@@ -3,6 +3,7 @@ from functools import wraps
 from types import FunctionType
 from typing import Any, Concatenate, cast
 
+from ._operations.cell_calling import _CellCallingOperationsMixin
 from ._operations.clustering import _ClusteringOperationsMixin
 from ._operations.embeddings import _EmbeddingOperationsMixin
 from ._operations.features import _FeatureOperationsMixin
@@ -171,6 +172,9 @@ class QcAccessor(_Accessor):
     feature_percentage = _bind(_QualityControlOperationsMixin._qc_feature_percentage)
     doublets = _bind(_QualityControlOperationsMixin._qc_doublets)
     hto_demultiplexing = _bind(_QualityControlOperationsMixin._qc_hto_demultiplexing)
+    call_cells = _bind(_CellCallingOperationsMixin._qc_call_cells)
+    load_cell_calls = _bind(_CellCallingOperationsMixin._qc_load_cell_calls)
+    barcode_ranks = _bind(_CellCallingOperationsMixin._qc_barcode_ranks)
 
 
 class ReductionAccessor(_Accessor):

@@ -507,6 +507,26 @@ def test_domain_packages_export_canonical_objects():
         ): "cytearc.quality_control.cell_cycle",
         (
             "cytearc.quality_control",
+            "BarcodeRanks",
+        ): "cytearc.quality_control.cell_calling",
+        (
+            "cytearc.quality_control",
+            "EmptyDropsResult",
+        ): "cytearc.quality_control.cell_calling",
+        (
+            "cytearc.quality_control",
+            "barcode_ranks",
+        ): "cytearc.quality_control.cell_calling",
+        (
+            "cytearc.quality_control",
+            "empty_drops",
+        ): "cytearc.quality_control.cell_calling",
+        (
+            "cytearc.quality_control",
+            "good_turing_proportions",
+        ): "cytearc.quality_control.cell_calling",
+        (
+            "cytearc.quality_control",
             "simulate_doublet_pairs",
         ): "cytearc.quality_control.doublets",
         (

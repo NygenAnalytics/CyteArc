@@ -213,8 +213,9 @@ def test_skipped_open_filter_warns_with_its_likely_causes(tmp_path):
         "not filter it again. If this is a raw "
         "(unfiltered) droplet matrix, most of its barcodes are empty droplets, "
         "and bounds computed over them keep the empty droplets and remove the "
-        "real cells: call cells first, or import the filtered matrix (for "
-        "example Cell Ranger's filtered_feature_bc_matrix), before QC filtering."
+        "real cells: call cells first with qc.call_cells, or import the filtered "
+        "matrix (for example Cell Ranger's filtered_feature_bc_matrix), before QC "
+        "filtering."
     ]
     # The warning points at the code that opened the store.
     assert caught[0].filename == __file__

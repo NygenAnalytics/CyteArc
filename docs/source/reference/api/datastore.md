@@ -68,10 +68,34 @@ writable open with `min_features_per_cell=k` removes cells with at most `k` feat
 `qc.auto_filter` chooses each metric's MAD policy from what CyteArc wrote and warns when it
 falls back to a column's name; pass `metric_policies` for imported columns such as scanpy's
 `total_counts` or `pct_counts_mt`.
+`qc.call_cells` calls cells in an unfiltered droplet matrix with EmptyDrops
+([Cell calling](../tutorials/cell-calling)). Import every barcode with counts, such as
+`CrH5Reader(path, is_filtered=False, filtering_cutoff=0)`: the barcodes with at most `lower`
+counts form the ambient pool that the other barcodes are tested against. It reads every barcode
+that the assay measured, never the live `I` column, so a writable open's `min_features_per_cell`
+floor cannot remove the ambient pool; open raw stores with `min_features_per_cell=-1` to keep `I`
+complete too. It saves the statistics of every barcode as an assay-scoped `cell_calling`
+artifact (operation `run_cell_calling`; arrays `total`, `log_probability`, `p_value`, `fdr`,
+`limited`, and the feature-length `ambient` profile; attributes `retain`, `knee`, `inflection`,
+`alpha`, and `n_ambient`) and returns a `cell_selection` (operation `call_cells`, parameter `fdr`)
+whose inputs are that artifact and the tested barcodes (a `select_all_cells` selection, narrowed by
+`select_measured_cells` when the assay did not measure every barcode). Another `fdr` reuses the
+statistics. `qc.load_cell_calls` reads them, and `qc.barcode_ranks` gives the barcode-rank curve
+from the prepared `<assay>_nCounts` totals without reading counts.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.QcAccessor
-    :members: filter, auto_filter, feature_percentage, doublets, hto_demultiplexing
+    :members: filter, auto_filter, feature_percentage, doublets, hto_demultiplexing, call_cells, load_cell_calls, barcode_ranks
+```
+
+The same computation runs on an in-memory matrix:
+
+```{eval-rst}
+.. autofunction:: cytearc.quality_control.empty_drops
+
+.. autofunction:: cytearc.quality_control.barcode_ranks
+
+.. autofunction:: cytearc.quality_control.good_turing_proportions
 ```
 
 ### `ds.features`
@@ -620,6 +644,12 @@ The recommended workflow is in [Read RNA and protein together with CITE-seq](../
     :members:
 
 .. autoclass:: cytearc.clustering.ParisClusterDiagnostic
+    :members:
+
+.. autoclass:: cytearc.quality_control.cell_calling.EmptyDropsResult
+    :members:
+
+.. autoclass:: cytearc.quality_control.cell_calling.BarcodeRanks
     :members:
 ```
 

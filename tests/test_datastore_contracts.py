@@ -178,9 +178,13 @@ _NAMESPACE_METHODS = [
 
 
 def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
-    # reduction.import_coordinates and artifacts.prune_incomplete joined the
-    # moved methods and find.
-    assert len(_NAMESPACE_METHODS) == 76
+    # reduction.import_coordinates, artifacts.prune_incomplete, and
+    # qc.call_cells, qc.load_cell_calls, and qc.barcode_ranks joined the moved
+    # methods and find.
+    assert len(_NAMESPACE_METHODS) == 79
+    assert {"call_cells", "load_cell_calls", "barcode_ranks"} <= {
+        name for namespace, _, name, _ in _NAMESPACE_METHODS if namespace == "qc"
+    }
 
 
 @pytest.mark.parametrize(
@@ -383,6 +387,7 @@ def test_mapping_datastore_private_mixin_order_is_stable():
 
 
 def test_datastore_private_mixin_order_is_stable():
+    from cytearc.datastore._operations.cell_calling import _CellCallingOperationsMixin
     from cytearc.datastore._operations.features import _FeatureOperationsMixin
     from cytearc.datastore._operations.integration_metrics import (
         _IntegrationMetricsOperationsMixin,
@@ -397,6 +402,7 @@ def test_datastore_private_mixin_order_is_stable():
     )
 
     assert DataStore.__bases__ == (
+        _CellCallingOperationsMixin,
         _QualityControlOperationsMixin,
         _FeatureOperationsMixin,
         _TrajectoryFeatureOperationsMixin,
@@ -405,8 +411,9 @@ def test_datastore_private_mixin_order_is_stable():
         _RegulonOperationsMixin,
         MappingDatastore,
     )
-    assert DataStore.mro()[:8] == [
+    assert DataStore.mro()[:9] == [
         DataStore,
+        _CellCallingOperationsMixin,
         _QualityControlOperationsMixin,
         _FeatureOperationsMixin,
         _TrajectoryFeatureOperationsMixin,
@@ -436,6 +443,7 @@ def test_datastore_facades_only_own_composition_methods():
 
 
 def test_datastore_operation_mixins_have_unique_method_owners():
+    from cytearc.datastore._operations.cell_calling import _CellCallingOperationsMixin
     from cytearc.datastore._operations.clustering import _ClusteringOperationsMixin
     from cytearc.datastore._operations.embeddings import _EmbeddingOperationsMixin
     from cytearc.datastore._operations.features import _FeatureOperationsMixin
@@ -470,6 +478,7 @@ def test_datastore_operation_mixins_have_unique_method_owners():
         _IntegrationMetricsOperationsMixin,
         _PresentationOperationsMixin,
         _RegulonOperationsMixin,
+        _CellCallingOperationsMixin,
     )
     owners: dict[str, list[str]] = {}
     for mixin in mixins:

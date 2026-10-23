@@ -121,6 +121,10 @@ They must not import those packages at module load time.
   It also owns presentation-independent feature resolution and normalized value fetching used by datastore workflows and plots.
   `features/statistical.py` owns the statistical design of `compare.test`, and `features/aggregation.py` the bulk profiles of `compare.compute_bulk`; the datastore methods keep grouping resolution, value reads, artifact planning, and persistence.
 - `quality_control/` owns filtering, HTO demultiplexing, doublet processing, cell-cycle assignment, and the default cell-cycle gene references.
+  `cell_calling.py` owns EmptyDrops cell calling of unfiltered droplet matrices: the barcode-rank
+  knee, Good-Turing ambient profiles, the Dirichlet-multinomial precision estimate, and seeded
+  Monte Carlo p-values. Its functions read count blocks that a caller streams, so the datastore
+  operation in `datastore._operations.cell_calling` owns the Zarr reads and the artifacts.
 - `mapping/` owns reference artifacts, feature alignment, confidence, Symphony-style correction, label transfer, and mapping results.
 - `regulons/` owns transcription-factor regulon inference: GRNBoost2-equivalent importance
   networks (`grn.py`), co-expression modules (`modules.py`), cisTarget ranking databases and
@@ -194,6 +198,7 @@ trajectory
 mapping
 mapping_reference
 quality_control
+cell_calling
 features
 integration_metrics
 presentation
@@ -1406,6 +1411,23 @@ CyteArc validates persisted data and public arguments against the following cont
   `parse_coordinate_ids`, so chromosome names may contain `:` and other id forms raise
   `ValueError` naming the id. `binary_search` raises `ValueError` for ranges that are not sorted by
   start, for which it returned wrong overlaps.
+- `qc.call_cells` calls cells in an unfiltered droplet matrix with EmptyDrops (Lun et al. 2019,
+  Genome Biology 20:63), implemented from the paper and its supplementary materials. It writes an
+  assay-scoped `cell_calling` artifact with operation `run_cell_calling` (parameters `lower`,
+  `retain`, `n_iter`, `alpha`, and `random_seed`, recorded as requested, so None stands for the
+  knee and the estimated precision; inputs `cell_selection` and `dataset_fingerprint`), whose
+  arrays hold `total`, `log_probability`, `p_value`, `fdr`, and `limited` for each barcode (NaN
+  and False at or below `lower`) and the feature-length `ambient` profile, and whose attributes
+  hold the resolved `retain`, `knee`,
+  `inflection`, `alpha` (None for the multinomial), and `n_ambient`. Reuse requires these
+  attributes and the ambient profile. `cell_calling` is a cell-aligned kind whose canonical array
+  is `fdr`. The called cells are a `cell_selection` with operation `call_cells`, parameter `fdr`,
+  and inputs `cell_calling` and `prior_cell_selection`; its default barcodes are a
+  `select_all_cells` selection of every row, narrowed by `select_measured_cells`. Random draws are
+  counter-based SplitMix64 streams keyed by the seed and the iteration, so p-values do not depend
+  on the thread count. `write_cell_data_artifact` gains `attributes`, stored before publication.
+  The warning of a writable open that keeps `I` because `min_features_per_cell` would remove at
+  least half of the active cells now points to `qc.call_cells` for unfiltered droplet matrices.
 
 Compatibility exists only where a current public facade or an explicit file-schema test says it
 does. There are no silent migrations, implicit compatibility branches, or forwarding shims for

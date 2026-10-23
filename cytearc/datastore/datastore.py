@@ -9,6 +9,7 @@ from ..storage.profiles import StorageProfile, ZarrLocation
 from ..storage.refs import ArtifactRef
 from ..storage.stores import create_matrix_source
 from ..storage.validation_scope import scope_public_methods
+from ._operations.cell_calling import _CellCallingOperationsMixin
 from ._operations.features import _FeatureOperationsMixin
 from ._operations.integration_metrics import _IntegrationMetricsOperationsMixin
 from ._operations.presentation import _PresentationOperationsMixin
@@ -186,6 +187,7 @@ def _check_forwarded_options(
 
 
 class DataStore(
+    _CellCallingOperationsMixin,
     _QualityControlOperationsMixin,
     _FeatureOperationsMixin,
     _TrajectoryFeatureOperationsMixin,
@@ -217,7 +219,9 @@ class DataStore(
                                records the value it applied in the cell table.
                                Later opens never filter ``I``: they log a value that
                                differs from the recorded one as not applied. A
-                               read-only open never filters.
+                               read-only open never filters. Open an unfiltered
+                               droplet matrix with -1 and call its cells with
+                               ``qc.call_cells``.
         mito_pattern: Feature-name pattern for the ``{assay}_percentMito`` column of each RNA assay.
                       The first writable open replaces any existing column with values computed from
                       this pattern, or ``^MT-`` when None. Later opens keep the stored values when

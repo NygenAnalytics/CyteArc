@@ -24,6 +24,7 @@ of normalization, log transformation, and then HVG selection.
 | Goal | Scanpy | CyteArc |
 |---|---|---|
 | Load counts | `sc.read_*` returns an `AnnData` | A reader and `*ToZarr` writer create the store; `DataStore` opens it |
+| Call cells in an unfiltered droplet matrix | No Scanpy function | `ds.qc.call_cells` implements EmptyDrops and returns the called cells as a cell-selection artifact ([](tutorials/cell_calling.ipynb)) |
 | Calculate QC metrics | `sc.pp.calculate_qc_metrics` | Opening a new `DataStore` calculates count and feature metrics, plus detected RNA mitochondrial and ribosomal percentages |
 | Filter cells | `sc.pp.filter_cells` or an `obs` mask | `ds.qc.filter` or `ds.qc.auto_filter` returns a cell-selection artifact without deleting cells or changing `I`. Bounds are exclusive: `lows=[200]` removes a cell with exactly 200 genes, which `min_genes=200` keeps, so pass `keep_bounds=True` to match. For imported `total_counts` or `pct_counts_mt` columns, pass `metric_policies` to `qc.auto_filter` |
 | Select and normalize features | `sc.pp.normalize_total`, `sc.pp.log1p`, `sc.pp.highly_variable_genes` | `ds.features.hvgs`, then `ds.features.normalize`, using the same cell-selection ref |

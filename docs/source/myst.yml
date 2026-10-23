@@ -33,6 +33,8 @@ project:
       title: PBMC analysis
     - file: tutorials/quality_control.ipynb
       title: Quality control
+    - file: tutorials/cell_calling.ipynb
+      title: Cell calling
     - file: tutorials/feature_selection.ipynb
       title: Highly variable genes
     - file: tutorials/dimensionality_reduction.ipynb

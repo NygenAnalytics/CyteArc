@@ -310,7 +310,8 @@ raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datas
   cells with at most `k` default-assay features from `I`, persists it, and records `k` in
   `cellData`. When at least half of the active cells would go, as in a small ADT panel or a raw
   (unfiltered) droplet matrix, it keeps `I` and issues a `UserWarning` naming both causes; on a raw
-  matrix, call cells or import the filtered matrix before QC. `k` must be an integer of at least
+  matrix, call cells with `qc.call_cells` (`quality-control.md`) or import the filtered matrix
+  before QC. `k` must be an integer of at least
   `-1`. Later opens never filter: a different `k` is logged as not applied. Reopening does not
   restore cells; `ds.cells.reset_key("I")` does, and filter later with `qc.filter`.
 - Stores just written by a writer or `SubsetZarr` raise `Assay 'RNA' is not prepared yet. Open the

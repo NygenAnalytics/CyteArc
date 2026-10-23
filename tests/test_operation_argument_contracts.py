@@ -209,6 +209,20 @@ _CONTRACTS = (
         model_only=_classified("algorithm_policy", "method", "values"),
     ),
     OperationContract(
+        QcAccessor.call_cells,
+        metadata_arguments.CellCallingArguments,
+        signature_only={
+            **_classified("routing", "from_assay"),
+            # The call_cells selection keeps the barcodes whose adjusted
+            # p-value of the saved statistics is at most fdr.
+            **_classified("parent_stage", "fdr"),
+        },
+        model_only={
+            **_classified("resolved_input", "dataset_fingerprint"),
+            **_classified("execution", "nthreads"),
+        },
+    ),
+    OperationContract(
         ScoresAccessor.cell_cycle,
         metadata_arguments.CellCycleArguments,
         constructor=_QualityControlOperationsMixin._run_cell_cycle_scoring_artifact,
