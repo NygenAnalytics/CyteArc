@@ -2,10 +2,13 @@ import hashlib
 import inspect
 import json
 import math
+import os
 import secrets
 import struct
+import types
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -320,7 +323,115 @@ def fingerprint_strings(values: np.ndarray) -> str:
     )
 
 
+# The directory of the ``cytearc`` package, with a trailing separator so a
+# sibling directory whose name starts with ``cytearc`` lies outside it.
+_PACKAGE_DIRECTORY = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ""
+)
+
+
+def _code_constant(value: Any) -> Any:
+    """Return a canonical form of one constant of compiled code."""
+    if isinstance(value, types.CodeType):
+        return _code_form(value)
+    if value is None or value is Ellipsis:
+        return [repr(value)]
+    if isinstance(value, bool):
+        return ["bool", value]
+    if isinstance(value, int):
+        return ["int", str(value)]
+    if isinstance(value, float):
+        return ["float", struct.pack(">d", value).hex()]
+    if isinstance(value, complex):
+        return ["complex", _code_constant(value.real), _code_constant(value.imag)]
+    if isinstance(value, str):
+        return ["str", value]
+    if isinstance(value, bytes):
+        return ["bytes", value.hex()]
+    if isinstance(value, tuple):
+        return ["tuple", [_code_constant(item) for item in value]]
+    if isinstance(value, frozenset):
+        items = [_code_constant(item) for item in value]
+        return ["frozenset", sorted(items, key=lambda item: json.dumps(item))]
+    if isinstance(value, slice):
+        return [
+            "slice",
+            *(_code_constant(part) for part in (value.start, value.stop, value.step)),
+        ]
+    # Code holds only literal constants, whose representation is their value.
+    return [type(value).__qualname__, repr(value)]
+
+
+def _code_form(code: types.CodeType) -> list[Any]:
+    """Return a canonical form of compiled code, its nested code included.
+
+    Line numbers and the file name are left out, so moving a function within
+    its file keeps its form.
+    """
+    return [
+        "code",
+        code.co_code.hex(),
+        [_code_constant(constant) for constant in code.co_consts],
+        list(code.co_names),
+        list(code.co_varnames),
+        list(code.co_freevars),
+        list(code.co_cellvars),
+        [
+            code.co_argcount,
+            code.co_posonlyargcount,
+            code.co_kwonlyargcount,
+            code.co_flags,
+        ],
+    ]
+
+
+def _function_fingerprint(function: types.FunctionType) -> str:
+    """Return a digest of a function's code, constants, names, and defaults.
+
+    Raises:
+        ValueError: If a default value is of a type that provenance cannot
+            record.
+    """
+    try:
+        defaults = canonical_bytes(
+            serialize_artifact_value(
+                {
+                    "defaults": list(function.__defaults__ or ()),
+                    "keyword_defaults": dict(function.__kwdefaults__ or {}),
+                }
+            )
+        )
+    except TypeError as error:
+        raise ValueError(
+            f"Function {function.__qualname__!r} has a default value that CyteArc "
+            f"cannot fingerprint ({error}); give it an artifact_identity that "
+            "names its behavior"
+        ) from None
+    digest = hashlib.blake2b(digest_size=16, person=b"cytearc-callable")
+    digest.update(json.dumps(_code_form(function.__code__)).encode("utf-8"))
+    digest.update(defaults)
+    return digest.hexdigest()
+
+
 def callable_identity(value: Any) -> dict[str, str]:
+    """Return how provenance identifies a callable, such as a custom normalizer.
+
+    A callable with an ``artifact_identity`` attribute is identified by it. A
+    module-level function or builtin is identified by its module and
+    qualified name. A function defined outside CyteArc is also identified by
+    ``code``, a digest of its bytecode, constants, names, and default values,
+    so a result is not reused after the function is edited. The digest does
+    not cover the values of the globals that the function reads or the
+    functions that it calls: a function whose behavior depends on them needs
+    an ``artifact_identity`` that changes with them. CyteArc's own functions
+    are identified by name alone, because operation revisions record what
+    changes in them.
+
+    Raises:
+        ValueError: If the callable is a lambda, a nested function or closure,
+            a method, or a callable object without an ``artifact_identity``,
+            or a function with a default value that cannot be fingerprinted.
+    """
     explicit = getattr(value, "artifact_identity", None)
     if explicit is not None:
         return {"identity": str(explicit)}
@@ -331,11 +442,21 @@ def callable_identity(value: Any) -> dict[str, str]:
         or "<lambda>" in qualname
         or bool(getattr(value, "__closure__", None))
     ):
-        raise ValueError("Dynamic or stateful callables must define artifact_identity")
-    return {
+        raise ValueError(
+            "Dynamic or stateful callables must define artifact_identity: "
+            f"{qualname!r} is a lambda, a nested function, a closure, a method, "
+            "or a callable object, whose name and code do not determine what it "
+            "computes"
+        )
+    identity = {
         "module": str(getattr(value, "__module__", type(value).__module__)),
         "qualname": qualname,
     }
+    if inspect.isfunction(value) and not os.path.abspath(
+        value.__code__.co_filename
+    ).startswith(_PACKAGE_DIRECTORY):
+        identity["code"] = _function_fingerprint(value)
+    return identity
 
 
 def serialize_artifact_value(value: Any) -> Any:
@@ -694,6 +815,54 @@ def list_artifacts(
     return refs
 
 
+async def _member_names(group: zarr.Group) -> list[str]:
+    return [name async for name in group.store.list_dir(group.path)]
+
+
+def _child_groups(parent: zarr.Group, what: str) -> list[tuple[str, zarr.Group]]:
+    """Return the child groups of ``parent``, sorted by name, one per name.
+
+    ``groups()`` reads every child's metadata concurrently. When a child's
+    metadata cannot be read, such as a torn ``zarr.json``, each child is
+    opened on its own, and the children that cannot be read are skipped with
+    one warning, so one damaged artifact never hides the others.
+    """
+    try:
+        # Object-store listings can repeat a group, so keep one entry per name.
+        return sorted(dict(parent.groups()).items())
+    except (KeyError, TypeError, ValueError):
+        pass
+    from zarr.core.sync import sync
+
+    from .stores import metadata_workers, run_concurrently
+
+    names = sorted(set(sync(_member_names(parent))) - {"zarr.json"})
+
+    def open_child(name: str) -> zarr.Group | zarr.Array | Exception:
+        try:
+            return parent[name]
+        except (KeyError, TypeError, ValueError) as error:
+            return error
+
+    children = run_concurrently(
+        [partial(open_child, name) for name in names],
+        workers=metadata_workers(parent),
+    )
+    groups = []
+    skipped = []
+    for name, child in zip(names, children, strict=True):
+        if isinstance(child, Exception):
+            skipped.append(f"{name} ({type(child).__name__}: {child})")
+        elif isinstance(child, zarr.Group):
+            groups.append((name, child))
+    if skipped:
+        logger.warning(
+            f"Skipped {len(skipped)} unreadable {what} below {parent.path or '/'}: "
+            + "; ".join(skipped)
+        )
+    return groups
+
+
 def _artifact_groups(
     root: zarr.Group,
     *,
@@ -703,8 +872,11 @@ def _artifact_groups(
 ) -> list[tuple[ArtifactRef, zarr.Group]]:
     """Return every artifact group in a scope, sorted by kind and ID.
 
-    ``groups()`` reads every child's metadata concurrently, so callers inspect
-    artifact attributes without reopening each group.
+    Child metadata is read concurrently, so callers inspect artifact
+    attributes without reopening each group. A child group whose metadata
+    cannot be read, and a kind that this release does not know, such as one
+    written by a newer release, are skipped with a warning rather than hiding
+    the rest of the scope.
     """
     if scope not in {"assay", "datastore"}:
         raise ValueError(f"Invalid artifact scope: {scope!r}")
@@ -721,17 +893,25 @@ def _artifact_groups(
     try:
         base = group_at(root, base_path)
         kind_groups = (
-            sorted(dict(base.groups()).items())
+            _child_groups(base, "artifact kinds")
             if kind is None
             else [(kind, group_at(base, kind))]
         )
     except KeyError:
         return []
+    unknown = [name for name, _ in kind_groups if name not in ARTIFACT_KINDS]
+    if unknown:
+        logger.warning(
+            f"Skipped artifact kinds that this CyteArc release does not know "
+            f"below {base_path}: {', '.join(unknown)}"
+        )
     found = []
     for artifact_kind, kind_group in kind_groups:
-        _validate_artifact_kind(artifact_kind)
-        # Object-store listings can repeat a group, so keep one entry per ID.
-        for artifact_id, group in sorted(dict(kind_group.groups()).items()):
+        if artifact_kind in unknown:
+            continue
+        for artifact_id, group in _child_groups(
+            kind_group, f"{artifact_kind} artifacts"
+        ):
             try:
                 ref = ArtifactRef(
                     scope=scope,
@@ -749,6 +929,23 @@ def _without_revision(provenance: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in provenance.items() if key != "revision"}
 
 
+def _without_callable_code(value: Any) -> Any:
+    """Return ``value`` with the code digests of recorded callables left out.
+
+    It is the form in which releases before 1.3.0 recorded a function defined
+    outside CyteArc: by module and qualified name alone.
+    """
+    if isinstance(value, Mapping):
+        return {
+            key: _without_callable_code(item)
+            for key, item in value.items()
+            if key != "code" or "module" not in value or "qualname" not in value
+        }
+    if isinstance(value, list):
+        return [_without_callable_code(item) for item in value]
+    return value
+
+
 def reusable_artifact_groups(
     root: zarr.Group,
     *,
@@ -761,6 +958,9 @@ def reusable_artifact_groups(
     """Complete artifacts with exactly this provenance, newest first, with groups.
 
     Without one, the newest artifact that differs only in its revision is logged.
+    An artifact that records a function defined outside CyteArc by name alone,
+    as releases before 1.3.0 did, differs from a request only in its revision
+    when the request's code digests are left out, and is logged the same way.
     """
     if invalidate_cache:
         return []
@@ -771,8 +971,9 @@ def reusable_artifact_groups(
         revision=provenance.get("revision", 1),
     )
     revision = requested.pop("revision", 1)
-    requested_hash = provenance_hash(requested)
     requested_bytes = canonical_bytes(requested)
+    legacy = _without_callable_code(requested)
+    legacy_bytes = None if legacy == requested else canonical_bytes(legacy)
     reusable: list[tuple[int, ArtifactRef, zarr.Group]] = []
     superseded: list[tuple[int, ArtifactRef, ArtifactStatus]] = []
     for ref, group in _artifact_groups(root, scope=scope, assay=assay, kind=kind):
@@ -782,10 +983,10 @@ def reusable_artifact_groups(
             continue
         if not status.complete or status.provenance is None:
             continue
-        stored = _without_revision(status.provenance)
-        if provenance_hash(stored) != requested_hash:
-            continue
-        if canonical_bytes(stored) != requested_bytes:
+        stored = canonical_bytes(_without_revision(status.provenance))
+        if stored != requested_bytes:
+            if stored == legacy_bytes and status.revision != revision:
+                superseded.append((status.created_at_ns or 0, ref, status))
             continue
         if status.revision == revision:
             reusable.append((status.created_at_ns or 0, ref, group))

@@ -65,6 +65,26 @@ it returns. Saved results need a module-level function or a callable with an `ar
 attribute, which provenance records. Pass `log_transform=True` to take logarithms of the counts
 that `norm_dummy` keeps as they are.
 
+Provenance identifies a module-level function defined outside CyteArc, such as one defined in a
+notebook, by its module, its qualified name, and `code`, a digest of its bytecode, constants, names,
+and default values. Editing the function, one of its constants, or a default gives saved results a
+new identity, so they are computed again rather than reused; the same function moved elsewhere in
+its file or defined again with the same code keeps its identity. Bytecode differs between Python
+versions, so another Python version also computes such results again. The digest does not cover the
+values of the globals that the function reads or the functions that it calls: give a normalizer
+whose behavior depends on them an `artifact_identity` that changes with them. A lambda, a nested
+function or closure, a method, a `functools.partial`, a callable object, and a function with a
+default value that provenance cannot record, such as an arbitrary object, raise `ValueError` unless
+they define `artifact_identity`. CyteArc's own normalizers are identified by name; operation
+revisions record changes to them.
+
+Releases before 1.3.0 identified such a function by name alone, so its results did not record its
+code. Operation revision 2 of each operation that records a normalizer (`run_normalization`,
+`summarize_rna_features`, `summarize_atac_features`, `run_marker_search`,
+`run_pseudotime_marker_search`, `run_pseudotime_aggregation`, and `run_statistical_testing`)
+applies to the results that record a normalizer defined outside CyteArc: their earlier results are
+reported stale, and planning logs one line when it computes one of them again.
+
 RNA library-size normalization divides each cell by its total, the `<assay>_nCounts` value or, with
 `renormalize_subset=True`, its sum over the selected features, and a cell whose total is zero
 normalizes to zeros. `cytearc.assay.normalization.library_size_divisors` holds this rule for every

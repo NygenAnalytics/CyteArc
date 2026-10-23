@@ -11,7 +11,7 @@ import zarr
 
 from .layout import _CODEC_MAX_BYTES, ZarrArraySpec, get_compressors
 from .profiles import StorageProfile
-from .types import array_metadata_shards, as_zarr_array
+from .types import array_metadata_shards, as_zarr_array, complete_chunks
 
 UNIT_BYTES = 1_000_000_000
 CHUNK_BYTES = 100_000_000
@@ -518,7 +518,12 @@ def validate_live_count_matrix_geometry(
 
 
 def create_count_matrix_array(group: Any, name: str, spec: ZarrArraySpec) -> zarr.Array:
-    """Create an array using the planned chunk/shard grid without clamping."""
+    """Create an array using the planned chunk/shard grid without clamping.
+
+    The returned array stores every chunk that it is given, one of zeros too,
+    because CyteArc reads a missing count chunk as lost data
+    (:func:`~cytearc.storage.types.complete_chunks`).
+    """
     kwargs: dict[str, Any] = {
         "shape": spec.shape,
         "chunks": spec.chunks,
@@ -530,7 +535,7 @@ def create_count_matrix_array(group: Any, name: str, spec: ZarrArraySpec) -> zar
         kwargs["shards"] = spec.shards
     if spec.fillValue is not None:
         kwargs["fill_value"] = spec.fillValue
-    return as_zarr_array(group.create_array(name, **kwargs), name=name)
+    return complete_chunks(as_zarr_array(group.create_array(name, **kwargs), name=name))
 
 
 def persist_count_matrix_plan(group: Any, plan: CountMatrixPairPlan) -> None:

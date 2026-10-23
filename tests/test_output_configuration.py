@@ -114,3 +114,123 @@ def test_loading_tolerates_an_already_removed_default_handler():
     assert module._handler_id is not None
     # Removing the copy's handler succeeds only because loading installed it.
     logger.remove(module._handler_id)
+
+
+def _run_isolated(code: str, **environment: str) -> subprocess.CompletedProcess:
+    """Run ``code`` in a fresh interpreter whose stderr holds only its own output."""
+    import os
+
+    # A coverage run measures subprocesses through these variables, and its
+    # messages would join the child's stderr.
+    inherited = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(("COVERAGE_", "COV_CORE_"))
+    }
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**inherited, **environment},
+    )
+
+
+# Loguru colours its default handler on CI services and in PyCharm even when
+# stderr is a pipe, so other code's records are compared without the colours.
+_ANSI_COLOUR = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _stderr_lines(result: subprocess.CompletedProcess) -> list[str]:
+    """Return the lines of ``result``'s stderr without terminal colours."""
+    return _ANSI_COLOUR.sub("", result.stderr).splitlines()
+
+
+def test_host_loguru_output_keeps_its_default_handler_and_level():
+    code = """
+from loguru import logger
+import cytearc
+import cytearc.utils.logging
+
+logger.debug("host debug")
+cytearc.logger.info("cytearc info")
+cytearc.configure_output(level="ERROR")
+logger.warning("host warning")
+cytearc.logger.warning("cytearc warning")
+cytearc.logger.error("cytearc error")
+"""
+    result = _run_isolated(code)
+    errors = _stderr_lines(result)
+
+    # CyteArc's records appear once, on stdout, in CyteArc's format.
+    assert result.stdout.splitlines() == ["INFO: cytearc info", "ERROR: cytearc error"]
+    # Other code keeps loguru's default stderr handler, its DEBUG level, and
+    # its format, and CyteArc's level setting does not silence it.
+    assert len(errors) == 2
+    assert "| DEBUG    | __main__:<module>:6 - host debug" in errors[0]
+    assert "| WARNING  | __main__:<module>:9 - host warning" in errors[1]
+
+
+def test_an_application_that_configured_loguru_keeps_its_handlers():
+    code = """
+import sys
+from loguru import logger
+
+logger.remove()
+host = logger.add(sys.stdout, format="HOST {level} {message}", level="DEBUG")
+import cytearc
+import cytearc.utils.logging
+
+logger.info("host first")
+logger.debug("host debug")
+cytearc.configure_output(level="ERROR")
+logger.info("host info")
+logger.remove(host)
+"""
+    result = _run_isolated(code)
+
+    # CyteArc's own sink shows none of the application's records, and the
+    # application's handler prints each of them once, below CyteArc's level too.
+    assert result.stdout.splitlines() == [
+        "HOST INFO host first",
+        "HOST DEBUG host debug",
+        "HOST INFO host info",
+    ]
+    assert result.stderr == ""
+
+
+def test_the_replaced_default_handler_honors_loguru_filter():
+    code = """
+from loguru import logger
+import cytearc
+
+logger.patch(lambda record: record.update(name="hostapp.sub")).info("kept")
+logger.patch(lambda record: record.update(name="hostapplication")).info("other")
+logger.info("main module")
+cytearc.logger.info("cytearc")
+"""
+    result = _run_isolated(code, LOGURU_FILTER="hostapp")
+    errors = _stderr_lines(result)
+
+    assert len(errors) == 1 and errors[0].endswith(" - kept")
+    assert result.stdout.splitlines() == ["INFO: cytearc"]
+
+
+def test_default_handler_filter_keeps_only_other_code_records(monkeypatch):
+    import cytearc.utils.logging as cytearc_logging
+
+    def record(name: str | None, **extra: object) -> dict[str, object]:
+        return {"name": name, "extra": extra}
+
+    keeps = cytearc_logging._other_record
+    monkeypatch.setattr(cytearc_logging, "_LOGURU_FILTER", None)
+    assert keeps(record("host"))
+    assert not keeps(record("host", cytearc=True))
+    monkeypatch.setattr(cytearc_logging, "_LOGURU_FILTER", "")
+    assert keeps(record(None))
+    monkeypatch.setattr(cytearc_logging, "_LOGURU_FILTER", "hostapp")
+    assert keeps(record("hostapp")) and keeps(record("hostapp.sub"))
+    assert not keeps(record("hostapplication"))
+    assert not keeps(record(None))
+    assert cytearc_logging._cytearc_record(record("anything", cytearc=True))
+    assert not cytearc_logging._cytearc_record(record("cytearc.storage"))

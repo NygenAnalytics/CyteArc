@@ -43,10 +43,13 @@ _WORKSPACE_COPY_ATTRS = ("defaultAssay", "assayTypes")
 
 
 def _location_identity(location: str) -> tuple[str, str]:
+    # Only a location with "://" is a URI, as for make_store, so a Windows
+    # drive path such as C:\data is a path rather than a URI of scheme "c".
+    if "://" not in location:
+        return "file", str(Path(location).expanduser().resolve())
     parsed = urlsplit(location)
-    if parsed.scheme in ("", "file"):
-        path = parsed.path if parsed.scheme == "file" else location
-        return "file", str(Path(path).expanduser().resolve())
+    if parsed.scheme == "file":
+        return "file", str(Path(parsed.path).expanduser().resolve())
     normalized_path = posixpath.normpath(parsed.path or "/")
     return "uri", urlunsplit(
         (
@@ -181,7 +184,11 @@ def make_store(
     storage_options: dict[str, Any] | None = None,
     read_only: bool = False,
 ) -> str | Store:
-    """Resolve a path, URI, or store for use with ``zarr.open_group``."""
+    """Resolve a path, URI, or store for use with ``zarr.open_group``.
+
+    A local path or ``file://`` URI resolves to an absolute path with ``~``
+    expanded.
+    """
     if isinstance(location, Store):
         return location
 
@@ -208,7 +215,9 @@ def make_store(
             options = {"retry_config": _REMOTE_RETRY_CONFIG, **(storage_options or {})}
             obstore = obstore_from_url(location, **options)
             return ObjectStore(store=obstore, read_only=read_only)  # type: ignore[type-var]
-        return local_zarr_path(location)
+        # An absolute path keeps naming the same store after the working
+        # directory changes, and "~" names the home directory.
+        return os.path.abspath(os.path.expanduser(local_zarr_path(location)))
 
     raise TypeError(
         f"zarr location must be a path string or zarr Store, got {type(location)!r}"
@@ -222,7 +231,12 @@ def _open_store_root(
     *,
     operation: str | None = None,
 ) -> zarr.Group:
-    """Open root metadata before resolving external count bindings."""
+    """Open root metadata before resolving external count bindings.
+
+    Every group is read from its own record, never from consolidated metadata,
+    which writes do not update, so a store that a tool consolidated opens with
+    its current contents.
+    """
     from .async_execution import ensure_zarr_host_ceiling
 
     ensure_zarr_host_ceiling()
@@ -231,9 +245,9 @@ def _open_store_root(
         # Zarr reads a string as a URL, which ends a local path at '#', '?',
         # or ';', so the path that the destination checks read is passed as a
         # Path, which Zarr opens as it is written.
-        root = zarr.open_group(Path(store), mode=mode)
+        root = zarr.open_group(Path(store), mode=mode, use_consolidated=False)
     else:
-        root = zarr.open_group(store=store, mode=mode)
+        root = zarr.open_group(store=store, mode=mode, use_consolidated=False)
     if operation is not None and "composite" in root.attrs:
         from ..composite.store import refuse_composite
 
@@ -299,7 +313,8 @@ def _persistable_location(source: str) -> str:
     """Return a location that resolves identically from any working directory."""
     if "://" in source:
         return source
-    return os.path.abspath(source)
+    # As make_store opens it: "~" names the home directory.
+    return os.path.abspath(os.path.expanduser(source))
 
 
 def discard_mount_target(target: zarr.Group, at: ZarrLocation) -> None:

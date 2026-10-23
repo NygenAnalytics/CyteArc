@@ -66,7 +66,7 @@ class MetaData:
     def __init__(self, zgrp: zarr.Group):
         self.locations: dict[str, zarr.Group] = {"primary": zgrp}
         self.N = self._get_size(zgrp)
-        self.index = np.array(range(self.N))
+        self.index = np.arange(self.N)
 
     @property
     def _group(self) -> zarr.Group:
@@ -285,6 +285,7 @@ class MetaData:
             ValueError: If the values cover neither every row nor the rows
                 that ``key`` selects, or the fill does not fit their dtype.
         """
+        values = self._label_aligned(values, key, name=name)
         supplied, supplied_missing = nullable_values(values, name=name)
         n_values = supplied.shape[0]
         if n_values == self.N:
@@ -307,6 +308,57 @@ class MetaData:
         expanded[selected] = supplied
         missing[selected] = supplied_missing
         return expanded, missing
+
+    def _label_aligned(self, values: Any, key: str, *, name: str) -> Any:
+        """Return ``values`` in row order, aligning a labelled Series to row ids.
+
+        A pandas Series whose index is not a ``RangeIndex`` is matched by label
+        to the ``ids`` of every row when it holds a value for every row, and
+        otherwise to the ids of the rows that ``key`` selects. It is returned
+        reordered to those rows with a ``RangeIndex``. Arrays, lists, and a
+        Series with a ``RangeIndex`` are returned unchanged, so their values
+        are assigned by position.
+
+        Raises:
+            ValueError: If the labels are not exactly those ids, each once.
+        """
+        if not isinstance(values, pd.Series) or isinstance(values.index, pd.RangeIndex):
+            return values
+        labels = values.index
+        ids = np.asarray(self.fetch_all("ids"))
+        rows = f"the {self.N} rows"
+        if len(labels) != self.N:
+            selected = np.asarray(self._bool_array(key)[:], dtype=bool)
+            ids = ids[selected]
+            rows = f"the {len(ids)} rows that {key!r} selects"
+        target = pd.Index(ids)
+        positions = (
+            labels.get_indexer(target)
+            if labels.is_unique and target.is_unique
+            else np.empty(0, dtype=np.int64)
+        )
+        if len(positions) == len(labels) == len(target) and (positions >= 0).all():
+            return values.iloc[positions].reset_index(drop=True)
+        if not target.is_unique:
+            problem = "the ids of those rows repeat a value"
+        elif not labels.is_unique:
+            problem = "the index repeats a label"
+        else:
+            known = set(target)
+            extra = [label for label in labels if label not in known]
+            given = set(labels)
+            absent = [row_id for row_id in target if row_id not in given]
+            problem = (
+                f"{len(extra)} labels are not such ids"
+                + (f", such as {extra[0]!r}" if extra else "")
+                + f", and {len(absent)} such ids have no label"
+                + (f", such as {absent[0]!r}" if absent else "")
+            )
+        raise ValueError(
+            f"Column {name!r} takes the values of a pandas Series by its index "
+            f"labels, which must be the ids of {rows}, each once; {problem}. "
+            "Pass values.to_numpy() to assign the values by position instead."
+        )
 
     def get_index_by(
         self,
@@ -371,10 +423,17 @@ class MetaData:
     ) -> None:
         """Insert a column into the table.
 
+        ``values`` hold a value for every row, or for the rows that ``key``
+        selects. Arrays, lists, and a pandas Series with a ``RangeIndex`` are
+        assigned by position. A Series with any other index is assigned by
+        label: its labels must be exactly the ``ids`` of those rows, in any
+        order, and each value goes to the row with its label.
+
         Raises:
             ValueError: If ``column_name`` is protected, already exists
                 without ``overwrite``, or contains ``/`` or ``\\``, which
-                Zarr reads as path separators.
+                Zarr reads as path separators, or if a Series is labelled by
+                anything other than those ids.
         """
         validate_metadata_column_name(column_name)
         if column_name in ["I", "ids"] and force is False:
@@ -404,9 +463,14 @@ class MetaData:
         self._save(column_name, expanded, missing)
 
     def update_key(self, values: np.ndarray, key: str) -> None:
-        """Restrict a boolean metadata key using the supplied values."""
+        """Restrict a boolean metadata key using the supplied values.
+
+        Values are matched to rows as :meth:`insert` matches them, so a pandas
+        Series labelled by ``ids`` is aligned to its rows by label.
+        """
         validate_metadata_column_name(key)
         self._protect(key)
+        values = self._label_aligned(values, key, name=key)
         supplied, missing = nullable_values(values, name=key)
         if supplied.dtype.kind != "b":
             raise TypeError(
@@ -421,8 +485,7 @@ class MetaData:
         """Set every value in a boolean metadata key to true."""
         validate_metadata_column_name(key)
         self._protect(key)
-        values = np.array([True for _ in range(self.N)]).astype(bool)
-        self._save(key, values)
+        self._save(key, np.ones(self.N, dtype=bool))
 
     def drop(self, column: str) -> None:
         """Delete an unprotected metadata column."""
@@ -475,11 +538,14 @@ class MetaData:
         Rows flagged by a column's linked missing mask are shown as missing:
         NaN for numeric columns, which become float64, a nullable boolean for
         boolean columns, and a missing value for other columns.
+
+        Raises:
+            KeyError: If a requested column is not in the table.
         """
         return _to_pandas_dataframe(self, columns, key)
 
     def grep(self, pattern: str, only_valid: bool = False) -> list[str]:
-        """Return feature names matching a case-insensitive regex."""
+        """Return the stored names that match a case-insensitive regex, sorted, once each."""
         return _grep(self, pattern, only_valid)
 
     def __repr__(self) -> str:

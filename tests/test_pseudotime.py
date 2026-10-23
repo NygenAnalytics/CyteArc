@@ -483,7 +483,9 @@ def test_marker_search_logs_the_configured_normalizer(
     )
 
     status = datastore.artifacts.inspect(ref)
-    assert status.revision == 1
+    # _scaled_by_totals is defined outside CyteArc, so its results record the
+    # revision that identifies a normalizer by its code.
+    assert status.revision == 2
     assert status.parameters["normalization"] == {
         "log_transform": True,
         "renormalize_subset": False,
@@ -542,12 +544,13 @@ def test_aggregation_logs_the_configured_normalizer(
     logged = datastore.trajectory.aggregation(
         pseudotime_scoring, log_transform=True, **arguments
     )
-    assert datastore.artifacts.inspect(logged).revision == 1
+    # Normalizers defined outside CyteArc record the code-digest revision.
+    assert datastore.artifacts.inspect(logged).revision == 2
 
     # The same values from a normalizer that logs its own output.
     monkeypatch.setattr(datastore.RNA, "normMethod", _logged_scaled_by_totals)
     direct = datastore.trajectory.aggregation(pseudotime_scoring, **arguments)
-    assert datastore.artifacts.inspect(direct).revision == 1
+    assert datastore.artifacts.inspect(direct).revision == 2
     np.testing.assert_allclose(
         np.asarray(datastore.trajectory.load_aggregation(logged).data),
         np.asarray(datastore.trajectory.load_aggregation(direct).data),

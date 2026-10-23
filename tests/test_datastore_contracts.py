@@ -114,24 +114,32 @@ _METHODS = {
         "to_anndata": DataStore.to_anndata,
         "import_coordinates": ReductionAccessor.import_coordinates,
     },
-    ArtifactAccessor: {"find": ArtifactAccessor.find},
+    ArtifactAccessor: {
+        "find": ArtifactAccessor.find,
+        "prune_incomplete": ArtifactAccessor.prune_incomplete,
+    },
 }
 
 # Keep the existing digest keys so moving a method cannot hide a signature change.
 _SIGNATURE_DIGESTS = {
     # Base and inherited graph constructors accept DataStore's optional setup values.
-    BaseDataStore: "7f5cea5c9ab2abd1066d6e3d29ddc0d0c8e6f14459792bfd1552bbf67145704a",
+    # min_features_per_cell is int | None: None applies 10 on a store's first
+    # writable open, and later opens never filter.
+    BaseDataStore: "65b8c1277d428920d77b0766fe77bff11158da2c90ec36899b2c6257580da57c",
     # run_leiden_clustering gained the native backend: backend is now
     # Literal["cytearc", "igraph", "leidenalg"] with the default "cytearc".
-    GraphDataStore: "471d38e2eafdbd330214bdb91c0433e3e0e08a7c5f5a52a842e0cce7f075b920",
+    # The inherited constructor takes min_features_per_cell: int | None.
+    GraphDataStore: "d0ea800dbb35d3e9cfb8a389e89e25a23e4b3ac20d65d58585792004a2c83d7a",
     MappingDatastore: "a4839ac0372df95f021fd8c383c1ac2aff6796c6b093e05510c71ad7e8449a72",
     # run_hto_demultiplexing gained the keyword-only positive_quantile: float
     # with the default 0.99. auto_filter_cells gained the keyword-only
     # metric_policies: dict[str, dict[str, str]] | None with the default None.
-    # to_anndata gained the keyword-only cell_selection, obsm, obs, graph,
-    # and dtype, each None by default, and reduction.import_coordinates is new.
-    DataStore: "e7d9a83a1c4ac84af55fe61bf1fe11ee344bb6ad12bcc030e929afd47c15f3ff",
-    ArtifactAccessor: "c48b4badcb3fbd03d03326278eafae0cf429ac31e5d053390e60ed9316d6b54b",
+    # to_anndata gained the keyword-only cell_selection, obsm, obs, graph, and
+    # dtype, each None by default, reduction.import_coordinates is new, and
+    # min_features_per_cell: int | None = None.
+    DataStore: "ec33c086bc6b81d8e318f39e09e7bbdc1bb28e226733e86b11aeb3ff63bb6b5d",
+    # artifacts.prune_incomplete(*, dry_run: bool = True) -> list[str] was added.
+    ArtifactAccessor: "6d4befabbbc91b00684038f44e0b3063905c84437587be0994c26370efa2570c",
 }
 
 
@@ -161,8 +169,9 @@ _NAMESPACE_METHODS = [
 
 
 def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
-    # reduction.import_coordinates joined the moved methods and find.
-    assert len(_NAMESPACE_METHODS) == 75
+    # reduction.import_coordinates and artifacts.prune_incomplete joined the
+    # moved methods and find.
+    assert len(_NAMESPACE_METHODS) == 76
 
 
 @pytest.mark.parametrize(

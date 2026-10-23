@@ -19,9 +19,9 @@ markers, and pipeline-run results. Docs: <https://docs.nygen.io/CyteArc/concepts
   budget. Leave headroom and measure the complete workflow on the intended host.
 - Resolution order: explicit `mem_budget`/`nthreads` argument, then env `CYTEARC_MEM_BUDGET` /
   `CYTEARC_WORKERS`, then 75% of detected memory and detected CPUs (cgroup and CPU-affinity aware).
-  Explicit budgets are not reduced. Specs: bytes (int), `"8G"`,
+  Explicit budgets are not reduced. Specs: bytes (int), `"8G"`/`"8GB"`/`"8GiB"`,
   `"512M"` (binary units, G = 1024^3 bytes), or a fraction of detected memory such as `"0.6"`.
-  A bare `"8"` is rejected as ambiguous.
+  A bare `"8"` is rejected as ambiguous, and so are `"inf"` and worker counts below 1.
 - More workers mean more concurrent buffers and remote requests; pair them with a `mem_budget`.
 - Converters need a `mem_budget` that fits the default count layout and refuse before writing
   when it does not (`references/data-access.md`). Prefer more memory over the smaller layout the

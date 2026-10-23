@@ -419,10 +419,17 @@ reject a live column with a missing value among the cells they use.
 
 {py:meth}`cytearc.metadata.MetaData.insert` writes such a column. Values given only for the rows that
 `key` selects (`"I"` by default) leave the other rows missing, holding empty text, `NaN`, 0,
-`False`, or `NaT`; values for every row keep every row. `None`, `NaN`, `pd.NA`, and `NaT` among
-object, categorical, nullable, or string values are missing too, and those values are typed as
-imports type them: bool, int64, float64, complex128, or else text; object integers outside the int64
-range raise `ValueError`. An explicit `fill_value` is stored as a real value without a mask and must
+`False`, or `NaT`; values for every row keep every row. Arrays, lists, and a pandas Series with a
+`RangeIndex` are assigned by position. A Series with any other index is assigned by label, as pandas
+aligns it: its labels must be exactly the `ids` of those rows, in any order, so annotations from a
+table in another order land on the right cells; labels that are not exactly those ids, such as
+repeated labels or the row positions of a frame read with `key`, raise `ValueError`, and
+`values.to_numpy()` assigns them by position instead. `update_key` aligns a Series the same way.
+`to_pandas_dataframe` raises `KeyError` for a column that the table does not hold, and `grep`
+returns the stored names that match, so names that differ only in case stay distinct. `None`,
+`NaN`, `pd.NA`, and `NaT` among object, categorical, nullable, or string values are missing too,
+and those values are typed as imports type them: bool, int64, float64, complex128, or else text;
+object integers outside the int64 range raise `ValueError`. An explicit `fill_value` is stored as a real value without a mask and must
 fit the values: text for text, which widens the column, a bool for a Boolean column, an integer
 within range for integers, a real number that is not a bool for floating-point values, and a
 datetime without a time zone or a timedelta that the unit of datetime or timedelta values holds

@@ -1156,6 +1156,18 @@ def test_fate_record_rejects_each_malformed_parameter(
             "normalization_method is malformed",
             id="blank-identity",
         ),
+        pytest.param(
+            {
+                "normalization_method": {
+                    "code": "",
+                    "module": "__main__",
+                    "qualname": "normalize",
+                }
+            },
+            ValueError,
+            "normalization_method is malformed",
+            id="blank-code",
+        ),
     ],
 )
 def test_marker_record_rejects_malformed_normalization(
@@ -1165,6 +1177,17 @@ def test_marker_record_rejects_malformed_normalization(
 ) -> None:
     with pytest.raises(error, match=message):
         validate_marker_parameters({**_MARKER_RECORD, **changes})
+
+
+def test_marker_record_keeps_the_code_digest_of_a_custom_normalizer() -> None:
+    # A normalizer defined outside CyteArc is identified by its code as well.
+    method = {"code": "0f" * 16, "module": "__main__", "qualname": "normalize"}
+
+    validated = validate_marker_parameters(
+        {**_MARKER_RECORD, "normalization_method": method}
+    )
+
+    assert validated["normalization_method"] == method
 
 
 def test_marker_record_of_an_assay_without_size_factor_is_valid() -> None:

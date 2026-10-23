@@ -299,7 +299,7 @@ def test_artifact_transaction_finishes_the_written_slot() -> None:
     assert _planned_normalized(root).ref == planned.ref
 
 
-@pytest.mark.parametrize("error", [RuntimeError("write failed"), KeyboardInterrupt()])
+@pytest.mark.parametrize("error", [RuntimeError("write failed"), OSError("lost")])
 def test_artifact_transaction_removes_a_failed_slot(error: BaseException) -> None:
     root = zarr.open_group(store=MemoryStore(), mode="w")
     planned = _planned_normalized(root)

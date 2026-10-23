@@ -28,6 +28,20 @@ def writable(array: zarr.Array) -> zarr.Array:
     return array.with_config({"write_empty_chunks": True})
 
 
+def complete_chunks(array: zarr.Array) -> zarr.Array:
+    """Return ``array`` configured for a count matrix, which stores every chunk.
+
+    Writes store every chunk, one of zeros too, as with :func:`writable`. A
+    missing chunk object then means the store lost data, as an interrupted
+    copy or upload can, so a read of one raises Zarr's ``ChunkNotFoundError``,
+    a ``ValueError`` that names the array's store path and the missing chunk
+    key, instead of reading fill values, which are zero counts. Zarr checks
+    the objects that it fetches, the shards of a sharded array, so a chunk
+    missing inside a stored shard still reads as fill values.
+    """
+    return array.with_config({"write_empty_chunks": True, "read_missing_chunks": False})
+
+
 def as_zarr_group(
     node: zarr.Array | zarr.Group,
     *,
@@ -70,13 +84,18 @@ def read_fresh_group(
     mode: Literal["r", "r+"] | None = None,
     missing_ok: bool = False,
 ) -> zarr.Group | None:
-    """Open the group at ``path`` below ``parent`` from its stored record."""
+    """Open the group at ``path`` below ``parent`` from its stored record.
+
+    Consolidated metadata is never read: it is a copy that writes to the
+    store do not update.
+    """
     try:
         return zarr.open_group(
             store=parent.store,
             path=(parent.store_path / path).path,
             mode=("r" if parent.read_only else "r+") if mode is None else mode,
             zarr_format=parent.metadata.zarr_format,
+            use_consolidated=False,
         )
     except GroupNotFoundError:
         if missing_ok:

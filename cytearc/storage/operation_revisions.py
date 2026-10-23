@@ -80,6 +80,63 @@ def _fitted_by_incremental_pca(
     return "incremental_block_rows" in parameters
 
 
+# Options that only the Harmony of releases before 1.2.0 accepted: Harmony2
+# renamed nclust, max_iter_kmeans, and lamb, and removed cluster_fn.
+_PRE_HARMONY2_OPTIONS = frozenset({"cluster_fn", "lamb", "max_iter_kmeans", "nclust"})
+
+
+def _records_pre_harmony2_option(
+    kind: str, parameters: Mapping[str, Any], inputs: Mapping[str, Any]
+) -> bool:
+    """Return whether a correction records an option that only Harmony before 1.2.0 took."""
+    options = parameters.get("harmony_parameters")
+    return isinstance(options, Mapping) and not _PRE_HARMONY2_OPTIONS.isdisjoint(
+        options
+    )
+
+
+def _records_normalizer_outside_cytearc(
+    kind: str, parameters: Mapping[str, Any], inputs: Mapping[str, Any]
+) -> bool:
+    """Return whether an artifact records a normalizer that CyteArc does not define.
+
+    Such a ``normalization_method`` names a function of another module, which
+    1.3.0 and later releases also identify by a digest of its code.
+    """
+    method = parameters.get("normalization_method")
+    if not isinstance(method, Mapping) or "identity" in method:
+        return False
+    module = method.get("module")
+    return (
+        isinstance(module, str)
+        and module != "cytearc"
+        and not module.startswith("cytearc.")
+    )
+
+
+_HARMONY2 = OperationRevision(
+    revision=2,
+    release="1.3.0",
+    change=(
+        "Harmony2 replaced the earlier Harmony in 1.2.0 (this entry came in "
+        "1.3.0); affects corrections that record nclust, max_iter_kmeans, lamb, "
+        "or cluster_fn, options of the earlier Harmony only. Other earlier "
+        "corrections record what 1.2 records, and the 1.2.0 payload contract "
+        "refuses to reuse them"
+    ),
+    applies=_records_pre_harmony2_option,
+)
+_NORMALIZER_CODE = OperationRevision(
+    revision=2,
+    release="1.3.0",
+    change=(
+        "A normalizer defined outside CyteArc is identified by a digest of its "
+        "code and defaults as well as its name, so results of an edited "
+        "normalizer are not reused; affects results that record such a normalizer"
+    ),
+    applies=_records_normalizer_outside_cytearc,
+)
+
 # Released revisions by operation. An operation that is not listed has no
 # revisions, so every artifact of it is revision 1. Append a revision to the
 # tuple of the operation it changes, adding the operation if needed; never
@@ -124,6 +181,14 @@ _OPERATION_REVISIONS: dict[str, tuple[OperationRevision, ...]] = {
             applies=_fitted_by_incremental_pca,
         ),
     ),
+    "run_harmony": (_HARMONY2,),
+    "run_marker_search": (_NORMALIZER_CODE,),
+    "run_normalization": (_NORMALIZER_CODE,),
+    "run_pseudotime_aggregation": (_NORMALIZER_CODE,),
+    "run_pseudotime_marker_search": (_NORMALIZER_CODE,),
+    "run_statistical_testing": (_NORMALIZER_CODE,),
+    "summarize_atac_features": (_NORMALIZER_CODE,),
+    "summarize_rna_features": (_NORMALIZER_CODE,),
 }
 
 

@@ -1,5 +1,6 @@
 """Resource limits used by one storage or analysis operation."""
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -154,9 +155,22 @@ def detect_workers() -> int:
     return min(limits)
 
 
+def _finite_number(text: str, spec: str | float, guidance: str) -> float:
+    """Return ``text`` as a positive finite number, naming ``spec`` otherwise."""
+    try:
+        number = float(text)
+    except ValueError as exc:
+        raise ValueError(f"Invalid memory spec: {spec!r}. {guidance}") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"Memory budget must be finite, got {spec!r}.")
+    if number <= 0:
+        raise ValueError(f"Memory budget must be positive, got {spec!r}.")
+    return number
+
+
 def _parse_memory_spec(spec: str | int | float) -> int:
     guidance = (
-        "Use raw bytes, a suffixed size like '8G'/'512M', "
+        "Use raw bytes, a suffixed size like '8G', '8GB', '8GiB', or '512M', "
         "or a fraction strictly between 0 and 1 like '0.6'."
     )
     if isinstance(spec, bool):
@@ -169,22 +183,15 @@ def _parse_memory_spec(spec: str | int | float) -> int:
     text = str(spec).strip()
     if not text:
         raise ValueError("Empty memory spec. " + guidance)
-    suffix = text[-1].upper()
-    if suffix in _SUFFIXES:
-        try:
-            value = float(text[:-1])
-        except ValueError as exc:
-            raise ValueError(f"Invalid memory spec: {spec!r}. {guidance}") from exc
-        if value <= 0:
-            raise ValueError(f"Memory budget must be positive, got {spec!r}.")
-        return max(1, int(value * _SUFFIXES[suffix]))
+    # K, M, G, and T are powers of 1024, alone or followed by B or iB.
+    unit = text.upper().removesuffix("B").removesuffix("I")
+    if unit[-1:] in _SUFFIXES:
+        size = _finite_number(unit[:-1], spec, guidance) * _SUFFIXES[unit[-1]]
+        if not math.isfinite(size):
+            raise ValueError(f"Memory budget must be finite, got {spec!r}.")
+        return max(1, int(size))
 
-    try:
-        number = float(text)
-    except ValueError as exc:
-        raise ValueError(f"Invalid memory spec: {spec!r}. {guidance}") from exc
-    if number <= 0:
-        raise ValueError(f"Memory budget must be positive, got {spec!r}.")
+    number = _finite_number(text, spec, guidance)
     if number < 1:
         return max(1, int(number * detect_total_memory_bytes()))
     if number < _MIN_RAW_BYTES:
@@ -199,7 +206,19 @@ def resolve_budget(
     memory: int | str | None = None,
     workers: int | None = None,
 ) -> ResourceBudget:
-    """Resolve limits, defaulting to 75% of detected memory and detected workers."""
+    """Resolve limits, defaulting to 75% of detected memory and detected workers.
+
+    The default memory budget is 75% of the detected total memory, the
+    physical memory or a lower container limit, not of the memory that is
+    free when the budget is resolved. ``memory`` takes bytes, a size whose
+    suffix K, M, G, or T is a power of 1024, alone or followed by ``B`` or
+    ``iB`` (``'8G'``, ``'8GB'``, and ``'8GiB'`` are all ``8 * 1024**3``), or a
+    fraction of the total strictly between 0 and 1.
+
+    Raises:
+        ValueError: If ``memory`` or ``CYTEARC_MEM_BUDGET`` is not a positive
+            finite size, or ``workers`` or ``CYTEARC_WORKERS`` is below 1.
+    """
     if memory is None:
         env_mem = os.environ.get("CYTEARC_MEM_BUDGET")
         if env_mem:
@@ -218,15 +237,18 @@ def resolve_budget(
                 raise ValueError(
                     f"Invalid CYTEARC_WORKERS={env_workers!r}; expected an integer."
                 ) from exc
+            if worker_count < 1:
+                raise ValueError(
+                    f"Invalid CYTEARC_WORKERS={env_workers!r}; expected at least 1."
+                )
         else:
             worker_count = detect_workers()
     else:
         worker_count = int(workers)
+        if worker_count < 1:
+            raise ValueError(f"The worker count must be at least 1, got {workers!r}.")
 
-    return ResourceBudget(
-        memoryBytes=max(1, memory_bytes),
-        workers=max(1, worker_count),
-    )
+    return ResourceBudget(memoryBytes=max(1, memory_bytes), workers=worker_count)
 
 
 DEFAULT_READ_AHEAD_BLOCKS = 2

@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -344,6 +344,16 @@ def discard_artifact(root: zarr.Group, planned: PlannedArtifact) -> None:
         logger.warning(f"Could not remove the incomplete artifact at {path}: {error}")
 
 
+def interrupted_artifact_message(path: str) -> str:
+    """Explain why an interrupted write keeps its incomplete artifact."""
+    return (
+        f"An interruption stopped the write of artifact {path}, which Zarr may "
+        "still be running, so the artifact was kept, marked incomplete; nothing "
+        "reuses it. Once no process is writing to this store, remove it with "
+        "ds.artifacts.prune_incomplete(dry_run=False)."
+    )
+
+
 @contextmanager
 def artifact_transaction(
     root: zarr.Group,
@@ -351,20 +361,139 @@ def artifact_transaction(
 ) -> Iterator[zarr.Group]:
     """Start a planned artifact, yield its group, and finish it after the body.
 
-    If the body or the payload validation raises, including ``KeyboardInterrupt``, the
-    started group is deleted before the error propagates, so a failed write
-    leaves no incomplete artifact behind.
+    If starting the group, the body, or the payload validation raises an
+    exception, the group that this call created is deleted before the error
+    propagates, so a failed write leaves no incomplete artifact behind. An
+    interruption (``KeyboardInterrupt``, ``asyncio.CancelledError``,
+    ``SystemExit``, or a shutdown request) keeps the group, marked incomplete,
+    and logs how to remove it: Zarr may still be running the write that the
+    interruption stopped waiting for, and a deleted group would collect its
+    chunks. Nothing is deleted once the publication write is issued.
     """
-    group = start_artifact(root, planned)
+    group: zarr.Group | None = None
     try:
+        group = start_artifact(root, planned)
         yield group
         validate_artifact_payload(group, planned)
-    except BaseException:
-        discard_artifact(root, planned)
+    except BaseException as error:
+        if not isinstance(error, Exception):
+            logger.warning(interrupted_artifact_message(artifact_path(planned.ref)))
+        elif group is not None:
+            discard_artifact(root, planned)
         raise
     # The publication write follows the try, so nothing is deleted once it is
     # issued.
     group.attrs["complete"] = True
+
+
+async def _has_keys(store: Any, prefix: str) -> bool:
+    async for _ in store.list_prefix(prefix):
+        return True
+    return False
+
+
+def prune_incomplete_artifacts(
+    root: zarr.Group,
+    assays: Iterable[str],
+    *,
+    dry_run: bool,
+) -> list[str]:
+    """Find, or remove, what interrupted and killed artifact writes left behind.
+
+    Below the datastore-scoped artifacts of ``root`` and those of each assay
+    in ``assays``, this finds the artifact groups that are not complete and
+    the directories below a known artifact kind that hold keys but no group
+    record: the chunks of a write that was killed before its group existed,
+    or that landed after its group was removed. Complete artifacts, groups
+    whose record cannot be read, unknown kinds, and other objects are never
+    touched. A mounted target is pruned of its own artifacts only; its matrix
+    source is read only.
+
+    An artifact that another process is writing is incomplete until it
+    finishes, so remove residue only after confirming that no process is
+    writing to the store.
+
+    Args:
+        root: The root or workspace group of a datastore.
+        assays: Names of the assays whose artifacts are checked.
+        dry_run: Find the residue without removing anything.
+
+    Returns:
+        The paths below ``root`` that were found, or removed, sorted.
+
+    Raises:
+        PermissionError: If ``dry_run`` is False and ``root`` is read only.
+    """
+    from zarr.core.sync import sync
+
+    from .artifacts import (
+        ARTIFACT_KINDS,
+        _artifact_status,
+        _child_groups,
+        _member_names,
+    )
+    from .stores import MountedArtifactStore
+    from .types import as_zarr_group
+
+    if not dry_run and root.read_only:
+        raise PermissionError(
+            "Removing incomplete artifacts requires a DataStore opened with "
+            "zarr_mode='r+'"
+        )
+    if isinstance(root.store, MountedArtifactStore):
+        root = zarr.open_group(
+            store=root.store._store,
+            path=root.path,
+            mode="r" if root.read_only else "r+",
+            use_consolidated=False,
+        )
+    scopes: list[tuple[ArtifactScope, str | None, str]] = [
+        ("datastore", None, "artifacts"),
+        *(("assay", assay, f"{assay}/artifacts") for assay in assays),
+    ]
+    found: list[str] = []
+    for scope, assay, base_path in scopes:
+        try:
+            base = as_zarr_group(root[base_path], name=base_path)
+        except (KeyError, TypeError):
+            # No artifacts, or an object that CyteArc did not write.
+            continue
+        for kind, kind_group in _child_groups(base, "artifact kinds"):
+            if kind not in ARTIFACT_KINDS:
+                continue
+            names = sync(_member_names(kind_group))
+            for name in sorted(set(names) - {"zarr.json"}):
+                path = f"{base_path}/{kind}/{name}"
+                try:
+                    ref = ArtifactRef(
+                        scope=scope, assay=assay, kind=kind, artifact_id=name
+                    )
+                except ValueError:
+                    # Not an artifact ID, so not something CyteArc wrote.
+                    continue
+                try:
+                    node = kind_group[name]
+                except KeyError:
+                    # Keys without a group record: chunks of a write without
+                    # a group. A plain object of that name holds no keys.
+                    prefix = "/".join(filter(None, (root.store_path.path, path)))
+                    if sync(_has_keys(root.store, f"{prefix}/")):
+                        found.append(path)
+                    continue
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    if not _artifact_status(
+                        as_zarr_group(node, name=path), ref, path
+                    ).complete:
+                        found.append(path)
+                except (KeyError, TypeError, ValueError):
+                    continue
+    found.sort()
+    if not dry_run:
+        for path in found:
+            sync((root.store_path / path).delete_dir())
+    return found
 
 
 def reused_artifact_group(

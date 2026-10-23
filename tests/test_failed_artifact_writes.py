@@ -1,4 +1,4 @@
-"""A failed or interrupted artifact write leaves no incomplete slot behind."""
+"""A failed artifact write leaves no incomplete slot behind; an interrupted one keeps it."""
 
 import numpy as np
 import pytest
@@ -6,7 +6,7 @@ import zarr
 from zarr.storage import MemoryStore
 
 from cytearc.storage.artifact_writer import discard_artifact, plan_artifact
-from cytearc.storage.artifacts import inspect_artifact, list_artifacts
+from cytearc.storage.artifacts import artifact_path, inspect_artifact, list_artifacts
 from cytearc.storage.selections import resolve_generated_selection_artifact
 
 
@@ -46,7 +46,7 @@ def test_failed_pca_write_deletes_its_slot(analyzed_datastore_ephemeral, monkeyp
     assert _all_refs(store, "reduction") == before
 
 
-def test_interrupted_ann_index_write_deletes_its_slot(
+def test_interrupted_ann_index_write_keeps_its_slot_incomplete(
     analyzed_datastore_ephemeral, monkeypatch
 ):
     store = analyzed_datastore_ephemeral
@@ -64,9 +64,17 @@ def test_interrupted_ann_index_write_deletes_its_slot(
     with pytest.raises(KeyboardInterrupt):
         store.graph.ann_index(reductions[0], invalidate_cache=True)
 
-    # The slot was started before the interruption and is gone after it.
+    # Zarr may still be running the interrupted write, so the slot stays,
+    # marked incomplete, until prune_incomplete removes it.
     assert len(slots) == 1
     assert "/artifacts/ann_index/" in f"/{slots[0]}"
+    (kept,) = _all_refs(store, "ann_index") - before
+    assert artifact_path(kept) == slots[0]
+    assert not store.artifacts.inspect(kept).complete
+    assert set(store.artifacts.list(kind="ann_index", complete_only=True)) == {
+        ref for ref in before if store.artifacts.inspect(ref).complete
+    }
+    assert store.artifacts.prune_incomplete(dry_run=False) == [slots[0]]
     assert slots[0] not in store.zw
     assert _all_refs(store, "ann_index") == before
 

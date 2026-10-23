@@ -51,7 +51,12 @@ from cytearc.storage.stores import (
     locations_overlap,
     MATRIX_SOURCE_ATTR,
 )
-from cytearc.storage.types import array_metadata_shards, as_zarr_array, as_zarr_group
+from cytearc.storage.types import (
+    array_metadata_shards,
+    as_zarr_array,
+    as_zarr_group,
+    complete_chunks,
+)
 
 
 def _count_assays(store: zarr.Group) -> list[tuple[str, str | None]]:
@@ -391,7 +396,9 @@ def repack_store(
                 "An incomplete count matrix cannot be repacked as complete data"
             )
         path = f"{matrix_path}/counts"
-        counts_to_copy[path] = counts
+        # A missing count chunk is lost data, which the copy must not write
+        # as zeros.
+        counts_to_copy[path] = complete_chunks(counts)
         feature_tables[path] = f"{prefix}{name}"
         skip_paths.update({path, f"{matrix_path}/countsT"})
         type_name = lookup_persisted_assay_type(

@@ -136,7 +136,8 @@ def test_metadata_rows_and_queries_match_table_contract():
     np.testing.assert_array_equal(
         table.sift("score", 1.0, 4.0), [False, True, True, False]
     )
-    assert table.grep("^AL") == ["ALPHA", "ALPINE"]
+    # Matching ignores case; the names come back as stored.
+    assert table.grep("^AL") == ["Alpha", "Alpine"]
     assert table.head(2)["score"].tolist() == [0.5, 2.0]
 
 

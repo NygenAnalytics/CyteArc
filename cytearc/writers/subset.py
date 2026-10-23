@@ -250,7 +250,11 @@ class SubsetZarr:
         # be copied with the cell metadata as finished data.
         source = self.assays[0].z
         refuse_pending_assays(
-            zarr.open_group(store=source.store, mode="r" if source.read_only else "r+"),
+            zarr.open_group(
+                store=source.store,
+                mode="r" if source.read_only else "r+",
+                use_consolidated=False,
+            ),
             operation="subset",
         )
         self.cellIdx = self._check_idx(cell_key, cell_idx)

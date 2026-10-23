@@ -201,9 +201,11 @@ def _normalization_method(value: Any) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise TypeError("normalization_method must be a mapping")
     keys = set(value)
-    if keys not in ({"identity"}, {"module", "qualname"}) or any(
-        not isinstance(value[key], str) or not value[key] for key in keys
-    ):
+    if keys not in (
+        {"identity"},
+        {"module", "qualname"},
+        {"code", "module", "qualname"},
+    ) or any(not isinstance(value[key], str) or not value[key] for key in keys):
         raise ValueError("normalization_method is malformed")
     return {key: value[key] for key in sorted(keys)}
 

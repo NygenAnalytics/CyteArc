@@ -42,7 +42,7 @@ from .layout import (
 from .parallel import _close_iterator, in_shard_context, stream_shards
 from .partition import affordable_width
 from .profiles import StorageProfile, resolve_storage_profile
-from .types import as_zarr_array, writable
+from .types import as_zarr_array, complete_chunks, writable
 from ..utils.arrays import (
     canonicalize_sparse,
     checked_sparse_cast,
@@ -1554,7 +1554,7 @@ def write_counts_t(
     n_feats = int(counts.shape[1])
     if n_cells == 0 or n_feats == 0:
         counts_t.attrs["complete"] = True
-        return counts_t
+        return complete_chunks(counts_t)
     feature_sets = [np.unique(np.asarray(f, dtype=np.int64)) for f in featureSets]
     set_totals = [np.zeros(n_cells, dtype=np.float64) for _ in feature_sets]
     dest_feat_shard = int(plan.countsT.shards[0]) if plan.countsT.shards else n_feats
@@ -1842,4 +1842,5 @@ def write_counts_t(
         )
     )
     counts_t.attrs["complete"] = True
-    return counts_t
+    # Read as a validated countsT is, so a lost chunk raises.
+    return complete_chunks(counts_t)

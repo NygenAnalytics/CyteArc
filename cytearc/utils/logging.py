@@ -1,8 +1,14 @@
+import os
 import sys
 from dataclasses import dataclass
 from typing import Any
 
-from loguru import logger
+from loguru import logger as _loguru_logger
+
+_CYTEARC_RECORD = "cytearc"
+
+logger = _loguru_logger.bind(**{_CYTEARC_RECORD: True})
+"""Loguru's logger, marking each record that CyteArc logs through it."""
 
 
 @dataclass(slots=True)
@@ -28,6 +34,29 @@ def _log_format() -> str:
     return "<level>{level}</level>: {message}"
 
 
+def _cytearc_record(record: Any) -> bool:
+    """Return whether CyteArc logged ``record``, the only records its sink shows."""
+    return record["extra"].get(_CYTEARC_RECORD) is True
+
+
+_LOGURU_FILTER = os.environ.get("LOGURU_FILTER")
+
+
+def _other_record(record: Any) -> bool:
+    """Return whether loguru's default handler shows ``record``.
+
+    That handler shows every record that CyteArc did not log, as filtered by
+    ``LOGURU_FILTER``, a module name whose records and whose submodules'
+    records it keeps.
+    """
+    if _cytearc_record(record):
+        return False
+    if not _LOGURU_FILTER:
+        return True
+    name = record["name"]
+    return name is not None and f"{name}.".startswith(f"{_LOGURU_FILTER}.")
+
+
 def _remove_cytearc_handler() -> None:
     global _handler_id
     if _handler_id is None:
@@ -48,6 +77,7 @@ def _install_cytearc_handler() -> None:
             colorize=None,
             format=_log_format(),
             level=_config.level,
+            filter=_cytearc_record,
         )
         return
     _handler_id = logger.add(
@@ -55,7 +85,26 @@ def _install_cytearc_handler() -> None:
         colorize=False,
         format=_log_format(),
         level=_config.level,
+        filter=_cytearc_record,
     )
+
+
+def _leave_cytearc_records_out_of_loguru_default() -> None:
+    """Keep loguru's default handler for other code, without CyteArc's records.
+
+    Loguru prints every record on stderr through its default handler 0 until
+    an application removes it. CyteArc shows its own records on stdout, so
+    that handler would print them a second time. When the handler is still
+    installed, it is replaced by one with the same sink and settings that
+    leaves out CyteArc's records; other code keeps its stderr output, level,
+    and format. An application that removed it manages its own handlers, and
+    they are not touched.
+    """
+    try:
+        logger.remove(0)
+    except ValueError:
+        return
+    logger.add(sys.stderr, filter=_other_record)
 
 
 def _resolve_level(level: str | None) -> str:
@@ -69,10 +118,7 @@ def _resolve_level(level: str | None) -> str:
         ) from error
 
 
-try:
-    logger.remove(0)
-except ValueError:
-    pass
+_leave_cytearc_records_out_of_loguru_default()
 _install_cytearc_handler()
 
 
@@ -89,7 +135,10 @@ def configure_output(
 ) -> None:
     """Configure CyteArc's logging and progress output.
 
-    Unspecified settings retain their current values.
+    Unspecified settings retain their current values. The level and
+    timestamps apply to CyteArc's own log sink, which shows only the records
+    logged through ``cytearc.logger``, so other code's loguru output keeps its
+    own handlers and levels.
     """
     update_handler = False
     if level is not None:
@@ -109,7 +158,10 @@ def configure_output(
 
 
 def set_verbosity(level: str | None = None, filepath: str | None = None) -> None:
-    """Set CyteArc's logging level and optional output file."""
+    """Set CyteArc's logging level and optional output file.
+
+    Like :func:`configure_output`, this changes only CyteArc's own sink.
+    """
     _config.level = _resolve_level(level)
     _config.filepath = filepath
     _install_cytearc_handler()

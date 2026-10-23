@@ -135,11 +135,32 @@ be listed with `scope="datastore"`. `artifacts.load(ref)` opens the payload only
 that the artifact exists and is complete, and `artifacts.load_values(ref)` reads the per-cell values of a
 cell-aligned artifact aligned to their cells ({ref}`cell_aligned_kinds`).
 
-A producer makes its artifact complete with one final write. A write that fails or is interrupted
-before that write removes its incomplete artifact. Once the final write is issued, CyteArc never
-removes the artifact, because the write can persist even when it reports an error. A failure or
-interruption during that write can therefore leave an incomplete artifact that
-`artifacts.list(complete_only=False)` shows and that nothing reuses.
+A producer makes its artifact complete with one final write. A write that fails with an error
+before that write removes its incomplete artifact. An interruption, such as Ctrl-C, a cancelled
+task, or a shutdown request, keeps the artifact, marked incomplete, and logs how to remove it,
+because Zarr may still be running the write that the interruption stopped waiting for, and a removed
+artifact would collect its late chunks. Once the final write is issued, CyteArc never removes the
+artifact, because the write can persist even when it reports an error. A process that is killed
+(SIGKILL, the out-of-memory killer, a kernel restart) leaves its incomplete artifact too, and a write
+that lands after its artifact was removed leaves chunks without an artifact record. Nothing reuses
+this residue, and `artifacts.list(complete_only=False)` shows the incomplete artifacts.
+
+`ds.artifacts.prune_incomplete()` lists the residue below the datastore's artifacts and those of
+every assay: the incomplete artifacts and the directories of chunks without a record.
+`ds.artifacts.prune_incomplete(dry_run=False)` removes it and returns what it removed. It never
+removes a complete artifact, an artifact whose record cannot be read, an unknown kind, or anything
+whose name is not an artifact ID, and a mounted store removes only its own artifacts. An artifact
+that another process is writing is incomplete until it finishes, so remove the residue only after
+confirming that no process is writing to the store; removing needs `zarr_mode='r+'`.
+
+```python
+ds.artifacts.prune_incomplete()  # list what interrupted or killed writes left
+ds.artifacts.prune_incomplete(dry_run=False)  # remove it, once no process writes
+```
+
+A listing reads each artifact's record. An artifact whose record cannot be read, such as a torn
+`zarr.json`, and a kind that this release does not know, such as one a newer release wrote, are
+skipped with a warning that names them, so the other artifacts are still listed, found, and reused.
 
 Results whose values must be finite are checked while they are written: normalized values, reduced
 coordinates, loadings, and centers, Harmony corrections and their fitted state, embedding
@@ -265,8 +286,10 @@ mermaid_source = lineage.to_mermaid()
 
 This identifies the exact selections, normalization, coordinates, and graph behind a result and
 shows where branches diverge. Each artifact in the report has one status: `complete`; `stale` when
-a later operation revision supersedes it; `incomplete`; `missing`; or `unresolved external` for an
-input in another datastore that was not supplied.
+a later operation revision supersedes it; `incomplete`; `missing`; `corrupt` when its record cannot
+be read, such as an `artifact_id` attribute that names another artifact or a malformed recorded
+input, which the report names and does not follow further; or `unresolved external` for an input in
+another datastore that was not supplied. Lineage of any depth is traced.
 
 An input stored in another datastore, such as the mapping reference behind a query projection, is
 recorded as an `ExternalArtifactRef`. It names the artifact's dataset by the prepared dataset
@@ -373,6 +396,7 @@ Use `summary.to_dict()` for a deterministic JSON-safe record.
    cytearc.datastore.artifact_accessor.ArtifactAccessor.load
    cytearc.datastore.artifact_accessor.ArtifactAccessor.load_values
    cytearc.datastore.artifact_accessor.ArtifactAccessor.lineage
+   cytearc.datastore.artifact_accessor.ArtifactAccessor.prune_incomplete
    cytearc.datastore.namespaces.FeaturesAccessor.resolve
 ```
 
@@ -383,6 +407,7 @@ Use `summary.to_dict()` for a deterministic JSON-safe record.
 .. automethod:: cytearc.datastore.artifact_accessor.ArtifactAccessor.load
 .. automethod:: cytearc.datastore.artifact_accessor.ArtifactAccessor.load_values
 .. automethod:: cytearc.datastore.artifact_accessor.ArtifactAccessor.lineage
+.. automethod:: cytearc.datastore.artifact_accessor.ArtifactAccessor.prune_incomplete
 .. automethod:: cytearc.datastore.namespaces.FeaturesAccessor.resolve
 ```
 

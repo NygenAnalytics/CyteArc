@@ -318,17 +318,48 @@ def selected_feature_values(values: np.ndarray, keep: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(values[keep])
 
 
+def _stream_indices(values: Any, *, limit: int, name: str) -> np.ndarray:
+    """Return a selection of in-range indices of a stream as int64; they may repeat.
+
+    Raises:
+        ValueError: If the selection is not one-dimensional.
+        TypeError: If it holds values other than integers, such as a boolean
+            mask, which would otherwise read as the indices 0 and 1.
+        IndexError: If an index lies outside ``[0, limit)``.
+    """
+    indices = np.asarray(values)
+    if indices.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional")
+    if indices.size == 0:
+        return np.empty(0, dtype=np.int64)
+    if not np.issubdtype(indices.dtype, np.integer):
+        raise TypeError(
+            f"{name} must hold integer indices, not {indices.dtype} values; "
+            "pass np.flatnonzero(mask) for a boolean mask"
+        )
+    indices = indices.astype(np.int64, copy=False)
+    if int(indices.min()) < 0 or int(indices.max()) >= limit:
+        raise IndexError(f"{name} contains an out-of-range index")
+    return indices
+
+
 def selected_feature_chunk_starts(
     array: Any,
     feat_idx: Sequence[int] | np.ndarray | None = None,
 ) -> list[int]:
-    """Return inner-chunk feature starts that intersect the selection."""
+    """Return inner-chunk feature starts that intersect the selection.
+
+    Raises:
+        ValueError: If ``feat_idx`` is not one-dimensional.
+        TypeError: If ``feat_idx`` holds values other than integers.
+        IndexError: If ``feat_idx`` holds an index outside the features.
+    """
     plane = _plane(array)
     feat_chunk = plane.axisChunk(0)
     n_feats = plane.shape[0]
     if feat_idx is None:
         return list(range(0, n_feats, feat_chunk))
-    indices = np.asarray(feat_idx, dtype=np.int64)
+    indices = _stream_indices(feat_idx, limit=n_feats, name="feat_idx")
     if indices.size == 0:
         return []
     bins = np.unique(indices // feat_chunk)
@@ -535,6 +566,28 @@ def _copy_band(
     copy_columns(block, local, dest, destinations)
 
 
+def _settled(outcomes: Sequence[T | BaseException]) -> list[T]:
+    """Return the results of concurrent reads that have all settled, or raise.
+
+    Reads that touch one lost chunk fail with the same error, which is raised
+    once. Distinct failures are raised together.
+    """
+    results: list[T] = []
+    failures: dict[tuple[type[BaseException], str], BaseException] = {}
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException):
+            failures.setdefault((type(outcome), str(outcome)), outcome)
+        else:
+            results.append(outcome)
+    if len(failures) > 1:
+        raise BaseExceptionGroup(
+            "Reads of one feature group failed", [*failures.values()]
+        )
+    if failures:
+        raise next(iter(failures.values()))
+    return results
+
+
 def _selected_cell_bands(
     selected_cells: np.ndarray,
     *,
@@ -582,9 +635,7 @@ def cell_band_selection(
     if cell_idx is None:
         cells = np.arange(n_cells, dtype=np.int64)
     else:
-        cells = np.asarray(cell_idx, dtype=np.int64)
-        if cells.size and (int(cells.min()) < 0 or int(cells.max()) >= n_cells):
-            raise IndexError("cell_idx contains an out-of-range index")
+        cells = _stream_indices(cell_idx, limit=n_cells, name="cell_idx")
     bands = _selected_cell_bands(
         cells, n_cells=n_cells, cell_chunk=geometry.axisChunk(1)
     )
@@ -947,7 +998,15 @@ def map_feature_read_groups(
                     del block
             return read_seconds
 
-        read_seconds = sum(await asyncio.gather(*(read_band(*band) for band in bands)))
+        # Every band settles before a failure propagates, so no band is still
+        # reading into dest, or holding its reservation, once its group failed.
+        read_seconds = sum(
+            _settled(
+                await asyncio.gather(
+                    *(read_band(*band) for band in bands), return_exceptions=True
+                )
+            )
+        )
         return FeatureReadGroup(
             featStart=int(feat_start),
             featEnd=int(feat_end),

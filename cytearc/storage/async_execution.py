@@ -350,6 +350,14 @@ class AsyncStorageRunner:
         self._blas: ThreadpoolController | None = None
 
     def run(self, operation: Callable[["AsyncStorageRunner"], Awaitable[T]]) -> T:
+        """Run ``operation`` to completion and return its result.
+
+        Inside a running event loop, as in a Jupyter cell, the operation runs
+        on a helper thread with its own loop. An interruption of the caller,
+        such as Ctrl-C, cancels the operation and waits until it has stopped
+        reading, computing, and writing before the interruption propagates,
+        so no work continues in the background behind the caller's cleanup.
+        """
         # Outside an except clause, so a failure is not chained to the error
         # that found no running loop.
         if not _in_event_loop():
@@ -357,16 +365,40 @@ class AsyncStorageRunner:
         error: list[BaseException] = []
         result: list[T] = []
         context = contextvars.copy_context()
+        started = threading.Event()
+        main: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any]]] = []
+
+        async def _main() -> T:
+            task = asyncio.current_task()
+            assert task is not None
+            main.append((asyncio.get_running_loop(), task))
+            started.set()
+            return await self._run(operation)
 
         def _in_thread() -> None:
             try:
-                result.append(context.run(lambda: asyncio.run(self._run(operation))))
+                result.append(context.run(lambda: asyncio.run(_main())))
             except BaseException as exc:
                 error.append(exc)
+            finally:
+                started.set()
 
-        thread = threading.Thread(target=_in_thread)
+        thread = threading.Thread(target=_in_thread, name="cytearc-storage-operation")
         thread.start()
-        thread.join()
+        try:
+            thread.join()
+        except BaseException:
+            # The caller was interrupted, which stops only its wait. Cancel the
+            # operation, wait until its work has stopped, then propagate.
+            started.wait()
+            for loop, task in main:
+                try:
+                    loop.call_soon_threadsafe(task.cancel)
+                except RuntimeError:
+                    # The loop closed: the operation already finished.
+                    pass
+            thread.join()
+            raise
         if error:
             raise error[0]
         return result[0]

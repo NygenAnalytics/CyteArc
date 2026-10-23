@@ -204,13 +204,20 @@ class DataStore(
 
     Args:
         zarr_loc: Path to Zarr file created using one of writer functions of CyteArc.
+                  A local path may start with ``~`` for the home directory, and
+                  a relative path names a store below the working directory at
+                  the time the store opens.
         assay_types: Mapping of assay names to preset types, such as 'RNA' or 'ATAC'.
         default_assay: Name of assay that should be considered as default. It is mandatory to provide this value
                        when DataStore loads a Zarr file for the first time.
-        min_features_per_cell: Writable opens remove from ``I`` every cell whose
-                               default-assay feature count is not greater than this
-                               value, unless that would remove at least half of the
-                               active cells.
+        min_features_per_cell: The first writable open of a store removes from ``I``
+                               every cell whose default-assay feature count is not
+                               greater than this value, 10 when None, unless that
+                               would remove at least half of the active cells, and
+                               records the value it applied in the cell table.
+                               Later opens never filter ``I``: they log a value that
+                               differs from the recorded one as not applied. A
+                               read-only open never filters.
         mito_pattern: Feature-name pattern for the ``{assay}_percentMito`` column of each RNA assay.
                       The first writable open replaces any existing column with values computed from
                       this pattern, or ``^MT-`` when None. Later opens keep the stored values when
@@ -243,7 +250,7 @@ class DataStore(
         zarr_loc: ZarrLocation,
         assay_types: dict[str, str] | None = None,
         default_assay: str | None = None,
-        min_features_per_cell: int = 10,
+        min_features_per_cell: int | None = None,
         mito_pattern: str | None = None,
         ribo_pattern: str | None = None,
         nthreads: int | None = None,

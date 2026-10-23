@@ -57,12 +57,20 @@ The documentation shows deterministic completed snapshots from the committed not
 `set_verbosity(level=..., filepath=...)` remains the interface for selecting a log level and optional file destination.
 Use it when a durable batch log is needed; use `configure_output` for ordinary notebook and console behavior.
 
+CyteArc's sink shows only the records that CyteArc logs, and `configure_output` and
+`set_verbosity` change only that sink, so an application or library that also logs with loguru
+keeps its own handlers, levels, and formats. Loguru prints every record on stderr through its
+default handler until an application removes that handler; while it is still installed, importing
+CyteArc's logging replaces it with a handler of the same sink and settings, including
+`LOGURU_LEVEL`, `LOGURU_FORMAT`, and `LOGURU_FILTER`, that leaves out CyteArc's records, which
+CyteArc's sink already shows. Handlers that an application added receive CyteArc's records as well.
+
 ```{eval-rst}
 .. py:data:: cytearc.logger
 
-    CyteArc's `loguru` logger. Library code logs through this object, so
-    :func:`cytearc.configure_output` controls the CyteArc-owned sink while preserving
-    sinks added by callers.
+    CyteArc's `loguru` logger, bound to mark each record that it logs. Library code logs
+    through this object, so :func:`cytearc.configure_output` controls the CyteArc-owned
+    sink while preserving sinks added by callers.
 ```
 
 ```{eval-rst}
