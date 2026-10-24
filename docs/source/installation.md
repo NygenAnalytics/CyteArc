@@ -106,7 +106,7 @@ it.
 (installation_tsne)=
 ## Optional t-SNE
 
-`embeddings.tsne` and the pipeline's `tsne` stage compute t-SNE with the [sgtsnepi] package, which CyteArc does not install by default.
+`embeddings.tsne` and the `tsne` stage of the pipeline recipes compute t-SNE with the [sgtsnepi] package, which CyteArc does not install by default.
 Add it with the `tsne` extra, in the same environment as CyteArc:
 
 ```bash
@@ -118,14 +118,14 @@ On other platforms the installer compiles it from source, which needs a C++ comp
 It runs on one thread, and it is licensed under the GPLv3, while CyteArc is BSD-3-Clause and does not depend on it unless you install the extra.
 Without `sgtsnepi`, computing a new t-SNE embedding raises an `ImportError` that names the `tsne` extra.
 Reusing a t-SNE embedding that a store already holds, and plotting or exporting it, does not need `sgtsnepi`.
-A pipeline run that enables t-SNE without `sgtsnepi` therefore still runs, and it logs a warning that names the extra before its first stage.
+A pipeline run with `tsne=True` therefore still starts without `sgtsnepi`: it logs a warning that names the extra before its first stage, and its `tsne` stage fails unless the store already holds a matching embedding.
 
 (installation_leiden_gpl)=
 ## Optional GPL Leiden backends
 
 Leiden clustering needs no extra package.
 Its default backend, `"cytearc"`, is CyteArc's own multi-threaded implementation (see {ref}`Leiden clustering <leiden_method>`).
-The alternative `"igraph"` and `"leidenalg"` backends of `clusters.leiden`, of the pipeline's `leiden` settings, and of `cytearc.clustering.leiden_membership` call the [igraph] and [leidenalg] packages.
+The alternative `"igraph"` and `"leidenalg"` backends of `clusters.leiden`, of the pipeline recipes' `leiden` settings, and of `cytearc.clustering.leiden_membership` call the [igraph] and [leidenalg] packages.
 They serve to reproduce a clustering computed with those packages, such as one saved by an earlier CyteArc release, whose default backend was `"igraph"`.
 CyteArc does not install them and lists them in none of its extras: igraph is licensed under the GPL-2.0-or-later and leidenalg under the GPL-3.0-or-later, while CyteArc is BSD-3-Clause.
 To use these backends, install the packages yourself in the same environment as CyteArc (leidenalg installs igraph as a dependency):

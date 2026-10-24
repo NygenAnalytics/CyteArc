@@ -57,11 +57,11 @@ The aim is one coherent execution path, not reimplementation for its own sake.
 
 ## Principal component analysis
 
-`reduction.pca` and the pipeline's PCA stage stream the normalized values of the selected cells
-in row blocks and never hold the whole matrix. With `feat_scaling=True`, each feature is first
-standardized with its mean and population standard deviation over the normalized cells. The
-solver depends only on the number of features, so the result does not depend on the memory
-budget, and the block size changes it only by rounding.
+`reduction.pca` and the PCA stage of the `rna` and `adt` pipeline recipes stream the normalized
+values of the selected cells in row blocks and never hold the whole matrix. With
+`feat_scaling=True`, each feature is first standardized with its mean and population standard
+deviation over the normalized cells. The solver depends only on the number of features, so the
+result does not depend on the memory budget, and the block size changes it only by rounding.
 
 - **Up to 4,096 features**, PCA is exact. One pass over the cells accumulates the float64
   covariance matrix with symmetric rank updates, and LAPACK's eigensolver returns its leading
@@ -102,7 +102,7 @@ them as stale.
 
 ## Leiden clustering
 
-`clusters.leiden`, the pipeline's Leiden stages, gene programs, and
+`clusters.leiden`, the Leiden stages of the pipeline recipes, gene programs, and
 `cytearc.clustering.leiden_membership` partition a graph with the Leiden algorithm of
 [Traag, Waltman and van Eck](https://doi.org/10.1038/s41598-019-41695-z). Every stored entry
 `(i, j)` of the input matrix `W` is an undirected edge of weight `W[i, j]`, so the clustered graph
@@ -112,9 +112,10 @@ under the configuration null model: a larger resolution gives more, smaller clus
 cluster is connected.
 
 The default backend, `"cytearc"`, is CyteArc's own implementation of the published method. It
-runs on up to `nthreads` threads, which `clusters.leiden` and the pipeline set to the datastore's
-worker budget, and it returns identical labels for every thread count. Labels run from 1: cluster
-1 has the most cells, and clusters of equal size are ordered by their smallest cell index. The
+runs on up to `nthreads` threads, which `clusters.leiden` and the pipeline recipes set to the
+datastore's worker budget, and it returns identical labels for every thread count. Labels run
+from 1: cluster 1 has the most cells, and clusters of equal size are ordered by their smallest
+cell index. The
 clustering package's README (`cytearc/clustering/README.md` in the
 [CyteArc repository](https://github.com/NygenAnalytics/CyteArc)) describes the implementation, how
 it was written and verified, and how it compares with igraph and leidenalg.
@@ -131,7 +132,7 @@ different backends are never reused for one another.
 
 ## Doublet detection
 
-`qc.doublets` and the pipeline's doublet stage follow
+`qc.doublets` and the doublet stage of the `rna` pipeline recipe follow
 [Scrublet](https://doi.org/10.1016/j.cels.2018.11.005) (Wolock, Lopez and Klein, 2019). Doublets
 form only among the cells of one capture, so each sample, the cells that share a label of
 `sample_column`, is simulated and scored on its own; without a sample column every cell is one

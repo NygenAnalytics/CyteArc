@@ -61,7 +61,21 @@ class PipelineRunOwner(Protocol):
 
 
 class PipelineExecutionError(RuntimeError):
-    """A handled pipeline failure with a durable run identifier."""
+    """A handled pipeline failure with a durable run identifier.
+
+    A recipe raises it once the run is recorded as failed, together with the
+    failing stage's record when that stage had one. The exception that
+    failed the run is its ``__cause__``; a pickled copy keeps it, or a
+    stand-in that names its type and message when the cause cannot be
+    pickled.
+
+    Attributes:
+        run_id: The failed run's identifier. ``ds.pipeline.open(run_id=...)``
+            opens the run, whose ``report()`` holds the persisted failure.
+        stage: The stage that failed, as the run's stage order names it, or
+            ``"finalize"`` when completing the run record failed after every
+            stage.
+    """
 
     def __init__(
         self,
@@ -93,6 +107,39 @@ class PipelineExecutionError(RuntimeError):
             ),
             self.__dict__,
         )
+
+
+class PipelineCancelled(RuntimeError):
+    """A pipeline run that stopped because its CancellationToken was cancelled.
+
+    Attributes:
+        run_id: The interrupted run, or None when the token was cancelled
+            before the run wrote anything.
+        stage: The stage whose work the cancellation cut short, or None when
+            the run stopped between stages or just after a stage's work
+            finished, which records that stage as completed.
+        reason: The reason given to ``CancellationToken.cancel``.
+    """
+
+    def __init__(self, run_id: str | None, stage: str | None, reason: str) -> None:
+        if run_id is not None and (not isinstance(run_id, str) or not run_id):
+            raise TypeError("Pipeline cancellation run_id must be non-empty or None")
+        if stage is not None and (not isinstance(stage, str) or not stage):
+            raise TypeError("Pipeline cancellation stage must be non-empty or None")
+        if not isinstance(reason, str) or not reason:
+            raise TypeError("Pipeline cancellation reason must be non-empty")
+        if run_id is None:
+            message = f"Pipeline run was cancelled before it started: {reason}"
+        else:
+            where = "" if stage is None else f" during stage {stage!r}"
+            message = f"Pipeline run {run_id} was cancelled{where}: {reason}"
+        super().__init__(message)
+        self.run_id = run_id
+        self.stage = stage
+        self.reason = reason
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
+        return (type(self), (self.run_id, self.stage, self.reason), self.__dict__)
 
 
 def _portable_cause(cause: BaseException | None) -> BaseException | None:
@@ -145,7 +192,13 @@ def _artifact_context(
 
 
 class PipelineAxisView:
-    """A narrow, immutable view over one completed pipeline-run axis."""
+    """A narrow, immutable view over one completed pipeline-run axis.
+
+    ``run.cells`` and ``run.features`` return one. Its fields read the run's
+    frozen selections, metadata snapshots, and result artifacts, never live
+    columns, and a read fails closed when the stored cell or feature
+    identities changed.
+    """
 
     __slots__ = (
         "_axis",
@@ -199,6 +252,7 @@ class PipelineAxisView:
 
     @property
     def columns(self) -> tuple[str, ...]:
+        """The names of the run's frozen fields, ``I``, ``ids``, and ``names`` first."""
         ordered = ["I", "ids", "names"]
         ordered.extend(
             descriptor.key
@@ -1100,7 +1154,17 @@ class PipelineAxisView:
 
 
 class PipelineRun(Mapping[str, ArtifactRef]):
-    """A datastore-bound handle for one durable pipeline invocation."""
+    """A datastore-bound handle for one durable pipeline invocation.
+
+    A recipe returns its completed run, and ``ds.pipeline.open`` and
+    ``ds.pipeline.list_runs`` reopen runs of every status. A completed run is
+    a read-only mapping of its output keys, such as ``"clusters"``, to exact
+    :class:`~cytearc.ArtifactRef` values, and its ``cells`` and ``features``
+    views hold its frozen fields. A run of another status raises
+    ``RuntimeError`` for its outputs and views, and ``report()`` gives the
+    persisted facts of a run of any status. A handle keeps the run record
+    that it opened, so open the run again to see a later status.
+    """
 
     __slots__ = ("_cells_view", "_features_view", "_owner", "_outputs", "_record")
 
@@ -1121,30 +1185,59 @@ class PipelineRun(Mapping[str, ArtifactRef]):
 
     @property
     def run_id(self) -> str:
+        """The run's unique identifier, which ``pipeline.open(run_id=...)`` takes."""
         return self._record.run_id
 
     @property
     def label(self) -> str | None:
+        """The run's immutable label, or None.
+
+        A run takes its requested label only when it completes, so a running,
+        failed, or interrupted run has None; ``report()["run"]
+        ["requestedLabel"]`` keeps the label that it requested.
+        """
         return self._record.label
 
     @property
     def assay(self) -> str:
+        """The analyzed assay.
+
+        A multimodal run's assay is its first source run's assay, whose
+        features its feature view covers.
+        """
         return self._record.assay
 
     @property
     def status(self) -> str:
+        """``"running"``, ``"completed"``, ``"failed"``, or ``"interrupted"``.
+
+        The status is the one that the run record held when this handle was
+        opened.
+        """
         return self._record.status
 
     @property
     def recipe(self) -> str:
+        """The recipe that wrote the run, such as ``"rna"``.
+
+        The recipes record ``"rna"``, ``"atac"``, ``"adt"``, and
+        ``"multimodal"``, and a run that ``pipeline.run()`` of an earlier
+        release saved records ``"basic_rna_analysis"``.
+        """
         return self._record.recipe
 
     @property
     def started_at_ns(self) -> int:
+        """When the run record was created, in nanoseconds since the epoch."""
         return self._record.started_at_ns
 
     @property
     def finished_at_ns(self) -> int | None:
+        """When the run ended, in nanoseconds since the epoch.
+
+        None while the run is running, including a run whose process died
+        without cleanup.
+        """
         return self._record.finished_at_ns
 
     def _require_completed(self, operation: str) -> None:
@@ -1168,6 +1261,13 @@ class PipelineRun(Mapping[str, ArtifactRef]):
 
     @property
     def cells(self) -> PipelineAxisView:
+        """The completed run's frozen cell fields, over its analysis cells.
+
+        The view's ``I`` is the run's ``analysis_cell_selection``, and its
+        other fields, such as ``clusters`` and ``umap_1``, read the run's
+        artifacts and metadata snapshots, never live columns. A run that did
+        not complete raises ``RuntimeError``.
+        """
         self._require_completed("cell views")
         if self._cells_view is None:
             self._cells_view = PipelineAxisView(
@@ -1179,6 +1279,13 @@ class PipelineRun(Mapping[str, ArtifactRef]):
 
     @property
     def features(self) -> PipelineAxisView:
+        """The completed run's frozen feature fields, over its assay's features.
+
+        The view's ``I`` is the run's ``feature_universe``, beside ``ids``,
+        ``names``, and the recipe's feature field, such as
+        ``highly_variable_features``; a multimodal run has no feature field.
+        A run that did not complete raises ``RuntimeError``.
+        """
         self._require_completed("feature views")
         if self._features_view is None:
             self._features_view = PipelineAxisView(
@@ -1208,6 +1315,11 @@ class PipelineRun(Mapping[str, ArtifactRef]):
                 "reusedArtifacts": reused,
                 "uncleanIncomplete": not self._record.complete,
                 "signalProtection": self._record.config.get("shutdown"),
+                "warnings": [
+                    {"stage": stage.stage, "message": message}
+                    for stage in stages
+                    for message in stage.warnings
+                ],
             },
         }
 
@@ -1223,8 +1335,29 @@ class PipelineRun(Mapping[str, ArtifactRef]):
         reused = sum(plan.disposition == "reused" for plan in stage.plans)
         return (
             f"| {stage.ordinal} | {stage.stage} | {stage.status} | {duration} | "
-            f"{peak} | {created} | {reused} |"
+            f"{peak} | {created} | {reused} | {len(stage.warnings)} |"
         )
+
+    @staticmethod
+    def _diagnostics_markdown(stages: Sequence[PipelineStageRecord]) -> list[str]:
+        """Return each stage's summary and warnings as markdown lines."""
+        lines: list[str] = []
+        for stage in stages:
+            if stage.summary is None and not stage.warnings:
+                continue
+            lines.append(f"### {stage.stage}")
+            lines.append("")
+            if stage.summary is not None:
+                lines.extend(
+                    (
+                        "```json",
+                        json.dumps(dict(stage.summary), sort_keys=True),
+                        "```",
+                    )
+                )
+            lines.extend(f"- Warning: {message}" for message in stage.warnings)
+            lines.append("")
+        return lines
 
     def _report_markdown(self) -> str:
         stages = load_pipeline_stage_records(self._owner.zw, self.run_id)
@@ -1253,10 +1386,14 @@ class PipelineRun(Mapping[str, ArtifactRef]):
             "",
             "## Stages",
             "",
-            "| # | Stage | Status | Wall seconds | Peak RSS bytes | Created | Reused |",
-            "|---:|---|---|---:|---:|---:|---:|",
+            "| # | Stage | Status | Wall seconds | Peak RSS bytes | Created | Reused "
+            "| Warnings |",
+            "|---:|---|---|---:|---:|---:|---:|---:|",
         ]
         lines.extend(self._stage_markdown(stage) for stage in stages)
+        diagnostics = self._diagnostics_markdown(stages)
+        if diagnostics:
+            lines.extend(["", "## Diagnostics", "", *diagnostics])
         outputs = run["outputs"]
         lines.extend(["", "## Outputs", ""])
         if outputs:
@@ -1299,7 +1436,40 @@ class PipelineRun(Mapping[str, ArtifactRef]):
         *,
         format: Literal["dict", "markdown"] = "dict",
     ) -> dict[str, Any] | str:
-        """Return deterministic persisted facts for any run status."""
+        """Return the persisted facts of the run, whatever its status.
+
+        The report reads the stage records again on each call, so a running
+        run's report grows as its stages end, while its run entry is the run
+        record that this handle opened. ``format="dict"`` returns three
+        entries:
+
+        - ``run``: the run record, with ``runId``, ``recipe``,
+          ``requestedLabel``, ``label``, ``assay``, ``startedAtNs``,
+          ``finishedAtNs``, ``status``, ``complete``, ``cytearcVersion``,
+          ``config``, ``stageOrder``, ``outputs``, ``fields``, ``error``,
+          and ``interruption``.
+        - ``stages``: each stage record written so far, skipped stages
+          included, with its status, times, outputs, artifact plans with
+          their ``created`` or ``reused`` dispositions, sampled time and
+          memory as ``metrics``, ``error``, ``interruption``, ``summary``,
+          and ``warnings``.
+        - ``summary``: ``createdArtifacts``, ``reusedArtifacts``,
+          ``uncleanIncomplete``, True while the run record is not complete,
+          as for a running run or one whose process died,
+          ``signalProtection``, and ``warnings``, every stage's warnings with
+          the stage that logged them, in stage order.
+
+        ``format="markdown"`` returns the same facts as a Markdown document,
+        with a table of the stages and a section of each stage's summary and
+        warnings.
+
+        Args:
+            format: ``"dict"`` or ``"markdown"``.
+
+        Raises:
+            ValueError: If ``format`` is another value, or if a stage record
+                holds fields that this release does not know.
+        """
         if format == "dict":
             return self._report_dict()
         if format == "markdown":
@@ -1309,7 +1479,7 @@ class PipelineRun(Mapping[str, ArtifactRef]):
     def __repr__(self) -> str:
         label = f", label={self.label!r}" if self.label is not None else ""
         return (
-            f"PipelineRun(run_id='{self.run_id[:12]}...', "
+            f"PipelineRun(run_id='{self.run_id[:12]}...', recipe={self.recipe!r}, "
             f"status={self.status!r}, assay={self.assay!r}{label})"
         )
 

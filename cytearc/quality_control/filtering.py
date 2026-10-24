@@ -46,6 +46,13 @@ RAW_DROPLET_REMEDY = (
     "filtered matrix (for example Cell Ranger's filtered_feature_bc_matrix), "
     "before QC filtering."
 )
+# The remedy of the same warnings for cells that were already called from
+# droplets, where empty droplets are not the likely cause.
+CALLED_CELLS_REMEDY = (
+    "These cells were called from droplets, so a second population is more "
+    "likely doublets, another cell type, or barcodes that cell calling kept near "
+    "the knee than empty droplets: check those cells before trusting the bounds."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,6 +455,7 @@ def _population_warning(
     high: float | None,
     high_work: float,
     scaled_mad: float,
+    remedy: str,
 ) -> str | None:
     """Describe a second population that the MAD bounds of a metric miss.
 
@@ -467,7 +475,7 @@ def _population_warning(
                 f"{group_label}: {above.size} cells above the upper {attr!r} "
                 f"bound of {high:.6g} form a separate population (median "
                 f"{float(np.median(raw[raw >= high])):.6g}), which the MAD bounds "
-                f"remove as outliers. {RAW_DROPLET_REMEDY} Otherwise check whether "
+                f"remove as outliers. {remedy} Otherwise check whether "
                 "those cells are a real population that the bounds should keep."
             )
     split = _split_two_groups(work)
@@ -487,7 +495,7 @@ def _population_warning(
         f"population (median {float(np.median(raw[in_low])):.6g}) and {n_high} a "
         f"high population (median {float(np.median(raw[~in_low])):.6g}), and the "
         "MAD bounds keep most of the low population. MAD bounds assume one "
-        f"population of cells. {RAW_DROPLET_REMEDY}"
+        f"population of cells. {remedy}"
     )
 
 
@@ -500,6 +508,7 @@ def sample_aware_mad_mask(
     min_cells_per_sample: int,
     attrs: list[str],
     metric_policies: Mapping[str, MetricPolicy] | None = None,
+    remedy: str = RAW_DROPLET_REMEDY,
 ) -> tuple[np.ndarray, _MadProvenance]:
     """Build one cell mask from pooled or per-sample MAD bounds.
 
@@ -619,6 +628,7 @@ def sample_aware_mad_mask(
                     high=high,
                     high_work=high_t,
                     scaled_mad=scaled_mad,
+                    remedy=remedy,
                 )
                 if message is not None:
                     population_warnings.append(message)
@@ -850,6 +860,7 @@ def filter_cell_metrics(
     n_mads: float = 3.0,
     min_cells_per_sample: int = 20,
     metric_policies: Mapping[str, MetricPolicy] | None = None,
+    remedy: str = RAW_DROPLET_REMEDY,
 ) -> CellFilterResult:
     """Apply one QC filtering rule to metric rows aligned with ``active``.
 
@@ -861,7 +872,8 @@ def filter_cell_metrics(
     each metric's policy from ``metric_policies``, or from its name without
     them. Manual bounds must match the type of their values. The result must
     retain at least one active row; automatic bounds that remove more than
-    half of the active rows give a warning.
+    half of the active rows give a warning. ``remedy`` ends the warnings about
+    a second population, which by default suspect a raw droplet matrix.
     """
     active_mask = np.asarray(active, dtype=bool)
     attrs = list(values_by_attr)
@@ -918,6 +930,7 @@ def filter_cell_metrics(
                 min_cells_per_sample=min_cells_per_sample,
                 attrs=attrs,
                 metric_policies=metric_policies,
+                remedy=remedy,
             )
             keep &= mad_keep
     else:
@@ -932,7 +945,7 @@ def filter_cell_metrics(
             f"Automatic QC bounds removed {n_removed} of {n_active} selected cells "
             f"({n_removed / n_active:.0%}), so most selected cells lie outside "
             "bounds meant to remove outliers. Check the resolved bounds and the "
-            f"metric distributions. {RAW_DROPLET_REMEDY}"
+            f"metric distributions. {remedy}"
         )
     return CellFilterResult(
         retained=retained,

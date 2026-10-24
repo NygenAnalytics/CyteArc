@@ -219,9 +219,12 @@ and notebook outputs.
 
 Pages that are not about building an artifact lineage open a pre-analyzed store with `download_dataset(..., zarr=True)`.
 Source stores are rebuilt from raw counts, while declared derived stores are rebuilt from their published inputs.
-`scripts/regenerate_docs_datasets.py` writes both kinds and creates a manifest under
-`docs/source/developers/dataset_manifests/` recording the recipe, cell counts, artifact and
-pipeline-run inventories, and archive checksum:
+`scripts/regenerate_docs_datasets.py` writes both kinds and runs each store's analysis with the
+pipeline recipes, saving every run under a label: `rna`, `atac`, or `adt` for a modality, and
+`wnn` or `snn` for a joint run of `pipeline.multimodal`. It creates a manifest under
+`docs/source/developers/dataset_manifests/` recording the dataset recipe, cell counts, the artifact
+inventory, the pipeline-run inventory (each run's ID, label, recorded recipe, and status), and the
+archive checksum:
 
     uv run python scripts/regenerate_docs_datasets.py --all
 
@@ -239,7 +242,7 @@ prepared CyteArc analysis shared by the quick start and result-reuse tutorial. R
 `tabula_sapiens_100k` reuses `build/cytebase/tabula_sapiens/data.zarr` when it is present.
 Documentation rendering reads saved notebooks and does not rebuild either dataset.
 
-Rebuild a store whenever its recipe changes, or whenever the stored layout changes in a way that would stop the published artifacts from being reused.
+Rebuild a store whenever its dataset recipe changes, or whenever the stored layout changes in a way that would stop the published artifacts from being reused.
 Nothing leaves `build/cytebase` until you publish:
 
     uv run python scripts/publish_docs_datasets.py            # print the plan
@@ -248,6 +251,11 @@ Nothing leaves `build/cytebase` until you publish:
 Publishing replaces `<dataset>/data.zarr.tar.gz` and `<dataset>/manifest.json`.
 For stores used in remote examples, it also synchronizes their unpacked files.
 A dataset needs a matching generated manifest and archive before it can be published.
+
+The bucket paths carry no version, so publishing replaces the stores that the tutorials of every CyteArc version download.
+A rebuild whose stores the latest release cannot read, or whose run labels that release's tutorials do not open, breaks those tutorials until the next release.
+Stores rebuilt with the pipeline recipes are such a rebuild: the tutorials of CyteArc 1.3.0 open their saved run with `pipeline.open(label="docs_default")`, a label that the rebuilt stores do not hold, and the `report()` of 1.3.0 rejects stage records that carry `summary` or `warnings`.
+Note such a rebuild in the release's changelog, and publish it as close to the release as practical.
 
 ## Releasing
 
@@ -260,7 +268,7 @@ Every job checks out the exact commit that the release tag named when the releas
 - `smoke` runs `tests/smoke_wheel.py` on the built wheel on Linux with Python 3.13, 3.14, and 3.15 and on Windows with Python 3.13.
 
 `tests/smoke_wheel.py` checks that the wheel is pure Python and complete, installs it into a clean environment with `uv venv` and `uv pip install`, imports the public modules from the installed wheel, and runs `tests/smoke_workflow.py` with that environment's interpreter in isolated mode.
-That script imports a synthetic three-population count matrix with `SparseToZarr` and analyzes it with `pipeline.run`; the run must complete, its UMAP coordinates must be finite, and Leiden must find at least two clusters.
+That script imports a synthetic three-population count matrix with `SparseToZarr` and analyzes it with `pipeline.rna`; the run must complete, its UMAP coordinates must be finite, and Leiden must find at least two clusters.
 It then exports the run's raw counts and normalized values with `to_h5ad` in that environment, which has no `anndata`, and reads both files back with h5py.
 On Linux x86_64 the environment installs the `tsne` extra and the run must also produce finite t-SNE coordinates; on every other platform the environment has no `sgtsnepi`, and `embeddings.tsne` must raise the `ImportError` that names the extra.
 No smoke environment may have an `sgtsne` executable on `PATH`.

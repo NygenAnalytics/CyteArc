@@ -180,9 +180,13 @@ async def _released_call(executor: ThreadPoolExecutor, fn: Callable[[], T]) -> T
     calls = [fn]
     del fn
     results: list[T] = []
+    # The worker runs ``fn`` in the caller's context, as a thread of the
+    # operation would, so a pipeline stage's log context, collected warnings,
+    # and shutdown checkpoints reach it.
+    context = contextvars.copy_context()
 
     def call() -> None:
-        results.append(calls.pop()())
+        results.append(context.run(calls.pop()))
 
     await _await_completion(asyncio.get_running_loop().run_in_executor(executor, call))
     return results.pop()

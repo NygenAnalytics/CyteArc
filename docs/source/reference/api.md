@@ -4,8 +4,11 @@
 Public CyteArc surfaces for analysts:
 
 - `DataStore` and its documented methods
-- Graph-construction methods and `ds.pipeline.run`
+- Graph-construction methods and the pipeline recipes `ds.pipeline.rna`, `ds.pipeline.atac`,
+  `ds.pipeline.adt`, and `ds.pipeline.multimodal`
 - `ArtifactRef`, `ArtifactStatus`, `PipelineRun`, and strict artifact-resolution errors
+- `pipeline_listener`, `CancellationToken`, and `PipelineCancelled` for following and stopping
+  pipeline runs
 - `EnrichmentResult` and `read_gmt` for gene-set scoring
 - `cytearc.regulons` for SCENIC-style regulons, chromVAR motif activity, cistromes from motifs or
   CUT&RUN peaks, region-to-gene links, and co-regulated gene programs

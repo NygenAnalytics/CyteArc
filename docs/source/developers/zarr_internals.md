@@ -123,24 +123,47 @@ Pipeline run, stage, and label-claim documents use one strict unversioned shape.
 `runId`, `recipe`, `requestedLabel`, `label`, `assay`, `startedAtNs`, `finishedAtNs`, `status`,
 `complete`, `cytearcVersion`, `config`, `stageOrder`, `outputs`, `fields`, `error`, and
 `interruption`. A stage has exactly `stage`, `ordinal`, `startedAtNs`, `finishedAtNs`, `status`,
-`complete`, `outputs`, `plans`, `metrics`, `error`, and `interruption`. A label claim has exactly
-`label` and `runId`. Unknown or missing fields fail closed.
+`complete`, `outputs`, `plans`, `metrics`, `error`, and `interruption`, and may also hold the
+optional `summary` and `warnings`. A label claim has exactly `label` and `runId`. Unknown or
+missing fields fail closed.
 
 Within 1.x a release may only add fields, and a release that adds one must still read records
 written without it. No release removes, renames, retypes, or reinterprets a field, so a run of any
-1.x release reads in every later 1.x release. A run's `config` and a field descriptor's `display`
-are JSON mappings that readers do not check key by key: a later release may add keys to them, and
-code that reads such a key treats its absence as the behavior of the release that wrote the run.
+1.x release reads in every later 1.x release. The stage fields `summary` and `warnings` were added
+this way: CyteArc writes both on every stage record it creates, and reads a stage record of an
+earlier release, which lacks them, as one without a summary or warnings. A run's `config` and a
+field descriptor's `display` are JSON mappings that readers do not check key by key: a later
+release may add keys to them, and code that reads such a key treats its absence as the behavior
+of the release that wrote the run.
+
+A run's `recipe` names the recipe that wrote it: `rna`, `atac`, `adt`, or `multimodal`. Runs of
+earlier 1.x releases record `basic_rna_analysis`, the RNA pipeline that `pipeline.run` executed.
+The `config` of a single-modality run records `cells` (the boolean cell column, or the cell
+selection and, when it came from a run, that run's ID and label), `snapshotColumns`, `species`, and
+under `stages` the resolved settings of each stage keyword, `false` for a skipped optional stage
+and `{"enabled": false}` for skipped filtering; an RNA run also records `doubletSampleColumns`. A
+multimodal run's `config` records its `method`, its source runs under `sources`, the shared cell
+selection under `cells`, `snapshotColumns`, and its `stages`. Every run's `config` also records
+`shutdown`, whether the run could install its signal guard.
 
 Reopening a run reads its `config` as recorded and never checks it against the current recipe, so
 a run whose settings a later release rejects, such as the t-SNE setting `parallel`, still reopens
-and reports.
+and reports. A `basic_rna_analysis` run therefore reopens, reports, plots, and exports with the
+`cellKey`, per-option, and `params` configuration and the stage order that it recorded.
 A 2.0 release may change records with an entry in the compatibility inventory.
 
 The run record is created before `input_snapshot`; final outputs and field descriptors are written
 only when the complete recipe succeeds. A handled failure or interruption first commits terminal
-stage and run details. A hard process death can leave a run or stage incomplete. There is no
-on-disk resume, repair, or same-ID retry protocol.
+stage and run details. An interrupted run records an `interruption`, whose `kind` names the cause:
+`signal`, `shutdown_request`, `keyboard_interrupt`, `asyncio_cancelled`, or `cancelled` for a run
+stopped through its `CancellationToken`, whose reason becomes the `message`. A run that receives a
+signal after a cancellation records the kind of the first request, `cancelled`. The stage whose
+work the interruption cut short records the same `interruption`. A stage whose work had finished
+is recorded as completed, so a run that stops between stages, or just after a stage's work
+finished, holds the interruption on its run record only. `abandoned_label_claim` is a run-only
+kind as well: it marks an unfinished label owner that `pipeline.abandon_label_claim` interrupted,
+with its `reason` as the `message`. A hard process death can leave a run or stage incomplete.
+There is no on-disk resume, repair, or same-ID retry protocol.
 
 Requested run labels use append-only atomic claims below
 `pipeline/runs/.label-claims/{labelDigest}` while a run is finalized. The completed run record is
@@ -155,12 +178,34 @@ Catalog scans skip run children they cannot read, so one crash cannot hide healt
 warning that names each skipped run ID and its error. Opening such a `run_id` exactly raises that
 error.
 
-The first stage stores a cell-selection artifact, a `feature_universe` all-feature selection, and
-full-axis cell and feature metadata snapshots. Frozen `run.features["I"]` is backed by that
-immutable feature selection rather than the live feature `I` column. Stored selection integrity
-compares its Boolean payload and current ordered row-ID fingerprint, not the later value of the
-source metadata column. Frozen run views therefore survive live `I` changes but fail if row
-identities are replaced or reordered. Every check computes the current fingerprint from the IDs'
+The first stage, `input_snapshot`, stores a cell-selection artifact of the run's input cells, a
+`feature_universe` all-feature selection, and full-axis cell and feature metadata snapshots. Its
+`cell_snapshot` holds the cell IDs and names and the QC columns that filtering reads, the `attrs`
+and a MAD `sample_column`; the `filtering` stage and the run's `ids` and `names` cell fields read
+it. Its `feature_snapshot` holds the feature IDs and names of the run's assay, which the stages that
+name features and the run's feature fields read. Every other group of cell columns that a run reads
+is frozen apart, in a snapshot that the stage writes only when the run uses that group:
+
+- `capture_snapshot`, the capture column of per-capture cell calling, which the `cell_calling`
+  stage reads;
+- `harmony_snapshot`, the Harmony batch columns, which the `harmony` stage reads;
+- `doublet_sample_snapshot`, the columns whose labels split doublet scoring, which the `doublets`
+  stage reads;
+- `column_snapshot`, the run's `snapshot_columns`, which the run's cell fields of those columns
+  read.
+
+A column that one stage reads therefore never enters the provenance of what another stage
+computes: a run with Harmony or snapshot columns filters to the same cell-selection artifact as a
+run without them. The snapshots are outputs of the stage record, not run outputs. A run given a
+cell selection or a completed run as `cells` keeps that selection as its input instead of storing
+another one, so runs that share cells share one ref. A multimodal run keeps the selection that its
+source runs share, stores a `cell_snapshot` of the cell IDs and names only, beside a
+`column_snapshot` when it names `snapshot_columns`, and stores a feature snapshot and a feature
+universe for each modality. Frozen `run.features["I"]` is backed by that immutable feature
+selection rather than the live feature `I` column. Stored selection integrity compares its Boolean
+payload and current ordered row-ID fingerprint, not the later value of the source metadata column.
+Frozen run views therefore survive live `I` changes but fail if row identities are replaced or
+reordered. Every check computes the current fingerprint from the IDs'
 stored bytes: it reads their metadata document and encoded chunk objects, and decodes and hashes
 the IDs again only when those bytes differ from the ones that a previous check in the process
 fingerprinted (`cytearc.storage.content_stamps`). An in-place chunk write, a rewritten or deleted
@@ -170,6 +215,18 @@ Each completed or failed stage stores exact nested artifact-plan dispositions an
 process-tree RSS metrics. Artifact reuse comes from planning receipts, never timestamp inference.
 Timing, memory, run identity, and reuse state remain in the run ledger and never mutate an artifact.
 New artifacts store immutable creation time and creator CyteArc version for diagnostics only.
+
+A completed stage's `summary` is a JSON mapping of diagnostics that CyteArc computes from the
+stage's artifacts, such as the cells that filtering kept and removed or the scores of cluster
+selection, so a reused stage reports what a computed one would. A stage with several summarized
+outputs keys its summary by output, and a summary lists at most 50 samples, hashtags, captures,
+or components. Metadata snapshots and ANN indexes have no diagnostics, so the summary of
+`input_snapshot` holds only its input cell selection, when the stage made one, and its feature
+universe. A stage that did not complete, or whose outputs have no diagnostics, such as `ann_index`,
+holds a `summary` of `null`. A completed, failed, or interrupted stage's `warnings` lists, oldest
+first, the warnings that CyteArc logged or issued while the stage ran and computed its summary. It
+keeps at most the first 50, each at most 512 characters long: a longer warning is cut and ends with
+`...`, as a longer error message does. Running and skipped stages hold no warnings.
 
 ## Removed assay state
 
@@ -320,8 +377,9 @@ from the live `I` column before a metadata grouping without `cell_selection` sna
 `qc.hto_demultiplexing`, `qc.doublets`, `trajectory.markers` and
 `trajectory.aggregation` (the valid cells of the pseudotime), `imputation.compute_imputed` (feature names),
 `mapping.run` (the query assay), `to_anndata` with `matrix="normed"` and without a run,
-`pipeline.run`, which checks the cells of `cell_key` before any stage runs and never narrows them,
-also for each other assay whose metric its filtering stage names, and the quality-control filters
+the recipes `pipeline.rna`, `pipeline.atac`, and `pipeline.adt`, which check the cells of `cells`
+before any stage runs and never narrow them, also for the HTO assay that an RNA run's hashing
+stage reads and for each other assay whose metric its filtering stage names, and the quality-control filters
 `qc.auto_filter` and `qc.filter` for each metric of an assay that they filter on. A cell column is a metric of the assay whose preparation wrote it:
 `<assay>_nCounts`, `<assay>_nFeatures`, and the percentage columns that the assay records in its
 `percentFeatures` attribute (`cytearc.storage.identity.generated_cell_columns`); the column is found
@@ -330,9 +388,10 @@ assay is a metric of that assay. A cell that the column marks False raises
 `cytearc.metadata.membership.UnmeasuredCellsError`, a `ValueError` whose `operation`, `assay`,
 `column`, `unmeasured`, `selected`, `remedy`, and `cell_key` attributes name the refusal, and whose
 message names the remedy for the operation's input: a cell selection from `select_measured_cells`,
-passed as `cell_selection=` to `compare.compute_bulk`, `compare.test`, and the QC filters, labels
-narrowed with `snapshot_cluster_labels`, a graph built over measured cells, or a `cell_key` column
-that is True only for the cells of the caller's column that the assay measured, such as one that
+passed as `cell_selection=` to `compare.compute_bulk`, `compare.test`, and the QC filters and as
+`cells=` to a pipeline recipe, labels narrowed with `snapshot_cluster_labels`, a graph built over
+measured cells, or a boolean column that is True only for the cells of the caller's column that
+the assay measured, passed as `cell_key` or as a recipe's `cells`, such as one that
 `ds.cells.insert("RNA_measured", ds.cells.fetch_all("I") & ds.cells.fetch_all("RNA_I"))` writes;
 the membership column alone also holds cells outside `I`. Operations that read only other results
 or metadata, such as PCA, neighbors, clustering, layouts, and `snapshot_cluster_labels`, do not

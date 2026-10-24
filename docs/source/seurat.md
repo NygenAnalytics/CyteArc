@@ -25,7 +25,7 @@ importing an `.rds` file, the CyteArc column describes analysis on the resulting
 | Scale, reduce, and find neighbours | `ScaleData`, `RunPCA`, `FindNeighbors` | `ds.reduction.pca` standardizes features by default, followed by CyteArc's neighbour-graph methods |
 | Embed and cluster | `RunUMAP`, `FindClusters` | `ds.embeddings.umap`, `ds.clusters.leiden` |
 | Correct batches with Harmony | Harmony integration after PCA | `ds.reduction.harmony` after PCA, followed by graph construction |
-| Integrate modalities with WNN | `FindMultiModalNeighbors` | Build neighbours per assay, then call `ds.integration.modalities(...)`; WNN is the default |
+| Integrate modalities with WNN | `FindMultiModalNeighbors` | Run each modality's recipe over the same cells, then `ds.pipeline.multimodal([rna_run, adt_run])`; or build neighbours per assay and call `ds.integration.modalities(...)`. WNN is the default |
 
 CyteArc WNN follows the published weighting equations but uses the supplied neighbour candidates
 rather than Seurat's wider default search. See [](tutorials/multimodal_diagnostics.ipynb) before
@@ -87,9 +87,11 @@ Inspection reports each reduction's `assayUsed` and `role`, along with input not
 anything is written. Review the writer's returned notices too: choices made during import,
 including the SCT-to-RNA default-assay change, are reported there.
 
-Typical next steps are `ds.pipeline.run()`, [](tutorials/scrna_seq.ipynb), or
-[](tutorials/graph_construction.ipynb). For multimodal data, build a neighbour artifact per assay
-before calling `integration.modalities`. When you only need raw matrices, original 10x HDF5 or Matrix
+Typical next steps are `ds.pipeline.rna()`, [](tutorials/scrna_seq.ipynb), or
+[](tutorials/graph_construction.ipynb). For multimodal data, analyze the other modalities over the
+cells of the RNA run, such as `adt_run = ds.pipeline.adt(cells=rna_run)`, and integrate the runs
+with `ds.pipeline.multimodal([rna_run, adt_run])`; or build a neighbour artifact per assay before
+calling `integration.modalities`. When you only need raw matrices, original 10x HDF5 or Matrix
 Market counts are still preferable to an RDS export.
 
 To return to Seurat, write H5AD or Matrix Market from CyteArc and convert or import it with the tools

@@ -7,6 +7,7 @@ samples and check what ``qc.doublets`` recovers, that each sample simulates
 and scores doublets alone, and that the scores are stable across seeds.
 """
 
+import inspect
 import math
 import shutil
 from dataclasses import dataclass, replace
@@ -21,7 +22,8 @@ from sklearn.metrics import roc_auc_score
 
 import cytearc.storage.operation_revisions as operation_revisions
 from cytearc import DataStore
-from cytearc.datastore._pipeline_recipe import resolve_pipeline_recipe
+from cytearc.datastore._pipeline.recipes import rna as rna_recipe
+from cytearc.datastore.pipeline_accessor import PipelineAccessor
 from cytearc.quality_control import doublets
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.storage.budget import ResourceBudget
@@ -1050,65 +1052,75 @@ def test_internal_doublet_samples_need_one_label_array_per_column(
 
 
 def test_pipeline_resolves_doublet_samples_from_settings_and_harmony(
-    datastore_zarr_root,
+    datastore_zarr_root, monkeypatch
 ):
     store = DataStore(datastore_zarr_root, default_assay="RNA", zarr_mode="r")
-    options = {
-        "assay": None,
-        "label": None,
-        "cell_key": "I",
-        "filtering": False,
-        "harmony_batch_columns": None,
-        "hvg_count": 1000,
-        "pca_dims": 21,
-        "neighbors_k": 11,
-        "umap": True,
-        "leiden": True,
-        "cell_cycle": True,
-        "paris": True,
-        "doublets": True,
-        "markers": True,
-        "snapshot_columns": (),
+    # The other keywords of a public call, at their defaults.
+    parameters = inspect.signature(PipelineAccessor.rna).parameters
+    defaults = {
+        name: parameter.default
+        for name, parameter in parameters.items()
+        if name not in {"self", "callback", "cancel"}
     }
+    # The columns that each resolved recipe freezes in its input snapshot.
+    snapshots: list[dict[str, Any]] = []
+    snapshot_stage = rna_recipe.input_snapshot_stage
+
+    def recorded(cells, **options: Any):
+        snapshots.append(options)
+        return snapshot_stage(cells, **options)
+
+    monkeypatch.setattr(rna_recipe, "input_snapshot_stage", recorded)
 
     def resolve(**overrides: Any):
-        return resolve_pipeline_recipe(store, **(options | overrides))
+        return rna_recipe.resolve_rna(store, **(defaults | overrides))
+
+    def samples(**overrides: Any) -> list[str]:
+        return resolve(**overrides).config["doubletSampleColumns"]
 
     pooled = resolve()
-    assert pooled.doublet_sample_columns == ()
-    assert pooled.to_config()["doubletSampleColumns"] == []
-    named = resolve(params={"doublets": {"sample_column": "ids"}})
-    assert named.doublet_sample_columns == ("ids",)
-    assert named.to_config()["doubletSampleColumns"] == ["ids"]
+    assert pooled.config["doubletSampleColumns"] == []
+    named = resolve(doublets={"sample_column": "ids"})
+    assert named.config["doubletSampleColumns"] == ["ids"]
     # The recipe resolves the samples; the run records the setting as given.
-    assert named.to_config()["params"]["doublets"] == {"sample_column": "ids"}
+    assert named.config["stages"]["doublets"] == {"sample_column": "ids"}
     # Doublet samples are frozen apart, so the cell snapshot, and the
     # identities of the stages that read it, do not change.
-    assert named.cell_snapshot_columns == pooled.cell_snapshot_columns
+    pooled_snapshot, named_snapshot = snapshots
     assert (
-        resolve(params={"doublets": {"sample_column": None}}).doublet_sample_columns
-        == ()
+        named_snapshot["cell_snapshot_columns"]
+        == pooled_snapshot["cell_snapshot_columns"]
     )
-    # With Harmony, doublets are scored within each batch by default.
-    harmony = resolve(harmony_batch_columns=["ids", "names"])
-    assert harmony.doublet_sample_columns == ("ids", "names")
-    chosen = resolve(
-        harmony_batch_columns=["ids"],
-        params={"doublets": {"sample_column": "names"}},
-    )
-    assert chosen.doublet_sample_columns == ("names",)
+    assert pooled_snapshot["extra_snapshots"] == {}
+    assert named_snapshot["extra_snapshots"] == {"doublet_sample_snapshot": ("ids",)}
+    assert samples(doublets={"sample_column": None}) == []
+    # With Harmony, doublets are scored within each batch by default. The
+    # batches are frozen for Harmony and for doublets apart from the cell
+    # snapshot, which Harmony leaves as it is.
+    assert samples(harmony={"batch_columns": ["ids", "names"]}) == ["ids", "names"]
+    harmony_snapshot = snapshots[-1]
     assert (
-        resolve(harmony_batch_columns=["ids"], doublets=False).doublet_sample_columns
-        == ()
+        harmony_snapshot["cell_snapshot_columns"]
+        == pooled_snapshot["cell_snapshot_columns"]
     )
+    assert harmony_snapshot["extra_snapshots"] == {
+        "harmony_snapshot": ("ids", "names"),
+        "doublet_sample_snapshot": ("ids", "names"),
+    }
+    chosen = samples(
+        harmony={"batch_columns": ["ids"]},
+        doublets={"sample_column": "names"},
+    )
+    assert chosen == ["names"]
+    assert samples(harmony={"batch_columns": ["ids"]}, doublets=False) == []
     with pytest.raises(ValueError, match="cannot be None"):
         resolve(
-            harmony_batch_columns=["ids"],
-            params={"doublets": {"sample_column": None}},
+            harmony={"batch_columns": ["ids"]},
+            doublets={"sample_column": None},
         )
     with pytest.raises(TypeError, match="non-empty string or None"):
-        resolve(params={"doublets": {"sample_column": ""}})
+        resolve(doublets={"sample_column": ""})
     with pytest.raises(KeyError, match="Doublet sample column 'missing'"):
-        resolve(params={"doublets": {"sample_column": "missing"}})
+        resolve(doublets={"sample_column": "missing"})
     with pytest.raises(ValueError, match="collide with reserved run fields"):
         resolve(snapshot_columns=("predicted_doublet",))

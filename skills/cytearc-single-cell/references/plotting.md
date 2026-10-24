@@ -214,7 +214,8 @@ r = ds.plots.cluster_connectivity(
 )
 r.tables["edges"]  # source, target, rawWeight, normalizedWeight
 r.close()
-ds.plots.cluster_tree(graph=graph, clusters=run["paris"], show=False).close()
+paris = ds.clusters.paris(graph)  # or run["paris"] of a paris=True run
+ds.plots.cluster_tree(graph=graph, clusters=paris, show=False).close()
 splt.graph_qc(ds.graph.load(graph=graph), show=False).close()
 ds.plots.composition(categories=run["clusters"], show=False).close()  # one stacked bar
 r = ds.plots.composition(category_by="cell_type", sample_by="sample_id", kind="stacked", show=False)
@@ -223,7 +224,9 @@ r.close()
 ```
 
 `kind="per_sample"` with a `StudyDesign` draws a strip of per-sample proportions per category
-instead; see integration-and-comparisons.md.
+instead; see integration-and-comparisons.md. For a WNN run,
+`ds.plots.modality_weights(graph=wnn["integrated_graph"], layout=wnn["umap"], show=False)` draws
+each modality's weight per cell, and run mode colors by the frozen `weight_<assay>` fields.
 
 ### Compose panels in a figure you own
 
@@ -274,7 +277,8 @@ plt.close(fig)
 - Run mode reads only the run. A live column, or any name that is neither a frozen field nor a
   gene, raises `KeyError` listing the run's fields; a ref that is not a run output, and a gene
   without `normalization=`, raise `ValueError`. Freeze live columns with `snapshot_columns=` when
-  running the pipeline, or switch to `layout=run["umap"]`.
+  running the recipe, or switch to `layout=run["umap"]`. `"paris"` exists only in a `paris=True`
+  run.
 - `layout="umap"` without `run=` raises `TypeError`. The pipeline writes no `RNA_UMAP*` columns,
   so `layout_key="RNA_UMAP"` fails on pipeline-only stores.
 - `groups` filters categories in `embedding` and `distribution` but is the cluster ref in

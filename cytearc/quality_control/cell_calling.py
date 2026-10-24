@@ -1168,7 +1168,7 @@ def run_empty_drops(
     if not len(tested):
         raise ValueError(
             f"No barcode has more than lower={lower} counts, so no barcode can "
-            "be tested; lower lower to test barcodes with fewer counts."
+            "be tested; decrease lower to test barcodes with fewer counts."
         )
     ranks = barcode_ranks(totals, lower=lower)
     if settings.retain is not None:

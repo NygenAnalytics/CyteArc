@@ -20,8 +20,12 @@ wnn = ds.integration.modalities([rna_neighbors, adt_neighbors])
 snn = ds.integration.modalities([rna_graph, adt_graph], method="snn")
 ```
 
-WNN also rejects neighbours built on normalized values, as a pipeline run with `pca_dims=0`
-builds them, because it weighs each assay by its reduced coordinates; SNN integrates such graphs.
+WNN also rejects neighbours built on normalized values, as an RNA pipeline run with
+`pca={"dims": 0}` builds them, because it weighs each assay by its reduced coordinates; SNN
+integrates such graphs.
+
+`ds.pipeline.multimodal([rna_run, adt_run])` runs this integration over completed pipeline runs of
+the same cells, then embeds and clusters the integrated graph as a durable run ({doc}`pipeline`).
 
 Integration holds its inputs in memory: SNN every source graph with a float64 matrix of
 shared-neighbour fractions per graph, about `16 * n_graphs + 20` bytes per edge, and WNN every
@@ -170,7 +174,7 @@ names each level `"{column}_{level}"`.
 
 The datastore checks `harmony_params` with
 {py:func}`~cytearc.embeddings.harmony.validate_harmony_parameters` before it reads data, and a
-pipeline checks `params["harmony"]["harmony_params"]` when it resolves its recipe, before it
+pipeline recipe checks `harmony={"harmony_params": ...}` when it validates its call, before it
 creates a run record. Keys of the earlier Harmony implementation raise `ValueError`:
 
 | Earlier key | Use instead | Message |

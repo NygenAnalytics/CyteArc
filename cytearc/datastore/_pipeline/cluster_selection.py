@@ -4,42 +4,43 @@ from typing import Any
 import numpy as np
 import zarr
 
-from ..graph.feature_projection import (
+from ...graph.feature_projection import (
     resolve_coordinate_inputs,
     resolve_native_graph_inputs,
 )
-from ..matrix import ChunkedArray
-from ..metrics.cluster_selection import (
+from ...matrix import ChunkedArray
+from ...metrics.cluster_selection import (
     DEFAULT_MIN_CLUSTER_QUOTA,
     SHARED_CLUSTER_QUOTA_STRATEGY,
     ClusterSelectionResult,
     select_clusters_by_silhouette,
     shared_cluster_quota_sample_indices,
 )
-from ..storage.artifact_writer import (
+from ...storage.artifact_writer import (
     ArrayRequirement,
     AttributeRequirement,
     artifact_transaction,
     plan_artifact,
 )
-from ..storage.artifacts import (
+from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
     require_complete_artifact,
 )
-from ..storage.arrays import create_zarr_dataset
-from ..storage.errors import ArtifactResolutionError
-from ..storage.types import as_zarr_array
-from ..utils.arguments import integer_argument
-from ..utils.shutdown import shutdown_checkpoint
+from ...storage.arrays import create_zarr_dataset
+from ...storage.errors import ArtifactResolutionError
+from ...storage.types import as_zarr_array
+from ...utils.arguments import integer_argument
+from ...utils.shutdown import shutdown_checkpoint
 
-# The coordinates that cluster selection scores, by kind: the operation that
-# must have produced them and its name in errors. A pipeline run with
-# ``pca_dims=0`` builds its graph on the normalized values.
+# The coordinates that cluster selection scores, by kind: the operations that
+# may have produced them and their names in errors. An RNA run with
+# ``pca={"dims": 0}`` builds its graph on the normalized values, and an ATAC
+# run builds it on LSI coordinates.
 _COORDINATE_OPERATIONS = {
-    "reduction": ("run_pca", "PCA"),
-    "batch_correction": ("run_harmony", "Harmony"),
-    "normalized": ("run_normalization", "run_normalization"),
+    "reduction": (frozenset({"run_pca", "run_lsi"}), "PCA or LSI"),
+    "batch_correction": (frozenset({"run_harmony"}), "Harmony"),
+    "normalized": (frozenset({"run_normalization"}), "run_normalization"),
 }
 # sklearn's working memory covers the distance output, not its temporaries.
 # Traced allocations can exceed twice that output size. This coarse allowance
@@ -85,12 +86,12 @@ def _validate_inputs(
     expected = _COORDINATE_OPERATIONS.get(coordinates.kind)
     if expected is None or coordinates.scope != "assay" or coordinates.assay is None:
         raise ValueError(
-            "coordinates must be an assay-scoped PCA reduction, Harmony "
+            "coordinates must be an assay-scoped PCA or LSI reduction, Harmony "
             "batch-correction, or normalized artifact"
         )
-    expected_operation, operation_name = expected
+    expected_operations, operation_name = expected
     coordinate_status = require_complete_artifact(store.zw, coordinates)
-    if coordinate_status.operation != expected_operation:
+    if coordinate_status.operation not in expected_operations:
         raise ValueError(f"coordinates must reference a {operation_name} artifact")
     if not isinstance(connectivity_map, ArtifactRef):
         raise TypeError("connectivity_map must be an ArtifactRef")

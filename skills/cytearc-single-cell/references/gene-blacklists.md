@@ -110,8 +110,8 @@ print("left:", sorted(selected(hvg_default) - selected(hvg_fixed)))
 blocked = re.compile(HUMAN_BLACKLIST, re.IGNORECASE)
 assert not any(blocked.match(gene) for gene in selected(hvg_fixed))
 
-run_fixed = ds.pipeline.run(label="baseline_blacklist_fixed",
-                            params={"hvg": {"blacklist": HUMAN_BLACKLIST}})
+run_fixed = ds.pipeline.rna(label="baseline_blacklist_fixed",
+                            hvg={"blacklist": HUMAN_BLACKLIST})
 print(run_fixed["highly_variable_features"] == hvg_fixed,
       ds.artifacts.inspect(run_fixed["highly_variable_features"]).parameters["blacklist"]
       == HUMAN_BLACKLIST)
@@ -152,7 +152,7 @@ print(frac.round(2).to_string())
 | Parameter | Default | Change when |
 | --- | --- | --- |
 | `features.hvgs(blacklist=)` | `DEFAULT_HVG_BLACKLIST` | Pass a species string when the cyclin, ribosomal, sex-gene, or Ig choices matter. |
-| `params={"hvg": {"blacklist": ...}}` | default regex | Same string through `ds.pipeline.run`; new label per string. |
+| `hvg={"blacklist": ...}` | default regex | Same string through `ds.pipeline.rna`; new label per string. |
 | `blacklist=""` | | Diagnostics only: shows what the name filter removes. |
 | `features.hvgs(max_cells=)` | detection in at most 99.5% of the selected cells | `np.inf` lets ubiquitous genes compete; the blacklist then matters more. |
 
@@ -184,4 +184,4 @@ print(frac.round(2).to_string())
 - `features-and-graphs.md`: HVG diagnostics and branching the graph.
 - `quality-control.md`: `percentMito`, `percentRibo` and `qc.feature_percentage`.
 - `markers-and-annotation.md`: marker tables and panels used for the add-on decisions.
-- `pipeline-runs-and-artifacts.md`: `params`, labels and artifact identity.
+- `pipeline-runs-and-artifacts.md`: stage keywords, labels and artifact identity.

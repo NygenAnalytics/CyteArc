@@ -39,8 +39,14 @@ reuse
 : Returning an existing artifact instead of recomputing it, when the requested operation, parameters, and inputs match its provenance.
   Changing a parameter produces a new artifact, and the steps that depended on the previous one are recomputed rather than reused.
 
+pipeline recipe
+: A `ds.pipeline` method that runs a fixed sequence of analysis stages and records the invocation
+  as a `PipelineRun`: `rna`, `atac`, and `adt` each analyze one assay, and `multimodal` integrates
+  completed runs of the same cells. Each stage keyword takes the settings of the stage's method.
+
 PipelineRun
-: Durable handle returned by `ds.pipeline.run()` and reopened through `ds.pipeline.open(...)`.
+: Durable handle returned by a pipeline recipe, such as `ds.pipeline.rna()`, and reopened through
+  `ds.pipeline.open(...)`.
   It maps stable output names to artifacts and exposes frozen cell and feature views plus reports.
   Plotting, marker loading, and export remain `DataStore` operations.
 
@@ -53,14 +59,15 @@ highly variable genes
 : Features selected with `features.hvgs` for neighbourhood-graph construction.
 
 neighbourhood graph
-: KNN graph of cells built by individual graph-construction methods or `ds.pipeline.run`.
+: KNN graph of cells built by individual graph-construction methods or a pipeline recipe.
   Embeddings, clustering, mapping, and multimodal integration reuse this graph.
 
 cell key
 : Boolean column in cell metadata that can be captured as an analytical input.
   Default is `I`.
   Filtering snapshots it into an immutable selection artifact, combines thresholds with that
-  selection, and leaves the column unchanged.
+  selection, and leaves the column unchanged. Pipeline recipes take it, or a selection artifact,
+  as `cells`.
 
 DataStore
 : Python interface to a CyteArc datastore containing Zarr-backed counts, metadata, and analysis artifacts.
@@ -81,7 +88,7 @@ assay
 : Named modality inside a `DataStore` (for example `RNA`, `ADT`, `ATAC`).
 
 Harmony
-: Batch correction of PCA coordinates with `reduction.harmony`, CyteArc's implementation of Harmony2, before ANN construction.
+: Batch correction of reduced coordinates, such as PCA or LSI, with `reduction.harmony`, CyteArc's implementation of Harmony2, before ANN construction.
 
 partial PCA
 : PCA trained on an immutable cell subset via `pca_cell_selection`.
@@ -127,11 +134,13 @@ Paris clustering
 
 Leiden clustering
 : Graph community detection via `clusters.leiden`.
-  A manual call returns a cluster-label artifact without adding metadata columns. The RNA pipeline
-  runs default resolutions `0.5`, `0.75`, `1.0`, and `1.25`, plus Paris unless disabled. Its
-  artifact-backed silhouette stage scores Leiden resolutions in the graph's coordinate space, and
-  `run["clusters"]` is the selected Leiden candidate's exact ref. Paris remains a diagnostic run
-  output. This automatic choice is a reproducible baseline, not biological validation.
+  A manual call returns a cluster-label artifact without adding metadata columns. The `rna`,
+  `atac`, and `adt` pipeline recipes run the resolutions `0.5`, `0.75`, `1.0`, and `1.25` by
+  default, and Paris only with `paris=True`. Their artifact-backed silhouette stage scores Leiden
+  resolutions in the graph's coordinate space, and `run["clusters"]` is the selected Leiden
+  candidate's exact ref. Paris remains a diagnostic run output. This automatic choice is a
+  reproducible baseline, not biological validation. A `multimodal` run clusters at `1.0` by
+  default and saves its only or selected resolution.
 
 SNN integration
 : Shared-nearest-neighbor merge of explicit modality-specific connectivity-map refs via

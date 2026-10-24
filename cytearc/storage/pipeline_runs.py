@@ -75,6 +75,10 @@ _STAGE_FIELDS = frozenset(
         "interruption",
     }
 )
+# Stage fields that later 1.x releases added; a record without them still reads.
+_STAGE_OPTIONAL_FIELDS = frozenset({"summary", "warnings"})
+# A stage record keeps at most this many warnings, each bounded like a message.
+STAGE_WARNING_LIMIT = 50
 _OUTPUT_FIELDS = frozenset({"key", "artifact"})
 _STAGE_OUTPUT_FIELDS = frozenset({"outputKey", "artifact", "reused"})
 _PLAN_FIELDS = frozenset({"operation", "ref", "disposition"})
@@ -203,11 +207,13 @@ def _exact_mapping(
     value: Any,
     expected: frozenset[str],
     name: str,
+    optional: frozenset[str] = frozenset(),
 ) -> Mapping[str, Any]:
     result = _mapping(value, name)
-    if set(result) != expected:
-        missing = sorted(expected - set(result))
-        extra = sorted(set(result) - expected)
+    present = set(result) - optional
+    if present != expected or not set(result) <= expected | optional:
+        missing = sorted(expected - present)
+        extra = sorted(set(result) - expected - optional)
         details = []
         if missing:
             details.append(f"missing {missing}")
@@ -638,10 +644,26 @@ class PipelineStageRecord:
     metrics: PipelineStageMetrics | None
     error: PipelineErrorRecord | None
     interruption: PipelineInterruptionRecord | None
+    # The stage's diagnostics, computed from its outputs once it completed.
+    summary: Mapping[str, Any] | None = None
+    # The warnings logged while the stage ran, oldest first.
+    warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_non_empty_string(self.stage, "stage")
         _validate_non_negative_int(self.ordinal, "stage ordinal")
+        if self.summary is not None:
+            object.__setattr__(
+                self, "summary", _json_mapping(self.summary, "stage summary")
+            )
+        if not isinstance(self.warnings, tuple) or any(
+            not isinstance(warning, str) or not warning for warning in self.warnings
+        ):
+            raise TypeError("stage warnings must be a tuple of non-empty strings")
+        if len(self.warnings) > STAGE_WARNING_LIMIT or any(
+            len(warning) > _RECORD_TEXT_LIMIT for warning in self.warnings
+        ):
+            raise ValueError("stage warnings exceed the record limits")
         _validate_positive_int(self.started_at_ns, "stage started_at_ns")
         if self.finished_at_ns is not None:
             _validate_positive_int(self.finished_at_ns, "stage finished_at_ns")
@@ -674,9 +696,13 @@ class PipelineStageRecord:
                 raise ValueError("running stages cannot contain receipts")
             if self.error is not None or self.interruption is not None:
                 raise ValueError("running stages cannot contain terminal details")
+            if self.summary is not None or self.warnings:
+                raise ValueError("running stages cannot contain diagnostics")
             return
         if self.finished_at_ns is None or self.metrics is None:
             raise ValueError("terminal stages require finish time and metrics")
+        if self.summary is not None and self.status != "completed":
+            raise ValueError("only completed stages can hold a summary")
         if self.status == "skipped" and self.outputs:
             raise ValueError("skipped stages cannot claim outputs")
         if self.status == "failed":
@@ -705,11 +731,22 @@ class PipelineStageRecord:
             "interruption": (
                 None if self.interruption is None else self.interruption.to_dict()
             ),
+            "summary": None if self.summary is None else dict(self.summary),
+            "warnings": list(self.warnings),
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "PipelineStageRecord":
-        raw = _exact_mapping(value, _STAGE_FIELDS, "pipeline stage")
+        raw = _exact_mapping(
+            value,
+            _STAGE_FIELDS,
+            "pipeline stage",
+            optional=_STAGE_OPTIONAL_FIELDS,
+        )
+        summary = raw.get("summary")
+        warnings = raw.get("warnings", ())
+        if not isinstance(warnings, Sequence) or isinstance(warnings, str | bytes):
+            raise TypeError("stage warnings must be a sequence")
         status = raw["status"]
         if status not in {
             "running",
@@ -766,6 +803,8 @@ class PipelineStageRecord:
                     _mapping(interruption, "stage interruption")
                 )
             ),
+            summary=None if summary is None else _mapping(summary, "stage summary"),
+            warnings=tuple(warnings),
         )
 
 
@@ -1414,6 +1453,8 @@ def finish_pipeline_stage_record(
     error: PipelineErrorRecord | BaseException | None = None,
     interruption: PipelineInterruptionRecord | None = None,
     finished_at_ns: int | None = None,
+    summary: Mapping[str, Any] | None = None,
+    warnings: Sequence[str] = (),
 ) -> PipelineStageRecord:
     run = load_pipeline_run_record(root, run_id)
     if run.complete or run.status != "running":
@@ -1444,6 +1485,11 @@ def finish_pipeline_stage_record(
         metrics=metrics,
         error=resolved_error,
         interruption=interruption,
+        summary=summary,
+        # An empty warning carries nothing to record, so it never blocks one.
+        warnings=tuple(
+            bounded_record_text(str(warning)) for warning in warnings if warning
+        )[:STAGE_WARNING_LIMIT],
     )
     _write_terminal_attrs(
         _get_group(root, pipeline_stage_path(run_id, ordinal), "Pipeline stage"),

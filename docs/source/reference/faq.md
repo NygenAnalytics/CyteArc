@@ -23,7 +23,8 @@ between CyteArc and Seurat WNN are summarized below.
 
 After PCA, call `corrected = ds.reduction.harmony(pca, ["batch_column"])`, then pass `corrected`
 explicitly to `embeddings.initialization` and `graph.ann_index`. Continue by passing the
-returned refs to `graph.neighbors` and `graph.connectivity`.
+returned refs to `graph.neighbors` and `graph.connectivity`. A pipeline recipe does the same with
+`ds.pipeline.rna(harmony={"batch_columns": ["batch_column"]})`.
 See {ref}`Harmony batch correction <harmony_batch_correction>` and the {ref}`dataset integration guide <integration_guide>`.
 
 ## How does CyteArc's Harmony2 differ from its earlier Harmony?
@@ -44,8 +45,8 @@ the change, such as `Unsupported Harmony parameter 'nclust': it was renamed to '
 - `cluster_fn` is removed, because clusters are seeded with k-means++.
 
 `max_iter_harmony` must now be at least 1, and it defaults to 40: a fit stops as soon as it
-converges, so the limit only bounds fits that settle slowly. Rename the keys in saved pipeline configurations too: a
-pipeline checks them before it creates a run record.
+converges, so the limit only bounds fits that settle slowly. Rename the keys in the `harmony`
+settings of pipeline recipes too: a recipe checks them before it creates a run record.
 
 By default the ridge penalty is dynamic: `ridge_alpha` (0.2) times each level's expected mass in
 the cluster, its share of all cells times the cluster's total assignment. Where a level has about
@@ -81,6 +82,8 @@ cytearc.configure_output(level="WARNING", progress=False)
 
 For a batch log file, use `set_verbosity(..., filepath=...)`.
 Enable timestamps with `configure_output(timestamps=True)`.
+An application that configures the standard library's `logging` can receive CyteArc's records on
+the `"cytearc"` logger with `configure_output(stdlib=True)`.
 See [Utilities API reference](/api/utilities.html) for all output settings and their defaults.
 Tutorial pages show completed snapshots from their cached execution; live notebooks animate the same operations.
 
@@ -155,15 +158,16 @@ ds.plots.cluster_tree(
 )
 ```
 
-Use silhouette scores or domain knowledge to compare the candidates. The RNA pipeline scores
-Leiden resolutions automatically in graph space and exposes the selected ref as `run["clusters"]`.
+Use silhouette scores or domain knowledge to compare the candidates. The `rna`, `atac`, and `adt`
+pipeline recipes score Leiden resolutions automatically in graph space and expose the selected ref
+as `run["clusters"]`; they run Paris only with `paris=True`.
 That result is a reproducible baseline, not proof that the selected resolution is biologically
 correct. Granular evaluation APIs such as `evaluate_cluster_separability` can inspect partitions
 outside the pipeline.
 
 ## Why do Leiden clusters differ from an earlier CyteArc release?
 
-`clusters.leiden` and the pipeline now use CyteArc's own Leiden implementation,
+`clusters.leiden` and the pipeline recipes now use CyteArc's own Leiden implementation,
 `backend="cytearc"`, by default; earlier releases used the igraph package. Both optimize the same
 modularity objective, but their random choices differ, so their labels differ even for the same
 seed, and the new backend numbers clusters by size, with cluster 1 the largest. Compare partitions
@@ -194,6 +198,18 @@ To build the cache into a deployment image, run a small analysis with `NUMBA_CAC
 building it, and set `NUMBA_CPU_NAME` (for example `x86-64-v3`) and an empty
 `NUMBA_CPU_FEATURES` both then and at run time, so the cache does not depend on the build
 machine's processor; the machines that run the image must support that processor level.
+
+## Where did `ds.pipeline.run` go?
+
+`DataStore.pipeline.run()` and its `params` mapping are removed. This is a breaking change within
+the 1.x releases with no alias, so `ds.pipeline.run` raises `AttributeError`. Call
+`ds.pipeline.rna()`, which takes one keyword per stage: `hvg={"top_n": 2000}` replaces
+`hvg_count=2000`, `pca={"dims": 30}` replaces `pca_dims=30`, `cells="x"` replaces `cell_key="x"`,
+and `umap={...}` replaces `params={"umap": {...}}`. Paris is off by default; pass `paris=True` to
+run it. `ds.pipeline.atac()` and `ds.pipeline.adt()` analyze other assays, and
+`ds.pipeline.multimodal()` integrates completed runs of the same cells. Runs that
+`pipeline.run()` saved still open and report. The
+[Analysis pipeline API reference](/api/pipeline.html) lists every replacement.
 
 ## Why will my existing RNA Zarr store not open?
 

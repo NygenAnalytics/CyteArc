@@ -11,7 +11,6 @@ import pandas as pd
 import pytest
 
 from scripts import regenerate_docs_datasets as generator
-from cytearc.storage import ArtifactRef
 
 
 def test_labelled_cluster_mask_rejects_blank_and_nan_values():
@@ -86,6 +85,81 @@ def test_prepared_run_columns_are_explicit_full_axis_copies():
     np.testing.assert_array_equal(store.cells.columns["I"], [True, False, True])
 
 
+class _PreparedCells:
+    """Record the teaching columns that a prepared store's cells receive."""
+
+    def __init__(self, n_cells: int) -> None:
+        self.N = n_cells
+        # A selection that the run's own must replace, not narrow.
+        self.columns = {"I": np.arange(n_cells) != 0}
+
+    def insert(
+        self,
+        name: str,
+        values: np.ndarray,
+        *,
+        fill_value: object,
+        overwrite: bool,
+    ) -> None:
+        # Full-axis values leave no row to the fill.
+        assert len(values) == self.N
+        assert overwrite is True
+        self.columns[name] = np.asarray(values)
+
+    def reset_key(self, key: str) -> None:
+        self.columns[key] = np.ones(self.N, dtype=bool)
+
+    def update_key(self, values: np.ndarray, key: str) -> None:
+        self.columns[key] &= np.asarray(values, dtype=bool)
+
+
+def test_prepared_run_columns_hold_the_fills_of_the_run_fields():
+    from tests.test_pipeline_run_foundation import _completed_run, _root
+
+    # A completed run of four cells that analyzed cells 0 and 2, with UMAP
+    # coordinates and cluster labels.
+    run = _completed_run(_root())
+    store = SimpleNamespace(cells=_PreparedCells(4))
+
+    generator._materialize_run_cell_columns(
+        store,
+        run,
+        {"RNA_UMAP1": "umap_1", "RNA_clusters": "clusters"},
+        set_selection=False,
+    )
+
+    # Unselected cells hold each field's fill: NaN for coordinates and -1
+    # for labels, which no cluster takes.
+    np.testing.assert_allclose(
+        store.cells.columns["RNA_UMAP1"], [1.0, np.nan, 3.0, np.nan], equal_nan=True
+    )
+    np.testing.assert_array_equal(store.cells.columns["RNA_clusters"], [0, -1, 2, -1])
+    # Without set_selection the prepared store keeps its own selection; with
+    # it, the run's selection replaces that selection.
+    np.testing.assert_array_equal(store.cells.columns["I"], [False, True, True, True])
+    generator._materialize_run_cell_columns(store, run, {}, set_selection=True)
+    np.testing.assert_array_equal(store.cells.columns["I"], [True, False, True, False])
+
+    # A field that the run did not record is refused, and the selection is
+    # left as it was.
+    store.cells.columns["I"] = np.ones(4, dtype=bool)
+    with pytest.raises(KeyError, match="Pipeline run has no prepared field 'paris'"):
+        generator._materialize_run_cell_columns(
+            store, run, {"RNA_paris_cluster": "paris"}, set_selection=True
+        )
+    assert "RNA_paris_cluster" not in store.cells.columns
+    np.testing.assert_array_equal(store.cells.columns["I"], np.ones(4, dtype=bool))
+    # The run's fields must cover every cell of the prepared store.
+    other = SimpleNamespace(cells=_PreparedCells(5))
+    with pytest.raises(
+        ValueError, match="Pipeline field 'clusters' is not a full-axis vector"
+    ):
+        generator._materialize_run_cell_columns(
+            other, run, {"RNA_clusters": "clusters"}, set_selection=False
+        )
+    assert "RNA_clusters" not in other.cells.columns
+
+
 def test_drop_retired_assay_state_removes_leftover_groups(tmp_path):
     import zarr
 
@@ -104,106 +178,120 @@ def test_drop_retired_assay_state_removes_leftover_groups(tmp_path):
     assert "artifacts" in root["RNA"]
 
 
-def test_prepared_artifact_columns_project_the_exact_stored_selection(monkeypatch):
-    selection = ArtifactRef(
-        scope="datastore",
-        assay=None,
-        kind="cell_selection",
-        artifact_id="a" * 64,
-    )
-    embedding = ArtifactRef(
-        scope="assay",
-        assay="RNA",
-        kind="embedding",
-        artifact_id="b" * 64,
-    )
-    calls: list[tuple[object, ArtifactRef, dict[str, object]]] = []
+class _RecordingPipeline:
+    """Record the recipe calls of a dataset analysis and return named runs."""
 
-    def selected_indices(
-        root: object,
-        ref: ArtifactRef,
-        **kwargs: object,
-    ) -> np.ndarray:
-        calls.append((root, ref, kwargs))
-        return np.asarray([0, 2], dtype=np.int64)
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
 
-    monkeypatch.setattr(
-        "cytearc.storage.selections.read_stored_selection_indices",
-        selected_indices,
-    )
+    def _run(self, recipe: str, *args: object, **settings: object) -> object:
+        self.calls.append((recipe, args, settings))
+        return SimpleNamespace(recipe=recipe, label=settings["label"])
 
-    class Cells:
-        N = 3
+    def rna(self, **settings: object) -> object:
+        return self._run("rna", **settings)
 
-        def __init__(self) -> None:
-            self.columns: dict[str, np.ndarray] = {}
+    def atac(self, **settings: object) -> object:
+        return self._run("atac", **settings)
 
-        def insert(
-            self,
-            name: str,
-            values: np.ndarray,
-            *,
-            fill_value: object,
-            overwrite: bool,
-        ) -> None:
-            assert overwrite is True
-            assert np.isnan(fill_value)
-            self.columns[name] = np.asarray(values)
+    def adt(self, **settings: object) -> object:
+        return self._run("adt", **settings)
 
-    root = object()
-    store = SimpleNamespace(
-        zw=root,
-        cells=Cells(),
-        artifacts=SimpleNamespace(
-            inspect=lambda ref: SimpleNamespace(
-                complete=ref == embedding,
-                inputs={"cell_selection": selection.to_dict()},
-            ),
-            load=lambda ref: {"values": np.asarray([[1.0, 10.0], [3.0, 30.0]])},
-        ),
-    )
+    def multimodal(self, runs: list[object], **settings: object) -> object:
+        return self._run("multimodal", runs, **settings)
 
-    generator._materialize_artifact_cell_columns(
-        store,
-        embedding,
-        {
-            "RNA_UMAP1": ("values", 0),
-            "RNA_UMAP2": ("values", 1),
-        },
-    )
 
-    np.testing.assert_allclose(
-        store.cells.columns["RNA_UMAP1"],
-        [1.0, np.nan, 3.0],
-        equal_nan=True,
-    )
-    np.testing.assert_allclose(
-        store.cells.columns["RNA_UMAP2"],
-        [10.0, np.nan, 30.0],
-        equal_nan=True,
-    )
-    assert calls == [
+def _record_teaching_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, dict[str, str], bool]]:
+    copied: list[tuple[str, dict[str, str], bool]] = []
+
+    def copy_columns(
+        store: object,
+        run: SimpleNamespace,
+        columns: dict[str, str],
+        *,
+        set_selection: bool,
+    ) -> None:
+        copied.append((run.label, dict(columns), set_selection))
+
+    monkeypatch.setattr(generator, "_materialize_run_cell_columns", copy_columns)
+    return copied
+
+
+def test_embedding_columns_name_the_umap_and_leiden_fields_of_a_run():
+    assert generator._embedding_columns("ADT", "1.0") == {
+        "ADT_UMAP1": "umap_1",
+        "ADT_UMAP2": "umap_2",
+        "ADT_leiden_cluster": "leiden_1.0",
+    }
+
+
+def test_citeseq_analysis_integrates_modality_runs_of_the_same_cells(monkeypatch):
+    copied = _record_teaching_columns(monkeypatch)
+    pipeline = _RecordingPipeline()
+
+    generator._analyze_citeseq(SimpleNamespace(pipeline=pipeline))
+
+    recipes = [
+        (recipe, settings["label"]) for recipe, _args, settings in pipeline.calls
+    ]
+    assert recipes == [
+        ("rna", "rna"),
+        ("adt", "adt"),
+        ("multimodal", "snn"),
+        ("multimodal", "wnn"),
+    ]
+    rna = pipeline.calls[0]
+    adt = pipeline.calls[1]
+    # The ADT run analyzes the RNA run's cells, and both multimodal runs
+    # integrate the two runs.
+    assert adt[2]["cells"].label == "rna"
+    for _recipe, (runs,), settings in pipeline.calls[2:]:
+        assert [run.label for run in runs] == ["rna", "adt"]
+        assert settings["method"] == settings["label"]
+    assert rna[2]["markers"] is False
+    # The teaching columns keep the names that the tutorials read.
+    assert copied == [
+        ("adt", generator._embedding_columns("ADT", "1.0"), False),
+        ("snn", generator._embedding_columns("RNA+ADT", "1.75"), False),
+        ("wnn", generator._embedding_columns("RNA+ADT_wnn", "1.75"), False),
         (
-            root,
-            selection,
-            {
-                "kind": "cell_selection",
-                "scope": "datastore",
-                "assay": None,
-                "table_path": "cellData",
-            },
-        )
+            "rna",
+            {**generator._embedding_columns("RNA", "1.0"), "RNA_clusters": "clusters"},
+            True,
+        ),
     ]
 
 
-def test_prepared_integer_artifact_columns_use_unselected_sentinel():
-    projected = generator._prepared_full_axis_values(
-        np.asarray([4, 7], dtype=np.int32),
-        np.asarray([0, 2], dtype=np.int64),
-        3,
-    )
+def test_teaseq_analysis_integrates_three_modality_runs(monkeypatch):
+    copied = _record_teaching_columns(monkeypatch)
+    pipeline = _RecordingPipeline()
 
-    np.testing.assert_array_equal(projected, [4, -1, 7])
+    generator._analyze_teaseq(SimpleNamespace(pipeline=pipeline))
+
+    recipes = [
+        (recipe, settings["label"]) for recipe, _args, settings in pipeline.calls
+    ]
+    assert recipes == [
+        ("rna", "rna"),
+        ("atac", "atac"),
+        ("adt", "adt"),
+        ("multimodal", "snn"),
+        ("multimodal", "wnn"),
+    ]
+    for recipe, _args, settings in pipeline.calls[1:3]:
+        assert settings["cells"].label == "rna", recipe
+    for _recipe, (runs,), _settings in pipeline.calls[3:]:
+        assert [run.label for run in runs] == ["rna", "atac", "adt"]
+    assert [label for label, _columns, _selection in copied] == [
+        "rna",
+        "atac",
+        "adt",
+        "snn",
+        "wnn",
+    ]
+    assert not any(selection for _label, _columns, selection in copied)
 
 
 def test_kang_recipes_subset_current_sources_by_cluster_labels():

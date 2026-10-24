@@ -93,19 +93,29 @@ works. `--data-only` drops analyses; `--nthreads`, `--profile {fast_local,cloud}
 ### Run long steps from an agent shell
 
 Some agent shells stop a foreground command after about 10 minutes, and an unbounded wait loop can
-hang for as long. Write the step as a script that logs to a file and ends with `DONE` or `FAILED`:
+hang for as long. Write the step as a script that logs to a file and ends with `DONE` or `FAILED`.
+A `callback=` that prints one line per stage event shows in the log which stage is running:
 
 ```python
 # step_baseline.py
+import json
 import sys
 import traceback
 
 import cytearc
 
 cytearc.configure_output(level="WARNING", progress=False)
+
+
+def log_stage(event):  # starts, ends, skips and failures; not the frequent progress events
+    if event.kind != "stage_progress":
+        print(json.dumps({"kind": event.kind, "stage": event.stage,
+                          "ordinal": event.ordinal, "stages": event.stages}), flush=True)
+
+
 try:
     ds = cytearc.DataStore("analysis.zarr", min_features_per_cell=-1)
-    run = ds.pipeline.run(label="baseline")
+    run = ds.pipeline.rna(label="baseline", callback=log_stage)
     print("run", run.run_id, run.status, flush=True)
 except Exception:
     traceback.print_exc()
@@ -138,9 +148,10 @@ done
 echo "state=$state"; tail -n 5 "$LOG"
 ```
 
-`running`: call the loop again. `failed`: read the traceback. `died`: the process ended without a
-final line (timeout, out of memory, kill); `ds.pipeline.list_runs()` shows what was recorded. The
-variable is `state` because zsh reserves `status`.
+`running`: call the loop again; the last event line names the stage and its `ordinal` of
+`stages`. `failed`: read the traceback. `died`: the process ended without a final line (timeout,
+out of memory, kill); `ds.pipeline.list_runs()` shows what was recorded. The variable is `state`
+because zsh reserves `status`.
 Check the saved PID with `kill -0`: `pgrep -f step_baseline.py` also matches the launching shell,
 so it never reports the job as gone. On macOS, `timeout` is `gtimeout` from GNU coreutils.
 
@@ -152,7 +163,10 @@ Label fields (`clusters`, `leiden_*`, `paris`, `cell_cycle_phase`) are categoric
 in natural order with the run's colors in `uns["<field>_colors"]`, so `sc.tl.rank_genes_groups`
 and categorical plots work directly; other frozen text that repeats or has missing values is a
 categorical in natural order (`d2` before `d10`) too. The run's PCA is `obsm["X_pca"]` with its
-loadings in `varm["PCs"]` (Harmony: `obsm["X_pca_harmony"]`).
+loadings in `varm["PCs"]` (Harmony: `obsm["X_pca_harmony"]`). An ATAC run exports `obsm["X_lsi"]`
+(Harmony: `X_lsi_harmony`) and flags its peaks in `var["prevalent_peaks"]`; an ADT run flags its
+panel in `var["panel"]`. A multimodal run exports the first run's raw counts with the joint
+`X_umap`, its clusters and `weight_<assay>` fields, and has no normalized matrix.
 `cell_type` below and in later recipes is a placeholder for your own label column, not held-out
 author labels.
 
@@ -167,8 +181,9 @@ cytearc.to_h5ad(ds.RNA, "baseline_run_plain.h5ad", run=run)   # same object with
 ```
 
 `adata.var_names` are feature IDs; symbols are in `adata.var["names"]`. Pass
-`snapshot_columns=["cell_type"]` to `ds.pipeline.run` to freeze live labels into future run
-exports (see `pipeline-runs-and-artifacts.md`).
+`snapshot_columns=["cell_type"]` to a recipe to freeze live labels into future run exports; a new
+run that only adds them reuses every artifact of the earlier one (see
+`pipeline-runs-and-artifacts.md`).
 
 ### Export a complete assay (streaming)
 
@@ -216,9 +231,10 @@ cytearc.to_h5ad(ds.RNA, "baseline_normed.h5ad", run=run, matrix="normed")   # sa
 rejected together with `run=`. Without `run`, `cell_key` (default `"I"`) selects cells, and
 `obs_names` are the cell `ids`: a panel export is the cheapest per-cell marker table.
 With `run=`, `matrix="normed"` exports the run's stored `normalized` artifact, exactly what its PCA
-read, so `X` and `var` cover only the run's highly variable genes; `layers` align to them. It raises
-`ValueError` when the run has no normalized output or its artifact does not cover the run's cells
-and highly variable genes. Without `run=`, `to_anndata(matrix="normed")` normalizes now with the
+or LSI read, so `X` and `var` cover only the run's selected features (highly variable genes,
+prevalent peaks or the ADT panel); `layers` align to them. It raises `ValueError` when the run has
+no normalized output (a multimodal run) or its artifact does not cover the run's cells and
+selected features. Without `run=`, `to_anndata(matrix="normed")` normalizes now with the
 assay's `normed` (`norm_lib_size`: 1000 per cell over all genes, no log), and `to_h5ad` rejects it.
 
 ### Export markers and metadata tables
@@ -278,10 +294,10 @@ contains no artifacts or pipeline runs. Use it to hand off, or before `to_mtx` o
 | Item | `to_anndata(run=run)` / `to_h5ad(assay, path, run=run)` | Otherwise |
 |---|---|---|
 | Cells | the run's analysis selection | `to_h5ad(ds.RNA, path)` exports all rows |
-| Features | the full feature universe; HVG flag in `var["highly_variable_features"]`; `matrix="normed"`: HVGs only | `feature_names=` without `run` |
-| `X` | raw counts; `matrix="normed"`: the run's `normalized` artifact, float32 | |
-| `obs` | frozen fields: cell-cycle, `leiden_*`, `paris`, `clusters` (categoricals with `uns` colors), `doublet_score`, `predicted_doublet`, `snapshot_columns` | join `ds.cells` by `ids` |
-| `obsm`, `varm` | `X_umap`, `X_pca` (`X_pca_harmony` with Harmony), `varm["PCs"]` | other artifacts: `obsm=` |
+| Features | the full feature universe; the recipe's selection flag in `var` (`highly_variable_features`, `prevalent_peaks` or `panel`); `matrix="normed"`: those features only | `feature_names=` without `run` |
+| `X` | raw counts (multimodal: the first run's assay); `matrix="normed"`: the run's `normalized` artifact, float32 | |
+| `obs` | frozen fields: cell-cycle, `leiden_*`, `paris` (with `paris=True`), `clusters` (categoricals with `uns` colors), `membership_strength`, `doublet_score`, `predicted_doublet`, `weight_<assay>` (WNN), `snapshot_columns` | join `ds.cells` by `ids` |
+| `obsm`, `varm` | `X_umap`, `X_pca` (`X_pca_harmony` with Harmony), `varm["PCs"]`; ATAC `X_lsi` (`X_lsi_harmony`) | other artifacts: `obsm=` |
 | `obsp` | with `graph=run["connectivity_map"]`: connectivities, distances, `uns["neighbors"]` | |
 | markers, run report | not exported | `markers.load`, `run.report(format="markdown")` |
 | MTX | `to_mtx` has no `run=` | `SubsetZarr` with run cells, then `to_mtx` |

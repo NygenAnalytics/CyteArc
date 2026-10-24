@@ -667,8 +667,8 @@ def test_pipeline_interruption_markdown_report() -> None:
     assert "## Failure" not in report
     # An unlabeled run omits the label from its representation.
     assert repr(run) == (
-        f"PipelineRun(run_id='{record.run_id[:12]}...', status='interrupted', "
-        "assay='RNA')"
+        f"PipelineRun(run_id='{record.run_id[:12]}...', recipe='basic', "
+        "status='interrupted', assay='RNA')"
     )
 
 
@@ -676,8 +676,8 @@ def test_labeled_run_representation_names_its_label() -> None:
     run = _completed_run(_root())
 
     assert repr(run) == (
-        f"PipelineRun(run_id='{run.run_id[:12]}...', status='completed', "
-        "assay='RNA', label='baseline')"
+        f"PipelineRun(run_id='{run.run_id[:12]}...', recipe='basic_rna_analysis', "
+        "status='completed', assay='RNA', label='baseline')"
     )
 
 

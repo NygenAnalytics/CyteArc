@@ -80,8 +80,8 @@ analysis = cytearc.mount_datastore(
     min_features_per_cell=-1,
 )
 
-# Run the RNA pipeline; its results are saved in fallopian_tube.zarr.
-run = analysis.pipeline.run(label="baseline")
+# Run the RNA recipe; its results are saved in fallopian_tube.zarr.
+run = analysis.pipeline.rna(label="baseline")
 
 # Color the computed UMAP by the selected clustering.
 analysis.plots.embedding(run=run, color_by="clusters")

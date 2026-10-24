@@ -1441,40 +1441,34 @@ def test_hvg_selection_records_its_revision_and_recomputes_earlier_ones(
 
 
 def test_pipeline_hvg_settings_cover_the_flavors(banded) -> None:
-    from cytearc.datastore._pipeline_recipe import resolve_pipeline_recipe
+    import inspect
 
+    from cytearc.datastore._pipeline.recipes.rna import resolve_rna
+    from cytearc.datastore.pipeline_accessor import PipelineAccessor
+
+    # The other keywords of a public call, at their defaults.
+    parameters = inspect.signature(PipelineAccessor.rna).parameters
+    defaults = {
+        name: parameter.default
+        for name, parameter in parameters.items()
+        if name not in {"self", "callback", "cancel"}
+    }
     for settings in (
         {"flavor": "pearson_residuals", "batch": "batch", "theta": 50, "clip": 3.0},
         {"flavor": "seurat_v3", "span": 0.5},
     ):
-        recipe = resolve_pipeline_recipe(
-            banded,
-            assay=None,
-            label=None,
-            cell_key="I",
-            filtering=False,
-            harmony_batch_columns=None,
-            hvg_count=1000,
-            pca_dims=21,
-            neighbors_k=11,
-            umap=True,
-            leiden=True,
-            cell_cycle=True,
-            paris=True,
-            doublets=True,
-            markers=True,
-            snapshot_columns=(),
-            params={"hvg": settings},
-        )
-        assert recipe.params_for("hvg") == settings
+        plan = resolve_rna(banded, **(defaults | {"hvg": settings}))
+        assert plan.config["stages"]["hvg"] == settings
     for hvg, error, message in (
         ({"flavor": "bogus"}, ValueError, "flavor must be one of"),
         ({"span": 0.5}, ValueError, "span applies only"),
-        ({"batch": 3}, TypeError, r"params\['hvg'\]\['batch'\] must be a cell"),
+        ({"batch": 3}, TypeError, r"hvg\['batch'\] must be a cell"),
         ({"batch": "absent"}, KeyError, "HVG batch column 'absent' was not found"),
     ):
         with pytest.raises(error, match=message):
-            banded.pipeline.run(params={"hvg": hvg})
+            banded.pipeline.rna(hvg=hvg)
+    # Each call was refused before it recorded a run.
+    assert banded.pipeline.list_runs() == ()
 
 
 # Agreement with scanpy 1.12.4 and scikit-misc 0.5.3

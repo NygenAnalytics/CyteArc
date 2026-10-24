@@ -9,8 +9,9 @@ myst:
 These `DataStore` methods build a neighbourhood graph as explicit, provenance-backed stages. Each
 builder returns an {py:class}`~cytearc.ArtifactRef`; pass that exact ref to the next stage.
 
-Prefer `ds.pipeline.run()` for the fixed rich RNA recipe. Use the individual methods for a partial
-workflow, an alternative branch, or parameters intentionally kept out of the pipeline surface.
+Prefer a pipeline recipe, such as `ds.pipeline.rna()`, for a standard analysis ({doc}`pipeline`).
+Use the individual methods for a partial workflow, an alternative branch, or a stage that the
+recipes do not run.
 See [Building neighbourhood graphs step by step](../tutorials/graph-construction) for an executable walkthrough.
 
 ## Explicit chain
@@ -44,9 +45,9 @@ The full stage order is:
 7. {py:meth}`~cytearc.datastore.namespaces.GraphAccessor.connectivity`
 
 Without a reduction, `graph.ann_index(normalized)` builds the graph on the normalized artifact
-itself: its float32 values of the selected features are the coordinates, one per feature, as in a
-pipeline run with `pca_dims=0`. Every later stage, including the embedding initialization and
-an SNN integration, accepts such a graph. Harmony corrects reduced coordinates only, and WNN
+itself: its float32 values of the selected features are the coordinates, one per feature, as in an
+RNA pipeline run with `pca={"dims": 0}`. Every later stage, including the embedding initialization
+and an SNN integration, accepts such a graph. Harmony corrects reduced coordinates only, and WNN
 integration, mapping references, and doublet scoring need them too, so each rejects normalized
 coordinates with an error that names a reduction such as `reduction.pca`. Because normalized values can
 be coordinates, `features.normalize` writes them with a checked writer: a value that is NaN or

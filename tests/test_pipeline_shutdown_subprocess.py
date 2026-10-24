@@ -1,3 +1,4 @@
+import json
 import os
 import select
 import signal
@@ -14,11 +15,17 @@ from cytearc.storage.pipeline_runs import (
     list_pipeline_run_records,
     load_pipeline_stage_records,
 )
-from tests.test_pipeline_run_record_paths import _write_graph_store
+from tests.test_pipeline_run_record_paths import (
+    _GRAPH_STAGE_STATUSES,
+    _GRAPH_STAGES,
+    _PCA,
+    _write_graph_store,
+)
 
-
+# Each child runs the RNA recipe with the settings given as its last argument.
 _CHILD = textwrap.dedent(
     """
+    import json
     import sys
     import time
 
@@ -36,135 +43,90 @@ _CHILD = textwrap.dedent(
             time.sleep(0.01)
 
     type(store)._reduction_pca = paused_pca
-    store.pipeline.run(
-        filtering=False,
-        cell_cycle=False,
-        hvg_count=20,
-        pca_dims=3,
-        neighbors_k=5,
-        umap=False,
-        leiden=False,
-        paris=False,
-        doublets=False,
-        markers=False,
-    )
+    store.pipeline.rna(**json.loads(sys.argv[3]))
     """
 )
 
 
 _SIGNAL_RACE_CHILD = textwrap.dedent(
     """
+    import json
     import os
     import signal
     import sys
     import time
 
+    import cytearc.datastore._pipeline.executor as executor
     from cytearc import DataStore
-    import cytearc.datastore.pipeline_accessor as pipeline_accessor
-    from cytearc.storage.pipeline_runs import (
-        PipelineStageMetrics,
-        complete_pipeline_run_record,
-        create_pipeline_run_record,
-        fail_pipeline_run_record,
-        finish_pipeline_stage_record,
-        start_pipeline_stage_record,
-    )
     from cytearc.utils.shutdown import current_shutdown_token
 
     store = DataStore(sys.argv[1], default_assay="RNA")
     case = sys.argv[2]
 
-    def metrics():
-        return PipelineStageMetrics(
-            wall_seconds=0.0,
-            rss_baseline_bytes=None,
-            rss_peak_bytes=None,
-            rss_incremental_peak_bytes=None,
-            sample_interval_seconds=0.1,
-            sample_count=0,
-            sampling_error_count=0,
-            rss_unavailable_reason="not sampled",
-        )
+    def requested():
+        token = current_shutdown_token()
+        return token is not None and token.requested
 
-    def execute_with_signal_race(
-        self,
-        recipe,
-        _callback,
-        *,
-        active_run_id,
-        **_kwargs,
-    ):
-        stage = "pca" if case == "operation_failure" else "handoff"
-        record = create_pipeline_run_record(
-            self._store.zw,
-            recipe="signal_regression",
-            requested_label=None,
-            assay=recipe.assay,
-            config={"case": case},
-            stage_order=(stage,),
-            cytearc_version="test",
-        )
-        active_run_id.append(record.run_id)
-        start_pipeline_stage_record(
-            self._store.zw,
-            run_id=record.run_id,
-            ordinal=0,
-            stage=stage,
-        )
-        if case == "operation_failure":
-            print("READY", flush=True)
-            while True:
-                token = current_shutdown_token()
-                if token is not None and token.requested:
-                    error = RuntimeError("PCA failed after SIGTERM")
-                    finish_pipeline_stage_record(
-                        self._store.zw,
-                        run_id=record.run_id,
-                        ordinal=0,
-                        status="failed",
-                        metrics=metrics(),
-                        error=error,
-                    )
-                    fail_pipeline_run_record(
-                        self._store.zw,
-                        run_id=record.run_id,
-                        error=error,
-                    )
-                    raise error
-                time.sleep(0.01)
-        finish_pipeline_stage_record(
-            self._store.zw,
-            run_id=record.run_id,
-            ordinal=0,
-            status="skipped",
-            metrics=metrics(),
-        )
-        complete_pipeline_run_record(
-            self._store.zw,
-            run_id=record.run_id,
-            outputs=(),
-            fields=(),
-        )
-        result = pipeline_accessor.open_pipeline_run(
-            self._store,
-            run_id=record.run_id,
-        )
+    def pca_failing_after_signal(self, *_args, **_kwargs):
+        # PCA never checks for shutdown, so SIGTERM only marks the run's
+        # token, and the stage then fails for a reason of its own.
+        print("READY", flush=True)
+        while not requested():
+            time.sleep(0.01)
+        raise RuntimeError("PCA failed after SIGTERM")
+
+    open_completed_run = executor.open_pipeline_run
+
+    def open_then_signal(*args, **kwargs):
+        # SIGTERM arrives once the run is durably complete, while the run is
+        # handed back to the caller.
+        run = open_completed_run(*args, **kwargs)
         os.kill(os.getpid(), signal.SIGTERM)
-        return result
+        while not requested():
+            time.sleep(0.01)
+        return run
 
-    pipeline_accessor.PipelineAccessor._execute_recipe = execute_with_signal_race
-    store.pipeline.run(
-        filtering=False,
-        cell_cycle=False,
-        hvg_count=20,
-        pca_dims=3,
-        neighbors_k=5,
-        umap=False,
-        leiden=False,
-        paris=False,
-        doublets=False,
-        markers=False,
-    )
+    if case == "operation_failure":
+        type(store)._reduction_pca = pca_failing_after_signal
+    else:
+        executor.open_pipeline_run = open_then_signal
+    store.pipeline.rna(**json.loads(sys.argv[3]))
+    """
+)
+
+
+# A user stops the run, and one signal from the test then arrives before PCA
+# reaches its next checkpoint.
+_CANCEL_THEN_SIGNAL_CHILD = textwrap.dedent(
+    """
+    import json
+    import signal
+    import sys
+    import time
+
+    from cytearc import CancellationToken, DataStore
+    from cytearc.utils.shutdown import current_shutdown_token, shutdown_checkpoint
+
+    # The signals take their default behavior, whatever the parent ignores.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    store = DataStore(sys.argv[1], default_assay="RNA")
+    cancel = CancellationToken()
+
+    def cancelled_pca(self, *_args, **_kwargs):
+        cancel.cancel("stopped by the user")
+        token = current_shutdown_token()
+        print("READY", flush=True)
+        while token.signal_record is None:
+            time.sleep(0.01)
+        print("SIGNALLED", token.signal_record.signal_name, flush=True)
+        shutdown_checkpoint()
+
+    type(store)._reduction_pca = cancelled_pca
+    try:
+        store.pipeline.rna(cancel=cancel, **json.loads(sys.argv[3]))
+    except BaseException as error:
+        print("RAISED", type(error).__name__, flush=True)
     """
 )
 
@@ -173,7 +135,7 @@ def _prepared_store(path: Path) -> Path:
     """Write a small RNA store and prepare it as every child opens it.
 
     The signal contract does not depend on data size, so each child reaches
-    its paused PCA stage after only a few quick stages.
+    its PCA stage, or completes its run, after only a few quick stages.
     """
     _write_graph_store(path)
     DataStore(str(path), default_assay="RNA")
@@ -194,9 +156,9 @@ def _child_environment() -> dict[str, str]:
     return environment
 
 
-def _start_child(path: Path, child: str, *arguments: str) -> subprocess.Popen[str]:
+def _start_child(path: Path, child: str, case: str) -> subprocess.Popen[str]:
     return subprocess.Popen(
-        [sys.executable, "-c", child, str(path), *arguments],
+        [sys.executable, "-c", child, str(path), case, json.dumps(_GRAPH_STAGES)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -283,14 +245,64 @@ def test_sigterm_commits_interrupted_pipeline_before_propagation(
     )
     stages = load_pipeline_stage_records(root, runs[0].run_id)
     assert [(stage.stage, stage.status) for stage in stages] == [
-        ("input_snapshot", "completed"),
-        ("filtering", "skipped"),
-        ("cell_cycle", "skipped"),
-        ("highly_variable_features", "completed"),
-        ("normalization", "completed"),
+        *_GRAPH_STAGE_STATUSES[:_PCA],
         ("pca", "interrupted"),
     ]
     assert all(stage.complete for stage in stages)
+    assert stages[-1].interruption is not None
+    assert stages[-1].interruption.signal_name == "SIGTERM"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signal contract")
+@pytest.mark.parametrize(
+    ("signum", "returncode", "raised"),
+    [
+        # SIGTERM's default action then ends the process.
+        (signal.SIGTERM, -signal.SIGTERM, []),
+        # SIGINT's handler then raises KeyboardInterrupt to the caller.
+        (signal.SIGINT, 0, ["RAISED KeyboardInterrupt"]),
+    ],
+    ids=["sigterm", "sigint"],
+)
+def test_a_signal_after_a_cancellation_takes_effect_once_the_run_is_recorded(
+    tmp_path: Path,
+    signum: signal.Signals,
+    returncode: int,
+    raised: list[str],
+) -> None:
+    location = _prepared_store(tmp_path / f"cancel-{signum.name}.zarr")
+    process = _start_child(location, _CANCEL_THEN_SIGNAL_CHILD, signum.name)
+    _wait_for_stdout(process, "READY")
+
+    process.send_signal(signum)
+    stdout, stderr = _communicate(process, timeout=30)
+
+    # The signal did not escalate: PCA saw it, stopped at its checkpoint, and
+    # the signal took its usual effect only once the run was recorded.
+    assert process.returncode == returncode, stderr
+    lines = stdout.splitlines()
+    assert f"SIGNALLED {signum.name}" in lines, stdout
+    assert [line for line in lines if line.startswith("RAISED")] == raised, stdout
+    root = DataStore(str(location), default_assay="RNA").zw
+    runs = list_pipeline_run_records(root, limit=100)
+    assert len(runs) == 1
+    assert (runs[0].status, runs[0].complete) == ("interrupted", True)
+    interruption = runs[0].interruption
+    assert interruption is not None
+    # The run records the cancellation, which came before the signal.
+    assert (
+        interruption.kind,
+        interruption.message,
+        interruption.signal_name,
+    ) == ("cancelled", "stopped by the user", None)
+    stages = load_pipeline_stage_records(root, runs[0].run_id)
+    assert [(stage.stage, stage.status) for stage in stages] == [
+        *_GRAPH_STAGE_STATUSES[:_PCA],
+        ("pca", "interrupted"),
+    ]
+    assert all(stage.complete for stage in stages)
+    assert stages[-1].interruption is not None
+    assert stages[-1].interruption.kind == "cancelled"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX signal contract")
@@ -310,14 +322,18 @@ def test_pending_sigterm_propagates_after_operation_failure(
     assert len(runs) == 1
     assert runs[0].status == "failed"
     assert runs[0].complete
+    assert runs[0].interruption is None
     assert runs[0].error is not None
     assert (runs[0].error.type, runs[0].error.message) == (
         "RuntimeError",
         "PCA failed after SIGTERM",
     )
     stages = load_pipeline_stage_records(root, runs[0].run_id)
-    assert [(stage.stage, stage.status) for stage in stages] == [("pca", "failed")]
-    assert stages[-1].complete
+    assert [(stage.stage, stage.status) for stage in stages] == [
+        *_GRAPH_STAGE_STATUSES[:_PCA],
+        ("pca", "failed"),
+    ]
+    assert all(stage.complete for stage in stages)
     assert stages[-1].error is not None
     assert stages[-1].error.type == "RuntimeError"
     # The operation failure is recorded first; the pending signal then ends
@@ -340,8 +356,11 @@ def test_pending_sigterm_propagates_after_completed_run_handoff(
     assert len(runs) == 1
     assert runs[0].status == "completed"
     assert runs[0].complete
+    assert runs[0].interruption is None
     stages = load_pipeline_stage_records(root, runs[0].run_id)
-    assert [(stage.stage, stage.status) for stage in stages] == [("handoff", "skipped")]
+    assert [(stage.stage, stage.status) for stage in stages] == list(
+        _GRAPH_STAGE_STATUSES
+    )
     assert all(stage.complete for stage in stages)
     assert returncode == -signal.SIGTERM, stderr
 
@@ -364,18 +383,7 @@ def test_sigkill_leaves_incomplete_run_and_a_new_run_reuses_only_complete_output
         "running"
     )
 
-    recovered = store.pipeline.run(
-        filtering=False,
-        cell_cycle=False,
-        hvg_count=20,
-        pca_dims=3,
-        neighbors_k=5,
-        umap=False,
-        leiden=False,
-        paris=False,
-        doublets=False,
-        markers=False,
-    )
+    recovered = store.pipeline.rna(**_GRAPH_STAGES)
     assert recovered.status == "completed"
     report = recovered.report()
     # Stages the killed run completed are reused; PCA onward is created.

@@ -114,6 +114,36 @@ def test_io_results_do_not_travel_through_the_io_loop_future() -> None:
     assert runner.run(operation) == (True, True)
 
 
+def test_compute_tasks_run_in_the_callers_context() -> None:
+    from contextvars import ContextVar
+
+    from cytearc.utils.logging import collect_warnings, logger
+
+    runner = _runner(ResourceBudget(1024 * 1024, 2))
+    marker: ContextVar[str | None] = ContextVar("compute_marker", default=None)
+
+    def task() -> tuple[str | None, bool]:
+        logger.warning("logged on a compute worker")
+        return marker.get(), threading.current_thread().name.startswith(
+            "cytearc-compute"
+        )
+
+    async def operation(active: AsyncStorageRunner) -> tuple[str | None, bool]:
+        return await active.compute(task)
+
+    # A pipeline stage's log context and warning collection reach the worker
+    # that runs a compute task, as they reach the operation's own thread.
+    token = marker.set("stage")
+    try:
+        with collect_warnings() as collected:
+            seen, on_worker = runner.run(operation)
+    finally:
+        marker.reset(token)
+
+    assert (seen, on_worker) == ("stage", True)
+    assert collected == ["logged on a compute worker"]
+
+
 def test_runner_pools_must_be_installed() -> None:
     runner = _runner(ResourceBudget(1024 * 1024, 2))
 

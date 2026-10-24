@@ -14,6 +14,7 @@ _EXPECTED_EXPORTS = {
     "ArtifactRef": "cytearc.storage.refs",
     "ArtifactResolutionError": "cytearc.storage.errors",
     "ArtifactStatus": "cytearc.storage.artifacts",
+    "CancellationToken": "cytearc.utils.shutdown",
     "CSVReader": "cytearc.readers",
     "CSVtoZarr": "cytearc.writers",
     "CrDirReader": "cytearc.readers",
@@ -42,6 +43,7 @@ _EXPECTED_EXPORTS = {
     "PseudotimeAggregationResult": "cytearc.trajectory.results",
     "PseudotimeMarkerResult": "cytearc.trajectory.results",
     "PseudotimeScoreResult": "cytearc.trajectory.results",
+    "PipelineCancelled": "cytearc.datastore.pipeline_run",
     "PipelineExecutionError": "cytearc.datastore.pipeline_run",
     "PipelineRun": "cytearc.datastore.pipeline_run",
     "SparseToZarr": "cytearc.writers",
@@ -59,6 +61,7 @@ _EXPECTED_EXPORTS = {
     "load_zarr": "cytearc.storage.stores",
     "logger": "cytearc.utils",
     "permute_into_chunks": "cytearc.utils",
+    "pipeline_listener": "cytearc.datastore.pipeline_accessor",
     "read_gmt": "cytearc.features.enrichment.net",
     "rescale_array": "cytearc.utils",
     "rolling_window": "cytearc.utils",
@@ -799,10 +802,32 @@ def test_legacy_plotting_surface_remains_absent():
 
 def test_pipeline_accessor_has_a_public_import_path():
     from cytearc import DataStore, PipelineExecutionError, PipelineRun
+    from cytearc.datastore import pipeline_accessor
     from cytearc.datastore.pipeline_accessor import PipelineAccessor
 
     assert hasattr(DataStore, "pipeline")
     assert PipelineAccessor.__module__ == "cytearc.datastore.pipeline_accessor"
     assert PipelineRun.__module__ == "cytearc.datastore.pipeline_run"
     assert PipelineExecutionError.__module__ == "cytearc.datastore.pipeline_run"
-    assert {"open", "list_runs", "run"} <= set(vars(PipelineAccessor))
+    public_methods = {
+        name
+        for name, value in vars(PipelineAccessor).items()
+        if not name.startswith("_") and callable(value)
+    }
+    # One recipe per modality replaced the single run method, with no alias.
+    assert public_methods == {
+        "open",
+        "list_runs",
+        "abandon_label_claim",
+        "rna",
+        "atac",
+        "adt",
+        "multimodal",
+    }
+    assert not hasattr(PipelineAccessor, "run")
+    # The event types keep their documented import path, under which they pickle.
+    for name in ("PipelineEvent", "PipelineProgress", "pipeline_listener"):
+        value = getattr(pipeline_accessor, name)
+        assert value.__module__ == "cytearc.datastore.pipeline_accessor"
+    for name in ("PipelineEventKind", "PipelineCallback", "DEFAULT_PANEL_EXCLUDE"):
+        assert hasattr(pipeline_accessor, name)

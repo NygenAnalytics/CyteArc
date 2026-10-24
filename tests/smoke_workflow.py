@@ -109,17 +109,22 @@ def run_workflow(directory: Path, *, expect_tsne: bool) -> str:
     location = str(directory / "smoke.zarr")
     SparseToZarr(counts, location, cells, genes, nthreads=1).dump()
     store = DataStore(location, default_assay="RNA", nthreads=1)
-    run = store.pipeline.run(
-        hvg_count=100,
-        pca_dims=10,
-        neighbors_k=10,
+    events: list[Any] = []
+    run = store.pipeline.rna(
+        hvg={"top_n": 100},
+        pca={"dims": 10},
+        neighbors={"k": 10},
         cell_cycle=False,
-        paris=False,
+        tsne=dict(_TSNE_SETTINGS) if expect_tsne else False,
         doublets=False,
         markers=False,
-        params={"tsne": dict(_TSNE_SETTINGS)} if expect_tsne else None,
+        callback=events.append,
     )
     assert run.status == "completed", run.status
+    assert run.recipe == "rna", run.recipe
+    kinds = [event.kind for event in events]
+    assert kinds[0] == "run_started" and kinds[-1] == "run_completed", kinds
+    assert {event.run_id for event in events} == {run.run_id}, kinds
     umap = _coordinates(run, "umap")
     clusters = np.unique(run.cells.fetch("clusters"))
     assert len(clusters) >= 2, f"Leiden found {len(clusters)} clusters, not 2 or more"

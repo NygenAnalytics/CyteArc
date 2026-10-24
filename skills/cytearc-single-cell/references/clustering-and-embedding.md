@@ -23,10 +23,14 @@ layouts, and extract labels and coordinates as cell-aligned arrays. Docs:
 - Payload rows follow the graph's frozen cell selection in stored-axis order, not every cell in
   the store (3,847 of 5,025 cells in the 10x 5K PBMC docs dataset baseline). Recover that
   selection with `ds.artifacts.inspect(ref).input_ref("cell_selection")`.
-- The default pipeline stores `leiden_0.5`, `leiden_0.75`, `leiden_1.0`, `leiden_1.25` and `paris`.
-  `run["clusters"]` is the Leiden candidate with the best PCA silhouette, recorded in
-  `run["cluster_selection"]`. Silhouette favours few compact clusters and can merge distinct
-  lineages or states. Treat that pick as a reproducible baseline only.
+- The `rna`, `atac` and `adt` recipes store `leiden_0.5`, `leiden_0.75`, `leiden_1.0` and
+  `leiden_1.25`; `paris=True` adds `paris` (off by default). `run["clusters"]` is the Leiden
+  candidate with the best silhouette in the coordinates that built the graph (PCA, Harmony, or
+  ATAC LSI), recorded in `run["cluster_selection"]`. Silhouette favours few compact clusters and
+  can merge distinct lineages or states. Treat that pick as a reproducible baseline only. A
+  multimodal run has no shared coordinates, so it saves its one partition: 1.0 by default, or
+  the one resolution that `leiden={"partitions": [...]}` names. Several partitions need a
+  `selected` one.
 - Leiden is seeded (`random_seed=4444`), so a single run says nothing about stability. Agreement
   across seeds, nested resolutions, markers and representations is the evidence. The default
   backend (`"cytearc"`, multi-threaded) gives the same labels for any `nthreads`, so only the
@@ -127,7 +131,8 @@ Repeat the evidence on one branch (more HVGs, other PCs or `k`; `features-and-gr
 cells must match, so labels compare directly.
 
 ```python
-alt = ds.pipeline.run(label="hvg2k_pc30_k21", hvg_count=2000, pca_dims=30, neighbors_k=21)
+alt = ds.pipeline.rna(label="hvg2k_pc30_k21", hvg={"top_n": 2000}, pca={"dims": 30},
+                      neighbors={"k": 21})
 assert alt["analysis_cell_selection"] == run["analysis_cell_selection"]
 alt_refs = [ds.clusters.leiden(alt["connectivity_map"], resolution=resolution)
             for resolution in (0.5, 1.0, 1.5)]
@@ -175,7 +180,7 @@ did a few global resolutions up to 2.0, but only at resolutions that failed the 
 ```python
 from dataclasses import asdict
 
-paris = ds.clusters.paris(graph)  # n_clusters="auto"; reuses run["paris"] when identical
+paris = ds.clusters.paris(graph)  # n_clusters="auto"; reuses the paris output of a paris=True run
 result = ds.clusters.load_paris(paris)
 diag = pd.DataFrame([asdict(item) for item in result.diagnostics])
 print(result.n_clusters, diag[["label", "size", "persistence", "decision_margin", "forced"]])
@@ -200,8 +205,8 @@ print(ds.artifacts.load(umap_tight)["values"].shape, ds.artifacts.load(tsne)["va
 ### Get labels and coordinates from a pipeline run
 
 ```python
-cells = run.cells.to_pandas_dataframe(
-    ["ids", "clusters", "leiden_1.0", "paris", "umap_1", "umap_2", "doublet_score"])
+cells = run.cells.to_pandas_dataframe(  # add "paris" for a paris=True run
+    ["ids", "clusters", "leiden_1.0", "umap_1", "umap_2", "doublet_score"])
 print(cells.head())  # one row per run cell, in stored-axis order
 full = run.cells.fetch_all("clusters")  # length ds.cells.N; -1 for cells outside the run
 print(len(full), (full == -1).sum())
@@ -233,7 +238,7 @@ The same helper works for membership strength, doublet scores, cell cycle and en
 
 | Parameter | Default | Change when |
 |---|---|---|
-| `resolution` (Leiden) | `1.0` (pipeline: 0.5, 0.75, 1.0, 1.25) | Raise for finer splits, lower to merge; always compare several |
+| `resolution` (Leiden) | `1.0` (recipes: 0.5, 0.75, 1.0, 1.25; multimodal 1.0) | Raise for finer splits, lower to merge; always compare several |
 | `random_seed` (Leiden) | `4444` | Rerun with 2 or more other seeds to test stability |
 | `backend` (Leiden) | `"cytearc"` | `"igraph"` or `"leidenalg"` only to match an external or earlier result; both need GPL packages that CyteArc does not install |
 | `n_clusters` (Paris) | `"auto"` | An integer to match another partition; it must be cuttable at one height, else `ValueError` |
@@ -276,9 +281,9 @@ The same helper works for membership strength, doublet scores, cell cycle and en
   `tsne` extra; an existing t-SNE artifact is still reused. Use UMAP when t-SNE is unavailable.
 - `embeddings.tsne` checks `tsne_dims`, `max_iter`, `alpha` (integers of at least 1), `early_iter` (an
   integer of at least 0), and `lambda_scale` and `box_h` (finite positive numbers) before it reads
-  the graph. `pipeline.run(params={"tsne": {...}})` applies the same checks before it creates a run
-  record, and with t-SNE on but no `sgtsnepi` it warns (naming the `tsne` extra) before the first
-  stage; it still runs, reusing a stored t-SNE, and only a new t-SNE fails, at its stage.
+  the graph. A recipe's `tsne={...}` applies the same checks before it creates a run record, and
+  with t-SNE on but no `sgtsnepi` it warns (naming the `tsne` extra) before the first stage; it
+  still runs, reusing a stored t-SNE, and only a new t-SNE fails, at its stage.
 
 ## See also
 
@@ -287,5 +292,5 @@ The same helper works for membership strength, doublet scores, cell cycle and en
 - `quality-control.md`: doublet scores and QC covariates behind technical clusters.
 - `plotting.md`: `ds.plots.embedding(layout=umap_ref, color_by=cluster_ref)`,
   `cluster_connectivity(graph=, groups=, layout=)` and `cluster_tree(graph=, clusters=paris_ref)`.
-- `pipeline-runs-and-artifacts.md`: run keys, `leiden=` pipeline settings, lineage.
+- `pipeline-runs-and-artifacts.md`: run keys, `leiden=` and `paris=` recipe settings, lineage.
 - `integration-and-comparisons.md`: clustering on integrated graphs and batch metrics.

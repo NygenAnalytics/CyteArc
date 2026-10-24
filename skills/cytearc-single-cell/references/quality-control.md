@@ -95,27 +95,47 @@ holds, any visible prior bounds, and why QC was gentle. Count models need raw UM
 
 A raw droplet matrix (Cell Ranger `raw_feature_bc_matrix`) is mostly empty droplets: MAD bounds
 centre on them and remove the cells. Call cells with EmptyDrops first, then run QC and the pipeline
-on the called cells.
+on the called cells. The `rna` recipe's `cell_calling` stage does both in one run; call by hand to
+inspect the calls first.
 
 ```python
 reader = cytearc.CrH5Reader("raw_feature_bc_matrix.h5", is_filtered=False, filtering_cutoff=0)
 cytearc.CrToZarr(reader, zarr_loc="raw.zarr").dump()  # keeps the low-count ambient barcodes
 ds = cytearc.DataStore("raw.zarr", min_features_per_cell=-1)  # keep every barcode in I
 ranks = ds.qc.barcode_ranks()  # knee and inflection totals from stored totals, no count read
-cells = ds.qc.call_cells()  # EmptyDrops, FDR 0.001 -> ArtifactRef(kind="cell_selection")
+run = ds.pipeline.rna(label="called", cell_calling=True)  # EmptyDrops, then MAD on called cells
+summary = {s["stage"]: s["summary"] for s in run.report()["stages"]}
+calling = summary["cell_calling"]  # keyed by output
+print(calling["cell_calling"])  # retain, knee, inflection, n_ambient
+print(calling["called_cell_selection"], summary["filtering"])  # cells, inputCells, removedCells
+
+cells = ds.qc.call_cells()  # by hand: EmptyDrops, FDR 0.001 -> ArtifactRef(kind="cell_selection")
 calls = ds.qc.load_cell_calls(cells)  # per barcode: total, log_probability, p_value, fdr, limited
 called = np.asarray(ds.artifacts.load(cells)["values"][:], dtype=bool)
 print(int(called.sum()), "cells; retain", calls.retain, "alpha", calls.alpha)
 auto = ds.qc.auto_filter(cell_selection=cells)  # QC on the called cells only
-ds.cells.insert("called_cell", called)  # the pipeline reads a cell key column
+by_hand = ds.pipeline.rna(label="called_by_hand", cells=cells, filtering=True)  # QC the given cells
 ```
 
 - `filtering_cutoff` defaults to 500 for unfiltered reads, which removes the ambient pool
   (barcodes with at most `lower=100` counts); `call_cells` then raises. Import with 0.
 - Barcodes at or above `retain` (the knee total) are cells without a test. A warning names
-  `limited` barcodes that were not called: rerun with a larger `n_iter`.
+  `limited` barcodes that were not called: rerun with a larger `n_iter`. In a run, such warnings
+  are in the stage record and `run.report()["summary"]["warnings"]`.
 - A merged store holds one ambient pool per capture: call each capture with
-  `cell_selection=` and combine the selections.
+  `cell_selection=` and combine the selections, or run the recipe with
+  `cell_calling={"sample_column": "capture"}`, which calls each capture apart and analyzes the
+  union. Every input cell needs a capture label; a missing value, or NaN in a float column, is
+  refused before the run starts. A capture that EmptyDrops cannot call fails the stage with
+  `Cell calling failed for capture 'a' of 'capture': <cause>`. A per-capture run has no
+  `cell_calling` output; its stage summary is the `called_cell_selection` one plus
+  `calledPerCapture` and `kneePerCapture`. The capture labels are frozen apart
+  (`capture_snapshot`), so changing `filtering`, `snapshot_columns` or Harmony reuses every
+  capture's calls.
+- The recipe's outputs are `cell_calling` (the per-barcode statistics) and `called_cell_selection`
+  before `analysis_cell_selection`; `cell_calling={"fdr": 0.01, "n_iter": 20000}` takes the
+  keywords of `qc.call_cells`, whose values are checked before the run starts. With `cell_calling`
+  the run filters the called cells by default, also when `cells` is a selection or a run.
 
 ### Distributions, default filter and candidate policies
 
@@ -156,7 +176,7 @@ and report each candidate's retention per scaffold cluster and per marker-positi
 one pipeline run plus one small count pass (the panel export).
 
 ```python
-scaffold = ds.pipeline.run(label="qc_scaffold", filtering=False, cell_cycle=False, paris=False)
+scaffold = ds.pipeline.rna(label="qc_scaffold", filtering=False, cell_cycle=False)
 in_run = mask(scaffold["analysis_cell_selection"])
 clusters = np.asarray(scaffold.cells.fetch("clusters"))
 kept = pd.DataFrame({name: mask(ref)[in_run] for name, ref in candidates.items()})
@@ -213,7 +233,8 @@ print(kept.groupby(labels).mean().round(2))
 
 Bounds are estimated within each sample of a real sample or capture column. Groups below
 `min_cells_per_sample` are kept unfiltered with a warning. Missing labels among active cells raise.
-For hashtag data pass `sample_artifact=NamedCellArtifact("hto", hto_ref)` (`kind="hto_identity"`).
+For hashtag data pass `sample_artifact=NamedCellArtifact("hto", hto_ref)` (`kind="hto_identity"`),
+or let the recipe's `hashing` stage do it (below).
 
 ```python
 per_sample = ds.qc.auto_filter(cell_selection=cells, sample_column="sample_id", n_mads=3.0,
@@ -223,23 +244,46 @@ for side in ("low", "high"):  # raw scale; a low near zero means no floor in tha
     print(side, pd.DataFrame({s: {m: b[side] for m, b in d.items()} for s, d in bounds.items()}).T)
 ```
 
-### Pipeline filtering and feeding a custom selection
+### Demultiplex hashtags in the recipe
 
-`filtering=True` (default) is pooled MAD on the four default columns, stored as its own artifact
-(`run["analysis_cell_selection"]`; compare masks, not refs). Other accepted values:
-`False`; `{"method": "mad", "n_mads": 5, "sample_column": "sample_id", "min_cells_per_sample": 20}`;
-`{"method": "gaussian", "min_p": 0.01, "max_p": 0.99}`; and
-`{"method": "manual", "attrs": [...], "lows": [...], "highs": [...], "keep_bounds": False}`.
-Unknown keys raise early. To run on a granular selection, insert it as a boolean column and
-disable pipeline filtering:
+With an assay of type `HTO`, `hashing=True` calls each cell's hashtag (`qc.hto_demultiplexing`),
+keeps the cells of exactly one hashtag (`hashed_cell_selection`; `Negative` and `Doublet` cells
+leave), and computes MAD bounds within each hashtag unless `filtering` names a `sample_column`
+(the filtering config records `"sampleSource": "hashing"`).
 
 ```python
-run_manual = ds.pipeline.run(label="qc_manual", filtering={
+hashed = ds.pipeline.rna(label="hashed", hashing=True)  # or {"positive_quantile": 0.999}
+summary = {s["stage"]: s["summary"] for s in hashed.report()["stages"]}
+print(summary["hashing"])  # {"hashing": {"hashtags", "negative", "multiplets"}, "hashed_cell_selection": ...}
+margin = ds.artifacts.load_values(hashed["hashing"], value="margin")  # CLR diagnostics per cell
+```
+
+Settings are those of `qc.hto_demultiplexing` plus `assay`, needed when the store has several HTO
+assays; `positive_quantile` is checked before the run starts. The run filters the singlets by
+default, also when `cells` is a selection or a run. Hashed samples share a capture, so doublets
+stay scored together unless `doublets` names a capture column. Known limitation: one
+demultiplexing fit covers every capture, even with per-capture cell calling, although each
+capture's HTO background differs, and each hashtag's MAD bounds pool its captures; on several
+captures, check the calls and `margin` per capture.
+
+### Pipeline filtering and feeding a custom selection
+
+With `cells` naming a column (the default `"I"`), and in a run with `cell_calling` or `hashing`
+whatever its `cells`, `filtering=None` is pooled MAD on the assay's QC columns (the four `RNA_*`
+columns here), stored as its own artifact
+(`run["analysis_cell_selection"]`; compare masks, not refs). Other accepted values: `False`;
+`True`; `{"method": "mad", "n_mads": 5, "sample_column": "sample_id", "min_cells_per_sample": 20}`;
+`{"method": "gaussian", "min_p": 0.01, "max_p": 0.99}`; and
+`{"method": "manual", "attrs": [...], "lows": [...], "highs": [...], "keep_bounds": False}`.
+Unknown keys raise early. A granular selection goes in as `cells=`, and the run keeps its cells
+as they are unless `filtering` asks for more:
+
+```python
+run_manual = ds.pipeline.rna(label="qc_manual", filtering={
     "method": "manual", "attrs": ["RNA_nFeatures", "RNA_percentMito"], "lows": [200, None],
     "highs": [None, 20]}, snapshot_columns=("RNA_nCounts", "RNA_percentMito"))
-ds.cells.insert("qc_pass", mask(floors), overwrite=True)
-run_custom = ds.pipeline.run(label="qc_custom", cell_key="qc_pass", filtering=False)
-assert np.array_equal(mask(run_custom["analysis_cell_selection"]), mask(floors))
+run_custom = ds.pipeline.rna(label="qc_custom", cells=floors)  # not filtered again
+assert run_custom["analysis_cell_selection"] == floors  # the given ref itself
 ```
 
 ### Custom feature-percentage metric
@@ -261,17 +305,22 @@ mad_hb = ds.qc.auto_filter(["RNA_percentMito"], cell_selection=cells,  # percent
 SoupX-style correction (Young and Behjati 2020), tutorial
 <https://docs.nygen.io/CyteArc/tutorials/ambient-rna>. It needs the channel's unfiltered droplets:
 import the raw Cell Ranger matrix with `cytearc.CrH5Reader(path, is_filtered=False,
-filtering_cutoff=1)` and open with `min_features_per_cell=-1`. Then a selection of the cells and a
-clustering of them (`pipeline.run(cell_key=..., filtering=False)`).
+filtering_cutoff=1)` and open with `min_features_per_cell=-1`. Correction is an explicit step
+between two runs: the first clusters the called cells, the estimate uses those clusters, and the
+second analyzes the corrected assay over the same cells.
 
 ```python
+first = ds.pipeline.rna(label="called_cells", cell_calling=True, filtering=False,
+                        cell_cycle=False, doublets=False)  # or cells=<your called-cell column>
 profile = ds.qc.ambient_profile(total_counts=(2, 10))  # or ds.qc.ambient_profile(empty_selection)
 soup = ds.qc.load_ambient_profile(profile)  # name, counts, fraction per feature
 gene_sets = {"haemoglobin": ["HBA1", "HBA2", "HBB"],  # keep genes the store has
              "immunoglobulin": ["IGKC", "IGHM", "IGLC2", "JCHAIN"]}
-rho = ds.qc.ambient_contamination(cells, profile, gene_sets=gene_sets, clusters=clusters)
+rho = ds.qc.ambient_contamination(first["analysis_cell_selection"], profile,
+                                  gene_sets=gene_sets, clusters=first["clusters"])
 est = ds.qc.load_ambient_contamination(rho)  # .estimate, .set_estimates, .evidence
 ds.qc.correct_ambient(rho, assay_label="RNA_soupx", random_seed=0)  # new RNA assay of integer counts
+corrected = ds.pipeline.rna(label="soupx", assay="RNA_soupx", cells=first)  # the same cells
 ```
 
 - `total_counts` must sit below the cells on the barcode-rank curve; the paper uses 2 to 10.
@@ -286,20 +335,21 @@ ds.qc.correct_ambient(rho, assay_label="RNA_soupx", random_seed=0)  # new RNA as
   cell from `random_seed`): every gene, even a rare soup gene, loses its share of the soup on
   average, and each cell loses its share rounded down or up. A seed reproduces the counts; the
   assay records it as `ambient_random_seed`.
-- The corrected assay measures only the estimated cells (`RNA_soupx_I`): pass
-  `assay="RNA_soupx"` or `from_assay=` with a selection of those cells.
+- The corrected assay measures only the estimated cells (`RNA_soupx_I`): run it with
+  `assay="RNA_soupx"` and `cells=` the first run or its selection, and pass `from_assay=` with a
+  selection of those cells elsewhere. Other cells raise `UnmeasuredCellsError`.
 - One profile and estimate per channel. Not implemented: SoupX's automatic estimate,
   cluster-aggregated correction, DecontX. CellBender output imports with `CrH5Reader`.
 
 ### Doublet scores
 
-The pipeline scores doublets by default (it needs a graph and a clustering), as Scrublet does:
+The `rna` recipe scores doublets by default (it needs a graph and a clustering), as Scrublet does:
 `doublet_score` is the probability that a cell is a doublet and `predicted_doublet` the call
 above its sample's automatic threshold. Doublets form within one capture, so with several
-captures pass the capture column: `params={"doublets": {"sample_column": "sample"}}`; a Harmony
-run scores within its batch columns by default. Do not pass HTO identities: hashed samples share
-a capture. High-RNA types such as plasma cells score high as a whole, so check calls and scores
-within their cluster and require co-expressed markers of two lineages before removing cells.
+captures pass the capture column: `doublets={"sample_column": "sample"}`; a Harmony run scores
+within its batch columns by default. Do not pass HTO identities: hashed samples share a capture.
+High-RNA types such as plasma cells score high as a whole, so check calls and scores within their
+cluster and require co-expressed markers of two lineages before removing cells.
 
 ```python
 scores = pd.Series(np.asarray(scaffold.cells.fetch("doublet_score")))
@@ -313,12 +363,22 @@ two_lineage = (((counts.CD3E > 0) & (counts.LYZ >= 5)) | ((counts.MS4A1 > 0) & (
 suspect = (called | (relative.to_numpy() > 3)) & two_lineage
 singlet = in_run.copy()
 singlet[np.flatnonzero(in_run)[suspect]] = False
-ds.cells.insert("qc_singlet", singlet, overwrite=True)  # then cell_key="qc_singlet"
+ds.cells.insert("qc_singlet", singlet, overwrite=True)
+# Then run cells=ds.snapshot_cell_selection("qc_singlet"); cells="qc_singlet" MAD-filters again.
 # Explicit, per capture; thresholds and estimated doublet rates per sample.
 doublets = ds.qc.doublets(scaffold["clusters"], scaffold["connectivity_map"],
                           sample_column="sample")
 print(ds.artifacts.load(doublets).attrs["samples"])
 called_singlets = ds.select_cells(doublets, value="predicted_doublets", include=[False])
+```
+
+Remove doublets with a second run over the first run's singlets. The given selection is not
+filtered again; HVGs, PCA, the graph, clusters and markers are recomputed without the doublets:
+
+```python
+run = ds.pipeline.open(label="baseline")  # a completed rna run with doublet scores
+singlets = ds.select_cells(run["doublets"], value="predicted_doublets", include=[False])
+clean = ds.pipeline.rna(label="baseline_singlets", cells=singlets)  # or the qc_singlet selection
 ```
 
 ## Parameters that matter
@@ -332,7 +392,8 @@ called_singlets = ds.select_cells(doublets, value="predicted_doublets", include=
 | `sample_column=` / `sample_artifact=` | `None` (pooled) | Several samples, captures or depths. MAD only. |
 | `min_cells_per_sample=` | `20` | Small samples; groups below it are kept unfiltered. |
 | `method=` (`min_p`, `max_p`) | `"mad"` | `"gaussian"` only to reproduce the old policy; `min_p`/`max_p` with MAD raise. |
-| `pipeline.run(filtering=False, cell_cycle=False, paris=False)` | filtering on | Scaffold run for the label-free audit. |
+| `pipeline.rna(filtering=False, cell_cycle=False)` | `filtering=None`: MAD on a column's cells, or on the cells that `cell_calling` or `hashing` keep; none for a given selection or run otherwise | Scaffold run for the label-free audit. |
+| `pipeline.rna(cell_calling=, hashing=)` | `False`, `False` | Raw droplets (EmptyDrops in the run) or an HTO assay (keep one-hashtag cells, MAD per hashtag; one fit over all captures). |
 | `qc.doublets(random_seed=)` | `4444` | Keep fixed; change only to test score stability. |
 | `qc.doublets(sample_column=)` | `None` (one sample) | Cells from several captures (10x channels or lanes): doublets are then simulated and scored within each. Never HTO identities. A Harmony pipeline run uses its batch columns. |
 | `qc.doublets(threshold=)` | `None` (per sample, automatic) | The `samples` attribute shows a `thresholdMethod` of `"otsu"` (no clear valley) or an estimated rate far from the loading's; then set one score, from 0 to 1, for every sample. |
@@ -376,7 +437,11 @@ called_singlets = ds.select_cells(doublets, value="predicted_doublets", include=
   `SPINK2`, `SOX4`, often `GATA2`, `CYTL1`) and no second lineage, even with high counts and
   doublet scores. Multiplets co-express full marker sets of two lineages (`CD3E` with `LYZ` or
   `CD14`; `MZB1` with `CD14`), exceed both parents in counts and sit between their clusters.
-- Expecting `I` to shrink after filtering. Pass the returned ref, or use a column with `cell_key=`.
+- Expecting `I` to shrink after filtering. Pass the returned ref on (`cell_selection=`, or a
+  recipe's `cells=`).
+- Expecting a recipe to QC-filter a selection or run passed as `cells=`: it keeps those cells as
+  they are, unless the run has `cell_calling` or `hashing`. Pass `filtering=True` or a mapping to
+  filter them.
 - `run.cells` exposes `names`, run results and `snapshot_columns`, not filter columns. QC columns
   need `snapshot_columns=(...)` or `ds.cells.fetch_all(col)[mask]`.
 

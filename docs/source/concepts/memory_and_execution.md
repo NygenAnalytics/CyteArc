@@ -21,8 +21,8 @@ import cytearc
 # Open the existing store with the chosen resource limits.
 ds = cytearc.DataStore("data.zarr", mem_budget="16G", nthreads=4)
 
-# Run the RNA pipeline under a new analysis label.
-run = ds.pipeline.run(label="rna_analysis")
+# Run the RNA recipe under a new analysis label.
+run = ds.pipeline.rna(label="rna_analysis")
 
 # Inspect recorded stage timings, memory use, and reused results.
 run.report()
@@ -30,8 +30,8 @@ run.report()
 
 Use a new label for each run. To inspect a completed run without recomputing it, reopen its
 label with `ds.pipeline.open(label="rna_analysis")` and call `report()` on that result.
-The report includes stage timings and sampled resident memory (RSS). Sampled peaks can miss
-brief allocations.
+The report includes stage timings, sampled resident memory (RSS), and the warnings that each
+stage logged. Sampled peaks can miss brief allocations.
 
 `mem_budget` is an operation budget, not a hard cap on total process resident memory.
 Memory the process already holds when an operation starts, such as the interpreter, native libraries, graph structures, and earlier results, is not subtracted, so a process can peak at its resident memory plus the budget.
@@ -74,8 +74,8 @@ Cluster selection reads its sampled cells in blocks of the stored coordinates, s
 `graph.ann_index` saves the index through a temporary file of about `4 * dims + 8 * ann_m + 20` bytes per cell, and `graph.neighbors` loads it through another one of the same size, in the system's temporary directory (`TMPDIR` on Linux and macOS); leave that much free space there.
 A composite with remote sources keeps downloaded source objects in the same temporary directory, up to `CYTEARC_SOURCE_CACHE_BYTES` per open composite (2 GiB unless set; `0` reads the sources directly). That disk space is outside `mem_budget`, and where the temporary directory is memory-backed, such as a `tmpfs` `/tmp`, it uses memory.
 
-A pipeline run with `pca_dims=0` builds its graph on the normalized values of the selected features, one coordinate per highly variable gene, so the memory and time of the ANN index, the neighbour queries, the embedding initialization, and cluster selection scale with the HVG count instead of the PCA dimensions.
-At 1,000,000 cells the index alone holds about 4.3 GB with 1,000 HVGs and 8.3 GB with 2,000 at the default `ann_m=24`, and the embedding initialization holds every cell's coordinates, 4 bytes per HVG per cell, when one stored band holds every cell; pass `params={"embedding_initialization": {"batch_size": ...}}` with a batch size below the cell count to select its streamed fit, which holds a sample of the cells and one block of coordinates at a time.
+An RNA run with `pca={"dims": 0}` builds its graph on the normalized values of the selected features, one coordinate per highly variable gene, so the memory and time of the ANN index, the neighbour queries, the embedding initialization, and cluster selection scale with the HVG count instead of the PCA dimensions.
+At 1,000,000 cells the index alone holds about 4.3 GB with 1,000 HVGs and 8.3 GB with 2,000 at the default `ann_m=24`, and the embedding initialization holds every cell's coordinates, 4 bytes per HVG per cell, when one stored band holds every cell; pass `embedding_initialization={"batch_size": ...}` with a batch size below the cell count to select its streamed fit, which holds a sample of the cells and one block of coordinates at a time.
 
 Outside these reservations, a Zarr codec thread can keep a decoded chunk for a moment after its read, and decoding a chunk of an unsharded array, such as normalized data, also holds that chunk's compressed bytes; leave host headroom.
 The identity checks of stored cell and feature selections, which most operations run once on their inputs, read the row identifiers in bands of whole chunks up to 64 MiB and hold one band, with its selected rows where they check a row order, outside the budget.
@@ -141,6 +141,13 @@ To also select a log level or file:
 cytearc.set_verbosity(level="INFO", filepath="cytearc-run.log")
 ```
 
+A job that configures Python's `logging` can receive CyteArc's records there instead:
+`cytearc.configure_output(stdlib=True)` sends them to the standard-library logger named `cytearc`,
+and a record logged during a pipeline stage carries the run ID and stage as its `cytearc_run_id`
+and `cytearc_stage` attributes. `set_verbosity` returns the records to CyteArc's own output.
+With progress bars off, a pipeline run still sends `stage_progress` events to its `callback` and
+listeners, so a job can record progress without rendering bars.
+
 See [Utilities API reference](/api/utilities.html) for the exact output contract.
 
 (benchmarks)=
@@ -156,7 +163,8 @@ CPU and memory limits, storage location, and whether the run reused existing art
 conversion and download time separate from analysis time, and report both stage timings and the
 complete elapsed time. Repeat measurements under the same conditions before comparing changes.
 
-A completed pipeline run provides stage timing and sampled resident memory in `run.report()`.
+A completed pipeline run provides stage timing, sampled resident memory, and each stage's
+warnings and summary in `run.report()`.
 Sampled peaks can miss brief allocations. `mem_budget` controls planned work and is not a hard
 limit on the process's resident memory; see [Memory budget](#memory-budget).
 

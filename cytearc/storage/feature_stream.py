@@ -53,6 +53,7 @@ type BlockBytes = Callable[[int], int]
 T = TypeVar("T")
 
 __all__ = [
+    "advance_on_consumption",
     "CellBandSelection",
     "FeatureCellBand",
     "FeatureReadGroup",
@@ -462,6 +463,38 @@ def plan_feature_consume(
     )
 
 
+def advance_on_consumption[T](
+    items: Iterator[T],
+    progress: Callable[[], Any] | None,
+) -> Iterator[T]:
+    """Yield handed-off ``items`` and advance a bar once each is consumed.
+
+    ``progress`` makes the bar when iteration starts, so a stream that is
+    never iterated draws none. The consumer's thread advances the bar, so the
+    progress that a pipeline stage observes comes from the stage's own
+    thread, as each unit's work is done. Closing the iterator releases the
+    item it holds, then closes ``items`` and the bar.
+    """
+    if progress is None:
+        yield from items
+        return
+    bar = progress()
+    try:
+        for item in items:
+            try:
+                yield item
+            finally:
+                del item
+            bar.update(1)
+    finally:
+        close = getattr(items, "close", None)
+        try:
+            if callable(close):
+                close()
+        finally:
+            bar.close()
+
+
 def iter_bounded_handoff(
     *,
     in_flight: int,
@@ -784,7 +817,8 @@ def stream_units(
 
     from ..utils.progress import tqdmbar
 
-    progress_bar = tqdmbar(desc=progress, total=len(units)) if progress else None
+    def make_bar() -> Any:
+        return tqdmbar(desc=progress, total=len(units))
 
     def run(deliver: Callable[[T], Awaitable[None]], stop: threading.Event) -> None:
         nonlocal fetch_seconds, compute_seconds, compute_wait_seconds
@@ -824,8 +858,6 @@ def stream_units(
                         await deliver(result)
                     del item, result
                     units_completed += 1
-                    if progress_bar is not None:
-                        progress_bar.update(1)
 
             pending: set[asyncio.Task[None]] = set()
             async with asyncio.TaskGroup() as tasks:
@@ -852,8 +884,6 @@ def stream_units(
         try:
             runner.run(operation)
         finally:
-            if progress_bar is not None:
-                progress_bar.close()
             report = record_execution_report(
                 ExecutionReport(
                     plan=plan,
@@ -873,7 +903,10 @@ def stream_units(
             if metrics is not None:
                 metrics.update(report.as_metrics())
 
-    return iter_bounded_handoff(in_flight=in_flight, run=run)
+    return advance_on_consumption(
+        iter_bounded_handoff(in_flight=in_flight, run=run),
+        make_bar if progress else None,
+    )
 
 
 def map_feature_read_groups(

@@ -41,7 +41,7 @@ import cytearc
 ds = cytearc.DataStore(
     "s3://bucket/cells.zarr",  # also gs://, hf://, or a local path
 )
-run = ds.pipeline.run()  # durable QC → graph → UMAP → clustering → marker run
+run = ds.pipeline.rna(label="rna")  # durable QC → graph → UMAP → clusters → markers
 
 ds.plots.embedding(
     run=run,
@@ -50,6 +50,7 @@ ds.plots.embedding(
 )
 ```
 
+Each modality has its own recipe, `ds.pipeline.rna()`, `ds.pipeline.atac()`, or `ds.pipeline.adt()`, and `ds.pipeline.multimodal(runs)` integrates completed runs of the same cells, with WNN by default.
 Read the [scRNA-seq tutorial](https://docs.nygen.io/CyteArc/tutorials/scrna-seq) for a granular workflow, or [remote stores](https://docs.nygen.io/CyteArc/tutorials/remote-stores) for cloud setups.
 
 ## CyteBase

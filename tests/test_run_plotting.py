@@ -40,19 +40,18 @@ def plotted_run(tmp_path_factory) -> SimpleNamespace:
     keep = np.arange(len(types)) % 3 != 0
     store.cells.insert("donor", donor)
     store.cells.insert("keep", keep)
-    run = store.pipeline.run(
+    run = store.pipeline.rna(
         label="plots",
         filtering=False,
         cell_cycle=False,
-        hvg_count=40,
-        pca_dims=5,
-        neighbors_k=8,
+        hvg={"top_n": 40},
+        pca={"dims": 5},
+        neighbors={"k": 8},
+        umap={"n_epochs": 30},
         leiden={"partitions": [1.0]},
-        paris=False,
         doublets=False,
         markers=False,
         snapshot_columns=("donor", "keep"),
-        params={"umap": {"n_epochs": 30}},
     )
     return SimpleNamespace(store=store, run=run)
 

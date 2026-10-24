@@ -6,7 +6,7 @@ from typing import Any, TypeVar, cast
 
 import numpy as np
 
-from .logging import progress_enabled
+from .progress import progress_requested
 
 T = TypeVar("T")
 
@@ -82,7 +82,7 @@ def compute_with_progress(
 ) -> np.ndarray:
     """Materialize a deferred array while reporting progress."""
     if hasattr(arr, "compute"):
-        progress_msg = msg if progress_enabled() else None
+        progress_msg = msg if progress_requested() else None
         return np.asarray(arr.compute(nthreads, progress_msg))
     return np.asarray(arr)
 

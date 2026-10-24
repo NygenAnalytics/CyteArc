@@ -1408,7 +1408,7 @@ def test_pipeline_matches_materialized_counts_and_reopens(tmp_path, monkeypatch)
         ids=joint.cells.fetch_all("ids"),
         policy=CountMatrixPolicy(4096, 1024),
     )
-    params = {
+    stages = {
         "filtering": False,
         "cell_cycle": False,
         "hvg": {"top_n": 40},
@@ -1421,9 +1421,9 @@ def test_pipeline_matches_materialized_counts_and_reopens(tmp_path, monkeypatch)
         "markers": False,
     }
     with count_fallbacks(monkeypatch) as fallbacks:
-        actual_run = joint.pipeline.run(params=params)
+        actual_run = joint.pipeline.rna(**stages)
     assert fallbacks == []
-    expected_run = reference.pipeline.run(params=params)
+    expected_run = reference.pipeline.rna(**stages)
     assert actual_run.status == expected_run.status == "completed"
     assert list(actual_run) == list(expected_run)
     for name in actual_run:

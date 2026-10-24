@@ -1,75 +1,62 @@
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
-import numpy as np
-
-from ..metadata.rows import apply_missing_mask
-from ..storage.artifacts import ArtifactRef, artifact_group
-from ..storage.pipeline_runs import (
-    PipelineOutputRecord,
-    abandon_pipeline_label_claim,
-    complete_pipeline_run_record,
-    create_pipeline_run_record,
-)
-from ..storage.selections import (
-    read_stored_selection_indices,
-    resolve_stored_selection_artifact,
-    snapshot_run_metadata,
-)
-from ..storage.types import as_zarr_array
+from ..storage.artifacts import ArtifactRef
+from ..storage.pipeline_runs import abandon_pipeline_label_claim
 from ..storage.validation_scope import validation_scoped
-from ..utils.logging import logger
-from ..utils.shutdown import (
-    ShutdownToken,
-    TemporarySignalGuard,
-    shutdown_checkpoint,
-    shutdown_scope,
-)
-from ._pipeline_cluster_selection import (
-    cluster_label_values,
-    run_cluster_selection,
-)
-from ._pipeline_fields import build_pipeline_fields
-from ._pipeline_filtering import filter_pipeline_selection, snapshot_column_values
-from ._pipeline_ledger import (
-    PipelineCallback,
+from ..utils.shutdown import CancellationToken
+from ._pipeline.events import (
+    PipelineCallback as PipelineCallback,
     PipelineEvent as PipelineEvent,
     PipelineEventKind as PipelineEventKind,
-    PipelineEventEmitter,
-    RunLedger,
-    end_pipeline_run,
-    interruption_record,
+    PipelineProgress as PipelineProgress,
+    pipeline_listener as pipeline_listener,
 )
-from ._pipeline_recipe import (
-    HVG_COUNT_DEFAULT,
-    NEIGHBORS_K_DEFAULT,
-    PCA_DIMS_DEFAULT,
-    ResolvedPipelineRecipe,
-    resolve_pipeline_recipe,
-)
+from ._pipeline.executor import execute_recipe
+from ._pipeline.recipes.adt import DEFAULT_PANEL_EXCLUDE as DEFAULT_PANEL_EXCLUDE
+from ._pipeline.recipes.adt import resolve_adt
+from ._pipeline.recipes.atac import resolve_atac
+from ._pipeline.recipes.multimodal import resolve_multimodal
+from ._pipeline.recipes.rna import resolve_rna
 from .pipeline_run import (
-    PipelineExecutionError,
     PipelineRun,
     list_pipeline_runs,
     open_pipeline_run,
 )
 
-# Preserve the documented event type's import and pickle identity after moving
-# its implementation into the ledger module.
+# Keep the documented event types' import and pickle identity here, where
+# users import them, though they are implemented beside the ledger.
 PipelineEvent.__module__ = __name__
+PipelineProgress.__module__ = __name__
+pipeline_listener.__module__ = __name__
 
-# The settings that make doublet scoring possible when the saved clustering
-# has one cluster. Silhouette selection never picks such a partition.
-_ONE_CLUSTER_DOUBLET_REMEDY = (
-    "Select a Leiden partition with two or more clusters with "
-    "params['leiden']['selected'], or omit 'selected' so that cluster selection "
-    "chooses one; set params['doublets']['heterotypic_fraction'] to 0 to simulate "
-    "doublets from any two sampled cells; or pass doublets=False."
-)
+type CellsArgument = str | ArtifactRef | PipelineRun
+"""A boolean cell column, a cell-selection artifact, or a completed run."""
+
+type StageSwitch = bool | Mapping[str, object]
+"""An optional stage: False skips it, True runs it, a mapping configures it."""
+
+type StageSettings = Mapping[str, object] | None
+"""A stage that always runs: None for its defaults, or a mapping of settings."""
 
 
 class PipelineAccessor:
-    """Store-bound entry point for the durable basic RNA pipeline."""
+    """Store-bound entry point for CyteArc's durable modality recipes.
+
+    Each recipe checks its call against the store before it writes anything:
+    its keywords and settings, the columns and cells it names, its stage
+    combinations, and the setting values that can be checked without reading
+    data. A call that fails these checks raises and writes nothing. The
+    recipe then runs its stages in order and returns a durable
+    :class:`~cytearc.PipelineRun`. A few values, such as ``ann_index``
+    ``ann_metric`` or a Leiden ``backend``, are checked only by their stage's
+    method when the stage runs, and such a failure records a failed run.
+
+    A stage keyword takes the keywords of the stage's method, which mean
+    exactly what they mean there, and an omitted setting takes that method's
+    default, except for a few defaults that a recipe fits to its data, such
+    as an ADT run's PCA ``dims``.
+    """
 
     __slots__ = ("_store",)
 
@@ -93,7 +80,7 @@ class PipelineAccessor:
         status: str | Sequence[str] | None = None,
         limit: int = 20,
     ) -> tuple[PipelineRun, ...]:
-        """List recent runs, optionally filtered by their terminal status."""
+        """List recent runs, newest first, optionally filtered by status."""
         return list_pipeline_runs(self._store, status=status, limit=limit)
 
     def abandon_label_claim(
@@ -120,583 +107,418 @@ class PipelineAccessor:
         )
         return PipelineRun(self._store, record)
 
+    def _require_runnable(self, callback: PipelineCallback | None) -> None:
+        if callback is not None and not callable(callback):
+            raise TypeError("callback must be callable")
+        if self._store.zarr_mode != "r+":
+            raise PermissionError("Pipeline execution requires zarr_mode='r+'")
+
     # One run validates each input once across its stages; artifacts are
     # immutable and prepared cell IDs cannot change during the run.
     @validation_scoped
-    def run(
+    def rna(
         self,
         *,
         assay: str | None = None,
         label: str | None = None,
-        cell_key: str = "I",
-        filtering: bool | Mapping[str, object] = True,
-        harmony_batch_columns: Sequence[str] | None = None,
-        hvg_count: int = HVG_COUNT_DEFAULT,
-        pca_dims: int = PCA_DIMS_DEFAULT,
-        neighbors_k: int = NEIGHBORS_K_DEFAULT,
-        umap: bool = True,
-        leiden: Mapping[str, object] | bool = True,
-        cell_cycle: bool = True,
-        paris: bool = True,
-        doublets: bool = True,
+        cells: CellsArgument = "I",
+        cell_calling: StageSwitch = False,
+        hashing: StageSwitch = False,
+        filtering: StageSwitch | None = None,
+        cell_cycle: StageSwitch = True,
+        hvg: StageSettings = None,
+        normalization: StageSettings = None,
+        pca: StageSettings = None,
+        harmony: Mapping[str, object] | Literal[False] | None = None,
+        ann_index: StageSettings = None,
+        neighbors: StageSettings = None,
+        connectivity: StageSettings = None,
+        embedding_initialization: StageSettings = None,
+        umap: StageSwitch = True,
+        tsne: StageSwitch = False,
+        leiden: StageSwitch = True,
+        paris: StageSwitch = False,
+        membership_strength: bool = False,
+        doublets: StageSwitch = True,
         markers: bool = True,
         snapshot_columns: Sequence[str] = (),
-        params: Mapping[str, object] | None = None,
+        species: str | None = None,
         callback: PipelineCallback | None = None,
+        cancel: CancellationToken | None = None,
     ) -> PipelineRun:
-        """Run the validated rich RNA recipe and return its durable handle.
+        """Analyze an RNA assay and return the durable run.
 
-        ``params`` maps a stage name to the keyword arguments the pipeline
-        forwards to that stage's function, so one mapping can configure a run:
+        The recipe optionally calls cells in raw droplets and demultiplexes
+        hashtags, filters cells on their QC metrics, scores the cell cycle,
+        selects highly variable genes, normalizes them by library size and
+        log, reduces them with PCA, optionally corrects batches with Harmony,
+        builds a neighbour graph, embeds it with UMAP, clusters it with Leiden
+        at several resolutions, saves the candidate with the best silhouette,
+        scores doublets, and ranks markers:
 
-        ``{"filtering": {"method": "manual", "lows": [...], "highs": [...]},
-        "hvg": {"flavor": "seurat_v3", "top_n": 2000}, "pca": {"dims": 30},
-        "umap": {"n_epochs": 400}, "leiden": {"partitions": [0.8, 1.0],
-        "selected": 1.0}, "tsne": {"max_iter": 800}}``
+        ``input_snapshot``, ``cell_calling``, ``hashing``, ``filtering``,
+        ``cell_cycle``, ``highly_variable_features``, ``normalization``,
+        ``pca``, ``harmony``, ``ann_index``, ``neighbors``, ``connectivity``,
+        ``embedding_initialization``, ``umap``, one ``leiden_<resolution>``
+        per candidate, ``paris``, ``cluster_selection``,
+        ``membership_strength``, ``tsne``, ``doublets``, ``markers``.
 
-        Sections:
-
-        - ``filtering``: the ``filtering`` mapping, or a bool.
-        - ``cell_cycle``, ``umap``, ``paris``, ``doublets``, ``markers``: a
-          mapping of settings, or a bool that switches the stage.
-        - ``hvg``, ``normalization``, ``pca``, ``ann_index``, ``neighbors``,
-          ``connectivity``, ``embedding_initialization``: settings for stages
-          that always run. The ``hvg`` settings are the keywords of
-          ``features.hvgs``, whose ``min_mean``, ``max_mean``, ``min_var``,
-          and ``max_var`` are log2 values; its ``batch`` names a cell
-          metadata column. ``pca`` ``dims=0`` skips PCA and builds the graph
-          on the normalized values of the selected features; it requires
-          ``doublets=False`` and no Harmony batch columns.
-        - ``harmony``: ``batch_columns`` plus ``harmony_params`` (the keyword
-          options of ``cytearc.embeddings.harmony.fit_harmony``) and
-          ``batch_size``, or False. A run with Harmony scores doublets within
-          each batch, the cells that share every batch label, unless
-          ``doublets`` names another ``sample_column``.
-        - ``leiden``: ``partitions``, an optional ``selected`` resolution that
-          becomes the saved clustering in place of the silhouette choice, and
-          Leiden settings; or a bool.
-        - ``tsne`` and ``membership_strength``: off unless requested. t-SNE
-          uses the UMAP graph and initialization; membership strength is
-          computed on the saved clustering.
-        - ``species``: a species key recorded with the run.
-
-        Unknown sections or settings raise before anything is written, and a
-        setting cannot also be given through its shortcut argument, such as
-        ``hvg_count`` with ``params["hvg"]["top_n"]``. Each stage validates
-        its own values. The run records the resolved settings.
+        Args:
+            assay: The RNA assay. Defaults to the default assay when it is an
+                RNA assay, else the store's only RNA assay.
+            label: An immutable label for the completed run, unique in the store.
+            cells: The cells to analyze: a boolean cell column, a cell-selection
+                artifact, or a completed run, whose analysis cells are reused
+                as they are.
+            cell_calling: EmptyDrops cell calling for a raw droplet matrix,
+                with the keywords of ``qc.call_cells`` and ``sample_column``,
+                a cell column of captures that are called apart, which must
+                label every cell of ``cells``.
+            hashing: Hashtag demultiplexing, with the keywords of
+                ``qc.hto_demultiplexing`` and ``assay``, the HTO assay
+                (default: the store's only assay of type ``HTO``). The run
+                keeps the cells of one hashtag and, unless ``filtering`` names
+                a ``sample_column``, computes MAD bounds within each hashtag.
+            filtering: QC filtering, with the settings of ``qc.auto_filter``
+                (``method``, ``attrs``, ``n_mads``, ``sample_column``,
+                ``min_cells_per_sample``, ``min_p``, ``max_p``) or, with
+                ``method="manual"``, ``lows``, ``highs``, and ``keep_bounds``.
+                None filters cells that ``cells`` names by column, and the
+                cells that ``cell_calling`` or ``hashing`` keep whatever
+                ``cells`` is; otherwise it keeps a given selection's or run's
+                cells as they are.
+            cell_cycle: Cell cycle scoring, with the keywords of
+                ``scores.cell_cycle``.
+            hvg: The keywords of ``features.hvgs``; ``batch`` names a cell
+                column, and ``min_mean``, ``max_mean``, ``min_var``, and
+                ``max_var`` are log2 values.
+            normalization: The keywords of ``features.normalize``.
+            pca: The keywords of ``reduction.pca``. ``dims`` must be below
+                ``hvg`` ``top_n``. ``dims=0`` skips PCA and builds the graph
+                on the normalized values, which needs ``doublets=False`` and
+                no Harmony.
+            harmony: ``batch_columns``, the cell columns whose batches Harmony
+                corrects, with ``harmony_params`` (the options of
+                ``cytearc.embeddings.harmony.fit_harmony``) and
+                ``batch_size``. None or False skips Harmony. A run with
+                Harmony scores doublets within each batch unless ``doublets``
+                names another ``sample_column``.
+            ann_index: The keywords of ``graph.ann_index``.
+            neighbors: The keywords of ``graph.neighbors``, such as ``k``.
+            connectivity: The keywords of ``graph.connectivity``.
+            embedding_initialization: The keywords of
+                ``embeddings.initialization``.
+            umap: UMAP, with the keywords of ``embeddings.umap``.
+            tsne: t-SNE on the UMAP graph and initialization, with the
+                keywords of ``embeddings.tsne``.
+            leiden: Leiden candidates: ``partitions``, the resolutions
+                (default 0.5, 0.75, 1.0, 1.25), an optional ``selected``
+                resolution that becomes the saved clustering in place of the
+                silhouette choice, and the keywords of ``clusters.leiden``.
+            paris: Paris clustering of the graph, for diagnosis, with the
+                keywords of ``clusters.paris``.
+            membership_strength: Score each cell's membership in its cluster.
+            doublets: Doublet scoring, with the keywords of ``qc.doublets``.
+            markers: Rank markers for each saved cluster.
+            snapshot_columns: Cell columns to freeze into the run's cell view.
+            species: A species key recorded with the run.
+            callback: Called with each :class:`PipelineEvent` of the run.
+            cancel: A :class:`~cytearc.CancellationToken` that stops the run.
 
         Raises:
-            UnmeasuredCellsError: If the assay did not measure a cell of ``cell_key``.
+            PermissionError: If the store is read-only.
+            TypeError: If the call fails its checks; nothing is written.
+            ValueError: If the call fails its checks; nothing is written.
+            KeyError: If the call names a missing column; nothing is written.
+            UnmeasuredCellsError: If the assay did not measure one of
+                ``cells``; nothing is written.
+            PipelineExecutionError: If a stage fails; the run is recorded failed.
+            PipelineCancelled: If ``cancel`` is cancelled; the run is recorded
+                interrupted.
+
+        Example:
+            >>> run = ds.pipeline.rna(label="rna", hvg={"top_n": 2000})
+            >>> run["clusters"], run.cells.fetch("umap_1")
         """
-        if callback is not None and not callable(callback):
-            raise TypeError("callback must be callable")
-        store = self._store
-        if store.zarr_mode != "r+":
-            raise PermissionError("Pipeline execution requires zarr_mode='r+'")
-        recipe = resolve_pipeline_recipe(
-            store,
+        self._require_runnable(callback)
+        plan = resolve_rna(
+            self._store,
             assay=assay,
             label=label,
-            cell_key=cell_key,
+            cells=cells,
+            cell_calling=cell_calling,
+            hashing=hashing,
             filtering=filtering,
-            harmony_batch_columns=harmony_batch_columns,
-            hvg_count=hvg_count,
-            pca_dims=pca_dims,
-            neighbors_k=neighbors_k,
-            umap=umap,
-            leiden=leiden,
             cell_cycle=cell_cycle,
+            hvg=hvg,
+            normalization=normalization,
+            pca=pca,
+            harmony=harmony,
+            ann_index=ann_index,
+            neighbors=neighbors,
+            connectivity=connectivity,
+            embedding_initialization=embedding_initialization,
+            umap=umap,
+            tsne=tsne,
+            leiden=leiden,
             paris=paris,
+            membership_strength=membership_strength,
             doublets=doublets,
             markers=markers,
             snapshot_columns=snapshot_columns,
-            params=params,
+            species=species,
         )
-        return self._run_recipe(recipe, callback)
+        return execute_recipe(self._store, plan, callback=callback, cancel=cancel)
 
-    def _run_recipe(
+    @validation_scoped
+    def atac(
         self,
-        recipe: ResolvedPipelineRecipe,
-        callback: PipelineCallback | None,
-    ) -> PipelineRun:
-        token = ShutdownToken()
-        active_run_id: list[str] = []
-        result: PipelineRun | None = None
-        try:
-            with TemporarySignalGuard(token) as guard, shutdown_scope(token):
-                try:
-                    result = self._execute_recipe(
-                        recipe,
-                        callback,
-                        signal_guard_available=guard.available,
-                        signal_guard_unavailable_reason=guard.unavailable_reason,
-                        active_run_id=active_run_id,
-                    )
-                except BaseException as error:
-                    if (
-                        interruption_record(error) is not None
-                        and active_run_id
-                        and end_pipeline_run(self._store.zw, active_run_id[0], error)
-                    ):
-                        PipelineEventEmitter(callback).emit(
-                            "pipeline_interrupted",
-                            "between_stages",
-                            error,
-                        )
-                    raise
-        finally:
-            if token.requested:
-                token.propagate()
-        assert result is not None
-        return result
-
-    def _execute_recipe(
-        self,
-        recipe: ResolvedPipelineRecipe,
-        callback: PipelineCallback | None,
         *,
-        signal_guard_available: bool,
-        signal_guard_unavailable_reason: str | None,
-        active_run_id: list[str],
+        assay: str | None = None,
+        label: str | None = None,
+        cells: CellsArgument = "I",
+        filtering: StageSwitch | None = None,
+        prevalent_peaks: StageSettings = None,
+        normalization: StageSettings = None,
+        lsi: StageSettings = None,
+        harmony: Mapping[str, object] | Literal[False] | None = None,
+        ann_index: StageSettings = None,
+        neighbors: StageSettings = None,
+        connectivity: StageSettings = None,
+        embedding_initialization: StageSettings = None,
+        umap: StageSwitch = True,
+        tsne: StageSwitch = False,
+        leiden: StageSwitch = True,
+        paris: StageSwitch = False,
+        membership_strength: bool = False,
+        markers: bool = True,
+        snapshot_columns: Sequence[str] = (),
+        species: str | None = None,
+        callback: PipelineCallback | None = None,
+        cancel: CancellationToken | None = None,
     ) -> PipelineRun:
-        store = self._store
-        shutdown_checkpoint()
-        from .. import __version__
+        """Analyze an ATAC assay of peak counts and return the durable run.
 
-        assay_obj = store._get_assay(recipe.assay)
-        config = recipe.to_config()
-        config["shutdown"] = {
-            "signalGuardAvailable": signal_guard_available,
-            "unavailableReason": signal_guard_unavailable_reason,
-        }
-        record = create_pipeline_run_record(
-            store.zw,
-            recipe="basic_rna_analysis",
-            requested_label=recipe.label,
-            assay=recipe.assay,
-            config=config,
-            stage_order=recipe.stage_order,
-            cytearc_version=__version__,
+        The recipe filters cells on their counts and accessible peaks,
+        selects the most prevalent peaks, normalizes them with TF-IDF, reduces
+        them with LSI, optionally corrects batches with Harmony, and then
+        builds, embeds, and clusters a graph as the RNA recipe does:
+
+        ``input_snapshot``, ``filtering``, ``prevalent_peaks``,
+        ``normalization``, ``lsi``, ``harmony``, ``ann_index``, ``neighbors``,
+        ``connectivity``, ``embedding_initialization``, ``umap``, one
+        ``leiden_<resolution>`` per candidate, ``paris``,
+        ``cluster_selection``, ``membership_strength``, ``tsne``, ``markers``.
+
+        Args:
+            assay: The ATAC assay. Defaults to the default assay when it is an
+                ATAC assay, else the store's only ATAC assay.
+            prevalent_peaks: The keywords of ``features.prevalent_peaks``,
+                such as ``top_n``, which defaults to 10,000 or one fewer than
+                the assay's peaks, whichever is smaller, and must be below the
+                assay's number of peaks. The run records the resolved
+                ``top_n``.
+            normalization: The keywords of ``features.normalize``.
+            lsi: The keywords of ``reduction.lsi``, such as ``dims`` and
+                ``skip_first``, a bool. ``dims``, plus the first component
+                that ``skip_first`` leaves out, must not exceed
+                ``prevalent_peaks`` ``top_n``. Cluster selection scores
+                candidates in the LSI coordinates, or in their Harmony
+                correction when the run has Harmony.
+
+        The other arguments mean what they mean for :meth:`rna`. The run
+        records the selected peaks as its ``prevalent_peaks`` feature field.
+        """
+        self._require_runnable(callback)
+        plan = resolve_atac(
+            self._store,
+            assay=assay,
+            label=label,
+            cells=cells,
+            filtering=filtering,
+            prevalent_peaks=prevalent_peaks,
+            normalization=normalization,
+            lsi=lsi,
+            harmony=harmony,
+            ann_index=ann_index,
+            neighbors=neighbors,
+            connectivity=connectivity,
+            embedding_initialization=embedding_initialization,
+            umap=umap,
+            tsne=tsne,
+            leiden=leiden,
+            paris=paris,
+            membership_strength=membership_strength,
+            markers=markers,
+            snapshot_columns=snapshot_columns,
+            species=species,
         )
-        active_run_id.append(record.run_id)
-        ledger = RunLedger(store.zw, record.run_id, callback)
-        artifacts: dict[str, ArtifactRef] = {}
-        cell_snapshot: ArtifactRef
-        feature_snapshot: ArtifactRef
-        frozen_feature_names: np.ndarray
-        all_features: ArtifactRef
-        doublet_samples: ArtifactRef | None = None
+        return execute_recipe(self._store, plan, callback=callback, cancel=cancel)
 
-        def input_snapshot_stage() -> Sequence[tuple[str, ArtifactRef]]:
-            nonlocal cell_snapshot, feature_snapshot, frozen_feature_names, all_features
-            nonlocal doublet_samples
-            input_selection = resolve_stored_selection_artifact(
-                store.zw,
-                table_path="cellData",
-                id_column="ids",
-                source_column=recipe.cell_key,
-                scope="datastore",
-                kind="cell_selection",
-                operation="snapshot_pipeline_input_selection",
-                parameters={"assay": recipe.assay},
-                inputs={},
-            )
-            cell_snapshot = snapshot_run_metadata(
-                store.zw,
-                table_path="cellData",
-                id_column="ids",
-                columns=recipe.cell_snapshot_columns,
-                axis="cell",
-            )
-            feature_snapshot = snapshot_run_metadata(
-                store.zw,
-                table_path=f"{recipe.assay}/featureData",
-                id_column="ids",
-                columns=("names",),
-                axis="feature",
-                assay=recipe.assay,
-            )
-            all_features = store._features_universe(from_assay=assay_obj.name)
-            frozen_feature_names = np.asarray(
-                as_zarr_array(
-                    artifact_group(store.zw, feature_snapshot)["names"],
-                    name="names",
-                )[:]
-            )
-            artifacts["input_cell_selection"] = input_selection
-            artifacts["feature_universe"] = all_features
-            outputs = [
-                ("input_cell_selection", input_selection),
-                ("cell_snapshot", cell_snapshot),
-                ("feature_snapshot", feature_snapshot),
-                ("feature_universe", all_features),
-            ]
-            if recipe.doublet_sample_columns:
-                # Doublet samples are frozen apart from the cell snapshot, so
-                # they leave the identities of the stages that read it alone.
-                doublet_samples = snapshot_run_metadata(
-                    store.zw,
-                    table_path="cellData",
-                    id_column="ids",
-                    columns=recipe.doublet_sample_columns,
-                    axis="cell",
-                )
-                outputs.append(("doublet_sample_snapshot", doublet_samples))
-            return tuple(outputs)
+    @validation_scoped
+    def adt(
+        self,
+        *,
+        assay: str | None = None,
+        label: str | None = None,
+        cells: CellsArgument = "I",
+        filtering: StageSwitch | None = None,
+        panel: StageSettings = None,
+        normalization: StageSettings = None,
+        pca: StageSettings = None,
+        harmony: Mapping[str, object] | Literal[False] | None = None,
+        ann_index: StageSettings = None,
+        neighbors: StageSettings = None,
+        connectivity: StageSettings = None,
+        embedding_initialization: StageSettings = None,
+        umap: StageSwitch = True,
+        tsne: StageSwitch = False,
+        leiden: StageSwitch = True,
+        paris: StageSwitch = False,
+        membership_strength: bool = False,
+        markers: bool = True,
+        snapshot_columns: Sequence[str] = (),
+        species: str | None = None,
+        callback: PipelineCallback | None = None,
+        cancel: CancellationToken | None = None,
+    ) -> PipelineRun:
+        """Analyze an ADT (antibody) assay and return the durable run.
 
-        ledger.run("input_snapshot", input_snapshot_stage)
+        The recipe leaves isotype controls out of the panel, normalizes the
+        antibodies with CLR, reduces them with PCA, optionally corrects
+        batches with Harmony, and then builds, embeds, and clusters a graph as
+        the RNA recipe does:
 
-        if recipe.filtering["enabled"]:
+        ``input_snapshot``, ``filtering``, ``panel``, ``normalization``,
+        ``pca``, ``harmony``, ``ann_index``, ``neighbors``, ``connectivity``,
+        ``embedding_initialization``, ``umap``, one ``leiden_<resolution>``
+        per candidate, ``paris``, ``cluster_selection``,
+        ``membership_strength``, ``tsne``, ``markers``.
 
-            def filtering_stage() -> Sequence[tuple[str, ArtifactRef]]:
-                ref = filter_pipeline_selection(
-                    store,
-                    recipe=recipe,
-                    input_selection=artifacts["input_cell_selection"],
-                    cell_snapshot=cell_snapshot,
-                )
-                artifacts["analysis_cell_selection"] = ref
-                return (("analysis_cell_selection", ref),)
+        Analyze ADT with the cells of an RNA run, ``cells=rna_run``, to
+        integrate the two with :meth:`multimodal`.
 
-            ledger.run("filtering", filtering_stage)
-        else:
-            artifacts["analysis_cell_selection"] = artifacts["input_cell_selection"]
-            ledger.skip("filtering")
-        analysis_selection = artifacts["analysis_cell_selection"]
+        Args:
+            assay: The ADT assay, of type ``ADT``. Defaults to the default
+                assay when it is one, else the store's only ADT assay.
+            filtering: QC filtering, as for :meth:`rna`. The run filters only
+                when ``filtering`` is True or a mapping; None, the default,
+                keeps the cells as they are, since an ADT run usually takes
+                the QC-passing cells of an RNA run. Without ``attrs``, the
+                filter reads the assay's ``<assay>_nCounts`` column only.
+            panel: ``exclude``, a regular expression of the antibody names to
+                leave out (default ``DEFAULT_PANEL_EXCLUDE``, which matches
+                "isotype", "control", and "ctrl" in any case), or None to keep
+                every antibody. The panel must keep at least two antibodies,
+                and the run records the excluded names.
+            normalization: The keywords of ``features.normalize``.
+            pca: The keywords of ``reduction.pca``. ``dims`` defaults to one
+                fewer than the panel's antibodies, at most the PCA default,
+                and must be below the panel's number of antibodies.
 
-        if recipe.cell_cycle:
-
-            def cell_cycle_stage() -> Sequence[tuple[str, ArtifactRef]]:
-                ref = store._run_cell_cycle_scoring_artifact(
-                    **recipe.params_for("cell_cycle"),
-                    assay=assay_obj,
-                    cell_selection=analysis_selection,
-                    feature_names=frozen_feature_names,
-                    feature_snapshot=feature_snapshot,
-                )
-                artifacts["cell_cycle"] = ref
-                return (("cell_cycle", ref),)
-
-            ledger.run("cell_cycle", cell_cycle_stage)
-        else:
-            ledger.skip("cell_cycle")
-
-        def hvg_stage() -> Sequence[tuple[str, ArtifactRef]]:
-            hvg = store._select_hvgs_artifact(
-                assay=assay_obj,
-                cell_selection=analysis_selection,
-                feature_names=frozen_feature_names,
-                feature_snapshot=feature_snapshot,
-                top_n=recipe.hvg_count,
-                show_plot=False,
-                **recipe.params_for("hvg"),
-            )
-            artifacts["highly_variable_features"] = hvg
-            return (("highly_variable_features", hvg),)
-
-        ledger.run("highly_variable_features", hvg_stage)
-
-        def normalization_stage() -> Sequence[tuple[str, ArtifactRef]]:
-            ref = store._features_normalize(
-                analysis_selection,
-                artifacts["highly_variable_features"],
-                **recipe.params_for("normalization"),
-            )
-            artifacts["normalized"] = ref
-            return (("normalized", ref),)
-
-        ledger.run("normalization", normalization_stage)
-
-        def pca_stage() -> Sequence[tuple[str, ArtifactRef]]:
-            ref = store._reduction_pca(
-                artifacts["normalized"],
-                dims=recipe.pca_dims,
-                **recipe.params_for("pca"),
-            )
-            artifacts["pca"] = ref
-            return (("pca", ref),)
-
-        if recipe.pca_dims:
-            ledger.run("pca", pca_stage)
-            coordinates = artifacts["pca"]
-        else:
-            # Without PCA the graph is built on the normalized values of the
-            # selected features, one coordinate per feature. The recipe has
-            # refused Harmony and doublet scoring, which need a PCA graph.
-            ledger.skip("pca")
-            coordinates = artifacts["normalized"]
-        # The uncorrected coordinates: the PCA that Harmony corrects.
-        reduction = coordinates
-        if recipe.harmony_batch_columns:
-
-            def harmony_stage() -> Sequence[tuple[str, ArtifactRef]]:
-                ref = store._run_harmony_artifact(
-                    reduction,
-                    cell_snapshot,
-                    list(recipe.harmony_batch_columns),
-                    **recipe.params_for("harmony"),
-                )
-                artifacts["harmony"] = ref
-                return (("harmony", ref),)
-
-            ledger.run("harmony", harmony_stage)
-            coordinates = artifacts["harmony"]
-        else:
-            ledger.skip("harmony")
-
-        def ann_stage() -> Sequence[tuple[str, ArtifactRef]]:
-            ref = store._graph_ann_index(coordinates, **recipe.params_for("ann_index"))
-            artifacts["ann_index"] = ref
-            return (("ann_index", ref),)
-
-        ledger.run("ann_index", ann_stage)
-
-        def neighbors_stage() -> Sequence[tuple[str, ArtifactRef]]:
-            ref = store._graph_neighbors(
-                artifacts["ann_index"],
-                coordinates=coordinates,
-                k=recipe.neighbors_k,
-                **recipe.params_for("neighbors"),
-            )
-            artifacts["neighbors"] = ref
-            return (("neighbors", ref),)
-
-        ledger.run("neighbors", neighbors_stage)
-
-        def connectivity_stage() -> Sequence[tuple[str, ArtifactRef]]:
-            ref = store._graph_connectivity(
-                artifacts["neighbors"], **recipe.params_for("connectivity")
-            )
-            artifacts["connectivity_map"] = ref
-            return (("connectivity_map", ref),)
-
-        ledger.run("connectivity", connectivity_stage)
-
-        def initialization_stage() -> Sequence[tuple[str, ArtifactRef]]:
-            ref = store._embeddings_initialization(
-                coordinates, **recipe.params_for("embedding_initialization")
-            )
-            artifacts["embedding_initialization"] = ref
-            return (("embedding_initialization", ref),)
-
-        if recipe.umap or recipe.tsne:
-            ledger.run("embedding_initialization", initialization_stage)
-        else:
-            ledger.skip("embedding_initialization")
-
-        def umap_stage() -> Sequence[tuple[str, ArtifactRef]]:
-            ref = store._run_umap_artifact(
-                artifacts["connectivity_map"],
-                artifacts["embedding_initialization"],
-                **recipe.params_for("umap"),
-            )
-            artifacts["umap"] = ref
-            return (("umap", ref),)
-
-        if recipe.umap:
-            ledger.run("umap", umap_stage)
-        else:
-            ledger.skip("umap")
-
-        for key, resolution in recipe.leiden_partitions:
-            output_key = f"leiden_{key}"
-
-            def leiden_stage(
-                output_key: str = output_key,
-                resolution: float = resolution,
-            ) -> Sequence[tuple[str, ArtifactRef]]:
-                ref = store._run_leiden_artifact(
-                    artifacts["connectivity_map"],
-                    resolution=resolution,
-                    **recipe.params_for("leiden"),
-                )
-                artifacts[output_key] = ref
-                return ((output_key, ref),)
-
-            ledger.run(output_key, leiden_stage)
-
-        if recipe.paris:
-
-            def paris_stage() -> Sequence[tuple[str, ArtifactRef]]:
-                ref = store._run_paris_artifact(
-                    artifacts["connectivity_map"], **recipe.params_for("paris")
-                )
-                artifacts["paris"] = ref
-                return (("paris", ref),)
-
-            ledger.run("paris", paris_stage)
-        else:
-            ledger.skip("paris")
-
-        clustering_candidates = [
-            (f"leiden_{key}", artifacts[f"leiden_{key}"])
-            for key, _resolution in recipe.leiden_partitions
-        ]
-        if recipe.leiden_selected is not None:
-            # The requested resolution is the saved clustering; the other
-            # partitions stay available as candidates.
-            artifacts["clusters"] = artifacts[f"leiden_{recipe.leiden_selected}"]
-            ledger.skip("cluster_selection")
-        elif clustering_candidates:
-
-            def cluster_selection_stage() -> Sequence[tuple[str, ArtifactRef]]:
-                decision, selected_key, selected_ref = run_cluster_selection(
-                    store,
-                    coordinates=coordinates,
-                    connectivity_map=artifacts["connectivity_map"],
-                    cell_selection=analysis_selection,
-                    candidates=clustering_candidates,
-                )
-                artifacts["cluster_selection"] = decision
-                artifacts["clusters"] = selected_ref
-                logger.info(f"Selected clustering candidate: {selected_key}")
-                return (("cluster_selection", decision),)
-
-            ledger.run("cluster_selection", cluster_selection_stage)
-        else:
-            ledger.skip("cluster_selection")
-
-        def membership_strength_stage() -> Sequence[tuple[str, ArtifactRef]]:
-            ref = store._clusters_membership_strength(
-                artifacts["clusters"], artifacts["connectivity_map"]
-            )
-            artifacts["membership_strength"] = ref
-            return (("membership_strength", ref),)
-
-        if recipe.membership_strength:
-            ledger.run("membership_strength", membership_strength_stage)
-        else:
-            ledger.skip("membership_strength")
-
-        def tsne_stage() -> Sequence[tuple[str, ArtifactRef]]:
-            ref = store._embeddings_tsne(
-                artifacts["connectivity_map"],
-                artifacts["embedding_initialization"],
-                verbose=False,
-                **recipe.params_for("tsne"),
-            )
-            artifacts["tsne"] = ref
-            return (("tsne", ref),)
-
-        if recipe.tsne:
-            ledger.run("tsne", tsne_stage)
-        else:
-            ledger.skip("tsne")
-
-        if recipe.doublets:
-
-            def doublet_stage() -> Sequence[tuple[str, ArtifactRef]]:
-                clusters = artifacts["clusters"]
-                settings = recipe.params_for("doublets")
-                # The recipe resolved the sample columns, Harmony's included.
-                settings.pop("sample_column", None)
-                sample_labels = None
-                if doublet_samples is not None:
-                    rows = read_stored_selection_indices(
-                        store.zw,
-                        analysis_selection,
-                        kind="cell_selection",
-                        scope="datastore",
-                        assay=None,
-                        table_path="cellData",
-                    )
-                    snapshot = artifact_group(store.zw, doublet_samples)
-                    sample_labels = []
-                    for column in recipe.doublet_sample_columns:
-                        values, missing = snapshot_column_values(snapshot, column)
-                        sample_labels.append(
-                            apply_missing_mask(
-                                values[rows],
-                                None if missing is None else missing[rows],
-                                labels=True,
-                            )
-                        )
-                # With Harmony the graph is the corrected one: samples are
-                # scored on the PCA that it corrected, so no other graph is built.
-                ref = store._run_doublet_detection_artifact(
-                    source_assay=assay_obj,
-                    cell_selection=analysis_selection,
-                    clusters=clusters,
-                    cluster_values=cluster_label_values(store.zw, clusters),
-                    connectivity=artifacts["connectivity_map"],
-                    feature_snapshot=feature_snapshot,
-                    sample_column=recipe.doublet_sample_columns or None,
-                    sample_labels=sample_labels,
-                    one_cluster_remedy=_ONE_CLUSTER_DOUBLET_REMEDY,
-                    **settings,
-                )
-                artifacts["doublets"] = ref
-                return (("doublets", ref),)
-
-            ledger.run("doublets", doublet_stage)
-        else:
-            ledger.skip("doublets")
-
-        if recipe.markers:
-
-            def marker_stage() -> Sequence[tuple[str, ArtifactRef]]:
-                clusters = artifacts["clusters"]
-                ref = store._run_marker_search_artifact(
-                    assay=assay_obj,
-                    cell_selection=analysis_selection,
-                    clusters=clusters,
-                    cluster_values=cluster_label_values(store.zw, clusters),
-                    feature_selection=all_features,
-                    feature_names=frozen_feature_names,
-                    feature_snapshot=feature_snapshot,
-                )
-                artifacts["markers"] = ref
-                return (("markers", ref),)
-
-            ledger.run("markers", marker_stage)
-        else:
-            ledger.skip("markers")
-
-        ordered_keys = (
-            "input_cell_selection",
-            "analysis_cell_selection",
-            "feature_universe",
-            "cell_cycle",
-            "highly_variable_features",
-            "normalized",
-            "pca",
-            "harmony",
-            "ann_index",
-            "neighbors",
-            "connectivity_map",
-            "embedding_initialization",
-            "umap",
-            *(f"leiden_{key}" for key, _value in recipe.leiden_partitions),
-            "paris",
-            "cluster_selection",
-            "clusters",
-            "membership_strength",
-            "tsne",
-            "doublets",
-            "markers",
+        The other arguments mean what they mean for :meth:`rna`. The run
+        records the panel as its ``panel`` feature field.
+        """
+        self._require_runnable(callback)
+        plan = resolve_adt(
+            self._store,
+            assay=assay,
+            label=label,
+            cells=cells,
+            filtering=filtering,
+            panel=panel,
+            normalization=normalization,
+            pca=pca,
+            harmony=harmony,
+            ann_index=ann_index,
+            neighbors=neighbors,
+            connectivity=connectivity,
+            embedding_initialization=embedding_initialization,
+            umap=umap,
+            tsne=tsne,
+            leiden=leiden,
+            paris=paris,
+            membership_strength=membership_strength,
+            markers=markers,
+            snapshot_columns=snapshot_columns,
+            species=species,
         )
-        outputs = tuple(
-            PipelineOutputRecord(key=key, artifact=artifacts[key])
-            for key in ordered_keys
-            if key in artifacts
+        return execute_recipe(self._store, plan, callback=callback, cancel=cancel)
+
+    @validation_scoped
+    def multimodal(
+        self,
+        runs: Sequence[PipelineRun],
+        *,
+        label: str | None = None,
+        method: str = "wnn",
+        integration: StageSettings = None,
+        embedding_initialization: StageSettings = None,
+        umap: StageSwitch = True,
+        tsne: StageSwitch = False,
+        leiden: StageSwitch = True,
+        paris: StageSwitch = False,
+        membership_strength: bool = False,
+        markers: bool = True,
+        snapshot_columns: Sequence[str] = (),
+        callback: PipelineCallback | None = None,
+        cancel: CancellationToken | None = None,
+    ) -> PipelineRun:
+        """Integrate completed modality runs of the same cells into one graph.
+
+        The recipe combines the runs' graphs with weighted nearest neighbours
+        (``method="wnn"``, the default for modalities measured in the same
+        cells) or shared nearest neighbours (``"snn"``), embeds and clusters
+        the integrated graph, and ranks each modality's markers for the joint
+        clusters:
+
+        ``input_snapshot``, ``integration``, ``embedding_initialization``,
+        ``umap``, one ``leiden_<resolution>`` per candidate, ``paris``,
+        ``cluster_selection`` (always skipped), ``membership_strength``,
+        ``tsne``, ``markers``.
+
+        The runs must analyze the same cells: run each modality after the
+        first with ``cells=<first run>``. WNN needs runs whose graphs were
+        built on PCA, LSI, or Harmony coordinates, and SNN needs runs built
+        with the same ``neighbors`` ``k``. The joint run's cell view holds the
+        joint UMAP, Leiden, and ``clusters`` fields and, for WNN, each cell's
+        ``weight_<assay>`` modality weights. Its ``assay`` and
+        ``feature_universe`` are the first run's, and its feature view covers
+        that assay's features with ``I``, ``ids``, and ``names`` only, without
+        the first run's feature field.
+
+        Args:
+            runs: Two or more completed runs of different assays, such as
+                ``[rna_run, adt_run]``.
+            method: ``"wnn"`` or ``"snn"``.
+            integration: The keywords of ``integration.modalities``:
+                ``chunk_size`` and, for WNN, ``l2_normalize``.
+            embedding_initialization: The keywords of
+                ``embeddings.initialization``, which starts the joint
+                embedding from the first run's coordinates.
+            leiden: As for :meth:`rna`, but the integrated graph has no shared
+                coordinates in which to compare candidates by silhouette, so
+                ``partitions`` defaults to ``[1.0]`` and several partitions
+                need a ``selected`` resolution.
+            markers: Rank each run's assay's features for the joint clusters,
+                as the ``markers_<assay>`` outputs.
+
+        The other arguments mean what they mean for :meth:`rna`.
+        """
+        self._require_runnable(callback)
+        plan = resolve_multimodal(
+            self._store,
+            runs,
+            label=label,
+            method=method,
+            integration=integration,
+            embedding_initialization=embedding_initialization,
+            umap=umap,
+            tsne=tsne,
+            leiden=leiden,
+            paris=paris,
+            membership_strength=membership_strength,
+            markers=markers,
+            snapshot_columns=snapshot_columns,
         )
-        try:
-            fields = build_pipeline_fields(
-                store,
-                recipe,
-                artifacts,
-                cell_snapshot=cell_snapshot,
-                feature_snapshot=feature_snapshot,
-            )
-            shutdown_checkpoint()
-            complete_pipeline_run_record(
-                store.zw,
-                run_id=record.run_id,
-                outputs=outputs,
-                fields=fields,
-            )
-            shutdown_checkpoint()
-        except Exception as error:
-            ledger.terminate(error)
-            raise PipelineExecutionError(record.run_id, "finalize", error) from error
-        return open_pipeline_run(store, run_id=record.run_id)
+        return execute_recipe(self._store, plan, callback=callback, cancel=cancel)

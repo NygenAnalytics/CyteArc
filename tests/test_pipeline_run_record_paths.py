@@ -15,6 +15,7 @@ from zarr.core.buffer import default_buffer_prototype
 from zarr.core.sync import sync
 from zarr.storage import FsspecStore, MemoryStore
 
+import cytearc.datastore._pipeline.executor as pipeline_executor
 import cytearc.storage.pipeline_runs as pipeline_run_storage
 from cytearc import DataStore, PipelineExecutionError, PipelineRun
 from cytearc.datastore.pipeline_accessor import PipelineEvent
@@ -41,12 +42,16 @@ from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
 from cytearc.storage.stores import load_zarr
 from cytearc.tools.repack_zarr import repack_store
 from cytearc.utils.logging import logger
-from cytearc.utils.shutdown import ShutdownRequested, current_shutdown_token
+from cytearc.utils.shutdown import (
+    ShutdownRequested,
+    ShutdownToken,
+    shutdown_checkpoint,
+)
 from cytearc.writers.counts_t import finalize_writer_counts_t
 from tests.storage_helpers import finalize_test_counts, write_count_store
 
 _CLAIMS = "pipeline/runs/.label-claims"
-_FAST_RUN = {
+_FAST_RUN: dict[str, Any] = {
     "filtering": False,
     "cell_cycle": False,
     "umap": False,
@@ -55,14 +60,39 @@ _FAST_RUN = {
     "doublets": False,
     "markers": False,
 }
-# Every graph stage runs, and Paris supplies a cluster cut for tree plots.
-_GRAPH_RUN = {
+# Every graph stage runs on the small graph store, and nothing after them.
+_GRAPH_STAGES: dict[str, Any] = {
     **_FAST_RUN,
-    "hvg_count": 20,
-    "pca_dims": 3,
-    "neighbors_k": 5,
-    "paris": True,
+    "hvg": {"top_n": 20},
+    "pca": {"dims": 3},
+    "neighbors": {"k": 5},
 }
+# The stage records of a completed run with _GRAPH_STAGES, in order.
+_GRAPH_STAGE_STATUSES = (
+    ("input_snapshot", "completed"),
+    ("cell_calling", "skipped"),
+    ("hashing", "skipped"),
+    ("filtering", "skipped"),
+    ("cell_cycle", "skipped"),
+    ("highly_variable_features", "completed"),
+    ("normalization", "completed"),
+    ("pca", "completed"),
+    ("harmony", "skipped"),
+    ("ann_index", "completed"),
+    ("neighbors", "completed"),
+    ("connectivity", "completed"),
+    ("embedding_initialization", "skipped"),
+    ("umap", "skipped"),
+    ("paris", "skipped"),
+    ("cluster_selection", "skipped"),
+    ("membership_strength", "skipped"),
+    ("tsne", "skipped"),
+    ("doublets", "skipped"),
+    ("markers", "skipped"),
+)
+_PCA = [stage for stage, _status in _GRAPH_STAGE_STATUSES].index("pca")
+# Paris supplies a cluster cut for tree plots.
+_GRAPH_RUN: dict[str, Any] = {**_GRAPH_STAGES, "paris": True}
 
 
 def _metrics() -> PipelineStageMetrics:
@@ -553,44 +583,80 @@ def test_repack_refuses_a_label_claim_deleted_after_it_was_listed(
         repack_store(str(source), str(tmp_path / "repacked.zarr"))
 
 
+def _lifecycle(events: list[PipelineEvent]) -> list[tuple[str, str | None]]:
+    """Return the run's events in order, without the timing-dependent progress."""
+    return [
+        (event.kind, event.stage) for event in events if event.kind != "stage_progress"
+    ]
+
+
+@pytest.fixture
+def run_tokens(monkeypatch: pytest.MonkeyPatch) -> list[ShutdownToken]:
+    """Record each run's shutdown token.
+
+    Callbacks run outside the run's shutdown scope, so a test reaches the
+    token that a request from a callback must reach through this record.
+    """
+    tokens: list[ShutdownToken] = []
+
+    class RecordedToken(ShutdownToken):
+        def __init__(self) -> None:
+            super().__init__()
+            tokens.append(self)
+
+    monkeypatch.setattr(pipeline_executor, "ShutdownToken", RecordedToken)
+    return tokens
+
+
+def _request_shutdown(tokens: list[ShutdownToken], reason: str) -> None:
+    (token,) = tokens
+    token.request(reason=reason)
+
+
 def test_pipeline_run_rejects_a_bad_callback_and_read_only_stores(
     tmp_path: Path,
 ) -> None:
     location = _small_store(tmp_path / "data.zarr")
     datastore = DataStore(location, default_assay="RNA", min_features_per_cell=1)
     with pytest.raises(TypeError, match="callback must be callable"):
-        datastore.pipeline.run(callback="print", **_FAST_RUN)  # type: ignore[arg-type]
+        datastore.pipeline.rna(callback="print", **_FAST_RUN)  # type: ignore[arg-type]
 
     read_only = DataStore(location, default_assay="RNA", zarr_mode="r")
     with pytest.raises(PermissionError, match=r"zarr_mode='r\+'"):
-        read_only.pipeline.run(**_FAST_RUN)
+        read_only.pipeline.rna(**_FAST_RUN)
     assert datastore.pipeline.list_runs() == ()
 
 
-def test_shutdown_requested_between_stages_ends_the_run_interrupted(
+def test_shutdown_requested_between_stages_ends_the_run_interrupted_once(
     tmp_path: Path,
+    run_tokens: list[ShutdownToken],
 ) -> None:
     location = _small_store(tmp_path / "data.zarr")
     datastore = DataStore(location, default_assay="RNA", min_features_per_cell=1)
-    events: list[tuple[str, str]] = []
+    events: list[PipelineEvent] = []
 
     def stop_after_first_stage(event: PipelineEvent) -> None:
-        events.append((event.kind, event.stage))
+        events.append(event)
         if event.kind == "stage_completed":
-            token = current_shutdown_token()
-            assert token is not None
-            token.request(reason="stop between stages")
+            _request_shutdown(run_tokens, "stop between stages")
 
     with pytest.raises(ShutdownRequested, match="stop between stages"):
-        datastore.pipeline.run(callback=stop_after_first_stage, **_FAST_RUN)
+        datastore.pipeline.rna(callback=stop_after_first_stage, **_FAST_RUN)
 
-    assert events == [
+    # No stage was running when the run stopped, so its one interruption
+    # event names none.
+    assert _lifecycle(events) == [
+        ("run_started", None),
         ("stage_started", "input_snapshot"),
         ("stage_completed", "input_snapshot"),
-        ("pipeline_interrupted", "between_stages"),
+        ("run_interrupted", None),
     ]
+    interrupted_event = events[-1]
+    assert interrupted_event.ordinal is None
+    assert isinstance(interrupted_event.error, ShutdownRequested)
     assert datastore.pipeline.list_runs(status="running") == ()
     (interrupted,) = datastore.pipeline.list_runs(status="interrupted")
+    assert interrupted_event.run_id == interrupted.run_id
     report = interrupted.report()
     assert report["run"]["complete"] is True
     assert report["run"]["interruption"]["kind"] == "shutdown_request"
@@ -639,11 +705,237 @@ def _write_graph_store(path: Path) -> str:
     return str(path)
 
 
+def _graph_datastore(path: Path) -> DataStore:
+    location = _write_graph_store(path)
+    return DataStore(location, default_assay="RNA", min_features_per_cell=1)
+
+
+def _stage_statuses(run: PipelineRun) -> list[tuple[str, str]]:
+    stages = run.report()["stages"]
+    # A stopped run never leaves a stage running.
+    assert all(stage["complete"] for stage in stages)
+    return [(stage["stage"], stage["status"]) for stage in stages]
+
+
+@pytest.mark.parametrize(
+    ("boundary", "stages", "tail"),
+    [
+        pytest.param(
+            ("run_started", None),
+            (),
+            [("run_started", None), ("run_interrupted", None)],
+            id="before_the_first_stage",
+        ),
+        pytest.param(
+            ("stage_skipped", "cell_calling"),
+            _GRAPH_STAGE_STATUSES[:2],
+            [("stage_skipped", "cell_calling"), ("run_interrupted", None)],
+            id="after_a_skipped_stage",
+        ),
+        pytest.param(
+            "inside_pca",
+            (*_GRAPH_STAGE_STATUSES[:_PCA], ("pca", "interrupted")),
+            [
+                ("stage_started", "pca"),
+                ("stage_interrupted", "pca"),
+                ("run_interrupted", "pca"),
+            ],
+            id="inside_a_stage",
+        ),
+        pytest.param(
+            "after_pca",
+            _GRAPH_STAGE_STATUSES[: _PCA + 1],
+            # The stage's work finished, so the run stopped between stages.
+            [
+                ("stage_started", "pca"),
+                ("stage_completed", "pca"),
+                ("run_interrupted", None),
+            ],
+            id="after_a_stage_action",
+        ),
+        pytest.param(
+            ("stage_skipped", "markers"),
+            _GRAPH_STAGE_STATUSES,
+            [("stage_skipped", "markers"), ("run_interrupted", None)],
+            id="after_the_last_stage",
+        ),
+    ],
+)
+def test_shutdown_at_each_run_boundary_ends_the_run_interrupted_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_tokens: list[ShutdownToken],
+    boundary: tuple[str, str | None] | str,
+    stages: tuple[tuple[str, str], ...],
+    tail: list[tuple[str, str | None]],
+) -> None:
+    datastore = _graph_datastore(tmp_path / "data.zarr")
+    reason = "stop at a run boundary"
+    events: list[PipelineEvent] = []
+
+    def observe(event: PipelineEvent) -> None:
+        events.append(event)
+        if (event.kind, event.stage) == boundary:
+            _request_shutdown(run_tokens, reason)
+
+    if isinstance(boundary, str):
+        original_pca = type(datastore)._reduction_pca
+
+        def interrupted_pca(store: DataStore, *args: Any, **kwargs: Any) -> Any:
+            if boundary == "inside_pca":
+                _request_shutdown(run_tokens, reason)
+                shutdown_checkpoint()
+            result = original_pca(store, *args, **kwargs)
+            # The request arrives after the stage's work has returned.
+            _request_shutdown(run_tokens, reason)
+            return result
+
+        monkeypatch.setattr(type(datastore), "_reduction_pca", interrupted_pca)
+
+    with pytest.raises(ShutdownRequested, match=reason):
+        datastore.pipeline.rna(callback=observe, **_GRAPH_STAGES)
+
+    lifecycle = _lifecycle(events)
+    assert lifecycle[-len(tail) :] == tail
+    assert [kind for kind, _stage in lifecycle].count("run_interrupted") == 1
+    assert datastore.pipeline.list_runs(status="running") == ()
+    (interrupted,) = datastore.pipeline.list_runs(status="interrupted")
+    assert {event.run_id for event in events} == {interrupted.run_id}
+    run = interrupted.report()["run"]
+    assert run["complete"] is True
+    assert run["outputs"] == []
+    assert (run["interruption"]["kind"], run["interruption"]["message"]) == (
+        "shutdown_request",
+        reason,
+    )
+    assert _stage_statuses(interrupted) == list(stages)
+
+
+def test_shutdown_after_the_run_completed_keeps_it_completed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_tokens: list[ShutdownToken],
+) -> None:
+    datastore = _graph_datastore(tmp_path / "data.zarr")
+    complete = pipeline_executor.complete_pipeline_run_record
+
+    def complete_then_request(*args: Any, **kwargs: Any) -> PipelineRunRecord:
+        record = complete(*args, **kwargs)
+        _request_shutdown(run_tokens, "stop after completion")
+        return record
+
+    monkeypatch.setattr(
+        pipeline_executor, "complete_pipeline_run_record", complete_then_request
+    )
+    events: list[PipelineEvent] = []
+
+    with pytest.raises(ShutdownRequested, match="stop after completion"):
+        datastore.pipeline.rna(label="handoff", callback=events.append, **_GRAPH_STAGES)
+
+    # The shutdown still reaches the caller, but the durable run is complete.
+    run = datastore.pipeline.open(label="handoff")
+    assert run.status == "completed"
+    assert run.report()["run"]["interruption"] is None
+    assert _stage_statuses(run) == list(_GRAPH_STAGE_STATUSES)
+    assert {"analysis_cell_selection", "pca", "connectivity_map"} <= set(run)
+    assert all(datastore.artifacts.inspect(ref).complete for ref in run.values())
+    # No event reports an outcome that the durable record contradicts.
+    kinds = {kind for kind, _stage in _lifecycle(events)}
+    assert not kinds & {"run_failed", "run_interrupted", "stage_failed"}
+
+
+def test_failed_stage_emits_stage_failed_then_run_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    datastore = _graph_datastore(tmp_path / "data.zarr")
+    expected = RuntimeError("deliberate PCA failure")
+
+    def failing_pca(_store: DataStore, *_args: Any, **_kwargs: Any) -> Any:
+        raise expected
+
+    monkeypatch.setattr(type(datastore), "_reduction_pca", failing_pca)
+    events: list[PipelineEvent] = []
+
+    with pytest.raises(PipelineExecutionError) as caught:
+        datastore.pipeline.rna(label="failed", callback=events.append, **_GRAPH_STAGES)
+
+    error = caught.value
+    assert error.stage == "pca"
+    assert error.__cause__ is expected
+    lifecycle = _lifecycle(events)
+    assert lifecycle[-3:] == [
+        ("stage_started", "pca"),
+        ("stage_failed", "pca"),
+        ("run_failed", "pca"),
+    ]
+    assert [kind for kind, _stage in lifecycle].count("run_failed") == 1
+    stage_failed, run_failed = events[-2:]
+    # The stage event carries the stage's error; the run event, the run's.
+    assert stage_failed.error is expected
+    assert run_failed.error is error
+    assert stage_failed.ordinal == run_failed.ordinal == _PCA
+    assert {event.run_id for event in events} == {error.run_id}
+    failed = datastore.pipeline.open(run_id=error.run_id)
+    assert failed.status == "failed"
+    assert failed.label is None
+    assert failed.report()["run"]["error"] == {
+        "type": "RuntimeError",
+        "message": str(expected),
+    }
+    assert _stage_statuses(failed) == [
+        *_GRAPH_STAGE_STATUSES[:_PCA],
+        ("pca", "failed"),
+    ]
+    with pytest.raises(KeyError, match="No completed pipeline run"):
+        datastore.pipeline.open(label="failed")
+
+
+def test_finalize_failure_fails_the_run_after_every_stage_ended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    datastore = _graph_datastore(tmp_path / "data.zarr")
+    expected = RuntimeError("deliberate finalize failure")
+
+    def failing_completion(*_args: Any, **_kwargs: Any) -> PipelineRunRecord:
+        raise expected
+
+    monkeypatch.setattr(
+        pipeline_executor, "complete_pipeline_run_record", failing_completion
+    )
+    events: list[PipelineEvent] = []
+
+    with pytest.raises(PipelineExecutionError) as caught:
+        datastore.pipeline.rna(
+            label="finalized", callback=events.append, **_GRAPH_STAGES
+        )
+
+    error = caught.value
+    assert error.stage == "finalize"
+    assert error.__cause__ is expected
+    # Finalizing is not a stage: the run fails without a stage event, and its
+    # event names the step outside the stage order.
+    lifecycle = _lifecycle(events)
+    assert lifecycle[-2:] == [("stage_skipped", "markers"), ("run_failed", "finalize")]
+    assert "stage_failed" not in {kind for kind, _stage in lifecycle}
+    assert (events[-1].ordinal, events[-1].error) == (None, error)
+    failed = datastore.pipeline.open(run_id=error.run_id)
+    assert failed.status == "failed"
+    assert failed.label is None
+    report = failed.report()
+    assert report["run"]["outputs"] == []
+    assert report["run"]["error"] == {"type": "RuntimeError", "message": str(expected)}
+    assert _stage_statuses(failed) == list(_GRAPH_STAGE_STATUSES)
+    with pytest.raises(KeyError, match="No completed pipeline run"):
+        datastore.pipeline.open(label="finalized")
+
+
 @pytest.fixture(scope="module")
 def completed_run(tmp_path_factory: Any) -> tuple[DataStore, PipelineRun, str]:
     location = _write_graph_store(tmp_path_factory.mktemp("graph_run") / "data.zarr")
     datastore = DataStore(location, default_assay="RNA", min_features_per_cell=1)
-    run = datastore.pipeline.run(label="baseline", **_GRAPH_RUN)
+    run = datastore.pipeline.rna(label="baseline", **_GRAPH_RUN)
     assert run.status == "completed"
     return datastore, run, location
 
@@ -717,14 +1009,16 @@ def test_label_committed_by_another_run_fails_this_run_at_finalize(
     shutil.copytree(location, copy)
     datastore = DataStore(str(copy), default_assay="RNA", min_features_per_cell=1)
     competitor: list[str] = []
+    events: list[PipelineEvent] = []
 
     def commit_competing_run(event: PipelineEvent) -> None:
+        events.append(event)
         # Another process commits the same label while this run executes.
         if event.kind == "stage_completed" and not competitor:
             competitor.append(_committed_run(datastore.zw, "contested").run_id)
 
     with pytest.raises(PipelineExecutionError) as caught:
-        datastore.pipeline.run(
+        datastore.pipeline.rna(
             label="contested", callback=commit_competing_run, **_GRAPH_RUN
         )
 
@@ -732,6 +1026,8 @@ def test_label_committed_by_another_run_fails_this_run_at_finalize(
     assert error.stage == "finalize"
     assert isinstance(error.__cause__, ValueError)
     assert "already committed" in str(error.__cause__)
+    assert _lifecycle(events)[-1] == ("run_failed", "finalize")
+    assert events[-1].error is error
     failed = datastore.pipeline.open(run_id=error.run_id)
     assert failed.status == "failed"
     assert failed.label is None

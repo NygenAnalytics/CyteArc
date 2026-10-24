@@ -1,5 +1,8 @@
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,12 +14,24 @@ logger = _loguru_logger.bind(**{_CYTEARC_RECORD: True})
 """Loguru's logger, marking each record that CyteArc logs through it."""
 
 
+STDLIB_LOGGER_NAME = "cytearc"
+"""The standard-library logger that receives CyteArc's records when bridged."""
+
+# The record extras that name the pipeline run and stage a record came from.
+RUN_ID_EXTRA = "cytearc_run_id"
+STAGE_EXTRA = "cytearc_stage"
+# A record with this extra set, such as a host callback's failure, is shown
+# but never collected into a stage's warnings.
+UNCOLLECTED_EXTRA = "cytearc_uncollected"
+
+
 @dataclass(slots=True)
 class _OutputConfig:
     level: str = "INFO"
     progress: bool = True
     timestamps: bool = False
     filepath: str | None = None
+    stdlib: bool = False
 
 
 _config = _OutputConfig()
@@ -26,6 +41,45 @@ _handler_id: int | None = None
 def _flushing_stdout_sink(message: Any) -> None:
     sys.stdout.write(str(message))
     sys.stdout.flush()
+
+
+def _stdlib_sink(message: Any) -> None:
+    """Forward one CyteArc record to the standard-library ``cytearc`` logger.
+
+    The forwarded record keeps the level number and name, such as
+    ``SUCCESS``, and the module, file, line, and function that logged it. A
+    record logged during a pipeline stage carries the run and stage as the
+    ``cytearc_run_id`` and ``cytearc_stage`` attributes, so a host's handlers
+    can route it.
+    """
+    import logging
+
+    record = message.record
+    target = logging.getLogger(STDLIB_LOGGER_NAME)
+    level = record["level"].no
+    if not target.isEnabledFor(level):
+        return
+    exception = record["exception"]
+    forwarded = target.makeRecord(
+        STDLIB_LOGGER_NAME,
+        level,
+        record["file"].path,
+        record["line"],
+        record["message"],
+        (),
+        (
+            None
+            if exception is None
+            else (exception.type, exception.value, exception.traceback)
+        ),
+        func=record["function"],
+        extra={
+            RUN_ID_EXTRA: record["extra"].get(RUN_ID_EXTRA),
+            STAGE_EXTRA: record["extra"].get(STAGE_EXTRA),
+        },
+    )
+    forwarded.levelname = record["level"].name
+    target.handle(forwarded)
 
 
 def _log_format() -> str:
@@ -71,6 +125,15 @@ def _remove_cytearc_handler() -> None:
 def _install_cytearc_handler() -> None:
     global _handler_id
     _remove_cytearc_handler()
+    if _config.stdlib:
+        _handler_id = logger.add(
+            _stdlib_sink,
+            colorize=False,
+            format="{message}",
+            level=_config.level,
+            filter=_cytearc_record,
+        )
+        return
     if _config.filepath is None:
         _handler_id = logger.add(
             _flushing_stdout_sink,
@@ -127,11 +190,63 @@ def progress_enabled() -> bool:
     return _config.progress
 
 
+# The warnings that CyteArc logs or issues in the current context, while a
+# caller collects them.
+_WARNINGS: ContextVar[list[str] | None] = ContextVar(
+    "cytearc_collected_warnings",
+    default=None,
+)
+
+
+def note_warning(message: str) -> None:
+    """Add ``message`` to the warnings that the current context collects."""
+    collected = _WARNINGS.get()
+    if collected is not None:
+        collected.append(str(message))
+
+
+@contextmanager
+def collect_warnings() -> Iterator[list[str]]:
+    """Collect the warnings that CyteArc logs or issues in this context.
+
+    The list gains each WARNING or higher record that CyteArc logs, and each
+    warning that it issues with :func:`cytearc.utils.warnings.warn`, from this
+    thread or asyncio task, so concurrent work elsewhere is not collected.
+    Display is unchanged.
+    """
+    collected: list[str] = []
+    token = _WARNINGS.set(collected)
+
+    def collecting(record: Any) -> bool:
+        return (
+            _cytearc_record(record)
+            and not record["extra"].get(UNCOLLECTED_EXTRA)
+            and _WARNINGS.get() is collected
+        )
+
+    handler = logger.add(
+        lambda message: collected.append(message.record["message"]),
+        level="WARNING",
+        filter=collecting,
+        format="{message}",
+        catch=True,
+    )
+    try:
+        yield collected
+    finally:
+        try:
+            logger.remove(handler)
+        except ValueError:
+            pass
+        _WARNINGS.reset(token)
+
+
 def configure_output(
     *,
     level: str | None = None,
     progress: bool | None = None,
     timestamps: bool | None = None,
+    stdlib: bool | None = None,
 ) -> None:
     """Configure CyteArc's logging and progress output.
 
@@ -139,6 +254,23 @@ def configure_output(
     timestamps apply to CyteArc's own log sink, which shows only the records
     logged through ``cytearc.logger``, so other code's loguru output keeps its
     own handlers and levels.
+
+    Args:
+        level: The lowest level that CyteArc's sink shows, such as
+            ``"WARNING"``.
+        progress: Whether to display progress bars. Pipeline progress events
+            are emitted either way.
+        timestamps: Whether log lines start with a timestamp.
+        stdlib: True sends CyteArc's records, at or above ``level``, to the
+            standard-library logger named ``"cytearc"`` instead of stdout or
+            the file that ``set_verbosity`` chose, for an application that
+            configures ``logging``. A forwarded record keeps the details of
+            the call that logged it: its ``module``, ``pathname``, ``lineno``,
+            and ``funcName``, and loguru's level name, such as ``SUCCESS``, as
+            its ``levelname``. A record logged during a pipeline stage carries
+            the run and stage as its ``cytearc_run_id`` and ``cytearc_stage``
+            attributes. False restores the stdout sink, or the file that
+            ``set_verbosity`` chose.
     """
     update_handler = False
     if level is not None:
@@ -153,6 +285,11 @@ def configure_output(
             raise TypeError("timestamps must be a bool")
         _config.timestamps = timestamps
         update_handler = True
+    if stdlib is not None:
+        if not isinstance(stdlib, bool):
+            raise TypeError("stdlib must be a bool")
+        _config.stdlib = stdlib
+        update_handler = True
     if update_handler:
         _install_cytearc_handler()
 
@@ -160,8 +297,10 @@ def configure_output(
 def set_verbosity(level: str | None = None, filepath: str | None = None) -> None:
     """Set CyteArc's logging level and optional output file.
 
-    Like :func:`configure_output`, this changes only CyteArc's own sink.
+    Like :func:`configure_output`, this changes only CyteArc's own sink. It
+    selects stdout or the file, so it also ends a ``stdlib`` bridge.
     """
     _config.level = _resolve_level(level)
     _config.filepath = filepath
+    _config.stdlib = False
     _install_cytearc_handler()
