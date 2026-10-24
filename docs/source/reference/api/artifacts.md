@@ -332,6 +332,7 @@ their rows follow the cell selection of their lineage rather than a recorded inp
 | `hto_identity` | `values` | labels | `max_id`, `second_id` | `margin` |
 | `imported_coordinates` | `data` | measurements | | |
 | `label_transfer` | `labels` | labels | `abstention_reason`, `candidate_codes`, `vote_class_codes` | `vote_class_fractions`, `vote_fraction`, `top_two_margin`, `vote_entropy`, `nearest_distance`, `reference_distance_percentile` |
+| `lineage_curves` | `progress` | measurements | `valid` | `distance` |
 | `membership_strength` | `values` | measurements | | |
 | `metadata_snapshot` | `values` | measurements | | |
 | `pseudotime` | `pseudotime` | measurements | `valid` | |

@@ -95,6 +95,10 @@ project:
       title: Expression dynamics
     - file: tutorials/fate_mapping.ipynb
       title: Fate mapping
+    - file: tutorials/lineage_dynamics.ipynb
+      title: Lineage dynamics
+    - file: tutorials/lineage_curves.ipynb
+      title: Lineage curves
     - file: tutorials/trajectory_validation.md
       title: Trajectory validation
   - title: Data management

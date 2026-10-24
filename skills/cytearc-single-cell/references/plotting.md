@@ -14,8 +14,8 @@ artifact refs. Docs: <https://docs.nygen.io/CyteArc/tutorials/plotting>,
 - `ds.plots.<name>(...)` is `cytearc.plotting.<name>(ds, ...)` with the store bound. Accessor methods:
   `embedding`, `embedding_raster`, `distribution`, `dotplot`, `matrixplot`, `composition`,
   `marker_heatmap`, `cluster_connectivity`, `cluster_tree`, `modality_weights`,
-  `pseudotime_heatmap`, `mapping_score`, `mapping_evidence`, `mapping_confusion`,
-  `mapping_calibration`, `run_recipe`. Standalone only in `cytearc.plotting`: `graph_qc` (sparse
+  `pseudotime_heatmap`, `lineage_heatmap`, `lineage_trends`, `lineage_curves`, `lineage_tree`,
+  `mapping_score`, `mapping_evidence`, `mapping_confusion`, `mapping_calibration`, `run_recipe`. Standalone only in `cytearc.plotting`: `graph_qc` (sparse
   graph), `elbow` and `highly_variable_features` (arrays), `qc` (DataFrame), plus
   `compose_results`, `label_panels`, `theme_context`.
 - Every plot returns a `PlotResult`: `figure`, `axes` (dict keyed by panel), `tables` (dict of

@@ -48,6 +48,12 @@ if TYPE_CHECKING:
         marker_heatmap as marker_heatmap,
         pseudotime_heatmap as pseudotime_heatmap,
     )
+    from .lineages import (
+        lineage_curves as lineage_curves,
+        lineage_heatmap as lineage_heatmap,
+        lineage_trends as lineage_trends,
+        lineage_tree as lineage_tree,
+    )
     from .mapping import (
         mapping_calibration as mapping_calibration,
         mapping_confusion as mapping_confusion,
@@ -90,6 +96,10 @@ __all__ = [
     "graph_qc",
     "highly_variable_features",
     "label_panels",
+    "lineage_curves",
+    "lineage_heatmap",
+    "lineage_trends",
+    "lineage_tree",
     "marker_heatmap",
     "mapping_calibration",
     "mapping_confusion",
@@ -137,6 +147,10 @@ __getattr__, __dir__ = _lazy_facade(
         "graph_qc": ".diagnostics",
         "highly_variable_features": ".diagnostics",
         "label_panels": "._figure",
+        "lineage_curves": ".lineages",
+        "lineage_heatmap": ".lineages",
+        "lineage_trends": ".lineages",
+        "lineage_tree": ".lineages",
         "marker_heatmap": ".heatmaps",
         "mapping_calibration": ".mapping",
         "mapping_confusion": ".mapping",

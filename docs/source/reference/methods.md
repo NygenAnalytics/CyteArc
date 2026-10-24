@@ -36,6 +36,8 @@ The aim is one coherent execution path, not reimplementation for its own sake.
 - **Matched multi-omics:** {term}`SNN integration` and [Hao-inspired WNN](https://doi.org/10.1016/j.cell.2021.04.048) integration for two or more assays, with WNN reporting one per-cell weight per modality.
 - **Clustering:** a native, multi-threaded implementation of [Leiden](https://doi.org/10.1038/s41598-019-41695-z) community detection ({ref}`details <leiden_method>`) and a native implementation of [Paris hierarchical clustering](https://doi.org/10.48550/arXiv.1806.01664) with fixed and branch-adaptive cuts.
 - **Trajectory analysis:** memory-aware [Population Balance Analysis](https://doi.org/10.1073/pnas.1714723115), supervised terminal-state fate probabilities, pseudotime aggregation and modules, and [MAGIC-style graph diffusion](https://doi.org/10.1016/j.cell.2018.05.061) for imputation.
+  Fate probabilities also weigh each cell in each lineage, as in [CellRank](https://doi.org/10.1038/s41592-021-01346-6), for lineage-resolved markers, profiles, and modules, and for lineage drivers: correlations with fate probability tested by Fisher's z-transform.
+  Lineage curves are fate-weighted [principal curves](https://doi.org/10.1080/01621459.1989.10478797) with the pseudotime rank as their projection index, smoothed by [penalized B-splines](https://doi.org/10.1214/ss/1038425655), and a [Slingshot](https://doi.org/10.1186/s12864-018-4772-0) cluster tree proposes candidate sinks ({ref}`lineage_curves`).
 - **Statistics and diagnostics:** marker AUC, the [Mann-Whitney U test](https://doi.org/10.1214/aoms/1177730491) with [Benjamini-Hochberg](https://doi.org/10.1111/j.2517-6161.1995.tb02031.x) correction, [Scrublet](https://doi.org/10.1016/j.cels.2018.11.005) doublet scores and calls simulated within each sample, cluster separability, and integration metrics informed by the [scIB benchmark](https://doi.org/10.1038/s41592-021-01336-8).
 - **Gene sets, protein, and sample tags:** [AUCell](https://doi.org/10.1038/nmeth.4463) and [WAGGR](https://doi.org/10.1093/bioadv/vbac016) activity scores, CITE-seq processing, and [cell-hashing](https://doi.org/10.1186/s13059-018-1603-1) demultiplexing.
 - **Ambient RNA:** a CyteArc implementation of [SoupX](https://doi.org/10.1093/gigascience/giaa151)
@@ -224,6 +226,15 @@ Agreement measured for one method is not evidence of equivalence for the rest of
   It follows the published weighting equations but is not bit-identical to Seurat defaults, as described in {ref}`the FAQ <faq>`.
 - AUCell and WAGGR scores are checked against frozen decoupler 2.2 fixtures.
 - Fate probabilities are checked against dense Dirichlet solutions on controlled graphs.
+- Lineage drivers reproduce the correlation test of CellRank 2.3.3 (Fisher's z-transform, 95%
+  intervals, and Benjamini-Hochberg adjustment) on the pancreas example's 1,234 branch cells,
+  2,000 highly variable genes, and four lineages within 1e-12 for every correlation, p-value,
+  interval bound, and adjusted p-value, with the same untested genes, when `min_cells=1`
+  tests every gene that varies, as CellRank does.
+- Lineage markers, drivers, and profiles are checked against dense recomputations from the
+  normalized expression and fate probabilities, and unit-weight correlations against SciPy.
+  Lineage curves recover a known noisy curve, and cluster trees recover a branched cluster
+  layout.
 - SCENIC regulons are compared with pySCENIC 0.12.1 (its Docker image, scikit-learn 1.1.3) on a
   10x Genomics PBMC multiome sample of 2,612 cells, 13,308 genes, and 1,201 factors.
   With the same seed, GRNBoost2 importances correlate at Pearson 0.998 and the top 1,000 to
@@ -286,6 +297,7 @@ It does not provide scVI, Scanorama, RNA velocity, peak calling, FRiP/TSS APIs, 
 Marker searches report cell-level Mann-Whitney statistics, AUC, and within-group multiple-testing correction, which are not a substitute for inference across biological replicates.
 {term}`WNN integration` requires two or more cell-aligned modalities, and CyteArc does not align unpaired modalities.
 Fate mapping needs user-supplied terminal states and does not infer them or use RNA velocity.
+A lineage tree proposes candidate sinks from clusters, but it can chain similar terminal clusters, so it does not discover them either.
 Imputation is intended for exploratory visualization rather than differential expression.
 Export selected data to AnnData or another supported format when a downstream method is outside CyteArc.
 

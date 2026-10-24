@@ -364,10 +364,12 @@ List the runs before opening one by label.
 - Unmeasured cells hold zero counts, which are no measurement. Operations that read an assay's
   values (normalization, HVGs, detected features, WAGGR, AUCell, markers, `compare.compute_bulk`, statistical
   tests of genes, prevalent peaks, cell cycle, feature percentages, HTO, doublets, pseudotime
-  features, `imputation.compute_imputed` of genes, `mapping.run`, `to_anndata(matrix="normed")`,
-  the pipeline recipes, and QC filters on an assay's metrics) raise `UnmeasuredCellsError` (a
-  `ValueError` with `.operation`, `.assay`, `.column`, `.unmeasured`, `.selected`) after their
-  argument checks and before writing anything, also on read-only stores. Narrow first:
+  and lineage features (`trajectory.lineage_markers`, `trajectory.drivers`,
+  `trajectory.lineage_aggregation`), `imputation.compute_imputed` of genes, `mapping.run`,
+  `to_anndata(matrix="normed")`, the pipeline recipes, and QC filters on an assay's metrics) raise
+  `UnmeasuredCellsError` (a `ValueError` with `.operation`, `.assay`, `.column`, `.unmeasured`,
+  `.selected`) after their argument checks and before writing anything, also on read-only stores.
+  Narrow first:
   `cells = ds.select_measured_cells("ADT", cell_selection=ds.snapshot_cell_selection("I"))`
   (the input comes back unchanged when the assay measured every cell, so identities stay);
   `compare.compute_bulk`, `compare.test`, `qc.auto_filter`, and `qc.filter` take it as

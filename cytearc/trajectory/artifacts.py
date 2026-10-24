@@ -4,6 +4,7 @@ from typing import Any
 import numpy as np
 import zarr
 from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse.csgraph import connected_components
 
 from ..metadata.selection import resolve_cell_aligned_artifact
 from ..storage.arrays import create_zarr_dataset
@@ -140,7 +141,11 @@ def _real_parameter(
         int | float | np.integer | np.floating,
     ):
         raise TypeError(f"{name} must be a real number")
-    resolved = float(value)
+    try:
+        resolved = float(value)
+    except OverflowError:
+        # A JSON integer beyond the float range is not a finite real.
+        raise ValueError(f"{name} must be finite") from None
     if not np.isfinite(resolved):
         raise ValueError(f"{name} must be finite")
     if minimum is not None and (
@@ -997,3 +1002,699 @@ def aggregation_payload_is_valid(
         ):
             return False
     return True
+
+
+LINEAGE_FEATURE_INPUTS = frozenset(
+    {
+        "cell_selection",
+        "feature_selection",
+        "fate",
+        "dataset_fingerprint",
+        "ordered_feature_ids_fingerprint",
+        "ordered_feature_names_fingerprint",
+    }
+)
+LINEAGE_MARKER_INPUTS = LINEAGE_FEATURE_INPUTS
+LINEAGE_MARKER_PARAMETERS = frozenset(
+    {
+        "normalization",
+        "normalization_method",
+        "size_factor",
+        "lineages",
+        "association_method",
+        "p_value_method",
+        "adjustment_method",
+        "adjustment_scope",
+        "min_cells",
+    }
+)
+LINEAGE_DRIVER_INPUTS = LINEAGE_FEATURE_INPUTS | {"driver_cells"}
+LINEAGE_DRIVER_PARAMETERS = frozenset(
+    {
+        "normalization",
+        "normalization_method",
+        "size_factor",
+        "lineages",
+        "include_sinks",
+        "min_cells",
+        "confidence_level",
+        "association_method",
+        "p_value_method",
+        "adjustment_method",
+        "adjustment_scope",
+    }
+)
+LINEAGE_AGGREGATION_INPUTS = LINEAGE_FEATURE_INPUTS
+LINEAGE_AGGREGATION_PARAMETERS = frozenset(
+    {
+        "normalization",
+        "normalization_method",
+        "size_factor",
+        "lineages",
+        "n_bins",
+        "smoothing",
+        "min_exp",
+        "z_scale",
+        "n_neighbours",
+        "n_clusters",
+        "ann_params",
+        "nan_cluster_value",
+    }
+)
+LINEAGE_CURVE_INPUTS = frozenset({"fate", "coordinates", "cell_selection"})
+LINEAGE_CURVE_PARAMETERS = frozenset(
+    {"lineages", "n_points", "df", "fit_bins", "spline_basis"}
+)
+LINEAGE_TREE_INPUTS = frozenset({"labels", "coordinates", "cell_selection"})
+LINEAGE_TREE_PARAMETERS = frozenset({"root", "ends"})
+LINEAGE_MARKER_PAYLOAD = (
+    "r_value",
+    "p_value",
+    "p_value_adjusted",
+    "effective_cells",
+    "feature_names",
+    "feature_ids",
+)
+LINEAGE_DRIVER_PAYLOAD = (
+    "r_value",
+    "p_value",
+    "p_value_adjusted",
+    "ci_low",
+    "ci_high",
+    "feature_names",
+    "feature_ids",
+)
+LINEAGE_AGGREGATION_PAYLOAD = (
+    "data",
+    "feature_indices",
+    "valid_features",
+    "feature_clusters",
+    "cluster_values",
+    "bin_pseudotime",
+    "lineage_weight",
+    "feature_names",
+    "feature_ids",
+)
+LINEAGE_CURVE_PAYLOAD = ("points", "curve_pseudotime", "progress", "distance", "valid")
+LINEAGE_TREE_PAYLOAD = ("sizes", "means", "edges", "lengths")
+LINEAGE_RESULT_ATTRIBUTES = _RESULT_ATTRIBUTES
+LINEAGE_DRIVER_ATTRIBUTES = _RESULT_ATTRIBUTES | {"n_cells"}
+LINEAGE_AGGREGATION_ATTRIBUTES = _RESULT_ATTRIBUTES | {"input_fingerprints"}
+LINEAGE_TREE_ATTRIBUTES = _RESULT_ATTRIBUTES | {"cluster_labels"}
+
+LINEAGE_MARKER_METHODS = {
+    "association_method": "fate_weighted_pearson",
+    "p_value_method": "student_t_kish",
+    "adjustment_method": "fdr_bh",
+    "adjustment_scope": "tested_features_per_lineage",
+}
+LINEAGE_DRIVER_METHODS = {
+    "association_method": "pearson",
+    "p_value_method": "fisher_z",
+    "adjustment_method": "fdr_bh",
+    "adjustment_scope": "tested_features_per_lineage",
+}
+
+
+def _fixed_methods(
+    parameters: Mapping[str, Any],
+    methods: Mapping[str, str],
+) -> dict[str, str]:
+    for name, expected in methods.items():
+        if parameters[name] != expected:
+            raise ValueError(f"{name} must be {expected!r}")
+    return dict(methods)
+
+
+def _feature_analysis_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "normalization": _normalization_parameters(parameters["normalization"]),
+        "normalization_method": _normalization_method(
+            parameters["normalization_method"]
+        ),
+        "size_factor": _size_factor(parameters["size_factor"]),
+        "lineages": _label_parameters(
+            parameters["lineages"], "lineages", required=True
+        ),
+    }
+
+
+def validate_lineage_marker_parameters(
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    require_exact_record_keys(
+        parameters,
+        LINEAGE_MARKER_PARAMETERS,
+        "Lineage-marker parameters",
+    )
+    return {
+        **_feature_analysis_parameters(parameters),
+        "min_cells": _real_parameter(
+            parameters["min_cells"], "min_cells", minimum=0.0, minimum_open=True
+        ),
+        **_fixed_methods(parameters, LINEAGE_MARKER_METHODS),
+    }
+
+
+def validate_lineage_driver_parameters(
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    require_exact_record_keys(
+        parameters,
+        LINEAGE_DRIVER_PARAMETERS,
+        "Lineage-driver parameters",
+    )
+    return {
+        **_feature_analysis_parameters(parameters),
+        "include_sinks": _boolean_parameter(
+            parameters["include_sinks"], "include_sinks"
+        ),
+        "min_cells": integer_argument(parameters["min_cells"], "min_cells", minimum=1),
+        "confidence_level": _real_parameter(
+            parameters["confidence_level"],
+            "confidence_level",
+            minimum=0.0,
+            maximum=1.0,
+            minimum_open=True,
+            maximum_open=True,
+        ),
+        **_fixed_methods(parameters, LINEAGE_DRIVER_METHODS),
+    }
+
+
+def validate_lineage_aggregation_parameters(
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    require_exact_record_keys(
+        parameters,
+        LINEAGE_AGGREGATION_PARAMETERS,
+        "Lineage-aggregation parameters",
+    )
+    n_clusters = integer_argument(parameters["n_clusters"], "n_clusters", minimum=1)
+    nan_cluster_value = integer_argument(
+        parameters["nan_cluster_value"], "nan_cluster_value"
+    )
+    if 1 <= nan_cluster_value <= n_clusters:
+        raise ValueError("nan_cluster_value conflicts with assigned cluster labels")
+    return {
+        **_feature_analysis_parameters(parameters),
+        "n_bins": integer_argument(parameters["n_bins"], "n_bins", minimum=2),
+        "smoothing": _real_parameter(parameters["smoothing"], "smoothing", minimum=0.0),
+        "min_exp": _real_parameter(parameters["min_exp"], "min_exp", minimum=0.0),
+        "z_scale": _boolean_parameter(parameters["z_scale"], "z_scale"),
+        "n_neighbours": integer_argument(
+            parameters["n_neighbours"], "n_neighbours", minimum=1
+        ),
+        "n_clusters": n_clusters,
+        "ann_params": _ann_parameters(parameters["ann_params"]),
+        "nan_cluster_value": nan_cluster_value,
+    }
+
+
+def validate_lineage_curve_parameters(
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    require_exact_record_keys(
+        parameters,
+        LINEAGE_CURVE_PARAMETERS,
+        "Lineage-curve parameters",
+    )
+    spline_basis = integer_argument(
+        parameters["spline_basis"], "spline_basis", minimum=8, maximum=4096
+    )
+    return {
+        "lineages": _label_parameters(
+            parameters["lineages"], "lineages", required=True
+        ),
+        "n_points": integer_argument(parameters["n_points"], "n_points", minimum=2),
+        "df": _real_parameter(
+            parameters["df"],
+            "df",
+            minimum=2.0,
+            maximum=float(spline_basis),
+            minimum_open=True,
+            maximum_open=True,
+        ),
+        "fit_bins": integer_argument(parameters["fit_bins"], "fit_bins", minimum=16),
+        "spline_basis": spline_basis,
+    }
+
+
+def validate_lineage_tree_parameters(
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    require_exact_record_keys(
+        parameters,
+        LINEAGE_TREE_PARAMETERS,
+        "Lineage-tree parameters",
+    )
+    raw_root = parameters["root"]
+    root = (
+        None
+        if raw_root is None
+        else _label_parameters([raw_root], "root", required=True)[0]
+    )
+    ends = _label_parameters(parameters["ends"], "ends", required=False)
+    if root is not None and any(bool(root == end) for end in ends):
+        raise ValueError("The root cannot also be an end")
+    return {"root": root, "ends": ends}
+
+
+def _identity_arrays_match(
+    group: Any,
+    *,
+    n_features: int,
+    expected_feature_ids_fingerprint: str,
+    expected_feature_names_fingerprint: str,
+) -> bool:
+    names_array = _array_contract(
+        group,
+        "feature_names",
+        shape=(n_features,),
+        dtype_kinds=frozenset({"O", "S", "T", "U"}),
+    )
+    ids_array = _array_contract(
+        group,
+        "feature_ids",
+        shape=(n_features,),
+        dtype_kinds=frozenset({"O", "S", "T", "U"}),
+    )
+    if names_array is None or ids_array is None:
+        return False
+    try:
+        return (
+            fingerprint_stored_strings(ids_array) == expected_feature_ids_fingerprint
+            and fingerprint_stored_strings(names_array)
+            == expected_feature_names_fingerprint
+        )
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return False
+
+
+def _feature_statistics_valid(
+    arrays: Sequence[Any],
+    *,
+    n_features: int,
+    selected_features: np.ndarray,
+    correlations: frozenset[int],
+    probabilities: frozenset[int],
+) -> bool:
+    """Check per-feature statistics, features by lineages, blockwise.
+
+    Rows of features outside the selection must be missing. The arrays at
+    the positions in ``correlations`` hold values in [-1, 1] and those in
+    ``probabilities`` values in [0, 1]; untested entries may be missing.
+    """
+    selected_indices = np.asarray(selected_features, dtype=np.int64)
+    block_rows = min(
+        row_band(array_geometry(array), unit="chunk", fallback=1) for array in arrays
+    )
+    for start in range(0, n_features, block_rows):
+        stop = min(start + block_rows, n_features)
+        selected = np.isin(
+            np.arange(start, stop, dtype=np.int64),
+            selected_indices,
+            assume_unique=True,
+        )
+        for position, array in enumerate(arrays):
+            values = np.asarray(array[start:stop], dtype=np.float64)
+            if np.isinf(values).any() or not np.isnan(values[~selected]).all():
+                return False
+            finite = values[selected][np.isfinite(values[selected])]
+            if position in correlations and np.any(np.abs(finite) > 1.0 + 1e-12):
+                return False
+            if (
+                position in probabilities
+                and len(finite)
+                and (float(finite.min()) < 0.0 or float(finite.max()) > 1.0)
+            ):
+                return False
+    return True
+
+
+def lineage_marker_payload_is_valid(
+    group: Any,
+    *,
+    n_features: int,
+    n_lineages: int,
+    selected_features: np.ndarray,
+    expected_feature_ids_fingerprint: str,
+    expected_feature_names_fingerprint: str,
+) -> bool:
+    """Check a stored lineage-marker payload against its features and lineages."""
+    if set(group.attrs) != LINEAGE_RESULT_ATTRIBUTES:
+        return False
+    if not payload_fingerprint_matches(group, LINEAGE_MARKER_PAYLOAD):
+        return False
+    stat_arrays = [
+        _array_contract(
+            group,
+            name,
+            shape=(n_features, n_lineages),
+            dtype_kinds=frozenset({"f"}),
+        )
+        for name in LINEAGE_MARKER_PAYLOAD[:3]
+    ]
+    sizes = _array_contract(
+        group,
+        "effective_cells",
+        shape=(n_lineages,),
+        dtype_kinds=frozenset({"f"}),
+    )
+    if any(array is None for array in stat_arrays) or sizes is None:
+        return False
+    effective = np.asarray(sizes[:], dtype=np.float64)
+    if not np.isfinite(effective).all() or np.any(effective <= 0.0):
+        return False
+    if not _identity_arrays_match(
+        group,
+        n_features=n_features,
+        expected_feature_ids_fingerprint=expected_feature_ids_fingerprint,
+        expected_feature_names_fingerprint=expected_feature_names_fingerprint,
+    ):
+        return False
+    return _feature_statistics_valid(
+        stat_arrays,
+        n_features=n_features,
+        selected_features=selected_features,
+        correlations=frozenset({0}),
+        probabilities=frozenset({1, 2}),
+    )
+
+
+def lineage_driver_payload_is_valid(
+    group: Any,
+    *,
+    n_features: int,
+    n_lineages: int,
+    n_cells: int,
+    selected_features: np.ndarray,
+    expected_feature_ids_fingerprint: str,
+    expected_feature_names_fingerprint: str,
+) -> bool:
+    """Check a stored lineage-driver payload against its features and cells."""
+    if set(group.attrs) != LINEAGE_DRIVER_ATTRIBUTES:
+        return False
+    raw_cells = group.attrs.get("n_cells")
+    if (
+        isinstance(raw_cells, bool | np.bool_)
+        or not isinstance(raw_cells, int | np.integer)
+        or int(raw_cells) != n_cells
+    ):
+        return False
+    if not payload_fingerprint_matches(group, LINEAGE_DRIVER_PAYLOAD):
+        return False
+    stat_arrays = [
+        _array_contract(
+            group,
+            name,
+            shape=(n_features, n_lineages),
+            dtype_kinds=frozenset({"f"}),
+        )
+        for name in LINEAGE_DRIVER_PAYLOAD[:5]
+    ]
+    if any(array is None for array in stat_arrays):
+        return False
+    if not _identity_arrays_match(
+        group,
+        n_features=n_features,
+        expected_feature_ids_fingerprint=expected_feature_ids_fingerprint,
+        expected_feature_names_fingerprint=expected_feature_names_fingerprint,
+    ):
+        return False
+    return _feature_statistics_valid(
+        stat_arrays,
+        n_features=n_features,
+        selected_features=selected_features,
+        correlations=frozenset({0, 3, 4}),
+        probabilities=frozenset({1, 2}),
+    )
+
+
+def lineage_aggregation_payload_is_valid(
+    group: Any,
+    *,
+    n_features: int,
+    selected_features: np.ndarray,
+    n_lineages: int,
+    n_bins: int,
+    n_clusters: int,
+    n_neighbours: int,
+    nan_cluster_value: int,
+    expected_input_fingerprints: Sequence[str],
+    expected_feature_ids_fingerprint: str,
+    expected_feature_names_fingerprint: str,
+) -> bool:
+    """Check a stored lineage aggregation against its features and bins.
+
+    ``selected_features`` are the increasing indices of a feature selection.
+    """
+    if set(group.attrs) != LINEAGE_AGGREGATION_ATTRIBUTES:
+        return False
+    if group.attrs.get("input_fingerprints") != list(expected_input_fingerprints):
+        return False
+    if not payload_fingerprint_matches(group, LINEAGE_AGGREGATION_PAYLOAD):
+        return False
+    n_selected = len(selected_features)
+    data_array = _array_contract(
+        group,
+        "data",
+        shape=(n_selected, n_lineages, n_bins),
+        dtype_kinds=frozenset({"f"}),
+    )
+    indices_array = _array_contract(
+        group,
+        "feature_indices",
+        shape=(n_selected,),
+        dtype_kinds=frozenset({"u"}),
+    )
+    valid_array = _array_contract(
+        group,
+        "valid_features",
+        shape=(n_selected,),
+        dtype_kinds=frozenset({"b"}),
+    )
+    clusters_array = _array_contract(
+        group,
+        "feature_clusters",
+        shape=(n_selected,),
+        dtype_kinds=frozenset({"i"}),
+    )
+    cluster_values_array = _array_contract(
+        group,
+        "cluster_values",
+        shape=(n_features,),
+        dtype_kinds=frozenset({"i"}),
+    )
+    ordering_array = _array_contract(
+        group,
+        "bin_pseudotime",
+        shape=(n_lineages, n_bins),
+        dtype_kinds=frozenset({"f"}),
+    )
+    weight_array = _array_contract(
+        group,
+        "lineage_weight",
+        shape=(n_lineages,),
+        dtype_kinds=frozenset({"f"}),
+    )
+    if (
+        data_array is None
+        or indices_array is None
+        or valid_array is None
+        or clusters_array is None
+        or cluster_values_array is None
+        or ordering_array is None
+        or weight_array is None
+    ):
+        return False
+    if not _identity_arrays_match(
+        group,
+        n_features=n_features,
+        expected_feature_ids_fingerprint=expected_feature_ids_fingerprint,
+        expected_feature_names_fingerprint=expected_feature_names_fingerprint,
+    ):
+        return False
+    bin_ordering = np.asarray(ordering_array[:], dtype=np.float64)
+    weights = np.asarray(weight_array[:], dtype=np.float64)
+    if (
+        not np.isfinite(bin_ordering).all()
+        or np.any(np.diff(bin_ordering, axis=1) < -1e-12)
+        or not np.isfinite(weights).all()
+        or np.any(weights < n_bins)
+    ):
+        return False
+    expected_indices = np.asarray(selected_features, dtype=np.int64)
+    if not np.array_equal(
+        np.asarray(indices_array[:], dtype=np.int64), expected_indices
+    ):
+        return False
+    valid = np.asarray(valid_array[:], dtype=bool)
+    clusters = np.asarray(clusters_array[:], dtype=np.int64)
+    valid_count = int(np.count_nonzero(valid))
+    if (
+        valid_count < 2
+        or not 1 <= n_neighbours < valid_count
+        or not 1 <= n_clusters <= valid_count
+        or np.any(clusters[~valid] != nan_cluster_value)
+        or np.any(clusters[valid] < 1)
+        or np.any(clusters[valid] > n_clusters)
+    ):
+        return False
+    block_rows = row_band(array_geometry(data_array), unit="chunk", fallback=1)
+    for start in range(0, n_selected, block_rows):
+        stop = min(start + block_rows, n_selected)
+        data = np.asarray(data_array[start:stop], dtype=np.float64)
+        block_valid = valid[start:stop]
+        if not np.isfinite(data[block_valid]).all() or np.any(
+            data[~block_valid] != 0.0
+        ):
+            return False
+    expected_clusters = np.full(n_features, nan_cluster_value, dtype=np.int64)
+    expected_clusters[expected_indices[valid]] = clusters[valid]
+    return np.array_equal(
+        np.asarray(cluster_values_array[:], dtype=np.int64),
+        expected_clusters,
+    )
+
+
+def lineage_curve_payload_is_valid(
+    group: Any,
+    *,
+    n_cells: int,
+    n_lineages: int,
+    n_points: int,
+    n_dims: int,
+    expected_valid: np.ndarray,
+) -> bool:
+    """Check stored lineage curves and cell projections against their shapes."""
+    if set(group.attrs) != LINEAGE_RESULT_ATTRIBUTES:
+        return False
+    if not payload_fingerprint_matches(group, LINEAGE_CURVE_PAYLOAD):
+        return False
+    points_array = _array_contract(
+        group,
+        "points",
+        shape=(n_lineages, n_points, n_dims),
+        dtype_kinds=frozenset({"f"}),
+    )
+    ordering_array = _array_contract(
+        group,
+        "curve_pseudotime",
+        shape=(n_lineages, n_points),
+        dtype_kinds=frozenset({"f"}),
+    )
+    progress_array = _array_contract(
+        group,
+        "progress",
+        shape=(n_cells, n_lineages),
+        dtype_kinds=frozenset({"f"}),
+    )
+    distance_array = _array_contract(
+        group,
+        "distance",
+        shape=(n_cells, n_lineages),
+        dtype_kinds=frozenset({"f"}),
+    )
+    valid_array = _array_contract(
+        group,
+        "valid",
+        shape=(n_cells,),
+        dtype_kinds=frozenset({"b"}),
+    )
+    if (
+        points_array is None
+        or ordering_array is None
+        or progress_array is None
+        or distance_array is None
+        or valid_array is None
+    ):
+        return False
+    points = np.asarray(points_array[:], dtype=np.float64)
+    curve_ordering = np.asarray(ordering_array[:], dtype=np.float64)
+    if (
+        not np.isfinite(points).all()
+        or not np.isfinite(curve_ordering).all()
+        or np.any(np.diff(curve_ordering, axis=1) < 0.0)
+    ):
+        return False
+    valid = np.asarray(valid_array[:], dtype=bool)
+    if not np.array_equal(valid, np.asarray(expected_valid, dtype=bool)):
+        return False
+    block_rows = min(
+        row_band(array_geometry(array), unit="chunk", fallback=1)
+        for array in (progress_array, distance_array)
+    )
+    for start in range(0, n_cells, block_rows):
+        stop = min(start + block_rows, n_cells)
+        block_valid = valid[start:stop]
+        progress = np.asarray(progress_array[start:stop], dtype=np.float64)
+        distance = np.asarray(distance_array[start:stop], dtype=np.float64)
+        scored_progress = progress[block_valid]
+        scored_distance = distance[block_valid]
+        if (
+            not np.isfinite(scored_progress).all()
+            or np.any(scored_progress < 0.0)
+            or np.any(scored_progress > 1.0)
+            or not np.isfinite(scored_distance).all()
+            or np.any(scored_distance < 0.0)
+            or not np.isnan(progress[~block_valid]).all()
+            or not np.isnan(distance[~block_valid]).all()
+        ):
+            return False
+    return True
+
+
+def lineage_tree_payload_is_valid(
+    group: Any,
+    *,
+    n_clusters: int,
+    n_dims: int,
+) -> bool:
+    """Check a stored cluster tree: sizes, means, and edges that form a tree."""
+    if set(group.attrs) != LINEAGE_TREE_ATTRIBUTES:
+        return False
+    labels = group.attrs.get("cluster_labels")
+    if not isinstance(labels, list) or len(labels) != n_clusters:
+        return False
+    if not payload_fingerprint_matches(group, LINEAGE_TREE_PAYLOAD):
+        return False
+    sizes_array = _array_contract(
+        group, "sizes", shape=(n_clusters,), dtype_kinds=frozenset({"i"})
+    )
+    means_array = _array_contract(
+        group, "means", shape=(n_clusters, n_dims), dtype_kinds=frozenset({"f"})
+    )
+    edges_array = _array_contract(
+        group, "edges", shape=(n_clusters - 1, 2), dtype_kinds=frozenset({"i"})
+    )
+    lengths_array = _array_contract(
+        group, "lengths", shape=(n_clusters - 1,), dtype_kinds=frozenset({"f"})
+    )
+    if (
+        sizes_array is None
+        or means_array is None
+        or edges_array is None
+        or lengths_array is None
+    ):
+        return False
+    sizes = np.asarray(sizes_array[:], dtype=np.int64)
+    means = np.asarray(means_array[:], dtype=np.float64)
+    edges = np.asarray(edges_array[:], dtype=np.int64)
+    lengths = np.asarray(lengths_array[:], dtype=np.float64)
+    if (
+        np.any(sizes < 1)
+        or not np.isfinite(means).all()
+        or not np.isfinite(lengths).all()
+        or np.any(lengths < 0.0)
+        or np.any(edges < 0)
+        or np.any(edges >= n_clusters)
+        or np.any(edges[:, 0] >= edges[:, 1])
+    ):
+        return False
+    adjacency = coo_matrix(
+        (np.ones(len(edges)), (edges[:, 0], edges[:, 1])),
+        shape=(n_clusters, n_clusters),
+    )
+    n_components, _ = connected_components(adjacency, directed=False)
+    return int(n_components) == 1

@@ -26,6 +26,7 @@ from cytearc import (
 )
 from cytearc.datastore._pipeline.executor import RecipePlan
 from cytearc.datastore._pipeline.recipes import atac as atac_recipe
+from cytearc.datastore._pipeline.recipes import multimodal as multimodal_recipe
 from cytearc.datastore._pipeline.recipes import rna as rna_recipe
 from cytearc.datastore._pipeline.recipes.adt import resolve_adt
 from cytearc.datastore._pipeline.recipes.atac import resolve_atac
@@ -1282,6 +1283,68 @@ def test_multimodal_checks_its_method_runs_and_settings(cite) -> None:
     assert _run_ids(datastore) == before
 
 
+def test_wnn_needs_neighbors_that_record_their_coordinates(cite, monkeypatch) -> None:
+    datastore = cite.datastore
+    neighbors = cite.rna["neighbors"]
+    before = _run_ids(datastore)
+    # A neighbors artifact whose record names no coordinates cannot show WNN
+    # the space its graph was built in.
+    monkeypatch.setattr(
+        multimodal_recipe, "inspect_artifact", lambda *_args: SimpleNamespace(inputs={})
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=f"^Neighbors artifact {neighbors.artifact_id} has no coordinates$",
+    ):
+        datastore.pipeline.multimodal([cite.rna, cite.adt])
+    assert _run_ids(datastore) == before
+
+
+class _WithoutNeighbors:
+    """A completed run seen without its neighbors output."""
+
+    def __init__(self, run: PipelineRun) -> None:
+        self._run = run
+
+    def __contains__(self, key: str) -> bool:
+        return key != "neighbors" and key in self._run
+
+    def __getitem__(self, key: str) -> Any:
+        return self._run[key]
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._run, name)
+
+
+def test_a_joint_embedding_starts_from_the_first_runs_neighbors(
+    cite, monkeypatch
+) -> None:
+    datastore = cite.datastore
+    original = multimodal_recipe._resolve_runs
+
+    def first_without_neighbors(
+        store: Any, runs: object, method: str
+    ) -> tuple[tuple[Any, ...], ArtifactRef]:
+        sources, selection = original(store, runs, method)
+        return (_WithoutNeighbors(sources[0]), *sources[1:]), selection
+
+    monkeypatch.setattr(multimodal_recipe, "_resolve_runs", first_without_neighbors)
+    before = _run_ids(datastore)
+
+    # SNN integrates connectivity graphs, but a joint UMAP still starts from
+    # the coordinates of the first run's neighbors.
+    with pytest.raises(
+        ValueError,
+        match=(
+            f"^Run {cite.rna.run_id} has no neighbors output whose coordinates "
+            "could initialize the joint embedding$"
+        ),
+    ):
+        datastore.pipeline.multimodal([cite.rna, cite.adt], method="snn")
+    assert _run_ids(datastore) == before
+
+
 def test_l2_normalize_applies_only_to_wnn(cite, joint, wnn_selected) -> None:
     with pytest.raises(ValueError, match=r"l2_normalize applies only to method='wnn'"):
         cite.datastore.pipeline.multimodal(
@@ -1471,6 +1534,14 @@ def test_cell_calling_per_capture_needs_a_label_for_every_input_cell(
                 **SMALL_RNA_SETTINGS,
             )
         assert re.fullmatch(_unlabeled_cells(column, count), str(caught.value))
+    # The cells of a selection are checked as the cells of a column are.
+    with pytest.raises(ValueError) as caught:
+        datastore.pipeline.rna(
+            cells=datastore.snapshot_cell_selection("I"),
+            cell_calling={**CELL_CALLING, "sample_column": "capture_gaps"},
+            **SMALL_RNA_SETTINGS,
+        )
+    assert re.fullmatch(_unlabeled_cells("capture_gaps", "1"), str(caught.value))
     assert _run_ids(datastore) == before
     # Only the run's own cells need a label.
     labelled = np.ones(datastore.cells.N, dtype=bool)

@@ -2297,6 +2297,29 @@ def test_filtering_without_qc_columns_keeps_the_input_selection(
     assert selection == run["input_cell_selection"]
 
 
+def test_a_filtering_stage_that_keeps_its_input_records_no_new_output(
+    minimal_base: SimpleNamespace,
+) -> None:
+    from cytearc.datastore._pipeline.stages import CellSource, filtering_stage
+
+    run = minimal_base.run
+    datastore = minimal_base.datastore
+    # Filtering on no QC columns keeps the input cells as they are.
+    stage = filtering_stage(
+        {"enabled": True, "attrs": []}, CellSource(column="I", selection=None)
+    )
+    state = _minimal_plan(datastore).start(datastore)
+    state.artifacts.update(
+        input_cell_selection=run["input_cell_selection"],
+        cell_snapshot=run.cells._descriptor_by_key["ids"].artifact,
+    )
+
+    assert stage.action is not None
+    # The kept input becomes the analysis cells without a second output.
+    assert stage.action(state) == ()
+    assert state.artifacts["analysis_cell_selection"] == run["input_cell_selection"]
+
+
 def test_pipeline_fields_describe_only_the_leiden_partitions_that_ran(
     minimal_base: SimpleNamespace,
 ) -> None:

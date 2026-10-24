@@ -183,8 +183,26 @@ _NAMESPACE_METHODS = [
 def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # reduction.import_coordinates, artifacts.prune_incomplete, the five
     # ambient RNA methods of qc, and qc.call_cells, qc.load_cell_calls, and
-    # qc.barcode_ranks joined the moved methods and find.
-    assert len(_NAMESPACE_METHODS) == 84
+    # qc.barcode_ranks joined the moved methods and find, then the ten
+    # lineage methods of trajectory: lineage_markers, drivers,
+    # lineage_aggregation, curves, and lineage_tree with their loaders.
+    assert len(_NAMESPACE_METHODS) == 94
+    assert {
+        "lineage_markers",
+        "load_lineage_markers",
+        "drivers",
+        "load_drivers",
+        "lineage_aggregation",
+        "load_lineage_aggregation",
+        "curves",
+        "load_curves",
+        "lineage_tree",
+        "load_lineage_tree",
+    } <= {
+        name
+        for namespace, _, name, _ in _NAMESPACE_METHODS
+        if namespace == "trajectory"
+    }
     assert {"call_cells", "load_cell_calls", "barcode_ranks"} <= {
         name for namespace, _, name, _ in _NAMESPACE_METHODS if namespace == "qc"
     }

@@ -375,7 +375,9 @@ from the live `I` column before a metadata grouping without `cell_selection` sna
 `compare.test` (feature keys, over the cells that the design keeps),
 `features.prevalent_peaks`, `scores.cell_cycle`, `qc.feature_percentage`,
 `qc.hto_demultiplexing`, `qc.doublets`, `trajectory.markers` and
-`trajectory.aggregation` (the valid cells of the pseudotime), `imputation.compute_imputed` (feature names),
+`trajectory.aggregation` (the valid cells of the pseudotime), `trajectory.lineage_markers` and
+`trajectory.lineage_aggregation` (the valid cells of the fate map), `trajectory.drivers` (the
+cells it correlates), `imputation.compute_imputed` (feature names),
 `mapping.run` (the query assay), `to_anndata` with `matrix="normed"` and without a run,
 the recipes `pipeline.rna`, `pipeline.atac`, and `pipeline.adt`, which check the cells of `cells`
 before any stage runs and never narrow them, also for the HTO assay that an RNA run's hashing
