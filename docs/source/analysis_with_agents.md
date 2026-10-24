@@ -334,10 +334,14 @@ Source and sink labels supervise the orientation; CyteArc does not discover term
 - Use [](tutorials/pseudotime.ipynb) for source and sink scoring.
 - Use [](tutorials/expression_dynamics.ipynb) for expression dynamics.
 - Use [](tutorials/fate_mapping.ipynb) for multiple terminal outcomes.
+- Use [](tutorials/lineage_dynamics.ipynb) for genes along each lineage, drivers of commitment, and lineage modules.
+- Use [](tutorials/lineage_curves.ipynb) for lineage curves, placing points on them, and candidate sinks from a cluster tree.
 - Use [](tutorials/trajectory_validation.md) to compare boundaries, graph components, marker tests, modules, and fate-probability validity.
 
 Compare plausible source and sink definitions when the endpoints are uncertain.
 Check validity keys, graph components, terminal probabilities, and expected marker trends.
+When a process branches, prefer lineage markers or drivers to a pooled pseudotime for fate-specific genes, and leave the endpoint cells out of driver searches.
+Treat cluster-tree leaves as candidate sinks to check with markers; a tree can chain similar endpoints.
 A pseudotime or fate artifact is a model-based summary, not evidence of causal lineage.
 
 ### Regulons, chromatin activity, and gene programs

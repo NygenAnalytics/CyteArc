@@ -215,6 +215,8 @@ def test_trajectory_tutorials_use_source_sink_sign_convention() -> None:
         "pseudotime.ipynb",
         "expression_dynamics.ipynb",
         "fate_mapping.ipynb",
+        "lineage_dynamics.ipynb",
+        "lineage_curves.ipynb",
     )
 
     for tutorial in tutorials:

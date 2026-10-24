@@ -378,6 +378,87 @@ _CONTRACTS = (
         | _classified("execution", "nthreads"),
     ),
     OperationContract(
+        TrajectoryAccessor.lineage_markers,
+        metadata_arguments.LineageMarkerArguments,
+        aliases={
+            "features": "feature_selection",
+            "norm_params": "normalization",
+        },
+        model_only=_classified(
+            "resolved_input",
+            "cell_selection",
+            "dataset_fingerprint",
+            "ordered_feature_ids_fingerprint",
+            "ordered_feature_names_fingerprint",
+            "normalization_method",
+            "size_factor",
+        )
+        | _classified(
+            "derived",
+            "association_method",
+            "p_value_method",
+            "adjustment_method",
+            "adjustment_scope",
+        )
+        | _classified("execution", "nthreads"),
+    ),
+    OperationContract(
+        TrajectoryAccessor.drivers,
+        metadata_arguments.LineageDriverArguments,
+        aliases={
+            "cells": "driver_cells",
+            "features": "feature_selection",
+            "norm_params": "normalization",
+        },
+        model_only=_classified(
+            "resolved_input",
+            "cell_selection",
+            "dataset_fingerprint",
+            "ordered_feature_ids_fingerprint",
+            "ordered_feature_names_fingerprint",
+            "normalization_method",
+            "size_factor",
+        )
+        | _classified(
+            "derived",
+            "association_method",
+            "p_value_method",
+            "adjustment_method",
+            "adjustment_scope",
+        )
+        | _classified("execution", "nthreads"),
+    ),
+    OperationContract(
+        TrajectoryAccessor.lineage_aggregation,
+        metadata_arguments.LineageAggregationArguments,
+        aliases={
+            "features": "feature_selection",
+            "norm_params": "normalization",
+        },
+        model_only=_classified(
+            "resolved_input",
+            "cell_selection",
+            "dataset_fingerprint",
+            "ordered_feature_ids_fingerprint",
+            "ordered_feature_names_fingerprint",
+            "normalization_method",
+            "size_factor",
+        )
+        | _classified("execution", "nthreads"),
+    ),
+    OperationContract(
+        TrajectoryAccessor.curves,
+        metadata_arguments.LineageCurveArguments,
+        model_only=_classified("resolved_input", "cell_selection")
+        | _classified("algorithm_policy", "fit_bins", "spline_basis"),
+    ),
+    OperationContract(
+        TrajectoryAccessor.lineage_tree,
+        metadata_arguments.LineageTreeArguments,
+        signature_only=_classified("transformed", "graph"),
+        model_only=_classified("resolved_input", "cell_selection"),
+    ),
+    OperationContract(
         TrajectoryAccessor.pseudotime,
         metadata_arguments.PseudotimeScoringArguments,
         aliases={"graph": "connectivity_map"},

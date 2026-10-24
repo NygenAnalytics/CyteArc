@@ -228,3 +228,21 @@ class TrajectoryAccessor(_Accessor):
     load_aggregation = _bind(
         _TrajectoryFeatureOperationsMixin._trajectory_load_aggregation
     )
+    lineage_markers = _bind(
+        _TrajectoryFeatureOperationsMixin._trajectory_lineage_markers
+    )
+    load_lineage_markers = _bind(
+        _TrajectoryFeatureOperationsMixin._trajectory_load_lineage_markers
+    )
+    drivers = _bind(_TrajectoryFeatureOperationsMixin._trajectory_drivers)
+    load_drivers = _bind(_TrajectoryFeatureOperationsMixin._trajectory_load_drivers)
+    lineage_aggregation = _bind(
+        _TrajectoryFeatureOperationsMixin._trajectory_lineage_aggregation
+    )
+    load_lineage_aggregation = _bind(
+        _TrajectoryFeatureOperationsMixin._trajectory_load_lineage_aggregation
+    )
+    curves = _bind(_TrajectoryOperationsMixin._trajectory_curves)
+    load_curves = _bind(_TrajectoryOperationsMixin._trajectory_load_curves)
+    lineage_tree = _bind(_TrajectoryOperationsMixin._trajectory_lineage_tree)
+    load_lineage_tree = _bind(_TrajectoryOperationsMixin._trajectory_load_lineage_tree)

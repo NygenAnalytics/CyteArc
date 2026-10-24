@@ -153,6 +153,9 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
                 "reference_distance_percentile": False,
             },
         ),
+        "lineage_curves": CellValueSpec(
+            "progress", False, {"distance": False, "valid": True}
+        ),
         "membership_strength": CellValueSpec("values", False),
         # A metadata snapshot is cell-aligned when it records a cell
         # selection, as the custom source/sink vector of pseudotime scoring

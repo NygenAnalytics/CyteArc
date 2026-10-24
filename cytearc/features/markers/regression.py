@@ -102,8 +102,11 @@ def _regression_r_batch(
     return r_out, status
 
 
-def _regression_p_values(r: np.ndarray, n_cells: int) -> np.ndarray:
-    """Calculate two-sided Student-t p-values matching `linregress`."""
+def _regression_p_values(r: np.ndarray, n_cells: float) -> np.ndarray:
+    """Calculate two-sided Student-t p-values matching `linregress`.
+
+    ``n_cells`` may be an effective number of cells, such as Kish's.
+    """
     df = float(n_cells - 2)
     denom = (1.0 - r + _LINREGRESS_TINY) * (1.0 + r + _LINREGRESS_TINY)
     t_stat = r * np.sqrt(df / denom)

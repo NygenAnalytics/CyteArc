@@ -30,17 +30,24 @@ from cytearc import (
     CancellationToken,
     DataStore,
     PipelineCancelled,
+    PipelineExecutionError,
     configure_output,
     pipeline_listener,
 )
 from cytearc.datastore._pipeline import events as pipeline_events
 from cytearc.datastore._pipeline import executor as pipeline_executor
+from cytearc.datastore._pipeline import ledger as pipeline_ledger
+from cytearc.datastore._pipeline import summaries as pipeline_summaries
 from cytearc.datastore._pipeline.events import PipelineEventEmitter
+from cytearc.datastore._pipeline.executor import PlannedStage
+from cytearc.datastore._pipeline.ledger import RunLedger
+from cytearc.datastore._pipeline.recipes import rna as rna_recipe
 from cytearc.datastore.pipeline_accessor import (
     PipelineCallback,
     PipelineEvent,
     PipelineProgress,
 )
+from cytearc.storage.artifacts import ArtifactRef
 from cytearc.storage.pipeline_runs import (
     STAGE_WARNING_LIMIT,
     PipelineErrorRecord,
@@ -57,6 +64,7 @@ from cytearc.storage.pipeline_runs import (
 from cytearc.utils.logging import (
     RUN_ID_EXTRA,
     STAGE_EXTRA,
+    collect_warnings,
     logger,
     progress_enabled,
     set_verbosity,
@@ -1918,3 +1926,198 @@ def test_a_failing_progress_observer_is_logged_and_the_work_goes_on() -> None:
     # Each failure is logged, and the bar keeps counting and reporting.
     assert calls == [1, 3]
     assert failures == [("A progress observer failed", ValueError)] * 2
+
+
+def _group(**arrays: np.ndarray) -> zarr.Group:
+    group = zarr.open_group(store=MemoryStore(), mode="w")
+    for name, values in arrays.items():
+        group.create_array(name, data=values)
+    return group
+
+
+def test_stage_summaries_report_nothing_for_what_an_artifact_lacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty = _group()
+    ref = ArtifactRef(scope="datastore", kind="cell_selection", artifact_id="0" * 64)
+
+    # Each summary reads only the arrays and attributes its artifact holds.
+    assert pipeline_summaries._selection(None, ref, empty) == {}
+    assert pipeline_summaries._hashtags(empty) == {}
+    assert pipeline_summaries._shape(empty, "data", ("cells", "dims")) == {}
+    flat = _group(data=np.zeros(3))
+    assert pipeline_summaries._shape(flat, "data", ("cells", "dims")) == {}
+    assert pipeline_summaries._harmony(empty) == {}
+    assert pipeline_summaries._clusters(empty) == {}
+    assert pipeline_summaries._cluster_cut(empty) == {}
+    assert pipeline_summaries._cell_cycle(empty) == {}
+    assert pipeline_summaries._membership(empty) == {}
+    # A partition of no cells has no clusters, and strengths that are all
+    # missing have no mean.
+    no_cells = _group(values=np.zeros(0, dtype=np.int64))
+    assert pipeline_summaries._clusters(no_cells) == {"clusters": 0}
+    assert pipeline_summaries._membership(_group(values=np.full(2, np.nan))) == {}
+
+    # A combined cell call whose capture input is not an artifact reference
+    # counts no cells for that capture.
+    status = SimpleNamespace(
+        operation="combine_capture_cell_calls",
+        inputs={"capture_0": "not a reference"},
+        parameters={"captures": ["lane_1"]},
+    )
+    monkeypatch.setattr(pipeline_summaries, "inspect_artifact", lambda *_args: status)
+    called = _group(values=np.array([True, False, True]))
+    assert pipeline_summaries._selection(None, ref, called) == {
+        "cells": 2,
+        "calledPerCapture": {},
+        "kneePerCapture": {},
+    }
+
+
+def test_run_callbacks_must_be_callable_and_progress_needs_a_callback() -> None:
+    with pytest.raises(TypeError, match="^callback must be callable$"):
+        pipeline_events.run_callbacks("not callable")  # type: ignore[arg-type]
+
+    emitter = PipelineEventEmitter(
+        [],
+        run_id="0" * 64,
+        recipe="rna",
+        label=None,
+        stage_order=("pca",),
+    )
+    # Without callbacks there is nobody to throttle progress for.
+    assert emitter.progress("pca", 0, 1, "pca", 1, 2) is None
+    assert emitter._last_progress == {}
+
+
+def test_an_observed_bar_reads_through_to_its_bar_and_counts_unsized_items() -> None:
+    updates: list[tuple[int, str | None, int, int | None]] = []
+
+    def observe(
+        bar: int, description: str | None, done: int, total: int | None
+    ) -> None:
+        updates.append((bar, description, done, total))
+
+    with observe_progress(observe):
+        bar = tqdmbar(desc="through", total=3)
+        # Attributes the observer does not keep come from the bar itself.
+        assert (bar.total, bar.n, bar.disable) == (3, 0, not progress_enabled())
+        bar.close()
+        # An iterator has no length, so its bar has no total.
+        unsized = tqdmbar((item for item in "ab"), desc="unsized")
+        assert list(unsized) == ["a", "b"]
+        unsized.close()
+
+    first = updates[0][0]
+    assert updates == [(first, "unsized", 1, None), (first, "unsized", 2, None)]
+
+
+def test_collected_warnings_end_cleanly_when_their_handler_is_gone(
+    restored_output: None,
+) -> None:
+    with collect_warnings() as collected:
+        logger.warning("kept")
+        # Removing every handler, as output configuration may, also removes
+        # the collector's own, which the context must not remove again.
+        logger.remove()
+
+    assert collected == ["kept"]
+
+
+def test_a_cancellation_reaches_the_caller_when_the_run_cannot_be_ended(
+    observed_store: DataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = CancellationToken()
+    events: list[PipelineEvent] = []
+
+    def observe(event: PipelineEvent) -> None:
+        events.append(event)
+        if (event.kind, event.stage) == ("stage_started", "pca"):
+            token.cancel("stopped at PCA")
+
+    def unwritable(self: RunLedger, error: BaseException) -> bool:
+        raise OSError("the run record cannot be written")
+
+    monkeypatch.setattr(RunLedger, "terminate", unwritable)
+    failures: list[str] = []
+    sink = logger.add(
+        lambda message: failures.append(message.record["message"]),
+        level="ERROR",
+        format="{message}",
+    )
+    try:
+        with pytest.raises(PipelineCancelled) as caught:
+            observed_store.pipeline.rna(callback=observe, cancel=token, **_OPTIONS)
+    finally:
+        logger.remove(sink)
+
+    run_id = events[0].run_id
+    # The ledger's storage error is logged, the cancellation still stops the
+    # caller, and the executor ends the run that the ledger could not.
+    assert caught.value.run_id == run_id
+    assert f"Could not record the interruption of pipeline run {run_id}" in failures
+    assert observed_store.pipeline.open(run_id=run_id).status == "interrupted"
+
+
+def test_a_stage_that_finished_before_a_cancellation_fails_if_unrecorded(
+    observed_store: DataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = CancellationToken()
+    original_pca = DataStore._reduction_pca
+    original_finish = pipeline_ledger.finish_pipeline_stage_record
+
+    def pca_then_cancel(self: DataStore, *args: Any, **kwargs: Any) -> Any:
+        result = original_pca(self, *args, **kwargs)
+        token.cancel("stopped as PCA finished")
+        return result
+
+    def unwritable_completion(root: Any, **kwargs: Any) -> Any:
+        # Only the record of the stage that completed as the run was
+        # cancelled cannot be written.
+        if token.cancelled and kwargs["status"] == "completed":
+            raise OSError("the stage record cannot be written")
+        return original_finish(root, **kwargs)
+
+    monkeypatch.setattr(DataStore, "_reduction_pca", pca_then_cancel)
+    monkeypatch.setattr(
+        pipeline_ledger, "finish_pipeline_stage_record", unwritable_completion
+    )
+    events: list[PipelineEvent] = []
+
+    with pytest.raises(PipelineExecutionError) as caught:
+        observed_store.pipeline.rna(callback=events.append, cancel=token, **_OPTIONS)
+
+    # A stage whose outcome cannot be recorded fails, and the run with it.
+    assert (caught.value.run_id, caught.value.stage) == (events[0].run_id, "pca")
+    assert isinstance(caught.value.__cause__, OSError)
+    run = observed_store.pipeline.open(run_id=caught.value.run_id)
+    assert run.status == "failed"
+    assert run.report()["stages"][-1]["status"] == "failed"
+    assert [event.kind for event in events][-2:] == ["stage_failed", "run_failed"]
+
+
+def test_a_failing_skip_hook_fails_the_run_before_its_stage_is_recorded(
+    observed_store: DataStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_input(_state: Any) -> None:
+        raise KeyError("input_cell_selection")
+
+    monkeypatch.setattr(
+        rna_recipe,
+        "filtering_stage",
+        lambda *_args, **_kwargs: PlannedStage(
+            "filtering", None, on_skip=missing_input
+        ),
+    )
+
+    with pytest.raises(PipelineExecutionError) as caught:
+        observed_store.pipeline.rna(**_OPTIONS)
+
+    assert caught.value.stage == "filtering"
+    assert isinstance(caught.value.__cause__, KeyError)
+    run = observed_store.pipeline.open(run_id=caught.value.run_id)
+    assert run.status == "failed"
+    assert "filtering" not in [stage["stage"] for stage in run.report()["stages"]]

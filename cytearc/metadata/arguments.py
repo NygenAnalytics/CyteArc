@@ -229,6 +229,118 @@ class PseudotimeAggregationArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class LineageMarkerArguments(OperationArguments):
+    operation: ClassVar[str] = "run_lineage_marker_search"
+    artifact_kind: ClassVar[str] = "lineage_markers"
+
+    cell_selection: ArtifactRef = artifact_input()
+    feature_selection: ArtifactRef = artifact_input()
+    fate: ArtifactRef = artifact_input()
+    dataset_fingerprint: str = artifact_input()
+    ordered_feature_ids_fingerprint: str = artifact_input()
+    ordered_feature_names_fingerprint: str = artifact_input()
+    normalization: dict[str, Any] = parameter()
+    normalization_method: dict[str, str] = parameter()
+    size_factor: float | None = parameter()
+    lineages: tuple[Any, ...] = parameter()
+    association_method: str = parameter()
+    p_value_method: str = parameter()
+    adjustment_method: str = parameter()
+    adjustment_scope: str = parameter()
+    min_cells: float = parameter()
+    gene_batch_size: int | None = execution()
+    nthreads: int = execution()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class LineageDriverArguments(OperationArguments):
+    operation: ClassVar[str] = "run_lineage_driver_search"
+    artifact_kind: ClassVar[str] = "lineage_drivers"
+
+    cell_selection: ArtifactRef = artifact_input()
+    driver_cells: ArtifactRef = artifact_input()
+    feature_selection: ArtifactRef = artifact_input()
+    fate: ArtifactRef = artifact_input()
+    dataset_fingerprint: str = artifact_input()
+    ordered_feature_ids_fingerprint: str = artifact_input()
+    ordered_feature_names_fingerprint: str = artifact_input()
+    normalization: dict[str, Any] = parameter()
+    normalization_method: dict[str, str] = parameter()
+    size_factor: float | None = parameter()
+    lineages: tuple[Any, ...] = parameter()
+    include_sinks: bool = parameter()
+    min_cells: int = parameter()
+    confidence_level: float = parameter()
+    association_method: str = parameter()
+    p_value_method: str = parameter()
+    adjustment_method: str = parameter()
+    adjustment_scope: str = parameter()
+    gene_batch_size: int | None = execution()
+    nthreads: int = execution()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class LineageAggregationArguments(OperationArguments):
+    operation: ClassVar[str] = "run_lineage_aggregation"
+    artifact_kind: ClassVar[str] = "lineage_aggregation"
+
+    cell_selection: ArtifactRef = artifact_input()
+    feature_selection: ArtifactRef = artifact_input()
+    fate: ArtifactRef = artifact_input()
+    dataset_fingerprint: str = artifact_input()
+    ordered_feature_ids_fingerprint: str = artifact_input()
+    ordered_feature_names_fingerprint: str = artifact_input()
+    normalization: dict[str, Any] = parameter()
+    normalization_method: dict[str, str] = parameter()
+    size_factor: float | None = parameter()
+    lineages: tuple[Any, ...] = parameter()
+    n_bins: int = parameter()
+    smoothing: float = parameter()
+    min_exp: float = parameter()
+    z_scale: bool = parameter()
+    n_neighbours: int = parameter()
+    n_clusters: int = parameter()
+    ann_params: dict[str, Any] = parameter()
+    nan_cluster_value: int = parameter()
+    batch_size: int | None = execution()
+    nthreads: int = execution()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class LineageCurveArguments(OperationArguments):
+    operation: ClassVar[str] = "fit_lineage_curves"
+    artifact_kind: ClassVar[str] = "lineage_curves"
+
+    fate: ArtifactRef = artifact_input()
+    coordinates: ArtifactRef = artifact_input()
+    cell_selection: ArtifactRef = artifact_input()
+    lineages: tuple[Any, ...] = parameter()
+    n_points: int = parameter()
+    df: float = parameter()
+    fit_bins: int = parameter()
+    spline_basis: int = parameter()
+    batch_size: int | None = execution()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class LineageTreeArguments(OperationArguments):
+    operation: ClassVar[str] = "build_lineage_tree"
+    artifact_kind: ClassVar[str] = "lineage_tree"
+
+    labels: ArtifactRef = artifact_input()
+    coordinates: ArtifactRef = artifact_input()
+    cell_selection: ArtifactRef = artifact_input()
+    root: Any = parameter()
+    ends: tuple[Any, ...] = parameter()
+    batch_size: int | None = execution()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class PrevalentPeakArguments(OperationArguments):
     operation: ClassVar[str] = "select_prevalent_peaks"
     artifact_kind: ClassVar[str] = "feature_selection"

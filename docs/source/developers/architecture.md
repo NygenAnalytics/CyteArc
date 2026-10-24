@@ -113,6 +113,9 @@ They must not import those packages at module load time.
   alters the native labels for unchanged parameters needs an `OperationRevision` of
   `run_leiden_clustering` scoped to `backend == "cytearc"` (placement rule 10).
 - `trajectory/` owns pseudotime scoring, feature-profile aggregation, feature module clustering, and pseudotime result records.
+  Lineage-resolved statistics weighted by fate probabilities (`lineages.py`), fate-weighted lineage
+  curves (`curves.py`), cluster spanning trees (`lineage_tree.py`), and their result records also
+  live there; their persisted contracts join the others in `artifacts.py`.
 - `metrics/` owns LISI, silhouette, graph, concordance, and integration scores, including the neighbor label agreement that membership strength stores.
 - `features/` owns variability selection (the cytearc, seurat_v3, and pearson_residuals flavors,
   their LOWESS and LOESS trend fits, and batch-aware ranking), feature scoring, enrichment, rank and regression marker searches, group-wise statistical tests, bulk aggregation, GFF parsing, genomic intervals, coordinate-based feature construction, and the name-based gene-family registry.

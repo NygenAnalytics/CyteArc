@@ -55,6 +55,9 @@ Granular workflows pass exact refs to the same datastore-owned plotting surface:
 | Paris hierarchy | `graph=graph_ref`, `clusters=paris_ref` |
 | marker heatmap | `marker=marker_ref` |
 | pseudotime heatmap | `aggregation=aggregation_ref` |
+| lineage heatmap and trends | `aggregation=lineage_aggregation_ref` |
+| lineage curves | `curves=curves_ref`, `layout=embedding_ref` |
+| lineage tree | `tree=tree_ref`, `layout=embedding_ref` |
 | mapping score | `mapping_score(result_ref, reference=reference, layout=embedding_ref)` |
 | label-transfer evidence, confusion, and calibration | `mapping_evidence(transfer_ref)`, `mapping_confusion(transfer_ref, known_labels=...)`, `mapping_calibration(transfer_ref, known_labels=...)` |
 
@@ -148,7 +151,7 @@ Helpers differ: `label_panels` returns `None`, `theme_context` is an iterator, a
 
 ```{eval-rst}
 .. automodule:: cytearc.plotting
-    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, run_recipe
+    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
     :imported-members:
     :undoc-members:
     :show-inheritance:

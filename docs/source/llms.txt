@@ -55,6 +55,8 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 - [Pseudotime](tutorials/pseudotime/): supervised sources and sinks
 - [Expression dynamics](tutorials/expression-dynamics/): feature profiles and modules
 - [Fate mapping](tutorials/fate-mapping/): multiple terminal outcomes
+- [Lineage dynamics](tutorials/lineage-dynamics/): fate-weighted genes, drivers, and modules per lineage
+- [Lineage curves](tutorials/lineage-curves/): curves per lineage, placing points, and candidate sinks from a cluster tree
 - [Trajectory validation](tutorials/trajectory-validation/): boundary, graph, statistical, and numerical checks
 
 ## Data management

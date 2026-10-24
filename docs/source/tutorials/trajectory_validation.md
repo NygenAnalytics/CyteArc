@@ -75,6 +75,29 @@ Untested marker features have missing p-values, and correction covers tested fea
 only. The aggregation result contains features that passed its expression and variance
 checks. Neither result establishes that a gene causes the process.
 
+## Check lineage-resolved results
+
+[](lineage_dynamics.ipynb) weighs each cell in each lineage by its fate probability. Check how
+many equally weighted cells each lineage amounts to before comparing their statistics:
+
+```python
+# Load the per-lineage correlations with pseudotime.
+lineage_markers = ds.trajectory.load_lineage_markers(lineage_ref)
+
+# Show each lineage's effective number of cells.
+lineage_markers.effective_cells
+```
+
+A lineage with few effective cells has noisy profiles and wide intervals. Shared trunk cells
+count in every lineage, so a lineage's strongest correlations often belong to all lineages;
+compare lineages before calling a gene fate-specific. Lineage drivers leave the endpoint cells
+out by default, because their probabilities are fixed by the model; including them mostly
+recovers the markers that defined the endpoints.
+
+Candidate endpoints from a cluster tree, as in [](lineage_curves.ipynb), depend on the
+clustering and can chain similar populations. Check them with markers, and compare the fate
+maps of plausible endpoint sets, before treating a lineage as established.
+
 ## Separate probability checks from biological evidence
 
 ```python

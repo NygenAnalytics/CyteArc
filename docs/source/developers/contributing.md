@@ -82,7 +82,7 @@ For full CI parity, also run the visual regression step (or see `AGENTS.md`):
 ### Performance benchmarks
 
 `tests/benchmarks/` times the operations that dominate large runs and projects each timing onto production sizes, such as one and ten million cells.
-`test_kernels.py` covers compute kernels, `test_stages.py` the `DataStore` stages, `test_cold_start.py` the import and compilation cost of a new process, and the `test_scaling_*.py` files readers, graphs, features, plotting, merge and export, and identity checks.
+`test_kernels.py` covers compute kernels, `test_stages.py` the `DataStore` stages, `test_cold_start.py` the import and compilation cost of a new process, and the `test_scaling_*.py` files readers, graphs, features, plotting, merge and export, identity checks, and the lineage kernels of trajectory analysis.
 Every benchmark also checks its result against an independent reference.
 A normal test run executes each benchmark once at a small size, without timing it.
 Timed runs need a quiet machine and their own process:

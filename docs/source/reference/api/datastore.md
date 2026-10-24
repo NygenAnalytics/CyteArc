@@ -233,8 +233,17 @@ functions in {doc}`regulons` turn them into regulons.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.TrajectoryAccessor
-    :members: pseudotime, load_pseudotime, fate, load_fate, markers, load_markers, aggregation, load_aggregation
+    :members: pseudotime, load_pseudotime, fate, load_fate, markers, load_markers, aggregation, load_aggregation, lineage_markers, load_lineage_markers, drivers, load_drivers, lineage_aggregation, load_lineage_aggregation, curves, load_curves, lineage_tree, load_lineage_tree
 ```
+
+The lineage methods resolve one fate map into its lineages: each scored cell
+weighs in each lineage by its fate probability. `lineage_markers` and
+`lineage_aggregation` follow features along each lineage, `drivers` correlates
+features with fate probabilities, and `curves` fits one curve per lineage
+through the graph's coordinates. `lineage_tree` is a diagnostic that proposes
+candidate sinks from a cluster tree; check them before passing them to `fate`.
+See [Resolve gene dynamics by lineage](../tutorials/lineage-dynamics) and
+[Draw lineage curves and check candidate sinks](../tutorials/lineage-curves).
 
 ### `ds.mapping`
 
@@ -700,6 +709,24 @@ The recommended workflow is in [Read RNA and protein together with CITE-seq](../
     :members:
 
 .. autoclass:: cytearc.PseudotimeAggregationResult
+    :members:
+
+.. autoclass:: cytearc.trajectory.LineageMarkerResult
+    :members:
+
+.. autoclass:: cytearc.trajectory.LineageDriverResult
+    :members:
+
+.. autoclass:: cytearc.trajectory.LineageAggregationResult
+    :members:
+
+.. autoclass:: cytearc.trajectory.LineageCurvesResult
+    :members:
+
+.. autoclass:: cytearc.trajectory.CurveProjection
+    :members:
+
+.. autoclass:: cytearc.trajectory.LineageTreeResult
     :members:
 
 .. autoclass:: cytearc.EnrichmentResult

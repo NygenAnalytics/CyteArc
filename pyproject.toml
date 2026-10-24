@@ -281,6 +281,8 @@ module = [
     "cytearc.features.markers.*",
     "cytearc.features.enrichment.aucell",
     "cytearc.datastore._operations.features",
+    "cytearc.trajectory.lineages",
+    "cytearc.trajectory.curves",
 ]
 disallow_untyped_calls = false
 disable_error_code = ["attr-defined", "arg-type"]

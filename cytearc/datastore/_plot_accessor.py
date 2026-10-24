@@ -894,5 +894,91 @@ class DataStorePlotAccessor:
         """Plot feature profiles ordered by stored pseudotime."""
         return self._forward(PlotResult, "pseudotime_heatmap", locals())
 
+    def lineage_heatmap(
+        self,
+        *,
+        aggregation: ArtifactRef,
+        lineages: Sequence[Any] | None = None,
+        show_features: list[str] | None = None,
+        figsize: tuple[float, float] | None = None,
+        vmin: float | None = None,
+        vmax: float | None = None,
+        heatmap_cmap: str = "coolwarm",
+        pseudotime_cmap: str = "viridis",
+        clusterbar_cmap: str = "tab20",
+        tick_fontsize: int = 10,
+        axis_fontsize: int = 12,
+        feature_label_fontsize: int = 10,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> "PlotResult":
+        """Plot fate-weighted feature profiles side by side for each lineage."""
+        return self._forward(PlotResult, "lineage_heatmap", locals())
+
+    def lineage_trends(
+        self,
+        *,
+        aggregation: ArtifactRef,
+        features: Sequence[str],
+        lineages: Sequence[Any] | None = None,
+        axis: Literal["progress", "pseudotime"] = "progress",
+        lineage_cmap: str = "tab10",
+        line_width: float = 2.0,
+        n_columns: int | None = None,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> "PlotResult":
+        """Plot selected features' profiles along each lineage."""
+        return self._forward(PlotResult, "lineage_trends", locals())
+
+    def lineage_curves(
+        self,
+        *,
+        curves: ArtifactRef,
+        layout: ArtifactRef,
+        lineages: Sequence[Any] | None = None,
+        df: float | None = None,
+        lineage_cmap: str = "tab10",
+        line_width: float = 2.5,
+        point_size: float | None = None,
+        point_alpha: float = 0.6,
+        cell_color: str = "#d0d0d0",
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> "PlotResult":
+        """Draw fate-weighted lineage curves over a two-dimensional layout."""
+        return self._forward(PlotResult, "lineage_curves", locals())
+
+    def lineage_tree(
+        self,
+        *,
+        tree: ArtifactRef,
+        layout: ArtifactRef,
+        show_cells: bool = True,
+        cell_color: str = "#d0d0d0",
+        point_size: float | None = None,
+        point_alpha: float = 0.5,
+        node_size: float = 80.0,
+        node_color: str = "#4e79a7",
+        root_color: str = "#59a14f",
+        leaf_color: str = "#e15759",
+        edge_color: str = "#555555",
+        labels: bool = True,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> "PlotResult":
+        """Draw a cluster tree over a two-dimensional layout."""
+        return self._forward(PlotResult, "lineage_tree", locals())
+
 
 scope_public_methods(DataStorePlotAccessor, module_prefix="cytearc.datastore")
