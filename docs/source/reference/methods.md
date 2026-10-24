@@ -10,13 +10,16 @@ description: Methods implemented by CyteArc, how they are validated, and their s
 
 CyteArc provides complete workflows for:
 
+- cell calling from unfiltered droplet matrices, ambient RNA correction, and doublet detection within samples
 - scRNA-seq quality control, feature selection, normalization, graph construction, embedding, clustering, and marker discovery
 - scATAC-seq peak filtering, LSI-based graph construction, clustering, and gene-score analysis
 - CITE-seq RNA and ADT processing with weighted-nearest-neighbour integration by default and
   explicit shared-nearest-neighbour integration as an alternative
 - pseudotime ordering, expression dynamics, modules, and multi-sink fate probabilities
 - dataset merging, Harmony or partial-PCA correction with quantitative diagnostics, reference mapping, and label transfer
+- joint analysis of local or remote datasets through mounts and virtual datasets
 - cell-cycle scoring, gene-set activity, imputation, and pseudobulk export
+- comparisons between conditions using biological samples, including paired donor designs
 - transcription-factor regulons from RNA (SCENIC), motif or binding-peak activity from ATAC
   (chromVAR), and co-regulated gene programs
 
@@ -26,6 +29,10 @@ CyteArc implements a computational stage itself when an external implementation 
 It uses established libraries where they fit the streaming and provenance model.
 The aim is one coherent execution path, not reimplementation for its own sake.
 
+- **Cell calling:** [EmptyDrops](https://doi.org/10.1186/s13059-019-1662-y) separates cells from
+  empty droplets using a Good-Turing ambient profile, a Dirichlet-multinomial model, Monte Carlo
+  p-values, and Benjamini-Hochberg FDR. The RNA pipeline can call cells separately for each
+  capture before applying QC. See [](../tutorials/cell_calling.ipynb).
 - **Reduction and graph construction:** streamed normalization, exact covariance (Gram-matrix) PCA with a randomized block Krylov solver for more than 4,096 features ({ref}`details <pca_method>`), randomized streaming {term}`LSI`, approximate nearest-neighbour search, UMAP, {term}`densMAP`, and graph-based t-SNE through the optional `tsne` extra (see {ref}`Optional t-SNE <installation_tsne>`).
 - **Feature selection:** highly variable genes by CyteArc's mean-variance trend of normalized
   values, by the variance-stabilizing transformation of [Seurat v3](https://doi.org/10.1016/j.cell.2019.05.031)
@@ -38,7 +45,16 @@ The aim is one coherent execution path, not reimplementation for its own sake.
 - **Trajectory analysis:** memory-aware [Population Balance Analysis](https://doi.org/10.1073/pnas.1714723115), supervised terminal-state fate probabilities, pseudotime aggregation and modules, and [MAGIC-style graph diffusion](https://doi.org/10.1016/j.cell.2018.05.061) for imputation.
   Fate probabilities also weigh each cell in each lineage, as in [CellRank](https://doi.org/10.1038/s41592-021-01346-6), for lineage-resolved markers, profiles, and modules, and for lineage drivers: correlations with fate probability tested by Fisher's z-transform.
   Lineage curves are fate-weighted [principal curves](https://doi.org/10.1080/01621459.1989.10478797) with the pseudotime rank as their projection index, smoothed by [penalized B-splines](https://doi.org/10.1214/ss/1038425655), and a [Slingshot](https://doi.org/10.1186/s12864-018-4772-0) cluster tree proposes candidate sinks ({ref}`lineage_curves`).
-- **Statistics and diagnostics:** marker AUC, the [Mann-Whitney U test](https://doi.org/10.1214/aoms/1177730491) with [Benjamini-Hochberg](https://doi.org/10.1111/j.2517-6161.1995.tb02031.x) correction, [Scrublet](https://doi.org/10.1016/j.cels.2018.11.005) doublet scores and calls simulated within each sample, cluster separability, and integration metrics informed by the [scIB benchmark](https://doi.org/10.1038/s41592-021-01336-8).
+- **Statistical comparisons:** [Mann-Whitney U](https://doi.org/10.1214/aoms/1177730491),
+  Kruskal-Wallis with optional Dunn pairwise tests, and paired Wilcoxon signed-rank tests on
+  sample summaries. Cell-level Welch t-tests and one-way ANOVA are also available.
+  Multiple-testing options include [Benjamini-Hochberg](https://doi.org/10.1111/j.2517-6161.1995.tb02031.x),
+  Holm, and Bonferroni correction. Marker search reports AUC, expression fractions, fold changes,
+  and Mann-Whitney statistics. See [](../tutorials/condition_comparisons.ipynb) for a paired
+  donor analysis and [](../tutorials/pseudobulk_and_differential_expression.ipynb) for export.
+- **Doublets and diagnostics:** [Scrublet](https://doi.org/10.1016/j.cels.2018.11.005)-style
+  doublet scores and calls simulated within each sample, cluster separability, and integration
+  metrics informed by the [scIB benchmark](https://doi.org/10.1038/s41592-021-01336-8).
 - **Gene sets, protein, and sample tags:** [AUCell](https://doi.org/10.1038/nmeth.4463) and [WAGGR](https://doi.org/10.1093/bioadv/vbac016) activity scores, CITE-seq processing, and [cell-hashing](https://doi.org/10.1186/s13059-018-1603-1) demultiplexing.
 - **Ambient RNA:** a CyteArc implementation of [SoupX](https://doi.org/10.1093/gigascience/giaa151)
   from its paper: the soup profile of empty droplets, contamination fractions from marker gene
@@ -99,6 +115,24 @@ The IncrementalPCA fit that CyteArc used before release 1.3.0 for wide or narrow
 inputs put its trailing components up to 89 degrees from the exact subspace, with variance
 shares off by 10 to 21%. Those fits recorded `incremental_block_rows`, and lineage reports mark
 them as stale.
+
+(neighbour_search)=
+
+## Neighbour search
+
+CyteArc uses HNSW approximate nearest-neighbour search. The defaults are `ann_m=24`
+for index connectivity, `ann_efc=200` for the search depth during construction, and
+`ann_ef=200` for the minimum query depth. Queries use at least twice the requested neighbour
+count. These settings balance index size and search work against neighbour recall at atlas scale.
+
+Across five approximately million-cell settings, including Tabula Sapiens, a lupus PBMC atlas,
+and a clustered synthetic dataset, these defaults reached recall@11 and recall@30 of at least
+0.995 in four settings. The 50-PC PBMC setting reached recall@30 of 0.988; its missed neighbours
+were within 1% of the exact k-th neighbour distance. The earlier defaults reached recall@11 of
+0.896 to 0.991 and left up to 0.92% of cells without a true neighbour, which motivated the
+deeper searches. Recall is the fraction of exact nearest neighbours recovered.
+
+See [](../tutorials/graph_construction.ipynb) for graph settings and diagnostics.
 
 (leiden_method)=
 
@@ -168,117 +202,119 @@ doublet rate. Doublets of two cells of one type cannot be told from singlets thi
 
 ## Validation
 
-Validation is method-specific.
-Agreement measured for one method is not evidence of equivalence for the rest of the package, and none of these comparisons establish biological ground truth.
+The comparisons below cover reference implementations, direct numerical checks, and biological
+outcomes. Inputs and settings are matched unless the table says otherwise.
 
-- HTO demultiplexing is checked against Seurat 5.5.1 `HTODemux` calls with k-means clustering and
-  the default `positive.quantile` of 0.99, on a pool where every singlet's highest CLR value is its
-  positive tag. CyteArc names a singlet by its one positive tag, while `HTODemux` names it by its
-  highest CLR value, so the two can differ in strongly unbalanced pools.
-- Doublet detection is compared with scanpy 1.12.4 `pp.scrublet` on the mouse pancreas sample
-  of 3,696 cells with 300 doublets of two cell types and 60 of one type added, each the sum of two
-  cells' counts. Over seeds 0 to 3, CyteArc ranks the doublets at AUROC 0.939 to 0.945 (0.971 to
-  0.974 for those of two types) and Scrublet at 0.913 to 0.919 (0.953 to 0.958). CyteArc's
-  automatic thresholds call 221 to 223 cells, 211 to 213 of the 300 doublets of two types and 9 or
-  10 singlets, and estimate a doublet rate of 0.09, the rate of the added doublets; Scrublet's
-  call 241 to 252 cells, 222 to 229 of them and 17 to 22 singlets. Scores correlate across seeds at Spearman 0.92
-  to 0.95 for CyteArc and 0.95 for Scrublet; the two methods' scores at 0.64. Tests check scores
-  and calls of doublets added to synthetic counts of one and of two captures, that no simulated
-  doublet pairs cells of two samples, and the neighbor counts against exact nearest neighbors.
-- Symphony-style query correction is checked against a golden fixture generated with the R Symphony 0.1.3 `mapQuery` implementation, including a case with nonzero correction.
-- Ambient RNA removal is compared with SoupX 1.6.2 on the 10x Genomics PBMC 1k (v2) and 10k (v3)
-  samples. With the same empty-droplet range the soup profiles are identical, the global,
-  per-gene-set, and per-cluster contamination fractions agree to within 2e-8, the tolerance of
-  SoupX's fit, and the same cells measure each gene set. Before rounding, the removal of each
-  gene from each cell matches SoupX's cell-level subtraction to within 1e-12 counts. CyteArc then
-  rounds each removal at random, as the paper does, with systematic sampling seeded by
-  `random_seed`, so a seed reproduces the counts. Summed over the cells, the removal of the genes
-  in each band of soup ranks, from the 10 most abundant soup genes to those beyond rank 5,000,
-  stays within 2.5% of the removal before rounding on PBMC 1k and within 0.4% on PBMC 10k, and
-  each gene's deviation from it has the binomial spread of its rounding.
-- Harmony2's ridge regression solves, batch pruning, stabilized cluster assignment update, and
-  clustering objective are checked against direct dense calculations from the published equations.
-  A synthetic benchmark in which two groups of batches share no cell types checks that batch mixing
-  rises while cell-type purity stays at its uncorrected level.
-  CyteArc's Harmony2 was written from the two papers, independently of other Harmony
-  implementations, and is not expected to match them number for number.
-- Highly variable gene flavors are compared with scanpy 1.12.4 and scikit-misc 0.5.3 on the
-  892 cells and 36,601 genes of the 1k PBMC CITE-seq test fixture, selecting 2,000 genes.
-  The seurat_v3 trend matches scikit-misc's interpolated LOESS to within 1e-12 on the log10 scale,
-  so the scores agree to the 10 digits the fixture keeps; the selections differ only in 4 genes tied
-  at the last selected score (Jaccard 0.998). Pearson residual variances agree to the same digits and select
-  the same genes, with and without two batches. With two batches, seurat_v3 scores differ from
-  scanpy's `seurat_v3_paper` by up to 7e-4 and 8 selected genes differ (Jaccard 0.996), because
-  scanpy's Welford batch means break ties between genes with equal means, which moves the
-  interpolated trend. scanpy clips every batch's residuals at the square root of the first
-  batch's cell count; CyteArc clips each batch at its own, so the batch comparison passes an
-  explicit clip. The LOESS, the standardized variance, and the residuals are also checked against
-  direct NumPy computations of their published formulas.
-- Marker statistics are checked against SciPy, including continuity and large-tie corrections.
-- Paris hierarchies are compared with the scikit-network reference implementation on tie-free graphs.
-- The native Leiden backend is checked against brute-force calculations on small random graphs,
-  and tests check that every cluster is connected, that no two clusters can be merged to increase
-  modularity, and that labels are identical on 1 to 4 threads. A separate implementation written
-  from the paper reached the same modularity within seed noise, and against the igraph backend
-  the modularity agrees within about 0.001 on graphs from 808 to 10 million cells. The clustering
-  package's README gives the details.
-- WNN is checked against scalar reference calculations, a two-modality CITE-seq fixture, and a synthetic three-modality Seurat 5.5.1 fixture, plus modality-order symmetry, row-order invariance, and degenerate bandwidths.
-  It follows the published weighting equations but is not bit-identical to Seurat defaults, as described in {ref}`the FAQ <faq>`.
-- AUCell and WAGGR scores are checked against frozen decoupler 2.2 fixtures.
-- Fate probabilities are checked against dense Dirichlet solutions on controlled graphs.
-- Lineage drivers reproduce the correlation test of CellRank 2.3.3 (Fisher's z-transform, 95%
-  intervals, and Benjamini-Hochberg adjustment) on the pancreas example's 1,234 branch cells,
-  2,000 highly variable genes, and four lineages within 1e-12 for every correlation, p-value,
-  interval bound, and adjusted p-value, with the same untested genes, when `min_cells=1`
-  tests every gene that varies, as CellRank does.
-- Lineage markers, drivers, and profiles are checked against dense recomputations from the
-  normalized expression and fate probabilities, and unit-weight correlations against SciPy.
-  Lineage curves recover a known noisy curve, and cluster trees recover a branched cluster
-  layout.
-- SCENIC regulons are compared with pySCENIC 0.12.1 (its Docker image, scikit-learn 1.1.3) on a
-  10x Genomics PBMC multiome sample of 2,612 cells, 13,308 genes, and 1,201 factors.
-  With the same seed, GRNBoost2 importances correlate at Pearson 0.998 and the top 1,000 to
-  100,000 links overlap at Jaccard 0.96; two pySCENIC seeds give 0.946 and 0.64. Links are not
-  bit-identical because scikit-learn's tree code has changed since 1.1.3.
-- cisTarget AUC, NES, recovery envelopes, and leading edges reproduce all 297 pySCENIC regulons
-  and 2,184 enriched motif rows (within 1e-15) when each motif is given the recovery curve that
-  pySCENIC 0.12.1 assigns it.
-  pySCENIC 0.12.1 gives most annotated motifs another enriched motif's curve; `prune_modules`
-  uses each motif's own, so on pySCENIC's network the regulon names agree but the median target
-  Jaccard is 0.25. These targets are more reproducible across GRNBoost2 seeds (median Jaccard
-  0.33, against 0.20 to 0.24 with pySCENIC's pruning).
-- AUCell regulon scores differ from pySCENIC's by design. CyteArc divides each cell's
-  recovery area by the largest area a regulon of that size can reach, as R AUCell and
-  decoupler do, while pySCENIC divides by the area of the whole ranking window. For an
-  unweighted 20-gene regulon among 1,000 genes, pySCENIC's scores are 0.79 times CyteArc's.
-- chromVAR deviations are compared with chromVAR 1.34.1 and motifmatchr 1.34.0 for 879 JASPAR
-  2024 motifs over 98,316 peaks. Given R's motif matches and background peaks, deviations and
-  z-scores agree within 4e-12, with the same missing values. With an even background, motif
-  matching finds every motifmatchr match (Jaccard 0.9998); all 2,510 additional matches belong
-  to four-base motifs. With the default subject background CyteArc departs from motifmatchr
-  twice: motifmatchr applies the background adjustment with the opposite sign to a log-odds
-  score, and it reuses each motif's forward-strand threshold for the reverse strand, which misses
-  the requested p-value when complementary bases differ in frequency. CyteArc scores proper
-  log-odds and gives each strand its own threshold, as MOODS does. Before the per-strand
-  thresholds, matches overlapped motifmatchr's at Jaccard 0.94, and end to end, with
-  independently drawn background peaks, per-motif z-scores correlated at a median Pearson of
-  0.96 and population means at 0.995; these have not been measured again since.
-- On the multiome sample, chromVAR scores CUT&RUN and ChIP-seq peak sets highest in the
-  expected population for SPI1 (dendritic cells), LEF1 (CD4 T cells), and the B-cell factors
-  PAX5, EBF1, POU2F2, and POU2AF1, but not for BCL11B binding measured in Jurkat cells.
-  Against ChIP-Atlas binding within 10 kb of a gene's start (the GRETA gold standard), the
-  fraction of factor-to-gene links with binding exceeds its random expectation by 8% for CyteArc
-  regulons, 7% for pySCENIC regulons, and 3% for each factor's top 50 GRNBoost2 targets.
-- Gene programs are compared with Hotspot 1.1.1 modules on the same cells and highly variable
-  genes. The six programs contain 89% of the 503 genes in Hotspot's ten modules, and 76% of those
-  genes fall in their module's majority program (adjusted Rand index 0.45 on shared genes,
-  against at most 0.008 for 100 permuted labelings). These figures were measured when gene
-  programs used the igraph Leiden backend, the default of earlier releases; with the native
-  default, the regulons tutorial forms the same six programs, each within 11 genes of its earlier
-  size. Hotspot splits the T-cell, monocyte, and B-cell programs into finer modules. Independent
-  noise profiles form no programs, but the membership threshold assumes independent samples and
-  ignores that programs are chosen from the same data: it screens chance groupings rather than
-  testing programs, and profiles of smoothed cells form spurious ones.
+### Comparisons with other tools
+
+| Method | Reference | Data | Main result |
+| :-- | :-- | :-- | :-- |
+| **Cell calling** | DropletUtils 1.30 `emptyDrops` | 10x PBMC 1k and 10k | Identical 1,045 calls on PBMC 1k; Jaccard 0.9975 on PBMC 10k with matching settings |
+| **Ambient RNA correction** | SoupX 1.6.2 | 10x PBMC 1k and 10k | Identical ambient profiles; contamination fractions agree within $2 \times 10^{-8}$ and cell-level subtraction within $10^{-12}$ counts before rounding |
+| **HTO demultiplexing** | Seurat 5.5.1 `HTODemux` | 1,000 cells, 10 hashtags | Identical calls with matched settings; singlet naming can differ in unbalanced pools, as described below |
+| **Highly variable genes** | Scanpy 1.12.4, scikit-misc 0.5.3 | 892 CITE-seq cells, 36,601 genes | Seurat v3 selection Jaccard 0.998; Pearson residuals select the same genes, including the matched two-batch comparison |
+| **Doublet detection** | Scanpy 1.12.4 `pp.scrublet` | 3,696 pancreas cells with 300 mixed-type and 60 same-type simulated doublets | AUROC 0.939–0.945 across four seeds, versus 0.913–0.919 for Scrublet |
+| **Marker statistics** | SciPy; presto, Scanpy, BPCells | Synthetic tests and three datasets of about one million cells | Statistics checked against SciPy; AUC differences from presto and Scanpy are at most $5.2 \times 10^{-6}$ on shared cells, genes, groups, and expression |
+| **Group comparisons** | SciPy and direct rank calculations | Independent and paired sample designs | Mann-Whitney, Kruskal-Wallis, Wilcoxon, Welch, ANOVA, and Dunn comparisons checked against reference calculations |
+| **WNN integration** | Seurat 5.5.1 | 300 CITE-seq cells; 48 synthetic cells with three modalities | Same neighbours and weights/affinities within $3 \times 10^{-8}$ with matched candidate neighbours; 89% neighbour overlap with Seurat defaults |
+| **Symphony-style query correction** | R Symphony 0.1.3 `mapQuery` | Four-cell, two-gene fixture | Coordinates agree on a small fixture with effectively zero correction |
+| **Cell-cycle scores** | Scanpy 1.12.4 | 3,696 pancreas cells; 3,948 PBMCs | Scores agree within $3.3 \times 10^{-16}$ with the same control genes |
+| **AUCell and WAGGR** | decoupler 2.2.0 | 3,948 PBMCs, 16 gene sets | Maximum score differences of $3 \times 10^{-8}$ and $9.2 \times 10^{-7}$, respectively; identical after rounding to single precision |
+| **Graph-diffusion imputation** | magic-impute 3.0.0 | 3,948 PBMCs, 200 genes | Values agree within $6 \times 10^{-6}$ on the same graph and diffusion time; median gene-wise correlation 0.95 with MAGIC defaults |
+| **iLISI and cLISI** | scib-metrics 0.6.1 | Two PBMC datasets | Per-cell scores agree within $1.6 \times 10^{-14}$ on the same neighbours and perplexity |
+| **Fate probabilities** | CellRank 2 | 3,696 pancreas cells; 1,110 LARRY progenitors | Correlations exceed 0.99999999 with matched graphs, pseudotime, terminal cells, and kernel settings; 0.985 on the pancreas with CellRank defaults |
+| **Lineage drivers** | CellRank 2.3.3 | 1,234 pancreas branch cells, 2,000 genes, four lineages | Correlations, confidence intervals, and significance results agree within $10^{-12}$ when both tools test every variable gene |
+| **GRNBoost2 networks** | pySCENIC 0.12.1 | 2,612 PBMC multiome cells, 13,308 genes, 1,201 factors | Importance correlation 0.998; Jaccard 0.96 for the top 1,000 to 100,000 links |
+| **chromVAR deviations** | chromVAR 1.34.1 | 879 motifs over 98,316 peaks | Deviations and z-scores agree within $4 \times 10^{-12}$ with the same motif matches and background peaks |
+| **Gene programs** | Hotspot 1.1.1 | PBMC multiome cells and highly variable genes | Six programs contain 89% of the 503 genes in Hotspot's ten modules; adjusted Rand index 0.45 on shared genes |
+
+In the LARRY lineage-tracing data, predicted neutrophil fate distinguished the later majority
+fate of 725 clones with AUROC 0.76 (95% confidence interval 0.73–0.80). This comparison used
+1,110 day-2 progenitors and measured outcomes from their later descendants. CellRank gave the
+same AUROC. This evaluates a biological prediction separately from agreement between tools.
+
+### Numerical and graph checks
+
+- **PCA and LSI:** the PCA comparisons are described in {ref}`pca_method`. Streaming LSI is
+  checked against the leading subspace of a dense singular-value decomposition and across
+  different block sizes.
+- **Neighbour search:** recall is measured against exact nearest neighbours, as described in
+  {ref}`neighbour_search`. Regression tests also compare the returned neighbours with exact
+  searches on clustered synthetic data.
+- **Harmony2:** ridge regression, batch pruning, cluster-assignment updates, and the clustering
+  objective are checked against direct dense calculations of the published equations. A
+  synthetic benchmark with two groups of batches that share no cell types checks that batch
+  mixing improves while cell-type purity stays at its uncorrected level.
+- **Leiden and Paris:** native Leiden is checked against brute-force calculations on small
+  random graphs, connectedness of every cluster, and identical labels on one to four threads.
+  Tests also check that merging two clusters cannot improve modularity. Against igraph,
+  modularity agrees within about 0.001 on graphs from 808 to ten million cells. Paris hierarchies
+  reproduce the scikit-network clades on tie-free graphs.
+- **Population Balance Analysis:** on 3,696 pancreas cells, the 30-mode solution has Spearman
+  correlation 0.99999 with the full dense potential and a maximum difference of $9.1 \times 10^{-4}$
+  on a unit scale. This checks the numerical approximation to the same equations.
+- **Fate and lineage analysis:** sparse fate solutions are checked against dense Dirichlet
+  solutions. Lineage markers, drivers, and profiles are checked against dense recomputations
+  from expression and fate probabilities. Lineage curves recover a known noisy curve, and
+  cluster trees recover a branched cluster layout.
+- **Cell calling and doublets:** tests check EmptyDrops likelihoods and simulations against
+  direct calculations, and reproduce calls across thread counts. Doublet tests check that
+  simulated parents come from the same capture and compare neighbour counts with exact searches.
+
+### Interpreting the comparisons
+
+**Cell calling and sample tags.** EmptyDrops comparisons use matched model precision and
+retention thresholds. CyteArc estimates the precision and finds the barcode-rank knee by spline
+curvature; DropletUtils 1.30 defaults to a multinomial model and traces the knee differently.
+The HTO comparison uses k-means and a positive quantile of 0.99. CyteArc names a singlet by its
+one positive tag, while Seurat names it by its highest CLR value; these agree in the comparison
+pool but can differ in strongly unbalanced pools.
+
+**Feature selection and scores.** The Seurat v3 trend agrees with scikit-misc's interpolated
+LOESS within $10^{-12}$ on the log10 scale. Four genes tied at the selection boundary account
+for the single-batch selection difference. In the two-batch comparison, eight selected genes
+differ (Jaccard 0.996) because floating-point ties in batch means affect the fitted trend.
+CyteArc clips each batch's Pearson residuals using that batch's cell count; the comparison sets
+the clip explicitly to match Scanpy. With independently sampled cell-cycle control genes,
+pancreas score correlations are 0.995 for S and 0.997 for G2/M.
+
+**Ambient RNA.** CyteArc uses seeded systematic sampling to round removed counts. Summed across
+cells, removal in bands of ambient-gene abundance stays within 2.5% of the unrounded removal on
+PBMC 1k and within 0.4% on PBMC 10k. The implemented SoupX steps are listed above.
+
+**Mapping.** The small Symphony fixture checks projection and correction mechanics; it does
+not establish agreement on substantial batch correction. Label-transfer vote fractions measure
+neighbour support, not a calibrated probability that a cell label is correct. The
+[mapping tutorial](../tutorials/mapping_and_label_transfer.ipynb) covers confidence and
+projection diagnostics.
+
+**Regulons.** GRNBoost2 links are not bit-identical to pySCENIC's because its Docker image uses
+an older scikit-learn tree implementation. For context, two pySCENIC seeds give importance
+correlation 0.946 and link Jaccard 0.64 in the same comparison. cisTarget AUC, NES, recovery
+envelopes, and leading edges reproduce all 297 pySCENIC regulons and 2,184 enriched motif rows
+within $10^{-15}$ when supplied the recovery curves that pySCENIC 0.12.1 assigns. CyteArc uses
+each motif's own curve, rather than another enriched motif's curve as pySCENIC sometimes does.
+On pySCENIC's network, the regulon names agree but median target Jaccard is 0.25; CyteArc's
+targets are more consistent across GRNBoost2 seeds (median Jaccard 0.33 versus 0.20–0.24).
+AUCell divides recovery area by the maximum attainable for the regulon's size, as R AUCell and
+decoupler do, rather than by the area of the whole ranking window as pySCENIC does.
+
+**Chromatin activity.** With an even sequence background, motif matching recovers every
+motifmatchr match (Jaccard 0.9998); the additional 2,510 matches are four-base motifs. CyteArc
+uses proper log-odds background adjustment and separate forward- and reverse-strand thresholds.
+Before the separate thresholds were introduced, end-to-end motif z-scores correlated at a
+median of 0.96 with chromVAR and population means at 0.995; these end-to-end values have not
+been measured again since. On the multiome sample, CUT&RUN and ChIP-seq peak activity is highest
+in the expected populations for SPI1, LEF1, PAX5, EBF1, POU2F2, and POU2AF1, but not for BCL11B
+binding measured in Jurkat cells. Against ChIP-Atlas binding near gene starts, factor-to-gene
+links exceed random binding expectations by 8% for CyteArc regulons, 7% for pySCENIC regulons,
+and 3% for the top GRNBoost2 targets.
+
+**Gene programs.** The Hotspot comparison used the igraph Leiden backend. The native backend
+also forms six programs in the saved regulon analysis, each within 11 genes of its earlier size.
+Hotspot separates the T-cell, monocyte, and B-cell programs into finer modules. Independent
+noise profiles form no programs, but smoothed cells can produce spurious ones: the membership
+threshold screens chance groupings and is not a significance test of the discovered programs.
 
 ## Current boundaries
 
@@ -300,4 +336,3 @@ Fate mapping needs user-supplied terminal states and does not infer them or use 
 A lineage tree proposes candidate sinks from clusters, but it can chain similar terminal clusters, so it does not discover them either.
 Imputation is intended for exploratory visualization rather than differential expression.
 Export selected data to AnnData or another supported format when a downstream method is outside CyteArc.
-

@@ -5,98 +5,93 @@
   <a href="https://codecov.io/gh/NygenAnalytics/CyteArc"><img src="https://codecov.io/gh/NygenAnalytics/CyteArc/graph/badge.svg" alt="Coverage"></a>
   <a href="https://docs.nygen.io/CyteArc/"><img src="https://img.shields.io/github/actions/workflow/status/NygenAnalytics/CyteArc/pages.yml?label=Documentation" alt="Documentation"></a>
   <a href="https://pypi.org/project/cytearc"><img src="https://img.shields.io/pypi/v/cytearc.svg?color=4c72b0" alt="PyPI"></a>
-  <a href="https://pypi.org/project/cytearc"><img src="https://img.shields.io/badge/python-3.13%20%7C%203.14%20%7C%203.15-4c72b0.svg" alt="Python 3.13, 3.14, and 3.15"></a>
 </p>
 
+CyteArc is a Python framework for **single-cell RNA, ATAC, protein, and matched multi-omic analysis**. Its Zarr layout and read engine are designed together for efficient access by cell or gene, locally or directly from remote storage.
 
-CyteArc is a **fast Python framework for single-cell RNA, ATAC, protein, and multi-omic analysis that scales to 100M+ cells**. In benchmarks, it processed **one million cells within 15 minutes**, from cell filtering through UMAP and clustering to marker gene identification. On **Tahoe-100M**, the same workflow ran in **under 20 hours without any subsampling**.
+CyteArc analysed **Tahoe-100M in under 20 hours on commodity hardware**, from cell filtering through UMAP, clustering, and marker gene identification, **without downsampling the dataset or using GPUs**. The same workflow processed one million cells within 15 minutes.
 
-[CyteBase](https://docs.nygen.io/CyteBase/) is a **ready-to-connect repository of CyteArc datastores**, containing approximately **200 million cells and 1.1 TB of data** on [Hugging Face](https://huggingface.co/buckets/Nygen/cytebase). CyteArc opens them by URI. Mount remote datasets for reanalysis and build or reuse references for mapping new cells, without downloading the complete count matrix. Counts stay remote while you save your own results in a store you control.
+Mount remote datasets, combine studies into **virtual datasets**, and run pipelines with provenance stored alongside the results.
 
-CyteArc's **built-in provenance** connects saved results to the exact cells, features, parameters, and upstream computations that produced them, so you can reuse completed work and trace each analysis.
+[Documentation](https://docs.nygen.io/CyteArc/) · [Quick start](https://docs.nygen.io/CyteArc/quickstart) · [Methods and validation](https://docs.nygen.io/CyteArc/reference/methods)
 
-| Problem | How CyteArc solves it | What you get |
-| :-- | :-- | :-- |
-| Your **dataset is larger than RAM** | Out-of-core algorithms, and neighbour search streams from cell-major and gene-major layouts, inside a memory budget you set | Analyse the selected cells with [explicit memory controls](https://docs.nygen.io/CyteArc/concepts/memory-and-execution) |
-| The **data is stored remotely** and requires downloading | Fetches only the chunks an operation touches, and writes results to a store you own | Start analysing immediately, with one authoritative copy |
-| A **single parameter change costs hours** of computation | Each step is fingerprinted by its settings and inputs, so reuse is by content, not by layer name | Only what changed recomputes, and the old version stays for comparison |
-| Sub-population analysis leaves **scattered copies that nobody can trace back** | Subsets are masks in one file, and every result carries the cells and parameters behind it | A year later, a result still explains itself |
+## Capabilities
+
+| Analysis | What you can do |
+| :-- | :-- |
+| **[Data access](https://docs.nygen.io/CyteArc/tutorials/remote-stores)** | Mount local or remote stores; combine cells across studies into virtual datasets without copying their counts |
+| **[Cell calling and QC](https://docs.nygen.io/CyteArc/tutorials/quality-control)** | EmptyDrops cell calling, ambient RNA correction, doublet detection within samples, cell-cycle scoring, and HTO demultiplexing |
+| **[Cell populations](https://docs.nygen.io/CyteArc/tutorials/scrna-seq)** | RNA, ATAC, and protein pipelines; batch-aware feature selection, PCA/LSI, UMAP, densMAP, t-SNE, Leiden/Paris clustering, and marker tests |
+| **[Integration](https://docs.nygen.io/CyteArc/tutorials/multimodal-diagnostics)** | Harmony2 batch correction, WNN/SNN integration of modalities measured in the same cells, and integration diagnostics |
+| **[Reference mapping](https://docs.nygen.io/CyteArc/tutorials/mapping-and-label-transfer)** | Symphony-style mapping, label transfer, and diagnostics for projected cells |
+| **[Condition comparisons](https://docs.nygen.io/CyteArc/tutorials/condition-comparisons)** | Sample-level and paired comparisons across donors, with pseudobulk export for downstream differential expression |
+| **[Trajectories](https://docs.nygen.io/CyteArc/tutorials/lineage-dynamics)** | Population Balance Analysis pseudotime, fate probabilities, lineage-specific gene dynamics, and fate-weighted curves |
+| **[Gene activity and regulation](https://docs.nygen.io/CyteArc/api/regulons.html)** | AUCell/WAGGR gene-set scores, SCENIC-style regulons, chromVAR motif activity, region-to-gene links, and gene programs |
+| **[Import and export](https://docs.nygen.io/CyteArc/tutorials/import-and-export)** | Cell Ranger, Matrix Market, AnnData, and Seurat import; export counts and selected analysis results to AnnData |
 
 ## Install
 
-Python 3.13+.
-
 ```bash
-uv venv --python 3.13
-uv pip install --python .venv "cytearc[extra]"
+pip install "cytearc[extra]"
 ```
 
-Detailed installation instructions [here](https://docs.nygen.io/CyteArc/installation)
+See [installation](https://docs.nygen.io/CyteArc/installation) for environment setup and platform requirements.
 
-## Quick start
+## Run a pipeline
 
 ```python
 import cytearc
 
-ds = cytearc.DataStore(
-    "s3://bucket/cells.zarr",  # also gs://, hf://, or a local path
-)
-run = ds.pipeline.rna(label="rna")  # durable QC → graph → UMAP → clusters → markers
-
-ds.plots.embedding(
-    run=run,
-    layout="umap",
-    color_by="clusters",
-)
+ds = cytearc.DataStore("cells.zarr")
+run = ds.pipeline.rna(label="rna")
+ds.plots.embedding(run=run, color_by="clusters")
 ```
 
-Each modality has its own recipe, `ds.pipeline.rna()`, `ds.pipeline.atac()`, or `ds.pipeline.adt()`, and `ds.pipeline.multimodal(runs)` integrates completed runs of the same cells, with WNN by default.
-Read the [scRNA-seq tutorial](https://docs.nygen.io/CyteArc/tutorials/scrna-seq) for a granular workflow, or [remote stores](https://docs.nygen.io/CyteArc/tutorials/remote-stores) for cloud setups.
+Pipelines cover QC through marker discovery, with over 100 stage settings across RNA, ATAC, protein, and multimodal workflows. See the [RNA tutorial](https://docs.nygen.io/CyteArc/tutorials/scrna-seq) for details.
 
-## CyteBase
+## Mount a remote dataset
 
-CyteBase provides a searchable catalog of public datasets stored as cloud-hosted CyteArc DataStores. Search by study, tissue, disease, or organism, then explore published cell annotations and available embeddings. Public access needs no credentials. CyteArc opens each dataset by its Hugging Face URI:
+Read datasets from Amazon S3, Google Cloud Storage, Hugging Face, or Cloudflare R2, and save your analysis locally.
 
 ```python
-import cytearc
-
-# A CyteBase dataset in the October 2026 release.
-uri = (
-    "hf://buckets/Nygen/cytebase-2610/datasets/"
-    "mcglade_2021_scrna_data_human_fallopian_tube_30f5e171/data.zarr"
+ds = cytearc.mount_datastore(
+    "hf://buckets/Nygen/cytebase-2610/datasets/mcglade_2021_scrna_data_human_fallopian_tube_30f5e171/data.zarr",
+    at="fallopian_tube.zarr",
+    storage_options={"token": False},
 )
-
-# Open it for read-only exploration; counts stay remote.
-ds = cytearc.DataStore(uri, zarr_mode="r", storage_options={"token": False}, min_features_per_cell=-1)
-
-# Create a writable local store for your own analysis, keeping counts remote.
-analysis = cytearc.mount_datastore(
-    uri, at="fallopian_tube.zarr", storage_options={"token": False}, min_features_per_cell=-1
-)
+run = ds.pipeline.rna(label="rna")
 ```
 
-Use `analysis` with the pipeline shown above to save new results locally. Computation runs in your Python environment, reading count blocks over the network as needed.
+Find datasets in the companion [CyteBase catalog](https://docs.nygen.io/CyteBase/). See [remote access](https://docs.nygen.io/CyteArc/tutorials/remote-stores) for connection options.
 
-To search the catalog for dataset URIs, install the separate [`cytebase`](https://github.com/NygenAnalytics/CyteBase) package (`pip install cytebase`) and see the [CyteBase documentation](https://docs.nygen.io/CyteBase/). [CyteBase datasets](https://docs.nygen.io/CyteArc/tutorials/cytebase-datasets) explains dataset URIs and releases.
+## Analyse several studies as one virtual dataset
 
-## Documentation
+A virtual dataset combines cells from existing stores without copying their count matrices, saving the time and space of a physical merge. It works like a regular datastore.
 
-Read workflow vignettes and API references in the **[documentation](https://docs.nygen.io/CyteArc/)**.
+```python
+from cytearc.composite import create_composite
 
-## CyteArc's capabilities
+sources = {
+    "study_a": cytearc.DataStore("study_a.zarr", zarr_mode="r"),
+    "study_b": cytearc.DataStore("study_b.zarr", zarr_mode="r"),
+}
 
-| Area | Methods |
-| :-- | :-- |
-| Modalities | scRNA-seq, scATAC-seq, CITE-seq, matched multi-omics |
-| Core workflow | Quality control, feature selection, normalization, PCA and LSI, KNN graph, UMAP, densMAP, t-SNE (optional `tsne` extra), Leiden, Paris, marker search |
-| Integration | Harmony2, partial PCA, shared and weighted nearest neighbours, integration metrics |
-| Mapping | Symphony-style reference mapping, label transfer, projection diagnostics |
-| Trajectory | Population Balance Analysis pseudotime, expression dynamics and modules, multi-sink fate probabilities |
-| Also included | Cell-cycle scoring, gene-set activity, graph-diffusion imputation, doublet scores, HTO demultiplexing, pseudobulk export |
+joint = create_composite(sources, at="joint.zarr", features="intersection")
+joint_run = joint.pipeline.rna(label="joint_rna")
+```
 
-## Support
+See the [joint-analysis tutorial](https://docs.nygen.io/CyteArc/tutorials/composite-datasets) for details.
 
-[GitHub issues](https://github.com/NygenAnalytics/CyteArc/issues)
+## Trace results and reuse work
 
-CyteArc is open source software released under the [BSD 3-Clause License](LICENSE) and maintained by [Nygen](https://nygen.io).
-Third-party code, fonts, and data that CyteArc includes or downloads are credited with their licenses in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+CyteArc records pipeline provenance in the datastore, linking result artifacts to their exact inputs and parameters. You can trace results and check their status without rerunning the analysis or setting up a separate workflow system. Matching results are reused automatically.
+
+```python
+ds.artifacts.lineage(run["markers"])
+```
+
+See [provenance](https://docs.nygen.io/CyteArc/concepts/provenance) and [result reuse](https://docs.nygen.io/CyteArc/tutorials/reuse-and-tracing) for details.
+
+---
+
+CyteArc is open source under the [BSD 3-Clause License](LICENSE), maintained by [Nygen](https://nygen.io). [Third-party notices](THIRD_PARTY_NOTICES.md).
