@@ -12,10 +12,13 @@ if TYPE_CHECKING:
     from . import cytebase as cytebase
     from . import datasets as datasets
     from .datastore.datastore import DataStore as DataStore
+    from .datastore.pipeline_accessor import pipeline_listener as pipeline_listener
     from .datastore.pipeline_run import (
+        PipelineCancelled as PipelineCancelled,
         PipelineExecutionError as PipelineExecutionError,
         PipelineRun as PipelineRun,
     )
+    from .utils.shutdown import CancellationToken as CancellationToken
     from .datastore.summary import DataStoreSummary as DataStoreSummary
     from .storage.lineage import ArtifactLineage as ArtifactLineage
     from .features.enrichment import (
@@ -118,6 +121,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "ArtifactRef": ".storage.refs",
     "ArtifactResolutionError": ".storage.errors",
     "ArtifactStatus": ".storage.artifacts",
+    "CancellationToken": ".utils.shutdown",
     "CSVReader": ".readers",
     "CSVtoZarr": ".writers",
     "CrDirReader": ".readers",
@@ -146,6 +150,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "PseudotimeAggregationResult": ".trajectory.results",
     "PseudotimeMarkerResult": ".trajectory.results",
     "PseudotimeScoreResult": ".trajectory.results",
+    "PipelineCancelled": ".datastore.pipeline_run",
     "PipelineExecutionError": ".datastore.pipeline_run",
     "PipelineRun": ".datastore.pipeline_run",
     "SparseToZarr": ".writers",
@@ -163,6 +168,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "load_zarr": ".storage.stores",
     "logger": ".utils",
     "permute_into_chunks": ".utils",
+    "pipeline_listener": ".datastore.pipeline_accessor",
     "read_gmt": ".features.enrichment",
     "rescale_array": ".utils",
     "rolling_window": ".utils",

@@ -37,13 +37,12 @@ from cytearc.writers import H5adToZarr
 N_CELLS = 240
 RECIPE = {
     "filtering": False,
-    "hvg_count": 40,
-    "pca_dims": 5,
-    "neighbors_k": 8,
+    "hvg": {"top_n": 40},
+    "pca": {"dims": 5},
+    "neighbors": {"k": 8},
     "umap": False,
     "cell_cycle": False,
     "doublets": False,
-    "paris": False,
     "markers": True,
 }
 
@@ -165,7 +164,7 @@ def published(tmp_path_factory):
     location = str(root / "source.zarr")
     imported = _import(h5ad, location)
     source = DataStore(location, default_assay="RNA", min_features_per_cell=-1)
-    run = source.pipeline.run(label="published", leiden={"partitions": [1.0]}, **RECIPE)
+    run = source.pipeline.rna(label="published", leiden={"partitions": [1.0]}, **RECIPE)
     summary = run.report()["summary"]
     return SimpleNamespace(
         location=location,
@@ -188,7 +187,7 @@ def branched(published, tmp_path_factory):
     before = _files(source)
     target = root / "target.zarr"
     mounted = _mount(str(source), target)
-    run = mounted.pipeline.run(label="branch", leiden={"partitions": [0.5]}, **RECIPE)
+    run = mounted.pipeline.rna(label="branch", leiden={"partitions": [0.5]}, **RECIPE)
     return SimpleNamespace(
         source=source, before=before, target=target, mounted=mounted, run=run
     )
@@ -277,7 +276,7 @@ def test_identical_recipe_on_a_mount_reuses_every_source_artifact(published, tmp
     target = tmp_path / "target.zarr"
     mounted = _mount(published.location, target)
 
-    run = mounted.pipeline.run(
+    run = mounted.pipeline.rna(
         label="published", leiden={"partitions": [1.0]}, **RECIPE
     )
 

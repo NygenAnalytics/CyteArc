@@ -218,17 +218,56 @@ Operation mixins have no runtime inheritance from datastore facades, no `__init_
 `TYPE_CHECKING` imports of siblings are allowed.
 Reusable algorithms must be placed in their domain package before being exposed through a datastore method.
 
-`datastore.pipeline_accessor` orchestrates the fixed basic RNA recipe. Focused internal modules own
-recipe validation, run/stage ledger bookkeeping, filtering, frozen field assembly, and cluster
-decision persistence. The reusable bounded silhouette comparison lives in
-`metrics.cluster_selection`; its datastore adapter validates graph-coordinate lineage and persists
-the immutable decision. `metrics.cluster_selection` is not part of the public `cytearc.metrics`
-facade. `datastore.pipeline_run` exposes the narrow durable `PipelineRun` handle and its frozen
-cell and feature views. Pipeline execution creates immutable artifacts and a strict run/stage
-ledger under `pipeline/runs`; it does not write live metadata. The ledger runs stages one at a
-time in recipe order on the calling thread. DataStore-owned plotting, marker
-loading, and export consume narrow frozen-run views. Completed runs can be reopened by their
-immutable label or exact run ID.
+`datastore.pipeline_accessor` exposes the pipeline recipes `rna`, `atac`, `adt`, and
+`multimodal`. Each recipe method is thin: it passes its keywords to a resolver in
+`datastore._pipeline.recipes`, one module per recipe (`rna.py`, `atac.py`, `adt.py`, and
+`multimodal.py`, with the steps that the single-modality recipes share in `common.py`). A resolver
+checks the call against the store without writing anything and returns a `RecipePlan`: the
+recorded recipe name, the assay, the label, the configuration that the run records, and every
+stage in order as a `PlannedStage`. It checks the keywords, the columns and cells, the stage
+combinations, and every setting value that a stage method's own validator or the store's shape can
+check before any data is read; the remaining values, and limits that depend on the data, are
+checked by each stage's method when the stage runs. A planned stage without an action is recorded
+as skipped, and its `on_skip` hook gives later stages the inputs that they would have read from it.
+`_pipeline/stages.py` builds the stages that several recipes share, from the input snapshot and
+filtering through normalization, PCA, Harmony, the graph, the embeddings, Leiden, Paris, cluster
+selection, and membership strength to markers. The input snapshot freezes each group of cell
+columns that a stage reads apart, the QC columns of filtering in `cell_snapshot` and the others in
+`capture_snapshot`, `harmony_snapshot`, `doublet_sample_snapshot`, and `column_snapshot`, so that
+a column one stage reads never enters the provenance of another stage's result.
+`_pipeline/settings.py` checks each stage keyword against the keywords of the stage's method, and
+`_pipeline/filtering.py` resolves and applies QC filtering. A new recipe adds a resolver module and
+reuses the rest.
+
+One generic executor, `_pipeline/executor.py`, runs every plan. It creates the run record, passes
+a `RunState` that holds the refs of the stages that ran so far from stage to stage, and completes
+the run with its outputs and the frozen cell and feature fields that `_pipeline/fields.py` builds
+from them. The ledger, `_pipeline/ledger.py`, runs one stage at a time in plan order on the
+calling thread, and each stage record is terminal before the next stage starts. A record holds the
+stage's artifact-plan receipts, wall time, sampled memory, and the warnings that CyteArc logged or
+issued while it ran, and a completed stage's record also holds a summary that
+`_pipeline/summaries.py` computes from the stage's artifacts, so a reused stage reports what a
+computed one would. `_pipeline/events.py` delivers each run's `PipelineEvent` values in order, on
+the run's thread, to its `callback` and to the listeners that `pipeline_listener` registered in the
+calling context. The event types name `datastore.pipeline_accessor`, where users import them, as
+their module, so they are documented and pickled there. While a stage runs, CyteArc's log records
+carry the run ID and stage, and its progress bars forward throttled `stage_progress` events. A
+`CancellationToken` passed as `cancel` requests shutdown on the run's shutdown token, so the run
+stops at its next shutdown checkpoint, as it does after a signal, records the run as interrupted,
+and raises `PipelineCancelled`. The ledger records the running stage as interrupted when the
+cancellation cut its work short, and as completed when its work had finished. The shutdown token
+keeps the first request and the first signal apart, so a signal after a cancellation does not
+escalate and takes its usual effect once the interrupted run is recorded.
+
+The reusable bounded silhouette comparison lives in `metrics.cluster_selection`. Its datastore
+adapter, `_pipeline/cluster_selection.py`, validates graph-coordinate lineage, scores the Leiden
+candidates in the coordinates that built the graph (PCA, LSI, or Harmony coordinates, or
+normalized values), and persists the immutable decision. `metrics.cluster_selection` is not part
+of the public `cytearc.metrics` facade. `datastore.pipeline_run` exposes the narrow durable
+`PipelineRun` handle and its frozen cell and feature views. Pipeline execution creates immutable
+artifacts and a strict run/stage ledger under `pipeline/runs`; it does not write live metadata.
+DataStore-owned plotting, marker loading, and export consume narrow frozen-run views. Completed
+runs can be reopened by their immutable label or exact run ID.
 
 ### Presentation
 
@@ -276,8 +315,9 @@ CyteArc validates persisted data and public arguments against the following cont
 - `AssayState` and `IncompatibleAnalysisStateError` are removed. A store containing
   `{assay}/state` is rejected on open and must be rebuilt. CyteArc never reads, migrates, or uses that
   group to choose a current result.
-- `DataStore.pipeline.run()` accepts only the documented recipe options and returns a durable
-  `PipelineRun`. Removed options and prior return values have no aliases or adapters.
+- The pipeline recipes `DataStore.pipeline.rna`, `atac`, `adt`, and `multimodal` accept only
+  their documented keywords and return a durable `PipelineRun`. Removed options and prior return
+  values have no aliases or adapters.
 - Feature selection, graph construction, embeddings, clusterings, scores, markers, mapping, and
   trajectory operations exchange exact `ArtifactRef` values. Consumers do not parse encoded
   metadata names, resolve an implicit latest result, or accept a live result column in place of an
@@ -288,7 +328,9 @@ CyteArc validates persisted data and public arguments against the following cont
   and field sets are unsupported.
 - Pipeline run, stage, and label-claim records have exact fields. Within 1.x a release may only
   add fields and must still read records without them, so a run of any 1.x release reopens in
-  every later 1.x release.
+  every later 1.x release. A stage record's `summary` and `warnings` are such added fields:
+  CyteArc writes them on every stage record and reads a stage record without them as one with no
+  summary and no warnings.
 - Pipeline stages run strictly in sequence. UMAP no longer runs on a worker thread beside the
   Leiden, Paris, cluster-selection, and membership-strength stages; outputs and artifact
   identities are unchanged. Durable stage records now attribute wall time and sampled memory to
@@ -297,11 +339,106 @@ CyteArc validates persisted data and public arguments against the following cont
   event before the next stage starts; earlier, UMAP's `stage_completed` arrived after the events
   of those stages, with or without a worker thread. Earlier run records whose stage windows
   overlap still read. `cytearc.utils.background` is removed.
-- `DataStore.pipeline.run` takes a `params` mapping of per-stage settings. Every run records two
-  more stages, `membership_strength` and `tsne`, skipped unless requested, and its configuration
-  records `params`, `species`, `tsne`, `membershipStrength`, and the Leiden `selected` resolution.
-  `pca_dims=0` skips PCA and builds the graph on the normalized artifact (see the `pca_dims=0`
-  entry).
+- Pipeline recipes replace `DataStore.pipeline.run()` in a documented break within 1.x:
+  `pipeline.run` and its `params` mapping are removed without an alias. `pipeline.rna`,
+  `pipeline.atac`, and `pipeline.adt` each analyze one modality, and `pipeline.multimodal`
+  integrates completed runs of the same cells. Their runs record the recipe names `"rna"`,
+  `"atac"`, `"adt"`, and `"multimodal"`, where runs of earlier releases record
+  `"basic_rna_analysis"`. Each stage has its own keyword, whose settings are the keywords of the
+  stage's method. An optional stage (`cell_calling`, `hashing`, `filtering`, `cell_cycle`, `umap`,
+  `tsne`, `leiden`, `paris`, and `doublets`) takes `False`, `True`, or a mapping of settings; a
+  stage that always runs, such as `hvg` or `pca`, takes `None` or a mapping and raises `TypeError`
+  for a bool; and `harmony` is `None`, `False`, or a mapping with `batch_columns`. The shortcut
+  arguments become settings: `hvg_count=n` is `hvg={"top_n": n}`, `pca_dims=n` is
+  `pca={"dims": n}`, `neighbors_k=n` is `neighbors={"k": n}`, and `harmony_batch_columns=columns`
+  is `harmony={"batch_columns": columns}`. A `params` section is its stage keyword, and
+  `params={"species": s}` is `species=s`. `cells` replaces `cell_key` and takes a boolean cell
+  column, a datastore cell-selection artifact, or a completed run, whose `analysis_cell_selection`
+  becomes the new run's cells as the same ref. Cells given as a selection or a run are not filtered
+  again unless `filtering` asks, or an RNA run calls cells or demultiplexes hashtags, which filters
+  the cells that those stages keep; an ADT run filters only when asked. Paris is off by default
+  (`paris=True` runs it). The RNA stage order gains `cell_calling` and `hashing` after
+  `input_snapshot`; like `membership_strength` and `tsne`, they are recorded as skipped unless
+  requested. The other RNA stages and their outputs are unchanged, and so are their artifact
+  identities in a run without Harmony or snapshot columns, which reuses every artifact of an earlier
+  run with the same settings; the next entry describes runs with them. A run's `config` records
+  `cells`, `snapshotColumns`, `species`, and the resolved settings of each stage keyword under
+  `stages`, in place of the earlier `cellKey`, per-option, and `params` keys. A refusal of
+  unmeasured cells names the operation `pipeline.rna`, `pipeline.atac`, or `pipeline.adt` and the
+  `cells` remedy.
+- A pipeline run's input snapshot freezes each group of cell columns apart. Its `cell_snapshot`
+  holds the cell names and the QC columns that filtering reads, and `capture_snapshot`,
+  `harmony_snapshot`, `doublet_sample_snapshot`, and `column_snapshot` hold the capture column of
+  per-capture cell calling, the Harmony batch columns, the doublet sample columns, and the
+  `snapshot_columns`, each written only when the run uses it. Earlier, the cell snapshot also held
+  the Harmony batch columns and the snapshot columns, and filtering and the Harmony fit recorded it
+  as an input, as per-capture cell calling, new with the recipes, did for its capture column. A run
+  with Harmony, snapshot columns, or per-capture cell calling therefore gets new identities for its
+  filtered cells and its Harmony fit, and for every artifact computed from them; a per-capture run
+  also gets new identities for its capture calls. Where an earlier run with the same settings
+  stored the former identities, the first such run computes these artifacts again once; nothing is
+  migrated, and the earlier artifacts stay listable and loadable. Runs without Harmony, snapshot
+  columns, or per-capture cell calling keep their identities. Runs that differ only in their
+  Harmony batch columns or snapshot columns now share their filtered cells and every artifact that
+  does not depend on that difference, and per-capture cell calls no longer change with the
+  filtering or snapshot settings.
+- Pipeline recipes check more of a call before a run record exists, with the validators of the
+  stages' methods where they have them: the `cell_calling` values `lower`, `retain`, `n_iter`,
+  `alpha`, `fdr`, and `random_seed`; the `hashing` `positive_quantile`; a capture label for every
+  input cell of per-capture cell calling, refusing a missing value or a NaN in a float column; an
+  RNA run's `pca` `dims` below its `hvg` `top_n`, and an ADT run's below its panel's antibodies; an
+  ATAC run's `prevalent_peaks` `top_n` below the assay's number of peaks, `lsi` `dims` with the
+  first component that `skip_first` leaves out at most `top_n`, and a bool `skip_first`; and, for
+  `multimodal(method="snn")`, source runs built with one `neighbors` `k`. Such a call raises
+  `TypeError` or `ValueError` and writes nothing, where its stage would otherwise fail after the
+  earlier stages with a failed run recorded; `pipeline.run()` failed in its PCA stage when the PCA
+  dimensions were not below the HVG count. An ATAC run's `prevalent_peaks` `top_n` defaults to
+  `min(10000, peaks - 1)`, and its configuration records the resolved `top_n`. Other values, such as
+  `ann_index` `ann_metric`, a Leiden `backend`, and the numeric `doublets` settings, and limits that
+  depend on the data are still checked by each stage's method when the stage runs.
+- Pipeline events are reworked. A `PipelineEvent` carries the run ID, recipe, label, stage, stage
+  ordinal, number of stages, and time and, as its kind needs, the stage's progress, metrics,
+  summary, outputs, reused output keys, warnings, or error; `to_dict()` returns its JSON values.
+  The kinds `run_started`, `stage_progress`, `stage_skipped`, `run_completed`, and `run_failed` are
+  added, and `pipeline_interrupted` is renamed `run_interrupted`. A run delivers its events to its
+  `callback` and to the listeners that `cytearc.pipeline_listener` registers for the runs started
+  in its context, and logs and ignores their exceptions. While a stage runs, CyteArc's progress bars
+  send `stage_progress` events, even when `configure_output(progress=False)` hides them, at most
+  one every 0.25 seconds for each bar besides its first update and the one that reaches its total.
+  `configure_output(stdlib=True)` sends CyteArc's log records to the standard-library logger
+  `cytearc`, keeping the module, file, line, and function of the call that logged each record and
+  loguru's level name, and a record logged during a stage carries `cytearc_run_id` and
+  `cytearc_stage`; `configure_output(stdlib=False)` restores stdout or the file that
+  `set_verbosity` chose. A
+  recipe's `cancel` takes a `cytearc.CancellationToken`. Cancelling the token from any thread stops
+  the run at its next checkpoint, records the run as interrupted with the interruption kind
+  `"cancelled"`, and raises `cytearc.PipelineCancelled`. The stage that was running is recorded as
+  interrupted when the cancellation cut its work short, and as completed when its work had
+  finished. A token cancelled before a run starts raises before anything is written, and a signal
+  never cancels a token. A signal that arrives after a cancellation does not escalate; only a
+  second signal does. The run stops at its next checkpoint and records the first request's kind,
+  `"cancelled"`, and once that is written the signal takes its usual effect: its prior handler runs
+  or it is raised again, so with the default handlers the call raises `KeyboardInterrupt` or the
+  process terminates in place of `PipelineCancelled`.
+- `run_interrupted` and `PipelineCancelled.stage` name a stage only when the interruption cut that
+  stage's work short. An interruption that a stage notices just after its work finished records the
+  stage as completed and emits its `stage_completed`, and then `run_interrupted` with no stage, as
+  an interruption between two stages or while a skipped stage is recorded does; `PipelineCancelled`
+  then has `stage` None. `run_failed` always names a stage: the stage that failed, or `finalize`
+  when completing the run record failed. Callbacks and listeners run in a copy of the caller's
+  context, taken before the run's shutdown and cancellation scopes, so a pending stop never
+  interrupts the CyteArc work that a callback does.
+- Stage records gain the optional fields `summary`, the diagnostics of a completed stage, and
+  `warnings`, the warnings logged or issued while the stage ran, at most 50 of at most 512
+  characters each. `run.report()` adds `summary["warnings"]`, one entry with its stage for each
+  warning, and the markdown report adds a Warnings column and a Diagnostics section. Runs of
+  earlier releases still open, report, plot, and export with the recipe name, configuration, and
+  stage order that they recorded. Cluster selection also scores LSI coordinates. Run exports handle
+  ATAC runs, whose LSI coordinates and their Harmony correction export as `obsm["X_lsi"]` and
+  `obsm["X_lsi_harmony"]`, and ADT runs. `matrix="normed"` exports a run's normalized values over
+  its feature selection: the highly variable genes of an RNA run, the prevalent peaks of an ATAC
+  run, or the panel of an ADT run. A multimodal run exports the raw counts of its first run's assay
+  and has no normalized values to export.
 - Mapping references and query projections use only their current exact-lineage contracts.
 - Label transfer is a saved artifact. `get_target_classes` and `get_target_label_evidence` are
   removed. `mapping.transfer_labels` freezes the reference labels it reads, from a reference column or a
@@ -978,8 +1115,11 @@ CyteArc validates persisted data and public arguments against the following cont
   raising `ValueError`.
 - Pipeline signal handling never waits for a lock, so a second signal cannot deadlock a run.
 - A pipeline stage setting means exactly what the same keyword means on the stage's method, and an
-  omitted setting takes that method's default. Non-finite settings raise before a run record is
-  created.
+  omitted setting takes that method's default, except where a recipe fits it to its data: an ADT
+  run's `pca` `dims` defaults to one fewer than its panel's antibodies, at most the PCA default, an
+  ATAC run's `prevalent_peaks` `top_n` to at most one fewer than the assay's peaks, and with Harmony
+  an RNA run's `doublets` `sample_column` to the Harmony batch columns. Non-finite settings raise
+  before a run record is created.
 - Pipeline t-SNE settings get the checks of `embeddings.tsne` when the recipe is resolved, before a run
   record exists. A missing `sgtsnepi` only logs a warning there, because a stored embedding can be
   reused without it.
@@ -1077,9 +1217,9 @@ CyteArc validates persisted data and public arguments against the following cont
 - `DataStore.to_anndata` raises `ImportError` when `anndata` is not installed, instead of logging an
   error and returning None. `to_h5ad` does not need `anndata`.
 - `to_anndata(run=run, matrix="normed")` and `to_h5ad(..., run=run, matrix="normed")` export the
-  run's stored `normalized` artifact over its highly variable features: the values that the run's
-  PCA read. Before, a run export normalized again over the whole feature universe and never matched
-  the run.
+  run's stored `normalized` artifact over its feature selection, such as the highly variable
+  features of an RNA run: the values that the run's reduction read. Before, a run export normalized
+  again over the whole feature universe and never matched the run.
 - One streaming H5AD writer (`cytearc.writers.export`) writes every export with h5py block by block
   and converts dense blocks to CSR in bounded steps, so no complete matrix is held. Live export
   files are unchanged.
@@ -1173,9 +1313,10 @@ CyteArc validates persisted data and public arguments against the following cont
 - `embeddings.tsne` raises `ImportError` naming the `tsne` extra when `sgtsnepi` is missing (wheels exist
   for Linux x86_64 and for macOS 26 or newer on arm64). Reusing an existing embedding needs no
   backend.
-- `pca_dims=0` builds the pipeline's graph on the normalized artifact instead of an identity
-  reduction, so the run has no `pca` or `reduction` output. It needs `doublets=False` and no Harmony
-  batch columns; either raises `ValueError` before the run starts.
+- `pca={"dims": 0}` builds an RNA run's graph on the normalized artifact instead of an identity
+  reduction, so the run has no `pca` output and no reduction artifact. It needs `doublets=False`,
+  no `harmony`, and no other PCA settings; otherwise the recipe raises `ValueError` before the run
+  starts.
 - Harmony: a cluster whose cells cancel keeps a zero centroid instead of NaN, `fit_harmony` raises
   `ValueError` for non-finite results, and `batch_levels` follows design order.
 - `clusters.membership_strength` stores the fraction of a cell's graph neighbors that carry the cell's
@@ -1183,10 +1324,10 @@ CyteArc validates persisted data and public arguments against the following cont
 - Marker `fold_change` is `mean / mean_rest`: `+inf` for a feature that no other cell expresses,
   and NaN when both means are 0 or either is negative. `load_marker_table` refuses tables without
   `fold_change_policy`.
-- `features.hvgs` and `params["hvg"]` check every option before anything is written: `min_cells` an
-  integer of at least 0, `top_n` and `n_bins` integers of at least 1, `lowess_frac` from 0 to 1,
-  `keep_bounds` a boolean, and `bin_strategy` `"adaptive"` or `"fixed"`. Floats such as
-  `min_cells=20.0` now raise.
+- `features.hvgs` and the RNA recipe's `hvg` settings check every option before anything is
+  written: `min_cells` an integer of at least 0, `top_n` and `n_bins` integers of at least 1,
+  `lowess_frac` from 0 to 1, `keep_bounds` a boolean, and `bin_strategy` `"adaptive"` or
+  `"fixed"`. Floats such as `min_cells=20.0` now raise.
 - `features.hvgs` takes `flavor` (`"cytearc"`, the earlier method and default; `"seurat_v3"`;
   `"pearson_residuals"`) and `batch`, a cell column that it snapshots or a label artifact, and
   combines batches by the number of batches in which a gene is highly variable, then its median
@@ -1229,7 +1370,7 @@ CyteArc validates persisted data and public arguments against the following cont
   `values` only. Doublets whose parents have ten or fewer features are scored like the others,
   and a doublet's library size for unrenormalized references is the sum of its parents'
   `<assay>_nCounts`. A Harmony-corrected graph is accepted with `sample_column`, and its samples
-  are scored on the PCA it corrected. The pipeline scores a Harmony run within its batches on
+  are scored on the PCA it corrected. The RNA recipe scores a Harmony run within its batches on
   the corrected graph, without the former `doublet_graph` stage and its `uncorrected_*`
   artifacts, freezes the sample labels as the input stage's `doublet_sample_snapshot`, records
   `doubletSampleColumns` in its configuration, and adds the frozen cell field
@@ -1381,7 +1522,8 @@ CyteArc validates persisted data and public arguments against the following cont
 - `to_anndata` and `to_h5ad` take `cell_selection`, `obsm`, `obs`, `graph`, and `dtype`. Run
   exports write label fields with a categorical display (`clusters`, `leiden_*`, `paris`,
   `cell_cycle_phase`) as categoricals of string labels in natural order, with the display colors,
-  where they wrote numbers before, and add the run's PCA as `obsm["X_pca"]` with `varm["PCs"]`.
+  where they wrote numbers before, and add the run's PCA as `obsm["X_pca"]` with `varm["PCs"]`
+  (an ATAC run's LSI as `obsm["X_lsi"]`).
   Raw `uint8` and `uint16` counts export as `float32` unless `dtype` names another dtype.
 - `to_mtx` writes a feature-type column without compression too, one type per assay, formats
   integer counts with NumPy, and compresses with gzip level 6; the matrix text is unchanged.
@@ -1494,6 +1636,10 @@ Public imports, result records, facade behavior, and wheel contents have separat
 - D8: `assayTypes` values are semantic labels, such as `RNA`, `ADT`, `HTO`, or `GeneActivity`,
   each naming the preset class that the store declares for an assay. CyteArc records no second type
   attribute, such as a modality or a measurement technology, beside them.
+- D11: pipeline recipes share one protocol. A recipe resolves its call against the store into a
+  `RecipePlan` of `PlannedStage` values without writing anything, and one generic executor and
+  ledger run every plan, with stages that several recipes share. The `rna`, `atac`, `adt`, and
+  `multimodal` recipes implement it.
 
 ### Deferred
 
@@ -1515,7 +1661,6 @@ Deferred to a later structural phase:
   what the normalized artifact records.
 - D10 WNN sources keyed by artifact reference wait for a 1.x design; `select_measured_cells`
   already gives one selection that every assay measured.
-- D11 a recipe protocol waits until a second pipeline recipe exists.
 
 ### Rejected
 

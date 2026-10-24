@@ -1087,7 +1087,7 @@ def test_pipeline_passes_sample_column_through(store):
     store.cells.insert("sample_id", labels, overwrite=True)
     counts = np.asarray(store.cells.fetch_all("RNA_nCounts"), dtype=float)
 
-    run = store.pipeline.run(
+    run = store.pipeline.rna(
         filtering={
             "sample_column": "sample_id",
             "n_mads": 3.0,
@@ -1095,9 +1095,9 @@ def test_pipeline_passes_sample_column_through(store):
             "attrs": ["RNA_nCounts"],
         },
         cell_cycle=False,
-        hvg_count=50,
-        pca_dims=5,
-        neighbors_k=3,
+        hvg={"top_n": 50},
+        pca={"dims": 5},
+        neighbors={"k": 3},
         umap=False,
         leiden=False,
         paris=False,

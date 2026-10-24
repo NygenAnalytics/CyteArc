@@ -48,8 +48,12 @@ the reference labels it reads into the query datastore, so the saved query label
 the exact annotations, threshold, and projection that produced them, even after the reference
 atlas is re-annotated.
 
-A [`PipelineRun`](/api/pipeline.html#cytearc.PipelineRun) adds one durable record for a complete workflow invocation. It
-binds named outputs and frozen cell and feature views without changing the artifact identity rules.
+A [`PipelineRun`](/api/pipeline.html#cytearc.PipelineRun) adds one durable record for a complete recipe invocation, such as
+`ds.pipeline.rna()`. It binds named outputs and frozen cell and feature views without changing the
+artifact identity rules: a run reuses every saved result whose provenance matches, and runs that
+analyze the same cells, such as an ADT run given an RNA run as `cells`, share one cell-selection
+artifact. The run's stage records hold timings, sampled memory, warnings, and summaries, which
+never change an artifact.
 
 Provenance establishes computational relationships. It does not prove that a parameter was
 scientifically appropriate, decide which branch is best, or replace study records.

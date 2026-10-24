@@ -58,8 +58,13 @@ if TYPE_CHECKING:
 else:
     _PresentationOperationsBase = object
 
-# The run outputs that a run export writes to obsm, under Scanpy's keys.
-_RUN_OBSM_OUTPUTS = {"pca": "X_pca", "harmony": "X_pca_harmony"}
+# The run outputs that a run export writes to obsm, under Scanpy's keys. An
+# ATAC run's Harmony output corrects its LSI coordinates.
+_RUN_OBSM_OUTPUTS = {"pca": "X_pca", "lsi": "X_lsi", "harmony": "X_pca_harmony"}
+_LSI_RUN_OBSM_OUTPUTS = {"lsi": "X_lsi", "harmony": "X_lsi_harmony"}
+# The run outputs that name the features a run's normalized values cover, one
+# for each modality recipe.
+_RUN_FEATURE_SELECTIONS = ("highly_variable_features", "prevalent_peaks", "panel")
 
 
 def _letter_suffix(position: int) -> str:
@@ -326,17 +331,22 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         ``uns["neighbors"]`` in Scanpy's layout. With ``run``, consecutive
         frozen ``umap_*`` fields are written to ``obsm["X_umap"]`` and
         removed from ``obs``, the run's PCA is ``obsm["X_pca"]`` (and its
-        Harmony correction ``obsm["X_pca_harmony"]``), and label fields
-        (``clusters``, ``leiden_*``, ``paris``) are categoricals with string
-        categories in natural order and the run's display colors.
+        Harmony correction ``obsm["X_pca_harmony"]``), an ATAC run's LSI is
+        ``obsm["X_lsi"]`` (and its Harmony correction
+        ``obsm["X_lsi_harmony"]``), and label fields (``clusters``,
+        ``leiden_*``, ``paris``) are categoricals with string categories in
+        natural order and the run's display colors.
 
         ``matrix="normed"`` means two different things. Without ``run``,
         ``X`` holds the assay's ``normed`` values of the exported features:
         for RNA, counts scaled by each cell's library size over all of its
         features to 1,000, without a log transform. With ``run``, ``X`` holds
-        the run's stored ``normalized`` artifact, the values that its PCA
-        read: log1p of counts scaled over the highly variable features only,
-        which are then the only features.
+        the run's stored ``normalized`` artifact, the values that its
+        reduction read, over the run's selected features only: an RNA run's
+        highly variable features (log1p of library-size-scaled counts), an
+        ATAC run's prevalent peaks (TF-IDF), or an ADT run's antibody panel
+        (CLR). A multimodal run has no normalized artifact, so it exports
+        raw counts of its first assay.
 
         Args:
             from_assay: Name of assay to be used. If no value is provided then the default assay will be used.
@@ -673,19 +683,21 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         the two exports cannot differ. Rows are the run's cells. With
         ``matrix="raw"``, columns are the run's feature universe and values
         its raw counts; with ``"normed"``, columns are the features of the
-        run's ``normalized`` artifact, which must be exactly its highly
-        variable features, and values are that artifact's stored float32
-        values, read row band by row band. Cell and feature fields are the
+        run's ``normalized`` artifact, which must be exactly its selected
+        features (highly variable features, prevalent peaks, or antibody
+        panel), and values are that artifact's stored float32 values, read
+        row band by row band. Cell and feature fields are the
         run's frozen fields, with masked rows missing, encoded as
         ``"categorical"`` columns: the plan decides which text fields are
         categoricals and in what order their categories are, for the file
         and for the object alike. A field with a categorical display, such
         as ``clusters``, ``leiden_*``, or ``paris``, is a categorical of its
         labels as text, in natural order, with the display's colors.
-        Consecutive ``umap_<k>`` fields become ``obsm["X_umap"]``, and the
+        Consecutive ``umap_<k>`` fields become ``obsm["X_umap"]``, the
         run's ``pca`` and ``harmony`` outputs ``obsm["X_pca"]`` and
         ``obsm["X_pca_harmony"]``, with the PCA loadings in
-        ``varm["PCs"]``. ``layers`` maps layer names to assays whose raw
+        ``varm["PCs"]``, and an ATAC run's ``lsi`` and ``harmony`` outputs
+        ``obsm["X_lsi"]`` and ``obsm["X_lsi_harmony"]``. ``layers`` maps layer names to assays whose raw
         counts are aligned to the exported features by ID.
         """
         from ...writers.export import (
@@ -780,10 +792,9 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
             ),
             layers=plan_layers,
         )
+        names = _LSI_RUN_OBSM_OUTPUTS if "lsi" in run else _RUN_OBSM_OUTPUTS
         coordinates = {
-            name: run[output]
-            for output, name in _RUN_OBSM_OUTPUTS.items()
-            if output in run
+            name: run[output] for output, name in names.items() if output in run
         }
         if not coordinates:
             return plan
@@ -804,7 +815,8 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
         Returns the values of the run's ``normalized`` artifact, streamed in
         row bands as stored, and the mask of their features over the assay.
         The artifact's cell selection must be the run's cell selection, and
-        its feature selection the run's highly variable features.
+        its feature selection the run's selected features: its highly
+        variable features, prevalent peaks, or antibody panel.
         """
         from ...assay.normalization import load_normalized_inputs
         from ...writers.export import H5adMatrix
@@ -831,13 +843,11 @@ class _PresentationOperationsMixin(_PresentationOperationsBase):
                 f"The normalized artifact of pipeline run {run.run_id} does not "
                 "cover the run's cells"
             )
-        if (
-            "highly_variable_features" not in run
-            or selections.features != run["highly_variable_features"]
-        ):
+        selected = next((key for key in _RUN_FEATURE_SELECTIONS if key in run), None)
+        if selected is None or selections.features != run[selected]:
             raise ValueError(
                 f"The normalized artifact of pipeline run {run.run_id} does not "
-                "cover the run's highly variable features"
+                "cover the run's selected features"
             )
         data = as_zarr_array(group["data"], name="data")
         values = H5adMatrix(

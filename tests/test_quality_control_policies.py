@@ -20,6 +20,7 @@ from cytearc.metadata.artifacts import plan_cell_data_artifact, write_cell_data_
 from cytearc.metadata.selection import NamedCellArtifact
 from cytearc.quality_control import filtering
 from cytearc.quality_control.filtering import (
+    CALLED_CELLS_REMEDY,
     RAW_DROPLET_REMEDY,
     MetricPolicy,
     _split_two_groups,
@@ -533,6 +534,28 @@ def test_a_bimodal_metric_whose_low_population_is_kept_is_reported():
         f"(median {np.median(cells):.6g}), and the MAD bounds keep most of the low "
         f"population. MAD bounds assume one population of cells. {RAW_DROPLET_REMEDY}"
     ]
+
+
+def test_called_cells_get_a_remedy_without_cell_calling():
+    empties = 3.0 + np.arange(100) % 10
+    cells = 5000.0 + np.arange(100)
+    values = np.r_[empties, cells]
+
+    with pytest.warns(UserWarning) as caught:
+        filter_cell_metrics(
+            {"RNA_nFeatures": values},
+            {},
+            np.ones(200, dtype=bool),
+            method="mad",
+            remedy=CALLED_CELLS_REMEDY,
+        )
+
+    # Cells that a run already called are not sent to call cells again.
+    (message,) = [str(warning.message) for warning in caught]
+    assert message.endswith(
+        f"MAD bounds assume one population of cells. {CALLED_CELLS_REMEDY}"
+    )
+    assert "qc.call_cells" not in message
 
 
 def test_a_bimodal_metric_without_mad_is_reported():

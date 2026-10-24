@@ -32,8 +32,8 @@ CyteBase docs: <https://docs.nygen.io/CyteBase/>.
   process"); open it again afterwards. `zarr_mode="r"` writes nothing;
   most producers return a matching existing artifact but raise `PermissionError` instead of
   computing. Feature selections, WAGGR, AUCell, `features.prevalent_peaks`, cell-cycle scoring, and
-  `pipeline.run` raise it before any lookup, and `mapping.run` and `mapping.build_reference` raise
-  `ValueError`.
+  the pipeline recipes raise it before any lookup, and `mapping.run` and `mapping.build_reference`
+  raise `ValueError`.
 - RNA assays hold cell-major `counts` plus gene-major `countsT`; other assays hold `counts` only.
   Stores from older releases (Zarr v2, no `countsT`, an `{assay}/state` group) fail to open:
   re-import the source.
@@ -69,7 +69,7 @@ snap = ds.summary().to_dict()                # JSON-safe
 print(snap["default_assay"], snap["total_cells"], snap["active_cells"], snap["resources"])
 print(snap["pipeline_run_counts"], snap["labeled_pipeline_runs"])
 print([(a["name"], a["assay_type"], a["total_features"], len(a["artifacts"])) for a in snap["assays"]])
-print(ds.pipeline.list_runs())                                   # newest first
+print(ds.pipeline.list_runs())                                   # newest first, with recipe
 print(ds.artifacts.list(complete_only=True))                     # default-assay artifacts
 print(ds.artifacts.list(scope="datastore", complete_only=True))  # cell selections, snapshots
 ds.show_zarr_tree(start="RNA", depth=1)
@@ -83,7 +83,7 @@ by_upper = {str(n).upper(): str(n) for n in ds.RNA.feats.fetch_all("names")}  # 
 
 # Per-cell values of a cell-aligned artifact (clusters, Paris cut, cell cycle, pseudotime, UMAP)
 run = ds.pipeline.open(label="baseline")  # a completed run; any cell-aligned ref works the same
-cut = ds.artifacts.load_values(run["paris"])   # reads the kind's canonical array: "labels" here
+cut = ds.artifacts.load_values(run["clusters"])  # the kind's canonical array: "values" (Paris: "labels")
 print(cut.value, cut.categorical, cut.values.shape)
 labels = cut.to_pandas()                  # indexed by cell id; rows recorded missing show as NA
 s_score = ds.artifacts.load_values(run["cell_cycle"], value="s_score")  # another per-cell array
@@ -93,11 +93,16 @@ xy = ds.artifacts.load_values(run["umap"]).to_pandas()  # DataFrame, one column 
 `artifacts.load_values` aligns rows to cell `ids` and flags rows the artifact records as missing, so
 prefer it to `artifacts.load(ref)["values"]`. `cell_selection=` reads a subset of the artifact's own
 cells. Cell selections, reference labels, graphs, reductions, and Harmony corrections are refused;
-open those with `artifacts.load`. A run's `cell_snapshot` and `feature_snapshot` are outputs of its
-`input_snapshot` stage, listed under `outputs` in `run.report()["stages"]`, not run outputs, so
-`run["cell_snapshot"]` raises `KeyError`. They hold whole metadata columns, not cell-aligned
-values, and are refused too: read their columns with `run.cells.fetch(column)` or
-`run.features.fetch(column)`. The memory check runs before anything is
+open those with `artifacts.load`. A run's metadata snapshots are outputs of its `input_snapshot`
+stage, listed under `outputs` in `run.report()["stages"]`, not run outputs, so
+`run["cell_snapshot"]` raises `KeyError`. `cell_snapshot` holds the cell names and the QC columns
+that filtering reads, and `feature_snapshot` the feature names. Other cell columns are frozen
+apart, only when the run uses them: `column_snapshot` (its `snapshot_columns`),
+`harmony_snapshot` (Harmony batch columns), `capture_snapshot` (the per-capture cell-calling
+column) and `doublet_sample_snapshot`. Snapshots hold whole metadata columns, not cell-aligned
+values, and are refused too: read names and `snapshot_columns` with `run.cells.fetch(column)`,
+feature names with `run.features.fetch("names")`, and the other columns live, with
+`ds.cells.fetch_all(column)[run.cells.fetch_all("I")]`. The memory check runs before anything is
 read and charges the values, their mask, the cell ids, and the row indexes the read builds; on
 `MemoryError`, pass a smaller `cell_selection=` or raise `mem_budget`.
 
@@ -252,7 +257,7 @@ analysis = cytearc.mount_datastore(
     uri, at="work/analysis.zarr", storage_options={"token": False}, min_features_per_cell=-1
 )
 print(analysis.zarr_mode, int(analysis.cells.fetch_all("I").sum()), analysis.cells.N)
-run = analysis.pipeline.run(label="baseline")  # results are written to work/analysis.zarr
+run = analysis.pipeline.rna(label="baseline")  # results are written to work/analysis.zarr
 ```
 
 ### Reopen a mount, or mount any store that owns its counts
@@ -273,9 +278,17 @@ mounted = cytearc.mount_datastore("shared/data.zarr", at="my_analysis.zarr", def
 repo = cytearc.datasets.connect("cytearc_docs")
 print(repo.list_datasets())
 path = repo.download_dataset("tenx_5K_pbmc_rnaseq", destination="cytearc_datasets", zarr=True)
-ds = cytearc.DataStore(f"{path}/data.zarr", zarr_mode="r")  # prepared; run label "docs_default"
+ds = cytearc.DataStore(f"{path}/data.zarr", zarr_mode="r")  # prepared, with saved runs
+print([(r.label, r.recipe) for r in ds.pipeline.list_runs(status="completed")])
 raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datasets")  # source files
 ```
+
+Documentation stores rebuilt for the recipes label each saved run by its modality: the RNA
+datasets carry `"rna"`; the CITE-seq store adds `"adt"`, `"wnn"` and `"snn"`; the TEA-seq store
+carries `"rna"`, `"atac"`, `"adt"`, `"wnn"` and `"snn"`; the ATAC store only `"atac"`; and the
+full Tabula Sapiens store none. Of the stores saved by earlier releases, the RNA and CITE-seq ones
+carry one run labelled `"docs_default"` with recipe `"basic_rna_analysis"`, which still opens.
+List the runs before opening one by label.
 
 ## Parameters that matter
 
@@ -285,7 +298,7 @@ raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datas
 | `default_assay` | stored value, or the only assay | first open of a multi-assay store (otherwise `ValueError`) |
 | `min_features_per_cell` | `None` (10 on the first writable open) | `-1` on the first writable open to keep every cell; later opens never filter |
 | `mito_pattern` / `ribo_pattern` | `None` (`^MT-`, `^RPS\|^RPL\|^MRPS\|^MRPL`) | gene names that these prefixes miss, only on the FIRST writable open; patterns ignore case, so `^MT-` already matches mouse `mt-` |
-| `assay_types` | inferred from assay names | custom names, e.g. `{"GEX": "RNA"}`; values must be presets (`RNA`, `ADT`, `HTO`, `Assay`, ...); a writable open records them, a read-only open must match the store |
+| `assay_types` | inferred from assay names | custom names, e.g. `{"GEX": "RNA"}`; values must be presets (`RNA`, `ADT`, `HTO`, `Assay`, ...); a writable open records them, a read-only open must match the store. Recipes find their assay by this type: an antibody assay named `assay2` needs `{"assay2": "ADT"}` before `ds.pipeline.adt()` |
 | `nthreads`, `mem_budget` | env `CYTEARC_WORKERS`, `CYTEARC_MEM_BUDGET`, else detected | see `performance-and-export.md` |
 | `workspace` | `None` | store written into a named workspace |
 | `storage_options` | `None` | object-store credentials or endpoints (read from env vars) |
@@ -351,19 +364,20 @@ raw = repo.download_dataset("xin_1K_pancreas_rnaseq", destination="cytearc_datas
 - Unmeasured cells hold zero counts, which are no measurement. Operations that read an assay's
   values (normalization, HVGs, detected features, WAGGR, AUCell, markers, `compare.compute_bulk`, statistical
   tests of genes, prevalent peaks, cell cycle, feature percentages, HTO, doublets, pseudotime
-  features, `imputation.compute_imputed` of genes, `mapping.run`, `to_anndata(matrix="normed")`, `pipeline.run`,
-  and QC filters on an assay's metrics) raise `UnmeasuredCellsError` (a `ValueError` with
-  `.operation`, `.assay`, `.column`, `.unmeasured`, `.selected`) after their argument checks and
-  before writing anything, also on read-only stores. Narrow first:
+  features, `imputation.compute_imputed` of genes, `mapping.run`, `to_anndata(matrix="normed")`,
+  the pipeline recipes, and QC filters on an assay's metrics) raise `UnmeasuredCellsError` (a
+  `ValueError` with `.operation`, `.assay`, `.column`, `.unmeasured`, `.selected`) after their
+  argument checks and before writing anything, also on read-only stores. Narrow first:
   `cells = ds.select_measured_cells("ADT", cell_selection=ds.snapshot_cell_selection("I"))`
   (the input comes back unchanged when the assay measured every cell, so identities stay);
   `compare.compute_bulk`, `compare.test`, `qc.auto_filter`, and `qc.filter` take it as
   `cell_selection=cells`; other labels: `ds.snapshot_cluster_labels(labels,
-  cell_selection=cells)`; graphs: build them over `cells`. The pipeline and normalized export take
-  a `cell_key` column of the cells of `I` that the pipeline's RNA assay measured, not
-  `cell_key="RNA_I"`, which also holds cells a filter removed from `I`:
+  cell_selection=cells)`; graphs: build them over `cells`. A recipe takes the measured selection
+  as `cells=` (with `filtering=True`, since a given selection is not filtered by default), or a
+  boolean column of the cells of `I` that its assay measured; normalized export takes such a
+  column as `cell_key`. Never `RNA_I` itself, which also holds cells a filter removed from `I`:
   `ds.cells.insert("RNA_measured", ds.cells.fetch_all("I") & ds.cells.fetch_all("RNA_I"))`, then
-  `ds.pipeline.run(cell_key="RNA_measured")`. A QC metric is a column that an assay's preparation
+  `ds.pipeline.rna(cells="RNA_measured")`. A QC metric is a column that an assay's preparation
   wrote (`<assay>_nCounts`, `<assay>_nFeatures`, its recorded `<assay>_percent*` columns) or a
   `quality_metric` artifact of that assay. Plots and `get_cell_vals` show unmeasured cells' gene
   values as NaN (missing), not 0, and normalize only measured cells; dot and matrix plots compute

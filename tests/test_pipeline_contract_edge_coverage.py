@@ -9,12 +9,27 @@ import pytest
 import zarr
 from zarr.storage import MemoryStore
 
-import cytearc.datastore._pipeline_ledger as ledger_module
-import cytearc.datastore._pipeline_recipe as recipe_module
+import cytearc.datastore._pipeline.ledger as ledger_module
+import cytearc.datastore._pipeline.recipes.rna as rna_module
 import cytearc.storage.pipeline_runs as run_storage
 from cytearc.clustering.leiden import canonical_resolution
-from cytearc.datastore._pipeline_ledger import RunLedger
-from cytearc.datastore.pipeline_run import PipelineExecutionError
+from cytearc.datastore._pipeline.events import PipelineEvent, PipelineEventEmitter
+from cytearc.datastore._pipeline.filtering import (
+    default_filter_columns,
+    resolve_filtering,
+)
+from cytearc.datastore._pipeline.ledger import RunLedger
+from cytearc.datastore._pipeline.recipes.common import resolve_run_filtering
+from cytearc.datastore._pipeline.settings import (
+    DEFAULT_LEIDEN_PARTITIONS,
+    column_sequence,
+    finite_real,
+    keyword_default,
+    leiden_config,
+    resolve_leiden,
+)
+from cytearc.datastore._pipeline.stages import CellSource
+from cytearc.datastore.pipeline_run import PipelineExecutionError, PipelineRun
 from cytearc.storage.artifact_writer import ArtifactPlanReceipt
 from cytearc.storage.pipeline_runs import (
     PipelineErrorRecord,
@@ -36,6 +51,16 @@ def _ref(value: str = "a") -> ArtifactRef:
         scope="datastore",
         kind="cell_selection",
         artifact_id=value * 64,
+    )
+
+
+def _events(*callbacks: Any) -> PipelineEventEmitter:
+    return PipelineEventEmitter(
+        callbacks,
+        run_id="run",
+        recipe="rna",
+        label=None,
+        stage_order=("stage",),
     )
 
 
@@ -91,7 +116,7 @@ def _terminal_stage(**changes: Any) -> PipelineStageRecord:
 def _running_run(**changes: Any) -> PipelineRunRecord:
     values: dict[str, Any] = {
         "run_id": "1" * 64,
-        "recipe": "basic",
+        "recipe": "rna",
         "requested_label": None,
         "label": None,
         "assay": "RNA",
@@ -114,7 +139,7 @@ def _running_run(**changes: Any) -> PipelineRunRecord:
 def _terminal_run(**changes: Any) -> PipelineRunRecord:
     values: dict[str, Any] = {
         "run_id": "1" * 64,
-        "recipe": "basic",
+        "recipe": "rna",
         "requested_label": None,
         "label": None,
         "assay": "RNA",
@@ -310,6 +335,51 @@ def test_pipeline_stage_record_rejects_inconsistent_states() -> None:
         PipelineStageRecord.from_dict(raw)
 
 
+def test_pipeline_stage_record_diagnostics_contract() -> None:
+    error = PipelineErrorRecord("ValueError", "bad")
+    summary = {"cells": 3, "dims": [1, 2]}
+
+    # A running stage holds neither diagnostic, and only a completed stage
+    # holds a summary; any terminal stage keeps the warnings it logged.
+    for changes, error_type, message in (
+        ({"summary": summary}, ValueError, "running stages cannot contain diagnostics"),
+        ({"warnings": ("slow",)}, ValueError, "running stages cannot contain"),
+        ({"warnings": ["slow"]}, TypeError, "tuple of non-empty strings"),
+        ({"warnings": ("",)}, TypeError, "tuple of non-empty strings"),
+        ({"warnings": ("slow",) * 51}, ValueError, "record limits"),
+        ({"warnings": ("x" * 513,)}, ValueError, "record limits"),
+        ({"summary": {"rate": float("nan")}}, ValueError, "non-finite"),
+        ({"summary": ["cells"]}, TypeError, "stage summary must be a mapping"),
+    ):
+        with pytest.raises(error_type, match=message):
+            _running_stage(**changes)
+    for changes in (
+        {"status": "skipped", "summary": summary},
+        {"status": "failed", "error": error, "summary": summary},
+    ):
+        with pytest.raises(
+            ValueError, match="only completed stages can hold a summary"
+        ):
+            _terminal_stage(**changes)
+    failed = _terminal_stage(status="failed", error=error, warnings=("slow",))
+    assert failed.warnings == ("slow",)
+
+    completed = _terminal_stage(summary=summary, warnings=("slow", "late"))
+    assert PipelineStageRecord.from_dict(completed.to_dict()) == completed
+    # A record written before stages held diagnostics still reads.
+    raw = _terminal_stage().to_dict()
+    del raw["summary"], raw["warnings"]
+    assert PipelineStageRecord.from_dict(raw) == _terminal_stage()
+    raw = completed.to_dict()
+    raw["warnings"] = "slow"
+    with pytest.raises(TypeError, match="^stage warnings must be a sequence$"):
+        PipelineStageRecord.from_dict(raw)
+    raw = completed.to_dict()
+    raw["notes"] = []
+    with pytest.raises(ValueError, match=r"extra \['notes'\]"):
+        PipelineStageRecord.from_dict(raw)
+
+
 def test_pipeline_run_record_rejects_inconsistent_states() -> None:
     output = PipelineOutputRecord("out", _ref())
     field = PipelineFieldDescriptor(
@@ -401,30 +471,45 @@ class _FakeRNA:
 class _RecipeStore:
     def __init__(self) -> None:
         self._defaultAssay: str | None = "RNA"
+        self.assay_names: list[str] = ["RNA"]
         self.cells = _Cells()
         self.assay: Any = _FakeRNA()
+        self.zw = None
 
     def _get_assay(self, name: str) -> Any:
         return self.assay
+
+    def _metric_assays(self, attrs: Any, artifact_metrics: Any) -> list[str]:
+        # The store's RNA assay wrote every QC column it holds.
+        return ["RNA" for attr in attrs if attr.startswith("RNA_")]
 
 
 def _recipe_kwargs() -> dict[str, Any]:
     return {
         "assay": "RNA",
         "label": None,
-        "cell_key": "I",
+        "cells": "I",
+        "cell_calling": False,
+        "hashing": False,
         "filtering": False,
-        "harmony_batch_columns": None,
-        "hvg_count": 10,
-        "pca_dims": 5,
-        "neighbors_k": 3,
-        "umap": False,
-        "leiden": True,
         "cell_cycle": False,
+        "hvg": {"top_n": 10},
+        "normalization": None,
+        "pca": {"dims": 5},
+        "harmony": None,
+        "ann_index": None,
+        "neighbors": {"k": 3},
+        "connectivity": None,
+        "embedding_initialization": None,
+        "umap": False,
+        "tsne": False,
+        "leiden": True,
         "paris": False,
+        "membership_strength": False,
         "doublets": False,
         "markers": False,
         "snapshot_columns": (),
+        "species": None,
     }
 
 
@@ -435,8 +520,8 @@ def test_pipeline_recipe_helper_validation() -> None:
         (["same", "same"], ValueError, "columns must not contain duplicates"),
     ):
         with pytest.raises(error_type, match=f"^{message}$"):
-            recipe_module._column_sequence(value, "columns")
-    assert recipe_module._column_sequence(["b", "a"], "columns") == ("b", "a")
+            column_sequence(value, "columns")
+    assert column_sequence(["b", "a"], "columns") == ("b", "a")
     for value, error_type, message in (
         (True, TypeError, "Leiden resolution must be a number"),
         ("one", TypeError, "Leiden resolution must be a number"),
@@ -446,25 +531,63 @@ def test_pipeline_recipe_helper_validation() -> None:
         with pytest.raises(error_type, match=f"^{message}$"):
             canonical_resolution(value)
     for value, error_type, message in (
-        (1, TypeError, "leiden must be a mapping or bool"),
-        ({}, ValueError, "leiden must contain exactly 'partitions'"),
+        (1, TypeError, "^leiden must be a mapping or bool$"),
+        ({"resolution": 1.0}, ValueError, r"^Unknown leiden settings \['resolution'\]"),
         ({"partitions": "one"}, TypeError, "leiden partitions must be a non-empty"),
         ({"partitions": []}, ValueError, "leiden partitions must not be empty"),
         ({"partitions": [1, 1.0]}, ValueError, "contain duplicate resolutions"),
+        (
+            {"partitions": [0.5], "selected": 1.0},
+            ValueError,
+            "^leiden selected must be one of the partitions$",
+        ),
+        (
+            {"partitions": [0.5], "selected": "0.5"},
+            TypeError,
+            "^Leiden resolution must be a number$",
+        ),
     ):
         with pytest.raises(error_type, match=message):
-            recipe_module._resolve_leiden(value)  # type: ignore[arg-type]
-    # Integer and float spellings of one resolution share one key.
-    assert recipe_module._resolve_leiden({"partitions": [2, 0.5]}) == (
-        ("2.0", 2.0),
-        ("0.5", 0.5),
+            resolve_leiden(value)
+    default = tuple((str(value), value) for value in DEFAULT_LEIDEN_PARTITIONS)
+    # True and settings without partitions take the default candidates, which
+    # a recipe may choose; False turns Leiden off.
+    assert resolve_leiden(True) == (default, None, {})
+    assert resolve_leiden({}) == (default, None, {})
+    assert resolve_leiden({"random_seed": 1}) == (default, None, {"random_seed": 1})
+    assert resolve_leiden(True, default_partitions=(1.0,)) == (
+        (("1.0", 1.0),),
+        None,
+        {},
     )
+    assert resolve_leiden(False) == ((), None, {})
+    # Integer and float spellings of one resolution share one key.
+    assert resolve_leiden({"partitions": [2, 0.5], "selected": 2}) == (
+        (("2.0", 2.0), ("0.5", 0.5)),
+        "2.0",
+        {},
+    )
+    # The run records the candidates and the selected resolution with the
+    # other settings, and False when Leiden is off.
+    partitions, selected, settings = resolve_leiden(
+        {"partitions": [0.5, 1], "selected": 1, "random_seed": 3}
+    )
+    assert leiden_config(partitions, selected, settings) == {
+        "random_seed": 3,
+        "partitions": [0.5, 1.0],
+        "selected": 1.0,
+    }
+    assert leiden_config(partitions, None, {}) == {
+        "partitions": [0.5, 1.0],
+        "selected": None,
+    }
+    assert leiden_config((), None, {}) is False
     for value, error_type in ((False, TypeError), ("bad", TypeError)):
         with pytest.raises(error_type, match="^value must be a finite number$"):
-            recipe_module._finite_real(value, "value")
+            finite_real(value, "value")
     with pytest.raises(ValueError, match="^value must be a finite number$"):
-        recipe_module._finite_real(float("nan"), "value")
-    assert recipe_module._finite_real(3, "value") == 3.0
+        finite_real(float("nan"), "value")
+    assert finite_real(3, "value") == 3.0
 
 
 def test_stage_setting_defaults_require_a_keyword_default() -> None:
@@ -472,11 +595,20 @@ def test_stage_setting_defaults_require_a_keyword_default() -> None:
         return top_n
 
     with pytest.raises(TypeError, match=r"\.stage\(\) has no default for 'top_n'$"):
-        recipe_module._keyword_default(stage, "top_n")
+        keyword_default(stage, "top_n")
 
 
 def test_pipeline_filtering_contract_errors() -> None:
     store = _RecipeStore()
+    default_attrs = default_filter_columns(
+        store, "RNA", ("nCounts", "nFeatures", "percentMito", "percentRibo")
+    )
+    # Preparation wrote counts and features, but no percentages, for this store.
+    assert default_attrs == ("RNA_nCounts", "RNA_nFeatures")
+
+    def resolve(value: Any) -> dict[str, Any]:
+        return resolve_filtering(store, value, default_attrs=default_attrs)
+
     invalid = (
         (object(), TypeError, "mapping or bool"),
         ({"method": "other"}, ValueError, "method"),
@@ -485,7 +617,18 @@ def test_pipeline_filtering_contract_errors() -> None:
         (
             {"method": "manual", "attrs": ["RNA_nCounts"], "unknown": 1},
             ValueError,
-            "Unknown manual",
+            r"^Unknown filtering settings \['unknown'\]",
+        ),
+        (
+            {
+                "method": "manual",
+                "attrs": ["RNA_nCounts"],
+                "lows": [0],
+                "highs": [2],
+                "min_p": 0.05,
+            },
+            ValueError,
+            r"Unknown manual filtering options: \['min_p'\]",
         ),
         (
             {"method": "manual", "attrs": ["RNA_nCounts"]},
@@ -531,7 +674,16 @@ def test_pipeline_filtering_contract_errors() -> None:
                 (3, 2, ValueError, "cannot exceed"),
             )
         ),
-        ({"attrs": ["RNA_nCounts"], "unknown": 1}, ValueError, "Unknown automatic"),
+        (
+            {"attrs": ["RNA_nCounts"], "unknown": 1},
+            ValueError,
+            r"^Unknown filtering settings \['unknown'\]",
+        ),
+        (
+            {"attrs": ["RNA_nCounts"], "lows": [0]},
+            ValueError,
+            r"Unknown automatic filtering options: \['lows'\]",
+        ),
         ({"attrs": ["RNA_nCounts"], "min_p": 0.999}, ValueError, "0 < min_p"),
         ({"attrs": ["RNA_nCounts"], "sample_column": ""}, TypeError, "sample_column"),
         (
@@ -569,11 +721,9 @@ def test_pipeline_filtering_contract_errors() -> None:
     )
     for value, error_type, message in invalid:
         with pytest.raises(error_type, match=message):
-            recipe_module._resolve_filtering(store, "RNA", value)  # type: ignore[arg-type]
+            resolve(value)
 
-    manual = recipe_module._resolve_filtering(
-        store,
-        "RNA",
+    manual = resolve(
         {
             "method": "manual",
             "attrs": ["RNA_nCounts"],
@@ -584,45 +734,113 @@ def test_pipeline_filtering_contract_errors() -> None:
     )
     assert manual["lows"] == [None]
     assert manual["keepBounds"] is True
-    assert recipe_module._resolve_filtering(store, "RNA", {"method": "auto"}) == (
-        recipe_module._resolve_filtering(store, "RNA", {"method": "mad"})
-    )
+    automatic = resolve({"method": "auto"})
+    assert automatic == resolve({"method": "mad"}) == resolve(True)
+    assert automatic["attrs"] == list(default_attrs)
+    assert resolve(False) == {"enabled": False}
 
 
-def test_resolve_pipeline_recipe_contract_errors(
+def test_run_filtering_defaults_to_where_the_cells_come_from() -> None:
+    store = _RecipeStore()
+    column = CellSource(column="I", selection=None)
+    selection = CellSource(column=None, selection=_ref())
+
+    def resolve(
+        cells: CellSource, value: object, *, default_on: bool = True
+    ) -> dict[str, Any]:
+        return resolve_run_filtering(
+            store,
+            value,
+            cells=cells,
+            assay="RNA",
+            default_attrs=("RNA_nCounts",),
+            operation="pipeline.rna",
+            default_on=default_on,
+        )
+
+    # None filters cells that a column names and takes a given selection or
+    # run's cells as already filtered; a recipe may turn the default off.
+    assert resolve(column, None)["enabled"] is True
+    assert resolve(selection, None) == {"enabled": False}
+    assert resolve(column, None, default_on=False) == {"enabled": False}
+    # A setting that the call gives applies to any cells.
+    assert resolve(selection, True) == resolve(column, True)
+    assert resolve(selection, True)["attrs"] == ["RNA_nCounts"]
+    assert resolve(column, False) == {"enabled": False}
+    with pytest.raises(TypeError, match="^filtering must be a mapping, bool, or None$"):
+        resolve(column, "mad")
+
+
+def test_resolve_rna_contract_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(recipe_module, "RNAassay", _FakeRNA)
+    monkeypatch.setattr(rna_module, "RNAassay", _FakeRNA)
     store = _RecipeStore()
     kwargs = _recipe_kwargs()
-    recipe = recipe_module.resolve_pipeline_recipe(store, **kwargs)
-    assert recipe.to_config()["hvgCount"] == 10
+    plan = rna_module.resolve_rna(store, **kwargs)
+    assert (plan.recipe, plan.assay, plan.label) == ("rna", "RNA", None)
+    assert plan.config["cells"] == {"column": "I"}
+    assert plan.config["stages"]["hvg"] == {"top_n": 10}
+    assert plan.config["stages"]["pca"] == {"dims": 5}
 
+    failed = PipelineRun(
+        store,
+        _terminal_run(
+            status="failed",
+            error=PipelineErrorRecord("ValueError", "bad"),
+        ),
+    )
+    other_kind = ArtifactRef(
+        scope="assay", kind="connectivity_map", artifact_id="b" * 64, assay="RNA"
+    )
     cases: list[tuple[dict[str, Any], type[BaseException], str]] = [
         ({"label": ""}, TypeError, "label"),
-        ({"cell_key": ""}, TypeError, "cell_key"),
-        ({"cell_key": "missing"}, KeyError, "selection column"),
-        ({"cell_key": "numeric"}, TypeError, "boolean"),
+        ({"cells": ""}, TypeError, "non-empty boolean cell column"),
+        ({"cells": "missing"}, KeyError, "selection column"),
+        ({"cells": "numeric"}, TypeError, "boolean"),
+        ({"cells": 1}, TypeError, "ArtifactRef, or a completed PipelineRun"),
+        ({"cells": other_kind}, ValueError, "datastore cell-selection artifact"),
+        ({"cells": failed}, ValueError, f"run {failed.run_id} is 'failed'"),
         ({"umap": 1}, TypeError, "umap"),
         ({"leiden": False, "doublets": True}, ValueError, "require"),
+        ({"leiden": False, "membership_strength": True}, ValueError, "requires"),
+        ({"markers": 1}, TypeError, "markers must be a boolean"),
         ({"snapshot_columns": ["I"]}, ValueError, "reserved"),
         ({"snapshot_columns": ["missing"]}, KeyError, "Snapshot columns"),
-        ({"harmony_batch_columns": []}, ValueError, "must not be empty"),
-        ({"harmony_batch_columns": ["missing"]}, KeyError, "Harmony columns"),
-        ({"hvg_count": 0}, ValueError, "hvg_count must be at least 1"),
-        ({"hvg_count": 2.0}, TypeError, "hvg_count must be an integer"),
+        ({"snapshot_columns": "sample"}, TypeError, "sequence of column names"),
+        ({"harmony": {"batch_columns": []}}, ValueError, "must not be empty"),
+        ({"harmony": {"batch_columns": ["missing"]}}, KeyError, "Harmony columns"),
+        ({"hvg": {"top_n": 0}}, ValueError, "top_n must be at least 1"),
+        ({"hvg": {"top_n": 2.0}}, TypeError, "top_n must be an integer"),
+        ({"hvg": {"batch": "missing"}}, KeyError, "HVG batch column"),
+        ({"pca": {"dims": -1}}, ValueError, "pca dims must be at least 0"),
+        ({"species": "human"}, ValueError, "species must be one of"),
+        ({"hashing": True}, ValueError, "needs an assay of type 'HTO'"),
+        ({"cell_calling": {"sample_column": "missing"}}, KeyError, "Capture column"),
+        ({"doublets": {"sample_column": "missing"}}, KeyError, "Doublet sample"),
     ]
     for changes, error_type, message in cases:
         with pytest.raises(error_type, match=message):
-            recipe_module.resolve_pipeline_recipe(store, **{**kwargs, **changes})
+            rna_module.resolve_rna(store, **{**kwargs, **changes})
 
+    # Without an assay, the recipe takes the default assay when it is an RNA
+    # assay, else the store's only RNA assay.
     store._defaultAssay = None
-    with pytest.raises(ValueError, match="No assay"):
-        recipe_module.resolve_pipeline_recipe(store, **{**kwargs, "assay": None})
+    assert rna_module.resolve_rna(store, **{**kwargs, "assay": None}).assay == "RNA"
+    store.assay_names = ["RNA", "RNA_2"]
+    with pytest.raises(ValueError, match=r"several RNA assays, \['RNA', 'RNA_2'\]"):
+        rna_module.resolve_rna(store, **{**kwargs, "assay": None})
+    store.assay_names = []
+    with pytest.raises(TypeError, match="^The store has no RNA assay for the rna"):
+        rna_module.resolve_rna(store, **{**kwargs, "assay": None})
     store._defaultAssay = "RNA"
+    with pytest.raises(TypeError, match="^assay must be a non-empty string or None$"):
+        rna_module.resolve_rna(store, **{**kwargs, "assay": ""})
     store.assay = object()
-    with pytest.raises(TypeError, match="RNA assay"):
-        recipe_module.resolve_pipeline_recipe(store, **kwargs)
+    with pytest.raises(
+        TypeError, match="^The rna recipe analyzes RNA assays; assay 'RNA' is of type"
+    ):
+        rna_module.resolve_rna(store, **kwargs)
 
 
 @contextmanager
@@ -642,7 +860,7 @@ def _sample_rss() -> Any:
 def test_run_ledger_records_and_interruption_helpers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ledger = RunLedger(object(), "run", None)
+    ledger = RunLedger(object(), "run", _events())
     with pytest.raises(
         RuntimeError, match=r"not observed by artifact planning: \['out'\]"
     ):
@@ -670,8 +888,8 @@ def test_run_ledger_records_and_interruption_helpers(
             metrics=_metrics(),
         )
 
-    events = []
-    ledger = RunLedger(object(), "run", events.append)
+    events: list[PipelineEvent] = []
+    ledger = RunLedger(object(), "run", _events(events.append))
     monkeypatch.setattr(
         ledger_module,
         "load_pipeline_run_record",
@@ -687,7 +905,9 @@ def test_run_ledger_records_and_interruption_helpers(
     ((_args, kwargs),) = interrupted
     assert kwargs["run_id"] == "run"
     assert kwargs["interruption"].kind == "keyboard_interrupt"
-    assert (events[-1].kind, events[-1].stage) == ("pipeline_interrupted", "stage")
+    assert [(event.kind, event.stage, event.ordinal) for event in events] == [
+        ("run_interrupted", "stage", 0)
+    ]
     assert ledger._fallback_metrics(0).sample_count >= 1
 
 
@@ -706,40 +926,44 @@ def test_run_ledger_skip_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(ledger_module, "fail_pipeline_run_record", lambda *a, **k: None)
 
-    calls = 0
-
-    def interrupt_after_start() -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise KeyboardInterrupt("stop")
-
-    monkeypatch.setattr(ledger_module, "shutdown_checkpoint", interrupt_after_start)
-    interrupted: list[str] = []
+    monkeypatch.setattr(ledger_module, "shutdown_checkpoint", lambda: None)
+    recorded: list[int] = []
     monkeypatch.setattr(
         RunLedger,
-        "_finish_interrupted",
-        lambda self, **kwargs: interrupted.append(kwargs["stage"]),
+        "_record_interrupted_stage",
+        lambda self, **kwargs: recorded.append(kwargs["ordinal"]),
     )
-    with pytest.raises(KeyboardInterrupt):
-        RunLedger(object(), "run", None).skip("stage")
-    assert interrupted == ["stage"]
-
-    monkeypatch.setattr(
-        ledger_module,
-        "start_pipeline_stage_record",
-        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt("stop")),
-    )
-    pending: list[str] = []
+    pending: list[str | None] = []
     monkeypatch.setattr(
         RunLedger,
         "interrupt_pending",
         lambda self, error, stage: pending.append(stage),
     )
-    monkeypatch.setattr(ledger_module, "shutdown_checkpoint", lambda: None)
+
+    # A skip emits no stage events, so an interruption while its record is
+    # written marks that record and ends the run between stages.
+    monkeypatch.setattr(
+        ledger_module,
+        "finish_pipeline_stage_record",
+        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt("stop")),
+    )
     with pytest.raises(KeyboardInterrupt):
-        RunLedger(object(), "run", None).skip("pending")
-    assert pending == ["pending"]
+        RunLedger(object(), "run", _events()).skip("stage")
+    assert (recorded, pending) == ([0], [None])
+
+    recorded.clear()
+    pending.clear()
+    monkeypatch.setattr(
+        ledger_module, "finish_pipeline_stage_record", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        ledger_module,
+        "start_pipeline_stage_record",
+        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt("stop")),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        RunLedger(object(), "run", _events()).skip("pending")
+    assert (recorded, pending) == ([], [None])
 
     class Fatal(BaseException):
         pass
@@ -750,7 +974,7 @@ def test_run_ledger_skip_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *a, **k: (_ for _ in ()).throw(Fatal()),
     )
     with pytest.raises(Fatal):
-        RunLedger(object(), "run", None).skip("fatal")
+        RunLedger(object(), "run", _events()).skip("fatal")
 
     monkeypatch.setattr(
         ledger_module,
@@ -766,7 +990,7 @@ def test_run_ledger_skip_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(
         PipelineExecutionError, match="failed during stage 'failed': bad$"
     ) as caught:
-        RunLedger(object(), "run", None).skip("failed")
+        RunLedger(object(), "run", _events()).skip("failed")
     assert isinstance(caught.value.__cause__, ValueError)
     # A stage that never started still ends its run as failed.
     assert [(kwargs["run_id"], str(kwargs["error"])) for kwargs in failed_runs] == [
@@ -789,7 +1013,7 @@ def test_run_ledger_run_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *a, **k: (_ for _ in ()).throw(ValueError("start")),
     )
     with pytest.raises(PipelineExecutionError, match="start"):
-        RunLedger(object(), "run", None).run("stage", lambda: ())
+        RunLedger(object(), "run", _events()).run("stage", lambda: ())
 
     monkeypatch.setattr(
         ledger_module, "start_pipeline_stage_record", lambda *a, **k: None
@@ -804,7 +1028,7 @@ def test_run_ledger_run_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda self, **kwargs: failures.append(kwargs["error"]),
     )
     with pytest.raises(PipelineExecutionError, match="not observed"):
-        RunLedger(object(), "run", None).run(
+        RunLedger(object(), "run", _events()).run(
             "unplanned",
             lambda: (("out", _ref()),),
         )
@@ -815,7 +1039,7 @@ def test_run_ledger_run_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(ledger_module, "finish_pipeline_stage_record", fail_finish)
     with pytest.raises(PipelineExecutionError, match="finish"):
-        RunLedger(object(), "run", None).run("finish", lambda: ())
+        RunLedger(object(), "run", _events()).run("finish", lambda: ())
 
     monkeypatch.setattr(
         ledger_module, "finish_pipeline_stage_record", lambda *a, **k: None
@@ -827,7 +1051,7 @@ def test_run_ledger_run_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda self, **kwargs: interrupted.append(kwargs["stage"]),
     )
     with pytest.raises(asyncio.CancelledError):
-        RunLedger(object(), "run", None).run(
+        RunLedger(object(), "run", _events()).run(
             "cancelled",
             lambda: (_ for _ in ()).throw(asyncio.CancelledError()),
         )
@@ -837,7 +1061,7 @@ def test_run_ledger_run_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         pass
 
     with pytest.raises(Fatal):
-        RunLedger(object(), "run", None).run(
+        RunLedger(object(), "run", _events()).run(
             "fatal",
             lambda: (_ for _ in ()).throw(Fatal()),
         )
@@ -847,7 +1071,7 @@ def test_pipeline_record_storage_rejects_torn_and_invalid_queries() -> None:
     root = zarr.open_group(store=MemoryStore(), mode="w")
     record = run_storage.create_pipeline_run_record(
         root,
-        recipe="basic",
+        recipe="rna",
         requested_label=None,
         assay="RNA",
         config={},
@@ -861,7 +1085,7 @@ def test_pipeline_record_storage_rejects_torn_and_invalid_queries() -> None:
     ):
         run_storage.create_pipeline_run_record(
             root,
-            recipe="basic",
+            recipe="rna",
             requested_label=None,
             assay="RNA",
             config={},
@@ -899,7 +1123,7 @@ def test_end_pipeline_run_records_once_and_keeps_terminal_runs() -> None:
     def new_run() -> str:
         return run_storage.create_pipeline_run_record(
             root,
-            recipe="basic",
+            recipe="rna",
             requested_label=None,
             assay="RNA",
             config={},

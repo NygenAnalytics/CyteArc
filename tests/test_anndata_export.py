@@ -1,6 +1,7 @@
 import dataclasses
 import shutil
 import sys
+import tarfile
 from types import SimpleNamespace
 
 import numpy as np
@@ -16,6 +17,7 @@ from cytearc.datastore.datastore import DataStore
 from cytearc.datastore._operations.presentation import _PresentationOperationsMixin
 from cytearc.datastore.pipeline_run import PipelineRun
 from cytearc.storage.pipeline_runs import PipelineOutputRecord
+from tests import full_path
 from tests.storage_helpers import insert_nullable_cell_column, write_count_store
 from tests.test_writers import _TOY_RNA_COUNTS
 
@@ -676,17 +678,16 @@ def exported_run(tmp_path_factory) -> tuple[DataStore, PipelineRun]:
     datastore = DataStore(
         location, default_assay="RNA", min_features_per_cell=1, nthreads=1
     )
-    run = datastore.pipeline.run(
+    run = datastore.pipeline.rna(
         label="export",
-        cell_key="keep",
+        cells="keep",
         filtering=False,
         cell_cycle=False,
-        paris=False,
+        hvg={"top_n": 12},
+        pca={"dims": 3},
+        neighbors={"k": 5},
         doublets=False,
         markers=False,
-        hvg_count=12,
-        pca_dims=3,
-        neighbors_k=5,
         snapshot_columns=[*_SNAPSHOT_COLUMNS, *_MASKED_COLUMNS, "m_none"],
     )
     assert run.status == "completed"
@@ -1009,7 +1010,7 @@ def test_normed_run_export_requires_the_runs_own_normalized_values(
     path = tmp_path / "rejected.h5ad"
     cases = {
         "does not cover the run's cells": _with_outputs(run, normalized=foreign),
-        "does not cover the run's highly variable features": _with_outputs(
+        "does not cover the run's selected features": _with_outputs(
             run, highly_variable_features=run["feature_universe"]
         ),
     }
@@ -1051,3 +1052,121 @@ def test_normed_run_export_requires_the_runs_own_normalized_values(
         int(_EXPORTED_RUN_CELLS.sum()),
         _RUN_FEATURES,
     )
+
+
+@pytest.fixture(scope="module")
+def atac_export_run(tmp_path_factory) -> tuple[DataStore, PipelineRun]:
+    """A completed ATAC run of the 500 PBMC peak counts."""
+    location = tmp_path_factory.mktemp("atac_export_run")
+    with tarfile.open(full_path("500_pbmc_atac.zarr.tar.gz"), "r:gz") as archive:
+        archive.extractall(location, filter="data")
+    datastore = DataStore(str(location), nthreads=1)
+    run = datastore.pipeline.atac(
+        label="atac",
+        prevalent_peaks={"top_n": 2000},
+        lsi={"dims": 6},
+        neighbors={"k": 5},
+        umap=False,
+        leiden={"partitions": [1.0]},
+        markers=False,
+    )
+    assert run.status == "completed"
+    return datastore, run
+
+
+@pytest.mark.slow
+def test_atac_run_export_holds_its_lsi_and_prevalent_peaks(
+    atac_export_run, tmp_path
+) -> None:
+    anndata = pytest.importorskip("anndata")
+    datastore, run = atac_export_run
+    path = tmp_path / "atac.h5ad"
+
+    raw = datastore.to_anndata(run=run)
+    normed = datastore.to_anndata(run=run, matrix="normed")
+    cytearc.to_h5ad(datastore.ATAC, str(path), run=run, matrix="normed")
+    written = anndata.read_h5ad(path)
+
+    lsi = np.asarray(datastore.artifacts.load(run["lsi"])["data"][:])
+    cells = run.cells.fetch("ids").astype(str).tolist()
+    assert "pca" not in run
+    assert lsi.shape[0] == len(cells)
+    for adata in (raw, normed, written):
+        # An ATAC run's reduction is its LSI, under Scanpy's key, and no PCA.
+        assert set(adata.obsm) == {"X_lsi"}
+        np.testing.assert_array_equal(adata.obsm["X_lsi"], lsi)
+        assert "PCs" not in adata.varm
+        assert adata.obs_names.tolist() == cells
+    assert raw.shape == (len(cells), int(run.features.fetch_all("I").sum()))
+
+    # The normalized values are the run's own, over its prevalent peaks.
+    stored = np.asarray(datastore.artifacts.load(run["normalized"])["data"][:])
+    peaks = np.flatnonzero(run.features.fetch_all("prevalent_peaks"))
+    peak_ids = datastore.ATAC.feats.fetch_all("ids").astype(str)
+    assert len(peaks) == 2000
+    for adata in (normed, written):
+        np.testing.assert_array_equal(adata.X.toarray(), stored)
+        assert adata.var_names.tolist() == peak_ids[peaks].tolist()
+        assert adata.var["prevalent_peaks"].all()
+    swapped = _with_outputs(run, prevalent_peaks=run["feature_universe"])
+    with pytest.raises(ValueError, match="does not cover the run's selected features"):
+        datastore.to_anndata(run=swapped, matrix="normed")
+
+
+@pytest.fixture(scope="module")
+def adt_export_run(
+    datastore_zarr_root, tmp_path_factory
+) -> tuple[DataStore, PipelineRun]:
+    """A completed ADT run of the CITE-seq store's antibody panel."""
+    location = tmp_path_factory.mktemp("adt_export_run") / "data.zarr"
+    shutil.copytree(datastore_zarr_root, location)
+    # The store keeps its antibodies as a generic assay; this records it as ADT.
+    datastore = DataStore(
+        str(location), default_assay="RNA", assay_types={"assay2": "ADT"}, nthreads=1
+    )
+    run = datastore.pipeline.adt(
+        label="adt",
+        neighbors={"k": 5},
+        umap=False,
+        leiden={"partitions": [1.0]},
+        markers=False,
+    )
+    assert run.status == "completed"
+    return datastore, run
+
+
+@pytest.mark.slow
+def test_normed_adt_run_export_covers_its_panel(adt_export_run, tmp_path) -> None:
+    datastore, run = adt_export_run
+
+    exported = datastore.to_anndata(run=run, matrix="normed")
+
+    names = datastore.assay2.feats.fetch_all("names").astype(str)
+    feature_ids = datastore.assay2.feats.fetch_all("ids").astype(str)
+    panel = np.flatnonzero(run.features.fetch_all("panel"))
+    # The panel leaves out the store's isotype control by default.
+    assert names[panel].tolist() == names[names != "IgG1_control_TotalSeqC"].tolist()
+    stored = np.asarray(datastore.artifacts.load(run["normalized"])["data"][:])
+    assert sparse.isspmatrix_csr(exported.X)
+    assert exported.X.dtype == np.float32
+    np.testing.assert_array_equal(exported.X.toarray(), stored)
+    assert exported.var_names.tolist() == feature_ids[panel].tolist()
+    assert exported.var["panel"].all()
+    assert exported.obs_names.tolist() == run.cells.fetch("ids").astype(str).tolist()
+    # The run's PCA of the panel, with its loadings over the panel.
+    pca = datastore.artifacts.load(run["pca"])
+    np.testing.assert_array_equal(exported.obsm["X_pca"], pca["data"][:])
+    np.testing.assert_array_equal(exported.varm["PCs"], pca["loadings"][:])
+
+    # Normalized values must cover the run's panel, not another selection.
+    swapped = _with_outputs(run, panel=run["feature_universe"])
+    expected = (
+        f"The normalized artifact of pipeline run {run.run_id} does not cover "
+        "the run's selected features"
+    )
+    with pytest.raises(ValueError, match=expected):
+        datastore.to_anndata(run=swapped, matrix="normed")
+    path = tmp_path / "rejected.h5ad"
+    with pytest.raises(ValueError, match=expected):
+        cytearc.to_h5ad(datastore.assay2, str(path), run=swapped, matrix="normed")
+    assert not path.exists()

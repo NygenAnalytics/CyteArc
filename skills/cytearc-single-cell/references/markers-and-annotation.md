@@ -15,7 +15,8 @@ labels. Docs: <https://docs.nygen.io/CyteArc/tutorials/annotation>, <https://doc
 
 - `markers.search(clusters, features=...)` takes an exact `cluster_labels` or `cluster_cut` ref
   and a feature-selection ref, streams counts once (remote for mounted stores) and returns
-  `ArtifactRef(kind="marker_table")`. `run["markers"]` is the table for `run["clusters"]`.
+  `ArtifactRef(kind="marker_table")`. `run["markers"]` is the table for `run["clusters"]`; a
+  multimodal run holds one table per modality, `run["markers_<assay>"]`, for its joint clusters.
 - Columns: `score` (CyteArc specificity, 0 to 1, summing to 1 across groups for each gene; near
   1/n_groups means ubiquitous), `mean`/`mean_rest`, `frac_exp`/`frac_exp_rest`, `fold_change`,
   `auc`, two-sided Mann-Whitney `p_value`, `p_value_adjusted` (BH within each group) and

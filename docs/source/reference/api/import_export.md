@@ -479,8 +479,9 @@ reference of every exported artifact by element, such as `uns["cytearc"]["artifa
 The two meanings of `matrix="normed"` differ. Without a `run`, `to_anndata(matrix="normed")`
 exports the assay's `normed` values of the selected cells and features: for RNA, counts scaled by
 each cell's library size over all of its features to 1,000, without a log transform. A run export
-with `matrix="normed"` exports the run's stored `normalized` artifact: log1p of counts scaled over
-the highly variable features only, which are then the only features, as described below.
+with `matrix="normed"` exports the run's stored `normalized` artifact over the run's selected
+features only, which are then the only features: for an RNA run, log1p of counts scaled over its
+highly variable genes, as described below.
 
 Without `run`, `to_anndata` and `to_h5ad` export the membership column `<assay>_I` of the
 exported assay as an ordinary `obs` column and declare it in `uns["cytearc"]["assayMembership"]`,
@@ -503,14 +504,17 @@ cytearc.to_h5ad(ds.RNA, "analysis.h5ad", run=run)
 cytearc.to_h5ad(ds.RNA, "analysis_normalized.h5ad", run=run, matrix="normed")
 ```
 
-The assay must be the exact assay object owned by the datastore that opened the run. A run export
+The assay must be the run's assay, `run.assay`, as the exact assay object owned by the datastore
+that opened the run. A run export
 to a file holds exactly what {py:meth}`~cytearc.datastore.datastore.DataStore.to_anndata` returns
 for the same `run` and `matrix`, because one resolution of the run's rows, columns, and values
 serves both: the run's cells, its frozen cell fields in `obs` with the consecutive UMAP fields in
-`obsm["X_umap"]`, its PCA in `obsm["X_pca"]` with the loadings in `varm["PCs"]` and its Harmony
-correction, if any, in `obsm["X_pca_harmony"]`, and its frozen feature fields in `var`. `to_anndata`
-holds that object in memory; `to_h5ad` streams it into the file. The run's plan decides which
-fields are categoricals. Label fields, those with a categorical display (`clusters`, `leiden_*`,
+`obsm["X_umap"]`, the PCA of an RNA or ADT run in `obsm["X_pca"]` with the loadings in
+`varm["PCs"]` and its Harmony correction, if any, in `obsm["X_pca_harmony"]`, the LSI of an ATAC
+run in `obsm["X_lsi"]` and its Harmony correction, if any, in `obsm["X_lsi_harmony"]`, and its
+frozen feature fields in `var`. `to_anndata` holds that object in memory; `to_h5ad` streams it
+into the file. The run's plan decides which fields are categoricals. Label fields, those with a
+categorical display (`clusters`, `leiden_*`,
 `paris`, and `cell_cycle_phase`), are categoricals whose categories are their labels as text in
 natural order, with the run's display colors as `uns["<field>_colors"]`, so that Scanpy's
 `rank_genes_groups(adata, "clusters")` and categorical plots work directly. Other text that repeats
@@ -528,14 +532,17 @@ supplied; `obsm`, `obs`, and `graph` add artifacts over the run's cells, such as
 
 With `matrix="raw"`, the default, `X` holds the raw counts of the run's cells over its feature
 universe. With `matrix="normed"`, `X` is the run's `normalized` artifact: the float32 values that
-its PCA read, as {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.normalize` stored them for
-the run, over the run's highly variable features in stored feature order. `var` then holds the
-frozen fields of those features only, and `to_anndata` `layers` align to them. The values are read
-in the artifact's stored row bands and never converted to float64. The export checks that the
-store's dataset fingerprint still matches the artifact and raises `ValueError` when the run has
-no normalized output, or when the artifact's cell selection is not the run's cell selection or its
-feature selection is not the run's highly variable features. Without a `run`,
-`to_anndata(matrix="normed")` normalizes the selected cells and features with the assay's
+{py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.normalize` stored for the run, over the
+run's selected features in stored feature order: the highly variable genes of an RNA run, the
+prevalent peaks of an ATAC run, or the panel of an ADT run. `var` then holds the frozen fields of
+those features only, and `to_anndata` `layers` align to them. The values are read in the
+artifact's stored row bands and never converted to float64. The export checks that the store's
+dataset fingerprint still matches the artifact and raises `ValueError` when the run has no
+normalized output, or when the artifact's cell selection is not the run's cell selection or its
+feature selection is not the run's selected features. A multimodal run has no normalized output
+and exports with `matrix="raw"`: `X` holds the raw counts of `run.assay`, its first source run's
+assay, beside the run's joint fields, and `to_h5ad` takes that assay as its `assay`. Without a
+`run`, `to_anndata(matrix="normed")` normalizes the selected cells and features with the assay's
 `normed`, and `to_h5ad` rejects `matrix="normed"`.
 
 `H5adToZarr.dump()` returns an `H5adImportResult` containing the written assays, analysis assay,

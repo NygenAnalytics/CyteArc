@@ -527,7 +527,7 @@ def test_silhouette_workspace_estimate_bounds_the_traced_peak(
     from sklearn import config_context
     from sklearn.metrics import silhouette_score
 
-    from cytearc.datastore._pipeline_cluster_selection import (
+    from cytearc.datastore._pipeline.cluster_selection import (
         _silhouette_workspace_bytes,
     )
 

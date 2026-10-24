@@ -256,7 +256,10 @@ def main() -> None:
         )
     print(f"Pipeline runs: {summary['pipeline_run_counts']}")
     for run in ds.pipeline.list_runs():
-        print(f"  {run.label!r}: status={run.status}, run_id={run.run_id[:12]}")
+        print(
+            f"  {run.label!r}: recipe={run.recipe}, assay={run.assay}, "
+            f"status={run.status}, run_id={run.run_id[:12]}"
+        )
     print(f"Mounted counts: {'matrixSource' in ds.z.attrs}")
 
     profile = {}

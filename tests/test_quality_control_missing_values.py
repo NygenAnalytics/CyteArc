@@ -11,7 +11,7 @@ import pytest
 
 from cytearc import DataStore
 from cytearc.quality_control.filtering import filter_cell_metrics
-from cytearc.datastore.pipeline_accessor import PipelineExecutionError
+from cytearc.datastore.pipeline_run import PipelineExecutionError
 from cytearc.storage.artifacts import (
     ArtifactRef,
     fingerprint_array,
@@ -47,9 +47,9 @@ def _run_options(filtering: dict[str, Any]) -> dict[str, Any]:
     return {
         "filtering": filtering,
         "cell_cycle": False,
-        "hvg_count": 50,
-        "pca_dims": 3,
-        "neighbors_k": 3,
+        "hvg": {"top_n": 50},
+        "pca": {"dims": 3},
+        "neighbors": {"k": 3},
         "umap": False,
         "leiden": False,
         "paris": False,
@@ -318,7 +318,7 @@ def test_public_and_pipeline_filters_agree_on_nullable_columns(
             expected[complete] = (values[complete] > bound_low) & (
                 values[complete] < bound_high
             )
-    run = store.pipeline.run(**_run_options(filtering))
+    run = store.pipeline.rna(**_run_options(filtering))
 
     public_mask = _selection_mask(store, public)
     np.testing.assert_array_equal(public_mask, expected)
@@ -360,7 +360,7 @@ def test_auto_filter_cells_rejects_masked_integer_sample_labels(small_store) -> 
             min_cells_per_sample=2,
         )
     with pytest.raises(PipelineExecutionError) as caught:
-        store.pipeline.run(
+        store.pipeline.rna(
             **_run_options(
                 {
                     "attrs": ["RNA_nCounts"],
@@ -504,7 +504,7 @@ def test_zero_count_percentages_fail_with_actionable_error_in_both_paths() -> No
         {"attrs": ["RNA_percentMito"], "min_cells_per_sample": 2},
     ):
         with pytest.raises(PipelineExecutionError) as caught:
-            dataset.pipeline.run(**_run_options(filtering))
+            dataset.pipeline.rna(**_run_options(filtering))
         assert caught.value.stage == "filtering"
         assert isinstance(caught.value.__cause__, ValueError)
         assert "exclude zero-count cells" in str(caught.value.__cause__)
@@ -561,7 +561,7 @@ def test_typed_sample_labels_validate_without_per_cell_scan(
     assert status.parameters["sample_sizes"] == {"A": n // 2, "B": n - n // 2}
 
     checked.clear()
-    run = store.pipeline.run(
+    run = store.pipeline.rna(
         **_run_options(
             {
                 "attrs": ["RNA_nCounts"],

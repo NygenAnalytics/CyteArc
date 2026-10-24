@@ -59,7 +59,7 @@ from .rows import (
 _DENSE_SELECTION = 16
 
 type MeasuredCellsRemedy = Literal[
-    "labels", "graph", "cell_key", "cell_selection", "export"
+    "labels", "graph", "cell_key", "cells", "cell_selection", "export"
 ]
 """How a refused caller selects measured cells, by the input it takes.
 
@@ -68,7 +68,9 @@ type MeasuredCellsRemedy = Literal[
 lineage of a graph, which must be built again over measured cells.
 ``"cell_key"``: the cells are those of a boolean cell column, so the caller
 takes another column, True only for the cells of that column that the assay
-measured. ``"cell_selection"``: the caller's ``cell_selection`` keyword
+measured. ``"cells"``: a pipeline recipe's ``cells`` keyword names the cells,
+as a boolean column or a selection, so the caller passes measured cells
+there. ``"cell_selection"``: the caller's ``cell_selection`` keyword
 narrows the cells that it reads, such as those of its labels or of the live
 ``I`` column. ``"export"``: a raw export that cannot declare which cells the
 assay measured exports only measured cells, or an export that declares them
@@ -286,6 +288,22 @@ def _measured_cells_remedy(
             f"cells of {key!r} that it measured, such as {name!r} after "
             f"`ds.cells.insert({name!r}, ds.cells.fetch_all({key!r}) & "
             f"ds.cells.fetch_all({column!r}))`."
+        )
+    if remedy == "cells":
+        if cell_key is None:
+            # A selection or an earlier run gave the cells, and a modality run
+            # that takes a run's cells must keep them to be combined with it.
+            return (
+                f"Pass as cells the selection from `{measured}`. When the cells "
+                "are an earlier run's, run that earlier run on cells that this "
+                "assay measured too, so that the runs analyze the same cells."
+            )
+        return (
+            f"Pass as cells the selection from `{measured}`, or a boolean cell "
+            f"column that is True only for the cells of {cell_key!r} that it "
+            f"measured, such as {f'{assay}_measured'!r} after "
+            f"`ds.cells.insert({f'{assay}_measured'!r}, "
+            f"ds.cells.fetch_all({cell_key!r}) & ds.cells.fetch_all({column!r}))`."
         )
     if remedy == "export":
         return (

@@ -20,17 +20,18 @@ A completed {py:class}`~cytearc.PipelineRun` can be passed to
 the run. There is no live fallback in run mode:
 
 - `color_by` takes one item or a list, drawn as one panel each. A string or `CellField` names a
-  frozen run cell field from `run.cells.columns`, such as `clusters`, `doublet_score`, or a column
-  frozen with `snapshot_columns`. An `ArtifactRef` must be an output of the run, such as
-  `run["leiden_1.0"]`. Any other ref raises `ValueError`; color by it with the granular
-  `layout=run["umap"]` route instead.
+  frozen run cell field from `run.cells.columns`, such as `clusters`, `doublet_score`, a
+  multimodal run's `weight_<assay>` modality weights, or a column frozen with `snapshot_columns`.
+  An `ArtifactRef` must be an output of the run, such as `run["leiden_1.0"]`. Any other ref raises
+  `ValueError`; color by it with the granular `layout=run["umap"]` route instead.
 - `facet_by`, `subset_by`, `Highlight(by=...)` and `DensityOverlay(group_by=...)` name frozen run
   cell fields. A name that is neither a frozen field nor, for `color_by`, a gene raises `KeyError`
   listing the run's cell fields.
-- A gene name or `FeatureRef` reads the live counts of the run's assay over the run's cells and
-  normalizes them with the assay's live normalizer. A run freezes no gene values, so a gene color
-  requires an explicit `normalization=NormalizationSpec(...)`, which provenance records; without
-  one it raises `ValueError`.
+- A gene name or `FeatureRef` reads the live counts of the run's assay, `run.assay`, over the run's
+  cells and normalizes them with the assay's live normalizer. A multimodal run's assay is its first
+  source run's assay. A run freezes no gene values, so a gene color requires an explicit
+  `normalization=NormalizationSpec(...)`, which provenance records; without one it raises
+  `ValueError`.
 - `cell_key` other than `"I"`, a `from_assay` other than the run's assay, and `point_sizes` raise
   `ValueError`. For per-cell sizes, pass `layout=run["umap"]` with sizes in that layout's cell
   order.

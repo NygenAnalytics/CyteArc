@@ -1,17 +1,18 @@
 ---
 name: cytearc-single-cell
-description: Analyze single-cell data with core CyteArc, the out-of-core Zarr DataStore library with immutable artifacts and pipeline runs. Covers opening, converting and mounting stores (including public CyteBase datasets opened by their hf:// URIs), QC with removal audits, HVG/PCA/neighbour graphs, Leiden/Paris clustering, UMAP, markers and cautious annotation, batch correction and donor-level comparisons, headless plotting, provenance and export. Use when a task involves a CyteArc .zarr store, a CyteBase dataset, cytearc.DataStore, ds.pipeline, or converting H5AD/10x/MTX/Seurat data for CyteArc. For CyteBase catalog search in depth, use the cytebase skill.
+description: Analyze single-cell data with core CyteArc, the out-of-core Zarr DataStore library with immutable artifacts and pipeline runs. Covers opening, converting and mounting stores (including public CyteBase datasets opened by their hf:// URIs), QC with removal audits, HVG/PCA/neighbour graphs, Leiden/Paris clustering, UMAP, markers and cautious annotation, batch correction and donor-level comparisons, RNA, ATAC, ADT and multimodal (WNN) pipeline recipes, headless plotting, provenance and export. Use when a task involves a CyteArc .zarr store, a CyteBase dataset, cytearc.DataStore, ds.pipeline, or converting H5AD/10x/MTX/Seurat data for CyteArc. For CyteBase catalog search in depth, use the cytebase skill.
 license: BSD-3-Clause
-compatibility: Requires Python 3.13+ and cytearc 1.0.0rc1 or newer (pip install "cytearc[extra]>=1.0.0rc1"; CyteBase datasets need network access, and searching their catalog needs the separate cytebase package; add the tsne extra for t-SNE and the regulons extra for cisTarget ranking databases).
+compatibility: Requires Python 3.13+ and a cytearc release after 1.3.0, which adds the ds.pipeline.rna/atac/adt/multimodal recipes (pip install "cytearc[extra]>1.3.0", plus --pre for a release candidate; CyteBase datasets need network access, and searching their catalog needs the separate cytebase package; add the tsne extra for t-SNE and the regulons extra for cisTarget ranking databases).
 metadata:
-  version: "0.5"
+  version: "0.6"
 ---
 
 # CyteArc single-cell analysis
 
 CyteArc streams Zarr-backed count matrices in bounded blocks and records every computation as an
 immutable, content-addressed artifact. This skill encodes how to drive core CyteArc for single-cell
-RNA analysis: which calls to make, in what order, what evidence to check, and what not to do.
+RNA analysis, and for the ATAC, ADT and multimodal runs beside it: which calls to make, in what
+order, what evidence to check, and what not to do.
 
 Read this file first. Then open only the reference modules you need (index below). Paths in this
 skill are relative to the skill directory. The maintained copy lives in the CyteArc repository at
@@ -21,9 +22,10 @@ not thresholds.
 
 ## Setup
 
-- Install into the environment you run Python from: `pip install "cytearc[extra]>=1.0.0rc1"`, plus
-  `cytearc[tsne]` for t-SNE and `cytearc[regulons]` for cisTarget ranking databases. The explicit
-  pre-release floor matters: a bare `cytearc[extra]` does not explicitly request a release candidate.
+- Install into the environment you run Python from: `pip install "cytearc[extra]>1.3.0"`, plus
+  `cytearc[tsne]` for t-SNE and `cytearc[regulons]` for cisTarget ranking databases. The floor
+  matters: releases up to 1.3.0 have `ds.pipeline.run(...)` instead of the recipes this skill uses.
+  pip skips pre-releases, so a release candidate also needs `pip install --pre`.
 - CyteBase datasets are CyteArc stores in public Hugging Face buckets, opened by URI with plain
   CyteArc (`references/data-access.md`). Searching their catalog needs the separate `cytebase`
   package (`pip install cytebase`, which CyteArc does not install) and its own skill:
@@ -41,7 +43,9 @@ not thresholds.
   minutes): write the step as a script that logs to a file and ends with a `DONE` or `FAILED` line,
   run it in the background, and wait with a bounded loop that also stops on a `Traceback` or a dead
   process. If you launch through a wrapper such as `uv run`, put `timeout` inside it
-  (`uv run timeout N python step.py`; the reverse can leave stale `running` records), and track the process by `$!` rather than `pgrep -f`. See
+  (`uv run timeout N python step.py`; the reverse can leave stale `running` records), and track
+  the process by `$!` rather than `pgrep -f`. Pass the recipe a `callback=` that prints one line
+  per stage event, so the log shows which stage is running. See
   `references/performance-and-export.md`. Never poll without a time limit.
 
 ## Mental model
@@ -56,10 +60,14 @@ not thresholds.
   and return refs: `features.hvgs -> features.normalize -> reduction.pca -> graph.ann_index ->
   graph.neighbors -> graph.connectivity -> clusters.leiden / embeddings.umap ->
   markers.search`. An identical call returns the existing artifact without recomputing.
-- **`ds.pipeline.run(label=...)`** runs that whole RNA recipe (filtering, cell cycle, HVG,
-  normalization, PCA, graph, UMAP, Leiden at 0.5/0.75/1.0/1.25 with a silhouette pick, Paris,
-  doublet scores, markers) and returns a durable **`PipelineRun`**: a mapping of output names to
-  refs plus frozen `run.cells` / `run.features` views and `run.report()`.
+- **`ds.pipeline.rna(label=...)`** runs that whole RNA recipe (filtering, cell cycle, HVG,
+  normalization, PCA, graph, UMAP, Leiden at 0.5/0.75/1.0/1.25 with a silhouette pick, doublet
+  scores, markers) and returns a durable **`PipelineRun`**: a mapping of output names to refs plus
+  frozen `run.cells` / `run.features` views and `run.report()`. Each stage takes one keyword:
+  `False` skips an optional stage, `True` runs it, and a mapping of the stage method's keywords
+  configures it (`hvg={"top_n": 2000}`, `pca={"dims": 30}`, `paris=True`). `cells=` takes a
+  boolean column, a cell selection or a completed run. `ds.pipeline.atac()`, `ds.pipeline.adt()`
+  and `ds.pipeline.multimodal([rna, adt])` cover peaks, antibodies and WNN integration.
 - Artifact payload rows follow the artifact's **cell selection**, not `ds.cells.N`.
 - A **mount** is a local writable store whose counts stay in a remote source (`matrixSource`).
   Every pass over counts is a network read; artifacts are written locally.
@@ -72,9 +80,9 @@ not thresholds.
    unless that would remove at least half of the active cells; then a `UserWarning` names a small
    panel or a raw droplet matrix as the likely cause. Pass `min_features_per_cell=-1` to that first
    open (or to `mount_datastore`) to keep every cell; later opens never filter `I`.
-2. **Never filter by editing `I`.** Keep the `cell_selection` ref a filter returns and pass it on, or
-   insert a boolean column and use `cell_key=`. `ds.cells.reset_key("I")` undoes an accidental
-   open-time filter.
+2. **Never filter by editing `I`.** Keep the `cell_selection` ref a filter returns and pass it on
+   (a recipe takes it as `cells=`). `ds.cells.reset_key("I")` undoes an accidental open-time
+   filter.
 3. **Keep every ref you will reuse in a dict** and record them. Never guess artifact IDs or read
    private Zarr paths. Use `ds.artifacts.inspect(ref)`, `ds.artifacts.load(ref)` and
    `ds.artifacts.list(...)`. Cell selections need `scope="datastore"` when listing.
@@ -85,9 +93,9 @@ not thresholds.
    Audit retention per sample and per marker-defined group without author labels, and look at the
    markers of removed cells (`references/quality-control.md`).
 5. **Labels are immutable and runs cannot be resumed.** Use a new `label` for every variant. A rerun
-   reuses every complete artifact, so it is cheap. Choose `snapshot_columns` (design columns you
-   want inside `run.cells` and exports) on the first run, because changing them recomputes
-   everything downstream.
+   reuses every complete artifact, so it is cheap, and a variant recomputes only what its change
+   feeds: a run that only adds `snapshot_columns` (design columns you want inside `run.cells` and
+   exports) reuses every artifact, and a run that adds Harmony reuses everything up to PCA.
 6. **Read pipeline outputs instead of recomputing them.** `run["markers"]`, `run["cell_cycle"]` and
    `run["doublets"]` already exist. A direct `markers.search(run["clusters"], ...)` creates a new
    artifact and rereads all counts.
@@ -127,7 +135,7 @@ not thresholds.
     cyclin family (`^CCN[A-Z]`) also removes cyclins that are not cell-cycle markers, such as
     `CCND1` and `CCNL1`, and it leaves Ig V/J genes in, which can split plasma cells by light chain
     instead of biology. Pass the species string from `references/gene-blacklists.md` when those
-    matter (`params={"hvg": {"blacklist": ...}}` in the pipeline). Add the clonotype add-on only
+    matter (`hvg={"blacklist": ...}` in a recipe). Add the clonotype add-on only
     on marker evidence. A `blacklist=` string replaces the default entirely, and changing it
     creates new HVG, PCA and graph artifacts.
 
@@ -140,7 +148,7 @@ Work in this order. After each step, write the decision and its evidence to an a
 | 1. Inspect | `scripts/inspect_store.py`, `ds.summary()`, existing runs; check raw versus corrected counts | cells, assays, mounted or local, count type, metadata roles | `data-access.md`, `quality-control.md` |
 | 2. Design | identify donor, sample, capture, batch and condition columns; derive missing units | unit of inference, confounding, held-out columns | `integration-and-comparisons.md` |
 | 3. QC | inspect distributions; compare policies; audit removals | chosen policy, cells kept per group, what was removed | `quality-control.md` |
-| 4. Baseline | `ds.pipeline.run(label=..., filtering=<chosen>, snapshot_columns=<design>)` | run id, report, kept cells | `pipeline-runs-and-artifacts.md` |
+| 4. Baseline | `ds.pipeline.rna(label=..., filtering=<chosen>, snapshot_columns=<design>)`; `atac`, `adt`, `multimodal` for other modalities | run id, report diagnostics and warnings, kept cells | `pipeline-runs-and-artifacts.md` |
 | 5. Structure | resolutions, seed stability, nesting, marker support, QC and doublets per cluster | chosen partition and why | `clustering-and-embedding.md` |
 | 6. Branch if needed | HVG count and blacklist, PCs, `k`, subclustering one lineage, Harmony (only if the design allows) | which alternative changed what | `features-and-graphs.md`, `gene-blacklists.md`, `integration-and-comparisons.md` |
 | 7. Annotate | marker tables, canonical panels, gene-set scores | label, markers, negatives, unresolved clusters | `markers-and-annotation.md` |
@@ -175,13 +183,14 @@ kept = np.asarray(ds.artifacts.load(mad5)["values"][:], dtype=bool)
 print(f"MAD 5 keeps {kept.sum()} of {ds.cells.N} cells")
 
 # Baseline run with the chosen policy; freeze design columns you will need later.
-run = ds.pipeline.run(
+run = ds.pipeline.rna(
     label="baseline_mad5",
     filtering={"method": "mad", "n_mads": 5},
     snapshot_columns=[c for c in ("donor_id", "sample_id") if c in ds.cells.columns],
 )
 print(run.status, list(run.keys()))
-(out / "run_report.md").write_text(run.report(format="markdown"))
+print(run.report()["summary"]["warnings"])  # warnings logged during stages, by stage
+(out / "run_report.md").write_text(run.report(format="markdown"))  # with a Diagnostics section
 
 # Figures and tables.
 umap = ds.plots.embedding(run=run, color_by="clusters", show=False)
@@ -221,12 +230,12 @@ any changes you make after seeing the comparison as such.
 | Module | Read when |
 |---|---|
 | `references/data-access.md` | opening, inspecting, converting (H5AD, 10x, MTX, Seurat), CyteBase search, open and mount |
-| `references/quality-control.md` | QC metrics, MAD/manual/per-sample filters, removal audits, doublet scores |
+| `references/quality-control.md` | QC metrics, MAD/manual/per-sample filters, removal audits, cell calling and hashtags in a recipe, ambient RNA between two runs, doublet scores and removal |
 | `references/features-and-graphs.md` | HVGs, normalization, PCA dims, ANN, neighbours, graph diagnostics, branching, subclustering |
 | `references/gene-blacklists.md` | what the default HVG blacklist removes, corrected blacklists for human and mouse, Ig/TCR and haemoglobin add-ons |
 | `references/clustering-and-embedding.md` | Leiden and Paris, choosing a partition, UMAP and t-SNE, labels as arrays |
 | `references/markers-and-annotation.md` | marker tables, canonical marker panels, labelling, AUCell/WAGGR, cell cycle, label comparison |
-| `references/pipeline-runs-and-artifacts.md` | `ds.pipeline.run` options, run reports, artifacts, lineage, failures, handoff record |
+| `references/pipeline-runs-and-artifacts.md` | recipes (`rna`, `atac`, `adt`, `multimodal`) and their stage keywords, CITE-seq and TEA-seq runs, migrating from `pipeline.run`, events and cancellation, run reports, artifacts, lineage, failures, handoff record |
 | `references/plotting.md` | headless figures, run mode versus ref mode, every `ds.plots` method |
 | `references/integration-and-comparisons.md` | study design and units, donors in two arms, composition tests, Harmony and its safety, merging, mapping, condition comparisons |
 | `references/performance-and-export.md` | budgets, long-running steps, streaming, mount repacking, AnnData/H5AD/MTX/CSV and pseudobulk export, subset stores |
@@ -241,7 +250,16 @@ any changes you make after seeing the comparison as such.
 | `RuntimeError: This store is being prepared by another process` | two processes opened a fresh import at once | open again once the other open has finished; if that process was killed, remove the claim the message names |
 | `ChunkNotFoundError` naming `counts` or `countsT` | a partial copy or upload lost a count chunk | restore the store from a complete copy or rebuild it; never set `read_missing_chunks` |
 | Incomplete artifacts left after Ctrl-C or a killed kernel | an interrupted write keeps its slot, marked incomplete | `ds.artifacts.prune_incomplete()` lists them; once no process writes to the store, pass `dry_run=False` |
-| `ValueError` on `ds.pipeline.run(label=...)` | label already completed | new label; reuse makes it cheap |
+| `ValueError: Pipeline label ... is already committed` from a recipe | label already completed | new label; reuse makes it cheap |
+| `AttributeError: ... no attribute 'run'`, or `TypeError: ... unexpected keyword argument` naming `params`, `cell_key`, `hvg_count`, `pca_dims`, `neighbors_k` or `harmony_batch_columns` | code written for `ds.pipeline.run`, which releases up to 1.3.0 had | the recipes and stage keywords: "Migrate from `pipeline.run`" in `references/pipeline-runs-and-artifacts.md` |
+| `TypeError: hvg must be a mapping because the stage always runs` (or `pca`, `neighbors`, ...) | a bool for a stage that always runs | omit it for the defaults, or pass a mapping such as `pca={"dims": 30}` |
+| `ValueError: Unknown <stage> settings [...]; allowed: [...]` | a key that the stage's method does not take | use a key from the list; settings are the method's own keywords |
+| `TypeError: The adt recipe analyzes ADT assays; assay 'assay2' is of type 'Assay' ...` or `TypeError: The store has no ADT assay for the adt recipe ...` (likewise `rna`, `atac`) | the assay's recorded type is not the recipe's modality, as for an antibody assay imported under a generic name | open the store writable once with the type, such as `assay_types={"assay2": "ADT"}`, as the message says, then run the recipe |
+| `ValueError: The store has several RNA assays, [...]; choose one with pipeline.rna(assay=...)` | the default assay is of another modality, and the store holds several of the recipe's | name one with `assay=` |
+| `ValueError: SNN integration needs graphs with the same number of neighbors per cell ...` | the modality runs used different `neighbors={"k": ...}` | rerun the modalities with one `k`, or integrate with `method="wnn"` |
+| `KeyError: 'paris'` on a run | Paris is off by default | `paris=True` on the run, or `ds.clusters.paris(run["connectivity_map"])` |
+| `ds.pipeline.multimodal` raises `Run ... analyzes another cell selection than run ...` | the modality runs hold different cell-selection artifacts, even of the same cells: two runs over `cells="I"` make two selections | run each modality after the first with `cells=<first run>`, such as `ds.pipeline.adt(cells=rna_run)`, and no `filtering` |
+| `PipelineCancelled` | the `CancellationToken` passed as `cancel=` was cancelled | the run is recorded `interrupted`; rerun with a new token, which reuses completed artifacts |
 | `PermissionError` from a producer | store opened with `zarr_mode="r"` and no matching artifact; WAGGR, AUCell, chromVAR, and `regulons.grn` refuse even with one | reopen writable |
 | `KeyError: 'values'` on a Paris ref | Paris stores `labels` | `ds.artifacts.load(ref)["labels"]` |
 | `ImportError` naming igraph or leidenalg from `clusters.leiden` or a pipeline Leiden stage | `backend="igraph"` or `"leidenalg"` needs GPL packages that CyteArc does not install | use the default `backend="cytearc"`; install the packages yourself (`uv pip install leidenalg`) only to match an external or earlier result |
@@ -255,7 +273,7 @@ any changes you make after seeing the comparison as such.
 | `KeyError` for a grouping column of a dot or matrix plot table | summary tables name grouping columns by role: `group`, `subgroup`, `sample` | `res.tables["aggregate"]["group"]`; `res.provenance.extras["group_by"]` names the source columns |
 | A wait for a long step never ends | unbounded polling, or the process died | bounded wait that checks the process and the log tail (Setup) |
 | QC bounds look odd or nothing is filtered | counts are corrected or already filtered | check the matrix first; prefer flag-only or gentle filters |
-| Pipeline fails in stage `'doublets'`: `every selected cell has the same cluster label` | `params["doublets"]["heterotypic_fraction"]` is above 0 (the default is 0) and `params["leiden"]["selected"]` saved a one-cluster partition, but forced heterotypic doublets need two clusters | select a finer resolution or drop `selected`; or `params={"doublets": {"heterotypic_fraction": 0}}`; or `doublets=False` |
+| Pipeline fails in stage `'doublets'`: `every selected cell has the same cluster label` | `doublets={"heterotypic_fraction": ...}` is above 0 (the default is 0) and `leiden={"selected": ...}` saved a one-cluster partition, but forced heterotypic doublets need two clusters | select a finer resolution or drop `selected`; or `doublets={"heterotypic_fraction": 0}`; or `doublets=False` |
 | Writer raises `FileExistsError: Destination ... is not empty` | the path holds data, such as an earlier import | `overwrite=True` (`SubsetZarr`: `overwrite_existing_file=True`) to replace an output that no `DataStore` has opened, or a new path |
 | Writer with `overwrite=True` raises `FileExistsError: Destination ... holds the prepared assays ...` or `... not part of a CyteArc store` | the path holds a store that a `DataStore` has opened, or other files | write to a new path, or delete the old store yourself first |
 | Writer raises `ValueError: Destination ... lies inside the Zarr store at ...` | the path is inside another store, such as `s.zarr/RNA` | write each store to its own directory outside other stores |
@@ -265,8 +283,8 @@ any changes you make after seeing the comparison as such.
 | Merge raises `Sources declare different types for assay ...` | sources record different `assayTypes` for one assay | reopen the wrong source writable with the right `assay_types`, then merge |
 | Merge raises `Cell column '<assay>_I' is reserved for the membership of assay ...` | a plain `<assay>_I` column without membership metadata | import the H5AD again, or drop the plain column in the source with `cells.drop("<assay>_I")` |
 | `cells.insert`/`update_key`/`reset_key`/`drop` raises `Cell column '<assay>_I' is reserved ...` or `... records which cells assay ... measured` | only imports, merges, and derived assays write membership | store values under another name; select measured cells with `select_measured_cells("<assay>")` |
-| `UnmeasuredCellsError: ... reads assay '<assay>' over N of M selected cells that it did not measure` | a merged store whose assay measured only some cells; their zero counts are no measurement | narrow first: `ds.select_measured_cells("<assay>", cell_selection=...)`, which `compare.compute_bulk`, `compare.test`, and QC filters take as `cell_selection=`; labels: `snapshot_cluster_labels(labels, cell_selection=...)` of that; graphs: rebuild over it; pipeline: a `cell_key` column of the cells of `I` that the assay measured, `ds.cells.insert("RNA_measured", ds.cells.fetch_all("I") & ds.cells.fetch_all("RNA_I"))` |
-| `ValueError: None of the s_genes match the assay feature names` from `ds.pipeline.run` | feature names are not gene symbols (Ensembl IDs, synthetic names); matching ignores case, so mouse symbols work | `cell_cycle=False`, or pass lists in the store's naming via `params={"cell_cycle": {"s_genes": [...], "g2m_genes": [...]}}` |
+| `UnmeasuredCellsError: ... reads assay '<assay>' over N of M selected cells that it did not measure` | a merged store whose assay measured only some cells; their zero counts are no measurement | narrow first: `ds.select_measured_cells("<assay>", cell_selection=...)`, which `compare.compute_bulk`, `compare.test`, and QC filters take as `cell_selection=`; labels: `snapshot_cluster_labels(labels, cell_selection=...)` of that; graphs: rebuild over it; recipes: `cells=` that selection with `filtering=True` (a given selection is not filtered by default), or a boolean column of the cells of `I` that the assay measured, `ds.cells.insert("RNA_measured", ds.cells.fetch_all("I") & ds.cells.fetch_all("RNA_I"))`; a modality run given an earlier run as `cells=`: rerun the earlier run on cells that this assay measured too, so that both analyze the same cells |
+| `ValueError: None of the s_genes match the assay feature names` from `ds.pipeline.rna` | feature names are not gene symbols (Ensembl IDs, synthetic names); matching ignores case, so mouse symbols work | `cell_cycle=False`, or pass lists in the store's naming via `cell_cycle={"s_genes": [...], "g2m_genes": [...]}` |
 
 ## Documentation map
 

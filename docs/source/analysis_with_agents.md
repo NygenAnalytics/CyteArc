@@ -72,7 +72,8 @@ Before choosing the next operation:
 
 1. Identify the assays and the current default assay.
 2. Inspect cell and feature metadata columns, including active selections.
-3. Use `ds.pipeline.list_runs()` and run reports to identify durable recipe invocations.
+3. Use `ds.pipeline.list_runs()` and run reports to identify durable recipe invocations;
+   `run.recipe` names the recipe of each run.
 4. Use `ds.artifacts.list(complete_only=True)` to find persisted alternatives.
 5. Use `ds.artifacts.inspect(ref)` before consuming an explicit result.
 6. Use `ds.artifacts.lineage(ref)` to verify upstream inputs.
@@ -100,21 +101,159 @@ This prospective boundary makes unintended writes and retrospective justificatio
 
 ### When to use the pipeline
 
-`ds.pipeline.run()` is a persistent baseline workflow.
-It writes immutable artifacts and a durable run ledger, but does not change live `I` or metadata
-columns. It scores enabled Leiden resolutions in the same coordinates that built the graph (PCA or
-Harmony coordinates or, with `pca_dims=0`, the normalized values), persists the decision as
-`run["cluster_selection"]`, and exposes the selected Leiden candidate ref as `run["clusters"]`.
-Paris remains `run["paris"]` for diagnosis. Silhouette supplies a reproducible baseline, not
-validation or ground truth.
+The pipeline recipes are persistent baseline workflows, one for each modality and one that
+integrates modalities:
+
+- `ds.pipeline.rna()` filters cells on their QC metrics, scores the cell cycle, selects highly
+  variable genes, normalizes them, reduces them with PCA, builds a neighbour graph, embeds it with
+  UMAP, clusters it with Leiden at several resolutions, scores doublets, and ranks markers.
+- `ds.pipeline.atac()` filters cells, selects the most prevalent peaks, normalizes them with
+  TF-IDF, reduces them with LSI, and builds, embeds, and clusters a graph.
+- `ds.pipeline.adt()` leaves isotype controls out of the antibody panel, normalizes the panel with
+  CLR, reduces it with PCA, and builds, embeds, and clusters a graph. It filters cells only when
+  asked, because it usually analyzes the QC-passing cells of an RNA run. Its default pattern
+  leaves out antibodies whose names contain "isotype", "control", or "ctrl"; check the excluded
+  names that the run records against the panel's controls, and set `panel={"exclude": ...}` when
+  they differ.
+- `ds.pipeline.multimodal(runs)` integrates completed runs of the same cells into one graph, then
+  embeds and clusters it.
+
+A recipe checks its call against the store before it writes anything: its keywords and settings,
+the columns and cells that it names, the combinations of its stages, and the setting values that
+can be checked without reading data. A `TypeError`, `ValueError`, or `KeyError` from the call
+therefore means that nothing was written: correct the call and run it again. A few values, such as
+`ann_index` `ann_metric`, a Leiden `backend`, and the numeric `doublets` settings, are checked only
+when their stage runs, as are limits that depend on the data. A `PipelineExecutionError` names the
+stage that failed, and the run is recorded as failed; the stages before it keep their artifacts,
+which a corrected run reuses. A run writes immutable artifacts and a durable run ledger, but does
+not change live `I` or metadata columns.
+
+Configure a stage with its own keyword. Its settings are the keywords of the stage's method and
+mean what they mean there: `hvg={"top_n": 2000}` for `features.hvgs`, `pca={"dims": 30}` for
+`reduction.pca`, `neighbors={"k": 21}` for `graph.neighbors`, or
+`harmony={"batch_columns": ["sample"]}` for Harmony. An optional stage, such as `cell_cycle`,
+`doublets`, `paris`, or `tsne`, takes `False` to skip it, `True` for its defaults, or a mapping of
+settings. An omitted setting takes the method's default, except for a few defaults that a recipe
+fits to its data, such as an ADT run's PCA dimensions, at most one fewer than its antibodies.
+`cells` names the cells to analyze: a boolean cell column (`"I"` by default), a cell-selection
+artifact, or a completed run, whose analysis cells are reused as they are. An RNA or ATAC run over
+a column filters its cells on their QC metrics by default, and so does an RNA run that calls cells
+or demultiplexes hashtags, whatever its `cells`. Otherwise a run over a selection or over another
+run's cells filters only when `filtering` asks, and an ADT run filters only when asked.
+
+The single-modality recipes score each Leiden candidate in the coordinates that built the graph
+(PCA, LSI, or Harmony coordinates or, with `pca={"dims": 0}`, the normalized values), persist the
+decision as `run["cluster_selection"]`, and expose the selected candidate's ref as
+`run["clusters"]`. `leiden={"partitions": [...], "selected": r}` saves the candidate at resolution
+`r` instead. Silhouette supplies a reproducible baseline, not validation or ground truth. Paris is
+off by default; `paris=True` adds a Paris clustering, `run["paris"]`, for diagnosis.
 
 Use `run.cells` and `run.features` for frozen inspection. Keep presentation and storage mutation on
 the datastore: `ds.plots.embedding(run=run, ...)`, `ds.markers.load(marker=run["markers"], ...)`,
 and `ds.to_anndata(run=run)`. Use an immutable run label when a completed run needs a
 human-readable name. Use granular methods and explicit artifact refs for alternatives outside the
-fixed recipe. For example,
+recipe stages. For example,
 `ds.plots.embedding(layout=embedding_ref, color_by=cluster_ref)` consumes granular outputs without
 materializing either as metadata.
+
+### Raw droplets and hashed captures
+
+Two optional RNA stages run before QC filtering, in this order:
+
+- `cell_calling=True` calls cells in an unfiltered droplet matrix with EmptyDrops, so that QC
+  filtering and its automatic bounds see cells rather than empty droplets. A matrix of called cells
+  needs no cell calling. The stage tests the barcodes of `cells`, which must therefore include the
+  empty droplets: open a store of raw droplets with `min_features_per_cell=-1`, which keeps every
+  barcode in `I`. Each capture has its own ambient profile and knee, so pass
+  `cell_calling={"sample_column": "<capture column>"}` to call the captures of a merged store
+  apart.
+- `hashing=True` demultiplexes the store's HTO assay (`hashing={"assay": ...}` names one when the
+  store has several) and keeps the cells with exactly one hashtag, so negative droplets and
+  multiplets of different hashtags leave the run. MAD filtering bounds are then computed within
+  each hashtag's cells unless `filtering` names a `sample_column`. Hashing cannot see a doublet of
+  two cells with the same hashtag, so keep doublet scoring on.
+
+Report each stage's summary: the knee and the number of called cells, which a run that calls its
+captures apart reports for each capture as `kneePerCapture` and `calledPerCapture`, and the cells
+of each hashtag with the negatives and multiplets.
+
+### Ambient RNA between two runs
+
+Ambient RNA correction is not a recipe stage. It is an explicit step between two runs, because the
+contamination estimate needs clusters of the uncorrected cells and the correction writes a new
+assay:
+
+1. Run a first RNA analysis over the called cells, `first = ds.pipeline.rna(...)`, for its
+   clusters.
+2. Estimate the soup from empty droplets with `qc.ambient_profile`, which needs a store of raw
+   droplets.
+3. Estimate the contamination of the first run's cells with `qc.ambient_contamination`, passing
+   `first["analysis_cell_selection"]`, the profile, `gene_sets`, and
+   `clusters=first["clusters"]`. Choose gene sets that some cell types of the sample cannot
+   express, such as haemoglobin genes outside erythroid cells or immunoglobulin genes outside B and
+   plasma cells.
+4. Write the corrected assay with `qc.correct_ambient(estimate, assay_label="RNA_soupx")`.
+5. Analyze the corrected counts over the same cells:
+   `ds.pipeline.rna(assay="RNA_soupx", cells=first)`.
+
+An estimate of exactly 0 comes with a warning: the gene sets held no counts in the cells that
+should not express them, which bounds the contamination but does not measure it. Report such an
+estimate rather than correct with it. Compare the markers of both runs: the correction should
+lower soup genes in clusters that do not express them, and a cluster that only one run finds needs
+its own marker evidence.
+
+### Doublets in a second pass
+
+The RNA recipe scores doublets after it clusters the cells (`doublets=True` by default), but it
+removes nothing: the run's graph, clusters, and markers include the predicted doublets. To analyze
+singlets, select them and run again over them:
+
+```python
+# Select the cells that the first run's doublet scoring calls singlets.
+singlets = ds.select_cells(first["doublets"], value="predicted_doublets", include=[False])
+
+# Analyze the singlets again, from feature selection to markers.
+second = ds.pipeline.rna(cells=singlets, doublets=False, label="singlets")
+```
+
+The second run rebuilds the highly variable genes, PCA, graph, and clusters without the doublets.
+With ambient RNA correction, score doublets in the run over the corrected counts and remove them
+in a run after it. Doublets form among the cells of one capture whatever their hashtags, so score
+them within each capture with `doublets={"sample_column": "<capture column>"}`, never within each
+hashtag; a run with Harmony scores within its batches unless `doublets` names another
+`sample_column`. Report the predicted doublet rate of each sample from the stage summary and
+compare it with the rate that the capture's loading leads one to expect. A doublet of two cells of
+one type looks like a singlet and is rarely called. Cells between two populations, such as an
+intermediate state, can also score high, so check the markers of a cluster that is rich in
+predicted doublets before removing it as an artifact.
+
+### Modalities of the same cells
+
+A multimodal run integrates completed runs that analyze exactly the same cells, and it refuses
+runs over different cells. Run the modality whose QC defines the cohort first, usually RNA, and
+pass that run as `cells` to the others, which reuse its analysis cells as they are:
+
+```python
+# Filter and analyze the RNA cells; this run defines the cohort.
+rna = ds.pipeline.rna(label="rna")
+
+# Analyze the antibodies of the same cells.
+adt = ds.pipeline.adt(cells=rna, label="adt")
+
+# Integrate the two graphs with WNN, then embed and cluster the joint graph.
+joint = ds.pipeline.multimodal([rna, adt], label="rna_adt_wnn")
+```
+
+When the cohort should pass the QC of every modality, name the QC metrics of each modality in the
+first run's `filtering={"attrs": [...]}`, or pass one QC selection as `cells` to every run. WNN
+(`method="wnn"`, the default) weighs each modality for each cell and needs runs whose graphs were
+built on PCA, LSI, or Harmony coordinates. Inspect the modality weights, `weight_<assay>` in
+`joint.cells` and `meanWeights` in the integration stage's summary: a joint cluster whose cells
+rely on one modality is supported by that modality alone. The integrated graph has no shared
+coordinates in which to compare Leiden candidates by silhouette, so a multimodal run clusters at
+one resolution, 1.0 by default, and several `partitions` need a `selected` resolution.
+`joint["markers_<assay>"]` ranks each modality's features for the joint clusters; name a joint
+cluster from the markers of every modality.
 
 ## Scientific decision loop
 
@@ -165,6 +304,8 @@ Start with [](tutorials/dataset_merging.ipynb) when compatible datasets need one
 - Use fixed-reference mapping when queries must remain comparable to one reference over time.
 - Use WNN by default for modalities measured in the same cells. Use SNN only when equal graph
   support is the intended comparison. Neither method integrates independent batches.
+  `ds.pipeline.multimodal(runs, method="wnn")` or `method="snn"` builds either one from modality
+  runs over the same cells (see [Modalities of the same cells](#modalities-of-the-same-cells)).
 
 The batch-correction workflow compares source mixing and structural preservation.
 CyteArc's `metric_*` methods provide evidence, not an automatic winner.
@@ -240,8 +381,8 @@ Do not write arbitrary artifact groups directly.
 Classify the problem before retrying:
 
 - **Input or schema:** inspect the source format and verify assay, feature, and cell identifiers.
-- **Run or provenance:** inspect the pipeline report, stored cell selection, feature-selection refs,
-  artifact status, and lineage.
+- **Run or provenance:** inspect the pipeline report (each stage's status, summary, and warnings),
+  stored cell selection, feature-selection refs, artifact status, and lineage.
   `ArtifactResolutionError.code` distinguishes missing, incomplete, or changed selection inputs.
   Do not consume incomplete artifacts.
 - **Resource or I/O:** inspect the configured memory budget, worker count, storage profile, and remote latency.
@@ -250,19 +391,46 @@ Classify the problem before retrying:
 - **Numerical or graph:** check dimensions, graph components, neighbour count, convergence, validity masks, and method-specific diagnostics.
 - **Scientific ambiguity:** preserve branches, seek another independent form of evidence, narrow the claim, or report that the available design does not resolve the alternatives.
 
-In a granular workflow, retry the lowest failed stage. A failed pipeline run is not resumable;
-start a new run, which can reuse matching complete artifacts from the earlier attempt.
+In a granular workflow, retry the lowest failed stage. A failed, interrupted, or cancelled pipeline
+run is not resumable; start a new run, which can reuse matching complete artifacts from the earlier
+attempt.
 
-## Progress and deterministic comparisons
+## Progress, cancellation, and deterministic comparisons
 
-`ds.pipeline.run(..., callback=...)` emits
-[`PipelineEvent`](/api/pipeline.html#cytearc.datastore.pipeline_accessor.PipelineEvent) values when stages start, complete,
-fail, or are interrupted.
-Use the callback to update an external progress record; callback failures do not control the pipeline.
-The durable report records stage timing, sampled process-tree RSS, and exact created or reused
-artifact plans. Granular analytical methods return artifact references.
+Every recipe takes `callback=`, which receives each
+[`PipelineEvent`](/api/pipeline.html#cytearc.datastore.pipeline_accessor.PipelineEvent) of the run,
+and `with cytearc.pipeline_listener(listener):` sends the events of every run started in its block
+to `listener`. Use either to update an external progress record. A run delivers its events in
+order, on the thread that runs it: `run_started`; for each stage, `stage_started`, any
+`stage_progress` events, and then `stage_completed`, `stage_failed`, or `stage_interrupted`, or
+only `stage_skipped` for a skipped stage; and last `run_completed`, `run_failed`, or
+`run_interrupted`. While a stage runs, CyteArc's progress bars send throttled `stage_progress`
+events, even when progress display is off. `event.to_dict()` returns the event as JSON values for
+a log. A callback or listener that raises is logged and ignored, so it cannot stop or fail a run;
+a slow one delays the run, so hand events to a queue instead.
+
+To stop a run, create a token, `token = cytearc.CancellationToken()`, pass it as `cancel=token`,
+and call `token.cancel("reason")` from any thread, such as on a user's stop request. The run stops
+at its next safe checkpoint and is recorded as interrupted with the interruption kind `cancelled`:
+a stage whose work the cancellation cut short is recorded as interrupted, and one whose work had
+finished as completed. The call raises `cytearc.PipelineCancelled`, which names the run, the stage
+whose work was cut short, or None when no stage's work was, and the reason. A token that is
+already cancelled stops the next run before it writes anything. Completed stages keep their
+artifacts, so a new run with the same settings reuses them. Do not interrupt a run by mutating the
+store or its records.
+
+The durable report, `run.report()` or `run.report(format="markdown")`, records each stage's status,
+timing, sampled process-tree RSS, exact created or reused artifact plans, a summary of its outputs,
+and the warnings that CyteArc logged while it ran. Read the summaries before interpreting a run:
+the cells that filtering removed, the variance that PCA explains, each Leiden candidate's number of
+clusters and their largest and smallest sizes, the silhouette scores of cluster selection, and the
+doublet rate of each sample. Report every stage warning with the result it qualifies. Granular
+analytical methods return artifact references.
 
 When comparing branches, retain the same cells, features, neighbour settings, and seeds unless one is the variable being tested.
+Two runs that differ in one stage keyword, or only in their `snapshot_columns`, share every artifact
+that does not depend on that difference, so their difference isolates that choice: runs with and
+without Harmony share their filtered cells, highly variable genes, and PCA.
 Record every deliberate difference.
 A layout can vary in orientation or spacing without representing different biology.
 

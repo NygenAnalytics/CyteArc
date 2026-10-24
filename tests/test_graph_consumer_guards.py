@@ -8,6 +8,7 @@ integration refuses graphs of different k before loading any of them.
 """
 
 import functools
+import inspect
 import shutil
 from pathlib import Path
 
@@ -20,7 +21,9 @@ from zarr.storage import MemoryStore
 from cytearc import DataStore
 from cytearc.clustering.leiden import native_leiden_peak_bytes
 from cytearc.datastore._operations.graph import _GraphOperationsMixin
-from cytearc.datastore._pipeline_recipe import _resolve_params
+from cytearc.datastore._pipeline.executor import RecipePlan
+from cytearc.datastore._pipeline.recipes.rna import resolve_rna
+from cytearc.datastore.pipeline_accessor import PipelineAccessor
 from cytearc.embeddings.sgtsne import sgtsne_input_bytes
 from cytearc.embeddings.umap import fuzzy_simplicial_set, umap_peak_bytes
 from cytearc.graph.arguments import graph_load_flags, umap_graph_flags
@@ -448,6 +451,17 @@ def test_graph_consumers_check_flags_before_reading(writable, monkeypatch) -> No
             call()
 
 
+def _resolve_rna(store: DataStore, **keywords: object) -> RecipePlan:
+    """Resolve ``store.pipeline.rna(**keywords)`` without running it."""
+    parameters = inspect.signature(PipelineAccessor.rna).parameters
+    defaults = {
+        name: parameter.default
+        for name, parameter in parameters.items()
+        if name not in {"self", "callback", "cancel"}
+    }
+    return resolve_rna(store, **(defaults | keywords))
+
+
 @pytest.mark.parametrize(
     ("section", "flags", "message"),
     [
@@ -458,14 +472,18 @@ def test_graph_consumers_check_flags_before_reading(writable, monkeypatch) -> No
         ("leiden", {"symmetric_graph": 1}, "symmetric_graph must be a boolean"),
     ],
 )
-def test_pipeline_params_check_graph_flags_before_a_run(section, flags, message):
+def test_pipeline_stage_settings_check_graph_flags_before_a_run(
+    writable, section, flags, message
+):
+    store, _refs = writable
     with pytest.raises((ValueError, TypeError), match=message):
-        _resolve_params({section: flags})
+        store.pipeline.rna(**{section: flags})
+    # The recipe refuses the flags before it records a run.
+    assert store.pipeline.list_runs() == ()
 
-    accepted = _resolve_params(
-        {section: {"symmetric_graph": False, "graph_upper_only": False}}
-    )[0]
-    assert accepted == {section: {"symmetric_graph": False, "graph_upper_only": False}}
+    accepted = {"symmetric_graph": False, "graph_upper_only": False}
+    recorded = _resolve_rna(store, **{section: accepted}).config["stages"][section]
+    assert {flag: recorded[flag] for flag in accepted} == accepted
 
 
 def test_embeddings_refuse_other_references_as_initialization(

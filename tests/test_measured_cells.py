@@ -24,7 +24,9 @@ import pytest
 import zarr
 
 from cytearc import DataStore
-from cytearc.datastore._pipeline_recipe import resolve_pipeline_recipe
+from cytearc.datastore._pipeline.recipes.adt import resolve_adt
+from cytearc.datastore._pipeline.recipes.atac import resolve_atac
+from cytearc.datastore._pipeline.recipes.rna import resolve_rna
 from cytearc.datastore.base_datastore import BaseDataStore
 from cytearc.features.values import (
     fetch_normalized_feature_matrix,
@@ -249,26 +251,84 @@ _PIPELINE: dict[str, Any] = {
     "paris": False,
     "doublets": False,
     "markers": False,
-    "hvg_count": 10,
-    "pca_dims": 3,
-    "neighbors_k": 5,
-    "leiden": {"partitions": [0.5, 1.0]},
     # Infinity is no setting, so a cutoff above every cell count keeps the
     # genes that these small stores detect in nearly every cell.
-    "params": {"hvg": {"min_cells": 1, "max_cells": _N_CELLS + 1}},
+    "hvg": {"top_n": 10, "min_cells": 1, "max_cells": _N_CELLS + 1},
+    "pca": {"dims": 3},
+    "neighbors": {"k": 5},
+    "leiden": {"partitions": [0.5, 1.0]},
+}
+# The ATAC and ADT recipe settings of these tests, with every keyword of
+# their resolvers but the cells.
+_ATAC: dict[str, Any] = {
+    "assay": None,
+    "label": None,
+    "filtering": None,
+    "prevalent_peaks": {"top_n": 20},
+    "normalization": None,
+    "lsi": {"dims": 3},
+    "harmony": None,
+    "ann_index": None,
+    "neighbors": {"k": 5},
+    "connectivity": None,
+    "embedding_initialization": None,
+    "umap": False,
+    "tsne": False,
+    "leiden": False,
+    "paris": False,
+    "membership_strength": False,
+    "markers": False,
+    "snapshot_columns": (),
+    "species": None,
+}
+_ADT: dict[str, Any] = {
+    "assay": None,
+    "label": None,
+    "filtering": None,
+    "panel": None,
+    "normalization": None,
+    "pca": None,
+    "harmony": None,
+    "ann_index": None,
+    "neighbors": {"k": 5},
+    "connectivity": None,
+    "embedding_initialization": None,
+    "umap": False,
+    "tsne": False,
+    "leiden": False,
+    "paris": False,
+    "membership_strength": False,
+    "markers": False,
+    "snapshot_columns": (),
+    "species": None,
 }
 
 
-def _recipe(store: DataStore, cell_key: str, **settings: Any) -> Any:
-    return resolve_pipeline_recipe(
+def _recipe(store: DataStore, cells: Any, **settings: Any) -> Any:
+    """Resolve the RNA recipe over ``cells`` without running it."""
+    return resolve_rna(
         store,
         assay=None,
         label=None,
-        cell_key=cell_key,
-        harmony_batch_columns=None,
+        cells=cells,
+        cell_calling=False,
+        hashing=False,
+        normalization=None,
+        harmony=None,
+        ann_index=None,
+        connectivity=None,
+        embedding_initialization=None,
+        tsne=False,
+        membership_strength=False,
         snapshot_columns=(),
+        species=None,
         **{**_PIPELINE, **settings},
     )
+
+
+def _atac_recipe(store: DataStore, cells: Any) -> Any:
+    """Resolve the ATAC recipe over ``cells`` without running it."""
+    return resolve_atac(store, cells=cells, **_ATAC)
 
 
 def _narrowed_labels(store: DataStore, labels: ArtifactRef) -> ArtifactRef:
@@ -294,6 +354,8 @@ class _Entry:
     remedy: str
     # Whether the request reads every cell of the store.
     every_cell: bool = True
+    # The test ID, when the operation has several entries.
+    name: str | None = None
 
 
 _SELECTION = "select_measured_cells("
@@ -306,6 +368,28 @@ _CELL_KEY = (
     "`ds.cells.insert('RNA_measured', ds.cells.fetch_all('I') & "
     "ds.cells.fetch_all('RNA_I'))`."
 )
+
+
+def _cells_remedy(assay: str) -> str:
+    """Return the remedy of a recipe whose ``cells`` hold unmeasured cells of I."""
+    return (
+        f"Pass as cells the selection from `select_measured_cells('{assay}', "
+        "cell_selection=...)`, or a boolean cell column that is True only for the "
+        f"cells of 'I' that it measured, such as '{assay}_measured' after "
+        f"`ds.cells.insert('{assay}_measured', ds.cells.fetch_all('I') & "
+        f"ds.cells.fetch_all('{assay}_I'))`."
+    )
+
+
+def _selection_cells_remedy(assay: str) -> str:
+    """Return the remedy of a recipe given unmeasured cells as a selection or run."""
+    return (
+        f"Pass as cells the selection from `select_measured_cells('{assay}', "
+        "cell_selection=...)`. When the cells are an earlier run's, run that "
+        "earlier run on cells that this assay measured too, so that the runs "
+        "analyze the same cells."
+    )
+
 
 _ENTRIES = (
     _Entry(
@@ -498,14 +582,30 @@ _ENTRIES = (
         _CELL_KEY,
     ),
     _Entry(
-        "pipeline.run",
+        "pipeline.rna",
         "RNA",
         lambda s, m: _recipe(s, "I"),
         lambda s, m: _recipe(s, "RNA_I"),
-        _CELL_KEY,
+        _cells_remedy("RNA"),
+    ),
+    # A recipe refuses a selection of cells as it refuses a cell column.
+    _Entry(
+        "pipeline.rna",
+        "RNA",
+        lambda s, m: _recipe(s, m.refs["all"]),
+        lambda s, m: _recipe(s, m.refs["measured_RNA"]),
+        _selection_cells_remedy("RNA"),
+        name="pipeline.rna-selection",
+    ),
+    _Entry(
+        "pipeline.atac",
+        "ATAC",
+        lambda s, m: _atac_recipe(s, "I"),
+        lambda s, m: _atac_recipe(s, m.refs["measured_ATAC"]),
+        _cells_remedy("ATAC"),
     ),
 )
-_IDS = [entry.operation for entry in _ENTRIES]
+_IDS = [entry.name or entry.operation for entry in _ENTRIES]
 
 
 def _assert_refusal(error: UnmeasuredCellsError, entry: _Entry) -> None:
@@ -693,7 +793,7 @@ def test_the_pipeline_runs_over_the_cells_that_its_remedy_names(measured) -> Non
     store.cells.insert(
         "RNA_measured", store.cells.fetch_all("I") & store.cells.fetch_all("RNA_I")
     )
-    run = store.pipeline.run(label="measured", cell_key="RNA_measured", **_PIPELINE)
+    run = store.pipeline.rna(label="measured", cells="RNA_measured", **_PIPELINE)
 
     assert run.status == "completed"
     np.testing.assert_array_equal(
@@ -701,6 +801,15 @@ def test_the_pipeline_runs_over_the_cells_that_its_remedy_names(measured) -> Non
         np.asarray(store.cells.fetch_all("RNA_I"), dtype=bool)
         & np.asarray(store.cells.fetch_all("I"), dtype=bool),
     )
+    # The remedy's selection, or a completed run over measured cells, gives
+    # the next run its input cells as they are.
+    for cells, expected in (
+        (measured.refs["measured_RNA"], measured.refs["measured_RNA"]),
+        (run, run["analysis_cell_selection"]),
+    ):
+        again = store.pipeline.rna(cells=cells, **_PIPELINE)
+        assert again.status == "completed"
+        assert again["input_cell_selection"] == expected
 
 
 @pytest.mark.slow
@@ -710,8 +819,8 @@ def test_results_over_unmeasured_cells_stay_readable_and_their_runs_reopen(
     """Results computed over unmeasured cells are neither detected nor repaired.
 
     They stay listable, loadable, and traceable, a completed run of such a
-    configuration reopens, and running its configuration again raises before
-    any stage.
+    configuration reopens, and running its configuration again, or a run over
+    its cells, raises before any stage.
     """
     store = measured.open()
     with pytest.MonkeyPatch.context() as patch:
@@ -720,10 +829,10 @@ def test_results_over_unmeasured_cells_stay_readable_and_their_runs_reopen(
             BaseDataStore, "_require_measured_cells", lambda *_args, **_kwargs: None
         )
         patch.setattr(
-            "cytearc.datastore._pipeline_recipe.require_measured_cells",
+            "cytearc.datastore._pipeline.stages.require_measured_cells",
             lambda *_args, **_kwargs: None,
         )
-        store.pipeline.run(label="earlier", **_PIPELINE)
+        store.pipeline.rna(label="earlier", **_PIPELINE)
     legacy = measured.refs["legacy_normalized"]
 
     assert legacy in store.artifacts.list(from_assay="RNA", kind="normalized")
@@ -732,12 +841,18 @@ def test_results_over_unmeasured_cells_stay_readable_and_their_runs_reopen(
     assert measured.refs["all"] in set(store.artifacts.lineage(legacy).graph)
     reopened = store.pipeline.open(label="earlier")
     assert reopened.status == "completed"
-    assert reopened.report()["run"]["config"]["cellKey"] == "I"
+    assert reopened.report()["run"]["config"]["cells"] == {"column": "I"}
 
     runs = [run.run_id for run in store.pipeline.list_runs()]
     before = _tree(measured.path)
-    with pytest.raises(UnmeasuredCellsError, match="pipeline.run"):
-        store.pipeline.run(label="again", **_PIPELINE)
+    with pytest.raises(UnmeasuredCellsError, match="pipeline.rna"):
+        store.pipeline.rna(label="again", **_PIPELINE)
+    # A run over the completed run's cells reads RNA over every cell too.
+    with pytest.raises(UnmeasuredCellsError) as raised:
+        store.pipeline.rna(label="again", cells=reopened, **_PIPELINE)
+    assert (raised.value.operation, raised.value.remedy) == ("pipeline.rna", "cells")
+    assert (raised.value.unmeasured, raised.value.selected) == (_N_ADT, _N_CELLS)
+    assert _selection_cells_remedy("RNA") in str(raised.value)
     assert [run.run_id for run in store.pipeline.list_runs()] == runs
     assert _tree(measured.path) == before
 
@@ -900,12 +1015,11 @@ def test_unmeasured_cells_error_keeps_its_fields_through_pickling() -> None:
     assert (copy.unmeasured, copy.selected, copy.remedy) == (2, 9, "graph")
     assert copy.cell_key is None
     assert str(copy) == str(error)
-    keyed = UnmeasuredCellsError(
-        "pipeline.run", "RNA", "RNA_I", 1, 4, "cell_key", "kept"
-    )
-    assert "cells of 'kept' that it measured" in str(keyed)
-    assert pickle.loads(pickle.dumps(keyed)).cell_key == "kept"
-    assert str(pickle.loads(pickle.dumps(keyed))) == str(keyed)
+    for operation, remedy in (("to_anndata", "cell_key"), ("pipeline.rna", "cells")):
+        keyed = UnmeasuredCellsError(operation, "RNA", "RNA_I", 1, 4, remedy, "kept")
+        assert "cells of 'kept' that it measured" in str(keyed)
+        assert pickle.loads(pickle.dumps(keyed)).cell_key == "kept"
+        assert str(pickle.loads(pickle.dumps(keyed))) == str(keyed)
 
 
 def test_membership_helpers_reject_unprepared_tables_and_misaligned_values() -> None:
@@ -1624,7 +1738,7 @@ def test_layers_refuse_cells_that_their_assay_did_not_measure(spliced) -> None:
     assert store.to_anndata(layers={"raw": "RNA"}).layers["raw"].shape == (72, 40)
 
     # A run export declares no membership at all.
-    run = store.pipeline.run(label="layers", **_PIPELINE)
+    run = store.pipeline.rna(label="layers", **_PIPELINE)
     with pytest.raises(UnmeasuredCellsError, match="SubsetZarr") as raised:
         store.to_anndata(run=run, layers={"unspliced": "URNA"})
     assert (raised.value.unmeasured, raised.value.selected) == (24, 72)
@@ -1640,18 +1754,124 @@ def test_pipeline_filtering_on_another_assays_metric_reads_that_assay(
 ) -> None:
     """The pipeline's QC filter reads the assay of each metric, as QC does."""
     store = _open(spliced)
+    every = store.snapshot_cell_selection("I")
     before = _tree(spliced)
     filtering = {"method": "mad", "attrs": ["RNA_nCounts", "URNA_nCounts"]}
 
-    with pytest.raises(UnmeasuredCellsError) as raised:
-        store.pipeline.run(label="urna", **{**_PIPELINE, "filtering": filtering})
+    # A selection of cells is checked as a cell column is.
+    for cells, remedy in (
+        ("I", _cells_remedy("URNA")),
+        (every, _selection_cells_remedy("URNA")),
+    ):
+        with pytest.raises(UnmeasuredCellsError) as raised:
+            store.pipeline.rna(
+                label="urna", cells=cells, **{**_PIPELINE, "filtering": filtering}
+            )
 
-    assert (raised.value.operation, raised.value.assay) == ("pipeline.run", "URNA")
-    assert (raised.value.unmeasured, raised.value.selected) == (24, 72)
-    assert "ds.cells.fetch_all('URNA_I')" in str(raised.value)
+        assert (raised.value.operation, raised.value.assay) == ("pipeline.rna", "URNA")
+        assert (raised.value.unmeasured, raised.value.selected) == (24, 72)
+        assert raised.value.remedy == "cells"
+        assert remedy in str(raised.value)
     assert _tree(spliced) == before
     # The pipeline's own assay measured every cell, so its metrics pass.
     _recipe(store, "I", filtering={"attrs": ["RNA_nCounts"]})
+
+
+def _merge_partial_adt(base: Path) -> Path:
+    """Merge 40 cells with RNA and ADT and 24 cells with RNA only.
+
+    RNA measured every cell, and ADT the 40 cells of the CITE-seq source.
+    """
+    rna = mapping_counts()
+    adt = np.random.default_rng(19).integers(1, 20, size=(40, 4))
+    write_count_store(str(base / "cite.zarr"), {"RNA": rna[:40], "ADT": adt}, "uint32")
+    write_count_store(str(base / "rna.zarr"), {"RNA": rna[40:]}, "uint32")
+    sources = [
+        DataStore(
+            str(base / f"{name}.zarr"),
+            default_assay="RNA",
+            min_features_per_cell=0,
+            nthreads=1,
+        )
+        for name in ("cite", "rna")
+    ]
+    path = base / "merged.zarr"
+    DataStoreMerge(sources, str(path), ["cite", "rna"], nthreads=1).dump()
+    return path
+
+
+@pytest.fixture(scope="module")
+def partial_adt(tmp_path_factory) -> Path:
+    return _merge_partial_adt(tmp_path_factory.mktemp("partial_adt"))
+
+
+def _assert_adt_refusal(error: UnmeasuredCellsError, remedy: str) -> None:
+    assert (error.operation, error.assay, error.column) == (
+        "pipeline.adt",
+        "ADT",
+        "ADT_I",
+    )
+    assert (error.unmeasured, error.selected, error.remedy) == (24, 64, "cells")
+    assert str(error).startswith(
+        "`pipeline.adt` reads assay 'ADT' over 24 of 64 selected cells that it did "
+        "not measure: cell column 'ADT_I' is False for them. "
+    )
+    assert remedy in str(error)
+
+
+def test_the_adt_recipe_refuses_cells_that_its_assay_did_not_measure(
+    partial_adt,
+) -> None:
+    store = _open(partial_adt)
+    every = store.snapshot_cell_selection("I")
+    runs = [run.run_id for run in store.pipeline.list_runs()]
+    before = _tree(partial_adt)
+
+    for cells, remedy in (
+        ("I", _cells_remedy("ADT")),
+        (every, _selection_cells_remedy("ADT")),
+    ):
+        with pytest.raises(UnmeasuredCellsError) as raised:
+            store.pipeline.adt(cells=cells, **_ADT)
+        _assert_adt_refusal(raised.value, remedy)
+    assert [run.run_id for run in store.pipeline.list_runs()] == runs
+    assert _tree(partial_adt) == before
+    # The remedy's selection holds the cells that ADT measured.
+    resolve_adt(
+        store,
+        cells=store.select_measured_cells("ADT", cell_selection=every),
+        **_ADT,
+    )
+
+
+@pytest.mark.slow
+def test_the_adt_recipe_refuses_an_rna_run_over_cells_without_antibodies(
+    partial_adt,
+) -> None:
+    """An ADT run takes the cells of an RNA run only where ADT measured them."""
+    store = _open(partial_adt)
+    rna_run = store.pipeline.rna(**{**_PIPELINE, "leiden": False})
+    runs = [run.run_id for run in store.pipeline.list_runs()]
+    before = _tree(partial_adt)
+
+    with pytest.raises(UnmeasuredCellsError) as raised:
+        store.pipeline.adt(cells=rna_run, **_ADT)
+
+    # The cells are the RNA run's, so the remedy restricts that run.
+    _assert_adt_refusal(raised.value, _selection_cells_remedy("ADT"))
+    assert [run.run_id for run in store.pipeline.list_runs()] == runs
+    assert _tree(partial_adt) == before
+    measured_cells = store.select_measured_cells(
+        "ADT", cell_selection=rna_run["analysis_cell_selection"]
+    )
+    adt_run = store.pipeline.adt(cells=measured_cells, **_ADT)
+    assert adt_run.status == "completed"
+    np.testing.assert_array_equal(
+        np.asarray(
+            store.artifacts.load(adt_run["analysis_cell_selection"])["values"][:]
+        ),
+        np.asarray(store.cells.fetch_all("ADT_I"), dtype=bool),
+    )
 
 
 def test_cluster_tree_fill_values_show_unmeasured_cells_as_missing(measured) -> None:

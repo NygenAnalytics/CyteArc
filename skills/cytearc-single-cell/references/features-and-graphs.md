@@ -7,8 +7,8 @@ chain of artifacts, then branch or subcluster it safely. Docs: <https://docs.nyg
 
 ## When to use
 
-- A pipeline default (`hvg_count=1000`, `pca_dims=21`, `neighbors_k=11`) needs to change, or two
-  settings need comparing side by side.
+- A recipe default (`hvg={"top_n": 1000}`, `pca={"dims": 21}`, `neighbors={"k": 11}`) needs to
+  change, or two settings need comparing side by side.
 - Building a graph on a custom cell selection (QC variant, subset) or feature list.
 - Subclustering one lineage of a coarse partition with its own HVGs, PCA and graph.
 - Diagnosing a graph before clustering or embedding.
@@ -23,17 +23,20 @@ chain of artifacts, then branch or subcluster it safely. Docs: <https://docs.nyg
 - Identity is operation + scientific parameters + exact inputs. An identical call returns the
   existing ref without recomputing; a changed `k` reuses normalization, PCA and the ANN index.
   Changing cells or features invalidates every downstream stage.
-- `ds.pipeline.run(hvg_count=, pca_dims=, neighbors_k=)` forwards to `features.hvgs(top_n=)`,
-  `reduction.pca(dims=)` and `graph.neighbors(k=)`. Explicit calls with the same arguments return the
-  very refs in `run[...]`. `pca_dims=0` skips PCA and builds the graph on the normalized HVG
-  values, `run["normalized"]`, which needs `doublets=False` and no Harmony (both need PCA).
+- A recipe's `hvg`, `normalization`, `pca`, `ann_index`, `neighbors` and `connectivity` mappings
+  take the keywords of `features.hvgs`, `features.normalize`, `reduction.pca`, `graph.ann_index`,
+  `graph.neighbors` and `graph.connectivity`. Explicit calls with the same arguments return the
+  very refs in `run[...]`. PCA needs `dims` + 1 features, so a recipe refuses `pca` `dims` that
+  are not below `hvg` `top_n` before it writes anything. `pca={"dims": 0}` skips PCA and builds
+  the graph on the normalized HVG values, `run["normalized"]`, which needs `doublets=False` and no
+  Harmony (both need PCA).
   `ds.graph.ann_index(normalized)` does the same outside the pipeline; WNN, mapping references
   and doublet scoring reject such graphs, SNN integrates them. Memory and time then scale with
   the HVG count, not the PCA dims: the ANN index holds about `4 * dims + 8 * ann_m + 130` bytes per
   cell (8.3 GB at 1M cells and 2,000 HVGs with the default `ann_m=24`), the default embedding
   initialization holds every cell's coordinates in memory (pass
-  `params={"embedding_initialization": {"batch_size": ...}}` below the cell count for the streamed
-  fit), and cluster selection decodes most of the normalized matrix to read its 10,000-cell sample.
+  `embedding_initialization={"batch_size": ...}` below the cell count for the streamed fit), and
+  cluster selection decodes most of the normalized matrix to read its 10,000-cell sample.
 - `graph.neighbors` searches `max(200, 2 * k)` candidates by default (the index's `ann_ef` floor and
   two per neighbour) and records the depth as its `ann_ef` only when it is not the index's own, so
   `k` up to 100 reuses earlier neighbors; pass `ann_ef=` for another depth. A query warns when
@@ -214,14 +217,17 @@ at k=21 (ARI 0.83). A larger `k` usually absorbs small clusters; the crosstab sh
 
 ### Same knobs through the pipeline
 
-`params` forwards other stage settings, including the blacklist. Giving a setting both ways (for
-example `hvg_count` and `params["hvg"]["top_n"]`) raises before anything is written. A completed
-label cannot be run again, even unchanged: reopen it with `ds.pipeline.open` or use a new label.
+Each stage keyword takes the method's own keywords, the blacklist included; an unknown key raises
+`ValueError` listing the allowed ones before anything is written. A completed label cannot be run
+again, even unchanged: reopen it with `ds.pipeline.open` or use a new label.
 
 ```python
-run_alt = ds.pipeline.run(
-    label="hvg2k_pc30_k21_blacklist", hvg_count=2000, pca_dims=30, neighbors_k=21,
-    params={"hvg": {"blacklist": blacklist}, "connectivity": {"bandwidth": 1.5}},
+run_alt = ds.pipeline.rna(
+    label="hvg2k_pc30_k21_blacklist",
+    hvg={"top_n": 2000, "blacklist": blacklist},
+    pca={"dims": 30},
+    neighbors={"k": 21},
+    connectivity={"bandwidth": 1.5},
 )
 print(run_alt.status, ds.artifacts.inspect(run_alt["neighbors"]).parameters["k"])
 print(run_alt["highly_variable_features"] == hvg_2k)  # same cells and blacklist: same artifact
@@ -296,14 +302,14 @@ minimum seed ARI was 0.78. The parent had no FOXP3 group.
 
 | Parameter | Default | Change when |
 | --- | --- | --- |
-| `features.hvgs(top_n=)` / `hvg_count` | `1000` | Weak or rare populations (raise); noisy programs dominate (lower). |
+| `features.hvgs(top_n=)` / `hvg={"top_n": ...}` | `1000` | Weak or rare populations (raise); noisy programs dominate (lower). |
 | `features.hvgs(blacklist=)` | `DEFAULT_HVG_BLACKLIST` | A family dominates the HVGs or is the question; what to add: `gene-blacklists.md`. |
 | `features.hvgs(min_cells=, max_cells=)` | `None`, `None`: 1% of the selected cells (3 to 20) and detection in at most 99.5% of them; none for the count flavors | Outlier-driven genes (raise `min_cells`); `max_cells=np.inf` keeps ubiquitous genes. |
 | `features.hvgs(flavor=)` | `"cytearc"` | Parity with scanpy/Seurat (`"seurat_v3"`), or a residual workflow (`"pearson_residuals"`). |
 | `features.hvgs(batch=)` | `None` | Samples or donors drive the HVGs; pass the sample column. |
-| `reduction.pca(dims=)` / `pca_dims` | `21` | After a variance and stability check; `0` in the pipeline means no PCA (graph on normalized values; pass `doublets=False`; memory and time scale with the HVG count). |
+| `reduction.pca(dims=)` / `pca={"dims": ...}` | `21` | After a variance and stability check; keep it below the HVG count. `0` in a recipe means no PCA (graph on normalized values; pass `doublets=False`; memory and time scale with the HVG count). |
 | `reduction.pca(pca_cell_selection=)` | `None` | Fit on a subset (for example one batch) and project all cells. |
-| `graph.neighbors(k=)` / `neighbors_k` | `11` (clamped to cells - 1) | Larger data or smoother graphs (15 to 30); smaller to resolve rare groups. |
+| `graph.neighbors(k=)` / `neighbors={"k": ...}` | `11` (clamped to cells - 1) | Larger data or smoother graphs (15 to 30); smaller to resolve rare groups. |
 | `graph.load(symmetric=, use_k=)` | `False`, all `k` | `True` for degree and connectivity checks; `use_k` to thin edges. |
 
 ## Check before moving on
@@ -332,7 +338,8 @@ minimum seed ARI was 0.78. The parent had no FOXP3 group.
 - Subclustering on the parent graph, or carrying subcluster IDs across artifacts. Rebuild inside
   the subset, join on the cell axis, and keep the parent labels. `select_cells(include=[])`
   raises; integer cluster artifacts need integer `include` values.
-- `features.hvgs` is RNA only. ATAC uses `features.prevalent_peaks` then `reduction.lsi`.
+- `features.hvgs` is RNA only. ATAC uses `features.prevalent_peaks` then `reduction.lsi`, as
+  `ds.pipeline.atac()` does; ADT uses an antibody panel, as `ds.pipeline.adt()` does.
 
 ## See also
 

@@ -32,6 +32,7 @@ from ..storage.execution import (
 from ..storage.feature_stream import (
     FeatureCellBand,
     FeatureReadGroup,
+    advance_on_consumption,
     cell_band_selection,
     feature_group_ranges,
     iter_bounded_handoff,
@@ -367,11 +368,14 @@ def map_read_groups[T](
         metrics.update(plan.as_metrics())
         metrics.update(details)
 
+    # The consumer advances the bar as each group's result is used.
+    def make_bar() -> Any:
+        return tqdmbar(desc=progress, total=len(layout.groups))
+
     def run(deliver: Callable[[T], Awaitable[None]], stop: Event) -> None:
         fetch_seconds = 0.0
         compute_seconds = 0.0
         completed = 0
-        bar = tqdmbar(desc=progress, total=len(layout.groups)) if progress else None
         runner = AsyncStorageRunner(operation=plan)
 
         async def operation(active: AsyncStorageRunner) -> None:
@@ -416,8 +420,6 @@ def map_read_groups[T](
                                 await deliver(result)
                                 del result, item, values
                                 completed += 1
-                                if bar is not None:
-                                    bar.update(1)
                     finally:
                         del source_values
 
@@ -448,8 +450,6 @@ def map_read_groups[T](
         try:
             runner.run(operation)
         finally:
-            if bar is not None:
-                bar.close()
             report = record_execution_report(
                 ExecutionReport(
                     plan=plan,
@@ -468,4 +468,7 @@ def map_read_groups[T](
             if metrics is not None:
                 metrics.update(report.as_metrics())
 
-    return iter_bounded_handoff(in_flight=plan.computeWorkers, run=run)
+    return advance_on_consumption(
+        iter_bounded_handoff(in_flight=plan.computeWorkers, run=run),
+        make_bar if progress else None,
+    )

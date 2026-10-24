@@ -13,9 +13,11 @@ result. For optional background on how CyteArc stores and reuses results, see
 ## Workflow map
 
 Scanpy commonly composes stages as separate `sc.pp`, `sc.tl`, and `sc.pl` calls. CyteArc provides
-the same level of control through individual methods, while `ds.pipeline.run()` is the shortest
-path through the standard RNA workflow. It returns a durable `PipelineRun` with frozen views and
-leaves live metadata unchanged.
+the same level of control through individual methods, while `ds.pipeline.rna()` is the shortest
+path through the standard RNA workflow; `ds.pipeline.atac()` and `ds.pipeline.adt()` do the same
+for peak and antibody counts. Each returns a durable `PipelineRun` with frozen views and leaves
+live metadata unchanged. A stage is configured with the keywords of its method, such as
+`ds.pipeline.rna(hvg={"top_n": 2000}, pca={"dims": 30}, neighbors={"k": 15})`.
 
 The rows below map intent, not identical statistical implementations. CyteArc selects highly
 variable genes before normalizing on that feature set, which differs from the common Scanpy order
@@ -122,17 +124,19 @@ adata = ds.to_anndata(run=run)
 cytearc.to_h5ad(ds.RNA, "pipeline-analysis.h5ad", run=run)
 ```
 
-Run export writes frozen UMAP coordinates to `obsm["X_umap"]`, the run's PCA to `obsm["X_pca"]`,
-and its cluster labels (`clusters`, `leiden_*`, and `paris`) to `obs` as categoricals with string
-categories in natural order and the run's colors. A run with `umap=False` does not invent an
-embedding. Add the run's graph with `graph=run["connectivity_map"]`. Both calls export the same
-object: `ds.to_anndata` holds it in memory, while `cytearc.to_h5ad` streams it to disk and needs
-neither the `anndata` package nor memory for the complete matrix. `X` holds raw counts over the
-run's feature universe.
+Run export writes frozen UMAP coordinates to `obsm["X_umap"]`, the run's PCA to `obsm["X_pca"]`
+(an ATAC run's LSI to `obsm["X_lsi"]`), and its cluster labels (`clusters`, `leiden_*`, and
+`paris` for a run with `paris=True`) to `obs` as categoricals with string categories in natural
+order and the run's colors. A run with `umap=False` does not invent an embedding. Add the run's
+graph with `graph=run["connectivity_map"]`. Both calls export the same object: `ds.to_anndata`
+holds it in memory, while `cytearc.to_h5ad` streams it to disk and needs neither the `anndata`
+package nor memory for the complete matrix. `X` holds raw counts over the run's feature universe.
 
 `matrix="normed"` means different values with and without a run. With `run`, `X` holds the values
 that the run's PCA read: its stored normalized values, the log1p of counts scaled over its highly
-variable genes, float32, over those genes only, which then become `var`. Without `run`,
+variable genes, float32, over those genes only, which then become `var`. An ATAC run exports its
+TF-IDF values over its prevalent peaks and an ADT run its CLR values over its panel. A multimodal
+run has no normalized values; it exports the raw counts of its first run's assay. Without `run`,
 `ds.to_anndata(matrix="normed")` holds the assay's library-size normalized values over all
 exported genes, counts scaled to 1,000 per cell without a log transform, and `cytearc.to_h5ad`
 rejects it.

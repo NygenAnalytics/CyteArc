@@ -42,10 +42,12 @@ See [Remote stores and mounted analysis targets](../tutorials/remote-stores).
 
 ## Analysis namespaces
 
-For a standard RNA analysis, start with `ds.pipeline.run(label=...)`. Use the namespaces below
-when selecting individual analysis steps. Each method keeps its scientific defaults, return
-type, and saved-result identity. Cell metadata stays on `ds.cells`, and `ds.get_assay(name)`
-provides access to every assay, including one whose name matches a namespace.
+For a standard analysis, start with a pipeline recipe, such as `ds.pipeline.rna(label=...)`,
+`ds.pipeline.atac(...)`, `ds.pipeline.adt(...)`, or `ds.pipeline.multimodal(...)`
+({doc}`pipeline`). Use the namespaces below when selecting individual analysis steps. Each method
+keeps its scientific defaults, return type, and saved-result identity. Cell metadata stays on
+`ds.cells`, and `ds.get_assay(name)` provides access to every assay, including one whose name
+matches a namespace.
 
 ### `ds.artifacts`
 
@@ -546,16 +548,19 @@ an operation that reads the assay's values refuses it. Normalization, `integrati
 detected-feature selection, WAGGR, AUCell, marker search, `compare.compute_bulk`, the feature keys of
 `compare.test`, prevalent peaks, cell-cycle scoring, feature percentages, HTO
 demultiplexing, doublet detection, pseudotime markers and aggregation, the feature names of
-`imputation.compute_imputed`, `mapping.run` of the query assay, `to_anndata(matrix="normed")` without a run, and
-`pipeline.run` check their cells against the membership column after their own argument and
+`imputation.compute_imputed`, `mapping.run` of the query assay, and `to_anndata(matrix="normed")`
+without a run check their cells against the membership column after their own argument and
 assay-type checks and before they reuse or write anything, on a read-only store too, and raise
 {py:exc}`~cytearc.metadata.membership.UnmeasuredCellsError`, a `ValueError` that names the
 operation, the assay, the column, and how many of the selected cells the assay did not measure.
+The pipeline recipes `pipeline.rna`, `pipeline.atac`, and `pipeline.adt` check their cells the
+same way before they write anything; as recipes write, they first need a store opened with
+`zarr_mode="r+"`.
 `compare.compute_bulk` checks the cells whose counts it reads: the cells of its bulk columns, or every selected
 cell for a mean that fits the assay's normalization over them, as ATAC and ADT means do; for a
 metadata grouping without `cell_selection`, it finds them from the live `I` column before it
 snapshots `I`. Quality control reads the assay of each metric that it filters on:
-`qc.auto_filter`, `qc.filter` on such a column, and the filtering stage of `pipeline.run`
+`qc.auto_filter`, `qc.filter` on such a column, and the filtering stage of a pipeline recipe
 refuse unmeasured cells too. A cell
 column is a metric of the assay whose preparation wrote it, `<assay>_nCounts`,
 `<assay>_nFeatures`, or a percentage column that the assay records in its `percentFeatures`
@@ -567,8 +572,9 @@ and a `to_anndata` layer of another assay cannot declare it and refuse them.
 {py:meth}`~cytearc.datastore.datastore.DataStore.select_measured_cells` keeps the measured cells of
 a selection: pass its result as `cell_selection`, which `compare.compute_bulk`, `compare.test`,
 and the QC filters also take directly, build graphs over it, or freeze labels over it with
-`snapshot_cluster_labels(labels, cell_selection=...)`. A pipeline run and normalized export take a
-`cell_key` column instead: one True only for the cells of `I` that the assay measured, such as
+`snapshot_cluster_labels(labels, cell_selection=...)`. A pipeline recipe takes that selection as
+its `cells`, or a boolean column. Normalized export takes a `cell_key` column instead. Either
+column must be True only for the cells of `I` that the assay measured, such as
 `ds.cells.insert("RNA_measured", ds.cells.fetch_all("I") & ds.cells.fetch_all("RNA_I"))`; the
 membership column alone also holds cells that a filter removed from `I`. `select_measured_cells`
 returns the input selection itself when the assay measured every selected cell, so fully measured
@@ -576,7 +582,7 @@ stores keep their identities. Plots and `get_cell_vals` show the feature values 
 as missing, NaN, instead of zero, and normalize only the measured cells, so that a normalizer
 fitted over the cells it reads, such as ATAC TF-IDF, gives a measured cell the value of a read of
 the measured cells alone. Opening saved results does not rerun membership checks; a pipeline
-configuration that selects unmeasured cells raises before any stage executes.
+recipe whose `cells` include unmeasured cells raises before it creates a run record.
 
 ```{eval-rst}
 .. autoexception:: cytearc.metadata.membership.UnmeasuredCellsError
@@ -677,6 +683,8 @@ loosen the solve.
 {py:meth}`~cytearc.datastore.namespaces.IntegrationAccessor.modalities` is the public SNN/WNN graph integration entry point.
 WNN requires two or more cell-aligned assays and stores one per-cell weight for each assay.
 SNN also requires two or more explicit connectivity-map refs.
+`ds.pipeline.multimodal(runs)` runs this integration over completed modality runs of the same
+cells and records a durable run ({doc}`pipeline`).
 The recommended workflow is in [Read RNA and protein together with CITE-seq](../tutorials/cite-seq); method comparison and diagnostics are in [Diagnose multimodal integration](../tutorials/multimodal-diagnostics).
 
 ## Analysis results

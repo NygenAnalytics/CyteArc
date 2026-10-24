@@ -72,30 +72,32 @@ and `ds.cells.insert("sample_id", values, overwrite=True)`; `insert` writes to t
 ### Harmony through the pipeline, with a matched baseline
 
 ```python
-design_cols = ("batch", "donor_id", "sample_id", "condition")   # Harmony columns first
-native = ds.pipeline.run(label="native", snapshot_columns=design_cols)
-corrected = ds.pipeline.run(
-    label="harmony_batch", harmony_batch_columns=["batch"], snapshot_columns=design_cols,
+design_cols = ("batch", "donor_id", "sample_id", "condition")
+native = ds.pipeline.rna(label="native", snapshot_columns=design_cols)
+corrected = ds.pipeline.rna(
+    label="harmony_batch", harmony={"batch_columns": ["batch"]}, snapshot_columns=design_cols,
 )
 assert native["pca"] == corrected["pca"]   # same frozen cells and PCA; only the graph differs
 print(corrected["harmony"])                # ArtifactRef(kind='batch_correction')
 ```
 
-The run's input snapshot is `names`, filter columns, Harmony columns, then `snapshot_columns`, in
-order; another list or order gives a new analysis selection and recomputes everything (24
-artifacts created, then 16 reused by the Harmony run; 10x 5K PBMC docs dataset). `run.cells`
-exposes only `snapshot_columns`: read a filter or Harmony column with
-`ds.cells.fetch_all(col)[run.cells.fetch_all("I")]`. Doublets are simulated and scored within
-each batch on the plain PCA; `params={"doublets": {"sample_column": ...}}` names the capture
-column when batches are not captures.
+Harmony's batch columns and `snapshot_columns` are frozen apart from the QC columns that filtering
+reads (as `harmony_snapshot` and `column_snapshot`), so the Harmony run filters to the same
+`analysis_cell_selection` as the native run, whatever its snapshot columns, and reuses every
+artifact up to PCA. Comparisons that need one cell selection, such as `compute_concordance`
+below, then work across the two runs. `run.cells` exposes only `snapshot_columns`: read a filter
+or Harmony column with `ds.cells.fetch_all(col)[run.cells.fetch_all("I")]`. Doublets are
+simulated and scored within each batch on the plain PCA
+(`report()["run"]["config"]["doubletSampleColumns"]`); `doublets={"sample_column": ...}` names
+the capture column when batches are not captures.
 
 As a branch of a run, `harmony = ds.reduction.harmony(run["pca"], ["batch"])` returns a ref to pass to
 `graph.ann_index` in place of PCA (chain in `features-and-graphs.md`; keep the run's `k`). Score it
 below with the run's `neighbors` and `connectivity_map` versus the new pair.
 Tune the fit with `harmony_params={...}` on `reduction.harmony`, or in a run with
-`params={"harmony": {"batch_columns": ["batch"], "harmony_params": {...}}}` instead of
-`harmony_batch_columns` (not both). Every key and default:
-<https://docs.nygen.io/CyteArc/api/integration.html>.
+`harmony={"batch_columns": ["batch"], "harmony_params": {...}, "batch_size": ...}`. `harmony=True`
+raises `ValueError` and a list such as `harmony=["batch"]` raises `TypeError`: the mapping must
+name `batch_columns`. ATAC runs correct their LSI coordinates the same way. Every key and default: <https://docs.nygen.io/CyteArc/api/integration.html>.
 
 ### Score native versus corrected
 
@@ -248,7 +250,9 @@ store; drop `is_primary_data == False` cells first and score iLISI before Harmon
 (`assayTypes`), and `<assay>_I` marks the cells each merged assay measured. Operations that read
 an assay refuse its unmeasured cells with `UnmeasuredCellsError`: narrow with
 `merged.select_measured_cells(assay, cell_selection=...)` first; WNN or SNN needs one selection
-that every integrated assay measured (chain the call per assay). `overwrite=True`
+that every integrated assay measured (chain the call per assay, pass it as the first modality
+run's `cells=` with `filtering=True`, then `cells=<first run>` to the others; modality recipes and
+`ds.pipeline.multimodal` are in `pipeline-runs-and-artifacts.md`). `overwrite=True`
 restarts only an earlier merge; a destination that holds another store or other files raises
 `ValueError`.
 `out_workspace=` adds a workspace to an existing CyteArc store and keeps its other members. Mapping
@@ -280,9 +284,9 @@ an inserted copy records abstentions only as missing values and loses their reas
 
 | Parameter | Default | Change when |
 | --- | --- | --- |
-| `harmony_batch_columns` / `batch_columns` | `None` (off) / required | Technical columns only |
+| `harmony={"batch_columns": [...]}` / `reduction.harmony(batch_columns)` | `None` (off) / required | Technical columns only |
 | `harmony_params` | `theta` 2, `n_clusters` cells / 30 (at most 100), dynamic ridge (`ridge_alpha` 0.2) | Mixing too weak: raise `theta`; distinct populations merge: lower it. `ridge_penalty=1.0` is the fixed 2019 penalty |
-| `neighbors_k` / `graph.neighbors(k=)` | 11 | 21 or more when LISI metrics decide |
+| `neighbors={"k": ...}` / `graph.neighbors(k=)` | 11 | 21 or more when LISI metrics decide |
 | metric `perplexity` | `None` = `floor(k/3)` | Keep fixed across graphs; capped at `k/3` |
 | `sample_by` / `pair_by` | `None` | Always `sample_by`; `pair_by` only if repeated |
 | `sample_stat` | `"mean"` | `"fraction"` + `expression_cutoff` for detection |
@@ -313,10 +317,11 @@ an inserted copy records abstentions only as missing values and loses their reas
   `harmony_params={"n_clusters": ...}` or the PCA dims, or raise the budget. WNN holds every assay's
   neighbours and coordinates, SNN every graph plus a float64 matrix per graph. The estimates are
   near-exact counts of what each step allocates, not a cap on process memory; leave headroom.
-- `reduction.harmony` and WNN reject coordinates that are normalized values (`pca_dims=0` runs); build
-  PCA first, or integrate such graphs with `method="snn"`.
+- `reduction.harmony` and WNN reject coordinates that are normalized values (`pca={"dims": 0}`
+  runs); build PCA first, or integrate such graphs with `method="snn"`.
 - Keys of the earlier Harmony raise `ValueError: Unsupported Harmony parameter ...`, also
-  from a saved pipeline `params`: `nclust` is `n_clusters`, `max_iter_kmeans` is
+  from a recipe's `harmony={"harmony_params": ...}` before the run starts: `nclust` is
+  `n_clusters`, `max_iter_kmeans` is
   `max_iter_cluster`, `lamb` is `ridge_penalty` (fixed and positive; omit it for the dynamic
   default), and `cluster_fn` is gone. `max_iter_harmony` must be at least 1.
 - iLISI depends on `k`: a random synthetic batch scored 0.34, 0.67 and 0.76 at `k` 11, 21 and 31

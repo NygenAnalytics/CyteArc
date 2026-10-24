@@ -4,7 +4,7 @@ import pickle
 import re
 import shutil
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from itertools import pairwise
 from types import SimpleNamespace
 from typing import Any
@@ -14,17 +14,29 @@ import pytest
 import zarr
 from zarr.storage import MemoryStore
 
-from cytearc import DataStore, PipelineExecutionError, PipelineRun
-from cytearc.datastore._pipeline_cluster_selection import (
+from cytearc import (
+    CancellationToken,
+    DataStore,
+    PipelineCancelled,
+    PipelineExecutionError,
+    PipelineRun,
+)
+from cytearc.datastore._pipeline.cluster_selection import (
     cluster_label_values,
     run_cluster_selection,
 )
-from cytearc.datastore._pipeline_fields import (
+from cytearc.datastore._pipeline.events import PipelineEventEmitter
+from cytearc.datastore._pipeline.executor import RecipePlan
+from cytearc.datastore._pipeline.fields import (
     categorical_array_display,
     continuous_array_display,
 )
-from cytearc.datastore._pipeline_ledger import PipelineEventEmitter
-from cytearc.datastore.pipeline_accessor import PipelineEvent
+from cytearc.datastore._pipeline.ledger import RunLedger
+from cytearc.datastore.pipeline_accessor import (
+    PipelineAccessor,
+    PipelineEvent,
+    PipelineProgress,
+)
 from cytearc.storage.artifact_writer import (
     finish_artifact,
     plan_artifact,
@@ -44,6 +56,7 @@ from cytearc.storage.selections import (
     read_stored_selection_mask,
     resolve_stored_selection_artifact,
 )
+from cytearc.utils.logging import logger
 from cytearc.utils.shutdown import ShutdownRequested, current_shutdown_token
 from tests.storage_helpers import insert_nullable_cell_column
 
@@ -52,15 +65,35 @@ def _minimal_run_options() -> dict[str, Any]:
     return {
         "filtering": False,
         "cell_cycle": False,
-        "hvg_count": 50,
-        "pca_dims": 3,
-        "neighbors_k": 3,
+        "hvg": {"top_n": 50},
+        "pca": {"dims": 3},
+        "neighbors": {"k": 3},
         "umap": False,
         "leiden": False,
         "paris": False,
         "doublets": False,
         "markers": False,
     }
+
+
+def _minimal_plan(datastore: DataStore, **changes: Any) -> RecipePlan:
+    """Resolve the minimal RNA recipe as ``pipeline.rna`` would, without writing."""
+    from cytearc.datastore._pipeline.recipes.rna import resolve_rna
+
+    parameters = inspect.signature(PipelineAccessor.rna).parameters
+    defaults = {
+        name: parameter.default
+        for name, parameter in parameters.items()
+        if name not in {"self", "callback", "cancel"}
+    }
+    return resolve_rna(datastore, **{**defaults, **_minimal_run_options(), **changes})
+
+
+def _event_order(events: Sequence[PipelineEvent]) -> list[tuple[str, str | None]]:
+    """Return the run's events in order, without the timing-dependent progress."""
+    return [
+        (event.kind, event.stage) for event in events if event.kind != "stage_progress"
+    ]
 
 
 @pytest.fixture(scope="module")
@@ -90,7 +123,7 @@ def minimal_base(datastore_zarr_root: str, tmp_path_factory) -> SimpleNamespace:
             "_embeddings_initialization",
             reject_embedding_initialization,
         )
-        run = datastore.pipeline.run(
+        run = datastore.pipeline.rna(
             label="baseline",
             callback=events.append,
             **_minimal_run_options(),
@@ -119,15 +152,41 @@ def test_pipeline_callback_baseexceptions_do_not_escape() -> None:
         events.append(event)
         raise KeyboardInterrupt("callback interruption")
 
-    PipelineEventEmitter(callback).emit("stage_started", "input_snapshot")
+    emitter = PipelineEventEmitter(
+        (callback, events.append),
+        run_id="a" * 64,
+        recipe="rna",
+        label=None,
+        stage_order=("input_snapshot", "pca"),
+    )
+    emitter.emit("stage_started", stage="pca")
 
-    assert [event.kind for event in events] == ["stage_started"]
+    # The failing callback neither escapes nor keeps the event from the next.
+    assert [event.kind for event in events] == ["stage_started", "stage_started"]
+    assert events[0] is events[1]
+    assert (events[0].run_id, events[0].recipe, events[0].stage) == (
+        "a" * 64,
+        "rna",
+        "pca",
+    )
+    assert (events[0].ordinal, events[0].stages) == (1, 2)
 
 
 def test_pipeline_event_keeps_its_public_pickle_identity() -> None:
-    event = PipelineEvent(kind="stage_completed", stage="pca")
+    event = PipelineEvent(
+        kind="stage_progress",
+        run_id="a" * 64,
+        recipe="rna",
+        label=None,
+        stage="pca",
+        ordinal=7,
+        stages=21,
+        time_ns=1,
+        progress=PipelineProgress(description="PCA", completed=1, total=4),
+    )
 
     assert PipelineEvent.__module__ == "cytearc.datastore.pipeline_accessor"
+    assert PipelineProgress.__module__ == "cytearc.datastore.pipeline_accessor"
     assert pickle.loads(pickle.dumps(event)) == event
 
 
@@ -416,38 +475,126 @@ def _select_clusters(
     )
 
 
-def test_pipeline_run_has_one_small_public_invocation() -> None:
+def test_pipeline_accessor_has_four_keyword_only_recipes() -> None:
     signature = inspect.signature(PipelineRun)
     assert tuple(signature.parameters) == ("owner", "record")
 
-    from cytearc.datastore.pipeline_accessor import PipelineAccessor
-
-    run_signature = inspect.signature(PipelineAccessor.run)
-    assert tuple(run_signature.parameters) == (
-        "self",
-        "assay",
-        "label",
-        "cell_key",
-        "filtering",
-        "harmony_batch_columns",
-        "hvg_count",
-        "pca_dims",
-        "neighbors_k",
-        "umap",
-        "leiden",
-        "cell_cycle",
-        "paris",
-        "doublets",
-        "markers",
-        "snapshot_columns",
-        "params",
-        "callback",
-    )
+    recipes = {
+        "rna": (
+            "self",
+            "assay",
+            "label",
+            "cells",
+            "cell_calling",
+            "hashing",
+            "filtering",
+            "cell_cycle",
+            "hvg",
+            "normalization",
+            "pca",
+            "harmony",
+            "ann_index",
+            "neighbors",
+            "connectivity",
+            "embedding_initialization",
+            "umap",
+            "tsne",
+            "leiden",
+            "paris",
+            "membership_strength",
+            "doublets",
+            "markers",
+            "snapshot_columns",
+            "species",
+            "callback",
+            "cancel",
+        ),
+        "atac": (
+            "self",
+            "assay",
+            "label",
+            "cells",
+            "filtering",
+            "prevalent_peaks",
+            "normalization",
+            "lsi",
+            "harmony",
+            "ann_index",
+            "neighbors",
+            "connectivity",
+            "embedding_initialization",
+            "umap",
+            "tsne",
+            "leiden",
+            "paris",
+            "membership_strength",
+            "markers",
+            "snapshot_columns",
+            "species",
+            "callback",
+            "cancel",
+        ),
+        "adt": (
+            "self",
+            "assay",
+            "label",
+            "cells",
+            "filtering",
+            "panel",
+            "normalization",
+            "pca",
+            "harmony",
+            "ann_index",
+            "neighbors",
+            "connectivity",
+            "embedding_initialization",
+            "umap",
+            "tsne",
+            "leiden",
+            "paris",
+            "membership_strength",
+            "markers",
+            "snapshot_columns",
+            "species",
+            "callback",
+            "cancel",
+        ),
+        "multimodal": (
+            "self",
+            "runs",
+            "label",
+            "method",
+            "integration",
+            "embedding_initialization",
+            "umap",
+            "tsne",
+            "leiden",
+            "paris",
+            "membership_strength",
+            "markers",
+            "snapshot_columns",
+            "callback",
+            "cancel",
+        ),
+    }
+    for recipe, expected in recipes.items():
+        parameters = inspect.signature(getattr(PipelineAccessor, recipe)).parameters
+        assert tuple(parameters) == expected, recipe
+        # Only the multimodal runs are positional; every setting is a keyword.
+        positional = [
+            name
+            for name, parameter in parameters.items()
+            if parameter.kind is not inspect.Parameter.KEYWORD_ONLY
+        ]
+        assert positional == (
+            ["self", "runs"] if recipe == "multimodal" else ["self"]
+        ), recipe
     assert tuple(inspect.signature(PipelineAccessor.open).parameters) == (
         "self",
         "run_id",
         "label",
     )
+    assert not hasattr(PipelineAccessor, "run")
     assert not hasattr(PipelineAccessor, "publish")
 
 
@@ -457,8 +604,11 @@ def test_pipeline_preflight_rejects_ambiguous_recipes_without_writes(
     datastore = datastore_ephemeral
     before = tuple(run.run_id for run in datastore.pipeline.list_runs(limit=100))
 
-    with pytest.raises(ValueError, match="exactly 'partitions'"):
-        datastore.pipeline.run(
+    with pytest.raises(
+        ValueError,
+        match=r"Unknown leiden settings \['automatic', 'primary'\]",
+    ):
+        datastore.pipeline.rna(
             leiden={"partitions": [0.5], "primary": 0.5, "automatic": True},
             doublets=False,
             markers=False,
@@ -467,22 +617,27 @@ def test_pipeline_preflight_rejects_ambiguous_recipes_without_writes(
         ValueError,
         match="doublets and markers require at least one Leiden candidate",
     ):
-        datastore.pipeline.run(leiden=False, paris=False)
+        datastore.pipeline.rna(leiden=False, paris=False)
     with pytest.raises(
         ValueError,
         match="doublets and markers require at least one Leiden candidate",
     ):
-        datastore.pipeline.run(leiden=False, paris=True)
+        datastore.pipeline.rna(leiden=False, paris=True)
     with pytest.raises(TypeError, match="leiden must be a mapping or bool"):
-        datastore.pipeline.run(leiden=None, doublets=False, markers=False)
-    with pytest.raises(TypeError, match="filtering must be a mapping or bool"):
-        datastore.pipeline.run(filtering=None)
+        datastore.pipeline.rna(leiden=None, doublets=False, markers=False)
+    with pytest.raises(TypeError, match="filtering must be a mapping, bool, or None"):
+        datastore.pipeline.rna(filtering="mad")
+    with pytest.raises(
+        TypeError,
+        match="hvg must be a mapping because the stage always runs",
+    ):
+        datastore.pipeline.rna(hvg=True)
     with pytest.raises(ValueError, match="reserved run fields"):
-        datastore.pipeline.run(snapshot_columns=("clusters",))
+        datastore.pipeline.rna(snapshot_columns=("clusters",))
     with pytest.raises(ValueError, match="reserved run fields"):
-        datastore.pipeline.run(snapshot_columns=("highly_variable_features",))
+        datastore.pipeline.rna(snapshot_columns=("highly_variable_features",))
     with pytest.raises(ValueError, match="duplicate resolutions"):
-        datastore.pipeline.run(
+        datastore.pipeline.rna(
             leiden={"partitions": [1, 1.0]},
             doublets=False,
             markers=False,
@@ -519,7 +674,7 @@ def test_pipeline_filtering_rejects_coercible_scalar_types_without_writes(
     before = tuple(run.run_id for run in datastore.pipeline.list_runs(limit=100))
 
     with pytest.raises(TypeError, match=message):
-        datastore.pipeline.run(filtering=filtering)
+        datastore.pipeline.rna(filtering=filtering)
 
     after = tuple(run.run_id for run in datastore.pipeline.list_runs(limit=100))
     assert after == before
@@ -536,7 +691,7 @@ def test_pipeline_requested_filtering_requires_at_least_one_qc_column(
     before = tuple(run.run_id for run in datastore.pipeline.list_runs(limit=100))
 
     with pytest.raises(ValueError, match="pass filtering=False"):
-        datastore.pipeline.run(**{**_minimal_run_options(), "filtering": True})
+        datastore.pipeline.rna(**{**_minimal_run_options(), "filtering": True})
 
     after = tuple(run.run_id for run in datastore.pipeline.list_runs(limit=100))
     assert after == before
@@ -557,6 +712,7 @@ def test_minimal_pipeline_is_artifact_only_cold_openable_and_ordered(
     assert returned.status == "completed"
     assert run.status == "completed"
     assert run.label == "baseline"
+    assert run.recipe == "rna"
     assert list(run) == [
         "input_cell_selection",
         "analysis_cell_selection",
@@ -582,20 +738,52 @@ def test_minimal_pipeline_is_artifact_only_cold_openable_and_ordered(
     assert frozenset(assay.feats.columns) == minimal_base.before.feature_columns
     assert dict(assay.attrs) == minimal_base.before.assay_attrs
 
+    # Every stage of the recipe is recorded in order, the skipped ones too.
     expected_stages = (
-        "input_snapshot",
-        "highly_variable_features",
-        "normalization",
-        "pca",
-        "ann_index",
-        "neighbors",
-        "connectivity",
+        ("input_snapshot", "completed"),
+        ("cell_calling", "skipped"),
+        ("hashing", "skipped"),
+        ("filtering", "skipped"),
+        ("cell_cycle", "skipped"),
+        ("highly_variable_features", "completed"),
+        ("normalization", "completed"),
+        ("pca", "completed"),
+        ("harmony", "skipped"),
+        ("ann_index", "completed"),
+        ("neighbors", "completed"),
+        ("connectivity", "completed"),
+        ("embedding_initialization", "skipped"),
+        ("umap", "skipped"),
+        ("paris", "skipped"),
+        ("cluster_selection", "skipped"),
+        ("membership_strength", "skipped"),
+        ("tsne", "skipped"),
+        ("doublets", "skipped"),
+        ("markers", "skipped"),
     )
-    assert [(event.kind, event.stage) for event in events] == [
-        (kind, stage)
-        for stage in expected_stages
-        for kind in ("stage_started", "stage_completed")
+    stage_order = [stage for stage, _status in expected_stages]
+    stage_events = {
+        "completed": ("stage_started", "stage_completed"),
+        "skipped": ("stage_skipped",),
+    }
+    assert _event_order(events) == [
+        ("run_started", None),
+        *(
+            (kind, stage)
+            for stage, status in expected_stages
+            for kind in stage_events[status]
+        ),
+        ("run_completed", None),
     ]
+    assert {(event.run_id, event.recipe, event.label) for event in events} == {
+        (run.run_id, "rna", "baseline")
+    }
+    assert {event.stages for event in events} == {len(expected_stages)}
+    for event in events:
+        expected_ordinal = (
+            None if event.stage is None else stage_order.index(event.stage)
+        )
+        assert event.ordinal == expected_ordinal
 
     reopened = datastore.pipeline.open(label="baseline")
     assert reopened.run_id == run.run_id
@@ -608,20 +796,23 @@ def test_minimal_pipeline_is_artifact_only_cold_openable_and_ordered(
     report = reopened.report()
     assert isinstance(report, Mapping)
     assert report["run"]["status"] == "completed"
+    assert report["run"]["recipe"] == "rna"
+    assert report["run"]["stageOrder"] == stage_order
+    assert [(stage["stage"], stage["status"]) for stage in report["stages"]] == list(
+        expected_stages
+    )
     assert all(stage["metrics"] is not None for stage in report["stages"])
     assert all("plans" in stage for stage in report["stages"])
-    stages = {stage["stage"]: stage for stage in report["stages"]}
-    assert stages["embedding_initialization"]["status"] == "skipped"
-    assert stages["umap"]["status"] == "skipped"
     markdown = reopened.report(format="markdown")
     assert "# Pipeline run" in markdown
+    assert "- Recipe: `rna`" in markdown
     assert f"- CyteArc version: `{report['run']['cytearcVersion']}`" in markdown
     assert not hasattr(reopened, "plots")
     assert not hasattr(reopened, "markers")
     assert not hasattr(reopened, "publish")
 
     with pytest.raises(ValueError, match="already committed"):
-        datastore.pipeline.run(label="baseline", **_minimal_run_options())
+        datastore.pipeline.rna(label="baseline", **_minimal_run_options())
     assert len(datastore.pipeline.list_runs(limit=100)) == 1
 
 
@@ -638,7 +829,7 @@ def test_pipeline_failure_exposes_openable_run_and_original_cause(
 
     monkeypatch.setattr(type(datastore), "_reduction_pca", fail_pca)
     with pytest.raises(PipelineExecutionError) as caught:
-        datastore.pipeline.run(
+        datastore.pipeline.rna(
             label="failed-baseline",
             callback=events.append,
             **_minimal_run_options(),
@@ -656,20 +847,28 @@ def test_pipeline_failure_exposes_openable_run_and_original_cause(
         "type": "RuntimeError",
         "message": "deliberate PCA failure",
     }
-    # Stages before PCA completed; PCA failed; later stages never started.
+    # Stages before PCA completed or were skipped; PCA failed; later stages
+    # never started.
     assert [(stage["stage"], stage["status"]) for stage in report["stages"]] == [
         ("input_snapshot", "completed"),
+        ("cell_calling", "skipped"),
+        ("hashing", "skipped"),
         ("filtering", "skipped"),
         ("cell_cycle", "skipped"),
         ("highly_variable_features", "completed"),
         ("normalization", "completed"),
         ("pca", "failed"),
     ]
-    assert [(event.kind, event.stage) for event in events][-2:] == [
+    assert _event_order(events)[-3:] == [
         ("stage_started", "pca"),
         ("stage_failed", "pca"),
+        ("run_failed", "pca"),
     ]
-    assert events[-1].error is expected
+    # The stage event carries the stage's own error and the run event the
+    # error that the run raised.
+    stage_failed, run_failed = events[-2:]
+    assert stage_failed.error is expected
+    assert run_failed.error is error
     with pytest.raises(RuntimeError, match="requires a completed run"):
         list(failed)
     with pytest.raises(KeyError, match="No completed pipeline run"):
@@ -680,11 +879,11 @@ def test_skipped_stage_bookkeeping_failure_commits_failed_stage_and_run(
     datastore_ephemeral,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import cytearc.datastore._pipeline_ledger as pipeline_module
+    import cytearc.datastore._pipeline.ledger as ledger_module
 
     datastore = datastore_ephemeral
     expected = RuntimeError("deliberate skipped-stage commit failure")
-    original_finish = pipeline_module.finish_pipeline_stage_record
+    original_finish = ledger_module.finish_pipeline_stage_record
     events: list[PipelineEvent] = []
 
     def fail_skipped_stage(*args, **kwargs):
@@ -693,40 +892,44 @@ def test_skipped_stage_bookkeeping_failure_commits_failed_stage_and_run(
         return original_finish(*args, **kwargs)
 
     monkeypatch.setattr(
-        pipeline_module,
+        ledger_module,
         "finish_pipeline_stage_record",
         fail_skipped_stage,
     )
     with pytest.raises(PipelineExecutionError) as caught:
-        datastore.pipeline.run(callback=events.append, **_minimal_run_options())
+        datastore.pipeline.rna(callback=events.append, **_minimal_run_options())
 
+    # Cell calling is the first stage that the minimal recipe skips.
     error = caught.value
-    assert error.stage == "filtering"
+    assert error.stage == "cell_calling"
     assert error.__cause__ is expected
     failed = datastore.pipeline.open(run_id=error.run_id)
     assert failed.status == "failed"
-    filtering = next(
-        stage for stage in failed.report()["stages"] if stage["stage"] == "filtering"
+    cell_calling = next(
+        stage for stage in failed.report()["stages"] if stage["stage"] == "cell_calling"
     )
-    assert filtering["status"] == "failed"
-    assert filtering["complete"] is True
-    assert filtering["error"] == {
+    assert cell_calling["status"] == "failed"
+    assert cell_calling["complete"] is True
+    assert cell_calling["error"] == {
         "type": "RuntimeError",
         "message": str(expected),
     }
-    assert events[-1].kind == "stage_failed"
-    assert events[-1].stage == "filtering"
+    assert _event_order(events)[-2:] == [
+        ("stage_failed", "cell_calling"),
+        ("run_failed", "cell_calling"),
+    ]
+    assert events[-2].error is expected
 
 
 def test_completed_stage_bookkeeping_failure_commits_failed_stage_and_run(
     datastore_ephemeral,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import cytearc.datastore._pipeline_ledger as pipeline_module
+    import cytearc.datastore._pipeline.ledger as ledger_module
 
     datastore = datastore_ephemeral
     expected = RuntimeError("deliberate completed-stage commit failure")
-    original_finish = pipeline_module.finish_pipeline_stage_record
+    original_finish = ledger_module.finish_pipeline_stage_record
     failed_once = False
     events: list[PipelineEvent] = []
 
@@ -738,12 +941,12 @@ def test_completed_stage_bookkeeping_failure_commits_failed_stage_and_run(
         return original_finish(*args, **kwargs)
 
     monkeypatch.setattr(
-        pipeline_module,
+        ledger_module,
         "finish_pipeline_stage_record",
         fail_completed_stage_once,
     )
     with pytest.raises(PipelineExecutionError) as caught:
-        datastore.pipeline.run(callback=events.append, **_minimal_run_options())
+        datastore.pipeline.rna(callback=events.append, **_minimal_run_options())
 
     error = caught.value
     assert error.stage == "input_snapshot"
@@ -758,11 +961,13 @@ def test_completed_stage_bookkeeping_failure_commits_failed_stage_and_run(
         "type": "RuntimeError",
         "message": str(expected),
     }
-    assert [(event.kind, event.stage) for event in events] == [
+    assert _event_order(events) == [
+        ("run_started", None),
         ("stage_started", "input_snapshot"),
         ("stage_failed", "input_snapshot"),
+        ("run_failed", "input_snapshot"),
     ]
-    assert events[-1].error is expected
+    assert events[-2].error is expected
 
 
 def test_pipeline_interruption_is_durable_before_callbacks(
@@ -777,7 +982,7 @@ def test_pipeline_interruption_is_durable_before_callbacks(
 
     def observe(event: PipelineEvent) -> None:
         events.append(event)
-        if event.kind in {"stage_interrupted", "pipeline_interrupted"}:
+        if event.kind in {"stage_interrupted", "run_interrupted"}:
             (stored,) = datastore.pipeline.list_runs(status="interrupted")
             report = stored.report()
             pca = next(stage for stage in report["stages"] if stage["stage"] == "pca")
@@ -792,12 +997,12 @@ def test_pipeline_interruption_is_durable_before_callbacks(
 
     monkeypatch.setattr(type(datastore), "_reduction_pca", interrupt_pca)
     with pytest.raises(KeyboardInterrupt, match="stop pipeline"):
-        datastore.pipeline.run(callback=observe, **_minimal_run_options())
+        datastore.pipeline.rna(callback=observe, **_minimal_run_options())
 
     # Both callbacks found the interrupted stage and run already committed.
     assert observed == {
         "stage_interrupted": (True, "interrupted", True),
-        "pipeline_interrupted": (True, "interrupted", True),
+        "run_interrupted": (True, "interrupted", True),
     }
     interrupted = datastore.pipeline.list_runs(status="interrupted")
     assert len(interrupted) == 1
@@ -807,9 +1012,9 @@ def test_pipeline_interruption_is_durable_before_callbacks(
     pca_stage = next(stage for stage in report["stages"] if stage["stage"] == "pca")
     assert pca_stage["status"] == "interrupted"
     assert pca_stage["complete"] is True
-    assert [event.kind for event in events[-2:]] == [
-        "stage_interrupted",
-        "pipeline_interrupted",
+    assert [(event.kind, event.stage) for event in events[-2:]] == [
+        ("stage_interrupted", "pca"),
+        ("run_interrupted", "pca"),
     ]
 
 
@@ -820,29 +1025,59 @@ def test_pending_shutdown_propagates_when_interruption_cleanup_fails(
     datastore = datastore_ephemeral
 
     def request_shutdown(
-        _accessor,
-        _recipe,
-        _callback,
+        store,
+        _plan,
+        _callbacks,
         *,
-        active_run_id,
+        active,
         **_kwargs,
     ) -> None:
-        active_run_id.append("a" * 64)
+        run_id = "a" * 64
+        events = PipelineEventEmitter(
+            (),
+            run_id=run_id,
+            recipe="rna",
+            label=None,
+            stage_order=(),
+        )
+        active.append((run_id, events, RunLedger(store.zw, run_id, events)))
         token = current_shutdown_token()
         assert token is not None
         token.request(reason="test shutdown")
         token.checkpoint()
 
-    monkeypatch.setattr(type(datastore.pipeline), "_execute_recipe", request_shutdown)
     monkeypatch.setattr(
-        "cytearc.datastore._pipeline_ledger.load_pipeline_run_record",
+        "cytearc.datastore._pipeline.executor._execute",
+        request_shutdown,
+    )
+    monkeypatch.setattr(
+        "cytearc.datastore._pipeline.ledger.load_pipeline_run_record",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             RuntimeError("cleanup bookkeeping failed")
         ),
     )
 
-    with pytest.raises(ShutdownRequested, match="test shutdown"):
-        datastore.pipeline.run(**_minimal_run_options())
+    logged: list[tuple[str, type[BaseException] | None]] = []
+
+    def capture(message: Any) -> None:
+        exception = message.record["exception"]
+        logged.append(
+            (message.record["message"], None if exception is None else exception.type)
+        )
+
+    sink = logger.add(capture, level="ERROR", format="{message}")
+    try:
+        with pytest.raises(ShutdownRequested, match="test shutdown"):
+            datastore.pipeline.rna(**_minimal_run_options())
+    finally:
+        logger.remove(sink)
+
+    # The shutdown reaches the caller, and the failed cleanup is logged, never
+    # raised in its place.
+    assert (
+        f"Could not record the interruption of pipeline run {'a' * 64}",
+        RuntimeError,
+    ) in logged
 
 
 def _filtering_stage_selection(
@@ -851,28 +1086,31 @@ def _filtering_stage_selection(
 ) -> ArtifactRef:
     """Run the pipeline through its filtering stage and return its selection.
 
-    The run stops between stages once filtering completes, so no later stage
-    recomputes features for the new selection.
+    The run is cancelled once filtering completes and stops between stages,
+    so no later stage recomputes features for the new selection.
     """
+    cancel = CancellationToken()
 
     def stop_after_filtering(event: PipelineEvent) -> None:
         if (event.kind, event.stage) == ("stage_completed", "filtering"):
-            token = current_shutdown_token()
-            assert token is not None
-            token.request(reason="stop after filtering")
+            cancel.cancel("stop after filtering")
 
-    with pytest.raises(ShutdownRequested, match="stop after filtering"):
-        datastore.pipeline.run(
+    with pytest.raises(PipelineCancelled, match="stop after filtering"):
+        datastore.pipeline.rna(
             callback=stop_after_filtering,
+            cancel=cancel,
             **{**_minimal_run_options(), "filtering": filtering},
         )
     (run,) = datastore.pipeline.list_runs(status="interrupted")
     report = run.report()
+    assert report["run"]["interruption"]["kind"] == "cancelled"
     assert [(stage["stage"], stage["status"]) for stage in report["stages"]] == [
         ("input_snapshot", "completed"),
+        ("cell_calling", "skipped"),
+        ("hashing", "skipped"),
         ("filtering", "completed"),
     ]
-    (output,) = report["stages"][1]["outputs"]
+    (output,) = report["stages"][-1]["outputs"]
     assert output["outputKey"] == "analysis_cell_selection"
     return ArtifactRef.from_dict(output["artifact"])
 
@@ -885,7 +1123,7 @@ def test_automatic_filtering_threads_one_distinct_analysis_selection(
     options = _minimal_run_options()
     options["filtering"] = True
 
-    run = datastore.pipeline.run(label="filtered", **options)
+    run = datastore.pipeline.rna(label="filtered", **options)
 
     assert run["analysis_cell_selection"] != run["input_cell_selection"]
     analysis_count = int(np.count_nonzero(run.cells.fetch_all("I")))
@@ -956,8 +1194,7 @@ def test_pipeline_auto_filtering_retains_constant_metric(datastore_ephemeral):
 def test_pooled_mad_defaults_match_pipeline_and_preserve_gaussian_option(
     datastore_ephemeral,
 ):
-    from cytearc.datastore._pipeline_filtering import filter_pipeline_selection
-    from cytearc.datastore._pipeline_recipe import resolve_pipeline_recipe
+    from cytearc.datastore._pipeline.filtering import filter_pipeline_selection
     from cytearc.storage.selections import (
         read_stored_selection_mask,
         snapshot_run_metadata,
@@ -993,23 +1230,13 @@ def test_pooled_mad_defaults_match_pipeline_and_preserve_gaussian_option(
         assert (
             store.qc.auto_filter(attrs=attrs, cell_selection=prior, **options) == direct
         )
-        recipe = resolve_pipeline_recipe(
-            store,
-            assay=None,
-            label=None,
-            cell_key="I",
-            harmony_batch_columns=None,
-            snapshot_columns=(),
-            **{
-                **_minimal_run_options(),
-                "filtering": {"attrs": attrs, **options},
-            },
-        )
+        plan = _minimal_plan(store, filtering={"attrs": attrs, **options})
         pipeline = filter_pipeline_selection(
             store,
-            recipe=recipe,
+            config=plan.config["stages"]["filtering"],
             input_selection=prior,
             cell_snapshot=snapshot,
+            source_column="I",
         )
         masks = []
         for ref in (direct, pipeline):
@@ -1043,7 +1270,7 @@ def test_pooled_mad_defaults_match_pipeline_and_preserve_gaussian_option(
 
 
 def test_snapshot_filter_columns_are_one_dimensional_with_linked_masks() -> None:
-    from cytearc.datastore._pipeline_filtering import snapshot_column_values
+    from cytearc.datastore._pipeline.filtering import snapshot_column_values
 
     snapshot = zarr.open_group(store=MemoryStore(), mode="w").create_group("frozen")
     snapshot.create_array("count", data=np.asarray([3, 4, 5], dtype=np.int32))
@@ -1087,7 +1314,7 @@ def test_pipeline_filtering_rejects_nullable_active_sample_label(
     }
 
     with pytest.raises(PipelineExecutionError) as caught:
-        datastore.pipeline.run(**options)
+        datastore.pipeline.rna(**options)
 
     assert caught.value.stage == "filtering"
     assert isinstance(caught.value.__cause__, ValueError)
@@ -1109,7 +1336,7 @@ def test_default_clustering_is_selected_by_a_persisted_silhouette_decision(
     }
     options = _minimal_run_options()
     options["leiden"] = True
-    run = datastore.pipeline.run(label="leiden-defaults", **options)
+    run = datastore.pipeline.rna(label="leiden-defaults", **options)
 
     partitions = ("leiden_0.5", "leiden_0.75", "leiden_1.0", "leiden_1.25")
     assert all(key in run for key in partitions)
@@ -1162,7 +1389,8 @@ def test_custom_leiden_uses_only_the_requested_candidate_set(
     datastore = pipeline_store
     options = _minimal_run_options()
     options["leiden"] = {"partitions": [0.4, 0.8]}
-    run = datastore.pipeline.run(**options)
+    options["paris"] = True
+    run = datastore.pipeline.rna(**options)
 
     assert "leiden_0.4" in run
     assert "leiden_0.8" in run
@@ -1176,6 +1404,10 @@ def test_custom_leiden_uses_only_the_requested_candidate_set(
         "leiden_0.4",
         "leiden_0.8",
     ]
+    # Paris runs beside the candidates as a diagnostic and is never one.
+    assert "paris" in run
+    assert "paris" not in decision.attrs["candidateKeys"]
+    assert run["clusters"] != run["paris"]
 
 
 def test_pipeline_runs_umap_and_leiden_stages_one_at_a_time(
@@ -1195,14 +1427,11 @@ def test_pipeline_runs_umap_and_leiden_stages_one_at_a_time(
     options = _minimal_run_options()
     options.update(umap=True, leiden={"partitions": [0.5, 1.0]})
 
-    run = datastore.pipeline.run(callback=events.append, **options)
+    run = datastore.pipeline.rna(callback=events.append, **options)
 
     assert umap_threads == [threading.current_thread()]
-    stages = [
-        stage
-        for stage in load_pipeline_stage_records(datastore.zw, run.run_id)
-        if stage.status != "skipped"
-    ]
+    records = load_pipeline_stage_records(datastore.zw, run.run_id)
+    stages = [stage for stage in records if stage.status != "skipped"]
     assert [stage.stage for stage in stages][-5:] == [
         "embedding_initialization",
         "umap",
@@ -1212,17 +1441,34 @@ def test_pipeline_runs_umap_and_leiden_stages_one_at_a_time(
     ]
     for earlier, later in pairwise(stages):
         assert earlier.finished_at_ns <= later.started_at_ns
-    assert [(event.kind, event.stage) for event in events] == [
-        (kind, stage.stage)
-        for stage in stages
-        for kind in ("stage_started", "stage_completed")
+    assert _event_order(events) == [
+        ("run_started", None),
+        *(
+            (kind, stage.stage)
+            for stage in records
+            for kind in (
+                ("stage_skipped",)
+                if stage.status == "skipped"
+                else ("stage_started", "stage_completed")
+            )
+        ),
+        ("run_completed", None),
     ]
+    # Progress arrives only from the stage that is running.
+    running: str | None = None
+    for event in events:
+        if event.kind == "stage_started":
+            running = event.stage
+        elif event.kind == "stage_completed":
+            running = None
+        elif event.kind == "stage_progress":
+            assert event.stage == running
 
 
 def test_cluster_selection_records_invalid_candidates_ties_and_reuse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import cytearc.datastore._pipeline_cluster_selection as selection_store
+    import cytearc.datastore._pipeline.cluster_selection as selection_store
     import cytearc.metrics.cluster_selection as selection_metrics
 
     sample_calls = 0
@@ -1434,7 +1680,7 @@ def test_cluster_selection_adapter_rejects_detached_lineage() -> None:
             )
         },
     )
-    with pytest.raises(ValueError, match="must reference a PCA artifact"):
+    with pytest.raises(ValueError, match="must reference a PCA or LSI artifact"):
         run_cluster_selection(
             store,
             coordinates=detached_pca,
@@ -1542,7 +1788,7 @@ def test_cluster_selection_adapter_rejects_detached_lineage() -> None:
     )
     with pytest.raises(
         ValueError,
-        match="assay-scoped PCA reduction, Harmony batch-correction, or normalized",
+        match="must be an assay-scoped PCA or LSI reduction, Harmony",
     ):
         run_cluster_selection(
             store,
@@ -1709,30 +1955,13 @@ def test_cluster_selection_adapter_rejects_detached_lineage() -> None:
 def test_empty_filtering_mapping_uses_automatic_defaults(
     minimal_base: SimpleNamespace,
 ) -> None:
-    from cytearc.datastore._pipeline_recipe import resolve_pipeline_recipe
+    plan = _minimal_plan(minimal_base.datastore, filtering={})
 
-    recipe = resolve_pipeline_recipe(
-        minimal_base.datastore,
-        assay=None,
-        label=None,
-        cell_key="I",
-        filtering={},
-        harmony_batch_columns=None,
-        hvg_count=50,
-        pca_dims=3,
-        neighbors_k=3,
-        umap=False,
-        leiden=False,
-        cell_cycle=False,
-        paris=False,
-        doublets=False,
-        markers=False,
-        snapshot_columns=(),
-    )
-
-    assert recipe.filtering["enabled"] is True
-    assert recipe.filtering["method"] == "mad"
-    assert recipe.leiden_partitions == ()
+    filtering = plan.config["stages"]["filtering"]
+    assert filtering["enabled"] is True
+    assert filtering["method"] == "mad"
+    assert plan.config["stages"]["leiden"] is False
+    assert not any(stage.startswith("leiden_") for stage in plan.stage_order)
 
 
 def test_cluster_selection_scores_harmony_coordinates_not_pca(
@@ -1915,7 +2144,7 @@ def test_cluster_selection_preserves_sample_and_scores_across_workspace_sizes(
 
 
 def test_cluster_selection_workspace_shrinks_for_wider_coordinates() -> None:
-    from cytearc.datastore._pipeline_cluster_selection import (
+    from cytearc.datastore._pipeline.cluster_selection import (
         _silhouette_working_memory_mib,
     )
 
@@ -1948,7 +2177,7 @@ def _two_cluster_lineage() -> tuple[
 def test_cluster_selection_rejects_a_graph_over_other_cells(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import cytearc.datastore._pipeline_cluster_selection as selection_store
+    import cytearc.datastore._pipeline.cluster_selection as selection_store
 
     _root, store, lineage, labels = _two_cluster_lineage()
     other_cells = ArtifactRef("datastore", "cell_selection", "0" * 64)
@@ -1986,7 +2215,7 @@ def test_cluster_selection_rechecks_the_scored_coordinate_payload(
     payload: dict[str, np.ndarray],
     message: str,
 ) -> None:
-    import cytearc.datastore._pipeline_cluster_selection as selection_store
+    import cytearc.datastore._pipeline.cluster_selection as selection_store
 
     _root, store, lineage, labels = _two_cluster_lineage()
     # The lineage resolvers reject such payloads first, so the stand-in
@@ -2008,7 +2237,7 @@ def test_cluster_selection_rechecks_the_scored_coordinate_payload(
 def test_reused_cluster_selection_requires_a_known_text_selected_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import cytearc.datastore._pipeline_cluster_selection as selection_store
+    import cytearc.datastore._pipeline.cluster_selection as selection_store
 
     root, store, lineage, labels = _two_cluster_lineage()
     candidates = (("clusters", labels),)
@@ -2047,34 +2276,22 @@ def test_reused_cluster_selection_requires_a_known_text_selected_key(
         _select_clusters(store, lineage, candidates)
 
 
-def _minimal_recipe(datastore: DataStore, **changes: Any) -> Any:
-    from cytearc.datastore._pipeline_recipe import resolve_pipeline_recipe
-
-    return resolve_pipeline_recipe(
-        datastore,
-        assay=None,
-        label=None,
-        cell_key="I",
-        harmony_batch_columns=None,
-        snapshot_columns=(),
-        **{**_minimal_run_options(), **changes},
-    )
-
-
 def test_filtering_without_qc_columns_keeps_the_input_selection(
     minimal_base: SimpleNamespace,
 ) -> None:
-    from cytearc.datastore._pipeline_filtering import filter_pipeline_selection
+    from cytearc.datastore._pipeline.filtering import filter_pipeline_selection
 
     run = minimal_base.run
-    recipe = _minimal_recipe(minimal_base.datastore)
-    assert recipe.filtering == {"enabled": False}
+    filtering = _minimal_plan(minimal_base.datastore).config["stages"]["filtering"]
+    assert filtering == {"enabled": False}
+    assert run.report()["run"]["config"]["stages"]["filtering"] == filtering
 
     selection = filter_pipeline_selection(
         minimal_base.datastore,
-        recipe=recipe,
+        config=filtering,
         input_selection=run["input_cell_selection"],
         cell_snapshot=run.cells._descriptor_by_key["ids"].artifact,
+        source_column="I",
     )
 
     assert selection == run["input_cell_selection"]
@@ -2083,21 +2300,19 @@ def test_filtering_without_qc_columns_keeps_the_input_selection(
 def test_pipeline_fields_describe_only_the_leiden_partitions_that_ran(
     minimal_base: SimpleNamespace,
 ) -> None:
-    from cytearc.datastore._pipeline_fields import build_pipeline_fields
-
     run = minimal_base.run
-    recipe = _minimal_recipe(minimal_base.datastore, leiden=True)
-    assert recipe.leiden_partitions
+    plan = _minimal_plan(minimal_base.datastore, leiden=True)
+    assert any(stage.startswith("leiden_") for stage in plan.stage_order)
     assert not any(key.startswith("leiden_") for key in run)
 
     # A partition without an artifact adds no field.
-    fields = build_pipeline_fields(
-        minimal_base.datastore,
-        recipe,
-        dict(run),
+    state = plan.start(minimal_base.datastore)
+    state.artifacts.update(
+        run,
         cell_snapshot=run.cells._descriptor_by_key["ids"].artifact,
         feature_snapshot=run.features._descriptor_by_key["ids"].artifact,
     )
+    fields = plan.fields(state)
 
     assert fields == run._record.fields
 
@@ -2125,14 +2340,15 @@ def test_rich_pipeline_views_plots_and_markers_remain_frozen_after_live_i_drift(
     feature_attrs_before = dict(assay.feats.locations["primary"].attrs)
     assay_attrs_before = dict(assay.attrs)
 
-    run = datastore.pipeline.run(
+    run = datastore.pipeline.rna(
         label="rich-frozen",
         filtering=False,
-        hvg_count=50,
-        pca_dims=3,
-        neighbors_k=3,
+        hvg={"top_n": 50},
+        pca={"dims": 3},
+        neighbors={"k": 3},
     )
 
+    # Paris, t-SNE, and membership strength are off by default.
     assert list(run) == [
         "input_cell_selection",
         "analysis_cell_selection",
@@ -2150,18 +2366,32 @@ def test_rich_pipeline_views_plots_and_markers_remain_frozen_after_live_i_drift(
         "leiden_0.75",
         "leiden_1.0",
         "leiden_1.25",
-        "paris",
         "cluster_selection",
         "clusters",
         "doublets",
         "markers",
     ]
+    assert run.cells.columns == (
+        "I",
+        "ids",
+        "names",
+        "s_score",
+        "g2m_score",
+        "cell_cycle_phase",
+        "umap_1",
+        "umap_2",
+        "leiden_0.5",
+        "leiden_0.75",
+        "leiden_1.0",
+        "leiden_1.25",
+        "clusters",
+        "doublet_score",
+        "predicted_doublet",
+    )
     decision = artifact_group(datastore.zw, run["cluster_selection"])
     assert run["clusters"] == run[decision.attrs["selectedKey"]]
     assert decision.attrs["selectedKey"].startswith("leiden_")
     assert "paris" not in decision.attrs["candidateKeys"]
-    assert "paris" in run
-    assert run["clusters"] != run["paris"]
     assert set(datastore.cells.columns) == set(cell_values_before)
     assert set(assay.feats.columns) == set(feature_values_before)
     for column, values in cell_values_before.items():
@@ -2240,13 +2470,13 @@ def test_harmony_doublets_are_scored_within_each_batch_without_another_graph(
         "_run_doublet_detection_artifact",
         capture_doublet_inputs,
     )
-    run = datastore.pipeline.run(
+    run = datastore.pipeline.rna(
         label="harmony-doublets",
         filtering=False,
-        harmony_batch_columns=("pipeline_batch",),
-        hvg_count=50,
-        pca_dims=3,
-        neighbors_k=3,
+        harmony={"batch_columns": ["pipeline_batch"]},
+        hvg={"top_n": 50},
+        pca={"dims": 3},
+        neighbors={"k": 3},
         umap=False,
         leiden={"partitions": [1.0]},
         cell_cycle=False,
@@ -2317,7 +2547,7 @@ def test_paris_only_pipeline_keeps_paris_as_a_diagnostic_without_clusters(
     pipeline_store,
 ) -> None:
     datastore = pipeline_store
-    run = datastore.pipeline.run(
+    run = datastore.pipeline.rna(
         **{
             **_minimal_run_options(),
             "leiden": False,
@@ -2358,7 +2588,7 @@ def test_snapshot_columns_freeze_user_metadata_with_dtype_fills(
     datastore.cells.insert("doublet_flag", flags)
     datastore.cells.insert("visit", visits)
 
-    run = datastore.pipeline.run(
+    run = datastore.pipeline.rna(
         snapshot_columns=("doublet_flag", "visit"),
         **_minimal_run_options(),
     )
