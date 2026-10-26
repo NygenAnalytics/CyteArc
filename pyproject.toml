@@ -91,7 +91,7 @@ test = [
     "sgtsnepi>=0.7; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 docs = [
-    "mystmd>=1.11.0",
+    "mystmd==1.11.0",
     "jupytext>=1.19.6",
     "ipykernel>=7.3.0",
     "nbclient",

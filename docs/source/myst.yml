@@ -1,6 +1,7 @@
 version: 1
 project:
   title: CyteArc
+  short_title: Overview
   description: Out-of-core single-cell analysis for RNA, ATAC, protein, and matched
     multi-omic data.
   github: https://github.com/NygenAnalytics/CyteArc
@@ -161,13 +162,16 @@ project:
   bibliography:
   - references.bib
 site:
-  template: book-theme
+  template: https://github.com/myst-templates/book-theme/archive/23f2df5493e23dfb1d9433c8aa64c87beb4232a3.zip
   parts:
-    primary_sidebar_footer: '[Third-party notices and data credits](reference/third_party_notices.md)'
+    primary_sidebar_footer: '<!-- No sidebar footer. -->'
+    navbar_end: '<a class="docs-home-link" href="https://docs.nygen.io/"><img class="brand-symbol" src="https://docs.nygen.io/assets/brand/logo/nygen-symbol.svg" alt="Nygen documentation home" width="32" height="32"></a>'
   options:
     folders: true
-    favicon: favicon.ico
-    logo: _static/cytearc-logo-black.png
-    logo_dark: _static/cytearc-logo-white.png
+    style: https://docs.nygen.io/assets/brand/myst.css
+    favicon: https://docs.nygen.io/assets/brand/logo/cytearc.ico
+    logo: https://docs.nygen.io/assets/brand/logo/cytearc.svg
+    logo_dark: https://docs.nygen.io/assets/brand/logo/cytearc.svg
+    logo_alt: CyteArc
     logo_text: CyteArc
     hide_authors: true

@@ -883,7 +883,7 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7" },
     { name = "matplotlib", marker = "extra == 'extra'", specifier = ">=3.9.2" },
     { name = "myst-parser", marker = "extra == 'docs'" },
-    { name = "mystmd", marker = "extra == 'docs'", specifier = ">=1.11.0" },
+    { name = "mystmd", marker = "extra == 'docs'", specifier = "==1.11.0" },
     { name = "nbclient", marker = "extra == 'docs'" },
     { name = "networkx", specifier = ">=3" },
     { name = "numba", specifier = ">=0.61" },
