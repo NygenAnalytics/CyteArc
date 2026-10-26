@@ -1,4 +1,4 @@
-<h1><img src="https://docs.nygen.io/assets/brand/logo/cytearc.svg" alt="" width="48" height="48" align="right"> CyteArc</h1>
+<h1><img src="https://docs.nygen.io/assets/brand/logo/cytearc-dark.png" alt="" width="96" align="right"> CyteArc</h1>
 
 <p align="left">
   <a href="https://github.com/NygenAnalytics/CyteArc/actions/workflows/pytest.yml"><img src="https://github.com/NygenAnalytics/CyteArc/actions/workflows/pytest.yml/badge.svg" alt="Tests"></a>
