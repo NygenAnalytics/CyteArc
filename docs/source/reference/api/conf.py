@@ -31,11 +31,13 @@ pygments_style = "sphinx"
 language = "en"
 
 html_theme = "sphinx_book_theme"
+html_css_files = ["https://docs.nygen.io/assets/brand/docs.css"]
+html_logo = "https://docs.nygen.io/assets/brand/logo/cytearc.svg"
+html_favicon = "https://docs.nygen.io/assets/brand/logo/cytearc.ico"
 html_title = "CyteArc API reference"
 html_baseurl = "https://docs.nygen.io/CyteArc/api/"
-html_favicon = str(SOURCE_ROOT / "favicon.ico")
-html_logo = str(SOURCE_ROOT / "_static" / "cytearc-logo-black.png")
 html_theme_options = {
+    "logo": {"text": "CyteArc", "alt_text": "CyteArc"},
     "repository_url": "https://github.com/NygenAnalytics/CyteArc",
     "path_to_docs": "docs/source/reference/api",
     "use_repository_button": True,
