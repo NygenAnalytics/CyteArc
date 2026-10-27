@@ -854,6 +854,9 @@ def rendered_discovery_files(
 def test_page_metadata_preserves_authored_content_and_completes_link_previews(
     route: str, title: str, expected: str
 ) -> None:
+    pytest.importorskip("jupytext")
+    pytest.importorskip("nbformat")
+    pytest.importorskip("yaml")
     from docs import build_docs
 
     class Metadata(HTMLParser):
@@ -908,6 +911,9 @@ def test_page_metadata_preserves_authored_content_and_completes_link_previews(
 
 
 def test_page_metadata_rejects_missing_authored_description() -> None:
+    pytest.importorskip("jupytext")
+    pytest.importorskip("nbformat")
+    pytest.importorskip("yaml")
     from docs import build_docs
 
     with pytest.raises(ValueError, match="Expected a title and description"):
