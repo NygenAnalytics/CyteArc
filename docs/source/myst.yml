@@ -17,7 +17,6 @@ project:
   - tutorials/regulons.ipynb
   static_files:
   - llms.txt
-  - ../build/api
   toc:
   - file: index.md
   - title: Getting started

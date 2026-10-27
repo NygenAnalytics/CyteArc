@@ -488,6 +488,163 @@ def test_prepared_sidebar_urls_respect_site_base_url(
     assert (source / "myst.yml").read_text() == source_config
 
 
+@pytest.mark.parametrize("base_url", ["", "/CyteArc"])
+def test_api_pages_join_the_staged_guide_navigation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    pytest.importorskip("jupytext")
+    pytest.importorskip("nbformat")
+    yaml = pytest.importorskip("yaml")
+    from docs import build_docs
+
+    api = tmp_path / "docs" / "build" / "api"
+    api.mkdir(parents=True)
+    (api / "index.html").write_text(
+        '<nav class="docs-api-tree"><ul><li>'
+        '<a href="datastore.html"><span>DataStore API reference</span></a>'
+        '</li><li><a href="import_export.html">Import &amp; export</a>'
+        "</li></ul></nav>"
+    )
+    site = tmp_path / "site"
+    site.mkdir()
+    config = {
+        "project": {
+            "toc": [
+                {"file": "index.md"},
+                {
+                    "title": "Reference",
+                    "children": [
+                        {"url": f"{base_url}/api/index.html", "title": "API reference"}
+                    ],
+                },
+            ]
+        }
+    }
+    (site / "myst.yml").write_text(yaml.safe_dump(config))
+    monkeypatch.setattr(build_docs, "DOCS", api.parents[1])
+    monkeypatch.setenv("BASE_URL", base_url)
+
+    build_docs.include_api_navigation(site)
+
+    toc = yaml.safe_load((site / "myst.yml").read_text())["project"]["toc"]
+    assert toc[0] == {"file": "index.md"}
+    assert toc[1]["children"][0]["children"] == [
+        {
+            "title": "DataStore API reference",
+            "url": f"{base_url}/api/datastore.html",
+            "open_in_same_tab": True,
+        },
+        {
+            "title": "Import & export",
+            "url": f"{base_url}/api/import_export.html",
+            "open_in_same_tab": True,
+        },
+    ]
+
+
+@pytest.mark.parametrize("base_url", ["", "/CyteArc"])
+def test_api_pages_keep_the_guide_header_navigation_and_existing_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    pytest.importorskip("jupytext")
+    pytest.importorskip("nbformat")
+    pytest.importorskip("yaml")
+    from docs import build_docs
+
+    monkeypatch.setenv("BASE_URL", base_url)
+    html = tmp_path / "html"
+    api = html / "api"
+    api.mkdir(parents=True)
+    header = (
+        '<nav class="myst-top-nav-bar"><div>'
+        '<button class="myst-top-nav-menu-button flex">Menu</button>'
+        f'<a class="myst-home-link" href="{base_url}/"><img src="logo.svg"/>CyteArc</a>'
+        '</div><button aria-expanded="false" data-state="closed" class="myst-search-bar flex myst-search-bar-disabled">Search'
+        "<script>window.headerScript = true;</script></button>"
+        '<button class="myst-theme-button">Theme</button></nav>'
+    )
+    navigation = (
+        '<nav class="myst-primary-sidebar-toc"><div class="myst-toc">'
+        f'<a class="myst-toc-item myst-toc-item-exact font-bold p-2 my-1" aria-current="page" href="{base_url}/">Overview</a>'
+        f'<a href="{base_url}/tutorials/remote-stores/">Remote stores</a>'
+        f'<a href="{base_url}/api/index.html">API reference</a>'
+        f'<a href="{base_url}/api/datastore.html">DataStore</a>'
+        "</div></nav>"
+    )
+    (html / "index.html").write_text(
+        f"<html><head></head><body>{header}{navigation}</body></html>"
+    )
+    article = '<article><h1 id="datastore">DataStore</h1><a href="datastore.html#method">Method</a></article>'
+    for name in ("index.html", "datastore.html", "search.html", "genindex.html"):
+        (api / name).write_text(
+            '<html><head></head><body class="docs-api"><header>'
+            '<nav class="docs-header-placeholder"></nav></header>'
+            '<div class="myst-primary-sidebar-nav docs-api-navigation">'
+            '<nav class="docs-api-tree"><ul><li>Original API menu</li></ul></nav>'
+            f"</div>{article}</body></html>"
+        )
+    (api / "objects.inv").write_bytes(b"existing Sphinx inventory")
+    static = api / "_static"
+    static.mkdir()
+    (static / "webpack-macros.html").write_text("{% macro assets() %}{% endmacro %}")
+
+    build_docs.integrate_api_navigation(html)
+
+    for page in api.glob("*.html"):
+        contents = page.read_text()
+        copied_header = build_docs.html_fragment(contents, "myst-top-nav-bar")
+        copied_navigation = build_docs.html_fragment(
+            contents, "myst-primary-sidebar-toc"
+        )
+        assert 'class="myst-search-bar search-button__button"' in copied_header
+        assert (
+            'class="myst-top-nav-menu-button sidebar-toggle primary-toggle"'
+            in copied_header
+        )
+        assert "myst-search-bar-disabled" not in copied_header
+        assert 'aria-label="Search documentation"' in copied_header
+        assert 'aria-controls="pst-search-dialog"' in copied_header
+        assert "aria-expanded" not in copied_header
+        assert "data-state" not in copied_header
+        assert "<script" not in copied_header
+        assert "Original API menu" not in contents
+        assert "font-bold" not in copied_navigation
+        assert "myst-toc-item-exact" not in copied_navigation
+        assert "p-2" not in copied_navigation
+        assert "my-1" not in copied_navigation
+        assert re.findall(r'href="([^"]+)"', copied_navigation) == re.findall(
+            r'href="([^"]+)"', navigation
+        )
+        selected = re.findall(r'<a\b[^>]*aria-current="page"[^>]*>', copied_navigation)
+        if page.name in {"index.html", "datastore.html"}:
+            assert len(selected) == 1
+            assert f'href="{base_url}/api/{page.name}"' in selected[0]
+        else:
+            assert not selected
+        assert article in contents
+        assert contents.count('src="https://docs.nygen.io/assets/brand/docs.js"') == 1
+        assert "nygen-docs-sidebar:" in contents
+        assert "fonts/inter/latin.woff2" in contents
+    assert (api / "objects.inv").read_bytes() == b"existing Sphinx inventory"
+    assert (
+        static / "webpack-macros.html"
+    ).read_text() == "{% macro assets() %}{% endmacro %}"
+
+
+def test_html_fragment_rejects_missing_or_duplicate_navigation() -> None:
+    pytest.importorskip("jupytext")
+    pytest.importorskip("nbformat")
+    pytest.importorskip("yaml")
+    from docs import build_docs
+
+    for contents in (
+        "<html></html>",
+        '<nav class="menu"></nav><nav class="menu"></nav>',
+    ):
+        with pytest.raises(ValueError, match="Expected one complete .menu element"):
+            build_docs.html_fragment(contents, "menu")
+
+
 @pytest.mark.parametrize("figure_count", [1, 2])
 def test_staged_figure_uses_authored_alt_without_changing_saved_output(
     executable_docs,
@@ -609,7 +766,7 @@ def rendered_discovery_files(
         page = html / route.strip("/") / "index.html"
         page.parent.mkdir(parents=True, exist_ok=True)
         page.write_text(
-            f"<html><head><title>{name}</title></head>"
+            f'<html><head><title>{name}</title><meta name="description" content="Authored guide description."/></head>'
             f"<body><nav>Site navigation</nav><article><h1>{name}</h1>"
             "<p>Saved result: 42 cells.</p>"
             "<pre>def count():\n    return 42\n\nprint(count())\n42</pre>"
@@ -642,7 +799,9 @@ def rendered_discovery_files(
         "# DataStore\n\n```{autoclass} cytearc.DataStore\n:members:\n```\n"
     )
     (html / "api" / "datastore.html").write_text(
-        '<html><head><link rel="canonical" '
+        "<html><head><title>CyteArc API reference</title>"
+        '<meta name="description" content="Authored API description."/>'
+        '<link rel="canonical" '
         'href="https://docs.nygen.io/CyteArc/api/datastore.html" /></head>'
         "<body>DataStore(path, *, mode='r')</body></html>"
     )
@@ -673,6 +832,89 @@ def rendered_discovery_files(
         "<url><loc>http://localhost:3000/quickstart</loc></url></urlset>"
     )
     return html, api_text, base_url
+
+
+@pytest.mark.parametrize(
+    ("route", "title", "expected"),
+    [
+        ("/", "CyteArc - CyteArc", "CyteArc documentation"),
+        ("/quickstart/", "Quick start - CyteArc", "Quick start - CyteArc"),
+        (
+            "/api/index.html",
+            "CyteArc Python API reference — CyteArc API reference",
+            "CyteArc Python API reference",
+        ),
+        (
+            "/api/cytearc.html",
+            "CyteArc API reference — CyteArc API reference",
+            "CyteArc Python API",
+        ),
+    ],
+)
+def test_page_metadata_preserves_authored_content_and_completes_link_previews(
+    route: str, title: str, expected: str
+) -> None:
+    from docs import build_docs
+
+    class Metadata(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tags: list[dict[str, str | None]] = []
+
+        def handle_starttag(
+            self, tag: str, attrs: list[tuple[str, str | None]]
+        ) -> None:
+            if tag == "meta":
+                self.tags.append(dict(attrs))
+
+    body = "<body><h1>Keep this heading</h1><svg><title>Keep SVG title</title></svg></body>"
+    source = (
+        f"<html><head><title>{title}</title>"
+        '<meta name="description" content="Read RNA &amp; ATAC &quot;together&quot;."/>'
+        '<meta property="og:title" content="Stale title"/>'
+        '<meta name="twitter:card" content="summary_large_image"/>'
+        '<meta name="robots" content="noindex,follow"/>'
+        f"</head>{body}</html>"
+    )
+    canonical = build_docs.PUBLIC_URL + route
+
+    actual = build_docs.update_page_metadata(source, canonical)
+
+    head = actual.split("</head>")[0]
+    parser = Metadata()
+    parser.feed(head)
+    keys = [tag.get("property", tag.get("name")) for tag in parser.tags]
+    assert len(keys) == len(set(keys))
+    metadata = dict(zip(keys, (tag["content"] for tag in parser.tags), strict=True))
+    assert re.findall(r"<title>(.*?)</title>", head) == [expected]
+    assert metadata["description"] == 'Read RNA & ATAC "together".'
+    assert metadata["og:description"] == metadata["description"]
+    assert metadata["og:title"] == expected
+    assert metadata["og:type"] == "website"
+    assert metadata["og:url"] == canonical
+    assert (
+        metadata["og:image"]
+        == "https://docs.nygen.io/assets/brand/logo/cytearc-dark.png"
+    )
+    assert metadata["og:image:type"] == "image/png"
+    assert metadata["og:image:width"] == metadata["og:image:height"] == "512"
+    assert metadata["og:image:alt"] == "CyteArc logo"
+    assert metadata["twitter:card"] == "summary"
+    assert metadata["twitter:image"] == metadata["og:image"]
+    assert metadata["twitter:image:alt"] == metadata["og:image:alt"]
+    assert metadata["robots"] == "noindex,follow"
+    assert actual.endswith(body + "</html>")
+    assert build_docs.update_page_metadata(actual, canonical) == actual
+
+
+def test_page_metadata_rejects_missing_authored_description() -> None:
+    from docs import build_docs
+
+    with pytest.raises(ValueError, match="Expected a title and description"):
+        build_docs.update_page_metadata(
+            "<html><head><title>Guide</title></head><body></body></html>",
+            build_docs.PUBLIC_URL + "/guide/",
+        )
 
 
 def _discovery_links(page: Path) -> list[dict[str, str | None]]:
