@@ -154,6 +154,7 @@ def test_focused_scanpy_and_seurat_guides_are_reachable() -> None:
 def test_agent_pages_are_withheld_and_their_sources_are_retained() -> None:
     project = _project()
     assert "llms.txt" in project["static_files"]
+    assert "../build/api" not in project["static_files"]
     assert not _AGENT_PAGES & _toc_files(project["toc"])
     for page in _AGENT_PAGES:
         assert (_DOCS_SOURCE / page).is_file()
