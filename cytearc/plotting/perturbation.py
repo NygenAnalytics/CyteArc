@@ -7,6 +7,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..perturbation.edistance import (
+    EDISTANCE_STATUSES,
+    TESTED as EDISTANCE_TESTED,
+)
 from ..perturbation.efficiency import EFFICIENCY_STATUSES, TESTED
 from ..perturbation.mixtures import (
     FIT_STATUSES,
@@ -80,6 +84,8 @@ _POINT_AREAS = (16.0, 144.0)
 # A fold change of minus infinity is drawn at the left edge with this marker.
 _NO_UMI_MARKER = "<"
 _NO_UMI_LABEL = "No UMI remains in the perturbed cells"
+
+_EDISTANCE_PANEL = "edistance"
 
 
 def _guide_calls(store: Any, calls: ArtifactRef) -> Any:
@@ -997,6 +1003,205 @@ def efficiency(
                 "statuses": {
                     status: int(statuses.get(status, 0))
                     for status in EFFICIENCY_STATUSES
+                },
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+def _perturbation_edistance(store: Any, edistance: ArtifactRef) -> Any:
+    """Load saved perturbation E-distances through the store's narrow loader."""
+    loader = getattr(getattr(store, "perturbation", None), "load_edistance", None)
+    if not callable(loader):
+        raise TypeError("store does not provide perturbation E-distances")
+    return loader(edistance)
+
+
+def _edistance_limits(distances: np.ndarray) -> tuple[float, float]:
+    """Return the limits of the E-distance axis.
+
+    The axis holds 0 and every finite E-distance, with a margin of 5% of their
+    range on each side; the range runs from -1 to 1 when no E-distance differs
+    from 0.
+    """
+    finite = distances[np.isfinite(distances)]
+    low = float(finite.min(initial=0.0))
+    high = float(finite.max(initial=0.0))
+    if low == high:
+        low, high = -1.0, 1.0
+    margin = 0.05 * (high - low)
+    return low - margin, high + margin
+
+
+@close_figures_on_error
+def edistance(
+    store: Any,
+    edistance: ArtifactRef,
+    *,
+    max_rows: int = 40,
+    alpha: float = 0.05,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot how far each perturbation moves its cells from the control cells.
+
+    ``edistance`` is a ``perturbation_edistance`` artifact of
+    ``ds.perturbation.edistance``, as ``ds.perturbation.load_edistance`` reads
+    it. Each tested target, or each tested guide when the E-distances were
+    measured by guide, gets one row labelled with its name. A point marks the
+    E-distance between the cells that carry the perturbation and the control
+    cells in the coordinates it was measured in, such as a PCA; it grows as the
+    perturbation moves its cells away from the control cells. The E-distance
+    is an unbiased estimate, so a perturbation whose cells look like the
+    control cells can fall a little left of the line at 0. A point is blue when
+    its adjusted p-value is below ``alpha`` and grey otherwise, and its area
+    grows with the cells that carry the perturbation. When the E-distances
+    were measured without permutation tests, no row has a p-value: every point
+    is blue, and the title says so.
+
+    When more than ``max_rows`` rows were tested, the plot keeps the
+    ``max_rows`` rows with the largest E-distances, ties broken by name. The
+    rows run from the largest E-distance at the top to the smallest at the
+    bottom. Rows whose status is not ``"tested"`` are left out, and the title
+    counts them by status. The table ``"edistance"`` holds the drawn rows of the
+    record, with every column, in drawing order.
+    """
+    if (
+        isinstance(max_rows, bool)
+        or not isinstance(max_rows, int | np.integer)
+        or max_rows < 1
+    ):
+        raise ValueError("max_rows must be a positive integer")
+    if isinstance(alpha, bool) or not isinstance(alpha, Real) or not 0 < alpha < 1:
+        raise ValueError("alpha must be a number above 0 and below 1")
+    max_rows = int(max_rows)
+    alpha = float(alpha)
+    loaded = _perturbation_edistance(store, edistance)
+    table = loaded.table
+    by = str(loaded.by)
+    tested_status = EDISTANCE_STATUSES[EDISTANCE_TESTED]
+    tested = table[table["status"] == tested_status]
+    n_tested = len(tested)
+    # The rows run from the largest E-distance to the smallest, ties broken by
+    # name, so the first max_rows of them have the largest E-distances.
+    drawn = (
+        tested.sort_values(
+            ["edistance", by], ascending=[False, True], na_position="last"
+        )
+        .head(max_rows)
+        .reset_index(drop=True)
+    )
+    distances = drawn["edistance"].to_numpy(dtype=np.float64)
+    n_cells = drawn["n_cells"].to_numpy(dtype=np.int64)
+    adjusted = drawn["adjusted_p_value"].to_numpy(dtype=np.float64)
+    # Without permutation tests no row has a p-value, and every point is blue.
+    permuted = bool(np.isfinite(adjusted).any())
+    significant = (adjusted < alpha) if permuted else np.ones(len(drawn), dtype=bool)
+    statuses = table["status"].value_counts()
+    title = [f"E-distance by {by}"]
+    if n_tested > max_rows:
+        title.append(
+            f"The {max_rows:,} of {n_tested:,} tested {by}s with the largest "
+            "E-distances"
+        )
+    if len(drawn) and not permuted:
+        title.append("Without permutation tests")
+    others = [
+        f"{int(statuses[status]):,} {status}"
+        for status in EDISTANCE_STATUSES
+        if status != tested_status and status in statuses.index
+    ]
+    if others:
+        title.append("Not plotted: " + ", ".join(others))
+    positions = np.arange(len(drawn), dtype=np.float64)[::-1]
+    colors = np.where(significant, _SIGNIFICANT_COLOR, _NOT_SIGNIFICANT_COLOR)
+    areas = _point_areas(n_cells, int(n_cells.max(initial=0)))
+    left, right = _edistance_limits(distances)
+    if figsize is None and target is None:
+        figsize = (
+            6.2 + (2.6 if show_legend else 0.0),
+            max(3.0, 0.22 * len(drawn) + 1.0 + 0.25 * len(title)),
+        )
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=[_EDISTANCE_PANEL], figsize=figsize
+        )
+        ax = axes[_EDISTANCE_PANEL]
+        foreground = foreground_color(theme)
+        ax.axvline(0.0, color=foreground, linewidth=0.8, zorder=1)
+        if len(drawn):
+            ax.scatter(
+                distances,
+                positions,
+                s=areas,
+                c=colors.tolist(),
+                marker="o",
+                linewidths=0,
+                zorder=3,
+            )
+        ax.set_xlim(left, right)
+        ax.set_yticks(positions, [str(name) for name in drawn[by].tolist()])
+        ax.set_ylim(-0.7, max(len(drawn), 1) - 0.3)
+        # Faint lines lead from each label to its point.
+        ax.tick_params(axis="y", length=0)
+        ax.grid(axis="y", color=foreground, alpha=0.15, linewidth=0.5)
+        ax.set_axisbelow(True)
+        ax.set_xlabel("E-distance to control cells")
+        ax.set_title("\n".join(title))
+        # The entries of the efficiency legend, without minus infinity, and
+        # without the p-values when no row has one.
+        handles, texts = _efficiency_legend(
+            significant if permuted else significant[:0],
+            np.zeros(len(drawn), dtype=bool),
+            n_cells,
+            alpha=alpha,
+            foreground=foreground,
+        )
+        if show_legend and handles:
+            if owns:
+                # Centred beside the axes, so the multi-line title never runs
+                # into it.
+                figure.legend(handles, texts, loc="outside right center", frameon=False)
+            else:
+                ax.legend(handles, texts, loc="best", frameon=False, fontsize="small")
+        apply_figure_chrome(figure, theme)
+    controls = table["n_control_cells"].to_numpy(dtype=np.int64)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"edistance": drawn},
+        legends=(
+            LegendSpec(kind="categorical", label="Adjusted p-value"),
+            LegendSpec(kind="size", label="Perturbed cells"),
+        ),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=edistance.assay,
+            cell_key=None,
+            # The perturbed cells of the drawn rows and the control cells.
+            n_cells=int(n_cells.sum()) + int(controls.max(initial=0)),
+            renderer="matplotlib",
+            notes=("perturbation_edistance",),
+            extras={
+                "edistance": edistance.to_dict(),
+                "by": by,
+                "n_permutations": int(loaded.n_permutations),
+                "random_seed": int(loaded.random_seed),
+                "max_rows": max_rows,
+                "alpha": alpha,
+                "n_tested": n_tested,
+                "statuses": {
+                    status: int(statuses.get(status, 0))
+                    for status in EDISTANCE_STATUSES
                 },
             },
         ),

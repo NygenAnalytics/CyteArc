@@ -2,6 +2,7 @@ import hashlib
 import os
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 
@@ -13,6 +14,7 @@ from ...metadata.arguments import (
     GuideCallArguments,
     GuideCallImportArguments,
     GuideThresholdArguments,
+    PerturbationEDistanceArguments,
     PerturbationEfficiencyArguments,
     PerturbationLabelArguments,
 )
@@ -40,6 +42,12 @@ from ...perturbation.guide_thresholds import (
     GuideThresholds,
     call_thresholds,
     guide_threshold_frames,
+)
+from ...perturbation.edistance import (
+    EDISTANCE_STATUSES,
+    PerturbationEDistance,
+    edistance_arrays,
+    edistance_memory_bytes,
 )
 from ...perturbation.efficiency import (
     EFFICIENCY_STATUSES,
@@ -77,6 +85,7 @@ from ...storage.artifact_writer import (
     PlannedArtifact,
 )
 from ...storage.artifacts import (
+    ArtifactStatus,
     ArtifactRef,
     artifact_group,
     fingerprint_strings,
@@ -145,6 +154,26 @@ def _file_sha256(path: str | os.PathLike[str]) -> str:
         for block in iter(lambda: handle.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class _LabelRows:
+    """The rows of a per-perturbation table, read from perturbation labels.
+
+    Attributes:
+        status: The labels' artifact status.
+        target_names: Every target of the labels, control targets included.
+        guide_targets: Each guide's position in ``target_names``, -1 without
+            a target.
+        codes: Each row's target, as a position in ``target_names``.
+        names: Each row's name: the target, or the guide.
+    """
+
+    status: ArtifactStatus
+    target_names: np.ndarray
+    guide_targets: np.ndarray
+    codes: np.ndarray
+    names: np.ndarray
 
 
 @contextmanager
@@ -1490,6 +1519,72 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             policy=str(parameters["policy"]),
         )
 
+    def _label_rows(self, labels: ArtifactRef, by: str) -> _LabelRows:
+        """Read the rows of a per-perturbation table: each target or each guide.
+
+        A row is a target that is not a control, or with ``by="guide"`` a guide
+        whose target is not a control, in assay order.
+        """
+        status = require_complete_artifact(self.zw, labels)
+        group = artifact_group(self.zw, labels)
+        calls = artifact_group(self.zw, status.input_ref("guide_calls"))
+
+        def read(stored: zarr.Group, name: str) -> np.ndarray:
+            return np.asarray(as_zarr_array(stored[name], name=name)[:])
+
+        target_names = read(group, "targets").astype(str)
+        is_control = read(group, "target_is_control").astype(bool)
+        guide_targets = read(group, "guide_target_codes").astype(np.int64)
+        if by == "target":
+            codes = np.flatnonzero(~is_control)
+            names = target_names[codes]
+        else:
+            guides = np.flatnonzero(
+                (guide_targets >= 0) & ~is_control[np.maximum(guide_targets, 0)]
+            )
+            codes = guide_targets[guides]
+            names = read(calls, "guides").astype(str)[guides]
+        return _LabelRows(
+            status=status,
+            target_names=target_names,
+            guide_targets=guide_targets,
+            codes=codes,
+            names=names,
+        )
+
+    def _label_groups(
+        self, labels: ArtifactRef, rows: _LabelRows, by: str
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return the row that each labelled cell carries alone, or -1, and its control flag.
+
+        A cell carries a target alone when its called guides target that gene
+        and no other, and a guide alone when it is the cell's one called guide.
+
+        Raises:
+            ValueError: If no labelled cell is a control cell.
+        """
+        group = artifact_group(self.zw, labels)
+
+        def read(name: str) -> np.ndarray:
+            return np.asarray(as_zarr_array(group[name], name=name)[:])
+
+        control = read("is_control").astype(bool)
+        if not control.any():
+            raise ValueError(
+                "The labels have no control cell; label cells with controls that "
+                "the guides target"
+            )
+        if by == "target":
+            row_of = np.full(len(rows.target_names), -1, dtype=np.int64)
+            row_of[rows.codes] = np.arange(len(rows.codes))
+            single = read("n_targets") == 1
+            first = read("target_codes")[:, 0]
+            return np.where(single, row_of[np.maximum(first, 0)], -1), control
+        guide_labels = np.asarray(
+            self._artifacts_load_values(labels, value="guide_label").values
+        ).astype(str)
+        return pd.Index(rows.names).get_indexer(guide_labels).astype(np.int64), control
+
     @validation_scoped
     def _perturbation_efficiency(
         self,
@@ -1570,29 +1665,12 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             raise TypeError("id_column must be a feature column name or None")
         if not isinstance(invalidate_cache, bool):
             raise TypeError("invalidate_cache must be a boolean")
-        status = require_complete_artifact(self.zw, labels)
+        rows = self._label_rows(labels, by)
+        status = rows.status
+        target_names, guide_targets_of = rows.target_names, rows.guide_targets
+        row_codes, row_names = rows.codes, rows.names
         guide_assay = self._get_assay(str(labels.assay))
         expression = self._get_assay(from_assay)
-        label_group = artifact_group(self.zw, labels)
-        calls_group = artifact_group(self.zw, status.input_ref("guide_calls"))
-
-        def read(stored: zarr.Group, name: str) -> np.ndarray:
-            return np.asarray(as_zarr_array(stored[name], name=name)[:])
-
-        target_names = read(label_group, "targets").astype(str)
-        target_is_control = read(label_group, "target_is_control").astype(bool)
-        guide_targets_of = read(label_group, "guide_target_codes").astype(np.int64)
-        guide_ids = read(calls_group, "guides").astype(str)
-        if by == "target":
-            row_codes = np.flatnonzero(~target_is_control)
-            row_names = target_names[row_codes]
-        else:
-            guided = guide_targets_of >= 0
-            row_guides = np.flatnonzero(
-                guided & ~target_is_control[np.maximum(guide_targets_of, 0)]
-            )
-            row_codes = guide_targets_of[row_guides]
-            row_names = guide_ids[row_guides]
         column = None
         if id_column is not None:
             if id_column not in guide_assay.feats.columns:
@@ -1650,26 +1728,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         )
         if planned.reused:
             return planned.ref
-        n_targets = read(label_group, "n_targets")
-        target_codes = read(label_group, "target_codes")
-        control = read(label_group, "is_control").astype(bool)
-        if by == "target":
-            row_of = np.full(len(target_names), -1, dtype=np.int64)
-            row_of[row_codes] = np.arange(n_rows)
-            groups = np.where(
-                n_targets == 1, row_of[np.maximum(target_codes[:, 0], 0)], -1
-            )
-        else:
-            row_of_guide = pd.Index(row_names)
-            single = np.asarray(
-                self._artifacts_load_values(labels, value="guide_label").values
-            ).astype(str)
-            groups = row_of_guide.get_indexer(single).astype(np.int64)
-        if not control.any():
-            raise ValueError(
-                "The labels have no control cell; label cells with controls that "
-                "the guides target"
-            )
+        groups, control = self._label_groups(labels, rows, by)
         compared = np.flatnonzero((groups >= 0) | control)
         cell_index = read_stored_selection_indices(
             self.zw,
@@ -1794,4 +1853,258 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             table=pd.DataFrame(columns),
             by=by,
             from_assay=str(efficiency.assay),
+        )
+
+    @validation_scoped
+    def _perturbation_edistance(
+        self,
+        labels: ArtifactRef,
+        coordinates: ArtifactRef,
+        *,
+        by: str = "target",
+        n_permutations: int = 1000,
+        random_seed: int = 0,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Measure how far each perturbation moves cells from the control cells.
+
+        The E-distance of Peidli et al. (2024, scPerturb) compares the cells
+        that carry a target alone, or a guide alone with ``by="guide"``, with
+        the control cells of the labels in a coordinate space such as a PCA:
+        twice the mean squared distance between the groups, minus the mean
+        squared distance within each group over distinct pairs. Its expected
+        value is twice the squared distance between the group means, so it
+        grows as a perturbation moves the centre of its cells away from the
+        controls, and a change in their spread alone leaves it near 0. A
+        permutation test
+        draws ``n_permutations`` groups of the perturbed group's size from the
+        pooled cells, and the p-value is the share of draws, counting the
+        observed groups, whose E-distance reaches the observed one, adjusted
+        across rows by Benjamini-Hochberg. Each row draws from its own seed,
+        derived from ``random_seed`` and the row.
+
+        The coordinates can be any reduction, batch correction, imported
+        coordinates or normalized values. Cells of the labels without
+        coordinates are left out and counted in a log message. A row with
+        fewer than two perturbed cells has no E-distance and the status
+        ``"too_few_cells"``.
+
+        Args:
+            labels: A ``perturbation_labels`` artifact from
+                :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.labels`.
+            coordinates: The coordinate artifact.
+            by: ``"target"`` for one row per target gene, or ``"guide"`` for
+                one row per guide.
+            n_permutations: The permutations of each test, from 0, which skips
+                the tests, to 1,000,000.
+            random_seed: The seed of the permutations, at least 0.
+            invalidate_cache: Measure again instead of reusing a saved table.
+
+        Returns:
+            A complete ``perturbation_edistance`` artifact scoped to the assay
+            of the coordinates. Read it with
+            :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.load_edistance`.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``labels`` is not a ``perturbation_labels``
+                artifact, ``coordinates`` is not a coordinate artifact, ``by``
+                is unknown, a number is out of range, or fewer than two control
+                cells have coordinates.
+            PermissionError: If the store is read-only and the table is not
+                saved yet.
+            MemoryError: If the coordinates of the compared cells do not fit
+                the memory budget.
+        """
+        from ...graph.feature_projection import (
+            NATIVE_COORDINATE_KINDS,
+            resolve_coordinate_inputs,
+        )
+
+        if not isinstance(labels, ArtifactRef):
+            raise TypeError("labels must be an ArtifactRef")
+        if labels.kind != PerturbationLabelArguments.artifact_kind:
+            raise ValueError(
+                f"labels must be a perturbation_labels artifact, not {labels.kind!r}"
+            )
+        if not isinstance(coordinates, ArtifactRef):
+            raise TypeError("coordinates must be an ArtifactRef")
+        if coordinates.kind not in NATIVE_COORDINATE_KINDS:
+            raise ValueError(
+                "coordinates must be a reduction, batch_correction, "
+                f"imported_coordinates or normalized artifact, not {coordinates.kind!r}"
+            )
+        if not isinstance(by, str) or by not in ("target", "guide"):
+            raise ValueError(f"by must be 'target' or 'guide', not {by!r}")
+        permutations = integer_argument(
+            n_permutations, "n_permutations", minimum=0, maximum=1_000_000
+        )
+        seed = integer_argument(random_seed, "random_seed", minimum=0)
+        if not isinstance(invalidate_cache, bool):
+            raise TypeError("invalidate_cache must be a boolean")
+        rows = self._label_rows(labels, by)
+        inputs = resolve_coordinate_inputs(self.zw, coordinates)
+        arguments = PerturbationEDistanceArguments(
+            labels=labels,
+            coordinates=coordinates,
+            by=by,
+            n_permutations=permutations,
+            random_seed=seed,
+            invalidate_cache=invalidate_cache,
+        )
+        n_rows = len(rows.names)
+        planned = arguments.plan(
+            self.zw,
+            scope="assay",
+            assay=str(coordinates.assay),
+            invalidate_cache=invalidate_cache,
+            required_arrays=(
+                ArrayRequirement("status", shape=(n_rows,), dtype_kind="i"),
+                *(
+                    ArrayRequirement(name, shape=(n_rows,), dtype_kind="i")
+                    for name in ("n_cells", "n_control_cells")
+                ),
+                *(
+                    ArrayRequirement(name, shape=(n_rows,), dtype_kind="f")
+                    for name in ("edistance", "p_value", "adjusted_p_value")
+                ),
+            ),
+            required_attributes=(
+                AttributeRequirement(
+                    "status_names",
+                    predicate=lambda value: list(value) == list(EDISTANCE_STATUSES),
+                ),
+                AttributeRequirement("by", predicate=lambda value: value == by),
+            ),
+        )
+        if planned.reused:
+            return planned.ref
+        groups, control = self._label_groups(labels, rows, by)
+
+        def indices(selection: ArtifactRef) -> np.ndarray:
+            return read_stored_selection_indices(
+                self.zw,
+                selection,
+                kind="cell_selection",
+                scope="datastore",
+                assay=None,
+                table_path="cellData",
+            ).astype(np.int64, copy=False)
+
+        labelled = indices(rows.status.input_ref("cell_selection"))
+        located = indices(inputs.cell_selection)
+        compared = np.flatnonzero((groups >= 0) | control)
+        positions = np.searchsorted(located, labelled[compared])
+        present = positions < len(located)
+        present[present] = located[positions[present]] == labelled[compared][present]
+        if not present.all():
+            logger.info(
+                f"{int(np.count_nonzero(~present))} of {len(compared)} compared cells "
+                "have no coordinates and are left out"
+            )
+        kept = compared[present]
+        n_control = int(np.count_nonzero(control[kept]))
+        if n_control < 2:
+            raise ValueError(
+                f"E-distances need at least two control cells with coordinates, "
+                f"and {n_control} of the labels' control cells have them"
+            )
+        data = as_zarr_array(artifact_group(self.zw, coordinates)["data"], name="data")
+        n_dims = int(data.shape[1])
+        resident = edistance_memory_bytes(
+            len(kept), n_dims, n_control, nthreads=self.nthreads
+        )
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"The E-distances of {len(kept)} cells in {n_dims} dimensions "
+                f"hold about {resident} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Raise mem_budget."
+            )
+        self._require_writable(arguments.operation)
+        values = np.asarray(data.oindex[positions[present], :], dtype=np.float64)
+        arrays = edistance_arrays(
+            values,
+            groups[kept],
+            control[kept],
+            n_rows,
+            n_permutations=permutations,
+            random_seed=seed,
+            nthreads=self.nthreads,
+        )
+        write_cell_data_artifact(
+            self.zw,
+            planned,
+            {
+                "names": rows.names,
+                "targets": rows.target_names[rows.codes],
+                **{
+                    name: getattr(arrays, name)
+                    for name in (
+                        "status",
+                        "n_cells",
+                        "n_control_cells",
+                        "edistance",
+                        "p_value",
+                        "adjusted_p_value",
+                    )
+                },
+            },
+            attributes={"status_names": list(EDISTANCE_STATUSES), "by": by},
+        )
+        logger.info(
+            f"Measured the E-distances of {int(np.count_nonzero(arrays.status == 0))} "
+            f"of {n_rows} {by}s with {permutations} permutations each"
+        )
+        return planned.ref
+
+    @validation_scoped
+    def _perturbation_load_edistance(
+        self, edistance: ArtifactRef
+    ) -> PerturbationEDistance:
+        """Read a saved E-distance table.
+
+        Args:
+            edistance: A ``perturbation_edistance`` artifact from
+                :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.edistance`.
+
+        Returns:
+            One row per target or guide, with the permutations and seed.
+
+        Raises:
+            TypeError: If ``edistance`` is not an ArtifactRef.
+            ValueError: If it is not a ``perturbation_edistance`` artifact.
+        """
+        if not isinstance(edistance, ArtifactRef):
+            raise TypeError("edistance must be an ArtifactRef")
+        if edistance.kind != PerturbationEDistanceArguments.artifact_kind:
+            raise ValueError(
+                "edistance must be a perturbation_edistance artifact, not "
+                f"{edistance.kind!r}"
+            )
+        status = require_complete_artifact(self.zw, edistance)
+        group = artifact_group(self.zw, edistance)
+
+        def read(name: str) -> np.ndarray:
+            return np.asarray(as_zarr_array(group[name], name=name)[:])
+
+        by = str(group.attrs["by"])
+        columns: dict[str, Any] = {}
+        if by == "guide":
+            columns["guide"] = read("names").astype(str)
+        columns["target"] = read("targets").astype(str)
+        columns["status"] = np.asarray(EDISTANCE_STATUSES, dtype=object)[read("status")]
+        for name in (
+            "n_cells",
+            "n_control_cells",
+            "edistance",
+            "p_value",
+            "adjusted_p_value",
+        ):
+            columns[name] = read(name)
+        parameters = status.parameters or {}
+        return PerturbationEDistance(
+            table=pd.DataFrame(columns),
+            by=by,
+            n_permutations=int(parameters["n_permutations"]),
+            random_seed=int(parameters["random_seed"]),
         )

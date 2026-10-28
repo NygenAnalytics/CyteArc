@@ -524,6 +524,19 @@ class PerturbationEfficiencyArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class PerturbationEDistanceArguments(OperationArguments):
+    operation: ClassVar[str] = "measure_edistance"
+    artifact_kind: ClassVar[str] = "perturbation_edistance"
+
+    labels: ArtifactRef = artifact_input()
+    coordinates: ArtifactRef = artifact_input()
+    by: str = parameter()
+    n_permutations: int = parameter()
+    random_seed: int = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class MembershipStrengthArguments(OperationArguments):
     operation: ClassVar[str] = "calc_membership_strength"
     artifact_kind: ClassVar[str] = "membership_strength"

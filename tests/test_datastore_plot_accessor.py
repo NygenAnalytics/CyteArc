@@ -22,6 +22,7 @@ _STORE_PLOT_METHODS = (
     "composition",
     "distribution",
     "dotplot",
+    "edistance",
     "efficiency",
     "embedding",
     "embedding_raster",
@@ -100,6 +101,12 @@ _EFFICIENCY_REF = ArtifactRef(
     assay="RNA",
     kind="perturbation_efficiency",
     artifact_id="4" * 64,
+)
+_EDISTANCE_REF = ArtifactRef(
+    scope="assay",
+    assay="RNA",
+    kind="perturbation_edistance",
+    artifact_id="5" * 64,
 )
 
 
@@ -297,6 +304,7 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             {"guides": ["g1"], "samples": ["s1"], "max_panels": 3},
         ),
         ("efficiency", (_EFFICIENCY_REF,), {"max_rows": 7, "alpha": 0.01}),
+        ("edistance", (_EDISTANCE_REF,), {"max_rows": 7, "alpha": 0.01}),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -334,6 +342,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("thresholds"))
     elif name == "efficiency":
         expected_args.append(expected_kwargs.pop("efficiency"))
+    elif name == "edistance":
+        expected_args.append(expected_kwargs.pop("edistance"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     )
     from .modality_weights import modality_weights as modality_weights
     from .perturbation import (
+        edistance as edistance,
         efficiency as efficiency,
         guide_calls as guide_calls,
         guide_thresholds as guide_thresholds,
@@ -95,6 +96,7 @@ __all__ = [
     "composition",
     "distribution",
     "dotplot",
+    "edistance",
     "efficiency",
     "elbow",
     "embedding",
@@ -149,6 +151,7 @@ __getattr__, __dir__ = _lazy_facade(
         "composition": ".composition",
         "distribution": ".distribution",
         "dotplot": ".summary",
+        "edistance": ".perturbation",
         "efficiency": ".perturbation",
         "elbow": ".diagnostics",
         "embedding": ".embedding",
