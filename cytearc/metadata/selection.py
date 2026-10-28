@@ -1,5 +1,6 @@
 """Value-selection contracts shared by analysis and presentation layers."""
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -13,6 +14,7 @@ from ..storage.artifacts import (
     ArtifactRef,
     ArtifactStatus,
     artifact_group,
+    fingerprint_strings,
     inspect_artifact,
     parse_artifact_ref,
 )
@@ -59,6 +61,7 @@ __all__ = [
     "grouping_value_name",
     "resolve_cell_aligned_artifact",
     "resolve_grouping",
+    "sample_codes",
     "valid_category_mask",
 ]
 
@@ -243,6 +246,66 @@ def valid_category_mask(
             raise ValueError("missing mask must align with category values")
         valid &= ~missing
     return valid
+
+
+def sample_codes(
+    columns: tuple[str, ...],
+    labels: Sequence[np.ndarray],
+    n_cells: int,
+    *,
+    reason: str,
+) -> tuple[np.ndarray, list[dict[str, str]], str | None]:
+    """Group the selected cells into samples by their label in every column.
+
+    Returns each cell's sample code, numbering the samples in sorted label
+    order; each sample's labels by column; and the fingerprint of the cells'
+    samples. Without columns every cell is in one sample without labels, and
+    the fingerprint is None.
+
+    Args:
+        columns: The cell metadata columns whose labels define the samples.
+        labels: Each column's label of every selected cell, with missing
+            labels already masked.
+        n_cells: The number of selected cells.
+        reason: Why every selected cell needs a label; it ends the error for
+            a cell without one.
+
+    Raises:
+        ValueError: If a column does not hold one label per selected cell, or
+            a selected cell has a missing or blank label.
+    """
+    if not columns:
+        return np.zeros(n_cells, dtype=np.int64), [{}], None
+    names_by_column = []
+    codes_by_column = []
+    for column, values in zip(columns, labels, strict=True):
+        array = np.asarray(values, dtype=object)
+        if array.shape != (n_cells,):
+            raise ValueError(
+                f"Sample column {column!r} must hold one label per selected cell"
+            )
+        missing = int(np.count_nonzero(~valid_category_mask(array)))
+        if missing:
+            raise ValueError(
+                f"Sample column {column!r} has no label for {missing} selected "
+                f"cells. {reason}"
+            )
+        names, codes = np.unique(array.astype(str), return_inverse=True)
+        names_by_column.append(names)
+        codes_by_column.append(codes.reshape(-1))
+    combinations, codes = np.unique(
+        np.column_stack(codes_by_column), axis=0, return_inverse=True
+    )
+    samples = [
+        {
+            column: str(names[code])
+            for column, names, code in zip(columns, names_by_column, row, strict=True)
+        }
+        for row in combinations
+    ]
+    rendered = np.asarray([json.dumps(sample) for sample in samples])
+    codes = codes.reshape(-1).astype(np.int64, copy=False)
+    return codes, samples, fingerprint_strings(rendered[codes])
 
 
 @dataclass(frozen=True, slots=True)

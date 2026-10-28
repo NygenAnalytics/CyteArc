@@ -25,6 +25,7 @@ _STORE_PLOT_METHODS = (
     "embedding",
     "embedding_raster",
     "guide_calls",
+    "guide_thresholds",
     "lineage_curves",
     "lineage_heatmap",
     "lineage_trends",
@@ -86,6 +87,12 @@ _INTEGRATED_GRAPH_REF = ArtifactRef(
     scope="datastore",
     kind="integrated_graph",
     artifact_id="2" * 64,
+)
+_GUIDE_THRESHOLDS_REF = ArtifactRef(
+    scope="assay",
+    assay="CRISPR",
+    kind="guide_thresholds",
+    artifact_id="3" * 64,
 )
 
 
@@ -277,6 +284,11 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             (),
             {"aggregation": _AGGREGATION_REF, "vmax": 3.0},
         ),
+        (
+            "guide_thresholds",
+            (_GUIDE_THRESHOLDS_REF,),
+            {"guides": ["g1"], "samples": ["s1"], "max_panels": 3},
+        ),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -310,6 +322,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("transfer"))
     elif name == "run_recipe":
         expected_args.append(expected_kwargs.pop("recipe"))
+    elif name == "guide_thresholds":
+        expected_args.append(expected_kwargs.pop("thresholds"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

@@ -141,6 +141,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "embedding_raster",
     "graph_qc",
     "guide_calls",
+    "guide_thresholds",
     "highly_variable_features",
     "label_panels",
     "lineage_curves",

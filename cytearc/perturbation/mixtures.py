@@ -41,6 +41,7 @@ from cytearc.perturbation.histograms import GuideCountHistograms
 __all__ = [
     "FITTED",
     "FIT_STATUSES",
+    "MAX_ITERATIONS",
     "NO_CELLS",
     "NO_FIT",
     "NO_POSITIVE",
@@ -67,23 +68,25 @@ TOO_SPARSE = 2
 NO_FIT = 3
 #: The fit is admissible but calls no count up to the guide's largest.
 NO_POSITIVE = 4
+#: The most EM iterations of one start, as in pertpy.
+MAX_ITERATIONS = 1000
 
 _LOG_SQRT_2PI = 0.5 * math.log(2.0 * math.pi)
 
 # Poisson-Gaussian settings, as in pertpy.
-_MAX_ITERATIONS = 1000
 _TOLERANCE = 1e-7
 _SCALE_FLOOR = 1e-3
 _WEIGHT_FLOOR = 1e-6
 _NEWTON_STEPS = 12
-# Starts that split each guide's values at a quantile of its cells: Poisson
-# below, Gaussian above.
+# Each fit runs from 15 starts: the 10 prior starts below and 5 starts that
+# split each guide's values at a quantile of its cells, Poisson below and
+# Gaussian above.
 _SPLIT_QUANTILES = np.array([0.5, 0.75, 0.9, 0.97, 0.99])
-# Starts at the medians of 15 draws from each prior, as crispat starts Pyro's
-# optimiser with init_to_median, as (Poisson rate, Gaussian mean, Gaussian
-# standard deviation) with Gaussian weight 0.5. They were drawn once with
-# numpy.random.default_rng(2024) and are fixed, so every guide starts from the
-# same points and its fit depends on its own counts only.
+# Each prior start holds the medians of 15 draws from each prior, as crispat
+# starts Pyro's optimiser with init_to_median, as (Poisson rate, Gaussian mean,
+# Gaussian standard deviation) with Gaussian weight 0.5. They were drawn once
+# with numpy.random.default_rng(2024) and are fixed, so every guide starts from
+# the same points and its fit depends on its own counts only.
 _PRIOR_STARTS = np.array(
     [
         (1.896025, 4.129306, 7.340522),
@@ -490,7 +493,7 @@ def fit_poisson_gaussian(histograms: GuideCountHistograms) -> PoissonGaussianFit
         fit,
         _PRIOR_STARTS,
         _SPLIT_QUANTILES,
-        _MAX_ITERATIONS,
+        MAX_ITERATIONS,
         _TOLERANCE,
         out,
     )
@@ -805,7 +808,7 @@ def fit_gaussian(histograms: GuideCountHistograms) -> GaussianFits:
         zero,
         fit,
         _GAUSSIAN_TAILS,
-        _MAX_ITERATIONS,
+        MAX_ITERATIONS,
         _GAUSSIAN_TOLERANCE,
         out,
     )

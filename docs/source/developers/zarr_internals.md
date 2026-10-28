@@ -374,7 +374,7 @@ columns, or every selected cell for a mean that fits the assay's normalization o
 from the live `I` column before a metadata grouping without `cell_selection` snapshots it),
 `compare.test` (feature keys, over the cells that the design keeps),
 `features.prevalent_peaks`, `scores.cell_cycle`, `qc.feature_percentage`,
-`qc.hto_demultiplexing`, `perturbation.import_guide_calls` (the guide assay), `qc.doublets`, `trajectory.markers` and
+`qc.hto_demultiplexing`, `perturbation.import_guide_calls` and `perturbation.call_guides` (the guide assay), `qc.doublets`, `trajectory.markers` and
 `trajectory.aggregation` (the valid cells of the pseudotime), `trajectory.lineage_markers` and
 `trajectory.lineage_aggregation` (the valid cells of the fate map), `trajectory.drivers` (the
 cells it correlates), `imputation.compute_imputed` (feature names),
