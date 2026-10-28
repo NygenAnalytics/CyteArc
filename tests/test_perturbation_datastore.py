@@ -247,6 +247,51 @@ def test_import_refuses_counts_that_are_not_unsigned_integers(tmp_path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"path": 7}, "path must be a path"),
+        ({"from_assay": 7}, "from_assay must be an assay name"),
+        ({"invalidate_cache": "yes"}, "invalidate_cache must be a boolean"),
+    ],
+)
+def test_import_refuses_arguments_of_the_wrong_type(
+    tmp_path, arguments, message
+) -> None:
+    store = _store(tmp_path)
+    call = {
+        "path": _call_file(tmp_path),
+        "cell_selection": _selection(store),
+        **arguments,
+    }
+    with pytest.raises(TypeError, match=message):
+        store.perturbation.import_guide_calls(call.pop("path"), **call)
+
+
+def test_import_refuses_an_empty_cell_selection(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.cells.insert("nobody", np.zeros(len(GUIDE_COUNTS), dtype=bool))
+    with pytest.raises(ValueError, match="selects no cell"):
+        store.perturbation.import_guide_calls(
+            _call_file(tmp_path),
+            cell_selection=store.snapshot_cell_selection("nobody"),
+        )
+
+
+def test_import_refuses_calls_larger_than_the_memory_budget(
+    tmp_path, monkeypatch
+) -> None:
+    store = _store(tmp_path)
+    selection = _selection(store)
+    # Seven cells and seven calls need about 1.5 kB beside the streamed counts.
+    monkeypatch.setattr(store, "memoryBytes", 1_000)
+    with pytest.raises(MemoryError, match="Raise mem_budget"):
+        store.perturbation.import_guide_calls(
+            _call_file(tmp_path), cell_selection=selection
+        )
+    assert store.artifacts.list(kind="guide_calls", from_assay="CRISPR") == []
+
+
 def test_import_checks_measured_cells_before_planning(tmp_path, monkeypatch) -> None:
     store = _store(tmp_path)
     selection = _selection(store)
