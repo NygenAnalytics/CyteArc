@@ -113,6 +113,15 @@ def test_call_arrays_refuse_malformed_calls(cells, codes, umis, message) -> None
         guide_call_arrays(cells, codes, umis, n_cells=3, guide_ids=GUIDES)
 
 
+@pytest.mark.parametrize(
+    ("cells", "codes"),
+    [([0.0], [1]), ([0], [1.0])],
+)
+def test_call_arrays_refuse_positions_that_are_not_integers(cells, codes) -> None:
+    with pytest.raises(ValueError, match="positions must be integers"):
+        guide_call_arrays(cells, codes, [3], n_cells=3, guide_ids=GUIDES)
+
+
 def test_frames_list_each_cell_and_each_call() -> None:
     arrays = guide_call_arrays(
         [0, 0, 2], [2, 0, 1], [5, 9, 3], n_cells=3, guide_ids=GUIDES
