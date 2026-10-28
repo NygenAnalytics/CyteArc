@@ -9,6 +9,7 @@ import pytest
 from matplotlib.colors import to_rgba
 from matplotlib.markers import MarkerStyle
 
+from cytearc.perturbation.edistance import PerturbationEDistance
 from cytearc.perturbation.efficiency import PerturbationEfficiency
 from cytearc.perturbation.guide_calls import (
     GuideCalls,
@@ -25,8 +26,14 @@ from cytearc.perturbation.mixtures import (
     gaussian_posterior,
     poisson_gaussian_posterior,
 )
+from cytearc.plotting._figure import LegendSpec
 from cytearc.plotting._style import foreground_color
-from cytearc.plotting.perturbation import efficiency, guide_calls, guide_thresholds
+from cytearc.plotting.perturbation import (
+    edistance,
+    efficiency,
+    guide_calls,
+    guide_thresholds,
+)
 from cytearc.storage.refs import ArtifactRef
 
 CALLS = ArtifactRef(
@@ -1049,3 +1056,461 @@ def test_the_efficiency_plot_needs_a_store_with_perturbation_efficiency(
         TypeError, match="store does not provide perturbation efficiency"
     ):
         efficiency(store, EFFICIENCY, show=False)
+
+
+EDISTANCE = ArtifactRef(
+    scope="assay", assay="RNA", kind="perturbation_edistance", artifact_id="d" * 64
+)
+
+# Each row is a name, a status, the perturbed cells, the E-distance and the
+# adjusted p-value. A guide's name starts with its target. A row with too few
+# cells holds NaN, as the record does, and an E-distance can fall below 0.
+EDISTANCE_TARGETS = [
+    ("TP53", "tested", 12, -0.3, 0.9),
+    ("MYC", "tested", 40, 6.5, 0.001),
+    ("GATA1", "tested", 25, 2.0, 0.2),
+    ("CD19", "too_few_cells", 1, np.nan, np.nan),
+    ("KLF1", "tested", 30, 4.0, 0.01),
+]
+# MYC_2 and GATA1_1 share an E-distance, and MYC_2 comes first in the record.
+EDISTANCE_GUIDES = [
+    ("MYC_2", "tested", 15, 1.5, 0.04),
+    ("TP53_1", "tested", 6, -0.2, 0.7),
+    ("TP53_2", "too_few_cells", 1, np.nan, np.nan),
+    ("MYC_1", "tested", 20, 5.0, 0.002),
+    ("GATA1_1", "tested", 8, 1.5, 0.3),
+    ("CD19_1", "too_few_cells", 0, np.nan, np.nan),
+]
+# B and A share an E-distance, and B comes first in the record.
+EDISTANCE_MANY = [
+    ("B", "tested", 30, 3.0, 0.01),
+    ("A", "tested", 10, 3.0, 0.01),
+    ("C", "tested", 20, 5.0, 0.2),
+    ("D", "tested", 5, 0.5, 0.001),
+    ("E", "tested", 10, -1.0, 0.5),
+    ("F", "too_few_cells", 1, np.nan, np.nan),
+]
+
+
+def _edistance_record(
+    rows: list[tuple[str, str, int, float, float]],
+    *,
+    by: str = "target",
+    n_permutations: int = 1000,
+) -> PerturbationEDistance:
+    """Build the record that ``load_edistance`` returns for ``rows``.
+
+    Every row is compared with the same 50 control cells, and the permutations
+    drew from seed 7. Without permutations no row has a p-value.
+    """
+    names = [row[0] for row in rows]
+    adjusted = np.asarray([row[4] for row in rows], dtype=np.float64)
+    if not n_permutations:
+        adjusted = np.full(len(rows), np.nan)
+    columns: dict[str, Any] = {"guide": np.asarray(names)} if by == "guide" else {}
+    columns.update(
+        target=np.asarray([name.split("_")[0] for name in names]),
+        status=np.asarray([row[1] for row in rows], dtype=object),
+        n_cells=np.asarray([row[2] for row in rows], dtype=np.int64),
+        n_control_cells=np.full(len(rows), 50, dtype=np.int64),
+        edistance=np.asarray([row[3] for row in rows], dtype=np.float64),
+        p_value=adjusted / 2,
+        adjusted_p_value=adjusted,
+    )
+    return PerturbationEDistance(
+        table=pd.DataFrame(columns),
+        by=by,
+        n_permutations=n_permutations,
+        random_seed=7,
+    )
+
+
+def _edistance_store(
+    record: PerturbationEDistance, requests: list[ArtifactRef] | None = None
+) -> SimpleNamespace:
+    """A store whose loader returns ``record`` and notes each reference it reads."""
+
+    def load(ref: ArtifactRef) -> PerturbationEDistance:
+        if requests is not None:
+            requests.append(ref)
+        return record
+
+    return SimpleNamespace(perturbation=SimpleNamespace(load_edistance=load))
+
+
+def _check_edistance_rows(result: Any, *, alpha: float) -> None:
+    """Check that each row of the table is drawn at its height, colour and area."""
+    ax = result.axes["edistance"]
+    table = result.tables["edistance"]
+    distances = table["edistance"].to_numpy()
+    n_cells = table["n_cells"].to_numpy()
+    adjusted = table["adjusted_p_value"].to_numpy()
+    names = table[result.provenance.extras["by"]].tolist()
+    assert _row_labels(ax) == names
+    # The rows run from the largest E-distance down, ties broken by name.
+    ranks = list(zip((-distances).tolist(), names, strict=True))
+    assert ranks == sorted(ranks)
+    if len(table):
+        (points,) = ax.collections
+        style = MarkerStyle("o")
+        shape = style.get_path().transformed(style.get_transform())
+        np.testing.assert_array_equal(points.get_paths()[0].vertices, shape.vertices)
+        offsets = np.asarray(points.get_offsets())
+        # The first row is drawn at the top.
+        np.testing.assert_array_equal(offsets[:, 1], np.arange(len(table))[::-1])
+        np.testing.assert_array_equal(offsets[:, 0], distances)
+        # Every point is blue when no row has a p-value.
+        significant = (
+            adjusted < alpha
+            if np.isfinite(adjusted).any()
+            else np.ones(len(table), dtype=bool)
+        )
+        colors = np.zeros((len(table), 4))
+        colors[:] = points.get_facecolors()
+        np.testing.assert_array_equal(
+            colors,
+            np.asarray(
+                [SIGNIFICANT if below else NOT_SIGNIFICANT for below in significant]
+            ),
+        )
+        # The areas rank as the perturbed cells do.
+        sizes = points.get_sizes()
+        np.testing.assert_array_equal(
+            np.sign(np.subtract.outer(sizes, sizes)),
+            np.sign(np.subtract.outer(n_cells, n_cells)),
+        )
+    else:
+        assert len(ax.collections) == 0
+    # The axis holds 0 and every E-distance with a margin of 5% of their range.
+    low = distances.min(initial=0.0)
+    high = distances.max(initial=0.0)
+    if low == high:
+        low, high = -1.0, 1.0
+    margin = 0.05 * (high - low)
+    assert ax.get_xlim() == pytest.approx((low - margin, high + margin))
+    (line,) = ax.get_lines()
+    assert list(line.get_xdata()) == [0.0, 0.0]
+
+
+def test_edistance_draws_each_tested_target_from_the_largest_distance_down() -> None:
+    requests: list[ArtifactRef] = []
+    record = _edistance_record(EDISTANCE_TARGETS)
+
+    result = edistance(_edistance_store(record, requests), EDISTANCE, show=False)
+
+    try:
+        assert requests == [EDISTANCE]
+        # TP53 looks like the control cells, so its E-distance falls below 0.
+        pd.testing.assert_frame_equal(
+            result.tables["edistance"],
+            record.table.iloc[[1, 4, 2, 0]].reset_index(drop=True),
+        )
+        assert list(result.axes) == ["edistance"]
+        _check_edistance_rows(result, alpha=0.05)
+        ax = result.axes["edistance"]
+        assert _row_labels(ax) == ["MYC", "KLF1", "GATA1", "TP53"]
+        assert ax.get_xlabel() == "E-distance to control cells"
+        assert ax.get_xlim() == pytest.approx((-0.64, 6.84))
+        assert ax.get_title().splitlines() == [
+            "E-distance by target",
+            "Not plotted: 1 too_few_cells",
+        ]
+        (legend,) = result.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "Adjusted p-value below 0.05",
+            "Adjusted p-value of 0.05 or more",
+            "12 perturbed cells",
+            "30 perturbed cells",
+            "40 perturbed cells",
+        ]
+        handles = legend.legend_handles
+        assert [handle.get_marker() for handle in handles] == ["o"] * 5
+        sizes = [handle.get_markersize() for handle in handles[2:]]
+        assert sizes == sorted(sizes) and len(set(sizes)) == 3
+        assert result.legends == (
+            LegendSpec(kind="categorical", label="Adjusted p-value"),
+            LegendSpec(kind="size", label="Perturbed cells"),
+        )
+        provenance = result.provenance
+        assert provenance.assay == "RNA"
+        # The perturbed cells of the four drawn targets and the control cells.
+        assert provenance.n_cells == 40 + 30 + 25 + 12 + 50
+        assert provenance.notes == ("perturbation_edistance",)
+        assert provenance.extras == {
+            "edistance": EDISTANCE.to_dict(),
+            "by": "target",
+            "n_permutations": 1000,
+            "random_seed": 7,
+            "max_rows": 40,
+            "alpha": 0.05,
+            "n_tested": 4,
+            "statuses": {"tested": 4, "too_few_cells": 1},
+        }
+    finally:
+        result.close()
+
+
+def test_edistance_by_guide_draws_each_tested_guide() -> None:
+    record = _edistance_record(EDISTANCE_GUIDES, by="guide")
+
+    result = edistance(
+        _edistance_store(record), EDISTANCE, alpha=np.float64(0.01), show=False
+    )
+
+    try:
+        table = result.tables["edistance"]
+        # GATA1_1 and MYC_2 share an E-distance, so their names order them.
+        pd.testing.assert_frame_equal(
+            table, record.table.iloc[[3, 4, 0, 1]].reset_index(drop=True)
+        )
+        assert list(table.columns)[:2] == ["guide", "target"]
+        _check_edistance_rows(result, alpha=0.01)
+        ax = result.axes["edistance"]
+        assert _row_labels(ax) == ["MYC_1", "GATA1_1", "MYC_2", "TP53_1"]
+        assert ax.get_title().splitlines() == [
+            "E-distance by guide",
+            "Not plotted: 2 too_few_cells",
+        ]
+        (legend,) = result.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "Adjusted p-value below 0.01",
+            "Adjusted p-value of 0.01 or more",
+            "6 perturbed cells",
+            "15 perturbed cells",
+            "20 perturbed cells",
+        ]
+        assert result.provenance.extras["by"] == "guide"
+        assert result.provenance.extras["alpha"] == 0.01
+        assert type(result.provenance.extras["alpha"]) is float
+        assert result.provenance.extras["statuses"] == {
+            "tested": 4,
+            "too_few_cells": 2,
+        }
+    finally:
+        result.close()
+
+
+def test_edistance_keeps_the_rows_with_the_largest_e_distances() -> None:
+    record = _edistance_record(EDISTANCE_MANY)
+    store = _edistance_store(record)
+
+    kept = edistance(store, EDISTANCE, max_rows=np.int64(2), show=False)
+    every = edistance(store, EDISTANCE, max_rows=5, show=False)
+
+    try:
+        # C has the largest E-distance, and A ties with B but comes first by
+        # name.
+        pd.testing.assert_frame_equal(
+            kept.tables["edistance"],
+            record.table.iloc[[2, 1]].reset_index(drop=True),
+        )
+        _check_edistance_rows(kept, alpha=0.05)
+        assert kept.axes["edistance"].get_title().splitlines() == [
+            "E-distance by target",
+            "The 2 of 5 tested targets with the largest E-distances",
+            "Not plotted: 1 too_few_cells",
+        ]
+        assert kept.provenance.extras["max_rows"] == 2
+        assert type(kept.provenance.extras["max_rows"]) is int
+        assert kept.provenance.extras["n_tested"] == 5
+        # The perturbed cells of C and A and the control cells.
+        assert kept.provenance.n_cells == 20 + 10 + 50
+        assert every.tables["edistance"]["target"].tolist() == [
+            "C",
+            "A",
+            "B",
+            "D",
+            "E",
+        ]
+        _check_edistance_rows(every, alpha=0.05)
+        assert every.axes["edistance"].get_title().splitlines() == [
+            "E-distance by target",
+            "Not plotted: 1 too_few_cells",
+        ]
+    finally:
+        kept.close()
+        every.close()
+
+
+def test_edistance_without_permutation_tests_draws_every_point_blue() -> None:
+    record = _edistance_record(EDISTANCE_TARGETS, n_permutations=0)
+    store = _edistance_store(record)
+
+    every = edistance(store, EDISTANCE, show=False)
+    kept = edistance(store, EDISTANCE, max_rows=3, show=False)
+
+    try:
+        assert record.table[["p_value", "adjusted_p_value"]].isna().all().all()
+        _check_edistance_rows(every, alpha=0.05)
+        (points,) = every.axes["edistance"].collections
+        np.testing.assert_array_equal(
+            points.get_facecolors(), np.tile(SIGNIFICANT, (4, 1))
+        )
+        assert every.axes["edistance"].get_title().splitlines() == [
+            "E-distance by target",
+            "Without permutation tests",
+            "Not plotted: 1 too_few_cells",
+        ]
+        (legend,) = every.figure.legends
+        # The legend gives only the point areas.
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "12 perturbed cells",
+            "30 perturbed cells",
+            "40 perturbed cells",
+        ]
+        assert every.provenance.extras["n_permutations"] == 0
+        _check_edistance_rows(kept, alpha=0.05)
+        assert _row_labels(kept.axes["edistance"]) == ["MYC", "KLF1", "GATA1"]
+        assert kept.axes["edistance"].get_title().splitlines() == [
+            "E-distance by target",
+            "The 3 of 4 tested targets with the largest E-distances",
+            "Without permutation tests",
+            "Not plotted: 1 too_few_cells",
+        ]
+    finally:
+        every.close()
+        kept.close()
+
+
+def test_edistance_without_a_nonzero_distance_still_shows_zero() -> None:
+    record = _edistance_record(
+        [
+            ("A", "too_few_cells", 1, np.nan, np.nan),
+            ("B", "too_few_cells", 0, np.nan, np.nan),
+        ]
+    )
+    empty = edistance(_edistance_store(record), EDISTANCE, show=False)
+    zero = edistance(
+        _edistance_store(_edistance_record([("C", "tested", 4, 0.0, 1.0)])),
+        EDISTANCE,
+        show=False,
+    )
+
+    try:
+        _check_edistance_rows(empty, alpha=0.05)
+        ax = empty.axes["edistance"]
+        assert len(ax.collections) == 0
+        assert list(ax.get_yticks()) == []
+        # The axis runs from -1 to 1, with its margins, when nothing differs
+        # from 0.
+        assert ax.get_xlim() == pytest.approx((-1.1, 1.1))
+        # No row is drawn, so the title says nothing of permutation tests.
+        assert ax.get_title().splitlines() == [
+            "E-distance by target",
+            "Not plotted: 2 too_few_cells",
+        ]
+        assert empty.figure.legends == []
+        pd.testing.assert_frame_equal(
+            empty.tables["edistance"], record.table.iloc[[]].reset_index(drop=True)
+        )
+        assert empty.provenance.n_cells == 50
+        assert empty.provenance.extras["n_tested"] == 0
+        assert empty.provenance.extras["statuses"] == {
+            "tested": 0,
+            "too_few_cells": 2,
+        }
+        _check_edistance_rows(zero, alpha=0.05)
+        assert zero.axes["edistance"].get_xlim() == pytest.approx((-1.1, 1.1))
+        assert zero.axes["edistance"].get_title() == "E-distance by target"
+        (legend,) = zero.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "Adjusted p-value of 0.05 or more",
+            "4 perturbed cells",
+        ]
+    finally:
+        empty.close()
+        zero.close()
+
+
+def test_edistance_draws_into_caller_axes_in_the_theme() -> None:
+    figure, ax = plt.subplots()
+    store = _edistance_store(_edistance_record(EDISTANCE_TARGETS))
+
+    try:
+        result = edistance(store, EDISTANCE, target=ax, theme="dark", show=False)
+        assert result.owns_figure is False
+        assert result.figure is figure
+        assert result.axes == {"edistance": ax}
+        assert figure.legends == []
+        assert [text.get_text() for text in ax.get_legend().get_texts()] == [
+            "Adjusted p-value below 0.05",
+            "Adjusted p-value of 0.05 or more",
+            "12 perturbed cells",
+            "30 perturbed cells",
+            "40 perturbed cells",
+        ]
+        _check_edistance_rows(result, alpha=0.05)
+        (line,) = ax.get_lines()
+        assert to_rgba(line.get_color()) == to_rgba(foreground_color("dark"))
+    finally:
+        plt.close(figure)
+
+
+def test_edistance_can_drop_the_legend() -> None:
+    store = _edistance_store(_edistance_record(EDISTANCE_TARGETS))
+
+    plain = edistance(store, EDISTANCE, show_legend=False, show=False)
+    legended = edistance(store, EDISTANCE, show=False)
+
+    try:
+        assert plain.figure.legends == []
+        assert plain.axes["edistance"].get_legend() is None
+        # Only a figure with a legend leaves room for it at the right.
+        assert plain.figure.get_size_inches()[0] < legended.figure.get_size_inches()[0]
+    finally:
+        plain.close()
+        legended.close()
+
+
+def test_showing_the_edistance_plot_releases_its_figure() -> None:
+    store = _edistance_store(_edistance_record(EDISTANCE_TARGETS))
+
+    result = edistance(store, EDISTANCE)
+
+    assert result.tables["edistance"]["target"].tolist() == [
+        "MYC",
+        "KLF1",
+        "GATA1",
+        "TP53",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"max_rows": 0}, "max_rows must be a positive integer"),
+        ({"max_rows": True}, "max_rows must be a positive integer"),
+        ({"max_rows": 2.0}, "max_rows must be a positive integer"),
+        ({"alpha": 0}, "alpha must be a number above 0 and below 1"),
+        ({"alpha": 1.0}, "alpha must be a number above 0 and below 1"),
+        ({"alpha": True}, "alpha must be a number above 0 and below 1"),
+        ({"alpha": "0.05"}, "alpha must be a number above 0 and below 1"),
+        ({"alpha": float("nan")}, "alpha must be a number above 0 and below 1"),
+    ],
+)
+def test_the_edistance_plot_refuses_settings_it_cannot_use(
+    arguments: dict[str, Any], message: str
+) -> None:
+    requests: list[ArtifactRef] = []
+    store = _edistance_store(_edistance_record(EDISTANCE_TARGETS), requests)
+
+    with pytest.raises(ValueError, match=message):
+        edistance(store, EDISTANCE, show=False, **arguments)
+    # The settings are checked before the record is read.
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "store",
+    [
+        SimpleNamespace(),
+        SimpleNamespace(perturbation=SimpleNamespace(load_efficiency=lambda ref: ref)),
+    ],
+)
+def test_the_edistance_plot_needs_a_store_with_perturbation_edistances(
+    store: SimpleNamespace,
+) -> None:
+    with pytest.raises(
+        TypeError, match="store does not provide perturbation E-distances"
+    ):
+        edistance(store, EDISTANCE, show=False)

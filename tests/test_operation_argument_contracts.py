@@ -331,6 +331,10 @@ _CONTRACTS = (
         ),
     ),
     OperationContract(
+        PerturbationAccessor.edistance,
+        metadata_arguments.PerturbationEDistanceArguments,
+    ),
+    OperationContract(
         QcAccessor.hto_demultiplexing,
         metadata_arguments.HtoIdentityArguments,
         model_only={

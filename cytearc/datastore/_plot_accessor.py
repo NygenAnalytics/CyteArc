@@ -610,6 +610,21 @@ class DataStorePlotAccessor:
         """Plot how strongly each perturbation changes the expression of its target gene."""
         return self._forward(PlotResult, "efficiency", locals())
 
+    def edistance(
+        self,
+        edistance: ArtifactRef,
+        *,
+        max_rows: int = 40,
+        alpha: float = 0.05,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot how far each perturbation moves its cells from the control cells."""
+        return self._forward(PlotResult, "edistance", locals())
+
     def dotplot(
         self,
         *,

@@ -1,6 +1,6 @@
 # Pooled CRISPR screens
 
-Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CRISPR Guide Capture) by the guides they carry, check those calls, label each cell by the genes its guides target, and check that each perturbation changed its own target gene before any perturbation analysis. Docs: <https://docs.nygen.io/CyteArc/api/perturbation.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CRISPR Guide Capture) by the guides they carry, check those calls, label each cell by the genes its guides target, check that each perturbation changed its own target gene, and rank perturbations by how far they move their cells from the control cells. Docs: <https://docs.nygen.io/CyteArc/api/perturbation.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 
@@ -8,6 +8,7 @@ Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CR
 - To import Cell Ranger's calls instead, its call file of the same run: `outs/crispr_analysis/protospacer_calls_per_cell.csv` from `cellranger count`, or `outs/per_sample_outs/<sample>/count/crispr_analysis/protospacer_calls_per_cell.csv` from `cellranger multi`.
 - To label cells by perturbation, each guide's target: the guide assay's `target_gene_name` column, which 10x imports fill from Cell Ranger's feature reference, or a mapping of guide IDs to targets.
 - To measure perturbation efficiency, an expression assay of the same cells and a way to find each target gene in it: the guide assay's `target_gene_id` column, which 10x imports fill with the gene's feature ID, or targets named like the expression assay's features.
+- To measure E-distances, coordinates of the labelled cells: a PCA, a batch correction, imported coordinates or normalized values, fitted on perturbed and control cells alike.
 
 ## Key concepts
 
@@ -52,6 +53,11 @@ Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CR
 - `status`: `"tested"`; `"no_feature"` (no feature matched; the row keeps its cells, and a warning `"N of M rows have no feature of assay 'RNA' ..."` names a few); `"no_cells"` (no cell carries the perturbation alone); `"no_control_expression"` (the controls hold no UMI of the gene: no fraction or fold change, but the means and p-value are kept).
 - Labels without a `"control"` cell raise `ValueError`. Reuse follows the labels, the expression data, each row's matched feature and `by`; `invalidate_cache=True` measures again.
 - `ds.plots.efficiency(efficiency)` draws each `"tested"` row's log2 fold change against the control cells, strongest knockdown at the top, coloured by `adjusted_p_value < alpha` (0.05) and sized by its cells; with more than `max_rows=40` tested rows it keeps those with the smallest adjusted p-values. Minus infinity is a triangle at the left edge, labelled "no UMI remains". Rows of other statuses are not drawn; the title counts them. Table: `efficiency` (the drawn rows, every column, in drawing order).
+- `ds.perturbation.edistance(labels, coordinates)` measures how far the cells of each perturbation sit from the `"control"` cells in a coordinate space (scPerturb's E-distance: twice the mean squared distance between groups minus the mean squared distance between distinct cells within each group). Its expected value is twice the squared distance between the group means: it detects a shift of the cells' centre, not a change of spread alone. Near 0, and possibly below, without an effect; strongly negative for a few widely spread cells. Rows and cells follow `efficiency`: `by="target"` (default) or `by="guide"`, single-target or single-guide cells only. `coordinates`: a `reduction`, `batch_correction`, `imported_coordinates` or `normalized` artifact of any assay; labelled cells without coordinates are left out and counted in a log message. Saved as a `perturbation_edistance` table scoped to the coordinates' assay, not cell-aligned.
+- Permutation test: `n_permutations=1000` draws of a group of the perturbed group's size from the pooled perturbed and control cells; `p_value = (draws reaching the observed E-distance + 1) / (n_permutations + 1)`, so its floor is about 0.001 at the default; `adjusted_p_value` is Benjamini-Hochberg across rows. `random_seed=0` seeds each row with the row, so results do not depend on `nthreads`. `n_permutations=0` skips the tests (NaN p-values).
+- `ds.perturbation.load_edistance(edistance)` returns a `PerturbationEDistance` record: `.table`, `.by`, `.n_permutations`, `.random_seed`. Table columns, one row per target (sorted) or guide (assay order), controls left out: `guide` (by guide only), `target`, `status` (`"tested"` or `"too_few_cells"`, fewer than two perturbed cells with coordinates, which has no distance or p-value), `n_cells`, `n_control_cells`, `edistance`, `p_value`, `adjusted_p_value`.
+- Labels without a `"control"` cell, or fewer than two control cells with coordinates, raise `ValueError`. Reuse follows the labels, the coordinates, `by`, `n_permutations` and `random_seed`; `invalidate_cache=True` measures again.
+- `ds.plots.edistance(edistance)` draws each `"tested"` row's E-distance, largest at the top, coloured by `adjusted_p_value < alpha` (0.05) and sized by its cells; with more than `max_rows=40` tested rows it keeps those with the largest E-distances. Rows of other statuses are not drawn; the title counts them. Table: `edistance` (the drawn rows, every column, in drawing order).
 
 ## Recipe
 
@@ -128,6 +134,17 @@ plot = ds.plots.efficiency(efficiency, show=False)
 plot.save("efficiency.png")
 plot.close()
 
+# Rank perturbations by how far they move their cells, in a PCA of all the cells.
+# `pca` is the PCA of the expression assay, such as the one of a ds.pipeline.rna run.
+edistance = ds.perturbation.edistance(labels, pca)  # by="target", n_permutations=1000
+distances = ds.perturbation.load_edistance(edistance).table
+print(distances["status"].value_counts())
+distance_columns = ["target", "n_cells", "edistance", "adjusted_p_value"]
+print(distances.query("status == 'tested'").sort_values("edistance", ascending=False)[distance_columns])
+plot = ds.plots.edistance(edistance, show=False)
+plot.save("edistance.png")
+plot.close()
+
 # Cell Ranger's calls of the same run, saved as the same artifact kind and labelled alike.
 imported = ds.perturbation.import_guide_calls(
     "outs/crispr_analysis/protospacer_calls_per_cell.csv",
@@ -159,3 +176,6 @@ imported_labels = ds.perturbation.labels(imported, controls=["Non-Targeting"])
 - A `"no_control_expression"` row has no fraction: the controls hold no UMI of the gene, so a knockdown cannot be measured. In an activation screen, `mean_umi` above 0 with a small `adjusted_p_value` shows the gene switched on.
 - Compare the guides of a gene with `by="guide"`: a guide whose fraction stays near 1 while another's falls has likely failed, and its cells dilute the gene's label. A guide row counts only cells whose one called guide it is, so a dual-guide screen (two guides of one gene per cell) has few such cells; measure it by target.
 - Efficiency covers cells with one target only. Cell Ranger's `perturbation_efficiencies_by_target.csv` also lists rows for pairs of targets, which CyteArc's table does not.
+- Measure E-distances in a space fitted on perturbed and control cells alike, such as the PCA of a standard run. When perturbations spread unevenly across runs or lanes, use coordinates corrected for the runs (`batch_correction`). Compare E-distances within one table or between tables on the same coordinates only; they depend on the dimensions and scale of the space.
+- Read each E-distance with `n_cells` and `adjusted_p_value`. When many rows sit at the p-value floor of 1 / (`n_permutations` + 1), raise `n_permutations`. A small E-distance does not show that a perturbation had no effect; a large one whose target did not move in `efficiency` calls for comparing its guides with `by="guide"`.
+- Check the log message of `edistance` for labelled cells without coordinates: coordinates fitted on a subset of cells leave the rest out.

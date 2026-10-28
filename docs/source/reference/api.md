@@ -12,7 +12,7 @@ Public CyteArc surfaces for analysts:
 - `EnrichmentResult` and `read_gmt` for gene-set scoring
 - `cytearc.regulons` for SCENIC-style regulons, chromVAR motif activity, cistromes from motifs or
   CUT&RUN peaks, region-to-gene links, and co-regulated gene programs
-- `cytearc.perturbation` for pooled CRISPR screens: guide calls made from the guide counts or imported from Cell Ranger, the thresholds fitted to each guide, perturbation labels that name the genes each cell's guides target, and the efficiency of each perturbation on its target gene
+- `cytearc.perturbation` for pooled CRISPR screens: guide calls made from the guide counts or imported from Cell Ranger, the thresholds fitted to each guide, perturbation labels that name the genes each cell's guides target, the efficiency of each perturbation on its target gene, and the E-distance of each perturbation's cells from the control cells
 - Readers that ingest source formats; writers that create or export Zarr stores (and other exports)
 - `cytearc.plotting`
 - `cytearc.datasets` for the public example datasets that the tutorials download

@@ -349,6 +349,8 @@ A `perturbation_labels` artifact comes from `perturbation.labels`, which records
 
 A `perturbation_efficiency` artifact comes from `perturbation.efficiency`, which records a `perturbation_labels` artifact as an input and compares each target gene's expression in the cells of its perturbation with the control cells of the labels. The artifact belongs to the expression assay that the comparison reads, not to the guide assay of the labels. Its rows are target genes or guides, not cells, so `select_cells` and `artifacts.load_values` do not read it; `perturbation.load_efficiency` reads it as a table of each row's matched feature, status, cells, mean UMIs and scaled expression in each group, remaining fraction, log2 fold change and p-values.
 
+A `perturbation_edistance` artifact comes from `perturbation.edistance`, which records a `perturbation_labels` artifact and a coordinate artifact, such as a PCA, as inputs and measures how far the cells of each perturbation sit from the control cells of the labels in those coordinates. The artifact belongs to the assay of the coordinates. Its rows are target genes or guides, not cells, so `select_cells` and `artifacts.load_values` do not read it; `perturbation.load_edistance` reads it as a table of each row's status, cells, E-distance and p-values.
+
 A metadata snapshot is cell-aligned when it records a cell selection, as the custom source and sink
 vector of pseudotime scoring does. The metadata snapshot of a pipeline run records none: it holds
 whole metadata columns, one row for each row of the cell or feature table, and is valid but not
