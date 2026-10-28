@@ -1,0 +1,303 @@
+"""Perturbation labels of pooled CRISPR screens: what each cell's guides target.
+
+Each guide of a library targets one gene, and control guides, such as
+non-targeting guides, target nothing in the genome. Two guides of one gene
+perturb the same gene, so a cell's perturbation is the set of genes its called
+guides target, apart from the control guides. A cell's label names that set:
+
+- ``"Negative"`` when no guide is called;
+- ``"control"`` when only control guides are called;
+- the gene when the called guides target one gene, with or without control
+  guides;
+- ``"Multiple"`` when they target two or more genes, or with the
+  ``"combinations"`` policy, the genes sorted and joined by ``"+"``.
+
+These functions resolve the target of each guide and turn calls into the arrays
+of a ``perturbation_labels`` artifact. They never touch storage.
+"""
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+
+import numpy as np
+import pandas as pd
+
+from cytearc.perturbation.guide_calls import MULTIPLE, NEGATIVE
+
+__all__ = [
+    "CONTROL",
+    "POLICIES",
+    "RESERVED_TARGETS",
+    "GuideTargets",
+    "PerturbationLabelArrays",
+    "PerturbationLabels",
+    "guide_targets",
+    "perturbation_label_arrays",
+    "perturbation_label_frames",
+]
+
+#: The label of a cell whose called guides are all control guides.
+CONTROL = "control"
+#: Labels that no target may take, since they label cells without one target.
+RESERVED_TARGETS = frozenset({CONTROL, NEGATIVE, MULTIPLE})
+#: How a cell whose guides target several genes is labelled.
+POLICIES = ("single", "combinations")
+_SEPARATOR = "+"
+
+
+@dataclass(frozen=True, slots=True)
+class GuideTargets:
+    """The target of every guide of a guide assay.
+
+    Attributes:
+        names: The distinct targets, sorted, control targets included.
+        is_control: Whether each target is a control target.
+        guide_codes: Each guide's position in ``names``, -1 for a guide
+            without a target.
+    """
+
+    names: np.ndarray
+    is_control: np.ndarray
+    guide_codes: np.ndarray
+
+    def guide_names(self) -> np.ndarray:
+        """Return each guide's target name, an empty string without one."""
+        names = np.full(len(self.guide_codes), "", dtype=object)
+        targeted = self.guide_codes >= 0
+        names[targeted] = self.names[self.guide_codes[targeted]]
+        return names
+
+
+def guide_targets(
+    guide_ids: np.ndarray,
+    column: np.ndarray | None,
+    overrides: Mapping[str, str] | None,
+    controls: tuple[str, ...],
+    *,
+    policy: str,
+) -> GuideTargets:
+    """Resolve and check the target of each guide.
+
+    Args:
+        guide_ids: The guide IDs in assay order.
+        column: Each guide's target from a feature column, or None. A missing
+            or blank value means the guide has no target there.
+        overrides: Targets by guide ID that replace the column's, or None.
+        controls: The target names of control guides.
+        policy: ``"single"`` or ``"combinations"``.
+
+    Returns:
+        The distinct targets, which of them are controls, and each guide's
+        target.
+
+    Raises:
+        ValueError: If an override names a guide that is not in the assay or
+            gives an empty target, a target is a reserved label or, with
+            ``"combinations"``, holds ``"+"``, or a control matches no target.
+    """
+    ids = np.asarray(guide_ids, dtype=object).astype(str)
+    names = np.full(len(ids), "", dtype=object)
+    if column is not None:
+        for index, value in enumerate(np.asarray(column, dtype=object)):
+            text = "" if value is None or pd.isna(value) else str(value).strip()
+            names[index] = text
+    if overrides:
+        positions = pd.Index(ids).get_indexer(list(overrides))
+        unknown = [
+            guide for guide, at in zip(overrides, positions, strict=True) if at < 0
+        ]
+        if unknown:
+            raise ValueError(
+                f"targets names {len(unknown)} guides that are not guides of the "
+                "assay, for example " + ", ".join(repr(guide) for guide in unknown[:5])
+            )
+        for position, target in zip(positions, overrides.values(), strict=True):
+            if not str(target).strip():
+                raise ValueError(
+                    f"targets gives guide {ids[position]!r} an empty target"
+                )
+            names[position] = str(target).strip()
+    distinct = np.asarray(sorted({name for name in names if name}), dtype=object)
+    reserved = sorted(RESERVED_TARGETS.intersection(distinct.tolist()))
+    if reserved:
+        raise ValueError(
+            "Targets conflict with labels reserved for cells without one target: "
+            + ", ".join(repr(name) for name in reserved)
+        )
+    if policy == "combinations":
+        joined = [name for name in distinct if _SEPARATOR in name]
+        if joined:
+            raise ValueError(
+                f"With policy='combinations', targets must not hold {_SEPARATOR!r}, "
+                f"which joins the genes of a combination, but {joined[0]!r} does"
+            )
+    missing = [control for control in controls if control not in set(distinct)]
+    if missing:
+        raise ValueError(
+            "controls name targets that no guide has: "
+            + ", ".join(repr(control) for control in missing)
+        )
+    lookup = pd.Index(distinct.astype(str))
+    guide_codes = np.where(names != "", lookup.get_indexer(names.astype(str)), -1)
+    return GuideTargets(
+        names=distinct,
+        is_control=np.isin(distinct, list(controls)),
+        guide_codes=guide_codes.astype(np.int32),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PerturbationLabelArrays:
+    """The per-cell arrays of a ``perturbation_labels`` artifact.
+
+    Attributes:
+        values: Each cell's label.
+        is_control: Whether each cell carries control guides only.
+        n_targets: The number of genes each cell's called guides target.
+        target_codes: Each cell's targets as positions in the targets, in
+            ascending order, padded with -1.
+    """
+
+    values: np.ndarray
+    is_control: np.ndarray
+    n_targets: np.ndarray
+    target_codes: np.ndarray
+
+
+def perturbation_label_arrays(
+    guide_codes: np.ndarray,
+    targets: GuideTargets,
+    *,
+    policy: str,
+) -> PerturbationLabelArrays:
+    """Label each cell by the genes its called guides target.
+
+    Args:
+        guide_codes: Each cell's called guides as positions in the assay,
+            padded with -1, as a ``guide_calls`` artifact holds them.
+        targets: The target of every guide, from :func:`guide_targets`.
+        policy: ``"single"`` labels a cell whose guides target several genes
+            ``"Multiple"``; ``"combinations"`` joins the genes, sorted, with
+            ``"+"``.
+
+    Returns:
+        The label, control flag, number of targets and target codes of each
+        cell.
+
+    Raises:
+        ValueError: If a called guide has no target.
+    """
+    codes = np.asarray(guide_codes)
+    called = codes >= 0
+    target_of = np.where(called, targets.guide_codes[np.where(called, codes, 0)], -1)
+    untargeted = np.unique(codes[called & (target_of < 0)])
+    if len(untargeted):
+        raise ValueError(
+            f"{len(untargeted)} called guides have no target; pass targets or "
+            "choose a target_column that names them"
+        )
+    control = (target_of >= 0) & targets.is_control[np.maximum(target_of, 0)]
+    gene = np.where(control, -1, target_of).astype(np.int64)
+    # The distinct genes of each cell, in ascending order, padded at the end.
+    pad = np.iinfo(np.int64).max
+    keyed = np.sort(np.where(gene >= 0, gene, pad).astype(np.int64), axis=1)
+    repeated = np.zeros(keyed.shape, dtype=bool)
+    repeated[:, 1:] = keyed[:, 1:] == keyed[:, :-1]
+    keyed = np.sort(np.where(repeated, pad, keyed), axis=1)
+    n_targets = np.count_nonzero(keyed != pad, axis=1).astype(np.int32)
+    width = max(1, int(n_targets.max(initial=0)))
+    target_codes = np.where(keyed[:, :width] == pad, -1, keyed[:, :width]).astype(
+        np.int32
+    )
+    is_control = control.any(axis=1) & (n_targets == 0)
+    values = np.full(len(codes), NEGATIVE, dtype=object)
+    values[is_control] = CONTROL
+    one = n_targets == 1
+    values[one] = targets.names[target_codes[one, 0]]
+    several = np.flatnonzero(n_targets > 1)
+    if policy == "single":
+        values[several] = MULTIPLE
+    else:
+        for row in several:
+            genes = target_codes[row]
+            values[row] = _SEPARATOR.join(targets.names[genes[genes >= 0]])
+    return PerturbationLabelArrays(
+        values=values,
+        is_control=is_control,
+        n_targets=n_targets,
+        target_codes=target_codes,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PerturbationLabels:
+    """The perturbation labels of a set of cells.
+
+    Attributes:
+        cells: One row per cell, indexed by cell ``ids``, with ``label``,
+            ``guide_label`` (the cell's label in the guide calls),
+            ``is_control`` and ``n_targets``.
+        targets: One row per cell and gene its called guides target, with the
+            cell's ``ids`` and the ``target``; control guides add no row.
+        guides: One row per guide of the assay, with ``guide``, ``target``
+            (None for a guide without one) and ``is_control``.
+        controls: The target names of control guides.
+        policy: ``"single"`` or ``"combinations"``.
+    """
+
+    cells: pd.DataFrame = field(repr=False)
+    targets: pd.DataFrame = field(repr=False)
+    guides: pd.DataFrame = field(repr=False)
+    controls: tuple[str, ...]
+    policy: str
+
+
+def perturbation_label_frames(
+    cell_ids: np.ndarray,
+    *,
+    values: np.ndarray,
+    guide_label: np.ndarray,
+    is_control: np.ndarray,
+    n_targets: np.ndarray,
+    target_codes: np.ndarray,
+    target_names: np.ndarray,
+    target_is_control: np.ndarray,
+    guide_ids: np.ndarray,
+    guide_target_codes: np.ndarray,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Return the per-cell, per-target and per-guide tables of stored labels."""
+    index = pd.Index(np.asarray(cell_ids), name="ids")
+    cells = pd.DataFrame(
+        {
+            "label": np.asarray(values, dtype=object),
+            "guide_label": np.asarray(guide_label, dtype=object),
+            "is_control": np.asarray(is_control, dtype=bool),
+            "n_targets": np.asarray(n_targets),
+        },
+        index=index,
+    )
+    codes = np.asarray(target_codes)
+    rows, slots = np.nonzero(codes >= 0)
+    names = np.asarray(target_names, dtype=object)
+    targets = pd.DataFrame(
+        {
+            "ids": np.asarray(cell_ids)[rows],
+            "target": names[codes[rows, slots]],
+        }
+    )
+    guide_codes = np.asarray(guide_target_codes)
+    targeted = guide_codes >= 0
+    guide_targets_text = np.full(len(guide_codes), None, dtype=object)
+    guide_targets_text[targeted] = names[guide_codes[targeted]]
+    guide_controls = np.zeros(len(guide_codes), dtype=bool)
+    guide_controls[targeted] = np.asarray(target_is_control, dtype=bool)[
+        guide_codes[targeted]
+    ]
+    guides = pd.DataFrame(
+        {
+            "guide": np.asarray(guide_ids, dtype=object),
+            "target": pd.Series(guide_targets_text, dtype=object),
+            "is_control": guide_controls,
+        }
+    )
+    return cells, targets, guides

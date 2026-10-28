@@ -180,6 +180,8 @@ class PerturbationAccessor(_Accessor):
     load_guide_thresholds = _bind(
         _PerturbationOperationsMixin._perturbation_load_guide_thresholds
     )
+    labels = _bind(_PerturbationOperationsMixin._perturbation_labels)
+    load_labels = _bind(_PerturbationOperationsMixin._perturbation_load_labels)
 
 
 class QcAccessor(_Accessor):

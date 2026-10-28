@@ -51,6 +51,7 @@ ARTIFACT_KINDS = frozenset(
         "metadata_snapshot",
         "neighbors",
         "normalized",
+        "perturbation_labels",
         "projection",
         "pseudotime",
         "pseudotime_aggregation",

@@ -336,6 +336,7 @@ their rows follow the cell selection of their lineage rather than a recorded inp
 | `lineage_curves` | `progress` | measurements | `valid` | `distance` |
 | `membership_strength` | `values` | measurements | | |
 | `metadata_snapshot` | `values` | measurements | | |
+| `perturbation_labels` | `values` | labels | `guide_label`, `is_control`, `target_codes` | `n_targets` |
 | `pseudotime` | `pseudotime` | measurements | `valid` | |
 | `quality_metric` | `values` | measurements | | |
 | `smart_label` | `values` | labels | | |
@@ -343,6 +344,8 @@ their rows follow the cell selection of their lineage rather than a recorded inp
 The `guide_codes` and `guide_umis` arrays of a `guide_calls` artifact hold one row per cell and one column per called guide: the called guides' positions among the artifact's `guides`, most UMIs first and padded with -1, and their UMIs, padded with 0. `artifacts.load_values` reads them as tables, while `select_cells` reads only one-dimensional arrays, as with the vote arrays of `label_transfer`.
 
 A `guide_calls` artifact comes from `perturbation.import_guide_calls`, which saves Cell Ranger's calls, or from `perturbation.call_guides`, which calls guides from the guide counts; the artifact's operation, `"import_guide_calls"` or `"call_guides"`, names its source. The fitted methods of `call_guides` also save an assay-scoped `guide_thresholds` artifact, which the calls record as an input: one fit for each sample and guide, with its status, threshold and parameters, and each guide's histogram of UMI counts. Its rows are samples and guides, not cells, so `select_cells` and `artifacts.load_values` do not read it; `perturbation.load_guide_thresholds` reads it as a table.
+
+A `perturbation_labels` artifact comes from `perturbation.labels`, which records a `guide_calls` artifact as an input and labels the same cells by the genes that their called guides target. Its `target_codes` array holds one row per cell and one column per gene: the positions of the cell's genes among the artifact's `targets`, in ascending order and padded with -1, with control targets left out. `artifacts.load_values` reads `target_codes` as a table, while `select_cells` reads only the one-dimensional arrays: `values`, `guide_label`, `is_control` and `n_targets`. The artifact's other arrays hold one row per target or per guide rather than per cell, so neither reader reads them: `targets` names the distinct targets, sorted and controls included, `target_is_control` marks the control targets, and `guide_target_codes` gives each guide's position in `targets`, -1 for a guide without a target. `perturbation.load_labels` turns them into the `targets` and `guides` tables of a `PerturbationLabels` record.
 
 A metadata snapshot is cell-aligned when it records a cell selection, as the custom source and sink
 vector of pseudotime scoring does. The metadata snapshot of a pipeline run records none: it holds

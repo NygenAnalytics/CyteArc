@@ -1,11 +1,12 @@
 # Pooled CRISPR screens
 
-Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CRISPR Guide Capture) by the guides they carry, and check those calls before any perturbation analysis. Docs: <https://docs.nygen.io/CyteArc/api/perturbation.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CRISPR Guide Capture) by the guides they carry, check those calls, and label each cell by the genes its guides target before any perturbation analysis. Docs: <https://docs.nygen.io/CyteArc/api/perturbation.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 
 - A store whose guide counts imported as an assay declared `CRISPR`: 10x HDF5, Matrix Market and H5AD imports send "CRISPR Guide Capture" and "CRISPR Direct Capture" features there (`data-access.md`). `call_guides` calls guides from these counts.
 - To import Cell Ranger's calls instead, its call file of the same run: `outs/crispr_analysis/protospacer_calls_per_cell.csv` from `cellranger count`, or `outs/per_sample_outs/<sample>/count/crispr_analysis/protospacer_calls_per_cell.csv` from `cellranger multi`.
+- To label cells by perturbation, each guide's target: the guide assay's `target_gene_name` column, which 10x imports fill from Cell Ranger's feature reference, or a mapping of guide IDs to targets.
 
 ## Key concepts
 
@@ -25,6 +26,19 @@ Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CR
 - `ds.perturbation.load_guide_calls(calls)` returns a `GuideCalls` record: `.cells` (one row per cell), `.calls` (one row per called guide, most UMIs first), `.guides` (every guide ID) and `.source` (`"call_guides"` or `"import_guide_calls"`).
 - `ds.plots.guide_calls(calls)` draws guides per cell, cells per guide, and the top guide's share of each cell's guide UMIs by call.
 - `ds.plots.guide_thresholds(calls)` draws each fit's threshold against its cells with a UMI of the guide, and the number of fits of each status. With `guides=[...]` it draws one panel per guide and sample: cells per UMI count, the posterior of the cells that carry the guide, and lines at the threshold and the call threshold. `samples=[...]` keeps some samples; more panels than `max_panels=12` raise `ValueError`. Tables: `thresholds`, `histograms`, and with `guides` also `posterior`.
+- `ds.perturbation.labels(calls, controls=["Non-Targeting"])` labels each cell of called or imported calls by the genes its called guides target, as an assay-scoped `perturbation_labels` artifact:
+  - `"Negative"`: no called guide.
+  - `"control"`: control guides only.
+  - the gene: guides of one gene, with or without control guides; two guides of one gene give the gene.
+  - `"Multiple"`: guides of two or more genes; with `policy="combinations"`, the genes sorted and joined by `"+"`, such as `"GENE1+GENE2"`.
+- `controls=` is required: the exact targets of the control guides, never guessed. A control that no guide has raises `ValueError`; the order of `controls` does not change the saved labels.
+- Each guide's target comes from `target_column=` of the guide assay's features (default `"target_gene_name"`). `targets={guide_id: target}` replaces the column's target of the guides it names, and `target_column=None` takes every target from `targets`. A guide may lack a target unless a cell calls it.
+- Refused with `ValueError`: a target equal to `"control"`, `"Negative"` or `"Multiple"`; under `"combinations"`, a target holding `"+"`; a control that no guide has; a called guide without a target (`"N called guides have no target"`).
+- Arrays: canonical `values`, `guide_label` (the cell's label in the calls), `is_control`, `n_targets`, and the two-dimensional `target_codes`, which keeps each cell's full set of genes under either policy. `targets`, `target_is_control` and `guide_target_codes` are not cell-aligned. `select_cells` reads the one-dimensional arrays.
+- Reuse follows the calls, each guide's resolved target, the controls and the policy: another target for any guide makes new labels, and `invalidate_cache=True` labels again. Labelling reads no counts.
+- `"Negative"` cells of `"top_guide"` calls stay `"Negative"`; the calls' `total_umi` and `top_fraction` tell cells with too few guide UMIs from cells whose guide UMIs are split among several guides.
+- `ds.perturbation.load_labels(labels)` returns a `PerturbationLabels` record: `.cells` (indexed by `ids`: `label`, `guide_label`, `is_control`, `n_targets`), `.targets` (`ids`, `target`; one row per cell and gene, none for control guides), `.guides` (`guide`, `target`, `is_control`), `.controls` and `.policy`.
+- The labels belong to the guide assay: `ds.compare.compute_bulk(labels, from_assay="RNA", ...)` pools expression, and without `from_assay` it pools the guide counts.
 
 ## Recipe
 
@@ -67,11 +81,27 @@ print(table.cells["call"].value_counts().head(20))
 one_guide = ds.select_cells(calls, value="n_guides", low=1, high=1, keep_bounds=True)
 guide_cells = ds.select_cells(calls, include=["ACE2-1"])
 
-# Cell Ranger's calls of the same run, saved as the same artifact kind.
+# Name the controls from the guide assay's target column, then label cells by gene.
+guides = ds.CRISPR.feats.to_pandas_dataframe(["ids", "target_gene_name"])
+print(guides["target_gene_name"].value_counts())  # the control target, such as "Non-Targeting"
+labels = ds.perturbation.labels(calls, controls=["Non-Targeting"])
+labelled = ds.perturbation.load_labels(labels)
+counts = labelled.cells["label"].value_counts()
+reserved = ["control", "Negative", "Multiple"]
+genes = counts.drop(reserved, errors="ignore")
+print(counts.reindex(reserved, fill_value=0).to_dict(), "one gene:", int(genes.sum()))
+print(genes.describe())  # cells per gene
+merged = labelled.cells.query("guide_label == 'Multiple' and label != 'Multiple'")
+print(len(merged), "cells with several called guides but one gene, or controls only")
+gene_cells = ds.select_cells(labels, include=["ACE2"])
+control_cells = ds.select_cells(labels, include=["control"])
+
+# Cell Ranger's calls of the same run, saved as the same artifact kind and labelled alike.
 imported = ds.perturbation.import_guide_calls(
     "outs/crispr_analysis/protospacer_calls_per_cell.csv",
     cell_selection=cells,
 )
+imported_labels = ds.perturbation.labels(imported, controls=["Non-Targeting"])
 ```
 
 ## Checks
@@ -82,6 +112,11 @@ imported = ds.perturbation.import_guide_calls(
 - A `"Negative"` cell of `"top_guide"` holds too few guide UMIs, or several guides with no dominant one, which SCEPTRE flags as holding several guides. Report the two apart, using `top_fraction` and `total_umi`.
 - Read the share of cells in each call before going on: a low-MOI screen should have most called cells with one guide. A large `"Multiple"` share points to doublets or to a high-MOI design.
 - `"Multiple"` cells whose `top_fraction` is near 1 may carry one guide plus ambient molecules of others. Report how many there are; do not reassign them.
-- `"Negative"` cells are not controls. Controls are cells that carry non-targeting guides, named explicitly.
+- `"Negative"` cells are not controls. Controls are cells that carry control guides only, which `labels` names `"control"` from the targets given as `controls=`.
 - Check `n_unmatched_barcodes` after each import. Many unmatched barcodes mean a wrong `barcode_prefix`, a call file from another run, or a cell selection that leaves out filtered cells.
 - `select_cells` reads one-dimensional arrays only; read `guide_codes` and `guide_umis` with `ds.artifacts.load_values(calls, value="guide_codes")` or from `load_guide_calls(calls).calls`.
+- Read the label counts before comparing genes: `"control"`, `"Negative"`, `"Multiple"` and the cells of each gene. Report genes with few cells instead of pooling them with others.
+- Count the cells that the merge moved: a `guide_label` of `"Multiple"` beside a gene's label means several guides of that gene, or a gene's guides and control guides. Dual-guide constructs and higher MOI move the most cells.
+- A `ValueError` that names a control means no guide has that target: copy the spelling from the target column (`"Non-Targeting"`, not `"Non-targeting"`). `"N called guides have no target"` means the column misses called guides; pass `targets={guide: target}`.
+- Compare each gene with the `"control"` cells. Keep `"Multiple"` and `"Negative"` out of per-gene comparisons (`null_vals=["Negative", "Multiple"]` in `compare.compute_bulk`), and under `"combinations"` the combination labels too.
+- In a high-MOI screen, analyse each gene across the cells whose guides target it, from `load_labels(labels).targets` or `target_codes`, rather than by combination labels, which hold few cells each.

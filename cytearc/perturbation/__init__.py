@@ -9,20 +9,28 @@ if TYPE_CHECKING:
         GuideCalls as GuideCalls,
     )
     from .guide_thresholds import GuideThresholds as GuideThresholds
+    from .labels import (
+        CONTROL as CONTROL,
+        PerturbationLabels as PerturbationLabels,
+    )
 
 __all__ = [
+    "CONTROL",
     "MULTIPLE",
     "NEGATIVE",
     "GuideCalls",
     "GuideThresholds",
+    "PerturbationLabels",
 ]
 
 __getattr__, __dir__ = _lazy_facade(
     __name__,
     {
+        "CONTROL": ".labels",
         "MULTIPLE": ".guide_calls",
         "NEGATIVE": ".guide_calls",
         "GuideCalls": ".guide_calls",
         "GuideThresholds": ".guide_thresholds",
+        "PerturbationLabels": ".labels",
     },
 )
