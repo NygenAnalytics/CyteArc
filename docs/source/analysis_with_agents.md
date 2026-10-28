@@ -374,6 +374,17 @@ Treat every regulon as a hypothesis about regulation, not as evidence of binding
   Factors nominated by motif enrichment of a program are candidates to test, not its
   demonstrated regulators.
 
+### Pooled CRISPR screens
+
+A pooled screen labels each cell by the guides it carries, so every downstream comparison depends on guide calls. Import Cell Ranger's calls with `perturbation.import_guide_calls` and inspect `plots.guide_calls` before labelling cells by perturbation.
+
+- Check the multiplicity of infection (MOI) that the design intended. In a low-MOI screen most called cells carry one guide, and cells with several calls are droplet doublets or cells with several integrations; analyse the cells with one called guide, which `select_cells(calls, value="n_guides", low=1, high=1, keep_bounds=True)` selects. Dual-guide constructs and high-MOI screens put several guides in each cell by design.
+- Every cell holds a few ambient guide molecules. A cell called `"Multiple"` whose top guide holds nearly all of its guide UMIs (`top_fraction`) may carry one guide plus ambient molecules of others; report how many cells this affects instead of reassigning them.
+- A cell called `"Negative"` has no confident guide: its guide was not captured, or the cell was not transduced. Negative cells are not controls. Controls are the cells that carry non-targeting guides, named explicitly.
+- Background guide levels differ between droplet runs. In a merged store, import each run's call file with its own `barcode_prefix` and a cell selection of that run.
+- A guide can fail to edit its target, and the cells that carry it then look like controls. Compare guides that target the same gene before trusting a gene-level effect.
+- Cells from one droplet run are not independent replicates. Test differential expression against controls across replicates, such as runs or donors, by pooling cells per perturbation and replicate with `compare.compute_bulk`.
+
 ### Methods outside CyteArc
 
 Use [](tutorials/custom_analyses.ipynb) for block streams, graph access, custom selections, external reductions, and supported export paths.

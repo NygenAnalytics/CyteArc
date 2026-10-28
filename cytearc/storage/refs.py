@@ -34,6 +34,7 @@ ARTIFACT_KINDS = frozenset(
         "feature_selection",
         "feature_summary",
         "grn_adjacencies",
+        "guide_calls",
         "hto_identity",
         "integrated_graph",
         "imported_coordinates",

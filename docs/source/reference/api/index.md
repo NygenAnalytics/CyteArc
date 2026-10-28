@@ -20,6 +20,7 @@ import_export
 integration
 mapping
 regulons
+perturbation
 plotting
 datasets
 utilities

@@ -60,6 +60,7 @@ Granular workflows pass exact refs to the same datastore-owned plotting surface:
 | lineage tree | `tree=tree_ref`, `layout=embedding_ref` |
 | mapping score | `mapping_score(result_ref, reference=reference, layout=embedding_ref)` |
 | label-transfer evidence, confusion, and calibration | `mapping_evidence(transfer_ref)`, `mapping_confusion(transfer_ref, known_labels=...)`, `mapping_calibration(transfer_ref, known_labels=...)` |
+| guide calls of a CRISPR screen | `guide_calls(calls_ref)` |
 
 `layout_key` and string forms on plotters that still accept them refer to deliberate live metadata
 inputs. Distribution grouping instead requires either an exact categorical artifact or an explicit
@@ -151,7 +152,7 @@ Helpers differ: `label_panels` returns `None`, `theme_context` is an iterator, a
 
 ```{eval-rst}
 .. automodule:: cytearc.plotting
-    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
+    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
     :imported-members:
     :undoc-members:
     :show-inheritance:

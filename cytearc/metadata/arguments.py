@@ -449,6 +449,21 @@ class CellCallingArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class GuideCallImportArguments(OperationArguments):
+    operation: ClassVar[str] = "import_guide_calls"
+    artifact_kind: ClassVar[str] = "guide_calls"
+
+    cell_selection: ArtifactRef = artifact_input()
+    # The guide counts give each cell's top guide and guide UMIs.
+    dataset_fingerprint: str = artifact_input()
+    guide_ids_fingerprint: str = artifact_input()
+    # The SHA-256 of the call file's bytes; its path is not part of the identity.
+    file_sha256: str = artifact_input()
+    barcode_prefix: str | None = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class MembershipStrengthArguments(OperationArguments):
     operation: ClassVar[str] = "calc_membership_strength"
     artifact_kind: ClassVar[str] = "membership_strength"

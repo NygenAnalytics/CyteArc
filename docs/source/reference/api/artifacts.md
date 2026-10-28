@@ -329,6 +329,7 @@ their rows follow the cell selection of their lineage rather than a recorded inp
 | `embedding` | `values` | measurements | | |
 | `enrichment_scores` | `scores` | measurements | | |
 | `fate_map` | `probabilities` | measurements | `valid` | |
+| `guide_calls` | `values` | labels | `top_guide`, `guide_codes` | `n_guides`, `top_umi`, `top_fraction`, `total_umi`, `guide_umis` |
 | `hto_identity` | `values` | labels | `max_id`, `second_id` | `margin` |
 | `imported_coordinates` | `data` | measurements | | |
 | `label_transfer` | `labels` | labels | `abstention_reason`, `candidate_codes`, `vote_class_codes` | `vote_class_fractions`, `vote_fraction`, `top_two_margin`, `vote_entropy`, `nearest_distance`, `reference_distance_percentile` |
@@ -338,6 +339,8 @@ their rows follow the cell selection of their lineage rather than a recorded inp
 | `pseudotime` | `pseudotime` | measurements | `valid` | |
 | `quality_metric` | `values` | measurements | | |
 | `smart_label` | `values` | labels | | |
+
+The `guide_codes` and `guide_umis` arrays of a `guide_calls` artifact hold one row per cell and one column per called guide: the called guides' positions among the artifact's `guides`, most UMIs first and padded with -1, and their UMIs, padded with 0. `artifacts.load_values` reads them as tables, while `select_cells` reads only one-dimensional arrays, as with the vote arrays of `label_transfer`.
 
 A metadata snapshot is cell-aligned when it records a cell selection, as the custom source and sink
 vector of pseudotime scoring does. The metadata snapshot of a pipeline run records none: it holds

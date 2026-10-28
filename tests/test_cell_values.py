@@ -43,6 +43,8 @@ _TWO_DIMENSIONAL = frozenset(
         ("embedding", "values"),
         ("enrichment_scores", "scores"),
         ("fate_map", "probabilities"),
+        ("guide_calls", "guide_codes"),
+        ("guide_calls", "guide_umis"),
         ("imported_coordinates", "data"),
         ("label_transfer", "vote_class_codes"),
         ("label_transfer", "vote_class_fractions"),

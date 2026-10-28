@@ -160,13 +160,18 @@ def plan_cell_data_artifact(
     inputs: dict[str, Any],
     execution_options: dict[str, Any],
     cell_selection: ArtifactRef,
-    arrays: Mapping[str, tuple[tuple[int, ...], str | None]],
+    arrays: Mapping[str, tuple[tuple[int | None, ...], str | None]],
     assay: str | None = None,
     invalidate_cache: bool = False,
     required_attributes: tuple[str | AttributeRequirement, ...] = (),
     reuse_validator: Callable[[ArtifactRef, zarr.Group], bool] | None = None,
 ) -> PlannedArtifact:
-    """Plan an artifact of arrays with one row per selected cell."""
+    """Plan an artifact of arrays with one row per selected cell.
+
+    A later dimension of an array's shape may be None when its size is known
+    only once the values are computed, such as the width of arrays padded to
+    the largest number of entries of one cell; reuse then accepts any size.
+    """
     if cell_selection.kind != "cell_selection":
         raise ValueError("cell_selection must reference a cell-selection artifact")
     selected_count = int(validate_cell_selection(root, cell_selection).selected_count)

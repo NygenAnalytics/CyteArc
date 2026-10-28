@@ -24,6 +24,7 @@ _STORE_PLOT_METHODS = (
     "dotplot",
     "embedding",
     "embedding_raster",
+    "guide_calls",
     "lineage_curves",
     "lineage_heatmap",
     "lineage_trends",

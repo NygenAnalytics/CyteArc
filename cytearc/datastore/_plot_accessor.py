@@ -564,6 +564,21 @@ class DataStorePlotAccessor:
         """Plot held-out label accuracy against retained coverage per threshold."""
         return self._forward(PlotResult, "mapping_calibration", locals())
 
+    def guide_calls(
+        self,
+        calls: ArtifactRef,
+        *,
+        max_guides_per_cell: int = 5,
+        bins: int = 20,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot how many guides each cell carries and how many cells carry each guide."""
+        return self._forward(PlotResult, "guide_calls", locals())
+
     def dotplot(
         self,
         *,

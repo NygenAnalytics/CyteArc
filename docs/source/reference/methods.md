@@ -70,6 +70,7 @@ The aim is one coherent execution path, not reimplementation for its own sake.
   motif deviations with MOODS-equivalent motif matching, cistromes from motifs or CUT&RUN and
   ChIP-seq peaks, region-to-gene links from paired RNA and ATAC, regulon specificity and
   connection specificity, and co-expression gene programs.
+- **Pooled CRISPR screens:** guide calls from Cell Ranger's CRISPR Guide Capture analysis, imported as an artifact that labels each cell with its one called guide, `"Negative"` or `"Multiple"`, with each cell's top guide and guide UMIs read from the streamed guide counts. CyteArc's own guide calling, perturbation labels, target efficiency and E-distance effect sizes are not implemented yet.
 
 (pca_method)=
 
@@ -212,6 +213,7 @@ outcomes. Inputs and settings are matched unless the table says otherwise.
 | **Cell calling** | DropletUtils 1.30 `emptyDrops` | 10x PBMC 1k and 10k | Identical 1,045 calls on PBMC 1k; Jaccard 0.9975 on PBMC 10k with matching settings |
 | **Ambient RNA correction** | SoupX 1.6.2 | 10x PBMC 1k and 10k | Identical ambient profiles; contamination fractions agree within $2 \times 10^{-8}$ and cell-level subtraction within $10^{-12}$ counts before rounding |
 | **HTO demultiplexing** | Seurat 5.5.1 `HTODemux` | 1,000 cells, 10 hashtags | Identical calls with matched settings; singlet naming can differ in unbalanced pools, as described below |
+| **Guide call import** | Cell Ranger 6.0.0 `protospacer_calls_per_cell.csv` | 10x 5k A549 cells transduced with a CRISPR pool, 5,867 cells, 93 guides | All 7,040 calls of 4,867 cells reproduced, and the 1,000 cells without a confident call labelled `"Negative"`; every called UMI count equals the guide count matrix |
 | **Highly variable genes** | Scanpy 1.12.4, scikit-misc 0.5.3 | 892 CITE-seq cells, 36,601 genes | Seurat v3 selection Jaccard 0.998; Pearson residuals select the same genes, including the matched two-batch comparison |
 | **Doublet detection** | Scanpy 1.12.4 `pp.scrublet` | 3,696 pancreas cells with 300 mixed-type and 60 same-type simulated doublets | AUROC 0.939–0.945 across four seeds, versus 0.913–0.919 for Scrublet |
 | **Marker statistics** | SciPy; presto, Scanpy, BPCells | Synthetic tests and three datasets of about one million cells | Statistics checked against SciPy; AUC differences from presto and Scanpy are at most $5.2 \times 10^{-6}$ on shared cells, genes, groups, and expression |
