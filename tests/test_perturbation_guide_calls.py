@@ -71,6 +71,12 @@ def test_count_summary_checks_the_stream() -> None:
         summarize_guide_counts([counts, counts[:1]], 3, 4)
 
 
+def test_count_summary_of_no_cells_is_empty() -> None:
+    summary = summarize_guide_counts([], 0, 4)
+    assert len(summary.top_code) == 0
+    assert len(summary.top_fraction) == 0
+
+
 def test_call_arrays_order_calls_and_label_cells() -> None:
     # Cell 0: guides 2 (40 UMIs) and 0 (40 UMIs) tie, so guide 0 comes first,
     # then guide 3 (7). Cell 1 has no call. Cell 2 has guide 1 only.

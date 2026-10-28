@@ -150,6 +150,20 @@ use but does not install.
   rules were written in Python from that description, not translated from the Fortran, and are
   checked against the fitted values of scikit-misc 0.5.3.
 
+### pertpy
+
+- Source: <https://github.com/scverse/pertpy>
+- Copyright (c) 2021, Lukas Heumos; Copyright (c) 2025, scverse®
+- License: MIT
+- Used in: `cytearc/perturbation/mixtures.py` (the Poisson-Gaussian guide fit: its expectation maximisation steps, its starting points, the rules that reject a fit, and the threshold rule, adapted from `pertpy/preprocessing/_guide_rna_mixture.py` at commit `9b5c53b`).
+
+### crispat
+
+- Source: <https://github.com/velten-group/crispat>
+- Copyright (c) 2024 Jana M. Braunger
+- License: MIT
+- Used in: `cytearc/perturbation/mixtures.py` (the Poisson-Gaussian model of `ga_poisson_gauss` at v0.9.11: its priors, the cells and guides it fits, and its threshold rule).
+
 ## Data in this repository
 
 - **JASPAR** (<https://jaspar.elixir.no>), CC BY 4.0: the motif matrices MA0004.1 (Arnt) and
@@ -688,6 +702,55 @@ OF THIS SOFTWARE OR ITS FITNESS FOR ANY PARTICULAR PURPOSE.
 MIT License
 
 Copyright (c) 2026 harryhaller001
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### pertpy (MIT License)
+
+```text
+Copyright (c) 2021, Lukas Heumos
+Copyright (c) 2025, scverse®
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### crispat (MIT License)
+
+```text
+Copyright (c) 2024 Jana M. Braunger
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

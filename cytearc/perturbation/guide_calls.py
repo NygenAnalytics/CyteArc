@@ -20,7 +20,7 @@ streams and never touch storage.
   the guide that comes first in the assay among guides with equal UMIs.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +34,7 @@ __all__ = [
     "GuideCallArrays",
     "GuideCalls",
     "GuideCountSummary",
+    "checked_count_blocks",
     "guide_call_arrays",
     "guide_calls_frames",
     "summarize_guide_counts",
@@ -115,6 +116,51 @@ class GuideCountSummary:
         return fraction
 
 
+def checked_count_blocks(
+    blocks: Iterable[np.ndarray],
+    *,
+    n_cells: int,
+    n_guides: int,
+) -> Iterator[tuple[int, np.ndarray]]:
+    """Yield each row block of guide counts with the position of its first row.
+
+    Args:
+        blocks: Consecutive row blocks of the cells x guides counts, which
+            together hold ``n_cells`` rows.
+        n_cells: The number of cells.
+        n_guides: The number of guides, the width of every block.
+
+    Yields:
+        The position of the block's first cell and the block as an array.
+
+    Raises:
+        TypeError: If a block holds counts that are not unsigned integers.
+        ValueError: If a block has the wrong width, or the blocks hold more or
+            fewer than ``n_cells`` rows.
+    """
+    start = 0
+    for raw in blocks:
+        block = np.asarray(raw)
+        if block.ndim != 2 or block.shape[1] != n_guides:
+            raise ValueError(
+                f"Guide count blocks must have {n_guides} columns, got shape "
+                f"{block.shape}"
+            )
+        if block.dtype.kind != "u":
+            raise TypeError(
+                f"Guide counts must be unsigned integers, got {block.dtype} counts"
+            )
+        stop = start + block.shape[0]
+        if stop > n_cells:
+            raise ValueError(f"The guide count blocks hold more than {n_cells} rows")
+        yield start, block
+        start = stop
+    if start != n_cells:
+        raise ValueError(
+            f"The guide count blocks hold {start} rows, but there are {n_cells} cells"
+        )
+
+
 def summarize_guide_counts(
     blocks: Iterable[np.ndarray],
     n_cells: int,
@@ -139,21 +185,10 @@ def summarize_guide_counts(
     top_code = np.full(n_cells, -1, dtype=np.int32)
     top_umi = np.zeros(n_cells, dtype=_UMI_DTYPE)
     total_umi = np.zeros(n_cells, dtype=np.uint64)
-    start = 0
-    for raw in blocks:
-        block = np.asarray(raw)
-        if block.ndim != 2 or block.shape[1] != n_guides:
-            raise ValueError(
-                f"Guide count blocks must have {n_guides} columns, got shape "
-                f"{block.shape}"
-            )
-        if block.dtype.kind != "u":
-            raise TypeError(
-                f"Guide counts must be unsigned integers, got {block.dtype} counts"
-            )
+    for start, block in checked_count_blocks(
+        blocks, n_cells=n_cells, n_guides=n_guides
+    ):
         stop = start + block.shape[0]
-        if stop > n_cells:
-            raise ValueError(f"The guide count blocks hold more than {n_cells} rows")
         if block.shape[0]:
             totals = block.sum(axis=1, dtype=np.uint64)
             # argmax returns the first maximum, the lowest guide position.
@@ -163,11 +198,6 @@ def summarize_guide_counts(
             top_code[start:stop] = np.where(counted, codes, -1)
             top_umi[start:stop] = np.where(counted, tops, 0)
             total_umi[start:stop] = totals
-        start = stop
-    if start != n_cells:
-        raise ValueError(
-            f"The guide count blocks hold {start} rows, but there are {n_cells} cells"
-        )
     return GuideCountSummary(top_code=top_code, top_umi=top_umi, total_umi=total_umi)
 
 
