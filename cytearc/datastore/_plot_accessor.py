@@ -579,6 +579,22 @@ class DataStorePlotAccessor:
         """Plot how many guides each cell carries and how many cells carry each guide."""
         return self._forward(PlotResult, "guide_calls", locals())
 
+    def guide_thresholds(
+        self,
+        thresholds: ArtifactRef,
+        *,
+        guides: Sequence[str] | None = None,
+        samples: Sequence[str] | None = None,
+        max_panels: int = 12,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the UMI thresholds that guide calling fitted to each guide in each sample."""
+        return self._forward(PlotResult, "guide_thresholds", locals())
+
     def dotplot(
         self,
         *,

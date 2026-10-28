@@ -29,6 +29,7 @@ from cytearc.datastore._operations.clustering import _ClusteringOperationsMixin
 from cytearc.datastore._operations.embeddings import _EmbeddingOperationsMixin
 from cytearc.datastore._operations.features import _FeatureOperationsMixin
 from cytearc.datastore._operations.graph import _GraphOperationsMixin
+from cytearc.datastore._operations.perturbation import _PerturbationOperationsMixin
 from cytearc.datastore._operations.quality_control import _QualityControlOperationsMixin
 from cytearc.graph import arguments as graph_arguments
 from cytearc.graph.arguments import OperationArguments
@@ -272,6 +273,39 @@ _CONTRACTS = (
             "resolved_input",
             "dataset_fingerprint",
             "guide_ids_fingerprint",
+        ),
+    ),
+    OperationContract(
+        PerturbationAccessor.call_guides,
+        metadata_arguments.GuideCallArguments,
+        signature_only={
+            **_classified("routing", "from_assay"),
+            # The thresholds input records the samples of the fits.
+            **_classified("transformed", "sample_column"),
+        },
+        model_only=_classified(
+            "resolved_input",
+            "dataset_fingerprint",
+            "guide_ids_fingerprint",
+            "guide_thresholds",
+        ),
+    ),
+    OperationContract(
+        PerturbationAccessor.call_guides,
+        metadata_arguments.GuideThresholdArguments,
+        constructor=_PerturbationOperationsMixin._plan_guide_thresholds,
+        aliases={"sample_column": "sample_columns"},
+        signature_only={
+            **_classified("routing", "from_assay"),
+            # The floor and the fraction belong to the calls, so another
+            # value reuses the fits.
+            **_classified("parent_stage", "min_umi", "fraction_threshold"),
+        },
+        model_only=_classified(
+            "resolved_input",
+            "dataset_fingerprint",
+            "guide_ids_fingerprint",
+            "sample_assignments_fingerprint",
         ),
     ),
     OperationContract(

@@ -8,11 +8,13 @@ if TYPE_CHECKING:
         NEGATIVE as NEGATIVE,
         GuideCalls as GuideCalls,
     )
+    from .guide_thresholds import GuideThresholds as GuideThresholds
 
 __all__ = [
     "MULTIPLE",
     "NEGATIVE",
     "GuideCalls",
+    "GuideThresholds",
 ]
 
 __getattr__, __dir__ = _lazy_facade(
@@ -21,5 +23,6 @@ __getattr__, __dir__ = _lazy_facade(
         "MULTIPLE": ".guide_calls",
         "NEGATIVE": ".guide_calls",
         "GuideCalls": ".guide_calls",
+        "GuideThresholds": ".guide_thresholds",
     },
 )

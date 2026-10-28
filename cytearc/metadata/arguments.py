@@ -464,6 +464,39 @@ class GuideCallImportArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class GuideThresholdArguments(OperationArguments):
+    operation: ClassVar[str] = "fit_guide_thresholds"
+    artifact_kind: ClassVar[str] = "guide_thresholds"
+
+    cell_selection: ArtifactRef = artifact_input()
+    # The guide counts give each guide's histogram in each sample.
+    dataset_fingerprint: str = artifact_input()
+    guide_ids_fingerprint: str = artifact_input()
+    # The fingerprint of each selected cell's sample, or None for one sample.
+    sample_assignments_fingerprint: str | None = artifact_input()
+    method: str = parameter()
+    sample_columns: tuple[str, ...] = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class GuideCallArguments(OperationArguments):
+    operation: ClassVar[str] = "call_guides"
+    artifact_kind: ClassVar[str] = "guide_calls"
+
+    cell_selection: ArtifactRef = artifact_input()
+    dataset_fingerprint: str = artifact_input()
+    guide_ids_fingerprint: str = artifact_input()
+    # The fitted thresholds, or None for a method that fits none. The floor
+    # and fraction belong to the calls, so changing them reuses the fits.
+    guide_thresholds: ArtifactRef | None = artifact_input()
+    method: str = parameter()
+    min_umi: int = parameter()
+    invalidate_cache: bool = execution()
+    fraction_threshold: float | None = parameter(None, omit_if_none=True)
+
+
+@dataclass(frozen=True, slots=True)
 class MembershipStrengthArguments(OperationArguments):
     operation: ClassVar[str] = "calc_membership_strength"
     artifact_kind: ClassVar[str] = "membership_strength"

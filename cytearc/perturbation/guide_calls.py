@@ -323,7 +323,7 @@ class GuideCalls:
         guides: The ID of every guide of the assay, in assay order, including
             guides called in no cell.
         source: The operation that made the calls: ``"import_guide_calls"``
-            for Cell Ranger's calls.
+            for Cell Ranger's calls and ``"call_guides"`` for CyteArc's.
     """
 
     cells: pd.DataFrame = field(repr=False)

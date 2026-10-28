@@ -1,4 +1,3 @@
-import json
 from collections.abc import Iterable, Sequence
 from numbers import Real
 from typing import TYPE_CHECKING, Any, Literal
@@ -61,7 +60,7 @@ from ...metadata.selection import (
     grouping_value_name,
     require_complete_cluster_labels,
     resolve_cell_aligned_artifact,
-    valid_category_mask,
+    sample_codes,
 )
 from ...storage.validation_scope import validation_scoped
 from ...storage.artifact_writer import (
@@ -149,53 +148,6 @@ def _doublet_sample_columns(sample_column: object) -> tuple[str, ...]:
     if len(set(columns)) != len(columns):
         raise ValueError("sample_column must not repeat a column")
     return columns
-
-
-def _doublet_sample_codes(
-    columns: tuple[str, ...],
-    labels: Sequence[np.ndarray],
-    n_cells: int,
-) -> tuple[np.ndarray, list[dict[str, str]], str | None]:
-    """Group the selected cells into samples by their label in every column.
-
-    Returns each cell's sample code, numbering the samples in sorted label
-    order; each sample's labels by column; and the fingerprint of the cells'
-    samples. Without columns every cell is in one sample without labels, and
-    the fingerprint is None.
-    """
-    if not columns:
-        return np.zeros(n_cells, dtype=np.int64), [{}], None
-    names_by_column = []
-    codes_by_column = []
-    for column, values in zip(columns, labels, strict=True):
-        array = np.asarray(values, dtype=object)
-        if array.shape != (n_cells,):
-            raise ValueError(
-                f"Sample column {column!r} must hold one label per selected cell"
-            )
-        missing = int(np.count_nonzero(~valid_category_mask(array)))
-        if missing:
-            raise ValueError(
-                f"Sample column {column!r} has no label for {missing} selected "
-                "cells. Doublets are simulated within each sample, so every "
-                "selected cell needs one"
-            )
-        names, codes = np.unique(array.astype(str), return_inverse=True)
-        names_by_column.append(names)
-        codes_by_column.append(codes.reshape(-1))
-    combinations, codes = np.unique(
-        np.column_stack(codes_by_column), axis=0, return_inverse=True
-    )
-    samples = [
-        {
-            column: str(names[code])
-            for column, names, code in zip(columns, names_by_column, row, strict=True)
-        }
-        for row in combinations
-    ]
-    rendered = np.asarray([json.dumps(sample) for sample in samples])
-    codes = codes.reshape(-1).astype(np.int64, copy=False)
-    return codes, samples, fingerprint_strings(rendered[codes])
 
 
 def _doublet_sample_text(labels: dict[str, str]) -> str:
@@ -1704,8 +1656,12 @@ class _QualityControlOperationsMixin(_QualityControlOperationsBase):
         if len(labels) != len(active_idx):
             raise ValueError("Cluster values must contain one label per selected cell")
         n_active = len(active_idx)
-        codes, samples, assignments = _doublet_sample_codes(
-            columns, sample_labels or (), n_active
+        codes, samples, assignments = sample_codes(
+            columns,
+            sample_labels or (),
+            n_active,
+            reason="Doublets are simulated within each sample, so every selected "
+            "cell needs one",
         )
         sizes = np.bincount(codes, minlength=len(samples))
         small = [sample for sample, size in zip(samples, sizes) if size < 2]

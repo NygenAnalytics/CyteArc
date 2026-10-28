@@ -975,9 +975,15 @@ def test_doublet_samples_need_labels_two_cells_and_pair_one_cluster_freely(
 
 
 def test_doublet_samples_group_cells_by_every_column_in_label_order():
-    from cytearc.datastore._operations.quality_control import (
-        _doublet_sample_codes,
-        _doublet_sample_columns,
+    from functools import partial
+
+    from cytearc.datastore._operations.quality_control import _doublet_sample_columns
+    from cytearc.metadata.selection import sample_codes
+
+    _doublet_sample_codes = partial(
+        sample_codes,
+        reason="Doublets are simulated within each sample, so every selected "
+        "cell needs one",
     )
 
     assert _doublet_sample_columns(None) == ()
@@ -1002,6 +1008,10 @@ def test_doublet_samples_group_cells_by_every_column_in_label_order():
     ]
     np.testing.assert_array_equal(codes, [2, 1, 0, 2])
     assert codes.dtype == np.int64
+    # Saved doublet scores record this fingerprint, so it must never change.
+    assert fingerprint == (
+        "213a045a1348dff0b4a5994a0d8b15f7a633fdda68918754a013f81bc174ecfc"
+    )
     # The fingerprint follows the samples of the cells, not their labels' type.
     same, _, same_fingerprint = _doublet_sample_codes(
         ("lane", "sample"),
@@ -1021,7 +1031,10 @@ def test_doublet_samples_group_cells_by_every_column_in_label_order():
     assert (pooled_samples, none) == ([{}], None)
     with pytest.raises(ValueError, match="must hold one label per selected cell"):
         _doublet_sample_codes(("lane",), [np.array(["1"])], 2)
-    with pytest.raises(ValueError, match="'lane' has no label for 2 selected cells"):
+    with pytest.raises(
+        ValueError,
+        match="'lane' has no label for 2 selected cells. Doublets are simulated",
+    ):
         _doublet_sample_codes(("lane",), [np.array(["1", None, " "], dtype=object)], 3)
 
 
