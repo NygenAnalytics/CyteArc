@@ -595,6 +595,21 @@ class DataStorePlotAccessor:
         """Plot the UMI thresholds that guide calling fitted to each guide in each sample."""
         return self._forward(PlotResult, "guide_thresholds", locals())
 
+    def efficiency(
+        self,
+        efficiency: ArtifactRef,
+        *,
+        max_rows: int = 40,
+        alpha: float = 0.05,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot how strongly each perturbation changes the expression of its target gene."""
+        return self._forward(PlotResult, "efficiency", locals())
+
     def dotplot(
         self,
         *,

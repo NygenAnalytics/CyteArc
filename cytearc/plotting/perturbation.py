@@ -1,11 +1,13 @@
 """Figures of pooled CRISPR screens."""
 
 from collections.abc import Callable, Hashable, Sequence
+from numbers import Real
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from ..perturbation.efficiency import EFFICIENCY_STATUSES, TESTED
 from ..perturbation.mixtures import (
     FIT_STATUSES,
     gaussian_posterior,
@@ -68,6 +70,16 @@ _LEGEND_ORDER = (
     _THRESHOLD_LABEL,
     _RAISED_LABEL,
 )
+
+_EFFICIENCY_PANEL = "efficiency"
+_SIGNIFICANT_COLOR = _ONE_GUIDE_COLOR
+_NOT_SIGNIFICANT_COLOR = _OTHER_STATUS_COLOR
+# A point's area, in points squared, grows linearly with the row's perturbed
+# cells from the first area to the second, which the row with the most takes.
+_POINT_AREAS = (16.0, 144.0)
+# A fold change of minus infinity is drawn at the left edge with this marker.
+_NO_UMI_MARKER = "<"
+_NO_UMI_LABEL = "No UMI remains in the perturbed cells"
 
 
 def _guide_calls(store: Any, calls: ArtifactRef) -> Any:
@@ -732,6 +744,260 @@ def guide_thresholds(
                 "guides": requested,
                 "samples": None if loaded.sample_column is None else sample_order,
                 "max_panels": max_panels,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+def _perturbation_efficiency(store: Any, efficiency: ArtifactRef) -> Any:
+    """Load a saved perturbation efficiency table through the store's narrow loader."""
+    loader = getattr(getattr(store, "perturbation", None), "load_efficiency", None)
+    if not callable(loader):
+        raise TypeError("store does not provide perturbation efficiency")
+    return loader(efficiency)
+
+
+def _point_areas(n_cells: np.ndarray, most: int) -> np.ndarray:
+    """Return point areas that grow linearly with ``n_cells``, largest at ``most``."""
+    smallest, largest = _POINT_AREAS
+    areas: np.ndarray = smallest + (largest - smallest) * n_cells / max(most, 1)
+    return areas
+
+
+def _fold_change_limits(fold_changes: np.ndarray) -> tuple[float, float, float]:
+    """Return the limits of the fold change axis and the position of minus infinity.
+
+    The axis holds 0 and every finite fold change, with a margin of 5% of their
+    range on each side; the range runs from -1 to 1 when no finite fold change
+    differs from 0. Minus infinity sits at the left edge, three margins left of
+    the smallest fold change, and the axis reaches one margin past it when a
+    fold change is minus infinity.
+    """
+    finite = fold_changes[np.isfinite(fold_changes)]
+    low = float(finite.min(initial=0.0))
+    high = float(finite.max(initial=0.0))
+    if low == high:
+        low, high = -1.0, 1.0
+    margin = 0.05 * (high - low)
+    edge = low - 3.0 * margin
+    left = edge - margin if np.isneginf(fold_changes).any() else low - margin
+    return left, high + margin, edge
+
+
+def _efficiency_legend(
+    significant: np.ndarray,
+    no_umi: np.ndarray,
+    n_cells: np.ndarray,
+    *,
+    alpha: float,
+    foreground: str,
+) -> tuple[list[Any], list[str]]:
+    """Return the legend handles and labels of the drawn rows.
+
+    Filled points give the colours of the drawn rows. Hollow markers give the
+    marker of minus infinity and the point areas of the smallest, middle and
+    largest perturbed cell counts.
+    """
+    from matplotlib.lines import Line2D
+
+    def marker(shape: str, color: str | None, size: float) -> Any:
+        return Line2D(
+            [],
+            [],
+            marker=shape,
+            linestyle="",
+            markerfacecolor="none" if color is None else color,
+            markeredgecolor=foreground if color is None else "none",
+            markersize=size,
+        )
+
+    handles: list[Any] = []
+    labels: list[str] = []
+    for chosen, color, label in (
+        (significant, _SIGNIFICANT_COLOR, f"Adjusted p-value below {alpha:g}"),
+        (
+            ~significant,
+            _NOT_SIGNIFICANT_COLOR,
+            f"Adjusted p-value of {alpha:g} or more",
+        ),
+    ):
+        if chosen.any():
+            handles.append(marker("o", color, 7.0))
+            labels.append(label)
+    if no_umi.any():
+        handles.append(marker(_NO_UMI_MARKER, None, 7.0))
+        labels.append(_NO_UMI_LABEL)
+    if len(n_cells):
+        ordered = np.sort(n_cells)
+        counts = np.unique(ordered[[0, len(ordered) // 2, -1]])
+        for count, area in zip(
+            counts.tolist(), _point_areas(counts, int(ordered[-1])), strict=True
+        ):
+            handles.append(marker("o", None, float(np.sqrt(area))))
+            labels.append(f"{count:,} perturbed cell" + ("" if count == 1 else "s"))
+    return handles, labels
+
+
+@close_figures_on_error
+def efficiency(
+    store: Any,
+    efficiency: ArtifactRef,
+    *,
+    max_rows: int = 40,
+    alpha: float = 0.05,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot how strongly each perturbation changes the expression of its target gene.
+
+    ``efficiency`` is a ``perturbation_efficiency`` artifact of
+    ``ds.perturbation.efficiency``, as ``ds.perturbation.load_efficiency``
+    reads it. Each tested target, or each tested guide when the efficiency was
+    measured by guide, gets one row labelled with its name. A point marks the
+    log2 fold change of the target gene's mean expression in the cells that
+    carry the perturbation against control cells, so a knockdown falls left of
+    the line at 0 and an activation right of it. A point is blue when its
+    adjusted p-value is below ``alpha`` and grey otherwise, and its area grows
+    with the cells that carry the perturbation. When no UMI of the gene remains
+    in those cells, the fold change is minus infinity: a triangle at the left
+    edge marks it, and the row's label says that no UMI remains.
+
+    When more than ``max_rows`` rows were tested, the plot keeps the
+    ``max_rows`` rows with the smallest adjusted p-values, ties broken by name.
+    The rows run from the strongest knockdown at the top to the strongest
+    activation at the bottom. Rows whose status is not ``"tested"`` are left
+    out, and the title counts them by status. The table ``"efficiency"`` holds
+    the drawn rows of the record, with every column, in drawing order.
+    """
+    if (
+        isinstance(max_rows, bool)
+        or not isinstance(max_rows, int | np.integer)
+        or max_rows < 1
+    ):
+        raise ValueError("max_rows must be a positive integer")
+    if isinstance(alpha, bool) or not isinstance(alpha, Real) or not 0 < alpha < 1:
+        raise ValueError("alpha must be a number above 0 and below 1")
+    max_rows = int(max_rows)
+    alpha = float(alpha)
+    loaded = _perturbation_efficiency(store, efficiency)
+    table = loaded.table
+    by = str(loaded.by)
+    tested_status = EFFICIENCY_STATUSES[TESTED]
+    tested = table[table["status"] == tested_status]
+    n_tested = len(tested)
+    if n_tested > max_rows:
+        ranked = tested.sort_values(["adjusted_p_value", by], na_position="last")
+        tested = ranked.head(max_rows)
+    drawn = tested.sort_values(
+        ["log2_fold_change", by], na_position="last"
+    ).reset_index(drop=True)
+    statuses = table["status"].value_counts()
+    title = [f"Perturbation efficiency by {by}"]
+    if n_tested > max_rows:
+        title.append(
+            f"The {max_rows:,} of {n_tested:,} tested {by}s with the smallest "
+            "adjusted p-values"
+        )
+    others = [
+        f"{int(statuses[status]):,} {status}"
+        for status in EFFICIENCY_STATUSES
+        if status != tested_status and status in statuses.index
+    ]
+    if others:
+        title.append("Not plotted: " + ", ".join(others))
+    fold_changes = drawn["log2_fold_change"].to_numpy(dtype=np.float64)
+    n_cells = drawn["n_cells"].to_numpy(dtype=np.int64)
+    significant = drawn["adjusted_p_value"].to_numpy(dtype=np.float64) < alpha
+    no_umi = np.isneginf(fold_changes)
+    labels = [
+        f"{name} (no UMI remains)" if missing else str(name)
+        for name, missing in zip(drawn[by].tolist(), no_umi.tolist(), strict=True)
+    ]
+    positions = np.arange(len(drawn), dtype=np.float64)[::-1]
+    colors = np.where(significant, _SIGNIFICANT_COLOR, _NOT_SIGNIFICANT_COLOR)
+    areas = _point_areas(n_cells, int(n_cells.max(initial=0)))
+    left, right, edge = _fold_change_limits(fold_changes)
+    x = np.where(no_umi, edge, fold_changes)
+    if figsize is None and target is None:
+        figsize = (
+            6.2 + (2.6 if show_legend else 0.0),
+            max(3.0, 0.22 * len(drawn) + 1.0 + 0.25 * len(title)),
+        )
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=[_EFFICIENCY_PANEL], figsize=figsize
+        )
+        ax = axes[_EFFICIENCY_PANEL]
+        foreground = foreground_color(theme)
+        ax.axvline(0.0, color=foreground, linewidth=0.8, zorder=1)
+        for chosen, shape in ((~no_umi, "o"), (no_umi, _NO_UMI_MARKER)):
+            if chosen.any():
+                ax.scatter(
+                    x[chosen],
+                    positions[chosen],
+                    s=areas[chosen],
+                    c=colors[chosen].tolist(),
+                    marker=shape,
+                    linewidths=0,
+                    zorder=3,
+                )
+        ax.set_xlim(left, right)
+        ax.set_yticks(positions, labels)
+        ax.set_ylim(-0.7, max(len(drawn), 1) - 0.3)
+        # Faint lines lead from each label to its point.
+        ax.tick_params(axis="y", length=0)
+        ax.grid(axis="y", color=foreground, alpha=0.15, linewidth=0.5)
+        ax.set_axisbelow(True)
+        ax.set_xlabel("Log2 fold change against control cells")
+        ax.set_title("\n".join(title))
+        handles, texts = _efficiency_legend(
+            significant, no_umi, n_cells, alpha=alpha, foreground=foreground
+        )
+        if show_legend and handles:
+            if owns:
+                # Centred beside the axes, so the multi-line title never runs
+                # into it.
+                figure.legend(handles, texts, loc="outside right center", frameon=False)
+            else:
+                ax.legend(handles, texts, loc="best", frameon=False, fontsize="small")
+        apply_figure_chrome(figure, theme)
+    controls = table["n_control_cells"].to_numpy(dtype=np.int64)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"efficiency": drawn},
+        legends=(
+            LegendSpec(kind="categorical", label="Adjusted p-value"),
+            LegendSpec(kind="size", label="Perturbed cells"),
+        ),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=efficiency.assay,
+            cell_key=None,
+            # The perturbed cells of the drawn rows and the control cells.
+            n_cells=int(n_cells.sum()) + int(controls.max(initial=0)),
+            renderer="matplotlib",
+            notes=("perturbation_efficiency",),
+            extras={
+                "efficiency": efficiency.to_dict(),
+                "by": by,
+                "from_assay": loaded.from_assay,
+                "max_rows": max_rows,
+                "alpha": alpha,
+                "n_tested": n_tested,
+                "statuses": {
+                    status: int(statuses.get(status, 0))
+                    for status in EFFICIENCY_STATUSES
+                },
             },
         ),
         owns_figure=owns,

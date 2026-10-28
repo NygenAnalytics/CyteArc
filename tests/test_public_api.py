@@ -136,6 +136,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "composition",
     "distribution",
     "dotplot",
+    "efficiency",
     "elbow",
     "embedding",
     "embedding_raster",

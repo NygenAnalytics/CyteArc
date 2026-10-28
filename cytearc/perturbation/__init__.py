@@ -8,6 +8,7 @@ if TYPE_CHECKING:
         NEGATIVE as NEGATIVE,
         GuideCalls as GuideCalls,
     )
+    from .efficiency import PerturbationEfficiency as PerturbationEfficiency
     from .guide_thresholds import GuideThresholds as GuideThresholds
     from .labels import (
         CONTROL as CONTROL,
@@ -20,6 +21,7 @@ __all__ = [
     "NEGATIVE",
     "GuideCalls",
     "GuideThresholds",
+    "PerturbationEfficiency",
     "PerturbationLabels",
 ]
 
@@ -31,6 +33,7 @@ __getattr__, __dir__ = _lazy_facade(
         "NEGATIVE": ".guide_calls",
         "GuideCalls": ".guide_calls",
         "GuideThresholds": ".guide_thresholds",
+        "PerturbationEfficiency": ".efficiency",
         "PerturbationLabels": ".labels",
     },
 )

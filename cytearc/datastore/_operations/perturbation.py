@@ -13,6 +13,7 @@ from ...metadata.arguments import (
     GuideCallArguments,
     GuideCallImportArguments,
     GuideThresholdArguments,
+    PerturbationEfficiencyArguments,
     PerturbationLabelArguments,
 )
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
@@ -39,6 +40,12 @@ from ...perturbation.guide_thresholds import (
     GuideThresholds,
     call_thresholds,
     guide_threshold_frames,
+)
+from ...perturbation.efficiency import (
+    EFFICIENCY_STATUSES,
+    PerturbationEfficiency,
+    efficiency_arrays,
+    target_features,
 )
 from ...perturbation.labels import (
     POLICIES,
@@ -119,6 +126,17 @@ _STATUS_TEXT = {
 # Above this share of called cells with several guides, a gaussian fit over
 # every cell has likely set thresholds among the ambient counts.
 _GAUSSIAN_MULTIPLE_SHARE = 0.5
+# The floating-point columns of a perturbation efficiency table.
+_EFFICIENCY_VALUES = (
+    "mean_umi",
+    "control_mean_umi",
+    "mean_expression",
+    "control_mean_expression",
+    "remaining_fraction",
+    "log2_fold_change",
+    "p_value",
+    "adjusted_p_value",
+)
 
 
 def _file_sha256(path: str | os.PathLike[str]) -> str:
@@ -1470,4 +1488,310 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             guides=guides,
             controls=tuple(str(name) for name in parameters["controls"]),
             policy=str(parameters["policy"]),
+        )
+
+    @validation_scoped
+    def _perturbation_efficiency(
+        self,
+        labels: ArtifactRef,
+        *,
+        from_assay: str = "RNA",
+        by: str = "target",
+        id_column: str | None = "target_gene_id",
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Measure how strongly each perturbation changes its target gene.
+
+        For each target gene, or each guide with ``by="guide"``, the target
+        gene's expression in the cells that carry the perturbation alone is
+        compared with its expression in the control cells of the labels. A
+        cell carries a target alone when its called guides target that gene
+        and no other, with or without control guides, and a guide alone when
+        it is the cell's one called guide. The comparison reports the mean
+        UMIs of the gene in each group, as Cell Ranger's perturbation
+        efficiency does, the mean expression after scaling each cell to the
+        median library size of the compared cells, the fraction of the control
+        expression that remains, its base-2 logarithm, and a two-sided
+        Mann-Whitney test on the scaled expression with Benjamini-Hochberg
+        adjustment. A knockdown leaves a fraction below 1 and an activation a
+        fraction above 1. A row whose control cells hold no UMI of the gene
+        has no fraction and the status ``"no_control_expression"``, but keeps
+        its p-value, which counts in the adjustment.
+
+        Each target is matched to a feature of ``from_assay`` by the feature
+        ID that ``id_column`` of the guide assay gives its guides, which 10x
+        imports fill from Cell Ranger's feature reference, when its guides
+        give one ID and the feature IDs are unique; otherwise by the one
+        feature whose name equals the target, when no other feature shares
+        that name. Only the target genes are read, feature-major when that
+        reads less. A target that matches no feature is kept with the status
+        ``"no_feature"`` and named in a warning.
+
+        Args:
+            labels: A ``perturbation_labels`` artifact from
+                :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.labels`.
+            from_assay: The expression assay.
+            by: ``"target"`` for one row per target gene, or ``"guide"`` for
+                one row per guide.
+            id_column: The feature column of the guide assay that holds each
+                guide's target feature ID, or None to match by name only.
+            invalidate_cache: Measure again instead of reusing a saved table.
+
+        Returns:
+            A complete ``perturbation_efficiency`` artifact scoped to
+            ``from_assay``. Read it with
+            :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.load_efficiency`.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``labels`` is not a ``perturbation_labels``
+                artifact, ``from_assay`` is not an assay, ``by`` is unknown,
+                ``id_column`` is not a feature column of the guide assay, or
+                the labels have no control cell.
+            PermissionError: If the store is read-only and the table is not
+                saved yet.
+            MemoryError: If the target genes of the compared cells do not fit
+                the memory budget.
+        """
+        from ...assay.normalization import feature_value_blocks
+        from ...metadata.selection import NormalizationSpec
+
+        if not isinstance(labels, ArtifactRef):
+            raise TypeError("labels must be an ArtifactRef")
+        if labels.kind != PerturbationLabelArguments.artifact_kind:
+            raise ValueError(
+                f"labels must be a perturbation_labels artifact, not {labels.kind!r}"
+            )
+        if not isinstance(from_assay, str) or from_assay not in self.assay_names:
+            raise ValueError(f"from_assay must name an assay, not {from_assay!r}")
+        if not isinstance(by, str) or by not in ("target", "guide"):
+            raise ValueError(f"by must be 'target' or 'guide', not {by!r}")
+        if id_column is not None and (not isinstance(id_column, str) or not id_column):
+            raise TypeError("id_column must be a feature column name or None")
+        if not isinstance(invalidate_cache, bool):
+            raise TypeError("invalidate_cache must be a boolean")
+        status = require_complete_artifact(self.zw, labels)
+        guide_assay = self._get_assay(str(labels.assay))
+        expression = self._get_assay(from_assay)
+        label_group = artifact_group(self.zw, labels)
+        calls_group = artifact_group(self.zw, status.input_ref("guide_calls"))
+
+        def read(stored: zarr.Group, name: str) -> np.ndarray:
+            return np.asarray(as_zarr_array(stored[name], name=name)[:])
+
+        target_names = read(label_group, "targets").astype(str)
+        target_is_control = read(label_group, "target_is_control").astype(bool)
+        guide_targets_of = read(label_group, "guide_target_codes").astype(np.int64)
+        guide_ids = read(calls_group, "guides").astype(str)
+        if by == "target":
+            row_codes = np.flatnonzero(~target_is_control)
+            row_names = target_names[row_codes]
+        else:
+            guided = guide_targets_of >= 0
+            row_guides = np.flatnonzero(
+                guided & ~target_is_control[np.maximum(guide_targets_of, 0)]
+            )
+            row_codes = guide_targets_of[row_guides]
+            row_names = guide_ids[row_guides]
+        column = None
+        if id_column is not None:
+            if id_column not in guide_assay.feats.columns:
+                raise ValueError(
+                    f"id_column {id_column!r} is not a feature column of assay "
+                    f"{guide_assay.name!r}"
+                )
+            column = np.asarray(guide_assay.feats.fetch_all(id_column), dtype=object)
+        self._require_measured_cells(
+            expression.name,
+            status.input_ref("cell_selection"),
+            operation=PerturbationEfficiencyArguments.operation,
+        )
+        feature_ids = np.asarray(expression.feats.fetch_all("ids")).astype(str)
+        feature_names = np.asarray(expression.feats.fetch_all("names")).astype(str)
+        row_features = target_features(
+            target_names, guide_targets_of, column, feature_ids, feature_names
+        )[row_codes]
+        row_feature_ids = np.where(
+            row_features >= 0, feature_ids[np.maximum(row_features, 0)], ""
+        )
+        arguments = PerturbationEfficiencyArguments(
+            labels=labels,
+            dataset_fingerprint=self._ensure_dataset_fingerprint(expression.name),
+            target_features_fingerprint=fingerprint_strings(
+                np.char.add(np.char.add(row_names.astype(str), "\t"), row_feature_ids)
+            ),
+            by=by,
+            invalidate_cache=invalidate_cache,
+        )
+        n_rows = len(row_names)
+        planned = arguments.plan(
+            self.zw,
+            scope="assay",
+            assay=expression.name,
+            invalidate_cache=invalidate_cache,
+            required_arrays=(
+                ArrayRequirement("status", shape=(n_rows,), dtype_kind="i"),
+                *(
+                    ArrayRequirement(name, shape=(n_rows,), dtype_kind="i")
+                    for name in ("n_cells", "n_control_cells")
+                ),
+                *(
+                    ArrayRequirement(name, shape=(n_rows,), dtype_kind="f")
+                    for name in _EFFICIENCY_VALUES
+                ),
+            ),
+            required_attributes=(
+                AttributeRequirement(
+                    "status_names",
+                    predicate=lambda value: list(value) == list(EFFICIENCY_STATUSES),
+                ),
+                AttributeRequirement("by", predicate=lambda value: value == by),
+            ),
+        )
+        if planned.reused:
+            return planned.ref
+        n_targets = read(label_group, "n_targets")
+        target_codes = read(label_group, "target_codes")
+        control = read(label_group, "is_control").astype(bool)
+        if by == "target":
+            row_of = np.full(len(target_names), -1, dtype=np.int64)
+            row_of[row_codes] = np.arange(n_rows)
+            groups = np.where(
+                n_targets == 1, row_of[np.maximum(target_codes[:, 0], 0)], -1
+            )
+        else:
+            row_of_guide = pd.Index(row_names)
+            single = np.asarray(
+                self._artifacts_load_values(labels, value="guide_label").values
+            ).astype(str)
+            groups = row_of_guide.get_indexer(single).astype(np.int64)
+        if not control.any():
+            raise ValueError(
+                "The labels have no control cell; label cells with controls that "
+                "the guides target"
+            )
+        compared = np.flatnonzero((groups >= 0) | control)
+        cell_index = read_stored_selection_indices(
+            self.zw,
+            status.input_ref("cell_selection"),
+            kind="cell_selection",
+            scope="datastore",
+            assay=None,
+            table_path="cellData",
+        ).astype(np.int64, copy=False)[compared]
+        needed_features = np.unique(row_features[row_features >= 0])
+        resident = len(compared) * (16 * len(needed_features) + 40)
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Comparing {len(needed_features)} target genes over "
+                f"{len(compared)} cells holds about {resident} bytes, more than "
+                f"the memory budget of {self.memoryBytes} bytes. Raise mem_budget."
+            )
+        self._require_writable(arguments.operation)
+        if len(needed_features):
+            _, blocks = feature_value_blocks(
+                expression,
+                needed_features,
+                cell_index,
+                NormalizationSpec(source="raw"),
+                nthreads=self.nthreads,
+                resident_bytes=resident,
+                scratch_bytes_per_row=8 * len(needed_features),
+            )
+            counts = np.concatenate(
+                [np.asarray(block, dtype=np.float64) for block in blocks]
+            )
+        else:
+            counts = np.zeros((len(compared), 0))
+        row_columns = np.where(
+            row_features >= 0, np.searchsorted(needed_features, row_features), -1
+        )
+        arrays = efficiency_arrays(
+            counts,
+            expression._cell_count_totals(cell_index),
+            groups[compared],
+            control[compared],
+            row_columns,
+        )
+        write_cell_data_artifact(
+            self.zw,
+            planned,
+            {
+                "names": row_names,
+                "targets": target_names[row_codes],
+                "features": row_feature_ids,
+                **{
+                    name: getattr(arrays, name)
+                    for name in (
+                        "status",
+                        "n_cells",
+                        "n_control_cells",
+                        *_EFFICIENCY_VALUES,
+                    )
+                },
+            },
+            attributes={"status_names": list(EFFICIENCY_STATUSES), "by": by},
+        )
+        unmatched = row_names[row_features < 0]
+        if len(unmatched):
+            warn(
+                f"{len(unmatched)} of {n_rows} rows have no feature of assay "
+                f"{expression.name!r} for their target, for example "
+                + ", ".join(repr(str(name)) for name in unmatched[:5])
+                + ". Check id_column, or the target names against the feature names."
+            )
+        logger.info(
+            f"Measured the efficiency of {int(np.count_nonzero(arrays.status == 0))} "
+            f"of {n_rows} {by}s against {int(control.sum())} control cells"
+        )
+        return planned.ref
+
+    @validation_scoped
+    def _perturbation_load_efficiency(
+        self, efficiency: ArtifactRef
+    ) -> PerturbationEfficiency:
+        """Read a saved perturbation efficiency table.
+
+        Args:
+            efficiency: A ``perturbation_efficiency`` artifact from
+                :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.efficiency`.
+
+        Returns:
+            One row per target or guide.
+
+        Raises:
+            TypeError: If ``efficiency`` is not an ArtifactRef.
+            ValueError: If it is not a ``perturbation_efficiency`` artifact.
+        """
+        if not isinstance(efficiency, ArtifactRef):
+            raise TypeError("efficiency must be an ArtifactRef")
+        if efficiency.kind != PerturbationEfficiencyArguments.artifact_kind:
+            raise ValueError(
+                "efficiency must be a perturbation_efficiency artifact, not "
+                f"{efficiency.kind!r}"
+            )
+        require_complete_artifact(self.zw, efficiency)
+        group = artifact_group(self.zw, efficiency)
+
+        def read(name: str) -> np.ndarray:
+            return np.asarray(as_zarr_array(group[name], name=name)[:])
+
+        by = str(group.attrs["by"])
+        features = read("features").astype(str)
+        columns: dict[str, Any] = {}
+        if by == "guide":
+            columns["guide"] = read("names").astype(str)
+        columns["target"] = read("targets").astype(str)
+        columns["feature"] = pd.Series(
+            [None if feature == "" else feature for feature in features], dtype=object
+        )
+        columns["status"] = np.asarray(EFFICIENCY_STATUSES, dtype=object)[
+            read("status")
+        ]
+        for name in ("n_cells", "n_control_cells", *_EFFICIENCY_VALUES):
+            columns[name] = read(name)
+        return PerturbationEfficiency(
+            table=pd.DataFrame(columns),
+            by=by,
+            from_assay=str(efficiency.assay),
         )

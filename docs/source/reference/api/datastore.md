@@ -224,11 +224,11 @@ functions in {doc}`regulons` turn them into regulons.
 
 ### `ds.perturbation`
 
-`call_guides` calls the guides of each cell of a pooled CRISPR screen from its guide counts, and `import_guide_calls` saves the calls that Cell Ranger made instead. Both save a `guide_calls` artifact that labels each cell with its called guide. `labels` turns the calls into a `perturbation_labels` artifact that labels each cell with the gene that its guides target, `"control"`, `"Negative"` or `"Multiple"`. {doc}`perturbation` compares the four calling methods, sets out the label rules, and describes the records that `load_guide_calls`, `load_guide_thresholds` and `load_labels` return.
+`call_guides` calls the guides of each cell of a pooled CRISPR screen from its guide counts, and `import_guide_calls` saves the calls that Cell Ranger made instead. Both save a `guide_calls` artifact that labels each cell with its called guide. `labels` turns the calls into a `perturbation_labels` artifact that labels each cell with the gene that its guides target, `"control"`, `"Negative"` or `"Multiple"`. `efficiency` compares each target gene's expression in the cells of its perturbation with the control cells of the labels and saves the comparison as a `perturbation_efficiency` table. {doc}`perturbation` compares the four calling methods, sets out the label rules and the efficiency measures, and describes the records that `load_guide_calls`, `load_guide_thresholds`, `load_labels` and `load_efficiency` return.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.PerturbationAccessor
-    :members: call_guides, load_guide_thresholds, import_guide_calls, load_guide_calls, labels, load_labels
+    :members: call_guides, load_guide_thresholds, import_guide_calls, load_guide_calls, labels, load_labels, efficiency, load_efficiency
 ```
 
 ### `ds.imputation`

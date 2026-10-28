@@ -1,14 +1,14 @@
 ---
 myst:
   html_meta:
-    description: CyteArc perturbation API for pooled single-cell CRISPR screens, with guide calling from guide counts, guide calls imported from Cell Ranger, perturbation labels that name the genes each cell's guides target, and the records of the calls, the fitted thresholds and the labels.
+    description: CyteArc perturbation API for pooled single-cell CRISPR screens, with guide calling from guide counts, guide calls imported from Cell Ranger, perturbation labels that name the genes each cell's guides target, the efficiency of each perturbation on its target gene, and the records of the calls, the fitted thresholds, the labels and the efficiency.
 ---
 
 # Perturbation API reference
 
-Pooled single-cell CRISPR screens, such as Perturb-seq, CROP-seq, ECCITE-seq and 10x CRISPR Guide Capture, give each cell guide RNAs that switch one target gene off or on, and read each cell's guides beside its transcriptome, from a transcript that carries the guide's sequence or from the guide RNA itself ([Replogle et al. 2020](https://doi.org/10.1038/s41587-020-0470-y)). CyteArc imports the guide counts as an assay declared `CRISPR`. Guide calling decides which guides each cell carries, since every cell also holds a few ambient guide molecules, and perturbation labels name the genes that those guides target. `cytearc.perturbation` holds the records of the calls, of the thresholds fitted to make them, and of the labels.
+Pooled single-cell CRISPR screens, such as Perturb-seq, CROP-seq, ECCITE-seq and 10x CRISPR Guide Capture, give each cell guide RNAs that switch one target gene off or on, and read each cell's guides beside its transcriptome, from a transcript that carries the guide's sequence or from the guide RNA itself ([Replogle et al. 2020](https://doi.org/10.1038/s41587-020-0470-y)). CyteArc imports the guide counts as an assay declared `CRISPR`. Guide calling decides which guides each cell carries, since every cell also holds a few ambient guide molecules, perturbation labels name the genes that those guides target, and perturbation efficiency measures how far each perturbation moved the expression of its target gene. `cytearc.perturbation` holds the records of the calls, of the thresholds fitted to make them, of the labels, and of the efficiency.
 
-The steps run on a `DataStore`. {meth}`ds.perturbation.call_guides <cytearc.datastore.namespaces.PerturbationAccessor.call_guides>` calls the guides of each cell from the guide counts, and {meth}`ds.perturbation.import_guide_calls <cytearc.datastore.namespaces.PerturbationAccessor.import_guide_calls>` saves Cell Ranger's calls from `protospacer_calls_per_cell.csv` instead. Both save a `guide_calls` artifact. {meth}`ds.perturbation.load_guide_calls <cytearc.datastore.namespaces.PerturbationAccessor.load_guide_calls>` reads the artifact as a {class}`~cytearc.perturbation.GuideCalls` record, and {meth}`ds.plots.guide_calls <cytearc.datastore.plot_accessor.DataStorePlotAccessor.guide_calls>` plots how many guides each cell carries and how many cells carry each guide. {meth}`ds.perturbation.load_guide_thresholds <cytearc.datastore.namespaces.PerturbationAccessor.load_guide_thresholds>` reads the fits of the fitted methods as a {class}`~cytearc.perturbation.GuideThresholds` record, and {meth}`ds.plots.guide_thresholds <cytearc.datastore.plot_accessor.DataStorePlotAccessor.guide_thresholds>` draws them. {meth}`ds.perturbation.labels <cytearc.datastore.namespaces.PerturbationAccessor.labels>` labels each cell by the genes that its called guides target and saves a `perturbation_labels` artifact, which {meth}`ds.perturbation.load_labels <cytearc.datastore.namespaces.PerturbationAccessor.load_labels>` reads as a {class}`~cytearc.perturbation.PerturbationLabels` record.
+The steps run on a `DataStore`. {meth}`ds.perturbation.call_guides <cytearc.datastore.namespaces.PerturbationAccessor.call_guides>` calls the guides of each cell from the guide counts, and {meth}`ds.perturbation.import_guide_calls <cytearc.datastore.namespaces.PerturbationAccessor.import_guide_calls>` saves Cell Ranger's calls from `protospacer_calls_per_cell.csv` instead. Both save a `guide_calls` artifact. {meth}`ds.perturbation.load_guide_calls <cytearc.datastore.namespaces.PerturbationAccessor.load_guide_calls>` reads the artifact as a {class}`~cytearc.perturbation.GuideCalls` record, and {meth}`ds.plots.guide_calls <cytearc.datastore.plot_accessor.DataStorePlotAccessor.guide_calls>` plots how many guides each cell carries and how many cells carry each guide. {meth}`ds.perturbation.load_guide_thresholds <cytearc.datastore.namespaces.PerturbationAccessor.load_guide_thresholds>` reads the fits of the fitted methods as a {class}`~cytearc.perturbation.GuideThresholds` record, and {meth}`ds.plots.guide_thresholds <cytearc.datastore.plot_accessor.DataStorePlotAccessor.guide_thresholds>` draws them. {meth}`ds.perturbation.labels <cytearc.datastore.namespaces.PerturbationAccessor.labels>` labels each cell by the genes that its called guides target and saves a `perturbation_labels` artifact, which {meth}`ds.perturbation.load_labels <cytearc.datastore.namespaces.PerturbationAccessor.load_labels>` reads as a {class}`~cytearc.perturbation.PerturbationLabels` record. {meth}`ds.perturbation.efficiency <cytearc.datastore.namespaces.PerturbationAccessor.efficiency>` compares each target gene's expression in the cells of its perturbation with the control cells and saves a `perturbation_efficiency` table, which {meth}`ds.perturbation.load_efficiency <cytearc.datastore.namespaces.PerturbationAccessor.load_efficiency>` reads as a {class}`~cytearc.perturbation.PerturbationEfficiency` record and {meth}`ds.plots.efficiency <cytearc.datastore.plot_accessor.DataStorePlotAccessor.efficiency>` draws.
 
 A `guide_calls` artifact labels each cell with its one called guide, with `"Negative"` when no guide is called, and with `"Multiple"` when several are. The labels group cells like cluster labels do, so `ds.select_cells(calls, include=["GUIDE-1"])` selects the cells of one guide and plots colour cells by their call; `ds.select_cells(calls, value="n_guides", low=1, high=1, keep_bounds=True)` keeps the cells with exactly one called guide. [Read per-cell values](cell_aligned_kinds) lists the artifact's arrays.
 
@@ -92,6 +92,51 @@ On the 10x A549 screen, 5,867 cells transduced with guides of 45 genes and non-t
 | Cell Ranger's, imported | 3,244 | 1,227 | 396 | 1,000 |
 | `call_guides` with its defaults | 3,349 | 1,355 | 387 | 776 |
 
+## Measure perturbation efficiency
+
+A perturbation explains a cell's response only if it changed its own target gene, and the cells of a guide that failed look like controls. `efficiency` compares each target gene's expression in the cells that carry its perturbation alone with the gene's expression in the `"control"` cells of the labels, the check that Cell Ranger calls perturbation efficiency. A knockdown lowers the target's expression, and an activation raises it.
+
+`by="target"`, the default, gives one row per target gene, and `by="guide"` one row per guide, so that the guides of a gene can be compared. A cell carries a target alone when its called guides target that gene and no other, with or without control guides, so the cells of a target are those that the labels give the target's label. A cell carries a guide alone when the guide is its one called guide. A cell with two guides of one gene, or with a gene's guide beside a control guide, therefore counts for the gene but for none of its guides. Cells whose guides target several genes, and `"Negative"` cells, stay out of the comparison. Each row holds:
+
+| Column | Meaning |
+|---|---|
+| `n_cells`, `n_control_cells` | The cells that carry the perturbation alone, and the control cells |
+| `mean_umi`, `control_mean_umi` | The mean UMIs of the target gene in each group, as Cell Ranger reports them |
+| `mean_expression`, `control_mean_expression` | The mean in each group after scaling each cell's UMIs to the median library size of the compared cells, so that sequencing depth does not change the comparison |
+| `remaining_fraction` | `mean_expression` over `control_mean_expression`, the fraction of the control expression that remains: below 1 for a knockdown and above 1 for an activation |
+| `log2_fold_change` | The base-2 logarithm of `remaining_fraction`, minus infinity when the perturbed cells hold no UMI of the gene |
+| `p_value` | A two-sided Mann-Whitney test of the scaled expression, which asks whether the values of one group tend to rank above those of the other |
+| `adjusted_p_value` | The Benjamini-Hochberg adjustment of `p_value` across the rows that have one, which controls the false discovery rate |
+
+A cell's library size is its total UMIs in the expression assay, and the compared cells are the perturbed cells of every row together with the control cells.
+
+Each target is matched to a feature of `from_assay`, `"RNA"` by default. The guide assay's `id_column`, `"target_gene_id"` by default, which 10x imports fill from Cell Ranger's feature reference, gives the feature ID of each guide's target, and a target whose guides give one ID that the expression assay holds is matched to that feature. Any other target is matched to the one feature whose name equals the target; a name that several features share matches none. `id_column=None` matches by name only. `efficiency` reads only the matched genes of the compared cells, feature-major when that reads less.
+
+Each row ends with a status:
+
+- `"tested"`: the target gene was compared.
+- `"no_feature"`: the target matches no feature of `from_assay`. The row keeps its cells, and a warning names a few such rows.
+- `"no_cells"`: no cell carries the perturbation alone.
+- `"no_control_expression"`: the control cells hold no UMI of the gene, so no fraction remains. The row keeps its means and its p-value, which can still show the activation of a gene that the control cells do not express.
+
+The table belongs to the expression assay rather than to the guide assay of the labels. It records the labels, the expression data, the feature matched to each row's target and `by`, so measuring again with the same values returns the saved table, an `id_column` that matches a target to another feature makes a new table, and `invalidate_cache=True` measures again. Labels without a `"control"` cell raise `ValueError`.
+
+```python
+labels = ds.perturbation.labels(calls, controls=["Non-Targeting"])
+efficiency = ds.perturbation.efficiency(labels)
+table = ds.perturbation.load_efficiency(efficiency).table
+table["status"].value_counts()
+table.query("status == 'tested'").sort_values("log2_fold_change")  # strongest knockdowns first
+by_guide = ds.perturbation.efficiency(labels, by="guide")  # one row per guide
+ds.plots.efficiency(efficiency)
+```
+
+`load_efficiency` returns a {class}`~cytearc.perturbation.PerturbationEfficiency` record. Its `table` holds one row per target gene, sorted by target, or one row per guide of a target gene, in the order of the guide assay; control targets and their guides have no row. Its columns are `guide` for rows by guide, `target`, `feature` (the matched feature ID, None without one), `status` and the columns above. `by` and `from_assay` name the rows and the expression assay.
+
+`ds.plots.efficiency` draws one row per tested target or guide, from the strongest knockdown at the top to the strongest activation at the bottom: a point at the row's log2 fold change against the control cells, coloured by whether its `adjusted_p_value` is below `alpha` (0.05), with an area that grows with its cells. A fold change of minus infinity is a triangle at the left edge, and the row's label says that no UMI remains. When more rows were tested than `max_rows` (40), the plot keeps the `max_rows` rows with the smallest adjusted p-values. Rows of the other statuses are not drawn, and the title counts them. The plot's table, `efficiency`, holds the drawn rows in drawing order.
+
+On the 10x A549 screen, with Cell Ranger's calls imported and `controls=["Non-Targeting"]`, `efficiency` takes 0.8 s. The cells and mean UMIs of all 45 targets and 77 guides equal those in Cell Ranger's `perturbation_efficiencies_by_target.csv` and `perturbation_efficiencies_by_feature.csv`, and the log2 fold changes have a Spearman correlation of 0.97 with Cell Ranger's, which shrinks its estimates. Cell Ranger also lists rows for pairs of targets, from the cells whose guides target both genes, while CyteArc's rows cover cells with one target.
+
 ## Guide calls
 
 ```{eval-rst}
@@ -108,4 +153,10 @@ On the 10x A549 screen, 5,867 cells transduced with guides of 45 genes and non-t
 
 ```{eval-rst}
 .. autoclass:: cytearc.perturbation.PerturbationLabels
+```
+
+## Perturbation efficiency
+
+```{eval-rst}
+.. autoclass:: cytearc.perturbation.PerturbationEfficiency
 ```

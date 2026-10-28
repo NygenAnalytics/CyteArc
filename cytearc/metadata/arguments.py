@@ -510,6 +510,20 @@ class PerturbationLabelArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class PerturbationEfficiencyArguments(OperationArguments):
+    operation: ClassVar[str] = "measure_perturbation_efficiency"
+    artifact_kind: ClassVar[str] = "perturbation_efficiency"
+
+    labels: ArtifactRef = artifact_input()
+    # The expression counts that the means and tests read.
+    dataset_fingerprint: str = artifact_input()
+    # Each row with the feature of its target gene, from id_column or the names.
+    target_features_fingerprint: str = artifact_input()
+    by: str = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class MembershipStrengthArguments(OperationArguments):
     operation: ClassVar[str] = "calc_membership_strength"
     artifact_kind: ClassVar[str] = "membership_strength"
