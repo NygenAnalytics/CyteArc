@@ -140,6 +140,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "embedding",
     "embedding_raster",
     "graph_qc",
+    "guide_calls",
     "highly_variable_features",
     "label_panels",
     "lineage_curves",
@@ -417,6 +418,7 @@ concrete = (
     "cytearc.plotting.lineages",
     "cytearc.plotting.mapping",
     "cytearc.plotting.modality_weights",
+    "cytearc.plotting.perturbation",
     "cytearc.plotting.recipes",
     "cytearc.plotting.summary",
 )

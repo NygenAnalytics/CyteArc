@@ -12,6 +12,7 @@ from ._operations.graph import _GraphOperationsMixin
 from ._operations.integration_metrics import _IntegrationMetricsOperationsMixin
 from ._operations.mapping import _MappingOperationsMixin
 from ._operations.mapping_reference import _MappingReferenceOperationsMixin
+from ._operations.perturbation import _PerturbationOperationsMixin
 from ._operations.presentation import _PresentationOperationsMixin
 from ._operations.quality_control import _QualityControlOperationsMixin
 from ._operations.regulons import _RegulonOperationsMixin
@@ -29,6 +30,7 @@ __all__ = [
     "IntegrationAccessor",
     "MappingAccessor",
     "MarkersAccessor",
+    "PerturbationAccessor",
     "QcAccessor",
     "ReductionAccessor",
     "RegulonsAccessor",
@@ -163,6 +165,17 @@ class MarkersAccessor(_Accessor):
     search = _bind(_FeatureOperationsMixin._markers_search)
     load = _bind(_FeatureOperationsMixin._markers_load)
     export_csv = _bind(_FeatureOperationsMixin._markers_export_csv)
+
+
+class PerturbationAccessor(_Accessor):
+    __slots__ = ()
+
+    import_guide_calls = _bind(
+        _PerturbationOperationsMixin._perturbation_import_guide_calls
+    )
+    load_guide_calls = _bind(
+        _PerturbationOperationsMixin._perturbation_load_guide_calls
+    )
 
 
 class QcAccessor(_Accessor):

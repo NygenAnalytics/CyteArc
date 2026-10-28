@@ -61,6 +61,7 @@ if TYPE_CHECKING:
         mapping_score as mapping_score,
     )
     from .modality_weights import modality_weights as modality_weights
+    from .perturbation import guide_calls as guide_calls
     from .summary import dotplot as dotplot
     from .summary import matrixplot as matrixplot
 
@@ -94,6 +95,7 @@ __all__ = [
     "embedding",
     "embedding_raster",
     "graph_qc",
+    "guide_calls",
     "highly_variable_features",
     "label_panels",
     "lineage_curves",
@@ -145,6 +147,7 @@ __getattr__, __dir__ = _lazy_facade(
         "embedding": ".embedding",
         "embedding_raster": ".embedding_raster",
         "graph_qc": ".diagnostics",
+        "guide_calls": ".perturbation",
         "highly_variable_features": ".diagnostics",
         "label_panels": "._figure",
         "lineage_curves": ".lineages",

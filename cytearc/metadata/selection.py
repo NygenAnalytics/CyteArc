@@ -134,6 +134,21 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
         "embedding": CellValueSpec("values", False),
         "enrichment_scores": CellValueSpec("scores", False),
         "fate_map": CellValueSpec("probabilities", False, {"valid": True}),
+        # guide_codes and guide_umis hold one row per cell and one column per
+        # called guide, padded to the cells' largest number of calls.
+        "guide_calls": CellValueSpec(
+            "values",
+            True,
+            {
+                "n_guides": False,
+                "top_guide": True,
+                "top_umi": False,
+                "top_fraction": False,
+                "total_umi": False,
+                "guide_codes": True,
+                "guide_umis": False,
+            },
+        ),
         "hto_identity": CellValueSpec(
             "values", True, {"max_id": True, "second_id": True, "margin": False}
         ),

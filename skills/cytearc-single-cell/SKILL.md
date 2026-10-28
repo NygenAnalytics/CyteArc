@@ -240,6 +240,7 @@ any changes you make after seeing the comparison as such.
 | `references/integration-and-comparisons.md` | study design and units, donors in two arms, composition tests, Harmony and its safety, merging, mapping, condition comparisons |
 | `references/performance-and-export.md` | budgets, long-running steps, streaming, mount repacking, AnnData/H5AD/MTX/CSV and pseudobulk export, subset stores |
 | `references/regulons.md` | SCENIC regulons from RNA, chromVAR motif and CUT&RUN activity in ATAC, region-to-gene links, co-regulated gene programs |
+| `references/perturbation-screens.md` | pooled CRISPR screens: importing Cell Ranger's guide calls, barcode prefixes in merged stores, single-guide cells, ambient guides, the guide-calls plot |
 
 ## Troubleshooting
 

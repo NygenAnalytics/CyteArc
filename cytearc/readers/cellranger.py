@@ -1,5 +1,7 @@
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Generator, Iterator, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import h5py
@@ -586,3 +588,158 @@ class CrH5Reader(CrReader):
     def close(self) -> None:
         """Closes file connection."""
         self.h5obj.close()
+
+
+_PROTOSPACER_COLUMNS = ("cell_barcode", "num_features", "feature_call", "num_umis")
+# Rows without a call, which Cell Ranger may write as an empty field or None.
+_NO_CALL = frozenset({"", "None"})
+
+
+@dataclass(frozen=True, slots=True)
+class ProtospacerCalls:
+    """The guide calls in Cell Ranger's ``protospacer_calls_per_cell.csv``.
+
+    Attributes:
+        barcodes: The cell barcode of each row, in file order.
+        rows: The row in ``barcodes`` of each call.
+        features: The feature ID of each call.
+        umis: The UMIs of each call.
+    """
+
+    barcodes: np.ndarray
+    rows: np.ndarray
+    features: np.ndarray
+    umis: np.ndarray
+
+
+def _line_numbers(rows: np.ndarray) -> str:
+    """Name the file lines of data rows, counting the header as line 1."""
+    lines = [str(int(row) + 2) for row in rows[:5]]
+    more = f" and {len(rows) - 5} more" if len(rows) > 5 else ""
+    return ", ".join(lines) + more
+
+
+def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
+    """Read the guide calls of each barcode from Cell Ranger's call file.
+
+    Cell Ranger's CRISPR Guide Capture analysis writes
+    ``crispr_analysis/protospacer_calls_per_cell.csv``, one row per barcode with
+    a confident call: ``cell_barcode``, ``num_features``, and the
+    ``|``-separated ``feature_call`` and ``num_umis`` of its called guides.
+    Barcodes without a confident call are absent, and a row whose
+    ``num_features`` is 0 holds no call. A gzip-compressed file is read too.
+
+    Args:
+        path: The call file.
+
+    Returns:
+        The barcode of each row and the feature ID and UMIs of each call.
+
+    Raises:
+        ValueError: If a column is missing, a barcode is empty or repeated,
+            ``num_features`` is not a whole number or disagrees with the
+            number of called features or UMI counts, a UMI count is not a
+            whole number, a feature ID is empty, or a row calls one feature
+            twice.
+    """
+    frame = pd.read_csv(
+        path,
+        dtype=str,
+        keep_default_na=False,
+        na_filter=False,
+        compression="infer",
+    )
+    missing = [name for name in _PROTOSPACER_COLUMNS if name not in frame.columns]
+    if missing:
+        raise ValueError(
+            "The call file lacks the columns "
+            + ", ".join(repr(name) for name in missing)
+            + "; Cell Ranger writes "
+            + ", ".join(_PROTOSPACER_COLUMNS)
+        )
+    barcodes = frame["cell_barcode"].str.strip().to_numpy(dtype=object)
+    empty = np.flatnonzero(barcodes == "")
+    if len(empty):
+        raise ValueError(f"Empty cell barcodes on lines {_line_numbers(empty)}")
+    repeated = np.flatnonzero(pd.Index(barcodes).duplicated(keep="first"))
+    if len(repeated):
+        raise ValueError(
+            f"Cell barcodes repeat on lines {_line_numbers(repeated)}, for example "
+            f"{barcodes[repeated[0]]!r}"
+        )
+    declared = pd.to_numeric(frame["num_features"].str.strip(), errors="coerce")
+    declared_values = declared.to_numpy(dtype=np.float64)
+    invalid = np.flatnonzero(
+        ~np.isfinite(declared_values)
+        | (declared_values < 0)
+        | (declared_values != np.floor(declared_values))
+    )
+    if len(invalid):
+        raise ValueError(
+            "num_features must be a whole number of at least 0 on lines "
+            f"{_line_numbers(invalid)}"
+        )
+    counts = declared_values.astype(np.int64)
+    feature_text = frame["feature_call"].str.strip()
+    umi_text = frame["num_umis"].str.strip()
+    uncalled = counts == 0
+    stray = np.flatnonzero(
+        uncalled
+        & ~(
+            feature_text.isin(_NO_CALL).to_numpy()
+            & umi_text.isin(_NO_CALL | {"0"}).to_numpy()
+        )
+    )
+    if len(stray):
+        raise ValueError(
+            f"Rows with num_features 0 list calls on lines {_line_numbers(stray)}"
+        )
+    called = np.flatnonzero(~uncalled)
+    feature_lists = feature_text.iloc[called].str.split("|")
+    umi_lists = umi_text.iloc[called].str.split("|")
+    feature_lengths = feature_lists.str.len().to_numpy(dtype=np.int64)
+    umi_lengths = umi_lists.str.len().to_numpy(dtype=np.int64)
+    mismatched = called[
+        (feature_lengths != counts[called]) | (umi_lengths != counts[called])
+    ]
+    if len(mismatched):
+        raise ValueError(
+            "num_features disagrees with the number of called features or UMI "
+            f"counts on lines {_line_numbers(mismatched)}"
+        )
+    rows = np.repeat(called, counts[called]).astype(np.int64)
+    if len(rows):
+        features = feature_lists.explode().str.strip().to_numpy(dtype=object)
+        umi_values = pd.to_numeric(
+            umi_lists.explode().str.strip(), errors="coerce"
+        ).to_numpy(dtype=np.float64)
+    else:
+        features = np.empty(0, dtype=object)
+        umi_values = np.empty(0, dtype=np.float64)
+    bad_umis = rows[
+        ~np.isfinite(umi_values)
+        | (umi_values < 0)
+        | (umi_values != np.floor(umi_values))
+    ]
+    if len(bad_umis):
+        raise ValueError(
+            "UMI counts must be whole numbers of at least 0 on lines "
+            f"{_line_numbers(np.unique(bad_umis))}"
+        )
+    blank = rows[features == ""]
+    if len(blank):
+        raise ValueError(
+            f"Empty feature IDs on lines {_line_numbers(np.unique(blank))}"
+        )
+    twice = rows[pd.MultiIndex.from_arrays([rows, features]).duplicated(keep="first")]
+    if len(twice):
+        raise ValueError(
+            "A feature is called twice in one row on lines "
+            f"{_line_numbers(np.unique(twice))}"
+        )
+    return ProtospacerCalls(
+        barcodes=barcodes,
+        rows=rows,
+        features=features,
+        umis=umi_values.astype(np.int64),
+    )

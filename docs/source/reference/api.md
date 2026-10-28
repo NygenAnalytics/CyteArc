@@ -12,6 +12,7 @@ Public CyteArc surfaces for analysts:
 - `EnrichmentResult` and `read_gmt` for gene-set scoring
 - `cytearc.regulons` for SCENIC-style regulons, chromVAR motif activity, cistromes from motifs or
   CUT&RUN peaks, region-to-gene links, and co-regulated gene programs
+- `cytearc.perturbation` for pooled CRISPR screens, starting with guide calls imported from Cell Ranger
 - Readers that ingest source formats; writers that create or export Zarr stores (and other exports)
 - `cytearc.plotting`
 - `cytearc.datasets` for the public example datasets that the tutorials download
@@ -34,6 +35,7 @@ Prefer calling methods on `DataStore`.
 | Integration and metrics | [Integration and metrics API reference](/api/integration.html) |
 | Mapping | [Mapping API reference](/api/mapping.html) |
 | Regulons and gene programs | [Regulons API reference](/api/regulons.html) |
+| CRISPR screens | [Perturbation API reference](/api/perturbation.html) |
 | Plotting | [Plotting API reference](/api/plotting.html) |
 | Example datasets | [Example datasets API reference](/api/datasets.html) |
 | Utilities | [Utilities API reference](/api/utilities.html) |

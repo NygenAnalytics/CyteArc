@@ -222,6 +222,15 @@ functions in {doc}`regulons` turn them into regulons.
     :members: grn, load_grn, profiles
 ```
 
+### `ds.perturbation`
+
+`import_guide_calls` saves the guide calls of a pooled CRISPR screen, as Cell Ranger made them, as a `guide_calls` artifact that labels each cell with its called guide; {doc}`perturbation` describes the record that `load_guide_calls` returns.
+
+```{eval-rst}
+.. autoclass:: cytearc.datastore.namespaces.PerturbationAccessor
+    :members: import_guide_calls, load_guide_calls
+```
+
 ### `ds.imputation`
 
 ```{eval-rst}

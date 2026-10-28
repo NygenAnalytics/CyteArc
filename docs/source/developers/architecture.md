@@ -14,7 +14,7 @@ Module-load dependencies point toward the earlier layers in this list:
 
 1. Foundation: `storage`, `matrix`, and `utils`
 2. Data model: `metadata`, `assay`, and `graph`
-3. Domain algorithms: `neighbors`, `embeddings`, `clustering`, `trajectory`, `metrics`, `features`, `quality_control`, `mapping`, and `regulons`
+3. Domain algorithms: `neighbors`, `embeddings`, `clustering`, `trajectory`, `metrics`, `features`, `quality_control`, `mapping`, `regulons`, and `perturbation`
 4. Import and export: `readers`, `writers`, and `merge`
 5. Orchestration: `datastore` and `datastore._operations`
 6. Presentation: `plotting`
@@ -143,6 +143,7 @@ They must not import those packages at module load time.
   `regulons` extra does not install `pyarrow`. `results.py` holds `GrnResult`, which names
   `storage.refs` only. `DataStore.regulons.profiles` sums cell groups with
   `compare.compute_bulk` and writes nothing.
+- `perturbation/` owns the analysis of pooled CRISPR screens. `guide_calls.py` turns guide calls into the per-cell arrays of a `guide_calls` artifact, summarises each cell's guide counts from blocks that a caller streams, and holds the `GuideCalls` record that `DataStore.perturbation.load_guide_calls` returns. Its functions never touch storage; the reader of Cell Ranger's call file lives in `readers/cellranger.py`, and the datastore operation in `datastore._operations.perturbation` owns the reads, the join of barcodes to cells, and the artifact.
 
 Domain algorithm packages must not import `datastore`, `plotting`, or general import/export packages at module load time.
 A domain that persists an artifact may use a narrow, named `storage` adapter.
@@ -210,6 +211,7 @@ features
 integration_metrics
 presentation
 regulons
+perturbation
 ```
 
 `ambient` binds the ambient RNA methods of `ds.qc`: it streams counts, persists soup profiles and
@@ -471,6 +473,7 @@ CyteArc validates persisted data and public arguments against the following cont
   attributes. It models raw counts, and `early_stopping` records which out-of-bag improvement
   ended each fit. `regulons.load_grn` returns a `GrnResult` and checks the cell and regulator
   digests.
+- `DataStore.perturbation.import_guide_calls` writes an assay-scoped, cell-aligned `guide_calls` artifact with operation `import_guide_calls`, whose identity holds the cell selection, the dataset fingerprint, a fingerprint of the guide IDs, the SHA-256 of the call file's bytes, and the barcode prefix. Its canonical `values` label each cell with its one called guide, `"Negative"`, or `"Multiple"`; `n_guides`, `top_guide`, `top_umi`, `top_fraction` and `total_umi` describe each cell's guides; the two-dimensional `guide_codes` and `guide_umis` hold each cell's called guides, padded to the largest number of calls, which planning leaves open with a `None` dimension; and `guides`, one row per guide and not cell-aligned, holds the guide IDs, which a reuse validator checks as `cell_calling` checks `ambient`. `perturbation.load_guide_calls` returns a `GuideCalls` record.
 - `enrichment_scores` artifacts gain the `chromvar` method, written by `scores.chromvar` with
   operation `run_chromvar` on an ATAC assay. Its `scores` are chromVAR z-scores and may hold NaN
   for a cell that expects fewer than one fragment in a set; a `deviations` array of the same

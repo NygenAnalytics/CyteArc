@@ -17,6 +17,7 @@ from cytearc.datastore.namespaces import (
     FeaturesAccessor,
     GraphAccessor,
     MarkersAccessor,
+    PerturbationAccessor,
     QcAccessor,
     ReductionAccessor,
     RegulonsAccessor,
@@ -259,6 +260,18 @@ _CONTRACTS = (
             "resolved_input",
             "cell_selection",
             "connectivity_map",
+        ),
+    ),
+    OperationContract(
+        PerturbationAccessor.import_guide_calls,
+        metadata_arguments.GuideCallImportArguments,
+        # The file is identified by the SHA-256 of its bytes, not its path.
+        aliases={"path": "file_sha256"},
+        signature_only=_classified("routing", "from_assay"),
+        model_only=_classified(
+            "resolved_input",
+            "dataset_fingerprint",
+            "guide_ids_fingerprint",
         ),
     ),
     OperationContract(

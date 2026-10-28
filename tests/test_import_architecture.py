@@ -490,6 +490,7 @@ def test_matrix_has_no_domain_or_orchestration_dependencies():
                 "metadata",
                 "metrics",
                 "neighbors",
+                "perturbation",
                 "plotting",
                 "quality_control",
                 "readers",
@@ -550,6 +551,7 @@ def test_algorithm_domains_do_not_import_orchestration_or_io():
     storage_exceptions = {
         "clustering": set(),
         "embeddings": {"imported_storage.py"},
+        "perturbation": set(),
         "regulons": set(),
         "trajectory": {"artifacts.py"},
     }
@@ -1249,6 +1251,9 @@ def test_datastore_operation_mixins_are_runtime_isolated():
     from cytearc.datastore._operations.mapping_reference import (
         _MappingReferenceOperationsMixin,
     )
+    from cytearc.datastore._operations.perturbation import (
+        _PerturbationOperationsMixin,
+    )
     from cytearc.datastore._operations.presentation import _PresentationOperationsMixin
     from cytearc.datastore._operations.quality_control import (
         _QualityControlOperationsMixin,
@@ -1297,6 +1302,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         _PresentationOperationsMixin,
         _RegulonOperationsMixin,
         _CellCallingOperationsMixin,
+        _PerturbationOperationsMixin,
     )
     assert all("__init__" not in mixin.__dict__ for mixin in mixins)
     assert all(mixin.__bases__ == (object,) for mixin in mixins)

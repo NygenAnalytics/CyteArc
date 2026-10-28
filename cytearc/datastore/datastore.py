@@ -13,6 +13,7 @@ from ._operations.ambient import _AmbientOperationsMixin
 from ._operations.cell_calling import _CellCallingOperationsMixin
 from ._operations.features import _FeatureOperationsMixin
 from ._operations.integration_metrics import _IntegrationMetricsOperationsMixin
+from ._operations.perturbation import _PerturbationOperationsMixin
 from ._operations.presentation import _PresentationOperationsMixin
 from ._operations.quality_control import _QualityControlOperationsMixin
 from ._operations.regulons import _RegulonOperationsMixin
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
         IntegrationAccessor,
         MappingAccessor,
         MarkersAccessor,
+        PerturbationAccessor,
         QcAccessor,
         ReductionAccessor,
         RegulonsAccessor,
@@ -196,6 +198,7 @@ class DataStore(
     _IntegrationMetricsOperationsMixin,
     _PresentationOperationsMixin,
     _RegulonOperationsMixin,
+    _PerturbationOperationsMixin,
     MappingDatastore,
 ):
     """This class extends MappingDatastore and consequently inherits methods of
@@ -346,6 +349,12 @@ class DataStore(
         from .namespaces import MarkersAccessor
 
         return MarkersAccessor(self)
+
+    @property
+    def perturbation(self) -> "PerturbationAccessor":
+        from .namespaces import PerturbationAccessor
+
+        return PerturbationAccessor(self)
 
     @property
     def qc(self) -> "QcAccessor":
