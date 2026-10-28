@@ -48,6 +48,7 @@ _TWO_DIMENSIONAL = frozenset(
         ("imported_coordinates", "data"),
         ("label_transfer", "vote_class_codes"),
         ("label_transfer", "vote_class_fractions"),
+        ("perturbation_labels", "target_codes"),
     }
 )
 

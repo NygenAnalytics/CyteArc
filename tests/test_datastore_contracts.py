@@ -189,13 +189,16 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # lineage methods of trajectory: lineage_markers, drivers,
     # lineage_aggregation, curves, and lineage_tree with their loaders, then
     # perturbation.import_guide_calls and perturbation.load_guide_calls, then
-    # perturbation.call_guides and perturbation.load_guide_thresholds.
-    assert len(_NAMESPACE_METHODS) == 98
+    # perturbation.call_guides and perturbation.load_guide_thresholds, then
+    # perturbation.labels and perturbation.load_labels.
+    assert len(_NAMESPACE_METHODS) == 100
     assert {
         "import_guide_calls",
         "load_guide_calls",
         "call_guides",
         "load_guide_thresholds",
+        "labels",
+        "load_labels",
     } == {
         name
         for namespace, _, name, _ in _NAMESPACE_METHODS

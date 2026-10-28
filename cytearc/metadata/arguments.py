@@ -497,6 +497,19 @@ class GuideCallArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class PerturbationLabelArguments(OperationArguments):
+    operation: ClassVar[str] = "label_perturbations"
+    artifact_kind: ClassVar[str] = "perturbation_labels"
+
+    guide_calls: ArtifactRef = artifact_input()
+    # The target of every guide, in assay order, from target_column and targets.
+    targets_fingerprint: str = artifact_input()
+    controls: tuple[str, ...] = parameter()
+    policy: str = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class MembershipStrengthArguments(OperationArguments):
     operation: ClassVar[str] = "calc_membership_strength"
     artifact_kind: ClassVar[str] = "membership_strength"

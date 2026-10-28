@@ -1,6 +1,6 @@
 import hashlib
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +13,7 @@ from ...metadata.arguments import (
     GuideCallArguments,
     GuideCallImportArguments,
     GuideThresholdArguments,
+    PerturbationLabelArguments,
 )
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from ...metadata.rows import (
@@ -38,6 +39,13 @@ from ...perturbation.guide_thresholds import (
     GuideThresholds,
     call_thresholds,
     guide_threshold_frames,
+)
+from ...perturbation.labels import (
+    POLICIES,
+    PerturbationLabels,
+    guide_targets,
+    perturbation_label_arrays,
+    perturbation_label_frames,
 )
 from ...perturbation.histograms import (
     MAX_COUNT,
@@ -1186,4 +1194,280 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             method=method,
             sample_column=sample_columns[0] if sample_columns else None,
             min_umi=min_umi,
+        )
+
+    @validation_scoped
+    def _perturbation_labels(
+        self,
+        calls: ArtifactRef,
+        *,
+        controls: Sequence[str],
+        target_column: str | None = "target_gene_name",
+        targets: Mapping[str, str] | None = None,
+        policy: str = "single",
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Label each cell by the genes that its called guides target.
+
+        Each guide targets one gene, and control guides, such as non-targeting
+        guides, target none. A cell's label is ``"Negative"`` without a called
+        guide, ``"control"`` with control guides only, the gene when its
+        guides target one gene, with or without control guides, and
+        ``"Multiple"`` when they target several. With
+        ``policy="combinations"``, a cell whose guides target several genes is
+        labelled with the genes, sorted and joined by ``"+"``, such as
+        ``"GENE1+GENE2"``.
+
+        Each guide's target comes from ``target_column`` of the guide assay's
+        features, which 10x imports fill from Cell Ranger's feature reference
+        (``target_gene_name``, with ``"Non-Targeting"`` for non-targeting
+        guides), and ``targets`` replaces the column's target of the guides
+        it names. Control guides are named by their target, never guessed.
+
+        The labels are saved as a ``perturbation_labels`` artifact for the
+        cells of the calls: ``values`` holds the labels beside ``guide_label``
+        (the cells' labels in the calls), ``is_control``, ``n_targets``, and
+        ``target_codes``, which holds each cell's genes as positions in the
+        artifact's ``targets``, padded with -1, so a cell's full set of genes
+        is kept under either policy. ``select_cells`` reads the
+        one-dimensional arrays, and ``artifacts.load_values`` reads every
+        per-cell array.
+
+        Args:
+            calls: A ``guide_calls`` artifact, imported from Cell Ranger or made
+                by :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.call_guides`.
+            controls: The targets of control guides, such as
+                ``["Non-Targeting"]``.
+            target_column: The feature column of the guide assay that holds
+                each guide's target, or None to take every target from
+                ``targets``.
+            targets: Targets by guide ID that replace the column's, or None.
+            policy: ``"single"`` or ``"combinations"``.
+            invalidate_cache: Label again instead of reusing saved labels.
+
+        Returns:
+            A complete assay-scoped ``perturbation_labels`` artifact. Read it
+            with
+            :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.load_labels`.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``calls`` is not a ``guide_calls`` artifact,
+                ``controls`` names no target or a blank one, neither
+                ``target_column`` nor ``targets`` is given, the target column
+                is not a feature column, ``targets`` names a guide that is not
+                in the assay or gives an empty target, a target is a reserved
+                label or, with ``"combinations"``, holds ``"+"``, a control
+                matches no target, a called guide has no target, or ``policy``
+                is unknown.
+            PermissionError: If the store is read-only and the labels are not
+                saved yet.
+            MemoryError: If the labelling does not fit the memory budget.
+        """
+        if not isinstance(calls, ArtifactRef):
+            raise TypeError("calls must be an ArtifactRef")
+        if calls.kind != GuideCallImportArguments.artifact_kind:
+            raise ValueError(
+                f"calls must be a guide_calls artifact, not {calls.kind!r}"
+            )
+        if (
+            isinstance(controls, str)
+            or not isinstance(controls, Sequence)
+            or not all(isinstance(name, str) for name in controls)
+        ):
+            raise TypeError(
+                "controls must be a sequence of target names, such as ['Non-Targeting']"
+            )
+        control_names = tuple(sorted({name.strip() for name in controls}))
+        if not control_names or "" in control_names:
+            raise ValueError(
+                "controls must name at least one target, and no name may be blank"
+            )
+        if target_column is not None and (
+            not isinstance(target_column, str) or not target_column
+        ):
+            raise TypeError("target_column must be a feature column name or None")
+        if targets is not None and (
+            not isinstance(targets, Mapping)
+            or not all(
+                isinstance(guide, str) and isinstance(target, str)
+                for guide, target in targets.items()
+            )
+        ):
+            raise TypeError("targets must map guide IDs to target names, or be None")
+        if target_column is None and not targets:
+            raise ValueError(
+                "Pass target_column, targets, or both, so that every called guide "
+                "has a target"
+            )
+        if not isinstance(policy, str) or policy not in POLICIES:
+            raise ValueError(
+                f"policy must be 'single' or 'combinations', not {policy!r}"
+            )
+        if not isinstance(invalidate_cache, bool):
+            raise TypeError("invalidate_cache must be a boolean")
+        status = require_complete_artifact(self.zw, calls)
+        assay = self._get_assay(str(calls.assay))
+        group = artifact_group(self.zw, calls)
+        guide_ids = np.asarray(as_zarr_array(group["guides"], name="guides")[:]).astype(
+            str
+        )
+        column = None
+        if target_column is not None:
+            if target_column not in assay.feats.columns:
+                raise ValueError(
+                    f"target_column {target_column!r} is not a feature column of "
+                    f"assay {assay.name!r}"
+                )
+            column = np.asarray(assay.feats.fetch_all(target_column), dtype=object)
+        resolved = guide_targets(
+            guide_ids, column, targets, control_names, policy=policy
+        )
+        arguments = PerturbationLabelArguments(
+            guide_calls=calls,
+            targets_fingerprint=fingerprint_strings(resolved.guide_names().astype(str)),
+            controls=control_names,
+            policy=policy,
+            invalidate_cache=invalidate_cache,
+        )
+        record = arguments.to_record()
+        codes = as_zarr_array(group["guide_codes"], name="guide_codes")
+        n_cells, width = (int(size) for size in codes.shape)
+        n_names = len(resolved.names)
+        n_guide_ids = len(guide_ids)
+
+        def has_targets(_ref: ArtifactRef, stored: zarr.Group) -> bool:
+            names = stored.get("targets")
+            guide_codes = stored.get("guide_target_codes")
+            return (
+                isinstance(names, zarr.Array)
+                and names.shape == (n_names,)
+                and isinstance(guide_codes, zarr.Array)
+                and guide_codes.shape == (n_guide_ids,)
+            )
+
+        planned = plan_cell_data_artifact(
+            self.zw,
+            scope="assay",
+            assay=assay.name,
+            kind=arguments.artifact_kind,
+            operation=arguments.operation,
+            parameters=record.parameters,
+            inputs=record.inputs,
+            execution_options=record.execution_options,
+            cell_selection=status.input_ref("cell_selection"),
+            arrays={
+                "values": ((n_cells,), None),
+                "guide_label": ((n_cells,), None),
+                "is_control": ((n_cells,), "b"),
+                "n_targets": ((n_cells,), "i"),
+                "target_codes": ((n_cells, None), "i"),
+            },
+            invalidate_cache=invalidate_cache,
+            reuse_validator=has_targets,
+        )
+        if planned.reused:
+            return planned.ref
+        # The calls as int32, their targets and two sorted copies as int64, and
+        # each cell's two labels.
+        needed = n_cells * (28 * width + 160)
+        if needed > self.memoryBytes:
+            raise MemoryError(
+                f"Labelling {n_cells} cells holds about {needed} bytes, more than "
+                f"the memory budget of {self.memoryBytes} bytes. Raise mem_budget."
+            )
+        guide_codes = np.asarray(codes[:])
+        called = np.unique(guide_codes[guide_codes >= 0])
+        untargeted = called[resolved.guide_codes[called] < 0]
+        if len(untargeted):
+            raise ValueError(
+                f"{len(untargeted)} called guides have no target, for example "
+                + ", ".join(repr(str(guide)) for guide in guide_ids[untargeted[:5]])
+                + "; pass targets or choose a target_column that names them"
+            )
+        self._require_writable(arguments.operation)
+        arrays = perturbation_label_arrays(guide_codes, resolved, policy=policy)
+        write_cell_data_artifact(
+            self.zw,
+            planned,
+            {
+                "values": arrays.values,
+                "guide_label": np.asarray(self._artifacts_load_values(calls).values),
+                "is_control": arrays.is_control,
+                "n_targets": arrays.n_targets,
+                "target_codes": arrays.target_codes,
+                "targets": resolved.names,
+                "target_is_control": resolved.is_control,
+                "guide_target_codes": resolved.guide_codes,
+            },
+        )
+        logger.info(
+            f"Labelled {n_cells} cells: "
+            f"{int(np.count_nonzero(arrays.n_targets == 1))} with one gene, "
+            f"{int(np.count_nonzero(arrays.n_targets > 1))} with several, "
+            f"{int(np.count_nonzero(arrays.is_control))} controls"
+        )
+        return planned.ref
+
+    @validation_scoped
+    def _perturbation_load_labels(self, labels: ArtifactRef) -> PerturbationLabels:
+        """Read saved perturbation labels as tables of cells, targets and guides.
+
+        Args:
+            labels: A ``perturbation_labels`` artifact from
+                :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.labels`.
+
+        Returns:
+            One row per cell, one row per cell and gene its guides target, one
+            row per guide with its target, and the controls and policy.
+
+        Raises:
+            TypeError: If ``labels`` is not an ArtifactRef.
+            ValueError: If it is not a ``perturbation_labels`` artifact.
+            MemoryError: If its values do not fit the datastore memory budget.
+        """
+        if not isinstance(labels, ArtifactRef):
+            raise TypeError("labels must be an ArtifactRef")
+        if labels.kind != PerturbationLabelArguments.artifact_kind:
+            raise ValueError(
+                f"labels must be a perturbation_labels artifact, not {labels.kind!r}"
+            )
+        status = require_complete_artifact(self.zw, labels)
+        group = artifact_group(self.zw, labels)
+        calls = artifact_group(self.zw, status.input_ref("guide_calls"))
+
+        def read(stored: zarr.Group, name: str) -> np.ndarray:
+            return np.asarray(as_zarr_array(stored[name], name=name)[:])
+
+        loaded = {
+            name: self._artifacts_load_values(
+                labels, value=None if name == "values" else name
+            )
+            for name in (
+                "values",
+                "guide_label",
+                "is_control",
+                "n_targets",
+                "target_codes",
+            )
+        }
+        cells, targets, guides = perturbation_label_frames(
+            loaded["values"].cell_ids,
+            values=np.asarray(loaded["values"].values),
+            guide_label=np.asarray(loaded["guide_label"].values),
+            is_control=np.asarray(loaded["is_control"].values),
+            n_targets=np.asarray(loaded["n_targets"].values),
+            target_codes=np.asarray(loaded["target_codes"].values),
+            target_names=read(group, "targets").astype(str),
+            target_is_control=read(group, "target_is_control"),
+            guide_ids=read(calls, "guides").astype(str),
+            guide_target_codes=read(group, "guide_target_codes"),
+        )
+        parameters = status.parameters or {}
+        return PerturbationLabels(
+            cells=cells,
+            targets=targets,
+            guides=guides,
+            controls=tuple(str(name) for name in parameters["controls"]),
+            policy=str(parameters["policy"]),
         )

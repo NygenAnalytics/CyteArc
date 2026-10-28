@@ -182,6 +182,18 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
         # the run's frozen fields, and label it corrupt only when its
         # recorded cell selection is malformed.
         "metadata_snapshot": CellValueSpec("values", False),
+        # target_codes holds one row per cell and one column per target gene,
+        # padded to the cells' largest number of targets.
+        "perturbation_labels": CellValueSpec(
+            "values",
+            True,
+            {
+                "guide_label": True,
+                "is_control": True,
+                "n_targets": False,
+                "target_codes": True,
+            },
+        ),
         "pseudotime": CellValueSpec("pseudotime", False, {"valid": True}),
         "quality_metric": CellValueSpec("values", False),
         "smart_label": CellValueSpec("values", True),

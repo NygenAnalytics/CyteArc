@@ -309,6 +309,15 @@ _CONTRACTS = (
         ),
     ),
     OperationContract(
+        PerturbationAccessor.labels,
+        metadata_arguments.PerturbationLabelArguments,
+        aliases={"calls": "guide_calls"},
+        # The column and the overrides become each guide's target, which the
+        # targets fingerprint records.
+        signature_only=_classified("transformed", "target_column", "targets"),
+        model_only=_classified("resolved_input", "targets_fingerprint"),
+    ),
+    OperationContract(
         QcAccessor.hto_demultiplexing,
         metadata_arguments.HtoIdentityArguments,
         model_only={
