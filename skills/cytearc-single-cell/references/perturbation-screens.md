@@ -1,12 +1,13 @@
 # Pooled CRISPR screens
 
-Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CRISPR Guide Capture) by the guides they carry, check those calls, and label each cell by the genes its guides target before any perturbation analysis. Docs: <https://docs.nygen.io/CyteArc/api/perturbation.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CRISPR Guide Capture) by the guides they carry, check those calls, label each cell by the genes its guides target, and check that each perturbation changed its own target gene before any perturbation analysis. Docs: <https://docs.nygen.io/CyteArc/api/perturbation.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 
 - A store whose guide counts imported as an assay declared `CRISPR`: 10x HDF5, Matrix Market and H5AD imports send "CRISPR Guide Capture" and "CRISPR Direct Capture" features there (`data-access.md`). `call_guides` calls guides from these counts.
 - To import Cell Ranger's calls instead, its call file of the same run: `outs/crispr_analysis/protospacer_calls_per_cell.csv` from `cellranger count`, or `outs/per_sample_outs/<sample>/count/crispr_analysis/protospacer_calls_per_cell.csv` from `cellranger multi`.
 - To label cells by perturbation, each guide's target: the guide assay's `target_gene_name` column, which 10x imports fill from Cell Ranger's feature reference, or a mapping of guide IDs to targets.
+- To measure perturbation efficiency, an expression assay of the same cells and a way to find each target gene in it: the guide assay's `target_gene_id` column, which 10x imports fill with the gene's feature ID, or targets named like the expression assay's features.
 
 ## Key concepts
 
@@ -39,6 +40,18 @@ Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CR
 - `"Negative"` cells of `"top_guide"` calls stay `"Negative"`; the calls' `total_umi` and `top_fraction` tell cells with too few guide UMIs from cells whose guide UMIs are split among several guides.
 - `ds.perturbation.load_labels(labels)` returns a `PerturbationLabels` record: `.cells` (indexed by `ids`: `label`, `guide_label`, `is_control`, `n_targets`), `.targets` (`ids`, `target`; one row per cell and gene, none for control guides), `.guides` (`guide`, `target`, `is_control`), `.controls` and `.policy`.
 - The labels belong to the guide assay: `ds.compare.compute_bulk(labels, from_assay="RNA", ...)` pools expression, and without `from_assay` it pools the guide counts.
+- `ds.perturbation.efficiency(labels)` checks that each perturbation changed its own target gene: the target gene's expression in the cells that carry the perturbation alone against the `"control"` cells of the labels. `by="target"` (default) gives one row per target gene; `by="guide"` one row per guide. A cell carries a target alone when its guides target that gene and no other, with or without control guides, and a guide alone when the guide is its one called guide. `"Multiple"`, combination and `"Negative"` cells stay out. Saved as a `perturbation_efficiency` table scoped to `from_assay` (default `"RNA"`), not cell-aligned.
+- `ds.perturbation.load_efficiency(efficiency)` returns a `PerturbationEfficiency` record: `.table`, `.by`, `.from_assay`. Table columns, one row per target (sorted) or guide (assay order), controls left out:
+  - `guide` (by guide only), `target`, `feature` (the matched feature ID, None without one), `status`.
+  - `n_cells` (cells with the perturbation alone), `n_control_cells`.
+  - `mean_umi`, `control_mean_umi`: raw mean UMIs of the gene in each group, as Cell Ranger reports them.
+  - `mean_expression`, `control_mean_expression`: means after scaling each cell to the median library size of the compared cells.
+  - `remaining_fraction`: `mean_expression / control_mean_expression`; below 1 for a knockdown, above 1 for an activation. `log2_fold_change`: its log2, minus infinity when the perturbed cells hold no UMI of the gene.
+  - `p_value`: two-sided Mann-Whitney on the scaled expression; `adjusted_p_value`: Benjamini-Hochberg across the rows with a p-value.
+- Each target matches the expression feature whose ID its guides give in `id_column=` (default `"target_gene_id"`), otherwise the one feature whose name equals the target; a name shared by several features matches none. `id_column=None` matches by name only. Only the matched genes of the compared cells are read.
+- `status`: `"tested"`; `"no_feature"` (no feature matched; the row keeps its cells, and a warning `"N of M rows have no feature of assay 'RNA' ..."` names a few); `"no_cells"` (no cell carries the perturbation alone); `"no_control_expression"` (the controls hold no UMI of the gene: no fraction or fold change, but the means and p-value are kept).
+- Labels without a `"control"` cell raise `ValueError`. Reuse follows the labels, the expression data, each row's matched feature and `by`; `invalidate_cache=True` measures again.
+- `ds.plots.efficiency(efficiency)` draws each `"tested"` row's log2 fold change against the control cells, strongest knockdown at the top, coloured by `adjusted_p_value < alpha` (0.05) and sized by its cells; with more than `max_rows=40` tested rows it keeps those with the smallest adjusted p-values. Minus infinity is a triangle at the left edge, labelled "no UMI remains". Rows of other statuses are not drawn; the title counts them. Table: `efficiency` (the drawn rows, every column, in drawing order).
 
 ## Recipe
 
@@ -96,6 +109,25 @@ print(len(merged), "cells with several called guides but one gene, or controls o
 gene_cells = ds.select_cells(labels, include=["ACE2"])
 control_cells = ds.select_cells(labels, include=["control"])
 
+# Check that each perturbation changed its own target gene in the expression assay.
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    efficiency = ds.perturbation.efficiency(labels)  # from_assay="RNA", by="target"
+for warning in caught:
+    print(warning.message)  # targets that match no feature of the expression assay
+measured = ds.perturbation.load_efficiency(efficiency).table
+print(measured["status"].value_counts())
+columns = ["target", "n_cells", "control_mean_umi", "remaining_fraction", "adjusted_p_value"]
+print(measured.query("status == 'tested'").sort_values("remaining_fraction")[columns])
+print(measured.query("status != 'tested'")[["target", "feature", "status", "n_cells"]])
+by_guide = ds.perturbation.efficiency(labels, by="guide")
+per_guide = ds.perturbation.load_efficiency(by_guide).table
+guide_columns = ["target", "guide", "n_cells", "remaining_fraction", "adjusted_p_value"]
+print(per_guide.query("status == 'tested'").sort_values(["target", "guide"])[guide_columns])
+plot = ds.plots.efficiency(efficiency, show=False)
+plot.save("efficiency.png")
+plot.close()
+
 # Cell Ranger's calls of the same run, saved as the same artifact kind and labelled alike.
 imported = ds.perturbation.import_guide_calls(
     "outs/crispr_analysis/protospacer_calls_per_cell.csv",
@@ -120,3 +152,10 @@ imported_labels = ds.perturbation.labels(imported, controls=["Non-Targeting"])
 - A `ValueError` that names a control means no guide has that target: copy the spelling from the target column (`"Non-Targeting"`, not `"Non-targeting"`). `"N called guides have no target"` means the column misses called guides; pass `targets={guide: target}`.
 - Compare each gene with the `"control"` cells. Keep `"Multiple"` and `"Negative"` out of per-gene comparisons (`null_vals=["Negative", "Multiple"]` in `compare.compute_bulk`), and under `"combinations"` the combination labels too.
 - In a high-MOI screen, analyse each gene across the cells whose guides target it, from `load_labels(labels).targets` or `target_codes`, rather than by combination labels, which hold few cells each.
+- Check each perturbation's own target before reading its effects on other genes. CRISPR interference expects `remaining_fraction` below 1 and CRISPR activation above 1. A Cas9 knockout lowers its target's transcripts mainly through nonsense-mediated decay, so a fraction near 1 in a knockout screen does not show a failed edit. Report targets that did not move as unconfirmed; do not drop them.
+- Compare by `remaining_fraction`, not by `mean_umi` against `control_mean_umi`, which also follow each group's sequencing depth.
+- Weigh each row by `n_cells` and `control_mean_umi`: few cells or a lowly expressed gene give a noisy fraction and a weak test. Minus infinity means no UMI of the gene in the perturbed cells, which can happen by chance in few cells of a lowly expressed gene.
+- Fix every `"no_feature"` row before reporting: compare the target with the guide assay's `target_gene_id` and the expression assay's feature IDs and names, then write the right feature IDs as a guide-assay column (`ds.CRISPR.feats.insert("gene_id", ids)`) and pass `id_column="gene_id"`, or relabel with `targets=` so the target equals a feature name. An enhancer or other non-coding target stays `"no_feature"`; test its nearby genes instead.
+- A `"no_control_expression"` row has no fraction: the controls hold no UMI of the gene, so a knockdown cannot be measured. In an activation screen, `mean_umi` above 0 with a small `adjusted_p_value` shows the gene switched on.
+- Compare the guides of a gene with `by="guide"`: a guide whose fraction stays near 1 while another's falls has likely failed, and its cells dilute the gene's label. A guide row counts only cells whose one called guide it is, so a dual-guide screen (two guides of one gene per cell) has few such cells; measure it by target.
+- Efficiency covers cells with one target only. Cell Ranger's `perturbation_efficiencies_by_target.csv` also lists rows for pairs of targets, which CyteArc's table does not.

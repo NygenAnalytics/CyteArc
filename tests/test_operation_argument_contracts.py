@@ -318,6 +318,19 @@ _CONTRACTS = (
         model_only=_classified("resolved_input", "targets_fingerprint"),
     ),
     OperationContract(
+        PerturbationAccessor.efficiency,
+        metadata_arguments.PerturbationEfficiencyArguments,
+        signature_only={
+            **_classified("routing", "from_assay"),
+            # The ID column matches each target to a feature, which the
+            # target features fingerprint records.
+            **_classified("transformed", "id_column"),
+        },
+        model_only=_classified(
+            "resolved_input", "dataset_fingerprint", "target_features_fingerprint"
+        ),
+    ),
+    OperationContract(
         QcAccessor.hto_demultiplexing,
         metadata_arguments.HtoIdentityArguments,
         model_only={

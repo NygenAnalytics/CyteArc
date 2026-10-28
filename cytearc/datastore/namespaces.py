@@ -182,6 +182,8 @@ class PerturbationAccessor(_Accessor):
     )
     labels = _bind(_PerturbationOperationsMixin._perturbation_labels)
     load_labels = _bind(_PerturbationOperationsMixin._perturbation_load_labels)
+    efficiency = _bind(_PerturbationOperationsMixin._perturbation_efficiency)
+    load_efficiency = _bind(_PerturbationOperationsMixin._perturbation_load_efficiency)
 
 
 class QcAccessor(_Accessor):

@@ -7,7 +7,9 @@ import numpy as np
 import pandas as pd
 import pytest
 from matplotlib.colors import to_rgba
+from matplotlib.markers import MarkerStyle
 
+from cytearc.perturbation.efficiency import PerturbationEfficiency
 from cytearc.perturbation.guide_calls import (
     GuideCalls,
     guide_call_arrays,
@@ -24,7 +26,7 @@ from cytearc.perturbation.mixtures import (
     poisson_gaussian_posterior,
 )
 from cytearc.plotting._style import foreground_color
-from cytearc.plotting.perturbation import guide_calls, guide_thresholds
+from cytearc.plotting.perturbation import efficiency, guide_calls, guide_thresholds
 from cytearc.storage.refs import ArtifactRef
 
 CALLS = ArtifactRef(
@@ -617,3 +619,433 @@ def test_the_threshold_plot_refuses_settings_it_cannot_use(
 def test_the_threshold_plot_needs_a_store_with_guide_thresholds() -> None:
     with pytest.raises(TypeError, match="store does not provide guide thresholds"):
         guide_thresholds(SimpleNamespace(), THRESHOLDS, show=False)
+
+
+EFFICIENCY = ArtifactRef(
+    scope="assay", assay="RNA", kind="perturbation_efficiency", artifact_id="c" * 64
+)
+SIGNIFICANT = to_rgba("#2b6cb0")
+NOT_SIGNIFICANT = to_rgba("#9e9e9e")
+
+# Each row is a name, a status, the perturbed cells, the log2 fold change and
+# the adjusted p-value. A guide's name starts with its target. Rows without a
+# fold change or p-value hold NaN, as the record does, and a row without
+# control expression keeps its p-value.
+TARGET_ROWS = [
+    ("MYC", "tested", 40, -2.5, 1e-6),
+    ("TP53", "tested", 12, -np.inf, 2e-4),
+    ("GATA1", "tested", 25, -0.4, 0.3),
+    ("KLF1", "tested", 30, 1.2, 0.01),
+    ("CD19", "no_feature", 18, np.nan, np.nan),
+    ("PAX5", "no_cells", 0, np.nan, np.nan),
+    ("SPI1", "no_control_expression", 9, np.nan, 1e-8),
+]
+GUIDE_ROWS = [
+    ("MYC_1", "tested", 20, -2.0, 0.001),
+    ("MYC_2", "tested", 15, -0.1, 0.8),
+    ("GATA1_1", "tested", 8, -0.1, 0.004),
+    ("TP53_1", "tested", 6, -np.inf, 0.02),
+    ("TP53_2", "no_cells", 0, np.nan, np.nan),
+    ("CD19_1", "no_feature", 4, np.nan, np.nan),
+]
+# A and B tie on their adjusted p-value; F has the smallest but was not tested.
+MANY_ROWS = [
+    ("A", "tested", 10, 0.5, 0.01),
+    ("B", "tested", 30, -1.0, 0.01),
+    ("C", "tested", 20, -3.0, 0.2),
+    ("D", "tested", 5, -0.2, 0.001),
+    ("E", "tested", 10, -np.inf, 0.5),
+    ("F", "no_control_expression", 5, np.nan, 1e-9),
+]
+
+
+def _efficiency_record(
+    rows: list[tuple[str, str, int, float, float]], *, by: str = "target"
+) -> PerturbationEfficiency:
+    """Build the record that ``load_efficiency`` returns for ``rows``.
+
+    The control cells hold 4 UMIs of each tested gene on average, and the
+    perturbed cells hold that times the fold change. A row without control
+    expression holds UMIs only in its perturbed cells.
+    """
+    names = [row[0] for row in rows]
+    targets = [name.split("_")[0] for name in names]
+    status = np.asarray([row[1] for row in rows], dtype=object)
+    fold = np.asarray([row[3] for row in rows], dtype=np.float64)
+    adjusted = np.asarray([row[4] for row in rows], dtype=np.float64)
+    unexpressed = status == "no_control_expression"
+    control = np.where(status == "tested", 4.0, np.where(unexpressed, 0.0, np.nan))
+    mean = np.where(unexpressed, 1.5, control * np.exp2(fold))
+    columns: dict[str, Any] = {"guide": np.asarray(names)} if by == "guide" else {}
+    columns.update(
+        target=np.asarray(targets),
+        feature=pd.Series(
+            [
+                None if row_status == "no_feature" else f"ENSG_{row_target}"
+                for row_status, row_target in zip(status, targets, strict=True)
+            ],
+            dtype=object,
+        ),
+        status=status,
+        n_cells=np.asarray([row[2] for row in rows], dtype=np.int64),
+        n_control_cells=np.full(len(rows), 50, dtype=np.int64),
+        mean_umi=mean,
+        control_mean_umi=control,
+        mean_expression=1.1 * mean,
+        control_mean_expression=1.1 * control,
+        remaining_fraction=np.exp2(fold),
+        log2_fold_change=fold,
+        p_value=adjusted / 2,
+        adjusted_p_value=adjusted,
+    )
+    return PerturbationEfficiency(table=pd.DataFrame(columns), by=by, from_assay="RNA")
+
+
+def _efficiency_store(
+    record: PerturbationEfficiency, requests: list[ArtifactRef] | None = None
+) -> SimpleNamespace:
+    """A store whose loader returns ``record`` and notes each reference it reads."""
+
+    def load(ref: ArtifactRef) -> PerturbationEfficiency:
+        if requests is not None:
+            requests.append(ref)
+        return record
+
+    return SimpleNamespace(perturbation=SimpleNamespace(load_efficiency=load))
+
+
+def _row_labels(ax: Any) -> list[str]:
+    """Return the row labels from the top of the plot to the bottom."""
+    ticks = zip(ax.get_yticks(), ax.get_yticklabels(), strict=True)
+    return [label.get_text() for _, label in sorted(ticks, key=lambda tick: -tick[0])]
+
+
+def _check_efficiency_rows(result: Any, *, alpha: float) -> None:
+    """Check that each row of the table is drawn at its height, colour and area."""
+    ax = result.axes["efficiency"]
+    table = result.tables["efficiency"]
+    fold = table["log2_fold_change"].to_numpy()
+    n_cells = table["n_cells"].to_numpy()
+    no_umi = np.isneginf(fold)
+    # The first row is drawn at the top.
+    heights = np.arange(len(table))[::-1]
+    groups = [
+        (chosen, marker)
+        for chosen, marker in ((~no_umi, "o"), (no_umi, "<"))
+        if chosen.any()
+    ]
+    assert len(ax.collections) == len(groups)
+    x = np.full(len(table), np.nan)
+    colors = np.zeros((len(table), 4))
+    sizes = np.zeros(len(table))
+    for collection, (chosen, marker) in zip(ax.collections, groups, strict=True):
+        style = MarkerStyle(marker)
+        shape = style.get_path().transformed(style.get_transform())
+        np.testing.assert_array_equal(
+            collection.get_paths()[0].vertices, shape.vertices
+        )
+        offsets = np.asarray(collection.get_offsets())
+        np.testing.assert_array_equal(offsets[:, 1], heights[chosen])
+        x[chosen] = offsets[:, 0]
+        colors[chosen] = collection.get_facecolors()
+        sizes[chosen] = collection.get_sizes()
+    np.testing.assert_array_equal(x[~no_umi], fold[~no_umi])
+    left, right = ax.get_xlim()
+    assert left < 0.0 < right
+    assert ((left < x) & (x < right)).all()
+    if no_umi.any():
+        # The rows where no UMI remains share one position at the left edge.
+        edge = x[no_umi]
+        assert (edge == edge[0]).all()
+        assert edge[0] < fold[~no_umi].min(initial=0.0)
+        assert edge[0] - left < 0.05 * (right - left)
+    significant = table["adjusted_p_value"].to_numpy() < alpha
+    expected_colors = np.asarray(
+        [SIGNIFICANT if below else NOT_SIGNIFICANT for below in significant]
+    ).reshape(-1, 4)
+    np.testing.assert_array_equal(colors, expected_colors)
+    # The areas rank as the perturbed cells do.
+    np.testing.assert_array_equal(
+        np.sign(np.subtract.outer(sizes, sizes)),
+        np.sign(np.subtract.outer(n_cells, n_cells)),
+    )
+    names = table[result.provenance.extras["by"]].tolist()
+    assert _row_labels(ax) == [
+        f"{name} (no UMI remains)" if missing else name
+        for name, missing in zip(names, no_umi, strict=True)
+    ]
+    (line,) = ax.get_lines()
+    assert list(line.get_xdata()) == [0.0, 0.0]
+
+
+def test_efficiency_draws_each_tested_target_from_knockdown_to_activation() -> None:
+    requests: list[ArtifactRef] = []
+    record = _efficiency_record(TARGET_ROWS)
+
+    result = efficiency(_efficiency_store(record, requests), EFFICIENCY, show=False)
+
+    try:
+        assert requests == [EFFICIENCY]
+        # No UMI of TP53 remains, so its fold change of minus infinity is first.
+        pd.testing.assert_frame_equal(
+            result.tables["efficiency"],
+            record.table.iloc[[1, 0, 2, 3]].reset_index(drop=True),
+        )
+        assert list(result.axes) == ["efficiency"]
+        _check_efficiency_rows(result, alpha=0.05)
+        ax = result.axes["efficiency"]
+        assert _row_labels(ax) == ["TP53 (no UMI remains)", "MYC", "GATA1", "KLF1"]
+        assert ax.get_xlabel() == "Log2 fold change against control cells"
+        assert ax.get_title().splitlines() == [
+            "Perturbation efficiency by target",
+            "Not plotted: 1 no_feature, 1 no_cells, 1 no_control_expression",
+        ]
+        (legend,) = result.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "Adjusted p-value below 0.05",
+            "Adjusted p-value of 0.05 or more",
+            "No UMI remains in the perturbed cells",
+            "12 perturbed cells",
+            "30 perturbed cells",
+            "40 perturbed cells",
+        ]
+        handles = legend.legend_handles
+        assert [handle.get_marker() for handle in handles] == ["o", "o", "<"] + [
+            "o"
+        ] * 3
+        sizes = [handle.get_markersize() for handle in handles[3:]]
+        assert sizes == sorted(sizes) and len(set(sizes)) == 3
+        assert [spec.kind for spec in result.legends] == ["categorical", "size"]
+        provenance = result.provenance
+        assert provenance.assay == "RNA"
+        # The perturbed cells of the four drawn targets and the control cells.
+        assert provenance.n_cells == 12 + 40 + 25 + 30 + 50
+        assert provenance.notes == ("perturbation_efficiency",)
+        assert provenance.extras == {
+            "efficiency": EFFICIENCY.to_dict(),
+            "by": "target",
+            "from_assay": "RNA",
+            "max_rows": 40,
+            "alpha": 0.05,
+            "n_tested": 4,
+            "statuses": {
+                "tested": 4,
+                "no_feature": 1,
+                "no_cells": 1,
+                "no_control_expression": 1,
+            },
+        }
+    finally:
+        result.close()
+
+
+def test_efficiency_by_guide_draws_each_tested_guide() -> None:
+    record = _efficiency_record(GUIDE_ROWS, by="guide")
+
+    result = efficiency(
+        _efficiency_store(record), EFFICIENCY, alpha=np.float64(0.01), show=False
+    )
+
+    try:
+        table = result.tables["efficiency"]
+        # GATA1_1 and MYC_2 share a fold change, so their names order them.
+        pd.testing.assert_frame_equal(
+            table, record.table.iloc[[3, 0, 2, 1]].reset_index(drop=True)
+        )
+        assert list(table.columns)[:2] == ["guide", "target"]
+        _check_efficiency_rows(result, alpha=0.01)
+        ax = result.axes["efficiency"]
+        assert _row_labels(ax) == [
+            "TP53_1 (no UMI remains)",
+            "MYC_1",
+            "GATA1_1",
+            "MYC_2",
+        ]
+        assert ax.get_title().splitlines() == [
+            "Perturbation efficiency by guide",
+            "Not plotted: 1 no_feature, 1 no_cells",
+        ]
+        (legend,) = result.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "Adjusted p-value below 0.01",
+            "Adjusted p-value of 0.01 or more",
+            "No UMI remains in the perturbed cells",
+            "6 perturbed cells",
+            "15 perturbed cells",
+            "20 perturbed cells",
+        ]
+        assert result.provenance.extras["by"] == "guide"
+        assert result.provenance.extras["alpha"] == 0.01
+        assert type(result.provenance.extras["alpha"]) is float
+    finally:
+        result.close()
+
+
+def test_efficiency_keeps_the_rows_with_the_smallest_adjusted_p_values() -> None:
+    record = _efficiency_record(MANY_ROWS)
+    store = _efficiency_store(record)
+
+    kept = efficiency(store, EFFICIENCY, max_rows=np.int64(2), show=False)
+    every = efficiency(store, EFFICIENCY, max_rows=5, show=False)
+
+    try:
+        # D has the smallest adjusted p-value of the tested rows, and A ties
+        # with B but comes first by name.
+        pd.testing.assert_frame_equal(
+            kept.tables["efficiency"],
+            record.table.iloc[[3, 0]].reset_index(drop=True),
+        )
+        _check_efficiency_rows(kept, alpha=0.05)
+        assert kept.axes["efficiency"].get_title().splitlines() == [
+            "Perturbation efficiency by target",
+            "The 2 of 5 tested targets with the smallest adjusted p-values",
+            "Not plotted: 1 no_control_expression",
+        ]
+        assert kept.provenance.extras["max_rows"] == 2
+        assert type(kept.provenance.extras["max_rows"]) is int
+        assert kept.provenance.extras["n_tested"] == 5
+        assert every.tables["efficiency"]["target"].tolist() == [
+            "E",
+            "C",
+            "B",
+            "D",
+            "A",
+        ]
+        _check_efficiency_rows(every, alpha=0.05)
+        assert every.axes["efficiency"].get_title().splitlines() == [
+            "Perturbation efficiency by target",
+            "Not plotted: 1 no_control_expression",
+        ]
+    finally:
+        kept.close()
+        every.close()
+
+
+def test_efficiency_without_a_finite_fold_change_still_shows_zero() -> None:
+    lost = efficiency(
+        _efficiency_store(_efficiency_record([("A", "tested", 1, -np.inf, 0.5)])),
+        EFFICIENCY,
+        show=False,
+    )
+    record = _efficiency_record(
+        [("B", "no_feature", 3, np.nan, np.nan), ("C", "no_cells", 0, np.nan, np.nan)]
+    )
+    empty = efficiency(_efficiency_store(record), EFFICIENCY, show=False)
+
+    try:
+        _check_efficiency_rows(lost, alpha=0.05)
+        (legend,) = lost.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "Adjusted p-value of 0.05 or more",
+            "No UMI remains in the perturbed cells",
+            "1 perturbed cell",
+        ]
+        _check_efficiency_rows(empty, alpha=0.05)
+        ax = empty.axes["efficiency"]
+        assert len(ax.collections) == 0
+        assert list(ax.get_yticks()) == []
+        assert ax.get_title().splitlines() == [
+            "Perturbation efficiency by target",
+            "Not plotted: 1 no_feature, 1 no_cells",
+        ]
+        assert empty.figure.legends == []
+        pd.testing.assert_frame_equal(
+            empty.tables["efficiency"], record.table.iloc[[]].reset_index(drop=True)
+        )
+        assert empty.provenance.n_cells == 50
+        assert empty.provenance.extras["n_tested"] == 0
+    finally:
+        lost.close()
+        empty.close()
+
+
+def test_efficiency_draws_into_caller_axes_in_the_theme() -> None:
+    figure, ax = plt.subplots()
+    store = _efficiency_store(_efficiency_record(TARGET_ROWS))
+
+    try:
+        result = efficiency(store, EFFICIENCY, target=ax, theme="dark", show=False)
+        assert result.owns_figure is False
+        assert result.figure is figure
+        assert result.axes == {"efficiency": ax}
+        assert figure.legends == []
+        assert [text.get_text() for text in ax.get_legend().get_texts()][:3] == [
+            "Adjusted p-value below 0.05",
+            "Adjusted p-value of 0.05 or more",
+            "No UMI remains in the perturbed cells",
+        ]
+        _check_efficiency_rows(result, alpha=0.05)
+        (line,) = ax.get_lines()
+        assert to_rgba(line.get_color()) == to_rgba(foreground_color("dark"))
+    finally:
+        plt.close(figure)
+
+
+def test_efficiency_can_drop_the_legend() -> None:
+    store = _efficiency_store(_efficiency_record(TARGET_ROWS))
+
+    plain = efficiency(store, EFFICIENCY, show_legend=False, show=False)
+    legended = efficiency(store, EFFICIENCY, show=False)
+
+    try:
+        assert plain.figure.legends == []
+        assert plain.axes["efficiency"].get_legend() is None
+        # Only a figure with a legend leaves room for it at the right.
+        assert plain.figure.get_size_inches()[0] < legended.figure.get_size_inches()[0]
+    finally:
+        plain.close()
+        legended.close()
+
+
+def test_showing_the_efficiency_plot_releases_its_figure() -> None:
+    store = _efficiency_store(_efficiency_record(TARGET_ROWS))
+
+    result = efficiency(store, EFFICIENCY)
+
+    assert result.tables["efficiency"]["target"].tolist() == [
+        "TP53",
+        "MYC",
+        "GATA1",
+        "KLF1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"max_rows": 0}, "max_rows must be a positive integer"),
+        ({"max_rows": True}, "max_rows must be a positive integer"),
+        ({"max_rows": 2.0}, "max_rows must be a positive integer"),
+        ({"alpha": 0}, "alpha must be a number above 0 and below 1"),
+        ({"alpha": 1.0}, "alpha must be a number above 0 and below 1"),
+        ({"alpha": True}, "alpha must be a number above 0 and below 1"),
+        ({"alpha": "0.05"}, "alpha must be a number above 0 and below 1"),
+        ({"alpha": float("nan")}, "alpha must be a number above 0 and below 1"),
+    ],
+)
+def test_the_efficiency_plot_refuses_settings_it_cannot_use(
+    arguments: dict[str, Any], message: str
+) -> None:
+    requests: list[ArtifactRef] = []
+    store = _efficiency_store(_efficiency_record(TARGET_ROWS), requests)
+
+    with pytest.raises(ValueError, match=message):
+        efficiency(store, EFFICIENCY, show=False, **arguments)
+    # The settings are checked before the record is read.
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "store",
+    [
+        SimpleNamespace(),
+        SimpleNamespace(perturbation=SimpleNamespace(load_guide_calls=lambda ref: ref)),
+    ],
+)
+def test_the_efficiency_plot_needs_a_store_with_perturbation_efficiency(
+    store: SimpleNamespace,
+) -> None:
+    with pytest.raises(
+        TypeError, match="store does not provide perturbation efficiency"
+    ):
+        efficiency(store, EFFICIENCY, show=False)
