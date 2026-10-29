@@ -13,21 +13,17 @@ These instructions apply to local profiling diagnostics and the Modal end-to-end
 uv run pytest -n 0 tests/test_profiling_*.py
 ```
 
-- Copy `profiling/config.example.toml` to the ignored `profiling/config.toml`. Do not commit
-  machine-specific configs, endpoints, bucket names, secrets, or result identifiers.
+- Copy `profiling/config.example.toml` to the ignored `profiling/config.toml`.
 - Set a fresh, non-empty `runTag` for every end-to-end measurement.
-- Ask before starting a paid or long-running Modal job.
 
 ## Deployment boundary
 
-Never run `modal deploy`. Deployment is a user action. Ask the user to run:
+Ask the user to run:
 
 ```bash
 uv run --group profiling modal deploy --env cytearc_profiling \
   -m profiling.app
 ```
-
-Do not create Modal environments, secrets, or credentials.
 
 ## Standard workflow
 
@@ -64,7 +60,7 @@ must share `workers` and `cytearcMemoryBudget`; `workflow` refuses a config wher
 differ. Their Modal CPU and memory may differ.
 
 ```bash
-# User action only; agents never deploy.
+# User action only.
 uv run --group profiling modal deploy --env cytearc_profiling \
   -m profiling.app
 
