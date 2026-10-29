@@ -242,3 +242,37 @@ def test_clonal_expansion(bench) -> None:
         )
 
     bench("repertoire.clonal_expansion", make, LADDER, check=check)
+
+
+def test_rarefaction_curve(bench) -> None:
+    from cytearc.repertoire.diversity import (
+        CloneSizes,
+        default_sizes,
+        hill_curve,
+        indices,
+    )
+
+    def make(n_cells: int):
+        codes = _clonotype_codes(n_cells)
+        clones = CloneSizes.from_sizes(np.bincount(codes[codes >= 0]))
+        sizes = default_sizes(clones.n).tolist()
+
+        def run():
+            curves = [hill_curve(clones, sizes, order) for order in (0, 1, 2)]
+            return clones, indices(clones), curves
+
+        return run
+
+    def check(n_cells: int, result) -> None:
+        clones, table, curves = result
+        codes = _clonotype_codes(n_cells)
+        assert clones.n == int((codes >= 0).sum())
+        assert table["clonotypes"] == len(np.unique(codes[codes >= 0]))
+        for values, methods in curves:
+            observed = methods.index("observed")
+            # Rarefied curves rise to the observed value.
+            assert np.all(np.diff(values[: observed + 1]) >= -1e-9)
+        richness, methods = curves[0]
+        assert richness[methods.index("observed")] == clones.richness
+
+    bench("repertoire.rarefaction_curve", make, LADDER, check=check)

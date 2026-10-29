@@ -241,6 +241,8 @@ class RepertoireAccessor(_Accessor):
     load_clonal_expansion = _bind(
         _RepertoireOperationsMixin._repertoire_load_clonal_expansion
     )
+    diversity = _bind(_RepertoireOperationsMixin._repertoire_diversity)
+    rarefaction = _bind(_RepertoireOperationsMixin._repertoire_rarefaction)
 
 
 class ScoresAccessor(_Accessor):

@@ -19,7 +19,11 @@ from ...metadata.rows import (
     read_metadata_missing_rows,
     read_metadata_rows,
 )
-from ...metadata.selection import sample_codes
+from ...metadata.selection import (
+    resolve_grouping,
+    sample_codes,
+    valid_category_mask,
+)
 from ...repertoire.chains import (
     NO_RECEPTOR,
     RECEPTOR_TYPES,
@@ -49,6 +53,23 @@ from ...repertoire.contigs import (
     decode_text,
     take_text,
 )
+from ...repertoire.diversity import (
+    INDEX_COLUMNS,
+    ORDERS,
+    CloneSizes,
+    ClonalDiversity,
+    Rarefaction,
+    common_coverage,
+    common_size,
+    coverage_at,
+    default_sizes,
+    diversity_at,
+    estimated_hill,
+    hill_curve,
+    indices,
+    observed_hill,
+    size_for_coverage,
+)
 from ...repertoire.expansion import (
     DEFAULT_BREAKPOINTS,
     DEFAULT_RANK_SPLITS,
@@ -74,6 +95,7 @@ from ...storage.artifacts import (
 from ...storage.selections import read_stored_selection_indices
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
+from ...utils.arrays import sort_categories
 from ...utils.logging import logger
 
 if TYPE_CHECKING:
@@ -118,6 +140,9 @@ _CLONOTYPE_TABLE_BYTES_PER_CELL = 1_000
 _EXPANSION_TABLE_BYTES_PER_CELL = 500
 # The column of each group's receptor type in the tables of clonal expansion.
 _RECEPTOR_TYPE_COLUMN = "receptor_type"
+# Grouping cells for diversity holds about 200 bytes per cell: the clonotype
+# and group codes and each grouping column's labels.
+_DIVERSITY_BYTES_PER_CELL = 300
 
 
 def _file_sha256(path: str | os.PathLike[str]) -> str:
@@ -311,8 +336,8 @@ def _stored_fields(group: zarr.Group) -> tuple[str, ...]:
     return tuple(str(name) for name in fields)
 
 
-def _within_columns(within: Any) -> tuple[str, ...]:
-    """Return the cell metadata columns of ``within`` as a tuple of names."""
+def _within_columns(within: Any, name: str = "within") -> tuple[str, ...]:
+    """Return the cell metadata columns of an argument as a tuple of names."""
     if within is None:
         return ()
     if isinstance(within, str):
@@ -320,11 +345,11 @@ def _within_columns(within: Any) -> tuple[str, ...]:
     elif isinstance(within, Sequence) and not isinstance(within, bytes):
         names = list(within)
     else:
-        raise TypeError("within must be a column name, a sequence of names, or None")
-    if not all(isinstance(name, str) and name for name in names):
-        raise TypeError("within must be a column name, a sequence of names, or None")
+        raise TypeError(f"{name} must be a column name, a sequence of names, or None")
+    if not all(isinstance(column, str) and column for column in names):
+        raise TypeError(f"{name} must be a column name, a sequence of names, or None")
     if len(set(names)) != len(names):
-        raise ValueError("within names a column twice")
+        raise ValueError(f"{name} names a column twice")
     return tuple(names)
 
 
@@ -1326,3 +1351,375 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             within=within,
             within_receptor_type=within_receptor_type,
         )
+
+    def _clone_groups(
+        self,
+        clonotypes: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None,
+        groups: ArtifactRef | None,
+        within_receptor_type: bool,
+        cell_selection: ArtifactRef | None,
+    ) -> tuple[tuple[str, ...], list[dict[str, str]], list[CloneSizes]]:
+        """Group the cells with a clonotype and count each group's clone sizes.
+
+        A cell without a clonotype, outside ``cell_selection``, or without a
+        label in a ``group_by`` column or in the ``groups`` artifact, is in no
+        group.
+
+        Returns:
+            The key columns, each group's labels in them, and each group's
+            clone sizes, groups in the natural order of their labels.
+        """
+        clonotype_group = self._clonotype_group(clonotypes)
+        if not isinstance(within_receptor_type, bool):
+            raise TypeError("within_receptor_type must be a boolean")
+        columns = _within_columns(group_by, "group_by")
+        if groups is not None and not isinstance(groups, ArtifactRef):
+            raise TypeError("groups must be an ArtifactRef or None")
+        key_columns = (
+            *columns,
+            *((groups.kind,) if groups is not None else ()),
+            *((_RECEPTOR_TYPE_COLUMN,) if within_receptor_type else ()),
+        )
+        if len(set(key_columns)) != len(key_columns):
+            raise ValueError(
+                f"The groups' columns {list(key_columns)} name one column twice; "
+                "rename the column or pass within_receptor_type=False"
+            )
+        codes = _read(clonotype_group, "codes").astype(np.int64)
+        has = codes >= 0
+        resident = _DIVERSITY_BYTES_PER_CELL * len(codes)
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Grouping the clonotypes of {len(codes)} cells holds about {resident} "
+                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
+                "Raise mem_budget."
+            )
+        status = inspect_artifact(self.zw, clonotypes)
+        cell_index = read_stored_selection_indices(
+            self.zw,
+            status.input_ref("cell_selection"),
+            kind="cell_selection",
+            scope="datastore",
+            assay=None,
+            table_path="cellData",
+        ).astype(np.int64, copy=False)
+        if cell_selection is not None:
+            if not isinstance(cell_selection, ArtifactRef):
+                raise TypeError("cell_selection must be an ArtifactRef or None")
+            chosen = read_stored_selection_indices(
+                self.zw,
+                cell_selection,
+                kind="cell_selection",
+                scope="datastore",
+                assay=None,
+                table_path="cellData",
+            )
+            has &= np.isin(cell_index, chosen)
+        cell_index = cell_index[has]
+        labels: list[np.ndarray] = []
+        for column in columns:
+            values = np.asarray(read_metadata_rows(self.cells, column, cell_index))
+            missing = read_metadata_missing_rows(self.cells, column, cell_index)
+            labels.append(_labels_or_none(values, missing))
+        if groups is not None:
+            resolved = resolve_grouping(self.zw, self.cells, groups)
+            values = np.asarray(resolved.labels, dtype=object)
+            valid = valid_category_mask(values, missing_mask=resolved.missing_mask)
+            lookup = pd.Series(
+                values[valid], index=np.asarray(resolved.cell_idx)[valid]
+            )
+            aligned = lookup.reindex(cell_index).to_numpy(dtype=object)
+            labels.append(_labels_or_none(aligned, pd.isna(aligned)))
+        if within_receptor_type:
+            receptor_type = _read(
+                artifact_group(self.zw, status.input_ref("receptors")), "values"
+            ).astype(str)
+            labels.append(receptor_type[has].astype(object))
+        clone_codes = codes[has]
+        if not labels:
+            return key_columns, [{}], [CloneSizes.from_sizes(np.bincount(clone_codes))]
+        label_codes = []
+        names_by_column = []
+        keep = np.ones(len(clone_codes), dtype=bool)
+        for values in labels:
+            present = np.asarray([value is not None for value in values], dtype=bool)
+            names = sort_categories(pd.unique(values[present]))
+            lookup = {name: position for position, name in enumerate(names)}
+            column_codes = np.full(len(values), -1, dtype=np.int64)
+            column_codes[present] = [lookup[value] for value in values[present]]
+            label_codes.append(column_codes)
+            names_by_column.append(names)
+            keep &= present
+        stacked = np.column_stack(label_codes)[keep]
+        combinations, group_codes = np.unique(stacked, axis=0, return_inverse=True)
+        group_codes = group_codes.reshape(-1)
+        group_keys = [
+            {
+                column: str(names[code])
+                for column, names, code in zip(
+                    key_columns, names_by_column, row, strict=True
+                )
+            }
+            for row in combinations.tolist()
+        ]
+        kept = clone_codes[keep]
+        n_codes = int(kept.max()) + 1 if len(kept) else 1
+        pairs, sizes = np.unique(group_codes * n_codes + kept, return_counts=True)
+        bounds = np.searchsorted(pairs // n_codes, np.arange(len(group_keys) + 1))
+        clone_sizes = [
+            CloneSizes.from_sizes(sizes[bounds[index] : bounds[index + 1]])
+            for index in range(len(group_keys))
+        ]
+        return key_columns, group_keys, clone_sizes
+
+    @validation_scoped
+    def _repertoire_diversity(
+        self,
+        clonotypes: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        within_receptor_type: bool = True,
+        cell_selection: ArtifactRef | None = None,
+        size: int | None = None,
+        coverage: float | None = None,
+    ) -> ClonalDiversity:
+        """Measure the diversity of the clonotypes of groups of cells.
+
+        The groups are the combinations of the labels of the ``group_by``
+        cell metadata columns, such as the sample, of the ``groups`` label
+        artifact, such as a clustering, and, with ``within_receptor_type``, of
+        the receptor type, so T cells and B cells are measured apart. Cells
+        without a clonotype or a label are left out. A clonotype's size in a
+        group is its cells there.
+
+        The indices are those of scRepertoire's ``clonalDiversity``,
+        immunarch's ``repDiversity`` and vegan's ``estimateR``: Shannon
+        entropy, Pielou's evenness, the Simpson indices, the Gini coefficient,
+        D50, Chao1 in its classic and bias-corrected forms, and ACE. Each
+        depends on how many cells a group holds, so the Hill numbers of
+        orders 0, 1 and 2, the effective numbers of clonotypes, are also
+        rarefied or extrapolated to a common ``size`` and to a common sample
+        ``coverage``, as iNEXT's ``estimateD`` does (Chao et al. 2014): by
+        default the smallest of the groups' doubled sizes, and the lowest
+        coverage of the groups at their doubled sizes. Compare groups by
+        these standardized numbers. Nothing is saved.
+
+        Args:
+            clonotypes: A ``clonotypes`` artifact.
+            group_by: Cell metadata columns whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups.
+            within_receptor_type: Measure each receptor type apart.
+            cell_selection: Only these cells, such as the T cells that
+                ``ds.select_cells(receptors, include=["TCR"])`` keeps, or None
+                for every cell of the clonotypes.
+            size: The common size in cells, or None for the default.
+            coverage: The common coverage, between 0 and 1, or None for the
+                default.
+
+        Returns:
+            The groups' indices and Hill numbers, observed, asymptotic and
+            standardized.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If no cell has a clonotype and a group, a column of the
+                groups is named twice, ``size`` is not positive, or a group
+                cannot reach ``coverage``.
+            MemoryError: If grouping the cells does not fit the memory budget.
+        """
+        if size is not None:
+            if isinstance(size, bool) or not isinstance(size, int | np.integer):
+                raise TypeError("size must be a positive integer or None")
+            if size < 1:
+                raise ValueError("size must be a positive integer or None")
+        if coverage is not None:
+            if isinstance(coverage, bool) or not isinstance(
+                coverage, int | float | np.integer | np.floating
+            ):
+                raise TypeError("coverage must be a number between 0 and 1, or None")
+            if not 0 < coverage < 1:
+                raise ValueError("coverage must be between 0 and 1, or None")
+        key_columns, group_keys, clone_sizes = self._clone_groups(
+            clonotypes,
+            group_by=group_by,
+            groups=groups,
+            within_receptor_type=within_receptor_type,
+            cell_selection=cell_selection,
+        )
+        if not clone_sizes or all(clones.n == 0 for clones in clone_sizes):
+            raise ValueError("No cell has both a clonotype and a group")
+        common = common_size(clone_sizes) if size is None else int(size)
+        level = common_coverage(clone_sizes) if coverage is None else float(coverage)
+        index_rows = []
+        hill_rows = []
+        for key, clones in zip(group_keys, clone_sizes, strict=True):
+            index_rows.append({**key, **indices(clones)})
+            needed = size_for_coverage(clones, level) if level < 1 else float("nan")
+            for order in ORDERS:
+                at_size, size_method = diversity_at(clones, common, order)
+                at_coverage, coverage_method = diversity_at(clones, needed, order)
+                hill_rows.append(
+                    {
+                        **key,
+                        "order": order,
+                        "observed": observed_hill(clones, order),
+                        "estimated": estimated_hill(clones, order),
+                        "at_size": at_size,
+                        "coverage_at_size": coverage_at(clones, common),
+                        "method_at_size": size_method,
+                        "at_coverage": at_coverage,
+                        "size_at_coverage": needed,
+                        "method_at_coverage": coverage_method,
+                    }
+                )
+        return ClonalDiversity(
+            indices=pd.DataFrame(index_rows, columns=[*key_columns, *INDEX_COLUMNS]),
+            hill=pd.DataFrame(hill_rows),
+            clonotypes=clonotypes,
+            group_by=_within_columns(group_by, "group_by"),
+            groups=groups,
+            within_receptor_type=within_receptor_type,
+            cell_selection=cell_selection,
+            size=common,
+            coverage=level,
+        )
+
+    @validation_scoped
+    def _repertoire_rarefaction(
+        self,
+        clonotypes: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        within_receptor_type: bool = True,
+        cell_selection: ArtifactRef | None = None,
+        orders: Sequence[int] = ORDERS,
+        sizes: Sequence[int] | None = None,
+        endpoint: int | None = None,
+        knots: int = 40,
+    ) -> Rarefaction:
+        """Rarefy and extrapolate the Hill numbers of groups of cells.
+
+        Each group's Hill numbers of ``orders`` 0, 1 and 2 are computed for
+        samples of more and fewer cells than it holds, with the sample
+        coverage of each size, as iNEXT's ``iNEXT`` does (Chao et al. 2014,
+        2023). Below a group's size the curve is the expected value of a
+        random subsample; above it, an extrapolation that is reliable up to
+        about twice the group's size for order 0. The groups are those of
+        :meth:`~cytearc.datastore.namespaces.RepertoireAccessor.diversity`.
+        Nothing is saved.
+
+        By default each group's curve has iNEXT's ``knots`` sizes: about half
+        evenly from 1 to its size and half from there to ``endpoint``, by
+        default twice its size. ``sizes`` gives every group the same sizes
+        instead.
+
+        Args:
+            clonotypes: A ``clonotypes`` artifact.
+            group_by: Cell metadata columns whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups.
+            within_receptor_type: Measure each receptor type apart.
+            cell_selection: Only these cells, or None for every cell of the
+                clonotypes.
+            orders: Orders of the Hill numbers, from 0, 1 and 2.
+            sizes: Sizes in cells for every group, or None for each group's
+                default sizes.
+            endpoint: The largest default size, or None for twice each
+                group's size.
+            knots: The number of default sizes.
+
+        Returns:
+            The curves, one row per group, order and size.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If an order, size, endpoint or knots is invalid, or no
+                cell has a clonotype and a group.
+            MemoryError: If grouping the cells does not fit the memory budget.
+        """
+        if isinstance(orders, str | bytes) or not isinstance(orders, Sequence):
+            raise TypeError("orders must be a sequence of 0, 1 and 2")
+        chosen = tuple(orders)
+        if (
+            not chosen
+            or any(isinstance(order, bool) or order not in ORDERS for order in chosen)
+            or len(set(chosen)) != len(chosen)
+        ):
+            raise ValueError("orders must hold distinct orders from 0, 1 and 2")
+        fixed: np.ndarray | None = None
+        if sizes is not None:
+            if isinstance(sizes, str | bytes) or not isinstance(sizes, Sequence):
+                raise TypeError("sizes must be a sequence of positive integers")
+            if not sizes or any(
+                isinstance(value, bool)
+                or not isinstance(value, int | np.integer)
+                or value < 1
+                for value in sizes
+            ):
+                raise ValueError("sizes must hold positive integers")
+            fixed = np.unique(np.asarray(sizes, dtype=np.int64))
+        # The defaults' arguments are checked once, before any group is read.
+        default_sizes(2, endpoint, knots)
+        key_columns, group_keys, clone_sizes = self._clone_groups(
+            clonotypes,
+            group_by=group_by,
+            groups=groups,
+            within_receptor_type=within_receptor_type,
+            cell_selection=cell_selection,
+        )
+        if not clone_sizes or all(clones.n == 0 for clones in clone_sizes):
+            raise ValueError("No cell has both a clonotype and a group")
+        rows = []
+        for key, clones in zip(group_keys, clone_sizes, strict=True):
+            group_sizes = (
+                default_sizes(clones.n, endpoint, knots) if fixed is None else fixed
+            )
+            covered = [coverage_at(clones, float(m)) for m in group_sizes]
+            for order in chosen:
+                values, methods = hill_curve(clones, group_sizes.tolist(), order)
+                for m, sample_coverage, value, method in zip(
+                    group_sizes, covered, values, methods, strict=True
+                ):
+                    rows.append(
+                        {
+                            **key,
+                            "order": order,
+                            "size": int(m),
+                            "method": method,
+                            "diversity": value,
+                            "coverage": sample_coverage,
+                        }
+                    )
+        return Rarefaction(
+            curves=pd.DataFrame(
+                rows,
+                columns=[
+                    *key_columns,
+                    "order",
+                    "size",
+                    "method",
+                    "diversity",
+                    "coverage",
+                ],
+            ),
+            clonotypes=clonotypes,
+            group_by=_within_columns(group_by, "group_by"),
+            groups=groups,
+            within_receptor_type=within_receptor_type,
+            cell_selection=cell_selection,
+            orders=chosen,
+        )
+
+
+def _labels_or_none(values: np.ndarray, missing: Any) -> np.ndarray:
+    """Return labels as objects, None where a label is missing or blank."""
+    array = np.asarray(values, dtype=object).copy()
+    valid = valid_category_mask(
+        array, missing_mask=None if missing is None else np.asarray(missing, dtype=bool)
+    )
+    array[~valid] = None
+    array[valid] = [str(value) for value in array[valid]]
+    return array

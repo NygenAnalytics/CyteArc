@@ -643,6 +643,27 @@ class DataStorePlotAccessor:
         """Plot the clonal expansion and clonal space of groups of cells."""
         return self._forward(PlotResult, "clonal_expansion", locals())
 
+    def clonal_rarefaction(
+        self,
+        clonotypes: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        within_receptor_type: bool = True,
+        cell_selection: ArtifactRef | None = None,
+        orders: Sequence[int] = (0, 1, 2),
+        base: str = "size",
+        endpoint: int | None = None,
+        knots: int = 40,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the rarefaction and extrapolation curves of groups of cells."""
+        return self._forward(PlotResult, "clonal_rarefaction", locals())
+
     def clonotype_abundance(
         self,
         clonotypes: ArtifactRef,

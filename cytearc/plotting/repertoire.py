@@ -8,6 +8,7 @@ import pandas as pd
 
 from ..metadata.selection import CellField, resolve_grouping
 from ..repertoire.chains import CHAIN_PAIRINGS, RECEPTOR_TYPES
+from ..repertoire.diversity import ORDERS
 from ..repertoire.expansion import (
     DEFAULT_RANK_SPLITS,
     rank_window_labels,
@@ -24,9 +25,26 @@ from ._figure import (
     close_figures_on_error,
     normalize_axes_target,
 )
-from ._style import apply_figure_chrome, colormap_palette, theme_context
+from ._style import (
+    apply_figure_chrome,
+    categorical_color_map,
+    colormap_palette,
+    theme_context,
+)
 
-__all__ = ["cell_groups", "clonal_expansion", "clonotype_abundance", "receptor_qc"]
+__all__ = [
+    "cell_groups",
+    "clonal_expansion",
+    "clonal_rarefaction",
+    "clonotype_abundance",
+    "receptor_qc",
+]
+
+_ORDER_TITLES = {
+    0: "Clonotypes (order 0)",
+    1: "Shannon diversity (order 1)",
+    2: "Simpson diversity (order 2)",
+}
 
 _QC_PANELS = ("receptor_type", "chain_pairing", "chains_per_cell")
 _RECEPTOR_TYPE_COLORS = {
@@ -724,6 +742,165 @@ def clonal_expansion(
                 "count": count,
                 "normalize": normalize,
                 "splits": list(loaded.splits),
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+def _load_rarefaction(store: Any, clonotypes: ArtifactRef, **options: Any) -> Any:
+    """Compute the curves through the store's narrow repertoire method."""
+    method = getattr(getattr(store, "repertoire", None), "rarefaction", None)
+    if not callable(method):
+        raise TypeError("store does not provide rarefaction")
+    return method(clonotypes, **options)
+
+
+def _key_names(table: pd.DataFrame, key_columns: Sequence[str]) -> np.ndarray:
+    """Name each row's group by its labels, joined by commas, or ``"all cells"``."""
+    if not key_columns:
+        return np.full(len(table), "all cells", dtype=object)
+    columns = [table[column].astype(str).to_numpy() for column in key_columns]
+    return np.asarray(
+        [", ".join(row) for row in zip(*columns, strict=True)], dtype=object
+    )
+
+
+@close_figures_on_error
+def clonal_rarefaction(
+    store: Any,
+    clonotypes: ArtifactRef,
+    *,
+    group_by: str | Sequence[str] | None = None,
+    groups: ArtifactRef | None = None,
+    within_receptor_type: bool = True,
+    cell_selection: ArtifactRef | None = None,
+    orders: Sequence[int] = ORDERS,
+    base: str = "size",
+    endpoint: int | None = None,
+    knots: int = 40,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot the rarefaction and extrapolation curves of groups of cells.
+
+    ``clonotypes`` is a ``clonotypes`` artifact. Each panel draws one order of
+    Hill numbers, the effective number of clonotypes, against the cells
+    sampled (``base="size"``) or the sample coverage (``base="coverage"``),
+    as iNEXT's ``ggiNEXT`` draws them: one line per group, solid where the
+    group is rarefied, dashed where it is extrapolated, and a point at its
+    observed size. With ``base="size"`` a last panel draws each group's
+    sample coverage against its size, which shows how complete each sample
+    is. Curves that keep rising at the observed point have not reached their
+    plateau: more cells would find more clonotypes.
+
+    The groups are those of ``ds.repertoire.diversity``: ``group_by`` cell
+    metadata columns, a ``groups`` label artifact and, with
+    ``within_receptor_type``, the receptor type, among the cells of
+    ``cell_selection``, such as the T cells. ``endpoint`` and ``knots`` set
+    the sizes of each curve, as ``ds.repertoire.rarefaction`` does.
+
+    Tables: ``curves`` (``group``, the groups' key columns, ``order``,
+    ``size``, ``method``, ``diversity``, ``coverage``).
+    """
+    if base not in ("size", "coverage"):
+        raise ValueError("base must be 'size' or 'coverage'")
+    result = _load_rarefaction(
+        store,
+        clonotypes,
+        group_by=group_by,
+        groups=groups,
+        within_receptor_type=within_receptor_type,
+        cell_selection=cell_selection,
+        orders=orders,
+        endpoint=endpoint,
+        knots=knots,
+    )
+    curves = result.curves.copy()
+    key_columns = [
+        column
+        for column in curves.columns
+        if column not in ("order", "size", "method", "diversity", "coverage")
+    ]
+    curves.insert(0, "group", _key_names(curves, key_columns))
+    names = sort_categories(pd.unique(curves["group"]))
+    colors = categorical_color_map(list(names))
+    panels = [f"order_{order}" for order in result.orders]
+    if base == "size":
+        panels.append("coverage")
+    if figsize is None and target is None:
+        figsize = (4.2 * len(panels) + 1.5, 3.8)
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=panels, figsize=figsize, n_columns=len(panels)
+        )
+        for panel in panels:
+            ax = axes[panel]
+            for name in names:
+                rows = curves[curves["group"] == name]
+                if panel != "coverage":
+                    rows = rows[rows["order"] == int(panel.split("_")[1])]
+                else:
+                    rows = rows[rows["order"] == result.orders[0]]
+                x = rows["size" if base == "size" else "coverage"].to_numpy()
+                y = rows["coverage" if panel == "coverage" else "diversity"].to_numpy()
+                method = rows["method"].to_numpy()
+                inner = method != "extrapolation"
+                outer = method != "rarefaction"
+                ax.plot(
+                    x[inner], y[inner], color=colors[name], linewidth=1.4, label=name
+                )
+                ax.plot(x[outer], y[outer], color=colors[name], linewidth=1.4, ls="--")
+                ax.plot(
+                    x[method == "observed"],
+                    y[method == "observed"],
+                    "o",
+                    color=colors[name],
+                    markersize=4,
+                )
+            ax.set_xlabel("Cells" if base == "size" else "Sample coverage")
+            if panel == "coverage":
+                ax.set_ylabel("Sample coverage")
+                ax.set_title("Sample completeness")
+            else:
+                ax.set_ylabel("Hill number")
+                ax.set_title(_ORDER_TITLES[int(panel.split("_")[1])])
+        if show_legend and len(names) > 1:
+            axes[panels[-1]].legend(
+                frameon=False, fontsize="small", loc="upper left", bbox_to_anchor=(1, 1)
+            )
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"curves": curves},
+        legends=(LegendSpec(kind="categorical", label="Group"),),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(
+                curves.loc[curves["method"] == "observed"]
+                .drop_duplicates("group")["size"]
+                .sum()
+            ),
+            renderer="matplotlib",
+            notes=("clonotypes",),
+            extras={
+                "clonotypes": clonotypes.to_dict(),
+                "grouping": ", ".join(key_columns) or None,
+                "orders": list(result.orders),
+                "base": base,
+                "endpoint": endpoint,
+                "knots": knots,
             },
         ),
         owns_figure=owns,
