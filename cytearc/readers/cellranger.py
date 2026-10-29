@@ -10,7 +10,7 @@ import pandas as pd
 from scipy.sparse import coo_matrix
 
 from ..utils.progress import iter_progress
-from ._contigs import header_fields, parse_contig_columns
+from ._contigs import compression, header_fields, parse_contig_columns
 from ._assay_names import (
     AUTO_ASSAY_NAMES,
     auto_name_feat_table,
@@ -852,7 +852,7 @@ def iter_vdj_contigs(
         dtype=str,
         keep_default_na=False,
         na_filter=False,
-        compression="infer",
+        compression=compression(path),
         usecols=lambda name: str(name).strip() in _VDJ_COLUMNS,
         chunksize=max(1, int(chunk_rows)),
     )

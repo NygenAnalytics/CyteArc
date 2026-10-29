@@ -122,7 +122,8 @@ def cell_groups(
     if resolved.missing_mask is not None:
         labels[np.asarray(resolved.missing_mask, dtype=bool)] = None
     aligned = pd.Series(labels, index=pd.Index(ids)).reindex(cell_ids)
-    values = aligned.to_numpy(dtype=object)
+    # An object Series gives a read-only view, so copy before filling in None.
+    values = aligned.to_numpy(dtype=object, copy=True)
     values[pd.isna(aligned).to_numpy()] = None
     return values, name
 
@@ -440,6 +441,8 @@ def clonotype_abundance(
     if figsize is None and target is None:
         figsize = (12.0, max(3.6, 0.28 * len(top_table) + 1.2))
     require_matplotlib()
+    from matplotlib.ticker import LogFormatter
+
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
             target, panel_keys=["sizes", "top"], figsize=figsize, n_columns=2
@@ -457,6 +460,9 @@ def clonotype_abundance(
             )
         ax.set_xscale("log")
         ax.set_yscale("log")
+        for axis in (ax.xaxis, ax.yaxis):
+            axis.set_major_formatter(LogFormatter())
+            axis.set_minor_formatter(LogFormatter())
         ax.set_xlabel("Cells of the clonotype")
         ax.set_ylabel("Clonotypes")
         ax.set_title("Clone sizes")
