@@ -1,6 +1,6 @@
 # Immune receptor repertoires
 
-Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, BD Rhapsody, TRUST4 and other AIRR producers), check each cell's chains, label cells by receptor type, subtype and chain pairing, group them into clonotypes, and measure clonal expansion within samples. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, BD Rhapsody, TRUST4 and other AIRR producers), check each cell's chains, label cells by receptor type, subtype and chain pairing, group them into clonotypes, measure clonal expansion within samples, and measure clonal diversity with rarefaction and extrapolation. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 
@@ -42,6 +42,13 @@ Import the T cell and B cell receptor contigs of single-cell immune profiling (1
 - `ds.repertoire.load_clonal_expansion(expansion, splits=(10, 100, 1000, 10000, 30000, 100000))` returns a `ClonalExpansion` record: `.cells` (`clonotype`, `category`, the group key columns (`within` columns, `receptor_type`), `group_clone_size`, `group_clone_frequency`), `.categories` (group key, `category`, `cells`, `clonotypes`, `fraction` of the group's cells; every category of every group), `.rank_windows` (group key, `window` such as `"1 to 10"`, `"11 to 100"`, ..., `"after 100000"`, `cells`, `fraction`: the cells of each group's clonotypes ranked by size into windows, scRepertoire's `clonalProportion`), `.labels`, `.breakpoints`, `.frequency_breakpoints`, `.splits`, `.within`, `.within_receptor_type`, `.clonotypes`.
 - `ds.plots.clonal_expansion(expansion, group_by=None, groups=None, count="cells", normalize=True, splits=...)` draws stacked bars per group of the categories (cells, or `count="clonotypes"`) and of the rank windows. Groups default to the expansion's own; `group_by`/`groups` regroup the cells (categories stay those measured within the expansion's groups; ranks are recounted within the plotted groups). Tables: `categories` (`group`, `category`, `cells` or `clonotypes`, `fraction`), `rank_windows` (`group`, `window`, `cells`, `fraction`).
 - Validated: every cell's category equals scirpy 0.25.1's `clonal_expansion` within pseudo samples and across all cells on PBMC 10k and CD8+ donor 1, and the plot's tables equal `summarize_clonal_expansion`; frequency fractions equal scRepertoire 2.8.0's `clonalHomeostasis` and rank windows its `clonalProportion` on PBMC 10k T cells.
+- `ds.repertoire.diversity(clonotypes, group_by=None, groups=None, within_receptor_type=True, cell_selection=None, size=None, coverage=None)` returns a `ClonalDiversity` record and saves nothing. Groups: `group_by` columns × `groups` label artifact (its key column is the artifact kind, such as `cluster_labels`) × `receptor_type`; `cell_selection` keeps some cells (such as `select_cells(receptors, include=["TCR"])`); cells without a clonotype or label are left out. A key column named twice (a `receptor_type` metadata column with `within_receptor_type=True`) raises.
+  - `.indices`, one row per group: `cells`, `clonotypes`, `singletons`, `doubletons`, `coverage` (Chao and Jost sample coverage, iNEXT's `SC`), `shannon` (nats), `pielou`, `simpson`, `inverse_simpson`, `gini_simpson`, `gini`, `d50`, `chao1` (`S + (n-1)/n f1²/(2 f2)`, iNEXT and immunarch), `chao1_bias_corrected` (`S + f1(f1-1)/(2(f2+1))`, vegan and scRepertoire), `ace` (rare ≤ 10 cells; NaN when all rare are singletons).
+  - `.hill`, one row per group and order 0, 1, 2: `observed`, `estimated` (asymptotic: Chao1, exp of Chao-Wang-Jost entropy, inverse of Good's Simpson estimate, inf without doubletons or larger), `at_size`, `coverage_at_size`, `method_at_size`, `at_coverage`, `size_at_coverage`, `method_at_coverage` (methods `"rarefaction"`, `"observed"`, `"extrapolation"`).
+  - `.size` and `.coverage`: the common size (default: smallest doubled group size) and coverage (default: lowest coverage at doubled sizes), iNEXT's `estimateD` defaults.
+- `ds.repertoire.rarefaction(clonotypes, group_by, groups, within_receptor_type, cell_selection, orders=(0, 1, 2), sizes=None, endpoint=None, knots=40)` returns a `Rarefaction` record: `.curves` (group key, `order`, `size`, `method`, `diversity`, `coverage`); default sizes are iNEXT's 40 knots per group (half up to its size, half to twice it); `sizes` gives every group the same sizes.
+- `ds.plots.clonal_rarefaction(clonotypes, group_by=..., cell_selection=..., orders=(0, 1, 2), base="size" or "coverage")`: one panel per order (`order_0`, `order_1`, `order_2`) plus `coverage` (sample completeness) with `base="size"`; solid rarefied, dashed extrapolated, a point at the observed size. Table: `curves` (with `group`).
+- Validated: Hill-number curves within 1.4e-12 of iNEXT 3.0.2 (its Shannon extrapolation is Chao et al. 2023's), asymptotic estimates within 7e-13, `estimateD` within 1e-7; every index within 6e-14 of scRepertoire 2.8.0 `clonalDiversity` (no bootstraps), immunarch 0.10.3 `repDiversity` and vegan 2.7.6 `estimateR`.
 
 ## Recipe
 
@@ -94,6 +101,16 @@ homeostasis = ds.repertoire.clonal_expansion(
 )  # scRepertoire's Rare to Hyperexpanded
 
 t_cells = ds.select_cells(receptors, include=["TCR"])
+diversity = ds.repertoire.diversity(clonotypes, group_by="sample", cell_selection=t_cells)
+print(diversity.indices[["sample", "cells", "clonotypes", "coverage", "shannon", "inverse_simpson", "chao1"]])
+print(diversity.size, diversity.coverage)  # the common size and coverage
+print(diversity.hill.pivot(index="sample", columns="order", values="at_coverage"))
+plot = ds.plots.clonal_rarefaction(clonotypes, group_by="sample", cell_selection=t_cells, show=False)
+plot.save("clonal_rarefaction.png")
+plot.close()
+curves = ds.repertoire.rarefaction(clonotypes, group_by="sample", cell_selection=t_cells).curves
+
+t_cells = ds.select_cells(receptors, include=["TCR"])
 paired = ds.select_cells(receptors, value="chain_pairing", include=["single pair", "extra VJ"])
 # `umap_ref` is a UMAP of the receptors' cells: to colour run["umap"] of a ds.pipeline.rna run,
 # import the receptors with cell_selection=run["analysis_cell_selection"].
@@ -124,3 +141,4 @@ merged = ds.repertoire.import_receptors(
 - B cell clonotypes from identical junctions split clones that carry somatic mutations; they are exact sequence variants, not clonal families.
 - Measure expansion `within` the sample: without it, a clonotype's cells in all samples add up. Frequency categories depend on sample size (one cell of 1,000 is already 0.001), so compare them only between samples of similar size; bounds in cells compare any samples.
 - Compare expansion between conditions with one value per sample (such as the fraction of cells in clonotypes of more than two cells), never with cells as replicates.
+- Compare diversity by Hill numbers at a common coverage or size (`hill.at_coverage`, `hill.at_size`), not observed indices, which grow with the cells sampled. Check `plots.clonal_rarefaction`: steep curves at the observed point mean richness and Chao1 are poorly determined; order 2 is stable. Name the Chao1 form reported. Leave out tiny groups (such as multichain cells, with `cell_selection`) or set `size`/`coverage`, since the smallest group sets the defaults.

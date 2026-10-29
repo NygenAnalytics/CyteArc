@@ -19,6 +19,11 @@ if TYPE_CHECKING:
         Clonotypes as Clonotypes,
     )
     from .contigs import FIELDS as FIELDS
+    from .diversity import (
+        ORDERS as ORDERS,
+        ClonalDiversity as ClonalDiversity,
+        Rarefaction as Rarefaction,
+    )
     from .expansion import ClonalExpansion as ClonalExpansion
     from .receptors import ImmuneReceptors as ImmuneReceptors
 
@@ -28,15 +33,18 @@ __all__ = [
     "FIELDS",
     "LOCI",
     "NO_RECEPTOR",
+    "ORDERS",
     "RECEPTOR_ARMS",
     "RECEPTOR_SUBTYPES",
     "RECEPTOR_TYPES",
     "SLOTS",
     "VDJ_LOCI",
     "VJ_LOCI",
+    "ClonalDiversity",
     "ClonalExpansion",
     "Clonotypes",
     "ImmuneReceptors",
+    "Rarefaction",
 ]
 
 __getattr__, __dir__ = _lazy_facade(
@@ -47,14 +55,17 @@ __getattr__, __dir__ = _lazy_facade(
         "FIELDS": ".contigs",
         "LOCI": ".chains",
         "NO_RECEPTOR": ".chains",
+        "ORDERS": ".diversity",
         "RECEPTOR_ARMS": ".clonotypes",
         "RECEPTOR_SUBTYPES": ".chains",
         "RECEPTOR_TYPES": ".chains",
         "SLOTS": ".chains",
         "VDJ_LOCI": ".chains",
         "VJ_LOCI": ".chains",
+        "ClonalDiversity": ".diversity",
         "ClonalExpansion": ".expansion",
         "Clonotypes": ".clonotypes",
         "ImmuneReceptors": ".receptors",
+        "Rarefaction": ".diversity",
     },
 )

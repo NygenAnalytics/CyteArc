@@ -18,6 +18,7 @@ from cytearc.storage import ArtifactRef
 
 _STORE_PLOT_METHODS = (
     "clonal_expansion",
+    "clonal_rarefaction",
     "clonotype_abundance",
     "cluster_connectivity",
     "cluster_tree",
@@ -334,6 +335,11 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             (_EXPANSION_REF,),
             {"group_by": "cluster", "count": "clonotypes"},
         ),
+        (
+            "clonal_rarefaction",
+            (_CLONOTYPES_REF,),
+            {"group_by": "sample", "orders": (0,), "base": "coverage"},
+        ),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -379,6 +385,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("clonotypes"))
     elif name == "clonal_expansion":
         expected_args.append(expected_kwargs.pop("expansion"))
+    elif name == "clonal_rarefaction":
+        expected_args.append(expected_kwargs.pop("clonotypes"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

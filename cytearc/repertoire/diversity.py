@@ -1,0 +1,712 @@
+"""The diversity of clonotypes within a group of cells.
+
+A group's clone sizes, the cells of each of its clonotypes, describe its
+repertoire as species abundances describe an ecological sample. The classic
+indices summarize them as scRepertoire, immunarch and vegan report them, and
+Hill numbers of orders 0, 1 and 2, the effective numbers of clonotypes, count
+all clonotypes, weigh them by their frequency, or count only the dominant
+ones. Every observed index depends on how many cells were sampled, so groups
+of different sizes are compared by rarefying and extrapolating their Hill
+numbers to a common number of cells, or to a common sample coverage, the
+share of the repertoire's cells whose clonotype the sample holds (Chao and
+Jost 2012; Chao et al. 2014, 2023).
+
+The estimators follow the papers: Chao1 (Chao 1984, 1987) and its
+bias-corrected form (Chao 2005), ACE (Chao and Lee 1992), the Shannon entropy
+estimator of Chao, Wang and Jost (2013), Good's unbiased Simpson estimator,
+the rarefaction and extrapolation of Chao et al. (2014) with the Shannon
+extrapolation of Chao et al. (2023), and the sample coverage of Chao and Jost
+(2012). Rarefied probabilities are products of ratios rather than differences
+of log-gamma functions, which keeps them exact for groups of millions of
+cells. These functions work on clone sizes and never touch storage.
+"""
+
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from scipy.special import digamma
+
+from ..storage.refs import ArtifactRef
+
+__all__ = [
+    "ORDERS",
+    "RARE_THRESHOLD",
+    "CloneSizes",
+    "ClonalDiversity",
+    "Rarefaction",
+    "ace",
+    "chao1",
+    "chao1_bias_corrected",
+    "coverage",
+    "default_sizes",
+    "diversity_at",
+    "estimated_hill",
+    "hill_curve",
+    "indices",
+    "observed_hill",
+    "size_for_coverage",
+]
+
+#: The orders of the Hill numbers that rarefaction and extrapolation reach:
+#: 0 counts clonotypes, 1 weighs them by frequency (the exponential of
+#: Shannon entropy), and 2 counts the dominant ones (the inverse Simpson
+#: index).
+ORDERS = (0, 1, 2)
+#: Clonotypes of at most this many cells are rare for ACE (Chao and Lee 1992).
+RARE_THRESHOLD = 10
+# Terms of the entropy estimator's series summed at once.
+_CHUNK = 1 << 20
+
+
+@dataclass(frozen=True, slots=True)
+class CloneSizes:
+    """A group's clone sizes, summarized by how many clonotypes have each size.
+
+    Attributes:
+        values: The distinct clone sizes, ascending.
+        counts: The clonotypes of each size.
+        n: The cells, the sum of the clone sizes.
+        richness: The clonotypes.
+        f1: The clonotypes of one cell, singletons.
+        f2: The clonotypes of two cells, doubletons.
+    """
+
+    values: np.ndarray
+    counts: np.ndarray
+    n: int
+    richness: int
+    f1: int
+    f2: int
+
+    @classmethod
+    def from_sizes(cls, sizes: Any) -> "CloneSizes":
+        """Summarize clone sizes; sizes of 0 are left out."""
+        array = np.asarray(sizes, dtype=np.int64).reshape(-1)
+        if (array < 0).any():
+            raise ValueError("Clone sizes must not be negative")
+        values, counts = np.unique(array[array > 0], return_counts=True)
+        return cls(
+            values=values.astype(np.int64),
+            counts=counts.astype(np.int64),
+            n=int((values * counts).sum()),
+            richness=int(counts.sum()),
+            f1=int(counts[values == 1].sum()),
+            f2=int(counts[values == 2].sum()),
+        )
+
+    def frequencies(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return each distinct size's clone frequency and its clonotypes."""
+        return self.values / self.n, self.counts
+
+
+def _shannon(clones: CloneSizes) -> float:
+    """The observed Shannon entropy, in nats."""
+    p, counts = clones.frequencies()
+    return float(-np.sum(counts * p * np.log(p)))
+
+
+def observed_hill(clones: CloneSizes, order: float) -> float:
+    """The observed Hill number of a real order, the effective clonotypes.
+
+    Order 0 is the clonotypes, order 1 the exponential of the Shannon entropy,
+    and order 2 the inverse Simpson index.
+    """
+    if clones.n == 0:
+        return float("nan")
+    p, counts = clones.frequencies()
+    if order == 1:
+        return float(np.exp(_shannon(clones)))
+    return float(np.sum(counts * p**order) ** (1 / (1 - order)))
+
+
+def _simpson_pairs(clones: CloneSizes) -> float:
+    """Good's unbiased estimate of the Simpson concentration, sum of p squared."""
+    if clones.n < 2:
+        return float("nan")
+    pairs = np.sum(clones.counts * clones.values * (clones.values - 1))
+    return float(pairs / (clones.n * (clones.n - 1)))
+
+
+def coverage(clones: CloneSizes) -> float:
+    """The estimated sample coverage of the group's cells (Chao and Jost 2012).
+
+    The coverage is the share of the repertoire's cells whose clonotype the
+    sample holds; one minus it is the chance that one more cell brings a new
+    clonotype. Without singletons the sample is complete.
+    """
+    if clones.n == 0:
+        return float("nan")
+    if clones.f1 == 0:
+        return 1.0
+    return float(1 - clones.f1 / clones.n * _undetected_ratio(clones))
+
+
+def _undetected_ratio(clones: CloneSizes) -> float:
+    """The ratio by which the coverage deficit shrinks with each added cell.
+
+    It is ``(n - 1) f1 / ((n - 1) f1 + 2 f2)`` with doubletons, and with
+    ``f1 - 1`` and ``f2 = 1`` without them, as in the entropy estimator of
+    Chao, Wang and Jost (2013).
+    """
+    n, f1, f2 = clones.n, clones.f1, clones.f2
+    if f2 > 0:
+        return (n - 1) * f1 / ((n - 1) * f1 + 2 * f2)
+    return (n - 1) * (f1 - 1) / ((n - 1) * (f1 - 1) + 2)
+
+
+def chao1(clones: CloneSizes) -> float:
+    """The Chao1 estimate of the clonotypes in the repertoire (Chao 1984, 1987).
+
+    ``S + (n - 1) / n * f1**2 / (2 f2)``, or ``S + (n - 1) / n * f1 (f1 - 1) /
+    2`` without doubletons, as iNEXT and immunarch estimate richness.
+    """
+    return clones.richness + _undetected(clones)
+
+
+def _undetected(clones: CloneSizes) -> float:
+    """The estimated clonotypes that the sample missed, Chao1's ``f0``."""
+    n, f1, f2 = clones.n, clones.f1, clones.f2
+    if n == 0:
+        return 0.0
+    if f2 > 0:
+        return (n - 1) / n * f1**2 / (2 * f2)
+    return (n - 1) / n * f1 * (f1 - 1) / 2
+
+
+def chao1_bias_corrected(clones: CloneSizes) -> float:
+    """The bias-corrected Chao1 estimate (Chao 2005): ``S + f1 (f1 - 1) / (2 (f2 + 1))``.
+
+    It is the form that vegan's ``estimateR`` and scRepertoire's ``chao1``
+    report, without the ``(n - 1) / n`` factor.
+    """
+    f1, f2 = clones.f1, clones.f2
+    return clones.richness + f1 * (f1 - 1) / (2 * (f2 + 1))
+
+
+def ace(clones: CloneSizes, rare: int = RARE_THRESHOLD) -> float:
+    """The abundance-based coverage estimate of the clonotypes (Chao and Lee 1992).
+
+    Clonotypes of at most ``rare`` cells are rare. The estimate is
+    ``S_abundant + S_rare / C + f1 / C * gamma**2``, where ``C = 1 - f1 /
+    N_rare`` is the coverage of the rare cells and ``gamma**2`` the squared
+    coefficient of variation of the rare clone sizes, at least 0. It is NaN
+    when every rare clonotype is a singleton, since then ``C = 0``.
+    """
+    rare_mask = clones.values <= rare
+    values, counts = clones.values[rare_mask], clones.counts[rare_mask]
+    abundant = int(clones.counts[~rare_mask].sum())
+    rare_clonotypes = int(counts.sum())
+    if rare_clonotypes == 0:
+        return float(abundant)
+    rare_cells = int((values * counts).sum())
+    rare_coverage = 1 - clones.f1 / rare_cells
+    if rare_coverage <= 0:
+        return float("nan")
+    pairs = float(np.sum(values * (values - 1) * counts))
+    gamma = max(
+        rare_clonotypes / rare_coverage * pairs / (rare_cells * (rare_cells - 1)) - 1,
+        0.0,
+    )
+    return float(
+        abundant + rare_clonotypes / rare_coverage + clones.f1 / rare_coverage * gamma
+    )
+
+
+def _entropy_tail(n: int, a: float) -> float:
+    """``(1 - a) ** (1 - n) * (-log(a) - sum((1 - a) ** r / r, r = 1..n-1))``.
+
+    The bracket is the tail of the series of ``-log(a)`` from ``r = n``, so
+    the whole equals ``sum((1 - a) ** j / (j + n - 1), j >= 1)``. When the
+    factor ``(1 - a) ** (1 - n)`` is moderate the tail is computed as written,
+    and otherwise by its series, which then converges in a few multiples of
+    ``n`` terms; either avoids overflow and loss of precision.
+    """
+    decay = -np.log1p(-a)
+    if (n - 1) * decay <= 5:
+        partial = 0.0
+        for start in range(1, n, _CHUNK):
+            r = np.arange(start, min(start + _CHUNK, n), dtype=np.float64)
+            partial += float(np.sum(np.exp(r * np.log1p(-a)) / r))
+        return float(np.exp((n - 1) * decay) * (-np.log(a) - partial))
+    total = 0.0
+    start = 1
+    while True:
+        j = np.arange(start, start + _CHUNK, dtype=np.float64)
+        terms = np.exp(-j * decay) / (j + n - 1)
+        total += float(terms.sum())
+        if terms[-1] < 1e-18 * total:
+            return total
+        start += _CHUNK
+
+
+def chao_entropy(clones: CloneSizes) -> float:
+    """The Shannon entropy estimate of Chao, Wang and Jost (2013), in nats.
+
+    The first term sums, over clonotypes of 1 to ``n - 1`` cells, their
+    frequency times ``1 / X + ... + 1 / (n - 1)``; the second estimates the
+    entropy of the clonotypes the sample missed from the singletons and
+    doubletons through ``A = 2 f2 / ((n - 1) f1 + 2 f2)``, or ``2 / ((n - 1)
+    (f1 - 1) + 2)`` without doubletons.
+    """
+    n, f1, f2 = clones.n, clones.f1, clones.f2
+    if n == 0:
+        return float("nan")
+    inner = clones.values <= n - 1
+    values, counts = clones.values[inner], clones.counts[inner]
+    first = float(np.sum(counts * values / n * (digamma(n) - digamma(values))))
+    if f1 == 0:
+        return first
+    if f2 > 0:
+        a = 2 * f2 / ((n - 1) * f1 + 2 * f2)
+    else:
+        a = 2 / ((n - 1) * (f1 - 1) + 2)
+    if a >= 1:
+        return first
+    return first + f1 / n * _entropy_tail(n, a)
+
+
+def estimated_hill(clones: CloneSizes, order: int) -> float:
+    """The asymptotic Hill number of order 0, 1 or 2, as iNEXT's ``AsyEst``.
+
+    Order 0 is Chao1, order 1 the exponential of the entropy estimate of
+    Chao, Wang and Jost (2013), and order 2 the inverse of Good's unbiased
+    Simpson estimate, infinite when no clonotype holds two cells.
+    """
+    _check_order(order)
+    if clones.n == 0:
+        return float("nan")
+    if order == 0:
+        return chao1(clones)
+    if order == 1:
+        return float(np.exp(chao_entropy(clones)))
+    pairs = _simpson_pairs(clones)
+    if not pairs > 0:
+        return float("inf")
+    return 1 / pairs
+
+
+def _check_order(order: Any) -> None:
+    if isinstance(order, bool) or order not in ORDERS:
+        raise ValueError("order must be 0, 1 or 2")
+
+
+def _missing_log(clones: CloneSizes, m: int) -> np.ndarray:
+    """The log chance that a sample of ``m`` cells misses each distinct size.
+
+    A clonotype of ``X`` of the ``n`` cells is missed with chance
+    ``C(n - X, m) / C(n, m)``, the product of ``1 - m / (n - j)`` for ``j``
+    below ``X``, summed here as logarithms so that the chance keeps its
+    precision when it is close to 1; it is ``-inf`` when ``X > n - m``.
+    """
+    n, values = clones.n, clones.values
+    largest = int(values[-1]) if len(values) else 0
+    reach = min(largest, n - m)
+    factors = np.log1p(-m / (n - np.arange(reach, dtype=np.float64)))
+    totals = np.concatenate([[0.0], np.cumsum(factors)])
+    return np.where(values <= reach, totals[np.minimum(values, reach)], -np.inf)
+
+
+def _expected_entropy(clones: CloneSizes, m: int) -> float:
+    """The expected Shannon entropy of a sample of ``m`` of the ``n`` cells.
+
+    For each distinct size ``X`` the cells drawn from one such clonotype
+    follow the hypergeometric distribution, whose probabilities are built
+    from the ratio of consecutive terms, outward from the mode, and
+    normalized over the support, which keeps them to a few units in the last
+    place; terms beyond 40 standard deviations of the mode, below ``e**-800``
+    of it, are left out.
+    """
+    n = clones.n
+    total = 0.0
+    for size, count in zip(clones.values.tolist(), clones.counts.tolist(), strict=True):
+        low, high = max(0, m - (n - size)), min(size, m)
+        mean = m * size / n
+        spread = np.sqrt(mean * (1 - size / n) * (n - m) / max(n - 1, 1))
+        mode = int(min(max((m + 1) * (size + 1) // (n + 2), low), high))
+        reach = int(np.ceil(40 * spread)) + 2
+        first, last = max(low, mode - reach), min(high, mode + reach)
+        k = np.arange(first, last + 1, dtype=np.float64)
+        step = (
+            np.log(size - k[1:] + 1)
+            + np.log(m - k[1:] + 1)
+            - np.log(k[1:])
+            - np.log(n - size - m + k[1:])
+        )
+        log_weight = np.concatenate([[0.0], np.cumsum(step)])
+        log_weight -= log_weight[mode - first]
+        weight = np.exp(log_weight)
+        share = np.where(k > 0, k / m, 1.0)
+        total += count * float(np.dot(weight, -share * np.log(share))) / weight.sum()
+    return total
+
+
+def _rarefied(clones: CloneSizes, m: int, order: int) -> float:
+    """The expected Hill number of a sample of ``m`` of the ``n`` cells."""
+    if order == 0:
+        return float(np.sum(clones.counts * -np.expm1(_missing_log(clones, m))))
+    if order == 2:
+        return 1 / (1 / m + (1 - 1 / m) * _pairs_or_zero(clones))
+    return float(np.exp(_expected_entropy(clones, m)))
+
+
+def _pairs_or_zero(clones: CloneSizes) -> float:
+    pairs = _simpson_pairs(clones)
+    return 0.0 if np.isnan(pairs) else pairs
+
+
+def _extrapolated(
+    clones: CloneSizes,
+    m: float,
+    order: int,
+    shannon: tuple[float, float, float] | None = None,
+) -> float:
+    """The expected Hill number of ``m > n`` cells (Chao et al. 2014, 2023).
+
+    Order 0 adds Chao1's missed clonotypes as more cells find them; order 2
+    extends Good's Simpson estimate; order 1 approaches the asymptotic
+    estimate geometrically from the observed value, at the rate that makes
+    the curve pass through the rarefied value at ``n - 1`` cells, the unified
+    form of Chao et al. (2023) that reduces to the richness formula at order
+    0. ``shannon`` holds the terms of :func:`_shannon_terms`, when known.
+    """
+    n, f1 = clones.n, clones.f1
+    extra = m - n
+    if order == 0:
+        missed = _undetected(clones)
+        if missed == 0:
+            return float(clones.richness)
+        return float(
+            clones.richness + missed * (1 - (1 - f1 / (n * missed + f1)) ** extra)
+        )
+    if order == 2:
+        return 1 / (1 / m + (1 - 1 / m) * _pairs_or_zero(clones))
+    observed, asymptote, rate = _shannon_terms(clones) if shannon is None else shannon
+    return float(observed + (asymptote - observed) * (1 - (1 - rate) ** extra))
+
+
+def _shannon_terms(clones: CloneSizes) -> tuple[float, float, float]:
+    """The observed and asymptotic Shannon diversity and the extrapolation rate.
+
+    The rate is ``(D(n) - D(n - 1)) / (D(inf) - D(n - 1))``, so the curve passes
+    through the rarefied value at ``n - 1`` cells; it is 0, a flat curve, when
+    the asymptote does not exceed the observed value.
+    """
+    observed = observed_hill(clones, 1)
+    asymptote = estimated_hill(clones, 1)
+    if clones.n < 2 or not asymptote > observed:
+        return observed, asymptote, 0.0
+    before = _rarefied(clones, clones.n - 1, 1)
+    return observed, asymptote, (observed - before) / (asymptote - before)
+
+
+def _rarefied_coverage(clones: CloneSizes, m: int) -> float:
+    """The expected coverage of a sample of ``m < n`` cells.
+
+    Each clonotype of ``X`` cells contributes its frequency times
+    ``C(n - X, m) / C(n - 1, m)``, the chance of missing it divided by the
+    chance ``1 - m / n`` of missing one given cell.
+    """
+    n = clones.n
+    missing = np.exp(_missing_log(clones, m) - np.log1p(-m / n))
+    return float(1 - np.sum(clones.counts * clones.values / n * missing))
+
+
+def _extrapolated_coverage(clones: CloneSizes, m: float) -> float:
+    """The expected coverage of ``m > n`` cells (Chao and Jost 2012)."""
+    if clones.f1 == 0:
+        return 1.0
+    return float(
+        1 - clones.f1 / clones.n * _undetected_ratio(clones) ** (m - clones.n + 1)
+    )
+
+
+def coverage_at(clones: CloneSizes, m: float) -> float:
+    """The expected coverage of a sample of ``m`` cells, rarefied or extrapolated.
+
+    A size between two whole numbers below ``n`` interpolates linearly, as
+    iNEXT does.
+    """
+    n = clones.n
+    if not m >= 1:
+        raise ValueError("A sample holds at least one cell")
+    if m >= n:
+        return coverage(clones) if m == n else _extrapolated_coverage(clones, m)
+    low = int(np.floor(m))
+    if low == m:
+        return _rarefied_coverage(clones, low)
+    high_value = coverage_at(clones, low + 1)
+    low_value = _rarefied_coverage(clones, low)
+    return low_value + (high_value - low_value) * (m - low)
+
+
+def diversity_at(
+    clones: CloneSizes,
+    m: float,
+    order: int,
+    *,
+    shannon: tuple[float, float, float] | None = None,
+) -> tuple[float, str]:
+    """The Hill number of a sample of ``m`` cells, and how it was reached.
+
+    Below ``n`` cells the sample is rarefied, interpolating linearly between
+    whole numbers of cells as iNEXT does; at ``n`` it is observed; above, it
+    is extrapolated. Sizes below 1 are not samples. ``shannon`` passes the
+    terms of the Shannon extrapolation computed once for many sizes.
+
+    Returns:
+        The Hill number and ``"rarefaction"``, ``"observed"`` or
+        ``"extrapolation"``.
+    """
+    _check_order(order)
+    n = clones.n
+    if not m >= 1:
+        raise ValueError("A sample holds at least one cell")
+    if m == n:
+        return observed_hill(clones, order), "observed"
+    if m > n:
+        return _extrapolated(clones, m, order, shannon), "extrapolation"
+    low = int(np.floor(m))
+    value = _rarefied(clones, low, order)
+    if low != m:
+        upper = (
+            observed_hill(clones, order)
+            if low + 1 == n
+            else _rarefied(clones, low + 1, order)
+        )
+        value += (upper - value) * (m - low)
+    return value, "rarefaction"
+
+
+def size_for_coverage(clones: CloneSizes, level: float) -> float:
+    """The cells that a sample needs to reach a coverage, as iNEXT's ``invChat``.
+
+    Below the observed coverage the size is found among the rarefied sizes
+    and interpolated linearly between whole numbers; above it, the
+    extrapolated coverage is inverted. A level below the coverage of one cell
+    needs one cell.
+
+    Raises:
+        ValueError: If the level is not between 0 and 1.
+    """
+    if not 0 < level < 1:
+        raise ValueError("coverage must be between 0 and 1")
+    n = clones.n
+    observed = coverage(clones)
+    if level == observed:
+        return float(n)
+    if level > observed:
+        # Below full coverage there are singletons, and the deficit shrinks by
+        # a ratio strictly between 0 and 1 with each added cell.
+        ratio = _undetected_ratio(clones)
+        return float(n + np.log((1 - level) * n / clones.f1) / np.log(ratio) - 1)
+    if coverage_at(clones, 1) >= level:
+        return 1.0
+    # The rarefied coverage grows with the size: bisect for the last whole
+    # size below the level.
+    low, high = 1, n
+    while high - low > 1:
+        middle = (low + high) // 2
+        if coverage_at(clones, middle) < level:
+            low = middle
+        else:
+            high = middle
+    low_value, high_value = coverage_at(clones, low), coverage_at(clones, high)
+    return float(low + (level - low_value) / (high_value - low_value))
+
+
+def hill_curve(
+    clones: CloneSizes, sizes: Sequence[float], order: int
+) -> tuple[list[float], list[str]]:
+    """The Hill numbers of samples of each size, as :func:`diversity_at` gives them.
+
+    The terms that every extrapolated size of order 1 shares are computed
+    once.
+    """
+    _check_order(order)
+    shannon = (
+        _shannon_terms(clones)
+        if order == 1 and any(m > clones.n for m in sizes)
+        else None
+    )
+    values, methods = [], []
+    for m in sizes:
+        value, method = diversity_at(clones, float(m), order, shannon=shannon)
+        values.append(value)
+        methods.append(method)
+    return values, methods
+
+
+def default_sizes(n: int, endpoint: int | None = None, knots: int = 40) -> np.ndarray:
+    """The sizes of iNEXT's default curve: ``knots`` sizes from 1 to ``endpoint``.
+
+    ``endpoint`` defaults to twice the ``n`` cells of the sample. Up to the
+    sample's size, about half the knots rarefy evenly from 1 to ``n - 1``,
+    then the sample itself, then about half extrapolate evenly from ``n + 1``
+    to the endpoint; an endpoint at most ``n`` rarefies only.
+    """
+    if isinstance(knots, bool) or not isinstance(knots, int) or knots < 2:
+        raise ValueError("knots must be an integer of at least 2")
+    if endpoint is None:
+        endpoint = 2 * n
+    if isinstance(endpoint, bool) or not isinstance(endpoint, int) or endpoint < 1:
+        raise ValueError("endpoint must be a positive integer")
+    if endpoint <= n:
+        sizes = np.floor(np.linspace(1, endpoint, knots))
+    else:
+        rarefied = (
+            np.floor(np.linspace(1, n - 1, knots // 2 - 1)) if n > 1 else np.array([])
+        )
+        extrapolated = np.floor(np.linspace(n + 1, endpoint, knots // 2))
+        sizes = np.concatenate([rarefied, [n], extrapolated])
+    return np.unique(sizes.astype(np.int64))
+
+
+def _gini(clones: CloneSizes) -> float:
+    """The Gini coefficient of the clone sizes, 0 when all are equal."""
+    if clones.richness == 0:
+        return float("nan")
+    sizes = np.repeat(clones.values, clones.counts).astype(np.float64)
+    ranks = np.arange(1, len(sizes) + 1)
+    total = sizes.sum()
+    return float(
+        2 * np.sum(ranks * sizes) / (len(sizes) * total) - (len(sizes) + 1) / len(sizes)
+    )
+
+
+def _d50(clones: CloneSizes) -> int:
+    """The fewest clonotypes, largest first, that hold at least half the cells."""
+    sizes = np.repeat(clones.values[::-1], clones.counts[::-1])
+    return int(np.searchsorted(np.cumsum(sizes), clones.n / 2, side="left") + 1)
+
+
+#: The columns of the table of indices, in order.
+INDEX_COLUMNS = (
+    "cells",
+    "clonotypes",
+    "singletons",
+    "doubletons",
+    "coverage",
+    "shannon",
+    "pielou",
+    "simpson",
+    "inverse_simpson",
+    "gini_simpson",
+    "gini",
+    "d50",
+    "chao1",
+    "chao1_bias_corrected",
+    "ace",
+)
+
+
+def indices(clones: CloneSizes) -> dict[str, float]:
+    """The observed diversity indices and richness estimates of a group.
+
+    Returns:
+        ``cells``, ``clonotypes``, ``singletons``, ``doubletons``,
+        ``coverage``; ``shannon`` (entropy in nats), ``pielou`` (Shannon
+        entropy over its maximum, the log of the clonotypes; NaN for one
+        clonotype), ``simpson`` (sum of squared frequencies),
+        ``inverse_simpson``, ``gini_simpson`` (one minus Simpson), ``gini``
+        (the Gini coefficient of the clone sizes), ``d50`` (the fewest
+        largest clonotypes that hold half the cells), ``chao1``,
+        ``chao1_bias_corrected`` and ``ace``.
+    """
+    p, counts = clones.frequencies()
+    simpson = float(np.sum(counts * p**2))
+    shannon = _shannon(clones)
+    return {
+        "cells": clones.n,
+        "clonotypes": clones.richness,
+        "singletons": clones.f1,
+        "doubletons": clones.f2,
+        "coverage": coverage(clones),
+        "shannon": shannon,
+        "pielou": shannon / np.log(clones.richness)
+        if clones.richness > 1
+        else float("nan"),
+        "simpson": simpson,
+        "inverse_simpson": 1 / simpson,
+        "gini_simpson": 1 - simpson,
+        "gini": _gini(clones),
+        "d50": _d50(clones),
+        "chao1": chao1(clones),
+        "chao1_bias_corrected": chao1_bias_corrected(clones),
+        "ace": ace(clones),
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class ClonalDiversity:
+    """The diversity of the clonotypes of groups of cells.
+
+    The groups are the combinations of the ``group_by`` columns' labels, the
+    ``groups`` artifact's labels and, with ``within_receptor_type``, the
+    receptor type; their columns are each group's key in the tables.
+
+    Attributes:
+        indices: One row per group: the group's key and the columns of
+            :func:`indices`.
+        hill: One row per group and order 0, 1 and 2: the group's key,
+            ``order``, ``observed`` and ``estimated`` (asymptotic) Hill
+            numbers, the Hill number ``at_size`` of the common size, with its
+            ``coverage_at_size`` and ``method_at_size``, and the Hill number
+            ``at_coverage`` of the common coverage, with its
+            ``size_at_coverage`` and ``method_at_coverage``.
+        clonotypes: The ``clonotypes`` artifact.
+        group_by: The cell metadata columns of the groups.
+        groups: The label artifact of the groups, or None.
+        within_receptor_type: Whether each receptor type is a group apart.
+        cell_selection: The cells kept, or None for every cell.
+        size: The common size in cells.
+        coverage: The common coverage.
+    """
+
+    indices: pd.DataFrame = field(repr=False)
+    hill: pd.DataFrame = field(repr=False)
+    clonotypes: ArtifactRef
+    group_by: tuple[str, ...]
+    groups: ArtifactRef | None
+    within_receptor_type: bool
+    cell_selection: ArtifactRef | None
+    size: int
+    coverage: float
+
+
+@dataclass(frozen=True, slots=True)
+class Rarefaction:
+    """The rarefaction and extrapolation curves of groups of cells.
+
+    Attributes:
+        curves: One row per group, order and size: the group's key,
+            ``order``, ``size`` (cells), ``method`` (``"rarefaction"``,
+            ``"observed"`` or ``"extrapolation"``), ``diversity`` (the Hill
+            number) and ``coverage``.
+        clonotypes: The ``clonotypes`` artifact.
+        group_by: The cell metadata columns of the groups.
+        groups: The label artifact of the groups, or None.
+        within_receptor_type: Whether each receptor type is a group apart.
+        cell_selection: The cells kept, or None for every cell.
+        orders: The orders of the curves.
+    """
+
+    curves: pd.DataFrame = field(repr=False)
+    clonotypes: ArtifactRef
+    group_by: tuple[str, ...]
+    groups: ArtifactRef | None
+    within_receptor_type: bool
+    cell_selection: ArtifactRef | None
+    orders: tuple[int, ...]
+
+
+def common_size(groups: Sequence[CloneSizes]) -> int:
+    """iNEXT's default common size: the smallest of the groups' doubled sizes."""
+    return int(min(2 * clones.n for clones in groups))
+
+
+def common_coverage(groups: Sequence[CloneSizes]) -> float:
+    """iNEXT's default common coverage: the lowest coverage at doubled sizes."""
+    return float(min(coverage_at(clones, 2 * clones.n) for clones in groups))

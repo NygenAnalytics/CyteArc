@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     )
     from .repertoire import (
         clonal_expansion as clonal_expansion,
+        clonal_rarefaction as clonal_rarefaction,
         clonotype_abundance as clonotype_abundance,
         receptor_qc as receptor_qc,
     )
@@ -98,6 +99,7 @@ __all__ = [
     "cluster_tree",
     "cluster_connectivity",
     "clonal_expansion",
+    "clonal_rarefaction",
     "clonotype_abundance",
     "compose_results",
     "composition",
@@ -156,6 +158,7 @@ __getattr__, __dir__ = _lazy_facade(
         "cluster_tree": ".cluster_tree",
         "cluster_connectivity": ".cluster_connectivity",
         "clonal_expansion": ".repertoire",
+        "clonal_rarefaction": ".repertoire",
         "clonotype_abundance": ".repertoire",
         "compose_results": "._figure",
         "composition": ".composition",

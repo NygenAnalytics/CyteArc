@@ -197,8 +197,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # perturbation.edistance and perturbation.load_edistance, then
     # repertoire.import_receptors and repertoire.load_receptors, then
     # repertoire.clonotypes and repertoire.load_clonotypes, then
-    # repertoire.clonal_expansion and repertoire.load_clonal_expansion.
-    assert len(_NAMESPACE_METHODS) == 110
+    # repertoire.clonal_expansion and repertoire.load_clonal_expansion, then
+    # repertoire.diversity and repertoire.rarefaction.
+    assert len(_NAMESPACE_METHODS) == 112
     assert {
         "import_receptors",
         "load_receptors",
@@ -206,6 +207,8 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
         "load_clonotypes",
         "clonal_expansion",
         "load_clonal_expansion",
+        "diversity",
+        "rarefaction",
     } == {
         name
         for namespace, _, name, _ in _NAMESPACE_METHODS
