@@ -320,3 +320,15 @@ def test_fields_of_some_sources_are_missing_for_the_others() -> None:
     assert table.column("c_call").tolist() == [None, "IGHM"]
     assert table.column("sequence").tolist() == [None, "ACGT"]
     assert table.column("umi_count").tolist() == [-1, 3]
+
+
+def test_some_values_of_packed_text_are_decoded_alone() -> None:
+    from cytearc.repertoire.contigs import pack_text, take_text
+
+    data, offsets = pack_text(["CASSF", "CAVF", "CARW", "αβ"])
+    assert take_text(data, offsets, np.asarray([3, 0, 0])).tolist() == [
+        "αβ",
+        "CASSF",
+        "CASSF",
+    ]
+    assert take_text(data, offsets, np.asarray([], dtype=np.int64)).tolist() == []

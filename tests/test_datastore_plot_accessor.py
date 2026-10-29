@@ -17,6 +17,7 @@ from cytearc.storage import ArtifactRef
 
 
 _STORE_PLOT_METHODS = (
+    "clonotype_abundance",
     "cluster_connectivity",
     "cluster_tree",
     "composition",
@@ -113,6 +114,11 @@ _RECEPTORS_REF = ArtifactRef(
     scope="datastore",
     kind="immune_receptors",
     artifact_id="6" * 64,
+)
+_CLONOTYPES_REF = ArtifactRef(
+    scope="datastore",
+    kind="clonotypes",
+    artifact_id="7" * 64,
 )
 
 
@@ -316,6 +322,7 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             (_RECEPTORS_REF,),
             {"group_by": "sample", "normalize": False},
         ),
+        ("clonotype_abundance", (_CLONOTYPES_REF,), {"top": 5}),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -357,6 +364,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("edistance"))
     elif name == "receptor_qc":
         expected_args.append(expected_kwargs.pop("receptors"))
+    elif name == "clonotype_abundance":
+        expected_args.append(expected_kwargs.pop("clonotypes"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

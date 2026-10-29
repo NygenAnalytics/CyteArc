@@ -625,6 +625,22 @@ class DataStorePlotAccessor:
         """Plot how far each perturbation moves its cells from the control cells."""
         return self._forward(PlotResult, "edistance", locals())
 
+    def clonotype_abundance(
+        self,
+        clonotypes: ArtifactRef,
+        *,
+        group_by: str | None = None,
+        groups: ArtifactRef | None = None,
+        top: int = 20,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot how many clonotypes have each size, and the largest clonotypes."""
+        return self._forward(PlotResult, "clonotype_abundance", locals())
+
     def receptor_qc(
         self,
         receptors: ArtifactRef,

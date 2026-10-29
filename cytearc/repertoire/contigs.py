@@ -54,6 +54,7 @@ __all__ = [
     "parse_integers",
     "parse_numbers",
     "parse_text",
+    "take_text",
     "unpack_text",
 ]
 
@@ -468,6 +469,25 @@ def _take_ragged(
     marked[missing] = -1
     new_offsets[1:] = marked
     return new_data, new_offsets
+
+
+def take_text(
+    data: np.ndarray, offsets: np.ndarray, positions: np.ndarray
+) -> np.ndarray:
+    """Decode some values of packed text, gathering only their bytes.
+
+    Args:
+        data: The packed bytes.
+        offsets: The offsets of every value in ``data``.
+        positions: The values to decode, as positions.
+
+    Returns:
+        The text of each position, as an object array.
+    """
+    gathered, bounds = _take_ragged(
+        data, offsets, np.asarray(positions, dtype=np.int64)
+    )
+    return unpack_text(gathered, bounds)
 
 
 @dataclass(frozen=True, slots=True)
