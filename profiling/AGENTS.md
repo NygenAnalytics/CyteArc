@@ -1,38 +1,31 @@
 # Profiling instructions
 
-These instructions apply to local profiling diagnostics and the Modal end-to-end profiler under
-`profiling/`.
+These instructions apply to local profiling diagnostics and the Modal end-to-end profiler under `profiling/`.
 
 ## Before cloud work
 
-- Read `docs/source/concepts/memory_and_execution.md#measuring-resource-use` for measurement
-  guidance and interpretation limits.
+- Read `docs/source/concepts/memory_and_execution.md#measuring-resource-use` for measurement guidance and interpretation limits.
 - Run local profiling tests before using cloud resources:
 
 ```bash
 uv run pytest -n 0 tests/test_profiling_*.py
 ```
 
-- Copy `profiling/config.example.toml` to the ignored `profiling/config.toml`. Do not commit
-  machine-specific configs, endpoints, bucket names, secrets, or result identifiers.
+- Copy `profiling/config.example.toml` to the ignored `profiling/config.toml`.
 - Set a fresh, non-empty `runTag` for every end-to-end measurement.
-- Ask before starting a paid or long-running Modal job.
 
 ## Deployment boundary
 
-Never run `modal deploy`. Deployment is a user action. Ask the user to run:
+Ask the user to run:
 
 ```bash
 uv run --group profiling modal deploy --env cytearc_profiling \
   -m profiling.app
 ```
-
-Do not create Modal environments, secrets, or credentials.
 
 ## Standard workflow
 
-After the user confirms that the current app is deployed, prepare deterministic CELLxGENE samples
-and confirm the requested result before starting the funnel:
+After the user confirms that the current app is deployed, prepare deterministic CELLxGENE samples and confirm the requested result before starting the funnel:
 
 ```bash
 uv run --group profiling modal run --env cytearc_profiling \
@@ -44,27 +37,20 @@ uv run --group profiling modal run --env cytearc_profiling \
   --config profiling/config.toml --size 1000000
 ```
 
-`prepare` spawns work and returns immediately. Confirm that its requested H5AD exists before
-`workflow --storage r2`.
+`prepare` spawns work and returns immediately. Confirm that its requested H5AD exists before `workflow --storage r2`.
 
-Use `step STEP` for a targeted stage, including repair of an incomplete `countsT`; use
-`workflow --storage local` for the Modal ephemeral-disk comparison.
+Use `step STEP` for a targeted stage, including repair of an incomplete `countsT`; use `workflow --storage local` for the Modal ephemeral-disk comparison.
 
 ## 1M R2 gate
 
-The 1M gate is `workflow --storage r2` on the product rotateOnce path. Use a fresh `runTag`, full funnel,
-size `1000000`, R2 backend (`cytearc_profiling` env).
+The 1M gate is `workflow --storage r2` on the product rotateOnce path. Use a fresh `runTag`, full funnel, size `1000000`, R2 backend (`cytearc_profiling` env).
 
-`profiling/config.example.toml` pins **8 CPU / 32 GiB** (CyteArc budget ~24 GiB) on
-`createStore`, `writeCountsT`, `markHvgs`, and `findMarkers`. Leave other stage envelopes as in
-the example so the gate does not claim the whole 1M funnel fits in 32 GiB.
+`profiling/config.example.toml` pins **8 CPU / 32 GiB** (CyteArc budget ~24 GiB) on `createStore`, `writeCountsT`, `markHvgs`, and `findMarkers`. Leave other stage envelopes as in the example so the gate does not claim the whole 1M funnel fits in 32 GiB.
 
-A funnel reuses the DataStore that `initializeStore` opens through `findMarkers`, so those stages
-must share `workers` and `cytearcMemoryBudget`; `workflow` refuses a config where they
-differ. Their Modal CPU and memory may differ.
+A funnel reuses the DataStore that `initializeStore` opens through `findMarkers`, so those stages must share `workers` and `cytearcMemoryBudget`; `workflow` refuses a config where they differ. Their Modal CPU and memory may differ.
 
 ```bash
-# User action only; agents never deploy.
+# User action only.
 uv run --group profiling modal deploy --env cytearc_profiling \
   -m profiling.app
 
@@ -77,50 +63,26 @@ uv run --group profiling modal run --env cytearc_profiling \
   --config profiling/config.toml --size 1000000
 ```
 
-Success: all stages ok; paired `countsT` with `complete=True`; HVG and markers finish without OOM;
-result JSON under the run's `runTag`. Expect hours of Modal time and real cost.
+Success: all stages ok; paired `countsT` with `complete=True`; HVG and markers finish without OOM; result JSON under the run's `runTag`. Expect hours of Modal time and real cost.
 
 ## Durable execution
 
-- Long work must use `.spawn(...)`, never `.remote()`. A blocking call can be cancelled when the
-  local gRPC session disconnects.
-- Wait through short `FunctionCall.get(timeout=...)` polls or durable result JSON instead of one
-  long blocking request.
-- Treat `FAILURE`, `INIT_FAILURE`, `TERMINATED`, and `TIMEOUT` as terminal.
-  Modal can raise an empty `TimeoutError` for a failed input.
-- Give coordinators about 1 CPU and 2 to 4 GiB with `retries=0`. Do not assign stage-worker
-  resources to coordinators.
-- Leave the Modal region and cloud options unset unless the experiment explicitly measures
-  a particular placement.
+- Long work must use `.spawn(...)`, never `.remote()`. A blocking call can be cancelled when the local gRPC session disconnects.
+- Wait through short `FunctionCall.get(timeout=...)` polls or durable result JSON instead of one long blocking request.
+- Treat `FAILURE`, `INIT_FAILURE`, `TERMINATED`, and `TIMEOUT` as terminal. Modal can raise an empty `TimeoutError` for a failed input.
+- Give coordinators about 1 CPU and 2 to 4 GiB with `retries=0`. Do not assign stage-worker resources to coordinators.
+- Leave the Modal region and cloud options unset unless the experiment explicitly measures a particular placement.
 - Log start, plan, periodic progress, and completion lines.
 - Persist each stage result and `funnel.json` before treating a run as complete.
 
 ## Measurement discipline
 
-- Never run two jobs with the same `runTag`. Stage jobs take a create-only claim per `runTag`,
-  size, and stage and release it when they finish, and they refuse a `runTag` that an e2e
-  funnel holds. A claim left by a killed job names the object to delete once that job has
-  stopped.
-- A stage whose artifact already existed measured a cache lookup and fails. Use `--force` or a
-  fresh `runTag`; `--allow-reuse` accepts it knowingly.
-- `storeUriOverride` and `storeUriBySize` are for consume stages only; other stages refuse them.
-  `createStore` refuses a destination that holds anything, read with the shared destination
-  probe, before it downloads the H5AD. A forced `createStore` deletes the store first and logs the
-  `runTag` and size, because writers create a store only at an empty destination and never replace
-  one that a `DataStore` has opened, as `initializeStore` does.
-- `prepare-fixture` uploads create-only, so it never replaces a prepared sample. Fixtures hold
-  `RPL` and `RPS` genes so the default `RNA_percentRibo` filter has a column; fixtures uploaded
-  before that change lack them, so prepare fixtures under a fresh `datasetPrefixUri` instead of
-  reusing an older fixture prefix. Results record the downloaded dataset's ETag and size, and
-  provenance records the digest of the code that ran next to the client's.
-- Change one measured variable at a time and keep workflow seeds fixed.
-- Compare runs only when dataset, code revision, settings, storage conditions, and resource
-  envelope are stated.
+- Never run two jobs with the same `runTag`. Stage jobs take a create-only claim per `runTag`, size, and stage and release it when they finish, and they refuse a `runTag` that an e2e funnel holds. A claim left by a killed job names the object to delete once that job has stopped.
+- A stage whose artifact already existed measured a cache lookup and fails. Use `--force` or a fresh `runTag`; `--allow-reuse` accepts it knowingly.
+- `storeUriOverride` and `storeUriBySize` are for consume stages only; other stages refuse them. `createStore` refuses a destination that holds anything, read with the shared destination probe, before it downloads the H5AD. A forced `createStore` deletes the store first and logs the `runTag` and size, because writers create a store only at an empty destination and never replace one that a `DataStore` has opened, as `initializeStore` does.
+- `prepare-fixture` uploads create-only, so it never replaces a prepared sample. Fixtures hold `RPL` and `RPS` genes so the default `RNA_percentRibo` filter has a column; fixtures uploaded before that change lack them, so prepare fixtures under a fresh `datasetPrefixUri` instead of reusing an older fixture prefix. Results record the downloaded dataset's ETag and size, and provenance records the digest of the code that ran next to the client's.
+- Keep workflow seeds fixed.
+- Compare runs only when dataset, code revision, settings, storage conditions, and resource envelope are stated.
 - Do not present measurements from different machine sizes as one scaling curve.
-- `workflow` runs one stage at a time, as `DataStore.pipeline` does, so the
-  CPU, memory, and store figures of each stage cover its own window, and `funnelSeconds` is the
-  funnel's wall time. Results that list `concurrentStages` come from earlier funnels that ran
-  UMAP beside a Leiden child process: those stages share one CPU and memory window, and their
-  `funnelSeconds` is not comparable with sequential funnels. Use `step STEP` to measure one
-  stage alone.
+- `workflow` runs one stage at a time, as `DataStore.pipeline` does, so the CPU, memory, and store figures of each stage cover its own window, and `funnelSeconds` is the funnel's wall time. Results that list `concurrentStages` come from earlier funnels that ran UMAP beside a Leiden child process: those stages share one CPU and memory window, and their `funnelSeconds` is not comparable with sequential funnels. Use `step STEP` to measure one stage alone.
 - Do not generalize one run into a hardware guarantee or a biological correctness claim.
