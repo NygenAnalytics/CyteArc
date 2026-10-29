@@ -40,6 +40,7 @@ _STORE_PLOT_METHODS = (
     "matrixplot",
     "modality_weights",
     "pseudotime_heatmap",
+    "receptor_qc",
     "run_recipe",
 )
 
@@ -107,6 +108,11 @@ _EDISTANCE_REF = ArtifactRef(
     assay="RNA",
     kind="perturbation_edistance",
     artifact_id="5" * 64,
+)
+_RECEPTORS_REF = ArtifactRef(
+    scope="datastore",
+    kind="immune_receptors",
+    artifact_id="6" * 64,
 )
 
 
@@ -305,6 +311,11 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
         ),
         ("efficiency", (_EFFICIENCY_REF,), {"max_rows": 7, "alpha": 0.01}),
         ("edistance", (_EDISTANCE_REF,), {"max_rows": 7, "alpha": 0.01}),
+        (
+            "receptor_qc",
+            (_RECEPTORS_REF,),
+            {"group_by": "sample", "normalize": False},
+        ),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -344,6 +355,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("efficiency"))
     elif name == "edistance":
         expected_args.append(expected_kwargs.pop("edistance"))
+    elif name == "receptor_qc":
+        expected_args.append(expected_kwargs.pop("receptors"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

@@ -396,7 +396,7 @@ measured cells, or a boolean column that is True only for the cells of the calle
 the assay measured, passed as `cell_key` or as a recipe's `cells`, such as one that
 `ds.cells.insert("RNA_measured", ds.cells.fetch_all("I") & ds.cells.fetch_all("RNA_I"))` writes;
 the membership column alone also holds cells outside `I`. Operations that read only other results
-or metadata, such as PCA, neighbors, clustering, layouts, `snapshot_cluster_labels`, and `perturbation.labels` (the guide calls and the guide assay's target column), do not
+or metadata, such as PCA, neighbors, clustering, layouts, `snapshot_cluster_labels`, and `perturbation.labels` (the guide calls and the guide assay's target column), and `repertoire.import_receptors`, whose contigs come from files and belong to no assay, do not
 check; the operations at the roots of their lineage do. Derived assays copy the membership. Raw
 exports that can declare it keep unmeasured cells: `to_h5ad` and `to_anndata` without layers. An
 export that cannot declare it refuses them before it writes or reads anything: `to_mtx`, whose

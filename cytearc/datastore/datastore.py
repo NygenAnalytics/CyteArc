@@ -17,6 +17,7 @@ from ._operations.perturbation import _PerturbationOperationsMixin
 from ._operations.presentation import _PresentationOperationsMixin
 from ._operations.quality_control import _QualityControlOperationsMixin
 from ._operations.regulons import _RegulonOperationsMixin
+from ._operations.repertoire import _RepertoireOperationsMixin
 from ._operations.trajectory import _TrajectoryFeatureOperationsMixin
 from .mapping_datastore import MappingDatastore
 
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
         QcAccessor,
         ReductionAccessor,
         RegulonsAccessor,
+        RepertoireAccessor,
         ScoresAccessor,
         TrajectoryAccessor,
     )
@@ -199,6 +201,7 @@ class DataStore(
     _PresentationOperationsMixin,
     _RegulonOperationsMixin,
     _PerturbationOperationsMixin,
+    _RepertoireOperationsMixin,
     MappingDatastore,
 ):
     """This class extends MappingDatastore and consequently inherits methods of
@@ -373,6 +376,12 @@ class DataStore(
         from .namespaces import RegulonsAccessor
 
         return RegulonsAccessor(self)
+
+    @property
+    def repertoire(self) -> "RepertoireAccessor":
+        from .namespaces import RepertoireAccessor
+
+        return RepertoireAccessor(self)
 
     @property
     def scores(self) -> "ScoresAccessor":

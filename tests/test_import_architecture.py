@@ -1007,8 +1007,10 @@ def test_reader_implementations_are_runtime_isolated():
     assert not (_CYTEARC_ROOT / "readers.py").exists()
     required_files = {
         "__init__.py",
+        "_contigs.py",
         "_text.py",
         "_sparse.py",
+        "airr.py",
         "cellranger.py",
         "csv.py",
         "h5ad.py",
@@ -1023,6 +1025,7 @@ def test_reader_implementations_are_runtime_isolated():
 
     forbidden_roots = {"datastore", "merge", "plotting", "storage", "writers"}
     format_modules = {
+        "readers.airr",
         "readers.cellranger",
         "readers.csv",
         "readers.h5ad",
@@ -1030,7 +1033,13 @@ def test_reader_implementations_are_runtime_isolated():
         "readers.seurat",
     }
     shared_reader_imports = {
-        "cellranger.py": {"readers._assay_names", "readers._sparse", "readers._text"},
+        "airr.py": {"readers._contigs"},
+        "cellranger.py": {
+            "readers._assay_names",
+            "readers._contigs",
+            "readers._sparse",
+            "readers._text",
+        },
         "csv.py": {"readers._text"},
         "h5ad.py": {
             "readers._assay_names",

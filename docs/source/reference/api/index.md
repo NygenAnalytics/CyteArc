@@ -21,6 +21,7 @@ integration
 mapping
 regulons
 perturbation
+repertoire
 plotting
 datasets
 utilities
