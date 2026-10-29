@@ -123,6 +123,7 @@ def test_navigation_prioritizes_remote_workflows_and_preserves_tutorials() -> No
         "tutorials/tea_seq.ipynb",
         "tutorials/multimodal_diagnostics.ipynb",
         "tutorials/hto_demultiplexing.ipynb",
+        "tutorials/immune_repertoires.ipynb",
     } <= modalities
 
     published = _toc_files(toctree)

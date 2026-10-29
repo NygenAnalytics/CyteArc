@@ -251,6 +251,7 @@ third-party observations and is licensed under BSD-3-Clause, as in `LICENSE`.
 | HTO demultiplexing | Stoeckius et al. (2018), Genome Biology 19:224, doi:10.1186/s13059-018-1603-1; GEO GSE108313 (GSM2895282, GSM2895283) | GEO; no license stated |
 | Cell calling | "1k PBMCs from a Healthy Donor (v2 chemistry)", raw feature-barcode matrix, 10x Genomics, <https://www.10xgenomics.com/datasets> | CC BY 4.0 |
 | Ambient RNA removal | "1k PBMCs from a Healthy Donor (v2 chemistry)", 10x Genomics, <https://www.10xgenomics.com/datasets>. Raw and filtered Cell Ranger matrices | CC BY 4.0 |
+| Immune repertoires | "Human PBMC from a Healthy Donor, 10k cells (v2)", 5' gene expression with TCR and BCR libraries, Cell Ranger 5.0.0, 10x Genomics, <https://www.10xgenomics.com/datasets>. Filtered feature-barcode matrix and filtered contig annotations | CC BY 4.0 |
 | CyteBase datasets and CyteBase composite datasets | Datasets from CZ CELLxGENE Discover, each credited in its CyteBase catalog entry | The license of each dataset on CELLxGENE Discover, usually CC BY 4.0 |
 
 ## Optional packages that CyteArc does not install
