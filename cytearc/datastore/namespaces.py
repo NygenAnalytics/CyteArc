@@ -186,6 +186,10 @@ class PerturbationAccessor(_Accessor):
     load_efficiency = _bind(_PerturbationOperationsMixin._perturbation_load_efficiency)
     edistance = _bind(_PerturbationOperationsMixin._perturbation_edistance)
     load_edistance = _bind(_PerturbationOperationsMixin._perturbation_load_edistance)
+    signature = _bind(_PerturbationOperationsMixin._perturbation_signature)
+    load_signature = _bind(_PerturbationOperationsMixin._perturbation_load_signature)
+    mixscape = _bind(_PerturbationOperationsMixin._perturbation_mixscape)
+    load_mixscape = _bind(_PerturbationOperationsMixin._perturbation_load_mixscape)
 
 
 class QcAccessor(_Accessor):

@@ -15,6 +15,8 @@ if TYPE_CHECKING:
         CONTROL as CONTROL,
         PerturbationLabels as PerturbationLabels,
     )
+    from .mixscape import MixscapeResult as MixscapeResult
+    from .signature import PerturbationSignature as PerturbationSignature
 
 __all__ = [
     "CONTROL",
@@ -22,9 +24,11 @@ __all__ = [
     "NEGATIVE",
     "GuideCalls",
     "GuideThresholds",
+    "MixscapeResult",
     "PerturbationEDistance",
     "PerturbationEfficiency",
     "PerturbationLabels",
+    "PerturbationSignature",
 ]
 
 __getattr__, __dir__ = _lazy_facade(
@@ -35,8 +39,10 @@ __getattr__, __dir__ = _lazy_facade(
         "NEGATIVE": ".guide_calls",
         "GuideCalls": ".guide_calls",
         "GuideThresholds": ".guide_thresholds",
+        "MixscapeResult": ".mixscape",
         "PerturbationEDistance": ".edistance",
         "PerturbationEfficiency": ".efficiency",
         "PerturbationLabels": ".labels",
+        "PerturbationSignature": ".signature",
     },
 )

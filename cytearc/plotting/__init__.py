@@ -66,6 +66,7 @@ if TYPE_CHECKING:
         efficiency as efficiency,
         guide_calls as guide_calls,
         guide_thresholds as guide_thresholds,
+        mixscape as mixscape,
     )
     from .summary import dotplot as dotplot
     from .summary import matrixplot as matrixplot
@@ -116,6 +117,7 @@ __all__ = [
     "mapping_evidence",
     "mapping_score",
     "matrixplot",
+    "mixscape",
     "modality_weights",
     "pseudotime_heatmap",
     "qc",
@@ -171,6 +173,7 @@ __getattr__, __dir__ = _lazy_facade(
         "mapping_evidence": ".mapping",
         "mapping_score": ".mapping",
         "matrixplot": ".summary",
+        "mixscape": ".perturbation",
         "modality_weights": ".modality_weights",
         "pseudotime_heatmap": ".heatmaps",
         "qc": ".diagnostics",

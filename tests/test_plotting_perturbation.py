@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 from matplotlib.colors import to_rgba
 from matplotlib.markers import MarkerStyle
+from scipy.stats import norm
 
 from cytearc.perturbation.edistance import PerturbationEDistance
 from cytearc.perturbation.efficiency import PerturbationEfficiency
@@ -21,6 +22,7 @@ from cytearc.perturbation.guide_thresholds import (
     GuideThresholds,
     guide_threshold_frames,
 )
+from cytearc.perturbation.mixscape import MixscapeResult
 from cytearc.perturbation.mixtures import (
     FIT_STATUSES,
     gaussian_posterior,
@@ -33,6 +35,7 @@ from cytearc.plotting.perturbation import (
     efficiency,
     guide_calls,
     guide_thresholds,
+    mixscape,
 )
 from cytearc.storage.refs import ArtifactRef
 
@@ -1514,3 +1517,813 @@ def test_the_edistance_plot_needs_a_store_with_perturbation_edistances(
         TypeError, match="store does not provide perturbation E-distances"
     ):
         edistance(store, EDISTANCE, show=False)
+
+
+MIXSCAPE = ArtifactRef(
+    scope="assay", assay="RNA", kind="mixscape_classes", artifact_id="e" * 64
+)
+KNOCKED_OUT = to_rgba("#2b6cb0")
+ESCAPED = to_rgba("#9e9e9e")
+PERTURBED_CURVE = to_rgba("#d55e00")
+MIXSCAPE_LEGEND = [
+    "KO (perturbed)",
+    "NP (not perturbed)",
+    "Fitted control component",
+    "Fitted perturbed component",
+]
+MixscapeRow = tuple[
+    str, str | None, str, list[float], list[float], tuple[float, ...] | None
+]
+
+# Each row is a target, its split, its status, the scores of its KO cells and
+# of its NP cells, and its fit: the mean and standard deviation of the control
+# component, then of the perturbed component. A row without a fit has only NP
+# cells, without scores.
+MIXSCAPE_TARGETS: list[MixscapeRow] = [
+    (
+        "MYC",
+        None,
+        "fitted",
+        [0.83, 0.91, 1.02, 1.04, 1.12, 1.29],
+        [-0.23, 0.04, 0.11, 0.37],
+        (0.0, 0.2, 1.0, 0.15),
+    ),
+    (
+        "TP53",
+        None,
+        "fitted",
+        [0.62, 1.18],
+        [-0.12, 0.02, 0.03, 0.21, 0.43, 0.16],
+        (0.05, 0.25, 0.9, 0.3),
+    ),
+    ("GATA1", None, "few_de_genes", [], [np.nan] * 5, None),
+    ("KLF1", None, "fitted", [1.52, 2.03, 1.81], [0.22], (0.1, 0.3, 1.7, 0.2)),
+    ("CD19", None, "few_cells", [], [np.nan] * 2, None),
+]
+# B and A share their cells, B and C their KO share, and E and D theirs.
+MIXSCAPE_MANY: list[MixscapeRow] = [
+    ("B", None, "fitted", [1.01, 1.13], [0.02, 0.12], (0.0, 0.2, 1.0, 0.2)),
+    ("A", None, "fitted", [0.97], [0.01, 0.13, -0.11], (0.0, 0.2, 1.0, 0.2)),
+    (
+        "C",
+        None,
+        "fitted",
+        [0.93, 1.04, 1.16],
+        [0.03, 0.22, 0.14],
+        (0.0, 0.2, 1.0, 0.2),
+    ),
+    ("E", None, "no_fit", [], [np.nan] * 7, None),
+    ("D", None, "few_de_genes", [], [np.nan] * 3, None),
+]
+# MYC is fitted in run1 only, TP53 in neither run, with a different status in
+# each, and KLF1 in both, with different fits.
+MIXSCAPE_SPLITS: list[MixscapeRow] = [
+    ("MYC", "run1", "fitted", [0.92, 1.03, 1.21], [0.02, 0.13], (0.0, 0.2, 1.0, 0.2)),
+    ("MYC", "run2", "few_cells", [], [np.nan] * 3, None),
+    ("TP53", "run1", "few_de_genes", [], [np.nan] * 2, None),
+    ("TP53", "run2", "few_cells", [], [np.nan] * 2, None),
+    ("KLF1", "run1", "fitted", [1.41, 1.62], [0.11, 0.24], (0.1, 0.3, 1.5, 0.2)),
+    (
+        "KLF1",
+        "run2",
+        "fitted",
+        [1.12, 1.33, 1.24],
+        [-0.07],
+        (0.0, 0.25, 1.2, 0.15),
+    ),
+]
+
+
+def _mixscape_record(
+    rows: list[MixscapeRow],
+    *,
+    perturbation_type: str = "KO",
+    split_column: str | None = None,
+) -> MixscapeResult:
+    """Build the record that ``load_mixscape`` returns for ``rows``.
+
+    The cells of each row come in its order, KO cells first, and then three
+    control cells and a cell with two targets. A cell with a score has the
+    posterior 0.9 when it is KO and 0.1 when it is NP.
+    """
+    cells: list[tuple[str, str, float, float, str | None]] = []
+    targets: list[dict[str, Any]] = []
+    for name, split, status, ko_scores, np_scores, fit in rows:
+        # Keep the test data honest: only a fitted row has KO cells or scores.
+        assert (fit is not None) == (status == "fitted")
+        assert fit is not None or (not ko_scores and np.isnan(np_scores).all())
+        for scores, word, chance in (
+            (ko_scores, perturbation_type, 0.9),
+            (np_scores, "NP", 0.1),
+        ):
+            cells.extend(
+                (
+                    f"{name} {word}",
+                    word,
+                    np.nan if fit is None else chance,
+                    score,
+                    split,
+                )
+                for score in scores
+            )
+        control_mean, control_sd, perturbed_mean, perturbed_sd = fit or (np.nan,) * 4
+        targets.append(
+            {
+                "target": name,
+                "split": split,
+                "status": status,
+                "n_cells": len(ko_scores) + len(np_scores),
+                "n_ko": len(ko_scores),
+                "n_de_genes": 2 if status == "few_de_genes" else 12,
+                "iterations": 0 if status == "few_de_genes" else 3,
+                "converged": fit is not None,
+                "control_mean": control_mean,
+                "control_sd": control_sd,
+                "perturbed_mean": perturbed_mean,
+                "perturbed_sd": perturbed_sd,
+                "perturbed_weight": np.nan if fit is None else 0.4,
+            }
+        )
+    split = rows[0][1] if rows else None
+    cells.extend(
+        (label, label, np.nan, np.nan, split)
+        for label in ["control"] * 3 + ["Multiple"]
+    )
+    frame = pd.DataFrame(
+        cells,
+        columns=["mixscape_class", "global_class", "posterior", "score", "split"],
+        index=pd.Index([f"cell{index}" for index in range(len(cells))], name="ids"),
+    )
+    table = pd.DataFrame(
+        targets,
+        columns=[
+            "target",
+            "split",
+            "status",
+            "n_cells",
+            "n_ko",
+            "n_de_genes",
+            "iterations",
+            "converged",
+            "control_mean",
+            "control_sd",
+            "perturbed_mean",
+            "perturbed_sd",
+            "perturbed_weight",
+        ],
+    ).astype(
+        {
+            "n_cells": np.int64,
+            "n_ko": np.int64,
+            "n_de_genes": np.int64,
+            "iterations": np.int64,
+            "converged": bool,
+        }
+    )
+    return MixscapeResult(
+        cells=frame,
+        targets=table,
+        de_genes=pd.DataFrame({"target": [], "split": [], "feature": []}),
+        perturbation_type=perturbation_type,
+        split_column=split_column,
+    )
+
+
+def _mixscape_store(
+    record: MixscapeResult, requests: list[ArtifactRef] | None = None
+) -> SimpleNamespace:
+    """A store whose loader returns ``record`` and notes each reference it reads."""
+
+    def load(ref: ArtifactRef) -> MixscapeResult:
+        if requests is not None:
+            requests.append(ref)
+        return record
+
+    return SimpleNamespace(perturbation=SimpleNamespace(load_mixscape=load))
+
+
+def _drawn_cells(record: MixscapeResult, names: list[str]) -> pd.DataFrame:
+    """Return the cells of ``names`` that have scores, target by target."""
+    cells = record.cells
+    frames = []
+    for name in names:
+        classes = [f"{name} {record.perturbation_type}", f"{name} NP"]
+        chosen = cells["mixscape_class"].isin(classes) & cells["score"].notna()
+        frames.append(cells[chosen].assign(target=name))
+    return pd.concat(frames)[["target", "split", "score", "global_class", "posterior"]]
+
+
+def _check_class_bars(result: Any) -> None:
+    """Check that each drawn target's bar splits at its KO share, first on top."""
+    ax = result.axes["classes"]
+    table = result.tables["classes"]
+    assert list(table.columns) == ["target", "n_cells", "n_ko", "n_np", "ko_share"]
+    assert (table["n_np"] == table["n_cells"] - table["n_ko"]).all()
+    shares = table["ko_share"].to_numpy()
+    np.testing.assert_allclose(shares, table["n_ko"] / table["n_cells"])
+    n_rows = len(table)
+    assert len(ax.patches) == 2 * n_rows
+    heights = np.arange(n_rows)[::-1]
+    for bars, left, width, color in (
+        (ax.patches[:n_rows], np.zeros(n_rows), shares, KNOCKED_OUT),
+        (ax.patches[n_rows:], shares, 1.0 - shares, ESCAPED),
+    ):
+        np.testing.assert_allclose([bar.get_x() for bar in bars], left)
+        np.testing.assert_allclose([bar.get_width() for bar in bars], width)
+        np.testing.assert_allclose(
+            [bar.get_y() + bar.get_height() / 2 for bar in bars], heights
+        )
+        assert [bar.get_facecolor() for bar in bars] == [color] * n_rows
+    # Each bar fills the axis, and its label names the target and its cells.
+    assert ax.get_xlim() == (0.0, 1.0)
+    assert ax.xaxis.get_major_formatter().format_ticks(ax.get_xticks()) == [
+        "0%",
+        "25%",
+        "50%",
+        "75%",
+        "100%",
+    ]
+    assert ax.get_xlabel() == "Share of the target's cells"
+    assert _row_labels(ax) == [
+        f"{name} ({count:,} cell{'' if count == 1 else 's'})"
+        for name, count in zip(table["target"], table["n_cells"], strict=True)
+    ]
+
+
+def _check_score_panel(
+    result: Any, name: str, fit: tuple[float, ...], *, theme: str = "notebook"
+) -> None:
+    """Check that a panel draws its target's scores and the normals of ``fit``."""
+    ax = result.axes[name]
+    table = result.tables["scores"]
+    cells = table[table["target"] == name]
+    scores = cells["score"].to_numpy()
+    ko = (
+        cells["global_class"] == result.provenance.extras["perturbation_type"]
+    ).to_numpy()
+    # 30 bins of equal width span the scores.
+    low, high = scores.min(), scores.max()
+    width = (high - low) / 30
+    edges = low + width * np.arange(31)
+    # Keep the test data honest: no score sits on an inner edge.
+    assert np.abs(scores[:, None] - edges[1:-1]).min() > 1e-6
+    bins = np.minimum(np.floor((scores - low) / width).astype(int), 29)
+    ko_bars = [bar for bar in ax.patches if bar.get_facecolor() == KNOCKED_OUT]
+    np_bars = [bar for bar in ax.patches if bar.get_facecolor() == ESCAPED]
+    assert len(ko_bars) + len(np_bars) == len(ax.patches)
+    for bars, chosen in ((ko_bars, ko), (np_bars, ~ko)):
+        if not chosen.any():
+            assert bars == []
+            continue
+        np.testing.assert_allclose([bar.get_x() for bar in bars], edges[:-1])
+        np.testing.assert_allclose([bar.get_width() for bar in bars], width)
+        # Each bar counts the cells of its class whose scores fall in its bin.
+        assert [bar.get_height() for bar in bars] == np.bincount(
+            bins[chosen], minlength=30
+        ).tolist()
+    # The NP bars stand on the KO bars.
+    assert [bar.get_y() for bar in ko_bars] == [0.0] * len(ko_bars)
+    if ko_bars and np_bars:
+        assert [bar.get_y() for bar in np_bars] == [bar.get_height() for bar in ko_bars]
+    assert (np.asarray(ax.get_yticks()) % 1 == 0).all()
+    control_mean, control_sd, perturbed_mean, perturbed_sd = fit
+    reach = [
+        low,
+        high,
+        control_mean - 3 * control_sd,
+        control_mean + 3 * control_sd,
+        perturbed_mean - 3 * perturbed_sd,
+        perturbed_mean + 3 * perturbed_sd,
+    ]
+    control, perturbed = ax.get_lines()
+    assert to_rgba(control.get_color()) == to_rgba(foreground_color(theme))
+    assert to_rgba(perturbed.get_color()) == PERTURBED_CURVE
+    for line, mean, sd, n_class in (
+        (control, control_mean, control_sd, np.count_nonzero(~ko)),
+        (perturbed, perturbed_mean, perturbed_sd, np.count_nonzero(ko)),
+    ):
+        values = line.get_xdata()
+        density = line.get_ydata()
+        np.testing.assert_allclose(values, np.linspace(min(reach), max(reach), 200))
+        np.testing.assert_allclose(
+            density, n_class * width * norm.pdf(values, mean, sd)
+        )
+        # Each curve covers as many cells as the bars of its class.
+        assert np.trapezoid(density, values) / width == pytest.approx(n_class, rel=0.01)
+    assert ax.get_xlabel() == "Perturbation score"
+    assert ax.get_ylabel() == "Cells"
+
+
+def test_mixscape_classes_draw_each_target_from_the_largest_ko_share_down() -> None:
+    requests: list[ArtifactRef] = []
+    record = _mixscape_record(MIXSCAPE_TARGETS)
+
+    result = mixscape(_mixscape_store(record, requests), MIXSCAPE, show=False)
+
+    try:
+        assert requests == [MIXSCAPE]
+        assert list(result.tables) == ["classes"]
+        table = result.tables["classes"]
+        assert table["target"].tolist() == ["KLF1", "MYC", "TP53", "CD19", "GATA1"]
+        assert table["n_cells"].tolist() == [4, 10, 8, 2, 5]
+        assert table["n_ko"].tolist() == [3, 6, 2, 0, 0]
+        assert table["ko_share"].tolist() == pytest.approx([0.75, 0.6, 0.25, 0, 0])
+        assert list(result.axes) == ["classes"]
+        _check_class_bars(result)
+        ax = result.axes["classes"]
+        # CD19 and GATA1 were not fitted, so all their cells are NP, and their
+        # names order them.
+        assert _row_labels(ax) == [
+            "KLF1 (4 cells)",
+            "MYC (10 cells)",
+            "TP53 (8 cells)",
+            "CD19 (2 cells)",
+            "GATA1 (5 cells)",
+        ]
+        assert ax.get_title().splitlines() == [
+            "Mixscape classes by target",
+            "Not fitted, so all NP: 1 few_de_genes, 1 few_cells",
+        ]
+        (legend,) = result.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == MIXSCAPE_LEGEND[:2]
+        assert result.legends == (LegendSpec(kind="categorical", label="Class"),)
+        provenance = result.provenance
+        assert provenance.assay == "RNA"
+        # The cells of the drawn targets.
+        assert provenance.n_cells == 4 + 10 + 8 + 2 + 5
+        assert provenance.notes == ("mixscape_classes",)
+        assert provenance.extras == {
+            "classes": MIXSCAPE.to_dict(),
+            "panel": "classes",
+            "perturbation_type": "KO",
+            "split_column": None,
+            "targets": None,
+            "max_targets": 40,
+            "statuses": {"fitted": 3, "few_de_genes": 1, "few_cells": 1, "no_fit": 0},
+        }
+    finally:
+        result.close()
+
+
+def test_mixscape_classes_keep_the_targets_with_the_most_cells() -> None:
+    store = _mixscape_store(_mixscape_record(MIXSCAPE_MANY))
+
+    kept = mixscape(store, MIXSCAPE, max_targets=np.int64(3), show=False)
+    every = mixscape(store, MIXSCAPE, max_targets=5, show=False)
+
+    try:
+        # E and C have the most cells, and A ties with B but comes first by
+        # name.
+        assert kept.tables["classes"]["target"].tolist() == ["C", "A", "E"]
+        _check_class_bars(kept)
+        assert kept.axes["classes"].get_title().splitlines() == [
+            "Mixscape classes by target",
+            "The 3 of 5 targets with the most cells",
+            "Not fitted, so all NP: 1 no_fit",
+        ]
+        assert kept.provenance.extras["max_targets"] == 3
+        assert type(kept.provenance.extras["max_targets"]) is int
+        assert kept.provenance.n_cells == 6 + 4 + 7
+        # B and C share a KO share, and so do D and E, so names order them.
+        assert every.tables["classes"]["target"].tolist() == ["B", "C", "A", "D", "E"]
+        _check_class_bars(every)
+        assert every.axes["classes"].get_title().splitlines() == [
+            "Mixscape classes by target",
+            "Not fitted, so all NP: 1 few_de_genes, 1 no_fit",
+        ]
+    finally:
+        kept.close()
+        every.close()
+
+
+def test_mixscape_classes_keep_the_chosen_targets_in_their_order() -> None:
+    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+
+    result = mixscape(
+        store,
+        MIXSCAPE,
+        targets=["GATA1", "MYC", "KLF1", "MYC"],
+        max_targets=3,
+        show=False,
+    )
+
+    try:
+        assert result.tables["classes"]["target"].tolist() == ["GATA1", "MYC", "KLF1"]
+        _check_class_bars(result)
+        assert result.axes["classes"].get_title().splitlines() == [
+            "Mixscape classes by target",
+            "Not fitted, so all NP: 1 few_de_genes",
+        ]
+        assert result.provenance.extras["targets"] == ["GATA1", "MYC", "KLF1"]
+        assert result.provenance.n_cells == 5 + 10 + 4
+    finally:
+        result.close()
+
+
+def test_mixscape_classes_pool_the_splits_of_each_target() -> None:
+    record = _mixscape_record(
+        MIXSCAPE_SPLITS, perturbation_type="KD", split_column="run"
+    )
+
+    result = mixscape(_mixscape_store(record), MIXSCAPE, show=False)
+
+    try:
+        table = result.tables["classes"]
+        assert table["target"].tolist() == ["KLF1", "MYC", "TP53"]
+        assert table["n_cells"].tolist() == [8, 8, 4]
+        assert table["n_ko"].tolist() == [5, 3, 0]
+        _check_class_bars(result)
+        # MYC was fitted in run1, so only TP53 counts, under both its statuses.
+        assert result.axes["classes"].get_title().splitlines() == [
+            "Mixscape classes by target",
+            "Not fitted, so all NP: 1 few_de_genes, 1 few_cells",
+        ]
+        (legend,) = result.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "KD (perturbed)",
+            "NP (not perturbed)",
+        ]
+        extras = result.provenance.extras
+        assert extras["perturbation_type"] == "KD"
+        assert extras["split_column"] == "run"
+        assert extras["statuses"] == {
+            "fitted": 3,
+            "few_de_genes": 1,
+            "few_cells": 2,
+            "no_fit": 0,
+        }
+    finally:
+        result.close()
+
+
+def test_mixscape_classes_without_a_fitted_target_still_draw() -> None:
+    empty = mixscape(_mixscape_store(_mixscape_record([])), MIXSCAPE, show=False)
+    unfitted = mixscape(
+        _mixscape_store(_mixscape_record(MIXSCAPE_MANY[3:])), MIXSCAPE, show=False
+    )
+
+    try:
+        _check_class_bars(empty)
+        ax = empty.axes["classes"]
+        assert len(ax.patches) == 0
+        assert list(ax.get_yticks()) == []
+        assert ax.get_title() == "Mixscape classes by target"
+        assert empty.figure.legends == []
+        assert empty.tables["classes"].empty
+        assert empty.provenance.n_cells == 0
+        assert empty.provenance.extras["statuses"] == {
+            "fitted": 0,
+            "few_de_genes": 0,
+            "few_cells": 0,
+            "no_fit": 0,
+        }
+        # Every cell is NP, so the legend names only NP.
+        _check_class_bars(unfitted)
+        (legend,) = unfitted.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "NP (not perturbed)"
+        ]
+    finally:
+        empty.close()
+        unfitted.close()
+
+
+def test_mixscape_classes_draw_into_caller_axes_in_the_theme() -> None:
+    figure, ax = plt.subplots()
+    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+
+    try:
+        result = mixscape(store, MIXSCAPE, target=ax, theme="dark", show=False)
+        assert result.owns_figure is False
+        assert result.figure is figure
+        assert result.axes == {"classes": ax}
+        assert figure.legends == []
+        legend = ax.get_legend()
+        assert [text.get_text() for text in legend.get_texts()] == MIXSCAPE_LEGEND[:2]
+        # Every bar spans the axes, so the legend stands beside them.
+        figure.canvas.draw()
+        assert legend.get_window_extent().x0 > ax.get_window_extent().x1
+        _check_class_bars(result)
+        assert to_rgba(ax.title.get_color()) == to_rgba(foreground_color("dark"))
+    finally:
+        plt.close(figure)
+
+
+def test_mixscape_scores_draw_one_panel_per_fitted_target() -> None:
+    requests: list[ArtifactRef] = []
+    record = _mixscape_record(MIXSCAPE_TARGETS)
+
+    result = mixscape(
+        _mixscape_store(record, requests), MIXSCAPE, panel="scores", show=False
+    )
+
+    try:
+        assert requests == [MIXSCAPE]
+        # The fitted targets, from the largest KO share to the smallest.
+        names = ["KLF1", "MYC", "TP53"]
+        assert list(result.axes) == names
+        assert list(result.tables) == ["scores"]
+        pd.testing.assert_frame_equal(
+            result.tables["scores"], _drawn_cells(record, names)
+        )
+        fits = {row[0]: row[5] for row in MIXSCAPE_TARGETS}
+        for name in names:
+            _check_score_panel(result, name, fits[name])
+            assert result.axes[name].get_title() == name
+        assert result.figure.get_suptitle().splitlines() == [
+            "Mixscape scores by target",
+            "Not fitted, so not drawn: 1 few_de_genes, 1 few_cells",
+        ]
+        (legend,) = result.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == MIXSCAPE_LEGEND
+        assert result.legends == (
+            LegendSpec(kind="categorical", label="Class"),
+            LegendSpec(kind="line", label="Fitted component"),
+        )
+        provenance = result.provenance
+        # The drawn cells.
+        assert provenance.n_cells == 4 + 10 + 8
+        assert provenance.notes == ("mixscape_classes",)
+        assert provenance.extras == {
+            "classes": MIXSCAPE.to_dict(),
+            "panel": "scores",
+            "perturbation_type": "KO",
+            "split_column": None,
+            "targets": None,
+            "max_targets": 40,
+            "statuses": {"fitted": 3, "few_de_genes": 1, "few_cells": 1, "no_fit": 0},
+        }
+    finally:
+        result.close()
+
+
+def test_mixscape_scores_keep_the_fitted_targets_with_the_most_cells() -> None:
+    record = _mixscape_record(MIXSCAPE_MANY)
+
+    result = mixscape(
+        _mixscape_store(record), MIXSCAPE, panel="scores", max_targets=2, show=False
+    )
+
+    try:
+        # C has the most cells of the fitted targets, and A ties with B but
+        # comes first by name.
+        assert list(result.axes) == ["C", "A"]
+        pd.testing.assert_frame_equal(
+            result.tables["scores"], _drawn_cells(record, ["C", "A"])
+        )
+        for name in ["C", "A"]:
+            _check_score_panel(result, name, (0.0, 0.2, 1.0, 0.2))
+        assert result.figure.get_suptitle().splitlines() == [
+            "Mixscape scores by target",
+            "The 2 of 3 fitted targets with the most cells",
+            "Not fitted, so not drawn: 1 few_de_genes, 1 no_fit",
+        ]
+        assert result.provenance.n_cells == 6 + 4
+    finally:
+        result.close()
+
+
+def test_mixscape_scores_fill_rows_of_four_panels() -> None:
+    rows: list[MixscapeRow] = [
+        (
+            f"T{index}",
+            None,
+            "fitted",
+            [0.93 + 0.01 * index, 1.07],
+            [0.02, 0.11],
+            (0.0, 0.2, 1.0, 0.2),
+        )
+        for index in range(5)
+    ]
+
+    result = mixscape(
+        _mixscape_store(_mixscape_record(rows)), MIXSCAPE, panel="scores", show=False
+    )
+
+    try:
+        # The targets share their cells and their KO share, so names order them.
+        names = [f"T{index}" for index in range(5)]
+        assert list(result.axes) == names
+        positions = [
+            (spec.rowspan.start, spec.colspan.start)
+            for spec in (result.axes[name].get_subplotspec() for name in names)
+        ]
+        assert positions == [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0)]
+        assert len(result.figure.axes) == 5
+        assert result.figure.get_suptitle() == "Mixscape scores by target"
+    finally:
+        result.close()
+
+
+def test_mixscape_scores_skip_chosen_targets_without_a_fit() -> None:
+    record = _mixscape_record(MIXSCAPE_TARGETS)
+
+    result = mixscape(
+        _mixscape_store(record),
+        MIXSCAPE,
+        panel="scores",
+        targets=["TP53", "GATA1", "MYC"],
+        show=False,
+    )
+
+    try:
+        assert list(result.axes) == ["TP53", "MYC"]
+        pd.testing.assert_frame_equal(
+            result.tables["scores"], _drawn_cells(record, ["TP53", "MYC"])
+        )
+        assert result.figure.get_suptitle().splitlines() == [
+            "Mixscape scores by target",
+            "Not fitted, so not drawn: 1 few_de_genes",
+        ]
+        assert result.provenance.extras["targets"] == ["TP53", "GATA1", "MYC"]
+    finally:
+        result.close()
+
+
+def test_mixscape_scores_pool_the_splits_and_draw_the_first_fit() -> None:
+    record = _mixscape_record(
+        MIXSCAPE_SPLITS, perturbation_type="KD", split_column="run"
+    )
+
+    result = mixscape(_mixscape_store(record), MIXSCAPE, panel="scores", show=False)
+
+    try:
+        assert list(result.axes) == ["KLF1", "MYC"]
+        table = result.tables["scores"]
+        pd.testing.assert_frame_equal(table, _drawn_cells(record, ["KLF1", "MYC"]))
+        # KLF1 pools both runs, and the cells of MYC in run2 have no score.
+        assert table["split"].tolist() == ["run1"] * 4 + ["run2"] * 4 + ["run1"] * 5
+        # The curves are the fit of each target's first fitted run.
+        _check_score_panel(result, "KLF1", (0.1, 0.3, 1.5, 0.2))
+        _check_score_panel(result, "MYC", (0.0, 0.2, 1.0, 0.2))
+        assert result.axes["KLF1"].get_title() == "KLF1, fit in run1"
+        assert result.axes["MYC"].get_title() == "MYC, fit in run1"
+        assert result.figure.get_suptitle().splitlines() == [
+            "Mixscape scores by target",
+            "Not fitted, so not drawn: 1 few_de_genes, 1 few_cells",
+        ]
+        (legend,) = result.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "KD (perturbed)",
+            *MIXSCAPE_LEGEND[1:],
+        ]
+    finally:
+        result.close()
+
+
+def test_mixscape_scores_draw_into_caller_axes_in_the_theme() -> None:
+    figure, axes = plt.subplots(1, 3)
+    figure.suptitle("The caller's figure")
+    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+
+    try:
+        result = mixscape(
+            store,
+            MIXSCAPE,
+            panel="scores",
+            targets=["TP53", "GATA1", "MYC"],
+            target={"MYC": axes[0], "TP53": axes[2]},
+            theme="dark",
+            show=False,
+        )
+        assert result.owns_figure is False
+        assert result.figure is figure
+        assert result.axes == {"TP53": axes[2], "MYC": axes[0]}
+        # The caller's figure keeps its title and has no legend: the first
+        # panel holds the legend, and the plot's title above its own.
+        assert figure.get_suptitle() == "The caller's figure"
+        assert figure.legends == []
+        assert [
+            text.get_text() for text in axes[2].get_legend().get_texts()
+        ] == MIXSCAPE_LEGEND
+        assert axes[0].get_legend() is None
+        assert axes[2].get_title().splitlines() == [
+            "Mixscape scores by target",
+            "Not fitted, so not drawn: 1 few_de_genes",
+            "TP53",
+        ]
+        assert axes[0].get_title() == "MYC"
+        _check_score_panel(result, "TP53", (0.05, 0.25, 0.9, 0.3), theme="dark")
+        _check_score_panel(result, "MYC", (0.0, 0.2, 1.0, 0.15), theme="dark")
+        assert not axes[1].has_data()
+    finally:
+        plt.close(figure)
+
+
+def test_mixscape_can_drop_the_legend() -> None:
+    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+
+    results = {
+        (panel, legend): mixscape(
+            store, MIXSCAPE, panel=panel, show_legend=legend, show=False
+        )
+        for panel in ("classes", "scores")
+        for legend in (False, True)
+    }
+
+    try:
+        for panel in ("classes", "scores"):
+            plain, legended = results[panel, False], results[panel, True]
+            assert plain.figure.legends == []
+            assert all(ax.get_legend() is None for ax in plain.axes.values())
+            # Only a figure with a legend leaves room for it at the right.
+            assert (
+                plain.figure.get_size_inches()[0] < legended.figure.get_size_inches()[0]
+            )
+    finally:
+        for result in results.values():
+            result.close()
+
+
+def test_showing_the_mixscape_plot_releases_its_figure() -> None:
+    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+
+    classes = mixscape(store, MIXSCAPE)
+    scores = mixscape(store, MIXSCAPE, panel="scores")
+
+    assert classes.tables["classes"]["target"].tolist() == [
+        "KLF1",
+        "MYC",
+        "TP53",
+        "CD19",
+        "GATA1",
+    ]
+    assert scores.tables["scores"]["target"].unique().tolist() == [
+        "KLF1",
+        "MYC",
+        "TP53",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "error", "message"),
+    [
+        ({"panel": "violin"}, ValueError, "panel must be 'classes' or 'scores'"),
+        ({"panel": None}, ValueError, "panel must be 'classes' or 'scores'"),
+        ({"max_targets": 0}, ValueError, "max_targets must be a positive integer"),
+        ({"max_targets": True}, ValueError, "max_targets must be a positive integer"),
+        ({"max_targets": 2.0}, ValueError, "max_targets must be a positive integer"),
+        ({"targets": "MYC"}, TypeError, "targets must be a sequence of targets"),
+        ({"targets": [1]}, TypeError, "targets must be a sequence of targets"),
+        ({"targets": []}, ValueError, "targets must name at least one target"),
+        (
+            {"targets": ["MYC", "TP53", "KLF1"], "max_targets": 2},
+            ValueError,
+            "targets names 3 targets, more than max_targets=2",
+        ),
+        (
+            {"panel": "scores", "targets": ["MYC", "TP53"], "max_targets": 1},
+            ValueError,
+            "targets names 2 targets, more than max_targets=1",
+        ),
+    ],
+)
+def test_the_mixscape_plot_refuses_settings_it_cannot_use(
+    arguments: dict[str, Any], error: type[Exception], message: str
+) -> None:
+    requests: list[ArtifactRef] = []
+    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS), requests)
+
+    with pytest.raises(error, match=message):
+        mixscape(store, MIXSCAPE, show=False, **arguments)
+    # The settings are checked before the record is read.
+    assert requests == []
+
+
+@pytest.mark.parametrize("panel", ["classes", "scores"])
+def test_the_mixscape_plot_names_a_target_the_classes_lack(panel: str) -> None:
+    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+
+    with pytest.raises(
+        ValueError, match="The Mixscape classes have no target named 'SOX2'"
+    ):
+        mixscape(
+            store, MIXSCAPE, panel=panel, targets=["MYC", "SOX2", "PAX5"], show=False
+        )
+
+
+@pytest.mark.parametrize(
+    ("rows", "targets"),
+    [(MIXSCAPE_TARGETS, ["GATA1", "CD19"]), (MIXSCAPE_MANY[3:], None)],
+)
+def test_the_mixscape_scores_need_a_fitted_target(
+    rows: list[MixscapeRow], targets: list[str] | None
+) -> None:
+    store = _mixscape_store(_mixscape_record(rows))
+
+    with pytest.raises(ValueError, match="None of the targets has a fitted split"):
+        mixscape(store, MIXSCAPE, panel="scores", targets=targets, show=False)
+
+
+@pytest.mark.parametrize(
+    "store",
+    [
+        SimpleNamespace(),
+        SimpleNamespace(perturbation=SimpleNamespace(load_edistance=lambda ref: ref)),
+    ],
+)
+def test_the_mixscape_plot_needs_a_store_with_mixscape_classes(
+    store: SimpleNamespace,
+) -> None:
+    with pytest.raises(TypeError, match="store does not provide Mixscape classes"):
+        mixscape(store, MIXSCAPE, show=False)

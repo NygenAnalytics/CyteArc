@@ -182,6 +182,12 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
         # the run's frozen fields, and label it corrupt only when its
         # recorded cell selection is malformed.
         "metadata_snapshot": CellValueSpec("values", False),
+        # posterior and score are NaN for cells outside a fitted target.
+        "mixscape_classes": CellValueSpec(
+            "values",
+            True,
+            {"global_class": True, "posterior": False, "score": False},
+        ),
         # target_codes holds one row per cell and one column per target gene,
         # padded to the cells' largest number of targets.
         "perturbation_labels": CellValueSpec(

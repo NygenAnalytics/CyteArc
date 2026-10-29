@@ -12,6 +12,7 @@ from ..perturbation.edistance import (
     TESTED as EDISTANCE_TESTED,
 )
 from ..perturbation.efficiency import EFFICIENCY_STATUSES, TESTED
+from ..perturbation.mixscape import MIXSCAPE_STATUSES
 from ..perturbation.mixtures import (
     FIT_STATUSES,
     gaussian_posterior,
@@ -86,6 +87,26 @@ _NO_UMI_MARKER = "<"
 _NO_UMI_LABEL = "No UMI remains in the perturbed cells"
 
 _EDISTANCE_PANEL = "edistance"
+
+_CLASSES_PANEL = "classes"
+_SCORES_PANEL = "scores"
+_KO_COLOR = _SIGNIFICANT_COLOR
+_NP_COLOR = _NOT_SIGNIFICANT_COLOR
+_NP_LABEL = "NP (not perturbed)"
+# A bar's share of the space between two neighbouring targets.
+_CLASS_BAR_HEIGHT = 0.7
+_CONTROL_CURVE_LABEL = "Fitted control component"
+_PERTURBED_CURVE_LABEL = "Fitted perturbed component"
+_PERTURBED_CURVE_COLOR = _THRESHOLD_COLOR
+# A scores panel sorts its cells' scores into this many bins of equal width.
+_SCORE_BINS = 30
+# A fitted normal is drawn at this many points, from the first bin or 3
+# standard deviations below the mean of either component, whichever is lower,
+# to the last bin or as far above, whichever is higher.
+_CURVE_POINTS = 200
+_CURVE_REACH = 3.0
+# A scores figure puts at most this many panels in a row.
+_SCORE_COLUMNS = 4
 
 
 def _guide_calls(store: Any, calls: ArtifactRef) -> Any:
@@ -1202,6 +1223,508 @@ def edistance(
                 "statuses": {
                     status: int(statuses.get(status, 0))
                     for status in EDISTANCE_STATUSES
+                },
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+def _mixscape_classes(store: Any, classes: ArtifactRef) -> Any:
+    """Load saved Mixscape classes through the store's narrow loader."""
+    loader = getattr(getattr(store, "perturbation", None), "load_mixscape", None)
+    if not callable(loader):
+        raise TypeError("store does not provide Mixscape classes")
+    return loader(classes)
+
+
+def _ko_label(perturbation_type: str) -> str:
+    """Return the legend label of the knocked-out cells."""
+    return f"{perturbation_type} (perturbed)"
+
+
+def _pooled_targets(rows: pd.DataFrame) -> pd.DataFrame:
+    """Return one row per target, in record order, that pools its splits.
+
+    The columns are ``target``, ``n_cells``, ``n_ko``, ``n_np``, ``ko_share``
+    and ``fitted``, whether any split of the target was fitted.
+    """
+    pooled = (
+        rows.assign(fitted=rows["status"] == "fitted")
+        .groupby("target", sort=False)
+        .agg(
+            n_cells=("n_cells", "sum"),
+            n_ko=("n_ko", "sum"),
+            fitted=("fitted", "any"),
+        )
+        .reset_index()
+    )
+    pooled.insert(3, "n_np", pooled["n_cells"] - pooled["n_ko"])
+    pooled.insert(4, "ko_share", pooled["n_ko"] / pooled["n_cells"])
+    return pooled
+
+
+def _most_cells(pooled: pd.DataFrame, max_targets: int) -> pd.DataFrame:
+    """Keep the ``max_targets`` targets with the most cells, ties broken by name.
+
+    They run from the largest KO share to the smallest, ties broken by name.
+    """
+    kept = pooled.sort_values(["n_cells", "target"], ascending=[False, True])
+    return kept.head(max_targets).sort_values(
+        ["ko_share", "target"], ascending=[False, True]
+    )
+
+
+def _unfitted_statuses(rows: pd.DataFrame, names: Sequence[str]) -> list[str]:
+    """Count the targets of ``names`` that were fitted in no split, by status.
+
+    A target whose splits have different statuses counts under each.
+    """
+    chosen = rows[rows["target"].isin(list(names))]
+    fitted = chosen.loc[chosen["status"] == "fitted", "target"]
+    unfitted = chosen[~chosen["target"].isin(fitted)]
+    counts = unfitted.drop_duplicates(["target", "status"])["status"].value_counts()
+    return [
+        f"{int(counts[status]):,} {status}"
+        for status in MIXSCAPE_STATUSES
+        if status in counts.index
+    ]
+
+
+def _class_bars(
+    rows: pd.DataFrame,
+    pooled: pd.DataFrame,
+    *,
+    requested: list[str] | None,
+    max_targets: int,
+    perturbation_type: str,
+    target: Any | None,
+    figsize: tuple[float, float] | None,
+    theme: str,
+    show_legend: bool,
+) -> tuple[Any, dict[Hashable, Any], bool, pd.DataFrame]:
+    """Draw one bar per target with the shares of its cells called KO and NP.
+
+    Returns the figure, the axes, whether the plot owns the figure, and the
+    drawn targets.
+    """
+    from matplotlib.ticker import PercentFormatter
+
+    if requested is None:
+        chosen = _most_cells(pooled, max_targets)
+    else:
+        chosen = pooled.set_index("target").loc[requested].reset_index()
+    drawn = chosen[["target", "n_cells", "n_ko", "n_np", "ko_share"]].reset_index(
+        drop=True
+    )
+    title = ["Mixscape classes by target"]
+    if requested is None and len(pooled) > max_targets:
+        title.append(
+            f"The {max_targets:,} of {len(pooled):,} targets with the most cells"
+        )
+    unfitted = _unfitted_statuses(rows, drawn["target"].tolist())
+    if unfitted:
+        title.append("Not fitted, so all NP: " + ", ".join(unfitted))
+    n_cells = drawn["n_cells"].to_numpy(dtype=np.int64)
+    ko_share = drawn["ko_share"].to_numpy(dtype=np.float64)
+    np_share = 1.0 - ko_share
+    positions = np.arange(len(drawn), dtype=np.float64)[::-1]
+    labels = [
+        f"{name} ({count:,} cell{'' if count == 1 else 's'})"
+        for name, count in zip(drawn["target"].tolist(), n_cells.tolist(), strict=True)
+    ]
+    if figsize is None and target is None:
+        figsize = (
+            6.2 + (2.2 if show_legend else 0.0),
+            max(3.0, 0.22 * len(drawn) + 1.0 + 0.25 * len(title)),
+        )
+    figure, axes, owns = normalize_axes_target(
+        target, panel_keys=[_CLASSES_PANEL], figsize=figsize
+    )
+    ax = axes[_CLASSES_PANEL]
+    bars = (
+        (
+            ax.barh(
+                positions,
+                ko_share,
+                height=_CLASS_BAR_HEIGHT,
+                color=_KO_COLOR,
+                label=_ko_label(perturbation_type),
+            ),
+            ko_share,
+        ),
+        (
+            ax.barh(
+                positions,
+                np_share,
+                height=_CLASS_BAR_HEIGHT,
+                left=ko_share,
+                color=_NP_COLOR,
+                label=_NP_LABEL,
+            ),
+            np_share,
+        ),
+    )
+    ax.set_xlim(0.0, 1.0)
+    ax.set_xticks(np.linspace(0.0, 1.0, 5))
+    ax.xaxis.set_major_formatter(PercentFormatter(xmax=1.0))
+    ax.set_yticks(positions, labels)
+    ax.set_ylim(-0.6, max(len(drawn), 1) - 0.4)
+    ax.tick_params(axis="y", length=0)
+    ax.set_xlabel("Share of the target's cells")
+    ax.set_title("\n".join(title))
+    handles = [container for container, shares in bars if (shares > 0).any()]
+    if show_legend and handles:
+        texts = [container.get_label() for container in handles]
+        if owns:
+            figure.legend(handles, texts, loc="outside right center", frameon=False)
+        else:
+            # Every bar spans the axes, so the legend goes beside them.
+            ax.legend(
+                handles,
+                texts,
+                loc="center left",
+                bbox_to_anchor=(1.02, 0.5),
+                frameon=False,
+                fontsize="small",
+            )
+    apply_figure_chrome(figure, theme)
+    return figure, axes, owns, drawn
+
+
+def _normal_density(values: np.ndarray, mean: float, sd: float) -> np.ndarray:
+    """Return the density of a normal distribution at ``values``."""
+    gap = (values - mean) / sd
+    density: np.ndarray = np.exp(-0.5 * gap * gap) / (sd * np.sqrt(2.0 * np.pi))
+    return density
+
+
+def _score_panel(
+    ax: Any,
+    name: str,
+    cells: pd.DataFrame,
+    fit: pd.Series,
+    *,
+    perturbation_type: str,
+    split_column: str | None,
+    foreground: str,
+) -> None:
+    """Draw the histogram of one target's scores and the normals of its fit."""
+    from matplotlib.ticker import MaxNLocator
+
+    scores = cells["score"].to_numpy(dtype=np.float64)
+    ko = (cells["global_class"] == perturbation_type).to_numpy(dtype=bool)
+    edges = np.histogram_bin_edges(scores, bins=_SCORE_BINS)
+    widths = np.diff(edges)
+    ko_counts = np.histogram(scores[ko], edges)[0]
+    np_counts = np.histogram(scores[~ko], edges)[0]
+    if ko_counts.any():
+        ax.bar(
+            edges[:-1],
+            ko_counts,
+            width=widths,
+            align="edge",
+            color=_KO_COLOR,
+            label=_ko_label(perturbation_type),
+        )
+    if np_counts.any():
+        ax.bar(
+            edges[:-1],
+            np_counts,
+            width=widths,
+            bottom=ko_counts,
+            align="edge",
+            color=_NP_COLOR,
+            label=_NP_LABEL,
+        )
+    # Each normal is scaled to the cells of its class, so that it covers as
+    # many cells as their bars.
+    components = (
+        (
+            float(fit["control_mean"]),
+            float(fit["control_sd"]),
+            int(np.count_nonzero(~ko)),
+            foreground,
+            _CONTROL_CURVE_LABEL,
+        ),
+        (
+            float(fit["perturbed_mean"]),
+            float(fit["perturbed_sd"]),
+            int(np.count_nonzero(ko)),
+            _PERTURBED_CURVE_COLOR,
+            _PERTURBED_CURVE_LABEL,
+        ),
+    )
+    low = min(
+        float(edges[0]), *(mean - _CURVE_REACH * sd for mean, sd, *_ in components)
+    )
+    high = max(
+        float(edges[-1]), *(mean + _CURVE_REACH * sd for mean, sd, *_ in components)
+    )
+    values = np.linspace(low, high, _CURVE_POINTS)
+    for mean, sd, n_class, color, label in components:
+        ax.plot(
+            values,
+            n_class * widths[0] * _normal_density(values, mean, sd),
+            color=color,
+            linewidth=1.6,
+            label=label,
+        )
+    # Bars count cells, so the ticks fall on whole numbers.
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.set_xlabel("Perturbation score")
+    ax.set_ylabel("Cells")
+    ax.set_title(name if split_column is None else f"{name}, fit in {fit['split']}")
+
+
+def _score_panels(
+    loaded: Any,
+    pooled: pd.DataFrame,
+    *,
+    requested: list[str] | None,
+    max_targets: int,
+    target: Any | None,
+    figsize: tuple[float, float] | None,
+    theme: str,
+    show_legend: bool,
+) -> tuple[Any, dict[Hashable, Any], bool, pd.DataFrame]:
+    """Draw one panel per target with a fitted split.
+
+    Returns the figure, the axes, whether the plot owns the figure, and the
+    drawn cells.
+    """
+    rows = loaded.targets
+    perturbation_type = str(loaded.perturbation_type)
+    fitted = pooled[pooled["fitted"].to_numpy(dtype=bool)]
+    if requested is None:
+        candidates = pooled["target"].tolist()
+        names = _most_cells(fitted, max_targets)["target"].tolist()
+    else:
+        candidates = requested
+        fitted_names = set(fitted["target"].tolist())
+        names = [name for name in requested if name in fitted_names]
+    title = ["Mixscape scores by target"]
+    if requested is None and len(fitted) > max_targets:
+        title.append(
+            f"The {max_targets:,} of {len(fitted):,} fitted targets with the most cells"
+        )
+    unfitted = _unfitted_statuses(rows, candidates)
+    if unfitted:
+        title.append("Not fitted, so not drawn: " + ", ".join(unfitted))
+    if not names:
+        raise ValueError(
+            "None of the targets has a fitted split, so there are no scores to plot"
+        )
+    cells = loaded.cells
+    owners = {f"{name} {perturbation_type}": name for name in names}
+    owners.update({f"{name} NP": name for name in names})
+    owner = cells["mixscape_class"].map(owners)
+    chosen = owner.notna().to_numpy(dtype=bool) & np.isfinite(
+        cells["score"].to_numpy(dtype=np.float64)
+    )
+    table = cells.loc[chosen, ["split", "score", "global_class", "posterior"]]
+    table.insert(0, "target", owner.to_numpy()[chosen])
+    rank = {name: position for position, name in enumerate(names)}
+    table = table.iloc[np.argsort(table["target"].map(rank).to_numpy(), kind="stable")]
+    # The first fitted split of each target, in record order.
+    fits = rows[rows["status"] == "fitted"].drop_duplicates("target")
+    fits = fits.set_index("target")
+    n_columns = min(_SCORE_COLUMNS, len(names))
+    if figsize is None and target is None:
+        n_rows = -(-len(names) // n_columns)
+        figsize = (
+            3.3 * n_columns + (2.4 if show_legend else 0.0),
+            2.7 * n_rows + 0.3 * len(title),
+        )
+    figure, axes, owns = normalize_axes_target(
+        target, panel_keys=list(names), figsize=figsize, n_columns=n_columns
+    )
+    foreground = foreground_color(theme)
+    by_target = table.groupby("target", sort=False)
+    for name in names:
+        _score_panel(
+            axes[name],
+            name,
+            by_target.get_group(name),
+            fits.loc[name],
+            perturbation_type=perturbation_type,
+            split_column=loaded.split_column,
+            foreground=foreground,
+        )
+    entries: dict[str, Any] = {}
+    for ax in axes.values():
+        for handle, label in zip(*ax.get_legend_handles_labels(), strict=True):
+            entries.setdefault(label, handle)
+    order = (
+        _ko_label(perturbation_type),
+        _NP_LABEL,
+        _CONTROL_CURVE_LABEL,
+        _PERTURBED_CURVE_LABEL,
+    )
+    labels = [label for label in order if label in entries]
+    first = axes[names[0]]
+    if show_legend:
+        handles = [entries[label] for label in labels]
+        if owns:
+            figure.legend(handles, labels, loc="outside right center", frameon=False)
+        else:
+            first.legend(handles, labels, loc="best", frameon=False, fontsize="small")
+    if owns:
+        figure.suptitle("\n".join(title))
+    else:
+        # A caller's figure keeps its own title, so the plot's title goes
+        # above the first panel's.
+        first.set_title("\n".join([*title, first.get_title()]))
+    apply_figure_chrome(figure, theme)
+    return figure, axes, owns, table
+
+
+@close_figures_on_error
+def mixscape(
+    store: Any,
+    classes: ArtifactRef,
+    *,
+    panel: str = "classes",
+    targets: Sequence[str] | None = None,
+    max_targets: int = 40,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot the share of each target's cells that Mixscape calls knocked out, or their scores.
+
+    ``classes`` is a ``mixscape_classes`` artifact of
+    ``ds.perturbation.mixscape``, as ``ds.perturbation.load_mixscape`` reads
+    it. Among the cells that carry one target, Mixscape calls each cell
+    knocked out (KO, or the ``perturbation_type`` of the classes) or an
+    escaper (NP, not perturbed).
+
+    With ``panel="classes"``, each target gets one bar, labelled with its name
+    and its cells in every split. The blue part of the bar is the share of its
+    cells called KO and the grey part the share called NP. The bars run from
+    the largest KO share at the top to the smallest, ties broken by name. A
+    target fitted in no split, because it had too few DE genes or KO cells or
+    its fit collapsed, has only NP cells, and the title counts such targets by
+    status. The table ``"classes"`` holds one row per drawn target, with
+    ``target``, ``n_cells``, ``n_ko``, ``n_np`` and ``ko_share``, in drawing
+    order.
+
+    With ``panel="scores"``, each target with a fitted split gets a panel: a
+    histogram of its cells' scores, their projections onto the target's
+    perturbation direction, with the KO cells in blue below the NP cells in
+    grey. Two curves show the normal distributions of the fit in the target's
+    first fitted split: the control component, which keeps the mean and
+    standard deviation of the control cells' scores, scaled to the NP cells of
+    the histogram, and the perturbed component, scaled to its KO cells. When
+    the classes were split, the histogram pools the target's fitted splits,
+    and the panel's title names the split of the curves. A target fitted in no
+    split has no scores and gets no panel; the title counts such targets by
+    status, and the plot raises ValueError when no target is left to draw.
+    The title stands above the panels, or above the first panel's own title
+    when the plot draws into a caller's axes, which also holds the legend. A
+    panel's axes take the target as key. The table ``"scores"``
+    holds one row per drawn cell, indexed by cell ID, with ``target``,
+    ``split``, ``score``, ``global_class`` and ``posterior``, in panel order.
+
+    ``targets`` keeps those targets in that order. Otherwise the plot keeps
+    the ``max_targets`` targets with the most cells, fitted targets for
+    ``panel="scores"``, ties broken by name, in the order of the bars, and the
+    title says when it leaves any out. When ``targets`` names more than
+    ``max_targets`` targets, the plot raises ValueError rather than draw a
+    crowded figure. A title counts a target whose splits have different
+    statuses under each status.
+    """
+    if not isinstance(panel, str) or panel not in (_CLASSES_PANEL, _SCORES_PANEL):
+        raise ValueError(f"panel must be 'classes' or 'scores', not {panel!r}")
+    if (
+        isinstance(max_targets, bool)
+        or not isinstance(max_targets, int | np.integer)
+        or max_targets < 1
+    ):
+        raise ValueError("max_targets must be a positive integer")
+    max_targets = int(max_targets)
+    requested = _distinct_labels(targets, "targets", "target")
+    if requested is not None and len(requested) > max_targets:
+        raise ValueError(
+            f"targets names {len(requested)} targets, more than "
+            f"max_targets={max_targets}"
+        )
+    loaded = _mixscape_classes(store, classes)
+    rows = loaded.targets
+    perturbation_type = str(loaded.perturbation_type)
+    pooled = _pooled_targets(rows)
+    if requested is not None:
+        known = set(pooled["target"].tolist())
+        unknown = [name for name in requested if name not in known]
+        if unknown:
+            raise ValueError(
+                f"The Mixscape classes have no target named {unknown[0]!r}"
+            )
+    statuses = rows["status"].value_counts()
+    require_matplotlib()
+    tables: dict[str, pd.DataFrame]
+    legends: tuple[LegendSpec, ...]
+    with theme_context(theme):
+        if panel == _CLASSES_PANEL:
+            figure, axes, owns, drawn = _class_bars(
+                rows,
+                pooled,
+                requested=requested,
+                max_targets=max_targets,
+                perturbation_type=perturbation_type,
+                target=target,
+                figsize=figsize,
+                theme=theme,
+                show_legend=show_legend,
+            )
+            tables = {"classes": drawn}
+            n_cells = int(drawn["n_cells"].sum())
+            legends = (LegendSpec(kind="categorical", label="Class"),)
+        else:
+            figure, axes, owns, drawn = _score_panels(
+                loaded,
+                pooled,
+                requested=requested,
+                max_targets=max_targets,
+                target=target,
+                figsize=figsize,
+                theme=theme,
+                show_legend=show_legend,
+            )
+            tables = {"scores": drawn}
+            n_cells = len(drawn)
+            legends = (
+                LegendSpec(kind="categorical", label="Class"),
+                LegendSpec(kind="line", label="Fitted component"),
+            )
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables=tables,
+        legends=legends,
+        scales=(),
+        provenance=PlotProvenance(
+            assay=classes.assay,
+            cell_key=None,
+            # The cells of the drawn targets, or the drawn cells.
+            n_cells=n_cells,
+            renderer="matplotlib",
+            notes=("mixscape_classes",),
+            extras={
+                "classes": classes.to_dict(),
+                "panel": panel,
+                "perturbation_type": perturbation_type,
+                "split_column": loaded.split_column,
+                "targets": requested,
+                "max_targets": max_targets,
+                "statuses": {
+                    status: int(statuses.get(status, 0)) for status in MIXSCAPE_STATUSES
                 },
             },
         ),

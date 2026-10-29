@@ -625,6 +625,22 @@ class DataStorePlotAccessor:
         """Plot how far each perturbation moves its cells from the control cells."""
         return self._forward(PlotResult, "edistance", locals())
 
+    def mixscape(
+        self,
+        classes: ArtifactRef,
+        *,
+        panel: str = "classes",
+        targets: Sequence[str] | None = None,
+        max_targets: int = 40,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the share of each target's cells that Mixscape calls knocked out, or their scores."""
+        return self._forward(PlotResult, "mixscape", locals())
+
     def dotplot(
         self,
         *,

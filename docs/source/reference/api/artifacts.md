@@ -336,6 +336,7 @@ their rows follow the cell selection of their lineage rather than a recorded inp
 | `lineage_curves` | `progress` | measurements | `valid` | `distance` |
 | `membership_strength` | `values` | measurements | | |
 | `metadata_snapshot` | `values` | measurements | | |
+| `mixscape_classes` | `values` | labels | `global_class` | `posterior`, `score` |
 | `perturbation_labels` | `values` | labels | `guide_label`, `is_control`, `target_codes` | `n_targets` |
 | `pseudotime` | `pseudotime` | measurements | `valid` | |
 | `quality_metric` | `values` | measurements | | |
@@ -350,6 +351,10 @@ A `perturbation_labels` artifact comes from `perturbation.labels`, which records
 A `perturbation_efficiency` artifact comes from `perturbation.efficiency`, which records a `perturbation_labels` artifact as an input and compares each target gene's expression in the cells of its perturbation with the control cells of the labels. The artifact belongs to the expression assay that the comparison reads, not to the guide assay of the labels. Its rows are target genes or guides, not cells, so `select_cells` and `artifacts.load_values` do not read it; `perturbation.load_efficiency` reads it as a table of each row's matched feature, status, cells, mean UMIs and scaled expression in each group, remaining fraction, log2 fold change and p-values.
 
 A `perturbation_edistance` artifact comes from `perturbation.edistance`, which records a `perturbation_labels` artifact and a coordinate artifact, such as a PCA, as inputs and measures how far the cells of each perturbation sit from the control cells of the labels in those coordinates. The artifact belongs to the assay of the coordinates. Its rows are target genes or guides, not cells, so `select_cells` and `artifacts.load_values` do not read it; `perturbation.load_edistance` reads it as a table of each row's status, cells, E-distance and p-values.
+
+A `perturbation_signature` artifact comes from `perturbation.signature`, which records a `perturbation_labels` artifact, a coordinate artifact and a feature selection as inputs, and holds the perturbation signature of every cell of the coordinates: its `values` array has one row per cell and one column per feature, `neighbors` gives each cell's nearest control cells as positions among the artifact's cells, nearest first, and `is_control` and `samples` describe each cell. The artifact belongs to the assay of the features and records the coordinates' cell selection, but it is not cell-aligned: `select_cells` and `artifacts.load_values` do not read it, and `perturbation.load_signature` reads it as tables indexed by cell ID.
+
+A `mixscape_classes` artifact comes from `perturbation.mixscape`, which records a `perturbation_signature` artifact as an input and holds one Mixscape class per cell of the signature, so `select_cells(classes, include=["GENE1 KO"])` selects the knocked-out cells of a target and plots colour cells by class. Its per-cell arrays are `values`, the class, `global_class`, `posterior` and `score`, which are NaN for cells outside a fitted target. Its other arrays hold one row per target and split rather than per cell, with each fit's status, cells, DE genes and mixture, and the DE genes of each row as offsets into `de_features`; `perturbation.load_mixscape` reads them as tables.
 
 A metadata snapshot is cell-aligned when it records a cell selection, as the custom source and sink
 vector of pseudotime scoring does. The metadata snapshot of a pipeline run records none: it holds
