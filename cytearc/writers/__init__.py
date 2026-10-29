@@ -6,6 +6,7 @@ from .._facade import lazy_facade as _lazy_facade
 
 if TYPE_CHECKING:
     from ._materialize import chunked_to_zarr, write_renorm_subset_to_zarr
+    from .airr import write_airr_rearrangements
     from ._store import (
         create_zarr_count_assay,
         create_zarr_dataset,
@@ -37,6 +38,7 @@ __all__ = [
     "to_h5ad",
     "to_mtx",
     "CSVtoZarr",
+    "write_airr_rearrangements",
 ]
 
 __getattr__, __dir__ = _lazy_facade(
@@ -50,6 +52,7 @@ __getattr__, __dir__ = _lazy_facade(
         "CrToZarr": ".cellranger",
         "MtxToZarr": ".cellranger",
         "CSVtoZarr": ".csv",
+        "write_airr_rearrangements": ".airr",
         "to_h5ad": ".export",
         "to_mtx": ".export",
         "H5adImportResult": ".h5ad",
