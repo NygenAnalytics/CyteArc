@@ -339,3 +339,82 @@ def test_cluster_assignment_checks_its_arguments() -> None:
         cutoff=1,
     )
     assert chainless.codes.tolist() == [-1, -1]
+
+
+@pytest.mark.parametrize(
+    ("metric", "cutoff"), [("hamming", 1), ("hamming", 2), ("levenshtein", 2)]
+)
+def test_neighbor_pairs_split_keys_into_passes(monkeypatch, metric, cutoff) -> None:
+    from cytearc.repertoire import distances
+
+    rng = np.random.default_rng(3)
+    texts = sorted(
+        {
+            "".join(rng.choice(list("ACG"), size=int(rng.integers(3, 9))))
+            for _ in range(120)
+        }
+    )
+    # A small pass splits the keys by their hash into many passes.
+    monkeypatch.setattr(distances, "_KEYS_PER_PASS", 97)
+    first, second = neighbor_pairs(texts, metric, cutoff)
+    want = {
+        (i, j)
+        for i, j in itertools.combinations(range(len(texts)), 2)
+        if _within(texts[i], texts[j], metric, cutoff)
+    }
+    assert set(zip(first.tolist(), second.tolist(), strict=True)) == want
+
+
+def test_clusters_do_not_depend_on_the_chunks_of_pairs(monkeypatch) -> None:
+    from cytearc.repertoire import clonotypes
+
+    # Many cells share one of two near alpha chains, as invariant T cells do,
+    # with second alpha chains and beta chains of their own.
+    rng = np.random.default_rng(5)
+    texts = ["CAVMDSNYQLIW", "CAVRDSNYQLIW"] + sorted(
+        {"".join(rng.choice(list("AC"), size=5)) for _ in range(60)}
+    )
+    n_cells = 80
+    sequences = np.full((n_cells, 4), -1, dtype=np.int64)
+    sequences[:, 0] = rng.integers(0, 2, size=n_cells)
+    sequences[:, 1] = np.where(
+        rng.random(n_cells) < 0.4, rng.integers(2, len(texts), size=n_cells), -1
+    )
+    sequences[:, 2] = rng.integers(2, len(texts), size=n_cells)
+    sequences[rng.random(n_cells) < 0.2, 2] = -1
+    groups = rng.integers(0, 2, size=n_cells)
+    whole = {}
+    for receptor_arms in RECEPTOR_ARMS:
+        for dual_ir in DUAL_IR:
+            whole[receptor_arms, dual_ir] = assign_clonotype_clusters(
+                sequences,
+                texts,
+                groups=groups,
+                metric="hamming",
+                cutoff=1,
+                receptor_arms=receptor_arms,
+                dual_ir=dual_ir,
+            ).codes
+    monkeypatch.setattr(clonotypes, "_PAIRS_PER_CHUNK", 3)
+    for (receptor_arms, dual_ir), codes in whole.items():
+        split = assign_clonotype_clusters(
+            sequences,
+            texts,
+            groups=groups,
+            metric="hamming",
+            cutoff=1,
+            receptor_arms=receptor_arms,
+            dual_ir=dual_ir,
+        )
+        np.testing.assert_array_equal(split.codes, codes)
+        expected = _pairwise_partition(
+            sequences,
+            texts,
+            groups,
+            np.zeros_like(sequences),
+            receptor_arms,
+            dual_ir,
+            "hamming",
+            1,
+        )
+        assert _partition(split.codes) == expected, (receptor_arms, dual_ir)

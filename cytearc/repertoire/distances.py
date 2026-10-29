@@ -187,6 +187,9 @@ def _edit_pairs(
 # Use keys when a text yields at most this many of them; compare every pair
 # of a length otherwise.
 _MAX_KEYS = 1_200
+# Keys hashed and sorted in one pass, about 40 bytes each at the peak; more
+# keys are split by their hash into passes of at most this many.
+_KEYS_PER_PASS = 1 << 23
 _FNV_OFFSET = np.uint64(14695981039346656037)
 _FNV_PRIME = np.uint64(1099511628211)
 _WILDCARD = np.uint64(0x1FF)
@@ -198,6 +201,8 @@ def _variant_keys(
     lengths: np.ndarray,
     limit: int,
     deletions: bool,
+    n_parts: int,
+    part: int,
     out_keys: np.ndarray,
     out_rows: np.ndarray,
 ) -> int:  # pragma: no cover
@@ -207,7 +212,12 @@ def _variant_keys(
     texts within ``limit`` edits share one; otherwise they replace exactly
     ``limit`` positions by a wildcard, so two texts of one length within
     ``limit`` substitutions share one. Up to three positions take part.
+    Only the keys whose hash leaves ``part`` modulo ``n_parts`` are kept,
+    and with empty outputs they are only counted.
     """
+    write = len(out_keys) > 0
+    parts = np.uint64(n_parts)
+    chosen = np.uint64(part)
     at = 0
     for row in range(codes.shape[0]):
         length = lengths[row]
@@ -240,8 +250,11 @@ def _variant_keys(
                         value = (
                             value ^ np.uint64(length - (count if deletions else 0))
                         ) * _FNV_PRIME
-                        out_keys[at] = value
-                        out_rows[at] = row
+                        if n_parts > 1 and value % parts != chosen:
+                            continue
+                        if write:
+                            out_keys[at] = value
+                            out_rows[at] = row
                         at += 1
     return at
 
@@ -315,22 +328,47 @@ def _key_count(length: int, limit: int, deletions: bool) -> int:
 def _keyed_pairs(
     codes: np.ndarray, lengths: np.ndarray, limit: int, deletions: bool
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Every pair within ``limit`` through shared variant keys, verified."""
+    """Every pair within ``limit`` through shared variant keys, verified.
+
+    Keys are split by their hash into passes of at most ``_KEYS_PER_PASS``,
+    so the keys held at once stay bounded however many the texts yield.
+    """
     total = int(sum(_key_count(int(length), limit, deletions) for length in lengths))
-    keys = np.empty(total, dtype=np.uint64)
-    rows = np.empty(total, dtype=np.int64)
-    written = _variant_keys(codes, lengths, limit, deletions, keys, rows)
-    order = np.argsort(keys[:written], kind="stable")
-    keys, rows = keys[order], rows[order]
+    n_parts = max(1, -(-total // _KEYS_PER_PASS))
     empty = np.empty(0, dtype=np.int64)
-    n_pairs = _run_pairs(keys, rows, True, empty, empty)
-    firsts = np.empty(n_pairs, dtype=np.int64)
-    seconds = np.empty(n_pairs, dtype=np.int64)
-    _run_pairs(keys, rows, False, firsts, seconds)
-    low = np.minimum(firsts, seconds)
-    high = np.maximum(firsts, seconds)
     width = max(int(len(lengths)), 1)
-    unique = np.unique(low * width + high)
+    found = [empty]
+    for part in range(n_parts):
+        size = (
+            total
+            if n_parts == 1
+            else _variant_keys(
+                codes,
+                lengths,
+                limit,
+                deletions,
+                n_parts,
+                part,
+                np.empty(0, dtype=np.uint64),
+                empty,
+            )
+        )
+        keys = np.empty(size, dtype=np.uint64)
+        rows = np.empty(size, dtype=np.int64)
+        written = _variant_keys(
+            codes, lengths, limit, deletions, n_parts, part, keys, rows
+        )
+        order = np.argsort(keys[:written], kind="stable")
+        keys, rows = keys[order], rows[order]
+        n_pairs = _run_pairs(keys, rows, True, empty, empty)
+        firsts = np.empty(n_pairs, dtype=np.int64)
+        seconds = np.empty(n_pairs, dtype=np.int64)
+        _run_pairs(keys, rows, False, firsts, seconds)
+        del keys, rows, order
+        found.append(
+            np.unique(np.minimum(firsts, seconds) * width + np.maximum(firsts, seconds))
+        )
+    unique = np.unique(np.concatenate(found))
     low, high = unique // width, unique % width
     keep = _check_pairs(codes, lengths, low, high, limit, deletions)
     return low[keep], high[keep]

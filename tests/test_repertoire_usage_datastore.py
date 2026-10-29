@@ -197,7 +197,10 @@ def test_gene_usage_plot_draws_one_panel_per_locus(tmp_path) -> None:
         # Without groups each locus draws bars.
         assert len(result.axes["TRA"].patches) == 2
         assert result.tables["usage"]["cells"].sum() == 13
-        assert result.provenance.n_cells == 13
+        # Cells, each counted once however many of its chains count.
+        usage = store.repertoire.gene_usage(receptors, group_by="sample")
+        assert result.provenance.n_cells == usage.n_cells == 7
+        assert usage.table["cells"].sum() == 13
     finally:
         result.close()
     grouped = plotting.gene_usage(
@@ -238,6 +241,10 @@ def test_gene_pairing_plot_draws_v_against_j(tmp_path) -> None:
         result.close()
     shown = plotting.gene_pairing(store, receptors, top=1, show_legend=False)
     assert shown.provenance.extras["top"] == 1
+    # The V and J genes with the most chains; ties go to the earlier name.
+    ax = shown.axes["TRA"]
+    assert [tick.get_text() for tick in ax.get_yticklabels()] == ["TRAV1"]
+    assert [tick.get_text() for tick in ax.get_xticklabels()] == ["TRAJ1"]
     with pytest.raises(ValueError, match="top must be a positive integer"):
         plotting.gene_pairing(store, receptors, top=True, show=False)
 

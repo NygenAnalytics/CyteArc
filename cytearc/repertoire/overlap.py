@@ -216,5 +216,19 @@ class ClonotypeTracking:
 
 
 def group_names(group_keys: Sequence[dict[str, str]]) -> list[str]:
-    """Name each group by its labels joined by commas, or ``"all cells"``."""
-    return [", ".join(key.values()) if key else "all cells" for key in group_keys]
+    """Name each group by its labels joined by commas, or ``"all cells"``.
+
+    Raises:
+        ValueError: If two groups get one name, as labels that hold a comma
+            can give them.
+    """
+    names = [", ".join(key.values()) if key else "all cells" for key in group_keys]
+    first: dict[str, dict[str, str]] = {}
+    for key, name in zip(group_keys, names, strict=True):
+        if name in first and first[name] != key:
+            raise ValueError(
+                f"The groups {first[name]} and {key} are both named {name!r}; "
+                "remove the commas from their labels"
+            )
+        first.setdefault(name, key)
+    return names

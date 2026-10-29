@@ -320,6 +320,11 @@ def test_clonotype_abundance_counts_sizes_and_draws_the_largest(tmp_path) -> Non
         ]
         assert top["cells"].tolist() == [3, 2, 1]
         assert result.provenance.n_cells == 7
+        # Plain numbers label the log axes, not 2x10^0.
+        ax = result.axes["sizes"]
+        result.figure.canvas.draw()
+        labels = [tick.get_text() for tick in ax.get_xticklabels(minor=True)]
+        assert "2" in labels and "3" in labels
     finally:
         result.close()
 
@@ -380,6 +385,21 @@ def test_clonotypes_refuse_more_cells_than_the_memory_budget(
     with pytest.raises(MemoryError, match="Raise mem_budget"):
         store.repertoire.clonotypes(receptors)
     assert store.artifacts.list(kind="clonotypes", scope="datastore") == []
+
+
+def test_within_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    store.cells.insert("clone_size", np.arange(N_CELLS).astype(str))
+    with pytest.raises(ValueError, match="'clone_size', which is also a column"):
+        store.repertoire.clonotypes(receptors, within="clone_size")
+
+
+def test_clonotype_clusters_need_room_for_their_search(tmp_path, monkeypatch) -> None:
+    store, receptors = _receptors(tmp_path)
+    monkeypatch.setattr(store, "memoryBytes", 1_000_000)
+    assert store.repertoire.clonotypes(receptors).kind == "clonotypes"
+    with pytest.raises(MemoryError, match="Raise mem_budget"):
+        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=1)
 
 
 def test_clonotype_clusters_link_similar_junctions(tmp_path) -> None:

@@ -54,9 +54,9 @@ class ImmuneReceptors:
             ``d_call`` for the VDJ slots only.
         chains: One row per contig: the cell's ``ids``, its ``slot`` (``""``
             for a contig in no slot), ``chain`` (whether it counts as a chain)
-            and each loaded field. Text is None where missing, counts and
-            positions are ``Int64`` and flags ``boolean``, with ``<NA>`` where
-            missing, and numbers are NaN where missing.
+            and each loaded field. Text is ``string``, counts and positions
+            ``Int64`` and flags ``boolean``, each with ``<NA>`` where missing,
+            and numbers are NaN where missing.
         fields: The stored contig fields, by AIRR name.
         productive_only: Whether only productive contigs count as chains.
     """
@@ -70,8 +70,9 @@ class ImmuneReceptors:
 def _field_column(kind: str, values: np.ndarray) -> Any:
     """Return stored values of one field kind in their table dtype."""
     if kind in (TEXT, RAGGED):
-        # pandas stores the text with its default string dtype, NA where missing.
-        return pd.array(np.asarray(values, dtype=object))
+        # Text has pandas' string dtype, NA where missing, even in a column
+        # without any text.
+        return pd.array(np.asarray(values, dtype=object), dtype="string")
     if kind == INTEGER:
         integers = np.asarray(values, dtype=np.int64)
         missing = integers < 0

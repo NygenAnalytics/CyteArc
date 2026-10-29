@@ -113,6 +113,42 @@ def test_diversity_groups_by_columns_labels_and_selections(tmp_path) -> None:
     assert selected.size == 10
 
 
+def test_diversity_at_full_coverage_is_the_observed_diversity(tmp_path) -> None:
+    store, _receptors, clonotypes = _clonotypes(tmp_path)
+    # The cells of clonotypes of two or more cells: no group has a singleton,
+    # so every coverage, and the default common coverage, is 1.
+    expanded = store.select_cells(
+        clonotypes, value="clone_size", low=2, keep_bounds=True
+    )
+    result = store.repertoire.diversity(clonotypes, cell_selection=expanded)
+    assert result.coverage == 1.0
+    hill = result.hill
+    np.testing.assert_allclose(hill["at_coverage"], hill["observed"])
+    assert (hill["method_at_coverage"] == "observed").all()
+    assert hill.groupby("receptor_type")["size_at_coverage"].first().to_dict() == {
+        "BCR": 2.0,
+        "TCR": 3.0,
+    }
+    plot = store.plots.clonal_rarefaction(
+        clonotypes, cell_selection=expanded, base="coverage", show=False
+    )
+    plot.close()
+
+
+def test_group_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:
+    store, receptors, clonotypes = _clonotypes(tmp_path)
+    store.cells.insert("coverage", SAMPLES)
+    with pytest.raises(ValueError, match="'coverage', which is also a column"):
+        store.repertoire.diversity(clonotypes, group_by="coverage")
+    with pytest.raises(ValueError, match="'coverage', which is also a column"):
+        store.repertoire.rarefaction(clonotypes, group_by="coverage")
+    # A name that only other results hold is free.
+    store.cells.insert("locus", SAMPLES)
+    assert len(store.repertoire.diversity(clonotypes, group_by="locus").indices) == 4
+    with pytest.raises(ValueError, match="'locus', which is also a column"):
+        store.repertoire.gene_usage(receptors, group_by="locus")
+
+
 def test_cells_without_a_label_are_left_out(tmp_path) -> None:
     store, _receptors_ref, clonotypes = _clonotypes(tmp_path)
     missing = np.zeros(N_CELLS, dtype=bool)

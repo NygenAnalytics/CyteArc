@@ -171,6 +171,10 @@ def test_expansion_can_count_every_cell_together(tmp_path) -> None:
     assert store.repertoire.load_clonal_expansion(named).within == ("receptor_type",)
     with pytest.raises(ValueError, match="within_receptor_type already adds"):
         store.repertoire.clonal_expansion(clonotypes, within="receptor_type")
+    # A column named like a column of the result would overwrite it.
+    store.cells.insert("category", SAMPLES)
+    with pytest.raises(ValueError, match="'category', which is also a column"):
+        store.repertoire.clonal_expansion(clonotypes, within="category")
 
 
 def test_frequency_bounds_place_cells_by_their_clone_share(tmp_path) -> None:
