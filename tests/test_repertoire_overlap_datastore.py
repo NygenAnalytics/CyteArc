@@ -139,6 +139,44 @@ def test_track_follows_the_largest_clonotypes_of_each_group(tmp_path) -> None:
     assert named.cells[["group", "cells"]].values.tolist() == [["s1", 0], ["s2", 1]]
 
 
+def test_groups_whose_labels_join_to_one_name_are_refused(tmp_path) -> None:
+    store, _receptors_ref, clonotypes = _clonotypes(tmp_path)
+    # ("a, b", "c") and ("a", "b, c") would both be named "a, b, c".
+    store.cells.insert("first", np.asarray(["a, b", "a"] * 4))
+    store.cells.insert("second", np.asarray(["c", "b, c"] * 4))
+    with pytest.raises(ValueError, match="are both named 'a, b, c"):
+        store.repertoire.overlap(
+            clonotypes, group_by=["first", "second"], within_receptor_type=False
+        )
+
+
+def test_track_follows_labelled_clonotypes_without_cells(tmp_path) -> None:
+    store, _receptors_ref, clonotypes = _clonotypes(tmp_path)
+    # Only clonotype_1's cells are selected; clonotype_3, a T cell singleton,
+    # is followed through the T cell groups with no cells.
+    selected = store.select_cells(clonotypes, include=["clonotype_1"])
+    tracked = store.repertoire.track(
+        clonotypes,
+        group_by="sample",
+        labels=["clonotype_1", "clonotype_3"],
+        cell_selection=selected,
+    )
+    assert tracked.tracked == ("clonotype_1", "clonotype_3")
+    rows = tracked.cells[tracked.cells["clonotype"] == "clonotype_3"]
+    assert rows[["group", "cells", "fraction"]].values.tolist() == [
+        ["s1, TCR", 0, 0.0],
+        ["s2, TCR", 0, 0.0],
+    ]
+    pooled = store.repertoire.track(
+        clonotypes,
+        group_by="sample",
+        labels=["clonotype_2"],
+        cell_selection=selected,
+        within_receptor_type=False,
+    )
+    assert pooled.cells[["group", "cells"]].values.tolist() == [["s1", 0], ["s2", 0]]
+
+
 @pytest.mark.parametrize(
     ("kwargs", "error", "message"),
     [
@@ -249,6 +287,23 @@ def test_tracking_plot_draws_one_line_per_clonotype(tmp_path) -> None:
         assert ax.get_legend() is None
     finally:
         ordered.close()
+    # With receptor types, the T and B cell groups of a sample share its
+    # position, which order names by the sample alone.
+    by_type = plotting.clonotype_tracking(
+        store, clonotypes, group_by="sample", order=["s2", "s1"], show=False
+    )
+    try:
+        ax = by_type.axes["tracking"]
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == ["s2", "s1"]
+        assert all(len(line.get_xdata()) == 2 for line in ax.get_lines())
+        assert set(by_type.tables["cells"]["group"]) == {
+            "s1, BCR",
+            "s1, TCR",
+            "s2, BCR",
+            "s2, TCR",
+        }
+    finally:
+        by_type.close()
     # Shown by default: on Agg the owned figure is closed.
     shown = plotting.clonotype_tracking(store, clonotypes, group_by="sample", top=1)
     assert shown.provenance.n_cells == 5

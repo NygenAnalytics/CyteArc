@@ -133,6 +133,11 @@ _LOOKUP_BYTES_PER_CELL = 100
 # of every slot, their distinct configurations and keys, and the labels, as
 # measured on 1,000,000 cells.
 _CLONOTYPE_BYTES_PER_CELL = 1_000
+# The columns of the tables of clonotypes, which a within column may not share.
+_CLONOTYPE_COLUMNS = frozenset(
+    {"clonotype", "clone_size", "n_cells", "fraction", "n_configurations"}
+    | {"receptor_type"}
+)
 # Bytes that a decoded contig field takes in a table, per contig, besides the
 # text of ragged fields.
 _TABLE_BYTES_PER_FIELD = 64
@@ -140,6 +145,12 @@ _TABLE_BYTES_PER_FIELD = 64
 # clonotype and group codes, the clone sizes and frequencies, and the labels
 # as written, as measured on 1,000,000 cells.
 _EXPANSION_BYTES_PER_CELL = 300
+# The columns of the tables of clonal expansion, which a within column may not
+# share; plots add a "group" column.
+_EXPANSION_COLUMNS = frozenset(
+    {"group", "clonotype", "category", "group_clone_size", "group_clone_frequency"}
+    | {"cells", "clonotypes", "fraction", "window"}
+)
 # The tables of loaded clonotypes and clonal expansion hold about 850 and 450
 # bytes per cell at their peak, with the cell IDs and labels as text, as
 # measured on 1,000,000 cells.
@@ -343,8 +354,14 @@ def _stored_fields(group: zarr.Group) -> tuple[str, ...]:
     return tuple(str(name) for name in fields)
 
 
-def _within_columns(within: Any, name: str = "within") -> tuple[str, ...]:
-    """Return the cell metadata columns of an argument as a tuple of names."""
+def _within_columns(
+    within: Any, name: str = "within", reserved: frozenset[str] = frozenset()
+) -> tuple[str, ...]:
+    """Return the cell metadata columns of an argument as a tuple of names.
+
+    A column may not share the name of a column of the result, in
+    ``reserved``, which it would overwrite.
+    """
     if within is None:
         return ()
     if isinstance(within, str):
@@ -357,6 +374,12 @@ def _within_columns(within: Any, name: str = "within") -> tuple[str, ...]:
         raise TypeError(f"{name} must be a column name, a sequence of names, or None")
     if len(set(names)) != len(names):
         raise ValueError(f"{name} names a column twice")
+    clashes = [column for column in names if column in reserved]
+    if clashes:
+        raise ValueError(
+            f"{name} names {clashes[0]!r}, which is also a column of the result; "
+            "copy the cell metadata column under another name"
+        )
     return tuple(names)
 
 
@@ -526,11 +549,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             chunk_rows = chunk_rows_for(self.memoryBytes, columns=source.n_columns)
             for _first_line, chunk in _iter_source(source, chunk_rows):
                 barcodes = chunk["cell_id"].to_numpy(dtype=object).astype(str)
-                rows = lookup.get_indexer(np.char.add(prefix, barcodes))
+                # The cell ID that a contig names: its file's prefix and its
+                # barcode, so equal barcodes of two samples stay apart.
+                identifiers = np.char.add(prefix, barcodes)
+                rows = lookup.get_indexer(identifiers)
                 matched = rows >= 0
                 n_file_contigs += len(chunk)
                 if not matched.all():
-                    missing = barcodes[~matched]
+                    missing = identifiers[~matched]
                     n_unmatched += len(missing)
                     for barcode in pd.unique(missing):
                         if barcode not in unmatched_barcodes:
@@ -858,7 +884,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         ):
             if not isinstance(flag, bool):
                 raise TypeError(f"{name} must be a boolean")
-        columns = _within_columns(within)
+        columns = _within_columns(within, reserved=_CLONOTYPE_COLUMNS)
         field_name = "junction" if sequence == "nt" else "junction_aa"
         if field_name not in fields:
             raise ValueError(
@@ -986,6 +1012,16 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             )
         require_complete_artifact(self.zw, clonotypes)
         return artifact_group(self.zw, clonotypes)
+
+    def _clonotype_receptor_type(self, clonotypes: ArtifactRef, code: int) -> str:
+        """The receptor type of a clonotype, that of its representative cell."""
+        group = self._clonotype_group(clonotypes)
+        representative = int(_read(group, "representatives")[code])
+        receptors = inspect_artifact(self.zw, clonotypes).input_ref("receptors")
+        values = as_zarr_array(
+            artifact_group(self.zw, receptors)["values"], name="values"
+        )
+        return str(np.asarray(values[representative : representative + 1])[0])
 
     @validation_scoped
     def _repertoire_load_clonotypes(self, clonotypes: ArtifactRef) -> Clonotypes:
@@ -1144,7 +1180,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         ):
             if not isinstance(flag, bool):
                 raise TypeError(f"{name} must be a boolean")
-        columns = _within_columns(within)
+        columns = _within_columns(within, reserved=_EXPANSION_COLUMNS)
         if within_receptor_type and _RECEPTOR_TYPE_COLUMN in columns:
             raise ValueError(
                 f"within names {_RECEPTOR_TYPE_COLUMN!r}, which within_receptor_type "
@@ -1607,7 +1643,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         hill_rows = []
         for key, clones in zip(group_keys, clone_sizes, strict=True):
             index_rows.append({**key, **indices(clones)})
-            needed = size_for_coverage(clones, level) if level < 1 else float("nan")
+            # The common coverage is 1 only when every group's coverage is 1,
+            # which the group's observed size reaches.
+            needed = size_for_coverage(clones, level) if level < 1 else float(clones.n)
             for order in ORDERS:
                 at_size, size_method = diversity_at(clones, common, order)
                 at_coverage, coverage_method = diversity_at(clones, needed, order)
@@ -1962,8 +2000,16 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         for code in chosen.tolist():
             mine = observed[observed["code"] == code]
             cells_by_group = dict(zip(mine["group"], mine["cells"], strict=True))
-            # The groups of every stratum that the clonotype has cells in.
+            # The groups of every stratum that the clonotype has cells in; a
+            # labelled clonotype without cells in them is followed through
+            # the groups of its own receptor type.
             reach = set(strata[mine["group"].to_numpy()].tolist())
+            if not reach:
+                reach = {
+                    self._clonotype_receptor_type(clonotypes, code)
+                    if within_receptor_type
+                    else 0
+                }
             for group in range(len(group_keys)):
                 if strata[group] not in reach:
                     continue

@@ -125,7 +125,8 @@ def cell_groups(
     if resolved.missing_mask is not None:
         labels[np.asarray(resolved.missing_mask, dtype=bool)] = None
     aligned = pd.Series(labels, index=pd.Index(ids)).reindex(cell_ids)
-    values = aligned.to_numpy(dtype=object)
+    # An object Series gives a read-only view, so copy before filling in None.
+    values = aligned.to_numpy(dtype=object, copy=True)
     values[pd.isna(aligned).to_numpy()] = None
     return values, name
 
@@ -443,6 +444,8 @@ def clonotype_abundance(
     if figsize is None and target is None:
         figsize = (12.0, max(3.6, 0.28 * len(top_table) + 1.2))
     require_matplotlib()
+    from matplotlib.ticker import LogFormatter
+
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
             target, panel_keys=["sizes", "top"], figsize=figsize, n_columns=2
@@ -460,6 +463,9 @@ def clonotype_abundance(
             )
         ax.set_xscale("log")
         ax.set_yscale("log")
+        for axis in (ax.xaxis, ax.yaxis):
+            axis.set_major_formatter(LogFormatter())
+            axis.set_minor_formatter(LogFormatter())
         ax.set_xlabel("Cells of the clonotype")
         ax.set_ylabel("Clonotypes")
         ax.set_title("Clone sizes")
@@ -1076,8 +1082,11 @@ def clonotype_tracking(
     most cells in each group, or ``labels``. Each draws one line across the
     groups, such as time points or tissues, of its share of each group's
     cells, labelled with its representative's ``VDJ_1`` junction, or its
-    ``VJ_1`` junction without a VDJ chain. ``order`` lists the group names
-    from left to right; by default they follow their natural order.
+    ``VJ_1`` junction without a VDJ chain. A clonotype's share counts the
+    cells of its receptor type, so the groups of T cells and B cells with one
+    label share a position. ``order`` lists the labels of the groups, those
+    of ``group_by`` and ``groups`` joined by commas, from left to right; by
+    default they follow their natural order.
 
     Tables: ``cells`` (``clonotype``, ``group``, the key columns, ``cells``
     and ``fraction``).
@@ -1092,7 +1101,17 @@ def clonotype_tracking(
         labels=labels,
     )
     cells = tracked.cells
-    present = sort_categories(pd.unique(cells["group"]))
+    keys = [
+        *tracked.group_by,
+        *((tracked.groups.kind,) if tracked.groups is not None else ()),
+    ]
+    # A clonotype counts among its receptor type's cells, so the groups of
+    # each receptor type share a position named by their labels alone.
+    positions_of = (
+        cells[keys].astype(str).agg(", ".join, axis=1) if keys else cells["group"]
+    )
+    placed = cells.assign(position=positions_of.to_numpy(dtype=object))
+    present = sort_categories(pd.unique(placed["position"]))
     if order is None:
         positions = list(present)
     else:
@@ -1113,7 +1132,7 @@ def clonotype_tracking(
         colors = categorical_color_map(list(tracked.tracked))
         x = np.arange(len(positions))
         for name in tracked.tracked:
-            rows = cells[cells["clonotype"] == name].set_index("group")["fraction"]
+            rows = placed[placed["clonotype"] == name].set_index("position")["fraction"]
             y = rows.reindex(positions).to_numpy(dtype=np.float64)
             ax.plot(
                 x,

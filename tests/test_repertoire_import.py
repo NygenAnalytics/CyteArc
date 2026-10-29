@@ -1,3 +1,4 @@
+import gzip
 import shutil
 from pathlib import Path
 
@@ -219,6 +220,22 @@ def test_unmatched_barcodes_are_named_in_a_warning(tmp_path) -> None:
     )
 
 
+def test_unmatched_barcodes_count_once_per_sample(tmp_path) -> None:
+    store = _store(tmp_path)
+    path = _tcr(tmp_path)
+    # Under a second prefix no barcode of the file names a cell, so its
+    # outside-1 is a barcode of its own beside the first file's.
+    ref = store.repertoire.import_receptors(
+        [path, path],
+        cell_selection=store.snapshot_cell_selection(),
+        barcode_prefix=["", "s2__"],
+    )
+    attributes = store.artifacts.load(ref).attrs
+    barcodes = {row.split(",")[0] for row in TCR_ROWS}
+    assert attributes["n_unmatched_barcodes"] == len(barcodes) + 1
+    assert attributes["n_unmatched_contigs"] == len(TCR_ROWS) + 1
+
+
 def test_import_is_reused_by_file_contents_in_any_order(tmp_path) -> None:
     store = _store(tmp_path)
     cells = store.snapshot_cell_selection()
@@ -250,6 +267,39 @@ def test_import_is_reused_by_file_contents_in_any_order(tmp_path) -> None:
         [_tcr(tmp_path), _bcr(tmp_path)], cell_selection=cells, invalidate_cache=True
     )
     assert again != first
+
+
+def test_full_ties_go_to_the_contig_id_in_any_row_order(tmp_path) -> None:
+    store = _store(tmp_path)
+    cells = store.snapshot_cell_selection()
+    # Two alpha chains that tie on counts and both junctions.
+    first = "cell0,true,cell0_contig_1,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,true,CAVF,TGTGCTGTGTTT,100,5,ct1,ct1_1"
+    second = "cell0,true,cell0_contig_2,true,500,TRA,TRAV2,,TRAJ1,TRAC,true,true,CAVF,TGTGCTGTGTTT,100,5,ct1,ct1_1"
+    for name, rows in (("ab.csv", [first, second]), ("ba.csv", [second, first])):
+        receptors = store.repertoire.import_receptors(
+            _write(tmp_path, name, CELLRANGER_HEADER, rows), cell_selection=cells
+        )
+        table = store.repertoire.load_receptors(receptors).cells
+        assert table.loc["cell0", ["VJ_1_v_call", "VJ_2_v_call"]].tolist() == [
+            "TRAV1",
+            "TRAV2",
+        ]
+
+
+def test_compressed_files_read_whatever_their_name(tmp_path) -> None:
+    store = _store(tmp_path)
+    cells = store.snapshot_cell_selection()
+    # Gzip-compressed Cell Ranger and AIRR files without the .gz suffix.
+    for plain in (_tcr(tmp_path), _airr(tmp_path)):
+        packed = plain.with_name(f"packed_{plain.name}")
+        packed.write_bytes(gzip.compress(plain.read_bytes()))
+        expected, found = (
+            store.repertoire.load_receptors(
+                store.repertoire.import_receptors(path, cell_selection=cells)
+            ).cells
+            for path in (plain, packed)
+        )
+        pd.testing.assert_frame_equal(found, expected)
 
 
 def test_non_productive_chains_count_when_asked(tmp_path) -> None:
@@ -430,6 +480,16 @@ def test_loading_reads_the_requested_fields(tmp_path) -> None:
         "VDJ_1_umi_count",
     ]
     assert "raw_clonotype_id" in loaded.fields
+    # Text has the string dtype, also in a field that no contig holds.
+    without_d = store.repertoire.import_receptors(
+        _tcr(tmp_path, [row.replace("TRBD1", "") for row in TCR_ROWS], "no_d.csv"),
+        cell_selection=store.snapshot_cell_selection(),
+    )
+    calls = store.repertoire.load_receptors(
+        without_d, fields=["v_call", "d_call"]
+    ).chains
+    assert calls["v_call"].dtype == "string" and calls["d_call"].dtype == "string"
+    assert calls["d_call"].isna().all()
     empty = store.repertoire.load_receptors(ref, fields=[])
     assert list(empty.chains.columns) == ["ids", "slot", "chain"]
     assert list(empty.cells.columns) == [
