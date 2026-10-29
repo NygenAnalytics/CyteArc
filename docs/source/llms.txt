@@ -36,6 +36,7 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 - [TEA-seq](tutorials/tea-seq/): prepared RNA, ATAC, and protein analysis with three-way WNN
 - [WNN and SNN integration](tutorials/multimodal-diagnostics/): compare SNN and WNN and inspect modality weights
 - [HTO demultiplexing](tutorials/hto-demultiplexing/): sample-tag classification and Seurat comparison
+- [Immune repertoires](tutorials/immune-repertoires/): TCR and BCR contigs, clonotypes, clonal expansion, diversity, overlap, gene usage, B cell clonal families, and AIRR export
 
 ## Integration and mapping
 

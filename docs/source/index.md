@@ -80,8 +80,8 @@ memory on your workload.
 - **Bring your own counts:** [](tutorials/import_and_export.ipynb) covers supported formats, and
   the [RNA-seq workflow](quickstart.ipynb#analyze-your-own-rna-seq-data) shows the standard
   pipeline. Review [](tutorials/quality_control.ipynb) before interpreting the results.
-- **Use another assay:** follow [](tutorials/scatac_seq.ipynb), [](tutorials/cite_seq.ipynb), or
-  [](tutorials/tea_seq.ipynb).
+- **Use another assay:** follow [](tutorials/scatac_seq.ipynb), [](tutorials/cite_seq.ipynb),
+  [](tutorials/tea_seq.ipynb), or [](tutorials/immune_repertoires.ipynb).
 
 Start with {ref}`Installation <installation>` to set up your environment, then follow the
 {ref}`Quick start <quickstart>`. For importing an existing analysis or translating individual
