@@ -20,7 +20,7 @@ from ..perturbation.mixtures import (
     poisson_gaussian_posterior,
 )
 from ..storage.refs import ArtifactRef
-from ._contracts import PlotProvenance
+from ._contracts import CategoricalScale, ColorScale, PlotProvenance
 from ._deps import require_matplotlib
 from ._figure import (
     LegendSpec,
@@ -28,11 +28,14 @@ from ._figure import (
     close_figures_on_error,
     normalize_axes_target,
 )
+from ._labels import place_layout_labels, register_layout_labels
 from ._style import (
     DEFAULT_RASTERIZE_THRESHOLD,
     apply_figure_chrome,
     default_point_size,
+    finish_embedding_axes,
     foreground_color,
+    padded_square_limits,
     theme_context,
 )
 
@@ -142,6 +145,47 @@ _BAND_PROBABILITY = 0.95
 _STRIP_HALF_WIDTH = 0.25
 _STRIP_SEED = 0
 _FOLD_CHANGE_BINS = 30
+
+_HEATMAP_PANEL = "heatmap"
+_EMBEDDING_PANEL = "embedding"
+# HDBSCAN's cluster of a perturbation that it leaves unassigned.
+_UNASSIGNED = -1
+# Clusters take CyteArc's colourblind-safe palette without its black, its
+# yellow and the two colours that read as grey, in the order in which they
+# first appear in the leaf order, and the ninth takes the first colour again.
+_CLUSTER_COLORS = (
+    "#0072B2",
+    "#E69F00",
+    "#009E73",
+    "#D55E00",
+    "#CC79A7",
+    "#56B4E9",
+    "#2E8B57",
+    "#A05195",
+)
+# The grey of unassigned perturbations recedes on each theme and stays apart
+# from every cluster colour, even with colour vision deficiency.
+_UNASSIGNED_COLOR = "#d4d4d4"
+_DARK_UNASSIGNED_COLOR = "#4d4d4d"
+_UNASSIGNED_LABEL = "Unassigned"
+# A heatmap names its perturbations when it draws at most this many, giving
+# each this many inches, and is otherwise this many inches square.
+_NAMED_PERTURBATIONS = 50
+_NAMED_ROW_INCHES = 0.16
+_HEATMAP_INCHES = 6.0
+_HEATMAP_MIN_INCHES = 3.0
+# A heatmap's own figure changes its width at most this many times to make
+# the heatmap square.
+_SQUARE_PASSES = 3
+# The cluster bar's width and its gap to the heatmap, in shares of the
+# heatmap's width.
+_BAR_WIDTH = 0.03
+_BAR_GAP = 0.01
+_CORRELATION_CMAP = "RdBu_r"
+_DISTANCE_CMAP = "Blues_r"
+# The ring around a named perturbation has this many times the area of its
+# point.
+_RING_AREA = 4.0
 
 
 def _guide_calls(store: Any, calls: ArtifactRef) -> Any:
@@ -1841,15 +1885,17 @@ def _point_sizes(n_points: int) -> tuple[float, float]:
     return size, max(1.5 * size, 20.0)
 
 
-def _place_labels(figure: Any, ax: Any, labels: list[Any]) -> None:
+def _place_labels(
+    figure: Any, ax: Any, labels: list[Any], *, avoid: Sequence[Any] = ()
+) -> None:
     """Move each label, in order, to the first free slot beside its point.
 
     The slots lie beside the point, on the side the label starts on and then
     on the other, at the point's height, then one label height above and
     below it, then two, and so on up to eight. A label takes the first slot
-    inside the axes that no earlier label overlaps, and keeps its first slot
-    when none is free. A thin line leads to the point from a label above or
-    below it.
+    inside the axes that no earlier label overlaps and that keeps the label
+    gap from every text of ``avoid``, and keeps its first slot when none is
+    free. A thin line leads to the point from a label above or below it.
     """
     from matplotlib.text import Text
 
@@ -1860,7 +1906,11 @@ def _place_labels(figure: Any, ax: Any, labels: list[Any]) -> None:
     steps = [0] + [
         sign * step for step in range(1, _LABEL_STEPS + 1) for sign in (1, -1)
     ]
-    placed: list[tuple[float, float, float, float]] = []
+    gap = _LABEL_GAP * scale
+    placed: list[tuple[float, float, float, float]] = [
+        (box.x0 - gap, box.y0 - gap, box.x1 + gap, box.y1 + gap)
+        for box in (Text.get_window_extent(text) for text in avoid)
+    ]
     for label in labels:
         extent = Text.get_window_extent(label)
         width, height = extent.width, extent.height
@@ -2642,6 +2692,631 @@ def association_calibration(
                     "calibration": len(calibration),
                     "positive": len(positive),
                 },
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+def _perturbation_clusters(store: Any, clusters: ArtifactRef) -> Any:
+    """Load saved perturbation clusters through the store's narrow loader."""
+    loader = getattr(getattr(store, "perturbation", None), "load_clusters", None)
+    if not callable(loader):
+        raise TypeError("store does not provide perturbation clusters")
+    return loader(clusters)
+
+
+def _distinct_cluster_ids(values: Sequence[int] | None) -> list[int] | None:
+    """Return the distinct cluster numbers of ``values`` in their order, or None."""
+    if values is None:
+        return None
+    if (
+        isinstance(values, str | bytes)
+        or not isinstance(values, Sequence)
+        or not all(
+            isinstance(value, int | np.integer) and not isinstance(value, bool)
+            for value in values
+        )
+    ):
+        raise TypeError("cluster_ids must be a sequence of cluster numbers or None")
+    if not values:
+        raise ValueError("cluster_ids must name at least one cluster")
+    return list(dict.fromkeys(int(value) for value in values))
+
+
+def _quoted(values: Sequence[Any]) -> str:
+    """Return the first five values quoted, and how many more there are."""
+    shown = ", ".join(repr(value) for value in values[:5])
+    return shown if len(values) <= 5 else f"{shown} and {len(values) - 5:,} more"
+
+
+def _cluster_palette(codes: np.ndarray) -> dict[int, str]:
+    """Colour the clusters in the order in which they first appear in ``codes``.
+
+    ``codes`` holds the cluster of every clustered perturbation in leaf order,
+    so a cluster keeps its colour whatever a plot draws.
+    """
+    first = pd.unique(codes[codes != _UNASSIGNED])
+    return {
+        int(cluster): _CLUSTER_COLORS[rank % len(_CLUSTER_COLORS)]
+        for rank, cluster in enumerate(first.tolist())
+    }
+
+
+def _cluster_runs(codes: np.ndarray) -> pd.DataFrame:
+    """Return the longest run of rows of each cluster, ties to the first run.
+
+    The rows of ``codes`` run in drawing order. The columns are ``cluster``,
+    ``row``, the middle of the run, and ``length``, one row per cluster in
+    order of cluster.
+    """
+    change = np.flatnonzero(np.diff(codes)) + 1
+    starts = np.concatenate([[0], change])
+    stops = np.concatenate([change, [len(codes)]])
+    runs = pd.DataFrame(
+        {
+            "cluster": codes[starts],
+            "row": (starts + stops - 1) / 2.0,
+            "length": stops - starts,
+        }
+    )
+    runs = runs[runs["cluster"] != _UNASSIGNED]
+    return (
+        runs.sort_values(
+            ["cluster", "length", "row"], ascending=[True, False, True], kind="stable"
+        )
+        .drop_duplicates("cluster")
+        .reset_index(drop=True)
+    )
+
+
+def _number_clusters(figure: Any, bar: Any, runs: pd.DataFrame) -> np.ndarray:
+    """Number the clusters beside the bar, longer runs first, without overlaps.
+
+    Each number sits beside the middle of its cluster's longest run. Once the
+    layout settles, the numbers are kept from the longest run to the
+    shortest, ties broken by row, and a number that would overlap a kept
+    number is left out. Returns whether each run's number is kept.
+    """
+    from matplotlib.text import Text
+
+    rows = runs["row"].to_numpy(dtype=np.float64)
+    texts = [str(cluster) for cluster in runs["cluster"].tolist()]
+    bar.set_yticks(rows, texts)
+    # The layout settles, and the numbers get their sizes, without rendering.
+    figure.draw_without_rendering()
+    height = max(
+        Text.get_window_extent(number).height for number in bar.get_yticklabels()
+    )
+    middles = bar.transData.transform(np.column_stack([np.zeros(len(rows)), rows]))
+    kept = np.zeros(len(rows), dtype=bool)
+    for index in np.lexsort((rows, -runs["length"].to_numpy())):
+        if not (np.abs(middles[kept, 1] - middles[index, 1]) < height).any():
+            kept[index] = True
+    bar.set_yticks(
+        rows[kept], [text for text, keep in zip(texts, kept, strict=True) if keep]
+    )
+    return kept
+
+
+def _square_heatmap(figure: Any, ax: Any) -> None:
+    """Change the figure's width until the heatmap's box comes out square.
+
+    The heatmap's height does not depend on the figure's width, and its width
+    follows the figure's nearly one for one: the colorbar's pad grows with
+    it. So each pass, after the layout settles, widens the figure by the
+    box's shortfall, and stops within half a pixel or after three passes.
+    """
+    for _ in range(_SQUARE_PASSES):
+        figure.draw_without_rendering()
+        box = ax.get_window_extent()
+        shortfall = box.height - box.width
+        if abs(shortfall) < 0.5:
+            return
+        width, height = figure.get_size_inches()
+        figure.set_size_inches(width + shortfall / figure.dpi, height)
+
+
+def _cluster_figsize(
+    panel: str, names: list[str] | None, *, n_title: int, show_legend: bool
+) -> tuple[float, float]:
+    """Return the size of a figure that holds the panel, its names and legend.
+
+    ``names`` are the perturbations that a heatmap names, or None.
+    """
+    from matplotlib import rcParams
+    from matplotlib.font_manager import FontProperties
+
+    title = 0.25 * n_title + 0.1
+    if panel == _EMBEDDING_PANEL:
+        return (_HEATMAP_INCHES, _HEATMAP_INCHES + title)
+    side = _HEATMAP_INCHES
+    names_inches = 0.0
+    if names is not None:
+        side = max(_HEATMAP_MIN_INCHES, _NAMED_ROW_INCHES * len(names))
+        points = FontProperties(size=rcParams["ytick.labelsize"]).get_size_in_points()
+        names_inches = 0.15 + 0.62 * points / 72.0 * max(map(len, names))
+    # The bar and its numbers, and the colorbar with its label.
+    width = side + 0.6 + names_inches + (1.0 if show_legend else 0.0)
+    return (width, side + names_inches + title)
+
+
+def _cluster_heatmap(
+    ax: Any,
+    loaded: Any,
+    drawn: pd.DataFrame,
+    colors: list[str],
+    *,
+    correlation: bool,
+    named: bool,
+) -> tuple[Any, Any, pd.DataFrame, tuple[float, float]]:
+    """Draw the profiles' correlations or distances and the cluster bar.
+
+    Returns the image, the bar's axes, the drawn matrix and its colour
+    limits.
+    """
+    from matplotlib.colors import to_rgba
+
+    n_drawn = len(drawn)
+    positions = loaded.distances.index.get_indexer(drawn.index)
+    matrix = loaded.distances.to_numpy(dtype=np.float64)[np.ix_(positions, positions)]
+    limits: tuple[float, float]
+    if correlation:
+        np.subtract(1.0, matrix, out=matrix)
+        limits = (-1.0, 1.0)
+    else:
+        # Distances run from 0 to the largest drawn, or to 1 when every drawn
+        # distance is 0.
+        limits = (0.0, float(matrix.max()) or 1.0)
+    # A heatmap with more perturbations than pixels averages the values that
+    # each pixel covers before colouring it, and a smaller one draws each cell
+    # as a block. The image fills the axes, whose box the plot's own figure
+    # makes square: a box of fixed aspect would leave the layout to place the
+    # bar's numbers against a box it then moves.
+    image = ax.imshow(
+        matrix,
+        cmap=_CORRELATION_CMAP if correlation else _DISTANCE_CMAP,
+        vmin=limits[0],
+        vmax=limits[1],
+        aspect="auto",
+        interpolation="antialiased",
+        interpolation_stage="data",
+        rasterized=True,
+    )
+    if named:
+        ticks = np.arange(n_drawn)
+        names = [str(name) for name in drawn.index.tolist()]
+        ax.set_xticks(ticks, names, rotation=90)
+        ax.set_yticks(ticks, names)
+        ax.yaxis.tick_right()
+        ax.tick_params(length=0)
+    else:
+        ax.set_xticks([])
+        ax.set_yticks([])
+    # The bar sits left of the heatmap, one row per drawn perturbation.
+    bar = ax.inset_axes([-(_BAR_GAP + _BAR_WIDTH), 0.0, _BAR_WIDTH, 1.0])
+    rgba = {color: to_rgba(color) for color in set(colors)}
+    bar.imshow(
+        np.asarray([rgba[color] for color in colors]).reshape(n_drawn, 1, 4),
+        aspect="auto",
+        interpolation="nearest",
+        extent=(0.0, 1.0, n_drawn - 0.5, -0.5),
+        rasterized=True,
+    )
+    bar.set_xlim(0.0, 1.0)
+    bar.set_ylim(n_drawn - 0.5, -0.5)
+    bar.set_xticks([])
+    bar.set_yticks([])
+    bar.tick_params(axis="y", length=2.0, pad=1.0)
+    for spine in (*ax.spines.values(), *bar.spines.values()):
+        spine.set_visible(False)
+    table = pd.DataFrame(
+        matrix, index=drawn.index.copy(), columns=drawn.index.copy(), copy=False
+    )
+    return image, bar, table, limits
+
+
+def _cluster_map(
+    ax: Any,
+    drawn: pd.DataFrame,
+    colors: list[str],
+    *,
+    named: list[str] | None,
+    show_legend: bool,
+    theme: str,
+) -> tuple[pd.DataFrame, list[Any], list[Any], bool]:
+    """Draw each perturbation at its place in the layout, coloured by cluster.
+
+    Returns the drawn clusters with their medians, the clusters' numbers, the
+    labels of the named perturbations, and whether the points are
+    rasterized.
+    """
+    from matplotlib import patheffects
+
+    x = drawn["x"].to_numpy(dtype=np.float64)
+    y = drawn["y"].to_numpy(dtype=np.float64)
+    assigned = drawn["cluster"].to_numpy(dtype=np.int64) != _UNASSIGNED
+    size, _ = _point_sizes(len(drawn))
+    rasterized = len(drawn) > DEFAULT_RASTERIZE_THRESHOLD
+    point_colors = np.asarray(colors, dtype=object)
+    # The unassigned perturbations lie beneath the clusters.
+    for chosen, order in ((~assigned, 2.0), (assigned, 3.0)):
+        if chosen.any():
+            ax.scatter(
+                x[chosen],
+                y[chosen],
+                s=size,
+                c=point_colors[chosen].tolist(),
+                linewidths=0,
+                zorder=order,
+                rasterized=rasterized,
+            )
+    xlim, ylim = padded_square_limits(x, y)
+    finish_embedding_axes(ax, xlim=xlim, ylim=ylim, frame="minimal")
+    members = drawn[assigned].groupby("cluster", sort=True)
+    medians = members[["x", "y"]].median()
+    clusters = pd.DataFrame(
+        {
+            "cluster": medians.index.to_numpy(dtype=np.int64),
+            "n_perturbations": members.size().to_numpy(dtype=np.int64),
+            "x": medians["x"].to_numpy(dtype=np.float64),
+            "y": medians["y"].to_numpy(dtype=np.float64),
+        }
+    )
+    numbers: list[Any] = []
+    if show_legend and len(clusters):
+        # Each number starts at its cluster's median, as the on-data labels
+        # of an embedding do, and moves aside when it overlaps another.
+        text_color = "#f5f5f5" if theme == "dark" else "#222222"
+        stroke = "#222222" if theme == "dark" else "#ffffff"
+        centres = clusters[["x", "y"]].to_numpy(dtype=np.float64)
+        numbers = [
+            ax.text(
+                centre_x,
+                centre_y,
+                str(cluster),
+                ha="center",
+                va="center",
+                fontsize=8,
+                color=text_color,
+                path_effects=[patheffects.withStroke(linewidth=2.0, foreground=stroke)],
+                zorder=5,
+                in_layout=False,
+            )
+            for cluster, (centre_x, centre_y) in zip(
+                clusters["cluster"].tolist(), centres.tolist(), strict=True
+            )
+        ]
+        register_layout_labels(ax, numbers, centres)
+    labels: list[Any] = []
+    if named:
+        foreground = foreground_color(theme)
+        rows = drawn.index.get_indexer(named)
+        ax.scatter(
+            x[rows],
+            y[rows],
+            s=_RING_AREA * size,
+            facecolors="none",
+            edgecolors=foreground,
+            linewidths=0.8,
+            zorder=4,
+            rasterized=rasterized,
+        )
+        middle = 0.5 * (xlim[0] + xlim[1])
+        for row, name in zip(rows.tolist(), named, strict=True):
+            # A name starts on the side towards the middle, where there is
+            # room.
+            towards = 1.0 if x[row] < middle else -1.0
+            label = ax.annotate(
+                name,
+                (float(x[row]), float(y[row])),
+                xytext=(towards * _LABEL_OFFSET, 0.0),
+                textcoords="offset points",
+                ha="left" if towards > 0 else "right",
+                va="center",
+                fontsize="small",
+                color=foreground,
+                zorder=6,
+                arrowprops={
+                    "arrowstyle": "-",
+                    "color": foreground,
+                    "linewidth": 0.6,
+                    "shrinkA": 0.0,
+                    "shrinkB": 2.0,
+                },
+            )
+            label.arrow_patch.set_visible(False)
+            labels.append(label)
+    return clusters, numbers, labels, rasterized
+
+
+@close_figures_on_error
+def perturbation_clusters(
+    store: Any,
+    clusters: ArtifactRef,
+    *,
+    panel: str = "heatmap",
+    perturbations: Sequence[str] | None = None,
+    cluster_ids: Sequence[int] | None = None,
+    label: Sequence[str] | None = None,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot clusters of perturbations as a heatmap of their profiles or as a map.
+
+    ``clusters`` is a ``perturbation_clusters`` artifact of
+    ``ds.perturbation.cluster``, as ``ds.perturbation.load_clusters`` reads
+    it.
+
+    With ``panel="heatmap"``, the perturbations run in the leaf order of
+    average linkage, from the top down and from the left, and each cell holds
+    the Pearson correlation of two profiles, on a diverging scale from -1 in
+    blue through 0 in white to 1 in red. When the clusters were found by
+    Euclidean distance, each cell holds the distance instead, from 0 in dark
+    blue to the largest drawn distance in white. A bar on the left colours
+    each perturbation by its cluster, grey when HDBSCAN left it unassigned,
+    and numbers each cluster beside the middle of the longest run of its
+    rows; a number that would overlap the number of a longer run is left
+    out. The names of the perturbations run beside the rows and below the
+    columns when the heatmap draws at most 50, and are left out of a larger
+    heatmap, which is too dense to name; ``perturbations`` or
+    ``cluster_ids`` then draw fewer. The matrix is drawn as one image, so
+    that thousands of perturbations render quickly and save to a small file.
+    The axes take the keys ``"heatmap"``, ``"cluster_bar"`` and
+    ``"colorbar"``. The table ``"matrix"`` holds the drawn values with the
+    perturbations in drawing order, and ``"clusters"`` holds each drawn
+    cluster's ``n_perturbations``, the ``row`` of its number and whether it
+    is ``numbered``.
+
+    With ``panel="embedding"``, each perturbation is a point at its place in
+    the clustering's two-dimensional layout, coloured by its cluster, with
+    the unassigned perturbations in grey beneath the others. Each cluster is
+    numbered at the median of its points, and a number that overlaps another
+    moves aside by at most about its height. ``label`` names those
+    perturbations: each gets a ring around its point and its name beside it,
+    and a name that would overlap another name or a number moves to the other
+    side, or above or below its point with a thin line to it. The points are
+    rasterized when there are more than 50,000. The axes take the key
+    ``"embedding"``. The table ``"clusters"`` holds each drawn cluster's
+    ``n_perturbations`` and the median ``x`` and ``y`` of its points, where
+    its number starts.
+
+    A cluster has the same colour in both panels and whatever the plot
+    draws. The clusters take eight colours, CyteArc's colourblind-safe
+    palette without its black, its yellow and its two greyish colours, in the
+    order in which they first appear in the leaf order; the ninth takes the
+    first colour again, and its number tells it apart.
+
+    ``perturbations`` keeps those perturbations, and ``cluster_ids`` keeps
+    the perturbations of those clusters, -1 for the unassigned ones; they
+    cannot be combined. The plot raises ValueError when either names a
+    perturbation or a cluster that the clusters lack, and when ``label``
+    names a perturbation that the plot does not draw or comes with
+    ``panel="heatmap"``. The title counts the drawn perturbations, out of
+    the clustered ones when some are left out, and the drawn clusters and
+    unassigned perturbations. ``show_legend=False`` leaves out the colorbar
+    and the cluster numbers. The table ``"perturbations"`` holds the drawn
+    rows of the record's table, indexed by perturbation, in leaf order.
+    """
+    if not isinstance(panel, str) or panel not in (_HEATMAP_PANEL, _EMBEDDING_PANEL):
+        raise ValueError(f"panel must be 'heatmap' or 'embedding', not {panel!r}")
+    requested = _distinct_labels(perturbations, "perturbations", "perturbation")
+    chosen = _distinct_cluster_ids(cluster_ids)
+    if requested is not None and chosen is not None:
+        raise ValueError("Pass perturbations or cluster_ids, not both")
+    named = _distinct_labels(label, "label", "perturbation")
+    if named is not None and panel == _HEATMAP_PANEL:
+        raise ValueError(
+            "label names perturbations in the embedding; the heatmap names every "
+            f"perturbation when it draws at most {_NAMED_PERTURBATIONS}"
+        )
+    loaded = _perturbation_clusters(store, clusters)
+    table = loaded.table
+    # Every clustered perturbation, in leaf order.
+    in_order = table.reindex(pd.Index(loaded.order, name=table.index.name))
+    every_code = in_order["cluster"].to_numpy(dtype=np.int64)
+    palette = _cluster_palette(every_code)
+    for names in (requested, named):
+        unknown = [name for name in names or () if name not in in_order.index]
+        if unknown:
+            raise ValueError(
+                f"The clusters have no perturbation named {_quoted(unknown)}"
+            )
+    if chosen is not None:
+        present = set(every_code.tolist())
+        missing = [cluster for cluster in chosen if cluster not in present]
+        if missing:
+            largest = int(every_code.max())
+            raise ValueError(
+                f"No perturbation is in cluster{'s' if len(missing) > 1 else ''} "
+                f"{_quoted(missing)}; "
+                + (
+                    f"the clusters run from 0 to {largest}, with -1 for "
+                    "unassigned perturbations"
+                    if largest >= 0
+                    else "every perturbation is unassigned, in cluster -1"
+                )
+            )
+        keep = np.isin(every_code, chosen)
+    elif requested is not None:
+        keep = in_order.index.isin(requested)
+    else:
+        keep = np.ones(len(in_order), dtype=bool)
+    drawn = in_order[keep]
+    hidden = [name for name in named or () if name not in drawn.index]
+    if hidden:
+        raise ValueError(
+            f"label names perturbations that the plot does not draw: {_quoted(hidden)}"
+        )
+    n_drawn = len(drawn)
+    n_clustered = len(in_order)
+    codes = drawn["cluster"].to_numpy(dtype=np.int64)
+    assigned = codes != _UNASSIGNED
+    n_unassigned = int(np.count_nonzero(~assigned))
+    drawn_clusters = sorted(set(codes[assigned].tolist()))
+    n_clusters = len(drawn_clusters)
+    unassigned = _DARK_UNASSIGNED_COLOR if theme == "dark" else _UNASSIGNED_COLOR
+    colors = [palette.get(code, unassigned) for code in codes.tolist()]
+    metric = str(loaded.metric)
+    correlation = metric == "correlation"
+    counts = f"{n_clusters:,} cluster{'' if n_clusters == 1 else 's'}"
+    if n_unassigned:
+        counts += f", {n_unassigned:,} unassigned in grey"
+    kept = "" if n_drawn == n_clustered else f"{n_drawn:,} of "
+    title = [
+        (
+            (
+                "Correlation between perturbation profiles"
+                if correlation
+                else "Euclidean distance between perturbation profiles"
+            )
+            if panel == _HEATMAP_PANEL
+            else "UMAP of perturbation profiles"
+        ),
+        f"{kept}{n_clustered:,} perturbation{'' if n_clustered == 1 else 's'}: "
+        f"{counts}",
+    ]
+    scale_label = "Pearson correlation" if correlation else "Euclidean distance"
+    category_scale = CategoricalScale(
+        order=tuple(drawn_clusters),
+        palette={cluster: palette[cluster] for cluster in drawn_clusters},
+        missing_color=unassigned,
+        missing_label=_UNASSIGNED_LABEL,
+    )
+    named_axes = n_drawn <= _NAMED_PERTURBATIONS
+    tables: dict[str, pd.DataFrame]
+    legends: tuple[LegendSpec, ...]
+    scales: tuple[Any, ...]
+    extras: dict[str, Any]
+    require_matplotlib()
+    with theme_context(theme):
+        sized = figsize is None and target is None
+        if sized:
+            figsize = _cluster_figsize(
+                panel,
+                [str(name) for name in drawn.index.tolist()] if named_axes else None,
+                n_title=len(title),
+                show_legend=show_legend,
+            )
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=[panel], figsize=figsize
+        )
+        ax = axes[panel]
+        if panel == _HEATMAP_PANEL:
+            image, bar, matrix, limits = _cluster_heatmap(
+                ax,
+                loaded,
+                drawn,
+                colors,
+                correlation=correlation,
+                named=named_axes,
+            )
+            axes["cluster_bar"] = bar
+            ax.set_title("\n".join(title))
+            if show_legend:
+                colorbar = figure.colorbar(image, ax=ax, shrink=0.5, aspect=15)
+                colorbar.set_label(scale_label)
+                if correlation:
+                    colorbar.set_ticks(np.linspace(-1.0, 1.0, 5))
+                axes["colorbar"] = colorbar.ax
+            apply_figure_chrome(figure, theme)
+            runs = _cluster_runs(codes)
+            numbered = (
+                _number_clusters(figure, bar, runs)
+                if show_legend and len(runs)
+                else np.zeros(len(runs), dtype=bool)
+            )
+            if sized:
+                _square_heatmap(figure, ax)
+            sizes = pd.Series(codes[assigned]).value_counts()
+            tables = {
+                "perturbations": drawn,
+                "matrix": matrix,
+                "clusters": pd.DataFrame(
+                    {
+                        "cluster": runs["cluster"].to_numpy(dtype=np.int64),
+                        "n_perturbations": sizes.reindex(runs["cluster"]).to_numpy(
+                            dtype=np.int64
+                        ),
+                        "row": runs["row"].to_numpy(dtype=np.float64),
+                        "numbered": numbered,
+                    }
+                ),
+            }
+            legends = (
+                LegendSpec(
+                    kind="colorbar",
+                    label=scale_label,
+                    extras={"vmin": limits[0], "vmax": limits[1]},
+                ),
+                LegendSpec(kind="categorical", label="Cluster"),
+            )
+            scales = (
+                ColorScale(
+                    cmap=_CORRELATION_CMAP if correlation else _DISTANCE_CMAP,
+                    vmin=limits[0],
+                    vmax=limits[1],
+                    vcenter=0.0 if correlation else None,
+                ),
+                category_scale,
+            )
+            extras = {"named": named_axes, "color_limits": list(limits)}
+        else:
+            cluster_table, numbers, labels, rasterized = _cluster_map(
+                ax,
+                drawn,
+                colors,
+                named=named,
+                show_legend=show_legend,
+                theme=theme,
+            )
+            ax.set_title("\n".join(title))
+            apply_figure_chrome(figure, theme)
+            # The numbers settle first, and the names then keep clear of them.
+            place_layout_labels(figure)
+            if labels:
+                _place_labels(figure, ax, labels, avoid=numbers)
+            tables = {"perturbations": drawn, "clusters": cluster_table}
+            legends = (LegendSpec(kind="categorical", label="Cluster"),)
+            scales = (category_scale,)
+            extras = {"rasterized": rasterized}
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables=tables,
+        legends=legends,
+        scales=scales,
+        provenance=PlotProvenance(
+            assay=clusters.assay,
+            cell_key=None,
+            # The cells of the drawn perturbations' profiles.
+            n_cells=int(drawn["n_cells"].sum()),
+            renderer="matplotlib",
+            notes=("perturbation_clusters",),
+            extras={
+                "clusters": clusters.to_dict(),
+                "panel": panel,
+                "metric": metric,
+                "min_cluster_size": int(loaded.min_cluster_size),
+                "min_samples": int(loaded.min_samples),
+                "selection": str(loaded.selection),
+                "seed": int(loaded.seed),
+                "from_assay": str(loaded.from_assay),
+                "perturbations": requested,
+                "cluster_ids": chosen,
+                "label": named,
+                "n_perturbations": n_drawn,
+                "n_clustered": n_clustered,
+                "n_clusters": n_clusters,
+                "n_unassigned": n_unassigned,
+                **extras,
             },
         ),
         owns_figure=owns,

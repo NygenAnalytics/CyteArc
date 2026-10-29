@@ -194,6 +194,10 @@ class PerturbationAccessor(_Accessor):
     load_associations = _bind(
         _PerturbationOperationsMixin._perturbation_load_associations
     )
+    profiles = _bind(_PerturbationOperationsMixin._perturbation_profiles)
+    load_profiles = _bind(_PerturbationOperationsMixin._perturbation_load_profiles)
+    cluster = _bind(_PerturbationOperationsMixin._perturbation_cluster)
+    load_clusters = _bind(_PerturbationOperationsMixin._perturbation_load_clusters)
 
 
 class QcAccessor(_Accessor):

@@ -42,6 +42,7 @@ _STORE_PLOT_METHODS = (
     "matrixplot",
     "mixscape",
     "modality_weights",
+    "perturbation_clusters",
     "pseudotime_heatmap",
     "run_recipe",
 )
@@ -122,6 +123,12 @@ _ASSOCIATIONS_REF = ArtifactRef(
     assay="RNA",
     kind="perturbation_associations",
     artifact_id="7" * 64,
+)
+_CLUSTERS_REF = ArtifactRef(
+    scope="assay",
+    assay="RNA",
+    kind="perturbation_clusters",
+    artifact_id="8" * 64,
 )
 
 
@@ -331,6 +338,11 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             {"targets": ["MYC"], "label_top": 3},
         ),
         ("association_calibration", (_ASSOCIATIONS_REF,), {"show_legend": False}),
+        (
+            "perturbation_clusters",
+            (_CLUSTERS_REF,),
+            {"panel": "embedding", "cluster_ids": [0, -1], "label": ["MYC"]},
+        ),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -374,6 +386,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("classes"))
     elif name in ("association_volcano", "association_calibration"):
         expected_args.append(expected_kwargs.pop("tests"))
+    elif name == "perturbation_clusters":
+        expected_args.append(expected_kwargs.pop("clusters"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

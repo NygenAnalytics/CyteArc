@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 import cytearc.perturbation.signature as signature_module
+from cytearc.datastore._operations import perturbation as perturbation_operations
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationSignature
 from cytearc.perturbation.signature import (
@@ -172,6 +173,43 @@ def test_signature_subtracts_each_cells_nearest_controls(tmp_path) -> None:
         rtol=1e-6,
         atol=1e-6,
     )
+
+
+def test_loading_a_signature_holds_its_values_once(tmp_path, monkeypatch) -> None:
+    store = _store(tmp_path)
+    ref = store.perturbation.signature(
+        _labels(store),
+        _coordinates(store),
+        features=_features(store),
+        dims=3,
+        n_neighbors=4,
+    )
+    read: list[np.ndarray] = []
+    as_zarr_array = perturbation_operations.as_zarr_array
+
+    class Recorded:
+        """The stored values, keeping each array that an orthogonal read returns."""
+
+        def __init__(self, stored) -> None:
+            self.oindex = self
+            self.stored = stored
+
+        def __getitem__(self, selection) -> np.ndarray:
+            read.append(np.asarray(self.stored.oindex[selection]))
+            return read[-1]
+
+    def recording(node, *, name=""):
+        stored = as_zarr_array(node, name=name)
+        return Recorded(stored) if name == "values" else stored
+
+    monkeypatch.setattr(perturbation_operations, "as_zarr_array", recording)
+
+    loaded = store.perturbation.load_signature(ref)
+
+    # The frame wraps the float32 values as read, the 4 bytes per value that
+    # the budget check counts, instead of a copy.
+    assert len(read) == 1 and read[0].dtype == np.float32
+    assert np.shares_memory(loaded.values.to_numpy(), read[0])
 
 
 def test_signature_keeps_each_sample_to_its_own_controls(tmp_path) -> None:

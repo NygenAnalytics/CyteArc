@@ -69,6 +69,7 @@ if TYPE_CHECKING:
         guide_calls as guide_calls,
         guide_thresholds as guide_thresholds,
         mixscape as mixscape,
+        perturbation_clusters as perturbation_clusters,
     )
     from .summary import dotplot as dotplot
     from .summary import matrixplot as matrixplot
@@ -123,6 +124,7 @@ __all__ = [
     "matrixplot",
     "mixscape",
     "modality_weights",
+    "perturbation_clusters",
     "pseudotime_heatmap",
     "qc",
     "run_recipe",
@@ -181,6 +183,7 @@ __getattr__, __dir__ = _lazy_facade(
         "matrixplot": ".summary",
         "mixscape": ".perturbation",
         "modality_weights": ".modality_weights",
+        "perturbation_clusters": ".perturbation",
         "pseudotime_heatmap": ".heatmaps",
         "qc": ".diagnostics",
         "run_recipe": ".recipes",

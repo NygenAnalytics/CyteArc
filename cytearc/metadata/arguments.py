@@ -600,6 +600,46 @@ class PerturbationAssociationArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class PerturbationProfileArguments(OperationArguments):
+    operation: ClassVar[str] = "compute_perturbation_profiles"
+    artifact_kind: ClassVar[str] = "perturbation_profiles"
+
+    # Perturbation labels, or Mixscape classes whose knocked-out cells alone
+    # make each target's profile.
+    labels: ArtifactRef = artifact_input()
+    feature_selection: ArtifactRef = artifact_input()
+    # The counts that the profiles average.
+    dataset_fingerprint: str = artifact_input()
+    # The fingerprint of each cell's sample over the control cells and the
+    # cells of the profiled perturbations, or None for one sample.
+    sample_assignments_fingerprint: str | None = artifact_input()
+    # Each profiled perturbation with the feature ID of its target, from
+    # id_column or the names, or None without masking.
+    target_features_fingerprint: str | None = artifact_input()
+    by: str = parameter()
+    min_cells: int = parameter()
+    mask_targets: bool = parameter()
+    sample_columns: tuple[str, ...] = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class PerturbationClusterArguments(OperationArguments):
+    operation: ClassVar[str] = "cluster_perturbations"
+    artifact_kind: ClassVar[str] = "perturbation_clusters"
+
+    perturbation_profiles: ArtifactRef = artifact_input()
+    # The names of the clustered perturbations, or None for every profile.
+    perturbations_fingerprint: str | None = artifact_input()
+    metric: str = parameter()
+    min_cluster_size: int = parameter()
+    min_samples: int = parameter()
+    selection: str = parameter()
+    seed: int = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class PerturbationEDistanceArguments(OperationArguments):
     operation: ClassVar[str] = "measure_edistance"
     artifact_kind: ClassVar[str] = "perturbation_edistance"
