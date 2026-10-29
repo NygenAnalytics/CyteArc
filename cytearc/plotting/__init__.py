@@ -73,7 +73,10 @@ if TYPE_CHECKING:
         clonal_rarefaction as clonal_rarefaction,
         clonotype_abundance as clonotype_abundance,
         clonotype_tracking as clonotype_tracking,
+        gene_pairing as gene_pairing,
+        gene_usage as gene_usage,
         receptor_qc as receptor_qc,
+        spectratype as spectratype,
     )
     from .summary import dotplot as dotplot
     from .summary import matrixplot as matrixplot
@@ -114,6 +117,8 @@ __all__ = [
     "elbow",
     "embedding",
     "embedding_raster",
+    "gene_pairing",
+    "gene_usage",
     "graph_qc",
     "guide_calls",
     "guide_thresholds",
@@ -134,6 +139,7 @@ __all__ = [
     "qc",
     "receptor_qc",
     "run_recipe",
+    "spectratype",
     "theme_context",
 ]
 
@@ -166,6 +172,8 @@ __getattr__, __dir__ = _lazy_facade(
         "clonal_rarefaction": ".repertoire",
         "clonotype_abundance": ".repertoire",
         "clonotype_tracking": ".repertoire",
+        "gene_pairing": ".repertoire",
+        "gene_usage": ".repertoire",
         "compose_results": "._figure",
         "composition": ".composition",
         "distribution": ".distribution",
@@ -194,6 +202,7 @@ __getattr__, __dir__ = _lazy_facade(
         "pseudotime_heatmap": ".heatmaps",
         "qc": ".diagnostics",
         "receptor_qc": ".repertoire",
+        "spectratype": ".repertoire",
         "run_recipe": ".recipes",
         "theme_context": "._style",
     },

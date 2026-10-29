@@ -1,6 +1,6 @@
 # Immune receptor repertoires
 
-Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, BD Rhapsody, TRUST4 and other AIRR producers), check each cell's chains, label cells by receptor type, subtype and chain pairing, group them into clonotypes, measure clonal expansion within samples, measure clonal diversity with rarefaction and extrapolation, and compare samples or cell types by the clonotypes they share. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, BD Rhapsody, TRUST4 and other AIRR producers), check each cell's chains, label cells by receptor type, subtype and chain pairing, group them into clonotypes, measure clonal expansion within samples, measure clonal diversity with rarefaction and extrapolation, compare samples or cell types by the clonotypes they share, and count gene usage and junction lengths. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 
@@ -51,6 +51,10 @@ Import the T cell and B cell receptor contigs of single-cell immune profiling (1
 - `ds.repertoire.track(clonotypes, group_by=..., top=10, labels=None, ...)` returns a `ClonotypeTracking` record: `.cells` (`clonotype`, `group`, key columns, `cells`, `fraction` of the group's cells; zeros included, within the clonotype's receptor type), `.tracked` (labels). Default: each group's `top` largest clonotypes, together (ties to the larger clonotype overall); `labels=["clonotype_1"]` instead.
 - `ds.plots.clonal_overlap(clonotypes, group_by=..., index="morisita_horn")` heatmap (diagonal blank, values printed up to 12 groups; tables `matrix`, `pairs`); `ds.plots.clonotype_tracking(clonotypes, group_by=..., top=..., order=[...])` one line per clonotype across groups (table `cells`).
 - Validated: every overlap index within 5e-14 of immunarch 0.10.3 `repOverlap` (`public`, `overlap`, `jaccard`, `tversky`, `cosine`, `morisita`) and scRepertoire 2.8.0 `clonalOverlap` (`raw`, `overlap`, `jaccard`, `cosine`, `morisita`) on CD8+ donor 1 and PBMC 10k pseudo samples. scRepertoire's `overlap`, `raw` and `cosine` are presence-based in its outputs, whatever its help page says.
+- `ds.repertoire.gene_usage(source, genes="v_call", level="gene", slots=("VJ_1", "VDJ_1"), count="cells", group_by=None, groups=None, cell_selection=None)` returns a `GeneUsage` record (saves nothing): `.table` (group key columns, `locus`, one column per gene field, `cells` or `clonotypes`, `fraction` within group and locus). `source`: `immune_receptors` (cells with a chain) or `clonotypes` (cells with a clonotype; `count="clonotypes"` counts each clonotype once per group and value). `genes`: one of `v_call`, `d_call`, `j_call`, `c_call`, or several for combinations such as V-J pairs. `level`: `"allele"` (`TRBV12-3*01`), `"gene"` (`TRBV12-3`), `"family"` (`TRBV12`; `TRAV29/DV5` → `TRAV29`). First call of a multi-gene call is kept; chains without the value are left out.
+- `ds.repertoire.spectratype(source, sequence="aa" or "nt", slots=..., count=..., group_by=...)` returns a `Spectratype` record: `.table` (group key columns, `locus`, `length`, count, `fraction`).
+- Plots: `ds.plots.gene_usage(source, gene="v_call", group_by=..., top=30)` (one panel per locus; heatmap of fractions by group, bars without groups; table `usage`), `ds.plots.gene_pairing(source, cell_selection=..., top=20)` (V × J heatmap per locus, of its `top` V and `top` J genes; table `pairs`), `ds.plots.spectratype(source, group_by=...)` (lines per group per locus; table `spectratype`).
+- Validated: every V, J and V-J pair count and junction length count of `VJ_1` and `VDJ_1` equals scirpy 0.25.1 `group_abundance` and `spectratype` on PBMC 10k pseudo samples. scRepertoire's `percentGenes` counts via immApex string parsing and is not comparable.
 - `ds.plots.clonal_rarefaction(clonotypes, group_by=..., cell_selection=..., orders=(0, 1, 2), base="size" or "coverage")`: one panel per order (`order_0`, `order_1`, `order_2`) plus `coverage` (sample completeness) with `base="size"`; solid rarefied, dashed extrapolated, a point at the observed size. Table: `curves` (with `group`).
 - Validated: Hill-number curves within 1.4e-12 of iNEXT 3.0.2 (its Shannon extrapolation is Chao et al. 2023's), asymptotic estimates within 7e-13, `estimateD` within 1e-7; every index within 6e-14 of scRepertoire 2.8.0 `clonalDiversity` (no bootstraps), immunarch 0.10.3 `repDiversity` and vegan 2.7.6 `estimateR`.
 
@@ -119,6 +123,15 @@ print(overlap.pairs[["group_1", "group_2", "shared", "morisita_horn", "shared_fr
 plot = ds.plots.clonal_overlap(clonotypes, group_by="tissue", cell_selection=t_cells, show=False)
 plot.save("clonal_overlap.png")
 plot.close()
+usage = ds.repertoire.gene_usage(clonotypes, genes="v_call", count="clonotypes", group_by="sample")
+print(usage.table.query("locus == 'TRB'").head())
+pairs = ds.repertoire.gene_usage(receptors, genes=("v_call", "j_call"))
+print(pairs.table.query("v_call == 'TRAV1-2' and j_call == 'TRAJ33'"))  # MAIT cells
+lengths = ds.repertoire.spectratype(receptors, group_by="sample").table
+for name in ("gene_usage", "gene_pairing", "spectratype"):
+    plot = getattr(ds.plots, name)(receptors, show=False)
+    plot.save(f"{name}.png")
+    plot.close()
 tracked = ds.repertoire.track(clonotypes, group_by="timepoint", top=5, cell_selection=t_cells)
 plot = ds.plots.clonotype_tracking(clonotypes, group_by="timepoint", top=5, order=["d0", "d7", "d28"], show=False)
 plot.save("clonotype_tracking.png")
@@ -155,5 +168,6 @@ merged = ds.repertoire.import_receptors(
 - B cell clonotypes from identical junctions split clones that carry somatic mutations; they are exact sequence variants, not clonal families.
 - Measure expansion `within` the sample: without it, a clonotype's cells in all samples add up. Frequency categories depend on sample size (one cell of 1,000 is already 0.001), so compare them only between samples of similar size; bounds in cells compare any samples.
 - Compare expansion between conditions with one value per sample (such as the fraction of cells in clonotypes of more than two cells), never with cells as replicates.
+- Use `count="clonotypes"` for gene usage compared between samples, so expanded clones do not decide shares; compare genes within their locus.
 - Report Morisita-Horn for overlap between groups of different depth; presence indices (Jaccard, overlap) grow with cells. A clonotype absent from one group may be below detection there.
 - Compare diversity by Hill numbers at a common coverage or size (`hill.at_coverage`, `hill.at_size`), not observed indices, which grow with the cells sampled. Check `plots.clonal_rarefaction`: steep curves at the observed point mean richness and Chao1 are poorly determined; order 2 is stable. Name the Chao1 form reported. Leave out tiny groups (such as multichain cells, with `cell_selection`) or set `size`/`coverage`, since the smallest group sets the defaults.

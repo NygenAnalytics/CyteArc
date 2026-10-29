@@ -70,6 +70,9 @@ Granular workflows pass exact refs to the same datastore-owned plotting surface:
 | rarefaction and extrapolation of clonal diversity | `clonal_rarefaction(clonotypes_ref, group_by="sample")`, or `base="coverage"` for coverage-based curves |
 | clonotypes shared between samples or cell types | `clonal_overlap(clonotypes_ref, group_by="tissue")`, or `index="jaccard"` for another index |
 | chosen clonotypes across time points or tissues | `clonotype_tracking(clonotypes_ref, group_by="timepoint", order=[...])` |
+| V, D, J or constant gene usage of each locus | `gene_usage(receptors_ref, group_by="sample")`, or `gene="j_call"`, `level="family"` |
+| V-J gene pairing of each locus | `gene_pairing(receptors_ref, cell_selection=t_cells)` |
+| junction length distribution of each locus | `spectratype(receptors_ref, group_by="sample")`, or `sequence="nt"` |
 
 `layout_key` and string forms on plotters that still accept them refer to deliberate live metadata
 inputs. Distribution grouping instead requires either an exact categorical artifact or an explicit
@@ -161,7 +164,7 @@ Helpers differ: `label_panels` returns `None`, `theme_context` is an iterator, a
 
 ```{eval-rst}
 .. automodule:: cytearc.plotting
-    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, receptor_qc, clonotype_abundance, clonal_expansion, clonal_rarefaction, clonal_overlap, clonotype_tracking, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
+    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, receptor_qc, clonotype_abundance, clonal_expansion, clonal_rarefaction, clonal_overlap, clonotype_tracking, gene_usage, gene_pairing, spectratype, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
     :imported-members:
     :undoc-members:
     :show-inheritance:

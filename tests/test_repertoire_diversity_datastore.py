@@ -135,6 +135,20 @@ def test_diversity_at_full_coverage_is_the_observed_diversity(tmp_path) -> None:
     plot.close()
 
 
+def test_group_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:
+    store, receptors, clonotypes = _clonotypes(tmp_path)
+    store.cells.insert("coverage", SAMPLES)
+    with pytest.raises(ValueError, match="'coverage', which is also a column"):
+        store.repertoire.diversity(clonotypes, group_by="coverage")
+    with pytest.raises(ValueError, match="'coverage', which is also a column"):
+        store.repertoire.rarefaction(clonotypes, group_by="coverage")
+    # A name that only other results hold is free.
+    store.cells.insert("locus", SAMPLES)
+    assert len(store.repertoire.diversity(clonotypes, group_by="locus").indices) == 4
+    with pytest.raises(ValueError, match="'locus', which is also a column"):
+        store.repertoire.gene_usage(receptors, group_by="locus")
+
+
 def test_cells_without_a_label_are_left_out(tmp_path) -> None:
     store, _receptors_ref, clonotypes = _clonotypes(tmp_path)
     missing = np.zeros(N_CELLS, dtype=bool)

@@ -31,11 +31,19 @@ if TYPE_CHECKING:
         ClonotypeTracking as ClonotypeTracking,
     )
     from .receptors import ImmuneReceptors as ImmuneReceptors
+    from .usage import (
+        GENE_FIELDS as GENE_FIELDS,
+        GENE_LEVELS as GENE_LEVELS,
+        GeneUsage as GeneUsage,
+        Spectratype as Spectratype,
+    )
 
 __all__ = [
     "CHAIN_PAIRINGS",
     "DUAL_IR",
     "FIELDS",
+    "GENE_FIELDS",
+    "GENE_LEVELS",
     "LOCI",
     "NO_RECEPTOR",
     "ORDERS",
@@ -51,8 +59,10 @@ __all__ = [
     "ClonotypeOverlap",
     "ClonotypeTracking",
     "Clonotypes",
+    "GeneUsage",
     "ImmuneReceptors",
     "Rarefaction",
+    "Spectratype",
 ]
 
 __getattr__, __dir__ = _lazy_facade(
@@ -61,6 +71,8 @@ __getattr__, __dir__ = _lazy_facade(
         "CHAIN_PAIRINGS": ".chains",
         "DUAL_IR": ".clonotypes",
         "FIELDS": ".contigs",
+        "GENE_FIELDS": ".usage",
+        "GENE_LEVELS": ".usage",
         "LOCI": ".chains",
         "NO_RECEPTOR": ".chains",
         "ORDERS": ".diversity",
@@ -76,7 +88,9 @@ __getattr__, __dir__ = _lazy_facade(
         "ClonotypeOverlap": ".overlap",
         "ClonotypeTracking": ".overlap",
         "Clonotypes": ".clonotypes",
+        "GeneUsage": ".usage",
         "ImmuneReceptors": ".receptors",
         "Rarefaction": ".diversity",
+        "Spectratype": ".usage",
     },
 )

@@ -146,6 +146,8 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "elbow",
     "embedding",
     "embedding_raster",
+    "gene_pairing",
+    "gene_usage",
     "graph_qc",
     "guide_calls",
     "guide_thresholds",
@@ -166,6 +168,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "qc",
     "receptor_qc",
     "run_recipe",
+    "spectratype",
     "theme_context",
 )
 

@@ -31,22 +31,25 @@ _STORE_PLOT_METHODS = (
     "efficiency",
     "embedding",
     "embedding_raster",
+    "gene_pairing",
+    "gene_usage",
     "guide_calls",
     "guide_thresholds",
     "lineage_curves",
     "lineage_heatmap",
-    "lineage_trends",
     "lineage_tree",
-    "marker_heatmap",
+    "lineage_trends",
     "mapping_calibration",
     "mapping_confusion",
     "mapping_evidence",
     "mapping_score",
+    "marker_heatmap",
     "matrixplot",
     "modality_weights",
     "pseudotime_heatmap",
     "receptor_qc",
     "run_recipe",
+    "spectratype",
 )
 
 _GRAPH_REF = ArtifactRef(
@@ -352,6 +355,9 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             (_CLONOTYPES_REF,),
             {"group_by": "time", "top": 3, "order": ["d0", "d7"]},
         ),
+        ("gene_usage", (_RECEPTORS_REF,), {"gene": "j_call", "level": "family"}),
+        ("gene_pairing", (_CLONOTYPES_REF,), {"count": "clonotypes", "top": 5}),
+        ("spectratype", (_RECEPTORS_REF,), {"sequence": "nt", "group_by": "sample"}),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -399,6 +405,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("expansion"))
     elif name in ("clonal_rarefaction", "clonal_overlap", "clonotype_tracking"):
         expected_args.append(expected_kwargs.pop("clonotypes"))
+    elif name in ("gene_usage", "gene_pairing", "spectratype"):
+        expected_args.append(expected_kwargs.pop("source"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]
