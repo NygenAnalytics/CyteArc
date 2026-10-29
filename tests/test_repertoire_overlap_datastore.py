@@ -129,6 +129,8 @@ def test_track_follows_the_largest_clonotypes_of_each_group(tmp_path) -> None:
         ["clonotype_2", "s2, BCR", 1],
     ]
     assert cells["fraction"].tolist() == pytest.approx([2 / 3, 1 / 2, 1, 1])
+    # The representatives' VDJ_1 junctions name the clonotypes.
+    assert tracked.junctions == ("CASSA", "CARW")
     named = store.repertoire.track(
         clonotypes,
         group_by="sample",
@@ -175,6 +177,50 @@ def test_track_follows_labelled_clonotypes_without_cells(tmp_path) -> None:
         within_receptor_type=False,
     )
     assert pooled.cells[["group", "cells"]].values.tolist() == [["s1", 0], ["s2", 0]]
+    # A B cell clonotype among groups of T cells alone has no groups to follow.
+    alone = store.repertoire.track(
+        clonotypes,
+        group_by="sample",
+        labels=["clonotype_2"],
+        cell_selection=selected,
+    )
+    assert alone.tracked == ("clonotype_2",) and alone.junctions == ("CARW",)
+    assert alone.cells.empty
+    assert alone.cells.columns.tolist() == [
+        "clonotype",
+        "group",
+        "sample",
+        "receptor_type",
+        "cells",
+        "fraction",
+    ]
+
+
+def test_overlap_and_track_refuse_tables_beyond_the_budget(
+    tmp_path, monkeypatch
+) -> None:
+    store, _receptors_ref, clonotypes = _clonotypes(tmp_path)
+    store.cells.insert("cell", np.asarray([f"c{index:02d}" for index in range(8)]))
+    # Grouping 8 cells fits, but 21 pairs of 7 groups, or the rows of their
+    # clonotypes in every group, do not.
+    monkeypatch.setattr(store, "memoryBytes", 3_000)
+    with pytest.raises(MemoryError, match="Compare fewer groups"):
+        store.repertoire.overlap(
+            clonotypes, group_by="cell", within_receptor_type=False
+        )
+    with pytest.raises(MemoryError, match="with a smaller top or labels"):
+        store.repertoire.track(
+            clonotypes, group_by="cell", within_receptor_type=False, top=1
+        )
+    monkeypatch.setattr(store, "memoryBytes", 1_000_000)
+    assert (
+        len(
+            store.repertoire.overlap(
+                clonotypes, group_by="cell", within_receptor_type=False
+            ).pairs
+        )
+        == 21
+    )
 
 
 @pytest.mark.parametrize(
@@ -252,6 +298,57 @@ def test_overlap_plot_leaves_out_values_of_many_groups(tmp_path) -> None:
     try:
         assert len(result.tables["matrix"]) == 7
         assert len(result.axes["matrix"].texts) == 42
+    finally:
+        result.close()
+
+
+class _TrackOnly:
+    """A store whose repertoire namespace can follow clonotypes but not load them."""
+
+    def __init__(self, store) -> None:
+        self.repertoire = self
+        self._store = store
+
+    def track(self, *args, **kwargs):
+        return self._store.repertoire.track(*args, **kwargs)
+
+    def load_clonotypes(self, *args, **kwargs):
+        raise AssertionError("the tracking plot loads the clonotypes")
+
+
+def test_tracking_plot_labels_come_from_the_tracked_clonotypes(tmp_path) -> None:
+    store, _receptors_ref, clonotypes = _clonotypes(tmp_path)
+    result = plotting.clonotype_tracking(
+        _TrackOnly(store), clonotypes, group_by="sample", top=1, show=False
+    )
+    try:
+        labels = [
+            text.get_text() for text in result.axes["tracking"].get_legend().get_texts()
+        ]
+        assert labels == ["clonotype_1 (CASSA)", "clonotype_2 (CARW)"]
+    finally:
+        result.close()
+
+
+def test_tracking_plot_places_groups_by_all_their_labels(tmp_path) -> None:
+    store, _receptors_ref, clonotypes = _clonotypes(tmp_path)
+    store.cells.insert("cluster", np.asarray(["x", "y", "x", "y", "x", "y", "x", "y"]))
+    result = plotting.clonotype_tracking(
+        store, clonotypes, group_by=["sample", "cluster"], top=1, show=False
+    )
+    try:
+        ax = result.axes["tracking"]
+        # T cells and B cells of a sample and cluster share a position.
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == [
+            "s1, x",
+            "s1, y",
+            "s2, x",
+            "s2, y",
+        ]
+        assert result.tables["cells"]["group"].tolist()[:2] == [
+            "s1, x, TCR",
+            "s2, y, TCR",
+        ]
     finally:
         result.close()
 

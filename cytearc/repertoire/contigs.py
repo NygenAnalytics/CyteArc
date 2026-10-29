@@ -24,7 +24,7 @@ offsets.
 - A missing number is NaN.
 """
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
@@ -338,10 +338,14 @@ def unpack_text(data: np.ndarray, offsets: np.ndarray) -> np.ndarray:
 class EncodedText:
     """Text stored once per distinct value.
 
+    Encoded contigs hold their distinct values sorted; packed values that
+    others build, such as an export's cell IDs, may come in any order, and
+    then ``categories`` holds them in that order.
+
     Attributes:
-        codes: The position of each contig's value among the sorted distinct
-            values, -1 for a missing value, as int32.
-        data: The UTF-8 bytes of the sorted distinct values, concatenated.
+        codes: The position of each contig's value among the distinct values,
+            -1 for a missing value, as int32.
+        data: The UTF-8 bytes of the distinct values, concatenated.
         offsets: The offsets of the distinct values in ``data``, one more than
             there are values.
     """
@@ -358,7 +362,7 @@ class EncodedText:
 
     @property
     def categories(self) -> np.ndarray:
-        """The distinct values, sorted, as an object array of text."""
+        """The distinct values, in their stored order, as an object array of text."""
         return unpack_text(self.data, self.offsets)
 
 
@@ -718,6 +722,11 @@ class ContigEncoder:
         )
         # A stable sort keeps the file rows of each cell and source in order.
         order = np.lexsort((sources, cells))
+        # Each row's position in the result, so that the values of every
+        # chunk are placed in it as the chunk is released.
+        destination = np.empty(len(order), dtype=np.int64)
+        destination[order] = np.arange(len(order))
+        bounds = np.cumsum([0, *lengths])
         text: dict[str, EncodedText] = {}
         ragged: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         values: dict[str, np.ndarray] = {}
@@ -736,13 +745,12 @@ class ContigEncoder:
                 ]
                 ragged[name] = _take_ragged(*_concatenate_ragged(ragged_pieces), order)
             else:
-                value_pieces = [
-                    chunk.values.pop(name)
-                    if name in chunk.values
-                    else _typed_values(kind, None, chunk.n_rows)
-                    for chunk in chunks
-                ]
-                values[name] = np.concatenate(value_pieces)[order]
+                placed = _typed_values(kind, None, len(order))
+                for position, chunk in enumerate(chunks):
+                    if name in chunk.values:
+                        rows = destination[bounds[position] : bounds[position + 1]]
+                        placed[rows] = chunk.values.pop(name)
+                values[name] = placed
         self._chunks = []
         self._nbytes = 0
         return ContigTable(
@@ -849,9 +857,3 @@ def chunk_rows_for(budget_bytes: int, *, columns: int) -> int:
     """
     rows = int(budget_bytes) // (20 * 1_000 * max(1, int(columns)))
     return int(min(50_000, max(10_000, rows)))
-
-
-def iter_present(columns: Iterable[str]) -> tuple[str, ...]:
-    """Return the fields of ``FIELDS`` that ``columns`` holds, in their order."""
-    available = set(columns)
-    return tuple(name for name in FIELDS if name in available)

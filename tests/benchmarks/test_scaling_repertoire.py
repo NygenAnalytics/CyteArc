@@ -7,6 +7,9 @@ counts each clonotype's cells within samples. Each benchmark runs one step on
 a simulated T cell repertoire in which most cells carry one alpha and one beta
 chain, some a second alpha chain, and clones of many sizes share their
 junctions, and checks the result, so it doubles as a test at the smoke size.
+The summaries of groups, such as samples by clusters, are measured over the
+number of groups as well: diversity, rarefaction and the clonotypes that
+groups share and follow, on simulated groups of about 150 cells.
 """
 
 from functools import lru_cache
@@ -21,6 +24,13 @@ from .harness import Ladder
 pytestmark = pytest.mark.benchmark
 
 LADDER = Ladder(sizes=(20_000, 40_000, 80_000, 160_000), smoke=500)
+# Groups such as samples by clusters: a few thousand in a large study.
+GROUPS = Ladder(
+    sizes=(125, 250, 500, 1_000), smoke=8, unit="groups", targets=(2_000, 10_000)
+)
+TRACKED_GROUPS = Ladder(
+    sizes=(62, 125, 250, 500), smoke=8, unit="groups", targets=(2_000, 10_000)
+)
 _CHUNK_ROWS = 50_000
 _AMINO_ACIDS = np.asarray(list("ACDEFGHIKLMNPQRSTVWY"))
 
@@ -333,3 +343,179 @@ def test_neighbor_pairs(bench) -> None:
         assert set(zip(first.tolist(), second.tolist(), strict=True)) <= edits
 
     bench("repertoire.neighbor_pairs", make, LADDER, check=check)
+
+
+@lru_cache(maxsize=1)
+def _group_pairs(
+    n_groups: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Simulate the clonotypes of ``n_groups`` groups of about 150 cells each.
+
+    The first nine tenths of the groups are T cells and the rest B cells, and a
+    clone's cells fall in its home group with probability 0.7 and otherwise in
+    any group of its receptor type, so groups share clonotypes.
+
+    Returns:
+        Each distinct pair of group and clonotype's group, clonotype code and
+        cells, sorted by group and clonotype, and each group's stratum.
+    """
+    from cytearc.repertoire.overlap import pair_counts
+
+    rng = np.random.default_rng([inputs.SEED, n_groups, 2])
+    n_cells = 150 * n_groups
+    sizes = np.minimum(rng.zipf(2.0, size=n_cells), 300)
+    clone_of_cell = np.repeat(np.arange(n_cells), sizes)[:n_cells]
+    n_clones = int(clone_of_cell.max()) + 1
+    t_groups = max(1, (9 * n_groups) // 10)
+    b_clone = rng.random(n_clones) < 0.1 if n_groups > 1 else np.zeros(n_clones, bool)
+    first = np.where(b_clone, t_groups, 0)
+    width = np.where(b_clone, n_groups - t_groups, t_groups)
+    home = first + (rng.random(n_clones) * width).astype(np.int64)
+    stray = first[clone_of_cell] + (rng.random(n_cells) * width[clone_of_cell]).astype(
+        np.int64
+    )
+    groups = np.where(rng.random(n_cells) < 0.7, home[clone_of_cell], stray)
+    strata = (np.arange(n_groups) >= t_groups).astype(np.int64)
+    return (*pair_counts(groups, clone_of_cell), strata)
+
+
+@lru_cache(maxsize=1)
+def _group_clone_sizes(n_groups: int):
+    from cytearc.repertoire.diversity import CloneSizes
+
+    pair_groups, _codes, pair_cells, strata = _group_pairs(n_groups)
+    bounds = np.searchsorted(pair_groups, np.arange(n_groups + 1))
+    groups = [
+        CloneSizes.from_sizes(pair_cells[bounds[at] : bounds[at + 1]])
+        for at in range(n_groups)
+    ]
+    keys = pd.DataFrame(
+        {
+            "group": [
+                f"g{at:05d}, {'BCR' if strata[at] else 'TCR'}" for at in range(n_groups)
+            ],
+            "sample": [f"g{at:05d}" for at in range(n_groups)],
+            "receptor_type": np.where(strata == 1, "BCR", "TCR"),
+        }
+    )
+    return groups, keys
+
+
+def test_diversity_tables(bench) -> None:
+    from cytearc.repertoire.diversity import (
+        ORDERS,
+        coverage_at,
+        diversity_at,
+        diversity_tables,
+        indices,
+    )
+
+    def make(n_groups: int):
+        groups, keys = _group_clone_sizes(n_groups)
+        return lambda: diversity_tables(groups, keys)
+
+    def check(n_groups: int, result) -> None:
+        groups, keys = _group_clone_sizes(n_groups)
+        table, hill, size, level = result
+        assert table["group"].tolist() == keys["group"].tolist()
+        assert table["cells"].tolist() == [clones.n for clones in groups]
+        assert size == min(2 * clones.n for clones in groups)
+        assert 0 < level < 1
+        assert len(hill) == len(ORDERS) * n_groups
+        # Spot-check groups against the scalar functions.
+        for at in (0, n_groups - 1):
+            clones = groups[at]
+            expected = indices(clones)
+            for column in ("clonotypes", "singletons", "d50"):
+                assert table[column].iat[at] == expected[column]
+            rows = hill.iloc[len(ORDERS) * at : len(ORDERS) * (at + 1)]
+            for order, value in zip(ORDERS, rows["at_size"], strict=True):
+                assert value == pytest.approx(
+                    diversity_at(clones, size, order)[0], rel=1e-12
+                )
+            assert rows["coverage_at_size"].iat[0] == pytest.approx(
+                coverage_at(clones, size), rel=1e-12
+            )
+            reached = coverage_at(clones, rows["size_at_coverage"].iat[0])
+            assert reached == pytest.approx(level, rel=1e-9)
+
+    bench("repertoire.diversity_tables", make, GROUPS, check=check)
+
+
+def test_rarefaction_curves(bench) -> None:
+    from cytearc.repertoire.diversity import (
+        default_sizes,
+        observed_hill,
+        rarefaction_curves,
+    )
+
+    def make(n_groups: int):
+        groups, keys = _group_clone_sizes(n_groups)
+        return lambda: rarefaction_curves(groups, keys)
+
+    def check(n_groups: int, curves) -> None:
+        groups, keys = _group_clone_sizes(n_groups)
+        lengths = [3 * len(default_sizes(clones.n)) for clones in groups]
+        assert len(curves) == sum(lengths)
+        observed = curves[curves["method"] == "observed"]
+        assert len(observed) == 3 * n_groups
+        for at in (0, n_groups - 1):
+            rows = observed[observed["group"] == keys["group"].iat[at]]
+            for order, value in zip(rows["order"], rows["diversity"], strict=True):
+                assert value == pytest.approx(
+                    observed_hill(groups[at], int(order)), rel=1e-12
+                )
+        # Rarefied curves rise to the observed value, and coverage with them.
+        rarefied = curves[curves["method"] != "extrapolation"]
+        for _key, rows in rarefied.groupby(["group", "order"], sort=False):
+            assert np.all(np.diff(rows["diversity"].to_numpy()) >= -1e-9)
+            assert np.all(np.diff(rows["coverage"].to_numpy()) >= -1e-12)
+
+    bench("repertoire.rarefaction_curves", make, GROUPS, check=check)
+
+
+def test_tracking(bench) -> None:
+    from cytearc.repertoire.overlap import (
+        top_clonotypes,
+        tracking_cells,
+        tracking_reach,
+    )
+
+    top = 3
+
+    def make(n_groups: int):
+        pair_groups, pair_codes, pair_cells, strata = _group_pairs(n_groups)
+
+        def run():
+            chosen = top_clonotypes(pair_groups, pair_codes, pair_cells, n_groups, top)
+            fallback = np.full(len(chosen), -1)
+            reach = tracking_reach(pair_groups, pair_codes, chosen, strata, fallback)
+            return (
+                chosen,
+                reach,
+                tracking_cells(
+                    pair_groups, pair_codes, pair_cells, chosen, strata, reach
+                ),
+            )
+
+        return run
+
+    def check(n_groups: int, result) -> None:
+        pair_groups, pair_codes, pair_cells, strata = _group_pairs(n_groups)
+        chosen, reach, (positions, groups, cells) = result
+        # The first group's largest clonotypes, the lower code first on ties,
+        # are followed.
+        mine = pair_groups == 0
+        order = np.lexsort((pair_codes[mine], -pair_cells[mine]))
+        assert set(pair_codes[mine][order][:top].tolist()) <= set(chosen.tolist())
+        # Rows by clonotype and group, through every group of the strata that
+        # each clonotype has cells in, with all of its cells.
+        keys = positions * n_groups + groups
+        assert np.all(np.diff(keys) > 0)
+        assert np.all(reach[positions, strata[groups]])
+        assert len(keys) == int((reach * np.bincount(strata)).sum())
+        totals = pd.Series(pair_cells).groupby(pair_codes).sum()
+        followed = pd.Series(cells).groupby(chosen[positions]).sum()
+        assert followed.to_dict() == totals.loc[chosen].to_dict()
+
+    bench("repertoire.tracking", make, TRACKED_GROUPS, check=check)

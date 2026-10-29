@@ -226,6 +226,14 @@ def test_receptor_qc_leaves_out_cells_with_a_missing_group(tmp_path) -> None:
         assert result.provenance.n_cells == 6
     finally:
         result.close()
+    # A blank label is a missing one.
+    store.cells.insert("lane", np.asarray(["p", " ", "p", "q", "", "q", "p", "q"]))
+    result = plotting.receptor_qc(store, ref, group_by="lane", show=False)
+    try:
+        assert result.tables["receptor_type"].columns.tolist() == ["p", "q"]
+        assert result.provenance.n_cells == 6
+    finally:
+        result.close()
 
 
 def test_receptor_qc_shows_fractions_of_all_cells_when_asked(tmp_path) -> None:

@@ -11,7 +11,6 @@ from cytearc.repertoire.contigs import (
     decode_text,
     encode_ragged,
     encode_text,
-    iter_present,
     parse_flags,
     parse_integers,
     parse_numbers,
@@ -259,13 +258,6 @@ def test_text_of_every_missing_value_merges_to_no_categories() -> None:
     table = encoder.finish()
     assert table.text["c_call"].codes.tolist() == [-1, -1, 0]
     assert table.text["c_call"].categories.tolist() == ["IGHM"]
-
-
-def test_present_fields_follow_the_storage_order() -> None:
-    assert iter_present(["junction_aa", "cell_id", "locus", "other"]) == (
-        "locus",
-        "junction_aa",
-    )
 
 
 def test_a_text_field_missing_everywhere_has_no_categories() -> None:

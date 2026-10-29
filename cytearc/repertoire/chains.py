@@ -44,6 +44,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
+import pandas as pd
 
 from .contigs import ContigTable, EncodedText
 
@@ -141,36 +142,44 @@ def infer_loci(calls: Mapping[str, np.ndarray]) -> np.ndarray:
     if len(lengths) > 1:
         raise ValueError("Every gene call field needs one value per contig")
     n_contigs = lengths.pop() if lengths else 0
-    inferred: list[str | None] = [""] * n_contigs
+    # Each contig's locus as a position in LOCI, -1 while no call names one.
+    inferred = np.full(n_contigs, -1, dtype=np.int8)
     conflict = np.zeros(n_contigs, dtype=bool)
-    cache: dict[str, str | None] = {}
     for name in _GENE_FIELDS:
         values = calls.get(name)
         if values is None:
             continue
-        for row, value in enumerate(np.asarray(values, dtype=object)):
-            if value is None or conflict[row]:
-                continue
-            text = str(value)
-            if text not in cache:
-                cache[text] = call_locus(text)
-            locus = cache[text]
-            if locus is None:
-                conflict[row] = True
-            elif locus:
-                if not inferred[row]:
-                    inferred[row] = locus
-                elif inferred[row] != locus:
-                    conflict[row] = True
-    result = np.asarray(inferred, dtype=object)
-    result[conflict | (result == "")] = None
+        # Each distinct call is read once: a locus, -1 for a call that takes
+        # no part, -2 for a call that names no locus.
+        codes, distinct = pd.factorize(
+            np.asarray(values, dtype=object), use_na_sentinel=True
+        )
+        named = [call_locus(str(call)) for call in distinct.tolist()]
+        by_call = np.asarray(
+            [
+                -2 if locus is None else LOCI.index(locus) if locus else -1
+                for locus in named
+            ],
+            dtype=np.int8,
+        )
+        loci = np.full(n_contigs, -1, dtype=np.int8)
+        present = codes >= 0
+        loci[present] = by_call[codes[present]]
+        conflict |= loci == -2
+        naming = loci >= 0
+        conflict |= naming & (inferred >= 0) & (inferred != loci)
+        inferred = np.where(naming & (inferred < 0), loci, inferred)
+    result = np.full(n_contigs, None, dtype=object)
+    known = (inferred >= 0) & ~conflict
+    result[known] = np.asarray(LOCI, dtype=object)[inferred[known]]
     return result
 
 
 def chain_arms(locus: EncodedText) -> np.ndarray:
     """Return each contig's arm: 0 for VJ, 1 for VDJ, -1 for no locus of a chain."""
-    by_category = np.full(len(locus.categories), -1, dtype=np.int8)
-    for position, name in enumerate(np.asarray(locus.categories, dtype=object)):
+    categories = locus.categories
+    by_category = np.full(len(categories), -1, dtype=np.int8)
+    for position, name in enumerate(np.asarray(categories, dtype=object)):
         if name in VJ_LOCI:
             by_category[position] = 0
         elif name in VDJ_LOCI:
@@ -189,7 +198,7 @@ class ChainIndex:
     Attributes:
         slots: The position of each cell's ``VJ_1``, ``VJ_2``, ``VDJ_1`` and
             ``VDJ_2`` chain among the contigs, -1 for an empty slot, as an
-            int64 array of one row per cell and four columns.
+            int32 array of one row per cell and four columns.
         n_vj: The number of chains of each cell's VJ arm, as int32.
         n_vdj: The number of chains of each cell's VDJ arm, as int32.
         eligible: Whether each contig counts as a chain.
@@ -324,7 +333,7 @@ def index_chains(
         starts, np.diff(np.r_[starts, len(ranked)])
     )
     counts = np.bincount(groups, minlength=2 * n_cells).reshape(n_cells, 2)
-    slots = np.full((n_cells, 4), -1, dtype=np.int64)
+    slots = np.full((n_cells, 4), -1, dtype=np.int32)
     keep = rank < 2
     slot_columns = (groups[keep] % 2) * 2 + rank[keep]
     slots[groups[keep] // 2, slot_columns] = ranked[keep]
@@ -368,13 +377,23 @@ def receptor_quality(index: ChainIndex, locus: EncodedText) -> ReceptorQuality:
     slots = np.asarray(index.slots)
     n_cells = slots.shape[0]
     codes = np.asarray(locus.codes)
-    names = np.asarray(locus.categories, dtype=object)
-    slot_loci = np.full(slots.shape, "", dtype=object)
+    # Each slot's locus as a position in LOCI, -1 for an empty slot or no
+    # locus of a chain, so the cells are classified by integer comparisons.
+    by_category = np.asarray(
+        [LOCI.index(name) if name in LOCI else -1 for name in locus.categories],
+        dtype=np.int8,
+    )
+    slot_loci = np.full(slots.shape, -1, dtype=np.int8)
     filled = slots >= 0
-    slot_loci[filled] = names[codes[slots[filled]]]
+    contig_codes = codes[slots[filled]]
+    slot_loci[filled] = np.where(
+        contig_codes >= 0, by_category[np.maximum(contig_codes, 0)], -1
+    )
 
     def has(name: str, columns: slice) -> np.ndarray:
-        return np.asarray((slot_loci[:, columns] == name).any(axis=1), dtype=bool)
+        return np.asarray(
+            (slot_loci[:, columns] == LOCI.index(name)).any(axis=1), dtype=bool
+        )
 
     vj, vdj = slice(0, 2), slice(2, 4)
     has_tra, has_trg = has("TRA", vj), has("TRG", vj)

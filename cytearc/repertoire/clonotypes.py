@@ -48,6 +48,7 @@ from numba import njit
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
+from ..utils.arrays import sorted_unique, unique_inverse, unique_rows
 from .chains import SLOTS
 
 __all__ = [
@@ -114,9 +115,124 @@ class ClonotypeAssignment:
         return len(self.sizes)
 
 
-def _element_ids(sequences: np.ndarray, genes: list[np.ndarray]) -> np.ndarray:
-    """Number each slot's element, its sequence with its genes, -1 without one."""
-    return _elements(sequences, genes)[0]
+def _elements(
+    sequences: np.ndarray, genes: list[np.ndarray]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Number each slot's element, -1 without one, and return each element's codes."""
+    present = sequences >= 0
+    ids = np.full(sequences.shape, -1, dtype=np.int64)
+    if not present.any():
+        return ids, np.empty((0, 1 + len(genes)), dtype=np.int64)
+    stacked = np.column_stack(
+        [sequences[present]] + [gene[present] for gene in genes]
+    ).astype(np.int64)
+    rows, inverse = unique_rows(stacked)
+    ids[present] = inverse
+    return ids, rows
+
+
+@dataclass(frozen=True, slots=True)
+class _Configurations:
+    """The distinct configurations of the cells that take part in clonotypes.
+
+    Attributes:
+        n_cells: The cells, those that take part and those that do not.
+        cells: The cells that take part: with a group and an element.
+        inverse: The configuration of each cell that takes part.
+        configurations: Each cell's configuration, -1 for no part.
+        rows: Each configuration's group and elements, one row each.
+        groups: Each configuration's group.
+        arms: Each configuration's elements of each arm that takes part.
+        taking: The arms that take part.
+        element_rows: Each element's sequence and gene codes.
+    """
+
+    n_cells: int
+    cells: np.ndarray
+    inverse: np.ndarray
+    configurations: np.ndarray
+    rows: np.ndarray
+    groups: np.ndarray
+    arms: dict[int, np.ndarray]
+    taking: list[int]
+    element_rows: np.ndarray
+
+    def unassigned(self) -> "ClonotypeAssignment":
+        """The assignment of cells none of which takes part."""
+        return ClonotypeAssignment(
+            codes=np.full(self.n_cells, -1, dtype=np.int64),
+            sizes=np.empty(0, dtype=np.int64),
+            configurations=self.configurations,
+            configuration_clonotypes=np.empty(0, dtype=np.int64),
+        )
+
+
+def _configurations(
+    sequences: np.ndarray,
+    groups: np.ndarray,
+    v_genes: np.ndarray | None,
+    j_genes: np.ndarray | None,
+    receptor_arms: str,
+    dual_ir: str,
+) -> _Configurations:
+    """Check the rules and number the cells' distinct configurations.
+
+    A cell's configuration is its group and the elements, sequences with
+    their gene calls, in the slots that the rules compare; cells of one
+    configuration share a clonotype under any rule.
+
+    Raises:
+        ValueError: If an option is unknown or the arrays do not align.
+    """
+    if receptor_arms not in RECEPTOR_ARMS:
+        raise ValueError(f"receptor_arms must be one of {', '.join(RECEPTOR_ARMS)}")
+    if dual_ir not in DUAL_IR:
+        raise ValueError(f"dual_ir must be one of {', '.join(DUAL_IR)}")
+    sequences = np.asarray(sequences, dtype=np.int64)
+    if sequences.ndim != 2 or sequences.shape[1] != 4:
+        raise ValueError("sequences must hold four slots per cell")
+    n_cells = sequences.shape[0]
+    groups = np.asarray(groups, dtype=np.int64).reshape(-1)
+    if len(groups) != n_cells:
+        raise ValueError("groups must hold one group per cell")
+    genes = [
+        np.asarray(gene, dtype=np.int64)
+        for gene in (v_genes, j_genes)
+        if gene is not None
+    ]
+    if any(gene.shape != sequences.shape for gene in genes):
+        raise ValueError("Gene codes must align with the sequences")
+    chains = [0] if dual_ir == "primary_only" else [0, 1]
+    taking = (
+        [_VJ, _VDJ]
+        if receptor_arms in ("all", "any")
+        else [_VJ if receptor_arms == "VJ" else _VDJ]
+    )
+    columns = [2 * arm + chain for arm in taking for chain in chains]
+    elements, element_rows = _elements(
+        sequences[:, columns], [gene[:, columns] for gene in genes]
+    )
+    cells = np.flatnonzero((groups >= 0) & (elements >= 0).any(axis=1))
+    configurations = np.full(n_cells, -1, dtype=np.int64)
+    # Cells with the same group and elements in every slot that takes part
+    # share a configuration, and so a clonotype.
+    rows, inverse = unique_rows(np.column_stack([groups[cells], elements[cells]]))
+    configurations[cells] = inverse
+    width = len(chains)
+    return _Configurations(
+        n_cells=n_cells,
+        cells=cells,
+        inverse=inverse,
+        configurations=configurations,
+        rows=rows,
+        groups=rows[:, 0],
+        arms={
+            arm: rows[:, 1 + position * width : 1 + (position + 1) * width]
+            for position, arm in enumerate(taking)
+        },
+        taking=taking,
+        element_rows=element_rows,
+    )
 
 
 def assign_clonotypes(
@@ -149,57 +265,10 @@ def assign_clonotypes(
     Raises:
         ValueError: If an option is unknown or the arrays do not align.
     """
-    if receptor_arms not in RECEPTOR_ARMS:
-        raise ValueError(f"receptor_arms must be one of {', '.join(RECEPTOR_ARMS)}")
-    if dual_ir not in DUAL_IR:
-        raise ValueError(f"dual_ir must be one of {', '.join(DUAL_IR)}")
-    sequences = np.asarray(sequences, dtype=np.int64)
-    if sequences.ndim != 2 or sequences.shape[1] != 4:
-        raise ValueError("sequences must hold four slots per cell")
-    n_cells = sequences.shape[0]
-    groups = np.asarray(groups, dtype=np.int64).reshape(-1)
-    if len(groups) != n_cells:
-        raise ValueError("groups must hold one group per cell")
-    genes = [
-        np.asarray(gene, dtype=np.int64)
-        for gene in (v_genes, j_genes)
-        if gene is not None
-    ]
-    if any(gene.shape != sequences.shape for gene in genes):
-        raise ValueError("Gene codes must align with the sequences")
-
-    chains = [0] if dual_ir == "primary_only" else [0, 1]
-    taking = (
-        [_VJ, _VDJ]
-        if receptor_arms in ("all", "any")
-        else [_VJ if receptor_arms == "VJ" else _VDJ]
-    )
-    columns = [2 * arm + chain for arm in taking for chain in chains]
-    elements = _element_ids(sequences[:, columns], [gene[:, columns] for gene in genes])
-    eligible = (groups >= 0) & (elements >= 0).any(axis=1)
-    cells = np.flatnonzero(eligible)
-    configurations = np.full(n_cells, -1, dtype=np.int64)
-    if not len(cells):
-        return ClonotypeAssignment(
-            codes=np.full(n_cells, -1, dtype=np.int64),
-            sizes=np.empty(0, dtype=np.int64),
-            configurations=configurations,
-            configuration_clonotypes=np.empty(0, dtype=np.int64),
-        )
-
-    # Cells with the same group and elements in every slot that takes part
-    # share a configuration, and so a clonotype.
-    unique_rows, inverse = np.unique(
-        np.column_stack([groups[cells], elements[cells]]), axis=0, return_inverse=True
-    )
-    inverse = inverse.reshape(-1)
-    configurations[cells] = inverse
-    config_groups = unique_rows[:, 0]
-    width = len(chains)
-    arm_elements = {
-        arm: unique_rows[:, 1 + position * width : 1 + (position + 1) * width]
-        for position, arm in enumerate(taking)
-    }
+    found = _configurations(sequences, groups, v_genes, j_genes, receptor_arms, dual_ir)
+    if not len(found.cells):
+        return found.unassigned()
+    config_groups, arm_elements, taking = found.groups, found.arms, found.taking
 
     owners: list[np.ndarray] = []
     keys: list[np.ndarray] = []
@@ -223,7 +292,7 @@ def assign_clonotypes(
         keep = flat >= 0
         return owner[keep], flat[keep, None]
 
-    ids = np.arange(len(unique_rows), dtype=np.int64)
+    ids = np.arange(len(found.rows), dtype=np.int64)
     if receptor_arms == "all":
         primary = {arm: arm_elements[arm][:, 0] >= 0 for arm in taking}
         both = ids[primary[_VJ] & primary[_VDJ]]
@@ -280,8 +349,10 @@ def assign_clonotypes(
                     key,
                 ],
             )
-    clusters = _components(len(unique_rows), owners, keys)
-    return _ranked(clusters, inverse, cells, n_cells, configurations)
+    clusters = _components(len(found.rows), owners, keys)
+    return _ranked(
+        clusters, found.inverse, found.cells, found.n_cells, found.configurations
+    )
 
 
 def assign_clonotype_clusters(
@@ -295,6 +366,7 @@ def assign_clonotype_clusters(
     j_genes: np.ndarray | None = None,
     receptor_arms: str = "all",
     dual_ir: str = "any",
+    max_bytes: int | None = None,
 ) -> ClonotypeAssignment:
     """Group cells into clonotype clusters by similar chains.
 
@@ -324,79 +396,43 @@ def assign_clonotype_clusters(
         j_genes: Each slot's J gene code, alike.
         receptor_arms: The arms that must agree.
         dual_ir: The chains of an arm that must agree.
+        max_bytes: The memory that the pairs of chains within the cutoff may
+            take, about 80 bytes each, or None for no limit.
 
     Returns:
         The clonotype cluster of each cell, ranked as clonotypes are.
+
+    Raises:
+        MemoryError: If the pairs of chains within the cutoff need more than
+            ``max_bytes``.
     """
     from .distances import DISTANCE_METRICS, neighbor_pairs
 
-    if receptor_arms not in RECEPTOR_ARMS:
-        raise ValueError(f"receptor_arms must be one of {', '.join(RECEPTOR_ARMS)}")
-    if dual_ir not in DUAL_IR:
-        raise ValueError(f"dual_ir must be one of {', '.join(DUAL_IR)}")
     if metric not in DISTANCE_METRICS:
         raise ValueError(f"metric must be one of {', '.join(DISTANCE_METRICS)}")
-    sequences = np.asarray(sequences, dtype=np.int64)
-    if sequences.ndim != 2 or sequences.shape[1] != 4:
-        raise ValueError("sequences must hold four slots per cell")
-    n_cells = sequences.shape[0]
-    groups = np.asarray(groups, dtype=np.int64).reshape(-1)
-    if len(groups) != n_cells:
-        raise ValueError("groups must hold one group per cell")
-    genes = [
-        np.asarray(gene, dtype=np.int64)
-        for gene in (v_genes, j_genes)
-        if gene is not None
-    ]
-    if any(gene.shape != sequences.shape for gene in genes):
-        raise ValueError("Gene codes must align with the sequences")
+    found = _configurations(sequences, groups, v_genes, j_genes, receptor_arms, dual_ir)
+    if not len(found.cells):
+        return found.unassigned()
     names = np.asarray(texts, dtype=object)
-
-    chains = [0] if dual_ir == "primary_only" else [0, 1]
-    taking = (
-        [_VJ, _VDJ]
-        if receptor_arms in ("all", "any")
-        else [_VJ if receptor_arms == "VJ" else _VDJ]
-    )
-    columns = [2 * arm + chain for arm in taking for chain in chains]
-    elements, element_rows = _elements(
-        sequences[:, columns], [gene[:, columns] for gene in genes]
-    )
-    eligible = (groups >= 0) & (elements >= 0).any(axis=1)
-    cells = np.flatnonzero(eligible)
-    configurations = np.full(n_cells, -1, dtype=np.int64)
-    if not len(cells):
-        return ClonotypeAssignment(
-            codes=np.full(n_cells, -1, dtype=np.int64),
-            sizes=np.empty(0, dtype=np.int64),
-            configurations=configurations,
-            configuration_clonotypes=np.empty(0, dtype=np.int64),
-        )
-    unique_rows, inverse = np.unique(
-        np.column_stack([groups[cells], elements[cells]]), axis=0, return_inverse=True
-    )
-    inverse = inverse.reshape(-1)
-    configurations[cells] = inverse
-    n_configurations = len(unique_rows)
-    config_groups = unique_rows[:, 0]
-    width = len(chains)
-    arm_elements = {
-        arm: unique_rows[:, 1 + position * width : 1 + (position + 1) * width]
-        for position, arm in enumerate(taking)
-    }
+    config_groups, arm_elements, taking = found.groups, found.arms, found.taking
+    n_configurations = len(found.rows)
+    element_rows = found.element_rows
 
     # Elements within the cutoff, with matching genes when asked: their
     # sequences are compared within blocks of equal gene calls.
     n_elements = len(element_rows)
-    blocks = (
-        np.unique(element_rows[:, 1:], axis=0, return_inverse=True)[1].reshape(-1)
-        if element_rows.shape[1] > 1
-        else None
-    )
+    blocks = unique_rows(element_rows[:, 1:])[1] if element_rows.shape[1] > 1 else None
     low, high = neighbor_pairs(
         names[element_rows[:, 0]], metric, int(cutoff), blocks=blocks
     )
-    near_codes = np.unique(
+    needed = _NEAR_PAIR_BYTES * len(low)
+    if max_bytes is not None and needed > max_bytes:
+        raise MemoryError(
+            f"The {len(low)} pairs of chains within the cutoff need about {needed} "
+            f"bytes, more than the {max_bytes} bytes left in the memory budget. "
+            "Require the same V and J genes, lower the cutoff, or raise mem_budget."
+        )
+    near_codes = sorted_unique(
         np.concatenate(
             [
                 low * n_elements + high,
@@ -452,10 +488,8 @@ def assign_clonotype_clusters(
         values = arm_elements[arm][rows]
         present = values >= 0
         owners = np.broadcast_to(config_groups[rows][:, None], values.shape)
-        nodes, inverse = np.unique(
-            np.column_stack([owners[present], values[present]]),
-            axis=0,
-            return_inverse=True,
+        nodes, inverse = unique_rows(
+            np.column_stack([owners[present], values[present]])
         )
         ids = np.full(values.shape, -1, dtype=np.int64)
         ids[present] = inverse.reshape(-1)
@@ -490,10 +524,8 @@ def assign_clonotype_clusters(
         """Each row's arm as a node, its group and sorted elements, -1 without one."""
         ordered = sorted_arms[arm][rows]
         valid = ordered[:, 0] >= 0
-        nodes, inverse = np.unique(
-            np.column_stack([config_groups[rows][valid], ordered[valid]]),
-            axis=0,
-            return_inverse=True,
+        nodes, inverse = unique_rows(
+            np.column_stack([config_groups[rows][valid], ordered[valid]])
         )
         ids = np.full(len(rows), -1, dtype=np.int64)
         ids[valid] = inverse.reshape(-1)
@@ -509,15 +541,13 @@ def assign_clonotype_clusters(
         elements = nodes[:, 1:]
         present = elements >= 0
         owners = np.broadcast_to(np.arange(len(nodes))[:, None], elements.shape)
-        parts, inverse = np.unique(
+        parts, inverse = unique_rows(
             np.column_stack(
                 [
                     np.broadcast_to(nodes[:, :1], elements.shape)[present],
                     elements[present],
                 ]
-            ),
-            axis=0,
-            return_inverse=True,
+            )
         )
         part_ids = np.full(elements.shape, -1, dtype=np.int64)
         part_ids[present] = inverse.reshape(-1)
@@ -573,7 +603,7 @@ def assign_clonotype_clusters(
             (np.ones(len(head), dtype=np.int8), (head, tail)), shape=(offset, offset)
         )
         _count, labels = connected_components(graph, directed=False)
-        return np.unique(labels[: len(rows)], return_inverse=True)[1].reshape(-1)
+        return unique_inverse(labels[: len(rows)])[1]
 
     def both_components(rows: np.ndarray) -> np.ndarray:
         """Components of rows linked when both of their arms match.
@@ -613,7 +643,7 @@ def assign_clonotype_clusters(
                 _union(
                     parent, first, second, arm_matches(other, rows[first], rows[second])
                 )
-        return np.unique(_roots(parent), return_inverse=True)[1].reshape(-1)
+        return unique_inverse(_roots(parent))[1]
 
     if receptor_arms == "all":
         # A row with both primary chains links only to rows with both,
@@ -634,7 +664,9 @@ def assign_clonotype_clusters(
             offset += int(labels.max()) + 1
     else:
         clusters = either_components(np.arange(n_configurations), taking)
-    return _ranked(clusters, inverse, cells, n_cells, configurations)
+    return _ranked(
+        clusters, found.inverse, found.cells, found.n_cells, found.configurations
+    )
 
 
 # Sorts missing elements last.
@@ -642,6 +674,10 @@ _NONE = np.iinfo(np.int64).max
 #: The memory that a clonotype cluster search holds beyond the clonotypes, at
 #: most: one pass of variant keys and one chunk of candidate pairs.
 CLUSTER_SEARCH_BYTES = 512 * 2**20
+# The bytes that each pair of chains within the cutoff holds while the cells
+# are linked: its codes, both directions, and the links between chains, as
+# measured on 1.2 to 2.9 million pairs of B cell junctions.
+_NEAR_PAIR_BYTES = 80
 # Candidate pairs checked at once: two arrays of this many int64 values and
 # the checks' temporaries, about 150 MB together.
 _PAIRS_PER_CHUNK = 1 << 21
@@ -669,7 +705,7 @@ def _candidate_pairs(
     starts = np.searchsorted(heads, np.arange(n_nodes + 1)).astype(np.int64)
 
     def grouped(nodes: np.ndarray, items: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        table = np.unique(np.column_stack([nodes, items]), axis=0)
+        table = unique_rows(np.column_stack([nodes, items]))[0]
         bounds = np.searchsorted(table[:, 0], np.arange(n_nodes + 1)).astype(np.int64)
         return bounds, np.ascontiguousarray(table[:, 1], dtype=np.int64)
 
@@ -798,22 +834,6 @@ def _roots(parent: np.ndarray) -> np.ndarray:  # pragma: no cover
     return roots
 
 
-def _elements(
-    sequences: np.ndarray, genes: list[np.ndarray]
-) -> tuple[np.ndarray, np.ndarray]:
-    """Number each slot's element, -1 without one, and return each element's codes."""
-    present = sequences >= 0
-    ids = np.full(sequences.shape, -1, dtype=np.int64)
-    if not present.any():
-        return ids, np.empty((0, 1 + len(genes)), dtype=np.int64)
-    stacked = np.column_stack(
-        [sequences[present]] + [gene[present] for gene in genes]
-    ).astype(np.int64)
-    rows, inverse = np.unique(stacked, axis=0, return_inverse=True)
-    ids[present] = inverse.reshape(-1)
-    return ids, rows
-
-
 def _append(
     owners: list[np.ndarray],
     keys: list[np.ndarray],
@@ -843,8 +863,7 @@ def _components(
         ]
     )
     all_owners = np.concatenate(owners)
-    _unique, key_ids = np.unique(padded, axis=0, return_inverse=True)
-    key_ids = key_ids.reshape(-1)
+    _unique, key_ids = unique_rows(padded)
     n_keys = int(key_ids.max()) + 1
     size = n_configurations + n_keys
     graph = coo_matrix(
@@ -926,8 +945,9 @@ class Clonotypes:
 
     Attributes:
         cells: One row per cell, indexed by cell ``ids``: ``clonotype`` (its
-            label, NA without one) and ``clone_size`` (the cells of its
-            clonotype, 0 without one).
+            label, as a categorical of the labels in rank order, NA without
+            one) and ``clone_size`` (the cells of its clonotype, 0 without
+            one).
         clonotypes: One row per clonotype, largest first: ``clonotype``,
             ``n_cells``, ``fraction`` (its share of the cells with a
             clonotype), ``n_configurations`` (its distinct combinations of
@@ -966,7 +986,7 @@ class Clonotypes:
 def clonotype_frames(
     cell_ids: np.ndarray,
     *,
-    values: np.ndarray,
+    codes: np.ndarray,
     clone_size: np.ndarray,
     clonotype_ids: np.ndarray,
     clonotype_sizes: np.ndarray,
@@ -980,7 +1000,8 @@ def clonotype_frames(
 
     Args:
         cell_ids: The ``ids`` of the cells.
-        values: Each cell's clonotype label, empty without one.
+        codes: Each cell's clonotype, a position in ``clonotype_ids``, -1
+            without one.
         clone_size: Each cell's clone size.
         clonotype_ids: The labels of the clonotypes, by rank.
         clonotype_sizes: The cells of each clonotype.
@@ -991,11 +1012,14 @@ def clonotype_frames(
             representative, -1 for an empty slot.
         chains: Each representative field's decoded values per contig.
     """
-    labels = np.asarray(values, dtype=object).copy()
-    labels[labels == ""] = None
+    # The labels are categories coded by the stored codes, ordered as the
+    # clonotypes rank, so the table holds no text per cell.
     cells = pd.DataFrame(
         {
-            "clonotype": pd.array(labels),
+            "clonotype": pd.Categorical.from_codes(
+                np.asarray(codes, dtype=np.int64),
+                categories=pd.Index(np.asarray(clonotype_ids, dtype=object)),
+            ),
             "clone_size": np.asarray(clone_size, dtype=np.int64),
         },
         index=pd.Index(np.asarray(cell_ids), name="ids"),

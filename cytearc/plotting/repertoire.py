@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..metadata.selection import CellField, resolve_grouping
+from ..metadata.selection import CellField, category_codes, resolve_grouping
 from ..repertoire.chains import CHAIN_PAIRINGS, RECEPTOR_TYPES
 from ..repertoire.diversity import ORDERS
 from ..repertoire.overlap import OVERLAP_INDICES
@@ -17,7 +17,8 @@ from ..repertoire.expansion import (
 )
 from ..storage.artifacts import inspect_artifact
 from ..storage.refs import ArtifactRef
-from ..utils.arrays import sort_categories
+from ..storage.selections import read_stored_selection_indices
+from ..utils.arrays import sort_categories, sorted_unique
 from ._contracts import PlotProvenance
 from ._deps import require_matplotlib
 from ._figure import (
@@ -76,41 +77,42 @@ _ARM_COLORS = {"VJ": "#2b6cb0", "VDJ": "#dd6b20"}
 _MANY_CHAINS = 3
 
 
-def _load_receptors(store: Any, receptors: ArtifactRef) -> Any:
-    """Load saved receptors through the store's narrow loader."""
-    loader = getattr(getattr(store, "repertoire", None), "load_receptors", None)
-    if not callable(loader):
-        raise TypeError("store does not provide immune receptors")
-    return loader(receptors, fields=())
+def _store_method(store: Any, name: str, description: str | None = None) -> Any:
+    """Return a method of the store's repertoire namespace, or raise."""
+    method = getattr(getattr(store, "repertoire", None), name, None)
+    if not callable(method):
+        raise TypeError(f"store does not provide {description or name}")
+    return method
 
 
 def cell_groups(
     store: Any,
     artifact: ArtifactRef,
-    cell_ids: pd.Index,
     *,
     group_by: str | None,
     groups: ArtifactRef | None,
-) -> tuple[np.ndarray | None, str | None]:
-    """Return the group label of each cell of a cell-aligned artifact.
+) -> tuple[np.ndarray | None, list[str], str | None]:
+    """Return the group of each cell of a cell-aligned artifact.
 
     ``group_by`` names a cell metadata column and ``groups`` a cell-label
     artifact, such as a clustering; at most one may be given. A label artifact
     may hold fewer cells than ``artifact``: the cells it lacks have no group,
-    and their label is None.
+    nor do cells with a missing or blank label. Cells are matched by their
+    positions in the store.
 
     Returns:
-        The labels aligned to ``cell_ids``, or None without a grouping, and
-        the grouping's name.
+        Each of the artifact's cells' group, as a position in the names, -1
+        without one, or None without a grouping; the labels of the groups
+        that some cell holds, in their natural order; and the grouping's name.
     """
     if group_by is not None and groups is not None:
         raise ValueError("Pass group_by or groups, not both")
     if group_by is None and groups is None:
-        return None, None
+        return None, [], None
+    selection = inspect_artifact(store.zw, artifact).input_ref("cell_selection")
     if group_by is not None:
         if not isinstance(group_by, str):
             raise TypeError("group_by must be the name of a cell metadata column")
-        selection = inspect_artifact(store.zw, artifact).input_ref("cell_selection")
         resolved = resolve_grouping(
             store.zw,
             store.cells,
@@ -123,36 +125,45 @@ def cell_groups(
             raise TypeError("groups must be an ArtifactRef")
         resolved = resolve_grouping(store.zw, store.cells, groups)
         name = groups.kind
-    ids = np.asarray(store.cells.fetch_all("ids")).astype(str)[resolved.cell_idx]
-    labels = np.asarray(resolved.labels, dtype=object).copy()
-    if resolved.missing_mask is not None:
-        labels[np.asarray(resolved.missing_mask, dtype=bool)] = None
-    aligned = pd.Series(labels, index=pd.Index(ids)).reindex(cell_ids)
-    # An object Series gives a read-only view, so copy before filling in None.
-    values = aligned.to_numpy(dtype=object, copy=True)
-    values[pd.isna(aligned).to_numpy()] = None
-    return values, name
+    cell_index = read_stored_selection_indices(
+        store.zw,
+        selection,
+        kind="cell_selection",
+        scope="datastore",
+        assay=None,
+        table_path="cellData",
+    )
+    codes, names = category_codes(resolved.labels, resolved.missing_mask)
+    at = pd.Index(np.asarray(resolved.cell_idx, dtype=np.int64)).get_indexer(
+        np.asarray(cell_index, dtype=np.int64)
+    )
+    aligned = np.full(len(at), -1, dtype=np.int64)
+    aligned[at >= 0] = codes[at[at >= 0]]
+    # Only the labels of the artifact's cells name groups.
+    held = sorted_unique(aligned[aligned >= 0])
+    aligned[aligned >= 0] = np.searchsorted(held, aligned[aligned >= 0])
+    return aligned, [names[code] for code in held.tolist()], name
 
 
 def _category_table(
     values: np.ndarray,
     order: Sequence[str],
-    labels: np.ndarray | None,
+    groups: np.ndarray | None,
+    names: Sequence[str],
 ) -> pd.DataFrame:
     """Count cells per category, one column per group, or ``cells`` without groups."""
-    if labels is None:
-        counts = pd.Series(values).value_counts().reindex(list(order), fill_value=0)
-        return pd.DataFrame({"cells": counts.to_numpy()}, index=pd.Index(order))
-    keep = np.asarray([label is not None for label in labels], dtype=bool)
-    present = sort_categories(pd.unique(labels[keep]))
-    table = pd.crosstab(
-        pd.Categorical(values[keep], categories=list(order)),
-        pd.Categorical(labels[keep], categories=present),
-        dropna=False,
+    categories = pd.Index(list(order)).get_indexer(np.asarray(values, dtype=object))
+    if groups is None:
+        counts = np.bincount(categories[categories >= 0], minlength=len(order))
+        return pd.DataFrame({"cells": counts}, index=pd.Index(order))
+    keep = (categories >= 0) & (groups >= 0)
+    matrix = np.bincount(
+        categories[keep] * len(names) + groups[keep],
+        minlength=len(order) * len(names),
+    ).reshape(len(order), len(names))
+    return pd.DataFrame(
+        matrix, index=pd.Index(order), columns=pd.Index([str(name) for name in names])
     )
-    table.index = pd.Index(order)
-    table.columns = pd.Index([str(value) for value in present])
-    return table
 
 
 def _draw_categories(
@@ -241,22 +252,20 @@ def receptor_qc(
     """
     if normalize is not None and not isinstance(normalize, bool):
         raise TypeError("normalize must be a boolean or None")
-    loaded = _load_receptors(store, receptors)
+    loaded = _store_method(store, "load_receptors", "immune receptors")(
+        receptors, fields=()
+    )
     cells = loaded.cells
-    labels, group_name = cell_groups(
-        store, receptors, pd.Index(cells.index), group_by=group_by, groups=groups
+    labels, names, group_name = cell_groups(
+        store, receptors, group_by=group_by, groups=groups
     )
     fractions = labels is not None if normalize is None else normalize
-    keep = (
-        np.ones(len(cells), dtype=bool)
-        if labels is None
-        else np.asarray([label is not None for label in labels], dtype=bool)
-    )
+    keep = np.ones(len(cells), dtype=bool) if labels is None else labels >= 0
     receptor_type = _category_table(
-        cells["receptor_type"].to_numpy(dtype=object), RECEPTOR_TYPES, labels
+        cells["receptor_type"].to_numpy(dtype=object), RECEPTOR_TYPES, labels, names
     )
     chain_pairing = _category_table(
-        cells["chain_pairing"].to_numpy(dtype=object), CHAIN_PAIRINGS, labels
+        cells["chain_pairing"].to_numpy(dtype=object), CHAIN_PAIRINGS, labels, names
     )
     bins = [str(count) for count in range(_MANY_CHAINS)] + [f"{_MANY_CHAINS}+"]
     chains_per_cell = pd.DataFrame(
@@ -346,14 +355,6 @@ def receptor_qc(
     return plot_result
 
 
-def _load_clonotypes(store: Any, clonotypes: ArtifactRef) -> Any:
-    """Load saved clonotypes through the store's narrow loader."""
-    loader = getattr(getattr(store, "repertoire", None), "load_clonotypes", None)
-    if not callable(loader):
-        raise TypeError("store does not provide clonotypes")
-    return loader(clonotypes)
-
-
 def _clonotype_label(name: str, row: pd.Series) -> str:
     """Name a clonotype by its label and its representative's main junction.
 
@@ -401,46 +402,58 @@ def clonotype_abundance(
     """
     if isinstance(top, bool) or not isinstance(top, int) or top < 1:
         raise ValueError("top must be a positive integer")
-    loaded = _load_clonotypes(store, clonotypes)
-    cells = loaded.cells
-    group_labels, group_name = cell_groups(
-        store, clonotypes, pd.Index(cells.index), group_by=group_by, groups=groups
+    loaded = _store_method(store, "load_clonotypes", "clonotypes")(clonotypes)
+    group_labels, names, group_name = cell_groups(
+        store, clonotypes, group_by=group_by, groups=groups
     )
-    clonotype = cells["clonotype"].to_numpy(dtype=object)
-    keep = ~pd.isna(cells["clonotype"]).to_numpy()
+    clonotype = np.asarray(loaded.cells["clonotype"].cat.codes, dtype=np.int64)
     if group_labels is None:
-        group_values = np.full(len(cells), "all cells", dtype=object)
+        cell_group = np.zeros(len(clonotype), dtype=np.int64)
+        names = ["all cells"]
     else:
-        group_values = np.asarray(group_labels, dtype=object)
-        keep &= np.asarray([label is not None for label in group_values], dtype=bool)
-    frame = pd.DataFrame({"group": group_values[keep], "clonotype": clonotype[keep]})
-    counts = frame.groupby(["group", "clonotype"], sort=False).size()
-    group_order = sort_categories(pd.unique(frame["group"]))
-    sizes = (
-        counts.rename("clone_size")
-        .reset_index()
-        .groupby(["group", "clone_size"])
-        .size()
-        .rename("n_clonotypes")
-        .reset_index()
+        cell_group = group_labels
+    keep = (clonotype >= 0) & (cell_group >= 0)
+    # Each clonotype's cells in each group, from the codes alone.
+    n_clonotypes = max(1, len(loaded.clonotypes))
+    pairs, pair_cells = np.unique(
+        cell_group[keep] * n_clonotypes + clonotype[keep], return_counts=True
     )
-    sizes["group"] = pd.Categorical(sizes["group"], categories=group_order)
-    sizes = sizes.sort_values(["group", "clone_size"]).reset_index(drop=True)
-    sizes["group"] = sizes["group"].astype(object)
-    per_group = (
-        counts.unstack("group", fill_value=0)
-        .reindex(columns=group_order, fill_value=0)
-        .astype(np.int64)
+    held = sorted_unique(pairs // n_clonotypes)
+    group_order = [names[code] for code in held.tolist()]
+    pair_groups = np.searchsorted(held, pairs // n_clonotypes)
+    pair_codes = pairs % n_clonotypes
+    width = int(pair_cells.max()) + 1 if len(pair_cells) else 1
+    size_keys, size_counts = np.unique(
+        pair_groups * width + pair_cells, return_counts=True
     )
-    totals = per_group.sum(axis=1)
-    rank = loaded.clonotypes.set_index("clonotype")
+    sizes = pd.DataFrame(
+        {
+            "group": np.asarray(group_order, dtype=object)[size_keys // width],
+            "clone_size": (size_keys % width).astype(np.int64),
+            "n_clonotypes": size_counts.astype(np.int64),
+        }
+    )
+    totals = np.bincount(pair_codes, weights=pair_cells, minlength=n_clonotypes)
+    present = np.flatnonzero(totals > 0)
     # The largest clonotypes, ties in the clonotypes' rank order.
-    positions = rank.index.get_indexer(totals.index)
-    order = np.lexsort((positions, -totals.to_numpy()))[:top]
-    chosen = totals.index[order]
-    top_table = per_group.loc[chosen].reset_index()
+    chosen = present[np.lexsort((present, -totals[present]))[:top]]
+    rows = np.full(n_clonotypes, -1, dtype=np.int64)
+    rows[chosen] = np.arange(len(chosen))
+    taken = rows[pair_codes] >= 0
+    matrix = np.zeros((len(chosen), len(group_order)), dtype=np.int64)
+    matrix[rows[pair_codes[taken]], pair_groups[taken]] = pair_cells[taken]
+    ids = loaded.clonotypes["clonotype"].to_numpy(dtype=object)
+    top_table = pd.DataFrame(
+        matrix, columns=pd.Index([str(name) for name in group_order])
+    )
+    top_table.insert(0, "clonotype", ids[chosen])
     top_table.insert(
-        1, "label", [_clonotype_label(name, rank.loc[name]) for name in chosen]
+        1,
+        "label",
+        [
+            _clonotype_label(str(ids[code]), loaded.clonotypes.iloc[code])
+            for code in chosen.tolist()
+        ],
     )
     if group_labels is None:
         top_table = top_table.rename(columns={"all cells": "cells"})
@@ -454,8 +467,9 @@ def clonotype_abundance(
             target, panel_keys=["sizes", "top"], figsize=figsize, n_columns=2
         )
         ax = axes["sizes"]
+        by_group = dict(tuple(sizes.groupby("group", sort=False)))
         for group in group_order:
-            rows = sizes[sizes["group"] == group]
+            rows = by_group[group]
             ax.plot(
                 rows["clone_size"],
                 rows["n_clonotypes"],
@@ -518,35 +532,6 @@ def clonotype_abundance(
     if show:
         plot_result.show()
     return plot_result
-
-
-def _load_expansion(store: Any, expansion: ArtifactRef, splits: Sequence[int]) -> Any:
-    """Load saved clonal expansion through the store's narrow loader."""
-    loader = getattr(getattr(store, "repertoire", None), "load_clonal_expansion", None)
-    if not callable(loader):
-        raise TypeError("store does not provide clonal expansion")
-    return loader(expansion, splits=splits)
-
-
-def _expansion_groups(loaded: Any) -> np.ndarray:
-    """Name each cell's group of the expansion, None without one.
-
-    A group is named by its labels in the key columns, joined by commas, or
-    ``"all cells"`` without key columns.
-    """
-    cells = loaded.cells
-    keys = [
-        *loaded.within,
-        *(("receptor_type",) if loaded.within_receptor_type else ()),
-    ]
-    names = np.full(len(cells), None, dtype=object)
-    counted = ~pd.isna(cells["category"]).to_numpy()
-    if not keys:
-        names[counted] = "all cells"
-        return names
-    columns = [cells[key].to_numpy(dtype=object)[counted] for key in keys]
-    names[counted] = [", ".join(map(str, row)) for row in zip(*columns, strict=True)]
-    return names
 
 
 def _stacked_shares(
@@ -649,13 +634,16 @@ def clonal_expansion(
         raise ValueError("count must be 'cells' or 'clonotypes'")
     if not isinstance(normalize, bool):
         raise TypeError("normalize must be a boolean")
-    loaded = _load_expansion(store, expansion, splits)
-    cells = loaded.cells
-    labels, group_name = cell_groups(
-        store, expansion, pd.Index(cells.index), group_by=group_by, groups=groups
+    loaded = _store_method(store, "load_clonal_expansion", "clonal expansion")(
+        expansion, splits=splits
     )
+    labels, names, group_name = cell_groups(
+        store, expansion, group_by=group_by, groups=groups
+    )
+    category_names = list(loaded.labels)
+    window_names = list(rank_window_labels(splits))
     if labels is None:
-        names = _expansion_groups(loaded)
+        # The expansion's own groups, which the loaded tables count.
         group_name = (
             ", ".join(
                 [
@@ -665,35 +653,46 @@ def clonal_expansion(
             )
             or None
         )
+        order = sort_categories(pd.unique(loaded.categories["group"].to_numpy(object)))
+        wide = (
+            loaded.categories.pivot(index="group", columns="category", values=count)
+            .reindex(index=order, columns=category_names, fill_value=0)
+            .astype(np.int64)
+        )
+        windows = (
+            loaded.rank_windows.pivot(index="group", columns="window", values="cells")
+            .reindex(index=order, columns=window_names, fill_value=0)
+            .astype(np.int64)
+        )
+        n_cells = int(loaded.categories["cells"].sum())
     else:
-        names = labels
-    category = cells["category"].to_numpy(dtype=object)
-    keep = ~pd.isna(cells["category"]).to_numpy() & np.asarray(
-        [name is not None for name in names], dtype=bool
-    )
-    order = sort_categories(pd.unique(names[keep]))
-    frame = pd.DataFrame(
-        {
-            "group": pd.Categorical(names[keep], categories=order),
-            "category": pd.Categorical(category[keep], categories=list(loaded.labels)),
-            "clonotype": cells["clonotype"].to_numpy(dtype=object)[keep],
-        }
-    )
-    if count == "clonotypes":
-        frame = frame.drop_duplicates()
-    wide = (
-        pd.crosstab(frame["group"], frame["category"], dropna=False)
-        .reindex(index=order, columns=list(loaded.labels), fill_value=0)
-        .astype(np.int64)
-    )
-    group_codes = pd.Categorical(names[keep], categories=order).codes.astype(np.int64)
-    clonotype_codes = pd.factorize(cells["clonotype"].to_numpy(dtype=object)[keep])[0]
-    window_names = list(rank_window_labels(splits))
-    windows = pd.DataFrame(
-        rank_windows(clonotype_codes, group_codes, len(order), splits),
-        index=pd.Index(order),
-        columns=pd.Index(window_names),
-    )
+        category = np.asarray(loaded.cells["category"].cat.codes, dtype=np.int64)
+        clonotype = np.asarray(loaded.cells["clonotype"].cat.codes, dtype=np.int64)
+        keep = (category >= 0) & (labels >= 0)
+        held = sorted_unique(labels[keep])
+        order = [names[code] for code in held.tolist()]
+        group_codes = np.searchsorted(held, labels[keep])
+        width = len(category_names)
+        if count == "cells":
+            keys = group_codes * width + category[keep]
+        else:
+            # Each clonotype counts once per group and category it holds there.
+            n_clonotypes = max(1, len(loaded.cells["clonotype"].cat.categories))
+            triples = sorted_unique(
+                (group_codes * n_clonotypes + clonotype[keep]) * width + category[keep]
+            )
+            keys = triples // (n_clonotypes * width) * width + triples % width
+        wide = pd.DataFrame(
+            np.bincount(keys, minlength=len(order) * width).reshape(len(order), width),
+            index=pd.Index(order, name="group"),
+            columns=pd.Index(category_names, name="category"),
+        )
+        windows = pd.DataFrame(
+            rank_windows(clonotype[keep], group_codes, len(order), splits),
+            index=pd.Index(order),
+            columns=pd.Index(window_names),
+        )
+        n_cells = int(keep.sum())
     # Windows that hold no cell of any group are left out of the figure.
     shown_windows = windows.loc[:, windows.sum(axis=0) > 0]
     if figsize is None and target is None:
@@ -745,7 +744,7 @@ def clonal_expansion(
         provenance=PlotProvenance(
             assay=None,
             cell_key=None,
-            n_cells=int(keep.sum()),
+            n_cells=n_cells,
             renderer="matplotlib",
             notes=("clonal_expansion",),
             extras={
@@ -762,24 +761,6 @@ def clonal_expansion(
     if show:
         plot_result.show()
     return plot_result
-
-
-def _load_rarefaction(store: Any, clonotypes: ArtifactRef, **options: Any) -> Any:
-    """Compute the curves through the store's narrow repertoire method."""
-    method = getattr(getattr(store, "repertoire", None), "rarefaction", None)
-    if not callable(method):
-        raise TypeError("store does not provide rarefaction")
-    return method(clonotypes, **options)
-
-
-def _key_names(table: pd.DataFrame, key_columns: Sequence[str]) -> np.ndarray:
-    """Name each row's group by its labels, joined by commas, or ``"all cells"``."""
-    if not key_columns:
-        return np.full(len(table), "all cells", dtype=object)
-    columns = [table[column].astype(str).to_numpy() for column in key_columns]
-    return np.asarray(
-        [", ".join(row) for row in zip(*columns, strict=True)], dtype=object
-    )
 
 
 @close_figures_on_error
@@ -824,8 +805,7 @@ def clonal_rarefaction(
     """
     if base not in ("size", "coverage"):
         raise ValueError("base must be 'size' or 'coverage'")
-    result = _load_rarefaction(
-        store,
+    result = _store_method(store, "rarefaction")(
         clonotypes,
         group_by=group_by,
         groups=groups,
@@ -835,15 +815,12 @@ def clonal_rarefaction(
         endpoint=endpoint,
         knots=knots,
     )
-    curves = result.curves.copy()
-    key_columns = [
-        column
-        for column in curves.columns
-        if column not in ("order", "size", "method", "diversity", "coverage")
-    ]
-    curves.insert(0, "group", _key_names(curves, key_columns))
+    curves = result.curves
+    # The key columns lie between the group's name and the order.
+    key_columns = list(curves.columns[1 : curves.columns.get_loc("order")])
     names = sort_categories(pd.unique(curves["group"]))
     colors = categorical_color_map(list(names))
+    by_curve = dict(tuple(curves.groupby(["group", "order"], sort=False)))
     panels = [f"order_{order}" for order in result.orders]
     if base == "size":
         panels.append("coverage")
@@ -856,12 +833,11 @@ def clonal_rarefaction(
         )
         for panel in panels:
             ax = axes[panel]
+            order = (
+                int(panel.split("_")[1]) if panel != "coverage" else result.orders[0]
+            )
             for name in names:
-                rows = curves[curves["group"] == name]
-                if panel != "coverage":
-                    rows = rows[rows["order"] == int(panel.split("_")[1])]
-                else:
-                    rows = rows[rows["order"] == result.orders[0]]
+                rows = by_curve[(name, order)]
                 x = rows["size" if base == "size" else "coverage"].to_numpy()
                 y = rows["coverage" if panel == "coverage" else "diversity"].to_numpy()
                 method = rows["method"].to_numpy()
@@ -923,14 +899,6 @@ def clonal_rarefaction(
     return plot_result
 
 
-def _repertoire_method(store: Any, name: str) -> Any:
-    """Return a method of the store's repertoire namespace, or raise."""
-    method = getattr(getattr(store, "repertoire", None), name, None)
-    if not callable(method):
-        raise TypeError(f"store does not provide {name}")
-    return method
-
-
 # Overlap matrices of at most this many groups print their values.
 _ANNOTATED_GROUPS = 12
 _OVERLAP_TITLES = {
@@ -975,7 +943,7 @@ def clonal_overlap(
     """
     if index not in OVERLAP_INDICES:
         raise ValueError(f"index must be one of {', '.join(OVERLAP_INDICES)}")
-    result = _repertoire_method(store, "overlap")(
+    result = _store_method(store, "overlap")(
         clonotypes,
         group_by=group_by,
         groups=groups,
@@ -983,16 +951,13 @@ def clonal_overlap(
         cell_selection=cell_selection,
     )
     names = list(result.group_sizes["group"])
-    position = {name: at for at, name in enumerate(names)}
+    positions = pd.Index(names)
+    first = positions.get_indexer(result.pairs["group_1"])
+    second = positions.get_indexer(result.pairs["group_2"])
+    pair_values = result.pairs[index].to_numpy(dtype=np.float64)
     values = np.full((len(names), len(names)), np.nan)
-    for first, second, value in zip(
-        result.pairs["group_1"],
-        result.pairs["group_2"],
-        result.pairs[index],
-        strict=True,
-    ):
-        values[position[first], position[second]] = value
-        values[position[second], position[first]] = value
+    values[first, second] = pair_values
+    values[second, first] = pair_values
     values[np.diag_indices(len(names))] = (
         result.group_sizes["clonotypes"].to_numpy(dtype=np.float64)
         if index == "shared"
@@ -1094,7 +1059,7 @@ def clonotype_tracking(
     Tables: ``cells`` (``clonotype``, ``group``, the key columns, ``cells``
     and ``fraction``).
     """
-    tracked = _repertoire_method(store, "track")(
+    tracked = _store_method(store, "track")(
         clonotypes,
         group_by=group_by,
         groups=groups,
@@ -1110,9 +1075,11 @@ def clonotype_tracking(
     ]
     # A clonotype counts among its receptor type's cells, so the groups of
     # each receptor type share a position named by their labels alone.
-    positions_of = (
-        cells[keys].astype(str).agg(", ".join, axis=1) if keys else cells["group"]
-    )
+    positions_of = cells["group"]
+    if keys:
+        positions_of = cells[keys[0]].astype(str)
+        for column in keys[1:]:
+            positions_of = positions_of + ", " + cells[column].astype(str)
     placed = cells.assign(position=positions_of.to_numpy(dtype=object))
     present = sort_categories(pd.unique(placed["position"]))
     if order is None:
@@ -1123,7 +1090,8 @@ def clonotype_tracking(
         positions = list(order)
         if sorted(map(str, positions)) != sorted(map(str, present)):
             raise ValueError(f"order must list the groups {present}")
-    rank = _load_clonotypes(store, clonotypes).clonotypes.set_index("clonotype")
+    junctions = dict(zip(tracked.tracked, tracked.junctions, strict=True))
+    by_clonotype = dict(tuple(placed.groupby("clonotype", sort=False)))
     if figsize is None and target is None:
         figsize = (max(6.0, 0.7 * len(positions) + 4.0), 4.2)
     require_matplotlib()
@@ -1135,8 +1103,12 @@ def clonotype_tracking(
         colors = categorical_color_map(list(tracked.tracked))
         x = np.arange(len(positions))
         for name in tracked.tracked:
-            rows = placed[placed["clonotype"] == name].set_index("position")["fraction"]
-            y = rows.reindex(positions).to_numpy(dtype=np.float64)
+            rows = by_clonotype.get(name, placed.iloc[:0])
+            y = (
+                rows.set_index("position")["fraction"]
+                .reindex(positions)
+                .to_numpy(dtype=np.float64)
+            )
             ax.plot(
                 x,
                 y,
@@ -1144,7 +1116,7 @@ def clonotype_tracking(
                 markersize=3.5,
                 linewidth=1.2,
                 color=colors[name],
-                label=_clonotype_label(name, rank.loc[name]),
+                label=f"{name} ({junctions[name]})",
             )
         ax.set_xticks(x, positions, rotation=45, ha="right")
         ax.set_ylabel("Fraction of the group's cells")
@@ -1240,7 +1212,7 @@ def gene_usage(
     """
     if isinstance(top, bool) or not isinstance(top, int) or top < 1:
         raise ValueError("top must be a positive integer")
-    result = _repertoire_method(store, "gene_usage")(
+    result = _store_method(store, "gene_usage")(
         source,
         genes=gene,
         level=level,
@@ -1251,16 +1223,11 @@ def gene_usage(
         cell_selection=cell_selection,
     )
     table = result.table
-    key_columns = [
-        column
-        for column in table.columns
-        if column not in ("locus", gene, count, "fraction")
-    ]
-    names = _key_names(table, key_columns)
     loci = _locus_panels(table)
+    by_locus = dict(tuple(table.groupby("locus", sort=False)))
     if figsize is None and target is None:
         figsize = (
-            max(5.0, 3.0 + 0.4 * len(set(names))) * len(loci),
+            max(5.0, 3.0 + 0.4 * table["group"].nunique()) * len(loci),
             max(4.0, 0.22 * top + 1.5),
         )
     require_matplotlib()
@@ -1270,27 +1237,16 @@ def gene_usage(
         )
         for locus in loci:
             ax = axes[locus]
-            rows = table[table["locus"] == locus]
-            row_names = names[(table["locus"] == locus).to_numpy()]
+            rows = by_locus[locus]
             totals = (
                 rows.groupby(gene)[count]
                 .sum()
                 .sort_values(ascending=False, kind="stable")
             )
             shown = list(totals.index[:top])
-            wide = (
-                pd.DataFrame(
-                    {
-                        "group": row_names,
-                        gene: rows[gene].to_numpy(),
-                        "fraction": rows["fraction"].to_numpy(),
-                    }
-                )
-                .pivot_table(
-                    index=gene, columns="group", values="fraction", fill_value=0
-                )
-                .reindex(index=shown)
-            )
+            wide = rows.pivot_table(
+                index=gene, columns="group", values="fraction", fill_value=0
+            ).reindex(index=shown)
             wide = wide.reindex(columns=sort_categories(wide.columns))
             if wide.shape[1] == 1:
                 positions = np.arange(len(shown))[::-1]
@@ -1357,7 +1313,7 @@ def gene_pairing(
     """
     if isinstance(top, bool) or not isinstance(top, int) or top < 1:
         raise ValueError("top must be a positive integer")
-    result = _repertoire_method(store, "gene_usage")(
+    result = _store_method(store, "gene_usage")(
         source,
         genes=("v_call", "j_call"),
         level=level,
@@ -1374,8 +1330,9 @@ def gene_pairing(
         figure, axes, owns = normalize_axes_target(
             target, panel_keys=loci, figsize=figsize, n_columns=max(1, len(loci))
         )
+        by_locus = dict(tuple(table.groupby("locus", sort=False)))
         for locus in loci:
-            rows = table[table["locus"] == locus]
+            rows = by_locus[locus]
             v_genes, j_genes = (
                 rows.groupby(field)[count]
                 .sum()
@@ -1443,7 +1400,7 @@ def spectratype(
 
     Tables: ``spectratype``, the rows of ``ds.repertoire.spectratype``.
     """
-    result = _repertoire_method(store, "spectratype")(
+    result = _store_method(store, "spectratype")(
         source,
         sequence=sequence,
         slots=slots,
@@ -1453,15 +1410,10 @@ def spectratype(
         cell_selection=cell_selection,
     )
     table = result.table
-    key_columns = [
-        column
-        for column in table.columns
-        if column not in ("locus", "length", count, "fraction")
-    ]
-    names = _key_names(table, key_columns)
-    group_order = sort_categories(pd.unique(names))
+    group_order = sort_categories(pd.unique(table["group"]))
     colors = categorical_color_map(list(group_order))
     loci = _locus_panels(table)
+    by_line = dict(tuple(table.groupby(["locus", "group"], sort=False)))
     if figsize is None and target is None:
         figsize = (4.5 * len(loci) + 1.5, 3.8)
     require_matplotlib()
@@ -1471,9 +1423,8 @@ def spectratype(
         )
         for locus in loci:
             ax = axes[locus]
-            in_locus = (table["locus"] == locus).to_numpy()
             for name in group_order:
-                rows = table[in_locus & (names == name)]
+                rows = by_line.get((locus, name), table.iloc[:0])
                 if len(group_order) == 1:
                     ax.bar(rows["length"], rows["fraction"], color="#2b6cb0")
                 else:
