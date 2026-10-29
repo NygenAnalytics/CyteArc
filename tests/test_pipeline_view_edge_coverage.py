@@ -109,13 +109,16 @@ def test_pipeline_complete_group_and_source_array_errors(
     cell_names = _descriptor(cells, "names")
     feature_names = _descriptor(features, "names")
 
-    wrong_assay = replace(
-        cell_names,
-        artifact=ArtifactRef("assay", "metadata_snapshot", "e" * 64, assay="ADT"),
-    )
+    other_assay = ArtifactRef("assay", "metadata_snapshot", "e" * 64, assay="ADT")
+    # Each assay has its own features, so a feature field of another assay is
+    # refused; a cell field of another assay resolves as any other, and this
+    # one names no stored artifact.
     with pytest.raises(ArtifactResolutionError) as caught:
-        cells._complete_group(wrong_assay)
+        features._complete_group(replace(feature_names, artifact=other_assay))
     assert caught.value.code == "pipeline_field_axis_mismatch"
+    with pytest.raises(ArtifactResolutionError) as caught:
+        cells._complete_group(replace(cell_names, artifact=other_assay))
+    assert caught.value.code == "artifact_missing"
     wrong_scope = replace(
         feature_names,
         artifact=ArtifactRef("datastore", "metadata_snapshot", "f" * 64),

@@ -53,6 +53,15 @@ GUIDES = [
     ("NT", ""),
 ]
 LABELS = {"controls": ["NT"]}
+# The guide that each of the first 420 cells carries. The next 10 cells carry
+# none, and the last 4 carry guides 0 and 4, of GENE_A and GENE_C.
+GUIDE_OF = np.r_[
+    np.repeat([0, 1], 40),
+    np.repeat([2, 3], 30),
+    np.full(40, 4),
+    np.full(40, 5),
+    np.repeat([6, 7, 8, 9], 50),
+]
 # The head of a quick run: 50 HVGs of the 120 genes and 5 PCA dimensions.
 HEAD: dict[str, Any] = {"hvg": {"top_n": 50}, "pca": {"dims": 5}}
 # A quick run of every cell, without QC filtering.
@@ -99,13 +108,7 @@ def _screen(seed: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     four carry guides of GENE_A and GENE_C.
     """
     rng = np.random.default_rng(seed)
-    guide_of = np.r_[
-        np.repeat([0, 1], 40),
-        np.repeat([2, 3], 30),
-        np.full(40, 4),
-        np.full(40, 5),
-        np.repeat([6, 7, 8, 9], 50),
-    ]
+    guide_of = GUIDE_OF
     n_cells = len(guide_of) + 14
     library = rng.lognormal(np.log(1500), 0.25, n_cells)
     base = rng.normal(-6.8, 0.6, N_GENES)
@@ -135,6 +138,35 @@ N_CELLS = len(RNA)
 # The cells that every cell column of the screen fills: the columns with gaps
 # leave out every tenth cell, 44 of the 434.
 FILLED = np.arange(N_CELLS) % 10 != 0
+# The run's cell fields of each cell's guide call and perturbation label.
+GUIDE_FIELDS = ["guide_call", "perturbation_label", "is_control"]
+
+
+def _designed_calls() -> pd.DataFrame:
+    """Return the guide call, label and control flag that each cell's guides give.
+
+    A cell with one guide is called by the guide's ID and labelled by its
+    target, or ``"control"`` for a non-targeting guide; a cell without a guide
+    is ``"Negative"``, and a cell with guides of two genes ``"Multiple"``.
+    """
+    targets = np.asarray([target for target, _ in GUIDES])[GUIDE_OF]
+    without, several = ["Negative"] * 10, ["Multiple"] * 4
+    return pd.DataFrame(
+        {
+            "guide_call": [
+                *(f"CRISPR{guide}" for guide in GUIDE_OF),
+                *without,
+                *several,
+            ],
+            "perturbation_label": [
+                *np.where(targets == "NT", "control", targets),
+                *without,
+                *several,
+            ],
+            "is_control": [*(targets == "NT"), *[False] * 14],
+        },
+        index=[f"cell{cell}" for cell in range(N_CELLS)],
+    )
 
 
 def _open(location: str | Path, **options: Any) -> DataStore:
@@ -333,7 +365,7 @@ def test_a_default_run_labels_the_cells_and_measures_each_target(runs) -> None:
     assert calls.parameters["method"] == "poisson_gaussian"
     distances = store.artifacts.inspect(run["edistance"])
     assert distances.inputs["coordinates"] == run["pca"].to_dict()
-    assert run.cells.columns == ("I", "ids", "names")
+    assert run.cells.columns == ("I", "ids", "names", *GUIDE_FIELDS)
     assert run.features.columns == ("I", "ids", "names", "highly_variable_features")
     config = run.report()["run"]["config"]
     assert (config["guideAssay"], config["profileLabels"]) == ("CRISPR", None)
@@ -433,12 +465,11 @@ def test_a_full_run_runs_every_stage(runs) -> None:
 def test_the_run_cells_hold_each_cells_mixscape_class(runs) -> None:
     run, store = runs.full, runs.store
 
-    # The guide calls and labels belong to the guide assay, which the run's
-    # RNA cell view cannot hold, so its cell fields are Mixscape's alone.
     assert run.cells.columns == (
         "I",
         "ids",
         "names",
+        *GUIDE_FIELDS,
         "mixscape_class",
         "mixscape_posterior",
     )
@@ -451,6 +482,84 @@ def test_the_run_cells_hold_each_cells_mixscape_class(runs) -> None:
         view["mixscape_posterior"], classes["posterior"].to_numpy()
     )
     assert set(classes["mixscape_class"]) >= {"GENE_A KO", "GENE_A NP", "control"}
+
+
+def test_the_run_cells_hold_each_cells_guide_call_and_label(runs) -> None:
+    store = runs.store
+    designed = _designed_calls()
+
+    for run in (runs.default, runs.full):
+        calls = store.perturbation.load_guide_calls(run["guide_calls"]).cells
+        labels = store.perturbation.load_labels(run["perturbation_labels"]).cells
+        view = run.cells.to_pandas_dataframe(["ids", *GUIDE_FIELDS]).set_index("ids")
+        # The RNA run's cells hold the guide assay's calls and labels of the
+        # run's cells, as the loaders read them.
+        assert view.index.tolist() == calls.index.tolist() == labels.index.tolist()
+        assert view["guide_call"].tolist() == calls["call"].tolist()
+        assert view["perturbation_label"].tolist() == labels["label"].tolist()
+        assert view["is_control"].tolist() == labels["is_control"].tolist()
+        # And as each cell's guides give them: a cell without a guide is
+        # "Negative", one with guides of two genes "Multiple", and one with a
+        # non-targeting guide is called by the guide and labelled "control".
+        for key in GUIDE_FIELDS:
+            assert view[key].tolist() == designed.loc[view.index, key].tolist()
+        # The record keeps its keys, and each field is an ordinary descriptor
+        # of a guide assay artifact of the run, read from its canonical array.
+        record = dict(store.zw[f"pipeline/runs/{run.run_id}"].attrs)
+        assert set(record) == {
+            *("runId", "recipe", "requestedLabel", "label", "assay", "startedAtNs"),
+            *("finishedAtNs", "status", "complete", "cytearcVersion", "config"),
+            *("stageOrder", "outputs", "fields", "error", "interruption"),
+        }
+        fields = {
+            field["key"]: field
+            for field in record["fields"]
+            if field["axis"] == "cells"
+        }
+        for key, output, array in (
+            ("guide_call", "guide_calls", "values"),
+            ("perturbation_label", "perturbation_labels", "values"),
+            ("is_control", "perturbation_labels", "is_control"),
+        ):
+            assert set(fields[key]) == {
+                *("key", "axis", "artifact", "sourceValue", "valueIndex"),
+                *("dtype", "fill", "missingMask", "display"),
+            }
+            assert fields[key]["artifact"] == run[output].to_dict()
+            assert (fields[key]["artifact"]["assay"], run.assay) == ("CRISPR", "RNA")
+            assert fields[key]["sourceValue"] == array
+
+    # A cell that QC filtering removed from the run holds each field's fill.
+    cells = runs.default.cells
+    removed = ~cells.fetch_all("I")
+    assert removed.any()
+    assert set(cells.fetch_all("guide_call")[removed]) == {""}
+    assert set(cells.fetch_all("perturbation_label")[removed]) == {""}
+    assert not cells.fetch_all("is_control")[removed].any()
+
+
+def test_a_run_export_writes_the_guide_fields_as_categories(runs) -> None:
+    store, run = runs.store, runs.default
+    calls = store.perturbation.load_guide_calls(run["guide_calls"]).cells
+    labels = store.perturbation.load_labels(run["perturbation_labels"]).cells
+
+    exported = store.to_anndata(run=run)
+
+    obs = exported.obs
+    assert obs.index.tolist() == labels.index.tolist()
+    expected = {
+        "guide_call": calls["call"],
+        "perturbation_label": labels["label"],
+        "is_control": labels["is_control"].astype(str),
+    }
+    for key, values in expected.items():
+        assert isinstance(obs[key].dtype, pd.CategoricalDtype)
+        assert obs[key].astype(str).tolist() == values.tolist()
+        # Text categories in natural order, each with the run's colour.
+        categories = obs[key].cat.categories.tolist()
+        assert categories == sorted(set(values))
+        assert len(exported.uns[f"{key}_colors"]) == len(categories)
+    assert obs["is_control"].cat.categories.tolist() == ["False", "True"]
 
 
 def test_each_stage_summary_equals_its_loader(runs) -> None:
@@ -1315,10 +1424,13 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
         ({"guide_assay": 3}, TypeError, "guide_assay must be a non-empty string"),
         ({"cells": "missing"}, KeyError, "Cell selection column 'missing'"),
         ({"harmony": {"batch_columns": ["missing"]}}, KeyError, "Harmony columns"),
-        (
-            {"snapshot_columns": ["mixscape_class"]},
-            ValueError,
-            "collide with reserved run fields",
+        *(
+            (
+                {"snapshot_columns": [field]},
+                ValueError,
+                "collide with reserved run fields",
+            )
+            for field in ("mixscape_class", *GUIDE_FIELDS)
         ),
         ({"callback": 3}, TypeError, "callback must be callable"),
     ],

@@ -2221,6 +2221,48 @@ def test_an_identical_second_call_creates_no_artifacts(cite, tmp_path: Path) -> 
     assert dict(again) == dict(cite.rna)
 
 
+@pytest.mark.parametrize(
+    ("fixture", "name"),
+    [
+        ("cite", "rna"),
+        ("cite", "adt"),
+        ("joint", "wnn"),
+        ("joint", "snn"),
+        ("atac", "run"),
+        ("hashed", "run"),
+    ],
+)
+def test_runs_of_the_other_recipes_keep_their_records_and_views(
+    fixture: str,
+    name: str,
+    request: pytest.FixtureRequest,
+) -> None:
+    run = getattr(request.getfixturevalue(fixture), name)
+    record = dict(run._owner.zw[f"pipeline/runs/{run.run_id}"].attrs)
+
+    # The record keeps its keys, and each field the keys of its descriptor.
+    assert set(record) == {
+        *("runId", "recipe", "requestedLabel", "label", "assay", "startedAtNs"),
+        *("finishedAtNs", "status", "complete", "cytearcVersion", "config"),
+        *("stageOrder", "outputs", "fields", "error", "interruption"),
+    }
+    for field in record["fields"]:
+        assert set(field) == {
+            *("key", "axis", "artifact", "sourceValue", "valueIndex"),
+            *("dtype", "fill", "missingMask", "display"),
+        }
+    # Each field is a selection or snapshot of the store, or an artifact of
+    # the run's assay: no other assay, such as the hashed run's hashtags,
+    # gives these runs a field.
+    assays = {field["artifact"].get("assay") for field in record["fields"]}
+    assert assays <= {None, run.assay}
+    assert run.assay in assays
+    # Both views open with the fields that the record lists.
+    for axis in ("cells", "features"):
+        listed = [field["key"] for field in record["fields"] if field["axis"] == axis]
+        assert list(getattr(run, axis).columns) == listed
+
+
 def test_a_basic_rna_analysis_record_still_opens_lists_and_reports() -> None:
     root = _root()
     written = _completed_run(root)

@@ -1392,37 +1392,71 @@ def test_run_view_validates_feature_result_payload_integrity() -> None:
     assert caught.value.code == "corrupt_payload"
 
 
-def test_run_view_rejects_cell_field_owned_by_another_assay() -> None:
+def test_run_view_reads_cell_field_of_another_assay_by_the_run_cells() -> None:
     root = _root()
     run = _completed_run(root)
-    foreign = _artifact(
+    other_selection = resolve_generated_selection_artifact(
         root,
-        scope="assay",
-        assay="ADT",
-        kind="cluster_labels",
-        values={"values": np.asarray([0, 2], dtype=np.int32)},
-        inputs={"cell_selection": run["analysis_cell_selection"].to_dict()},
-    )
+        scope="datastore",
+        kind="cell_selection",
+        values=np.asarray([True, True, False, False]),
+        row_ids=np.asarray(["c1", "c2", "c3", "c4"]),
+        operation="test_other_selection",
+        parameters={},
+        inputs={},
+        source_column="I",
+    )[0]
     run_group = root[f"pipeline/runs/{run.run_id}"]
     fields = list(run_group.attrs["fields"])
-    run_group.attrs["fields"] = [
-        {**field, "artifact": foreign.to_dict()}
-        if field["axis"] == "cells" and field["key"] == "clusters"
-        else field
-        for field in fields
-    ]
 
-    reopened = open_pipeline_run(_Owner(root), run_id=run.run_id)
+    def with_adt_clusters(cell_selection: ArtifactRef) -> PipelineRun:
+        # Every assay shares the store's cells, and the owner offers no ADT
+        # assay, which a cell view never needs.
+        clusters = _artifact(
+            root,
+            scope="assay",
+            assay="ADT",
+            kind="cluster_labels",
+            values={"values": np.asarray([5, 7], dtype=np.int32)},
+            inputs={"cell_selection": cell_selection.to_dict()},
+        )
+        run_group.attrs["fields"] = [
+            {**field, "artifact": clusters.to_dict()}
+            if field["axis"] == "cells" and field["key"] == "clusters"
+            else field
+            for field in fields
+        ]
+        return open_pipeline_run(_Owner(root), run_id=run.run_id)
+
+    # The run's cells are c1 and c3, so the field's two rows are theirs.
+    cells = with_adt_clusters(run["analysis_cell_selection"]).cells
+    np.testing.assert_array_equal(cells.fetch("clusters"), [5, 7])
+    np.testing.assert_array_equal(cells.fetch_all("clusters"), [5, -1, 7, -1])
+    assert cells.to_pandas_dataframe(["ids", "clusters"]).to_dict("list") == {
+        "ids": ["c1", "c3"],
+        "clusters": [5, 7],
+    }
+    # A field of another assay computed on other cells is refused.
     with pytest.raises(ArtifactResolutionError) as caught:
-        _ = reopened.cells
-    assert caught.value.code == "pipeline_field_axis_mismatch"
+        _ = with_adt_clusters(other_selection).cells
+    assert caught.value.code == "pipeline_field_selection_mismatch"
 
 
-def test_run_view_rejects_datastore_scoped_feature_field() -> None:
+@pytest.mark.parametrize(
+    ("scope", "assay"),
+    [("datastore", None), ("assay", "ADT")],
+    ids=["datastore", "another_assay"],
+)
+def test_run_view_rejects_feature_field_outside_the_run_assay(
+    scope: str,
+    assay: str | None,
+) -> None:
     root = _root()
     run = _completed_run(root)
     foreign = _artifact(
         root,
+        scope=scope,
+        assay=assay,
         kind="feature_selection",
         values={"values": np.asarray([True, False, True])},
         inputs={},
@@ -1440,6 +1474,8 @@ def test_run_view_rejects_datastore_scoped_feature_field() -> None:
     with pytest.raises(ArtifactResolutionError) as caught:
         _ = reopened.features
     assert caught.value.code == "pipeline_field_axis_mismatch"
+    # Each assay has its own features, while the cells view still opens.
+    assert reopened.cells.columns == run.cells.columns
 
 
 def test_run_view_selected_blocks_and_head_are_bounded() -> None:

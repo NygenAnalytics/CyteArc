@@ -1,6 +1,6 @@
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import Context, copy_context
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -9,6 +9,7 @@ from ...storage.artifacts import ArtifactRef
 from ...storage.pipeline_runs import (
     PipelineFieldDescriptor,
     PipelineOutputRecord,
+    PipelineRunRecord,
     complete_pipeline_run_record,
     create_pipeline_run_record,
 )
@@ -23,6 +24,7 @@ from ...utils.shutdown import (
     shutdown_scope,
 )
 from ..pipeline_run import (
+    PipelineAxisView,
     PipelineCancelled,
     PipelineExecutionError,
     PipelineRun,
@@ -193,6 +195,32 @@ def _end_interrupted(store: Any, run_id: str, error: BaseException) -> bool:
         return False
 
 
+def _open_views(
+    store: Any,
+    record: PipelineRunRecord,
+    outputs: tuple[PipelineOutputRecord, ...],
+    fields: tuple[PipelineFieldDescriptor, ...],
+) -> None:
+    """Open the run's cell and feature views on the record it will complete.
+
+    The views check every field against the run's selections, so a field
+    that they cannot read fails the run at finalize, before the run takes
+    its label.
+    """
+    completed = replace(
+        record,
+        label=record.requested_label,
+        # The views read no times; the record only needs a valid one.
+        finished_at_ns=record.started_at_ns,
+        status="completed",
+        complete=True,
+        outputs=outputs,
+        fields=fields,
+    )
+    PipelineAxisView(store, completed, axis="cells")
+    PipelineAxisView(store, completed, axis="features")
+
+
 def _execute(
     store: Any,
     plan: RecipePlan,
@@ -265,6 +293,7 @@ def _execute(
     )
     try:
         fields = plan.fields(state)
+        _open_views(store, record, outputs, fields)
         shutdown_checkpoint()
         complete_pipeline_run_record(
             store.zw,

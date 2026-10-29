@@ -114,12 +114,7 @@ run["clusters"] == run["leiden_0.5"]  # True on the 10x 5K PBMC docs dataset
 | `multimodal` | `integration` of the source runs' graphs (`method="wnn"` or `"snn"`) | none; `run.features` and `assay` are the first run's | `integrated_graph` in place of the three graph outputs; no `cluster_selection`; `markers_<assay>` per source run instead of `markers` |
 | `perturbation` | the RNA head (`filtering`, `hvg`, `normalization`, `pca`, `harmony` off) with `guide_calling` and `labels` (`controls` required) before it, and `efficiency` and `edistance` on; `signature`, `mixscape`, `associations`, `profiles` and `clusters` off | `highly_variable_features` | no graph, UMAP, Leiden or markers; `guide_thresholds` (fitted calls), `guide_calls`, `perturbation_labels`, `efficiency`, `edistance`, `signature`, `mixscape`, `associations`, `profiles`, `perturbation_clusters`; `run.assay` is the RNA assay |
 
-`run.cells` holds the frozen fields of the stages that ran: `I, ids, names`, any
-`snapshot_columns`, `s_score, g2m_score, cell_cycle_phase` (RNA), `umap_1, umap_2`, `tsne_1,
-tsne_2`, `leiden_*`, `paris`, `clusters`, `membership_strength`, `doublet_score,
-predicted_doublet` (RNA), `weight_<assay>` for each modality of a WNN run, and
-`mixscape_class, mixscape_posterior` for a perturbation run with Mixscape; its guide calls and
-labels belong to the guide assay and are no fields (read them with their loaders).
+`run.cells` holds the frozen fields of the stages that ran: `I, ids, names`, any `snapshot_columns`, `s_score, g2m_score, cell_cycle_phase` (RNA), `umap_1, umap_2`, `tsne_1, tsne_2`, `leiden_*`, `paris`, `clusters`, `membership_strength`, `doublet_score, predicted_doublet` (RNA), `weight_<assay>` for each modality of a WNN run, `guide_call, perturbation_label, is_control` for a perturbation run, and `mixscape_class, mixscape_posterior` for a perturbation run with Mixscape. A cell field can read an artifact of any assay computed on the run's cells, such as the guide assay's calls; `run.features` holds only fields of the run's assay.
 
 ### Analyze several modalities of the same cells
 

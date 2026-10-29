@@ -16,11 +16,14 @@ from zarr.core.sync import sync
 from zarr.storage import FsspecStore, MemoryStore
 
 import cytearc.datastore._pipeline.executor as pipeline_executor
+import cytearc.datastore._pipeline.recipes.rna as rna_recipe
 import cytearc.storage.pipeline_runs as pipeline_run_storage
 from cytearc import DataStore, PipelineExecutionError, PipelineRun
 from cytearc.datastore.pipeline_accessor import PipelineEvent
 from cytearc.storage.artifacts import ArtifactRef, new_artifact_id
+from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.pipeline_runs import (
+    PipelineFieldDescriptor,
     PipelineInterruptionRecord,
     PipelineOutputRecord,
     PipelineRunRecord,
@@ -929,6 +932,76 @@ def test_finalize_failure_fails_the_run_after_every_stage_ended(
     assert _stage_statuses(failed) == list(_GRAPH_STAGE_STATUSES)
     with pytest.raises(KeyError, match="No completed pipeline run"):
         datastore.pipeline.open(label="finalized")
+
+
+@pytest.mark.parametrize(
+    ("axis", "code"),
+    [
+        # The cell view reads only fields computed on the run's cells.
+        ("cells", "pipeline_field_selection_mismatch"),
+        # The feature view reads only fields of the run's assay.
+        ("features", "pipeline_field_axis_mismatch"),
+    ],
+)
+def test_a_field_that_its_view_refuses_fails_the_run_before_it_takes_its_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    axis: str,
+    code: str,
+) -> None:
+    datastore = _graph_datastore(tmp_path / "data.zarr")
+    name = "cell_fields" if axis == "cells" else "feature_fields"
+    declared = getattr(rna_recipe, name)
+
+    def with_unreadable_field(*args: Any, **kwargs: Any) -> list[Any]:
+        # The artifacts follow the store, and for feature fields the assay.
+        artifacts = args[-1]
+        # The run's input cells are a complete artifact, which completing the
+        # record accepts, but neither view can read them as a field.
+        unreadable = PipelineFieldDescriptor(
+            key="unreadable",
+            axis="cells" if axis == "cells" else "features",
+            artifact=artifacts["input_cell_selection"],
+            source_value="values",
+            value_index=None,
+            dtype=np.dtype(bool).str,
+            fill=False,
+            missing_mask=None,
+            display=None,
+        )
+        return [*declared(*args, **kwargs), unreadable]
+
+    monkeypatch.setattr(rna_recipe, name, with_unreadable_field)
+    events: list[PipelineEvent] = []
+
+    with pytest.raises(PipelineExecutionError) as caught:
+        datastore.pipeline.rna(
+            label="finalized", callback=events.append, **_GRAPH_STAGES
+        )
+
+    error = caught.value
+    assert error.stage == "finalize"
+    assert isinstance(error.__cause__, ArtifactResolutionError)
+    assert error.__cause__.code == code
+    assert _lifecycle(events)[-2:] == [
+        ("stage_skipped", "markers"),
+        ("run_failed", "finalize"),
+    ]
+    failed = datastore.pipeline.open(run_id=error.run_id)
+    assert (failed.status, failed.label) == ("failed", None)
+    report = failed.report()
+    assert (report["run"]["outputs"], report["run"]["fields"]) == ([], [])
+    assert report["run"]["error"]["type"] == "ArtifactResolutionError"
+    assert _stage_statuses(failed) == list(_GRAPH_STAGE_STATUSES)
+    # The run claimed no label, so the next run with that label takes it.
+    claim_owner = pipeline_run_storage._pipeline_label_claim_owner
+    assert claim_owner(datastore.zw, "finalized") is None
+    with pytest.raises(KeyError, match="No completed pipeline run"):
+        datastore.pipeline.open(label="finalized")
+    monkeypatch.setattr(rna_recipe, name, declared)
+    run = datastore.pipeline.rna(label="finalized", **_GRAPH_STAGES)
+    assert (run.status, run.label) == ("completed", "finalized")
+    assert claim_owner(datastore.zw, "finalized") == run.run_id
 
 
 @pytest.fixture(scope="module")

@@ -263,22 +263,15 @@ class PipelineAxisView:
 
     def _complete_group(self, descriptor: PipelineFieldDescriptor) -> zarr.Group:
         ref = descriptor.artifact
+        # Each assay has its own features, so a feature field must belong to
+        # the run's assay. Every assay shares the store's cells, so a cell
+        # field of any assay aligns by the run's cell selection, which
+        # _validate_descriptor checks.
         if self._axis == "features" and (
             ref.scope != "assay" or ref.assay != self._assay
         ):
             raise ArtifactResolutionError(
                 f"Pipeline feature field {descriptor.key!r} belongs to "
-                f"assay {ref.assay!r}, not {self._assay!r}",
-                code="pipeline_field_axis_mismatch",
-                context=_artifact_context(
-                    ref,
-                    run_id=self._run_id,
-                    field=descriptor.key,
-                ),
-            )
-        if self._axis == "cells" and ref.scope == "assay" and ref.assay != self._assay:
-            raise ArtifactResolutionError(
-                f"Pipeline cell field {descriptor.key!r} belongs to "
                 f"assay {ref.assay!r}, not {self._assay!r}",
                 code="pipeline_field_axis_mismatch",
                 context=_artifact_context(
@@ -1265,8 +1258,11 @@ class PipelineRun(Mapping[str, ArtifactRef]):
 
         The view's ``I`` is the run's ``analysis_cell_selection``, and its
         other fields, such as ``clusters`` and ``umap_1``, read the run's
-        artifacts and metadata snapshots, never live columns. A run that did
-        not complete raises ``RuntimeError``.
+        artifacts and metadata snapshots, never live columns. Every assay
+        shares the store's cells, so a field can read an artifact of another
+        assay that was computed on the run's cell selection, such as the
+        guide calls behind a perturbation run's ``guide_call``. A run that
+        did not complete raises ``RuntimeError``.
         """
         self._require_completed("cell views")
         if self._cells_view is None:
