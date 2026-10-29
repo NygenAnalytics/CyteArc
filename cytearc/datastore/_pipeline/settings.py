@@ -96,8 +96,10 @@ DEFAULT_LEIDEN_PARTITIONS: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25)
 # omitting it uses that method's default. Some keys configure the recipe
 # instead: Leiden ``partitions`` and ``selected``, the ADT panel's
 # ``exclude``, the HTO ``assay`` of hashing, the capture ``sample_column`` of
-# cell calling, and guide calling's ``path`` and ``barcode_prefix``, which
-# import Cell Ranger's calls in place of calling guides. Harmony's
+# cell calling, guide calling's ``path`` and ``barcode_prefix``, which import
+# Cell Ranger's calls in place of calling guides, and the ``cells`` of
+# profiles, which chooses between every cell of each label and Mixscape's
+# knocked-out cells. Harmony's
 # ``batch_columns`` and the ``controls`` of perturbation labels are required
 # keywords of their methods.
 STAGE_SETTINGS: Mapping[str, frozenset[str]] = MappingProxyType(
@@ -290,7 +292,7 @@ STAGE_SETTINGS: Mapping[str, frozenset[str]] = MappingProxyType(
             }
         ),
         "profiles": frozenset(
-            {"by", "sample_column", "min_cells", "mask_targets", "id_column"}
+            {"by", "sample_column", "min_cells", "mask_targets", "id_column", "cells"}
         ),
         "clusters": frozenset(
             {

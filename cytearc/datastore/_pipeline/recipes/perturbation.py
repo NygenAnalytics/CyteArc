@@ -99,6 +99,9 @@ TRANS_PAIRS_ONLY = (
 # The text between the sample's name and the cell's own ID in the cell IDs of
 # a merged store, as DataStoreMerge writes them.
 MERGED_SEPARATOR = "__"
+# The cells that the profiles average, by the output that holds them: every
+# cell of each label, or the cells that Mixscape calls knocked out.
+PROFILE_CELLS = {"labelled": "perturbation_labels", "knocked_out": "mixscape"}
 
 
 def _resolve_guide_assay(store: Any, name: object) -> tuple[str, Any]:
@@ -208,6 +211,31 @@ def _resolve_associations(
         if np.dtype(store.cells.get_dtype(column)).kind not in "biuf":
             raise ValueError(f"covariate '{column}' must be numeric")
     return True, settings
+
+
+def _profile_labels(settings: Mapping[str, Any], mixscape: bool) -> str:
+    """Return the output whose cells the profiles average.
+
+    The profiles' ``cells`` setting chooses: ``"knocked_out"``, the default
+    of a run with Mixscape, averages the cells that Mixscape calls knocked
+    out, so that escapers do not dilute the profiles, and ``"labelled"``,
+    the default otherwise, every cell of each label.
+
+    Raises:
+        ValueError: If ``cells`` is neither, or is ``"knocked_out"`` in a run
+            without Mixscape.
+    """
+    cells = settings.get("cells", "knocked_out" if mixscape else "labelled")
+    if not isinstance(cells, str) or cells not in PROFILE_CELLS:
+        raise ValueError(
+            f"profiles['cells'] must be 'knocked_out' or 'labelled', not {cells!r}"
+        )
+    if cells == "knocked_out" and not mixscape:
+        raise ValueError(
+            "profiles['cells'] 'knocked_out' applies only with mixscape, which "
+            "calls the knocked-out cells"
+        )
+    return PROFILE_CELLS[cells]
 
 
 def _settings_only(
@@ -552,6 +580,7 @@ def resolve_perturbation(
         _cell_column(store, profile_settings, "profiles", "sample_column")
         if method_setting("profiles", profile_settings, "mask_targets"):
             _require_id_column(store, guide, profile_settings, "profiles")
+    profile_labels = _profile_labels(profile_settings, mixscape_enabled)
     snapshots = resolve_snapshot_columns(
         store,
         snapshot_columns,
@@ -604,9 +633,6 @@ def resolve_perturbation(
     cell_columns, extra_snapshots = cell_snapshots(
         filtering_config, harmony_columns=harmony_columns, snapshot_columns=snapshots
     )
-    # Profiles of a run with Mixscape average the knocked-out cells of each
-    # target, so that escapers do not dilute them.
-    profile_labels = "mixscape" if mixscape_enabled else "perturbation_labels"
     stages = (
         input_snapshot_stage(
             source,
@@ -626,7 +652,12 @@ def resolve_perturbation(
         _signature_stage(mixscape_enabled, signature_settings),
         _mixscape_stage(mixscape_enabled, mixscape_settings),
         _associations_stage(associations_enabled, assay_name, association_settings),
-        _profiles_stage(clusters_enabled, profile_labels, profile_settings),
+        # The profiles' cells setting configures the recipe, not the method.
+        _profiles_stage(
+            clusters_enabled,
+            profile_labels,
+            {key: value for key, value in profile_settings.items() if key != "cells"},
+        ),
         _clusters_stage(clusters_enabled, cluster_settings),
     )
     config = {

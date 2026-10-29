@@ -119,7 +119,7 @@ Each row ends with a status:
 - `"no_cells"`: no cell carries the perturbation alone.
 - `"no_control_expression"`: the control cells hold no UMI of the gene, so no fraction remains. The row keeps its means and its p-value, which can still show the activation of a gene that the control cells do not express.
 
-The table belongs to the expression assay rather than to the guide assay of the labels. It records the labels, the expression data, the feature matched to each row's target and `by`, so measuring again with the same values returns the saved table, an `id_column` that matches a target to another feature makes a new table, and `invalidate_cache=True` measures again. Labels without a `"control"` cell raise `ValueError`.
+The table belongs to the expression assay rather than to the guide assay of the labels. It records the labels, the expression data, the feature matched to each row's target and `by`, so measuring again with the same values returns the saved table and repeats its warning, an `id_column` that matches a target to another feature makes a new table, and `invalidate_cache=True` measures again. Labels without a `"control"` cell raise `ValueError`.
 
 ```python
 labels = ds.perturbation.labels(calls, controls=["Non-Targeting"])
