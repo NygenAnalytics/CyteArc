@@ -630,8 +630,11 @@ class PipelineAccessor:
             profiles: The keywords of ``perturbation.profiles`` (``by``,
                 ``sample_column``, ``min_cells``, ``mask_targets``, and
                 ``id_column``) for the profiles that ``clusters`` reads, of
-                the highly variable genes. With ``mixscape``, a target's
-                profile averages its knocked-out cells. Settings without
+                the highly variable genes, and ``cells``, the cells that a
+                target's profile averages: ``"knocked_out"``, the default
+                with ``mixscape``, takes its knocked-out cells, and
+                ``"labelled"``, the default and only choice without
+                ``mixscape``, every cell of its label. Settings without
                 ``clusters`` are refused.
             clusters: Clusters of the perturbations whose profiles agree, with
                 the keywords of ``perturbation.cluster``.

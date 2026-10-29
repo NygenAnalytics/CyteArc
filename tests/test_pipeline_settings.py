@@ -166,14 +166,16 @@ def adt_store(datastore_zarr_root: str, tmp_path_factory) -> DataStore:
 
 # Settings that configure the recipe, not the stage's method: the Leiden
 # candidates, the HTO assay that hashing reads, the capture column whose
-# captures cell calling calls apart, the antibodies the panel leaves out, and
-# the Cell Ranger call file that guide calling imports in place of calling.
+# captures cell calling calls apart, the antibodies the panel leaves out, the
+# Cell Ranger call file that guide calling imports in place of calling, and
+# the cells that the profiles average, which choose their labels.
 _RECIPE_SETTINGS: dict[str, frozenset[str]] = {
     "leiden": frozenset({"partitions", "selected"}),
     "hashing": frozenset({"assay"}),
     "cell_calling": frozenset({"sample_column"}),
     "panel": frozenset({"exclude"}),
     "guide_calling": frozenset({"path", "barcode_prefix"}),
+    "profiles": frozenset({"cells"}),
 }
 # Method keywords without a default, which the settings must give: Harmony's
 # batch columns and the controls of perturbation labels. The doublet

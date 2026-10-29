@@ -234,6 +234,29 @@ def _reused(run: PipelineRun) -> dict[str, bool]:
     }
 
 
+def _profile_summaries(store: DataStore, run: PipelineRun) -> dict[str, Any]:
+    """Return the summaries of a run's profiles and clusters, from their loaders."""
+    profiles = store.perturbation.load_profiles(run["profiles"])
+    clusters = store.perturbation.load_clusters(run["perturbation_clusters"])
+    assigned = clusters.table["cluster"][clusters.table["cluster"] >= 0]
+    sizes = assigned.value_counts()
+    return {
+        "profiles": {
+            "perturbations": len(profiles.values),
+            "features": profiles.values.shape[1],
+            "leftOut": len(profiles.left_out),
+            "zeroSdFeatures": int((profiles.features["n_zero_sd"] > 0).sum()),
+            "samples": len(profiles.samples),
+        },
+        "perturbation_clusters": {
+            "perturbations": len(clusters.table),
+            "clusters": assigned.nunique(),
+            "unassigned": int((clusters.table["cluster"] < 0).sum()),
+            "largestCluster": int(sizes.max()) if len(sizes) else 0,
+        },
+    }
+
+
 def _resolve(store: DataStore, **keywords: Any) -> RecipePlan:
     """Resolve a call as ``ds.pipeline.perturbation`` does, writing nothing.
 
@@ -767,22 +790,9 @@ def test_each_stage_summary_equals_its_loader(runs) -> None:
         "positiveDetected": int(tests.positive["significant"].sum()),
         "alpha": tests.alpha,
     }
-    profiles = store.perturbation.load_profiles(runs.full["profiles"])
-    assert full["profiles"] == {
-        "perturbations": len(profiles.values),
-        "features": profiles.values.shape[1],
-        "leftOut": len(profiles.left_out),
-        "zeroSdFeatures": int((profiles.features["n_zero_sd"] > 0).sum()),
-        "samples": len(profiles.samples),
-    }
-    clusters = store.perturbation.load_clusters(runs.full["perturbation_clusters"])
-    assigned = clusters.table["cluster"][clusters.table["cluster"] >= 0]
-    assert full["perturbation_clusters"] == {
-        "perturbations": len(clusters.table),
-        "clusters": assigned.nunique(),
-        "unassigned": int((clusters.table["cluster"] < 0).sum()),
-        "largestCluster": int(assigned.value_counts().max()),
-    }
+    assert {
+        stage: full[stage] for stage in ("profiles", "perturbation_clusters")
+    } == _profile_summaries(store, runs.full)
     # The two programs make two clusters of two targets.
     assert full["perturbation_clusters"]["clusters"] == 2
     # The report shows each summary, as its Diagnostics section.
@@ -916,6 +926,53 @@ def test_the_recipe_reuses_the_artifacts_of_standalone_calls(screen, tmp_path) -
     assert run.report()["run"]["config"]["profileLabels"] == "perturbation_labels"
 
 
+def test_a_run_with_mixscape_can_profile_every_labelled_cell(runs, tmp_path) -> None:
+    store = _copy(runs.location, tmp_path)
+    full = runs.full
+    labels, hvgs = full["perturbation_labels"], full["highly_variable_features"]
+    # A call with the labels profiles every cell of each target.
+    standalone = store.perturbation.profiles(labels, hvgs, sample_column="lane")
+    settings = {"sample_column": "lane", "cells": "labelled"}
+
+    run = store.pipeline.perturbation(labels=LABELS, **{**FULL, "profiles": settings})
+
+    # The run reuses those profiles and every other output of the full run;
+    # only the clusters of the profiles are new.
+    assert run["profiles"] == standalone
+    assert _reused(run)["profiles"]
+    assert dict(run) == {
+        **dict(full),
+        "profiles": standalone,
+        "perturbation_clusters": run["perturbation_clusters"],
+    }
+    created = run.report()["summary"]["createdArtifacts"]
+    assert [item["kind"] for item in created] == ["perturbation_clusters"]
+    config = run.report()["run"]["config"]
+    assert config["profileLabels"] == "perturbation_labels"
+    assert config["stages"]["profiles"] == settings
+    # A target's profile averages its cells with one target, escapers
+    # included, so more cells than the knocked-out cells of the full run.
+    cells = store.perturbation.load_labels(labels).cells
+    single = cells.loc[cells["n_targets"] == 1, "label"].value_counts()
+    profiled = store.perturbation.load_profiles(run["profiles"]).perturbations
+    assert profiled["n_cells"].tolist() == single[profiled.index].tolist()
+    knocked_out = store.perturbation.load_profiles(full["profiles"]).perturbations
+    assert (knocked_out["n_cells"] < profiled.loc[knocked_out.index, "n_cells"]).any()
+    summaries_ = {name: stage["summary"] for name, stage in _stages(run).items()}
+    assert {
+        stage: summaries_[stage] for stage in ("profiles", "perturbation_clusters")
+    } == _profile_summaries(store, run)
+
+    # Knocked-out cells, named, are the default of a run with Mixscape.
+    named = store.pipeline.perturbation(
+        labels=LABELS,
+        **{**FULL, "profiles": {"sample_column": "lane", "cells": "knocked_out"}},
+    )
+    assert dict(named) == dict(full)
+    assert named.report()["summary"]["createdArtifacts"] == []
+    assert named.report()["run"]["config"]["profileLabels"] == "mixscape"
+
+
 def test_a_run_after_an_rna_run_reuses_its_cells_genes_and_coordinates(
     screen, tmp_path
 ) -> None:
@@ -987,7 +1044,18 @@ def test_guide_calling_imports_cell_rangers_calls(screen, tmp_path) -> None:
         )
     )
     pd.testing.assert_series_equal(loaded.cells["call"], fixed.cells["call"])
-    assert _stages(run)["guide_calling"]["warnings"]
+    warned = [
+        f"1 of {N_CELLS - 9} barcodes of the call file match no selected cell, "
+        "for example 'unknown-barcode'. Check barcode_prefix and cell_selection."
+    ]
+    assert _stages(run)["guide_calling"]["warnings"] == warned
+    # A run that reuses the calls records the import's warning again.
+    again = store.pipeline.perturbation(
+        labels=LABELS, guide_calling={"path": path}, efficiency=False, **QUICK
+    )
+    assert again["guide_calls"] == run["guide_calls"]
+    assert _reused(again)["guide_calls"]
+    assert _stages(again)["guide_calling"]["warnings"] == warned
 
 
 def test_one_call_file_reaches_the_cells_of_one_sample(screen, tmp_path) -> None:
@@ -1144,6 +1212,19 @@ def test_a_resolved_call_runs_its_stages_in_order(readonly) -> None:
     plan = _resolve(readonly, clusters=True, profiles={"min_cells": 10}, **HEAD)
     assert plan.config["profileLabels"] == "perturbation_labels"
     assert plan.config["stages"]["profiles"] == {"min_cells": 10}
+    plan = _resolve(readonly, clusters=True, profiles={"cells": "labelled"}, **HEAD)
+    assert plan.config["profileLabels"] == "perturbation_labels"
+    # With Mixscape they average the knocked-out cells, unless they take every
+    # labelled cell.
+    with_mixscape = {"mixscape": True, "signature": {"dims": 5}, "clusters": True}
+    for profiles, labels in (
+        (None, "mixscape"),
+        ({"cells": "knocked_out"}, "mixscape"),
+        ({"cells": "labelled", "min_cells": 10}, "perturbation_labels"),
+    ):
+        plan = _resolve(readonly, profiles=profiles, **with_mixscape, **HEAD)
+        assert plan.config["profileLabels"] == labels
+        assert plan.config["stages"]["profiles"] == (profiles or {})
     # Without clusters, empty profile settings are no settings.
     plan = _resolve(readonly, profiles={}, signature={}, **HEAD)
     assert plan.config["stages"]["profiles"] is False
@@ -1417,6 +1498,27 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
             ValueError,
             "Profiling per sample needs a 'lane_gaps' label for every cell, but 44 "
             "of the run's cells have none",
+        ),
+        # Only Mixscape calls knocked-out cells.
+        (
+            {"clusters": True, "profiles": {"cells": "knocked_out"}},
+            ValueError,
+            r"profiles\['cells'\] 'knocked_out' applies only with mixscape",
+        ),
+        (
+            {"clusters": True, "profiles": {"cells": "every"}},
+            ValueError,
+            r"profiles\['cells'\] must be 'knocked_out' or 'labelled', not 'every'",
+        ),
+        (
+            {
+                "mixscape": True,
+                "signature": {"dims": 5},
+                "clusters": True,
+                "profiles": {"cells": ["labelled"]},
+            },
+            ValueError,
+            r"must be 'knocked_out' or 'labelled', not \['labelled'\]",
         ),
         # The run's assays, cells and fields.
         ({"assay": "CRISPR"}, TypeError, "The perturbation recipe analyzes RNA"),

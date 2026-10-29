@@ -56,6 +56,7 @@ from ...perturbation.edistance import (
 )
 from ...perturbation.efficiency import (
     EFFICIENCY_STATUSES,
+    NO_FEATURE,
     PerturbationEfficiency,
     efficiency_arrays,
     efficiency_settings,
@@ -298,6 +299,30 @@ def _called_cells(histograms: GuideCountHistograms, table: np.ndarray) -> int:
     return int(histograms.cells[called].sum())
 
 
+def _unmatched_barcodes_warning(attributes: Mapping[str, Any]) -> str | None:
+    """Name the call file's barcodes that match no selected cell, or return None.
+
+    Imported calls warn with this message, and so do saved calls when an
+    import reuses them.
+
+    Args:
+        attributes: The attributes of the imported calls:
+            ``n_file_barcodes``, ``n_unmatched_barcodes`` and
+            ``unmatched_barcode_examples``.
+    """
+    n_unmatched = int(attributes["n_unmatched_barcodes"])
+    if not n_unmatched:
+        return None
+    return (
+        f"{n_unmatched} of {int(attributes['n_file_barcodes'])} barcodes of the "
+        "call file match no selected cell, for example "
+        + ", ".join(
+            repr(str(value)) for value in attributes["unmatched_barcode_examples"]
+        )
+        + ". Check barcode_prefix and cell_selection."
+    )
+
+
 def _unfitted_warning(
     status: np.ndarray, samples: list[str | None], guide_ids: np.ndarray
 ) -> str | None:
@@ -325,6 +350,30 @@ def _unfitted_warning(
         + ". For example "
         + ", ".join(examples)
         + ". perturbation.load_guide_thresholds lists every status."
+    )
+
+
+def _unmatched_targets_warning(
+    names: np.ndarray, status: np.ndarray, assay: str
+) -> str | None:
+    """Name the efficiency rows whose target matches no feature, or return None.
+
+    A measured table warns with this message, and so does a saved table when
+    ``efficiency`` reuses it.
+
+    Args:
+        names: Each row's name: its target, or its guide.
+        status: Each row's status, as a position in ``EFFICIENCY_STATUSES``.
+        assay: The expression assay.
+    """
+    unmatched = names[np.asarray(status) == NO_FEATURE]
+    if not len(unmatched):
+        return None
+    return (
+        f"{len(unmatched)} of {len(names)} rows have no feature of assay "
+        f"{assay!r} for their target, for example "
+        + ", ".join(repr(str(name)) for name in unmatched[:5])
+        + ". Check id_column, or the target names against the feature names."
     )
 
 
@@ -493,7 +542,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         and two underscores, so import each sample's file with its own prefix
         and a cell selection of that sample. Barcodes that match no selected
         cell are counted, saved in the artifact's ``n_unmatched_barcodes`` and
-        ``unmatched_barcode_examples`` attributes, and named in a warning.
+        ``unmatched_barcode_examples`` attributes, and named in a logged
+        warning, which a reused import logs again.
 
         The artifact's ``values`` hold the called guide's ID for a cell with
         one call, ``"Negative"`` for a cell with none, and ``"Multiple"`` for a
@@ -599,10 +649,20 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 "guide_umis": ((n_cells, None), "u"),
             },
             invalidate_cache=invalidate_cache,
-            required_attributes=("n_file_barcodes", "n_unmatched_barcodes"),
+            required_attributes=(
+                "n_file_barcodes",
+                "n_unmatched_barcodes",
+                "unmatched_barcode_examples",
+            ),
             reuse_validator=has_guides,
         )
         if planned.reused:
+            # Saved calls warn as they did when they were imported.
+            message = _unmatched_barcodes_warning(
+                artifact_group(self.zw, planned.ref).attrs
+            )
+            if message is not None:
+                logger.warning(message)
             return planned.ref
         self._require_writable(arguments.operation)
 
@@ -662,6 +722,13 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         top_guide = np.full(n_cells, "", dtype=object)
         counted = summary.top_code >= 0
         top_guide[counted] = guide_ids[summary.top_code[counted]]
+        # The attributes also hold what the warning names, so that saved calls
+        # warn again as they did.
+        attributes = {
+            "n_file_barcodes": int(len(file_calls.barcodes)),
+            "n_unmatched_barcodes": int(len(unmatched)),
+            "unmatched_barcode_examples": [str(value) for value in examples],
+        }
         write_cell_data_artifact(
             self.zw,
             planned,
@@ -676,19 +743,11 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 "guide_umis": arrays.guide_umis,
                 "guides": guide_ids,
             },
-            attributes={
-                "n_file_barcodes": int(len(file_calls.barcodes)),
-                "n_unmatched_barcodes": int(len(unmatched)),
-                "unmatched_barcode_examples": [str(value) for value in examples],
-            },
+            attributes=attributes,
         )
-        if len(unmatched):
-            logger.warning(
-                f"{len(unmatched)} of {len(file_calls.barcodes)} barcodes of the call "
-                "file match no selected cell, for example "
-                + ", ".join(repr(str(value)) for value in examples)
-                + ". Check barcode_prefix and cell_selection."
-            )
+        message = _unmatched_barcodes_warning(attributes)
+        if message is not None:
+            logger.warning(message)
         logger.info(
             f"Imported guide calls of {int(np.count_nonzero(arrays.n_guides))} of "
             f"{n_cells} cells"
@@ -1762,7 +1821,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         feature whose name equals the target, when no other feature shares
         that name. Only the target genes are read, feature-major when that
         reads less. A target that matches no feature is kept with the status
-        ``"no_feature"`` and named in a warning.
+        ``"no_feature"`` and named in a warning, which a reused table repeats.
 
         Args:
             labels: A ``perturbation_labels`` artifact from
@@ -1840,6 +1899,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             assay=expression.name,
             invalidate_cache=invalidate_cache,
             required_arrays=(
+                ArrayRequirement("names", shape=(n_rows,)),
                 ArrayRequirement("status", shape=(n_rows,), dtype_kind="i"),
                 *(
                     ArrayRequirement(name, shape=(n_rows,), dtype_kind="i")
@@ -1859,6 +1919,15 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             ),
         )
         if planned.reused:
+            # A saved table warns as it did when it was measured.
+            stored = artifact_group(self.zw, planned.ref)
+            message = _unmatched_targets_warning(
+                np.asarray(as_zarr_array(stored["names"], name="names")[:]).astype(str),
+                np.asarray(as_zarr_array(stored["status"], name="status")[:]),
+                expression.name,
+            )
+            if message is not None:
+                warn(message)
             return planned.ref
         groups, control = self._label_groups(labels, rows, by)
         compared = np.flatnonzero((groups >= 0) | control)
@@ -1923,14 +1992,9 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             },
             attributes={"status_names": list(EFFICIENCY_STATUSES), "by": by},
         )
-        unmatched = row_names[row_features < 0]
-        if len(unmatched):
-            warn(
-                f"{len(unmatched)} of {n_rows} rows have no feature of assay "
-                f"{expression.name!r} for their target, for example "
-                + ", ".join(repr(str(name)) for name in unmatched[:5])
-                + ". Check id_column, or the target names against the feature names."
-            )
+        message = _unmatched_targets_warning(row_names, arrays.status, expression.name)
+        if message is not None:
+            warn(message)
         logger.info(
             f"Measured the efficiency of {int(np.count_nonzero(arrays.status == 0))} "
             f"of {n_rows} {by}s against {int(control.sum())} control cells"

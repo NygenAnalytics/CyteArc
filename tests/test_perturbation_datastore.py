@@ -6,7 +6,9 @@ import pytest
 
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import MULTIPLE, NEGATIVE, GuideCalls
+from cytearc.storage.artifacts import ArtifactRef
 from cytearc.storage.selections import read_stored_selection_indices
+from cytearc.utils.logging import collect_warnings
 from tests.storage_helpers import write_count_store
 
 # Guides are named CRISPR0 to CRISPR3 and cells cell0 to cell7.
@@ -214,6 +216,50 @@ def test_a_barcode_prefix_joins_barcodes_to_cell_ids(tmp_path) -> None:
     cells = store.perturbation.load_guide_calls(ref).cells
     assert cells.loc[["cell0", "cell5"], "call"].tolist() == ["CRISPR0", "CRISPR2"]
     assert store.artifacts.load(ref).attrs["n_unmatched_barcodes"] == 0
+
+
+def _logged_import(
+    store: DataStore, path: Path, **arguments
+) -> tuple[ArtifactRef, list[str]]:
+    """Import guide calls, and return them with the warnings that CyteArc logs."""
+    with collect_warnings() as messages:
+        calls = store.perturbation.import_guide_calls(path, **arguments)
+    return calls, list(messages)
+
+
+def test_a_reused_import_logs_the_warning_of_the_first(tmp_path) -> None:
+    store = _store(tmp_path)
+    selection = _selection(store)
+    path = _call_file(tmp_path)
+
+    calls, messages = _logged_import(store, path, cell_selection=selection)
+
+    # cell6 is outside the selection, and no cell is named outside-1.
+    assert messages == [
+        "2 of 7 barcodes of the call file match no selected cell, for example "
+        "'cell6', 'outside-1'. Check barcode_prefix and cell_selection."
+    ]
+    # The saved calls log it again, alike: for the same file under another
+    # name, and in a store opened read-only.
+    moved = _call_file(tmp_path, name="moved.csv")
+    assert _logged_import(store, moved, cell_selection=selection) == (calls, messages)
+    reader = DataStore(
+        str(tmp_path / "store.zarr"), default_assay="RNA", zarr_mode="r", nthreads=1
+    )
+    assert _logged_import(reader, path, cell_selection=selection) == (calls, messages)
+    # Calls whose every barcode joins a selected cell log nothing, imported or
+    # reused.
+    joined = _call_file(
+        tmp_path,
+        "cell_barcode,num_features,feature_call,num_umis\n"
+        "0,1,CRISPR0,30\n"
+        "5,1,CRISPR2,40\n",
+        "joined.csv",
+    )
+    arguments = {"cell_selection": selection, "barcode_prefix": "cell"}
+    quiet = _logged_import(store, joined, **arguments)
+    assert quiet[1] == []
+    assert _logged_import(store, joined, **arguments) == quiet
 
 
 def test_import_refuses_assays_and_guides_it_cannot_use(tmp_path) -> None:

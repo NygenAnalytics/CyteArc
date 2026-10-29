@@ -409,10 +409,19 @@ def test_gaussian_warns_when_most_calls_carry_several_guides(tmp_path) -> None:
     carriers = rng.choice(1000, size=20, replace=False)
     counts[carriers, rng.integers(0, 15, size=20)] += 100
     store = _store(tmp_path, counts.astype(np.uint16), lanes=None)
-    with pytest.warns(
-        UserWarning, match="of the cells with a call have several guides"
-    ):
-        store.perturbation.call_guides(_cells(store), method="gaussian", min_umi=1)
+    cells = _cells(store)
+    with warnings.catch_warnings(record=True) as first:
+        warnings.simplefilter("always")
+        calls = store.perturbation.call_guides(cells, method="gaussian", min_umi=1)
+    messages = [str(entry.message) for entry in first]
+    assert any("of the cells with a call have several guides" in m for m in messages)
+
+    # Saved calls warn again, alike.
+    with warnings.catch_warnings(record=True) as again:
+        warnings.simplefilter("always")
+        reused = store.perturbation.call_guides(cells, method="gaussian", min_umi=1)
+    assert reused == calls
+    assert [str(entry.message) for entry in again] == messages
 
 
 def test_fits_run_on_the_store_threads_and_restore_them(tmp_path, monkeypatch) -> None:

@@ -1,3 +1,4 @@
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -7,7 +8,7 @@ from scipy.stats import false_discovery_control, mannwhitneyu
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationEfficiency
 from cytearc.perturbation.efficiency import efficiency_arrays, target_features
-from cytearc.storage.artifacts import inspect_artifact
+from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
 from tests.storage_helpers import write_count_store
 
 # Guides, their targets and the feature IDs of the targets. RNA4 has no ID and
@@ -169,12 +170,51 @@ def test_targets_match_by_name_without_an_id_column(tmp_path) -> None:
     assert statuses.eq("no_feature").all()
 
 
+def _warned_efficiency(
+    store: DataStore, *args, **kwargs
+) -> tuple[ArtifactRef, list[str]]:
+    """Measure efficiency, and return the table with the messages it warns."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        table = store.perturbation.efficiency(*args, **kwargs)
+    return table, [
+        str(entry.message) for entry in caught if entry.category is UserWarning
+    ]
+
+
+def test_a_reused_table_repeats_the_warning_of_the_measured_one(tmp_path) -> None:
+    store = _store(tmp_path)
+    labels = _labels(store)
+
+    measured, messages = _warned_efficiency(store, labels)
+
+    # GENE_C's guide gives a feature ID that the RNA assay lacks.
+    assert messages == [
+        "1 of 5 rows have no feature of assay 'RNA' for their target, for example "
+        "'GENE_C'. Check id_column, or the target names against the feature names."
+    ]
+    assert _warned_efficiency(store, labels) == (measured, messages)
+    # By name, only RNA4 matches a feature, so the warning names four rows.
+    by_name, messages = _warned_efficiency(store, labels, id_column=None)
+    assert messages == [
+        "4 of 5 rows have no feature of assay 'RNA' for their target, for example "
+        "'GENE_A', 'GENE_B', 'GENE_C', 'GENE_D'. Check id_column, or the target "
+        "names against the feature names."
+    ]
+    assert _warned_efficiency(store, labels, id_column=None) == (by_name, messages)
+    # With GENE_C a control, every row matches a feature, and neither the
+    # measured nor the reused table warns.
+    matched = _labels(store, controls=("Non-Targeting", "GENE_C"))
+    quiet = _warned_efficiency(store, matched)
+    assert quiet[1] == []
+    assert _warned_efficiency(store, matched) == quiet
+
+
 def test_efficiency_is_reused_and_follows_its_inputs(tmp_path) -> None:
     store = _store(tmp_path)
     labels = _labels(store)
-    with pytest.warns(UserWarning):
-        ref = store.perturbation.efficiency(labels)
-    assert store.perturbation.efficiency(labels) == ref
+    ref, messages = _warned_efficiency(store, labels)
+    assert _warned_efficiency(store, labels) == (ref, messages)
     status = inspect_artifact(store.zw, ref)
     assert status.parameters == {"by": "target"}
     assert set(status.inputs) == {
@@ -192,7 +232,8 @@ def test_efficiency_is_reused_and_follows_its_inputs(tmp_path) -> None:
         nthreads=1,
         zarr_mode="r",
     )
-    assert reader.perturbation.efficiency(labels) == ref
+    # A store opened read-only reuses the table, and its warning.
+    assert _warned_efficiency(reader, labels) == (ref, messages)
     with pytest.raises(PermissionError, match="measure_perturbation_efficiency"):
         reader.perturbation.efficiency(labels, by="guide")
 
