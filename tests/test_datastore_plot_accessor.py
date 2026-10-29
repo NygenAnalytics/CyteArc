@@ -38,6 +38,7 @@ _STORE_PLOT_METHODS = (
     "mapping_evidence",
     "mapping_score",
     "matrixplot",
+    "mixscape",
     "modality_weights",
     "pseudotime_heatmap",
     "run_recipe",
@@ -107,6 +108,12 @@ _EDISTANCE_REF = ArtifactRef(
     assay="RNA",
     kind="perturbation_edistance",
     artifact_id="5" * 64,
+)
+_MIXSCAPE_REF = ArtifactRef(
+    scope="assay",
+    assay="RNA",
+    kind="mixscape_classes",
+    artifact_id="6" * 64,
 )
 
 
@@ -305,6 +312,11 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
         ),
         ("efficiency", (_EFFICIENCY_REF,), {"max_rows": 7, "alpha": 0.01}),
         ("edistance", (_EDISTANCE_REF,), {"max_rows": 7, "alpha": 0.01}),
+        (
+            "mixscape",
+            (_MIXSCAPE_REF,),
+            {"panel": "scores", "targets": ["MYC"], "max_targets": 7},
+        ),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -344,6 +356,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("efficiency"))
     elif name == "edistance":
         expected_args.append(expected_kwargs.pop("edistance"))
+    elif name == "mixscape":
+        expected_args.append(expected_kwargs.pop("classes"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

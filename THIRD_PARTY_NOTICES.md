@@ -54,7 +54,16 @@ use but does not install.
 - Used in: `cytearc/neighbors/integration.py` (the modality weights and constants of
   `FindModalityWeights` and `MultiModalNN`), `cytearc/quality_control/hto.py` (the HTODemux
   procedure), `scripts/export_seurat_wnn_golden.R` (expressions copied from
-  `FindModalityWeights`), and the reference equations in `tests/test_knn_utils.py`.
+  `FindModalityWeights`), the reference equations in `tests/test_knn_utils.py`, and
+  `cytearc/perturbation/signature.py` (the perturbation signature of `CalcPerturbSig` and
+  `PerturbDiff` in `R/mixscape.R`, read at the main branch in October 2026: each cell's nearest
+  non-targeting cells within its split, and its log-normalized values against the log of their
+  mean normalized values, normalized in the order of the operations of `LogNorm` in
+  `src/data_manipulation.cpp`), `cytearc/perturbation/mixscape.py` and the `mixscape` operation in
+  `cytearc/datastore/_operations/perturbation.py` (the iterations of `RunMixscape` and
+  `TopDEGenesMixscape` in the same file, the filters, fold change and Bonferroni adjustment of
+  `FindMarkers` and `FoldChange` in `R/differential_expression.R`, and the scaling of
+  `FastDenseRowScale` in `src/data_manipulation.cpp`).
 
 ### chromVAR
 
@@ -103,7 +112,9 @@ use but does not install.
 - Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers.
 - License: BSD-3-Clause
 - Used in: `cytearc/features/markers/regression.py` (the correlation and its p-value, adapted from
-  `scipy.stats.linregress`).
+  `scipy.stats.linregress`), and `cytearc/perturbation/mixscape.py` (the normal approximation of
+  the rank-sum test with its tie and continuity corrections, in the order of the operations of
+  `scipy.stats.mannwhitneyu`, so that the p-values agree).
 
 ### scib-metrics
 

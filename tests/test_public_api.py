@@ -156,6 +156,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "mapping_evidence",
     "mapping_score",
     "matrixplot",
+    "mixscape",
     "modality_weights",
     "pseudotime_heatmap",
     "qc",

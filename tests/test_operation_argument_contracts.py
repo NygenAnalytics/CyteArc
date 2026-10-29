@@ -335,6 +335,22 @@ _CONTRACTS = (
         metadata_arguments.PerturbationEDistanceArguments,
     ),
     OperationContract(
+        PerturbationAccessor.signature,
+        metadata_arguments.PerturbationSignatureArguments,
+        aliases={"sample_column": "sample_columns"},
+        model_only=_classified(
+            "resolved_input", "dataset_fingerprint", "sample_assignments_fingerprint"
+        ),
+    ),
+    OperationContract(
+        PerturbationAccessor.mixscape,
+        metadata_arguments.MixscapeArguments,
+        aliases={"split_column": "split_columns"},
+        model_only=_classified(
+            "resolved_input", "dataset_fingerprint", "split_assignments_fingerprint"
+        ),
+    ),
+    OperationContract(
         QcAccessor.hto_demultiplexing,
         metadata_arguments.HtoIdentityArguments,
         model_only={

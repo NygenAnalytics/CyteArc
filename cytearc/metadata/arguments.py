@@ -524,6 +524,50 @@ class PerturbationEfficiencyArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class PerturbationSignatureArguments(OperationArguments):
+    operation: ClassVar[str] = "compute_perturbation_signature"
+    artifact_kind: ClassVar[str] = "perturbation_signature"
+
+    # The labels name the control cells; the coordinates give the cells and
+    # their neighbors; the features are the signature's columns.
+    labels: ArtifactRef = artifact_input()
+    coordinates: ArtifactRef = artifact_input()
+    features: ArtifactRef = artifact_input()
+    dataset_fingerprint: str = artifact_input()
+    # The fingerprint of each cell's sample, or None for one sample.
+    sample_assignments_fingerprint: str | None = artifact_input()
+    dims: int = parameter()
+    n_neighbors: int = parameter()
+    sample_columns: tuple[str, ...] = parameter()
+    scale_factor: float = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class MixscapeArguments(OperationArguments):
+    operation: ClassVar[str] = "run_mixscape"
+    artifact_kind: ClassVar[str] = "mixscape_classes"
+
+    # The signature records the labels, the coordinates and the features.
+    signature: ArtifactRef = artifact_input()
+    # The counts give the DE genes and the signatures of DE genes outside the
+    # signature's features.
+    dataset_fingerprint: str = artifact_input()
+    # The fingerprint of each cell's split, or None for one split.
+    split_assignments_fingerprint: str | None = artifact_input()
+    split_columns: tuple[str, ...] = parameter()
+    min_de_genes: int = parameter()
+    min_cells: int = parameter()
+    logfc_threshold: float = parameter()
+    min_fraction: float = parameter()
+    p_value_cutoff: float = parameter()
+    scale: bool = parameter()
+    max_iterations: int = parameter()
+    perturbation_type: str = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class PerturbationEDistanceArguments(OperationArguments):
     operation: ClassVar[str] = "measure_edistance"
     artifact_kind: ClassVar[str] = "perturbation_edistance"
