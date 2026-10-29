@@ -211,8 +211,9 @@ def cell_fields(
 
     Results appear in one order for every recipe: cell cycle scores, UMAP and
     t-SNE coordinates, Leiden candidates, Paris, the saved clustering,
-    membership strength, doublet calls, Mixscape classes, and WNN modality
-    weights. A result the run did not produce has no field.
+    membership strength, doublet calls, guide calls, perturbation labels,
+    Mixscape classes, and WNN modality weights. A result the run did not
+    produce has no field.
     """
     root = store.zw
     cell_snapshot = artifacts["cell_snapshot"]
@@ -300,6 +301,22 @@ def cell_fields(
             _categorical(
                 root, key="predicted_doublet", ref=ref, source="predicted_doublets"
             )
+        )
+    # The guide calls and labels belong to the guide assay. Every assay shares
+    # the store's cells, so the view reads them by the run's cell selection.
+    if "guide_calls" in artifacts:
+        fields.append(
+            _categorical(
+                root, key="guide_call", ref=artifacts["guide_calls"], source="values"
+            )
+        )
+    if "perturbation_labels" in artifacts:
+        ref = artifacts["perturbation_labels"]
+        fields.append(
+            _categorical(root, key="perturbation_label", ref=ref, source="values")
+        )
+        fields.append(
+            _categorical(root, key="is_control", ref=ref, source="is_control")
         )
     if "mixscape" in artifacts:
         # Mixscape classifies the run's cells; its other results describe

@@ -225,7 +225,12 @@ screen = ds.pipeline.perturbation(
 )
 ```
 
-The run's `assay` is the RNA assay. Its cell view holds `mixscape_class` and `mixscape_posterior` when the run calls Mixscape. The guide calls and labels belong to the guide assay, whose artifacts a view of the RNA assay's cells cannot hold, so read them with `ds.perturbation.load_guide_calls(screen["guide_calls"])` and `ds.perturbation.load_labels(screen["perturbation_labels"])`.
+The run's `assay` is the RNA assay. Its cell view holds each cell's `guide_call`, the call of the run's `guide_calls`: the ID of its one called guide, `"Negative"` without a guide, or `"Multiple"` with several. It holds `perturbation_label`, the label of the run's `perturbation_labels`, and `is_control`, which is True for a cell with control guides only, labelled `"control"`. A cell with several guides of one gene, or with a gene's guides beside control guides, is called `"Multiple"` but labelled by the gene; [Label cells by perturbation](perturbation.md#label-cells-by-perturbation) lists every case. With Mixscape, the view also holds `mixscape_class` and `mixscape_posterior`. The guide calls and labels belong to the guide assay, and the view reads them by the run's cells ([Frozen fields](#frozen-fields)). `ds.perturbation.load_guide_calls(screen["guide_calls"])` and `ds.perturbation.load_labels(screen["perturbation_labels"])` read their other columns, such as each cell's guides and genes:
+
+```python
+screen.cells.to_pandas_dataframe(["ids", "guide_call", "perturbation_label"])
+adata = ds.to_anndata(run=screen)  # obs holds the three fields as categories
+```
 
 ## Stage keywords
 
@@ -767,6 +772,7 @@ view.head(n=5)
 | `membership_strength` | cells | `membership_strength=True` |
 | `doublet_score`, `predicted_doublet` | cells | an `rna` run scores doublets |
 | `weight_<assay>` | cells | a WNN `multimodal` run, one per assay |
+| `guide_call`, `perturbation_label`, `is_control` | cells | a `perturbation` run |
 | `mixscape_class`, `mixscape_posterior` | cells | a `perturbation` run calls Mixscape |
 | `highly_variable_features`, `prevalent_peaks`, or `panel` | features | an `rna` or `perturbation` run, an `atac` run, or an `adt` run |
 
@@ -777,13 +783,9 @@ only. The views retain captured names and requested metadata even if live values
 change. They fail closed if ordered cell or feature identities change. There is no live overlay or
 mutation surface.
 
-`snapshot_columns` cannot use the name of a field that the run produces or could produce: `I`,
-`ids`, `names`, `s_score`, `g2m_score`, `cell_cycle_phase`, the run's `umap_<n>`, `tsne_<n>`, and
-`leiden_<resolution>` fields, `paris`, `clusters`, `membership_strength`, `doublet_score`,
-`predicted_doublet`, and the recipe's feature field, or for a multimodal run its `weight_<assay>`
-fields. A `perturbation` run also reserves `mixscape_class` and `mixscape_posterior`, which a run
-without Mixscape does not produce. Its guide calls and labels belong to the guide assay, so its RNA
-cell view holds no field of them.
+Every assay of a store shares its cells, so a cell field can read an artifact of any assay, such as the guide calls of a `perturbation` run, which belong to the guide assay. The cell view checks that each artifact was computed on the run's cells, as its recorded cell selection shows, and refuses one computed on other cells. Each assay has its own features, so a feature field reads only artifacts of the run's assay. A run opens both views before it completes, so a field that a view refuses fails the run at `"finalize"`, and the run does not take its label.
+
+`snapshot_columns` cannot use the name of a field that the run produces or could produce: `I`, `ids`, `names`, `s_score`, `g2m_score`, `cell_cycle_phase`, the run's `umap_<n>`, `tsne_<n>`, and `leiden_<resolution>` fields, `paris`, `clusters`, `membership_strength`, `doublet_score`, `predicted_doublet`, and the recipe's feature field, or for a multimodal run its `weight_<assay>` fields. A `perturbation` run also reserves `guide_call`, `perturbation_label`, and `is_control`, and `mixscape_class` and `mixscape_posterior`, which a run without Mixscape does not produce.
 
 Pipeline execution writes immutable artifacts and run records only. It never inserts result
 columns or rewrites live `I`. Plotting, marker loading, and export stay on `DataStore`:
@@ -901,6 +903,8 @@ from earlier releases never meet this error. The pipeline recipes added the stag
 and `warnings`: a 1.x release from before the recipes opens the runs that they save, but its
 `report()` raises on those fields. A 2.0 release may change run records and lists each change in
 its compatibility inventory.
+
+A cell field can read an artifact of another assay than the run's, as the guide fields of a `perturbation` run do ([Frozen fields](#frozen-fields)). Such a field is an ordinary entry of the record's `fields`, so run records keep their shape, with no new record field, schema version, or migration, and every saved run reads as before. CyteArc 1.3.0 and earlier releases read cell fields of the run's assay only: they refuse the cell view of a run with such a field, with an `ArtifactResolutionError` whose code is `pipeline_field_axis_mismatch`, while its outputs and feature view open. They do not know the artifact kinds of a `perturbation` run's guide calls and labels, such as `guide_calls`, so they open no `perturbation` run. A run keeps the fields that it recorded and gains none later: a `perturbation` run saved without the guide fields gets them only from a new run of the recipe with the same settings, under another label or none, which reuses every artifact of the earlier run.
 
 Run and stage records are otherwise strict: a missing or unknown field, or a malformed value,
 fails closed. `list_runs` and open-by-label skip records they cannot read so healthy runs remain

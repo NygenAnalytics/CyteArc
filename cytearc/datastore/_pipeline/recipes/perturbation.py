@@ -64,8 +64,10 @@ RECIPE = "perturbation"
 OPERATION = "pipeline.perturbation"
 # The declared type of the guide assay whose counts the guides are called from.
 GUIDE_ASSAY_TYPE = "CRISPR"
-# The run's cell fields of Mixscape's classes, which no snapshot column may
-# take, whether or not the run runs Mixscape.
+# The run's cell fields of each cell's guide call and perturbation label, and
+# of Mixscape's classes, which no snapshot column may take, whether or not the
+# run runs Mixscape.
+GUIDE_FIELDS = ("guide_call", "perturbation_label", "is_control")
 MIXSCAPE_FIELDS = ("mixscape_class", "mixscape_posterior")
 # The run's outputs, in record order; an output that the run did not produce
 # is left out.
@@ -557,7 +559,7 @@ def resolve_perturbation(
             umap_dims=0,
             tsne_dims=0,
             leiden_keys=(),
-            extra=("highly_variable_features", *MIXSCAPE_FIELDS),
+            extra=("highly_variable_features", *GUIDE_FIELDS, *MIXSCAPE_FIELDS),
         ),
     )
     # The settings are checked, so the run's cells are checked last: a run
