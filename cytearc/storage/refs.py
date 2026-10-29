@@ -38,6 +38,7 @@ ARTIFACT_KINDS = frozenset(
         "guide_thresholds",
         "hto_identity",
         "integrated_graph",
+        "immune_receptors",
         "imported_coordinates",
         "label_transfer",
         "lineage_aggregation",

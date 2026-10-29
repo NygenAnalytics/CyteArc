@@ -537,6 +537,19 @@ class PerturbationEDistanceArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class ImmuneReceptorImportArguments(OperationArguments):
+    operation: ClassVar[str] = "import_immune_receptors"
+    artifact_kind: ClassVar[str] = "immune_receptors"
+
+    cell_selection: ArtifactRef = artifact_input()
+    # Each contig file's format, the SHA-256 of its bytes and its barcode
+    # prefix, ordered by digest and prefix; paths are not part of the identity.
+    sources: tuple[dict[str, Any], ...] = artifact_input()
+    productive_only: bool = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class MembershipStrengthArguments(OperationArguments):
     operation: ClassVar[str] = "calc_membership_strength"
     artifact_kind: ClassVar[str] = "membership_strength"

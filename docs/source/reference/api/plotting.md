@@ -64,6 +64,7 @@ Granular workflows pass exact refs to the same datastore-owned plotting surface:
 | fitted guide thresholds of a CRISPR screen | `guide_thresholds(calls_ref)`, or `guide_thresholds(calls_ref, guides=[...])` for one panel per guide and sample |
 | perturbation efficiency of a CRISPR screen | `efficiency(efficiency_ref)` |
 | E-distance of each perturbation from the control cells | `edistance(edistance_ref)` |
+| receptor types, chain pairings and chains per cell of imported immune receptors | `receptor_qc(receptors_ref)`, or `receptor_qc(receptors_ref, group_by="sample")` for one bar per group |
 
 `layout_key` and string forms on plotters that still accept them refer to deliberate live metadata
 inputs. Distribution grouping instead requires either an exact categorical artifact or an explicit
@@ -155,7 +156,7 @@ Helpers differ: `label_panels` returns `None`, `theme_context` is an iterator, a
 
 ```{eval-rst}
 .. automodule:: cytearc.plotting
-    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
+    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, receptor_qc, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
     :imported-members:
     :undoc-members:
     :show-inheritance:

@@ -159,6 +159,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "modality_weights",
     "pseudotime_heatmap",
     "qc",
+    "receptor_qc",
     "run_recipe",
     "theme_context",
 )
@@ -423,6 +424,7 @@ concrete = (
     "cytearc.plotting.modality_weights",
     "cytearc.plotting.perturbation",
     "cytearc.plotting.recipes",
+    "cytearc.plotting.repertoire",
     "cytearc.plotting.summary",
 )
 print(json.dumps({{

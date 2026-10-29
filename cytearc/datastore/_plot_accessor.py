@@ -625,6 +625,22 @@ class DataStorePlotAccessor:
         """Plot how far each perturbation moves its cells from the control cells."""
         return self._forward(PlotResult, "edistance", locals())
 
+    def receptor_qc(
+        self,
+        receptors: ArtifactRef,
+        *,
+        group_by: str | None = None,
+        groups: ArtifactRef | None = None,
+        normalize: bool | None = None,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the receptor types, chain pairings and chains per cell of imported receptors."""
+        return self._forward(PlotResult, "receptor_qc", locals())
+
     def dotplot(
         self,
         *,

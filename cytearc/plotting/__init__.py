@@ -67,6 +67,7 @@ if TYPE_CHECKING:
         guide_calls as guide_calls,
         guide_thresholds as guide_thresholds,
     )
+    from .repertoire import receptor_qc as receptor_qc
     from .summary import dotplot as dotplot
     from .summary import matrixplot as matrixplot
 
@@ -119,6 +120,7 @@ __all__ = [
     "modality_weights",
     "pseudotime_heatmap",
     "qc",
+    "receptor_qc",
     "run_recipe",
     "theme_context",
 ]
@@ -174,6 +176,7 @@ __getattr__, __dir__ = _lazy_facade(
         "modality_weights": ".modality_weights",
         "pseudotime_heatmap": ".heatmaps",
         "qc": ".diagnostics",
+        "receptor_qc": ".repertoire",
         "run_recipe": ".recipes",
         "theme_context": "._style",
     },

@@ -231,6 +231,15 @@ functions in {doc}`regulons` turn them into regulons.
     :members: call_guides, load_guide_thresholds, import_guide_calls, load_guide_calls, labels, load_labels, efficiency, load_efficiency, edistance, load_edistance
 ```
 
+### `ds.repertoire`
+
+`import_receptors` reads the T cell and B cell receptor contigs of a set of cells from Cell Ranger's contig annotations or AIRR Rearrangement files and saves them as an `immune_receptors` artifact, which ranks each cell's chains and labels the cell with its receptor type, subtype and chain pairing; {doc}`repertoire` describes the receptor model and the record that `load_receptors` returns.
+
+```{eval-rst}
+.. autoclass:: cytearc.datastore.namespaces.RepertoireAccessor
+    :members: import_receptors, load_receptors
+```
+
 ### `ds.imputation`
 
 ```{eval-rst}

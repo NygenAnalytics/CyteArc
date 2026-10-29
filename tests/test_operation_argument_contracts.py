@@ -21,6 +21,7 @@ from cytearc.datastore.namespaces import (
     QcAccessor,
     ReductionAccessor,
     RegulonsAccessor,
+    RepertoireAccessor,
     ScoresAccessor,
     TrajectoryAccessor,
 )
@@ -333,6 +334,14 @@ _CONTRACTS = (
     OperationContract(
         PerturbationAccessor.edistance,
         metadata_arguments.PerturbationEDistanceArguments,
+    ),
+    OperationContract(
+        RepertoireAccessor.import_receptors,
+        metadata_arguments.ImmuneReceptorImportArguments,
+        # Each file is identified by its format, the SHA-256 of its bytes and
+        # its barcode prefix, in canonical order; its path is not recorded.
+        signature_only=_classified("transformed", "paths", "barcode_prefix"),
+        model_only=_classified("resolved_input", "sources"),
     ),
     OperationContract(
         QcAccessor.hto_demultiplexing,
