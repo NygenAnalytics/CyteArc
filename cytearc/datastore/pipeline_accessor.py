@@ -17,6 +17,7 @@ from ._pipeline.recipes.adt import DEFAULT_PANEL_EXCLUDE as DEFAULT_PANEL_EXCLUD
 from ._pipeline.recipes.adt import resolve_adt
 from ._pipeline.recipes.atac import resolve_atac
 from ._pipeline.recipes.multimodal import resolve_multimodal
+from ._pipeline.recipes.perturbation import resolve_perturbation
 from ._pipeline.recipes.rna import resolve_rna
 from .pipeline_run import (
     PipelineRun,
@@ -519,6 +520,163 @@ class PipelineAccessor:
             paris=paris,
             membership_strength=membership_strength,
             markers=markers,
+            snapshot_columns=snapshot_columns,
+        )
+        return execute_recipe(self._store, plan, callback=callback, cancel=cancel)
+
+    @validation_scoped
+    def perturbation(
+        self,
+        *,
+        assay: str | None = None,
+        guide_assay: str | None = None,
+        label: str | None = None,
+        cells: CellsArgument = "I",
+        filtering: StageSwitch | None = None,
+        guide_calling: StageSettings = None,
+        labels: Mapping[str, object],
+        efficiency: StageSwitch = True,
+        hvg: StageSettings = None,
+        normalization: StageSettings = None,
+        pca: StageSettings = None,
+        harmony: Mapping[str, object] | Literal[False] | None = None,
+        edistance: StageSwitch = True,
+        signature: StageSettings = None,
+        mixscape: StageSwitch = False,
+        associations: StageSwitch = False,
+        profiles: StageSettings = None,
+        clusters: StageSwitch = False,
+        snapshot_columns: Sequence[str] = (),
+        callback: PipelineCallback | None = None,
+        cancel: CancellationToken | None = None,
+    ) -> PipelineRun:
+        """Analyze a pooled CRISPR screen and return the durable run.
+
+        The recipe filters cells on their RNA QC metrics, calls the guides of
+        each cell from the guide counts or imports Cell Ranger's calls, labels
+        each cell by the genes that its guides target, and measures each
+        perturbation's efficiency on its own gene. It then selects highly
+        variable genes, normalizes them, reduces them with PCA, optionally
+        corrects batches with Harmony, and measures how far each perturbation
+        moves its cells from the control cells. Optional stages call each
+        target's knocked-out cells and escapers with Mixscape, test which
+        highly variable genes each target changes, and cluster the
+        perturbations whose profiles agree:
+
+        ``input_snapshot``, ``filtering``, ``guide_calling``,
+        ``perturbation_labels``, ``efficiency``, ``highly_variable_features``,
+        ``normalization``, ``pca``, ``harmony``, ``edistance``,
+        ``signature``, ``mixscape``, ``associations``, ``profiles``,
+        ``perturbation_clusters``.
+
+        The stages from ``filtering`` to ``harmony`` are those of
+        :meth:`rna`, so a run with an RNA run's settings, or with
+        ``cells=rna_run`` and the same ``hvg``, ``normalization``, ``pca``,
+        and ``harmony`` settings, reuses its artifacts. The run's ``assay``
+        is the RNA assay.
+
+        The run checks its call before it writes anything. Which cells a
+        stage reads depends on the data, so every sample or split column that
+        a stage reads must label every cell of ``cells``, with neither a
+        missing value nor empty or whitespace text, and every covariate of
+        ``associations`` must hold a finite value for each of them.
+
+        Args:
+            assay: The RNA assay. Defaults to the default assay when it is an
+                RNA assay, else the store's only RNA assay.
+            guide_assay: The guide assay, declared ``CRISPR``. Defaults to the
+                store's only assay declared ``CRISPR``.
+            label: An immutable label for the completed run, unique in the store.
+            cells: The cells to analyze, as for :meth:`rna`. The guide assay
+                must have measured them too.
+            filtering: QC filtering on the RNA assay's metrics, as for
+                :meth:`rna`.
+            guide_calling: The keywords of ``perturbation.call_guides``
+                (``method``, ``min_umi``, ``fraction_threshold``, and
+                ``sample_column``), or ``path`` and ``barcode_prefix``, which
+                import Cell Ranger's ``protospacer_calls_per_cell.csv`` with
+                ``perturbation.import_guide_calls`` instead. The guides of the
+                run's analysis cells are called. A call file holds the
+                barcodes of one sample, so with ``barcode_prefix`` every cell
+                of ``cells`` must have an ID that starts with it, and without
+                one, ``cells`` must not come from several samples of a merged
+                store, whose cell IDs are ``<sample>__<barcode>``.
+            labels: The keywords of ``perturbation.labels``: ``controls``,
+                the targets of the control guides, which the recipe needs,
+                and ``target_column``, ``targets``, and ``policy``.
+            efficiency: The efficiency of each perturbation on its target
+                gene, with the keywords of ``perturbation.efficiency`` (``by``
+                and ``id_column``).
+            hvg: The keywords of ``features.hvgs``, as for :meth:`rna`.
+            normalization: The keywords of ``features.normalize``.
+            pca: The keywords of ``reduction.pca``. ``dims`` must be at least
+                1 and below ``hvg`` ``top_n``.
+            harmony: Harmony settings, as for :meth:`rna`. With Harmony, the
+                E-distances and the signature read the corrected coordinates.
+            edistance: E-distances in the run's coordinates, with the keywords
+                of ``perturbation.edistance`` (``by``, ``n_permutations``,
+                and ``random_seed``).
+            signature: The keywords of ``perturbation.signature`` (``dims``,
+                ``n_neighbors``, ``sample_column``, and ``scale_factor``) for
+                the signature that ``mixscape`` reads, computed in the highly
+                variable genes. ``dims`` must be at most ``pca`` ``dims``.
+                Settings without ``mixscape`` are refused.
+            mixscape: Mixscape's knocked-out cells and escapers, with the
+                keywords of ``perturbation.mixscape``.
+            associations: Tests of every target against every highly variable
+                gene, with the keywords of ``perturbation.associations`` but
+                ``pairs`` and ``features``; ``positive_controls`` is
+                ``"targets"`` or None.
+            profiles: The keywords of ``perturbation.profiles`` (``by``,
+                ``sample_column``, ``min_cells``, ``mask_targets``, and
+                ``id_column``) for the profiles that ``clusters`` reads, of
+                the highly variable genes. With ``mixscape``, a target's
+                profile averages its knocked-out cells. Settings without
+                ``clusters`` are refused.
+            clusters: Clusters of the perturbations whose profiles agree, with
+                the keywords of ``perturbation.cluster``.
+            snapshot_columns: Cell columns to freeze into the run's cell view.
+            callback: Called with each :class:`PipelineEvent` of the run.
+            cancel: A :class:`~cytearc.CancellationToken` that stops the run.
+
+        Raises:
+            PermissionError: If the store is read-only.
+            TypeError: If the call fails its checks; nothing is written.
+            ValueError: If the call fails its checks; nothing is written.
+            KeyError: If the call names a missing column; nothing is written.
+            FileNotFoundError: If ``guide_calling`` ``path`` names no file.
+            UnmeasuredCellsError: If the RNA or the guide assay did not
+                measure one of ``cells``; nothing is written.
+            PipelineExecutionError: If a stage fails; the run is recorded failed.
+            PipelineCancelled: If ``cancel`` is cancelled; the run is recorded
+                interrupted.
+
+        Example:
+            >>> labels = {"controls": ["Non-Targeting"]}
+            >>> run = ds.pipeline.perturbation(labels=labels, label="screen")
+            >>> ds.perturbation.load_efficiency(run["efficiency"]).table
+        """
+        self._require_runnable(callback)
+        plan = resolve_perturbation(
+            self._store,
+            assay=assay,
+            guide_assay=guide_assay,
+            label=label,
+            cells=cells,
+            filtering=filtering,
+            guide_calling=guide_calling,
+            labels=labels,
+            efficiency=efficiency,
+            hvg=hvg,
+            normalization=normalization,
+            pca=pca,
+            harmony=harmony,
+            edistance=edistance,
+            signature=signature,
+            mixscape=mixscape,
+            associations=associations,
+            profiles=profiles,
+            clusters=clusters,
             snapshot_columns=snapshot_columns,
         )
         return execute_recipe(self._store, plan, callback=callback, cancel=cancel)

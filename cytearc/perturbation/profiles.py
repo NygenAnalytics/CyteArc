@@ -36,13 +36,16 @@ import numpy as np
 import pandas as pd
 from numba import njit, prange
 
+from ..utils.arguments import integer_argument
 from ..utils.moments import welford_add
+from .efficiency import id_column_setting, rows_setting
 
 __all__ = [
     "CONTROL_SD_DDOF",
     "PerturbationProfiles",
     "control_moments",
     "depth_target",
+    "profile_settings",
     "profile_values",
     "z_score_sums",
 ]
@@ -52,6 +55,37 @@ __all__ = [
 CONTROL_SD_DDOF = 1
 # The features that one thread of a kernel takes at a time.
 _TILE = 64
+
+
+def profile_settings(
+    by: object,
+    min_cells: object,
+    mask_targets: object,
+    id_column: object,
+    sample_column: object,
+) -> int:
+    """Check the settings of perturbation profiles, as ``profiles`` takes them.
+
+    The pipeline recipe checks the same settings before its run starts.
+    Whether the columns exist is checked against the store.
+
+    Returns:
+        ``min_cells`` as a Python integer.
+
+    Raises:
+        TypeError: If a setting has the wrong type.
+        ValueError: If ``by`` is unknown, or ``min_cells`` is below 1.
+    """
+    rows_setting(by)
+    floor = integer_argument(min_cells, "min_cells", minimum=1)
+    if not isinstance(mask_targets, bool):
+        raise TypeError("mask_targets must be a boolean")
+    id_column_setting(id_column)
+    if sample_column is not None and (
+        not isinstance(sample_column, str) or not sample_column
+    ):
+        raise TypeError("sample_column must be a non-empty string or None")
+    return floor
 
 
 def depth_target(totals: np.ndarray, control: np.ndarray) -> float:

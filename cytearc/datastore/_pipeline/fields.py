@@ -211,8 +211,8 @@ def cell_fields(
 
     Results appear in one order for every recipe: cell cycle scores, UMAP and
     t-SNE coordinates, Leiden candidates, Paris, the saved clustering,
-    membership strength, doublet calls, and WNN modality weights. A result
-    the run did not produce has no field.
+    membership strength, doublet calls, Mixscape classes, and WNN modality
+    weights. A result the run did not produce has no field.
     """
     root = store.zw
     cell_snapshot = artifacts["cell_snapshot"]
@@ -300,6 +300,16 @@ def cell_fields(
             _categorical(
                 root, key="predicted_doublet", ref=ref, source="predicted_doublets"
             )
+        )
+    if "mixscape" in artifacts:
+        # Mixscape classifies the run's cells; its other results describe
+        # each target and stay in the artifact.
+        ref = artifacts["mixscape"]
+        fields.append(
+            _categorical(root, key="mixscape_class", ref=ref, source="values")
+        )
+        fields.append(
+            _continuous(root, key="mixscape_posterior", ref=ref, source="posterior")
         )
     integrated = artifacts.get("integrated_graph")
     if integrated is not None:

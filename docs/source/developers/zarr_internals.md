@@ -136,14 +136,15 @@ field descriptor's `display` are JSON mappings that readers do not check key by 
 release may add keys to them, and code that reads such a key treats its absence as the behavior
 of the release that wrote the run.
 
-A run's `recipe` names the recipe that wrote it: `rna`, `atac`, `adt`, or `multimodal`. Runs of
-earlier 1.x releases record `basic_rna_analysis`, the RNA pipeline that `pipeline.run` executed.
+A run's `recipe` names the recipe that wrote it: `rna`, `atac`, `adt`, `multimodal`, or
+`perturbation`. Runs of earlier 1.x releases record `basic_rna_analysis`, the RNA pipeline that
+`pipeline.run` executed.
 The `config` of a single-modality run records `cells` (the boolean cell column, or the cell
 selection and, when it came from a run, that run's ID and label), `snapshotColumns`, `species`, and
 under `stages` the resolved settings of each stage keyword, `false` for a skipped optional stage
 and `{"enabled": false}` for skipped filtering; an RNA run also records `doubletSampleColumns`. A
 multimodal run's `config` records its `method`, its source runs under `sources`, the shared cell
-selection under `cells`, `snapshotColumns`, and its `stages`. Every run's `config` also records
+selection under `cells`, `snapshotColumns`, and its `stages`. A perturbation run's `config` records `cells`, `snapshotColumns`, `guideAssay`, its guide assay, `profileLabels`, the output whose cells its profiles average (null without clusters), and under `stages` the settings of each stage keyword, `false` for an optional stage that is off and for `signature` and `profiles` whose stage does not run. Every run's `config` also records
 `shutdown`, whether the run could install its signal guard.
 
 Reopening a run reads its `config` as recorded and never checks it against the current recipe, so
@@ -379,9 +380,9 @@ from the live `I` column before a metadata grouping without `cell_selection` sna
 `trajectory.lineage_aggregation` (the valid cells of the fate map), `trajectory.drivers` (the
 cells it correlates), `imputation.compute_imputed` (feature names),
 `mapping.run` (the query assay), `to_anndata` with `matrix="normed"` and without a run,
-the recipes `pipeline.rna`, `pipeline.atac`, and `pipeline.adt`, which check the cells of `cells`
-before any stage runs and never narrow them, also for the HTO assay that an RNA run's hashing
-stage reads and for each other assay whose metric its filtering stage names, and the quality-control filters
+the recipes `pipeline.rna`, `pipeline.atac`, `pipeline.adt`, and `pipeline.perturbation`, which
+check the cells of `cells` before any stage runs and never narrow them, also for the HTO assay that
+an RNA run's hashing stage reads, for the guide assay of a perturbation run, and for each other assay whose metric its filtering stage names, and the quality-control filters
 `qc.auto_filter` and `qc.filter` for each metric of an assay that they filter on. A cell column is a metric of the assay whose preparation wrote it:
 `<assay>_nCounts`, `<assay>_nFeatures`, and the percentage columns that the assay records in its
 `percentFeatures` attribute (`cytearc.storage.identity.generated_cell_columns`); the column is found

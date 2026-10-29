@@ -32,6 +32,9 @@ __all__ = [
     "EfficiencyArrays",
     "PerturbationEfficiency",
     "efficiency_arrays",
+    "efficiency_settings",
+    "id_column_setting",
+    "rows_setting",
     "target_features",
 ]
 
@@ -45,6 +48,36 @@ NO_FEATURE = 1
 NO_CELLS = 2
 #: The control cells hold no UMI of the target gene, so no fraction remains.
 NO_CONTROL_EXPRESSION = 3
+
+
+def rows_setting(by: object) -> str:
+    """Check ``by``, the rows of a perturbation table: targets or guides."""
+    if not isinstance(by, str) or by not in ("target", "guide"):
+        raise ValueError(f"by must be 'target' or 'guide', not {by!r}")
+    return by
+
+
+def id_column_setting(id_column: object) -> str | None:
+    """Check ``id_column``, the guide assay's column of target feature IDs.
+
+    Whether the column exists is checked against the guide assay.
+    """
+    if id_column is not None and (not isinstance(id_column, str) or not id_column):
+        raise TypeError("id_column must be a feature column name or None")
+    return id_column
+
+
+def efficiency_settings(by: object, id_column: object) -> None:
+    """Check the settings of perturbation efficiency, as ``efficiency`` takes them.
+
+    The pipeline recipe checks the same settings before its run starts.
+
+    Raises:
+        TypeError: If ``id_column`` is neither a column name nor None.
+        ValueError: If ``by`` is neither ``"target"`` nor ``"guide"``.
+    """
+    rows_setting(by)
+    id_column_setting(id_column)
 
 
 @dataclass(frozen=True, slots=True)

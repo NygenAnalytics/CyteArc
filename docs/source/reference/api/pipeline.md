@@ -1,7 +1,7 @@
 ---
 myst:
   html_meta:
-    description: Run CyteArc's RNA, ATAC, ADT, and multimodal pipeline recipes, follow and cancel runs, and inspect durable PipelineRun records and frozen outputs.
+    description: Run CyteArc's RNA, ATAC, ADT, multimodal, and CRISPR screen pipeline recipes, follow and cancel runs, and inspect durable PipelineRun records and frozen outputs.
 ---
 
 # Analysis pipeline API reference
@@ -9,7 +9,8 @@ myst:
 `DataStore.pipeline` runs CyteArc's modality recipes and records each run in the datastore. A call
 that fails its checks writes nothing
 ([Validation before a run starts](#validation-before-a-run-starts)). `rna`, `atac`, and `adt` each
-analyze one assay, and `multimodal` integrates completed runs of the same cells. Each recipe
+analyze one assay, `multimodal` integrates completed runs of the same cells, and `perturbation`
+analyzes a pooled CRISPR screen from its RNA and guide assays. Each recipe
 returns a durable, read-only {py:class}`~cytearc.PipelineRun` whose outputs are exact immutable
 {py:class}`~cytearc.ArtifactRef` values.
 
@@ -28,6 +29,7 @@ returns a durable, read-only {py:class}`~cytearc.PipelineRun` whose outputs are 
    cytearc.datastore.pipeline_accessor.PipelineAccessor.atac
    cytearc.datastore.pipeline_accessor.PipelineAccessor.adt
    cytearc.datastore.pipeline_accessor.PipelineAccessor.multimodal
+   cytearc.datastore.pipeline_accessor.PipelineAccessor.perturbation
    cytearc.datastore.pipeline_accessor.PipelineAccessor.open
    cytearc.datastore.pipeline_accessor.PipelineAccessor.list_runs
    cytearc.datastore.pipeline_accessor.PipelineAccessor.abandon_label_claim
@@ -43,9 +45,10 @@ returns a durable, read-only {py:class}`~cytearc.PipelineRun` whose outputs are 
 | `atac` | an ATAC assay of peak counts | LSI of the most prevalent peaks | `prevalent_peaks` | Harmony, Paris, membership strength, t-SNE |
 | `adt` | an ADT assay of antibody counts | PCA of the antibody panel | `panel` | filtering, Harmony, Paris, membership strength, t-SNE |
 | `multimodal` | two or more completed runs of the same cells | none; it integrates the runs' graphs | none | Paris, membership strength, t-SNE |
+| `perturbation` | the RNA assay and the guide assay of a pooled CRISPR screen | none; E-distances and signatures read the PCA of the highly variable genes, or its Harmony correction | `highly_variable_features` | Harmony, Mixscape, association tests, clusters |
 
-`rna`, `atac`, and `adt` take `assay=None` by default: the default assay when it has the recipe's
-modality, else the store's only assay of that modality. A store with several such assays needs
+`rna`, `atac`, `adt`, and `perturbation` take `assay=None` by default: the default assay when it has
+the recipe's modality, else the store's only assay of that modality. A store with several such assays needs
 `assay=`. An assay of another modality raises `TypeError`, such as
 `The rna recipe analyzes RNA assays; assay 'ADT' is of type 'ADT'`.
 
@@ -181,24 +184,70 @@ ADT assay must have measured each of those cells. Each run is a separate durable
 own label, and the multimodal run records its sources as `config["sources"]`. A TEA-seq analysis
 adds `atac = ds.pipeline.atac(cells=rna, label="atac")` and integrates `[rna, atac, adt]`.
 
+### Perturbation
+
+```python
+screen = ds.pipeline.perturbation(labels={"controls": ["Non-Targeting"]}, label="screen")
+
+ds.perturbation.load_efficiency(screen["efficiency"]).table
+ds.perturbation.load_edistance(screen["edistance"]).table
+print(screen.report(format="markdown"))
+```
+
+The `perturbation` recipe analyzes a pooled CRISPR screen ({doc}`perturbation`): an RNA assay and a guide assay, declared `CRISPR`, that measured the same cells. It runs these stages in order:
+
+`input_snapshot`, `filtering`, `guide_calling`, `perturbation_labels`, `efficiency`, `highly_variable_features`, `normalization`, `pca`, `harmony`, `edistance`, `signature`, `mixscape`, `associations`, `profiles`, `perturbation_clusters`.
+
+By default it filters cells on their RNA QC metrics as the `rna` recipe does, calls the guides of the analysis cells with `perturbation.call_guides` and its default `method="poisson_gaussian"`, labels each cell by the genes that its guides target, and measures each target's efficiency on its own gene. It then selects 1,000 highly variable genes, normalizes them, keeps 21 PCA dimensions, and measures each target's E-distance from the control cells in the PCA, with 1,000 permutations. Harmony, Mixscape, the association tests, and the clusters are off. The guides are called and the cells labelled before the PCA, so a labelling that fails stops the run early.
+
+`labels` is required and must name `controls`, the targets of the control guides, which `perturbation.labels` needs: CyteArc never guesses which guides are controls. `guide_assay` defaults to the store's only assay declared `CRISPR`. `guide_calling` takes the keywords of `perturbation.call_guides`, or `path` and `barcode_prefix`, with which the stage imports Cell Ranger's `protospacer_calls_per_cell.csv` through `perturbation.import_guide_calls` instead. Fitted calls output their fits as `guide_thresholds` beside the `guide_calls`. Efficiency matches each target to a gene by the guide assay's `target_gene_id` column, which 10x imports fill, so a guide assay without it needs `efficiency={"id_column": None}`, which matches targets by name; the run refuses the default otherwise.
+
+Cell Ranger writes a call file for each sample, and the import matches each of its barcodes to the cell whose ID is `barcode_prefix` followed by the barcode. A cell that no barcode can reach would be labelled `"Negative"` and left out of every later stage, so a run that imports a call file refuses such cells before it writes anything: with `barcode_prefix`, cells of `cells` whose IDs do not start with it, and without one, cells of `cells` from several samples of a merged store, which names each cell `<sample>__<barcode>`. In a merged store, restrict `cells` to the cells of one sample and pass its prefix, such as `barcode_prefix="lane1__"`, or call the guides from their counts. The stage summary's `unmatchedBarcodes` counts the file's barcodes that match no analysis cell, which with the default filtering include those of the cells that QC filtering removed; the import's warning counts them too, so compare the count with the `filtering` stage's `removedCells` before suspecting `barcode_prefix`.
+
+`signature` configures the signature that `mixscape=True` computes first, and `profiles` the profiles that `clusters=True` clusters; their settings without that stage raise `ValueError`. The signature holds the highly variable genes, and its `dims` must not exceed the PCA's, so its default of 15 needs `pca` `dims` of at least 15. E-distances and the signature read the Harmony coordinates when the run has Harmony, and the PCA otherwise. The association tests test every target against every highly variable gene (`pairs="trans"`), so `associations` takes neither `pairs` nor `features`, and its `positive_controls` is `"targets"` or None; call `ds.perturbation.associations` for a table of pairs. In a run with Mixscape, the profiles average each target's knocked-out cells, from the `mixscape` output, so that escapers do not dilute them; without Mixscape they average the cells of each label. The run records which output the profiles read as `config["profileLabels"]`.
+
+Each perturbation stage calls a `ds.perturbation` method with the run's refs and settings, so the method called with the same refs and settings returns the run's artifact, and a run reuses the artifacts of such calls. The stages from `filtering` to `harmony` are those of the `rna` recipe. A run with the cells and the `filtering`, `hvg`, `normalization`, `pca`, and `harmony` settings of an `rna` run reuses that run's analysis cells, highly variable genes, normalized values, PCA, and Harmony coordinates, and so does a run given the RNA run as `cells`, which keeps its analysis cells, with the same `hvg`, `normalization`, `pca`, and `harmony` settings:
+
+```python
+rna = ds.pipeline.rna(label="rna", hvg={"top_n": 2000}, pca={"dims": 30})
+
+# Reuse the RNA run's cells, genes, and PCA, and run every stage.
+screen = ds.pipeline.perturbation(
+    cells=rna,
+    labels={"controls": ["Non-Targeting"]},
+    hvg={"top_n": 2000},
+    pca={"dims": 30},
+    signature={"dims": 30, "sample_column": "lane"},
+    mixscape=True,
+    associations={"sample_column": "lane"},
+    clusters=True,
+    label="screen",
+)
+```
+
+The run's `assay` is the RNA assay. Its cell view holds `mixscape_class` and `mixscape_posterior` when the run calls Mixscape. The guide calls and labels belong to the guide assay, whose artifacts a view of the RNA assay's cells cannot hold, so read them with `ds.perturbation.load_guide_calls(screen["guide_calls"])` and `ds.perturbation.load_labels(screen["perturbation_labels"])`.
+
 ## Stage keywords
 
 Each stage keyword configures one stage:
 
 - An optional stage, `cell_calling`, `hashing`, `filtering`, `cell_cycle`, `umap`, `tsne`, `leiden`,
-  `paris`, or `doublets`, takes `False` to skip it, `True` to run it with its defaults, or a mapping
-  of settings, which also runs it. `None` is not a switch: `umap=None` raises `TypeError`.
+  `paris`, `doublets`, `efficiency`, `edistance`, `mixscape`, `associations`, or `clusters`, takes
+  `False` to skip it, `True` to run it with its defaults, or a mapping of settings, which also runs
+  it. `None` is not a switch: `umap=None` raises `TypeError`.
   `filtering=None` is the default of the `filtering` keyword, described in
   [Filtering](#filtering).
 - A stage that always runs, `hvg`, `normalization`, `pca`, `prevalent_peaks`, `lsi`, `panel`,
-  `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, or `integration`, takes None
-  for its defaults or a mapping of settings. A bool raises `TypeError`, such as
+  `ann_index`, `neighbors`, `connectivity`, `embedding_initialization`, `integration`, or
+  `guide_calling`, takes None for its defaults or a mapping of settings. A bool raises `TypeError`, such as
   `pca must be a mapping because the stage always runs`.
 - `harmony` is None, the default, or `False`, which leave Harmony off, or a mapping that names
   `batch_columns`. `harmony=True` raises `ValueError`
   (`harmony needs a mapping with batch_columns`), and any other value, such as a list of columns,
   raises `TypeError`.
 - `membership_strength` and `markers` are plain bools.
+- `labels`, the settings of a `perturbation` run's labels, is a required mapping that names `controls`.
+- `signature` and `profiles` configure the stages that a `perturbation` run's `mixscape` and `clusters` run: None, the default, or a mapping of settings, which raises `ValueError` while its stage is off. A bool raises `TypeError`.
 
 A setting means exactly what the same keyword means on the stage's method, and an omitted setting
 takes that method's default, with three exceptions that fit the recipe to its data: an `adt` run's
@@ -208,7 +257,8 @@ with Harmony, an `rna` run's `doublets` `sample_column` to the Harmony batch col
 ([Doublets and Harmony](#doublets-and-harmony)). The pipeline supplies the artifacts that each
 stage consumes, so a mapping holds settings only. A few keys configure the recipe instead: Leiden
 `partitions` and `selected`, Harmony `batch_columns`, cell-calling `sample_column`, hashing
-`assay`, and panel `exclude`. An unknown key raises `ValueError` that lists the allowed keys, such
+`assay`, panel `exclude`, and guide-calling `path` and `barcode_prefix`, which import Cell Ranger's
+calls in place of calling guides. An unknown key raises `ValueError` that lists the allowed keys, such
 as `Unknown pca settings ['dim']; allowed: ['batch_size', 'dims', 'feat_scaling']`.
 
 ```python
@@ -230,27 +280,36 @@ run = ds.pipeline.rna(
 | --- | --- | --- | --- |
 | `cell_calling` | `rna` | {py:meth}`~cytearc.datastore.namespaces.QcAccessor.call_cells` | `lower`, `retain`, `n_iter`, `alpha`, `fdr`, `random_seed`, and `sample_column`, a cell column of captures |
 | `hashing` | `rna` | {py:meth}`~cytearc.datastore.namespaces.QcAccessor.hto_demultiplexing` | `assay`, the HTO assay; `random_seed`, `positive_quantile` |
-| `filtering` | `rna`, `atac`, `adt` | the rules of {py:meth}`~cytearc.datastore.namespaces.QcAccessor.auto_filter` | `method`, `attrs`, `n_mads`, `sample_column`, `min_cells_per_sample`, `min_p`, `max_p`; with `method="manual"`, `attrs`, `lows`, `highs`, `keep_bounds` |
+| `filtering` | `rna`, `atac`, `adt`, `perturbation` | the rules of {py:meth}`~cytearc.datastore.namespaces.QcAccessor.auto_filter` | `method`, `attrs`, `n_mads`, `sample_column`, `min_cells_per_sample`, `min_p`, `max_p`; with `method="manual"`, `attrs`, `lows`, `highs`, `keep_bounds` |
 | `cell_cycle` | `rna` | {py:meth}`~cytearc.datastore.namespaces.ScoresAccessor.cell_cycle` | `s_genes`, `g2m_genes`, `ctrl_size`, `log_transform`, `n_bins`, `rand_seed` |
-| `hvg` | `rna` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.hvgs` | `top_n`, `flavor`, `batch` (a cell metadata column), `min_cells`, `max_cells`, `min_mean`, `max_mean`, `min_var`, `max_var` (the last four are log2 values), `n_bins`, `lowess_frac`, `blacklist`, `keep_bounds`, `bin_strategy`, `span`, `theta`, `clip` |
+| `hvg` | `rna`, `perturbation` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.hvgs` | `top_n`, `flavor`, `batch` (a cell metadata column), `min_cells`, `max_cells`, `min_mean`, `max_mean`, `min_var`, `max_var` (the last four are log2 values), `n_bins`, `lowess_frac`, `blacklist`, `keep_bounds`, `bin_strategy`, `span`, `theta`, `clip` |
 | `prevalent_peaks` | `atac` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.prevalent_peaks` | `top_n` |
 | `panel` | `adt` | the antibody panel | `exclude`, a regular expression or None |
-| `normalization` | `rna`, `atac`, `adt` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.normalize` | `log_transform`, `renormalize_subset` |
-| `pca` | `rna`, `adt` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.pca` | `dims`, `feat_scaling`, `batch_size` |
+| `normalization` | `rna`, `atac`, `adt`, `perturbation` | {py:meth}`~cytearc.datastore.namespaces.FeaturesAccessor.normalize` | `log_transform`, `renormalize_subset` |
+| `pca` | `rna`, `adt`, `perturbation` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.pca` | `dims`, `feat_scaling`, `batch_size` |
 | `lsi` | `atac` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.lsi` | `dims`, `skip_first`, `rand_state`, `solver`, `n_iter`, `n_oversamples`, `batch_size` |
-| `harmony` | `rna`, `atac`, `adt` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.harmony` | `batch_columns` (required), `harmony_params` (the keyword options of {py:func}`~cytearc.embeddings.fit_harmony`), `batch_size` |
+| `harmony` | `rna`, `atac`, `adt`, `perturbation` | {py:meth}`~cytearc.datastore.namespaces.ReductionAccessor.harmony` | `batch_columns` (required), `harmony_params` (the keyword options of {py:func}`~cytearc.embeddings.fit_harmony`), `batch_size` |
 | `ann_index` | `rna`, `atac`, `adt` | {py:meth}`~cytearc.datastore.namespaces.GraphAccessor.ann_index` | `ann_metric`, `ann_efc`, `ann_ef`, `ann_m`, `ann_parallel`, `rand_state`, `batch_size` |
 | `neighbors` | `rna`, `atac`, `adt` | {py:meth}`~cytearc.datastore.namespaces.GraphAccessor.neighbors` | `k`, `ann_ef`, `batch_size` |
 | `connectivity` | `rna`, `atac`, `adt` | {py:meth}`~cytearc.datastore.namespaces.GraphAccessor.connectivity` | `local_connectivity`, `bandwidth` |
 | `integration` | `multimodal` | {py:meth}`~cytearc.datastore.namespaces.IntegrationAccessor.modalities` | `chunk_size`, and for WNN `l2_normalize` |
-| `embedding_initialization` | all | {py:meth}`~cytearc.datastore.namespaces.EmbeddingsAccessor.initialization` | `n_centroids`, `rand_state`, `batch_size`, `kmeans_sampling`, `kmeans_batch_size` |
-| `umap` | all | {py:meth}`~cytearc.datastore.namespaces.EmbeddingsAccessor.umap` | `umap_dims`, `spread`, `min_dist`, `n_epochs`, `repulsion_strength`, `initial_alpha`, `negative_sample_rate`, `use_density_map`, `dens_lambda`, `dens_frac`, `dens_var_shift`, `random_seed`, `parallel`, `symmetric_graph`, `graph_upper_only` |
-| `tsne` | all | {py:meth}`~cytearc.datastore.namespaces.EmbeddingsAccessor.tsne` | `tsne_dims`, `lambda_scale`, `max_iter`, `early_iter`, `alpha`, `box_h`, `symmetric_graph`, `graph_upper_only` |
-| `leiden` | all | {py:meth}`~cytearc.datastore.namespaces.ClustersAccessor.leiden` | `partitions`, `selected`, `backend`, `random_seed`, `symmetric_graph`, `graph_upper_only` |
-| `paris` | all | {py:meth}`~cytearc.datastore.namespaces.ClustersAccessor.paris` | `n_clusters`, `min_cluster_size` |
-| `membership_strength` | all | {py:meth}`~cytearc.datastore.namespaces.ClustersAccessor.membership_strength` | none; a bool |
+| `embedding_initialization` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.EmbeddingsAccessor.initialization` | `n_centroids`, `rand_state`, `batch_size`, `kmeans_sampling`, `kmeans_batch_size` |
+| `umap` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.EmbeddingsAccessor.umap` | `umap_dims`, `spread`, `min_dist`, `n_epochs`, `repulsion_strength`, `initial_alpha`, `negative_sample_rate`, `use_density_map`, `dens_lambda`, `dens_frac`, `dens_var_shift`, `random_seed`, `parallel`, `symmetric_graph`, `graph_upper_only` |
+| `tsne` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.EmbeddingsAccessor.tsne` | `tsne_dims`, `lambda_scale`, `max_iter`, `early_iter`, `alpha`, `box_h`, `symmetric_graph`, `graph_upper_only` |
+| `leiden` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.ClustersAccessor.leiden` | `partitions`, `selected`, `backend`, `random_seed`, `symmetric_graph`, `graph_upper_only` |
+| `paris` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.ClustersAccessor.paris` | `n_clusters`, `min_cluster_size` |
+| `membership_strength` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.ClustersAccessor.membership_strength` | none; a bool |
 | `doublets` | `rna` | {py:meth}`~cytearc.datastore.namespaces.QcAccessor.doublets` | `cluster_sample_fraction`, `max_cells_per_cluster`, `sample_column`, `simulation_ratio`, `heterotypic_fraction`, `save_k`, `expected_doublet_rate`, `threshold`, `smoothing_t`, `normalize_scores`, `random_seed` |
-| `markers` | all | {py:meth}`~cytearc.datastore.namespaces.MarkersAccessor.search` | none; a bool |
+| `markers` | all but `perturbation` | {py:meth}`~cytearc.datastore.namespaces.MarkersAccessor.search` | none; a bool |
+| `guide_calling` | `perturbation` | {py:meth}`~cytearc.datastore.namespaces.PerturbationAccessor.call_guides`, or {py:meth}`~cytearc.datastore.namespaces.PerturbationAccessor.import_guide_calls` with `path` | `method`, `min_umi`, `fraction_threshold`, `sample_column`; or `path` and `barcode_prefix` |
+| `labels` | `perturbation` | {py:meth}`~cytearc.datastore.namespaces.PerturbationAccessor.labels` | `controls` (required), `target_column`, `targets`, `policy` |
+| `efficiency` | `perturbation` | {py:meth}`~cytearc.datastore.namespaces.PerturbationAccessor.efficiency` | `by`, `id_column` |
+| `edistance` | `perturbation` | {py:meth}`~cytearc.datastore.namespaces.PerturbationAccessor.edistance` | `by`, `n_permutations`, `random_seed` |
+| `signature` | `perturbation` | {py:meth}`~cytearc.datastore.namespaces.PerturbationAccessor.signature` | `dims`, `n_neighbors`, `sample_column`, `scale_factor` |
+| `mixscape` | `perturbation` | {py:meth}`~cytearc.datastore.namespaces.PerturbationAccessor.mixscape` | `split_column`, `min_de_genes`, `min_cells`, `logfc_threshold`, `min_fraction`, `p_value_cutoff`, `scale`, `max_iterations`, `perturbation_type` |
+| `associations` | `perturbation` | {py:meth}`~cytearc.datastore.namespaces.PerturbationAccessor.associations` | `positive_controls` (`"targets"` or None), `id_column`, `integration`, `sample_column`, `covariates`, `side`, `n_resamples`, `stage_threshold`, `approximation`, `min_nonzero`, `n_calibration_pairs`, `alpha`, `seed` |
+| `profiles` | `perturbation` | {py:meth}`~cytearc.datastore.namespaces.PerturbationAccessor.profiles` | `by`, `sample_column`, `min_cells`, `mask_targets`, `id_column` |
+| `clusters` | `perturbation` | {py:meth}`~cytearc.datastore.namespaces.PerturbationAccessor.cluster` | `perturbations`, `metric`, `min_cluster_size`, `min_samples`, `selection`, `seed` |
 
 The other keywords configure the run itself:
 
@@ -261,7 +320,8 @@ The other keywords configure the run itself:
   use a reserved field name ([Frozen fields](#frozen-fields)).
 - `species`: a species key recorded with the run, one of `homo_sapiens`, `mus_musculus`,
   `rattus_norvegicus`, `danio_rerio`, `drosophila_melanogaster`, or `caenorhabditis_elegans`.
-  `multimodal` takes none.
+  `multimodal` and `perturbation` take none.
+- `guide_assay`: the guide assay of a `perturbation` run ([Perturbation](#perturbation)).
 - `callback`: a callable that receives each
   {py:class}`~cytearc.datastore.pipeline_accessor.PipelineEvent` of the run
   ([Events and listeners](#events-and-listeners)).
@@ -330,11 +390,19 @@ method where it has them:
 - The runs of `multimodal` ([Multimodal](#multimodal)). With `method="snn"`, runs built with
   different `neighbors` `k` raise `ValueError` that names `neighbors={'k': ...}` and
   `method='wnn'`.
+- The guide assay of `perturbation`: the store's only assay declared `CRISPR`, or the one that `guide_assay` names, which must be declared `CRISPR` and store unsigned counts. A store with no CRISPR assay, or several, raises `ValueError` that lists them.
+- `labels`: `controls`, which a mapping without them, or `labels=None`, lacks (`ValueError`, `labels needs controls, the targets of the control guides, ...`), and the checks of `perturbation.labels` against the guide assay's targets: a control that no guide has, a target that is a reserved label or, with `policy="combinations"`, holds `"+"`, `targets` that name a guide that the assay lacks, and a `target_column` that the guide assay lacks. A called guide without a target shows only in the calls, so the `perturbation_labels` stage refuses it, and the run fails.
+- `guide_calling`: the checks of `perturbation.call_guides` for `method`, `min_umi`, `fraction_threshold`, and `sample_column`, or a `path` that is a file (`FileNotFoundError` otherwise) with a `barcode_prefix` of text or None. A `path` beside a calling setting, or `barcode_prefix` without `path`, raises `ValueError`, and so do cells of `cells` that the call file cannot reach: with `barcode_prefix`, cells whose IDs do not start with it, and without one, cells from several samples of a merged store.
+- The settings of `efficiency`, `edistance`, `signature`, `mixscape`, `associations`, `profiles`, and `clusters`: the checks of their methods, an `id_column` that the guide assay lacks where the stage reads it (`efficiency`, `associations` with `positive_controls="targets"`, and `profiles` with `mask_targets`), sample, split, and covariate columns that the store lacks (`KeyError`), and covariates that do not hold numbers.
+- The `sample_column` of `guide_calling`, `signature`, `associations`, or `profiles`, and a Mixscape `split_column`, must label every cell of `cells`: a missing value, NaN in a float column, or empty or whitespace text raises `ValueError`. Each covariate of `associations` must hold a finite value for every cell of `cells`: a missing, NaN, or infinite value raises `ValueError`. The methods need labels and covariate values only on the cells that they read, such as the control cells and the cells of the tested targets, but which cells those are depends on the data, so the run asks for them on every cell of `cells`.
+- `pca` `dims` of a `perturbation` run: at least 1 and below `hvg` `top_n`, and at least `signature` `dims` when the run calls Mixscape.
+- `signature` settings without `mixscape`, `profiles` settings without `clusters`, and `pairs`, `features`, or a table of `positive_controls` in `associations` raise `ValueError`.
 
 Every other value is checked by the stage's method when the stage runs, such as `ann_index`
 `ann_metric`, a Leiden `backend`, the numeric `doublets` settings, and the `umap` settings other
 than `umap_dims` and the graph flags, and so are limits that depend on the data, such as the memory
-that the ANN index or cluster selection needs. Such a value or limit fails its stage after the
+that the ANN index or cluster selection needs, a sample with fewer control cells than the signature's
+`n_neighbors`, or clusters of fewer than 3 profiles. Such a value or limit fails its stage after the
 earlier stages have run: the run is recorded as failed and raises `PipelineExecutionError`.
 
 A handled stage failure raises {py:class}`~cytearc.PipelineExecutionError` after the stage and
@@ -399,7 +467,8 @@ itself. A run that is not completed, or a run of another datastore, raises `Valu
 The recipe checks every assay that it reads over these cells, the analyzed assay and, with
 hashing, the HTO assay, and the assay of each QC metric that it filters on. A cell that one of them
 did not measure raises {py:exc}`~cytearc.metadata.membership.UnmeasuredCellsError` with the
-operation `pipeline.rna`, `pipeline.atac`, or `pipeline.adt`, and a message that says how to pass
+operation `pipeline.rna`, `pipeline.atac`, `pipeline.adt`, or `pipeline.perturbation`, whose guide
+assay is checked too, and a message that says how to pass
 measured cells as `cells`; when the cells are an earlier run's, it says to run that earlier run on
 cells that the assay measured too, so that the runs analyze the same cells. The run never narrows
 `cells` on its own.
@@ -633,10 +702,19 @@ embedding_initialization, umap, leiden_1.0, clusters, markers_RNA, markers_ADT
 ```
 
 Its `input_cell_selection` and `analysis_cell_selection` are both the selection that its runs
-share, and its `feature_universe` is the first run's. `run.recipe` names the recipe, `"rna"`,
-`"atac"`, `"adt"`, or `"multimodal"`, and `run.assay` the analyzed assay, or the first run's assay
-for a multimodal run. Normal mapping operations such as `run["pca"]`, `list(run)`, and `run.items()`
-are available only on a successfully completed run.
+share, and its `feature_universe` is the first run's. A default `perturbation` run has:
+
+```text
+input_cell_selection, analysis_cell_selection, feature_universe, guide_thresholds, guide_calls,
+perturbation_labels, efficiency, highly_variable_features, normalized, pca, edistance
+```
+
+Its optional stages add `harmony` after `pca`, and `signature`, `mixscape`, `associations`, `profiles`, and `perturbation_clusters`, in that order, after `edistance`. Calls that fit no thresholds, with `method="fixed"` or `"top_guide"` or imported from Cell Ranger, have no `guide_thresholds`.
+
+`run.recipe` names the recipe, `"rna"`, `"atac"`, `"adt"`, `"multimodal"`, or `"perturbation"`,
+and `run.assay` the analyzed assay, the RNA assay of a perturbation run, or the first run's assay
+for a multimodal run. Normal mapping operations such as `run["pca"]`, `list(run)`, and
+`run.items()` are available only on a successfully completed run.
 
 ### Run snapshots
 
@@ -689,7 +767,8 @@ view.head(n=5)
 | `membership_strength` | cells | `membership_strength=True` |
 | `doublet_score`, `predicted_doublet` | cells | an `rna` run scores doublets |
 | `weight_<assay>` | cells | a WNN `multimodal` run, one per assay |
-| `highly_variable_features`, `prevalent_peaks`, or `panel` | features | an `rna`, `atac`, or `adt` run |
+| `mixscape_class`, `mixscape_posterior` | cells | a `perturbation` run calls Mixscape |
+| `highly_variable_features`, `prevalent_peaks`, or `panel` | features | an `rna` or `perturbation` run, an `atac` run, or an `adt` run |
 
 Cell `I` is the analysis selection. Feature `I` is backed by the immutable
 `run["feature_universe"]` selection created during the input stage, not the live feature `I`
@@ -702,7 +781,9 @@ mutation surface.
 `ids`, `names`, `s_score`, `g2m_score`, `cell_cycle_phase`, the run's `umap_<n>`, `tsne_<n>`, and
 `leiden_<resolution>` fields, `paris`, `clusters`, `membership_strength`, `doublet_score`,
 `predicted_doublet`, and the recipe's feature field, or for a multimodal run its `weight_<assay>`
-fields.
+fields. A `perturbation` run also reserves `mixscape_class` and `mixscape_posterior`, which a run
+without Mixscape does not produce. Its guide calls and labels belong to the guide assay, so its RNA
+cell view holds no field of them.
 
 Pipeline execution writes immutable artifacts and run records only. It never inserts result
 columns or rewrites live `I`. Plotting, marker loading, and export stay on `DataStore`:
@@ -737,6 +818,8 @@ that the call gave it, `False` for an optional stage that the call turned off, a
 `exclude` pattern and the `excluded` names, `hashing` its `assay`, and `filtering` the filter's
 parameters. A multimodal run records `method`, `sources` (each run's `runId`, `label`, `recipe`,
 and `assay`), `cells` (`{"selection": ref}`), `snapshotColumns`, `stages`, and `shutdown`.
+
+A `perturbation` run records `cells`, `snapshotColumns`, `guideAssay`, the guide assay, `profileLabels`, the output whose cells the profiles average (`"mixscape"` in a run with Mixscape, else `"perturbation_labels"`, and None without clusters), `stages`, and `shutdown`. Its `stages` record `False` for `signature` without Mixscape and for `profiles` without clusters, and a `guide_calling` `path` as the text of the path.
 
 ## Open, list, and report runs
 
@@ -847,6 +930,17 @@ cannot be computed is logged as a warning and left out. For example:
 | `membership_strength` | `mean`, and `belowHalf`, the number of cells whose membership strength is below 0.5 |
 | `doublets` | `predictedDoublets`, `rate`, and `samples`, with each sample's threshold and calls |
 | `integration` | `assays` and `meanWeights`, the mean modality weight of each assay |
+| `guide_calling` | `guide_calls` (`cells`; `negative`, `single`, and `multiple`, the cells with no, one, and several calls; `calledGuides`, the guides called in some cell; and for imported calls `fileBarcodes` and `unmatchedBarcodes`, the file's barcodes that match no analysis cell, those of the cells that filtering removed included), and for fitted calls `guide_thresholds` (`samples`, 1 without a `sample_column`, `guides`, and `statuses`, the fits of each status) |
+| `perturbation_labels` | `cells`, `controls`, `negative`, `multipleTargets` (cells whose guides target several genes), `targets` (the targets that are not controls), `targetCells` (the `min`, `median`, and `max` of each target's cells that carry it alone), `fewCellTargets` (the targets with fewer than 25 such cells and their cells, fewest first, at most 50), and `fewCellTargetCount` |
+| `efficiency` | `by`, `rows`, `statuses`, `knockedDown` (tested rows with an adjusted p-value below 0.05 and a remaining fraction below 1), `medianRemainingFraction` (of the tested rows), and `noFeature` (the rows without a feature, at most 50) |
+| `edistance` | `by`, `rows`, `statuses`, `significant` (tested rows with an adjusted p-value below 0.05), `atFloor` (tested rows at the smallest p-value of their permutations, 1 / (`n_permutations` + 1)), and `nPermutations` |
+| `signature` | `cells`, `features`, `controls`, `samples` (the samples of `sample_column`, which the loader's `cells["sample"]` names, 0 without one), `neighbors` |
+| `mixscape` | `rows` (targets by split), `statuses`, `cells`, `knockedOut`, `fewDeGenes` (the targets with too few DE genes in some split, at most 50), `perturbationType` |
+| `associations` | `discoveryPairs`, `testedDiscoveryPairs` (those that pass QC), `discoveries`, `calibrationPairs`, `falseDiscoveries`, `calibrationGrade`, `calibrationStatus`, `falseDiscoveriesByControlGuides` (the false discoveries of each group of control guides, most first, at most 50), `positivePairs`, `positiveDetected`, `alpha` |
+| `profiles` | `perturbations`, `features`, `leftOut`, `zeroSdFeatures` (features without spread over some sample's control cells), `samples` (the rows of the loader's `samples`, 1 without a `sample_column`) |
+| `perturbation_clusters` | `perturbations`, `clusters`, `unassigned`, `largestCluster` |
+
+The perturbation summaries count adjusted p-values below 0.05 and targets with fewer than 25 cells, fixed thresholds; the loaders of {doc}`perturbation` read every row for others.
 
 Each stage record also keeps the warnings that CyteArc logged or issued while the stage ran,
 oldest first: at most 50, each cut to 512 characters. The stage's own worker threads report into
@@ -897,7 +991,7 @@ the run has, skipped stages included), and `time_ns`. The other fields depend on
 | `stage_started` | after a stage's record is written, before the stage runs | |
 | `stage_progress` | while a stage runs, as a CyteArc progress bar advances | `progress` |
 | `stage_completed` | after the stage's outputs are recorded | `metrics`, `summary`, `outputs`, `reused`, `warnings` |
-| `stage_skipped` | after a stage that the run does not compute is recorded as skipped: one that the call turned off, or one that the recipe skips, such as `cluster_selection` with a `selected` resolution, `embedding_initialization` without UMAP or t-SNE, or `pca` with `dims=0` | `metrics` |
+| `stage_skipped` | after a stage that the run does not compute is recorded as skipped: one that the call turned off, or one that the recipe skips, such as `cluster_selection` with a `selected` resolution, `embedding_initialization` without UMAP or t-SNE, `pca` with `dims=0`, or a perturbation run's `signature` without Mixscape and `profiles` without clusters | `metrics` |
 | `stage_failed` | after the stage and the run are recorded as failed | `metrics`, `warnings`, `error` |
 | `stage_interrupted` | after the stage and the run are recorded as interrupted | `metrics`, `warnings`, `error` |
 | `run_completed` | after the run record is complete | |
@@ -1070,7 +1164,7 @@ confirm that the process has stopped before treating such a run as abandoned.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.pipeline_accessor.PipelineAccessor
-    :members: rna, atac, adt, multimodal, open, list_runs, abandon_label_claim
+    :members: rna, atac, adt, multimodal, perturbation, open, list_runs, abandon_label_claim
 
 .. autoclass:: cytearc.PipelineRun
     :members:

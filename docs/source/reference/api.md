@@ -5,7 +5,7 @@ Public CyteArc surfaces for analysts:
 
 - `DataStore` and its documented methods
 - Graph-construction methods and the pipeline recipes `ds.pipeline.rna`, `ds.pipeline.atac`,
-  `ds.pipeline.adt`, and `ds.pipeline.multimodal`
+  `ds.pipeline.adt`, `ds.pipeline.multimodal`, and `ds.pipeline.perturbation`
 - `ArtifactRef`, `ArtifactStatus`, `PipelineRun`, and strict artifact-resolution errors
 - `pipeline_listener`, `CancellationToken`, and `PipelineCancelled` for following and stopping
   pipeline runs

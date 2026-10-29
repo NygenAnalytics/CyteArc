@@ -1,3 +1,5 @@
+import math
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -391,6 +393,57 @@ def test_classify_target_statuses_without_a_fit() -> None:
         **settings,
     )
     assert collapsed.status == NO_FIT
+
+
+def test_classify_target_posterior_does_not_overflow() -> None:
+    # A tight knocked-out component puts the escaper, a cell like the
+    # controls, about 38 of its standard deviations from its mean, so its log
+    # likelihood ratio exceeds log(DBL_MAX), where exp overflowed.
+    pattern = np.linspace(-1.0, 1.0, 30)
+    target = np.r_[10.0 + 0.263 * pattern / pattern.std(), 0.0][:, None]
+    control = np.r_[np.ones(100), -np.ones(100)][:, None]
+    with warnings.catch_warnings(), np.errstate(over="raise"):
+        warnings.simplefilter("error")
+        fit = classify_target(
+            target,
+            control,
+            n_de_genes=5,
+            min_de_genes=5,
+            min_cells=5,
+            max_iterations=10,
+            scale=False,
+        )
+    assert fit.status == FITTED and fit.converged
+    assert fit.ko.tolist() == [True] * 30 + [False]
+    log_ratio = mixscape_module._log_normal(
+        fit.score, fit.control_mean, fit.control_sd
+    ) - mixscape_module._log_normal(fit.score, fit.perturbed_mean, fit.perturbed_sd)
+    assert np.log(np.finfo(np.float64).max) < log_ratio[-1] < 745.0
+    # The escaper's posterior is exp(-log_ratio), a subnormal number, not 0.
+    assert math.isclose(fit.posterior[-1], math.exp(-log_ratio[-1]), rel_tol=1e-9)
+    np.testing.assert_array_equal(
+        fit.posterior[:-1], 1.0 / (1.0 + np.exp(log_ratio[:-1]))
+    )
+
+
+def test_knocked_out_posterior_keeps_every_finite_value() -> None:
+    limit = np.log(np.finfo(np.float64).max)
+    finite = np.r_[np.linspace(-800.0, 709.0, 100_001), limit, -np.inf, np.nan]
+    beyond = np.r_[np.nextafter(limit, np.inf), 720.0, 800.0, np.inf]
+    with warnings.catch_warnings(), np.errstate(over="raise"):
+        warnings.simplefilter("error")
+        posterior = mixscape_module._knocked_out_posterior(np.r_[finite, beyond])
+    # Where exp(log_ratio) is finite, the posterior is 1 / (1 + exp(log_ratio))
+    # to the last bit, and beyond it exp(-log_ratio), subnormal or 0.
+    np.testing.assert_array_equal(
+        posterior[: len(finite)], 1.0 / (1.0 + np.exp(finite))
+    )
+    np.testing.assert_allclose(
+        posterior[len(finite) :],
+        [math.exp(-value) for value in beyond],
+        rtol=1e-9,
+        atol=0,
+    )
 
 
 def _ranked_values(rng: np.random.Generator) -> np.ndarray:

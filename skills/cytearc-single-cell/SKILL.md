@@ -1,6 +1,6 @@
 ---
 name: cytearc-single-cell
-description: Analyze single-cell data with core CyteArc, the out-of-core Zarr DataStore library with immutable artifacts and pipeline runs. Covers opening, converting and mounting stores (including public CyteBase datasets opened by their hf:// URIs), QC with removal audits, HVG/PCA/neighbour graphs, Leiden/Paris clustering, UMAP, markers and cautious annotation, batch correction and donor-level comparisons, RNA, ATAC, ADT and multimodal (WNN) pipeline recipes, headless plotting, provenance and export. Use when a task involves a CyteArc .zarr store, a CyteBase dataset, cytearc.DataStore, ds.pipeline, or converting H5AD/10x/MTX/Seurat data for CyteArc. For CyteBase catalog search in depth, use the cytebase skill.
+description: Analyze single-cell data with core CyteArc, the out-of-core Zarr DataStore library with immutable artifacts and pipeline runs. Covers opening, converting and mounting stores (including public CyteBase datasets opened by their hf:// URIs), QC with removal audits, HVG/PCA/neighbour graphs, Leiden/Paris clustering, UMAP, markers and cautious annotation, batch correction and donor-level comparisons, RNA, ATAC, ADT, multimodal (WNN) and CRISPR screen pipeline recipes, headless plotting, provenance and export. Use when a task involves a CyteArc .zarr store, a CyteBase dataset, cytearc.DataStore, ds.pipeline, or converting H5AD/10x/MTX/Seurat data for CyteArc. For CyteBase catalog search in depth, use the cytebase skill.
 license: BSD-3-Clause
 compatibility: Requires Python 3.13+ and a cytearc release after 1.3.0, which adds the ds.pipeline.rna/atac/adt/multimodal recipes (pip install "cytearc[extra]>1.3.0", plus --pre for a release candidate; CyteBase datasets need network access, and searching their catalog needs the separate cytebase package; add the tsne extra for t-SNE and the regulons extra for cisTarget ranking databases).
 metadata:
@@ -67,7 +67,8 @@ not thresholds.
   `False` skips an optional stage, `True` runs it, and a mapping of the stage method's keywords
   configures it (`hvg={"top_n": 2000}`, `pca={"dims": 30}`, `paris=True`). `cells=` takes a
   boolean column, a cell selection or a completed run. `ds.pipeline.atac()`, `ds.pipeline.adt()`
-  and `ds.pipeline.multimodal([rna, adt])` cover peaks, antibodies and WNN integration.
+  and `ds.pipeline.multimodal([rna, adt])` cover peaks, antibodies and WNN integration, and
+  `ds.pipeline.perturbation(labels={"controls": [...]})` a pooled CRISPR screen.
 - Artifact payload rows follow the artifact's **cell selection**, not `ds.cells.N`.
 - A **mount** is a local writable store whose counts stay in a remote source (`matrixSource`).
   Every pass over counts is a network read; artifacts are written locally.
@@ -235,12 +236,12 @@ any changes you make after seeing the comparison as such.
 | `references/gene-blacklists.md` | what the default HVG blacklist removes, corrected blacklists for human and mouse, Ig/TCR and haemoglobin add-ons |
 | `references/clustering-and-embedding.md` | Leiden and Paris, choosing a partition, UMAP and t-SNE, labels as arrays |
 | `references/markers-and-annotation.md` | marker tables, canonical marker panels, labelling, AUCell/WAGGR, cell cycle, label comparison |
-| `references/pipeline-runs-and-artifacts.md` | recipes (`rna`, `atac`, `adt`, `multimodal`) and their stage keywords, CITE-seq and TEA-seq runs, migrating from `pipeline.run`, events and cancellation, run reports, artifacts, lineage, failures, handoff record |
+| `references/pipeline-runs-and-artifacts.md` | recipes (`rna`, `atac`, `adt`, `multimodal`, `perturbation`) and their stage keywords, CITE-seq and TEA-seq runs, migrating from `pipeline.run`, events and cancellation, run reports, artifacts, lineage, failures, handoff record |
 | `references/plotting.md` | headless figures, run mode versus ref mode, every `ds.plots` method |
 | `references/integration-and-comparisons.md` | study design and units, donors in two arms, composition tests, Harmony and its safety, merging, mapping, condition comparisons |
 | `references/performance-and-export.md` | budgets, long-running steps, streaming, mount repacking, AnnData/H5AD/MTX/CSV and pseudobulk export, subset stores |
 | `references/regulons.md` | SCENIC regulons from RNA, chromVAR motif and CUT&RUN activity in ATAC, region-to-gene links, co-regulated gene programs |
-| `references/perturbation-screens.md` | pooled CRISPR screens: calling guides from counts and choosing a method, fitted thresholds and their plot, UMI floors, importing Cell Ranger's guide calls, barcode prefixes in merged stores, single-guide cells, ambient guides, the guide-calls plot, perturbation labels by target gene, naming controls, `"Multiple"` or combination labels, perturbation efficiency of each target gene or guide, unmatched targets, the efficiency plot, E-distances of each perturbation from the control cells with permutation tests, the E-distance plot, Mixscape's perturbation signatures and knocked-out cells and escapers, the Mixscape plot, SCEPTRE-style association tests of each perturbation and gene with their calibration and positive-control checks, perturbation profiles z-normalized against the control cells by target or guide, HDBSCAN clusters of perturbations by profile correlation |
+| `references/perturbation-screens.md` | pooled CRISPR screens: the `ds.pipeline.perturbation` recipe and the checks of its stage summaries, a table of each target's effects, calling guides from counts and choosing a method, fitted thresholds and their plot, UMI floors, importing Cell Ranger's guide calls, barcode prefixes in merged stores, single-guide cells, ambient guides, the guide-calls plot, perturbation labels by target gene, naming controls, `"Multiple"` or combination labels, perturbation efficiency of each target gene or guide, unmatched targets, the efficiency plot, E-distances of each perturbation from the control cells with permutation tests, the E-distance plot, Mixscape's perturbation signatures and knocked-out cells and escapers, the Mixscape plot, SCEPTRE-style association tests of each perturbation and gene with their calibration and positive-control checks, perturbation profiles z-normalized against the control cells by target or guide, HDBSCAN clusters of perturbations by profile correlation |
 
 ## Troubleshooting
 

@@ -10,17 +10,14 @@ from ....metadata.rows import apply_missing_mask
 from ....storage.artifacts import ArtifactRef, artifact_group, inspect_artifact
 from ....storage.selections import (
     read_stored_selection_indices,
-    read_stored_selection_mask,
     resolve_generated_selection_artifact,
 )
-from ....storage.types import as_zarr_group
 from ....utils.arguments import integer_argument
 from ..cluster_selection import cluster_label_values
 from ..executor import PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
 from ..filtering import default_filter_columns, hashtag_labels, snapshot_column_values
 from ..settings import (
-    HVG_TOP_N_DEFAULT,
     PCA_DIMS_DEFAULT,
     leiden_config,
     resolve_leiden,
@@ -28,13 +25,13 @@ from ..settings import (
     stage_settings,
 )
 from ..stages import (
-    CellSource,
     Outputs,
     clustering_tail,
     filtering_stage,
     graph_output_keys,
     graph_stages,
     harmony_stage,
+    hvg_stage,
     input_snapshot_stage,
     markers_stage,
     normalization_stage,
@@ -44,24 +41,29 @@ from ..stages import (
 from ..summaries import summarize_stage
 from .common import (
     cell_snapshots,
+    check_labeled_cells,
+    check_pca_features,
     check_tsne,
     harmony_config,
     modality_assay,
     resolve_embeddings,
     resolve_graph,
     resolve_harmony,
+    resolve_hvg,
     require_bool,
     resolve_label,
     resolve_run_filtering,
+    require_labeled_cells,
     resolve_snapshot_columns,
     run_reserved_fields,
+    selection_mask,
 )
 
 RECIPE = "rna"
 OPERATION = "pipeline.rna"
 # The QC columns that preparation writes for an RNA assay, which filtering
 # reads when its settings name no columns.
-_FILTER_SUFFIXES = ("nCounts", "nFeatures", "percentMito", "percentRibo")
+FILTER_SUFFIXES = ("nCounts", "nFeatures", "percentMito", "percentRibo")
 
 # The settings that make doublet scoring possible when the saved clustering
 # has one cluster. Silhouette selection never picks such a partition.
@@ -71,17 +73,8 @@ ONE_CLUSTER_DOUBLET_REMEDY = (
     "chooses one; set doublets={'heterotypic_fraction': 0} to simulate "
     "doublets from any two sampled cells; or pass doublets=False."
 )
-
-
-def _selection_mask(store: Any, ref: ArtifactRef) -> np.ndarray:
-    return read_stored_selection_mask(
-        store.zw,
-        ref,
-        kind="cell_selection",
-        scope="datastore",
-        assay=None,
-        table_path="cellData",
-    )
+# What a capture column labels every cell for.
+_CAPTURE_PURPOSE = "Cell calling per capture"
 
 
 def _derived_selection(
@@ -103,42 +96,6 @@ def _derived_selection(
         inputs=inputs,
         source_column="artifact",
     )[0]
-
-
-def _require_capture_labels(
-    labels: np.ndarray,
-    missing: np.ndarray | None,
-    active: np.ndarray,
-    column: str,
-) -> None:
-    """Refuse capture labels that leave one of the active cells unlabeled."""
-    unlabeled = np.zeros(len(active), dtype=bool) if missing is None else missing
-    if labels.dtype.kind == "f":
-        unlabeled = unlabeled | np.isnan(labels)
-    count = int(np.count_nonzero(unlabeled & active))
-    if count:
-        verb = "has" if count == 1 else "have"
-        raise ValueError(
-            f"Cell calling per capture needs a {column!r} label for every cell, "
-            f"but {count} of the run's cells {verb} none"
-        )
-
-
-def _check_capture_labels(store: Any, source: CellSource, column: str) -> None:
-    """Refuse a capture column with unlabeled input cells before the run starts.
-
-    The stage checks its frozen labels again, since the live column can change
-    before the snapshot.
-    """
-    labels, missing = snapshot_column_values(
-        as_zarr_group(store.zw["cellData"], name="cellData"), column
-    )
-    if source.column is not None:
-        active = np.asarray(store.cells.fetch_all(source.column), dtype=bool)
-    else:
-        assert source.selection is not None
-        active = _selection_mask(store, source.selection)
-    _require_capture_labels(labels, missing, active, column)
 
 
 def _cell_calling_stage(
@@ -165,14 +122,16 @@ def _cell_calling_stage(
                 ("cell_calling", ArtifactRef.from_dict(dict(calls))),
                 ("called_cell_selection", called),
             )
-        active = _selection_mask(store, source)
+        active = selection_mask(store, source)
         # The capture labels are frozen apart from the cell snapshot, so the
         # filtering and snapshot settings leave each capture's calls alone.
         snapshot = state.artifacts["capture_snapshot"]
         labels, missing = snapshot_column_values(
             artifact_group(store.zw, snapshot), capture_column
         )
-        _require_capture_labels(labels, missing, active, capture_column)
+        require_labeled_cells(
+            labels, missing, active, capture_column, purpose=_CAPTURE_PURPOSE
+        )
         labels = np.asarray(labels).astype(str)
         union = np.zeros(len(active), dtype=bool)
         inputs: dict[str, Any] = {"input_cell_selection": source}
@@ -194,7 +153,7 @@ def _cell_calling_stage(
                     f"Cell calling failed for capture {capture!r} of "
                     f"{capture_column!r}: {error}"
                 ) from error
-            union |= _selection_mask(store, called)
+            union |= selection_mask(store, called)
             inputs[f"capture_{index}"] = called
         merged = _derived_selection(
             store,
@@ -223,7 +182,7 @@ def _hashing_stage(
         store = state.store
         source = state.artifacts[input_key]
         hashing = store._qc_hto_demultiplexing(source, from_assay=hto_assay, **settings)
-        active = _selection_mask(store, source)
+        active = selection_mask(store, source)
         labels = hashtag_labels(store, hashing, source, active)
         singlets = active & ~np.isin(labels, ("Negative", "Doublet"))
         if not singlets.any():
@@ -306,21 +265,6 @@ def _cell_cycle_stage(enabled: bool, settings: Mapping[str, Any]) -> PlannedStag
         return (("cell_cycle", ref),)
 
     return PlannedStage("cell_cycle", action)
-
-
-def _hvg_stage(settings: Mapping[str, Any]) -> PlannedStage:
-    def action(state: RunState) -> Outputs:
-        ref = state.store._select_hvgs_artifact(
-            assay=state.assay,
-            cell_selection=state.artifacts["analysis_cell_selection"],
-            feature_names=state.feature_names,
-            feature_snapshot=state.artifacts["feature_snapshot"],
-            show_plot=False,
-            **settings,
-        )
-        return (("highly_variable_features", ref),)
-
-    return PlannedStage("highly_variable_features", action)
 
 
 def _doublet_stage(
@@ -433,10 +377,7 @@ def resolve_rna(
     cell_cycle_enabled, cell_cycle_settings = stage_settings(
         "cell_cycle", cell_cycle, optional=True
     )
-    _hvg_enabled, hvg_settings = stage_settings("hvg", hvg, optional=False)
-    hvg_batch = hvg_settings.get("batch")
-    if hvg_batch is not None and hvg_batch not in store.cells.columns:
-        raise KeyError(f"HVG batch column {hvg_batch!r} was not found")
+    hvg_settings = resolve_hvg(store, hvg)
     _norm_enabled, normalization_settings = stage_settings(
         "normalization", normalization, optional=False
     )
@@ -446,12 +387,7 @@ def resolve_rna(
     )
     if pca_dims == 0 and pca_settings:
         raise ValueError("PCA settings need dims above 0; dims=0 skips PCA")
-    hvg_top_n = hvg_settings.get("top_n", HVG_TOP_N_DEFAULT)
-    if pca_dims >= hvg_top_n:
-        raise ValueError(
-            f"pca dims ({pca_dims}) must be below hvg top_n ({hvg_top_n}): PCA "
-            "needs at least dims + 1 features"
-        )
+    check_pca_features(pca_dims, hvg_settings)
     harmony_columns, harmony_settings = resolve_harmony(store, harmony)
     graph = resolve_graph(
         ann_index=ann_index,
@@ -508,12 +444,14 @@ def resolve_rna(
         filtering,
         cells=source,
         assay=assay_name,
-        default_attrs=default_filter_columns(store, assay_name, _FILTER_SUFFIXES),
+        default_attrs=default_filter_columns(store, assay_name, FILTER_SUFFIXES),
         operation=OPERATION,
         qc_stages=calling_enabled or hashing_enabled,
     )
     if calling_enabled and capture_column is not None:
-        _check_capture_labels(store, source, capture_column)
+        # The stage checks its frozen labels again, since the live column can
+        # change before the snapshot.
+        check_labeled_cells(store, source, capture_column, purpose=_CAPTURE_PURPOSE)
     cell_columns, extra_snapshots = cell_snapshots(
         filtering_config,
         harmony_columns=harmony_columns,
@@ -564,7 +502,7 @@ def resolve_rna(
             called=calling_enabled,
         ),
         _cell_cycle_stage(cell_cycle_enabled, cell_cycle_settings),
-        _hvg_stage(hvg_settings),
+        hvg_stage(hvg_settings),
         normalization_stage("highly_variable_features", normalization_settings),
         pca_stage(pca_dims, pca_settings),
         harmony_stage(harmony_columns, harmony_settings),

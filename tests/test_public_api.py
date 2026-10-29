@@ -837,6 +837,7 @@ def test_pipeline_accessor_has_a_public_import_path():
         "atac",
         "adt",
         "multimodal",
+        "perturbation",
     }
     assert not hasattr(PipelineAccessor, "run")
     # The event types keep their documented import path, under which they pickle.

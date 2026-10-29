@@ -28,6 +28,8 @@ import numpy as np
 import pandas as pd
 from numba import njit, prange
 
+from cytearc.utils.arguments import float_argument, integer_argument
+
 __all__ = [
     "PerturbationSignature",
     "nearest_controls",
@@ -35,6 +37,7 @@ __all__ = [
     "normalize_counts_by_feature",
     "signature_of_values",
     "signature_rows",
+    "signature_settings",
 ]
 
 # The bytes of distances that one block of query cells holds.
@@ -42,6 +45,37 @@ _DISTANCE_BYTES = 1 << 26
 # Candidates beyond the k nearest by the fast distances, which the exact
 # distances then rank.
 _EXTRA_CANDIDATES = 8
+
+
+def signature_settings(
+    dims: object,
+    n_neighbors: object,
+    scale_factor: object,
+    sample_column: object,
+) -> tuple[int, int, float]:
+    """Check the settings of a perturbation signature, as ``signature`` takes them.
+
+    The pipeline recipe checks the same settings before its run starts.
+    Whether ``dims`` fits the coordinates, and whether the sample column
+    exists, are checked against the store.
+
+    Returns:
+        The coordinate dimensions, the neighbors and the scale factor.
+
+    Raises:
+        TypeError: If a setting has the wrong type.
+        ValueError: If a number is out of range.
+    """
+    resolved_dims = integer_argument(dims, "dims", minimum=1)
+    neighbors_k = integer_argument(n_neighbors, "n_neighbors", minimum=1)
+    factor = float_argument(scale_factor, "scale_factor")
+    if factor <= 0:
+        raise ValueError("scale_factor must be above 0")
+    if sample_column is not None and (
+        not isinstance(sample_column, str) or not sample_column
+    ):
+        raise TypeError("sample_column must be a non-empty string or None")
+    return resolved_dims, neighbors_k, factor
 
 
 def nearest_controls(

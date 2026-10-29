@@ -43,7 +43,8 @@ See [Remote stores and mounted analysis targets](../tutorials/remote-stores).
 ## Analysis namespaces
 
 For a standard analysis, start with a pipeline recipe, such as `ds.pipeline.rna(label=...)`,
-`ds.pipeline.atac(...)`, `ds.pipeline.adt(...)`, or `ds.pipeline.multimodal(...)`
+`ds.pipeline.atac(...)`, `ds.pipeline.adt(...)`, `ds.pipeline.multimodal(...)`, or
+`ds.pipeline.perturbation(...)`
 ({doc}`pipeline`). Use the namespaces below when selecting individual analysis steps. Each method
 keeps its scientific defaults, return type, and saved-result identity. Cell metadata stays on
 `ds.cells`, and `ds.get_assay(name)` provides access to every assay, including one whose name

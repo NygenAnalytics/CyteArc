@@ -17,6 +17,15 @@ from ...features.variability import (
     hvg_options,
 )
 from ...graph.arguments import graph_load_flags, umap_graph_flags
+from ...perturbation.associations import association_settings
+from ...perturbation.clusters import cluster_settings, perturbation_names
+from ...perturbation.edistance import edistance_settings
+from ...perturbation.efficiency import efficiency_settings
+from ...perturbation.guide_thresholds import call_settings
+from ...perturbation.labels import label_settings
+from ...perturbation.mixscape import mixscape_settings
+from ...perturbation.profiles import profile_settings
+from ...perturbation.signature import signature_settings
 from ...quality_control.cell_calling import validated_fdr, validated_settings
 from ...quality_control.hto import _validated_positive_quantile
 from ...utils.arguments import integer_argument
@@ -25,6 +34,7 @@ from .._operations.cell_calling import _CellCallingOperationsMixin
 from .._operations.embeddings import _EmbeddingOperationsMixin
 from .._operations.features import _FeatureOperationsMixin
 from .._operations.graph import _GraphOperationsMixin
+from .._operations.perturbation import _PerturbationOperationsMixin
 from .._operations.quality_control import _QualityControlOperationsMixin
 
 
@@ -85,9 +95,11 @@ DEFAULT_LEIDEN_PARTITIONS: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25)
 # means exactly what the same keyword means on the stage's method, and
 # omitting it uses that method's default. Some keys configure the recipe
 # instead: Leiden ``partitions`` and ``selected``, the ADT panel's
-# ``exclude``, the HTO ``assay`` of hashing, and the capture
-# ``sample_column`` of cell calling. Harmony's ``batch_columns`` is the
-# required keyword of its method.
+# ``exclude``, the HTO ``assay`` of hashing, the capture ``sample_column`` of
+# cell calling, and guide calling's ``path`` and ``barcode_prefix``, which
+# import Cell Ranger's calls in place of calling guides. Harmony's
+# ``batch_columns`` and the ``controls`` of perturbation labels are required
+# keywords of their methods.
 STAGE_SETTINGS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "cell_calling": frozenset(
@@ -231,7 +243,80 @@ STAGE_SETTINGS: Mapping[str, frozenset[str]] = MappingProxyType(
             }
         ),
         "markers": frozenset(),
+        "guide_calling": frozenset(
+            {
+                "method",
+                "min_umi",
+                "fraction_threshold",
+                "sample_column",
+                "path",
+                "barcode_prefix",
+            }
+        ),
+        "labels": frozenset({"controls", "target_column", "targets", "policy"}),
+        "efficiency": frozenset({"by", "id_column"}),
+        "edistance": frozenset({"by", "n_permutations", "random_seed"}),
+        "signature": frozenset(
+            {"dims", "n_neighbors", "sample_column", "scale_factor"}
+        ),
+        "mixscape": frozenset(
+            {
+                "split_column",
+                "min_de_genes",
+                "min_cells",
+                "logfc_threshold",
+                "min_fraction",
+                "p_value_cutoff",
+                "scale",
+                "max_iterations",
+                "perturbation_type",
+            }
+        ),
+        "associations": frozenset(
+            {
+                "positive_controls",
+                "id_column",
+                "integration",
+                "sample_column",
+                "covariates",
+                "side",
+                "n_resamples",
+                "stage_threshold",
+                "approximation",
+                "min_nonzero",
+                "n_calibration_pairs",
+                "alpha",
+                "seed",
+            }
+        ),
+        "profiles": frozenset(
+            {"by", "sample_column", "min_cells", "mask_targets", "id_column"}
+        ),
+        "clusters": frozenset(
+            {
+                "perturbations",
+                "metric",
+                "min_cluster_size",
+                "min_samples",
+                "selection",
+                "seed",
+            }
+        ),
     }
+)
+# The settings with which guide calling imports Cell Ranger's calls, in place
+# of the settings with which it calls guides.
+GUIDE_IMPORT_SETTINGS = frozenset({"path", "barcode_prefix"})
+# Labels need controls, which CyteArc never guesses.
+LABELS_NEED_CONTROLS = (
+    "labels needs controls, the targets of the control guides, such as "
+    "labels={'controls': ['Non-Targeting']}; CyteArc never guesses them"
+)
+# Guide calling either imports Cell Ranger's calls or calls guides.
+_GUIDE_CALLING_EITHER = (
+    "guide_calling imports Cell Ranger's calls with path and barcode_prefix, or "
+    "calls guides with method, min_umi, fraction_threshold and sample_column; "
+    "not both"
 )
 
 
@@ -298,6 +383,71 @@ _CELL_CALLING_DEFAULTS: Mapping[str, Any] = MappingProxyType(
         for name in ("lower", "retain", "n_iter", "alpha", "fdr", "random_seed")
     }
 )
+# Each perturbation stage's check, which its method runs on the same settings,
+# and the method whose defaults the settings omit. A check takes the settings
+# by the method's keyword names.
+_PERTURBATION = _PerturbationOperationsMixin
+_PERTURBATION_CHECKS: Mapping[str, tuple[Callable[..., Any], Callable[..., Any]]] = (
+    MappingProxyType(
+        {
+            "guide_calling": (call_settings, _PERTURBATION._perturbation_call_guides),
+            "labels": (label_settings, _PERTURBATION._perturbation_labels),
+            "efficiency": (efficiency_settings, _PERTURBATION._perturbation_efficiency),
+            "edistance": (edistance_settings, _PERTURBATION._perturbation_edistance),
+            "signature": (signature_settings, _PERTURBATION._perturbation_signature),
+            "mixscape": (mixscape_settings, _PERTURBATION._perturbation_mixscape),
+            "associations": (
+                association_settings,
+                _PERTURBATION._perturbation_associations,
+            ),
+            "profiles": (profile_settings, _PERTURBATION._perturbation_profiles),
+            "clusters": (cluster_settings, _PERTURBATION._perturbation_cluster),
+        }
+    )
+)
+# The dimensions of a perturbation signature whose settings omit them.
+SIGNATURE_DIMS_DEFAULT: int = keyword_default(
+    _PERTURBATION._perturbation_signature, "dims"
+)
+
+
+def method_setting(stage: str, settings: Mapping[str, Any], name: str) -> Any:
+    """Return a perturbation stage's setting, or its method's default."""
+    if name in settings:
+        return settings[name]
+    return keyword_default(_PERTURBATION_CHECKS[stage][1], name)
+
+
+def _check_perturbation_stage(stage: str, value: Mapping[str, Any]) -> None:
+    """Run a perturbation stage method's own checks on the stage's settings.
+
+    Guide calling either imports Cell Ranger's calls, with ``path`` and
+    ``barcode_prefix``, or calls guides with the other settings. Labels need
+    ``controls``, which have no default.
+    """
+    if stage == "guide_calling" and "path" in value:
+        if set(value) - GUIDE_IMPORT_SETTINGS:
+            raise ValueError(_GUIDE_CALLING_EITHER)
+        path = value["path"]
+        if not isinstance(path, str) or not path:
+            raise TypeError("path must be a path to Cell Ranger's call file")
+        prefix = value.get("barcode_prefix")
+        if prefix is not None and not isinstance(prefix, str):
+            raise TypeError("barcode_prefix must be text or None")
+        return
+    if stage == "guide_calling" and "barcode_prefix" in value:
+        raise ValueError(_GUIDE_CALLING_EITHER)
+    if stage == "labels" and "controls" not in value:
+        raise ValueError(LABELS_NEED_CONTROLS)
+    check, _method = _PERTURBATION_CHECKS[stage]
+    check(
+        **{
+            name: method_setting(stage, value, name)
+            for name in inspect.signature(check).parameters
+        }
+    )
+    if stage == "clusters" and value.get("perturbations") is not None:
+        perturbation_names(value["perturbations"])
 
 
 def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:
@@ -343,6 +493,8 @@ def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:
         validated_settings(**options)
     elif stage == "hashing" and "positive_quantile" in value:
         _validated_positive_quantile(value["positive_quantile"])
+    elif stage in _PERTURBATION_CHECKS:
+        _check_perturbation_stage(stage, value)
     # The counts and sizes that these stages take must be positive integers.
     for key in _POSITIVE_INTEGER_SETTINGS.get(stage, ()):
         if key in value:

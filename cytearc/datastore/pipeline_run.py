@@ -1220,9 +1220,9 @@ class PipelineRun(Mapping[str, ArtifactRef]):
     def recipe(self) -> str:
         """The recipe that wrote the run, such as ``"rna"``.
 
-        The recipes record ``"rna"``, ``"atac"``, ``"adt"``, and
-        ``"multimodal"``, and a run that ``pipeline.run()`` of an earlier
-        release saved records ``"basic_rna_analysis"``.
+        The recipes record ``"rna"``, ``"atac"``, ``"adt"``, ``"multimodal"``,
+        and ``"perturbation"``, and a run that ``pipeline.run()`` of an
+        earlier release saved records ``"basic_rna_analysis"``.
         """
         return self._record.recipe
 

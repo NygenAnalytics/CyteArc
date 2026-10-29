@@ -27,6 +27,8 @@ import pandas as pd
 from numba import njit, prange
 from scipy.special import ndtr
 
+from cytearc.utils.arguments import float_argument, integer_argument
+
 __all__ = [
     "FEW_CELLS",
     "FEW_DE_GENES",
@@ -38,6 +40,7 @@ __all__ = [
     "classify_target",
     "constrained_mixture",
     "group_totals",
+    "mixscape_settings",
     "rank_sum_p_values",
     "scale_like_seurat",
     "sorted_log_values",
@@ -58,6 +61,62 @@ _LOG_SQRT_2PI = 0.5 * np.log(2.0 * np.pi)
 # Smallest standard deviation of the fitted component before it counts as
 # collapsed onto a few cells.
 _MIN_SD = 1e-12
+# The log of the largest float64, about 709.78, above which exp overflows.
+_LOG_LARGEST = float(np.log(np.finfo(np.float64).max))
+
+
+def mixscape_settings(
+    min_de_genes: object,
+    min_cells: object,
+    max_iterations: object,
+    logfc_threshold: object,
+    min_fraction: object,
+    p_value_cutoff: object,
+    scale: object,
+    perturbation_type: object,
+    split_column: object,
+) -> tuple[int, int, int, float, float, float]:
+    """Check the settings of Mixscape, as ``mixscape`` takes them.
+
+    The pipeline recipe checks the same settings before its run starts.
+    Whether the split column exists is checked against the store.
+
+    Returns:
+        ``min_de_genes``, ``min_cells``, ``max_iterations``,
+        ``logfc_threshold``, ``min_fraction`` and ``p_value_cutoff``, as
+        Python numbers.
+
+    Raises:
+        TypeError: If a setting has the wrong type.
+        ValueError: If a number is out of range, or ``perturbation_type`` is
+            empty or holds a space.
+    """
+    de_floor = integer_argument(min_de_genes, "min_de_genes", minimum=1)
+    cell_floor = integer_argument(min_cells, "min_cells", minimum=1)
+    iterations = integer_argument(max_iterations, "max_iterations", minimum=1)
+    fold = float_argument(logfc_threshold, "logfc_threshold")
+    fraction = float_argument(min_fraction, "min_fraction")
+    cutoff = float_argument(p_value_cutoff, "p_value_cutoff")
+    if fold < 0:
+        raise ValueError("logfc_threshold must be at least 0")
+    if not 0 <= fraction <= 1:
+        raise ValueError("min_fraction must be from 0 to 1")
+    if not 0 < cutoff <= 1:
+        raise ValueError("p_value_cutoff must be above 0 and at most 1")
+    if not isinstance(scale, bool):
+        raise TypeError("scale must be a boolean")
+    if not isinstance(perturbation_type, str):
+        raise TypeError("perturbation_type must be a string")
+    if not perturbation_type or " " in perturbation_type:
+        raise ValueError(
+            "perturbation_type must be one word, such as 'KO', not "
+            f"{perturbation_type!r}"
+        )
+    if split_column is not None and (
+        not isinstance(split_column, str) or not split_column
+    ):
+        raise TypeError("split_column must be a non-empty string or None")
+    return de_floor, cell_floor, iterations, fold, fraction, cutoff
 
 
 @njit(cache=True, nogil=True, parallel=True)
@@ -332,6 +391,24 @@ def _log_normal(values: np.ndarray, mean: float, sd: float) -> np.ndarray:
     return out
 
 
+def _knocked_out_posterior(log_ratio: np.ndarray) -> np.ndarray:
+    """Return ``1 / (1 + exp(log_ratio))`` without overflowing exp.
+
+    ``log_ratio`` is each cell's log likelihood under the control component
+    minus that under the fitted one, so this is the probability of the fitted
+    component under equal priors. Up to log(DBL_MAX), about 709.78, it is
+    computed as written. Above it exp overflows, and the posterior equals
+    ``exp(-log_ratio) / (1 + exp(-log_ratio))``, where ``exp(-log_ratio)`` is
+    below 2**-1022 and leaves the 1 unchanged: the posterior is
+    ``exp(-log_ratio)``, a subnormal number, or 0 above about 745.
+    """
+    posterior = np.empty_like(log_ratio)
+    beyond = log_ratio > _LOG_LARGEST
+    posterior[~beyond] = 1.0 / (1.0 + np.exp(log_ratio[~beyond]))
+    posterior[beyond] = np.exp(-log_ratio[beyond])
+    return posterior
+
+
 def constrained_mixture(
     scores: np.ndarray,
     control_mean: float,
@@ -524,7 +601,7 @@ def classify_target(
         log_ratio = _log_normal(scores, control_mean, control_sd) - _log_normal(
             scores, fit.mean, fit.sd
         )
-        posterior = 1.0 / (1.0 + np.exp(log_ratio))
+        posterior = _knocked_out_posterior(log_ratio)
         called = np.where(posterior > 0.5, True, np.where(posterior < 0.5, False, ko))
         if np.count_nonzero(called) < min_cells:
             return _escapers(n_target, FEW_CELLS, iterations)
