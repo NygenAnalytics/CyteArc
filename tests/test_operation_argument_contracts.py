@@ -370,6 +370,28 @@ _CONTRACTS = (
         ),
     ),
     OperationContract(
+        PerturbationAccessor.profiles,
+        metadata_arguments.PerturbationProfileArguments,
+        aliases={"features": "feature_selection", "sample_column": "sample_columns"},
+        # The ID column matches each target to the feature that masking sets
+        # to 0, which the target features fingerprint records.
+        signature_only=_classified("transformed", "id_column"),
+        model_only=_classified(
+            "resolved_input",
+            "dataset_fingerprint",
+            "sample_assignments_fingerprint",
+            "target_features_fingerprint",
+        ),
+    ),
+    OperationContract(
+        PerturbationAccessor.cluster,
+        metadata_arguments.PerturbationClusterArguments,
+        aliases={"profiles": "perturbation_profiles"},
+        # The named perturbations become a fingerprint of their names.
+        signature_only=_classified("transformed", "perturbations"),
+        model_only=_classified("resolved_input", "perturbations_fingerprint"),
+    ),
+    OperationContract(
         QcAccessor.hto_demultiplexing,
         metadata_arguments.HtoIdentityArguments,
         model_only={

@@ -1,6 +1,6 @@
 import hashlib
 import os
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -16,9 +16,11 @@ from ...metadata.arguments import (
     GuideThresholdArguments,
     MixscapeArguments,
     PerturbationAssociationArguments,
+    PerturbationClusterArguments,
     PerturbationEDistanceArguments,
     PerturbationEfficiencyArguments,
     PerturbationLabelArguments,
+    PerturbationProfileArguments,
     PerturbationSignatureArguments,
 )
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
@@ -67,7 +69,9 @@ from ...perturbation.labels import (
     perturbation_label_frames,
 )
 from ...perturbation.associations import PerturbationAssociations
+from ...perturbation.clusters import PerturbationClusters
 from ...perturbation.mixscape import MixscapeResult
+from ...perturbation.profiles import PerturbationProfiles
 from ...perturbation.signature import PerturbationSignature
 from ...perturbation.histograms import (
     MAX_COUNT,
@@ -230,6 +234,30 @@ class _LabelRows:
     names: np.ndarray
 
 
+@dataclass(frozen=True, slots=True)
+class _ProfileCells:
+    """The cells of perturbation profiles, from labels or Mixscape classes.
+
+    Attributes:
+        labels: The perturbation labels that name the targets and controls.
+        rows: The perturbations: each target of the labels that is not a
+            control, or each guide with a target.
+        row_control: Whether each row is a control guide.
+        cell_selection: The selection of the cells.
+        cell_index: The cells' positions in the store.
+        groups: Each cell's perturbation, a row of ``rows``, or -1.
+        control: Whether each cell is a control cell.
+    """
+
+    labels: ArtifactRef
+    rows: _LabelRows
+    row_control: np.ndarray
+    cell_selection: ArtifactRef
+    cell_index: np.ndarray
+    groups: np.ndarray
+    control: np.ndarray
+
+
 @contextmanager
 def _numba_threads(nthreads: int) -> Iterator[None]:
     """Run the parallel fits on ``nthreads`` Numba threads, then restore them."""
@@ -350,6 +378,38 @@ def _association_warnings(
             "covariates and the control guides before trusting the discoveries"
         )
     return messages
+
+
+def _left_out_warning(
+    names: np.ndarray,
+    n_cells: np.ndarray,
+    n_rows: int,
+    min_cells: int,
+    rows: str,
+    cells: str,
+) -> str | None:
+    """Name the perturbations without a profile, or return None when every one has one.
+
+    Args:
+        names: The perturbations with fewer than ``min_cells`` cells.
+        n_cells: Their cells.
+        n_rows: The perturbations of the labels.
+        min_cells: The fewest cells of a profiled perturbation.
+        rows: What the perturbations are, ``"targets"`` or ``"guides"``.
+        cells: What their cells are, such as ``"knocked-out cells"``.
+    """
+    if not len(names):
+        return None
+    examples = ", ".join(
+        f"{str(name)!r} ({int(count)})"
+        for name, count in zip(names[:5], n_cells[:5], strict=True)
+    )
+    more = ", and more" if len(names) > 5 else ""
+    return (
+        f"{len(names)} of {n_rows} {rows} have fewer than {min_cells} {cells} "
+        f"and get no profile: {examples}{more}. perturbation.load_profiles lists "
+        "them all in left_out."
+    )
 
 
 class _PerturbationOperationsMixin(_PerturbationOperationsBase):
@@ -1633,11 +1693,14 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             policy=str(parameters["policy"]),
         )
 
-    def _label_rows(self, labels: ArtifactRef, by: str) -> _LabelRows:
+    def _label_rows(
+        self, labels: ArtifactRef, by: str, *, control_guides: bool = False
+    ) -> _LabelRows:
         """Read the rows of a per-perturbation table: each target or each guide.
 
         A row is a target that is not a control, or with ``by="guide"`` a guide
-        whose target is not a control, in assay order.
+        whose target is not a control, in assay order; ``control_guides``
+        makes the guides of control targets rows too.
         """
         status = require_complete_artifact(self.zw, labels)
         group = artifact_group(self.zw, labels)
@@ -1654,7 +1717,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             names = target_names[codes]
         else:
             guides = np.flatnonzero(
-                (guide_targets >= 0) & ~is_control[np.maximum(guide_targets, 0)]
+                (guide_targets >= 0)
+                & (control_guides | ~is_control[np.maximum(guide_targets, 0)])
             )
             codes = guide_targets[guides]
             names = read(calls, "guides").astype(str)[guides]
@@ -2689,7 +2753,11 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         sample_columns = list(parameters["sample_columns"])
         index = pd.Index(cell_ids, name="ids")
         return PerturbationSignature(
-            values=pd.DataFrame(values, index=index, columns=feature_ids[columns]),
+            # The frame wraps the values as read, the 4 bytes per value that the
+            # budget check above counts; pandas would otherwise copy them.
+            values=pd.DataFrame(
+                values, index=index, columns=feature_ids[columns], copy=False
+            ),
             cells=pd.DataFrame(
                 {
                     "is_control": read("is_control").astype(bool),
@@ -4422,4 +4490,906 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             from_assay=str(tests.assay),
             n_false_discoveries=int(str(group.attrs["n_false_discoveries"])),
             calibration_grade=str(group.attrs["calibration_grade"]),
+        )
+
+    def _profile_cells(self, labels: ArtifactRef, by: str) -> _ProfileCells:
+        """Read the rows and cells of perturbation profiles.
+
+        The rows are the targets of the labels that are not controls, or with
+        ``by="guide"`` every guide with a target, the control guides included.
+        A row's cells carry its target, or its guide, alone. With Mixscape
+        classes, the cells are those of the classes, and of a row that is not
+        a control guide only those that Mixscape called knocked out count.
+
+        Raises:
+            ValueError: If the labels have no control cell.
+        """
+
+        def selected_cells(selection: ArtifactRef) -> np.ndarray:
+            return read_stored_selection_indices(
+                self.zw,
+                selection,
+                kind="cell_selection",
+                scope="datastore",
+                assay=None,
+                table_path="cellData",
+            ).astype(np.int64, copy=False)
+
+        classes = None
+        perturbation_labels = labels
+        if labels.kind == MixscapeArguments.artifact_kind:
+            classes = require_complete_artifact(self.zw, labels)
+            perturbation_labels = require_complete_artifact(
+                self.zw, classes.input_ref("signature")
+            ).input_ref("labels")
+        rows = self._label_rows(perturbation_labels, by, control_guides=True)
+        groups, control = self._label_groups(perturbation_labels, rows, by)
+        row_control = np.asarray(
+            as_zarr_array(
+                artifact_group(self.zw, perturbation_labels)["target_is_control"],
+                name="target_is_control",
+            )[:],
+            dtype=bool,
+        )[rows.codes]
+        selection = rows.status.input_ref("cell_selection")
+        cell_index = selected_cells(selection)
+        if classes is not None:
+            # The cells of the classes, with the rows and flags of those that
+            # the labels cover.
+            selection = classes.input_ref("cell_selection")
+            classified = selected_cells(selection)
+            positions = np.searchsorted(classified, cell_index)
+            present = positions < len(classified)
+            present[present] = classified[positions[present]] == cell_index[present]
+            aligned = np.full(len(classified), -1, dtype=np.int64)
+            aligned[positions[present]] = groups[present]
+            control_flags = np.zeros(len(classified), dtype=bool)
+            control_flags[positions[present]] = control[present]
+            knocked_out = np.asarray(
+                self._artifacts_load_values(labels, value="global_class").values
+            ).astype(str) == str((classes.parameters or {})["perturbation_type"])
+            kept = aligned >= 0
+            kept[kept] = knocked_out[kept] | row_control[aligned[kept]]
+            cell_index, groups, control = (
+                classified,
+                np.where(kept, aligned, -1),
+                control_flags,
+            )
+        return _ProfileCells(
+            labels=perturbation_labels,
+            rows=rows,
+            row_control=row_control,
+            cell_selection=selection,
+            cell_index=cell_index,
+            groups=groups,
+            control=control,
+        )
+
+    @validation_scoped
+    def _perturbation_profiles(
+        self,
+        labels: ArtifactRef,
+        features: ArtifactRef,
+        *,
+        by: str = "target",
+        sample_column: str | None = None,
+        min_cells: int = 25,
+        mask_targets: bool = True,
+        id_column: str | None = "target_gene_id",
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Average each perturbation's z-normalized expression into its profile.
+
+        Replogle et al. (2022) compare perturbations by their mean expression
+        profiles, each feature measured against the control cells:
+
+        1. Each cell's counts in ``features`` are scaled so that its total,
+           the sum of its stored counts over every feature of the assay,
+           equals the median total of the control cells of the labels.
+        2. Within each sample of ``sample_column``, such as a GEM group, each
+           feature is z-normalized against the sample's control cells,
+           ``z = (x - mean) / sd``, with the standard deviation's n - 1
+           divisor, for every cell, control cells included.
+        3. A perturbation's profile is the mean z-score of its cells over all
+           samples, computed in float64 and stored as float32.
+
+        This recipe reproduces the published profiles of Replogle et al.'s K562
+        essential screen from its cells to float32 rounding. A feature whose
+        control cells in a sample hold one value has no spread there, and its
+        z-scores in that sample are 0, CyteArc's choice where Replogle et al.'s
+        genome-wide profiles hold infinite values; ``load_profiles`` counts
+        such samples for each feature. A sample needs 2 control cells or more.
+
+        A perturbation is a target of the labels that is not a control, or
+        with ``by="guide"`` a guide, each control guide included, as Replogle
+        et al.'s profiles have a row for each guide pair, control pairs
+        included; with targets, the control cells get no row, since their mean
+        z-score is 0. A perturbation's cells carry its target, or its guide,
+        alone. With Mixscape classes as ``labels``, only the cells that
+        Mixscape called knocked out count, among the cells of the classes, so
+        that escapers do not dilute the profiles; a control guide keeps its
+        cells. A perturbation with fewer than ``min_cells`` cells, 25 as in
+        Replogle et al., gets no profile and is named in a warning, which a
+        reused result repeats. With ``mask_targets``, each profile's own
+        target feature is set to 0, the control mean, so that the knockdown
+        of the target itself does not make two perturbations alike; a target
+        is matched to a feature as
+        :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.efficiency`
+        matches it, and control guides mask nothing.
+
+        The counts are read twice, the control cells and then the cells of
+        the profiled perturbations, in bands of features that fit the memory
+        budget, and the profiles do not depend on the bands or the threads.
+
+        Args:
+            labels: A ``perturbation_labels`` artifact, or a
+                ``mixscape_classes`` artifact whose knocked-out cells alone
+                count.
+            features: A ``feature_selection`` artifact, such as highly
+                variable genes, whose features the profiles hold; its assay is
+                the expression assay.
+            by: ``"target"`` for one profile per target gene, or ``"guide"``
+                for one per guide, control guides included.
+            sample_column: A cell metadata column whose samples are
+                z-normalized against their own control cells, or None for one
+                sample.
+            min_cells: The fewest cells of a profiled perturbation.
+            mask_targets: Set each profile's own target feature to 0.
+            id_column: The feature column of the guide assay that holds each
+                guide's target feature ID, or None to match targets by name
+                only; it matters only with ``mask_targets``.
+            invalidate_cache: Compute again instead of reusing saved
+                profiles.
+
+        Returns:
+            A complete ``perturbation_profiles`` artifact scoped to the assay
+            of ``features``, with one profile per perturbation. Read it with
+            :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.load_profiles`.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``labels`` or ``features`` is not an artifact of
+                its kinds, ``by`` is unknown, ``min_cells`` is below 1,
+                ``sample_column`` is not a cell metadata column or leaves a
+                control cell or a cell of a profiled perturbation without a
+                sample, a sample has fewer than 2 control cells, ``id_column``
+                is not a feature column of the guide assay, the labels have no
+                control cell, or no perturbation has ``min_cells`` cells.
+            PermissionError: If the store is read-only and the profiles are
+                not saved yet.
+            MemoryError: If the profiles and one feature's sums do not fit the
+                memory budget.
+        """
+        from ...assay.normalization import feature_value_blocks
+        from ...metadata.selection import NormalizationSpec
+        from ...perturbation.profiles import (
+            CONTROL_SD_DDOF,
+            control_moments,
+            depth_target,
+            profile_values,
+            z_score_sums,
+        )
+        from ...storage.feature_selection import read_feature_selection_indices
+
+        if not isinstance(labels, ArtifactRef):
+            raise TypeError("labels must be an ArtifactRef")
+        if labels.kind not in (
+            PerturbationLabelArguments.artifact_kind,
+            MixscapeArguments.artifact_kind,
+        ):
+            raise ValueError(
+                "labels must be a perturbation_labels or mixscape_classes "
+                f"artifact, not {labels.kind!r}"
+            )
+        if not isinstance(features, ArtifactRef):
+            raise TypeError("features must be an ArtifactRef")
+        if features.kind != "feature_selection":
+            raise ValueError(
+                f"features must be a feature_selection artifact, not {features.kind!r}"
+            )
+        if not isinstance(by, str) or by not in ("target", "guide"):
+            raise ValueError(f"by must be 'target' or 'guide', not {by!r}")
+        floor = integer_argument(min_cells, "min_cells", minimum=1)
+        if not isinstance(mask_targets, bool):
+            raise TypeError("mask_targets must be a boolean")
+        if id_column is not None and (not isinstance(id_column, str) or not id_column):
+            raise TypeError("id_column must be a feature column name or None")
+        if sample_column is not None:
+            if not isinstance(sample_column, str) or not sample_column:
+                raise TypeError("sample_column must be a non-empty string or None")
+            if sample_column not in self.cells.columns:
+                raise ValueError(
+                    f"sample_column '{sample_column}' not found in cell metadata"
+                )
+        if not isinstance(invalidate_cache, bool):
+            raise TypeError("invalidate_cache must be a boolean")
+        cells = self._profile_cells(labels, by)
+        expression = self._get_assay(str(features.assay))
+        self._require_measured_cells(
+            expression.name,
+            cells.cell_selection,
+            operation=PerturbationProfileArguments.operation,
+        )
+        feature_index = np.asarray(
+            read_feature_selection_indices(self.zw, expression.name, features),
+            dtype=np.int64,
+        )
+        n_features = len(feature_index)
+        rows = cells.rows
+        n_rows = len(rows.names)
+        grouped = cells.groups >= 0
+        sizes = np.bincount(cells.groups[grouped], minlength=n_rows)
+        kept = np.flatnonzero(sizes >= floor)
+        thin = np.flatnonzero(sizes < floor)
+        if labels.kind == PerturbationLabelArguments.artifact_kind:
+            noun = "cells"
+        elif by == "target":
+            noun = "knocked-out cells"
+        else:
+            noun = "knocked-out or control cells"
+        if not len(kept):
+            raise ValueError(
+                f"No {by} has {floor} {noun} or more, so none gets a profile; "
+                "lower min_cells"
+            )
+        n_kept = len(kept)
+        names = rows.names[kept].astype(str)
+        row_targets = rows.target_names[rows.codes].astype(str)
+        feature_ids = np.asarray(expression.feats.fetch_all("ids")).astype(str)
+        # Each profile's masked feature, as a position in the assay.
+        masked = np.full(n_kept, -1, dtype=np.int64)
+        targets_fingerprint = None
+        if mask_targets:
+            guide_assay = self._get_assay(str(cells.labels.assay))
+            guide_feature_ids: np.ndarray | None = None
+            if id_column is not None:
+                if id_column not in guide_assay.feats.columns:
+                    raise ValueError(
+                        f"id_column {id_column!r} is not a feature column of assay "
+                        f"{guide_assay.name!r}"
+                    )
+                guide_feature_ids = np.asarray(
+                    guide_assay.feats.fetch_all(id_column), dtype=object
+                )
+            matched = target_features(
+                rows.target_names,
+                rows.guide_targets,
+                guide_feature_ids,
+                feature_ids,
+                np.asarray(expression.feats.fetch_all("names")).astype(str),
+            )[rows.codes[kept]]
+            # A control target is no gene of the genome.
+            matched[cells.row_control[kept]] = -1
+            targets_fingerprint = fingerprint_strings(
+                np.char.add(
+                    np.char.add(names, "\t"),
+                    np.where(matched >= 0, feature_ids[np.maximum(matched, 0)], ""),
+                )
+            )
+            # Only a target among the profiles' features has a value to mask.
+            inside = np.isin(matched, feature_index)
+            masked[inside] = matched[inside]
+        slot = np.full(n_rows, -1, dtype=np.int64)
+        slot[kept] = np.arange(n_kept)
+        groups = np.where(grouped, slot[np.maximum(cells.groups, 0)], -1)
+        # The cells read: the control cells and the cells of the profiled
+        # perturbations, which by guide include the control cells of a
+        # control guide, in store order.
+        used = np.flatnonzero(cells.control | (groups >= 0))
+        used_cells = cells.cell_index[used]
+        is_control = cells.control[used]
+        columns = () if sample_column is None else (sample_column,)
+        samples, sample_labels, assignments = sample_codes(
+            columns,
+            [self._guide_sample_labels(column, used_cells) for column in columns],
+            len(used),
+            reason=(
+                "Each sample's control cells z-normalize its cells, so every "
+                "control cell and every cell of a profiled perturbation needs one"
+            ),
+        )
+        sample_names = [
+            None if sample_column is None else labels_by_column[sample_column]
+            for labels_by_column in sample_labels
+        ]
+        n_samples = len(sample_names)
+        n_controls = np.bincount(samples[is_control], minlength=n_samples)
+        # The standard deviation's divisor needs this many control cells.
+        needed = CONTROL_SD_DDOF + 1
+        short = np.flatnonzero(n_controls < needed)
+        if len(short):
+            where = (
+                "the labels have"
+                if sample_column is None
+                else f"sample {sample_names[short[0]]!r} has"
+            )
+            raise ValueError(
+                f"The control standard deviations of a sample need {needed} "
+                f"control cells or more, but {where} "
+                f"{int(n_controls[short[0]])}; pass a sample_column whose "
+                f"samples each hold {needed} or more, or label more control cells"
+            )
+        arguments = PerturbationProfileArguments(
+            labels=labels,
+            feature_selection=features,
+            dataset_fingerprint=self._ensure_dataset_fingerprint(expression.name),
+            sample_assignments_fingerprint=assignments,
+            target_features_fingerprint=targets_fingerprint,
+            by=by,
+            min_cells=floor,
+            mask_targets=mask_targets,
+            sample_columns=columns,
+            invalidate_cache=invalidate_cache,
+        )
+        planned = arguments.plan(
+            self.zw,
+            scope="assay",
+            assay=expression.name,
+            invalidate_cache=invalidate_cache,
+            required_arrays=(
+                ArrayRequirement("values", shape=(n_kept, n_features), dtype_kind="f"),
+                *(
+                    ArrayRequirement(name, shape=(n_kept,))
+                    for name in ("perturbations", "targets")
+                ),
+                ArrayRequirement("is_control", shape=(n_kept,), dtype_kind="b"),
+                *(
+                    ArrayRequirement(name, shape=(n_kept,), dtype_kind="i")
+                    for name in ("n_cells", "masked_features")
+                ),
+                *(
+                    ArrayRequirement(name, shape=(len(thin),))
+                    for name in ("left_out", "left_out_targets")
+                ),
+                ArrayRequirement(
+                    "left_out_n_cells", shape=(len(thin),), dtype_kind="i"
+                ),
+                *(
+                    ArrayRequirement(name, shape=(n_features,), dtype_kind="i")
+                    for name in ("features", "n_zero_sd")
+                ),
+                ArrayRequirement("n_control_cells", shape=(n_samples,), dtype_kind="i"),
+                *(
+                    ArrayRequirement(
+                        name, shape=(n_samples, n_features), dtype_kind="f"
+                    )
+                    for name in ("control_mean", "control_sd")
+                ),
+            ),
+            required_attributes=(
+                AttributeRequirement(
+                    "sample_names", predicate=lambda value: value == sample_names
+                ),
+            ),
+        )
+        left_out = _left_out_warning(
+            rows.names[thin].astype(str), sizes[thin], n_rows, floor, f"{by}s", noun
+        )
+        if planned.reused:
+            # Saved profiles warn as they did when they were computed.
+            if left_out is not None:
+                warn(left_out)
+            return planned.ref
+        # Each labelled cell's position, perturbation and flag, each read
+        # cell's position, sample and total, the float32 profiles, and each
+        # sample's control mean and standard deviation of every feature.
+        held = (
+            24 * len(cells.cell_index)
+            + 32 * len(used)
+            + 4 * n_kept * n_features
+            + 16 * n_samples * n_features
+            + 16 * n_features
+        )
+        # One feature of a band: its float64 sums over the perturbations,
+        # which are divided straight into the profiles counted above, its
+        # running moments in each sample, and a cell's value as read and as a
+        # C-ordered copy.
+        per_feature = 8 * n_kept + 24 * n_samples + 16
+        width = min(n_features, max(self.memoryBytes - held, 0) // per_feature)
+        if width < 1:
+            raise MemoryError(
+                f"The profiles of {n_kept} {by}s in {n_features} features hold "
+                f"about {held + per_feature} bytes with one feature's sums, more "
+                f"than the memory budget of {self.memoryBytes} bytes. Raise "
+                "mem_budget, or pass fewer features."
+            )
+        self._require_writable(arguments.operation)
+        totals = expression._cell_count_totals(used_cells)
+        target = depth_target(totals, is_control)
+        controls = np.flatnonzero(is_control)
+        members = np.flatnonzero(groups[used] >= 0)
+        member_groups = groups[used][members]
+        n_cells = sizes[kept].astype(np.int64)
+        masked_columns = np.full(n_kept, -1, dtype=np.int64)
+        masked_columns[masked >= 0] = np.searchsorted(
+            feature_index, masked[masked >= 0]
+        )
+        values = np.empty((n_kept, n_features), dtype=np.float32)
+        means = np.empty((n_samples, n_features))
+        sds = np.empty((n_samples, n_features))
+
+        def counts(band: np.ndarray, positions: np.ndarray) -> Iterator[np.ndarray]:
+            """Stream the counts of a band of features over some read cells."""
+            _, blocks = feature_value_blocks(
+                expression,
+                band,
+                used_cells[positions],
+                NormalizationSpec(source="raw"),
+                nthreads=self.nthreads,
+                resident_bytes=held + (per_feature - 16) * len(band),
+                scratch_bytes_per_row=16 * len(band),
+            )
+            yield from blocks
+
+        with _numba_threads(self.nthreads):
+            for start in range(0, n_features, width):
+                stop = min(start + width, n_features)
+                band = feature_index[start:stop]
+                _, means[:, start:stop], sds[:, start:stop] = control_moments(
+                    counts(band, controls),
+                    totals[controls],
+                    target,
+                    samples[controls],
+                    n_samples,
+                    len(band),
+                )
+                sums = z_score_sums(
+                    counts(band, members),
+                    totals[members],
+                    target,
+                    samples[members],
+                    member_groups,
+                    means[:, start:stop],
+                    sds[:, start:stop],
+                    n_kept,
+                )
+                inside = (masked_columns >= start) & (masked_columns < stop)
+                # The means go straight into the band of the float32 profiles.
+                profile_values(
+                    sums,
+                    n_cells,
+                    np.where(inside, masked_columns - start, -1),
+                    out=values[:, start:stop],
+                )
+                del sums
+        n_zero_sd = np.count_nonzero(sds == 0, axis=0).astype(np.int64)
+        write_cell_data_artifact(
+            self.zw,
+            planned,
+            {
+                "values": values,
+                "perturbations": names,
+                "targets": row_targets[kept],
+                "is_control": cells.row_control[kept],
+                "n_cells": n_cells,
+                "masked_features": masked,
+                "left_out": rows.names[thin].astype(str),
+                "left_out_targets": row_targets[thin],
+                "left_out_n_cells": sizes[thin].astype(np.int64),
+                "features": feature_index,
+                "n_zero_sd": n_zero_sd,
+                "n_control_cells": n_controls.astype(np.int64),
+                "control_mean": means,
+                "control_sd": sds,
+            },
+            attributes={"sample_names": sample_names},
+        )
+        if left_out is not None:
+            warn(left_out)
+        flat = int(np.count_nonzero(n_zero_sd))
+        logger.info(
+            f"Computed the profiles of {n_kept} {by}s in {n_features} features "
+            f"against {len(controls)} control cells in {n_samples} samples"
+            + (
+                f"; {flat} features hold one value over the control cells of a "
+                "sample, where their z-scores are 0"
+                if flat
+                else ""
+            )
+        )
+        return planned.ref
+
+    @validation_scoped
+    def _perturbation_load_profiles(
+        self, profiles: ArtifactRef
+    ) -> PerturbationProfiles:
+        """Read saved perturbation profiles.
+
+        Args:
+            profiles: A ``perturbation_profiles`` artifact from
+                :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.profiles`.
+
+        Returns:
+            Each perturbation's profile with its cells and masked feature, the
+            perturbations left out, and each sample's control cells and
+            control statistics of each feature.
+
+        Raises:
+            TypeError: If ``profiles`` is not an ArtifactRef.
+            ValueError: If it is not a ``perturbation_profiles`` artifact.
+            MemoryError: If its profiles do not fit the memory budget.
+        """
+        if not isinstance(profiles, ArtifactRef):
+            raise TypeError("profiles must be an ArtifactRef")
+        if profiles.kind != PerturbationProfileArguments.artifact_kind:
+            raise ValueError(
+                "profiles must be a perturbation_profiles artifact, not "
+                f"{profiles.kind!r}"
+            )
+        status = require_complete_artifact(self.zw, profiles)
+        group = artifact_group(self.zw, profiles)
+        assay = self._get_assay(str(profiles.assay))
+
+        def read(name: str) -> np.ndarray:
+            return np.asarray(as_zarr_array(group[name], name=name)[:])
+
+        stored = as_zarr_array(group["values"], name="values")
+        # The frame holds the float32 values as read, without a copy.
+        n_bytes = 4 * int(np.prod(stored.shape))
+        if n_bytes > self.memoryBytes:
+            raise MemoryError(
+                f"The profiles of {stored.shape[0]} perturbations in "
+                f"{stored.shape[1]} features hold {n_bytes} bytes, more than the "
+                f"memory budget of {self.memoryBytes} bytes. Raise mem_budget."
+            )
+        feature_ids = np.asarray(assay.feats.fetch_all("ids")).astype(str)
+        positions = read("features")
+        columns = pd.Index(feature_ids[positions], name="feature")
+        index = pd.Index(read("perturbations").astype(str), name="perturbation")
+        masked = read("masked_features")
+        samples = pd.Index(
+            np.asarray(_stored_samples(group, "sample_names"), dtype=object),
+            name="sample",
+        )
+        parameters = status.parameters or {}
+        sample_columns = list(parameters["sample_columns"])
+        return PerturbationProfiles(
+            values=pd.DataFrame(
+                np.asarray(stored[:]), index=index, columns=columns, copy=False
+            ),
+            perturbations=pd.DataFrame(
+                {
+                    "target": read("targets").astype(str),
+                    "is_control": read("is_control").astype(bool),
+                    "n_cells": read("n_cells"),
+                    "masked_feature": pd.Series(
+                        [
+                            None if code < 0 else str(feature_ids[code])
+                            for code in masked
+                        ],
+                        dtype=object,
+                        index=index,
+                    ),
+                },
+                index=index,
+            ),
+            left_out=pd.DataFrame(
+                {
+                    "perturbation": read("left_out").astype(str),
+                    "target": read("left_out_targets").astype(str),
+                    "n_cells": read("left_out_n_cells"),
+                }
+            ),
+            features=pd.DataFrame(
+                {
+                    "feature_name": np.asarray(assay.feats.fetch_all("names")).astype(
+                        str
+                    )[positions],
+                    "n_zero_sd": read("n_zero_sd"),
+                },
+                index=columns,
+            ),
+            samples=pd.DataFrame(
+                {"n_control_cells": read("n_control_cells")}, index=samples
+            ),
+            control_mean=pd.DataFrame(
+                read("control_mean"), index=samples, columns=columns
+            ),
+            control_sd=pd.DataFrame(read("control_sd"), index=samples, columns=columns),
+            by=str(parameters["by"]),
+            from_assay=assay.name,
+            sample_column=sample_columns[0] if sample_columns else None,
+            min_cells=int(parameters["min_cells"]),
+            mask_targets=bool(parameters["mask_targets"]),
+            labels_kind=str(status.input_ref("labels").kind),
+        )
+
+    @validation_scoped
+    def _perturbation_cluster(
+        self,
+        profiles: ArtifactRef,
+        *,
+        perturbations: Sequence[str] | None = None,
+        metric: str = "correlation",
+        min_cluster_size: int = 4,
+        min_samples: int = 2,
+        selection: str = "eom",
+        seed: int = 0,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Cluster the perturbations whose profiles change expression alike.
+
+        As Replogle et al. (2022) did, the distance between two profiles is 1
+        minus their Pearson correlation over the features, which ignores how
+        strongly each perturbation acts; ``metric="euclidean"`` keeps it.
+        HDBSCAN finds the clusters on these distances, through scikit-learn's
+        ``HDBSCAN(metric="precomputed")`` with ``alpha=1`` and without a
+        single cluster, and a perturbation it cannot place gets the cluster
+        -1. ``min_samples`` follows scikit-learn, which counts the point
+        itself, so the ``min_samples=1`` of the ``hdbscan`` package, which
+        Replogle et al. ran with ``min_cluster_size=4`` and
+        ``selection="eom"``, is 2 here, the default. Average linkage of the
+        same distances orders the perturbations for a heatmap. A UMAP layout
+        of each perturbation's 15 nearest perturbations by the same distances
+        places them in two dimensions, from the first two principal
+        components of the profiles, on one thread, so that it depends only on
+        ``seed``.
+
+        Args:
+            profiles: A ``perturbation_profiles`` artifact from
+                :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.profiles`.
+            perturbations: The names of the perturbations to cluster, in any
+                order, such as those with a significant E-distance and a low
+                remaining fraction, or None for every profile.
+            metric: ``"correlation"`` or ``"euclidean"``.
+            min_cluster_size: The fewest perturbations of a cluster, at least
+                2.
+            min_samples: The perturbations within a perturbation's core
+                distance, itself included, at least 1.
+            selection: ``"eom"`` to select clusters by excess of mass, or
+                ``"leaf"`` to take the leaves of HDBSCAN's cluster tree.
+            seed: The seed of the layout, from 0 to 2**32 - 1.
+            invalidate_cache: Cluster again instead of reusing saved clusters.
+
+        Returns:
+            A complete ``perturbation_clusters`` artifact scoped to the assay
+            of the profiles, with one row per clustered perturbation. Read it
+            with
+            :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.load_clusters`.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``profiles`` is not a ``perturbation_profiles``
+                artifact, ``perturbations`` names a perturbation without a
+                profile, fewer than 3 perturbations or 2 features remain,
+                ``min_samples`` exceeds the perturbations, or a setting is
+                unknown or outside its range.
+            PermissionError: If the store is read-only and the clusters are
+                not saved yet.
+            MemoryError: If the profiles and the distances between them,
+                with their working copies, do not fit the memory budget.
+        """
+        from threadpoolctl import threadpool_limits
+
+        from ...perturbation.clusters import (
+            METRICS,
+            SELECTIONS,
+            cluster_memory_bytes,
+            cluster_profiles,
+        )
+
+        if not isinstance(profiles, ArtifactRef):
+            raise TypeError("profiles must be an ArtifactRef")
+        if profiles.kind != PerturbationProfileArguments.artifact_kind:
+            raise ValueError(
+                "profiles must be a perturbation_profiles artifact, not "
+                f"{profiles.kind!r}"
+            )
+        if metric not in METRICS:
+            raise ValueError(
+                f"metric must be 'correlation' or 'euclidean', not {metric!r}"
+            )
+        cluster_size = integer_argument(min_cluster_size, "min_cluster_size", minimum=2)
+        core_size = integer_argument(min_samples, "min_samples", minimum=1)
+        if selection not in SELECTIONS:
+            raise ValueError(f"selection must be 'eom' or 'leaf', not {selection!r}")
+        # scikit-learn's PCA, which starts the layout, accepts 32-bit unsigned
+        # random states only.
+        resolved_seed = integer_argument(seed, "seed", minimum=0, maximum=2**32 - 1)
+        if not isinstance(invalidate_cache, bool):
+            raise TypeError("invalidate_cache must be a boolean")
+        require_complete_artifact(self.zw, profiles)
+        group = artifact_group(self.zw, profiles)
+        names = np.asarray(
+            as_zarr_array(group["perturbations"], name="perturbations")[:]
+        ).astype(str)
+        if perturbations is None:
+            chosen = np.arange(len(names))
+        else:
+            if isinstance(perturbations, str | bytes) or not isinstance(
+                perturbations, Iterable
+            ):
+                raise TypeError(
+                    "perturbations must be a sequence of perturbation names or None"
+                )
+            requested = list(perturbations)
+            if not all(isinstance(name, str) for name in requested):
+                raise TypeError(
+                    "perturbations must be a sequence of perturbation names or None"
+                )
+            positions = pd.Index(names).get_indexer(requested)
+            unknown = sorted(
+                {
+                    name
+                    for name, position in zip(requested, positions, strict=True)
+                    if position < 0
+                }
+            )
+            if unknown:
+                raise ValueError(
+                    "perturbations names perturbations without a profile: "
+                    + ", ".join(repr(name) for name in unknown[:5])
+                    + "; the profiles hold the perturbations with at least "
+                    "min_cells cells"
+                )
+            chosen = np.unique(positions)
+        stored = as_zarr_array(group["values"], name="values")
+        n_chosen = len(chosen)
+        n_features = int(stored.shape[1])
+        if n_chosen < 3 or n_features < 2:
+            raise ValueError(
+                "Clustering needs at least 3 perturbations and 2 features, not "
+                f"{n_chosen} and {n_features}"
+            )
+        if core_size > n_chosen:
+            raise ValueError(
+                f"min_samples={core_size} must be at most the {n_chosen} "
+                "perturbations clustered"
+            )
+        selected = names[chosen]
+        arguments = PerturbationClusterArguments(
+            perturbation_profiles=profiles,
+            # Every profile, named or not, is the same input.
+            perturbations_fingerprint=(
+                None if n_chosen == len(names) else fingerprint_strings(selected)
+            ),
+            metric=metric,
+            min_cluster_size=cluster_size,
+            min_samples=core_size,
+            selection=selection,
+            seed=resolved_seed,
+            invalidate_cache=invalidate_cache,
+        )
+        planned = arguments.plan(
+            self.zw,
+            scope="assay",
+            assay=str(profiles.assay),
+            invalidate_cache=invalidate_cache,
+            required_arrays=(
+                ArrayRequirement("perturbations", shape=(n_chosen,)),
+                *(
+                    ArrayRequirement(name, shape=(n_chosen,), dtype_kind="i")
+                    for name in ("cluster", "order")
+                ),
+                ArrayRequirement("probability", shape=(n_chosen,), dtype_kind="f"),
+                ArrayRequirement("embedding", shape=(n_chosen, 2), dtype_kind="f"),
+            ),
+        )
+        if planned.reused:
+            return planned.ref
+        # The float32 profiles as read, and the clustering's peak.
+        needed = 4 * n_chosen * n_features + cluster_memory_bytes(n_chosen, n_features)
+        if needed > self.memoryBytes:
+            raise MemoryError(
+                f"Clustering {n_chosen} perturbations in {n_features} features "
+                f"holds about {needed} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Pass fewer perturbations, or raise "
+                "mem_budget."
+            )
+        self._require_writable(arguments.operation)
+        values = np.asarray(stored.oindex[chosen, :])
+        # The distances' matrix products use as many BLAS threads as the store.
+        with threadpool_limits(limits=self.nthreads, user_api="blas"):
+            arrays = cluster_profiles(
+                values,
+                metric=metric,
+                min_cluster_size=cluster_size,
+                min_samples=core_size,
+                selection=selection,
+                seed=resolved_seed,
+            )
+        write_cell_data_artifact(
+            self.zw,
+            planned,
+            {
+                "perturbations": selected,
+                "cluster": arrays.cluster,
+                "probability": arrays.probability,
+                "order": arrays.order,
+                "embedding": arrays.embedding,
+            },
+        )
+        logger.info(
+            f"Clustered {n_chosen} perturbations into "
+            f"{int(arrays.cluster.max(initial=-1)) + 1} clusters, with "
+            f"{int(np.count_nonzero(arrays.cluster < 0))} unassigned"
+        )
+        return planned.ref
+
+    @validation_scoped
+    def _perturbation_load_clusters(
+        self, clusters: ArtifactRef
+    ) -> PerturbationClusters:
+        """Read saved perturbation clusters with the distances between their profiles.
+
+        The distances are computed again from the saved profiles, as the
+        clustering computed them.
+
+        Args:
+            clusters: A ``perturbation_clusters`` artifact from
+                :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.cluster`.
+
+        Returns:
+            Each perturbation's cluster, membership strength, cells and place
+            in the layout, the leaf order and the distances.
+
+        Raises:
+            TypeError: If ``clusters`` is not an ArtifactRef.
+            ValueError: If it is not a ``perturbation_clusters`` artifact.
+            MemoryError: If the distances between the profiles do not fit the
+                memory budget.
+        """
+        from threadpoolctl import threadpool_limits
+
+        from ...perturbation.clusters import profile_distances
+
+        if not isinstance(clusters, ArtifactRef):
+            raise TypeError("clusters must be an ArtifactRef")
+        if clusters.kind != PerturbationClusterArguments.artifact_kind:
+            raise ValueError(
+                "clusters must be a perturbation_clusters artifact, not "
+                f"{clusters.kind!r}"
+            )
+        status = require_complete_artifact(self.zw, clusters)
+        group = artifact_group(self.zw, clusters)
+        source_ref = status.input_ref("perturbation_profiles")
+        require_complete_artifact(self.zw, source_ref)
+        source = artifact_group(self.zw, source_ref)
+
+        def read(stored: zarr.Group, name: str) -> np.ndarray:
+            return np.asarray(as_zarr_array(stored[name], name=name)[:])
+
+        names = read(group, "perturbations").astype(str)
+        positions = pd.Index(read(source, "perturbations").astype(str)).get_indexer(
+            names
+        )
+        values = as_zarr_array(source["values"], name="values")
+        n_clustered = len(names)
+        n_features = int(values.shape[1])
+        # The distances and their symmetric copy, and the profiles as read,
+        # as float64 and centred.
+        n_bytes = 16 * n_clustered * n_clustered + 20 * n_clustered * n_features
+        if n_bytes > self.memoryBytes:
+            raise MemoryError(
+                f"The distances between {n_clustered} profiles hold about "
+                f"{n_bytes} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Raise mem_budget."
+            )
+        parameters = status.parameters or {}
+        metric = str(parameters["metric"])
+        with threadpool_limits(limits=self.nthreads, user_api="blas"):
+            distances = profile_distances(
+                np.asarray(values.oindex[positions, :]), metric
+            )
+        index = pd.Index(names, name="perturbation")
+        embedding = read(group, "embedding")
+        return PerturbationClusters(
+            table=pd.DataFrame(
+                {
+                    "cluster": read(group, "cluster"),
+                    "probability": read(group, "probability"),
+                    "n_cells": read(source, "n_cells")[positions],
+                    "x": embedding[:, 0],
+                    "y": embedding[:, 1],
+                },
+                index=index,
+            ),
+            order=names[read(group, "order")],
+            distances=pd.DataFrame(distances, index=index, columns=index.copy()),
+            metric=metric,
+            min_cluster_size=int(parameters["min_cluster_size"]),
+            min_samples=int(parameters["min_samples"]),
+            selection=str(parameters["selection"]),
+            seed=int(parameters["seed"]),
+            from_assay=str(clusters.assay),
         )

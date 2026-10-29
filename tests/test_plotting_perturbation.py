@@ -10,10 +10,11 @@ import pytest
 from matplotlib.collections import PolyCollection
 from matplotlib.colors import to_rgba
 from matplotlib.markers import MarkerStyle
-from matplotlib.text import Text
+from matplotlib.text import Annotation, Text
 from scipy.stats import beta, false_discovery_control, norm
 
 from cytearc.perturbation.associations import PerturbationAssociations
+from cytearc.perturbation.clusters import PerturbationClusters, profile_distances
 from cytearc.perturbation.edistance import PerturbationEDistance
 from cytearc.perturbation.efficiency import PerturbationEfficiency
 from cytearc.perturbation.guide_calls import (
@@ -32,8 +33,9 @@ from cytearc.perturbation.mixtures import (
     gaussian_posterior,
     poisson_gaussian_posterior,
 )
+from cytearc.plotting._contracts import CategoricalScale, ColorScale
 from cytearc.plotting._figure import LegendSpec
-from cytearc.plotting._style import foreground_color
+from cytearc.plotting._style import default_point_size, foreground_color
 from cytearc.plotting.perturbation import (
     association_calibration,
     association_volcano,
@@ -42,6 +44,7 @@ from cytearc.plotting.perturbation import (
     guide_calls,
     guide_thresholds,
     mixscape,
+    perturbation_clusters,
 )
 from cytearc.storage.refs import ArtifactRef
 
@@ -3668,3 +3671,937 @@ def test_the_association_plots_need_a_store_with_associations(
         TypeError, match="store does not provide perturbation associations"
     ):
         plot(store, ASSOCIATIONS, show=False)
+
+
+CLUSTERS = ArtifactRef(
+    scope="assay", assay="RNA", kind="perturbation_clusters", artifact_id="9" * 64
+)
+CLUSTER_HEXES = (
+    "#0072B2",
+    "#E69F00",
+    "#009E73",
+    "#D55E00",
+    "#CC79A7",
+    "#56B4E9",
+    "#2E8B57",
+    "#A05195",
+)
+UNASSIGNED = to_rgba("#d4d4d4")
+DARK_UNASSIGNED = to_rgba("#4d4d4d")
+ClusterRow = tuple[str, int, int, float, float]
+
+# Each row is a perturbation, its cluster, its cells and its place in the
+# layout, in the order of the profiles. Cluster 0 lies in a row with its
+# median at MED13, and the clusters lie far apart.
+CLUSTER_ROWS: list[ClusterRow] = [
+    ("MED12", 0, 40, 0.0, 0.0),
+    ("MED13", 0, 35, 0.3, 0.0),
+    ("MED14", 0, 30, 0.6, 0.0),
+    ("RPL5", 1, 80, 10.0, 0.0),
+    ("RPL7", 1, 75, 10.4, 0.5),
+    ("RPL9", 1, 60, 9.8, 0.3),
+    ("RPS3", 1, 70, 10.2, -0.4),
+    ("MYC", -1, 25, 5.0, 5.0),
+    ("TP53", -1, 20, 4.0, -3.0),
+    ("CCT2", 2, 50, 0.0, 9.0),
+    ("CCT3", 2, 45, 0.4, 9.5),
+    ("CCT4", 2, 40, -0.3, 9.2),
+]
+# The leaf order runs through cluster 2 and then cluster 0, and splits
+# cluster 1 around MYC, so that its longest run holds three perturbations.
+CLUSTER_ORDER = [
+    "CCT3",
+    "CCT2",
+    "CCT4",
+    "MED13",
+    "MED12",
+    "MED14",
+    "RPL5",
+    "RPL9",
+    "RPS3",
+    "MYC",
+    "RPL7",
+    "TP53",
+]
+
+
+def _clusters_record(
+    rows: list[ClusterRow] = CLUSTER_ROWS,
+    order: list[str] = CLUSTER_ORDER,
+    *,
+    metric: str = "correlation",
+) -> PerturbationClusters:
+    """Build the record that ``load_clusters`` returns for ``rows``.
+
+    The distances are those of random profiles over 30 features, as the
+    clustering measures them.
+    """
+    index = pd.Index([row[0] for row in rows], name="perturbation")
+    profiles = np.random.default_rng(0).normal(size=(len(rows), 30))
+    return PerturbationClusters(
+        table=pd.DataFrame(
+            {
+                "cluster": np.asarray([row[1] for row in rows], dtype=np.int64),
+                "probability": np.asarray([0.0 if row[1] < 0 else 0.9 for row in rows]),
+                "n_cells": np.asarray([row[2] for row in rows], dtype=np.int64),
+                "x": np.asarray([row[3] for row in rows], dtype=np.float32),
+                "y": np.asarray([row[4] for row in rows], dtype=np.float32),
+            },
+            index=index,
+        ),
+        order=np.asarray(order),
+        distances=pd.DataFrame(
+            profile_distances(profiles, metric), index=index, columns=index.copy()
+        ),
+        metric=metric,
+        min_cluster_size=3,
+        min_samples=2,
+        selection="eom",
+        seed=7,
+        from_assay="RNA",
+    )
+
+
+def _clusters_store(
+    record: PerturbationClusters, requests: list[ArtifactRef] | None = None
+) -> SimpleNamespace:
+    """A store whose loader returns ``record`` and notes each reference it reads."""
+
+    def load(ref: ArtifactRef) -> PerturbationClusters:
+        if requests is not None:
+            requests.append(ref)
+        return record
+
+    return SimpleNamespace(perturbation=SimpleNamespace(load_clusters=load))
+
+
+def _cluster_hexes(record: PerturbationClusters) -> dict[int, str]:
+    """Each cluster's colour, by the order in which it first appears in leaf order."""
+    in_order = record.table["cluster"].reindex(record.order).tolist()
+    first = list(dict.fromkeys(code for code in in_order if code >= 0))
+    return {code: CLUSTER_HEXES[rank % 8] for rank, code in enumerate(first)}
+
+
+def _drawn_colors(
+    result: Any, record: PerturbationClusters, theme: str = "notebook"
+) -> np.ndarray:
+    """Each drawn perturbation's colour, grey when it is unassigned."""
+    hexes = _cluster_hexes(record)
+    grey = DARK_UNASSIGNED if theme == "dark" else UNASSIGNED
+    return np.asarray(
+        [
+            to_rgba(hexes[code]) if code >= 0 else grey
+            for code in result.tables["perturbations"]["cluster"].tolist()
+        ]
+    )
+
+
+def _longest_runs(codes: list[int]) -> dict[int, tuple[float, int]]:
+    """Each cluster's longest run of rows, ties to the first: its middle and length."""
+    runs: dict[int, tuple[float, int]] = {}
+    start = 0
+    for stop in range(1, len(codes) + 1):
+        if stop == len(codes) or codes[stop] != codes[start]:
+            length = stop - start
+            if codes[start] >= 0 and length > runs.get(codes[start], (0.0, 0))[1]:
+                runs[codes[start]] = ((start + stop - 1) / 2, length)
+            start = stop
+    return runs
+
+
+def _check_heatmap(
+    result: Any, record: PerturbationClusters, *, theme: str = "notebook"
+) -> None:
+    """Check that the matrix, the bar and its numbers follow the drawn rows."""
+    ax = result.axes["heatmap"]
+    bar = result.axes["cluster_bar"]
+    drawn = result.tables["perturbations"]
+    names = drawn.index.tolist()
+    n_drawn = len(names)
+    # The drawn perturbations run in leaf order, with their rows of the record.
+    assert names == [name for name in record.order.tolist() if name in set(names)]
+    pd.testing.assert_frame_equal(drawn, record.table.loc[names])
+    values = record.distances.loc[names, names].to_numpy()
+    if record.metric == "correlation":
+        values = 1.0 - values
+    (image,) = ax.images
+    np.testing.assert_array_equal(np.asarray(image.get_array()), values)
+    pd.testing.assert_frame_equal(
+        result.tables["matrix"],
+        pd.DataFrame(values, index=drawn.index, columns=drawn.index),
+    )
+    assert list(image.get_extent()) == [-0.5, n_drawn - 0.5, n_drawn - 0.5, -0.5]
+    (strip,) = bar.images
+    np.testing.assert_array_equal(
+        np.asarray(strip.get_array())[:, 0, :], _drawn_colors(result, record, theme)
+    )
+    assert bar.get_ylim() == ax.get_ylim() == (n_drawn - 0.5, -0.5)
+    # The bar stands left of the heatmap and as high as it.
+    result.figure.draw_without_rendering()
+    box = ax.get_window_extent()
+    bar_box = bar.get_window_extent()
+    assert bar_box.x1 < box.x0
+    assert (bar_box.y0, bar_box.y1) == pytest.approx((box.y0, box.y1))
+    codes = drawn["cluster"].tolist()
+    runs = _longest_runs(codes)
+    clusters = result.tables["clusters"]
+    assert clusters["cluster"].tolist() == sorted(runs)
+    assert clusters["row"].tolist() == [runs[code][0] for code in sorted(runs)]
+    assert clusters["n_perturbations"].tolist() == [
+        codes.count(code) for code in sorted(runs)
+    ]
+    # Each kept number sits beside the middle of its cluster's longest run.
+    kept = clusters[clusters["numbered"]]
+    np.testing.assert_array_equal(bar.get_yticks(), kept["row"])
+    assert [label.get_text() for label in bar.get_yticklabels()] == [
+        str(code) for code in kept["cluster"]
+    ]
+
+
+def _check_map(
+    result: Any, record: PerturbationClusters, *, theme: str = "notebook"
+) -> None:
+    """Check that each drawn perturbation is a point at its place and colour."""
+    ax = result.axes["embedding"]
+    drawn = result.tables["perturbations"]
+    names = drawn.index.tolist()
+    assert names == [name for name in record.order.tolist() if name in set(names)]
+    pd.testing.assert_frame_equal(drawn, record.table.loc[names])
+    x = drawn["x"].to_numpy(dtype=np.float64)
+    y = drawn["y"].to_numpy(dtype=np.float64)
+    colors = _drawn_colors(result, record, theme)
+    assigned = drawn["cluster"].to_numpy() >= 0
+    # The unassigned perturbations are drawn first, beneath the clusters.
+    groups = [
+        (chosen, order)
+        for chosen, order in ((~assigned, 2.0), (assigned, 3.0))
+        if chosen.any()
+    ]
+    size = default_point_size(len(drawn), size_min=6.0, size_max=30.0)
+    for collection, (chosen, order) in zip(ax.collections, groups, strict=False):
+        np.testing.assert_array_equal(
+            np.asarray(collection.get_offsets()), np.column_stack([x, y])[chosen]
+        )
+        np.testing.assert_array_equal(collection.get_facecolors(), colors[chosen])
+        np.testing.assert_array_equal(collection.get_sizes(), [size])
+        assert collection.get_zorder() == order
+        assert collection.get_rasterized() is result.provenance.extras["rasterized"]
+    # The window is square and holds every point.
+    left, right = ax.get_xlim()
+    bottom, top = ax.get_ylim()
+    assert right - left == pytest.approx(top - bottom)
+    assert ((left < x) & (x < right) & (bottom < y) & (y < top)).all()
+    members = drawn[assigned].groupby("cluster")
+    clusters = result.tables["clusters"]
+    assert clusters["cluster"].tolist() == sorted(members.groups)
+    np.testing.assert_array_equal(clusters["n_perturbations"], members.size())
+    np.testing.assert_array_equal(
+        clusters[["x", "y"]].to_numpy(), members[["x", "y"]].median().to_numpy()
+    )
+
+
+def _check_names_apart(result: Any) -> None:
+    """Check that names lie inside the axes, apart and clear of every number."""
+    ax = result.axes["embedding"]
+    figure = result.figure
+    figure.draw_without_rendering()
+    frame = ax.get_window_extent()
+    gap = 2.0 * figure.dpi / 72.0
+    names = [Text.get_window_extent(t) for t in ax.texts if isinstance(t, Annotation)]
+    numbers = [t.get_window_extent() for t in ax.texts if not isinstance(t, Annotation)]
+
+    def apart(box: Any, other: Any, padding: float) -> bool:
+        # Half a pixel of slack absorbs rounding.
+        return (
+            box.x1 <= other.x0 - padding + 0.5
+            or other.x1 + padding <= box.x0 + 0.5
+            or box.y1 <= other.y0 - padding + 0.5
+            or other.y1 + padding <= box.y0 + 0.5
+        )
+
+    for index, box in enumerate(names):
+        assert frame.x0 - 0.5 <= box.x0 and box.x1 <= frame.x1 + 0.5
+        assert frame.y0 - 0.5 <= box.y0 and box.y1 <= frame.y1 + 0.5
+        assert all(apart(box, other, 0.0) for other in names[index + 1 :])
+        assert all(apart(box, number, gap) for number in numbers)
+
+
+def test_cluster_heatmap_draws_the_correlations_in_leaf_order() -> None:
+    requests: list[ArtifactRef] = []
+    record = _clusters_record()
+
+    result = perturbation_clusters(
+        _clusters_store(record, requests), CLUSTERS, show=False
+    )
+
+    try:
+        assert requests == [CLUSTERS]
+        assert list(result.axes) == ["heatmap", "cluster_bar", "colorbar"]
+        _check_heatmap(result, record)
+        ax = result.axes["heatmap"]
+        (image,) = ax.images
+        assert image.get_cmap().name == "RdBu_r"
+        assert image.get_clim() == (-1.0, 1.0)
+        # Twelve perturbations are few enough to name, beside the rows on the
+        # right and below the columns.
+        assert [label.get_text() for label in ax.get_yticklabels()] == CLUSTER_ORDER
+        assert [label.get_text() for label in ax.get_xticklabels()] == CLUSTER_ORDER
+        assert ax.yaxis.get_ticks_position() == "right"
+        assert {label.get_rotation() for label in ax.get_xticklabels()} == {90.0}
+        # Cluster 2 comes first in the leaf order and takes the first colour.
+        # Cluster 1's number sits beside its run of three, not beside RPL7.
+        assert result.tables["clusters"].to_dict("list") == {
+            "cluster": [0, 1, 2],
+            "n_perturbations": [3, 4, 3],
+            "row": [4.0, 7.0, 1.0],
+            "numbered": [True, True, True],
+        }
+        colorbar = result.axes["colorbar"]
+        assert colorbar.get_ylabel() == "Pearson correlation"
+        np.testing.assert_allclose(colorbar.get_yticks(), [-1.0, -0.5, 0.0, 0.5, 1.0])
+        assert ax.get_title().splitlines() == [
+            "Correlation between perturbation profiles",
+            "12 perturbations: 3 clusters, 2 unassigned in grey",
+        ]
+        # The plot's own figure makes the heatmap's box square.
+        box = ax.get_window_extent()
+        assert box.width == pytest.approx(box.height, abs=2.0)
+        assert result.legends == (
+            LegendSpec(
+                kind="colorbar",
+                label="Pearson correlation",
+                extras={"vmin": -1.0, "vmax": 1.0},
+            ),
+            LegendSpec(kind="categorical", label="Cluster"),
+        )
+        assert result.scales == (
+            ColorScale(cmap="RdBu_r", vmin=-1.0, vmax=1.0, vcenter=0.0),
+            CategoricalScale(
+                order=(0, 1, 2),
+                palette={0: "#E69F00", 1: "#009E73", 2: "#0072B2"},
+                missing_color="#d4d4d4",
+                missing_label="Unassigned",
+            ),
+        )
+        provenance = result.provenance
+        assert provenance.assay == "RNA"
+        assert provenance.n_cells == sum(row[2] for row in CLUSTER_ROWS)
+        assert provenance.notes == ("perturbation_clusters",)
+        assert provenance.extras == {
+            "clusters": CLUSTERS.to_dict(),
+            "panel": "heatmap",
+            "metric": "correlation",
+            "min_cluster_size": 3,
+            "min_samples": 2,
+            "selection": "eom",
+            "seed": 7,
+            "from_assay": "RNA",
+            "perturbations": None,
+            "cluster_ids": None,
+            "label": None,
+            "n_perturbations": 12,
+            "n_clustered": 12,
+            "n_clusters": 3,
+            "n_unassigned": 2,
+            "named": True,
+            "color_limits": [-1.0, 1.0],
+        }
+    finally:
+        result.close()
+
+
+def test_cluster_heatmap_keeps_the_chosen_perturbations_or_clusters() -> None:
+    record = _clusters_record()
+    store = _clusters_store(record)
+
+    named = perturbation_clusters(
+        store, CLUSTERS, perturbations=["MYC", "CCT2", "RPL7", "CCT2"], show=False
+    )
+    chosen = perturbation_clusters(
+        store, CLUSTERS, cluster_ids=[np.int64(1), -1, 1], show=False
+    )
+
+    try:
+        # The named perturbations run in leaf order, once each, and keep the
+        # colours of their clusters.
+        assert named.tables["perturbations"].index.tolist() == ["CCT2", "MYC", "RPL7"]
+        _check_heatmap(named, record)
+        assert named.axes["heatmap"].get_title().splitlines()[1] == (
+            "3 of 12 perturbations: 2 clusters, 1 unassigned in grey"
+        )
+        assert named.provenance.extras["perturbations"] == ["MYC", "CCT2", "RPL7"]
+        assert named.provenance.extras["n_perturbations"] == 3
+        assert named.provenance.n_cells == 50 + 25 + 75
+        assert chosen.tables["perturbations"].index.tolist() == [
+            "RPL5",
+            "RPL9",
+            "RPS3",
+            "MYC",
+            "RPL7",
+            "TP53",
+        ]
+        _check_heatmap(chosen, record)
+        assert chosen.tables["clusters"]["row"].tolist() == [1.0]
+        assert chosen.axes["heatmap"].get_title().splitlines()[1] == (
+            "6 of 12 perturbations: 1 cluster, 2 unassigned in grey"
+        )
+        assert chosen.provenance.extras["cluster_ids"] == [1, -1]
+        assert all(
+            type(code) is int for code in chosen.provenance.extras["cluster_ids"]
+        )
+    finally:
+        named.close()
+        chosen.close()
+
+
+def test_cluster_heatmap_by_euclidean_distance() -> None:
+    record = _clusters_record(metric="euclidean")
+    store = _clusters_store(record)
+
+    every = perturbation_clusters(store, CLUSTERS, show=False)
+    alone = perturbation_clusters(store, CLUSTERS, perturbations=["MYC"], show=False)
+
+    try:
+        _check_heatmap(every, record)
+        (image,) = every.axes["heatmap"].images
+        largest = float(record.distances.to_numpy().max())
+        assert image.get_cmap().name == "Blues_r"
+        assert image.get_clim() == (0.0, largest)
+        assert every.axes["colorbar"].get_ylabel() == "Euclidean distance"
+        assert every.axes["heatmap"].get_title().splitlines()[0] == (
+            "Euclidean distance between perturbation profiles"
+        )
+        assert every.scales[0] == ColorScale(cmap="Blues_r", vmin=0.0, vmax=largest)
+        assert every.provenance.extras["metric"] == "euclidean"
+        assert every.provenance.extras["color_limits"] == [0.0, largest]
+        # A lone perturbation sits at distance 0 from itself, so the scale
+        # runs to 1, and an unassigned one has no cluster to number.
+        _check_heatmap(alone, record)
+        assert alone.axes["heatmap"].images[0].get_clim() == (0.0, 1.0)
+        assert alone.tables["clusters"].empty
+        assert alone.axes["heatmap"].get_title().splitlines()[1] == (
+            "1 of 12 perturbations: 0 clusters, 1 unassigned in grey"
+        )
+    finally:
+        every.close()
+        alone.close()
+
+
+@pytest.mark.parametrize(("n_drawn", "named"), [(50, True), (51, False)])
+def test_cluster_heatmap_names_at_most_50_perturbations(
+    n_drawn: int, named: bool
+) -> None:
+    rows: list[ClusterRow] = [
+        (f"P{index:02d}", index // 10, 30, float(index), 0.0)
+        for index in range(n_drawn)
+    ]
+    record = _clusters_record(rows, [row[0] for row in rows])
+
+    result = perturbation_clusters(_clusters_store(record), CLUSTERS, show=False)
+
+    try:
+        _check_heatmap(result, record)
+        ax = result.axes["heatmap"]
+        names = [row[0] for row in rows] if named else []
+        assert [label.get_text() for label in ax.get_yticklabels()] == names
+        assert [label.get_text() for label in ax.get_xticklabels()] == names
+        assert result.provenance.extras["named"] is named
+        box = ax.get_window_extent()
+        assert box.width == pytest.approx(box.height, abs=2.0)
+    finally:
+        result.close()
+
+
+def test_cluster_heatmap_numbers_longer_runs_first_without_overlaps() -> None:
+    # Eighty clusters of 2 to 8 perturbations in 400 rows, too many to number
+    # each.
+    codes = np.repeat(np.arange(80), np.arange(80) % 7 + 2)
+    rows: list[ClusterRow] = [
+        (f"P{index:03d}", int(code), 30, float(index), 0.0)
+        for index, code in enumerate(codes)
+    ]
+    record = _clusters_record(rows, [row[0] for row in rows])
+
+    result = perturbation_clusters(_clusters_store(record), CLUSTERS, show=False)
+
+    try:
+        _check_heatmap(result, record)
+        clusters = result.tables["clusters"]
+        numbered = clusters["numbered"].to_numpy()
+        assert 0 < numbered.sum() < len(clusters)
+        bar = result.axes["cluster_bar"]
+        boxes = [Text.get_window_extent(label) for label in bar.get_yticklabels()]
+        height = max(box.height for box in boxes)
+        # No two numbers overlap.
+        tops = sorted((box.y0, box.y1) for box in boxes)
+        assert all(
+            low[1] <= high[0] + 0.5 for low, high in zip(tops, tops[1:], strict=False)
+        )
+        # A number is left out only where it would overlap the number of a
+        # longer run, or of a run as long and higher up.
+        rows_drawn = clusters["row"].to_numpy()
+        lengths = clusters["n_perturbations"].to_numpy()
+        middles = bar.transData.transform(
+            np.column_stack([np.zeros(len(rows_drawn)), rows_drawn])
+        )[:, 1]
+        for index in np.flatnonzero(~numbered):
+            assert any(
+                abs(middles[other] - middles[index]) < height
+                and (lengths[other], -rows_drawn[other])
+                > (lengths[index], -rows_drawn[index])
+                for other in np.flatnonzero(numbered)
+            )
+    finally:
+        result.close()
+
+
+def test_cluster_heatmap_keeps_a_chosen_figure_size() -> None:
+    record = _clusters_record()
+
+    result = perturbation_clusters(
+        _clusters_store(record), CLUSTERS, figsize=(8.0, 5.0), show=False
+    )
+
+    try:
+        assert tuple(result.figure.get_size_inches()) == (8.0, 5.0)
+        _check_heatmap(result, record)
+    finally:
+        result.close()
+
+
+def test_clusters_take_eight_colours_in_leaf_order_and_keep_them() -> None:
+    # Ten clusters of two, which first appear in the leaf order from 9 down.
+    rows: list[ClusterRow] = [
+        (f"P{index:02d}", index // 2, 30, float(index), 0.0) for index in range(20)
+    ]
+    record = _clusters_record(rows, [row[0] for row in reversed(rows)])
+    store = _clusters_store(record)
+
+    every = perturbation_clusters(store, CLUSTERS, show=False)
+    some = perturbation_clusters(store, CLUSTERS, cluster_ids=[0, 1], show=False)
+
+    try:
+        _check_heatmap(every, record)
+        _check_heatmap(some, record)
+        # The ninth cluster to appear, 1, takes the first colour again.
+        assert every.scales[1].palette == {
+            9: "#0072B2",
+            8: "#E69F00",
+            7: "#009E73",
+            6: "#D55E00",
+            5: "#CC79A7",
+            4: "#56B4E9",
+            3: "#2E8B57",
+            2: "#A05195",
+            1: "#0072B2",
+            0: "#E69F00",
+        }
+        # The drawn clusters keep their colours.
+        assert some.scales[1].palette == {0: "#E69F00", 1: "#0072B2"}
+    finally:
+        every.close()
+        some.close()
+
+
+def test_cluster_map_draws_each_perturbation_coloured_by_cluster() -> None:
+    requests: list[ArtifactRef] = []
+    record = _clusters_record()
+
+    result = perturbation_clusters(
+        _clusters_store(record, requests), CLUSTERS, panel="embedding", show=False
+    )
+
+    try:
+        assert requests == [CLUSTERS]
+        assert list(result.axes) == ["embedding"]
+        _check_map(result, record)
+        ax = result.axes["embedding"]
+        assert len(ax.collections) == 2
+        assert result.tables["clusters"].to_dict("list") == {
+            "cluster": [0, 1, 2],
+            "n_perturbations": [3, 4, 3],
+            "x": pytest.approx([0.3, 10.1, 0.0]),
+            "y": pytest.approx([0.0, 0.15, 9.2]),
+        }
+        # Each cluster is numbered at its median, which lie far apart.
+        numbers = list(ax.texts)
+        assert [number.get_text() for number in numbers] == ["0", "1", "2"]
+        for number, (x, y) in zip(
+            numbers, [(0.3, 0.0), (10.1, 0.15), (0.0, 9.2)], strict=True
+        ):
+            assert number.get_position() == pytest.approx((x, y), abs=1e-6)
+            assert to_rgba(number.get_color()) == to_rgba("#222222")
+            assert number.get_path_effects()
+        assert ax.get_title().splitlines() == [
+            "UMAP of perturbation profiles",
+            "12 perturbations: 3 clusters, 2 unassigned in grey",
+        ]
+        assert ax.get_xticks().size == 0 and ax.get_yticks().size == 0
+        assert result.legends == (LegendSpec(kind="categorical", label="Cluster"),)
+        assert result.scales == (
+            CategoricalScale(
+                order=(0, 1, 2),
+                palette={0: "#E69F00", 1: "#009E73", 2: "#0072B2"},
+                missing_color="#d4d4d4",
+                missing_label="Unassigned",
+            ),
+        )
+        extras = result.provenance.extras
+        assert extras["panel"] == "embedding"
+        assert extras["rasterized"] is False
+        assert "named" not in extras
+    finally:
+        result.close()
+
+
+def test_cluster_map_names_chosen_perturbations_clear_of_the_numbers() -> None:
+    record = _clusters_record()
+
+    result = perturbation_clusters(
+        _clusters_store(record),
+        CLUSTERS,
+        panel="embedding",
+        label=["MED12", "TP53", "RPL7", "MED12"],
+        show=False,
+    )
+
+    try:
+        _check_map(result, record)
+        ax = result.axes["embedding"]
+        named = ["MED12", "TP53", "RPL7"]
+        places = record.table.loc[named, ["x", "y"]].to_numpy(dtype=np.float64)
+        # Each named perturbation gets a ring around its point.
+        assert len(ax.collections) == 3
+        ring = ax.collections[2]
+        np.testing.assert_array_equal(np.asarray(ring.get_offsets()), places)
+        assert len(ring.get_facecolors()) == 0
+        np.testing.assert_array_equal(
+            ring.get_edgecolors(), [to_rgba(foreground_color("notebook"))]
+        )
+        size = default_point_size(12, size_min=6.0, size_max=30.0)
+        np.testing.assert_array_equal(ring.get_sizes(), [4.0 * size])
+        labels = [text for text in ax.texts if isinstance(text, Annotation)]
+        assert [label.get_text() for label in labels] == named
+        for label, place in zip(labels, places.tolist(), strict=True):
+            assert label.xy == pytest.approx(place)
+            side = "left" if label.xyann[0] > 0 else "right"
+            assert label.get_horizontalalignment() == side
+            assert label.arrow_patch.get_visible() == (label.xyann[1] != 0)
+        # MED12's name would start right of it, over the number of cluster 0
+        # at MED13, so it moves.
+        assert labels[0].xyann != (5.0, 0.0)
+        _check_names_apart(result)
+        assert result.provenance.extras["label"] == named
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize(
+    ("cluster_ids", "drawn", "n_texts"),
+    [([2], ["CCT3", "CCT2", "CCT4"], 1), ([-1], ["MYC", "TP53"], 0)],
+)
+def test_cluster_map_keeps_the_chosen_clusters(
+    cluster_ids: list[int], drawn: list[str], n_texts: int
+) -> None:
+    record = _clusters_record()
+
+    result = perturbation_clusters(
+        _clusters_store(record),
+        CLUSTERS,
+        panel="embedding",
+        cluster_ids=cluster_ids,
+        show=False,
+    )
+
+    try:
+        assert result.tables["perturbations"].index.tolist() == drawn
+        _check_map(result, record)
+        ax = result.axes["embedding"]
+        assert len(ax.collections) == 1
+        assert len(ax.texts) == n_texts
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize("panel", ["heatmap", "embedding"])
+def test_cluster_plots_without_a_cluster_draw_every_perturbation_grey(
+    panel: str,
+) -> None:
+    loners: list[ClusterRow] = [
+        (name, -1, cells, x, y) for name, _, cells, x, y in CLUSTER_ROWS
+    ]
+    record = _clusters_record(loners)
+
+    result = perturbation_clusters(
+        _clusters_store(record), CLUSTERS, panel=panel, show=False
+    )
+
+    try:
+        ax = result.axes[panel]
+        assert ax.get_title().splitlines()[1] == (
+            "12 perturbations: 0 clusters, 12 unassigned in grey"
+        )
+        assert result.tables["clusters"].empty
+        assert result.scales[-1].order == ()
+        if panel == "heatmap":
+            _check_heatmap(result, record)
+            assert result.axes["cluster_bar"].get_yticks().size == 0
+        else:
+            _check_map(result, record)
+            assert len(ax.texts) == 0
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize("panel", ["heatmap", "embedding"])
+def test_cluster_plots_draw_into_caller_axes_in_the_theme(panel: str) -> None:
+    figure, ax = plt.subplots(figsize=(5.0, 4.0))
+    record = _clusters_record()
+
+    try:
+        result = perturbation_clusters(
+            _clusters_store(record),
+            CLUSTERS,
+            panel=panel,
+            label=["MYC"] if panel == "embedding" else None,
+            target=ax,
+            theme="dark",
+            show=False,
+        )
+        assert result.owns_figure is False
+        assert result.figure is figure
+        assert result.axes[panel] is ax
+        # The plot keeps the caller's figure as it is.
+        assert tuple(figure.get_size_inches()) == (5.0, 4.0)
+        dark = to_rgba(foreground_color("dark"))
+        assert to_rgba(ax.title.get_color()) == dark
+        if panel == "heatmap":
+            assert list(result.axes) == ["heatmap", "cluster_bar", "colorbar"]
+            _check_heatmap(result, record, theme="dark")
+        else:
+            _check_map(result, record, theme="dark")
+            colors = {to_rgba(text.get_color()) for text in ax.texts}
+            assert colors == {to_rgba("#f5f5f5"), dark}
+            np.testing.assert_array_equal(ax.collections[-1].get_edgecolors(), [dark])
+    finally:
+        plt.close(figure)
+
+
+@pytest.mark.parametrize("panel", ["heatmap", "embedding"])
+def test_cluster_plots_can_drop_the_legend(panel: str) -> None:
+    store = _clusters_store(_clusters_record())
+
+    plain = perturbation_clusters(
+        store, CLUSTERS, panel=panel, show_legend=False, show=False
+    )
+    legended = perturbation_clusters(store, CLUSTERS, panel=panel, show=False)
+
+    try:
+        if panel == "heatmap":
+            assert list(plain.axes) == ["heatmap", "cluster_bar"]
+            # The bar is a child of the heatmap's axes, and no colorbar is
+            # drawn.
+            assert plain.figure.axes == [plain.axes["heatmap"]]
+            assert plain.axes["heatmap"].child_axes == [plain.axes["cluster_bar"]]
+            assert plain.axes["cluster_bar"].get_yticks().size == 0
+            assert not plain.tables["clusters"]["numbered"].any()
+            # Only a figure with a colorbar leaves room for it at the right.
+            plain_width = plain.figure.get_size_inches()[0]
+            assert plain_width < legended.figure.get_size_inches()[0]
+        else:
+            assert len(plain.axes["embedding"].texts) == 0
+            assert len(legended.axes["embedding"].texts) == 3
+    finally:
+        plain.close()
+        legended.close()
+
+
+def test_cluster_map_rasterizes_more_than_50000_points() -> None:
+    n_perturbations = 50_001
+    names = [f"P{index}" for index in range(n_perturbations)]
+    angles = np.linspace(0.0, 2.0 * np.pi, n_perturbations)
+    index = pd.Index(names, name="perturbation")
+    # The map reads no distances, so this record holds none.
+    record = PerturbationClusters(
+        table=pd.DataFrame(
+            {
+                "cluster": np.arange(n_perturbations) % 3 - 1,
+                "probability": np.ones(n_perturbations),
+                "n_cells": np.full(n_perturbations, 30),
+                "x": np.cos(angles).astype(np.float32),
+                "y": np.sin(angles).astype(np.float32),
+            },
+            index=index,
+        ),
+        order=np.asarray(names),
+        distances=pd.DataFrame(),
+        metric="correlation",
+        min_cluster_size=3,
+        min_samples=2,
+        selection="eom",
+        seed=0,
+        from_assay="RNA",
+    )
+    store = _clusters_store(record)
+
+    every = perturbation_clusters(store, CLUSTERS, panel="embedding", show=False)
+    fewer = perturbation_clusters(
+        store, CLUSTERS, panel="embedding", perturbations=names[1:], show=False
+    )
+
+    try:
+        assert every.provenance.extras["rasterized"] is True
+        collections = every.axes["embedding"].collections
+        assert len(collections) == 2 and all(c.get_rasterized() for c in collections)
+        assert fewer.provenance.extras["rasterized"] is False
+        assert not any(c.get_rasterized() for c in fewer.axes["embedding"].collections)
+    finally:
+        every.close()
+        fewer.close()
+
+
+def test_showing_the_cluster_plots_releases_their_figures() -> None:
+    store = _clusters_store(_clusters_record())
+
+    heatmap = perturbation_clusters(store, CLUSTERS)
+    embedding = perturbation_clusters(store, CLUSTERS, panel="embedding")
+
+    assert heatmap.tables["perturbations"].index.tolist() == CLUSTER_ORDER
+    assert embedding.tables["clusters"]["cluster"].tolist() == [0, 1, 2]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "error", "message"),
+    [
+        ({"panel": "scores"}, ValueError, "panel must be 'heatmap' or 'embedding'"),
+        ({"panel": None}, ValueError, "panel must be 'heatmap' or 'embedding'"),
+        (
+            {"perturbations": "MYC"},
+            TypeError,
+            "perturbations must be a sequence of perturbations",
+        ),
+        (
+            {"perturbations": [1]},
+            TypeError,
+            "perturbations must be a sequence of perturbations",
+        ),
+        (
+            {"perturbations": []},
+            ValueError,
+            "perturbations must name at least one perturbation",
+        ),
+        ({"cluster_ids": "0"}, TypeError, "cluster_ids must be a sequence of cluster"),
+        ({"cluster_ids": b"\x00"}, TypeError, "cluster_ids must be a sequence"),
+        ({"cluster_ids": [True]}, TypeError, "cluster_ids must be a sequence"),
+        ({"cluster_ids": [1.0]}, TypeError, "cluster_ids must be a sequence"),
+        ({"cluster_ids": np.array([0])}, TypeError, "cluster_ids must be a sequence"),
+        ({"cluster_ids": []}, ValueError, "cluster_ids must name at least one"),
+        (
+            {"perturbations": ["MYC"], "cluster_ids": [0]},
+            ValueError,
+            "Pass perturbations or cluster_ids, not both",
+        ),
+        (
+            {"label": ["MYC"]},
+            ValueError,
+            "label names perturbations in the embedding; the heatmap names every "
+            "perturbation when it draws at most 50",
+        ),
+        (
+            {"panel": "embedding", "label": "MYC"},
+            TypeError,
+            "label must be a sequence of perturbations",
+        ),
+        (
+            {"panel": "embedding", "label": []},
+            ValueError,
+            "label must name at least one perturbation",
+        ),
+    ],
+)
+def test_the_cluster_plot_refuses_settings_it_cannot_use(
+    arguments: dict[str, Any], error: type[Exception], message: str
+) -> None:
+    requests: list[ArtifactRef] = []
+    store = _clusters_store(_clusters_record(), requests)
+
+    with pytest.raises(error, match=message):
+        perturbation_clusters(store, CLUSTERS, show=False, **arguments)
+    # The settings are checked before the record is read.
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (
+            {"perturbations": ["MYC", "GATA1"]},
+            "^The clusters have no perturbation named 'GATA1'$",
+        ),
+        (
+            {"perturbations": [f"G{index}" for index in range(7)]},
+            "named 'G0', 'G1', 'G2', 'G3', 'G4' and 2 more$",
+        ),
+        ({"panel": "embedding", "label": ["GATA1"]}, "no perturbation named 'GATA1'"),
+        (
+            {"cluster_ids": [7]},
+            "^No perturbation is in cluster 7; the clusters run from 0 to 2, with -1 "
+            "for unassigned perturbations$",
+        ),
+        ({"cluster_ids": [0, 7, 9]}, "^No perturbation is in clusters 7, 9;"),
+        (
+            {"panel": "embedding", "cluster_ids": [0], "label": ["MYC", "RPL5"]},
+            "^label names perturbations that the plot does not draw: 'MYC', 'RPL5'$",
+        ),
+    ],
+)
+def test_the_cluster_plot_names_what_the_clusters_lack(
+    arguments: dict[str, Any], message: str
+) -> None:
+    store = _clusters_store(_clusters_record())
+
+    with pytest.raises(ValueError, match=message):
+        perturbation_clusters(store, CLUSTERS, show=False, **arguments)
+
+
+def test_the_cluster_plot_names_the_clusters_of_a_record_without_some() -> None:
+    assigned = [row for row in CLUSTER_ROWS if row[1] >= 0]
+    order = [name for name in CLUSTER_ORDER if name not in ("MYC", "TP53")]
+    loners: list[ClusterRow] = [
+        (name, -1, cells, x, y) for name, _, cells, x, y in CLUSTER_ROWS
+    ]
+
+    with pytest.raises(
+        ValueError, match="^No perturbation is in cluster -1; the clusters run from 0"
+    ):
+        perturbation_clusters(
+            _clusters_store(_clusters_record(assigned, order)),
+            CLUSTERS,
+            cluster_ids=[-1],
+            show=False,
+        )
+    with pytest.raises(
+        ValueError,
+        match="^No perturbation is in cluster 0; every perturbation is unassigned, "
+        "in cluster -1$",
+    ):
+        perturbation_clusters(
+            _clusters_store(_clusters_record(loners)),
+            CLUSTERS,
+            cluster_ids=[0],
+            show=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "store",
+    [
+        SimpleNamespace(),
+        SimpleNamespace(perturbation=SimpleNamespace(load_profiles=lambda ref: ref)),
+    ],
+)
+def test_the_cluster_plot_needs_a_store_with_perturbation_clusters(
+    store: SimpleNamespace,
+) -> None:
+    with pytest.raises(TypeError, match="store does not provide perturbation clusters"):
+        perturbation_clusters(store, CLUSTERS, show=False)

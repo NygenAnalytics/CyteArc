@@ -160,6 +160,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "matrixplot",
     "mixscape",
     "modality_weights",
+    "perturbation_clusters",
     "pseudotime_heatmap",
     "qc",
     "run_recipe",

@@ -669,6 +669,23 @@ class DataStorePlotAccessor:
         """Plot the calibration of association tests on negative and positive controls."""
         return self._forward(PlotResult, "association_calibration", locals())
 
+    def perturbation_clusters(
+        self,
+        clusters: ArtifactRef,
+        *,
+        panel: str = "heatmap",
+        perturbations: Sequence[str] | None = None,
+        cluster_ids: Sequence[int] | None = None,
+        label: Sequence[str] | None = None,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot clusters of perturbations as a heatmap of their profiles or as a map."""
+        return self._forward(PlotResult, "perturbation_clusters", locals())
+
     def dotplot(
         self,
         *,
