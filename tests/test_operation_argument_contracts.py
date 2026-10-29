@@ -351,6 +351,25 @@ _CONTRACTS = (
         ),
     ),
     OperationContract(
+        PerturbationAccessor.associations,
+        metadata_arguments.PerturbationAssociationArguments,
+        aliases={"sample_column": "sample_columns", "covariates": "covariate_columns"},
+        signature_only={
+            **_classified("routing", "from_assay"),
+            # The pairs, the positive controls and the ID column that matches
+            # them become fingerprints of target and feature IDs.
+            **_classified("transformed", "pairs", "positive_controls", "id_column"),
+        },
+        model_only=_classified(
+            "resolved_input",
+            "dataset_fingerprint",
+            "pairs_fingerprint",
+            "positive_controls_fingerprint",
+            "sample_assignments_fingerprint",
+            "covariates_fingerprint",
+        ),
+    ),
+    OperationContract(
         QcAccessor.hto_demultiplexing,
         metadata_arguments.HtoIdentityArguments,
         model_only={

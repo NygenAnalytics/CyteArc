@@ -62,6 +62,8 @@ if TYPE_CHECKING:
     )
     from .modality_weights import modality_weights as modality_weights
     from .perturbation import (
+        association_calibration as association_calibration,
+        association_volcano as association_volcano,
         edistance as edistance,
         efficiency as efficiency,
         guide_calls as guide_calls,
@@ -91,6 +93,8 @@ __all__ = [
     "SizeScale",
     "StudyDesign",
     "THEMES",
+    "association_calibration",
+    "association_volcano",
     "cluster_tree",
     "cluster_connectivity",
     "compose_results",
@@ -147,6 +151,8 @@ __getattr__, __dir__ = _lazy_facade(
         "SizeScale": "._contracts",
         "StudyDesign": "._contracts",
         "THEMES": "._style",
+        "association_calibration": ".perturbation",
+        "association_volcano": ".perturbation",
         "cluster_tree": ".cluster_tree",
         "cluster_connectivity": ".cluster_connectivity",
         "compose_results": "._figure",

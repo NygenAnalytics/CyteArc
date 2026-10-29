@@ -130,6 +130,8 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "SizeScale",
     "StudyDesign",
     "THEMES",
+    "association_calibration",
+    "association_volcano",
     "cluster_tree",
     "cluster_connectivity",
     "compose_results",

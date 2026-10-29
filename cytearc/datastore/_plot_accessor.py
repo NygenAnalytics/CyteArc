@@ -641,6 +641,34 @@ class DataStorePlotAccessor:
         """Plot the share of each target's cells that Mixscape calls knocked out, or their scores."""
         return self._forward(PlotResult, "mixscape", locals())
 
+    def association_volcano(
+        self,
+        tests: ArtifactRef,
+        *,
+        targets: Sequence[str] | None = None,
+        label_top: int = 10,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the fold change and p-value of each tested pair of a target and a gene."""
+        return self._forward(PlotResult, "association_volcano", locals())
+
+    def association_calibration(
+        self,
+        tests: ArtifactRef,
+        *,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the calibration of association tests on negative and positive controls."""
+        return self._forward(PlotResult, "association_calibration", locals())
+
     def dotplot(
         self,
         *,

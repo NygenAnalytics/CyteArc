@@ -568,6 +568,38 @@ class MixscapeArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class PerturbationAssociationArguments(OperationArguments):
+    operation: ClassVar[str] = "test_perturbation_associations"
+    artifact_kind: ClassVar[str] = "perturbation_associations"
+
+    labels: ArtifactRef = artifact_input()
+    # The counts that the regressions and the QC read.
+    dataset_fingerprint: str = artifact_input()
+    # Trans pairs test every feature of a feature selection; explicit pairs
+    # and positive controls are fingerprinted as target and feature IDs.
+    features: ArtifactRef | None = artifact_input()
+    pairs_fingerprint: str | None = artifact_input()
+    positive_controls_fingerprint: str | None = artifact_input()
+    # The fingerprint of each cell's sample and of the covariate columns over
+    # the tested cells, the control cells and the cells of the tested targets
+    # or guides, or None without them.
+    sample_assignments_fingerprint: str | None = artifact_input()
+    covariates_fingerprint: str | None = artifact_input()
+    integration: str = parameter()
+    side: str = parameter()
+    n_resamples: tuple[int, int, int] = parameter()
+    stage_threshold: float = parameter()
+    approximation: str = parameter()
+    min_nonzero: int = parameter()
+    n_calibration_pairs: int | None = parameter()
+    alpha: float = parameter()
+    seed: int = parameter()
+    sample_columns: tuple[str, ...] = parameter()
+    covariate_columns: tuple[str, ...] = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class PerturbationEDistanceArguments(OperationArguments):
     operation: ClassVar[str] = "measure_edistance"
     artifact_kind: ClassVar[str] = "perturbation_edistance"

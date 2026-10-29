@@ -2,10 +2,11 @@
 
 from collections.abc import Callable, Hashable, Sequence
 from numbers import Real
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+from scipy.special import betaincinv
 
 from ..perturbation.edistance import (
     EDISTANCE_STATUSES,
@@ -30,6 +31,7 @@ from ._figure import (
 from ._style import (
     DEFAULT_RASTERIZE_THRESHOLD,
     apply_figure_chrome,
+    default_point_size,
     foreground_color,
     theme_context,
 )
@@ -107,6 +109,39 @@ _CURVE_POINTS = 200
 _CURVE_REACH = 3.0
 # A scores figure puts at most this many panels in a row.
 _SCORE_COLUMNS = 4
+
+_VOLCANO_PANEL = "volcano"
+_CALIBRATION_PANELS = ("qq", "fold_changes", "controls")
+# A plot of association tests rasterizes the points of a panel that draws more
+# than this many.
+_ASSOCIATION_RASTERIZE_THRESHOLD = 100_000
+# A p-value below this, such as 0 when it underflows, is drawn at the top edge
+# of a -log10 axis.
+_SMALLEST_P_VALUE = 1e-300
+_TOP_EDGE_MARKER = "^"
+_TOP_EDGE_LABEL = "p-value below 1e-300"
+_BEYOND_AXIS_LABEL = "Beyond the axis"
+_NO_COUNTS_LABEL = "No counts in the perturbed cells"
+_CUT_LABEL = "Benjamini-Hochberg cut"
+_TARGETING_COLOR = _SIGNIFICANT_COLOR
+_NEGATIVE_CONTROL_COLOR = _THRESHOLD_COLOR
+# The label of a p-value axis names the side of a one-sided test.
+_SIDE_WORDS = {"left": " for a decrease", "right": " for an increase"}
+# A volcano label sits this many points beside its point. A label that would
+# overlap another steps up or down by its height and this gap, in points, at
+# most this many times each way.
+_LABEL_OFFSET = 5.0
+_LABEL_GAP = 2.0
+_LABEL_STEPS = 8
+# A QQ band is drawn at every rank of at most this many p-values, and at this
+# many ranks spread evenly on the log scale otherwise.
+_BAND_RANKS = 1000
+_BAND_PROBABILITY = 0.95
+# The points of a strip of control p-values spread at random, with a fixed
+# seed, over this distance on each side of the strip's position.
+_STRIP_HALF_WIDTH = 0.25
+_STRIP_SEED = 0
+_FOLD_CHANGE_BINS = 30
 
 
 def _guide_calls(store: Any, calls: ArtifactRef) -> Any:
@@ -1725,6 +1760,887 @@ def mixscape(
                 "max_targets": max_targets,
                 "statuses": {
                     status: int(statuses.get(status, 0)) for status in MIXSCAPE_STATUSES
+                },
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+def _perturbation_associations(store: Any, tests: ArtifactRef) -> Any:
+    """Load saved association tests through the store's narrow loader."""
+    loader = getattr(getattr(store, "perturbation", None), "load_associations", None)
+    if not callable(loader):
+        raise TypeError("store does not provide perturbation associations")
+    return loader(tests)
+
+
+def _tested_pairs(pairs: pd.DataFrame) -> pd.DataFrame:
+    """Return the pairs that passed QC and have a p-value."""
+    tested = pairs["pass_qc"].to_numpy(dtype=bool) & ~np.isnan(
+        pairs["p_value"].to_numpy(dtype=np.float64)
+    )
+    return pairs[tested]
+
+
+def _p_value_heights(p_values: np.ndarray) -> np.ndarray:
+    """Return -log10 of each p-value, and infinity for one below 1e-300."""
+    heights = np.full(len(p_values), np.inf)
+    drawn = p_values >= _SMALLEST_P_VALUE
+    heights[drawn] = -np.log10(p_values[drawn])
+    return heights
+
+
+def _height_limits(high: float, edged: bool) -> tuple[float, float, float]:
+    """Return the limits of a -log10 p-value axis and the height of its top edge.
+
+    The axis holds 0 and ``high``, or 1 when ``high`` is not above 0, with a
+    margin of 5% of that on each side. A point beyond the axis sits at its top
+    edge, three margins above ``high``, and the axis then reaches one margin
+    past the edge.
+    """
+    if not high > 0:
+        high = 1.0
+    margin = 0.05 * high
+    edge = high + 3.0 * margin
+    return -margin, (edge + margin) if edged else (high + margin), edge
+
+
+def _legend_marker(shape: str, color: str | None, foreground: str) -> Any:
+    """Return the legend handle of a marker filled with ``color``, or hollow."""
+    from matplotlib.lines import Line2D
+
+    return Line2D(
+        [],
+        [],
+        marker=shape,
+        linestyle="",
+        markerfacecolor="none" if color is None else color,
+        markeredgecolor=foreground if color is None else "none",
+        markersize=7.0,
+    )
+
+
+def _legend_line(color: str, linestyle: Literal["-", "--"], linewidth: float) -> Any:
+    """Return the legend handle of a line."""
+    from matplotlib.lines import Line2D
+
+    return Line2D([], [], color=color, linestyle=linestyle, linewidth=linewidth)
+
+
+def _point_sizes(n_points: int) -> tuple[float, float]:
+    """Return the areas of the dots and of the edge markers of a panel.
+
+    The dots stay large enough to show the few pairs away from the crowd.
+    """
+    size = default_point_size(n_points, size_min=6.0, size_max=30.0)
+    return size, max(1.5 * size, 20.0)
+
+
+def _place_labels(figure: Any, ax: Any, labels: list[Any]) -> None:
+    """Move each label, in order, to the first free slot beside its point.
+
+    The slots lie beside the point, on the side the label starts on and then
+    on the other, at the point's height, then one label height above and
+    below it, then two, and so on up to eight. A label takes the first slot
+    inside the axes that no earlier label overlaps, and keeps its first slot
+    when none is free. A thin line leads to the point from a label above or
+    below it.
+    """
+    from matplotlib.text import Text
+
+    # The layout settles, and the labels get their sizes, without rendering.
+    figure.draw_without_rendering()
+    scale = figure.dpi / 72.0
+    frame = ax.get_window_extent()
+    steps = [0] + [
+        sign * step for step in range(1, _LABEL_STEPS + 1) for sign in (1, -1)
+    ]
+    placed: list[tuple[float, float, float, float]] = []
+    for label in labels:
+        extent = Text.get_window_extent(label)
+        width, height = extent.width, extent.height
+        anchor_x, anchor_y = ax.transData.transform(label.xy)
+        start = 1.0 if label.get_horizontalalignment() == "left" else -1.0
+        slots = [
+            (side * _LABEL_OFFSET, step * (height / scale + _LABEL_GAP))
+            for step in steps
+            for side in (start, -start)
+        ]
+        # In a slot, the label's left or right edge sits at the slot's offset,
+        # which centres the label vertically.
+        boxes = []
+        for dx, dy in slots:
+            left = anchor_x + dx * scale - (0.0 if dx > 0 else width)
+            bottom = anchor_y + dy * scale - height / 2.0
+            boxes.append((left, bottom, left + width, bottom + height))
+        chosen = next(
+            (
+                index
+                for index, (left, bottom, right, top) in enumerate(boxes)
+                if frame.x0 <= left
+                and right <= frame.x1
+                and frame.y0 <= bottom
+                and top <= frame.y1
+                and not any(
+                    left < other[2]
+                    and other[0] < right
+                    and bottom < other[3]
+                    and other[1] < top
+                    for other in placed
+                )
+            ),
+            0,
+        )
+        placed.append(boxes[chosen])
+        dx, dy = slots[chosen]
+        label.xyann = (dx, dy)
+        label.set_horizontalalignment("left" if dx > 0 else "right")
+        label.arrow_patch.set_visible(dy != 0)
+
+
+def _volcano_legend(
+    significant: np.ndarray,
+    at_top: np.ndarray,
+    no_counts: np.ndarray,
+    *,
+    cut: bool,
+    alpha: float,
+    foreground: str,
+) -> tuple[list[Any], list[str]]:
+    """Return the legend handles and labels of the drawn pairs."""
+    entries: list[tuple[Any, str]] = []
+    if significant.any():
+        entries.append(
+            (
+                _legend_marker("o", _SIGNIFICANT_COLOR, foreground),
+                f"Significant at FDR {alpha:g}",
+            )
+        )
+    if not significant.all():
+        entries.append(
+            (_legend_marker("o", _NOT_SIGNIFICANT_COLOR, foreground), "Not significant")
+        )
+    if at_top.any():
+        entries.append(
+            (_legend_marker(_TOP_EDGE_MARKER, None, foreground), _TOP_EDGE_LABEL)
+        )
+    if no_counts.any():
+        entries.append(
+            (_legend_marker(_NO_UMI_MARKER, None, foreground), _NO_COUNTS_LABEL)
+        )
+    if cut:
+        entries.append((_legend_line(_THRESHOLD_COLOR, "--", 1.2), _CUT_LABEL))
+    return [handle for handle, _ in entries], [label for _, label in entries]
+
+
+@close_figures_on_error
+def association_volcano(
+    store: Any,
+    tests: ArtifactRef,
+    *,
+    targets: Sequence[str] | None = None,
+    label_top: int = 10,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot how much and how significantly each perturbation changes each gene.
+
+    ``tests`` is a ``perturbation_associations`` artifact of
+    ``ds.perturbation.associations``, as ``ds.perturbation.load_associations``
+    reads it. Each discovery pair of a target and a gene that passed QC gets
+    a point at its log2 fold change, the gene's counts in the target's cells
+    against the counts that its fit on the control cells predicts for them,
+    and at -log10 of its p-value. A point is blue when the pair is
+    significant at the false discovery rate of the tests and grey otherwise.
+    A dashed line marks the largest p-value of a significant pair, the cut of
+    the Benjamini-Hochberg procedure, which runs over the pairs of every
+    target. When the tests are one-sided, the label of the p-value axis names
+    the side tested.
+
+    A p-value below 1e-300, such as 0 when it underflows, is drawn as an
+    upward triangle at the top edge. A fold change of minus infinity, when
+    the target's cells hold no counts of the gene, is drawn as a triangle at
+    the left edge. The ``label_top`` pairs with the smallest p-values, ties
+    broken by the larger size of ``z`` and then by target and gene, are
+    labelled ``target:feature`` beside their points, and ``label_top=0``
+    labels none. A label that would overlap a label of a smaller p-value
+    moves to the other side of its point, or above or below it with a thin
+    line to it. The points are rasterized when there are more than 100,000.
+
+    ``targets`` keeps the pairs of those targets, and the plot raises
+    ValueError naming any target without discovery pairs. The plot also
+    raises ValueError when none of the kept pairs passed QC. The title counts
+    the significant pairs among the drawn pairs, and the pairs left out
+    because they were not tested. The table ``"volcano"`` holds the drawn
+    pairs with every column of the record, from the smallest p-value to the
+    largest, ties broken as for the labels, so its first ``label_top`` rows
+    are the labelled pairs.
+    """
+    if (
+        isinstance(label_top, bool)
+        or not isinstance(label_top, int | np.integer)
+        or label_top < 0
+    ):
+        raise ValueError("label_top must be a non-negative integer")
+    label_top = int(label_top)
+    requested = _distinct_labels(targets, "targets", "target")
+    loaded = _perturbation_associations(store, tests)
+    side = str(loaded.side)
+    alpha = float(loaded.alpha)
+    discovery = loaded.discovery
+    # The procedure ran over the pairs of every target, so the cut comes from
+    # every significant pair, drawn or not.
+    every = _tested_pairs(discovery)
+    called = every["p_value"].to_numpy(dtype=np.float64)[
+        every["significant"].to_numpy(dtype=bool)
+    ]
+    cut = float(called.max()) if len(called) else None
+    if requested is not None:
+        known = set(discovery["target"].tolist())
+        unknown = [name for name in requested if name not in known]
+        if unknown:
+            raise ValueError(
+                "The discovery pairs have no target named "
+                + ", ".join(repr(name) for name in unknown)
+            )
+        discovery = discovery[discovery["target"].isin(requested)]
+    tested = _tested_pairs(discovery)
+    tested = tested[~np.isnan(tested["log2_fold_change"].to_numpy(dtype=np.float64))]
+    if tested.empty:
+        scope = "" if requested is None else " of these targets"
+        raise ValueError(
+            f"None of the discovery pairs{scope} passed QC, so there are no "
+            "p-values to plot"
+        )
+    n_untested = len(discovery) - len(tested)
+    drawn = tested.sort_values(
+        ["p_value", "z", "target", "feature"],
+        key=lambda column: -column.abs() if column.name == "z" else column,
+        kind="stable",
+        na_position="last",
+    ).reset_index(drop=True)
+    n_drawn = len(drawn)
+    fold_changes = drawn["log2_fold_change"].to_numpy(dtype=np.float64)
+    significant = drawn["significant"].to_numpy(dtype=bool)
+    no_counts = np.isneginf(fold_changes)
+    left, right, left_edge = _fold_change_limits(fold_changes)
+    x = np.where(no_counts, left_edge, fold_changes)
+    heights = _p_value_heights(drawn["p_value"].to_numpy(dtype=np.float64))
+    at_top = ~np.isfinite(heights)
+    # The axis also holds the cut, which a drawn pair need not reach.
+    cut_height = None if cut is None else float(_p_value_heights(np.asarray([cut]))[0])
+    reached = [float(heights[~at_top].max(initial=0.0))]
+    if cut_height is not None and np.isfinite(cut_height):
+        reached.append(cut_height)
+    bottom, top, top_edge = _height_limits(
+        max(reached),
+        bool(at_top.any()) or (cut_height is not None and np.isinf(cut_height)),
+    )
+    y = np.where(at_top, top_edge, heights)
+    shapes = np.where(
+        no_counts, _NO_UMI_MARKER, np.where(at_top, _TOP_EDGE_MARKER, "o")
+    )
+    size, edge_size = _point_sizes(n_drawn)
+    rasterized = n_drawn > _ASSOCIATION_RASTERIZE_THRESHOLD
+    n_significant = int(np.count_nonzero(significant))
+    title = [
+        "Association tests of the discovery pairs",
+        f"{n_significant:,} of {n_drawn:,} tested pair{'' if n_drawn == 1 else 's'} "
+        f"significant at FDR {alpha:g}",
+    ]
+    if n_untested:
+        title.append(
+            f"Not plotted: {n_untested:,} untested pair{'' if n_untested == 1 else 's'}"
+        )
+    if figsize is None and target is None:
+        figsize = (5.4 + (3.0 if show_legend else 0.0), 4.4 + 0.25 * len(title))
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=[_VOLCANO_PANEL], figsize=figsize
+        )
+        ax = axes[_VOLCANO_PANEL]
+        foreground = foreground_color(theme)
+        ax.axvline(0.0, color=foreground, linewidth=0.8, zorder=1)
+        # The significant pairs are drawn over the others.
+        for chosen_significance, color, order in (
+            (False, _NOT_SIGNIFICANT_COLOR, 2.0),
+            (True, _SIGNIFICANT_COLOR, 3.0),
+        ):
+            for shape in ("o", _TOP_EDGE_MARKER, _NO_UMI_MARKER):
+                chosen = (significant == chosen_significance) & (shapes == shape)
+                if chosen.any():
+                    ax.scatter(
+                        x[chosen],
+                        y[chosen],
+                        s=size if shape == "o" else edge_size,
+                        color=color,
+                        marker=shape,
+                        linewidths=0,
+                        alpha=0.75,
+                        zorder=order,
+                        rasterized=rasterized,
+                    )
+        if cut_height is not None:
+            ax.axhline(
+                top_edge if np.isinf(cut_height) else cut_height,
+                color=_THRESHOLD_COLOR,
+                linestyle="--",
+                linewidth=1.2,
+                zorder=3.5,
+            )
+        targets_drawn = drawn["target"].tolist()
+        # Labels name genes by name, such as IFNGR1, rather than by ID.
+        features_drawn = drawn[
+            "feature_name" if "feature_name" in drawn else "feature"
+        ].tolist()
+        labels = []
+        for row in range(min(label_top, n_drawn)):
+            # A label starts on the side towards the middle, where a volcano
+            # has room.
+            towards = 1.0 if x[row] < 0 else -1.0
+            label = ax.annotate(
+                f"{targets_drawn[row]}:{features_drawn[row]}",
+                (float(x[row]), float(y[row])),
+                xytext=(towards * _LABEL_OFFSET, 0.0),
+                textcoords="offset points",
+                ha="left" if towards > 0 else "right",
+                va="center",
+                fontsize="small",
+                color=foreground,
+                zorder=4,
+                arrowprops={
+                    "arrowstyle": "-",
+                    "color": foreground,
+                    "linewidth": 0.6,
+                    "shrinkA": 0.0,
+                    "shrinkB": 2.0,
+                },
+            )
+            label.arrow_patch.set_visible(False)
+            labels.append(label)
+        ax.set_xlim(left, right)
+        ax.set_ylim(bottom, top)
+        ax.set_xlabel("Log2 fold change against control cells")
+        ax.set_ylabel(f"-log10 p-value{_SIDE_WORDS.get(side, '')}")
+        ax.set_title("\n".join(title))
+        handles, texts = _volcano_legend(
+            significant,
+            at_top & ~no_counts,
+            no_counts,
+            cut=cut_height is not None,
+            alpha=alpha,
+            foreground=foreground,
+        )
+        if show_legend:
+            if owns:
+                figure.legend(handles, texts, loc="outside right center", frameon=False)
+            else:
+                ax.legend(handles, texts, loc="best", frameon=False, fontsize="small")
+        apply_figure_chrome(figure, theme)
+        if len(labels) > 1:
+            _place_labels(figure, ax, labels)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"volcano": drawn},
+        legends=(
+            LegendSpec(kind="categorical", label="Significance"),
+            LegendSpec(kind="line", label=_CUT_LABEL),
+        ),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=tests.assay,
+            cell_key=None,
+            # The cells of the drawn targets and the control cells.
+            n_cells=int(drawn.groupby("target", sort=False)["n_cells"].max().sum())
+            + int(drawn["n_control_cells"].max()),
+            renderer="matplotlib",
+            notes=("perturbation_associations",),
+            extras={
+                "tests": tests.to_dict(),
+                "side": side,
+                "integration": str(loaded.integration),
+                "from_assay": str(loaded.from_assay),
+                "alpha": alpha,
+                "targets": requested,
+                "label_top": label_top,
+                "n_tested": n_drawn,
+                "n_significant": n_significant,
+                "largest_significant_p_value": cut,
+                "rasterized": rasterized,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+def _set_rows(sets: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the ``target``, ``feature`` and ``p_value`` of each set's pairs.
+
+    The rows come set by set, each in its order, after a ``set`` column that
+    names their set.
+    """
+    frames = list(sets.values())
+    return pd.DataFrame(
+        {
+            "set": np.repeat(
+                np.asarray(list(sets), dtype=object), [len(frame) for frame in frames]
+            ),
+            **{
+                column: np.concatenate(
+                    [np.zeros(0, dtype=object)]
+                    + [frame[column].to_numpy(dtype=object) for frame in frames]
+                )
+                for column in ("target", "feature")
+            },
+            "p_value": np.concatenate(
+                [np.zeros(0)]
+                + [frame["p_value"].to_numpy(dtype=np.float64) for frame in frames]
+            ),
+        }
+    )
+
+
+def _band_ranks(n: int) -> np.ndarray:
+    """Return the ranks at which the band of ``n`` uniform p-values is drawn.
+
+    Every rank when ``n`` is at most 1,000, and otherwise 1,000 ranks spread
+    evenly on the log scale and rounded, without repeats.
+    """
+    if n <= _BAND_RANKS:
+        return np.arange(1, n + 1, dtype=np.int64)
+    spread = np.rint(np.geomspace(1.0, float(n), _BAND_RANKS))
+    ranks: np.ndarray = np.unique(spread.astype(np.int64))
+    return ranks
+
+
+def _qq_band(n: int) -> pd.DataFrame:
+    """Return the 95% band of the i-th smallest of ``n`` uniform p-values.
+
+    The i-th smallest follows Beta(i, n - i + 1), whose mean is i / (n + 1),
+    so its 2.5% and 97.5% quantiles bound the band, at the ranks of
+    :func:`_band_ranks`.
+    """
+    ranks = _band_ranks(n)
+    first = ranks.astype(np.float64)
+    second = n - first + 1.0
+    tail = (1.0 - _BAND_PROBABILITY) / 2.0
+    return pd.DataFrame(
+        {
+            "rank": ranks,
+            "expected": first / (n + 1.0),
+            "lower": betaincinv(first, second, tail),
+            "upper": betaincinv(first, second, 1.0 - tail),
+        }
+    )
+
+
+def _qq_points(calibration: pd.DataFrame, discovery: pd.DataFrame) -> pd.DataFrame:
+    """Return the QQ points of the tested negative-control and discovery pairs.
+
+    Each set runs from its smallest p-value to its largest, and ``expected``
+    is the mean of the i-th smallest of the set's n uniform p-values,
+    i / (n + 1).
+    """
+    sets = {
+        "calibration": calibration.sort_values("p_value", kind="stable"),
+        "discovery": discovery.sort_values("p_value", kind="stable"),
+    }
+    points = _set_rows(sets)
+    points["expected"] = np.concatenate(
+        [np.arange(1, len(frame) + 1) / (len(frame) + 1.0) for frame in sets.values()]
+    )
+    return points
+
+
+def _qq_panel(
+    ax: Any,
+    points: pd.DataFrame,
+    band: pd.DataFrame,
+    *,
+    side: str,
+    foreground: str,
+    show_legend: bool,
+) -> None:
+    """Draw the QQ plot of the negative-control and discovery p-values."""
+    from matplotlib.patches import Patch
+
+    sets = points["set"].to_numpy(dtype=object)
+    x = -np.log10(points["expected"].to_numpy(dtype=np.float64))
+    heights = _p_value_heights(points["p_value"].to_numpy(dtype=np.float64))
+    calibration = sets == "calibration"
+    band_x = -np.log10(band["expected"].to_numpy(dtype=np.float64))
+    band_low = -np.log10(band["upper"].to_numpy(dtype=np.float64))
+    band_high = -np.log10(band["lower"].to_numpy(dtype=np.float64))
+    # The axis holds the identity line, the band and the negative controls,
+    # so a discovery p-value above them, like a p-value below 1e-300, sits at
+    # the top edge.
+    high = max(
+        float(x.max()),
+        float(band_high.max()),
+        float(heights[calibration & np.isfinite(heights)].max(initial=0.0)),
+    )
+    beyond = ~(heights <= high)
+    bottom, top, edge = _height_limits(high, bool(beyond.any()))
+    y = np.where(beyond, edge, heights)
+    increasing = np.argsort(band_x)
+    ax.fill_between(
+        band_x[increasing],
+        band_low[increasing],
+        band_high[increasing],
+        color=foreground,
+        alpha=0.15,
+        linewidth=0,
+        zorder=1,
+    )
+    ax.axline((0.0, 0.0), slope=1.0, color=foreground, linewidth=0.8, zorder=1.5)
+    size, edge_size = _point_sizes(len(points))
+    rasterized = len(points) > _ASSOCIATION_RASTERIZE_THRESHOLD
+    # The discovery p-values are drawn over the negative controls.
+    for name, color, order in (
+        ("calibration", _NEGATIVE_CONTROL_COLOR, 2.0),
+        ("discovery", _TARGETING_COLOR, 3.0),
+    ):
+        in_set = sets == name
+        for shape, chosen in (
+            ("o", in_set & ~beyond),
+            (_TOP_EDGE_MARKER, in_set & beyond),
+        ):
+            if chosen.any():
+                ax.scatter(
+                    x[chosen],
+                    y[chosen],
+                    s=size if shape == "o" else edge_size,
+                    color=color,
+                    marker=shape,
+                    linewidths=0,
+                    alpha=0.75,
+                    zorder=order,
+                    rasterized=rasterized,
+                )
+    left, right, _ = _height_limits(float(x.max()), False)
+    ax.set_xlim(left, right)
+    ax.set_ylim(bottom, top)
+    ax.set_xlabel("Expected -log10 p-value")
+    ax.set_ylabel(f"Observed -log10 p-value{_SIDE_WORDS.get(side, '')}")
+    ax.set_title("Negative-control p-values")
+    if show_legend:
+        # Short labels keep the legend clear of the points.
+        entries = [
+            (
+                _legend_marker("o", _NEGATIVE_CONTROL_COLOR, foreground),
+                "Negative controls",
+            )
+        ]
+        if not calibration.all():
+            entries.append(
+                (_legend_marker("o", _TARGETING_COLOR, foreground), "Discovery pairs")
+            )
+        entries.append((_legend_line(foreground, "-", 0.8), "Null expectation"))
+        entries.append(
+            (
+                Patch(facecolor=foreground, alpha=0.15, linewidth=0),
+                f"{_BAND_PROBABILITY:.0%} null band",
+            )
+        )
+        if beyond.any():
+            entries.append(
+                (
+                    _legend_marker(_TOP_EDGE_MARKER, None, foreground),
+                    _BEYOND_AXIS_LABEL,
+                )
+            )
+        # Points rarely fall below the identity line far from the origin.
+        ax.legend(
+            [handle for handle, _ in entries],
+            [label for _, label in entries],
+            loc="lower right",
+            frameon=False,
+            fontsize="small",
+        )
+
+
+def _fold_change_panel(
+    ax: Any, calibration: pd.DataFrame, *, foreground: str
+) -> tuple[pd.DataFrame, float | None]:
+    """Draw the histogram of the negative-control fold changes and their mean.
+
+    Returns the histogram and the mean, None without a finite fold change.
+    """
+    from matplotlib.ticker import MaxNLocator
+
+    fold_changes = calibration["log2_fold_change"].to_numpy(dtype=np.float64)
+    finite = np.isfinite(fold_changes)
+    values = fold_changes[finite]
+    title = ["Negative-control fold changes"]
+    mean: float | None = None
+    counts = np.zeros(0, dtype=np.int64)
+    edges = np.zeros(1)
+    if len(values):
+        counts, edges = np.histogram(values, bins=_FOLD_CHANGE_BINS)
+        ax.bar(
+            edges[:-1],
+            counts,
+            width=np.diff(edges),
+            align="edge",
+            color=_NEGATIVE_CONTROL_COLOR,
+            linewidth=0,
+        )
+        mean = float(values.mean())
+        ax.axvline(mean, color=foreground, linestyle="--", linewidth=1.2)
+        title.append(f"Dashed line at the mean, {mean:.3g}")
+    n_infinite = int(np.count_nonzero(~finite))
+    if n_infinite:
+        title.append(f"Not drawn: {n_infinite:,} without a finite fold change")
+    # Bars count pairs, so the ticks fall on whole numbers.
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.set_xlabel("Log2 fold change against the other control cells")
+    ax.set_ylabel("Negative-control pairs")
+    ax.set_title("\n".join(title))
+    histogram = pd.DataFrame(
+        {"bin_start": edges[:-1], "bin_stop": edges[1:], "pairs": counts}
+    )
+    return histogram, mean
+
+
+def _controls_panel(
+    ax: Any,
+    positive: pd.DataFrame,
+    calibration: pd.DataFrame,
+    *,
+    n_positive_pairs: int,
+    discoveries: str,
+    side: str,
+    foreground: str,
+    show_legend: bool,
+) -> pd.DataFrame:
+    """Draw the p-values of the positive and negative controls as two strips.
+
+    Returns the drawn controls.
+    """
+    controls = _set_rows({"positive": positive, "calibration": calibration})
+    sets = controls["set"].to_numpy(dtype=object)
+    positions = np.where(sets == "positive", 0.0, 1.0)
+    random = np.random.default_rng(_STRIP_SEED)
+    x = positions + random.uniform(-_STRIP_HALF_WIDTH, _STRIP_HALF_WIDTH, len(sets))
+    heights = _p_value_heights(controls["p_value"].to_numpy(dtype=np.float64))
+    at_top = ~np.isfinite(heights)
+    bottom, top, edge = _height_limits(
+        float(heights[~at_top].max(initial=0.0)), bool(at_top.any())
+    )
+    y = np.where(at_top, edge, heights)
+    size, edge_size = _point_sizes(len(controls))
+    rasterized = len(controls) > _ASSOCIATION_RASTERIZE_THRESHOLD
+    for name, color in (
+        ("positive", _TARGETING_COLOR),
+        ("calibration", _NEGATIVE_CONTROL_COLOR),
+    ):
+        in_set = sets == name
+        for shape, chosen in (
+            ("o", in_set & ~at_top),
+            (_TOP_EDGE_MARKER, in_set & at_top),
+        ):
+            if chosen.any():
+                ax.scatter(
+                    x[chosen],
+                    y[chosen],
+                    s=size if shape == "o" else edge_size,
+                    color=color,
+                    marker=shape,
+                    linewidths=0,
+                    alpha=0.75,
+                    zorder=2,
+                    rasterized=rasterized,
+                )
+    if positive.empty:
+        ax.text(
+            0.0,
+            0.5,
+            "No positive controls"
+            if n_positive_pairs == 0
+            else "No positive control passed QC",
+            transform=ax.get_xaxis_transform(),
+            ha="center",
+            va="center",
+            color=foreground,
+        )
+    labels = [
+        f"{name}\n{count:,} pair{'' if count == 1 else 's'}"
+        for name, count in (
+            ("Positive controls", len(positive)),
+            ("Negative controls", len(calibration)),
+        )
+    ]
+    ax.set_xticks([0.0, 1.0], labels)
+    ax.tick_params(axis="x", length=0)
+    ax.set_xlim(-0.6, 1.6)
+    ax.set_ylim(bottom, top)
+    ax.set_ylabel(f"-log10 p-value{_SIDE_WORDS.get(side, '')}")
+    ax.set_title("\n".join(["Positive and negative controls", discoveries]))
+    if show_legend and at_top.any():
+        # The negative controls rarely rise far above the bottom.
+        ax.legend(
+            [_legend_marker(_TOP_EDGE_MARKER, None, foreground)],
+            [_TOP_EDGE_LABEL],
+            loc="center right",
+            frameon=False,
+            fontsize="small",
+        )
+    return controls
+
+
+@close_figures_on_error
+def association_calibration(
+    store: Any,
+    tests: ArtifactRef,
+    *,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot whether the association tests keep their error rate, and find effects.
+
+    ``tests`` is a ``perturbation_associations`` artifact of
+    ``ds.perturbation.associations``, as ``ds.perturbation.load_associations``
+    reads it. Its negative-control pairs test groups of non-targeting guides
+    against the other control cells, so no gene should change, and its
+    positive-control pairs, such as each target with its own gene, should
+    change. Three panels in a row, whose axes take the keys ``"qq"``,
+    ``"fold_changes"`` and ``"controls"``, follow the calibration check of
+    the SCEPTRE book.
+
+    ``"qq"`` draws -log10 of the negative-control p-values against the
+    quantiles of as many uniform p-values. Calibrated p-values follow the
+    identity line and mostly stay within the shaded band, between the 2.5%
+    and 97.5% quantiles of Beta(i, n - i + 1), which the i-th smallest of n
+    uniform p-values follows. The discovery p-values are drawn in blue over
+    them, against the quantiles of their own number, and rise above the line
+    where perturbations change genes. The axis holds the band and the
+    negative controls, so a discovery p-value above it, like any p-value
+    below 1e-300, is drawn as an upward triangle at the top edge.
+
+    ``"fold_changes"`` is a histogram of the negative-control log2 fold
+    changes, with a dashed line at their mean, which lies near 0 when the
+    tests are calibrated. ``"controls"`` draws -log10 of the positive-control
+    and negative-control p-values as two strips, each point moved sideways at
+    random with a fixed seed so that the points stay apart. Its title counts
+    the negative-control pairs that the tests call significant, the false
+    discoveries, with their grade. Without a tested positive-control pair,
+    the panel says so. A p-value below 1e-300 is drawn at the top edge.
+
+    When the tests are one-sided, the labels of the p-value axes name the
+    side tested. A panel rasterizes its points when it draws more than
+    100,000. The plot raises ValueError when no negative-control pair passed
+    QC. The table ``"qq"`` holds the drawn p-values with ``set``,
+    ``target``, ``feature``, ``p_value`` and ``expected``, the uniform
+    quantile i / (n + 1); ``"band"`` holds the band's ``rank``, ``expected``,
+    ``lower`` and ``upper`` p-values, at every rank of at most 1,000
+    negative-control pairs and at 1,000 ranks spread on the log scale
+    otherwise; ``"fold_changes"`` holds the histogram's ``bin_start``,
+    ``bin_stop`` and ``pairs``; and ``"controls"`` holds the drawn controls
+    with ``set``, ``target``, ``feature`` and ``p_value``.
+    """
+    loaded = _perturbation_associations(store, tests)
+    side = str(loaded.side)
+    alpha = float(loaded.alpha)
+    calibration = _tested_pairs(loaded.calibration)
+    if calibration.empty:
+        raise ValueError(
+            "None of the negative-control pairs passed QC, so there is no "
+            "calibration to plot"
+        )
+    discovery = _tested_pairs(loaded.discovery)
+    positive = _tested_pairs(loaded.positive)
+    points = _qq_points(calibration, discovery)
+    band = _qq_band(len(calibration))
+    n_false = int(loaded.n_false_discoveries)
+    grade = str(loaded.calibration_grade)
+    discoveries = (
+        f"{n_false:,} false discover{'y' if n_false == 1 else 'ies'} "
+        f"at FDR {alpha:g} ({grade})"
+    )
+    if figsize is None and target is None:
+        figsize = (13.0, 4.6)
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=list(_CALIBRATION_PANELS), figsize=figsize, n_columns=3
+        )
+        foreground = foreground_color(theme)
+        _qq_panel(
+            axes["qq"],
+            points,
+            band,
+            side=side,
+            foreground=foreground,
+            show_legend=show_legend,
+        )
+        fold_changes, mean = _fold_change_panel(
+            axes["fold_changes"], calibration, foreground=foreground
+        )
+        controls = _controls_panel(
+            axes["controls"],
+            positive,
+            calibration,
+            n_positive_pairs=len(loaded.positive),
+            discoveries=discoveries,
+            side=side,
+            foreground=foreground,
+            show_legend=show_legend,
+        )
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={
+            "qq": points,
+            "band": band,
+            "fold_changes": fold_changes,
+            "controls": controls,
+        },
+        legends=(
+            LegendSpec(kind="categorical", label="Pairs"),
+            LegendSpec(kind="line", label="Expected under the null"),
+        ),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=tests.assay,
+            cell_key=None,
+            # The control cells, which each negative-control pair splits into
+            # its group's cells and the others.
+            n_cells=int(
+                (calibration["n_cells"] + calibration["n_control_cells"]).max()
+            ),
+            renderer="matplotlib",
+            notes=("perturbation_associations",),
+            extras={
+                "tests": tests.to_dict(),
+                "side": side,
+                "integration": str(loaded.integration),
+                "from_assay": str(loaded.from_assay),
+                "alpha": alpha,
+                "n_false_discoveries": n_false,
+                "calibration_grade": grade,
+                "mean_log2_fold_change": mean,
+                "n_tested": {
+                    "discovery": len(discovery),
+                    "calibration": len(calibration),
+                    "positive": len(positive),
                 },
             },
         ),

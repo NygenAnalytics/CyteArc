@@ -65,6 +65,8 @@ Granular workflows pass exact refs to the same datastore-owned plotting surface:
 | perturbation efficiency of a CRISPR screen | `efficiency(efficiency_ref)` |
 | E-distance of each perturbation from the control cells | `edistance(edistance_ref)` |
 | Mixscape's knocked-out and escaping cells of each target | `mixscape(classes_ref)`, or `mixscape(classes_ref, panel="scores")` for each target's scores and fitted distributions |
+| fold change and p-value of each tested pair of a target and a gene | `association_volcano(tests_ref)`, or `association_volcano(tests_ref, targets=[...])` for the pairs of some targets |
+| calibration of the association tests on negative controls, and their power on positive controls | `association_calibration(tests_ref)` |
 
 `layout_key` and string forms on plotters that still accept them refer to deliberate live metadata
 inputs. Distribution grouping instead requires either an exact categorical artifact or an explicit
@@ -156,7 +158,7 @@ Helpers differ: `label_panels` returns `None`, `theme_context` is an iterator, a
 
 ```{eval-rst}
 .. automodule:: cytearc.plotting
-    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, mixscape, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
+    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, mixscape, association_volcano, association_calibration, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
     :imported-members:
     :undoc-members:
     :show-inheritance:

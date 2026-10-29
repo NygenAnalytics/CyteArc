@@ -190,6 +190,10 @@ class PerturbationAccessor(_Accessor):
     load_signature = _bind(_PerturbationOperationsMixin._perturbation_load_signature)
     mixscape = _bind(_PerturbationOperationsMixin._perturbation_mixscape)
     load_mixscape = _bind(_PerturbationOperationsMixin._perturbation_load_mixscape)
+    associations = _bind(_PerturbationOperationsMixin._perturbation_associations)
+    load_associations = _bind(
+        _PerturbationOperationsMixin._perturbation_load_associations
+    )
 
 
 class QcAccessor(_Accessor):
