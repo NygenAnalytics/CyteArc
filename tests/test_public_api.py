@@ -132,6 +132,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "THEMES",
     "cluster_tree",
     "cluster_connectivity",
+    "clonal_expansion",
     "clonotype_abundance",
     "compose_results",
     "composition",

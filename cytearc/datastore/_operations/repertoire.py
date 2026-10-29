@@ -8,7 +8,11 @@ import numpy as np
 import pandas as pd
 import zarr
 
-from ...metadata.arguments import ClonotypeArguments, ImmuneReceptorImportArguments
+from ...metadata.arguments import (
+    ClonalExpansionArguments,
+    ClonotypeArguments,
+    ImmuneReceptorImportArguments,
+)
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from ...metadata.rows import (
     apply_missing_mask,
@@ -44,6 +48,16 @@ from ...repertoire.contigs import (
     decode_ragged,
     decode_text,
     take_text,
+)
+from ...repertoire.expansion import (
+    DEFAULT_BREAKPOINTS,
+    DEFAULT_RANK_SPLITS,
+    ClonalExpansion,
+    checked_bounds,
+    expansion_categories,
+    expansion_tables,
+    frequency_labels,
+    group_clone_sizes,
 )
 from ...repertoire.receptors import (
     SLOT_FIELDS,
@@ -98,6 +112,23 @@ _CLONOTYPE_COLUMNS = frozenset(
 # Bytes that a decoded contig field takes in a table, per contig, besides the
 # text of ragged fields.
 _TABLE_BYTES_PER_FIELD = 64
+# Measuring clonal expansion holds, at its peak, about 270 bytes per cell: the
+# clonotype and group codes, the clone sizes and frequencies, and the labels
+# as written, as measured on 1,000,000 cells.
+_EXPANSION_BYTES_PER_CELL = 300
+# The columns of the tables of clonal expansion, which a within column may not
+# share; plots add a "group" column.
+_EXPANSION_COLUMNS = frozenset(
+    {"group", "clonotype", "category", "group_clone_size", "group_clone_frequency"}
+    | {"cells", "clonotypes", "fraction", "window"}
+)
+# The tables of loaded clonotypes and clonal expansion hold about 850 and 450
+# bytes per cell at their peak, with the cell IDs and labels as text, as
+# measured on 1,000,000 cells.
+_CLONOTYPE_TABLE_BYTES_PER_CELL = 1_000
+_EXPANSION_TABLE_BYTES_PER_CELL = 500
+# The column of each group's receptor type in the tables of clonal expansion.
+_RECEPTOR_TYPE_COLUMN = "receptor_type"
 
 
 def _file_sha256(path: str | os.PathLike[str]) -> str:
@@ -678,6 +709,51 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             productive_only=bool((status.parameters or {})["productive_only"]),
         )
 
+    def _within_samples(
+        self,
+        cell_selection: ArtifactRef,
+        columns: tuple[str, ...],
+        rows: np.ndarray,
+        *,
+        reason: str,
+    ) -> tuple[np.ndarray, list[dict[str, str]], str | None]:
+        """Group the selected cells at ``rows`` by their labels in ``columns``.
+
+        Returns each of those cells' sample code, each sample's labels, and the
+        fingerprint of the cells' samples, as ``sample_codes`` does; without
+        columns, one sample without labels and no fingerprint.
+        """
+        n_rows = int(np.count_nonzero(rows))
+        if not columns:
+            return sample_codes(columns, [], n_rows, reason=reason)
+        cell_index = read_stored_selection_indices(
+            self.zw,
+            cell_selection,
+            kind="cell_selection",
+            scope="datastore",
+            assay=None,
+            table_path="cellData",
+        ).astype(np.int64, copy=False)[rows]
+        labels = [
+            apply_missing_mask(
+                np.asarray(read_metadata_rows(self.cells, column, cell_index)),
+                read_metadata_missing_rows(self.cells, column, cell_index),
+                labels=True,
+            )
+            for column in columns
+        ]
+        return sample_codes(columns, labels, n_rows, reason=reason)
+
+    def _check_table_budget(self, n_cells: int, per_cell: int, name: str) -> None:
+        """Refuse to load tables of ``n_cells`` cells beyond the memory budget."""
+        resident = per_cell * int(n_cells)
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Loading the {name} of {n_cells} cells holds about {resident} "
+                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
+                "Raise mem_budget."
+            )
+
     def _receptor_group(
         self, receptors: ArtifactRef
     ) -> tuple[zarr.Group, tuple[str, ...]]:
@@ -797,34 +873,13 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         else:
             type_codes = np.zeros(n_cells, dtype=np.int64)
         within_codes = np.zeros(n_cells, dtype=np.int64)
-        fingerprint = None
-        within_labels: list[dict[str, str]] = [{}]
-        if columns:
-            cell_index = read_stored_selection_indices(
-                self.zw,
-                cell_selection,
-                kind="cell_selection",
-                scope="datastore",
-                assay=None,
-                table_path="cellData",
-            ).astype(np.int64, copy=False)[with_receptor]
-            column_labels = [
-                read_metadata_rows(self.cells, column, cell_index) for column in columns
-            ]
-            missing = [
-                read_metadata_missing_rows(self.cells, column, cell_index)
-                for column in columns
-            ]
-            codes, within_labels, fingerprint = sample_codes(
-                columns,
-                [
-                    apply_missing_mask(np.asarray(values), mask, labels=True)
-                    for values, mask in zip(column_labels, missing, strict=True)
-                ],
-                len(cell_index),
-                reason="Every cell with a receptor needs a label in the within columns.",
-            )
-            within_codes[with_receptor] = codes
+        codes, within_labels, fingerprint = self._within_samples(
+            cell_selection,
+            columns,
+            with_receptor,
+            reason="Every cell with a receptor needs a label in the within columns.",
+        )
+        within_codes[with_receptor] = codes
         n_within = max(1, int(within_codes.max()) + 1)
         groups = np.where(
             with_receptor, type_codes.astype(np.int64) * n_within + within_codes, -1
@@ -942,8 +997,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Raises:
             TypeError: If ``clonotypes`` is not an ArtifactRef.
             ValueError: If it is not a ``clonotypes`` artifact.
+            MemoryError: If the tables, about 1,000 bytes per cell, do not fit
+                the memory budget.
         """
         group = self._clonotype_group(clonotypes)
+        self._check_table_budget(
+            as_zarr_array(group["codes"], name="codes").shape[0],
+            _CLONOTYPE_TABLE_BYTES_PER_CELL,
+            "clonotypes",
+        )
         status = inspect_artifact(self.zw, clonotypes)
         parameters = dict(status.parameters or {})
         receptors = status.input_ref("receptors")
@@ -998,4 +1060,295 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             same_j_gene=bool(parameters["same_j_gene"]),
             within=within,
             within_receptor_type=bool(parameters["within_receptor_type"]),
+        )
+
+    @validation_scoped
+    def _repertoire_clonal_expansion(
+        self,
+        clonotypes: ArtifactRef,
+        *,
+        within: str | Sequence[str] | None = None,
+        within_receptor_type: bool = True,
+        breakpoints: Sequence[int] | None = None,
+        frequency_breakpoints: Sequence[float] | None = None,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Place each cell in an expansion category by its clone size in its group.
+
+        A clonotype that holds more than one cell has expanded. Its size is
+        counted within groups of cells: the combinations of the labels of the
+        ``within`` cell metadata columns, such as the sample, and, with
+        ``within_receptor_type``, of the receptor type, so T cells and B cells
+        are counted apart. Without ``within``, a clonotype's size counts its
+        cells in every sample, as scirpy's ``clonal_expansion`` does without
+        ``expanded_in``.
+
+        ``breakpoints`` sorts the cells by their clonotype's cells in the
+        group, as scirpy's ``breakpoints`` do: the default ``(1, 2, 5, 20,
+        100)`` makes the categories ``"1 cell"``, ``"2 cells"``,
+        ``"3 to 5 cells"``, ``"6 to 20 cells"``, ``"21 to 100 cells"`` and
+        ``"more than 100 cells"``.
+        ``frequency_breakpoints`` sorts them instead by their clonotype's
+        frequency, its share of the group's cells with a clonotype, in bins
+        ``(lower, upper]`` that end at 1, as scRepertoire's
+        ``clonalHomeostasis`` does: ``(0.0001, 0.001, 0.01, 0.1, 1)`` makes its
+        Rare, Small, Medium, Large and Hyperexpanded categories, named
+        ``"0 to 0.0001"`` to ``"0.1 to 1"``. A frequency depends on the
+        group's number of cells, so compare groups of similar sizes, or bounds
+        in cells.
+
+        The artifact's canonical ``values`` hold each cell's category, empty
+        for a cell without a clonotype, so
+        ``ds.select_cells(expansion, include=["more than 100 cells"])`` keeps
+        the cells of the largest clonotypes. ``group_clone_size`` and
+        ``group_clone_frequency`` are its other per-cell arrays.
+
+        Args:
+            clonotypes: A ``clonotypes`` artifact.
+            within: Cell metadata columns whose labels define the groups, such
+                as the sample; every cell with a clonotype needs a label.
+            within_receptor_type: Count each receptor type apart.
+            breakpoints: Strictly increasing bounds in cells, or None.
+            frequency_breakpoints: Strictly increasing frequency bounds, the
+                last 1, or None. Pass at most one of the two bounds; without
+                either, ``breakpoints`` are ``(1, 2, 5, 20, 100)``.
+            invalidate_cache: Measure again instead of reusing a saved result.
+
+        Returns:
+            A complete datastore-scoped ``clonal_expansion`` artifact aligned
+            to the clonotypes' cells. Read it with
+            :meth:`~cytearc.datastore.namespaces.RepertoireAccessor.load_clonal_expansion`
+            or plot it with ``ds.plots.clonal_expansion``.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If both bounds are given, the bounds are invalid,
+                ``within`` names ``receptor_type`` while
+                ``within_receptor_type`` adds it, or a ``within`` column has no
+                label for a cell with a clonotype.
+            PermissionError: If the store is read-only and the result is not
+                saved yet.
+            MemoryError: If the measurement, about 300 bytes per cell, does
+                not fit the memory budget.
+        """
+        group = self._clonotype_group(clonotypes)
+        for name, flag in (
+            ("within_receptor_type", within_receptor_type),
+            ("invalidate_cache", invalidate_cache),
+        ):
+            if not isinstance(flag, bool):
+                raise TypeError(f"{name} must be a boolean")
+        columns = _within_columns(within, reserved=_EXPANSION_COLUMNS)
+        if within_receptor_type and _RECEPTOR_TYPE_COLUMN in columns:
+            raise ValueError(
+                f"within names {_RECEPTOR_TYPE_COLUMN!r}, which within_receptor_type "
+                "already adds; pass within_receptor_type=False to use the column"
+            )
+        if breakpoints is not None and frequency_breakpoints is not None:
+            raise ValueError("Pass breakpoints or frequency_breakpoints, not both")
+        counts: tuple[int, ...] | None = None
+        frequencies: tuple[float, ...] | None = None
+        if frequency_breakpoints is None:
+            counts = checked_bounds(
+                DEFAULT_BREAKPOINTS if breakpoints is None else breakpoints,
+                "breakpoints",
+                whole=True,
+            )
+        else:
+            frequencies = checked_bounds(
+                frequency_breakpoints, "frequency_breakpoints", whole=False
+            )
+            # Naming the bins checks that the last bound is 1.
+            frequency_labels(frequencies)
+        status = inspect_artifact(self.zw, clonotypes)
+        cell_selection = status.input_ref("cell_selection")
+        codes = _read(group, "codes").astype(np.int64)
+        n_cells = len(codes)
+        has = codes >= 0
+        within_codes, within_labels, fingerprint = self._within_samples(
+            cell_selection,
+            columns,
+            has,
+            reason="Every cell with a clonotype needs a label in the within columns.",
+        )
+        arguments = ClonalExpansionArguments(
+            clonotypes=clonotypes,
+            within_fingerprint=fingerprint,
+            within=columns,
+            within_receptor_type=within_receptor_type,
+            breakpoints=counts,
+            frequency_breakpoints=frequencies,
+            invalidate_cache=invalidate_cache,
+        )
+        record = arguments.to_record()
+        planned = plan_cell_data_artifact(
+            self.zw,
+            scope="datastore",
+            kind=arguments.artifact_kind,
+            operation=arguments.operation,
+            parameters=record.parameters,
+            inputs=record.inputs,
+            execution_options=record.execution_options,
+            cell_selection=cell_selection,
+            arrays={
+                "values": ((n_cells,), None),
+                "group_clone_size": ((n_cells,), "i"),
+                "group_clone_frequency": ((n_cells,), "f"),
+                "groups": ((n_cells,), "i"),
+            },
+            invalidate_cache=invalidate_cache,
+            required_attributes=("labels", "group_keys"),
+        )
+        if planned.reused:
+            return planned.ref
+        self._require_writable(arguments.operation)
+        resident = _EXPANSION_BYTES_PER_CELL * n_cells
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Measuring the clonal expansion of {n_cells} cells holds about "
+                f"{resident} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Raise mem_budget."
+            )
+        if within_receptor_type:
+            receptors = status.input_ref("receptors")
+            receptor_type = _read(artifact_group(self.zw, receptors), "values")
+            types, type_codes = np.unique(
+                receptor_type.astype(str)[has], return_inverse=True
+            )
+        else:
+            types = np.asarray([], dtype=str)
+            type_codes = np.zeros(len(within_codes), dtype=np.int64)
+        combinations, group_codes = np.unique(
+            np.column_stack([within_codes, type_codes]).astype(np.int64),
+            axis=0,
+            return_inverse=True,
+        )
+        group_keys = [
+            {
+                **within_labels[sample],
+                **(
+                    {_RECEPTOR_TYPE_COLUMN: str(types[kind])}
+                    if within_receptor_type
+                    else {}
+                ),
+            }
+            for sample, kind in combinations.tolist()
+        ]
+        groups = np.full(n_cells, -1, dtype=np.int64)
+        groups[has] = group_codes.reshape(-1)
+        sizes, clone_frequencies = group_clone_sizes(codes, groups)
+        categories, labels = expansion_categories(
+            sizes,
+            clone_frequencies,
+            breakpoints=counts,
+            frequency_breakpoints=frequencies,
+        )
+        names = np.asarray(labels, dtype=object)
+        values = np.full(n_cells, "", dtype=object)
+        values[has] = names[categories[has]]
+        write_cell_data_artifact(
+            self.zw,
+            planned,
+            {
+                "values": values,
+                "group_clone_size": sizes,
+                "group_clone_frequency": clone_frequencies,
+                "groups": groups.astype(np.int32),
+            },
+            attributes={"labels": list(labels), "group_keys": group_keys},
+        )
+        logger.info(
+            f"Measured the clonal expansion of {int(has.sum())} cells with a "
+            f"clonotype in {len(group_keys)} groups"
+        )
+        return planned.ref
+
+    @validation_scoped
+    def _repertoire_load_clonal_expansion(
+        self,
+        expansion: ArtifactRef,
+        *,
+        splits: Sequence[int] = DEFAULT_RANK_SPLITS,
+    ) -> ClonalExpansion:
+        """Read saved clonal expansion as tables of cells, categories and ranks.
+
+        Besides each cell's category and each group's cells and clonotypes per
+        category, the loader ranks each group's clonotypes by their cells and
+        counts the cells that the clonotypes in each window of ranks hold, as
+        scRepertoire's ``clonalProportion`` does: by default the 10 largest,
+        11 to 100, 101 to 1000, 1001 to 10000, 10001 to 30000, 30001 to
+        100000, and the rest.
+
+        Args:
+            expansion: A ``clonal_expansion`` artifact, such as one from
+                :meth:`~cytearc.datastore.namespaces.RepertoireAccessor.clonal_expansion`.
+            splits: The last rank of each window but the last, strictly
+                increasing.
+
+        Returns:
+            The clonal expansion, with one row per cell, one per group and
+            category, and one per group and rank window.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``expansion`` is not a ``clonal_expansion``
+                artifact, or ``splits`` are invalid.
+            MemoryError: If the tables, about 500 bytes per cell, do not fit
+                the memory budget.
+        """
+        if not isinstance(expansion, ArtifactRef):
+            raise TypeError("expansion must be an ArtifactRef")
+        if expansion.kind != ClonalExpansionArguments.artifact_kind:
+            raise ValueError(
+                f"expansion must be a clonal_expansion artifact, not {expansion.kind!r}"
+            )
+        bounds = checked_bounds(splits, "splits", whole=True)
+        require_complete_artifact(self.zw, expansion)
+        group = artifact_group(self.zw, expansion)
+        self._check_table_budget(
+            as_zarr_array(group["groups"], name="groups").shape[0],
+            _EXPANSION_TABLE_BYTES_PER_CELL,
+            "clonal expansion",
+        )
+        status = inspect_artifact(self.zw, expansion)
+        parameters = dict(status.parameters or {})
+        clonotypes = status.input_ref("clonotypes")
+        within = tuple(str(column) for column in parameters["within"])
+        within_receptor_type = bool(parameters["within_receptor_type"])
+        labels = tuple(str(name) for name in cast(list[str], group.attrs["labels"]))
+        group_keys = cast(list[dict[str, str]], group.attrs["group_keys"])
+        loaded = self._artifacts_load_values(expansion)
+        categories = pd.Index(labels).get_indexer(np.asarray(loaded.values, dtype=str))
+        clonotype_group = self._clonotype_group(clonotypes)
+        cells, table, ranks = expansion_tables(
+            loaded.cell_ids,
+            categories=categories,
+            labels=labels,
+            clonotypes=_read(clonotype_group, "codes"),
+            clonotype_ids=_read(clonotype_group, "clonotype_ids").astype(str),
+            groups=_read(group, "groups"),
+            group_keys=group_keys,
+            key_columns=(
+                *within,
+                *((_RECEPTOR_TYPE_COLUMN,) if within_receptor_type else ()),
+            ),
+            sizes=_read(group, "group_clone_size"),
+            frequencies=_read(group, "group_clone_frequency"),
+            splits=bounds,
+        )
+        counts = parameters["breakpoints"]
+        frequencies = parameters["frequency_breakpoints"]
+        return ClonalExpansion(
+            cells=cells,
+            categories=table,
+            rank_windows=ranks,
+            clonotypes=clonotypes,
+            labels=labels,
+            breakpoints=None if counts is None else tuple(int(v) for v in counts),
+            frequency_breakpoints=(
+                None if frequencies is None else tuple(float(v) for v in frequencies)
+            ),
+            splits=bounds,
+            within=within,
+            within_receptor_type=within_receptor_type,
         )

@@ -625,6 +625,24 @@ class DataStorePlotAccessor:
         """Plot how far each perturbation moves its cells from the control cells."""
         return self._forward(PlotResult, "edistance", locals())
 
+    def clonal_expansion(
+        self,
+        expansion: ArtifactRef,
+        *,
+        group_by: str | None = None,
+        groups: ArtifactRef | None = None,
+        count: str = "cells",
+        normalize: bool = True,
+        splits: Sequence[int] = (10, 100, 1_000, 10_000, 30_000, 100_000),
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the clonal expansion and clonal space of groups of cells."""
+        return self._forward(PlotResult, "clonal_expansion", locals())
+
     def clonotype_abundance(
         self,
         clonotypes: ArtifactRef,

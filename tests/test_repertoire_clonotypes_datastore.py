@@ -382,7 +382,7 @@ def test_clonotypes_refuse_more_cells_than_the_memory_budget(
     monkeypatch.setattr(store, "memoryBytes", 1_000)
     with pytest.raises(MemoryError, match="Raise mem_budget"):
         store.repertoire.clonotypes(receptors)
-    assert store.artifacts.list(kind="clonotypes") == []
+    assert store.artifacts.list(kind="clonotypes", scope="datastore") == []
 
 
 def test_within_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:

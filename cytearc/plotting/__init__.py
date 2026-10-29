@@ -68,6 +68,7 @@ if TYPE_CHECKING:
         guide_thresholds as guide_thresholds,
     )
     from .repertoire import (
+        clonal_expansion as clonal_expansion,
         clonotype_abundance as clonotype_abundance,
         receptor_qc as receptor_qc,
     )
@@ -96,6 +97,7 @@ __all__ = [
     "THEMES",
     "cluster_tree",
     "cluster_connectivity",
+    "clonal_expansion",
     "clonotype_abundance",
     "compose_results",
     "composition",
@@ -153,6 +155,7 @@ __getattr__, __dir__ = _lazy_facade(
         "THEMES": "._style",
         "cluster_tree": ".cluster_tree",
         "cluster_connectivity": ".cluster_connectivity",
+        "clonal_expansion": ".repertoire",
         "clonotype_abundance": ".repertoire",
         "compose_results": "._figure",
         "composition": ".composition",
