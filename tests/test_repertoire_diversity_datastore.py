@@ -46,8 +46,9 @@ def test_diversity_measures_each_receptor_type_apart(tmp_path) -> None:
     assert result.groups is None and result.cell_selection is None
     assert result.within_receptor_type is True
     table = result.indices
-    assert table.columns.tolist() == ["receptor_type", *dv.INDEX_COLUMNS]
+    assert table.columns.tolist() == ["group", "receptor_type", *dv.INDEX_COLUMNS]
     assert table["receptor_type"].tolist() == ["BCR", "TCR"]
+    assert table["group"].tolist() == ["BCR", "TCR"]
     for name, clones in (("BCR", BCR), ("TCR", TCR)):
         row = table.set_index("receptor_type").loc[name]
         for column, value in dv.indices(clones).items():
@@ -58,6 +59,7 @@ def test_diversity_measures_each_receptor_type_apart(tmp_path) -> None:
     assert result.coverage == pytest.approx(dv.coverage_at(TCR, 10))
     hill = result.hill.set_index(["receptor_type", "order"])
     assert result.hill.columns.tolist() == [
+        "group",
         "receptor_type",
         "order",
         "observed",
@@ -100,12 +102,22 @@ def test_diversity_groups_by_columns_labels_and_selections(tmp_path) -> None:
         "cluster", cell_selection=store.snapshot_cell_selection()
     )
     crossed = store.repertoire.diversity(clonotypes, group_by=["sample"], groups=labels)
-    assert crossed.indices.columns[:3].tolist() == [
+    assert crossed.indices.columns[:4].tolist() == [
+        "group",
         "sample",
         "cluster_labels",
         "receptor_type",
     ]
     assert crossed.indices["cells"].sum() == 7
+    # Each group is named by its labels joined by commas, in their order.
+    names = crossed.indices[["sample", "cluster_labels", "receptor_type"]].agg(
+        ", ".join, axis=1
+    )
+    assert crossed.indices["group"].tolist() == names.tolist()
+    assert crossed.indices["group"].iloc[0] == "s1, x, TCR"
+    assert crossed.hill["group"].tolist() == [
+        name for name in names.tolist() for _ in dv.ORDERS
+    ]
     t_cells = store.select_cells(receptors, include=["TCR"])
     selected = store.repertoire.diversity(clonotypes, cell_selection=t_cells)
     assert selected.cell_selection == t_cells
@@ -210,6 +222,7 @@ def test_rarefaction_follows_each_groups_default_sizes(tmp_path) -> None:
     assert isinstance(result, Rarefaction) and result.orders == (0, 1, 2)
     curves = result.curves
     assert curves.columns.tolist() == [
+        "group",
         "receptor_type",
         "order",
         "size",
@@ -229,7 +242,8 @@ def test_rarefaction_follows_each_groups_default_sizes(tmp_path) -> None:
         clonotypes, orders=[2], sizes=[4, 2, 4], within_receptor_type=False
     )
     assert fixed.orders == (2,)
-    assert fixed.curves.columns.tolist()[:2] == ["order", "size"]
+    assert fixed.curves.columns.tolist()[:3] == ["group", "order", "size"]
+    assert set(fixed.curves["group"]) == {"all cells"}
     assert fixed.curves["size"].tolist() == [2, 4]
     short = store.repertoire.rarefaction(clonotypes, endpoint=4, knots=4, orders=(0,))
     assert set(short.curves["size"]) <= {1, 2, 3, 4}

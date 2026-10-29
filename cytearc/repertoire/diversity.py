@@ -18,18 +18,22 @@ the rarefaction and extrapolation of Chao et al. (2014) with the Shannon
 extrapolation of Chao et al. (2023), and the sample coverage of Chao and Jost
 (2012). Rarefied probabilities are products of ratios rather than differences
 of log-gamma functions, which keeps them exact for groups of millions of
-cells. These functions work on clone sizes and never touch storage.
+cells. Compiled loops rarefy a group to many sizes in one call. These
+functions work on clone sizes and never touch storage.
 """
 
-from collections.abc import Sequence
+import math
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import pandas as pd
+from numba import njit
 from scipy.special import digamma
 
 from ..storage.refs import ArtifactRef
+from ..utils.arrays import sorted_unique
 
 __all__ = [
     "ORDERS",
@@ -43,10 +47,12 @@ __all__ = [
     "coverage",
     "default_sizes",
     "diversity_at",
+    "diversity_tables",
     "estimated_hill",
     "hill_curve",
     "indices",
     "observed_hill",
+    "rarefaction_curves",
     "size_for_coverage",
 ]
 
@@ -59,6 +65,11 @@ ORDERS = (0, 1, 2)
 RARE_THRESHOLD = 10
 # Terms of the entropy estimator's series summed at once.
 _CHUNK = 1 << 20
+# How a Hill number of a sample size was reached, by code.
+_METHODS = ("rarefaction", "observed", "extrapolation")
+_RAREFACTION, _OBSERVED, _EXTRAPOLATION = range(3)
+# The sizes that each round of the search for a coverage evaluates at once.
+_COVERAGE_PROBES = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +98,12 @@ class CloneSizes:
         array = np.asarray(sizes, dtype=np.int64).reshape(-1)
         if (array < 0).any():
             raise ValueError("Clone sizes must not be negative")
-        values, counts = np.unique(array[array > 0], return_counts=True)
+        # Sorting and comparing neighbours counts each size, as np.unique
+        # does, without hashing many distinct sizes.
+        ordered = np.sort(array[array > 0])
+        starts = np.flatnonzero(np.diff(ordered, prepend=0) != 0)
+        values = ordered[starts]
+        counts = np.diff(starts, append=len(ordered))
         return cls(
             values=values.astype(np.int64),
             counts=counts.astype(np.int64),
@@ -293,24 +309,41 @@ def _check_order(order: Any) -> None:
         raise ValueError("order must be 0, 1 or 2")
 
 
-def _missing_log(clones: CloneSizes, m: int) -> np.ndarray:
-    """The log chance that a sample of ``m`` cells misses each distinct size.
+@njit(cache=True)
+def _missing_logs(
+    values: np.ndarray, n: int, sizes: np.ndarray
+) -> np.ndarray:  # pragma: no cover
+    """The log chance that a sample of each size misses each distinct size.
 
-    A clonotype of ``X`` of the ``n`` cells is missed with chance
-    ``C(n - X, m) / C(n, m)``, the product of ``1 - m / (n - j)`` for ``j``
-    below ``X``, summed here as logarithms so that the chance keeps its
-    precision when it is close to 1; it is ``-inf`` when ``X > n - m``.
+    A clonotype of ``X`` of the ``n`` cells is missed by a sample of ``m``
+    cells with chance ``C(n - X, m) / C(n, m)``, the product of ``1 - m / (n
+    - j)`` for ``j`` below ``X``, summed here as logarithms in order of ``j``
+    so that the chance keeps its precision when it is close to 1; it is
+    ``-inf`` when ``X > n - m``. Row ``s`` holds the sample of ``sizes[s]``
+    cells and column ``i`` the distinct size ``values[i]``, ascending.
     """
-    n, values = clones.n, clones.values
-    largest = int(values[-1]) if len(values) else 0
-    reach = min(largest, n - m)
-    factors = np.log1p(-m / (n - np.arange(reach, dtype=np.float64)))
-    totals = np.concatenate([[0.0], np.cumsum(factors)])
-    return np.where(values <= reach, totals[np.minimum(values, reach)], -np.inf)
+    missing = np.empty((len(sizes), len(values)))
+    for row in range(len(sizes)):
+        m = sizes[row]
+        total = 0.0
+        j = 0
+        for column in range(len(values)):
+            size = values[column]
+            if size > n - m:
+                missing[row, column] = -np.inf
+                continue
+            while j < size:
+                total += math.log1p(-m / (n - j))
+                j += 1
+            missing[row, column] = total
+    return missing
 
 
-def _expected_entropy(clones: CloneSizes, m: int) -> float:
-    """The expected Shannon entropy of a sample of ``m`` of the ``n`` cells.
+@njit(cache=True)
+def _expected_entropies(
+    values: np.ndarray, counts: np.ndarray, n: int, sizes: np.ndarray
+) -> np.ndarray:  # pragma: no cover
+    """The expected Shannon entropy of a sample of each size below ``n``.
 
     For each distinct size ``X`` the cells drawn from one such clonotype
     follow the hypergeometric distribution, whose probabilities are built
@@ -319,37 +352,66 @@ def _expected_entropy(clones: CloneSizes, m: int) -> float:
     place; terms beyond 40 standard deviations of the mode, below ``e**-800``
     of it, are left out.
     """
-    n = clones.n
-    total = 0.0
-    for size, count in zip(clones.values.tolist(), clones.counts.tolist(), strict=True):
-        low, high = max(0, m - (n - size)), min(size, m)
-        mean = m * size / n
-        spread = np.sqrt(mean * (1 - size / n) * (n - m) / max(n - 1, 1))
-        mode = int(min(max((m + 1) * (size + 1) // (n + 2), low), high))
-        reach = int(np.ceil(40 * spread)) + 2
-        first, last = max(low, mode - reach), min(high, mode + reach)
-        k = np.arange(first, last + 1, dtype=np.float64)
-        step = (
-            np.log(size - k[1:] + 1)
-            + np.log(m - k[1:] + 1)
-            - np.log(k[1:])
-            - np.log(n - size - m + k[1:])
-        )
-        log_weight = np.concatenate([[0.0], np.cumsum(step)])
-        log_weight -= log_weight[mode - first]
-        weight = np.exp(log_weight)
-        share = np.where(k > 0, k / m, 1.0)
-        total += count * float(np.dot(weight, -share * np.log(share))) / weight.sum()
-    return total
+    entropies = np.empty(len(sizes))
+    logs = np.empty(64)
+    for at in range(len(sizes)):
+        m = sizes[at]
+        total = 0.0
+        for index in range(len(values)):
+            size = values[index]
+            low = max(0, m - (n - size))
+            high = min(size, m)
+            mean = m * size / n
+            spread = math.sqrt(mean * (1 - size / n) * (n - m) / max(n - 1, 1))
+            mode = min(max((m + 1) * (size + 1) // (n + 2), low), high)
+            reach = int(math.ceil(40 * spread)) + 2
+            first = max(low, mode - reach)
+            length = min(high, mode + reach) - first + 1
+            if length > len(logs):
+                logs = np.empty(2 * length)
+            # The log of each term over the first, by the ratio of
+            # consecutive terms.
+            logs[0] = 0.0
+            running = 0.0
+            for offset in range(1, length):
+                k = float(first + offset)
+                running += (
+                    math.log(size - k + 1)
+                    + math.log(m - k + 1)
+                    - math.log(k)
+                    - math.log(n - size - m + k)
+                )
+                logs[offset] = running
+            shift = logs[mode - first]
+            weights = 0.0
+            entropy = 0.0
+            for offset in range(length):
+                weight = math.exp(logs[offset] - shift)
+                weights += weight
+                drawn = first + offset
+                if drawn > 0:
+                    share = drawn / m
+                    entropy += weight * (-share * math.log(share))
+            total += counts[index] * entropy / weights
+        entropies[at] = total
+    return entropies
 
 
-def _rarefied(clones: CloneSizes, m: int, order: int) -> float:
-    """The expected Hill number of a sample of ``m`` of the ``n`` cells."""
+def _rarefied(
+    clones: CloneSizes,
+    sizes: np.ndarray,
+    order: int,
+    missing: Callable[[], np.ndarray],
+) -> np.ndarray:
+    """The expected Hill numbers of samples of whole sizes below the ``n`` cells.
+
+    ``missing`` gives the sizes' :func:`_missing_logs`, which order 0 needs.
+    """
     if order == 0:
-        return float(np.sum(clones.counts * -np.expm1(_missing_log(clones, m))))
+        return np.sum(clones.counts * -np.expm1(missing()), axis=1)
     if order == 2:
-        return 1 / (1 / m + (1 - 1 / m) * _pairs_or_zero(clones))
-    return float(np.exp(_expected_entropy(clones, m)))
+        return 1 / (1 / sizes + (1 - 1 / sizes) * _pairs_or_zero(clones))
+    return np.exp(_expected_entropies(clones.values, clones.counts, clones.n, sizes))
 
 
 def _pairs_or_zero(clones: CloneSizes) -> float:
@@ -359,68 +421,175 @@ def _pairs_or_zero(clones: CloneSizes) -> float:
 
 def _extrapolated(
     clones: CloneSizes,
-    m: float,
+    sizes: np.ndarray,
     order: int,
     shannon: tuple[float, float, float] | None = None,
-) -> float:
-    """The expected Hill number of ``m > n`` cells (Chao et al. 2014, 2023).
+) -> np.ndarray:
+    """The expected Hill numbers of samples of more than the ``n`` cells.
 
     Order 0 adds Chao1's missed clonotypes as more cells find them; order 2
     extends Good's Simpson estimate; order 1 approaches the asymptotic
     estimate geometrically from the observed value, at the rate that makes
     the curve pass through the rarefied value at ``n - 1`` cells, the unified
     form of Chao et al. (2023) that reduces to the richness formula at order
-    0. ``shannon`` holds the terms of :func:`_shannon_terms`, when known.
+    0 (Chao et al. 2014, 2023). ``shannon`` holds the terms of
+    :func:`_shannon_terms`, when known.
     """
     n, f1 = clones.n, clones.f1
-    extra = m - n
+    extra = sizes - n
     if order == 0:
         missed = _undetected(clones)
         if missed == 0:
-            return float(clones.richness)
-        return float(
-            clones.richness + missed * (1 - (1 - f1 / (n * missed + f1)) ** extra)
-        )
+            return np.full(len(sizes), float(clones.richness))
+        return clones.richness + missed * (1 - (1 - f1 / (n * missed + f1)) ** extra)
     if order == 2:
-        return 1 / (1 / m + (1 - 1 / m) * _pairs_or_zero(clones))
+        return 1 / (1 / sizes + (1 - 1 / sizes) * _pairs_or_zero(clones))
     observed, asymptote, rate = _shannon_terms(clones) if shannon is None else shannon
-    return float(observed + (asymptote - observed) * (1 - (1 - rate) ** extra))
+    return observed + (asymptote - observed) * (1 - (1 - rate) ** extra)
 
 
-def _shannon_terms(clones: CloneSizes) -> tuple[float, float, float]:
+def _shannon_terms(
+    clones: CloneSizes, asymptote: float | None = None
+) -> tuple[float, float, float]:
     """The observed and asymptotic Shannon diversity and the extrapolation rate.
 
     The rate is ``(D(n) - D(n - 1)) / (D(inf) - D(n - 1))``, so the curve passes
     through the rarefied value at ``n - 1`` cells; it is 0, a flat curve, when
-    the asymptote does not exceed the observed value.
+    the asymptote does not exceed the observed value. ``asymptote`` passes
+    the asymptotic estimate, when known.
     """
     observed = observed_hill(clones, 1)
-    asymptote = estimated_hill(clones, 1)
+    if asymptote is None:
+        asymptote = estimated_hill(clones, 1)
     if clones.n < 2 or not asymptote > observed:
         return observed, asymptote, 0.0
-    before = _rarefied(clones, clones.n - 1, 1)
+    entropy = _expected_entropies(
+        clones.values, clones.counts, clones.n, np.asarray([clones.n - 1])
+    )
+    before = float(np.exp(entropy[0]))
     return observed, asymptote, (observed - before) / (asymptote - before)
 
 
-def _rarefied_coverage(clones: CloneSizes, m: int) -> float:
-    """The expected coverage of a sample of ``m < n`` cells.
+def _rarefied_coverage(
+    clones: CloneSizes, sizes: np.ndarray, missing: np.ndarray | None = None
+) -> np.ndarray:
+    """The expected coverage of samples of whole sizes below the ``n`` cells.
 
     Each clonotype of ``X`` cells contributes its frequency times
     ``C(n - X, m) / C(n - 1, m)``, the chance of missing it divided by the
-    chance ``1 - m / n`` of missing one given cell.
+    chance ``1 - m / n`` of missing one given cell. ``missing`` passes the
+    sizes' :func:`_missing_logs`, when known.
     """
     n = clones.n
-    missing = np.exp(_missing_log(clones, m) - np.log1p(-m / n))
-    return float(1 - np.sum(clones.counts * clones.values / n * missing))
+    if missing is None:
+        missing = _missing_logs(clones.values, n, sizes)
+    chance = np.exp(missing - np.log1p(-sizes / n)[:, None])
+    return 1 - np.sum(clones.counts * clones.values / n * chance, axis=1)
 
 
-def _extrapolated_coverage(clones: CloneSizes, m: float) -> float:
-    """The expected coverage of ``m > n`` cells (Chao and Jost 2012)."""
+def _extrapolated_coverage(clones: CloneSizes, sizes: np.ndarray) -> np.ndarray:
+    """The expected coverage of samples of more than the ``n`` cells (Chao and Jost 2012)."""
     if clones.f1 == 0:
-        return 1.0
-    return float(
-        1 - clones.f1 / clones.n * _undetected_ratio(clones) ** (m - clones.n + 1)
+        return np.ones(len(sizes))
+    return 1 - clones.f1 / clones.n * _undetected_ratio(clones) ** (
+        sizes - clones.n + 1
     )
+
+
+def _sample_sizes(sizes: Any) -> np.ndarray:
+    """Return sample sizes as floats, each at least one cell."""
+    array = np.asarray(sizes, dtype=np.float64).reshape(-1)
+    if not np.all(array >= 1):
+        raise ValueError("A sample holds at least one cell")
+    return array
+
+
+class _Samples:
+    """Samples of some sizes of a group's cells, and how each is reached.
+
+    A sample smaller than the ``n`` cells is rarefied, at ``n`` observed, and
+    larger extrapolated. A size between two whole numbers below ``n``
+    interpolates linearly between them, as iNEXT does, and above ``n - 1``
+    toward the observed value. Each whole size below ``n`` is rarefied once,
+    for every order and the coverage.
+    """
+
+    def __init__(self, clones: CloneSizes, sizes: np.ndarray) -> None:
+        n = clones.n
+        self.clones = clones
+        self.sizes = sizes
+        self.above = sizes > n
+        self.below = sizes < n
+        self.methods = np.full(len(sizes), _OBSERVED, dtype=np.int8)
+        self.methods[self.above] = _EXTRAPOLATION
+        self.methods[self.below] = _RAREFACTION
+        self.any_above = bool(self.above.any())
+        self.any_below = bool(self.below.any())
+        self._missing: np.ndarray | None = None
+        if self.any_below:
+            self.low = np.floor(sizes[self.below]).astype(np.int64)
+            self.fraction = sizes[self.below] - self.low
+            self.between = self.fraction > 0
+            upper = self.low + 1
+            self.inner = self.between & (upper < n)
+            self.whole = sorted_unique(np.concatenate([self.low, upper[self.inner]]))
+            self._low_at = np.searchsorted(self.whole, self.low)
+            self._upper_at = np.searchsorted(self.whole, upper[self.inner])
+
+    def _missed(self) -> np.ndarray:
+        """The :func:`_missing_logs` of the whole sizes, computed once."""
+        if self._missing is None:
+            self._missing = _missing_logs(self.clones.values, self.clones.n, self.whole)
+        return self._missing
+
+    def _combine(
+        self,
+        at_n: float,
+        extrapolate: Callable[[np.ndarray], np.ndarray],
+        rarefy: Callable[[], np.ndarray],
+    ) -> np.ndarray:
+        values = np.full(len(self.sizes), at_n)
+        if self.any_above:
+            values[self.above] = extrapolate(self.sizes[self.above])
+        if self.any_below:
+            reached = rarefy()
+            below = reached[self._low_at]
+            between = self.between
+            if between.any():
+                upper = np.full(len(below), at_n)
+                upper[self.inner] = reached[self._upper_at]
+                below[between] += (upper[between] - below[between]) * self.fraction[
+                    between
+                ]
+            values[self.below] = below
+        return values
+
+    def hill(
+        self,
+        order: int,
+        shannon: tuple[float, float, float] | None = None,
+        observed: float | None = None,
+    ) -> np.ndarray:
+        """The Hill numbers of an order.
+
+        ``shannon`` passes the terms of :func:`_shannon_terms` and
+        ``observed`` the observed Hill number, when known.
+        """
+        clones = self.clones
+        return self._combine(
+            observed_hill(clones, order) if observed is None else observed,
+            lambda sizes: _extrapolated(clones, sizes, order, shannon),
+            lambda: _rarefied(clones, self.whole, order, self._missed),
+        )
+
+    def coverage(self) -> np.ndarray:
+        """The expected coverage of each sample."""
+        clones = self.clones
+        return self._combine(
+            coverage(clones),
+            lambda sizes: _extrapolated_coverage(clones, sizes),
+            lambda: _rarefied_coverage(clones, self.whole, self._missed()),
+        )
 
 
 def coverage_at(clones: CloneSizes, m: float) -> float:
@@ -429,17 +598,7 @@ def coverage_at(clones: CloneSizes, m: float) -> float:
     A size between two whole numbers below ``n`` interpolates linearly, as
     iNEXT does.
     """
-    n = clones.n
-    if not m >= 1:
-        raise ValueError("A sample holds at least one cell")
-    if m >= n:
-        return coverage(clones) if m == n else _extrapolated_coverage(clones, m)
-    low = int(np.floor(m))
-    if low == m:
-        return _rarefied_coverage(clones, low)
-    high_value = coverage_at(clones, low + 1)
-    low_value = _rarefied_coverage(clones, low)
-    return low_value + (high_value - low_value) * (m - low)
+    return float(_Samples(clones, _sample_sizes(m)).coverage()[0])
 
 
 def diversity_at(
@@ -461,23 +620,8 @@ def diversity_at(
         ``"extrapolation"``.
     """
     _check_order(order)
-    n = clones.n
-    if not m >= 1:
-        raise ValueError("A sample holds at least one cell")
-    if m == n:
-        return observed_hill(clones, order), "observed"
-    if m > n:
-        return _extrapolated(clones, m, order, shannon), "extrapolation"
-    low = int(np.floor(m))
-    value = _rarefied(clones, low, order)
-    if low != m:
-        upper = (
-            observed_hill(clones, order)
-            if low + 1 == n
-            else _rarefied(clones, low + 1, order)
-        )
-        value += (upper - value) * (m - low)
-    return value, "rarefaction"
+    samples = _Samples(clones, _sample_sizes(m))
+    return float(samples.hill(order, shannon)[0]), _METHODS[int(samples.methods[0])]
 
 
 def size_for_coverage(clones: CloneSizes, level: float) -> float:
@@ -502,18 +646,25 @@ def size_for_coverage(clones: CloneSizes, level: float) -> float:
         # a ratio strictly between 0 and 1 with each added cell.
         ratio = _undetected_ratio(clones)
         return float(n + np.log((1 - level) * n / clones.f1) / np.log(ratio) - 1)
-    if coverage_at(clones, 1) >= level:
+    low_value = coverage_at(clones, 1)
+    if low_value >= level:
         return 1.0
-    # The rarefied coverage grows with the size: bisect for the last whole
-    # size below the level.
-    low, high = 1, n
+    # The rarefied coverage grows with the size: narrow the whole sizes
+    # around the level, several at a time, to the last below it.
+    low, high, high_value = 1, n, observed
     while high - low > 1:
-        middle = (low + high) // 2
-        if coverage_at(clones, middle) < level:
-            low = middle
+        if high - low - 1 <= _COVERAGE_PROBES:
+            probes = np.arange(low + 1, high, dtype=np.int64)
         else:
-            high = middle
-    low_value, high_value = coverage_at(clones, low), coverage_at(clones, high)
+            spaced = np.linspace(low, high, _COVERAGE_PROBES + 2)[1:-1]
+            probes = sorted_unique(spaced.astype(np.int64))
+        values = _rarefied_coverage(clones, probes)
+        reached = values >= level
+        first = int(np.argmax(reached)) if reached.any() else len(probes)
+        if first > 0:
+            low, low_value = int(probes[first - 1]), float(values[first - 1])
+        if first < len(probes):
+            high, high_value = int(probes[first]), float(values[first])
     return float(low + (level - low_value) / (high_value - low_value))
 
 
@@ -522,21 +673,14 @@ def hill_curve(
 ) -> tuple[list[float], list[str]]:
     """The Hill numbers of samples of each size, as :func:`diversity_at` gives them.
 
-    The terms that every extrapolated size of order 1 shares are computed
-    once.
+    The sizes are computed together, and the terms that every extrapolated
+    size of order 1 shares once.
     """
     _check_order(order)
-    shannon = (
-        _shannon_terms(clones)
-        if order == 1 and any(m > clones.n for m in sizes)
-        else None
-    )
-    values, methods = [], []
-    for m in sizes:
-        value, method = diversity_at(clones, float(m), order, shannon=shannon)
-        values.append(value)
-        methods.append(method)
-    return values, methods
+    samples = _Samples(clones, _sample_sizes(sizes))
+    shannon = _shannon_terms(clones) if order == 1 and samples.any_above else None
+    values = samples.hill(order, shannon)
+    return values.tolist(), [_METHODS[code] for code in samples.methods.tolist()]
 
 
 def default_sizes(n: int, endpoint: int | None = None, knots: int = 40) -> np.ndarray:
@@ -561,7 +705,7 @@ def default_sizes(n: int, endpoint: int | None = None, knots: int = 40) -> np.nd
         )
         extrapolated = np.floor(np.linspace(n + 1, endpoint, knots // 2))
         sizes = np.concatenate([rarefied, [n], extrapolated])
-    return np.unique(sizes.astype(np.int64))
+    return sorted_unique(sizes.astype(np.int64))
 
 
 def _gini(clones: CloneSizes) -> float:
@@ -600,6 +744,8 @@ INDEX_COLUMNS = (
     "chao1_bias_corrected",
     "ace",
 )
+# The indices that count cells or clonotypes.
+_COUNT_INDICES = frozenset({"cells", "clonotypes", "singletons", "doubletons", "d50"})
 
 
 def indices(clones: CloneSizes) -> dict[str, float]:
@@ -645,16 +791,17 @@ class ClonalDiversity:
 
     The groups are the combinations of the ``group_by`` columns' labels, the
     ``groups`` artifact's labels and, with ``within_receptor_type``, the
-    receptor type; their columns are each group's key in the tables.
+    receptor type; each table names a group in ``group``, its labels joined
+    by commas, and holds its labels in the key columns.
 
     Attributes:
-        indices: One row per group: the group's key and the columns of
-            :func:`indices`.
-        hill: One row per group and order 0, 1 and 2: the group's key,
-            ``order``, ``observed`` and ``estimated`` (asymptotic) Hill
-            numbers, the Hill number ``at_size`` of the common size, with its
-            ``coverage_at_size`` and ``method_at_size``, and the Hill number
-            ``at_coverage`` of the common coverage, with its
+        indices: One row per group: ``group``, the key columns and the
+            columns of :func:`indices`.
+        hill: One row per group and order 0, 1 and 2: ``group``, the key
+            columns, ``order``, ``observed`` and ``estimated`` (asymptotic)
+            Hill numbers, the Hill number ``at_size`` of the common size, with
+            its ``coverage_at_size`` and ``method_at_size``, and the Hill
+            number ``at_coverage`` of the common coverage, with its
             ``size_at_coverage`` and ``method_at_coverage``.
         clonotypes: The ``clonotypes`` artifact.
         group_by: The cell metadata columns of the groups.
@@ -681,10 +828,11 @@ class Rarefaction:
     """The rarefaction and extrapolation curves of groups of cells.
 
     Attributes:
-        curves: One row per group, order and size: the group's key,
-            ``order``, ``size`` (cells), ``method`` (``"rarefaction"``,
-            ``"observed"`` or ``"extrapolation"``), ``diversity`` (the Hill
-            number) and ``coverage``.
+        curves: One row per group, order and size: ``group`` (its labels
+            joined by commas), the key columns, ``order``, ``size`` (cells),
+            ``method`` (``"rarefaction"``, ``"observed"`` or
+            ``"extrapolation"``), ``diversity`` (the Hill number) and
+            ``coverage``.
         clonotypes: The ``clonotypes`` artifact.
         group_by: The cell metadata columns of the groups.
         groups: The label artifact of the groups, or None.
@@ -710,3 +858,152 @@ def common_size(groups: Sequence[CloneSizes]) -> int:
 def common_coverage(groups: Sequence[CloneSizes]) -> float:
     """iNEXT's default common coverage: the lowest coverage at doubled sizes."""
     return float(min(coverage_at(clones, 2 * clones.n) for clones in groups))
+
+
+def _method_names(codes: np.ndarray) -> np.ndarray:
+    """Name each method code."""
+    return np.asarray(np.asarray(_METHODS, dtype=object)[codes])
+
+
+def _keyed(keys: pd.DataFrame, positions: np.ndarray) -> pd.DataFrame:
+    """The rows of ``keys`` at ``positions``, numbered from 0."""
+    return keys.take(positions).reset_index(drop=True)
+
+
+def diversity_tables(
+    groups: Sequence[CloneSizes],
+    keys: pd.DataFrame,
+    *,
+    size: int | None = None,
+    coverage: float | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, int, float]:
+    """The indices and Hill numbers of groups, the tables of :class:`ClonalDiversity`.
+
+    Each group's Hill numbers of orders 0, 1 and 2 are observed, estimated,
+    and standardized to a common size and a common coverage, as iNEXT's
+    ``estimateD`` does.
+
+    Args:
+        groups: Each group's clone sizes; every group holds a cell.
+        keys: One row per group, in the order of ``groups``: ``group``, its
+            name, and its label in each key column.
+        size: The common size in cells, or None for :func:`common_size`.
+        coverage: The common coverage, between 0 and 1, or None for
+            :func:`common_coverage`.
+
+    Returns:
+        The table of indices, the table of Hill numbers, the common size and
+        the common coverage.
+
+    Raises:
+        ValueError: If ``coverage`` is not above 0.
+    """
+    common = common_size(groups) if size is None else int(size)
+    level = common_coverage(groups) if coverage is None else float(coverage)
+    n_groups, n_orders = len(groups), len(ORDERS)
+    shape = (n_groups, n_orders)
+    observed, estimated = np.empty(shape), np.empty(shape)
+    at_size, at_coverage = np.empty(shape), np.empty(shape)
+    size_methods = np.empty(shape, dtype=np.int8)
+    coverage_methods = np.empty(shape, dtype=np.int8)
+    coverage_at_size = np.empty(n_groups)
+    size_at_coverage = np.empty(n_groups)
+    rows = []
+    for position, clones in enumerate(groups):
+        rows.append(indices(clones))
+        # The common coverage is 1 only when every group's coverage is 1,
+        # which the group's observed size reaches.
+        needed = size_for_coverage(clones, level) if level < 1 else float(clones.n)
+        samples = _Samples(clones, np.asarray([common, needed], dtype=np.float64))
+        best = [estimated_hill(clones, order) for order in ORDERS]
+        shannon = _shannon_terms(clones, best[1]) if samples.any_above else None
+        for at, order in enumerate(ORDERS):
+            observed[position, at] = observed_hill(clones, order)
+            estimated[position, at] = best[at]
+            at_size[position, at], at_coverage[position, at] = samples.hill(
+                order, shannon, observed[position, at]
+            )
+        size_methods[position], coverage_methods[position] = samples.methods
+        coverage_at_size[position] = samples.coverage()[0]
+        size_at_coverage[position] = needed
+    table = _keyed(keys, np.arange(n_groups))
+    for column in INDEX_COLUMNS:
+        table[column] = np.asarray(
+            [row[column] for row in rows],
+            dtype=np.int64 if column in _COUNT_INDICES else np.float64,
+        )
+    hill = _keyed(keys, np.repeat(np.arange(n_groups), n_orders))
+    hill["order"] = np.tile(np.asarray(ORDERS, dtype=np.int64), n_groups)
+    hill["observed"] = observed.reshape(-1)
+    hill["estimated"] = estimated.reshape(-1)
+    hill["at_size"] = at_size.reshape(-1)
+    hill["coverage_at_size"] = np.repeat(coverage_at_size, n_orders)
+    hill["method_at_size"] = _method_names(size_methods.reshape(-1))
+    hill["at_coverage"] = at_coverage.reshape(-1)
+    hill["size_at_coverage"] = np.repeat(size_at_coverage, n_orders)
+    hill["method_at_coverage"] = _method_names(coverage_methods.reshape(-1))
+    return table, hill, common, level
+
+
+def rarefaction_curves(
+    groups: Sequence[CloneSizes],
+    keys: pd.DataFrame,
+    orders: Sequence[int] = ORDERS,
+    *,
+    sizes: Sequence[int] | None = None,
+    endpoint: int | None = None,
+    knots: int = 40,
+) -> pd.DataFrame:
+    """The rarefaction and extrapolation curves of groups, as :class:`Rarefaction` holds them.
+
+    Args:
+        groups: Each group's clone sizes; every group holds a cell.
+        keys: One row per group, in the order of ``groups``: ``group``, its
+            name, and its label in each key column.
+        orders: The orders of the Hill numbers, from 0, 1 and 2.
+        sizes: Positive sizes in cells for every group, or None for each
+            group's :func:`default_sizes`.
+        endpoint: The largest default size, or None for twice each group's
+            size.
+        knots: The number of default sizes.
+
+    Returns:
+        One row per group, order and size: ``group``, the key columns,
+        ``order``, ``size``, ``method``, ``diversity`` and ``coverage``.
+    """
+    chosen = tuple(orders)
+    for order in chosen:
+        _check_order(order)
+    fixed = None if sizes is None else sorted_unique(np.asarray(sizes, dtype=np.int64))
+    curve_sizes = [
+        default_sizes(clones.n, endpoint, knots) if fixed is None else fixed
+        for clones in groups
+    ]
+    lengths = np.asarray([len(points) for points in curve_sizes], dtype=np.int64)
+    ends = np.cumsum(lengths * len(chosen))
+    total = int(ends[-1]) if len(ends) else 0
+    order_column = np.empty(total, dtype=np.int64)
+    size_column = np.empty(total, dtype=np.int64)
+    methods = np.empty(total, dtype=np.int8)
+    diversity = np.empty(total)
+    covered = np.empty(total)
+    for clones, points, end in zip(groups, curve_sizes, ends.tolist(), strict=True):
+        samples = _Samples(clones, points.astype(np.float64))
+        sample_coverage = samples.coverage()
+        shannon = _shannon_terms(clones) if 1 in chosen and samples.any_above else None
+        start = end - len(points) * len(chosen)
+        for order in chosen:
+            stop = start + len(points)
+            order_column[start:stop] = order
+            size_column[start:stop] = points
+            methods[start:stop] = samples.methods
+            diversity[start:stop] = samples.hill(order, shannon)
+            covered[start:stop] = sample_coverage
+            start = stop
+    table = _keyed(keys, np.repeat(np.arange(len(groups)), lengths * len(chosen)))
+    table["order"] = order_column
+    table["size"] = size_column
+    table["method"] = _method_names(methods)
+    table["diversity"] = diversity
+    table["coverage"] = covered
+    return table

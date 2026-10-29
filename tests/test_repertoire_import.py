@@ -448,6 +448,27 @@ def test_import_refuses_contigs_larger_than_the_memory_budget(
     assert store.artifacts.list(kind="immune_receptors", scope="datastore") == []
 
 
+def test_contig_arrays_are_chunked_by_bytes(tmp_path, monkeypatch) -> None:
+    from cytearc.datastore._operations import repertoire as operations
+    from cytearc.storage.artifacts import artifact_group
+
+    monkeypatch.setattr(operations, "_CONTIG_CHUNK_BYTES", 16)
+    store = _store(tmp_path)
+    cells = store.snapshot_cell_selection()
+    ref = store.repertoire.import_receptors(_tcr(tmp_path), cell_selection=cells)
+    group = artifact_group(store.zw, ref)
+    # Per-contig codes of 4 bytes and packed bytes fill chunks of 16 bytes;
+    # per-cell arrays keep chunks of cells.
+    assert group["contig_junction_aa"].chunks == (4,)
+    assert group["contig_junction_aa_values"].chunks == (16,)
+    assert group["contig_cells"].dtype == np.int32
+    assert group["chain_slots"].dtype == np.int32
+    n_cells = group["n_vj"].shape[0]
+    assert group["n_vj"].chunks == (n_cells,)
+    loaded = store.repertoire.load_receptors(ref)
+    assert loaded.chains["junction_aa"].notna().any()
+
+
 def test_a_read_only_store_refuses_to_import_new_receptors(tmp_path) -> None:
     store = _store(tmp_path)
     cells = store.snapshot_cell_selection()

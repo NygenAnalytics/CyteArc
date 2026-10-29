@@ -302,3 +302,18 @@ def test_representatives_are_first_cells_of_the_most_frequent_configuration() ->
     assert n_configurations.tolist() == [3, 1]
     empty = _assign(_slots((None, None, None, None)))
     assert [array.tolist() for array in representative_cells(empty)] == [[], []]
+
+
+def test_cluster_pairs_are_checked_against_the_memory_left() -> None:
+    from cytearc.repertoire.clonotypes import assign_clonotype_clusters
+
+    # Three cells whose beta chains differ by one residue: two pairs of
+    # chains within the cutoff.
+    sequences = np.asarray([[-1, -1, 0, -1], [-1, -1, 1, -1], [-1, -1, 2, -1]])
+    texts = ["CASSF", "CASTF", "CAGSF"]
+    groups = np.zeros(3, dtype=np.int64)
+    options = dict(groups=groups, metric="hamming", cutoff=1, receptor_arms="VDJ")
+    linked = assign_clonotype_clusters(sequences, texts, max_bytes=160, **options)
+    assert linked.codes.tolist() == [0, 0, 0]
+    with pytest.raises(MemoryError, match="2 pairs of chains within the cutoff"):
+        assign_clonotype_clusters(sequences, texts, max_bytes=159, **options)

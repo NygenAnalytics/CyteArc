@@ -18,11 +18,12 @@ from ...metadata.rows import (
     apply_missing_mask,
     read_metadata_missing_rows,
     read_metadata_rows,
+    read_metadata_rows_chunkwise,
 )
 from ...metadata.selection import (
+    category_codes,
     resolve_grouping,
     sample_codes,
-    valid_category_mask,
 )
 from ...repertoire.chains import (
     NO_RECEPTOR,
@@ -63,16 +64,9 @@ from ...repertoire.diversity import (
     CloneSizes,
     ClonalDiversity,
     Rarefaction,
-    common_coverage,
-    common_size,
-    coverage_at,
     default_sizes,
-    diversity_at,
-    estimated_hill,
-    hill_curve,
-    indices,
-    observed_hill,
-    size_for_coverage,
+    diversity_tables,
+    rarefaction_curves,
 )
 from ...repertoire.expansion import (
     DEFAULT_BREAKPOINTS,
@@ -84,19 +78,26 @@ from ...repertoire.expansion import (
     frequency_labels,
     group_clone_sizes,
 )
+from ...repertoire.groups import group_names
 from ...repertoire.overlap import (
     ClonotypeOverlap,
     ClonotypeTracking,
-    group_names,
+    group_frame,
+    overlap_extent,
     overlap_pairs,
+    pair_counts,
     top_clonotypes,
+    tracking_cells,
+    tracking_reach,
 )
 from ...repertoire.usage import (
     GENE_FIELDS,
     GeneUsage,
     Spectratype,
-    count_units,
+    count_chains,
+    gene_codes,
     gene_names,
+    text_lengths,
 )
 from ...repertoire.receptors import (
     SLOT_FIELDS,
@@ -113,7 +114,7 @@ from ...storage.artifacts import (
 from ...storage.selections import read_stored_selection_indices
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
-from ...utils.arrays import sort_categories
+from ...utils.arrays import sorted_unique, unique_rows
 from ...utils.logging import logger
 
 if TYPE_CHECKING:
@@ -152,6 +153,10 @@ _CLONOTYPE_COLUMNS = frozenset(
 # Bytes that a decoded contig field takes in a table, per contig, besides the
 # text of ragged fields.
 _TABLE_BYTES_PER_FIELD = 64
+# The bytes of each chunk of a contig array. Packed text and per-contig codes
+# are read and written whole, which chunks of megabytes make fast; an export
+# holds one chunk of each array it reads.
+_CONTIG_CHUNK_BYTES = 2 * 2**20
 # Measuring clonal expansion holds, at its peak, about 270 bytes per cell: the
 # clonotype and group codes, the clone sizes and frequencies, and the labels
 # as written, as measured on 1,000,000 cells.
@@ -169,11 +174,14 @@ _CLONOTYPE_TABLE_BYTES_PER_CELL = 1_000
 _EXPANSION_TABLE_BYTES_PER_CELL = 500
 # The column of each group's receptor type in the tables of clonal expansion.
 _RECEPTOR_TYPE_COLUMN = "receptor_type"
-# Grouping cells for diversity holds about 200 bytes per cell: the clonotype
-# and group codes and each grouping column's labels.
-_DIVERSITY_BYTES_PER_CELL = 300
+# Grouping cells holds, at its peak, about these bytes per cell and per column
+# of labels: the cells' positions, codes and groups, and each column's labels
+# while they are coded; 84 bytes per cell without labels and 206 with four
+# columns, as measured on 1,000,000 cells.
+_GROUPING_BYTES_PER_CELL = 100
+_GROUPING_BYTES_PER_COLUMN = 70
 # The columns of each grouped result besides the groups' labels, which a
-# column of labels may not share; plots add a "group" column.
+# column of labels may not share; "group" names each group.
 _DIVERSITY_COLUMNS = frozenset(
     {"group", *INDEX_COLUMNS, "order", "observed", "estimated", "at_size"}
     | {"coverage_at_size", "method_at_size", "at_coverage", "size_at_coverage"}
@@ -190,6 +198,17 @@ _USAGE_COLUMNS = frozenset(
 _SPECTRATYPE_COLUMNS = frozenset(
     {"group", "locus", "length", "cells", "clonotypes", "fraction"}
 )
+# Comparing groups holds, at its peak, about 220 bytes per pair of groups of
+# one stratum, the pairs' indices and their table, 16 bytes per product of
+# two groups of the largest stratum, and 40 bytes per count of a clonotype in
+# a group, as measured on 1,000 and 2,000 groups.
+_OVERLAP_BYTES_PER_PAIR = 250
+_OVERLAP_BYTES_PER_PRODUCT = 24
+_OVERLAP_BYTES_PER_COUNT = 40
+# Following clonotypes holds about 110 bytes per row of the table with three
+# key columns, as measured on 1.3 million rows, and a byte per chosen
+# clonotype and group.
+_TRACK_BYTES_PER_ROW = 150
 
 
 def _file_sha256(path: str | os.PathLike[str]) -> str:
@@ -301,7 +320,7 @@ def _contig_arrays(table: ContigTable) -> dict[str, np.ndarray]:
     ``contig_f_offsets``. Other fields are stored as ``contig_f``.
     """
     arrays: dict[str, np.ndarray] = {
-        "contig_cells": np.asarray(table.cells, dtype=np.int64),
+        "contig_cells": np.asarray(table.cells, dtype=np.int32),
         "contig_sources": np.asarray(table.sources, dtype=np.int32),
     }
     # contig_cells, contig_sources and contig_chain are not fields.
@@ -319,6 +338,35 @@ def _contig_arrays(table: ContigTable) -> dict[str, np.ndarray]:
         else:
             arrays[f"contig_{name}"] = np.asarray(table.values[name])
     return arrays
+
+
+def _sorted_codes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the sorted distinct labels and each label's code among them.
+
+    The codes equal those of ``np.unique(values, return_inverse=True)``, by
+    hashing rather than by sorting every label.
+    """
+    codes, distinct = pd.factorize(np.asarray(values), sort=True)
+    return np.asarray(distinct), np.asarray(codes, dtype=np.int64)
+
+
+def _labels_of(
+    keys: list[dict[str, str]], column: str, codes: np.ndarray
+) -> np.ndarray:
+    """Each code's label in a column of the keys, None for -1."""
+    labels = np.asarray([key.get(column) for key in keys], dtype=object)
+    taken = np.full(len(codes), None, dtype=object)
+    present = codes >= 0
+    taken[present] = labels[codes[present]]
+    return taken
+
+
+def _contig_chunk_lengths(arrays: dict[str, np.ndarray]) -> dict[str, int]:
+    """Chunk each contig array in about 8 MiB, for whole-array reads and writes."""
+    return {
+        name: max(1, _CONTIG_CHUNK_BYTES // max(1, values.dtype.itemsize))
+        for name, values in arrays.items()
+    }
 
 
 def _read(group: zarr.Group, name: str) -> np.ndarray:
@@ -565,13 +613,17 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             return planned.ref
         self._require_writable(arguments.operation)
 
-        cell_ids = np.asarray(self.cells.fetch_all("ids"))[cell_index].astype(str)
-        lookup = pd.Index(cell_ids)
+        # The lookup holds each selected cell's ID once, with a hash slot.
+        lookup = pd.Index(
+            np.asarray(self.cells.fetch_all("ids"))[cell_index].astype(object)
+        )
         lookup_bytes = _LOOKUP_BYTES_PER_CELL * n_cells
         encoder = ContigEncoder()
         n_file_contigs = 0
         n_unmatched = 0
-        unmatched_barcodes: set[str] = set()
+        # Unmatched barcodes are counted by their 64-bit hashes, which an
+        # all_contig_annotations.csv of many barcodes keeps small.
+        unmatched_hashes = np.empty(0, dtype=np.uint64)
         examples: list[str] = []
         for position, source in enumerate(sources):
             prefix = source.barcode_prefix or ""
@@ -585,13 +637,19 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 matched = rows >= 0
                 n_file_contigs += len(chunk)
                 if not matched.all():
-                    missing = identifiers[~matched]
-                    n_unmatched += len(missing)
-                    for barcode in pd.unique(missing):
-                        if barcode not in unmatched_barcodes:
-                            unmatched_barcodes.add(barcode)
-                            if len(examples) < _UNMATCHED_EXAMPLES:
-                                examples.append(str(barcode))
+                    missing = pd.unique(identifiers[~matched])
+                    n_unmatched += int(np.count_nonzero(~matched))
+                    hashes = np.asarray(
+                        pd.util.hash_array(missing.astype(object)), dtype=np.uint64
+                    )
+                    unmatched_hashes = sorted_unique(
+                        np.concatenate([unmatched_hashes, hashes])
+                    )
+                    for barcode in missing.tolist():
+                        if len(examples) == _UNMATCHED_EXAMPLES:
+                            break
+                        if barcode not in examples:
+                            examples.append(str(barcode))
                 encoder.add(
                     chunk.loc[matched].drop(columns="cell_id"),
                     rows[matched],
@@ -625,6 +683,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
         quality = receptor_quality(index, locus)
         n_contigs = np.bincount(table.cells, minlength=n_cells).astype(np.int32)
+        contig_arrays = {"contig_chain": index.eligible, **_contig_arrays(table)}
         write_cell_data_artifact(
             self.zw,
             planned,
@@ -637,21 +696,21 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 "n_vdj": index.n_vdj,
                 "n_contigs": n_contigs,
                 "chain_slots": index.slots,
-                "contig_chain": index.eligible,
-                **_contig_arrays(table),
+                **contig_arrays,
             },
+            chunk_lengths=_contig_chunk_lengths(contig_arrays),
             attributes={
                 "fields": list(table.fields),
                 "n_file_contigs": int(n_file_contigs),
                 "n_unmatched_contigs": int(n_unmatched),
-                "n_unmatched_barcodes": len(unmatched_barcodes),
+                "n_unmatched_barcodes": len(unmatched_hashes),
                 "unmatched_barcode_examples": examples,
             },
         )
         if n_unmatched:
             logger.warning(
                 f"{n_unmatched} of {n_file_contigs} contigs, of "
-                f"{len(unmatched_barcodes)} barcodes, match no selected cell, for "
+                f"{len(unmatched_hashes)} barcodes, match no selected cell, for "
                 "example " + ", ".join(repr(value) for value in examples) + ". "
                 "Check barcode_prefix and cell_selection."
             )
@@ -690,16 +749,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 field is not stored.
             MemoryError: If the tables do not fit the datastore memory budget.
         """
-        if not isinstance(receptors, ArtifactRef):
-            raise TypeError("receptors must be an ArtifactRef")
-        if receptors.kind != ImmuneReceptorImportArguments.artifact_kind:
-            raise ValueError(
-                "receptors must be an immune_receptors artifact, not "
-                f"{receptors.kind!r}"
-            )
-        status = require_complete_artifact(self.zw, receptors)
-        group = artifact_group(self.zw, receptors)
-        stored = _stored_fields(group)
+        group, stored = self._receptor_group(receptors)
         if fields is None:
             chosen = stored
         else:
@@ -735,13 +785,11 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 f"memory budget of {self.memoryBytes} bytes. Pass fields= with "
                 "fewer fields, or raise mem_budget."
             )
-        loaded = {
-            name: self._artifacts_load_values(
-                receptors, value=None if name == "values" else name
-            )
-            for name in _CELL_ARRAYS
-        }
-        cell_ids = loaded["values"].cell_ids
+        # The canonical values come with the cell IDs; the other per-cell
+        # arrays are aligned to the same cells.
+        loaded = self._artifacts_load_values(receptors)
+        cell_ids = loaded.cell_ids
+        arrays = {name: _read(group, name) for name in _CELL_ARRAYS[1:]}
         slots = _read(group, "chain_slots")
         columns = {name: _stored_column(group, name) for name in chosen}
         chains = contig_frame(
@@ -753,21 +801,22 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
         cells = receptor_cell_frame(
             cell_ids,
-            receptor_type=np.asarray(loaded["values"].values),
-            receptor_subtype=np.asarray(loaded["receptor_subtype"].values),
-            chain_pairing=np.asarray(loaded["chain_pairing"].values),
-            n_vj=np.asarray(loaded["n_vj"].values),
-            n_vdj=np.asarray(loaded["n_vdj"].values),
-            n_contigs=np.asarray(loaded["n_contigs"].values),
+            receptor_type=np.asarray(loaded.values),
+            receptor_subtype=arrays["receptor_subtype"],
+            chain_pairing=arrays["chain_pairing"],
+            n_vj=arrays["n_vj"],
+            n_vdj=arrays["n_vdj"],
+            n_contigs=arrays["n_contigs"],
             slots=slots,
             columns=columns,
             fields=chosen,
         )
+        parameters = inspect_artifact(self.zw, receptors).parameters or {}
         return ImmuneReceptors(
             cells=cells,
             chains=chains,
             fields=stored,
-            productive_only=bool((status.parameters or {})["productive_only"]),
+            productive_only=bool(parameters["productive_only"]),
         )
 
     def _within_samples(
@@ -804,6 +853,19 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             for column in columns
         ]
         return sample_codes(columns, labels, n_rows, reason=reason)
+
+    def _artifact_cell_ids(self, artifact: ArtifactRef) -> np.ndarray:
+        """The IDs of a cell-aligned artifact's cells, in the order of its arrays."""
+        selection = inspect_artifact(self.zw, artifact).input_ref("cell_selection")
+        cell_index = read_stored_selection_indices(
+            self.zw,
+            selection,
+            kind="cell_selection",
+            scope="datastore",
+            assay=None,
+            table_path="cellData",
+        )
+        return np.asarray(read_metadata_rows_chunkwise(self.cells, "ids", cell_index))
 
     def _check_table_budget(self, n_cells: int, per_cell: int, name: str) -> None:
         """Refuse to load tables of ``n_cells`` cells beyond the memory budget."""
@@ -968,7 +1030,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         n_cells = len(receptor_type)
         with_receptor = receptor_type != NO_RECEPTOR
         if within_receptor_type:
-            _types, type_codes = np.unique(receptor_type, return_inverse=True)
+            _types, type_codes = _sorted_codes(receptor_type)
         else:
             type_codes = np.zeros(n_cells, dtype=np.int64)
         within_codes = np.zeros(n_cells, dtype=np.int64)
@@ -1052,6 +1114,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 j_genes=j_genes,
                 receptor_arms=receptor_arms,
                 dual_ir=dual_ir,
+                max_bytes=self.memoryBytes - resident,
             )
         labels = clonotype_labels(assignment.n_clonotypes)
         has = assignment.codes >= 0
@@ -1101,16 +1164,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         require_complete_artifact(self.zw, clonotypes)
         return artifact_group(self.zw, clonotypes)
 
-    def _clonotype_receptor_type(self, clonotypes: ArtifactRef, code: int) -> str:
-        """The receptor type of a clonotype, that of its representative cell."""
-        group = self._clonotype_group(clonotypes)
-        representative = int(_read(group, "representatives")[code])
-        receptors = inspect_artifact(self.zw, clonotypes).input_ref("receptors")
-        values = as_zarr_array(
-            artifact_group(self.zw, receptors)["values"], name="values"
-        )
-        return str(np.asarray(values[representative : representative + 1])[0])
-
     @validation_scoped
     def _repertoire_load_clonotypes(self, clonotypes: ArtifactRef) -> Clonotypes:
         """Read saved clonotypes as a table of cells and a table of clonotypes.
@@ -1141,8 +1194,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         receptors = status.input_ref("receptors")
         receptor_group = artifact_group(self.zw, receptors)
         fields = _stored_fields(receptor_group)
-        labels = self._artifacts_load_values(clonotypes)
-        sizes = self._artifacts_load_values(clonotypes, value="clone_size")
+        cell_ids = self._artifact_cell_ids(clonotypes)
         representatives = _read(group, "representatives").astype(np.int64)
         slots = _read(receptor_group, "chain_slots")[representatives]
         # Only the representatives' contigs are decoded.
@@ -1159,21 +1211,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
         within_codes = _read(group, "clonotype_within").astype(np.int64)
         cells, table = clonotype_frames(
-            labels.cell_ids,
-            values=np.asarray(labels.values),
-            clone_size=np.asarray(sizes.values),
+            cell_ids,
+            codes=_read(group, "codes"),
+            clone_size=_read(group, "clone_size"),
             clonotype_ids=_read(group, "clonotype_ids").astype(str),
             clonotype_sizes=_read(group, "clonotype_sizes"),
             n_configurations=_read(group, "n_configurations"),
             receptor_type=_read(receptor_group, "values").astype(str)[representatives],
             within={
-                column: np.asarray(
-                    [
-                        within_labels[code][column] if code >= 0 else None
-                        for code in within_codes.tolist()
-                    ],
-                    dtype=object,
-                )
+                column: _labels_of(within_labels, column, within_codes)
                 for column in within
             },
             slots=local.reshape(slots.shape),
@@ -1344,16 +1390,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if within_receptor_type:
             receptors = status.input_ref("receptors")
             receptor_type = _read(artifact_group(self.zw, receptors), "values")
-            types, type_codes = np.unique(
-                receptor_type.astype(str)[has], return_inverse=True
-            )
+            types, type_codes = _sorted_codes(receptor_type.astype(str)[has])
         else:
             types = np.asarray([], dtype=str)
             type_codes = np.zeros(len(within_codes), dtype=np.int64)
-        combinations, group_codes = np.unique(
-            np.column_stack([within_codes, type_codes]).astype(np.int64),
-            axis=0,
-            return_inverse=True,
+        combinations, group_codes = unique_rows(
+            np.column_stack([within_codes, type_codes]).astype(np.int64)
         )
         group_keys = [
             {
@@ -1366,8 +1408,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             }
             for sample, kind in combinations.tolist()
         ]
+        # Tables and plots name each group by its labels.
+        group_names(group_keys)
         groups = np.full(n_cells, -1, dtype=np.int64)
-        groups[has] = group_codes.reshape(-1)
+        groups[has] = group_codes
         sizes, clone_frequencies = group_clone_sizes(codes, groups)
         categories, labels = expansion_categories(
             sizes,
@@ -1449,11 +1493,21 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         within_receptor_type = bool(parameters["within_receptor_type"])
         labels = tuple(str(name) for name in cast(list[str], group.attrs["labels"]))
         group_keys = cast(list[dict[str, str]], group.attrs["group_keys"])
-        loaded = self._artifacts_load_values(expansion)
-        categories = pd.Index(labels).get_indexer(np.asarray(loaded.values, dtype=str))
+        counts = parameters["breakpoints"]
+        frequencies = parameters["frequency_breakpoints"]
+        sizes = _read(group, "group_clone_size")
+        clone_frequencies = _read(group, "group_clone_frequency")
+        # Each cell's category follows from its clone size or frequency and
+        # the bounds, as it was saved.
+        categories, _labels = expansion_categories(
+            sizes,
+            clone_frequencies,
+            breakpoints=counts,
+            frequency_breakpoints=frequencies,
+        )
         clonotype_group = self._clonotype_group(clonotypes)
         cells, table, ranks = expansion_tables(
-            loaded.cell_ids,
+            self._artifact_cell_ids(expansion),
             categories=categories,
             labels=labels,
             clonotypes=_read(clonotype_group, "codes"),
@@ -1464,12 +1518,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 *within,
                 *((_RECEPTOR_TYPE_COLUMN,) if within_receptor_type else ()),
             ),
-            sizes=_read(group, "group_clone_size"),
-            frequencies=_read(group, "group_clone_frequency"),
+            sizes=sizes,
+            frequencies=clone_frequencies,
             splits=bounds,
         )
-        counts = parameters["breakpoints"]
-        frequencies = parameters["frequency_breakpoints"]
         return ClonalExpansion(
             cells=cells,
             categories=table,
@@ -1494,14 +1546,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         within_receptor_type: bool,
         cell_selection: ArtifactRef | None,
         reserved: frozenset[str] = frozenset(),
-    ) -> tuple[tuple[str, ...], list[dict[str, str]], list[CloneSizes]]:
+    ) -> tuple[pd.DataFrame, list[CloneSizes]]:
         """Group the cells with a clonotype and count each group's clone sizes.
 
         Returns:
-            The key columns, each group's labels in them, and each group's
-            clone sizes, groups in the natural order of their labels.
+            One row per group, in the natural order of the labels, with its
+            name in ``group`` and its labels in the key columns, and each
+            group's clone sizes.
         """
-        key_columns, group_keys, pair_groups, _codes, pair_cells = self._clone_counts(
+        keys, pair_groups, _codes, pair_cells = self._clone_counts(
             clonotypes,
             group_by=group_by,
             groups=groups,
@@ -1509,12 +1562,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             cell_selection=cell_selection,
             reserved=reserved,
         )
-        bounds = np.searchsorted(pair_groups, np.arange(len(group_keys) + 1))
+        bounds = np.searchsorted(pair_groups, np.arange(len(keys) + 1))
         clone_sizes = [
             CloneSizes.from_sizes(pair_cells[bounds[index] : bounds[index + 1]])
-            for index in range(len(group_keys))
+            for index in range(len(keys))
         ]
-        return key_columns, group_keys, clone_sizes
+        return keys, clone_sizes
 
     def _clone_counts(
         self,
@@ -1525,19 +1578,17 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         within_receptor_type: bool,
         cell_selection: ArtifactRef | None,
         reserved: frozenset[str] = frozenset(),
-    ) -> tuple[
-        tuple[str, ...], list[dict[str, str]], np.ndarray, np.ndarray, np.ndarray
-    ]:
+    ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
         """Group the cells with a clonotype and count each clonotype's cells.
 
         The groups are those of :meth:`_cell_groups`, among the cells with a
         clonotype.
 
         Returns:
-            The key columns, each group's labels in them, in the natural order
-            of the labels, and for each distinct pair of group and clonotype,
-            sorted by group and clonotype code, its group, its clonotype code
-            and its cells.
+            One row per group, in the natural order of the labels, with its
+            name in ``group`` and its labels in the key columns, and for each
+            distinct pair of group and clonotype, sorted by group and
+            clonotype code, its group, its clonotype code and its cells.
         """
         clonotype_group = self._clonotype_group(clonotypes)
         codes = _read(clonotype_group, "codes").astype(np.int64)
@@ -1553,18 +1604,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             reserved=reserved,
         )
         grouped = cell_groups >= 0
-        kept = codes[grouped]
-        n_codes = int(kept.max()) + 1 if len(kept) else 1
-        pairs, cells = np.unique(
-            cell_groups[grouped] * n_codes + kept, return_counts=True
+        pair_groups, pair_codes, pair_cells = pair_counts(
+            cell_groups[grouped], codes[grouped]
         )
-        return (
-            key_columns,
-            group_keys,
-            (pairs // n_codes).astype(np.int64),
-            (pairs % n_codes).astype(np.int64),
-            cells.astype(np.int64),
-        )
+        return group_frame(key_columns, group_keys), pair_groups, pair_codes, pair_cells
 
     def _cell_groups(
         self,
@@ -1615,11 +1658,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 "rename the column or pass within_receptor_type=False"
             )
         n_cells = len(rows)
-        resident = _DIVERSITY_BYTES_PER_CELL * n_cells
+        n_columns = len(key_columns)
+        resident = n_cells * (
+            _GROUPING_BYTES_PER_CELL + _GROUPING_BYTES_PER_COLUMN * n_columns
+        )
         if resident > self.memoryBytes:
             raise MemoryError(
-                f"Grouping {n_cells} cells holds about {resident} bytes, more than "
-                f"the memory budget of {self.memoryBytes} bytes. Raise mem_budget."
+                f"Grouping {n_cells} cells by {n_columns} columns holds about "
+                f"{resident} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Raise mem_budget."
             )
         has = np.asarray(rows, dtype=bool).copy()
         cell_index = read_stored_selection_indices(
@@ -1643,54 +1690,45 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             )
             has &= np.isin(cell_index, chosen)
         cell_index = cell_index[has]
-        labels: list[np.ndarray] = []
-        for column in columns:
-            values = np.asarray(read_metadata_rows(self.cells, column, cell_index))
-            missing = read_metadata_missing_rows(self.cells, column, cell_index)
-            labels.append(_labels_or_none(values, missing))
+        # Each column's labels are coded once, in the natural order of their
+        # texts, and only the distinct labels are checked and named.
+        coded: list[tuple[np.ndarray, list[str]]] = [
+            category_codes(
+                read_metadata_rows(self.cells, column, cell_index),
+                read_metadata_missing_rows(self.cells, column, cell_index),
+            )
+            for column in columns
+        ]
         if groups is not None:
             resolved = resolve_grouping(self.zw, self.cells, groups)
-            values = np.asarray(resolved.labels, dtype=object)
-            valid = valid_category_mask(values, missing_mask=resolved.missing_mask)
-            lookup = pd.Series(
-                values[valid], index=np.asarray(resolved.cell_idx)[valid]
+            codes, names = category_codes(resolved.labels, resolved.missing_mask)
+            at = pd.Index(np.asarray(resolved.cell_idx, dtype=np.int64)).get_indexer(
+                cell_index
             )
-            aligned = lookup.reindex(cell_index).to_numpy(dtype=object)
-            labels.append(_labels_or_none(aligned, pd.isna(aligned)))
+            aligned = np.full(len(cell_index), -1, dtype=np.int64)
+            aligned[at >= 0] = codes[at[at >= 0]]
+            coded.append((aligned, names))
         if within_receptor_type:
-            receptor_type = _read(artifact_group(self.zw, receptors), "values").astype(
-                str
-            )
-            labels.append(receptor_type[has].astype(object))
+            receptor_type = _read(artifact_group(self.zw, receptors), "values")
+            coded.append(category_codes(receptor_type[has]))
         cell_groups = np.full(n_cells, -1, dtype=np.int64)
-        if not labels:
+        if not coded:
             cell_groups[has] = 0
             return key_columns, [{}], cell_groups
-        label_codes = []
-        names_by_column = []
-        keep = np.ones(int(has.sum()), dtype=bool)
-        for values in labels:
-            present = np.asarray([value is not None for value in values], dtype=bool)
-            names = sort_categories(pd.unique(values[present]))
-            lookup = {name: position for position, name in enumerate(names)}
-            column_codes = np.full(len(values), -1, dtype=np.int64)
-            column_codes[present] = [lookup[value] for value in values[present]]
-            label_codes.append(column_codes)
-            names_by_column.append(names)
-            keep &= present
-        stacked = np.column_stack(label_codes)[keep]
-        combinations, group_codes = np.unique(stacked, axis=0, return_inverse=True)
+        stacked = np.column_stack([codes for codes, _names in coded])
+        keep = (stacked >= 0).all(axis=1)
+        combinations, group_codes = unique_rows(stacked[keep])
         group_keys = [
             {
-                column: str(names[code])
-                for column, names, code in zip(
-                    key_columns, names_by_column, row, strict=True
+                column: names[code]
+                for column, (_codes, names), code in zip(
+                    key_columns, coded, row, strict=True
                 )
             }
             for row in combinations.tolist()
         ]
         selected = np.flatnonzero(has)
-        cell_groups[selected[keep]] = group_codes.reshape(-1)
+        cell_groups[selected[keep]] = group_codes
         # Groups are named by their labels joined by commas, and need one
         # name each.
         group_names(group_keys)
@@ -1764,7 +1802,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 raise TypeError("coverage must be a number between 0 and 1, or None")
             if not 0 < coverage < 1:
                 raise ValueError("coverage must be between 0 and 1, or None")
-        key_columns, group_keys, clone_sizes = self._clone_groups(
+        keys, clone_sizes = self._clone_groups(
             clonotypes,
             group_by=group_by,
             groups=groups,
@@ -1774,35 +1812,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
         if not clone_sizes or all(clones.n == 0 for clones in clone_sizes):
             raise ValueError("No cell has both a clonotype and a group")
-        common = common_size(clone_sizes) if size is None else int(size)
-        level = common_coverage(clone_sizes) if coverage is None else float(coverage)
-        index_rows = []
-        hill_rows = []
-        for key, clones in zip(group_keys, clone_sizes, strict=True):
-            index_rows.append({**key, **indices(clones)})
-            # The common coverage is 1 only when every group's coverage is 1,
-            # which the group's observed size reaches.
-            needed = size_for_coverage(clones, level) if level < 1 else float(clones.n)
-            for order in ORDERS:
-                at_size, size_method = diversity_at(clones, common, order)
-                at_coverage, coverage_method = diversity_at(clones, needed, order)
-                hill_rows.append(
-                    {
-                        **key,
-                        "order": order,
-                        "observed": observed_hill(clones, order),
-                        "estimated": estimated_hill(clones, order),
-                        "at_size": at_size,
-                        "coverage_at_size": coverage_at(clones, common),
-                        "method_at_size": size_method,
-                        "at_coverage": at_coverage,
-                        "size_at_coverage": needed,
-                        "method_at_coverage": coverage_method,
-                    }
-                )
+        table, hill, common, level = diversity_tables(
+            clone_sizes, keys, size=size, coverage=coverage
+        )
         return ClonalDiversity(
-            indices=pd.DataFrame(index_rows, columns=[*key_columns, *INDEX_COLUMNS]),
-            hill=pd.DataFrame(hill_rows),
+            indices=table,
+            hill=hill,
             clonotypes=clonotypes,
             group_by=_within_columns(group_by, "group_by"),
             groups=groups,
@@ -1874,7 +1889,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             or len(set(chosen)) != len(chosen)
         ):
             raise ValueError("orders must hold distinct orders from 0, 1 and 2")
-        fixed: np.ndarray | None = None
         if sizes is not None:
             if isinstance(sizes, str | bytes) or not isinstance(sizes, Sequence):
                 raise TypeError("sizes must be a sequence of positive integers")
@@ -1885,10 +1899,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 for value in sizes
             ):
                 raise ValueError("sizes must hold positive integers")
-            fixed = np.unique(np.asarray(sizes, dtype=np.int64))
         # The defaults' arguments are checked once, before any group is read.
         default_sizes(2, endpoint, knots)
-        key_columns, group_keys, clone_sizes = self._clone_groups(
+        keys, clone_sizes = self._clone_groups(
             clonotypes,
             group_by=group_by,
             groups=groups,
@@ -1898,38 +1911,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
         if not clone_sizes or all(clones.n == 0 for clones in clone_sizes):
             raise ValueError("No cell has both a clonotype and a group")
-        rows = []
-        for key, clones in zip(group_keys, clone_sizes, strict=True):
-            group_sizes = (
-                default_sizes(clones.n, endpoint, knots) if fixed is None else fixed
-            )
-            covered = [coverage_at(clones, float(m)) for m in group_sizes]
-            for order in chosen:
-                values, methods = hill_curve(clones, group_sizes.tolist(), order)
-                for m, sample_coverage, value, method in zip(
-                    group_sizes, covered, values, methods, strict=True
-                ):
-                    rows.append(
-                        {
-                            **key,
-                            "order": order,
-                            "size": int(m),
-                            "method": method,
-                            "diversity": value,
-                            "coverage": sample_coverage,
-                        }
-                    )
         return Rarefaction(
-            curves=pd.DataFrame(
-                rows,
-                columns=[
-                    *key_columns,
-                    "order",
-                    "size",
-                    "method",
-                    "diversity",
-                    "coverage",
-                ],
+            curves=rarefaction_curves(
+                clone_sizes,
+                keys,
+                chosen,
+                sizes=sizes,
+                endpoint=endpoint,
+                knots=knots,
             ),
             clonotypes=clonotypes,
             group_by=_within_columns(group_by, "group_by"),
@@ -1940,26 +1929,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
 
     def _group_table(
-        self,
-        key_columns: tuple[str, ...],
-        group_keys: list[dict[str, str]],
-        pair_groups: np.ndarray,
-        pair_cells: np.ndarray,
+        self, keys: pd.DataFrame, pair_groups: np.ndarray, pair_cells: np.ndarray
     ) -> pd.DataFrame:
         """One row per group: its name, labels, cells and clonotypes."""
-        n_groups = len(group_keys)
-        return pd.DataFrame(
-            {
-                "group": group_names(group_keys),
-                **{
-                    column: [key[column] for key in group_keys]
-                    for column in key_columns
-                },
-                "cells": np.bincount(
-                    pair_groups, weights=pair_cells, minlength=n_groups
-                ).astype(np.int64),
-                "clonotypes": np.bincount(pair_groups, minlength=n_groups),
-            }
+        n_groups = len(keys)
+        return keys.assign(
+            cells=np.bincount(
+                pair_groups, weights=pair_cells, minlength=n_groups
+            ).astype(np.int64),
+            clonotypes=np.bincount(pair_groups, minlength=n_groups),
         )
 
     @validation_scoped
@@ -2010,32 +1988,44 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If fewer than two groups hold a cell with a clonotype,
                 or a column of the groups is named twice.
-            MemoryError: If grouping the cells does not fit the memory budget.
+            MemoryError: If grouping the cells, or the pairs of groups, do not
+                fit the memory budget.
         """
-        key_columns, group_keys, pair_groups, pair_codes, pair_cells = (
-            self._clone_counts(
-                clonotypes,
-                group_by=group_by,
-                groups=groups,
-                within_receptor_type=within_receptor_type,
-                cell_selection=cell_selection,
-                reserved=_OVERLAP_COLUMNS,
-            )
+        keys, pair_groups, pair_codes, pair_cells = self._clone_counts(
+            clonotypes,
+            group_by=group_by,
+            groups=groups,
+            within_receptor_type=within_receptor_type,
+            cell_selection=cell_selection,
+            reserved=_OVERLAP_COLUMNS,
         )
-        if len(pair_cells) == 0 or len(group_keys) < 2:
+        if len(pair_cells) == 0 or len(keys) < 2:
             raise ValueError(
                 "Overlap needs at least two groups of cells with a clonotype"
             )
-        sizes = self._group_table(key_columns, group_keys, pair_groups, pair_cells)
         strata = (
-            np.asarray([key[_RECEPTOR_TYPE_COLUMN] for key in group_keys])
+            keys[_RECEPTOR_TYPE_COLUMN].to_numpy(dtype=object)
             if within_receptor_type
             else None
         )
-        pairs = overlap_pairs(
-            pair_groups, pair_codes, pair_cells, len(group_keys), strata=strata
+        n_pairs, largest = overlap_extent(len(keys), strata)
+        resident = (
+            _OVERLAP_BYTES_PER_PAIR * n_pairs
+            + _OVERLAP_BYTES_PER_PRODUCT * largest**2
+            + _OVERLAP_BYTES_PER_COUNT * len(pair_cells)
         )
-        names = np.asarray(sizes["group"], dtype=object)
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Comparing {len(keys)} groups gives {n_pairs} pairs, which hold "
+                f"about {resident} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Compare fewer groups, with fewer "
+                "group_by columns or a cell_selection, or raise mem_budget."
+            )
+        sizes = self._group_table(keys, pair_groups, pair_cells)
+        pairs = overlap_pairs(
+            pair_groups, pair_codes, pair_cells, len(keys), strata=strata
+        )
+        names = keys["group"].to_numpy(dtype=object)
         pairs.insert(0, "group_1", names[pairs.pop("first").to_numpy()])
         pairs.insert(1, "group_2", names[pairs.pop("second").to_numpy()])
         return ClonotypeOverlap(
@@ -2083,13 +2073,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             labels: Clonotype labels to follow instead, or None.
 
         Returns:
-            One row per chosen clonotype and group.
+            One row per chosen clonotype and group, and the junction that
+            names each chosen clonotype.
 
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``top`` is not positive, a label names no
                 clonotype, or no cell has a clonotype and a group.
-            MemoryError: If grouping the cells does not fit the memory budget.
+            MemoryError: If grouping the cells, or the table of the chosen
+                clonotypes' groups, does not fit the memory budget.
         """
         if isinstance(top, bool) or not isinstance(top, int | np.integer):
             raise TypeError("top must be a positive integer")
@@ -2101,15 +2093,13 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             or not all(isinstance(label, str) for label in labels)
         ):
             raise TypeError("labels must be a sequence of clonotype labels or None")
-        key_columns, group_keys, pair_groups, pair_codes, pair_cells = (
-            self._clone_counts(
-                clonotypes,
-                group_by=group_by,
-                groups=groups,
-                within_receptor_type=within_receptor_type,
-                cell_selection=cell_selection,
-                reserved=_TRACK_COLUMNS,
-            )
+        keys, pair_groups, pair_codes, pair_cells = self._clone_counts(
+            clonotypes,
+            group_by=group_by,
+            groups=groups,
+            within_receptor_type=within_receptor_type,
+            cell_selection=cell_selection,
+            reserved=_TRACK_COLUMNS,
         )
         if len(pair_cells) == 0:
             raise ValueError("No cell has both a clonotype and a group")
@@ -2118,63 +2108,106 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         )
         if labels is None:
             chosen = top_clonotypes(
-                pair_groups, pair_codes, pair_cells, len(group_keys), int(top)
+                pair_groups, pair_codes, pair_cells, len(keys), int(top)
             )
         else:
             positions = pd.Index(identifiers).get_indexer(list(labels))
             unknown = [label for label, at in zip(labels, positions) if at < 0]
             if unknown:
                 raise ValueError(f"No clonotype is labelled {unknown[:5]}")
-            chosen = np.unique(positions)
-        sizes = self._group_table(key_columns, group_keys, pair_groups, pair_cells)
-        strata = (
-            np.asarray([key[_RECEPTOR_TYPE_COLUMN] for key in group_keys])
+            chosen = sorted_unique(positions.astype(np.int64))
+        sizes = self._group_table(keys, pair_groups, pair_cells)
+        stratum_names, strata = np.unique(
+            keys[_RECEPTOR_TYPE_COLUMN].to_numpy(dtype=object)
             if within_receptor_type
-            else np.zeros(len(group_keys), dtype=object)
+            else np.zeros(len(keys), dtype=object),
+            return_inverse=True,
         )
-        observed = pd.DataFrame(
-            {"code": pair_codes, "group": pair_groups, "cells": pair_cells}
+        receptor_types, junctions = self._representative_chains(clonotypes, chosen)
+        # A labelled clonotype without cells in the groups is followed through
+        # the groups of its own receptor type.
+        if within_receptor_type:
+            lookup = {name: code for code, name in enumerate(stratum_names.tolist())}
+            fallback = np.asarray(
+                [lookup.get(name, -1) for name in receptor_types.tolist()],
+                dtype=np.int64,
+            )
+        else:
+            fallback = np.zeros(len(chosen), dtype=np.int64)
+        reach = tracking_reach(pair_groups, pair_codes, chosen, strata, fallback)
+        n_rows = int((reach * np.bincount(strata, minlength=reach.shape[1])).sum())
+        resident = _TRACK_BYTES_PER_ROW * n_rows + reach.shape[0] * len(keys)
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Following {len(chosen)} clonotypes through {len(keys)} groups "
+                f"gives {n_rows} rows, which hold about {resident} bytes, more "
+                f"than the memory budget of {self.memoryBytes} bytes. Follow "
+                "fewer clonotypes, with a smaller top or labels, or fewer "
+                "groups, or raise mem_budget."
+            )
+        followed, rows, counts = tracking_cells(
+            pair_groups, pair_codes, pair_cells, chosen, strata, reach
         )
-        observed = observed[observed["code"].isin(chosen)]
-        rows = []
-        for code in chosen.tolist():
-            mine = observed[observed["code"] == code]
-            cells_by_group = dict(zip(mine["group"], mine["cells"], strict=True))
-            # The groups of every stratum that the clonotype has cells in; a
-            # labelled clonotype without cells in them is followed through
-            # the groups of its own receptor type.
-            reach = set(strata[mine["group"].to_numpy()].tolist())
-            if not reach:
-                reach = {
-                    self._clonotype_receptor_type(clonotypes, code)
-                    if within_receptor_type
-                    else 0
-                }
-            for group in range(len(group_keys)):
-                if strata[group] not in reach:
-                    continue
-                count = int(cells_by_group.get(group, 0))
-                rows.append(
-                    {
-                        "clonotype": identifiers[code],
-                        "group": sizes["group"].iat[group],
-                        **group_keys[group],
-                        "cells": count,
-                        "fraction": count / int(sizes["cells"].iat[group]),
-                    }
-                )
+        if len(rows):
+            table = keys.take(rows).reset_index(drop=True)
+            names = np.asarray(identifiers[chosen].tolist(), dtype=object)
+            table.insert(0, "clonotype", names[followed])
+            table["cells"] = counts
+            table["fraction"] = counts / sizes["cells"].to_numpy()[rows]
+        else:
+            table = pd.DataFrame(
+                columns=["clonotype", *keys.columns, "cells", "fraction"]
+            )
         return ClonotypeTracking(
-            cells=pd.DataFrame(
-                rows,
-                columns=["clonotype", "group", *key_columns, "cells", "fraction"],
-            ),
+            cells=table,
             clonotypes=clonotypes,
             tracked=tuple(identifiers[chosen].tolist()),
             group_by=_within_columns(group_by, "group_by"),
             groups=groups,
             within_receptor_type=within_receptor_type,
             cell_selection=cell_selection,
+            junctions=junctions,
         )
+
+    def _representative_chains(
+        self, clonotypes: ArtifactRef, codes: np.ndarray
+    ) -> tuple[np.ndarray, tuple[str, ...]]:
+        """Read the receptor type and naming junction of some clonotypes.
+
+        Both are those of each clonotype's representative cell, and the
+        junction is the residues of its ``VDJ_1`` chain, or of its ``VJ_1``
+        chain without a VDJ chain. Only the representatives' rows are read.
+
+        Returns:
+            The receptor type of each clonotype, and its junction.
+        """
+        group = self._clonotype_group(clonotypes)
+        cells = np.asarray(
+            as_zarr_array(
+                group["representatives"], name="representatives"
+            ).get_coordinate_selection(np.asarray(codes, dtype=np.int64)),
+            dtype=np.int64,
+        )
+        receptors = inspect_artifact(self.zw, clonotypes).input_ref("receptors")
+        receptor_group = artifact_group(self.zw, receptors)
+        values = as_zarr_array(receptor_group["values"], name="values")
+        receptor_types = np.asarray(values.get_coordinate_selection(cells)).astype(str)
+        slots = np.asarray(
+            as_zarr_array(
+                receptor_group["chain_slots"], name="chain_slots"
+            ).get_orthogonal_selection(
+                (
+                    cells,
+                    np.asarray(
+                        [SLOTS.index("VDJ_1"), SLOTS.index("VJ_1")], dtype=np.int64
+                    ),
+                )
+            ),
+            dtype=np.int64,
+        ).reshape(len(cells), 2)
+        contigs = np.where(slots[:, 0] >= 0, slots[:, 0], slots[:, 1])
+        junctions = _stored_text_at(receptor_group, "junction_aa", contigs)
+        return receptor_types, tuple(junctions.tolist())
 
     def _slot_units(
         self,
@@ -2187,16 +2220,18 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         groups: ArtifactRef | None,
         cell_selection: ArtifactRef | None,
         reserved: frozenset[str] = frozenset(),
-    ) -> tuple[tuple[str, ...], list[dict[str, str]], pd.DataFrame, tuple[str, ...]]:
-        """One row per counted chain of the chosen slots, with its fields.
+    ) -> tuple[pd.DataFrame, dict[str, np.ndarray], tuple[str, ...], zarr.Group]:
+        """Each counted chain of the chosen slots, with its fields' stored codes.
 
         A ``clonotypes`` source counts only cells with a clonotype, and with
         ``count="clonotypes"`` each clonotype once per group and value.
 
         Returns:
-            The key columns, each group's labels, one row per chain (``group``,
-            ``cell``, the cell's row, ``locus``, each field, and ``clonotype``,
-            the clonotype code, with a clonotypes source), and the slots.
+            One row per group, with its name in ``group`` and its labels in
+            the key columns; for each chain, ``group``, ``cell``, the cell's
+            row, the text codes of ``locus`` and of each field, and
+            ``clonotype``, the clonotype code, with a clonotypes source; the
+            slots; and the ``immune_receptors`` artifact's group.
         """
         if isinstance(slots, str):
             slots = (slots,)
@@ -2242,53 +2277,60 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             cell_selection=cell_selection,
             reserved=reserved,
         )
-        parts = []
-        for position in range(len(chosen)):
-            cells = np.flatnonzero(
-                (cell_groups >= 0) & (slot_contigs[:, position] >= 0)
-            )
-            contigs = slot_contigs[cells, position]
-            part = {
-                "group": cell_groups[cells],
-                "cell": cells,
-                "locus": _stored_text_at(group, "locus", contigs),
-                **{name: _stored_text_at(group, name, contigs) for name in fields},
-            }
-            if codes is not None:
-                part["clonotype"] = codes[cells]
-            parts.append(pd.DataFrame(part))
-        units = pd.concat(parts, ignore_index=True)
-        return key_columns, group_keys, units, chosen
+        cells, positions = np.nonzero((cell_groups >= 0)[:, None] & (slot_contigs >= 0))
+        contigs = slot_contigs[cells, positions]
+        units = {
+            "group": cell_groups[cells],
+            "cell": cells.astype(np.int64),
+            **{name: _slot_codes(group, name, contigs) for name in ("locus", *fields)},
+        }
+        if codes is not None:
+            units["clonotype"] = codes[cells]
+        return group_frame(key_columns, group_keys), units, chosen, group
 
-    def _counted(
-        self,
-        units: pd.DataFrame,
-        values: list[str],
-        count: str,
-        key_columns: tuple[str, ...],
-        group_keys: list[dict[str, str]],
-    ) -> tuple[pd.DataFrame, int]:
-        """Count chains, or clonotypes once per group and value, and name groups.
+    @staticmethod
+    def _distinct_text(
+        group: zarr.Group, name: str, codes: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Decode the distinct values of a stored text field among some codes.
 
         Returns:
-            The counts, and the cells with a chain whose values are all known.
+            Each code's position among the distinct values, -1 for a missing
+            value, and those values, in the order of their text.
         """
-        known = units[values].notna().all(axis=1).to_numpy()
-        n_cells = int(pd.unique(units["cell"].to_numpy()[known]).size)
-        units = units.drop(columns="cell")
-        if count == "clonotypes":
-            units = units.drop_duplicates(["group", "clonotype", "locus", *values])
-        table = count_units(units, ["group", "locus"], values, count)
-        positions = table.pop("group").to_numpy(dtype=np.int64)
-        for at, column in enumerate(key_columns):
-            table.insert(
-                at,
-                column,
-                np.asarray(
-                    [group_keys[code][column] for code in positions], dtype=object
-                ),
+        known = codes >= 0
+        needed = sorted_unique(codes[known])
+        values = np.empty(0, dtype=object)
+        if len(needed):
+            values = take_text(
+                _read(group, f"contig_{name}_values"),
+                _read(group, f"contig_{name}_offsets"),
+                needed,
             )
-        return table, n_cells
+        local = np.full(len(codes), -1, dtype=np.int64)
+        local[known] = np.searchsorted(needed, codes[known])
+        return local, values
+
+    @staticmethod
+    def _text_lengths(
+        group: zarr.Group, name: str, codes: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Measure the distinct values of a stored text field among some codes.
+
+        Returns:
+            Each code's length in characters, -1 for a missing value, and
+            every length up to the longest, the names of those codes.
+        """
+        known = codes >= 0
+        needed = sorted_unique(codes[known])
+        lengths = text_lengths(
+            _read(group, f"contig_{name}_values"),
+            _read(group, f"contig_{name}_offsets"),
+            needed,
+        )
+        measured = np.full(len(codes), -1, dtype=np.int64)
+        measured[known] = lengths[np.searchsorted(needed, codes[known])]
+        return measured, np.arange(int(lengths.max(initial=-1)) + 1, dtype=np.int64)
 
     @validation_scoped
     def _repertoire_gene_usage(
@@ -2355,7 +2397,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 f"genes must hold distinct fields from {', '.join(GENE_FIELDS)}"
             )
         gene_names(np.asarray([], dtype=object), level)
-        key_columns, group_keys, units, chosen = self._slot_units(
+        keys, units, chosen, group = self._slot_units(
             source,
             fields,
             slots=slots,
@@ -2365,10 +2407,19 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             cell_selection=cell_selection,
             reserved=_USAGE_COLUMNS,
         )
-        for name in fields:
-            units[name] = gene_names(units[name].to_numpy(dtype=object), level)
-        table, n_cells = self._counted(
-            units, list(fields), count, key_columns, group_keys
+        # Each distinct call is decoded and named once.
+        named = {
+            name: gene_codes(*self._distinct_text(group, name, units[name]), level)
+            for name in fields
+        }
+        table, n_cells = count_chains(
+            keys,
+            units["group"],
+            units["cell"],
+            self._distinct_text(group, "locus", units["locus"]),
+            named,
+            count,
+            clonotypes=units.get("clonotype"),
         )
         return GeneUsage(
             table=table,
@@ -2428,7 +2479,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if sequence not in SEQUENCES:
             raise ValueError(f"sequence must be one of {', '.join(SEQUENCES)}")
         field_name = "junction_aa" if sequence == "aa" else "junction"
-        key_columns, group_keys, units, chosen = self._slot_units(
+        keys, units, chosen, group = self._slot_units(
             source,
             (field_name,),
             slots=slots,
@@ -2438,18 +2489,18 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             cell_selection=cell_selection,
             reserved=_SPECTRATYPE_COLUMNS,
         )
-        junctions = units.pop(field_name).to_numpy(dtype=object)
-        units["length"] = pd.array(
-            [len(value) if isinstance(value, str) else None for value in junctions],
-            dtype="Int64",
-        )
-        table, n_cells = self._counted(
-            units, ["length"], count, key_columns, group_keys
+        # Rows follow the groups' natural order, then the locus and length.
+        table, n_cells = count_chains(
+            keys,
+            units["group"],
+            units["cell"],
+            self._distinct_text(group, "locus", units["locus"]),
+            {"length": self._text_lengths(group, field_name, units[field_name])},
+            count,
+            clonotypes=units.get("clonotype"),
+            by_count=False,
         )
         table["length"] = table["length"].astype(np.int64)
-        table = table.sort_values(
-            [*key_columns, "locus", "length"], kind="stable"
-        ).reset_index(drop=True)
         return Spectratype(
             table=table,
             source=source,
@@ -2486,7 +2537,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         repeats, such as ``<barcode>_contig_1`` of the TCR and the BCR files
         of one cell, gets ``_2``, ``_3`` and so on from its second
         occurrence, in the order of the contigs, since the schema requires
-        unique identifiers. A path ending in ``.gz`` is gzip-compressed.
+        unique identifiers. A path ending in ``.gz`` is gzip-compressed at
+        level 6.
+
+        The contigs are read and written in blocks of about 32 MiB of
+        rendered text, so the export holds one block, the cells' IDs and
+        clonotypes, and the distinct values of the text fields at once.
 
         Args:
             source: An ``immune_receptors`` or ``clonotypes`` artifact.
@@ -2502,9 +2558,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``source`` is another kind of artifact or a field
                 is not stored.
-            MemoryError: If the contigs do not fit the memory budget.
+            MemoryError: If the export's estimated peak exceeds the memory
+                budget.
         """
-        from ...writers.airr import write_airr_rearrangements
+        from ...writers.airr import (
+            AIRR_REQUIRED_FIELDS,
+            AirrRearrangementWriter,
+            suffix_repeated_ids,
+        )
 
         if not isinstance(chains_only, bool):
             raise TypeError("chains_only must be a boolean")
@@ -2512,7 +2573,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             raise TypeError("path must be a path")
         if not isinstance(source, ArtifactRef):
             raise TypeError("source must be an ArtifactRef")
-        if source.kind == ClonotypeArguments.artifact_kind:
+        clonotypes = source.kind == ClonotypeArguments.artifact_kind
+        if clonotypes:
             self._clonotype_group(source)
             receptors = inspect_artifact(self.zw, source).input_ref("receptors")
         elif source.kind == ImmuneReceptorImportArguments.artifact_kind:
@@ -2530,59 +2592,429 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 "sequence_id",
                 *[name for name in fields if name != "sequence_id"],
             ]
-        loaded = self._repertoire_load_receptors(receptors, fields=fields)
-        contigs = loaded.chains
-        if chains_only:
-            contigs = contigs[contigs["chain"].to_numpy(dtype=bool)]
-        table = contigs.drop(columns=["slot", "chain"]).rename(
-            columns={"ids": "cell_id"}
-        )
-        if source.kind == ClonotypeArguments.artifact_kind:
-            labels = self._artifacts_load_values(source)
-            clone = pd.Series(
-                np.asarray(labels.values, dtype=object),
-                index=np.asarray(labels.cell_ids),
-            )
-            mapped = clone.reindex(table["cell_id"].to_numpy()).to_numpy(
-                dtype=object, copy=True
-            )
-            mapped[pd.isna(mapped) | (mapped == "")] = None
-            table["clone_id"] = pd.array(mapped, dtype="string")
-        identifiers = table["sequence_id"].astype(str)
-        repeat = identifiers.groupby(identifiers, sort=False).cumcount().to_numpy()
-        if (repeat > 0).any():
-            renamed = identifiers.to_numpy(dtype=object).copy()
-            used = set(renamed.tolist())
-            for at in np.flatnonzero(repeat > 0).tolist():
-                # The next suffix from the occurrence's number that names no
-                # other contig.
-                suffix = int(repeat[at]) + 1
-                while f"{renamed[at]}_{suffix}" in used:
-                    suffix += 1
-                renamed[at] = f"{renamed[at]}_{suffix}"
-                used.add(renamed[at])
-            table["sequence_id"] = renamed
-            logger.warning(
-                f"{int((repeat > 0).sum())} contig IDs repeat; their later occurrences "
-                "are written with a suffix such as _2"
-            )
+        group, stored = self._receptor_group(receptors)
+        if fields is None:
+            chosen = stored
+        else:
+            unknown = [name for name in fields if name not in stored]
+            if unknown:
+                raise ValueError(
+                    "The receptors store no field "
+                    + ", ".join(repr(str(name)) for name in unknown)
+                    + "; they store "
+                    + ", ".join(stored)
+                )
+            chosen = tuple(name for name in stored if name in set(fields))
+        columns = ["cell_id", *chosen]
+        if clonotypes and "clone_id" not in columns:
+            columns.append("clone_id")
         leading = [
             name
             for name in ("cell_id", "clone_id", "locus", "c_call", "umi_count")
-            if name in table.columns
+            if name in columns
         ]
-        rest = [name for name in table.columns if name not in leading]
-        written = write_airr_rearrangements(table, path, columns=[*leading, *rest])
+        order = [*leading, *[name for name in columns if name not in leading]]
+        # A clonotypes artifact's labels replace an imported clone_id.
+        contigs = _ExportContigs(
+            group,
+            tuple(name for name in chosen if not (clonotypes and name == "clone_id")),
+            chains_only=chains_only,
+        )
+        n_cells = int(as_zarr_array(group["values"], name="values").shape[0])
+        plan = contigs.plan(
+            n_cells=n_cells,
+            n_columns=len(AIRR_REQUIRED_FIELDS)
+            + sum(name not in AIRR_REQUIRED_FIELDS for name in order),
+            clonotypes=clonotypes,
+            budget=self.memoryBytes,
+        )
+        if plan.peak > self.memoryBytes:
+            raise MemoryError(
+                f"Exporting the {contigs.n_contigs} contigs of {n_cells} cells with "
+                f"{len(chosen)} fields holds about {plan.peak} bytes at its peak, "
+                f"more than the memory budget of {self.memoryBytes} bytes. Raise "
+                "mem_budget, or pass fields= with fewer fields."
+            )
+        selection = inspect_artifact(self.zw, receptors).input_ref("cell_selection")
+        clones = None
+        if clonotypes:
+            # The labels are read at the receptors' cells, which contig_cells
+            # counts.
+            labels = self._artifacts_load_values(source, cell_selection=selection)
+            cell_ids, clones = labels.cell_ids, _clone_text(labels.values)
+            del labels
+        else:
+            # The cells' IDs come with their smallest per-cell array.
+            cell_ids = self._artifacts_load_values(
+                receptors, value="n_contigs"
+            ).cell_ids
+        cells = EncodedText.from_categories(np.empty(0, np.int32), cell_ids)
+        del cell_ids
+        hashes, whole = contigs.scan(plan.block_rows)
+
+        def ids_at(rows: np.ndarray) -> np.ndarray:
+            held = plan.held + _ID_BYTES * len(rows)
+            if held > self.memoryBytes:
+                raise MemoryError(
+                    f"Naming {len(rows)} repeated contig IDs holds about {held} "
+                    f"bytes, more than the memory budget of {self.memoryBytes} "
+                    "bytes. Raise mem_budget."
+                )
+            return contigs.ids_at(rows, plan.block_rows)
+
+        renamed = suffix_repeated_ids(hashes, ids_at)
+        del hashes
+        if len(renamed[0]):
+            logger.warning(
+                f"{len(renamed[0])} contig IDs repeat; their later occurrences "
+                "are written with a suffix such as _2"
+            )
+        with AirrRearrangementWriter(path, order, whole=whole) as writer:
+            for block in contigs.blocks(plan.block_rows, cells, clones, renamed):
+                writer.write(block)
+        written = writer.n_rows
         logger.info(f"Wrote {written} contigs to {os.fspath(path)}")
         return written
 
 
-def _labels_or_none(values: np.ndarray, missing: Any) -> np.ndarray:
-    """Return labels as objects, None where a label is missing or blank."""
-    array = np.asarray(values, dtype=object).copy()
-    valid = valid_category_mask(
-        array, missing_mask=None if missing is None else np.asarray(missing, dtype=bool)
-    )
-    array[~valid] = None
-    array[valid] = [str(value) for value in array[valid]]
-    return array
+# An AIRR export renders its contigs in blocks of about this many bytes of
+# text, a whole number of blocks per stored chunk.
+_EXPORT_BLOCK_BYTES = 32 * 2**20
+# The rendered bytes of a cell ID, a clonotype label, and a value of each kind
+# of field besides text.
+_EXPORT_CELL_ID_BYTES = 32
+_EXPORT_LABEL_BYTES = 16
+_EXPORT_VALUE_BYTES = {"integer": 7, "flag": 2, "number": 20}
+# The bytes that a block holds per contig and field while it is written,
+# besides the text that it reads and writes: a text field's codes, and an
+# integer, flag or number as it is rendered.
+_EXPORT_FIELD_BYTES = {"text": 8, "integer": 25, "flag": 16, "number": 70}
+# Resident memory grows by about 1.6 bytes per byte that a block holds, and by
+# up to 64 MiB for Zarr's reads, as measured on 100,000 cells of AIRR files
+# and 200,000 cells of Cell Ranger files.
+_EXPORT_BLOCK_FACTOR = 1.7
+_EXPORT_READ_BYTES = 64 * 2**20
+# Reading and packing the cells' IDs holds up to about 600 bytes per cell at
+# its peak, and reading their clonotype labels 250 more; packed, both hold 48.
+_EXPORT_SETUP_BYTES_PER_CELL = 600
+_EXPORT_LABEL_BYTES_PER_CELL = 250
+_EXPORT_HELD_BYTES_PER_CELL = 48
+# Hashing the contig IDs holds about this many bytes per contig, and naming a
+# repeated ID about this many per ID read.
+_HASH_BYTES = 40
+_ID_BYTES = 200
+
+
+@dataclass(frozen=True, slots=True)
+class _ExportPlan:
+    """The block size of an AIRR export and the bytes it holds."""
+
+    block_rows: int
+    held: int
+    peak: int
+
+
+class _Window:
+    """Read a stored array in ascending slices, one stored chunk at a time."""
+
+    def __init__(self, array: zarr.Array) -> None:
+        self._array = array
+        self._chunk = max(1, int(array.chunks[0]))
+        self._start = 0
+        self._values = np.asarray(array[0:0])
+
+    def read(self, start: int, stop: int) -> np.ndarray:
+        if start < self._start or stop > self._start + len(self._values):
+            first = start - start % self._chunk
+            last = min(-(-stop // self._chunk) * self._chunk, self._array.shape[0])
+            self._values = np.asarray(self._array[first:last])
+            self._start = first
+        return self._values[start - self._start : stop - self._start]
+
+
+class _RaggedWindow:
+    """Read a stored ragged field in consecutive blocks of contigs."""
+
+    def __init__(self, group: zarr.Group, name: str) -> None:
+        self._data = as_zarr_array(group[f"contig_{name}"], name=name)
+        self._ends = _Window(as_zarr_array(group[f"contig_{name}_offsets"], name=name))
+        self._end = 0
+
+    def _bounds(self, start: int, stop: int) -> np.ndarray:
+        ends = self._ends.read(start + 1, stop + 1)
+        bounds = np.empty(len(ends) + 1, dtype=np.int64)
+        bounds[0] = self._end
+        # A missing value's end is -1: it ends where the value before it does.
+        np.maximum.accumulate(np.maximum(ends, self._end), out=bounds[1:])
+        return bounds
+
+    def read(self, start: int, stop: int) -> tuple[np.ndarray, np.ndarray]:
+        """Read the block after the last one read, from contig 0 on.
+
+        Returns:
+            The bytes of the block's values, and the offsets of each value in
+            them, the last its end; a missing value is empty.
+        """
+        bounds = self._bounds(start, stop)
+        data = np.asarray(self._data[self._end : int(bounds[-1])])
+        bounds -= self._end
+        self._end += int(bounds[-1])
+        return data, bounds
+
+    def skip(self, start: int, stop: int) -> None:
+        """Pass over the block after the last one read, reading only its ends."""
+        self._end = int(self._bounds(start, stop)[-1])
+
+
+def _kept(values: np.ndarray, kept: np.ndarray | None) -> np.ndarray:
+    """Return a block's values of the rows of the file, all without ``kept``."""
+    return values if kept is None else values[kept]
+
+
+def _clone_text(labels: np.ndarray) -> EncodedText:
+    """Encode each cell's clonotype label, -1 for a cell without one."""
+    from ...repertoire.contigs import encode_text
+
+    values = np.asarray(labels, dtype=object).copy()
+    values[np.asarray(pd.isna(values), dtype=bool) | (values == "")] = None
+    return encode_text(values)
+
+
+class _ExportContigs:
+    """The contigs of an ``immune_receptors`` artifact, read for an AIRR export.
+
+    Each pass reads blocks of contigs in order from the first; with
+    ``chains_only``, a block's rows are its contigs that count as chains.
+    """
+
+    def __init__(
+        self, group: zarr.Group, fields: tuple[str, ...], *, chains_only: bool
+    ) -> None:
+        self._group = group
+        self._fields = fields
+        self._chains_only = chains_only
+        cells = as_zarr_array(group["contig_cells"], name="contig_cells")
+        self.n_contigs = int(cells.shape[0])
+        self._chunk = max(1, int(cells.chunks[0]))
+
+    def _array(self, name: str) -> zarr.Array:
+        return as_zarr_array(self._group[name], name=name)
+
+    def plan(
+        self, *, n_cells: int, n_columns: int, clonotypes: bool, budget: int
+    ) -> _ExportPlan:
+        """Choose the contigs of a block and count the bytes that the export holds.
+
+        Args:
+            n_cells: The receptors' cells.
+            n_columns: The columns of the file.
+            clonotypes: Whether each cell's clonotype is written.
+            budget: The memory budget; a block takes at most a sixteenth.
+        """
+        n_contigs = max(1, self.n_contigs)
+        # Each contig's rendered row, with its tabs and newline, and the other
+        # bytes that a block holds per contig: its cell's and clonotype's
+        # codes, and its row's offsets.
+        rendered = n_columns + _EXPORT_CELL_ID_BYTES
+        working = 32
+        if clonotypes:
+            rendered += _EXPORT_LABEL_BYTES
+            working += 8
+        categories = 0
+        # A stored chunk of contig_cells and contig_chain, and of each field.
+        windows = 9 * self._chunk
+        for name in self._fields:
+            kind = FIELDS[name]
+            if kind == TEXT:
+                data = int(self._array(f"contig_{name}_values").shape[0])
+                n_values = int(self._array(f"contig_{name}_offsets").shape[0]) - 1
+                categories += data + 8 * (n_values + 1)
+                rendered += data // max(1, n_values)
+                working += _EXPORT_FIELD_BYTES[kind]
+                windows += 4 * self._chunk
+            elif kind == RAGGED:
+                # The bytes read, which are also written.
+                text = int(self._array(f"contig_{name}").shape[0]) // n_contigs
+                rendered += text
+                working += text
+                windows += 8 * self._chunk
+            else:
+                rendered += _EXPORT_VALUE_BYTES[kind]
+                working += _EXPORT_FIELD_BYTES[kind]
+                windows += 8 * self._chunk
+        block_bytes = max(1, min(_EXPORT_BLOCK_BYTES, budget // 16))
+        wanted = max(1, min(self._chunk, block_bytes // rendered))
+        # Blocks divide each stored chunk evenly, so a chunk is read once.
+        block_rows = -(-self._chunk // -(-self._chunk // wanted))
+        held = categories + _EXPORT_HELD_BYTES_PER_CELL * n_cells
+        setup = n_cells * (
+            _EXPORT_SETUP_BYTES_PER_CELL
+            + (_EXPORT_LABEL_BYTES_PER_CELL if clonotypes else 0)
+        )
+        block = (
+            windows
+            + int(_EXPORT_BLOCK_FACTOR * (rendered + working) * block_rows)
+            + _EXPORT_READ_BYTES
+        )
+        return _ExportPlan(
+            block_rows=block_rows,
+            held=held + _HASH_BYTES * self.n_contigs,
+            peak=held + max(setup, _HASH_BYTES * self.n_contigs, block),
+        )
+
+    def _spans(self, block_rows: int) -> Iterator[tuple[int, int, np.ndarray | None]]:
+        """Yield each block's contigs and the rows of the file among them."""
+        chain = _Window(self._array("contig_chain")) if self._chains_only else None
+        for first in range(0, self.n_contigs, self._chunk):
+            last = min(first + self._chunk, self.n_contigs)
+            for start in range(first, last, block_rows):
+                stop = min(start + block_rows, last)
+                yield (
+                    start,
+                    stop,
+                    None if chain is None else np.flatnonzero(chain.read(start, stop)),
+                )
+
+    def scan(self, block_rows: int) -> tuple[np.ndarray, set[str]]:
+        """Hash the ID of each row and find the number fields that are whole.
+
+        Returns:
+            The ``sequence_id_hashes`` of the rows, and the number fields
+            whose rows hold only whole numbers, which are written as integers.
+        """
+        from ...repertoire.contigs import NUMBER
+        from ...writers.airr import sequence_id_hashes
+
+        ids = _RaggedWindow(self._group, "sequence_id")
+        numbers = {
+            name: _Window(self._array(f"contig_{name}"))
+            for name in self._fields
+            if FIELDS[name] == NUMBER
+        }
+        whole = dict.fromkeys(numbers, True)
+        hashes = []
+        for start, stop, kept in self._spans(block_rows):
+            hashes.append(
+                sequence_id_hashes(_kept(decode_ragged(*ids.read(start, stop)), kept))
+            )
+            for name, window in numbers.items():
+                if whole[name]:
+                    values = _kept(window.read(start, stop), kept)
+                    present = values[~np.isnan(values)]
+                    whole[name] = bool(
+                        np.isfinite(present).all()
+                        and (present == np.round(present)).all()
+                    )
+        return (
+            np.concatenate([np.empty(0, dtype=np.uint64), *hashes]),
+            {name for name, flag in whole.items() if flag},
+        )
+
+    def ids_at(self, rows: np.ndarray, block_rows: int) -> np.ndarray:
+        """Return the IDs of rows, given their positions in ascending order."""
+        rows = np.asarray(rows, dtype=np.int64)
+        found = np.empty(len(rows), dtype=object)
+        ids = _RaggedWindow(self._group, "sequence_id")
+        done = before = 0
+        for start, stop, kept in self._spans(block_rows):
+            if done == len(rows):
+                break
+            n_rows = stop - start if kept is None else len(kept)
+            upto = int(np.searchsorted(rows, before + n_rows))
+            if upto > done:
+                data, bounds = ids.read(start, stop)
+                local = rows[done:upto] - before
+                found[done:upto] = take_text(
+                    data, bounds, local if kept is None else kept[local]
+                )
+                done = upto
+            else:
+                ids.skip(start, stop)
+            before += n_rows
+        return found
+
+    def blocks(
+        self,
+        block_rows: int,
+        cells: EncodedText,
+        clones: EncodedText | None,
+        renamed: tuple[np.ndarray, np.ndarray],
+    ) -> Iterator[dict[str, Any]]:
+        """Yield the columns of each block's rows, for the AIRR writer.
+
+        Args:
+            block_rows: The contigs of a block.
+            cells: Each cell's ID; its codes are unused.
+            clones: Each cell's clonotype label, or None to write none.
+            renamed: The rows whose ID is written with a suffix, ascending,
+                and their new IDs.
+        """
+        from ...repertoire.contigs import FLAG, INTEGER
+
+        positions = _Window(self._array("contig_cells"))
+        text = {
+            name: (
+                _Window(self._array(f"contig_{name}")),
+                _read(self._group, f"contig_{name}_values"),
+                _read(self._group, f"contig_{name}_offsets"),
+            )
+            for name in self._fields
+            if FIELDS[name] == TEXT
+        }
+        ragged = {
+            name: _RaggedWindow(self._group, name)
+            for name in self._fields
+            if FIELDS[name] == RAGGED
+        }
+        values = {
+            name: _Window(self._array(f"contig_{name}"))
+            for name in self._fields
+            if FIELDS[name] not in (TEXT, RAGGED)
+        }
+        renamed_rows, renamed_ids = renamed
+        before = 0
+        for start, stop, kept in self._spans(block_rows):
+            rows = np.arange(stop - start) if kept is None else kept
+            cell = _kept(positions.read(start, stop), kept)
+            block: dict[str, Any] = {
+                "cell_id": EncodedText(cell, cells.data, cells.offsets)
+            }
+            if clones is not None:
+                block["clone_id"] = EncodedText(
+                    np.asarray(clones.codes)[cell], clones.data, clones.offsets
+                )
+            for name, (window, data, offsets) in text.items():
+                block[name] = EncodedText(
+                    _kept(window.read(start, stop), kept), data, offsets
+                )
+            for name, reader in ragged.items():
+                data, bounds = reader.read(start, stop)
+                codes = rows
+                if name == "sequence_id":
+                    first, last = np.searchsorted(
+                        renamed_rows, [before, before + len(rows)]
+                    )
+                    if last > first:
+                        # A renamed row takes a value after the block's.
+                        extra = EncodedText.from_categories(
+                            np.empty(0, np.int32), renamed_ids[first:last]
+                        )
+                        data = np.concatenate([data, extra.data])
+                        bounds = np.concatenate(
+                            [bounds, extra.offsets[1:] + bounds[-1]]
+                        )
+                        codes = rows.copy()
+                        codes[renamed_rows[first:last] - before] = (
+                            stop - start + np.arange(last - first)
+                        )
+                block[name] = EncodedText(codes, data, bounds)
+            for name, window in values.items():
+                stored = _kept(window.read(start, stop), kept)
+                if FIELDS[name] == INTEGER:
+                    block[name] = pd.arrays.IntegerArray(stored, stored < 0)
+                elif FIELDS[name] == FLAG:
+                    block[name] = pd.arrays.BooleanArray(stored == 1, stored < 0)
+                else:
+                    block[name] = stored
+            yield block
+            before += len(rows)

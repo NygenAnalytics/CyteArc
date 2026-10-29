@@ -415,3 +415,183 @@ def test_common_levels_follow_inext_defaults() -> None:
     )
     frame = pd.DataFrame({"size": [1]})
     assert not frame.empty
+
+
+def _exact_entropy(sizes, m) -> float:
+    """The expected entropy of m of the cells, from exact hypergeometric terms."""
+    n = sum(sizes)
+    total = comb(n, m)
+    terms = []
+    for size in sizes:
+        for k in range(max(1, m - (n - size)), min(size, m) + 1):
+            chance = Fraction(comb(size, k) * comb(n - size, m - k), total)
+            terms.append(float(chance) * -(k / m) * log(k / m))
+    return float(np.sum(np.sort(terms)))
+
+
+@pytest.mark.parametrize(
+    ("sizes", "m"),
+    [
+        ([200, 150, 80, 40, 40, 20, 9, 5, 3, 2, 1, 1, 1], 300),
+        ([200, 150, 80, 40, 40, 20, 9, 5, 3, 2, 1, 1, 1], 551),
+        ([90, 3, 3, 2, 1, 1], 7),
+        ([5, 4, 1], 1),
+    ],
+)
+def test_rarefied_entropy_equals_exact_hypergeometric_sums(sizes, m) -> None:
+    # Large clones and samples need windows of more than 64 terms each.
+    clones = _clones(sizes)
+    expected = np.exp(_exact_entropy(sizes, m))
+    assert dv.diversity_at(clones, m, 1)[0] == pytest.approx(expected, rel=1e-13)
+    values, methods = dv.hill_curve(clones, [m, m, 1, clones.n], 1)
+    assert values[:2] == pytest.approx([expected, expected], rel=1e-13)
+    assert methods == ["rarefaction", "rarefaction", "rarefaction", "observed"]
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_size_for_coverage_finds_the_last_whole_size_below_the_level(seed) -> None:
+    rng = np.random.default_rng(seed)
+    clones = _clones(np.minimum(rng.zipf(1.6, size=int(rng.integers(30, 300))), 60))
+    n = clones.n
+    # The coverage of every whole size, each computed on its own.
+    whole = [dv.coverage_at(clones, m) for m in range(1, n + 1)]
+    for level in rng.uniform(whole[0], whole[-1], size=6):
+        low = max(m for m in range(1, n) if whole[m - 1] < level)
+        expected = low + (level - whole[low - 1]) / (whole[low] - whole[low - 1])
+        assert dv.size_for_coverage(clones, level) == pytest.approx(expected, rel=1e-13)
+
+
+def test_diversity_tables_match_inext_for_every_group() -> None:
+    groups = [_clones(A), _clones(B)]
+    keys = pd.DataFrame({"group": ["a, s1", "b, s2"], "sample": ["s1", "s2"]})
+    table, hill, size, level = dv.diversity_tables(groups, keys)
+    # iNEXT's defaults: the smallest doubled size and the lowest coverage at
+    # doubled sizes.
+    assert size == 66
+    assert level == pytest.approx(0.909807035796235, rel=1e-11)
+    assert table.columns.tolist() == ["group", "sample", *dv.INDEX_COLUMNS]
+    assert table["group"].tolist() == ["a, s1", "b, s2"]
+    assert table[
+        ["cells", "clonotypes", "singletons", "doubletons"]
+    ].values.tolist() == [
+        [33, 12, 6, 2],
+        [82, 9, 4, 2],
+    ]
+    assert table["coverage"].round(4).tolist() == [0.8219, 0.9518]
+    assert hill.columns.tolist() == [
+        "group",
+        "sample",
+        "order",
+        "observed",
+        "estimated",
+        "at_size",
+        "coverage_at_size",
+        "method_at_size",
+        "at_coverage",
+        "size_at_coverage",
+        "method_at_coverage",
+    ]
+    assert hill["group"].tolist() == ["a, s1"] * 3 + ["b, s2"] * 3
+    assert hill["order"].tolist() == [0, 1, 2] * 2
+    a, b = hill.iloc[:3], hill.iloc[3:]
+    np.testing.assert_allclose(
+        a["observed"], [12, 8.39095516943926, 6.29479768786127], rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        b["estimated"],
+        [12.9512195121951, 3.56798065100181, 2.33380182712578],
+        rtol=1e-10,
+    )
+    # A at 66 cells, twice its size; B rarefied to them.
+    np.testing.assert_allclose(
+        a["at_size"], [16.3078174812882, 10.030943287946, 6.86254430878299], rtol=1e-11
+    )
+    assert a["coverage_at_size"].tolist() == pytest.approx([0.909807035796235] * 3)
+    assert a["method_at_size"].tolist() == ["extrapolation"] * 3
+    assert b["method_at_size"].tolist() == ["rarefaction"] * 3
+    # The common coverage is A's own at 66 cells.
+    assert a["size_at_coverage"].tolist() == pytest.approx([66.0] * 3, rel=1e-12)
+    np.testing.assert_allclose(a["at_coverage"], a["at_size"], rtol=1e-11)
+    at_coverage = dv.diversity_tables(groups, keys, size=23, coverage=0.9)[1]
+    a, b = at_coverage.iloc[:3], at_coverage.iloc[3:]
+    np.testing.assert_allclose(
+        a["at_coverage"],
+        [15.8272727272727, 9.85088615975206, 6.81211855586043],
+        rtol=1e-10,
+    )
+    assert b["size_at_coverage"].iloc[0] == pytest.approx(23.9610607098077, rel=1e-6)
+    np.testing.assert_allclose(
+        b["at_size"], [4.83087682300689, 2.86343404471686, 2.20587980477662], rtol=1e-11
+    )
+    assert b["coverage_at_size"].iloc[0] == pytest.approx(0.898496221999323, rel=1e-11)
+    assert a["method_at_coverage"].tolist() == ["extrapolation"] * 3
+    assert b["method_at_coverage"].tolist() == ["rarefaction"] * 3
+
+
+def test_rarefaction_curves_hold_each_group_order_and_size() -> None:
+    groups = [_clones(A), _clones(B)]
+    keys = pd.DataFrame({"group": ["a", "b"]})
+    curves = dv.rarefaction_curves(
+        groups, keys, (2, 0, 1), sizes=[164, 16, 23, 50, 66, 16]
+    )
+    assert curves.columns.tolist() == [
+        "group",
+        "order",
+        "size",
+        "method",
+        "diversity",
+        "coverage",
+    ]
+    sizes = [16, 23, 50, 66, 164]
+    assert curves["group"].tolist() == ["a"] * 15 + ["b"] * 15
+    assert curves["order"].tolist() == ([2] * 5 + [0] * 5 + [1] * 5) * 2
+    assert curves["size"].tolist() == sizes * 6
+    # A holds 33 cells and B 82.
+    assert curves["method"].tolist()[:5] == ["rarefaction"] * 2 + ["extrapolation"] * 3
+    assert curves["method"].tolist()[15:20] == ["rarefaction"] * 4 + ["extrapolation"]
+    by_row = curves.set_index(["group", "order", "size"])
+    for group, m, values, sample_coverage in (
+        (
+            "a",
+            16,
+            (8.21695037134414, 6.6098071433199, 5.35361216730039),
+            0.720121122234581,
+        ),
+        (
+            "a",
+            50,
+            (14.5805132036704, 9.37988957393188, 6.6700353713997),
+            0.874555928089749,
+        ),
+        (
+            "a",
+            66,
+            (16.3078174812882, 10.030943287946, 6.86254430878299),
+            0.909807035796235,
+        ),
+        (
+            "b",
+            23,
+            (4.83087682300689, 2.86343404471686, 2.20587980477662),
+            0.898496221999323,
+        ),
+        (
+            "b",
+            164,
+            (11.5065556459352, 3.45205826596542, 2.3149742848642),
+            0.98238214797244,
+        ),
+    ):
+        for order, value in zip(dv.ORDERS, values, strict=True):
+            row = by_row.loc[(group, order, m)]
+            assert row["diversity"] == pytest.approx(value, rel=1e-11)
+            assert row["coverage"] == pytest.approx(sample_coverage, rel=1e-11)
+    defaults = dv.rarefaction_curves(groups, keys, (0,), endpoint=40, knots=4)
+    # A's 33 cells extrapolate to the endpoint; B's 82 rarefy to it.
+    assert defaults["size"].tolist() == [1, 33, 34, 40, 1, 14, 27, 40]
+    assert (
+        dv.rarefaction_curves([], keys.iloc[:0]).columns.tolist()
+        == curves.columns.tolist()
+    )
+    with pytest.raises(ValueError, match="order must be"):
+        dv.rarefaction_curves(groups, keys, (3,))

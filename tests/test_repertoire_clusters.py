@@ -42,7 +42,61 @@ def _within(first: str, second: str, metric: str, cutoff: int) -> bool:
     mismatches = sum(a != b for a, b in zip(first, second, strict=True))
     if metric == "hamming":
         return mismatches <= cutoff
-    return (200 * mismatches + len(first)) // (2 * len(first)) <= cutoff
+    return not first or (200 * mismatches + len(first)) // (2 * len(first)) <= cutoff
+
+
+def _pairs(first: np.ndarray, second: np.ndarray) -> set[tuple[int, int]]:
+    """The pairs that a search returned, checked to be distinct and ordered."""
+    assert first.dtype == second.dtype == np.int64
+    assert (first < second).all()
+    pairs = set(zip(first.tolist(), second.tolist(), strict=True))
+    assert len(pairs) == len(first)
+    return pairs
+
+
+def _expected(texts, metric, cutoff, blocks=None) -> set[tuple[int, int]]:
+    return {
+        (i, j)
+        for i, j in itertools.combinations(range(len(texts)), 2)
+        if (blocks is None or blocks[i] == blocks[j])
+        and _within(texts[i], texts[j], metric, cutoff)
+    }
+
+
+def _force(monkeypatch, path: str) -> None:
+    """Make the search use keys, or compare pairs, wherever it can."""
+    from cytearc.repertoire import distances
+
+    names = (
+        ("_KEY_NS", "_EDIT_KEY_NS")
+        if path == "keyed"
+        else ("_PAIR_NS", "_EDIT_PAIR_NS", "_EDIT_CUTOFF_NS")
+    )
+    for name in names:
+        monkeypatch.setattr(distances, name, 0.0)
+
+
+def _families(rng, alphabet: str, n_bases: int, high: int) -> list[str]:
+    """Texts of up to ``high`` letters, each with variants by one to three edits."""
+    letters = list(alphabet)
+    texts = []
+    for _ in range(n_bases):
+        base = "".join(rng.choice(letters, size=int(rng.integers(0, high + 1))))
+        texts.append(base)
+        for _ in range(int(rng.integers(0, 4))):
+            text = list(base)
+            for _ in range(int(rng.integers(1, 4))):
+                position = int(rng.integers(0, len(text) + 1))
+                letter = str(rng.choice(letters))
+                kind = int(rng.integers(0, 3))
+                if kind == 0 and position < len(text):
+                    text[position] = letter
+                elif kind == 1:
+                    text.insert(position, letter)
+                elif position < len(text):
+                    del text[position]
+            texts.append("".join(text))
+    return texts
 
 
 @pytest.mark.parametrize(
@@ -355,14 +409,150 @@ def test_neighbor_pairs_split_keys_into_passes(monkeypatch, metric, cutoff) -> N
         }
     )
     # A small pass splits the keys by their hash into many passes.
+    _force(monkeypatch, "keyed")
     monkeypatch.setattr(distances, "_KEYS_PER_PASS", 97)
     first, second = neighbor_pairs(texts, metric, cutoff)
-    want = {
-        (i, j)
-        for i, j in itertools.combinations(range(len(texts)), 2)
-        if _within(texts[i], texts[j], metric, cutoff)
+    assert _pairs(first, second) == _expected(texts, metric, cutoff)
+
+
+@pytest.mark.parametrize("path", ["keyed", "pairwise"])
+@pytest.mark.parametrize("alphabet", ["AC", "ACGT", "ACDEFGHIKLMNPQRSTVWY"])
+def test_keys_and_pairwise_comparisons_find_every_pair(
+    monkeypatch, path, alphabet
+) -> None:
+    # Either search, wherever it applies, finds every pair within each cutoff:
+    # of texts of 0 to 12 letters and their variants, with runs of one letter
+    # whose deletions coincide, a repeated text, and blocks.
+    _force(monkeypatch, path)
+    rng = np.random.default_rng(len(alphabet))
+    texts = _families(rng, alphabet, 20, 12) + ["AAAA", "AAAA", "AAA", "AACAA", "A"]
+    blocks = rng.integers(0, 2, size=len(texts))
+    pairs = list(itertools.combinations(range(len(texts)), 2))
+    edits = {(i, j): _levenshtein(texts[i], texts[j]) for i, j in pairs}
+    same_length = [(i, j) for i, j in pairs if len(texts[i]) == len(texts[j])]
+    for metric, cutoffs in (
+        ("hamming", (0, 1, 2, 3)),
+        ("levenshtein", (0, 1, 2, 3)),
+        ("normalized_hamming", (0, 25, 50)),
+    ):
+        for cutoff in cutoffs:
+            if metric == "levenshtein":
+                near = {pair for pair, edit in edits.items() if edit <= cutoff}
+            else:
+                near = {
+                    (i, j)
+                    for i, j in same_length
+                    if _within(texts[i], texts[j], metric, cutoff)
+                }
+            for chosen in (None, blocks):
+                first, second = neighbor_pairs(texts, metric, cutoff, blocks=chosen)
+                want = {
+                    (i, j) for i, j in near if chosen is None or chosen[i] == chosen[j]
+                }
+                assert _pairs(first, second) == want, (metric, cutoff, chosen)
+
+
+@pytest.mark.parametrize("codes", ["zero", "four values"])
+@pytest.mark.parametrize(
+    ("metric", "cutoff"), [("hamming", 1), ("hamming", 3), ("levenshtein", 2)]
+)
+def test_texts_whose_keys_share_a_hash_by_chance_are_compared(
+    monkeypatch, codes, metric, cutoff
+) -> None:
+    from cytearc.repertoire import distances
+
+    # With every code zero, or drawn from four values, most keys share a hash
+    # with keys of other variants; those texts are compared and left out, and
+    # most passes stay empty.
+    values = np.random.default_rng(0).integers(0, 2**63, size=4).astype(np.uint64)
+
+    def table(width: int) -> np.ndarray:
+        if codes == "zero":
+            return np.zeros((width, 257), dtype=np.uint64)
+        return values[np.random.default_rng(1).integers(0, 4, size=(width, 257))]
+
+    monkeypatch.setattr(distances, "_zobrist_table", table)
+    monkeypatch.setattr(distances, "_KEYS_PER_PASS", 500)
+    _force(monkeypatch, "keyed")
+    rng = np.random.default_rng(4)
+    texts = sorted(set(_families(rng, "ACG", 30, 8)))
+    first, second = neighbor_pairs(texts, metric, cutoff)
+    assert _pairs(first, second) == _expected(texts, metric, cutoff)
+
+
+def test_the_search_compares_pairs_or_uses_keys_by_their_estimated_time(
+    monkeypatch,
+) -> None:
+    from cytearc.repertoire import distances
+
+    calls: dict[str, int] = {}
+    for name in ("_keyed_pairs", "_hamming_pairs", "_edit_pairs"):
+
+        def spy(*args, _original=getattr(distances, name), _name=name):
+            calls[_name] = calls.get(_name, 0) + 1
+            return _original(*args)
+
+        monkeypatch.setattr(distances, name, spy)
+    rng = np.random.default_rng(8)
+    # Many short texts yield few keys each, so keys find their pairs sooner;
+    # a few long texts yield many keys each, so comparing them does.
+    short = sorted({"".join(rng.choice(list("ACGT"), size=6)) for _ in range(1500)})
+    long = [
+        base[:position] + "A" + base[position + 1 :]
+        for base in ("".join(rng.choice(list("ACGT"), size=30)) for _ in range(8))
+        for position in (0, 7, 29)
+    ]
+    texts = short + long
+    first, second = neighbor_pairs(texts, "hamming", 1)
+    assert calls == {"_keyed_pairs": 1, "_hamming_pairs": 1}
+    codes = np.asarray([[ord(letter) for letter in text] for text in short])
+    mismatches = (codes[:, None, :] != codes[None, :, :]).sum(axis=2)
+    within = np.argwhere(np.triu(mismatches <= 1, k=1))
+    want = set(map(tuple, within.tolist())) | {
+        (len(short) + i, len(short) + j)
+        for i, j in itertools.combinations(range(len(long)), 2)
+        if _within(long[i], long[j], "hamming", 1)
     }
-    assert set(zip(first.tolist(), second.tolist(), strict=True)) == want
+    assert _pairs(first, second) == want
+    # Edits search each block their own way: keys for many short texts,
+    # comparisons for a few long ones.
+    calls.clear()
+    edited = short[:150] + long[:6]
+    blocks = np.repeat([0, 1], [150, 6])
+    first, second = neighbor_pairs(edited, "levenshtein", 2, blocks=blocks)
+    assert calls["_keyed_pairs"] == 1 and calls["_edit_pairs"] >= 1
+    assert "_hamming_pairs" not in calls
+    assert _pairs(first, second) == _expected(edited, "levenshtein", 2, blocks)
+
+
+def test_texts_compare_by_character_beyond_ascii() -> None:
+    # Latin-1 characters keep their code points; other characters are coded
+    # by rank, so each counts as one substitution or edit.
+    for texts in (["éa", "ea", "éb", "ébc"], ["αβγ", "αβδ", "ωβγ", "αβ", "éβγ"]):
+        for metric, cutoff in (("hamming", 1), ("levenshtein", 1)):
+            first, second = neighbor_pairs(texts, metric, cutoff)
+            assert _pairs(first, second) == _expected(texts, metric, cutoff)
+    with pytest.raises(ValueError, match="at most 256 distinct characters"):
+        neighbor_pairs([chr(0x100 + index) for index in range(257)], "hamming", 1)
+
+
+def test_few_unmatched_or_empty_texts() -> None:
+    for texts, metric, cutoff, blocks in (
+        (["CASSF"], "levenshtein", 1, None),
+        (["CAF", "CASF", "CASSF"], "hamming", 3, None),
+        (["CAF", "CASF", "CASSF"], "normalized_hamming", 50, None),
+        (["CASSF", "CASSY"], "levenshtein", 1, [0, 1]),
+    ):
+        first, second = neighbor_pairs(texts, metric, cutoff, blocks=blocks)
+        assert _pairs(first, second) == set()
+    # Empty texts are identical, and one edit from a letter.
+    for metric, cutoff in (
+        ("hamming", 1),
+        ("normalized_hamming", 0),
+        ("levenshtein", 1),
+    ):
+        first, second = neighbor_pairs(["", "", "A"], metric, cutoff)
+        assert _pairs(first, second) == _expected(["", "", "A"], metric, cutoff)
 
 
 def test_clusters_do_not_depend_on_the_chunks_of_pairs(monkeypatch) -> None:

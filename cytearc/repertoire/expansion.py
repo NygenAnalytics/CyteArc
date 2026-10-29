@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from ..storage.refs import ArtifactRef
+from .groups import group_names
 
 __all__ = [
     "DEFAULT_BREAKPOINTS",
@@ -264,17 +265,19 @@ class ClonalExpansion:
     Attributes:
         cells: One row per cell, indexed by cell ``ids``: ``clonotype``,
             ``category`` (its expansion category, NA without a clonotype),
-            the group's key,
+            ``group`` (the group's labels joined by commas), the group's key,
             ``group_clone_size`` (the cells of its clonotype in its group, 0
             without one) and ``group_clone_frequency`` (their share of the
-            group's cells with a clonotype, NaN without one).
+            group's cells with a clonotype, NaN without one). The labels are
+            categoricals, and ``category`` is ordered, smallest first.
         categories: One row per group and category, every category of every
-            group: the group's key, ``category``, ``cells``, ``clonotypes``,
-            and ``fraction``, the share of the group's cells with a clonotype
-            that the category holds.
-        rank_windows: One row per group and rank window: the group's key,
-            ``window``, the ``cells`` that the group's clonotypes ranked in the
-            window hold, and their ``fraction`` of the group's cells.
+            group: ``group``, the group's key, ``category``, ``cells``,
+            ``clonotypes``, and ``fraction``, the share of the group's cells
+            with a clonotype that the category holds.
+        rank_windows: One row per group and rank window: ``group``, the
+            group's key, ``window``, the ``cells`` that the group's clonotypes
+            ranked in the window hold, and their ``fraction`` of the group's
+            cells.
         clonotypes: The ``clonotypes`` artifact.
         labels: The categories, smallest clonotypes first.
         breakpoints: The bounds in cells, or None with frequency bounds.
@@ -342,38 +345,49 @@ def expansion_tables(
     names = np.asarray(list(labels), dtype=object)
     n_groups, n_categories = len(group_keys), len(names)
     counted = categories >= 0
+    group_labels = np.asarray(group_names(group_keys), dtype=object)
     keys = {
         column: np.asarray([key[column] for key in group_keys], dtype=object)
         for column in key_columns
     }
-    cell_columns: dict[str, Any] = {}
-    cell_clonotype = np.full(len(clonotypes), None, dtype=object)
-    has = clonotypes >= 0
-    cell_clonotype[has] = np.asarray(clonotype_ids, dtype=object)[clonotypes[has]]
-    cell_columns["clonotype"] = pd.array(cell_clonotype, dtype="string")
-    cell_category = np.full(len(categories), None, dtype=object)
-    cell_category[counted] = names[categories[counted]]
-    cell_columns["category"] = pd.array(cell_category, dtype="string")
-    grouped = groups >= 0
+    # Each cell's labels are categories coded by the stored codes, so the
+    # table holds no text per cell.
+    cell_columns: dict[str, Any] = {
+        "clonotype": pd.Categorical.from_codes(
+            np.where(clonotypes >= 0, clonotypes, -1),
+            categories=pd.Index(np.asarray(clonotype_ids, dtype=object)),
+        ),
+        "category": pd.Categorical.from_codes(
+            categories, categories=pd.Index(names), ordered=True
+        ),
+        "group": pd.Categorical.from_codes(groups, categories=pd.Index(group_labels)),
+    }
     for column, column_keys in keys.items():
-        values = np.full(len(groups), None, dtype=object)
-        values[grouped] = column_keys[groups[grouped]]
-        cell_columns[column] = pd.array(values, dtype="string")
+        distinct, group_codes = np.unique(column_keys.astype(str), return_inverse=True)
+        cell_columns[column] = pd.Categorical.from_codes(
+            np.where(groups >= 0, group_codes.reshape(-1)[np.maximum(groups, 0)], -1)
+            if n_groups
+            else np.full(len(groups), -1),
+            categories=pd.Index(distinct.astype(object)),
+        )
     cell_columns["group_clone_size"] = np.asarray(sizes, dtype=np.int64)
     cell_columns["group_clone_frequency"] = np.asarray(frequencies, dtype=np.float64)
     cells = pd.DataFrame(cell_columns, index=pd.Index(np.asarray(cell_ids), name="ids"))
 
     cell_counts = np.zeros((n_groups, n_categories), dtype=np.int64)
     np.add.at(cell_counts, (groups[counted], categories[counted]), 1)
-    # A clonotype has one size in a group, so one category there.
-    pairs = np.unique(
-        np.column_stack([groups[counted], clonotypes[counted], categories[counted]]),
-        axis=0,
-    )
+    # A clonotype has one size in a group, so one category there: each pair
+    # of group and clonotype counts once, in the category of its first cell.
     clonotype_counts = np.zeros((n_groups, n_categories), dtype=np.int64)
-    np.add.at(clonotype_counts, (pairs[:, 0], pairs[:, 2]), 1)
+    if counted.any():
+        pair_keys = groups[counted] * (int(clonotypes.max()) + 1) + clonotypes[counted]
+        _pairs, first = np.unique(pair_keys, return_index=True)
+        np.add.at(
+            clonotype_counts, (groups[counted][first], categories[counted][first]), 1
+        )
     table = pd.DataFrame(
         {
+            "group": pd.array(np.repeat(group_labels, n_categories), dtype="string"),
             **{
                 column: pd.array(np.repeat(column_keys, n_categories), dtype="string")
                 for column, column_keys in keys.items()
@@ -388,6 +402,9 @@ def expansion_tables(
     window_names = np.asarray(rank_window_labels(splits), dtype=object)
     ranks = pd.DataFrame(
         {
+            "group": pd.array(
+                np.repeat(group_labels, len(window_names)), dtype="string"
+            ),
             **{
                 column: pd.array(
                     np.repeat(column_keys, len(window_names)), dtype="string"

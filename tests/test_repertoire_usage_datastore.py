@@ -42,6 +42,7 @@ def test_gene_usage_counts_each_cells_primary_chains(tmp_path) -> None:
     assert usage.slots == ("VJ_1", "VDJ_1") and usage.count == "cells"
     assert usage.source == receptors and usage.groups is None
     assert usage.table.to_dict("list") == {
+        "group": ["all cells"] * 5,
         "locus": ["IGH", "IGK", "TRA", "TRA", "TRB"],
         "v_call": ["IGHV1", "IGKV1", "TRAV1", "TRAV2", "TRBV1"],
         "cells": [2, 2, 3, 1, 5],
@@ -55,6 +56,7 @@ def test_gene_usage_counts_each_cells_primary_chains(tmp_path) -> None:
         receptors, genes=["v_call", "j_call"], slots=["VJ_1", "VJ_2"]
     )
     assert pairs.table.columns.tolist() == [
+        "group",
         "locus",
         "v_call",
         "j_call",
@@ -73,7 +75,8 @@ def test_gene_usage_counts_each_cells_primary_chains(tmp_path) -> None:
 def test_gene_usage_by_group_and_by_clonotype(tmp_path) -> None:
     store, receptors, clonotypes = _sources(tmp_path)
     by_sample = store.repertoire.gene_usage(receptors, group_by="sample").table
-    assert by_sample.columns[:2].tolist() == ["sample", "locus"]
+    assert by_sample.columns[:3].tolist() == ["group", "sample", "locus"]
+    assert (by_sample["group"] == by_sample["sample"]).all()
     s1 = by_sample[(by_sample["sample"] == "s1") & (by_sample["locus"] == "TRA")]
     assert s1[["v_call", "cells", "fraction"]].values.tolist() == [
         ["TRAV1", 2, 2 / 3],
@@ -117,6 +120,7 @@ def test_spectratype_counts_junction_lengths(tmp_path) -> None:
     assert isinstance(result, Spectratype)
     assert result.sequence == "aa" and result.slots == ("VJ_1", "VDJ_1")
     assert result.table.to_dict("list") == {
+        "group": ["all cells"] * 4,
         "locus": ["IGH", "IGK", "TRA", "TRB"],
         "length": [4, 4, 4, 5],
         "cells": [2, 2, 4, 5],
@@ -127,6 +131,7 @@ def test_spectratype_counts_junction_lengths(tmp_path) -> None:
     )
     table = nucleotides.table
     assert table.columns.tolist() == [
+        "group",
         "sample",
         "locus",
         "length",
@@ -137,6 +142,22 @@ def test_spectratype_counts_junction_lengths(tmp_path) -> None:
     # s1 holds clonotype_1 (cell0 and cell4) and clonotype_4 (cell2), both
     # with 12 alpha nucleotides.
     assert tra[["length", "clonotypes"]].values.tolist() == [[12, 2]]
+
+
+def test_tables_follow_the_natural_order_of_the_groups(tmp_path) -> None:
+    store, receptors, clonotypes = _sources(tmp_path)
+    # "g10" sorts before "g2" as text, but after it as a label.
+    store.cells.insert("batch", np.asarray(["g10", "g2"] * 4))
+    lengths = store.repertoire.spectratype(receptors, group_by="batch").table
+    assert list(dict.fromkeys(lengths["batch"])) == ["g2", "g10"]
+    assert lengths["group"].tolist() == lengths["batch"].tolist()
+    # Within a group, by locus and then by length.
+    for _group, rows in lengths.groupby("group", sort=False):
+        assert rows[["locus", "length"]].values.tolist() == sorted(
+            rows[["locus", "length"]].values.tolist()
+        )
+    usage = store.repertoire.gene_usage(clonotypes, group_by="batch").table
+    assert list(dict.fromkeys(usage["batch"])) == ["g2", "g10"]
 
 
 @pytest.mark.parametrize(
@@ -232,7 +253,8 @@ def test_gene_pairing_plot_draws_v_against_j(tmp_path) -> None:
             "TRAV3",
         ]
         assert [tick.get_text() for tick in ax.get_xticklabels()] == ["TRAJ1", "TRAJ2"]
-        assert result.tables["pairs"].columns[:3].tolist() == [
+        assert result.tables["pairs"].columns[:4].tolist() == [
+            "group",
             "locus",
             "v_call",
             "j_call",

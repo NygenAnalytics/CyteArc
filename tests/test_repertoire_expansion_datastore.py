@@ -70,10 +70,12 @@ def test_expansion_counts_each_receptor_type_apart_by_default(tmp_path) -> None:
     assert cells.columns.tolist() == [
         "clonotype",
         "category",
+        "group",
         "receptor_type",
         "group_clone_size",
         "group_clone_frequency",
     ]
+    assert cells["group"].tolist()[:2] == ["TCR", "TCR"]
     assert cells["category"].tolist()[:7] == [
         "3 to 5 cells",
         "3 to 5 cells",
@@ -93,6 +95,7 @@ def test_expansion_counts_each_receptor_type_apart_by_default(tmp_path) -> None:
     )
     table = loaded.categories
     assert table.columns.tolist() == [
+        "group",
         "receptor_type",
         "category",
         "cells",
@@ -107,7 +110,13 @@ def test_expansion_counts_each_receptor_type_apart_by_default(tmp_path) -> None:
         table["fraction"], [0, 1, 0, 0, 0, 0, 0.4, 0, 0.6, 0, 0, 0]
     )
     ranks = loaded.rank_windows
-    assert ranks.columns.tolist() == ["receptor_type", "window", "cells", "fraction"]
+    assert ranks.columns.tolist() == [
+        "group",
+        "receptor_type",
+        "window",
+        "cells",
+        "fraction",
+    ]
     assert ranks.query("window == '1 to 10'")["cells"].tolist() == [2, 5]
     assert int(ranks["cells"].sum()) == 7
 
@@ -144,6 +153,19 @@ def test_expansion_counts_cells_within_samples(tmp_path) -> None:
     assert ranks.loc[("s2", "TCR", "after 1"), "fraction"] == 0.5
 
 
+def test_expansion_refuses_groups_that_labels_with_commas_name_alike(
+    tmp_path,
+) -> None:
+    store, clonotypes = _clonotypes(tmp_path)
+    # "x, y" with "z" and "x" with "y, z" both read "x, y, z".
+    store.cells.insert("first", np.asarray(["x, y"] * 4 + ["x"] * 4))
+    store.cells.insert("second", np.asarray(["z"] * 4 + ["y, z"] * 4))
+    with pytest.raises(ValueError, match="remove the commas"):
+        store.repertoire.clonal_expansion(
+            clonotypes, within=["first", "second"], within_receptor_type=False
+        )
+
+
 def test_expansion_can_count_every_cell_together(tmp_path) -> None:
     store, clonotypes = _clonotypes(tmp_path)
     ref = store.repertoire.clonal_expansion(clonotypes, within_receptor_type=False)
@@ -151,16 +173,19 @@ def test_expansion_can_count_every_cell_together(tmp_path) -> None:
     assert loaded.cells.columns.tolist() == [
         "clonotype",
         "category",
+        "group",
         "group_clone_size",
         "group_clone_frequency",
     ]
     assert loaded.cells.loc["cell0", "group_clone_frequency"] == 3 / 7
     assert loaded.categories.columns.tolist() == [
+        "group",
         "category",
         "cells",
         "clonotypes",
         "fraction",
     ]
+    assert set(loaded.categories["group"]) == {"all cells"}
     assert loaded.categories["cells"].tolist() == [2, 2, 3, 0, 0, 0]
     # A column named receptor_type may group the cells when the receptor type
     # does not.

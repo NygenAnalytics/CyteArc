@@ -256,11 +256,18 @@ def test_tables_count_cells_and_clonotypes_per_group() -> None:
     assert cells.columns.tolist() == [
         "clonotype",
         "category",
+        "group",
         "sample",
         "group_clone_size",
         "group_clone_frequency",
     ]
-    assert cells.loc["cell0"].tolist()[:4] == ["c1", "2 cells", "A", 2]
+    assert cells.loc["cell0"].tolist()[:5] == ["c1", "2 cells", "A", "A", 2]
+    # Per-cell labels are categories coded by the stored codes; the expansion
+    # categories keep their order, smallest clonotypes first.
+    assert cells["clonotype"].cat.categories.tolist() == ["c1", "c2", "c3", "c4"]
+    assert cells["category"].cat.ordered
+    assert cells["category"].cat.categories.tolist() == list(labels)
+    assert cells["group"].cat.codes.tolist() == groups.tolist()
     assert pd.isna(cells.loc["cell6", "clonotype"])
     assert pd.isna(cells.loc["cell6", "category"])
     assert pd.isna(cells.loc["cell8", "sample"])
@@ -268,6 +275,7 @@ def test_tables_count_cells_and_clonotypes_per_group() -> None:
     assert cells.loc["cell8", "clonotype"] == "c4"
     assert pd.isna(cells.loc["cell8", "category"])
     assert table.to_dict("list") == {
+        "group": ["A", "A", "A", "B", "B", "B"],
         "sample": ["A", "A", "A", "B", "B", "B"],
         "category": [
             "1 cell",
@@ -282,6 +290,7 @@ def test_tables_count_cells_and_clonotypes_per_group() -> None:
         "fraction": [0.2, 0.8, 0.0, 1 / 3, 2 / 3, 0.0],
     }
     assert ranks.to_dict("list") == {
+        "group": ["A", "A", "A", "B", "B", "B"],
         "sample": ["A", "A", "A", "B", "B", "B"],
         "window": ["1", "2", "after 2", "1", "2", "after 2"],
         "cells": [2, 2, 1, 2, 1, 0],
@@ -306,17 +315,25 @@ def test_tables_without_clonotypes_or_key_columns() -> None:
     assert cells.columns.tolist() == [
         "clonotype",
         "category",
+        "group",
         "group_clone_size",
         "group_clone_frequency",
     ]
     assert cells["category"].isna().all()
+    assert cells["group"].isna().all()
     assert table.empty and table.columns.tolist() == [
+        "group",
         "category",
         "cells",
         "clonotypes",
         "fraction",
     ]
-    assert ranks.empty and ranks.columns.tolist() == ["window", "cells", "fraction"]
+    assert ranks.empty and ranks.columns.tolist() == [
+        "group",
+        "window",
+        "cells",
+        "fraction",
+    ]
     # One group without key columns, whose cells all lack a clonotype.
     _cells, table, ranks = expansion_tables(
         np.asarray(["cell0"]),
@@ -332,5 +349,6 @@ def test_tables_without_clonotypes_or_key_columns() -> None:
         splits=(10,),
     )
     assert table["cells"].tolist() == [0, 0]
+    assert table["group"].tolist() == ["all cells", "all cells"]
     assert table["fraction"].isna().all()
     assert ranks["cells"].tolist() == [0, 0]
