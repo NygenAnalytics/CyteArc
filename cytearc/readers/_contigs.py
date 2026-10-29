@@ -19,16 +19,24 @@ from ..repertoire.contigs import (
     parse_text,
 )
 
-__all__ = ["first_line", "header_fields", "parse_contig_columns"]
+__all__ = ["compression", "first_line", "header_fields", "parse_contig_columns"]
 
 _GENE_CALLS = ("v_call", "d_call", "j_call", "c_call")
 
 
+def compression(path: str | os.PathLike[str]) -> str | None:
+    """Return ``"gzip"`` for a gzip-compressed file, by its first bytes, else None.
+
+    The bytes decide rather than the file's suffix, so a compressed file
+    without ``.gz`` reads as well.
+    """
+    with open(path, "rb") as handle:
+        return "gzip" if handle.read(2) == b"\x1f\x8b" else None
+
+
 def first_line(path: str | os.PathLike[str]) -> str:
     """Return the first line of a plain or gzip-compressed text file."""
-    with open(path, "rb") as handle:
-        compressed = handle.read(2) == b"\x1f\x8b"
-    opener = gzip.open if compressed else open
+    opener = gzip.open if compression(path) == "gzip" else open
     with opener(path, "rt", encoding="utf-8", errors="replace") as text:
         return text.readline().rstrip("\r\n")
 

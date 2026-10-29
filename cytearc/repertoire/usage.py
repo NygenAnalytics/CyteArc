@@ -125,6 +125,7 @@ class GeneUsage:
         group_by: The cell metadata columns of the groups.
         groups: The label artifact of the groups, or None.
         cell_selection: The cells kept, or None for every cell.
+        n_cells: The cells with a counted chain.
     """
 
     table: pd.DataFrame = field(repr=False)
@@ -136,6 +137,7 @@ class GeneUsage:
     group_by: tuple[str, ...]
     groups: ArtifactRef | None
     cell_selection: ArtifactRef | None
+    n_cells: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +156,7 @@ class Spectratype:
         group_by: The cell metadata columns of the groups.
         groups: The label artifact of the groups, or None.
         cell_selection: The cells kept, or None for every cell.
+        n_cells: The cells with a counted chain.
     """
 
     table: pd.DataFrame = field(repr=False)
@@ -164,3 +167,4 @@ class Spectratype:
     group_by: tuple[str, ...]
     groups: ArtifactRef | None
     cell_selection: ArtifactRef | None
+    n_cells: int
