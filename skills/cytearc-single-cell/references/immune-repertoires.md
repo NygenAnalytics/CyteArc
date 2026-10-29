@@ -30,6 +30,7 @@ Import the T cell and B cell receptor contigs of single-cell immune profiling (1
   - `dual_ir="any"` (default: one chain of an arm matches one of the other's), `"all"` (same number of chains, all matched, either order), `"primary_only"`.
   - `same_v_gene=False`, `same_j_gene=False`: also require matched chains' gene calls to match.
   - `within=None`: cell metadata columns (such as the donor) whose labels keep clonotypes apart; every cell with a receptor needs a label. `within_receptor_type=True` keeps TCR, BCR, ambiguous and multichain cells apart.
+  - `metric="identity"` (default; `cutoff=None`), or clonotype clusters by similar junctions: `"hamming"` (≤ `cutoff` substitutions, equal length), `"normalized_hamming"` (≤ `cutoff` percent of the length, rounded half up, equal length), `"levenshtein"` (≤ `cutoff` edits). `cutoff` is required for these (scirpy's default 2 means 2% for normalized_hamming). Same rules for arms, dual chains, genes, groups. Record: `.metric`, `.cutoff`. Pairs within cutoffs ≤ 3 are found through keys (100k junctions: 0.6 s for 1 substitution, 4.6 s for 2 edits).
 - Clonotypes are the connected components of the links, so a cell matching two others joins them. Labels `clonotype_1` (largest), `clonotype_2`, ...; ties follow the sorted chains, so labels do not depend on cell order. Arrays: canonical `values` (label, empty and treated as missing for a cell without one), `codes` (rank minus one, -1 without), `clone_size` (0 without). `select_cells(clonotypes, include=["clonotype_1"])` selects a clonotype's cells; `select_cells(clonotypes, value="clone_size", low=2, keep_bounds=True)` the expanded cells.
 - Reuse follows the receptors, the options and the `within` labels; `invalidate_cache=True` defines again. About 1,000 bytes per cell at the peak, checked against `mem_budget`.
 - `ds.repertoire.load_clonotypes(clonotypes)` returns a `Clonotypes` record: `.cells` (indexed by `ids`: `clonotype`, NA without, and `clone_size`), `.clonotypes` (one row per clonotype, largest first: `clonotype`, `n_cells`, `fraction` of cells with a clonotype, `n_configurations`, `receptor_type`, each `within` column, and the representative cell's chains per slot: `VJ_1_junction_aa`, `VJ_1_junction`, `VJ_1_v_call`, `VJ_1_j_call`, ..., `VDJ_2_j_call`), and the options (`.sequence`, `.receptor_arms`, `.dual_ir`, `.same_v_gene`, `.same_j_gene`, `.within`, `.within_receptor_type`, `.receptors`).
@@ -94,6 +95,11 @@ plot.save("clonotype_abundance.png")
 plot.close()
 by_donor = ds.repertoire.clonotypes(receptors, within="donor")  # several donors
 residues = ds.repertoire.clonotypes(receptors, sequence="aa")  # shared specificity
+similar = ds.repertoire.clonotypes(receptors, sequence="aa", metric="hamming", cutoff=1)  # likely one epitope
+families = ds.repertoire.clonotypes(  # B cell clonal families
+    receptors, sequence="nt", metric="normalized_hamming", cutoff=15,
+    same_v_gene=True, same_j_gene=True, within="donor",
+)
 expanded = ds.select_cells(clonotypes, value="clone_size", low=2, keep_bounds=True)
 
 expansion = ds.repertoire.clonal_expansion(clonotypes, within="sample")
@@ -164,7 +170,7 @@ merged = ds.repertoire.import_receptors(
 - Report the clonotype options. Keep `sequence="nt"` to count clones (identical amino acids from different nucleotides are independent recombinations); use `"aa"` for shared specificity.
 - With several donors, pass the donor as `within`; never the tissue or time point of one donor, whose clones the study follows across samples.
 - Orphan cells form their own clonotypes under `receptor_arms="all"`; with many orphan VDJ cells, also try `receptor_arms="VDJ"` and report both.
-- B cell clonotypes from identical junctions split clones that carry somatic mutations; they are exact sequence variants, not clonal families.
+- B cell clonotypes from identical junctions split clones that carry somatic mutations; they are exact sequence variants, not clonal families. Use `metric="normalized_hamming"` on nucleotides with V and J matches and the donor as `within` for families, and report the cutoff.
 - Measure expansion `within` the sample: without it, a clonotype's cells in all samples add up. Frequency categories depend on sample size (one cell of 1,000 is already 0.001), so compare them only between samples of similar size; bounds in cells compare any samples.
 - Compare expansion between conditions with one value per sample (such as the fraction of cells in clonotypes of more than two cells), never with cells as replicates.
 - Use `count="clonotypes"` for gene usage compared between samples, so expanded clones do not decide shares; compare genes within their locus.

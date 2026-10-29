@@ -44,6 +44,7 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+from scipy import sparse
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
@@ -113,16 +114,7 @@ class ClonotypeAssignment:
 
 def _element_ids(sequences: np.ndarray, genes: list[np.ndarray]) -> np.ndarray:
     """Number each slot's element, its sequence with its genes, -1 without one."""
-    present = sequences >= 0
-    ids = np.full(sequences.shape, -1, dtype=np.int64)
-    if not present.any():
-        return ids
-    stacked = np.column_stack(
-        [sequences[present]] + [gene[present] for gene in genes]
-    ).astype(np.int64)
-    _unique, inverse = np.unique(stacked, axis=0, return_inverse=True)
-    ids[present] = inverse.reshape(-1)
-    return ids
+    return _elements(sequences, genes)[0]
 
 
 def assign_clonotypes(
@@ -290,6 +282,218 @@ def assign_clonotypes(
     return _ranked(clusters, inverse, cells, n_cells, configurations)
 
 
+def assign_clonotype_clusters(
+    sequences: np.ndarray,
+    texts: Any,
+    *,
+    groups: np.ndarray,
+    metric: str,
+    cutoff: int,
+    v_genes: np.ndarray | None = None,
+    j_genes: np.ndarray | None = None,
+    receptor_arms: str = "all",
+    dual_ir: str = "any",
+) -> ClonotypeAssignment:
+    """Group cells into clonotype clusters by similar chains.
+
+    The rules are those of :func:`assign_clonotypes`, with two chains matching
+    when their sequences are within ``cutoff`` of each other by ``metric``,
+    and share their gene calls when those are given, rather than identical:
+    as in scirpy's ``define_clonotype_clusters``, two cells are linked when
+    the arms that ``receptor_arms`` requires match, an arm matching through
+    any one pair of chains (``"any"``), its primary chains
+    (``"primary_only"``), or every chain in some pairing of two arms of the
+    same number of chains (``"all"``). Clusters are the connected groups of
+    linked cells.
+
+    Args:
+        sequences: Each cell's sequence code in its four slots, -1 for none.
+        texts: The sequence of each code.
+        groups: Each cell's group; -1 keeps a cell out.
+        metric: ``"hamming"``, ``"normalized_hamming"`` or ``"levenshtein"``.
+        cutoff: The largest distance of matching chains.
+        v_genes: Each slot's V gene code, when matched chains must share it.
+        j_genes: Each slot's J gene code, alike.
+        receptor_arms: The arms that must agree.
+        dual_ir: The chains of an arm that must agree.
+
+    Returns:
+        The clonotype cluster of each cell, ranked as clonotypes are.
+    """
+    from .distances import DISTANCE_METRICS, neighbor_pairs
+
+    if receptor_arms not in RECEPTOR_ARMS:
+        raise ValueError(f"receptor_arms must be one of {', '.join(RECEPTOR_ARMS)}")
+    if dual_ir not in DUAL_IR:
+        raise ValueError(f"dual_ir must be one of {', '.join(DUAL_IR)}")
+    if metric not in DISTANCE_METRICS:
+        raise ValueError(f"metric must be one of {', '.join(DISTANCE_METRICS)}")
+    sequences = np.asarray(sequences, dtype=np.int64)
+    if sequences.ndim != 2 or sequences.shape[1] != 4:
+        raise ValueError("sequences must hold four slots per cell")
+    n_cells = sequences.shape[0]
+    groups = np.asarray(groups, dtype=np.int64).reshape(-1)
+    if len(groups) != n_cells:
+        raise ValueError("groups must hold one group per cell")
+    genes = [
+        np.asarray(gene, dtype=np.int64)
+        for gene in (v_genes, j_genes)
+        if gene is not None
+    ]
+    if any(gene.shape != sequences.shape for gene in genes):
+        raise ValueError("Gene codes must align with the sequences")
+    names = np.asarray(texts, dtype=object)
+
+    chains = [0] if dual_ir == "primary_only" else [0, 1]
+    taking = (
+        [_VJ, _VDJ]
+        if receptor_arms in ("all", "any")
+        else [_VJ if receptor_arms == "VJ" else _VDJ]
+    )
+    columns = [2 * arm + chain for arm in taking for chain in chains]
+    elements, element_rows = _elements(
+        sequences[:, columns], [gene[:, columns] for gene in genes]
+    )
+    eligible = (groups >= 0) & (elements >= 0).any(axis=1)
+    cells = np.flatnonzero(eligible)
+    configurations = np.full(n_cells, -1, dtype=np.int64)
+    if not len(cells):
+        return ClonotypeAssignment(
+            codes=np.full(n_cells, -1, dtype=np.int64),
+            sizes=np.empty(0, dtype=np.int64),
+            configurations=configurations,
+            configuration_clonotypes=np.empty(0, dtype=np.int64),
+        )
+    unique_rows, inverse = np.unique(
+        np.column_stack([groups[cells], elements[cells]]), axis=0, return_inverse=True
+    )
+    inverse = inverse.reshape(-1)
+    configurations[cells] = inverse
+    n_configurations = len(unique_rows)
+    config_groups = unique_rows[:, 0]
+    width = len(chains)
+    arm_elements = {
+        arm: unique_rows[:, 1 + position * width : 1 + (position + 1) * width]
+        for position, arm in enumerate(taking)
+    }
+
+    # Elements within the cutoff, with matching genes when asked: their
+    # sequences are compared within blocks of equal gene calls.
+    n_elements = len(element_rows)
+    blocks = (
+        np.unique(element_rows[:, 1:], axis=0, return_inverse=True)[1].reshape(-1)
+        if element_rows.shape[1] > 1
+        else None
+    )
+    low, high = neighbor_pairs(
+        names[element_rows[:, 0]], metric, int(cutoff), blocks=blocks
+    )
+    near = coo_matrix(
+        (
+            np.ones(2 * len(low) + n_elements, dtype=np.int8),
+            (
+                np.concatenate([low, high, np.arange(n_elements)]),
+                np.concatenate([high, low, np.arange(n_elements)]),
+            ),
+        ),
+        shape=(n_elements, n_elements),
+    ).tocsr()
+    near_codes = np.unique(
+        np.concatenate(
+            [
+                low * n_elements + high,
+                high * n_elements + low,
+                np.arange(n_elements) * (n_elements + 1),
+            ]
+        )
+    )
+
+    def is_near(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+        """Whether element pairs are within the cutoff; -1 is never near."""
+        valid = (first >= 0) & (second >= 0)
+        encoded = np.where(valid, first * n_elements + second, -1)
+        found = np.searchsorted(near_codes, encoded)
+        found = np.minimum(found, len(near_codes) - 1)
+        return np.asarray(valid & (near_codes[found] == encoded), dtype=bool)
+
+    def arm_links(arm: int) -> tuple[np.ndarray, np.ndarray]:
+        """The pairs of configurations, first below second, whose arm matches."""
+        values = arm_elements[arm]
+        owner = np.repeat(np.arange(n_configurations), values.shape[1])
+        flat = values.reshape(-1)
+        keep = flat >= 0
+        incidence = coo_matrix(
+            (np.ones(int(keep.sum()), dtype=np.int8), (owner[keep], flat[keep])),
+            shape=(n_configurations, n_elements),
+        ).tocsr()
+        linked = sparse.triu(
+            (incidence @ near @ incidence.T).tocoo(), k=1, format="coo"
+        )
+        first, second = linked.row.astype(np.int64), linked.col.astype(np.int64)
+        same = config_groups[first] == config_groups[second]
+        first, second = first[same], second[same]
+        if dual_ir != "all":
+            return first, second
+        # Every chain matched: the same number of chains, paired in order or
+        # crossed.
+        ordered = np.sort(np.where(values < 0, np.iinfo(np.int64).max, values), axis=1)
+        ordered[ordered == np.iinfo(np.int64).max] = -1
+        counts = (values >= 0).sum(axis=1)
+        a, b = ordered[first], ordered[second]
+        straight = is_near(a[:, 0], b[:, 0]) & (
+            (counts[first] == 1) | is_near(a[:, 1], b[:, 1])
+        )
+        crossed = (
+            (counts[first] == 2) & is_near(a[:, 0], b[:, 1]) & is_near(a[:, 1], b[:, 0])
+        )
+        keep_pair = (counts[first] == counts[second]) & (straight | crossed)
+        return first[keep_pair], second[keep_pair]
+
+    links = {arm: arm_links(arm) for arm in taking}
+
+    def as_set(pair: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+        return np.asarray(pair[0] * n_configurations + pair[1], dtype=np.int64)
+
+    if receptor_arms == "all":
+        primary = {arm: arm_elements[arm][:, 0] >= 0 for arm in taking}
+        arm_count = primary[_VJ].astype(np.int64) + primary[_VDJ].astype(np.int64)
+        both = np.intersect1d(as_set(links[_VJ]), as_set(links[_VDJ]))
+        either = np.union1d(as_set(links[_VJ]), as_set(links[_VDJ]))
+        first, second = both // n_configurations, both % n_configurations
+        paired = (arm_count[first] == 2) & (arm_count[second] == 2)
+        one_first, one_second = either // n_configurations, either % n_configurations
+        single = (arm_count[one_first] < 2) & (
+            arm_count[one_first] == arm_count[one_second]
+        )
+        first = np.concatenate([first[paired], one_first[single]])
+        second = np.concatenate([second[paired], one_second[single]])
+    else:
+        merged = np.unique(np.concatenate([as_set(links[arm]) for arm in taking]))
+        first, second = merged // n_configurations, merged % n_configurations
+    graph = coo_matrix(
+        (np.ones(len(first), dtype=np.int8), (first, second)),
+        shape=(n_configurations, n_configurations),
+    )
+    _n, clusters = connected_components(graph, directed=False)
+    return _ranked(clusters.astype(np.int64), inverse, cells, n_cells, configurations)
+
+
+def _elements(
+    sequences: np.ndarray, genes: list[np.ndarray]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Number each slot's element, -1 without one, and return each element's codes."""
+    present = sequences >= 0
+    ids = np.full(sequences.shape, -1, dtype=np.int64)
+    if not present.any():
+        return ids, np.empty((0, 1 + len(genes)), dtype=np.int64)
+    stacked = np.column_stack(
+        [sequences[present]] + [gene[present] for gene in genes]
+    ).astype(np.int64)
+    rows, inverse = np.unique(stacked, axis=0, return_inverse=True)
+    ids[present] = inverse.reshape(-1)
+    return ids, rows
+
+
 def _append(
     owners: list[np.ndarray],
     keys: list[np.ndarray],
@@ -421,6 +625,8 @@ class Clonotypes:
         same_j_gene: Whether matched chains had to share their J gene call.
         within: The cell metadata columns that kept clonotypes apart.
         within_receptor_type: Whether receptor types kept clonotypes apart.
+        metric: ``"identity"`` or the distance that links similar chains.
+        cutoff: The largest distance of linked chains, 0 for identity.
     """
 
     cells: pd.DataFrame = field(repr=False)
@@ -433,6 +639,8 @@ class Clonotypes:
     same_j_gene: bool
     within: tuple[str, ...]
     within_receptor_type: bool
+    metric: str
+    cutoff: int
 
 
 def clonotype_frames(

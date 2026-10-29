@@ -95,6 +95,29 @@ Each distinct combination of a cell's compared chains, its configuration, gets k
 
 On "Human PBMC from a Healthy Donor, 10k cells (v2)", 6,189 cells with a receptor, and "CD8+ T cells of Healthy Donor 1", 46,526 cells with a receptor, the clonotypes equal scirpy 0.25.1's `define_clonotype_clusters` with the identity metric, cell for cell, for ten combinations of the options: `"nt"` and `"aa"`, every value of `receptor_arms` and `dual_ir`, the V and J gene matches, and without receptor types. With `dual_ir="all"` they also equal the clone keys of scRepertoire 2.8.0's `combineTCR` for all 5,213 PBMC T cells (`CTnt` with `"nt"`, `CTaa` with `"aa"`, and `CTstrict` with `"nt"` and both gene matches), and Cell Ranger 3.0.2's clonotypes, sets of identical productive junctions, for all 46,342 T cells of donor 1. Cell Ranger 5.0.0 groups clonotypes with enclone, which also merges cells that lack a chain, and agrees for 98.9% of the PBMC T cells. Defining the clonotypes of donor 1 takes 0.4 s, where scirpy's `ir_dist` and `define_clonotypes` take 5.8 s on its 47,584 V(D)J barcodes.
 
+### Clonotype clusters
+
+T cells whose receptors differ by a residue or two often recognize the same epitope, and the B cells of one clone differ by somatic mutations, so identical junctions split groups that belong together. `metric` links chains whose junctions are similar instead, as scirpy's `define_clonotype_clusters` does, under the same rules for arms, dual chains, gene calls, groups and receptor types:
+
+| `metric` | Two junctions are linked when |
+|---|---|
+| `"identity"`, the default | They are identical; `cutoff` stays None |
+| `"hamming"` | They have one length and at most `cutoff` substitutions |
+| `"normalized_hamming"` | They have one length and their substitutions are at most `cutoff` percent of it, rounded half up, as scirpy rounds them |
+| `"levenshtein"` | At most `cutoff` substitutions, insertions and deletions turn one into the other |
+
+```python
+similar = ds.repertoire.clonotypes(receptors, sequence="aa", metric="hamming", cutoff=1)
+families = ds.repertoire.clonotypes(
+    b_receptors, sequence="nt", metric="normalized_hamming", cutoff=15,
+    same_v_gene=True, same_j_gene=True, within="donor",
+)
+```
+
+`cutoff` has no default for the distance metrics, since it decides the clusters; scirpy defaults to 2, which for `normalized_hamming` means 2 percent, and its B cell tutorial passes 15. The clusters label cells like clonotypes do and feed expansion, diversity and overlap alike; the saved record holds the metric and cutoff. Every pair of distinct junctions within the cutoff is found exactly: for cutoffs up to 3, two junctions of one length within that many substitutions share a key in which those positions are masked, and two junctions within that many edits share a variant with at most that many positions deleted from each, so only the junctions that share a key are compared; longer junctions with larger cutoffs, such as nucleotide junctions at 15 percent, compare every pair of one length, or of lengths within the cutoff. On 100,000 distinct junctions of 11 to 18 residues, the pairs take 0.6 s within one substitution, 2.9 s within two, and 0.7 s and 4.6 s within one and two edits.
+
+The clusters equal scirpy 0.25.1's `ir_dist` and `define_clonotype_clusters` for every cell of both 10x runs, 6,189 PBMC cells and 46,526 CD8+ cells with a receptor, in nine settings: residues within one and two substitutions with both arms and either chain, within one with every chain matched, with either arm and primary chains, and with the VDJ arm and V gene matches; within one edit, both arms; within two edits with the VJ arm and every chain matched, and with V and J gene matches; and nucleotides within 15 percent with V gene matches. A setting takes 0.6 to 3.5 s on the CD8+ cells, where scirpy's distances take 8 to 209 s on two cores.
+
 `load_clonotypes` returns a {class}`~cytearc.repertoire.Clonotypes` record. Its `cells` table holds each cell's `clonotype` and `clone_size`, and its `clonotypes` table one row per clonotype, largest first: `n_cells`, `fraction` (its share of the cells with a clonotype), `n_configurations`, its `receptor_type` and `within` labels, and the chains of its representative cell, the first cell of its most frequent configuration, slot by slot, such as `VDJ_1_junction_aa`, `VDJ_1_v_call` and `VJ_1_junction`.
 
 `ds.plots.clonotype_abundance` draws how many clonotypes have each size on log scales, and the `top` (20) clonotypes with the most cells, each labelled with its representative's `VDJ_1` junction, or its `VJ_1` junction without a VDJ chain. With `group_by` or `groups`, sizes count the cells of each clonotype within each group, one line per group, and the bars stack by group. Its tables are `sizes` and `top`.
