@@ -1,6 +1,6 @@
 # Immune receptor repertoires
 
-Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, BD Rhapsody, TRUST4 and other AIRR producers), check each cell's chains, label cells by receptor type, subtype and chain pairing, group them into clonotypes, measure clonal expansion within samples, and measure clonal diversity with rarefaction and extrapolation. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, BD Rhapsody, TRUST4 and other AIRR producers), check each cell's chains, label cells by receptor type, subtype and chain pairing, group them into clonotypes, measure clonal expansion within samples, measure clonal diversity with rarefaction and extrapolation, and compare samples or cell types by the clonotypes they share. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 
@@ -47,6 +47,10 @@ Import the T cell and B cell receptor contigs of single-cell immune profiling (1
   - `.hill`, one row per group and order 0, 1, 2: `observed`, `estimated` (asymptotic: Chao1, exp of Chao-Wang-Jost entropy, inverse of Good's Simpson estimate, inf without doubletons or larger), `at_size`, `coverage_at_size`, `method_at_size`, `at_coverage`, `size_at_coverage`, `method_at_coverage` (methods `"rarefaction"`, `"observed"`, `"extrapolation"`).
   - `.size` and `.coverage`: the common size (default: smallest doubled group size) and coverage (default: lowest coverage at doubled sizes), iNEXT's `estimateD` defaults.
 - `ds.repertoire.rarefaction(clonotypes, group_by, groups, within_receptor_type, cell_selection, orders=(0, 1, 2), sizes=None, endpoint=None, knots=40)` returns a `Rarefaction` record: `.curves` (group key, `order`, `size`, `method`, `diversity`, `coverage`); default sizes are iNEXT's 40 knots per group (half up to its size, half to twice it); `sizes` gives every group the same sizes.
+- `ds.repertoire.overlap(clonotypes, group_by=None, groups=None, within_receptor_type=True, cell_selection=None)` returns a `ClonotypeOverlap` record and saves nothing; with `within_receptor_type` only groups of one receptor type are compared. `.group_sizes` (`group`, key columns, `cells`, `clonotypes`); `.pairs` (`group_1`, `group_2`, `shared`, `jaccard`, `sorensen`, `overlap`, `cosine` (presence, Ochiai), `morisita_horn`, `abundance_cosine`, `shared_fraction_1`, `shared_fraction_2`). Needs at least two groups.
+- `ds.repertoire.track(clonotypes, group_by=..., top=10, labels=None, ...)` returns a `ClonotypeTracking` record: `.cells` (`clonotype`, `group`, key columns, `cells`, `fraction` of the group's cells; zeros included, within the clonotype's receptor type), `.tracked` (labels). Default: each group's `top` largest clonotypes, together (ties to the larger clonotype overall); `labels=["clonotype_1"]` instead.
+- `ds.plots.clonal_overlap(clonotypes, group_by=..., index="morisita_horn")` heatmap (diagonal blank, values printed up to 12 groups; tables `matrix`, `pairs`); `ds.plots.clonotype_tracking(clonotypes, group_by=..., top=..., order=[...])` one line per clonotype across groups (table `cells`).
+- Validated: every overlap index within 5e-14 of immunarch 0.10.3 `repOverlap` (`public`, `overlap`, `jaccard`, `tversky`, `cosine`, `morisita`) and scRepertoire 2.8.0 `clonalOverlap` (`raw`, `overlap`, `jaccard`, `cosine`, `morisita`) on CD8+ donor 1 and PBMC 10k pseudo samples. scRepertoire's `overlap`, `raw` and `cosine` are presence-based in its outputs, whatever its help page says.
 - `ds.plots.clonal_rarefaction(clonotypes, group_by=..., cell_selection=..., orders=(0, 1, 2), base="size" or "coverage")`: one panel per order (`order_0`, `order_1`, `order_2`) plus `coverage` (sample completeness) with `base="size"`; solid rarefied, dashed extrapolated, a point at the observed size. Table: `curves` (with `group`).
 - Validated: Hill-number curves within 1.4e-12 of iNEXT 3.0.2 (its Shannon extrapolation is Chao et al. 2023's), asymptotic estimates within 7e-13, `estimateD` within 1e-7; every index within 6e-14 of scRepertoire 2.8.0 `clonalDiversity` (no bootstraps), immunarch 0.10.3 `repDiversity` and vegan 2.7.6 `estimateR`.
 
@@ -110,6 +114,16 @@ plot.save("clonal_rarefaction.png")
 plot.close()
 curves = ds.repertoire.rarefaction(clonotypes, group_by="sample", cell_selection=t_cells).curves
 
+overlap = ds.repertoire.overlap(clonotypes, group_by="tissue", cell_selection=t_cells)
+print(overlap.pairs[["group_1", "group_2", "shared", "morisita_horn", "shared_fraction_1", "shared_fraction_2"]])
+plot = ds.plots.clonal_overlap(clonotypes, group_by="tissue", cell_selection=t_cells, show=False)
+plot.save("clonal_overlap.png")
+plot.close()
+tracked = ds.repertoire.track(clonotypes, group_by="timepoint", top=5, cell_selection=t_cells)
+plot = ds.plots.clonotype_tracking(clonotypes, group_by="timepoint", top=5, order=["d0", "d7", "d28"], show=False)
+plot.save("clonotype_tracking.png")
+plot.close()
+
 t_cells = ds.select_cells(receptors, include=["TCR"])
 paired = ds.select_cells(receptors, value="chain_pairing", include=["single pair", "extra VJ"])
 # `umap_ref` is a UMAP of the receptors' cells: to colour run["umap"] of a ds.pipeline.rna run,
@@ -141,4 +155,5 @@ merged = ds.repertoire.import_receptors(
 - B cell clonotypes from identical junctions split clones that carry somatic mutations; they are exact sequence variants, not clonal families.
 - Measure expansion `within` the sample: without it, a clonotype's cells in all samples add up. Frequency categories depend on sample size (one cell of 1,000 is already 0.001), so compare them only between samples of similar size; bounds in cells compare any samples.
 - Compare expansion between conditions with one value per sample (such as the fraction of cells in clonotypes of more than two cells), never with cells as replicates.
+- Report Morisita-Horn for overlap between groups of different depth; presence indices (Jaccard, overlap) grow with cells. A clonotype absent from one group may be below detection there.
 - Compare diversity by Hill numbers at a common coverage or size (`hill.at_coverage`, `hill.at_size`), not observed indices, which grow with the cells sampled. Check `plots.clonal_rarefaction`: steep curves at the observed point mean richness and Chao1 are poorly determined; order 2 is stable. Name the Chao1 form reported. Leave out tiny groups (such as multichain cells, with `cell_selection`) or set `size`/`coverage`, since the smallest group sets the defaults.

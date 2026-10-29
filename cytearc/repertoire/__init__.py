@@ -25,6 +25,11 @@ if TYPE_CHECKING:
         Rarefaction as Rarefaction,
     )
     from .expansion import ClonalExpansion as ClonalExpansion
+    from .overlap import (
+        OVERLAP_INDICES as OVERLAP_INDICES,
+        ClonotypeOverlap as ClonotypeOverlap,
+        ClonotypeTracking as ClonotypeTracking,
+    )
     from .receptors import ImmuneReceptors as ImmuneReceptors
 
 __all__ = [
@@ -34,6 +39,7 @@ __all__ = [
     "LOCI",
     "NO_RECEPTOR",
     "ORDERS",
+    "OVERLAP_INDICES",
     "RECEPTOR_ARMS",
     "RECEPTOR_SUBTYPES",
     "RECEPTOR_TYPES",
@@ -42,6 +48,8 @@ __all__ = [
     "VJ_LOCI",
     "ClonalDiversity",
     "ClonalExpansion",
+    "ClonotypeOverlap",
+    "ClonotypeTracking",
     "Clonotypes",
     "ImmuneReceptors",
     "Rarefaction",
@@ -56,6 +64,7 @@ __getattr__, __dir__ = _lazy_facade(
         "LOCI": ".chains",
         "NO_RECEPTOR": ".chains",
         "ORDERS": ".diversity",
+        "OVERLAP_INDICES": ".overlap",
         "RECEPTOR_ARMS": ".clonotypes",
         "RECEPTOR_SUBTYPES": ".chains",
         "RECEPTOR_TYPES": ".chains",
@@ -64,6 +73,8 @@ __getattr__, __dir__ = _lazy_facade(
         "VJ_LOCI": ".chains",
         "ClonalDiversity": ".diversity",
         "ClonalExpansion": ".expansion",
+        "ClonotypeOverlap": ".overlap",
+        "ClonotypeTracking": ".overlap",
         "Clonotypes": ".clonotypes",
         "ImmuneReceptors": ".receptors",
         "Rarefaction": ".diversity",

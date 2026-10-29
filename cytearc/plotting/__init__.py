@@ -69,8 +69,10 @@ if TYPE_CHECKING:
     )
     from .repertoire import (
         clonal_expansion as clonal_expansion,
+        clonal_overlap as clonal_overlap,
         clonal_rarefaction as clonal_rarefaction,
         clonotype_abundance as clonotype_abundance,
+        clonotype_tracking as clonotype_tracking,
         receptor_qc as receptor_qc,
     )
     from .summary import dotplot as dotplot
@@ -99,8 +101,10 @@ __all__ = [
     "cluster_tree",
     "cluster_connectivity",
     "clonal_expansion",
+    "clonal_overlap",
     "clonal_rarefaction",
     "clonotype_abundance",
+    "clonotype_tracking",
     "compose_results",
     "composition",
     "distribution",
@@ -158,8 +162,10 @@ __getattr__, __dir__ = _lazy_facade(
         "cluster_tree": ".cluster_tree",
         "cluster_connectivity": ".cluster_connectivity",
         "clonal_expansion": ".repertoire",
+        "clonal_overlap": ".repertoire",
         "clonal_rarefaction": ".repertoire",
         "clonotype_abundance": ".repertoire",
+        "clonotype_tracking": ".repertoire",
         "compose_results": "._figure",
         "composition": ".composition",
         "distribution": ".distribution",

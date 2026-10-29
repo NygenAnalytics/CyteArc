@@ -664,6 +664,44 @@ class DataStorePlotAccessor:
         """Plot the rarefaction and extrapolation curves of groups of cells."""
         return self._forward(PlotResult, "clonal_rarefaction", locals())
 
+    def clonal_overlap(
+        self,
+        clonotypes: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        within_receptor_type: bool = True,
+        cell_selection: ArtifactRef | None = None,
+        index: str = "morisita_horn",
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot an overlap index between every pair of groups as a heatmap."""
+        return self._forward(PlotResult, "clonal_overlap", locals())
+
+    def clonotype_tracking(
+        self,
+        clonotypes: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        within_receptor_type: bool = True,
+        cell_selection: ArtifactRef | None = None,
+        top: int = 10,
+        labels: Sequence[str] | None = None,
+        order: Sequence[str] | None = None,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the share of cells of chosen clonotypes across groups of cells."""
+        return self._forward(PlotResult, "clonotype_tracking", locals())
+
     def clonotype_abundance(
         self,
         clonotypes: ArtifactRef,

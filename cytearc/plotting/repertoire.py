@@ -9,6 +9,7 @@ import pandas as pd
 from ..metadata.selection import CellField, resolve_grouping
 from ..repertoire.chains import CHAIN_PAIRINGS, RECEPTOR_TYPES
 from ..repertoire.diversity import ORDERS
+from ..repertoire.overlap import OVERLAP_INDICES
 from ..repertoire.expansion import (
     DEFAULT_RANK_SPLITS,
     rank_window_labels,
@@ -35,8 +36,10 @@ from ._style import (
 __all__ = [
     "cell_groups",
     "clonal_expansion",
+    "clonal_overlap",
     "clonal_rarefaction",
     "clonotype_abundance",
+    "clonotype_tracking",
     "receptor_qc",
 ]
 
@@ -907,6 +910,266 @@ def clonal_rarefaction(
                 "base": base,
                 "endpoint": endpoint,
                 "knots": knots,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+def _repertoire_method(store: Any, name: str) -> Any:
+    """Return a method of the store's repertoire namespace, or raise."""
+    method = getattr(getattr(store, "repertoire", None), name, None)
+    if not callable(method):
+        raise TypeError(f"store does not provide {name}")
+    return method
+
+
+# Overlap matrices of at most this many groups print their values.
+_ANNOTATED_GROUPS = 12
+_OVERLAP_TITLES = {
+    "shared": "Shared clonotypes",
+    "jaccard": "Jaccard index",
+    "sorensen": "Sørensen index",
+    "overlap": "Overlap coefficient",
+    "cosine": "Cosine of presence",
+    "morisita_horn": "Morisita-Horn index",
+    "abundance_cosine": "Cosine of clone sizes",
+}
+
+
+@close_figures_on_error
+def clonal_overlap(
+    store: Any,
+    clonotypes: ArtifactRef,
+    *,
+    group_by: str | Sequence[str] | None = None,
+    groups: ArtifactRef | None = None,
+    within_receptor_type: bool = True,
+    cell_selection: ArtifactRef | None = None,
+    index: str = "morisita_horn",
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot an overlap index between every pair of groups as a heatmap.
+
+    ``index`` is one of ``"shared"``, ``"jaccard"``, ``"sorensen"``,
+    ``"overlap"``, ``"cosine"``, ``"morisita_horn"`` (the default) and
+    ``"abundance_cosine"``, as ``ds.repertoire.overlap`` computes them.
+    The diagonal is left blank so that the colours span the pairs, and pairs
+    of different receptor types stay blank; the ``matrix`` table holds each
+    group's clonotypes on its diagonal for ``"shared"`` and 1 otherwise.
+    Groups are those of ``ds.repertoire.overlap``. Matrices of at most 12
+    groups print their values.
+
+    Tables: ``matrix`` (groups by groups) and ``pairs``.
+    """
+    if index not in OVERLAP_INDICES:
+        raise ValueError(f"index must be one of {', '.join(OVERLAP_INDICES)}")
+    result = _repertoire_method(store, "overlap")(
+        clonotypes,
+        group_by=group_by,
+        groups=groups,
+        within_receptor_type=within_receptor_type,
+        cell_selection=cell_selection,
+    )
+    names = list(result.group_sizes["group"])
+    position = {name: at for at, name in enumerate(names)}
+    values = np.full((len(names), len(names)), np.nan)
+    for first, second, value in zip(
+        result.pairs["group_1"],
+        result.pairs["group_2"],
+        result.pairs[index],
+        strict=True,
+    ):
+        values[position[first], position[second]] = value
+        values[position[second], position[first]] = value
+    values[np.diag_indices(len(names))] = (
+        result.group_sizes["clonotypes"].to_numpy(dtype=np.float64)
+        if index == "shared"
+        else 1.0
+    )
+    matrix = pd.DataFrame(values, index=pd.Index(names), columns=pd.Index(names))
+    if figsize is None and target is None:
+        side = max(4.0, 0.55 * len(names) + 2.5)
+        figsize = (side + 1.2, side)
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=["matrix"], figsize=figsize, n_columns=1
+        )
+        ax = axes["matrix"]
+        drawn = values.copy()
+        drawn[np.diag_indices(len(names))] = np.nan
+        image = ax.imshow(np.ma.masked_invalid(drawn), cmap="viridis")
+        ax.set_xticks(np.arange(len(names)), names, rotation=90)
+        ax.set_yticks(np.arange(len(names)), names)
+        ax.set_title(_OVERLAP_TITLES[index])
+        if len(names) <= _ANNOTATED_GROUPS:
+            for row in range(len(names)):
+                for column in range(len(names)):
+                    value = drawn[row, column]
+                    if np.isnan(value):
+                        continue
+                    # Dark text on light cells, light text on dark ones.
+                    red, green, blue, _alpha = image.cmap(image.norm(value))
+                    light = 0.299 * red + 0.587 * green + 0.114 * blue > 0.5
+                    ax.text(
+                        column,
+                        row,
+                        f"{value:.0f}" if index == "shared" else f"{value:.3g}",
+                        ha="center",
+                        va="center",
+                        color="black" if light else "white",
+                        fontsize="x-small",
+                    )
+        if show_legend:
+            figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"matrix": matrix, "pairs": result.pairs},
+        legends=(LegendSpec(kind="continuous", label=index),),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(result.group_sizes["cells"].sum()),
+            renderer="matplotlib",
+            notes=("clonotypes",),
+            extras={
+                "clonotypes": clonotypes.to_dict(),
+                "index": index,
+                "groups": names,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+@close_figures_on_error
+def clonotype_tracking(
+    store: Any,
+    clonotypes: ArtifactRef,
+    *,
+    group_by: str | Sequence[str] | None = None,
+    groups: ArtifactRef | None = None,
+    within_receptor_type: bool = True,
+    cell_selection: ArtifactRef | None = None,
+    top: int = 10,
+    labels: Sequence[str] | None = None,
+    order: Sequence[str] | None = None,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot the share of cells of chosen clonotypes across groups of cells.
+
+    The clonotypes are those of ``ds.repertoire.track``: the ``top`` with the
+    most cells in each group, or ``labels``. Each draws one line across the
+    groups, such as time points or tissues, of its share of each group's
+    cells, labelled with its representative's ``VDJ_1`` junction, or its
+    ``VJ_1`` junction without a VDJ chain. A clonotype's share counts the
+    cells of its receptor type, so the groups of T cells and B cells with one
+    label share a position. ``order`` lists the labels of the groups, those
+    of ``group_by`` and ``groups`` joined by commas, from left to right; by
+    default they follow their natural order.
+
+    Tables: ``cells`` (``clonotype``, ``group``, the key columns, ``cells``
+    and ``fraction``).
+    """
+    tracked = _repertoire_method(store, "track")(
+        clonotypes,
+        group_by=group_by,
+        groups=groups,
+        within_receptor_type=within_receptor_type,
+        cell_selection=cell_selection,
+        top=top,
+        labels=labels,
+    )
+    cells = tracked.cells
+    keys = [
+        *tracked.group_by,
+        *((tracked.groups.kind,) if tracked.groups is not None else ()),
+    ]
+    # A clonotype counts among its receptor type's cells, so the groups of
+    # each receptor type share a position named by their labels alone.
+    positions_of = (
+        cells[keys].astype(str).agg(", ".join, axis=1) if keys else cells["group"]
+    )
+    placed = cells.assign(position=positions_of.to_numpy(dtype=object))
+    present = sort_categories(pd.unique(placed["position"]))
+    if order is None:
+        positions = list(present)
+    else:
+        if isinstance(order, str) or not isinstance(order, Sequence):
+            raise TypeError("order must be a sequence of group names")
+        positions = list(order)
+        if sorted(map(str, positions)) != sorted(map(str, present)):
+            raise ValueError(f"order must list the groups {present}")
+    rank = _load_clonotypes(store, clonotypes).clonotypes.set_index("clonotype")
+    if figsize is None and target is None:
+        figsize = (max(6.0, 0.7 * len(positions) + 4.0), 4.2)
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=["tracking"], figsize=figsize, n_columns=1
+        )
+        ax = axes["tracking"]
+        colors = categorical_color_map(list(tracked.tracked))
+        x = np.arange(len(positions))
+        for name in tracked.tracked:
+            rows = placed[placed["clonotype"] == name].set_index("position")["fraction"]
+            y = rows.reindex(positions).to_numpy(dtype=np.float64)
+            ax.plot(
+                x,
+                y,
+                marker="o",
+                markersize=3.5,
+                linewidth=1.2,
+                color=colors[name],
+                label=_clonotype_label(name, rank.loc[name]),
+            )
+        ax.set_xticks(x, positions, rotation=45, ha="right")
+        ax.set_ylabel("Fraction of the group's cells")
+        ax.set_title("Clonotypes across groups")
+        if show_legend:
+            ax.legend(
+                frameon=False,
+                fontsize="x-small",
+                loc="upper left",
+                bbox_to_anchor=(1, 1),
+            )
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"cells": cells},
+        legends=(LegendSpec(kind="categorical", label="Clonotype"),),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(cells["cells"].sum()),
+            renderer="matplotlib",
+            notes=("clonotypes",),
+            extras={
+                "clonotypes": clonotypes.to_dict(),
+                "tracked": list(tracked.tracked),
+                "order": positions,
             },
         ),
         owns_figure=owns,

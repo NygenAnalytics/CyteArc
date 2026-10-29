@@ -276,3 +276,34 @@ def test_rarefaction_curve(bench) -> None:
         assert richness[methods.index("observed")] == clones.richness
 
     bench("repertoire.rarefaction_curve", make, LADDER, check=check)
+
+
+def test_overlap_pairs(bench) -> None:
+    from cytearc.repertoire.overlap import overlap_pairs
+
+    n_groups = 16
+
+    def counts(n_cells: int):
+        codes = _clonotype_codes(n_cells)
+        has = codes >= 0
+        groups = np.random.default_rng([inputs.SEED, n_cells, n_groups]).integers(
+            0, n_groups, n_cells
+        )[has]
+        pairs, cells = np.unique(
+            groups * (int(codes.max()) + 1) + codes[has], return_counts=True
+        )
+        return pairs // (int(codes.max()) + 1), pairs % (int(codes.max()) + 1), cells
+
+    def make(n_cells: int):
+        pair_groups, pair_codes, pair_cells = counts(n_cells)
+        return lambda: overlap_pairs(pair_groups, pair_codes, pair_cells, n_groups)
+
+    def check(n_cells: int, table) -> None:
+        pair_groups, pair_codes, _cells = counts(n_cells)
+        assert len(table) == n_groups * (n_groups - 1) // 2
+        first = set(pair_codes[pair_groups == 0].tolist())
+        second = set(pair_codes[pair_groups == 1].tolist())
+        assert table.iloc[0]["shared"] == len(first & second)
+        assert ((table["jaccard"] >= 0) & (table["jaccard"] <= 1)).all()
+
+    bench("repertoire.overlap_pairs", make, LADDER, check=check)
