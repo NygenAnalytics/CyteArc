@@ -1,14 +1,14 @@
 ---
 myst:
   html_meta:
-    description: CyteArc repertoire API for single-cell T cell and B cell receptor data, with contigs imported from Cell Ranger and AIRR Rearrangement files, the ranked chains of each cell, its receptor type, subtype and chain pairing, clonotypes of cells that share their receptor, clonal expansion within samples, clonal diversity with rarefaction and extrapolation, and the records of the receptors, clonotypes, expansion and diversity.
+    description: CyteArc repertoire API for single-cell T cell and B cell receptor data, with contigs imported from Cell Ranger and AIRR Rearrangement files, the ranked chains of each cell, its receptor type, subtype and chain pairing, clonotypes of cells that share their receptor, clonal expansion within samples, clonal diversity with rarefaction and extrapolation, the clonotypes that samples or cell types share, and the records of the receptors, clonotypes, expansion, diversity and overlap.
 ---
 
 # Repertoire API reference
 
 Single-cell immune profiling reads the T cell receptor (TCR) or B cell receptor (BCR) of each cell beside its transcriptome. A V(D)J library, such as 10x Genomics Chromium Single Cell Immune Profiling, assembles each cell's receptor transcripts into contigs: one chain each, with its locus, its V, D, J and constant genes, and its junction, the CDR3 with the conserved cysteine and phenylalanine or tryptophan on either side. A T cell receptor pairs an alpha chain (TRA) with a beta chain (TRB), or a gamma chain (TRG) with a delta chain (TRD), and a B cell receptor pairs a heavy chain (IGH) with a kappa (IGK) or lambda (IGL) light chain. `cytearc.repertoire` holds the record of the imported receptors and the constants of the receptor model; contig fields keep their names in the AIRR Community's Rearrangement schema ([Vander Heiden et al. 2018](https://doi.org/10.3389/fimmu.2018.02206)).
 
-The steps run on a `DataStore` whose cells are the cells of the expression library. {meth}`ds.repertoire.import_receptors <cytearc.datastore.namespaces.RepertoireAccessor.import_receptors>` reads the contigs of those cells and saves an `immune_receptors` artifact, {meth}`ds.repertoire.load_receptors <cytearc.datastore.namespaces.RepertoireAccessor.load_receptors>` reads it as an {class}`~cytearc.repertoire.ImmuneReceptors` record, and {meth}`ds.plots.receptor_qc <cytearc.datastore.plot_accessor.DataStorePlotAccessor.receptor_qc>` plots the receptor types, chain pairings and chains per cell. {meth}`ds.repertoire.clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.clonotypes>` groups the cells into clonotypes and saves a `clonotypes` artifact, {meth}`ds.repertoire.load_clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.load_clonotypes>` reads it as a {class}`~cytearc.repertoire.Clonotypes` record, and {meth}`ds.plots.clonotype_abundance <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonotype_abundance>` plots the clone sizes and the largest clonotypes. {meth}`ds.repertoire.clonal_expansion <cytearc.datastore.namespaces.RepertoireAccessor.clonal_expansion>` places each cell in an expansion category by its clone size within its sample and saves a `clonal_expansion` artifact, {meth}`ds.repertoire.load_clonal_expansion <cytearc.datastore.namespaces.RepertoireAccessor.load_clonal_expansion>` reads it as a {class}`~cytearc.repertoire.ClonalExpansion` record, and {meth}`ds.plots.clonal_expansion <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonal_expansion>` plots the expansion and clonal space of each sample or cell type. {meth}`ds.repertoire.diversity <cytearc.datastore.namespaces.RepertoireAccessor.diversity>` measures the diversity of each group's clonotypes as a {class}`~cytearc.repertoire.ClonalDiversity` record, {meth}`ds.repertoire.rarefaction <cytearc.datastore.namespaces.RepertoireAccessor.rarefaction>` rarefies and extrapolates it as a {class}`~cytearc.repertoire.Rarefaction` record, and {meth}`ds.plots.clonal_rarefaction <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonal_rarefaction>` plots the curves.
+The steps run on a `DataStore` whose cells are the cells of the expression library. {meth}`ds.repertoire.import_receptors <cytearc.datastore.namespaces.RepertoireAccessor.import_receptors>` reads the contigs of those cells and saves an `immune_receptors` artifact, {meth}`ds.repertoire.load_receptors <cytearc.datastore.namespaces.RepertoireAccessor.load_receptors>` reads it as an {class}`~cytearc.repertoire.ImmuneReceptors` record, and {meth}`ds.plots.receptor_qc <cytearc.datastore.plot_accessor.DataStorePlotAccessor.receptor_qc>` plots the receptor types, chain pairings and chains per cell. {meth}`ds.repertoire.clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.clonotypes>` groups the cells into clonotypes and saves a `clonotypes` artifact, {meth}`ds.repertoire.load_clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.load_clonotypes>` reads it as a {class}`~cytearc.repertoire.Clonotypes` record, and {meth}`ds.plots.clonotype_abundance <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonotype_abundance>` plots the clone sizes and the largest clonotypes. {meth}`ds.repertoire.clonal_expansion <cytearc.datastore.namespaces.RepertoireAccessor.clonal_expansion>` places each cell in an expansion category by its clone size within its sample and saves a `clonal_expansion` artifact, {meth}`ds.repertoire.load_clonal_expansion <cytearc.datastore.namespaces.RepertoireAccessor.load_clonal_expansion>` reads it as a {class}`~cytearc.repertoire.ClonalExpansion` record, and {meth}`ds.plots.clonal_expansion <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonal_expansion>` plots the expansion and clonal space of each sample or cell type. {meth}`ds.repertoire.diversity <cytearc.datastore.namespaces.RepertoireAccessor.diversity>` measures the diversity of each group's clonotypes as a {class}`~cytearc.repertoire.ClonalDiversity` record, {meth}`ds.repertoire.rarefaction <cytearc.datastore.namespaces.RepertoireAccessor.rarefaction>` rarefies and extrapolates it as a {class}`~cytearc.repertoire.Rarefaction` record, and {meth}`ds.plots.clonal_rarefaction <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonal_rarefaction>` plots the curves. {meth}`ds.repertoire.overlap <cytearc.datastore.namespaces.RepertoireAccessor.overlap>` compares groups by the clonotypes they share as a {class}`~cytearc.repertoire.ClonotypeOverlap` record, {meth}`ds.repertoire.track <cytearc.datastore.namespaces.RepertoireAccessor.track>` follows chosen clonotypes across groups as a {class}`~cytearc.repertoire.ClonotypeTracking` record, and {meth}`ds.plots.clonal_overlap <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonal_overlap>` and {meth}`ds.plots.clonotype_tracking <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonotype_tracking>` plot them.
 
 ## Import contigs
 
@@ -170,6 +170,37 @@ Every observed index depends on how many cells a group holds: a larger sample fi
 
 The implementation follows the papers rather than the code of iNEXT, which is licensed under the GPL, and validates against its outputs. On iNEXT's two example vectors, the four pseudo samples of the PBMC run and of the CD8+ run (11,523 to 11,745 cells each), all 46,526 CD8+ cells together, and six edge cases (no singletons, no doubletons, every clonotype a singleton, a lone singleton, one clonotype, two cells), the Hill numbers of iNEXT 3.0.2's curves equal CyteArc's within 1.4e-12 at every size, rarefied, observed and extrapolated, the coverages within 3e-9, the asymptotic estimates within 7e-13, and `estimateD` by size within 5e-13 and by coverage within 1e-7, the tolerance of iNEXT's root finding; the default sizes are iNEXT's. Where the two differ, CyteArc's rarefied coverage equals exact rational arithmetic within 1e-16, where iNEXT's carries errors up to 3e-12, because the chance of missing a clonotype is computed as a product of ratios rather than from log-gamma functions. The indices equal scRepertoire 2.8.0's `clonalDiversity` without bootstraps for all twelve of its metrics, immunarch 0.10.3's `repDiversity` (`chao1`, `d50`, `div`, `gini`, `gini.simp`, `inv.simp` and Hill numbers of orders 1 to 6) and vegan 2.7.6's `estimateR` (`S.chao1`, `S.ACE`), within 6e-14, on the same pseudo samples and edge cases. On a million simulated T cells in eight samples, `diversity` takes 1.2 s and `rarefaction` 1.5 s, holding at most 260 MiB; grouping the cells is checked against the memory budget at about 300 bytes per cell.
 
+## Compare groups
+
+Two samples of one donor share the clonotypes of clones that both sampled, such as a tumour and the blood, two time points, or a sorted and an unsorted population, and two cell types share the clonotypes of clones whose cells took both fates. `overlap` compares every pair of groups by their clonotypes. The groups are the combinations of the labels of `group_by` cell metadata columns and of a `groups` label artifact, among the cells of `cell_selection`; with `within_receptor_type`, the default, the receptor type is part of each group and only groups of one receptor type are compared, since a T cell and a B cell never share a clonotype. Cells without a clonotype or a label are left out. Nothing is saved.
+
+```python
+result = ds.repertoire.overlap(clonotypes, group_by="tissue", cell_selection=t_cells)
+result.pairs  # one row per pair of tissues
+ds.plots.clonal_overlap(clonotypes, group_by="tissue", cell_selection=t_cells)
+tracked = ds.repertoire.track(clonotypes, group_by="timepoint", top=10)
+ds.plots.clonotype_tracking(clonotypes, group_by="timepoint", order=["day 0", "day 7", "day 28"])
+```
+
+The `pairs` table holds one row per pair, `group_1` and `group_2` named by their labels joined by commas, with these columns, for groups of `S1` and `S2` clonotypes and clone sizes `x` and `y` of `X` and `Y` cells:
+
+| Column | Definition | As in |
+|---|---|---|
+| `shared` | The clonotypes of both groups | scRepertoire's `raw`, immunarch's `public` |
+| `jaccard` | `shared / (S1 + S2 - shared)` | scRepertoire's and immunarch's `jaccard` |
+| `sorensen` | `2 shared / (S1 + S2)` | immunarch's `tversky` with its default weights |
+| `overlap` | `shared / min(S1, S2)` | scRepertoire's and immunarch's `overlap` |
+| `cosine` | `shared / sqrt(S1 S2)`, the cosine of presence | scRepertoire's `cosine` |
+| `morisita_horn` | `2 sum(x y) / ((sum(x^2) / X^2 + sum(y^2) / Y^2) X Y)` ([Horn 1966](https://doi.org/10.1086/282436)) | scRepertoire's and immunarch's `morisita` |
+| `abundance_cosine` | `sum(x y) / sqrt(sum(x^2) sum(y^2))`, the cosine of the clone sizes | immunarch's `cosine` |
+| `shared_fraction_1`, `shared_fraction_2` | The share of each group's cells whose clonotype the other group holds | |
+
+The first five count clonotypes and grow with the cells of both groups, since larger samples find more of the rare clonotypes that two samples share by chance; the Morisita-Horn index and the cosine of clone sizes weigh clonotypes by their cells, depend little on sample size, and come near 1 when the same expanded clones dominate both groups. `group_sizes` holds each group's cells and clonotypes. `ds.plots.clonal_overlap` draws one `index` as a heatmap of the pairs, `"morisita_horn"` by default, with values printed for at most 12 groups; its tables are `matrix` and `pairs`.
+
+`track` follows clonotypes across groups, such as time points: by default the `top` (10) with the most cells in each group, together, as scRepertoire's `clonalCompare` chooses them, with ties going to the larger clonotype overall; `labels` names them instead. Its `cells` table holds each clonotype's cells and share of the cells of each group of its receptor type, zeros included. `ds.plots.clonotype_tracking` draws one line per clonotype across the groups, in their natural order or in `order`, each labelled with its representative's junction.
+
+On the four pseudo samples of CD8+ donor 1, which share about 500 clonotypes per pair and whose expanded clones give a Morisita-Horn index of 0.994 to 0.997, and on PBMC 10k with clonotypes equal to scRepertoire's `CTstrict` and `CTaa`, every index equals immunarch 0.10.3's `repOverlap` and scRepertoire 2.8.0's `clonalOverlap` within 5e-14, for every pair. scRepertoire's help page gives abundance-weighted formulas for its `overlap`, `raw` and `cosine`, but its outputs follow the presence formulas above, which CyteArc reproduces. On a million simulated T cells in eight samples, `overlap` and `track` each take about 1.3 s and hold at most 270 MiB.
+
 ## Immune receptors
 
 ```{eval-rst}
@@ -193,4 +224,11 @@ The implementation follows the papers rather than the code of iNEXT, which is li
 ```{eval-rst}
 .. autoclass:: cytearc.repertoire.ClonalDiversity
 .. autoclass:: cytearc.repertoire.Rarefaction
+```
+
+## Clonotype overlap
+
+```{eval-rst}
+.. autoclass:: cytearc.repertoire.ClonotypeOverlap
+.. autoclass:: cytearc.repertoire.ClonotypeTracking
 ```

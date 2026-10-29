@@ -80,6 +80,13 @@ from ...repertoire.expansion import (
     frequency_labels,
     group_clone_sizes,
 )
+from ...repertoire.overlap import (
+    ClonotypeOverlap,
+    ClonotypeTracking,
+    group_names,
+    overlap_pairs,
+    top_clonotypes,
+)
 from ...repertoire.receptors import (
     SLOT_FIELDS,
     ImmuneReceptors,
@@ -1363,13 +1370,48 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
     ) -> tuple[tuple[str, ...], list[dict[str, str]], list[CloneSizes]]:
         """Group the cells with a clonotype and count each group's clone sizes.
 
-        A cell without a clonotype, outside ``cell_selection``, or without a
-        label in a ``group_by`` column or in the ``groups`` artifact, is in no
-        group.
-
         Returns:
             The key columns, each group's labels in them, and each group's
             clone sizes, groups in the natural order of their labels.
+        """
+        key_columns, group_keys, pair_groups, _codes, pair_cells = self._clone_counts(
+            clonotypes,
+            group_by=group_by,
+            groups=groups,
+            within_receptor_type=within_receptor_type,
+            cell_selection=cell_selection,
+        )
+        bounds = np.searchsorted(pair_groups, np.arange(len(group_keys) + 1))
+        clone_sizes = [
+            CloneSizes.from_sizes(pair_cells[bounds[index] : bounds[index + 1]])
+            for index in range(len(group_keys))
+        ]
+        return key_columns, group_keys, clone_sizes
+
+    def _clone_counts(
+        self,
+        clonotypes: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None,
+        groups: ArtifactRef | None,
+        within_receptor_type: bool,
+        cell_selection: ArtifactRef | None,
+    ) -> tuple[
+        tuple[str, ...], list[dict[str, str]], np.ndarray, np.ndarray, np.ndarray
+    ]:
+        """Group the cells with a clonotype and count each clonotype's cells.
+
+        The groups are the combinations of the labels of the ``group_by``
+        columns, of the ``groups`` artifact and, with
+        ``within_receptor_type``, of the receptor type. A cell without a
+        clonotype, outside ``cell_selection``, or without a label, is in no
+        group.
+
+        Returns:
+            The key columns, each group's labels in them, in the natural order
+            of the labels, and for each distinct pair of group and clonotype,
+            sorted by group and clonotype code, its group, its clonotype code
+            and its cells.
         """
         clonotype_group = self._clonotype_group(clonotypes)
         if not isinstance(within_receptor_type, bool):
@@ -1439,7 +1481,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             labels.append(receptor_type[has].astype(object))
         clone_codes = codes[has]
         if not labels:
-            return key_columns, [{}], [CloneSizes.from_sizes(np.bincount(clone_codes))]
+            present, cells = np.unique(clone_codes, return_counts=True)
+            return (
+                key_columns,
+                [{}],
+                np.zeros(len(present), dtype=np.int64),
+                present.astype(np.int64),
+                cells.astype(np.int64),
+            )
         label_codes = []
         names_by_column = []
         keep = np.ones(len(clone_codes), dtype=bool)
@@ -1466,13 +1515,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         ]
         kept = clone_codes[keep]
         n_codes = int(kept.max()) + 1 if len(kept) else 1
-        pairs, sizes = np.unique(group_codes * n_codes + kept, return_counts=True)
-        bounds = np.searchsorted(pairs // n_codes, np.arange(len(group_keys) + 1))
-        clone_sizes = [
-            CloneSizes.from_sizes(sizes[bounds[index] : bounds[index + 1]])
-            for index in range(len(group_keys))
-        ]
-        return key_columns, group_keys, clone_sizes
+        pairs, cells = np.unique(group_codes * n_codes + kept, return_counts=True)
+        return (
+            key_columns,
+            group_keys,
+            (pairs // n_codes).astype(np.int64),
+            (pairs % n_codes).astype(np.int64),
+            cells.astype(np.int64),
+        )
 
     @validation_scoped
     def _repertoire_diversity(
@@ -1711,6 +1761,233 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             within_receptor_type=within_receptor_type,
             cell_selection=cell_selection,
             orders=chosen,
+        )
+
+    def _group_table(
+        self,
+        key_columns: tuple[str, ...],
+        group_keys: list[dict[str, str]],
+        pair_groups: np.ndarray,
+        pair_cells: np.ndarray,
+    ) -> pd.DataFrame:
+        """One row per group: its name, labels, cells and clonotypes."""
+        n_groups = len(group_keys)
+        return pd.DataFrame(
+            {
+                "group": group_names(group_keys),
+                **{
+                    column: [key[column] for key in group_keys]
+                    for column in key_columns
+                },
+                "cells": np.bincount(
+                    pair_groups, weights=pair_cells, minlength=n_groups
+                ).astype(np.int64),
+                "clonotypes": np.bincount(pair_groups, minlength=n_groups),
+            }
+        )
+
+    @validation_scoped
+    def _repertoire_overlap(
+        self,
+        clonotypes: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        within_receptor_type: bool = True,
+        cell_selection: ArtifactRef | None = None,
+    ) -> ClonotypeOverlap:
+        """Compare groups of cells by the clonotypes they share.
+
+        The groups are the combinations of the labels of the ``group_by``
+        cell metadata columns, such as the sample or the tissue, and of the
+        ``groups`` label artifact, such as a clustering, among the cells of
+        ``cell_selection``. With ``within_receptor_type`` the receptor type
+        is part of each group and only groups of one receptor type are
+        compared, since a T cell and a B cell never share a clonotype. Cells
+        without a clonotype or a label are left out. Nothing is saved.
+
+        Each pair of groups gets presence indices, which count clonotypes,
+        and abundance indices, which weigh them by their cells, as
+        scRepertoire's ``clonalOverlap`` and immunarch's ``repOverlap`` report
+        them: ``shared`` (the clonotypes of both), ``jaccard``, ``sorensen``,
+        ``overlap`` (shared over the smaller group's clonotypes), ``cosine``
+        (Ochiai's, of presence), ``morisita_horn`` and ``abundance_cosine``,
+        and the share of each group's cells whose clonotype the other holds.
+        Presence indices grow with the cells of both groups, since a larger
+        sample finds more of the rare clonotypes; the Morisita-Horn index
+        depends little on them and is near 1 when the same expanded clones
+        dominate both groups.
+
+        Args:
+            clonotypes: A ``clonotypes`` artifact.
+            group_by: Cell metadata columns whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups.
+            within_receptor_type: Make the receptor type part of each group
+                and compare only groups of one receptor type.
+            cell_selection: Only these cells, or None for every cell of the
+                clonotypes.
+
+        Returns:
+            The groups' cells and clonotypes and the indices of every pair.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If fewer than two groups hold a cell with a clonotype,
+                or a column of the groups is named twice.
+            MemoryError: If grouping the cells does not fit the memory budget.
+        """
+        key_columns, group_keys, pair_groups, pair_codes, pair_cells = (
+            self._clone_counts(
+                clonotypes,
+                group_by=group_by,
+                groups=groups,
+                within_receptor_type=within_receptor_type,
+                cell_selection=cell_selection,
+            )
+        )
+        if len(pair_cells) == 0 or len(group_keys) < 2:
+            raise ValueError(
+                "Overlap needs at least two groups of cells with a clonotype"
+            )
+        sizes = self._group_table(key_columns, group_keys, pair_groups, pair_cells)
+        strata = (
+            np.asarray([key[_RECEPTOR_TYPE_COLUMN] for key in group_keys])
+            if within_receptor_type
+            else None
+        )
+        pairs = overlap_pairs(
+            pair_groups, pair_codes, pair_cells, len(group_keys), strata=strata
+        )
+        names = np.asarray(sizes["group"], dtype=object)
+        pairs.insert(0, "group_1", names[pairs.pop("first").to_numpy()])
+        pairs.insert(1, "group_2", names[pairs.pop("second").to_numpy()])
+        return ClonotypeOverlap(
+            group_sizes=sizes,
+            pairs=pairs,
+            clonotypes=clonotypes,
+            group_by=_within_columns(group_by, "group_by"),
+            groups=groups,
+            within_receptor_type=within_receptor_type,
+            cell_selection=cell_selection,
+        )
+
+    @validation_scoped
+    def _repertoire_track(
+        self,
+        clonotypes: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        within_receptor_type: bool = True,
+        cell_selection: ArtifactRef | None = None,
+        top: int = 10,
+        labels: Sequence[str] | None = None,
+    ) -> ClonotypeTracking:
+        """Follow chosen clonotypes across groups of cells.
+
+        By default the clonotypes are the ``top`` with the most cells in each
+        group, together, as scRepertoire's ``clonalCompare`` chooses them;
+        ``labels`` names them instead, such as ``["clonotype_1"]``. Each
+        chosen clonotype gets its cells and share of cells in every group of
+        its receptor type, zeros included, so a clonotype that expands
+        between time points or spreads between tissues shows it. The groups
+        are those of
+        :meth:`~cytearc.datastore.namespaces.RepertoireAccessor.overlap`.
+        Nothing is saved.
+
+        Args:
+            clonotypes: A ``clonotypes`` artifact.
+            group_by: Cell metadata columns whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups.
+            within_receptor_type: Make the receptor type part of each group.
+            cell_selection: Only these cells, or None for every cell of the
+                clonotypes.
+            top: The clonotypes with the most cells to take from each group.
+            labels: Clonotype labels to follow instead, or None.
+
+        Returns:
+            One row per chosen clonotype and group.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``top`` is not positive, a label names no
+                clonotype, or no cell has a clonotype and a group.
+            MemoryError: If grouping the cells does not fit the memory budget.
+        """
+        if isinstance(top, bool) or not isinstance(top, int | np.integer):
+            raise TypeError("top must be a positive integer")
+        if top < 1:
+            raise ValueError("top must be a positive integer")
+        if labels is not None and (
+            isinstance(labels, str | bytes)
+            or not isinstance(labels, Sequence)
+            or not all(isinstance(label, str) for label in labels)
+        ):
+            raise TypeError("labels must be a sequence of clonotype labels or None")
+        key_columns, group_keys, pair_groups, pair_codes, pair_cells = (
+            self._clone_counts(
+                clonotypes,
+                group_by=group_by,
+                groups=groups,
+                within_receptor_type=within_receptor_type,
+                cell_selection=cell_selection,
+            )
+        )
+        if len(pair_cells) == 0:
+            raise ValueError("No cell has both a clonotype and a group")
+        identifiers = _read(self._clonotype_group(clonotypes), "clonotype_ids").astype(
+            str
+        )
+        if labels is None:
+            chosen = top_clonotypes(
+                pair_groups, pair_codes, pair_cells, len(group_keys), int(top)
+            )
+        else:
+            positions = pd.Index(identifiers).get_indexer(list(labels))
+            unknown = [label for label, at in zip(labels, positions) if at < 0]
+            if unknown:
+                raise ValueError(f"No clonotype is labelled {unknown[:5]}")
+            chosen = np.unique(positions)
+        sizes = self._group_table(key_columns, group_keys, pair_groups, pair_cells)
+        strata = (
+            np.asarray([key[_RECEPTOR_TYPE_COLUMN] for key in group_keys])
+            if within_receptor_type
+            else np.zeros(len(group_keys), dtype=object)
+        )
+        observed = pd.DataFrame(
+            {"code": pair_codes, "group": pair_groups, "cells": pair_cells}
+        )
+        observed = observed[observed["code"].isin(chosen)]
+        rows = []
+        for code in chosen.tolist():
+            mine = observed[observed["code"] == code]
+            cells_by_group = dict(zip(mine["group"], mine["cells"], strict=True))
+            # The groups of every stratum that the clonotype has cells in.
+            reach = set(strata[mine["group"].to_numpy()].tolist())
+            for group in range(len(group_keys)):
+                if strata[group] not in reach:
+                    continue
+                count = int(cells_by_group.get(group, 0))
+                rows.append(
+                    {
+                        "clonotype": identifiers[code],
+                        "group": sizes["group"].iat[group],
+                        **group_keys[group],
+                        "cells": count,
+                        "fraction": count / int(sizes["cells"].iat[group]),
+                    }
+                )
+        return ClonotypeTracking(
+            cells=pd.DataFrame(
+                rows,
+                columns=["clonotype", "group", *key_columns, "cells", "fraction"],
+            ),
+            clonotypes=clonotypes,
+            tracked=tuple(identifiers[chosen].tolist()),
+            group_by=_within_columns(group_by, "group_by"),
+            groups=groups,
+            within_receptor_type=within_receptor_type,
+            cell_selection=cell_selection,
         )
 
 
