@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any
@@ -6,10 +7,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib.collections import PolyCollection
 from matplotlib.colors import to_rgba
 from matplotlib.markers import MarkerStyle
-from scipy.stats import norm
+from matplotlib.text import Text
+from scipy.stats import beta, false_discovery_control, norm
 
+from cytearc.perturbation.associations import PerturbationAssociations
 from cytearc.perturbation.edistance import PerturbationEDistance
 from cytearc.perturbation.efficiency import PerturbationEfficiency
 from cytearc.perturbation.guide_calls import (
@@ -31,6 +35,8 @@ from cytearc.perturbation.mixtures import (
 from cytearc.plotting._figure import LegendSpec
 from cytearc.plotting._style import foreground_color
 from cytearc.plotting.perturbation import (
+    association_calibration,
+    association_volcano,
     edistance,
     efficiency,
     guide_calls,
@@ -2327,3 +2333,1338 @@ def test_the_mixscape_plot_needs_a_store_with_mixscape_classes(
 ) -> None:
     with pytest.raises(TypeError, match="store does not provide Mixscape classes"):
         mixscape(store, MIXSCAPE, show=False)
+
+
+ASSOCIATIONS = ArtifactRef(
+    scope="assay", assay="RNA", kind="perturbation_associations", artifact_id="f" * 64
+)
+TARGETING = to_rgba("#2b6cb0")
+NEGATIVE_CONTROL = to_rgba("#d55e00")
+CUT = to_rgba("#d55e00")
+NAN = np.nan
+AssociationRow = tuple[str, str, float, float, float]
+
+# Each pair is a target, a gene, its p-value, log2 fold change and z; a pair
+# with a NaN p-value failed QC. At FDR 0.1 the six smallest p-values are
+# significant, so the Benjamini-Hochberg cut is 0.03. KLF1 and HBG1 tie on
+# their p-value, and KLF1 has the larger z.
+DISCOVERY_ROWS: list[AssociationRow] = [
+    ("MYC", "NPM1", 1e-12, -1.8, -7.1),
+    ("MYC", "NCL", 3e-5, -0.9, -4.2),
+    ("MYC", "CD19", 0.4, 0.1, 0.8),
+    ("MYC", "ACTB", NAN, NAN, NAN),
+    ("TP53", "CDKN1A", 2e-8, -2.6, -5.6),
+    ("TP53", "BAX", 0.002, 0.7, 3.1),
+    ("TP53", "GAPDH", 0.9, 0.02, 0.1),
+    ("GATA1", "HBG1", 0.03, 1.2, 2.2),
+    ("GATA1", "KLF1", 0.03, -0.5, -2.6),
+    ("GATA1", "TAL1", NAN, NAN, NAN),
+    ("GATA1", "LMO2", 1.0, 0.0, 0.0),
+    ("CD4", "IL2", 0.5, 0.2, 0.67),
+    ("CD4", "IL7R", 0.7, -0.1, -0.39),
+]
+# The tested pairs of DISCOVERY_ROWS from the smallest p-value up.
+VOLCANO_ORDER = [
+    "MYC:NPM1",
+    "TP53:CDKN1A",
+    "MYC:NCL",
+    "TP53:BAX",
+    "GATA1:KLF1",
+    "GATA1:HBG1",
+    "MYC:CD19",
+    "CD4:IL2",
+    "CD4:IL7R",
+    "TP53:GAPDH",
+    "GATA1:LMO2",
+]
+# A p-value of 0, or below 1e-300, has no height and sits at the top edge,
+# unlike one of 1e-300. MYC's cells hold no counts of MYC or MAX.
+EDGE_ROWS: list[AssociationRow] = [
+    ("TP53", "CDKN1A", 0.0, -2.6, -40.0),
+    ("TP53", "MDM2", 1e-310, 2.1, 38.0),
+    ("TP53", "BAX", 1e-300, 0.7, 37.0),
+    ("MYC", "MYC", 1e-6, -np.inf, -5.0),
+    ("MYC", "MAX", 0.0, -np.inf, -41.0),
+    ("MYC", "NCL", 0.5, 0.3, 0.7),
+]
+EDGE_LEGEND = [
+    "Significant at FDR 0.1",
+    "Not significant",
+    "p-value below 1e-300",
+    "No counts in the perturbed cells",
+    "Benjamini-Hochberg cut",
+]
+# Groups of non-targeting guides against the other control cells. At FDR 0.1
+# the two smallest p-values are significant: two false discoveries.
+CALIBRATION_ROWS: list[AssociationRow] = [
+    ("NT1", "NPM1", 1e-5, 0.21, 4.4),
+    ("NT1", "NCL", 2e-5, -0.18, -4.3),
+    ("NT1", "CD19", 0.03, 0.05, 2.2),
+    ("NT1", "ACTB", 0.95, -0.02, -0.06),
+    ("NT1", "BAX", 0.31, 0.1, 1.0),
+    ("NT2", "GAPDH", 0.62, -0.08, -0.5),
+    ("NT2", "HBG1", 0.11, 0.0, 1.6),
+    ("NT2", "KLF1", 0.78, 0.03, 0.28),
+    ("NT2", "TAL1", NAN, NAN, NAN),
+    ("NT2", "LMO2", 0.5, -0.04, -0.67),
+    ("NT3", "IL2", 0.23, 0.07, 1.2),
+    ("NT3", "IL7R", 0.87, -0.01, -0.16),
+    ("NT3", "MDM2", 0.04, 0.12, 2.05),
+    ("NT3", "MAX", 0.69, -0.06, -0.4),
+    ("NT3", "CDKN1A", 0.41, 0.02, 0.82),
+]
+# Each target with its own gene; the p-value of MYC underflows to 0.
+POSITIVE_ROWS: list[AssociationRow] = [
+    ("MYC", "MYC", 0.0, -3.1, -30.0),
+    ("TP53", "TP53", 1e-40, -2.4, -13.0),
+    ("GATA1", "GATA1", 1e-9, -1.5, -6.0),
+    ("CD4", "CD4", NAN, NAN, NAN),
+]
+
+
+def _grade(n_false: int) -> str:
+    """Return the SCEPTRE book's grade of a calibration with ``n_false`` false discoveries."""
+    for most, grade in ((1, "excellent"), (6, "mild"), (14, "moderate")):
+        if n_false <= most:
+            return grade
+    return "severe"
+
+
+def _pair_table(
+    target: Sequence[str] | np.ndarray,
+    feature: Sequence[str] | np.ndarray,
+    p_value: np.ndarray,
+    fold_change: np.ndarray,
+    z: np.ndarray,
+    *,
+    alpha: float = 0.1,
+    group_cells: int | None = None,
+) -> pd.DataFrame:
+    """Build a table of pairs as ``load_associations`` returns it.
+
+    A pair with a NaN p-value failed QC and holds NaN in every test column.
+    Benjamini-Hochberg adjusts the p-values of the other pairs, and those
+    adjusted to at most ``alpha`` are significant. There are 300 control
+    cells. Each target has 20 cells and 5 more for each target before it, or,
+    with ``group_cells``, each target is a group of that many control cells
+    tested against the others.
+    """
+    p = np.asarray(p_value, dtype=np.float64)
+    passed = ~np.isnan(p)
+    adjusted = np.full(len(p), np.nan)
+    if passed.any():
+        adjusted[passed] = false_discovery_control(p[passed])
+    names = np.asarray(target, dtype=object)
+    rank = {name: index for index, name in enumerate(dict.fromkeys(names.tolist()))}
+    if group_cells is None:
+        n_cells = np.asarray([20 + 5 * rank[name] for name in names], dtype=np.int64)
+    else:
+        n_cells = np.full(len(p), group_cells, dtype=np.int64)
+    second = passed & (p <= 0.01)
+    return pd.DataFrame(
+        {
+            "target": names,
+            "feature": np.asarray(feature, dtype=object),
+            "n_cells": n_cells,
+            "n_control_cells": 300 - (0 if group_cells is None else n_cells),
+            "n_nonzero_cells": np.where(passed, 12, 3),
+            "n_nonzero_control_cells": np.where(passed, 80, 4),
+            "pass_qc": passed,
+            "z": np.where(passed, z, np.nan),
+            "p_value": p,
+            "adjusted_p_value": adjusted,
+            "significant": passed & (adjusted <= alpha),
+            "log2_fold_change": np.where(passed, fold_change, np.nan),
+            "se_log2_fold_change": np.where(passed, 0.3, np.nan),
+            "stage": np.where(passed, np.where(second, 2, 1), 0),
+            "skew_location": np.where(second, 0.1, np.nan),
+            "skew_scale": np.where(second, 1.1, np.nan),
+            "skew_shape": np.where(second, 0.2, np.nan),
+        }
+    )
+
+
+def _pairs(
+    rows: list[AssociationRow], *, alpha: float = 0.1, group_cells: int | None = None
+) -> pd.DataFrame:
+    """Build the table of ``rows``; negative-control groups name their guides."""
+    columns = [list(column) for column in zip(*rows, strict=True)] or [[]] * 5
+    target, feature, p_value, fold_change, z = columns
+    table = _pair_table(
+        target,
+        feature,
+        np.asarray(p_value, dtype=np.float64),
+        np.asarray(fold_change, dtype=np.float64),
+        np.asarray(z, dtype=np.float64),
+        alpha=alpha,
+        group_cells=group_cells,
+    )
+    if group_cells is not None:
+        table["control_guides"] = [f"{name}_a+{name}_b" for name in target]
+    return table
+
+
+def _associations_record(
+    discovery: list[AssociationRow] | pd.DataFrame = DISCOVERY_ROWS,
+    calibration: list[AssociationRow] = CALIBRATION_ROWS,
+    positive: list[AssociationRow] = POSITIVE_ROWS,
+    *,
+    side: str = "both",
+) -> PerturbationAssociations:
+    """Build the record that ``load_associations`` returns for these pairs.
+
+    The negative controls are groups of 30 control cells, and their false
+    discoveries and grade follow from their significant pairs.
+    """
+    negative = _pairs(calibration, group_cells=30)
+    n_false = int(negative["significant"].sum())
+    return PerturbationAssociations(
+        discovery=(
+            discovery if isinstance(discovery, pd.DataFrame) else _pairs(discovery)
+        ),
+        calibration=negative,
+        positive=_pairs(positive),
+        alpha=0.1,
+        side=side,
+        integration="union",
+        from_assay="RNA",
+        n_false_discoveries=n_false,
+        calibration_grade=_grade(n_false),
+    )
+
+
+def _associations_store(
+    record: PerturbationAssociations, requests: list[ArtifactRef] | None = None
+) -> SimpleNamespace:
+    """A store whose loader returns ``record`` and notes each reference it reads."""
+
+    def load(ref: ArtifactRef) -> PerturbationAssociations:
+        if requests is not None:
+            requests.append(ref)
+        return record
+
+    return SimpleNamespace(perturbation=SimpleNamespace(load_associations=load))
+
+
+def _tested(pairs: pd.DataFrame) -> pd.DataFrame:
+    """Return the pairs that passed QC, from the smallest p-value up."""
+    return pairs[pairs["pass_qc"]].sort_values("p_value", kind="stable")
+
+
+def _marker_vertices(marker: str) -> np.ndarray:
+    style = MarkerStyle(marker)
+    vertices: np.ndarray = style.get_path().transformed(style.get_transform()).vertices
+    return vertices
+
+
+def _point_groups(ax: Any) -> list[Any]:
+    """Return the scatters of a panel, without a QQ band."""
+    return [
+        collection
+        for collection in ax.collections
+        if not isinstance(collection, PolyCollection)
+    ]
+
+
+def _check_points(
+    collections: list[Any],
+    groups: list[tuple[np.ndarray, str, tuple[float, ...]]],
+    *,
+    rasterized: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Check each scatter's marker, colour and rasterization against ``groups``.
+
+    Each group is the rows of a scatter, its marker and its colour. Returns
+    each row's drawn position.
+    """
+    assert len(collections) == len(groups)
+    n_rows = len(groups[0][0])
+    x = np.full(n_rows, np.nan)
+    y = np.full(n_rows, np.nan)
+    for collection, (chosen, marker, color) in zip(collections, groups, strict=True):
+        np.testing.assert_array_equal(
+            collection.get_paths()[0].vertices, _marker_vertices(marker)
+        )
+        np.testing.assert_allclose(collection.get_facecolors(), [to_rgba(color, 0.75)])
+        assert collection.get_rasterized() is rasterized
+        offsets = np.asarray(collection.get_offsets())
+        x[chosen] = offsets[:, 0]
+        y[chosen] = offsets[:, 1]
+    assert not np.isnan(x).any()
+    return x, y
+
+
+def _check_top_edge(
+    ax: Any, y: np.ndarray, at_top: np.ndarray, heights: np.ndarray
+) -> None:
+    """Check that the rows at the top edge share a height above the others."""
+    bottom, top = ax.get_ylim()
+    assert ((bottom < y) & (y < top)).all()
+    np.testing.assert_allclose(y[~at_top], heights[~at_top])
+    if at_top.any():
+        edge = y[at_top]
+        assert (edge == edge[0]).all()
+        assert edge[0] > heights[~at_top].max(initial=0.0)
+        assert top - edge[0] < 0.05 * (top - bottom)
+
+
+def _check_volcano(result: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Check that each drawn pair is a point at its fold change and p-value.
+
+    Returns the drawn position of each row of the table.
+    """
+    ax = result.axes["volcano"]
+    table = result.tables["volcano"]
+    fold = table["log2_fold_change"].to_numpy()
+    p = table["p_value"].to_numpy()
+    significant = table["significant"].to_numpy(dtype=bool)
+    no_counts = np.isneginf(fold)
+    at_top = p < 1e-300
+    shapes = np.where(no_counts, "<", np.where(at_top, "^", "o"))
+    # The pairs that are not significant come first, each shape in turn.
+    groups = [
+        (chosen, shape, color)
+        for flag, color in ((False, NOT_SIGNIFICANT), (True, SIGNIFICANT))
+        for shape in ("o", "^", "<")
+        if (chosen := (significant == flag) & (shapes == shape)).any()
+    ]
+    x, y = _check_points(
+        ax.collections, groups, rasterized=result.provenance.extras["rasterized"]
+    )
+    np.testing.assert_array_equal(x[~no_counts], fold[~no_counts])
+    left, right = ax.get_xlim()
+    assert ((left < x) & (x < right)).all()
+    if no_counts.any():
+        # A fold change of minus infinity sits at the left edge.
+        edge = x[no_counts]
+        assert (edge == edge[0]).all()
+        assert edge[0] < fold[~no_counts].min(initial=0.0)
+        assert edge[0] - left < 0.05 * (right - left)
+    heights = np.full(len(p), np.inf)
+    heights[~at_top] = -np.log10(p[~at_top])
+    _check_top_edge(ax, y, at_top, heights)
+    return x, y
+
+
+def _label_text(table: pd.DataFrame) -> list[str]:
+    return (table["target"] + ":" + table["feature"]).tolist()
+
+
+def _check_labels_apart(result: Any) -> None:
+    """Check that the labels lie inside the axes and that no two overlap."""
+    ax = result.axes["volcano"]
+    result.figure.draw_without_rendering()
+    frame = ax.get_window_extent()
+    boxes = [Text.get_window_extent(label) for label in ax.texts]
+    # Half a pixel of slack absorbs rounding.
+    for index, box in enumerate(boxes):
+        assert frame.x0 - 0.5 <= box.x0 and box.x1 <= frame.x1 + 0.5
+        assert frame.y0 - 0.5 <= box.y0 and box.y1 <= frame.y1 + 0.5
+        for other in boxes[index + 1 :]:
+            assert not (
+                box.x0 < other.x1 - 0.5
+                and other.x0 < box.x1 - 0.5
+                and box.y0 < other.y1 - 0.5
+                and other.y0 < box.y1 - 0.5
+            )
+
+
+def test_association_volcano_draws_each_tested_discovery_pair() -> None:
+    requests: list[ArtifactRef] = []
+    record = _associations_record()
+
+    result = association_volcano(
+        _associations_store(record, requests), ASSOCIATIONS, show=False
+    )
+
+    try:
+        assert requests == [ASSOCIATIONS]
+        assert list(result.axes) == ["volcano"]
+        table = result.tables["volcano"]
+        assert _label_text(table) == VOLCANO_ORDER
+        pd.testing.assert_frame_equal(
+            table,
+            record.discovery.iloc[[0, 4, 1, 5, 8, 7, 2, 11, 12, 6, 10]].reset_index(
+                drop=True
+            ),
+        )
+        x, y = _check_volcano(result)
+        ax = result.axes["volcano"]
+        zero, cut = ax.get_lines()
+        assert list(zero.get_xdata()) == [0.0, 0.0]
+        assert to_rgba(zero.get_color()) == to_rgba(foreground_color("notebook"))
+        # The cut is the largest p-value of a significant pair.
+        assert cut.get_linestyle() == "--"
+        np.testing.assert_allclose(cut.get_ydata(), [-np.log10(0.03)] * 2)
+        assert to_rgba(cut.get_color()) == CUT
+        assert ax.get_xlabel() == "Log2 fold change against control cells"
+        assert ax.get_ylabel() == "-log10 p-value"
+        assert ax.get_title().splitlines() == [
+            "Association tests of the discovery pairs",
+            "6 of 11 tested pairs significant at FDR 0.1",
+            "Not plotted: 2 untested pairs",
+        ]
+        # The ten smallest p-values are labelled at their points.
+        labels = ax.texts
+        assert [label.get_text() for label in labels] == VOLCANO_ORDER[:10]
+        for row, label in enumerate(labels):
+            assert label.xy == (x[row], y[row])
+            assert to_rgba(label.get_color()) == to_rgba(foreground_color("notebook"))
+        _check_labels_apart(result)
+        (legend,) = result.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "Significant at FDR 0.1",
+            "Not significant",
+            "Benjamini-Hochberg cut",
+        ]
+        assert result.legends == (
+            LegendSpec(kind="categorical", label="Significance"),
+            LegendSpec(kind="line", label="Benjamini-Hochberg cut"),
+        )
+        provenance = result.provenance
+        assert provenance.assay == "RNA"
+        # The cells of MYC, TP53, GATA1 and CD4, and the control cells.
+        assert provenance.n_cells == 20 + 25 + 30 + 35 + 300
+        assert provenance.notes == ("perturbation_associations",)
+        assert provenance.extras == {
+            "tests": ASSOCIATIONS.to_dict(),
+            "side": "both",
+            "integration": "union",
+            "from_assay": "RNA",
+            "alpha": 0.1,
+            "targets": None,
+            "label_top": 10,
+            "n_tested": 11,
+            "n_significant": 6,
+            "largest_significant_p_value": 0.03,
+            "rasterized": False,
+        }
+    finally:
+        result.close()
+
+
+def test_association_volcano_breaks_ties_by_z_and_then_by_name() -> None:
+    rows: list[AssociationRow] = [
+        ("B", "G2", 0.01, 0.5, 2.6),
+        ("A", "G9", 0.01, -0.5, -2.6),
+        ("C", "G1", 0.01, 0.6, -3.0),
+        ("A", "G1", 0.01, 0.4, 2.6),
+    ]
+
+    result = association_volcano(
+        _associations_store(_associations_record(rows)),
+        ASSOCIATIONS,
+        label_top=2,
+        show=False,
+    )
+
+    try:
+        assert _label_text(result.tables["volcano"]) == ["C:G1", "A:G1", "A:G9", "B:G2"]
+        texts = [label.get_text() for label in result.axes["volcano"].texts]
+        assert texts == ["C:G1", "A:G1"]
+        _check_volcano(result)
+    finally:
+        result.close()
+
+
+def test_association_volcano_keeps_the_chosen_targets() -> None:
+    store = _associations_store(_associations_record())
+
+    kept = association_volcano(
+        store, ASSOCIATIONS, targets=["CD4", "GATA1", "CD4"], show=False
+    )
+    quiet = association_volcano(store, ASSOCIATIONS, targets=["CD4"], show=False)
+
+    try:
+        assert _label_text(kept.tables["volcano"]) == [
+            "GATA1:KLF1",
+            "GATA1:HBG1",
+            "CD4:IL2",
+            "CD4:IL7R",
+            "GATA1:LMO2",
+        ]
+        _check_volcano(kept)
+        ax = kept.axes["volcano"]
+        # The cut comes from the pairs of every target.
+        _, cut = ax.get_lines()
+        np.testing.assert_allclose(cut.get_ydata(), [-np.log10(0.03)] * 2)
+        assert ax.get_title().splitlines() == [
+            "Association tests of the discovery pairs",
+            "2 of 5 tested pairs significant at FDR 0.1",
+            "Not plotted: 1 untested pair",
+        ]
+        extras = kept.provenance.extras
+        assert extras["targets"] == ["CD4", "GATA1"]
+        assert extras["largest_significant_p_value"] == 0.03
+        assert kept.provenance.n_cells == 30 + 35 + 300
+        # No pair of CD4 is significant, and the axis still holds the cut.
+        _check_volcano(quiet)
+        ax = quiet.axes["volcano"]
+        _, cut = ax.get_lines()
+        assert cut.get_ydata()[0] == pytest.approx(-np.log10(0.03))
+        assert cut.get_ydata()[0] < ax.get_ylim()[1]
+        assert ax.get_title().splitlines()[1:] == [
+            "0 of 2 tested pairs significant at FDR 0.1"
+        ]
+        (legend,) = quiet.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "Not significant",
+            "Benjamini-Hochberg cut",
+        ]
+    finally:
+        kept.close()
+        quiet.close()
+
+
+def test_association_volcano_names_the_targets_it_lacks() -> None:
+    store = _associations_store(_associations_record())
+
+    with pytest.raises(
+        ValueError, match="The discovery pairs have no target named 'SOX2', 'PAX5'"
+    ):
+        association_volcano(
+            store, ASSOCIATIONS, targets=["MYC", "SOX2", "PAX5"], show=False
+        )
+
+
+def test_association_volcano_draws_extreme_pairs_at_the_edges() -> None:
+    record = _associations_record(EDGE_ROWS)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = association_volcano(
+            _associations_store(record), ASSOCIATIONS, show=False
+        )
+
+    try:
+        table = result.tables["volcano"]
+        # The p-values of 0 tie, so the larger z comes first.
+        assert _label_text(table) == [
+            "MYC:MAX",
+            "TP53:CDKN1A",
+            "TP53:MDM2",
+            "TP53:BAX",
+            "MYC:MYC",
+            "MYC:NCL",
+        ]
+        x, y = _check_volcano(result)
+        # A p-value of 1e-300 keeps its height, and MAX sits at both edges.
+        assert y[3] == pytest.approx(300.0)
+        assert (x[0], y[0]) == (x[4], y[1])
+        ax = result.axes["volcano"]
+        _, cut = ax.get_lines()
+        np.testing.assert_allclose(cut.get_ydata(), [6.0, 6.0])
+        (legend,) = result.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == EDGE_LEGEND
+        markers = [handle.get_marker() for handle in legend.legend_handles[:4]]
+        assert markers == ["o", "o", "^", "<"]
+        # The markers of the edges are hollow.
+        assert [
+            handle.get_markerfacecolor() for handle in legend.legend_handles[2:4]
+        ] == [
+            "none",
+            "none",
+        ]
+        _check_labels_apart(result)
+    finally:
+        result.close()
+
+
+def test_association_volcano_draws_a_cut_below_1e_300_at_the_top_edge() -> None:
+    rows: list[AssociationRow] = [
+        ("A", "G1", 0.0, -2.0, -40.0),
+        ("A", "G2", 0.0, 2.0, 41.0),
+        ("A", "G3", 0.6, 0.1, 0.5),
+        ("A", "G4", 0.9, 0.0, 0.1),
+    ]
+
+    result = association_volcano(
+        _associations_store(_associations_record(rows)), ASSOCIATIONS, show=False
+    )
+
+    try:
+        _, y = _check_volcano(result)
+        ax = result.axes["volcano"]
+        _, cut = ax.get_lines()
+        assert list(cut.get_ydata()) == [y[0], y[0]]
+        assert result.provenance.extras["largest_significant_p_value"] == 0.0
+    finally:
+        result.close()
+
+
+def test_association_volcano_without_a_significant_pair_draws_no_cut() -> None:
+    rows: list[AssociationRow] = [
+        ("A", "G1", 0.3, 0.1, 1.0),
+        ("A", "G2", 0.8, -0.1, -0.25),
+    ]
+
+    result = association_volcano(
+        _associations_store(_associations_record(rows)), ASSOCIATIONS, show=False
+    )
+
+    try:
+        _check_volcano(result)
+        ax = result.axes["volcano"]
+        (zero,) = ax.get_lines()
+        assert list(zero.get_xdata()) == [0.0, 0.0]
+        (legend,) = result.figure.legends
+        assert [text.get_text() for text in legend.get_texts()] == ["Not significant"]
+        assert result.provenance.extras["largest_significant_p_value"] is None
+        assert ax.get_title().splitlines() == [
+            "Association tests of the discovery pairs",
+            "0 of 2 tested pairs significant at FDR 0.1",
+        ]
+    finally:
+        result.close()
+
+
+def test_association_volcano_without_a_finite_height_still_shows_zero() -> None:
+    ones: list[AssociationRow] = [
+        ("A", "G1", 1.0, 0.1, 0.0),
+        ("A", "G2", 1.0, -0.1, 0.0),
+    ]
+    zeros: list[AssociationRow] = [
+        ("A", "G1", 0.0, 2.0, 40.0),
+        ("A", "G2", 0.0, -2.0, -39.0),
+    ]
+
+    flat = association_volcano(
+        _associations_store(_associations_record(ones)), ASSOCIATIONS, show=False
+    )
+    edged = association_volcano(
+        _associations_store(_associations_record(zeros)), ASSOCIATIONS, show=False
+    )
+
+    try:
+        # The p-values of 1 sit at 0, on an axis that runs to 1.
+        _, y = _check_volcano(flat)
+        assert list(y) == [0.0, 0.0]
+        assert flat.axes["volcano"].get_ylim() == pytest.approx((-0.05, 1.05))
+        # The p-values of 0, and the cut among them, sit at the top edge of an
+        # axis that runs to 1 below it.
+        _, y = _check_volcano(edged)
+        assert list(y) == pytest.approx([1.15, 1.15])
+        ax = edged.axes["volcano"]
+        assert ax.get_ylim() == pytest.approx((-0.05, 1.2))
+        _, cut = ax.get_lines()
+        assert list(cut.get_ydata()) == pytest.approx([1.15, 1.15])
+    finally:
+        flat.close()
+        edged.close()
+
+
+def test_association_volcano_labels_the_chosen_number_of_pairs() -> None:
+    store = _associations_store(_associations_record())
+
+    three = association_volcano(store, ASSOCIATIONS, label_top=np.int64(3), show=False)
+    none = association_volcano(store, ASSOCIATIONS, label_top=0, show=False)
+    every = association_volcano(store, ASSOCIATIONS, label_top=50, show=False)
+
+    try:
+        texts = [label.get_text() for label in three.axes["volcano"].texts]
+        assert texts == VOLCANO_ORDER[:3]
+        assert three.provenance.extras["label_top"] == 3
+        assert type(three.provenance.extras["label_top"]) is int
+        assert len(none.axes["volcano"].texts) == 0
+        texts = [label.get_text() for label in every.axes["volcano"].texts]
+        assert texts == VOLCANO_ORDER
+        _check_labels_apart(every)
+    finally:
+        three.close()
+        none.close()
+        every.close()
+
+
+def test_association_volcano_labels_genes_by_name() -> None:
+    discovery = _pairs(DISCOVERY_ROWS)
+    discovery.insert(2, "feature_name", "name-" + discovery["feature"])
+    store = _associations_store(_associations_record(discovery))
+
+    plot = association_volcano(store, ASSOCIATIONS, label_top=3, show=False)
+
+    try:
+        texts = [label.get_text() for label in plot.axes["volcano"].texts]
+        assert texts == [
+            "{}:name-{}".format(*label.split(":")) for label in VOLCANO_ORDER[:3]
+        ]
+    finally:
+        plot.close()
+
+
+def test_association_volcano_moves_crowded_labels_apart() -> None:
+    # Five pairs share almost one place, near the top right of the volcano.
+    rows: list[AssociationRow] = [
+        ("A", f"GENE{index}", 1e-20 * (1 + index / 100), 2.0 + index / 1000, 9.0)
+        for index in range(5)
+    ]
+    rows.append(("A", "OTHER", 0.5, -1.0, -0.7))
+
+    result = association_volcano(
+        _associations_store(_associations_record(rows)), ASSOCIATIONS, show=False
+    )
+
+    try:
+        labels = result.axes["volcano"].texts
+        assert [label.get_text() for label in labels] == [
+            *(f"A:GENE{index}" for index in range(5)),
+            "A:OTHER",
+        ]
+        _check_labels_apart(result)
+        # A label starts beside its point, towards the middle; the others move
+        # aside, and those above or below their points have a line to them.
+        first = labels[0]
+        assert first.xyann == (-5.0, 0.0)
+        assert first.get_horizontalalignment() == "right"
+        other = labels[5]
+        assert other.xyann == (5.0, 0.0)
+        assert other.get_horizontalalignment() == "left"
+        assert any(label.xyann[1] != 0 for label in labels[1:5])
+        for label in labels:
+            assert label.arrow_patch.get_visible() == (label.xyann[1] != 0)
+            side = "left" if label.xyann[0] > 0 else "right"
+            assert label.get_horizontalalignment() == side
+    finally:
+        result.close()
+
+
+def test_association_volcano_rasterizes_more_than_100000_points() -> None:
+    n_pairs = 100_000
+    discovery = _pair_table(
+        ["A"] * n_pairs + ["B"],
+        [f"G{index}" for index in range(n_pairs + 1)],
+        np.linspace(0.05, 1.0, n_pairs + 1),
+        np.linspace(-1.0, 1.0, n_pairs + 1),
+        np.linspace(2.0, 0.0, n_pairs + 1),
+    )
+    store = _associations_store(_associations_record(discovery))
+
+    every = association_volcano(store, ASSOCIATIONS, label_top=0, show=False)
+    most = association_volcano(
+        store, ASSOCIATIONS, targets=["A"], label_top=0, show=False
+    )
+
+    try:
+        assert len(every.tables["volcano"]) == n_pairs + 1
+        assert every.provenance.extras["rasterized"] is True
+        collections = every.axes["volcano"].collections
+        assert collections and all(c.get_rasterized() for c in collections)
+        assert len(most.tables["volcano"]) == n_pairs
+        assert most.provenance.extras["rasterized"] is False
+        assert not any(c.get_rasterized() for c in most.axes["volcano"].collections)
+    finally:
+        every.close()
+        most.close()
+
+
+@pytest.mark.parametrize(
+    ("side", "words"),
+    [("both", ""), ("left", " for a decrease"), ("right", " for an increase")],
+)
+def test_the_association_plots_name_the_side_tested(side: str, words: str) -> None:
+    store = _associations_store(_associations_record(side=side))
+
+    volcano = association_volcano(store, ASSOCIATIONS, show=False)
+    calibration = association_calibration(store, ASSOCIATIONS, show=False)
+
+    try:
+        assert volcano.axes["volcano"].get_ylabel() == f"-log10 p-value{words}"
+        qq_label = calibration.axes["qq"].get_ylabel()
+        assert qq_label == f"Observed -log10 p-value{words}"
+        controls_label = calibration.axes["controls"].get_ylabel()
+        assert controls_label == f"-log10 p-value{words}"
+        assert volcano.provenance.extras["side"] == side
+        assert calibration.provenance.extras["side"] == side
+    finally:
+        volcano.close()
+        calibration.close()
+
+
+def test_association_volcano_draws_into_caller_axes_in_the_theme() -> None:
+    figure, ax = plt.subplots()
+    store = _associations_store(_associations_record(EDGE_ROWS))
+
+    try:
+        result = association_volcano(
+            store, ASSOCIATIONS, target=ax, theme="dark", show=False
+        )
+        assert result.owns_figure is False
+        assert result.figure is figure
+        assert result.axes == {"volcano": ax}
+        assert figure.legends == []
+        texts = [text.get_text() for text in ax.get_legend().get_texts()]
+        assert texts == EDGE_LEGEND
+        _check_volcano(result)
+        dark = to_rgba(foreground_color("dark"))
+        zero, _ = ax.get_lines()
+        assert to_rgba(zero.get_color()) == dark
+        assert all(to_rgba(label.get_color()) == dark for label in ax.texts)
+        assert to_rgba(ax.title.get_color()) == dark
+        _check_labels_apart(result)
+    finally:
+        plt.close(figure)
+
+
+def test_association_volcano_can_drop_the_legend() -> None:
+    store = _associations_store(_associations_record())
+
+    plain = association_volcano(store, ASSOCIATIONS, show_legend=False, show=False)
+    legended = association_volcano(store, ASSOCIATIONS, show=False)
+
+    try:
+        assert plain.figure.legends == []
+        assert plain.axes["volcano"].get_legend() is None
+        # Only a figure with a legend leaves room for it at the right.
+        assert plain.figure.get_size_inches()[0] < legended.figure.get_size_inches()[0]
+    finally:
+        plain.close()
+        legended.close()
+
+
+def test_showing_the_association_plots_releases_their_figures() -> None:
+    store = _associations_store(_associations_record())
+
+    volcano = association_volcano(store, ASSOCIATIONS)
+    calibration = association_calibration(store, ASSOCIATIONS)
+
+    assert _label_text(volcano.tables["volcano"]) == VOLCANO_ORDER
+    assert calibration.provenance.extras["n_false_discoveries"] == 2
+
+
+@pytest.mark.parametrize(
+    ("arguments", "error", "message"),
+    [
+        ({"label_top": -1}, ValueError, "label_top must be a non-negative integer"),
+        ({"label_top": True}, ValueError, "label_top must be a non-negative integer"),
+        ({"label_top": 2.0}, ValueError, "label_top must be a non-negative integer"),
+        ({"label_top": "3"}, ValueError, "label_top must be a non-negative integer"),
+        ({"targets": "MYC"}, TypeError, "targets must be a sequence of targets"),
+        ({"targets": [1]}, TypeError, "targets must be a sequence of targets"),
+        ({"targets": []}, ValueError, "targets must name at least one target"),
+    ],
+)
+def test_the_association_volcano_refuses_settings_it_cannot_use(
+    arguments: dict[str, Any], error: type[Exception], message: str
+) -> None:
+    requests: list[ArtifactRef] = []
+    store = _associations_store(_associations_record(), requests)
+
+    with pytest.raises(error, match=message):
+        association_volcano(store, ASSOCIATIONS, show=False, **arguments)
+    # The settings are checked before the record is read.
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    ("rows", "targets", "message"),
+    [
+        ([("MYC", "NPM1", NAN, NAN, NAN)], None, "None of the discovery pairs passed"),
+        ([], None, "None of the discovery pairs passed QC"),
+        (
+            [*DISCOVERY_ROWS, ("CD8", "GZMB", NAN, NAN, NAN)],
+            ["CD8"],
+            "None of the discovery pairs of these targets passed QC",
+        ),
+    ],
+)
+def test_the_association_volcano_needs_a_tested_discovery_pair(
+    rows: list[AssociationRow], targets: list[str] | None, message: str
+) -> None:
+    store = _associations_store(_associations_record(rows))
+
+    with pytest.raises(ValueError, match=message):
+        association_volcano(store, ASSOCIATIONS, targets=targets, show=False)
+
+
+def _check_qq(
+    result: Any, record: PerturbationAssociations, *, theme: str = "notebook"
+) -> None:
+    """Check the QQ panel against the tested p-values and the Beta band."""
+    ax = result.axes["qq"]
+    points = result.tables["qq"]
+    # Each set from its smallest p-value up, against the means of as many
+    # ordered uniform p-values.
+    sets = {
+        "calibration": _tested(record.calibration),
+        "discovery": _tested(record.discovery),
+    }
+    expected = pd.DataFrame(
+        {
+            "set": np.repeat(
+                np.asarray(list(sets), dtype=object),
+                [len(frame) for frame in sets.values()],
+            ),
+            **{
+                column: np.concatenate(
+                    [frame[column].to_numpy(dtype=object) for frame in sets.values()]
+                )
+                for column in ("target", "feature")
+            },
+            "p_value": np.concatenate(
+                [frame["p_value"].to_numpy() for frame in sets.values()]
+            ),
+            "expected": np.concatenate(
+                [
+                    np.arange(1, len(frame) + 1) / (len(frame) + 1)
+                    for frame in sets.values()
+                ]
+            ),
+        }
+    )
+    pd.testing.assert_frame_equal(points, expected)
+    # The band holds the 2.5% and 97.5% quantiles of the i-th smallest of n
+    # uniform p-values, at every rank of these few p-values.
+    n = len(_tested(record.calibration))
+    band = result.tables["band"]
+    ranks = np.arange(1, n + 1)
+    assert band["rank"].tolist() == ranks.tolist()
+    np.testing.assert_allclose(band["expected"], ranks / (n + 1))
+    np.testing.assert_allclose(band["lower"], beta.ppf(0.025, ranks, n - ranks + 1))
+    np.testing.assert_allclose(band["upper"], beta.ppf(0.975, ranks, n - ranks + 1))
+    (fill,) = [c for c in ax.collections if isinstance(c, PolyCollection)]
+    vertices = fill.get_paths()[0].vertices
+    for x, low, high in zip(
+        -np.log10(band["expected"]),
+        -np.log10(band["upper"]),
+        -np.log10(band["lower"]),
+        strict=True,
+    ):
+        assert np.isclose(vertices, [x, low]).all(axis=1).any()
+        assert np.isclose(vertices, [x, high]).all(axis=1).any()
+    foreground = to_rgba(foreground_color(theme))
+    np.testing.assert_allclose(fill.get_facecolor(), [to_rgba(foreground, 0.15)])
+    (identity,) = ax.get_lines()
+    assert identity.get_xy1() == (0.0, 0.0)
+    assert identity.get_slope() == 1.0
+    assert to_rgba(identity.get_color()) == foreground
+    # The axis holds the identity line, the band and the negative controls,
+    # and the discovery p-values above them, like p-values below 1e-300, sit
+    # at the top edge.
+    names = points["set"].to_numpy(dtype=object)
+    p = points["p_value"].to_numpy()
+    heights = np.full(len(p), np.inf)
+    shown = p >= 1e-300
+    heights[shown] = -np.log10(p[shown])
+    high = max(
+        np.log10(n + 1),
+        -np.log10(beta.ppf(0.025, 1, n)),
+        heights[(names == "calibration") & shown].max(),
+        np.log10(np.count_nonzero(names == "discovery") + 1),
+    )
+    beyond = ~(heights <= high)
+    groups = [
+        (chosen, shape, color)
+        for name, color in (
+            ("calibration", NEGATIVE_CONTROL),
+            ("discovery", TARGETING),
+        )
+        for shape, edge in (("o", False), ("^", True))
+        if (chosen := (names == name) & (beyond == edge)).any()
+    ]
+    x, y = _check_points(_point_groups(ax), groups, rasterized=False)
+    np.testing.assert_allclose(x, -np.log10(points["expected"].to_numpy()))
+    _check_top_edge(ax, y, beyond, np.where(beyond, np.inf, heights))
+    assert ax.get_xlabel() == "Expected -log10 p-value"
+    assert ax.get_title() == "Negative-control p-values"
+
+
+def _check_fold_changes(result: Any, record: PerturbationAssociations) -> None:
+    """Check the histogram of the negative-control fold changes and its mean."""
+    ax = result.axes["fold_changes"]
+    folds = _tested(record.calibration)["log2_fold_change"].to_numpy()
+    values = folds[np.isfinite(folds)]
+    counts, edges = np.histogram(values, bins=30)
+    histogram = result.tables["fold_changes"]
+    np.testing.assert_allclose(histogram["bin_start"], edges[:-1])
+    np.testing.assert_allclose(histogram["bin_stop"], edges[1:])
+    assert histogram["pairs"].tolist() == counts.tolist()
+    bars = ax.patches
+    assert len(bars) == 30
+    np.testing.assert_allclose([bar.get_x() for bar in bars], edges[:-1])
+    np.testing.assert_allclose([bar.get_width() for bar in bars], np.diff(edges))
+    assert [bar.get_height() for bar in bars] == counts.tolist()
+    assert {bar.get_facecolor() for bar in bars} == {NEGATIVE_CONTROL}
+    (mean,) = ax.get_lines()
+    assert mean.get_linestyle() == "--"
+    np.testing.assert_allclose(mean.get_xdata(), [values.mean()] * 2)
+    assert result.provenance.extras["mean_log2_fold_change"] == pytest.approx(
+        values.mean()
+    )
+    assert (np.asarray(ax.get_yticks()) % 1 == 0).all()
+    assert ax.get_xlabel() == "Log2 fold change against the other control cells"
+    assert ax.get_ylabel() == "Negative-control pairs"
+
+
+def _check_controls(result: Any, record: PerturbationAssociations) -> None:
+    """Check the strips of the positive-control and negative-control p-values."""
+    ax = result.axes["controls"]
+    controls = result.tables["controls"]
+    positive = _tested(record.positive).sort_index()
+    calibration = _tested(record.calibration).sort_index()
+    expected = pd.DataFrame(
+        {
+            "set": np.repeat(
+                np.asarray(["positive", "calibration"], dtype=object),
+                [len(positive), len(calibration)],
+            ),
+            "target": np.concatenate(
+                [positive["target"].to_numpy(), calibration["target"].to_numpy()]
+            ).astype(object),
+            "feature": np.concatenate(
+                [positive["feature"].to_numpy(), calibration["feature"].to_numpy()]
+            ).astype(object),
+            "p_value": np.concatenate(
+                [positive["p_value"].to_numpy(), calibration["p_value"].to_numpy()]
+            ),
+        }
+    )
+    pd.testing.assert_frame_equal(controls, expected)
+    names = controls["set"].to_numpy(dtype=object)
+    p = controls["p_value"].to_numpy()
+    at_top = p < 1e-300
+    groups = [
+        (chosen, shape, color)
+        for name, color in (("positive", TARGETING), ("calibration", NEGATIVE_CONTROL))
+        for shape, edge in (("o", False), ("^", True))
+        if (chosen := (names == name) & (at_top == edge)).any()
+    ]
+    x, y = _check_points(_point_groups(ax), groups, rasterized=False)
+    # Each strip spreads its points around its position.
+    positions = np.where(names == "positive", 0.0, 1.0)
+    assert (np.abs(x - positions) <= 0.25).all()
+    assert len(np.unique(x)) == len(x)
+    heights = np.full(len(p), np.inf)
+    heights[~at_top] = -np.log10(p[~at_top])
+    _check_top_edge(ax, y, at_top, heights)
+    assert list(ax.get_xticks()) == [0.0, 1.0]
+    assert [label.get_text() for label in ax.get_xticklabels()] == [
+        f"Positive controls\n{len(positive)} pair{'' if len(positive) == 1 else 's'}",
+        f"Negative controls\n{len(calibration)} pairs",
+    ]
+
+
+def test_association_calibration_draws_the_three_panels() -> None:
+    requests: list[ArtifactRef] = []
+    record = _associations_record()
+
+    result = association_calibration(
+        _associations_store(record, requests), ASSOCIATIONS, show=False
+    )
+
+    try:
+        assert requests == [ASSOCIATIONS]
+        assert list(result.axes) == ["qq", "fold_changes", "controls"]
+        positions = [
+            (spec.rowspan.start, spec.colspan.start)
+            for spec in (ax.get_subplotspec() for ax in result.axes.values())
+        ]
+        assert positions == [(0, 0), (0, 1), (0, 2)]
+        assert list(result.tables) == ["qq", "band", "fold_changes", "controls"]
+        _check_qq(result, record)
+        _check_fold_changes(result, record)
+        _check_controls(result, record)
+        qq, fold_changes, controls = result.axes.values()
+        assert [text.get_text() for text in qq.get_legend().get_texts()] == [
+            "Negative controls",
+            "Discovery pairs",
+            "Null expectation",
+            "95% null band",
+            "Beyond the axis",
+        ]
+        mean = _tested(record.calibration)["log2_fold_change"].mean()
+        assert fold_changes.get_title().splitlines() == [
+            "Negative-control fold changes",
+            f"Dashed line at the mean, {mean:.3g}",
+        ]
+        assert fold_changes.get_legend() is None
+        assert controls.get_title().splitlines() == [
+            "Positive and negative controls",
+            "2 false discoveries at FDR 0.1 (mild)",
+        ]
+        assert [text.get_text() for text in controls.get_legend().get_texts()] == [
+            "p-value below 1e-300"
+        ]
+        assert result.figure.legends == []
+        assert result.legends == (
+            LegendSpec(kind="categorical", label="Pairs"),
+            LegendSpec(kind="line", label="Expected under the null"),
+        )
+        provenance = result.provenance
+        assert provenance.assay == "RNA"
+        # The control cells, which each negative-control pair splits.
+        assert provenance.n_cells == 300
+        assert provenance.notes == ("perturbation_associations",)
+        assert provenance.extras == {
+            "tests": ASSOCIATIONS.to_dict(),
+            "side": "both",
+            "integration": "union",
+            "from_assay": "RNA",
+            "alpha": 0.1,
+            "n_false_discoveries": 2,
+            "calibration_grade": "mild",
+            "mean_log2_fold_change": pytest.approx(mean),
+            "n_tested": {"discovery": 11, "calibration": 14, "positive": 3},
+        }
+    finally:
+        result.close()
+
+
+def test_association_calibration_spreads_a_large_band_on_the_log_scale() -> None:
+    n_pairs = 5000
+    rows: list[AssociationRow] = [
+        ("NT1", f"G{index}", (index + 0.5) / n_pairs, 0.0, 0.0)
+        for index in range(n_pairs)
+    ]
+    record = _associations_record(calibration=rows)
+
+    result = association_calibration(
+        _associations_store(record), ASSOCIATIONS, show=False
+    )
+
+    try:
+        band = result.tables["band"]
+        ranks = band["rank"].to_numpy()
+        # 1,000 ranks spread on the log scale, without repeats.
+        expected = np.unique(np.rint(np.geomspace(1, n_pairs, 1000)).astype(int))
+        assert ranks.tolist() == expected.tolist()
+        assert ranks[0] == 1 and ranks[-1] == n_pairs
+        assert len(ranks) < 1000
+        np.testing.assert_allclose(
+            band["lower"], beta.ppf(0.025, ranks, n_pairs - ranks + 1)
+        )
+        np.testing.assert_allclose(
+            band["upper"], beta.ppf(0.975, ranks, n_pairs - ranks + 1)
+        )
+        # Every negative control is drawn.
+        assert np.count_nonzero(result.tables["qq"]["set"] == "calibration") == n_pairs
+        assert result.axes["controls"].get_title().splitlines()[1] == (
+            "0 false discoveries at FDR 0.1 (excellent)"
+        )
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize(
+    ("positive", "message"),
+    [
+        ([], "No positive controls"),
+        ([("CD4", "CD4", NAN, NAN, NAN)], "No positive control passed QC"),
+    ],
+)
+def test_association_calibration_says_when_no_positive_control_was_tested(
+    positive: list[AssociationRow], message: str
+) -> None:
+    record = _associations_record(positive=positive)
+
+    result = association_calibration(
+        _associations_store(record), ASSOCIATIONS, show=False
+    )
+
+    try:
+        _check_controls(result, record)
+        ax = result.axes["controls"]
+        (note,) = ax.texts
+        assert note.get_text() == message
+        assert note.get_position()[0] == 0.0
+        assert (result.tables["controls"]["set"] == "calibration").all()
+        # Without a p-value below 1e-300 the panel needs no legend.
+        assert ax.get_legend() is None
+        assert result.provenance.extras["n_tested"]["positive"] == 0
+    finally:
+        result.close()
+
+
+def test_association_calibration_without_tested_discovery_pairs_draws_no_overlay() -> (
+    None
+):
+    record = _associations_record([("MYC", "NPM1", NAN, NAN, NAN)])
+
+    result = association_calibration(
+        _associations_store(record), ASSOCIATIONS, show=False
+    )
+
+    try:
+        _check_qq(result, record)
+        assert set(result.tables["qq"]["set"]) == {"calibration"}
+        texts = result.axes["qq"].get_legend().get_texts()
+        assert [text.get_text() for text in texts] == [
+            "Negative controls",
+            "Null expectation",
+            "95% null band",
+        ]
+    finally:
+        result.close()
+
+
+def test_association_calibration_draws_negative_controls_below_1e_300_at_the_top() -> (
+    None
+):
+    rows = [*CALIBRATION_ROWS, ("NT4", "ACTB", 0.0, 0.3, 39.0)]
+    record = _associations_record(calibration=rows)
+
+    result = association_calibration(
+        _associations_store(record), ASSOCIATIONS, show=False
+    )
+
+    try:
+        _check_qq(result, record)
+        _check_controls(result, record)
+        assert result.axes["controls"].get_title().splitlines()[1] == (
+            "3 false discoveries at FDR 0.1 (mild)"
+        )
+    finally:
+        result.close()
+
+
+def test_association_calibration_leaves_out_infinite_fold_changes() -> None:
+    some = _associations_record(
+        calibration=[*CALIBRATION_ROWS, ("NT4", "ACTB", 0.7, -np.inf, -0.4)]
+    )
+    every = _associations_record(
+        calibration=[
+            ("NT1", "NPM1", 0.3, -np.inf, -1.0),
+            ("NT1", "NCL", 0.8, -np.inf, -0.2),
+        ]
+    )
+
+    partly = association_calibration(
+        _associations_store(some), ASSOCIATIONS, show=False
+    )
+    none = association_calibration(_associations_store(every), ASSOCIATIONS, show=False)
+
+    try:
+        _check_fold_changes(partly, some)
+        folds = _tested(some.calibration)["log2_fold_change"].to_numpy()
+        mean = folds[np.isfinite(folds)].mean()
+        assert partly.axes["fold_changes"].get_title().splitlines() == [
+            "Negative-control fold changes",
+            f"Dashed line at the mean, {mean:.3g}",
+            "Not drawn: 1 without a finite fold change",
+        ]
+        ax = none.axes["fold_changes"]
+        assert len(ax.patches) == 0
+        assert len(ax.get_lines()) == 0
+        assert none.tables["fold_changes"].empty
+        assert list(none.tables["fold_changes"].columns) == [
+            "bin_start",
+            "bin_stop",
+            "pairs",
+        ]
+        assert ax.get_title().splitlines() == [
+            "Negative-control fold changes",
+            "Not drawn: 2 without a finite fold change",
+        ]
+        assert none.provenance.extras["mean_log2_fold_change"] is None
+    finally:
+        partly.close()
+        none.close()
+
+
+def test_association_calibration_rasterizes_crowded_panels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The QQ panel draws 14 negative controls and 11 discovery pairs, and the
+    # controls panel 3 positive and 14 negative controls.
+    monkeypatch.setattr(
+        "cytearc.plotting.perturbation._ASSOCIATION_RASTERIZE_THRESHOLD", 20
+    )
+    store = _associations_store(_associations_record())
+
+    result = association_calibration(store, ASSOCIATIONS, show=False)
+
+    try:
+        qq = _point_groups(result.axes["qq"])
+        assert qq and all(collection.get_rasterized() for collection in qq)
+        controls = _point_groups(result.axes["controls"])
+        assert controls and not any(c.get_rasterized() for c in controls)
+    finally:
+        result.close()
+
+
+def test_association_calibration_draws_into_caller_axes_in_the_theme() -> None:
+    figure, axes = plt.subplots(1, 3)
+    record = _associations_record()
+
+    try:
+        result = association_calibration(
+            _associations_store(record),
+            ASSOCIATIONS,
+            target={"qq": axes[2], "fold_changes": axes[0], "controls": axes[1]},
+            theme="dark",
+            show=False,
+        )
+        assert result.owns_figure is False
+        assert result.figure is figure
+        assert result.axes == {
+            "qq": axes[2],
+            "fold_changes": axes[0],
+            "controls": axes[1],
+        }
+        _check_qq(result, record, theme="dark")
+        _check_fold_changes(result, record)
+        _check_controls(result, record)
+        dark = to_rgba(foreground_color("dark"))
+        (mean,) = axes[0].get_lines()
+        assert to_rgba(mean.get_color()) == dark
+        assert all(to_rgba(ax.title.get_color()) == dark for ax in axes)
+        assert figure.legends == []
+    finally:
+        plt.close(figure)
+
+
+def test_association_calibration_takes_a_sequence_of_axes_but_not_one_axes() -> None:
+    figure, axes = plt.subplots(1, 3)
+    store = _associations_store(_associations_record())
+
+    try:
+        result = association_calibration(
+            store, ASSOCIATIONS, target=list(axes), show=False
+        )
+        assert list(result.axes.values()) == list(axes)
+        with pytest.raises(TypeError, match="only valid for one-panel plots"):
+            association_calibration(store, ASSOCIATIONS, target=axes[0], show=False)
+    finally:
+        plt.close(figure)
+
+
+def test_association_calibration_can_drop_the_legends() -> None:
+    store = _associations_store(_associations_record())
+
+    result = association_calibration(store, ASSOCIATIONS, show_legend=False, show=False)
+
+    try:
+        assert result.figure.legends == []
+        assert all(ax.get_legend() is None for ax in result.axes.values())
+    finally:
+        result.close()
+
+
+@pytest.mark.parametrize(
+    "calibration",
+    [[], [("NT1", "NPM1", NAN, NAN, NAN), ("NT2", "NCL", NAN, NAN, NAN)]],
+)
+def test_the_association_calibration_needs_a_tested_negative_control(
+    calibration: list[AssociationRow],
+) -> None:
+    store = _associations_store(_associations_record(calibration=calibration))
+
+    with pytest.raises(
+        ValueError, match="None of the negative-control pairs passed QC"
+    ):
+        association_calibration(store, ASSOCIATIONS, show=False)
+
+
+@pytest.mark.parametrize("plot", [association_volcano, association_calibration])
+@pytest.mark.parametrize(
+    "store",
+    [
+        SimpleNamespace(),
+        SimpleNamespace(perturbation=SimpleNamespace(load_mixscape=lambda ref: ref)),
+    ],
+)
+def test_the_association_plots_need_a_store_with_associations(
+    plot: Any, store: SimpleNamespace
+) -> None:
+    with pytest.raises(
+        TypeError, match="store does not provide perturbation associations"
+    ):
+        plot(store, ASSOCIATIONS, show=False)

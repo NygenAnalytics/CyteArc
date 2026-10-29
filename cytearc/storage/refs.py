@@ -52,6 +52,7 @@ ARTIFACT_KINDS = frozenset(
         "mixscape_classes",
         "neighbors",
         "normalized",
+        "perturbation_associations",
         "perturbation_edistance",
         "perturbation_efficiency",
         "perturbation_labels",

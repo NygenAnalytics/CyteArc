@@ -8,6 +8,7 @@ if TYPE_CHECKING:
         NEGATIVE as NEGATIVE,
         GuideCalls as GuideCalls,
     )
+    from .associations import PerturbationAssociations as PerturbationAssociations
     from .edistance import PerturbationEDistance as PerturbationEDistance
     from .efficiency import PerturbationEfficiency as PerturbationEfficiency
     from .guide_thresholds import GuideThresholds as GuideThresholds
@@ -25,6 +26,7 @@ __all__ = [
     "GuideCalls",
     "GuideThresholds",
     "MixscapeResult",
+    "PerturbationAssociations",
     "PerturbationEDistance",
     "PerturbationEfficiency",
     "PerturbationLabels",
@@ -40,6 +42,7 @@ __getattr__, __dir__ = _lazy_facade(
         "GuideCalls": ".guide_calls",
         "GuideThresholds": ".guide_thresholds",
         "MixscapeResult": ".mixscape",
+        "PerturbationAssociations": ".associations",
         "PerturbationEDistance": ".edistance",
         "PerturbationEfficiency": ".efficiency",
         "PerturbationLabels": ".labels",

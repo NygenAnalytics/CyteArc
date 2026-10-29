@@ -194,8 +194,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # perturbation.efficiency and perturbation.load_efficiency, then
     # perturbation.edistance and perturbation.load_edistance, then
     # perturbation.signature and perturbation.load_signature, then
-    # perturbation.mixscape and perturbation.load_mixscape.
-    assert len(_NAMESPACE_METHODS) == 108
+    # perturbation.mixscape and perturbation.load_mixscape, then
+    # perturbation.associations and perturbation.load_associations.
+    assert len(_NAMESPACE_METHODS) == 110
     assert {
         "import_guide_calls",
         "load_guide_calls",
@@ -211,6 +212,8 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
         "load_signature",
         "mixscape",
         "load_mixscape",
+        "associations",
+        "load_associations",
     } == {
         name
         for namespace, _, name, _ in _NAMESPACE_METHODS
