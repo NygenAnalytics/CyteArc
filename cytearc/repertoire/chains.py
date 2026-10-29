@@ -14,7 +14,8 @@ non-productive contigs are kept, a productive rearrangement. They are ranked
 within each arm by UMI count, then duplicate count, then read count (AIRR's
 ``consensus_count``), each most first, then by the junction nucleotide and
 amino-acid sequences, last in sort order first as scirpy ranks them, and last
-by their order in the files, which an import puts in a fixed order. The first two chains of an arm are its primary and secondary chains
+by contig ID, so the ranking does not depend on the order of the rows. The
+first two chains of an arm are its primary and secondary chains
 (``VJ_1``, ``VJ_2``, ``VDJ_1``, ``VDJ_2``); a cell with more than two chains
 of an arm is a multichain cell, often a doublet.
 
@@ -223,6 +224,37 @@ def _count_key(table: ContigTable, name: str) -> np.ndarray:
     return np.maximum(np.asarray(values, dtype=np.int64), 0)
 
 
+def _break_ties_by_id(
+    table: ContigTable,
+    chosen: np.ndarray,
+    order: np.ndarray,
+    keys: tuple[np.ndarray, ...],
+) -> np.ndarray:
+    """Order the contigs that tie on every key by their contig ID.
+
+    Only the tied contigs' IDs are decoded. Contigs whose IDs tie too, which
+    one file never holds, keep the order of their sources and rows.
+    """
+    if len(order) < 2 or "sequence_id" not in table.fields:
+        return order
+    ranked = np.column_stack([key[order] for key in keys])
+    tied = (ranked[1:] == ranked[:-1]).all(axis=1)
+    if not tied.any():
+        return order
+    runs = np.cumsum(np.r_[True, ~tied]) - 1
+    member = np.zeros(len(order), dtype=bool)
+    member[1:] |= tied
+    member[:-1] |= tied
+    positions = np.flatnonzero(member)
+    ids = table.column_at("sequence_id", chosen[order[positions]])
+    names = np.asarray([("" if name is None else str(name)) for name in ids])
+    id_rank = np.unique(names, return_inverse=True)[1].reshape(-1)
+    within = np.lexsort((order[positions], id_rank, runs[positions]))
+    order = order.copy()
+    order[positions] = order[positions][within]
+    return order
+
+
 def _text_codes(table: ContigTable, name: str) -> np.ndarray:
     encoded = table.text.get(name)
     if encoded is None:
@@ -274,19 +306,17 @@ def index_chains(
     cells = np.asarray(table.cells, dtype=np.int64)[chosen]
     chosen_arms = arms[chosen].astype(np.int64)
     # np.lexsort sorts by its last key first: cell, then arm, then the ranks.
-    # The contigs' own order breaks full ties: by source, then by file row.
-    order = np.lexsort(
-        (
-            chosen,
-            _descending(junction_aa[chosen]),
-            _descending(_text_codes(table, "junction")[chosen]),
-            -_count_key(table, "consensus_count")[chosen],
-            -_count_key(table, "duplicate_count")[chosen],
-            -_count_key(table, "umi_count")[chosen],
-            chosen_arms,
-            cells,
-        )
+    keys = (
+        _descending(junction_aa[chosen]),
+        _descending(_text_codes(table, "junction")[chosen]),
+        -_count_key(table, "consensus_count")[chosen],
+        -_count_key(table, "duplicate_count")[chosen],
+        -_count_key(table, "umi_count")[chosen],
+        chosen_arms,
+        cells,
     )
+    order = np.lexsort((chosen, *keys))
+    order = _break_ties_by_id(table, chosen, order, keys)
     ranked = chosen[order]
     groups = cells[order] * 2 + chosen_arms[order]
     starts = np.flatnonzero(np.r_[True, groups[1:] != groups[:-1]])

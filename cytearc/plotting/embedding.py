@@ -9,7 +9,11 @@ import pandas as pd
 
 from ..features.values import normalization_is_cell_local, resolve_feature_batch
 from ..metadata.rows import apply_missing_mask
-from ..metadata.selection import CellFieldKind, cell_value_spec
+from ..metadata.selection import (
+    CellFieldKind,
+    cell_value_spec,
+    valid_category_mask,
+)
 from ..storage.artifacts import ArtifactRef
 from ._contracts import (
     CategoricalScale,
@@ -499,16 +503,18 @@ def _prefetch_colors(
                     "color_by and layout artifacts select cells in a different order"
                 )
             values = np.asarray(grouping_values[0])
-            out.append(
-                (
-                    values,
-                    item.kind,
-                    # Label artifacts are categorical whatever their dtype.
-                    cell_value_spec(item.kind).categorical
-                    or _is_categorical(pd.Series(values), "auto"),
-                    False,
-                )
+            # Label artifacts are categorical whatever their dtype.
+            categorical = cell_value_spec(item.kind).categorical or _is_categorical(
+                pd.Series(values), "auto"
             )
+            if categorical:
+                # A blank label, such as that of a cell without a clonotype,
+                # is missing, as groupings treat it.
+                valid = valid_category_mask(values)
+                if not valid.all():
+                    values = values.astype(object)
+                    values[~valid] = None
+            out.append((values, item.kind, categorical, False))
             continue
         if isinstance(item, CellField):
             vals = _selected_metadata_column(
