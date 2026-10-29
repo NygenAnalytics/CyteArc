@@ -78,6 +78,8 @@ def test_clonotypes_follow_identical_chains(tmp_path) -> None:
         "same_j_gene": False,
         "within": [],
         "within_receptor_type": True,
+        "metric": "identity",
+        "cutoff": 0,
     }
     assert status.input_ref("receptors") == receptors
     loaded = store.repertoire.load_clonotypes(ref)
@@ -390,3 +392,69 @@ def test_within_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:
     store.cells.insert("clone_size", np.arange(N_CELLS).astype(str))
     with pytest.raises(ValueError, match="'clone_size', which is also a column"):
         store.repertoire.clonotypes(receptors, within="clone_size")
+
+
+def test_clonotype_clusters_need_room_for_their_search(tmp_path, monkeypatch) -> None:
+    store, receptors = _receptors(tmp_path)
+    monkeypatch.setattr(store, "memoryBytes", 1_000_000)
+    assert store.repertoire.clonotypes(receptors).kind == "clonotypes"
+    with pytest.raises(MemoryError, match="Raise mem_budget"):
+        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=1)
+
+
+def test_clonotype_clusters_link_similar_junctions(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    # cell2's alpha junction differs from cell0's in 3 of 12 nucleotides.
+    identical = store.repertoire.clonotypes(receptors)
+    near = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    assert near != identical
+    loaded = store.repertoire.load_clonotypes(near)
+    assert loaded.metric == "hamming" and loaded.cutoff == 3
+    assert _members(loaded)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
+    status = store.artifacts.inspect(near)
+    assert (status.parameters["metric"], status.parameters["cutoff"]) == ("hamming", 3)
+    two = store.repertoire.load_clonotypes(
+        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=2)
+    )
+    assert _members(two)["clonotype_1"] == ["cell0", "cell1", "cell4"]
+    # 3 of 12 is 25 percent.
+    for cutoff, joined in ((25, True), (24, False)):
+        result = store.repertoire.load_clonotypes(
+            store.repertoire.clonotypes(
+                receptors, metric="normalized_hamming", cutoff=cutoff
+            )
+        )
+        assert ("cell2" in _members(result)["clonotype_1"]) is joined
+    edits = store.repertoire.load_clonotypes(
+        store.repertoire.clonotypes(receptors, metric="levenshtein", cutoff=3)
+    )
+    assert _members(edits)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
+    # Residues: cell2's alpha chain is identical, so amino-acid clusters
+    # equal amino-acid clonotypes.
+    residues = store.repertoire.load_clonotypes(
+        store.repertoire.clonotypes(
+            receptors, sequence="aa", metric="levenshtein", cutoff=1
+        )
+    )
+    assert _members(residues)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"metric": "tcrdist"}, ValueError, "metric must be one of"),
+        ({"metric": "identity", "cutoff": 1}, ValueError, "takes no cutoff"),
+        ({"metric": "identity", "cutoff": False}, ValueError, "takes no cutoff"),
+        ({"metric": "hamming"}, ValueError, "needs a cutoff"),
+        ({"metric": "hamming", "cutoff": 1.5}, TypeError, "cutoff must be"),
+        ({"metric": "levenshtein", "cutoff": True}, TypeError, "cutoff must be"),
+        ({"metric": "hamming", "cutoff": -1}, ValueError, "non-negative"),
+        ({"metric": "normalized_hamming", "cutoff": 101}, ValueError, "at most 100"),
+    ],
+)
+def test_clonotype_cluster_options_are_checked(
+    tmp_path, kwargs, error, message
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    with pytest.raises(error, match=message):
+        store.repertoire.clonotypes(receptors, **kwargs)

@@ -307,3 +307,29 @@ def test_overlap_pairs(bench) -> None:
         assert ((table["jaccard"] >= 0) & (table["jaccard"] <= 1)).all()
 
     bench("repertoire.overlap_pairs", make, LADDER, check=check)
+
+
+def test_neighbor_pairs(bench) -> None:
+    from cytearc.repertoire.distances import neighbor_pairs
+
+    def junctions(n_cells: int) -> list[str]:
+        return sorted(set(_contigs(n_cells)["junction_aa"].tolist()))
+
+    def make(n_cells: int):
+        texts = junctions(n_cells)
+        return lambda: (
+            neighbor_pairs(texts, "hamming", 1),
+            neighbor_pairs(texts, "levenshtein", 1),
+        )
+
+    def check(n_cells: int, result) -> None:
+        texts = junctions(n_cells)
+        (first, second), (edit_first, edit_second) = result
+        for a, b in zip(first[:50].tolist(), second[:50].tolist(), strict=True):
+            assert len(texts[a]) == len(texts[b])
+            assert sum(x != y for x, y in zip(texts[a], texts[b], strict=True)) <= 1
+        # Every pair within one substitution is within one edit.
+        edits = set(zip(edit_first.tolist(), edit_second.tolist(), strict=True))
+        assert set(zip(first.tolist(), second.tolist(), strict=True)) <= edits
+
+    bench("repertoire.neighbor_pairs", make, LADDER, check=check)

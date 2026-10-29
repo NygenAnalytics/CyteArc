@@ -565,6 +565,9 @@ class ClonotypeArguments(OperationArguments):
     same_j_gene: bool = parameter()
     within: tuple[str, ...] = parameter()
     within_receptor_type: bool = parameter()
+    # "identity" links identical junctions, with a cutoff of 0.
+    metric: str = parameter()
+    cutoff: int = parameter()
     invalidate_cache: bool = execution()
 
 
