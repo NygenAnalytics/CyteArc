@@ -323,6 +323,7 @@ their rows follow the cell selection of their lineage rather than a recorded inp
 | `ambient_contamination` | `values` | measurements | `expressing`, `used` | `observed`, `expected`, `p_values` |
 | `cell_calling` | `fdr` | measurements | `limited` | `total`, `log_probability`, `p_value` |
 | `cell_cycle` | `phase` | labels | | `s_score`, `g2m_score` |
+| `clonal_expansion` | `values` | labels | | `group_clone_size`, `group_clone_frequency` |
 | `clonotypes` | `values` | labels | `codes` | `clone_size` |
 | `cluster_cut` | `labels` | labels | | |
 | `cluster_labels` | `values` | labels | | |
@@ -352,6 +353,8 @@ A `perturbation_labels` artifact comes from `perturbation.labels`, which records
 An `immune_receptors` artifact comes from `repertoire.import_receptors`, which reads the receptor contigs of a cell selection from Cell Ranger's contig annotations or AIRR Rearrangement files. Its canonical `values` hold each cell's receptor type. Its `chain_slots` array holds one row per cell and four columns, the positions of the cell's `VJ_1`, `VJ_2`, `VDJ_1` and `VDJ_2` chains among the contigs, padded with -1, and its other arrays hold one row per contig rather than per cell, so neither `select_cells` nor `artifacts.load_values` reads them: `contig_cells` gives each contig's cell, `contig_sources` its file, `contig_chain` whether it counts as a chain, and `contig_<field>` each field, with the distinct values of a text field in `contig_<field>_values` and `contig_<field>_offsets`. `repertoire.load_receptors` turns them into the tables of an `ImmuneReceptors` record.
 
 A `clonotypes` artifact comes from `repertoire.clonotypes`, which records an `immune_receptors` artifact as an input and labels the same cells with their clonotype, empty for a cell without one. Its arrays `clonotype_ids`, `clonotype_sizes`, `representatives`, `n_configurations` and `clonotype_within` hold one row per clonotype rather than per cell, so neither `select_cells` nor `artifacts.load_values` reads them; `repertoire.load_clonotypes` turns them into the `clonotypes` table of a `Clonotypes` record.
+
+A `clonal_expansion` artifact comes from `repertoire.clonal_expansion`, which records a `clonotypes` artifact as an input and labels the same cells with their expansion category, empty for a cell without a clonotype. Its `groups` array gives each cell's group, -1 without one, and its `labels` and `group_keys` attributes name the categories, smallest clonotypes first, and each group's labels; `repertoire.load_clonal_expansion` turns them into the tables of a `ClonalExpansion` record.
 
 A `perturbation_efficiency` artifact comes from `perturbation.efficiency`, which records a `perturbation_labels` artifact as an input and compares each target gene's expression in the cells of its perturbation with the control cells of the labels. The artifact belongs to the expression assay that the comparison reads, not to the guide assay of the labels. Its rows are target genes or guides, not cells, so `select_cells` and `artifacts.load_values` do not read it; `perturbation.load_efficiency` reads it as a table of each row's matched feature, status, cells, mean UMIs and scaled expression in each group, remaining fraction, log2 fold change and p-values.
 

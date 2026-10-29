@@ -129,6 +129,11 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
         "cell_cycle": CellValueSpec(
             "phase", True, {"s_score": False, "g2m_score": False}
         ),
+        "clonal_expansion": CellValueSpec(
+            "values",
+            True,
+            {"group_clone_size": False, "group_clone_frequency": False},
+        ),
         "clonotypes": CellValueSpec(
             "values", True, {"codes": True, "clone_size": False}
         ),

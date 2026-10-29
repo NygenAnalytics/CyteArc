@@ -350,6 +350,12 @@ _CONTRACTS = (
         model_only=_classified("resolved_input", "within_fingerprint"),
     ),
     OperationContract(
+        RepertoireAccessor.clonal_expansion,
+        metadata_arguments.ClonalExpansionArguments,
+        # The labels of the within columns are recorded by their fingerprint.
+        model_only=_classified("resolved_input", "within_fingerprint"),
+    ),
+    OperationContract(
         QcAccessor.hto_demultiplexing,
         metadata_arguments.HtoIdentityArguments,
         model_only={

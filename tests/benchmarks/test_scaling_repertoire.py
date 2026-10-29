@@ -1,11 +1,12 @@
-"""Benchmarks of the import of immune receptor contigs.
+"""Benchmarks of the import of immune receptor contigs and their analysis.
 
 An import encodes the parsed contigs chunk by chunk, holding each distinct
 gene call and junction once, and then ranks each cell's chains and labels its
-receptor. Each benchmark runs one step on a simulated T cell repertoire in
-which most cells carry one alpha and one beta chain, some a second alpha
-chain, and clones of many sizes share their junctions, and checks the result,
-so it doubles as a test at the smoke size.
+receptor. Clonotypes group the cells by their chains, and clonal expansion
+counts each clonotype's cells within samples. Each benchmark runs one step on
+a simulated T cell repertoire in which most cells carry one alpha and one beta
+chain, some a second alpha chain, and clones of many sizes share their
+junctions, and checks the result, so it doubles as a test at the smoke size.
 """
 
 from functools import lru_cache
@@ -188,3 +189,56 @@ def test_assign_clonotypes(bench) -> None:
         assert (frame.groupby([0, 1, 2, 3])["code"].nunique() == 1).all()
 
     bench("repertoire.assign_clonotypes", make, LADDER, check=check)
+
+
+@lru_cache(maxsize=1)
+def _clonotype_codes(n_cells: int) -> np.ndarray:
+    from cytearc.repertoire.clonotypes import assign_clonotypes
+
+    sequences = _slot_junctions(n_cells)
+    groups = np.where((sequences >= 0).any(axis=1), 0, -1)
+    return assign_clonotypes(sequences, groups=groups).codes
+
+
+def _samples(n_cells: int) -> np.ndarray:
+    """Spread the cells over eight samples."""
+    return np.random.default_rng([inputs.SEED, n_cells, 8]).integers(0, 8, n_cells)
+
+
+def test_clonal_expansion(bench) -> None:
+    from cytearc.repertoire.expansion import (
+        DEFAULT_BREAKPOINTS,
+        DEFAULT_RANK_SPLITS,
+        expansion_categories,
+        group_clone_sizes,
+        rank_windows,
+    )
+
+    def make(n_cells: int):
+        codes = _clonotype_codes(n_cells)
+        groups = np.where(codes >= 0, _samples(n_cells), -1)
+
+        def run():
+            sizes, frequencies = group_clone_sizes(codes, groups)
+            categories, _labels = expansion_categories(
+                sizes, frequencies, breakpoints=DEFAULT_BREAKPOINTS
+            )
+            windows = rank_windows(codes, groups, 8, DEFAULT_RANK_SPLITS)
+            return sizes, categories, windows
+
+        return run
+
+    def check(n_cells: int, result) -> None:
+        sizes, categories, windows = result
+        codes = _clonotype_codes(n_cells)
+        has = codes >= 0
+        frame = pd.DataFrame({"sample": _samples(n_cells)[has], "code": codes[has]})
+        expected = frame.groupby(["sample", "code"])["code"].transform("size")
+        np.testing.assert_array_equal(sizes[has], expected.to_numpy())
+        assert (sizes[~has] == 0).all() and (categories[~has] == -1).all()
+        assert (categories[has] >= 0).all()
+        np.testing.assert_array_equal(
+            windows.sum(axis=1), np.bincount(frame["sample"], minlength=8)
+        )
+
+    bench("repertoire.clonal_expansion", make, LADDER, check=check)

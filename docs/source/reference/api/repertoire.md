@@ -1,14 +1,14 @@
 ---
 myst:
   html_meta:
-    description: CyteArc repertoire API for single-cell T cell and B cell receptor data, with contigs imported from Cell Ranger and AIRR Rearrangement files, the ranked chains of each cell, its receptor type, subtype and chain pairing, clonotypes of cells that share their receptor, and the records of the receptors and clonotypes.
+    description: CyteArc repertoire API for single-cell T cell and B cell receptor data, with contigs imported from Cell Ranger and AIRR Rearrangement files, the ranked chains of each cell, its receptor type, subtype and chain pairing, clonotypes of cells that share their receptor, clonal expansion within samples, and the records of the receptors, clonotypes and expansion.
 ---
 
 # Repertoire API reference
 
 Single-cell immune profiling reads the T cell receptor (TCR) or B cell receptor (BCR) of each cell beside its transcriptome. A V(D)J library, such as 10x Genomics Chromium Single Cell Immune Profiling, assembles each cell's receptor transcripts into contigs: one chain each, with its locus, its V, D, J and constant genes, and its junction, the CDR3 with the conserved cysteine and phenylalanine or tryptophan on either side. A T cell receptor pairs an alpha chain (TRA) with a beta chain (TRB), or a gamma chain (TRG) with a delta chain (TRD), and a B cell receptor pairs a heavy chain (IGH) with a kappa (IGK) or lambda (IGL) light chain. `cytearc.repertoire` holds the record of the imported receptors and the constants of the receptor model; contig fields keep their names in the AIRR Community's Rearrangement schema ([Vander Heiden et al. 2018](https://doi.org/10.3389/fimmu.2018.02206)).
 
-The steps run on a `DataStore` whose cells are the cells of the expression library. {meth}`ds.repertoire.import_receptors <cytearc.datastore.namespaces.RepertoireAccessor.import_receptors>` reads the contigs of those cells and saves an `immune_receptors` artifact, {meth}`ds.repertoire.load_receptors <cytearc.datastore.namespaces.RepertoireAccessor.load_receptors>` reads it as an {class}`~cytearc.repertoire.ImmuneReceptors` record, and {meth}`ds.plots.receptor_qc <cytearc.datastore.plot_accessor.DataStorePlotAccessor.receptor_qc>` plots the receptor types, chain pairings and chains per cell. {meth}`ds.repertoire.clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.clonotypes>` groups the cells into clonotypes and saves a `clonotypes` artifact, {meth}`ds.repertoire.load_clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.load_clonotypes>` reads it as a {class}`~cytearc.repertoire.Clonotypes` record, and {meth}`ds.plots.clonotype_abundance <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonotype_abundance>` plots the clone sizes and the largest clonotypes.
+The steps run on a `DataStore` whose cells are the cells of the expression library. {meth}`ds.repertoire.import_receptors <cytearc.datastore.namespaces.RepertoireAccessor.import_receptors>` reads the contigs of those cells and saves an `immune_receptors` artifact, {meth}`ds.repertoire.load_receptors <cytearc.datastore.namespaces.RepertoireAccessor.load_receptors>` reads it as an {class}`~cytearc.repertoire.ImmuneReceptors` record, and {meth}`ds.plots.receptor_qc <cytearc.datastore.plot_accessor.DataStorePlotAccessor.receptor_qc>` plots the receptor types, chain pairings and chains per cell. {meth}`ds.repertoire.clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.clonotypes>` groups the cells into clonotypes and saves a `clonotypes` artifact, {meth}`ds.repertoire.load_clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.load_clonotypes>` reads it as a {class}`~cytearc.repertoire.Clonotypes` record, and {meth}`ds.plots.clonotype_abundance <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonotype_abundance>` plots the clone sizes and the largest clonotypes. {meth}`ds.repertoire.clonal_expansion <cytearc.datastore.namespaces.RepertoireAccessor.clonal_expansion>` places each cell in an expansion category by its clone size within its sample and saves a `clonal_expansion` artifact, {meth}`ds.repertoire.load_clonal_expansion <cytearc.datastore.namespaces.RepertoireAccessor.load_clonal_expansion>` reads it as a {class}`~cytearc.repertoire.ClonalExpansion` record, and {meth}`ds.plots.clonal_expansion <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonal_expansion>` plots the expansion and clonal space of each sample or cell type.
 
 ## Import contigs
 
@@ -99,6 +99,43 @@ On "Human PBMC from a Healthy Donor, 10k cells (v2)", 6,189 cells with a recepto
 
 `ds.plots.clonotype_abundance` draws how many clonotypes have each size on log scales, and the `top` (20) clonotypes with the most cells, each labelled with its representative's `VDJ_1` junction, or its `VJ_1` junction without a VDJ chain. With `group_by` or `groups`, sizes count the cells of each clonotype within each group, one line per group, and the bars stack by group. Its tables are `sizes` and `top`.
 
+## Measure clonal expansion
+
+A clonotype that holds more than one cell has expanded: its founding cell divided, as T and B cells do when they meet their antigen. `clonal_expansion` counts each clonotype's cells within groups of cells and places each cell in an expansion category by its clonotype's size in its group. The groups are the combinations of the labels of the `within` cell metadata columns, such as the sample, and of the receptor type, so T cells and B cells are counted apart unless `within_receptor_type=False`. Without `within`, a clonotype's cells count in every sample together, as scirpy's `clonal_expansion` counts them without `expanded_in`; every cell with a clonotype needs a label in the `within` columns.
+
+```python
+expansion = ds.repertoire.clonal_expansion(clonotypes, within="sample")
+table = ds.repertoire.load_clonal_expansion(expansion)
+table.categories  # cells and clonotypes of each sample in each category
+large = ds.select_cells(expansion, include=["21 to 100 cells", "more than 100 cells"])
+ds.plots.clonal_expansion(expansion, group_by="cell_type")
+```
+
+One of two kinds of bounds sets the categories:
+
+| Option | Categories | As in |
+|---|---|---|
+| `breakpoints`, the default `(1, 2, 5, 20, 100)` | By the clonotype's cells in the group: `"1 cell"`, `"2 cells"`, `"3 to 5 cells"`, `"6 to 20 cells"`, `"21 to 100 cells"` and `"more than 100 cells"` | scirpy's `breakpoints`, whose categories are `"<= 1"`, `"<= 2"`, `"<= 5"` and so on |
+| `frequency_breakpoints`, such as `(0.0001, 0.001, 0.01, 0.1, 1)` | By the clonotype's frequency, its share of the group's cells with a clonotype, in bins `(lower, upper]` that end at 1: `"0 to 0.0001"`, `"0.0001 to 0.001"`, `"0.001 to 0.01"`, `"0.01 to 0.1"` and `"0.1 to 1"` | scRepertoire's `clonalHomeostasis` and `cloneSize`, which name these bins Rare, Small, Medium, Large and Hyperexpanded |
+
+A frequency depends on the size of its group: in a sample of 1,300 cells a clonotype of one cell already has the frequency 0.00077, so the first bin of these bounds stays empty, and a clonotype of two cells is Medium. Compare frequencies between groups of similar sizes, or use bounds in cells. The names of bounds in cells sort in their order, so groupings and legends that sort labels naturally keep them from the smallest clonotypes to the largest.
+
+The artifact's canonical `values` hold each cell's category, empty for a cell without a clonotype, so `select_cells` keeps the cells of large clonotypes and `ds.plots.embedding(color_by=expansion)` colours cells by category. `group_clone_size`, the cells of the cell's clonotype in its group, and `group_clone_frequency`, their share of the group's cells with a clonotype, are its other per-cell arrays. The result records the clonotypes, the bounds and, with `within`, the cells' labels, so measuring again with the same values returns the saved result. The measurement holds about 300 bytes per cell at its peak.
+
+`load_clonal_expansion` returns a {class}`~cytearc.repertoire.ClonalExpansion` record with three tables, whose groups are keyed by the `within` columns and `receptor_type`:
+
+| Table | Rows | Columns |
+|---|---|---|
+| `cells` | One per cell | `clonotype`, `category`, the group's key, `group_clone_size`, `group_clone_frequency` |
+| `categories` | One per group and category, empty categories included | The group's key, `category`, `cells`, `clonotypes`, and `fraction`, the share of the group's cells with a clonotype that the category holds |
+| `rank_windows` | One per group and window of ranks | The group's key, `window`, `cells`, `fraction` |
+
+The rank windows describe a group's clonal space as scRepertoire's `clonalProportion` does: the group's clonotypes are ranked by their cells in the group, and each window counts the cells of the clonotypes ranked in it. `splits` sets the windows; the default `(10, 100, 1000, 10000, 30000, 100000)` gives scRepertoire's windows `"1 to 10"` to `"30001 to 100000"`, and `"after 100000"` holds the cells that scRepertoire leaves out. Tied clonotypes hold the same cells, so ties do not change the counts. A sample whose ten largest clonotypes hold most of its cells is dominated by a few clones.
+
+`ds.plots.clonal_expansion` draws one stacked bar per group of the share of its cells in each category, or of its clonotypes with `count="clonotypes"`, as scirpy's `summarize_clonal_expansion` counts them, and one stacked bar per group of the share of its cells in each rank window, leaving out windows without cells. The groups are the expansion's own unless `group_by` names a cell metadata column or `groups` a cell-label artifact: each cell keeps the category measured within its sample, so grouping by cell type shows which cell types hold the expanded cells of their samples, and the ranks are counted within the plotted groups. `normalize=False` draws counts. Its tables are `categories` and `rank_windows`.
+
+Each 10x Genomics run below holds one donor, so four pseudo samples and six pseudo clusters were assigned from a hash of each barcode. The categories equal those of scirpy 0.25.1's `clonal_expansion` for every cell, within the pseudo samples and across all cells, with the default bounds and with `(1, 2)`: 6,189 cells of "Human PBMC from a Healthy Donor, 10k cells (v2)" and 46,526 cells of "CD8+ T cells of Healthy Donor 1", whose expanded CD8+ T cell clones fill every category. `summarize_clonal_expansion` by pseudo cluster, counting cells and clonotypes, equals the plot's tables. On the T cell contigs of the PBMC run, with clonotypes that equal scRepertoire's `CTstrict` and `CTaa` keys and the four pseudo samples, the fractions of `frequency_breakpoints=(0.0001, 0.001, 0.01, 0.1, 1)` equal scRepertoire 2.8.0's `clonalHomeostasis` within 4e-16, and the rank windows' cells equal its `clonalProportion`. On a million simulated T cells in eight samples, measuring takes 1.7 to 2.5 s and 260 MiB, and loading the tables 1.5 to 2.3 s and up to 460 MiB.
+
 ## Immune receptors
 
 ```{eval-rst}
@@ -109,4 +146,10 @@ On "Human PBMC from a Healthy Donor, 10k cells (v2)", 6,189 cells with a recepto
 
 ```{eval-rst}
 .. autoclass:: cytearc.repertoire.Clonotypes
+```
+
+## Clonal expansion
+
+```{eval-rst}
+.. autoclass:: cytearc.repertoire.ClonalExpansion
 ```

@@ -321,7 +321,7 @@ def test_contig_ids_are_required_and_unique_within_a_file(
         store.repertoire.import_receptors(
             _tcr(tmp_path, rows), cell_selection=store.snapshot_cell_selection()
         )
-    assert store.artifacts.list(kind="immune_receptors") == []
+    assert store.artifacts.list(kind="immune_receptors", scope="datastore") == []
 
 
 def test_one_contig_id_may_appear_in_two_files(tmp_path) -> None:
@@ -395,7 +395,7 @@ def test_import_refuses_contigs_larger_than_the_memory_budget(
     monkeypatch.setattr(store, "memoryBytes", 1_000)
     with pytest.raises(MemoryError, match="Raise mem_budget"):
         store.repertoire.import_receptors(_tcr(tmp_path), cell_selection=cells)
-    assert store.artifacts.list(kind="immune_receptors") == []
+    assert store.artifacts.list(kind="immune_receptors", scope="datastore") == []
 
 
 def test_a_read_only_store_refuses_to_import_new_receptors(tmp_path) -> None:

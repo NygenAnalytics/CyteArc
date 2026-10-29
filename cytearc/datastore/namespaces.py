@@ -237,6 +237,10 @@ class RepertoireAccessor(_Accessor):
     load_receptors = _bind(_RepertoireOperationsMixin._repertoire_load_receptors)
     clonotypes = _bind(_RepertoireOperationsMixin._repertoire_clonotypes)
     load_clonotypes = _bind(_RepertoireOperationsMixin._repertoire_load_clonotypes)
+    clonal_expansion = _bind(_RepertoireOperationsMixin._repertoire_clonal_expansion)
+    load_clonal_expansion = _bind(
+        _RepertoireOperationsMixin._repertoire_load_clonal_expansion
+    )
 
 
 class ScoresAccessor(_Accessor):

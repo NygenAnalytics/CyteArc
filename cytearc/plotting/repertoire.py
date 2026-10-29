@@ -8,6 +8,11 @@ import pandas as pd
 
 from ..metadata.selection import CellField, resolve_grouping
 from ..repertoire.chains import CHAIN_PAIRINGS, RECEPTOR_TYPES
+from ..repertoire.expansion import (
+    DEFAULT_RANK_SPLITS,
+    rank_window_labels,
+    rank_windows,
+)
 from ..storage.artifacts import inspect_artifact
 from ..storage.refs import ArtifactRef
 from ..utils.arrays import sort_categories
@@ -19,9 +24,9 @@ from ._figure import (
     close_figures_on_error,
     normalize_axes_target,
 )
-from ._style import apply_figure_chrome, theme_context
+from ._style import apply_figure_chrome, colormap_palette, theme_context
 
-__all__ = ["cell_groups", "clonotype_abundance", "receptor_qc"]
+__all__ = ["cell_groups", "clonal_expansion", "clonotype_abundance", "receptor_qc"]
 
 _QC_PANELS = ("receptor_type", "chain_pairing", "chains_per_cell")
 _RECEPTOR_TYPE_COLORS = {
@@ -475,6 +480,250 @@ def clonotype_abundance(
                 "clonotypes": clonotypes.to_dict(),
                 "grouping": group_name,
                 "top": top,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+def _load_expansion(store: Any, expansion: ArtifactRef, splits: Sequence[int]) -> Any:
+    """Load saved clonal expansion through the store's narrow loader."""
+    loader = getattr(getattr(store, "repertoire", None), "load_clonal_expansion", None)
+    if not callable(loader):
+        raise TypeError("store does not provide clonal expansion")
+    return loader(expansion, splits=splits)
+
+
+def _expansion_groups(loaded: Any) -> np.ndarray:
+    """Name each cell's group of the expansion, None without one.
+
+    A group is named by its labels in the key columns, joined by commas, or
+    ``"all cells"`` without key columns.
+    """
+    cells = loaded.cells
+    keys = [
+        *loaded.within,
+        *(("receptor_type",) if loaded.within_receptor_type else ()),
+    ]
+    names = np.full(len(cells), None, dtype=object)
+    counted = ~pd.isna(cells["category"]).to_numpy()
+    if not keys:
+        names[counted] = "all cells"
+        return names
+    columns = [cells[key].to_numpy(dtype=object)[counted] for key in keys]
+    names[counted] = [", ".join(map(str, row)) for row in zip(*columns, strict=True)]
+    return names
+
+
+def _stacked_shares(
+    ax: Any,
+    table: pd.DataFrame,
+    colors: dict[str, str],
+    *,
+    normalize: bool,
+    xlabel: str,
+    title: str,
+    show_legend: bool,
+    legend_title: str,
+) -> None:
+    """Draw one horizontal stacked bar per group, the first group on top."""
+    totals = table.sum(axis=1).to_numpy(dtype=np.float64)
+    positions = np.arange(len(table))[::-1]
+    left = np.zeros(len(table))
+    for name in table.columns:
+        widths = table[name].to_numpy(dtype=np.float64)
+        if normalize:
+            widths = np.divide(
+                widths, totals, out=np.zeros_like(widths), where=totals > 0
+            )
+        ax.barh(positions, widths, left=left, color=colors[str(name)], label=str(name))
+        left += widths
+    ax.set_yticks(positions, [str(name) for name in table.index])
+    ax.set_xlabel(xlabel)
+    ax.set_title(title)
+    if show_legend and table.size:
+        ax.legend(
+            title=legend_title,
+            frameon=False,
+            fontsize="small",
+            loc="upper left",
+            bbox_to_anchor=(1, 1),
+        )
+
+
+def _long_table(wide: pd.DataFrame, column: str, value: str) -> pd.DataFrame:
+    """Turn a table of groups by columns into rows of group, column, value, fraction."""
+    totals = wide.sum(axis=1).to_numpy(dtype=np.float64)
+    shares = np.divide(
+        wide.to_numpy(dtype=np.float64),
+        totals[:, None],
+        out=np.full(wide.shape, np.nan),
+        where=totals[:, None] > 0,
+    )
+    return pd.DataFrame(
+        {
+            "group": np.repeat(wide.index.to_numpy(dtype=object), wide.shape[1]),
+            column: np.tile(wide.columns.to_numpy(dtype=object), wide.shape[0]),
+            value: wide.to_numpy(dtype=np.int64).reshape(-1),
+            "fraction": shares.reshape(-1),
+        }
+    )
+
+
+@close_figures_on_error
+def clonal_expansion(
+    store: Any,
+    expansion: ArtifactRef,
+    *,
+    group_by: str | None = None,
+    groups: ArtifactRef | None = None,
+    count: str = "cells",
+    normalize: bool = True,
+    splits: Sequence[int] = DEFAULT_RANK_SPLITS,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot the clonal expansion and clonal space of groups of cells.
+
+    ``expansion`` is a ``clonal_expansion`` artifact, such as one from
+    ``ds.repertoire.clonal_expansion``. The first panel draws one stacked bar
+    per group: the share of its cells (``count="cells"``) or of its
+    clonotypes (``count="clonotypes"``) in each expansion category, as
+    scirpy's ``summarize_clonal_expansion`` and scRepertoire's
+    ``clonalHomeostasis`` do. The second panel ranks each group's clonotypes
+    by their cells in the group and draws the share of its cells that the
+    clonotypes of each window of ranks hold, as scRepertoire's
+    ``clonalProportion`` does: a sample whose ten largest clonotypes hold
+    most of its cells is dominated by a few clones.
+
+    The groups are the expansion's own, such as its samples, unless
+    ``group_by`` names a cell metadata column, such as a cell type, or
+    ``groups`` a cell-label artifact, such as a clustering. Each cell keeps
+    the category measured within its expansion group, so grouping the cells
+    by cluster shows which clusters hold the expanded cells of their samples;
+    the ranks are counted within the plotted groups. Cells without a
+    clonotype or a group are left out.
+
+    Tables: ``categories`` (``group``, ``category``, then ``cells`` or
+    ``clonotypes``, and ``fraction``) and ``rank_windows`` (``group``,
+    ``window``, ``cells`` and ``fraction``).
+    """
+    if count not in ("cells", "clonotypes"):
+        raise ValueError("count must be 'cells' or 'clonotypes'")
+    if not isinstance(normalize, bool):
+        raise TypeError("normalize must be a boolean")
+    loaded = _load_expansion(store, expansion, splits)
+    cells = loaded.cells
+    labels, group_name = cell_groups(
+        store, expansion, pd.Index(cells.index), group_by=group_by, groups=groups
+    )
+    if labels is None:
+        names = _expansion_groups(loaded)
+        group_name = (
+            ", ".join(
+                [
+                    *loaded.within,
+                    *(("receptor_type",) if loaded.within_receptor_type else ()),
+                ]
+            )
+            or None
+        )
+    else:
+        names = labels
+    category = cells["category"].to_numpy(dtype=object)
+    keep = ~pd.isna(cells["category"]).to_numpy() & np.asarray(
+        [name is not None for name in names], dtype=bool
+    )
+    order = sort_categories(pd.unique(names[keep]))
+    frame = pd.DataFrame(
+        {
+            "group": pd.Categorical(names[keep], categories=order),
+            "category": pd.Categorical(category[keep], categories=list(loaded.labels)),
+            "clonotype": cells["clonotype"].to_numpy(dtype=object)[keep],
+        }
+    )
+    if count == "clonotypes":
+        frame = frame.drop_duplicates()
+    wide = (
+        pd.crosstab(frame["group"], frame["category"], dropna=False)
+        .reindex(index=order, columns=list(loaded.labels), fill_value=0)
+        .astype(np.int64)
+    )
+    group_codes = pd.Categorical(names[keep], categories=order).codes.astype(np.int64)
+    clonotype_codes = pd.factorize(cells["clonotype"].to_numpy(dtype=object)[keep])[0]
+    window_names = list(rank_window_labels(splits))
+    windows = pd.DataFrame(
+        rank_windows(clonotype_codes, group_codes, len(order), splits),
+        index=pd.Index(order),
+        columns=pd.Index(window_names),
+    )
+    # Windows that hold no cell of any group are left out of the figure.
+    shown_windows = windows.loc[:, windows.sum(axis=0) > 0]
+    if figsize is None and target is None:
+        figsize = (13.0, max(3.2, 0.32 * len(order) + 1.6))
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target,
+            panel_keys=["categories", "rank_windows"],
+            figsize=figsize,
+            n_columns=2,
+        )
+        noun = "cells" if count == "cells" else "clonotypes"
+        _stacked_shares(
+            axes["categories"],
+            wide,
+            colormap_palette(list(loaded.labels), "viridis_r"),
+            normalize=normalize,
+            xlabel=f"Fraction of {noun}" if normalize else noun.capitalize(),
+            title="Clonal expansion",
+            show_legend=show_legend,
+            legend_title=(
+                "Clone size" if loaded.breakpoints is not None else "Clone frequency"
+            ),
+        )
+        _stacked_shares(
+            axes["rank_windows"],
+            shown_windows,
+            colormap_palette(window_names, "viridis"),
+            normalize=normalize,
+            xlabel="Fraction of cells" if normalize else "Cells",
+            title="Clonal space by clonotype rank",
+            show_legend=show_legend,
+            legend_title="Clonotype rank",
+        )
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={
+            "categories": _long_table(wide, "category", count),
+            "rank_windows": _long_table(windows, "window", "cells"),
+        },
+        legends=(
+            LegendSpec(kind="categorical", label="Expansion category"),
+            LegendSpec(kind="categorical", label="Clonotype rank"),
+        ),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(keep.sum()),
+            renderer="matplotlib",
+            notes=("clonal_expansion",),
+            extras={
+                "clonal_expansion": expansion.to_dict(),
+                "grouping": group_name,
+                "count": count,
+                "normalize": normalize,
+                "splits": list(loaded.splits),
             },
         ),
         owns_figure=owns,

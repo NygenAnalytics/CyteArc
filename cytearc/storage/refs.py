@@ -21,6 +21,7 @@ ARTIFACT_KINDS = frozenset(
         "cluster_hierarchy",
         "cluster_labels",
         "cluster_selection",
+        "clonal_expansion",
         "clonotypes",
         "coalesced_tree",
         "connectivity_map",

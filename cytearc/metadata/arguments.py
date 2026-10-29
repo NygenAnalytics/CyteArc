@@ -569,6 +569,23 @@ class ClonotypeArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class ClonalExpansionArguments(OperationArguments):
+    operation: ClassVar[str] = "measure_clonal_expansion"
+    artifact_kind: ClassVar[str] = "clonal_expansion"
+
+    clonotypes: ArtifactRef = artifact_input()
+    # The fingerprint of each clonotype cell's labels in the within columns,
+    # or None without columns.
+    within_fingerprint: str | None = artifact_input()
+    within: tuple[str, ...] = parameter()
+    within_receptor_type: bool = parameter()
+    # Exactly one of the two bounds is recorded; the other is None.
+    breakpoints: tuple[int, ...] | None = parameter()
+    frequency_breakpoints: tuple[float, ...] | None = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class MembershipStrengthArguments(OperationArguments):
     operation: ClassVar[str] = "calc_membership_strength"
     artifact_kind: ClassVar[str] = "membership_strength"

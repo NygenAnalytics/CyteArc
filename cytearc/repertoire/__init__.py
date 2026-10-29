@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         Clonotypes as Clonotypes,
     )
     from .contigs import FIELDS as FIELDS
+    from .expansion import ClonalExpansion as ClonalExpansion
     from .receptors import ImmuneReceptors as ImmuneReceptors
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "SLOTS",
     "VDJ_LOCI",
     "VJ_LOCI",
+    "ClonalExpansion",
     "Clonotypes",
     "ImmuneReceptors",
 ]
@@ -51,6 +53,7 @@ __getattr__, __dir__ = _lazy_facade(
         "SLOTS": ".chains",
         "VDJ_LOCI": ".chains",
         "VJ_LOCI": ".chains",
+        "ClonalExpansion": ".expansion",
         "Clonotypes": ".clonotypes",
         "ImmuneReceptors": ".receptors",
     },
