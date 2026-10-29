@@ -389,11 +389,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             chunk_rows = chunk_rows_for(self.memoryBytes, columns=source.n_columns)
             for _first_line, chunk in _iter_source(source, chunk_rows):
                 barcodes = chunk["cell_id"].to_numpy(dtype=object).astype(str)
-                rows = lookup.get_indexer(np.char.add(prefix, barcodes))
+                # The cell ID that a contig names: its file's prefix and its
+                # barcode, so equal barcodes of two samples stay apart.
+                identifiers = np.char.add(prefix, barcodes)
+                rows = lookup.get_indexer(identifiers)
                 matched = rows >= 0
                 n_file_contigs += len(chunk)
                 if not matched.all():
-                    missing = barcodes[~matched]
+                    missing = identifiers[~matched]
                     n_unmatched += len(missing)
                     for barcode in pd.unique(missing):
                         if barcode not in unmatched_barcodes:

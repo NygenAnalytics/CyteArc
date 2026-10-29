@@ -15,7 +15,7 @@ from collections.abc import Iterator
 import pandas as pd
 
 from ..repertoire.contigs import FIELDS, REQUIRED_FIELDS
-from ._contigs import first_line, header_fields, parse_contig_columns
+from ._contigs import compression, first_line, header_fields, parse_contig_columns
 
 __all__ = [
     "AIRR_FORMAT",
@@ -129,7 +129,7 @@ def iter_airr_rearrangements(
         dtype=str,
         keep_default_na=False,
         na_filter=False,
-        compression="infer",
+        compression=compression(path),
         usecols=lambda name: str(name).strip() in kept,
         chunksize=max(1, int(chunk_rows)),
     )

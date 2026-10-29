@@ -105,6 +105,25 @@ def test_receptor_qc_groups_by_labels_of_fewer_cells(tmp_path) -> None:
         result.close()
 
 
+def test_receptor_qc_groups_by_integer_labels_of_fewer_cells(tmp_path) -> None:
+    # Integer labels, as clusterings hold them, align as objects; the cells
+    # that the labels lack get no group.
+    store, ref = _receptors(tmp_path)
+    keep = np.zeros(N_CELLS, dtype=bool)
+    keep[:4] = True
+    store.cells.insert("first", keep)
+    store.cells.insert("cluster", np.arange(N_CELLS) % 2)
+    labels = store.snapshot_cluster_labels(
+        "cluster", cell_selection=store.snapshot_cell_selection("first")
+    )
+    result = plotting.receptor_qc(store, ref, groups=labels, show=False)
+    try:
+        assert result.tables["chain_pairing"].sum().tolist() == [2, 2]
+        assert result.provenance.n_cells == 4
+    finally:
+        result.close()
+
+
 def test_receptor_qc_draws_on_caller_axes(tmp_path) -> None:
     store, ref = _receptors(tmp_path)
     figure, axes = plt.subplots(1, 3)

@@ -134,14 +134,17 @@ def test_missing_counts_rank_as_zero_and_duplicate_counts_follow_umis() -> None:
     assert [ids[position] for position in index.slots[0]] == ["a2", "a1", "b2", "b1"]
 
 
-def test_full_ties_rank_by_file_order() -> None:
+def test_full_ties_rank_by_contig_id() -> None:
     rows = [
         _chain("TRB", "CASA", junction="TGT", umi_count=1, sequence_id="z"),
         _chain("TRB", "CASA", junction="TGT", umi_count=1, sequence_id="a"),
+        _chain("TRB", "CASB", junction="TGT", umi_count=1, sequence_id="m"),
     ]
-    table = _table(rows, [0, 0])
+    table = _table(rows, [0, 0, 0])
     index = index_chains(table, 1, locus=table.text["locus"])
-    assert table.column("sequence_id")[index.slots[0, 2]] == "z"
+    ids = table.column("sequence_id")
+    # CASB ranks first by its junction; the tied CASA chains by their IDs.
+    assert [ids[index.slots[0, 2]], ids[index.slots[0, 3]]] == ["m", "a"]
 
 
 def test_contigs_that_are_not_chains_fill_no_slot() -> None:

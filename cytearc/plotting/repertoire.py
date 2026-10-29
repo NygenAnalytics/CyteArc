@@ -98,7 +98,8 @@ def receptor_groups(
     if resolved.missing_mask is not None:
         labels[np.asarray(resolved.missing_mask, dtype=bool)] = None
     aligned = pd.Series(labels, index=pd.Index(ids)).reindex(cell_ids)
-    values = aligned.to_numpy(dtype=object)
+    # An object Series gives a read-only view, so copy before filling in None.
+    values = aligned.to_numpy(dtype=object, copy=True)
     values[pd.isna(aligned).to_numpy()] = None
     return values, name
 

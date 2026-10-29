@@ -509,6 +509,20 @@ class ContigTable:
             return decode_ragged(*self.ragged[name])
         return self.values[name]
 
+    def column_at(self, name: str, rows: np.ndarray) -> np.ndarray:
+        """Return one field of chosen contigs, decoding only those."""
+        kind = FIELDS.get(name)
+        if name not in self.fields or kind is None:
+            raise KeyError(f"No contig field {name!r}")
+        rows = np.asarray(rows, dtype=np.int64)
+        if kind == TEXT:
+            encoded = self.text[name]
+            return decode_text(np.asarray(encoded.codes)[rows], encoded.categories)
+        if kind == RAGGED:
+            return decode_ragged(*_take_ragged(*self.ragged[name], rows))
+        values: np.ndarray = np.asarray(self.values[name])[rows]
+        return values
+
 
 @dataclass(slots=True)
 class _Chunk:
