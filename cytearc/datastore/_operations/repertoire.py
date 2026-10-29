@@ -27,6 +27,7 @@ from ...metadata.selection import (
 from ...repertoire.chains import (
     NO_RECEPTOR,
     RECEPTOR_TYPES,
+    SLOTS,
     index_chains,
     receptor_quality,
 )
@@ -86,6 +87,13 @@ from ...repertoire.overlap import (
     group_names,
     overlap_pairs,
     top_clonotypes,
+)
+from ...repertoire.usage import (
+    GENE_FIELDS,
+    GeneUsage,
+    Spectratype,
+    count_units,
+    gene_names,
 )
 from ...repertoire.receptors import (
     SLOT_FIELDS,
@@ -1401,11 +1409,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
     ]:
         """Group the cells with a clonotype and count each clonotype's cells.
 
-        The groups are the combinations of the labels of the ``group_by``
-        columns, of the ``groups`` artifact and, with
-        ``within_receptor_type``, of the receptor type. A cell without a
-        clonotype, outside ``cell_selection``, or without a label, is in no
-        group.
+        The groups are those of :meth:`_cell_groups`, among the cells with a
+        clonotype.
 
         Returns:
             The key columns, each group's labels in them, in the natural order
@@ -1414,6 +1419,63 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             and its cells.
         """
         clonotype_group = self._clonotype_group(clonotypes)
+        codes = _read(clonotype_group, "codes").astype(np.int64)
+        status = inspect_artifact(self.zw, clonotypes)
+        key_columns, group_keys, cell_groups = self._cell_groups(
+            status.input_ref("cell_selection"),
+            status.input_ref("receptors"),
+            codes >= 0,
+            group_by=group_by,
+            groups=groups,
+            within_receptor_type=within_receptor_type,
+            cell_selection=cell_selection,
+        )
+        grouped = cell_groups >= 0
+        kept = codes[grouped]
+        n_codes = int(kept.max()) + 1 if len(kept) else 1
+        pairs, cells = np.unique(
+            cell_groups[grouped] * n_codes + kept, return_counts=True
+        )
+        return (
+            key_columns,
+            group_keys,
+            (pairs // n_codes).astype(np.int64),
+            (pairs % n_codes).astype(np.int64),
+            cells.astype(np.int64),
+        )
+
+    def _cell_groups(
+        self,
+        artifact_cells: ArtifactRef,
+        receptors: ArtifactRef,
+        rows: np.ndarray,
+        *,
+        group_by: str | Sequence[str] | None,
+        groups: ArtifactRef | None,
+        within_receptor_type: bool,
+        cell_selection: ArtifactRef | None,
+    ) -> tuple[tuple[str, ...], list[dict[str, str]], np.ndarray]:
+        """Group the cells of a cell-aligned artifact by their labels.
+
+        The groups are the combinations of the labels of the ``group_by``
+        columns, of the ``groups`` artifact and, with
+        ``within_receptor_type``, of the receptor type of ``receptors``. A
+        cell outside ``rows`` or ``cell_selection``, or without a label, is
+        in no group.
+
+        Args:
+            artifact_cells: The cell selection of the artifact's cells.
+            receptors: The ``immune_receptors`` artifact of those cells.
+            rows: The cells that may join a group.
+            group_by: Cell metadata columns.
+            groups: A cell-label artifact.
+            within_receptor_type: Make the receptor type part of each group.
+            cell_selection: Only these cells, or None.
+
+        Returns:
+            The key columns, each group's labels in them, in the natural order
+            of the labels, and each cell's group, -1 for none.
+        """
         if not isinstance(within_receptor_type, bool):
             raise TypeError("within_receptor_type must be a boolean")
         columns = _within_columns(group_by, "group_by")
@@ -1429,19 +1491,17 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 f"The groups' columns {list(key_columns)} name one column twice; "
                 "rename the column or pass within_receptor_type=False"
             )
-        codes = _read(clonotype_group, "codes").astype(np.int64)
-        has = codes >= 0
-        resident = _DIVERSITY_BYTES_PER_CELL * len(codes)
+        n_cells = len(rows)
+        resident = _DIVERSITY_BYTES_PER_CELL * n_cells
         if resident > self.memoryBytes:
             raise MemoryError(
-                f"Grouping the clonotypes of {len(codes)} cells holds about {resident} "
-                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
-                "Raise mem_budget."
+                f"Grouping {n_cells} cells holds about {resident} bytes, more than "
+                f"the memory budget of {self.memoryBytes} bytes. Raise mem_budget."
             )
-        status = inspect_artifact(self.zw, clonotypes)
+        has = np.asarray(rows, dtype=bool).copy()
         cell_index = read_stored_selection_indices(
             self.zw,
-            status.input_ref("cell_selection"),
+            artifact_cells,
             kind="cell_selection",
             scope="datastore",
             assay=None,
@@ -1475,23 +1535,17 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             aligned = lookup.reindex(cell_index).to_numpy(dtype=object)
             labels.append(_labels_or_none(aligned, pd.isna(aligned)))
         if within_receptor_type:
-            receptor_type = _read(
-                artifact_group(self.zw, status.input_ref("receptors")), "values"
-            ).astype(str)
-            labels.append(receptor_type[has].astype(object))
-        clone_codes = codes[has]
-        if not labels:
-            present, cells = np.unique(clone_codes, return_counts=True)
-            return (
-                key_columns,
-                [{}],
-                np.zeros(len(present), dtype=np.int64),
-                present.astype(np.int64),
-                cells.astype(np.int64),
+            receptor_type = _read(artifact_group(self.zw, receptors), "values").astype(
+                str
             )
+            labels.append(receptor_type[has].astype(object))
+        cell_groups = np.full(n_cells, -1, dtype=np.int64)
+        if not labels:
+            cell_groups[has] = 0
+            return key_columns, [{}], cell_groups
         label_codes = []
         names_by_column = []
-        keep = np.ones(len(clone_codes), dtype=bool)
+        keep = np.ones(int(has.sum()), dtype=bool)
         for values in labels:
             present = np.asarray([value is not None for value in values], dtype=bool)
             names = sort_categories(pd.unique(values[present]))
@@ -1503,7 +1557,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             keep &= present
         stacked = np.column_stack(label_codes)[keep]
         combinations, group_codes = np.unique(stacked, axis=0, return_inverse=True)
-        group_codes = group_codes.reshape(-1)
         group_keys = [
             {
                 column: str(names[code])
@@ -1513,16 +1566,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             }
             for row in combinations.tolist()
         ]
-        kept = clone_codes[keep]
-        n_codes = int(kept.max()) + 1 if len(kept) else 1
-        pairs, cells = np.unique(group_codes * n_codes + kept, return_counts=True)
-        return (
-            key_columns,
-            group_keys,
-            (pairs // n_codes).astype(np.int64),
-            (pairs % n_codes).astype(np.int64),
-            cells.astype(np.int64),
-        )
+        selected = np.flatnonzero(has)
+        cell_groups[selected[keep]] = group_codes.reshape(-1)
+        return key_columns, group_keys, cell_groups
 
     @validation_scoped
     def _repertoire_diversity(
@@ -1987,6 +2033,273 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             group_by=_within_columns(group_by, "group_by"),
             groups=groups,
             within_receptor_type=within_receptor_type,
+            cell_selection=cell_selection,
+        )
+
+    def _slot_units(
+        self,
+        source: ArtifactRef,
+        fields: tuple[str, ...],
+        *,
+        slots: Any,
+        count: Any,
+        group_by: str | Sequence[str] | None,
+        groups: ArtifactRef | None,
+        cell_selection: ArtifactRef | None,
+    ) -> tuple[tuple[str, ...], list[dict[str, str]], pd.DataFrame, tuple[str, ...]]:
+        """One row per counted chain of the chosen slots, with its fields.
+
+        A ``clonotypes`` source counts only cells with a clonotype, and with
+        ``count="clonotypes"`` each clonotype once per group and value.
+
+        Returns:
+            The key columns, each group's labels, one row per chain (``group``,
+            ``locus``, each field, and ``clonotype``, the clonotype code, with
+            a clonotypes source), and the slots.
+        """
+        if isinstance(slots, str):
+            slots = (slots,)
+        if not isinstance(slots, tuple | list) or not slots:
+            raise TypeError("slots must be a slot name or a sequence of slot names")
+        chosen = tuple(slots)
+        if any(slot not in SLOTS for slot in chosen) or len(set(chosen)) != len(chosen):
+            raise ValueError(f"slots must hold distinct slots from {', '.join(SLOTS)}")
+        if count not in ("cells", "clonotypes"):
+            raise ValueError("count must be 'cells' or 'clonotypes'")
+        if not isinstance(source, ArtifactRef):
+            raise TypeError("source must be an ArtifactRef")
+        if source.kind == ClonotypeArguments.artifact_kind:
+            codes = _read(self._clonotype_group(source), "codes").astype(np.int64)
+            receptors = inspect_artifact(self.zw, source).input_ref("receptors")
+        elif source.kind == ImmuneReceptorImportArguments.artifact_kind:
+            if count == "clonotypes":
+                raise ValueError("count='clonotypes' needs a clonotypes artifact")
+            codes = None
+            receptors = source
+        else:
+            raise ValueError(
+                "source must be an immune_receptors or clonotypes artifact, not "
+                f"{source.kind!r}"
+            )
+        group, stored = self._receptor_group(receptors)
+        for name in fields:
+            if name not in stored:
+                raise ValueError(f"The receptors store no {name}")
+        slot_contigs = _read(group, "chain_slots")[
+            :, [SLOTS.index(slot) for slot in chosen]
+        ]
+        rows = (slot_contigs >= 0).any(axis=1)
+        if codes is not None:
+            rows &= codes >= 0
+        key_columns, group_keys, cell_groups = self._cell_groups(
+            inspect_artifact(self.zw, receptors).input_ref("cell_selection"),
+            receptors,
+            rows,
+            group_by=group_by,
+            groups=groups,
+            within_receptor_type=False,
+            cell_selection=cell_selection,
+        )
+        parts = []
+        for position in range(len(chosen)):
+            cells = np.flatnonzero(
+                (cell_groups >= 0) & (slot_contigs[:, position] >= 0)
+            )
+            contigs = slot_contigs[cells, position]
+            part = {
+                "group": cell_groups[cells],
+                "locus": _stored_text_at(group, "locus", contigs),
+                **{name: _stored_text_at(group, name, contigs) for name in fields},
+            }
+            if codes is not None:
+                part["clonotype"] = codes[cells]
+            parts.append(pd.DataFrame(part))
+        units = pd.concat(parts, ignore_index=True)
+        return key_columns, group_keys, units, chosen
+
+    def _counted(
+        self,
+        units: pd.DataFrame,
+        values: list[str],
+        count: str,
+        key_columns: tuple[str, ...],
+        group_keys: list[dict[str, str]],
+    ) -> pd.DataFrame:
+        """Count chains, or clonotypes once per group and value, and name groups."""
+        if count == "clonotypes":
+            units = units.drop_duplicates(["group", "clonotype", "locus", *values])
+        table = count_units(units, ["group", "locus"], values, count)
+        positions = table.pop("group").to_numpy(dtype=np.int64)
+        for at, column in enumerate(key_columns):
+            table.insert(
+                at,
+                column,
+                np.asarray(
+                    [group_keys[code][column] for code in positions], dtype=object
+                ),
+            )
+        return table
+
+    @validation_scoped
+    def _repertoire_gene_usage(
+        self,
+        source: ArtifactRef,
+        *,
+        genes: str | Sequence[str] = "v_call",
+        level: str = "gene",
+        slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
+        count: str = "cells",
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        cell_selection: ArtifactRef | None = None,
+    ) -> GeneUsage:
+        """Count the genes of the chains of groups of cells.
+
+        Each cell counts by its chains in ``slots``, by default its primary
+        chain of each arm, ``VJ_1`` and ``VDJ_1``, as scirpy reads a slot's
+        gene calls; each chain counts within its locus, so TRA and TRB genes
+        get their own shares. ``genes`` names one gene field, such as
+        ``"v_call"``, or several, such as ``("v_call", "j_call")`` for the
+        V-J pairs of each chain. ``level`` names calls as called, with their
+        allele (``"allele"``), as genes (``"gene"``, the default) or as
+        families (``"family"``), and a call naming several genes keeps its
+        first. A chain without a call is not counted.
+
+        ``source`` is an ``immune_receptors`` artifact, whose cells with a
+        chain count, or a ``clonotypes`` artifact, whose cells with a
+        clonotype count; ``count="clonotypes"`` then counts each clonotype
+        once per group and gene instead of each cell, which keeps expanded
+        clones from dominating the shares. The groups are the combinations of
+        the labels of ``group_by`` columns and of a ``groups`` label artifact,
+        among the cells of ``cell_selection``; without either, every cell is
+        one group. Nothing is saved.
+
+        Args:
+            source: An ``immune_receptors`` or ``clonotypes`` artifact.
+            genes: One gene field or several, from ``v_call``, ``d_call``,
+                ``j_call`` and ``c_call``.
+            level: ``"allele"``, ``"gene"`` or ``"family"``.
+            slots: The chain slots to count.
+            count: ``"cells"`` or ``"clonotypes"``.
+            group_by: Cell metadata columns whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups.
+            cell_selection: Only these cells, or None for every cell.
+
+        Returns:
+            One row per group, locus and gene, or gene combination.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If an option is unknown, a gene field is not stored,
+                or ``count="clonotypes"`` is asked of receptors.
+            MemoryError: If grouping the cells does not fit the memory budget.
+        """
+        fields = (genes,) if isinstance(genes, str) else genes
+        if not isinstance(fields, tuple | list) or not fields:
+            raise TypeError("genes must be a gene field or a sequence of gene fields")
+        fields = tuple(fields)
+        if any(name not in GENE_FIELDS for name in fields) or len(set(fields)) != len(
+            fields
+        ):
+            raise ValueError(
+                f"genes must hold distinct fields from {', '.join(GENE_FIELDS)}"
+            )
+        gene_names(np.asarray([], dtype=object), level)
+        key_columns, group_keys, units, chosen = self._slot_units(
+            source,
+            fields,
+            slots=slots,
+            count=count,
+            group_by=group_by,
+            groups=groups,
+            cell_selection=cell_selection,
+        )
+        for name in fields:
+            units[name] = gene_names(units[name].to_numpy(dtype=object), level)
+        return GeneUsage(
+            table=self._counted(units, list(fields), count, key_columns, group_keys),
+            source=source,
+            genes=fields,
+            level=level,
+            slots=chosen,
+            count=count,
+            group_by=_within_columns(group_by, "group_by"),
+            groups=groups,
+            cell_selection=cell_selection,
+        )
+
+    @validation_scoped
+    def _repertoire_spectratype(
+        self,
+        source: ArtifactRef,
+        *,
+        sequence: str = "aa",
+        slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
+        count: str = "cells",
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        cell_selection: ArtifactRef | None = None,
+    ) -> Spectratype:
+        """Count the junction lengths of the chains of groups of cells.
+
+        The spectratype of a repertoire is the distribution of its junction
+        lengths, in residues (``sequence="aa"``) or nucleotides (``"nt"``),
+        as scirpy's ``spectratype`` counts them; a narrow peak points to an
+        expanded clone, and a repertoire of naive cells has a smooth,
+        roughly Gaussian one. Junctions include their conserved cysteine and
+        phenylalanine or tryptophan, as Cell Ranger's CDR3 does. Cells,
+        slots, counts and groups are those of
+        :meth:`~cytearc.datastore.namespaces.RepertoireAccessor.gene_usage`.
+        Nothing is saved.
+
+        Args:
+            source: An ``immune_receptors`` or ``clonotypes`` artifact.
+            sequence: ``"aa"`` or ``"nt"``.
+            slots: The chain slots to count.
+            count: ``"cells"`` or ``"clonotypes"``.
+            group_by: Cell metadata columns whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups.
+            cell_selection: Only these cells, or None for every cell.
+
+        Returns:
+            One row per group, locus and length.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If an option is unknown, the junctions are not
+                stored, or ``count="clonotypes"`` is asked of receptors.
+            MemoryError: If grouping the cells does not fit the memory budget.
+        """
+        if sequence not in SEQUENCES:
+            raise ValueError(f"sequence must be one of {', '.join(SEQUENCES)}")
+        field_name = "junction_aa" if sequence == "aa" else "junction"
+        key_columns, group_keys, units, chosen = self._slot_units(
+            source,
+            (field_name,),
+            slots=slots,
+            count=count,
+            group_by=group_by,
+            groups=groups,
+            cell_selection=cell_selection,
+        )
+        junctions = units.pop(field_name).to_numpy(dtype=object)
+        units["length"] = pd.array(
+            [len(value) if isinstance(value, str) else None for value in junctions],
+            dtype="Int64",
+        )
+        table = self._counted(units, ["length"], count, key_columns, group_keys)
+        table["length"] = table["length"].astype(np.int64)
+        table = table.sort_values(
+            [*key_columns, "locus", "length"], kind="stable"
+        ).reset_index(drop=True)
+        return Spectratype(
+            table=table,
+            source=source,
+            sequence=sequence,
+            slots=chosen,
+            count=count,
+            group_by=_within_columns(group_by, "group_by"),
+            groups=groups,
             cell_selection=cell_selection,
         )
 

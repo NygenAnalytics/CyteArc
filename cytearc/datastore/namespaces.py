@@ -245,6 +245,8 @@ class RepertoireAccessor(_Accessor):
     rarefaction = _bind(_RepertoireOperationsMixin._repertoire_rarefaction)
     overlap = _bind(_RepertoireOperationsMixin._repertoire_overlap)
     track = _bind(_RepertoireOperationsMixin._repertoire_track)
+    gene_usage = _bind(_RepertoireOperationsMixin._repertoire_gene_usage)
+    spectratype = _bind(_RepertoireOperationsMixin._repertoire_spectratype)
 
 
 class ScoresAccessor(_Accessor):

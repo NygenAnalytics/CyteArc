@@ -40,7 +40,10 @@ __all__ = [
     "clonal_rarefaction",
     "clonotype_abundance",
     "clonotype_tracking",
+    "gene_pairing",
+    "gene_usage",
     "receptor_qc",
+    "spectratype",
 ]
 
 _ORDER_TITLES = {
@@ -1151,6 +1154,348 @@ def clonotype_tracking(
                 "clonotypes": clonotypes.to_dict(),
                 "tracked": list(tracked.tracked),
                 "order": positions,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+def _locus_panels(table: pd.DataFrame) -> list[str]:
+    """The loci of a table, in their natural order."""
+    return [str(locus) for locus in sort_categories(pd.unique(table["locus"]))]
+
+
+def _heatmap(
+    ax: Any, matrix: pd.DataFrame, *, title: str, show_legend: bool, figure: Any
+) -> None:
+    """Draw a matrix of fractions with labelled rows and columns."""
+    image = ax.imshow(
+        np.ma.masked_invalid(matrix.to_numpy(dtype=np.float64)),
+        cmap="viridis",
+        aspect="auto",
+        vmin=0,
+    )
+    ax.set_xticks(
+        np.arange(matrix.shape[1]), [str(c) for c in matrix.columns], rotation=90
+    )
+    ax.set_yticks(
+        np.arange(matrix.shape[0]), [str(r) for r in matrix.index], fontsize="small"
+    )
+    ax.set_title(title)
+    if show_legend:
+        figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="Fraction")
+
+
+@close_figures_on_error
+def gene_usage(
+    store: Any,
+    source: ArtifactRef,
+    *,
+    gene: str = "v_call",
+    level: str = "gene",
+    slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
+    count: str = "cells",
+    group_by: str | Sequence[str] | None = None,
+    groups: ArtifactRef | None = None,
+    cell_selection: ArtifactRef | None = None,
+    top: int = 30,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot the gene usage of groups of cells, one panel per locus.
+
+    ``source`` and the options are those of ``ds.repertoire.gene_usage`` for
+    one ``gene`` field. Each panel holds one locus, such as TRA or TRB, and
+    its ``top`` genes with the most chains over all groups: a heatmap of
+    each gene's fraction of each group's chains of that locus, or bars
+    without groups.
+
+    Tables: ``usage``, the rows of ``ds.repertoire.gene_usage``.
+    """
+    if isinstance(top, bool) or not isinstance(top, int) or top < 1:
+        raise ValueError("top must be a positive integer")
+    result = _repertoire_method(store, "gene_usage")(
+        source,
+        genes=gene,
+        level=level,
+        slots=slots,
+        count=count,
+        group_by=group_by,
+        groups=groups,
+        cell_selection=cell_selection,
+    )
+    table = result.table
+    key_columns = [
+        column
+        for column in table.columns
+        if column not in ("locus", gene, count, "fraction")
+    ]
+    names = _key_names(table, key_columns)
+    loci = _locus_panels(table)
+    if figsize is None and target is None:
+        figsize = (
+            max(5.0, 3.0 + 0.4 * len(set(names))) * len(loci),
+            max(4.0, 0.22 * top + 1.5),
+        )
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=loci, figsize=figsize, n_columns=max(1, len(loci))
+        )
+        for locus in loci:
+            ax = axes[locus]
+            rows = table[table["locus"] == locus]
+            row_names = names[(table["locus"] == locus).to_numpy()]
+            totals = (
+                rows.groupby(gene)[count]
+                .sum()
+                .sort_values(ascending=False, kind="stable")
+            )
+            shown = list(totals.index[:top])
+            wide = (
+                pd.DataFrame(
+                    {
+                        "group": row_names,
+                        gene: rows[gene].to_numpy(),
+                        "fraction": rows["fraction"].to_numpy(),
+                    }
+                )
+                .pivot_table(
+                    index=gene, columns="group", values="fraction", fill_value=0
+                )
+                .reindex(index=shown)
+            )
+            wide = wide.reindex(columns=sort_categories(wide.columns))
+            if wide.shape[1] == 1:
+                positions = np.arange(len(shown))[::-1]
+                ax.barh(positions, wide.iloc[:, 0].to_numpy(), color="#2b6cb0")
+                ax.set_yticks(positions, shown, fontsize="small")
+                ax.set_xlabel(f"Fraction of {count}")
+                ax.set_title(locus)
+            else:
+                _heatmap(ax, wide, title=locus, show_legend=show_legend, figure=figure)
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"usage": table},
+        legends=(LegendSpec(kind="continuous", label="Fraction"),),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(table[count].sum()),
+            renderer="matplotlib",
+            notes=(source.kind,),
+            extras={
+                "source": source.to_dict(),
+                "gene": gene,
+                "level": level,
+                "slots": list(result.slots),
+                "count": count,
+                "top": top,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+@close_figures_on_error
+def gene_pairing(
+    store: Any,
+    source: ArtifactRef,
+    *,
+    level: str = "gene",
+    slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
+    count: str = "cells",
+    cell_selection: ArtifactRef | None = None,
+    top: int = 20,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot how the V and J genes of each locus pair, one panel per locus.
+
+    Each panel draws the fraction of the locus's chains with each V gene,
+    among its ``top`` V genes with the most chains, and each J gene, as
+    ``ds.repertoire.gene_usage`` counts the pairs of ``v_call`` and
+    ``j_call`` among the cells of ``cell_selection``.
+
+    Tables: ``pairs``, the rows of ``ds.repertoire.gene_usage``.
+    """
+    if isinstance(top, bool) or not isinstance(top, int) or top < 1:
+        raise ValueError("top must be a positive integer")
+    result = _repertoire_method(store, "gene_usage")(
+        source,
+        genes=("v_call", "j_call"),
+        level=level,
+        slots=slots,
+        count=count,
+        cell_selection=cell_selection,
+    )
+    table = result.table
+    loci = _locus_panels(table)
+    if figsize is None and target is None:
+        figsize = (6.5 * len(loci), max(4.0, 0.25 * top + 2.0))
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=loci, figsize=figsize, n_columns=max(1, len(loci))
+        )
+        for locus in loci:
+            rows = table[table["locus"] == locus]
+            totals = (
+                rows.groupby("v_call")[count]
+                .sum()
+                .sort_values(ascending=False, kind="stable")
+            )
+            wide = rows.pivot_table(
+                index="v_call", columns="j_call", values="fraction", fill_value=0
+            ).reindex(index=list(totals.index[:top]))
+            wide = wide.reindex(columns=sort_categories(wide.columns))
+            _heatmap(
+                axes[locus], wide, title=locus, show_legend=show_legend, figure=figure
+            )
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"pairs": table},
+        legends=(LegendSpec(kind="continuous", label="Fraction"),),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(table[count].sum()),
+            renderer="matplotlib",
+            notes=(source.kind,),
+            extras={
+                "source": source.to_dict(),
+                "level": level,
+                "slots": list(result.slots),
+                "count": count,
+                "top": top,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+@close_figures_on_error
+def spectratype(
+    store: Any,
+    source: ArtifactRef,
+    *,
+    sequence: str = "aa",
+    slots: str | Sequence[str] = ("VJ_1", "VDJ_1"),
+    count: str = "cells",
+    group_by: str | Sequence[str] | None = None,
+    groups: ArtifactRef | None = None,
+    cell_selection: ArtifactRef | None = None,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot the junction lengths of groups of cells, one panel per locus.
+
+    ``source`` and the options are those of ``ds.repertoire.spectratype``.
+    Each panel draws, for one locus, each group's fraction of chains at each
+    junction length, one line per group, or bars without groups.
+
+    Tables: ``spectratype``, the rows of ``ds.repertoire.spectratype``.
+    """
+    result = _repertoire_method(store, "spectratype")(
+        source,
+        sequence=sequence,
+        slots=slots,
+        count=count,
+        group_by=group_by,
+        groups=groups,
+        cell_selection=cell_selection,
+    )
+    table = result.table
+    key_columns = [
+        column
+        for column in table.columns
+        if column not in ("locus", "length", count, "fraction")
+    ]
+    names = _key_names(table, key_columns)
+    group_order = sort_categories(pd.unique(names))
+    colors = categorical_color_map(list(group_order))
+    loci = _locus_panels(table)
+    if figsize is None and target is None:
+        figsize = (4.5 * len(loci) + 1.5, 3.8)
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=loci, figsize=figsize, n_columns=max(1, len(loci))
+        )
+        for locus in loci:
+            ax = axes[locus]
+            in_locus = (table["locus"] == locus).to_numpy()
+            for name in group_order:
+                rows = table[in_locus & (names == name)]
+                if len(group_order) == 1:
+                    ax.bar(rows["length"], rows["fraction"], color="#2b6cb0")
+                else:
+                    ax.plot(
+                        rows["length"],
+                        rows["fraction"],
+                        marker="o",
+                        markersize=3,
+                        linewidth=1.2,
+                        color=colors[name],
+                        label=name,
+                    )
+            ax.set_xlabel(
+                "Junction length (residues)"
+                if sequence == "aa"
+                else "Junction length (nucleotides)"
+            )
+            ax.xaxis.get_major_locator().set_params(integer=True)
+            ax.set_ylabel(f"Fraction of {count}")
+            ax.set_title(locus)
+        if show_legend and len(group_order) > 1:
+            axes[loci[-1]].legend(
+                frameon=False, fontsize="small", loc="upper left", bbox_to_anchor=(1, 1)
+            )
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"spectratype": table},
+        legends=(LegendSpec(kind="categorical", label="Group"),),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(table[count].sum()),
+            renderer="matplotlib",
+            notes=(source.kind,),
+            extras={
+                "source": source.to_dict(),
+                "sequence": sequence,
+                "slots": list(result.slots),
+                "count": count,
             },
         ),
         owns_figure=owns,
