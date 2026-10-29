@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 import matplotlib
@@ -7,6 +8,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+from matplotlib.colors import to_hex
 
 from cytearc import plotting
 from cytearc.datastore.datastore import DataStore
@@ -101,6 +103,70 @@ def test_receptor_qc_groups_by_labels_of_fewer_cells(tmp_path) -> None:
         assert result.provenance.n_cells == 4
         assert result.tables["chains_per_cell"].sum().tolist() == [4, 4]
         assert result.provenance.extras["grouping"] == "cluster_labels"
+    finally:
+        result.close()
+
+
+def test_embedding_draws_cells_without_a_clonotype_as_missing(tmp_path) -> None:
+    from cytearc.embeddings.imported import write_imported_embedding
+    from cytearc.storage.artifacts import fingerprint_array
+
+    store = _store(tmp_path)
+    cells = store.snapshot_cell_selection()
+    receptors = store.repertoire.import_receptors(
+        [_tcr(tmp_path), _bcr(tmp_path)], cell_selection=cells
+    )
+    coordinates = np.column_stack([np.arange(N_CELLS), np.zeros(N_CELLS)]).astype(
+        np.float32
+    )
+    layout = write_imported_embedding(
+        store.zw,
+        assay="RNA",
+        dimreduc_key="umap",
+        role="umap",
+        coordinates=coordinates,
+        source_digest=hashlib.sha256(b"layout").digest(),
+        payload_fingerprints={"values": fingerprint_array(coordinates)},
+        source_cell_ids=np.asarray(store.cells.fetch_all("ids")).astype(str),
+        cell_selection=cells,
+        block_rows=4,
+    )
+    clonotypes = store.repertoire.clonotypes(receptors)
+    labels = store.artifacts.load_values(clonotypes).to_pandas()
+    without = int((labels.astype(str) == "").sum())
+    assert without > 0
+    result = store.plots.embedding(layout=layout, color_by=clonotypes, show=False)
+    try:
+        scale = next(
+            scale
+            for scale in result.scales
+            if isinstance(scale, plotting.CategoricalScale)
+        )
+        # Blank labels are missing: drawn in the missing colour, not as a category.
+        assert "" not in scale.palette
+        assert set(scale.palette) == set(labels[labels.astype(str) != ""])
+        (points,) = result.axes[next(iter(result.axes))].collections
+        drawn = [to_hex(color) for color in points.get_facecolors()]
+        assert drawn.count(to_hex(scale.missing_color)) == without
+    finally:
+        result.close()
+
+
+def test_receptor_qc_groups_by_integer_labels_of_fewer_cells(tmp_path) -> None:
+    # Integer labels, as clusterings hold them, align as objects; the cells
+    # that the labels lack get no group.
+    store, ref = _receptors(tmp_path)
+    keep = np.zeros(N_CELLS, dtype=bool)
+    keep[:4] = True
+    store.cells.insert("first", keep)
+    store.cells.insert("cluster", np.arange(N_CELLS) % 2)
+    labels = store.snapshot_cluster_labels(
+        "cluster", cell_selection=store.snapshot_cell_selection("first")
+    )
+    result = plotting.receptor_qc(store, ref, groups=labels, show=False)
+    try:
+        assert result.tables["chain_pairing"].sum().tolist() == [2, 2]
+        assert result.provenance.n_cells == 4
     finally:
         result.close()
 
