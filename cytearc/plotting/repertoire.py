@@ -21,7 +21,7 @@ from ._figure import (
 )
 from ._style import apply_figure_chrome, theme_context
 
-__all__ = ["receptor_qc"]
+__all__ = ["cell_groups", "clonotype_abundance", "receptor_qc"]
 
 _QC_PANELS = ("receptor_type", "chain_pairing", "chains_per_cell")
 _RECEPTOR_TYPE_COLORS = {
@@ -55,19 +55,20 @@ def _load_receptors(store: Any, receptors: ArtifactRef) -> Any:
     return loader(receptors, fields=())
 
 
-def receptor_groups(
+def cell_groups(
     store: Any,
-    receptors: ArtifactRef,
+    artifact: ArtifactRef,
     cell_ids: pd.Index,
     *,
     group_by: str | None,
     groups: ArtifactRef | None,
 ) -> tuple[np.ndarray | None, str | None]:
-    """Return each receptor cell's group label, None where it has none.
+    """Return the group label of each cell of a cell-aligned artifact.
 
     ``group_by`` names a cell metadata column and ``groups`` a cell-label
     artifact, such as a clustering; at most one may be given. A label artifact
-    may hold fewer cells than the receptors: the cells it lacks have no group.
+    may hold fewer cells than ``artifact``: the cells it lacks have no group,
+    and their label is None.
 
     Returns:
         The labels aligned to ``cell_ids``, or None without a grouping, and
@@ -80,7 +81,7 @@ def receptor_groups(
     if group_by is not None:
         if not isinstance(group_by, str):
             raise TypeError("group_by must be the name of a cell metadata column")
-        selection = inspect_artifact(store.zw, receptors).input_ref("cell_selection")
+        selection = inspect_artifact(store.zw, artifact).input_ref("cell_selection")
         resolved = resolve_grouping(
             store.zw,
             store.cells,
@@ -212,7 +213,7 @@ def receptor_qc(
         raise TypeError("normalize must be a boolean or None")
     loaded = _load_receptors(store, receptors)
     cells = loaded.cells
-    labels, group_name = receptor_groups(
+    labels, group_name = cell_groups(
         store, receptors, pd.Index(cells.index), group_by=group_by, groups=groups
     )
     fractions = labels is not None if normalize is None else normalize
@@ -305,6 +306,175 @@ def receptor_qc(
                 "immune_receptors": receptors.to_dict(),
                 "grouping": group_name,
                 "normalize": fractions,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+def _load_clonotypes(store: Any, clonotypes: ArtifactRef) -> Any:
+    """Load saved clonotypes through the store's narrow loader."""
+    loader = getattr(getattr(store, "repertoire", None), "load_clonotypes", None)
+    if not callable(loader):
+        raise TypeError("store does not provide clonotypes")
+    return loader(clonotypes)
+
+
+def _clonotype_label(name: str, row: pd.Series) -> str:
+    """Name a clonotype by its label and its representative's main junction.
+
+    The representative of a clonotype has a chain in ``VDJ_1`` or ``VJ_1``, so
+    one of their junctions names it.
+    """
+    junction = row.get("VDJ_1_junction_aa")
+    if not isinstance(junction, str):
+        junction = row.get("VJ_1_junction_aa")
+    return f"{name} ({junction})"
+
+
+@close_figures_on_error
+def clonotype_abundance(
+    store: Any,
+    clonotypes: ArtifactRef,
+    *,
+    group_by: str | None = None,
+    groups: ArtifactRef | None = None,
+    top: int = 20,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot how many clonotypes have each size, and the largest clonotypes.
+
+    ``clonotypes`` is a ``clonotypes`` artifact, such as one from
+    ``ds.repertoire.clonotypes``. The first panel counts clonotypes by their
+    number of cells on log scales: most clonotypes hold one cell, and expanded
+    clonotypes form the tail. The second panel draws the ``top`` clonotypes
+    with the most cells, each labelled with its representative's ``VDJ_1``
+    junction amino acids, or its ``VJ_1`` junction without a VDJ chain.
+
+    ``group_by`` names a cell metadata column, such as the sample, and
+    ``groups`` a cell-label artifact, such as a clustering; with either, the
+    first panel draws one line per group, counting the cells of each clonotype
+    within the group, and the second stacks each clonotype's cells by group.
+    Cells without a group are left out.
+
+    Tables: ``sizes`` (``group``, ``clone_size``, ``n_clonotypes``) and
+    ``top`` (``clonotype``, ``label``, then the cells of each group, or
+    ``cells``).
+    """
+    if isinstance(top, bool) or not isinstance(top, int) or top < 1:
+        raise ValueError("top must be a positive integer")
+    loaded = _load_clonotypes(store, clonotypes)
+    cells = loaded.cells
+    group_labels, group_name = cell_groups(
+        store, clonotypes, pd.Index(cells.index), group_by=group_by, groups=groups
+    )
+    clonotype = cells["clonotype"].to_numpy(dtype=object)
+    keep = ~pd.isna(cells["clonotype"]).to_numpy()
+    if group_labels is None:
+        group_values = np.full(len(cells), "all cells", dtype=object)
+    else:
+        group_values = np.asarray(group_labels, dtype=object)
+        keep &= np.asarray([label is not None for label in group_values], dtype=bool)
+    frame = pd.DataFrame({"group": group_values[keep], "clonotype": clonotype[keep]})
+    counts = frame.groupby(["group", "clonotype"], sort=False).size()
+    group_order = sort_categories(pd.unique(frame["group"]))
+    sizes = (
+        counts.rename("clone_size")
+        .reset_index()
+        .groupby(["group", "clone_size"])
+        .size()
+        .rename("n_clonotypes")
+        .reset_index()
+    )
+    sizes["group"] = pd.Categorical(sizes["group"], categories=group_order)
+    sizes = sizes.sort_values(["group", "clone_size"]).reset_index(drop=True)
+    sizes["group"] = sizes["group"].astype(object)
+    per_group = (
+        counts.unstack("group", fill_value=0)
+        .reindex(columns=group_order, fill_value=0)
+        .astype(np.int64)
+    )
+    totals = per_group.sum(axis=1)
+    rank = loaded.clonotypes.set_index("clonotype")
+    # The largest clonotypes, ties in the clonotypes' rank order.
+    positions = rank.index.get_indexer(totals.index)
+    order = np.lexsort((positions, -totals.to_numpy()))[:top]
+    chosen = totals.index[order]
+    top_table = per_group.loc[chosen].reset_index()
+    top_table.insert(
+        1, "label", [_clonotype_label(name, rank.loc[name]) for name in chosen]
+    )
+    if group_labels is None:
+        top_table = top_table.rename(columns={"all cells": "cells"})
+    if figsize is None and target is None:
+        figsize = (12.0, max(3.6, 0.28 * len(top_table) + 1.2))
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=["sizes", "top"], figsize=figsize, n_columns=2
+        )
+        ax = axes["sizes"]
+        for group in group_order:
+            rows = sizes[sizes["group"] == group]
+            ax.plot(
+                rows["clone_size"],
+                rows["n_clonotypes"],
+                marker="o",
+                markersize=3,
+                linewidth=1.2,
+                label=str(group),
+            )
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("Cells of the clonotype")
+        ax.set_ylabel("Clonotypes")
+        ax.set_title("Clone sizes")
+        if show_legend and group_labels is not None:
+            ax.legend(frameon=False, fontsize="small")
+        ax = axes["top"]
+        positions = np.arange(len(top_table))[::-1]
+        left = np.zeros(len(top_table))
+        value_columns = [
+            column
+            for column in top_table.columns
+            if column not in ("clonotype", "label")
+        ]
+        for column in value_columns:
+            widths = top_table[column].to_numpy(dtype=np.float64)
+            ax.barh(positions, widths, left=left, label=str(column))
+            left += widths
+        ax.set_yticks(positions, top_table["label"].tolist(), fontsize="small")
+        ax.set_xlabel("Cells")
+        ax.set_title(f"Largest {len(top_table)} clonotypes")
+        if show_legend and group_labels is not None:
+            ax.legend(frameon=False, fontsize="small", loc="lower right")
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"sizes": sizes, "top": top_table},
+        legends=(LegendSpec(kind="categorical", label=group_name),)
+        if group_labels is not None
+        else (),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(keep.sum()),
+            renderer="matplotlib",
+            notes=("clonotypes",),
+            extras={
+                "clonotypes": clonotypes.to_dict(),
+                "grouping": group_name,
+                "top": top,
             },
         ),
         owns_figure=owns,

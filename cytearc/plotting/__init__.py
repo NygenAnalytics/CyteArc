@@ -67,7 +67,10 @@ if TYPE_CHECKING:
         guide_calls as guide_calls,
         guide_thresholds as guide_thresholds,
     )
-    from .repertoire import receptor_qc as receptor_qc
+    from .repertoire import (
+        clonotype_abundance as clonotype_abundance,
+        receptor_qc as receptor_qc,
+    )
     from .summary import dotplot as dotplot
     from .summary import matrixplot as matrixplot
 
@@ -93,6 +96,7 @@ __all__ = [
     "THEMES",
     "cluster_tree",
     "cluster_connectivity",
+    "clonotype_abundance",
     "compose_results",
     "composition",
     "distribution",
@@ -149,6 +153,7 @@ __getattr__, __dir__ = _lazy_facade(
         "THEMES": "._style",
         "cluster_tree": ".cluster_tree",
         "cluster_connectivity": ".cluster_connectivity",
+        "clonotype_abundance": ".repertoire",
         "compose_results": "._figure",
         "composition": ".composition",
         "distribution": ".distribution",

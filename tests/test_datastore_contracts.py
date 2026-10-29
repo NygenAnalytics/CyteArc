@@ -195,9 +195,15 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # perturbation.labels and perturbation.load_labels, then
     # perturbation.efficiency and perturbation.load_efficiency, then
     # perturbation.edistance and perturbation.load_edistance, then
-    # repertoire.import_receptors and repertoire.load_receptors.
-    assert len(_NAMESPACE_METHODS) == 106
-    assert {"import_receptors", "load_receptors"} == {
+    # repertoire.import_receptors and repertoire.load_receptors, then
+    # repertoire.clonotypes and repertoire.load_clonotypes.
+    assert len(_NAMESPACE_METHODS) == 108
+    assert {
+        "import_receptors",
+        "load_receptors",
+        "clonotypes",
+        "load_clonotypes",
+    } == {
         name
         for namespace, _, name, _ in _NAMESPACE_METHODS
         if namespace == "repertoire"

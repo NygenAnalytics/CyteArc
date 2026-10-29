@@ -344,6 +344,12 @@ _CONTRACTS = (
         model_only=_classified("resolved_input", "sources"),
     ),
     OperationContract(
+        RepertoireAccessor.clonotypes,
+        metadata_arguments.ClonotypeArguments,
+        # The labels of the within columns are recorded by their fingerprint.
+        model_only=_classified("resolved_input", "within_fingerprint"),
+    ),
+    OperationContract(
         QcAccessor.hto_demultiplexing,
         metadata_arguments.HtoIdentityArguments,
         model_only={
