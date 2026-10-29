@@ -4,11 +4,18 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
+
 from ....metadata.membership import require_measured_cells
+from ....metadata.selection import valid_category_mask
+from ....storage.artifacts import ArtifactRef
+from ....storage.selections import read_stored_selection_mask
+from ....storage.types import as_zarr_group
 from ....utils.arguments import integer_argument
 from ..fields import reserved_fields
-from ..filtering import filter_columns, resolve_filtering
+from ..filtering import filter_columns, resolve_filtering, snapshot_column_values
 from ..settings import (
+    HVG_TOP_N_DEFAULT,
     TSNE_DIMS_DEFAULT,
     UMAP_DIMS_DEFAULT,
     column_sequence,
@@ -17,6 +24,85 @@ from ..settings import (
     warn_without_sgtsnepi,
 )
 from ..stages import CellSource
+
+
+def selection_mask(store: Any, ref: ArtifactRef) -> np.ndarray:
+    """Return a datastore cell selection as its mask over the cell axis."""
+    return read_stored_selection_mask(
+        store.zw,
+        ref,
+        kind="cell_selection",
+        scope="datastore",
+        assay=None,
+        table_path="cellData",
+    )
+
+
+def input_cell_mask(store: Any, source: CellSource) -> np.ndarray:
+    """Return a run's input cells, a column or a selection, as a cell-axis mask."""
+    if source.column is not None:
+        return np.asarray(store.cells.fetch_all(source.column), dtype=bool)
+    assert source.selection is not None
+    return selection_mask(store, source.selection)
+
+
+def require_labeled_cells(
+    labels: np.ndarray,
+    missing: np.ndarray | None,
+    active: np.ndarray,
+    column: str,
+    *,
+    purpose: str,
+    blank_is_label: bool = True,
+) -> None:
+    """Refuse labels that leave one of the active cells unlabeled.
+
+    ``purpose`` names what needs the labels, such as ``"Cell calling per
+    capture"``. A missing value, or NaN in a float column, is no label. With
+    ``blank_is_label=False``, empty or whitespace text is no label either, as
+    for the samples of the perturbation methods, which ``valid_category_mask``
+    checks.
+    """
+    if blank_is_label:
+        unlabeled = np.zeros(len(active), dtype=bool) if missing is None else missing
+        if labels.dtype.kind == "f":
+            unlabeled = unlabeled | np.isnan(labels)
+    else:
+        unlabeled = ~valid_category_mask(labels, missing_mask=missing)
+    count = int(np.count_nonzero(unlabeled & active))
+    if count:
+        verb = "has" if count == 1 else "have"
+        raise ValueError(
+            f"{purpose} needs a {column!r} label for every cell, "
+            f"but {count} of the run's cells {verb} none"
+        )
+
+
+def check_labeled_cells(
+    store: Any,
+    source: CellSource,
+    column: str,
+    *,
+    purpose: str,
+    blank_is_label: bool = True,
+) -> None:
+    """Refuse a cell column that leaves one of a run's input cells unlabeled.
+
+    A recipe checks the live column before the run starts; the stage that
+    reads the labels checks the cells that it reads. ``blank_is_label`` is
+    that of :func:`require_labeled_cells`.
+    """
+    labels, missing = snapshot_column_values(
+        as_zarr_group(store.zw["cellData"], name="cellData"), column
+    )
+    require_labeled_cells(
+        labels,
+        missing,
+        input_cell_mask(store, source),
+        column,
+        purpose=purpose,
+        blank_is_label=blank_is_label,
+    )
 
 
 def resolve_label(label: object) -> str | None:
@@ -87,6 +173,29 @@ def modality_assay(
         f"The store has several {modality} assays, {found!r}; choose one with "
         f"pipeline.{recipe}(assay=...)"
     )
+
+
+def resolve_hvg(store: Any, hvg: object) -> dict[str, Any]:
+    """Return the settings of highly variable gene selection.
+
+    Raises:
+        KeyError: If ``batch`` names a missing cell column.
+    """
+    _enabled, settings = stage_settings("hvg", hvg, optional=False)
+    batch = settings.get("batch")
+    if batch is not None and batch not in store.cells.columns:
+        raise KeyError(f"HVG batch column {batch!r} was not found")
+    return settings
+
+
+def check_pca_features(dims: int, hvg: Mapping[str, Any]) -> None:
+    """Refuse PCA dimensions that the highly variable genes cannot give."""
+    top_n = hvg.get("top_n", HVG_TOP_N_DEFAULT)
+    if dims >= top_n:
+        raise ValueError(
+            f"pca dims ({dims}) must be below hvg top_n ({top_n}): PCA "
+            "needs at least dims + 1 features"
+        )
 
 
 @dataclass(frozen=True, slots=True)

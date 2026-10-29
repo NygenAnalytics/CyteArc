@@ -5,7 +5,7 @@ reused artifact reports the same numbers as a computed one. Summaries read
 attributes and bounded blocks of small arrays, never a matrix.
 """
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -16,12 +16,25 @@ from ...storage.types import as_zarr_array
 
 # A summary lists at most this many samples, clusters, or components.
 SUMMARY_ITEM_LIMIT = 50
+# A target with fewer single-target cells than this is named in the labels'
+# summary: the fewest cells of a perturbation profile by default, as in
+# Replogle et al. (2022).
+FEW_TARGET_CELLS = 25
+# The adjusted p-value below which a perturbation's test counts in a summary.
+SIGNIFICANT_P = 0.05
 
 
 def _array(group: Any, name: str) -> Any | None:
     if name not in group:
         return None
     return as_zarr_array(group[name], name=name)
+
+
+def _arrays(group: Any, *names: str) -> list[Any] | None:
+    """Return the arrays of ``names``, or None when one of them is missing."""
+    if any(name not in group for name in names):
+        return None
+    return [as_zarr_array(group[name], name=name) for name in names]
 
 
 def _blocks(array: Any) -> Any:
@@ -33,6 +46,22 @@ def _blocks(array: Any) -> Any:
 
 def _true_count(array: Any) -> int:
     return sum(int(np.count_nonzero(block)) for block in _blocks(array))
+
+
+def _row_ranges(array: Any) -> Iterator[tuple[int, int]]:
+    """Yield bounded row ranges of ``array``, to read arrays of its rows alike."""
+    rows = int(array.shape[0])
+    block = array_block_rows(array, rows)
+    for start in range(0, rows, block):
+        yield start, min(start + block, rows)
+
+
+def _status_counts(group: Any, codes: np.ndarray) -> dict[str, int]:
+    """Count each status of the artifact's ``status_names`` among ``codes``."""
+    names = [str(name) for name in group.attrs.get("status_names") or ()]
+    return {
+        name: int(np.count_nonzero(codes == index)) for index, name in enumerate(names)
+    }
 
 
 def _float(value: Any, digits: int = 4) -> float | None:
@@ -258,6 +287,280 @@ def _markers(group: Any) -> dict[str, Any]:
     }
 
 
+def _guide_thresholds(group: Any) -> dict[str, Any]:
+    status = _array(group, "status")
+    if status is None or status.ndim != 2:
+        return {}
+    codes = np.concatenate(
+        [np.asarray(block).ravel() for block in _blocks(status)]
+        or [np.empty(0, dtype=np.int64)]
+    )
+    return {
+        "samples": int(status.shape[0]),
+        "guides": int(status.shape[1]),
+        "statuses": _status_counts(group, codes),
+    }
+
+
+def _guide_calls(group: Any) -> dict[str, Any]:
+    arrays = _arrays(group, "n_guides", "guide_codes", "guides")
+    if arrays is None:
+        return {}
+    n_guides, codes, guides = arrays
+    # Cells with no call, one call, and several calls.
+    calls = np.zeros(3, dtype=np.int64)
+    for block in _blocks(n_guides):
+        calls += np.bincount(
+            np.minimum(np.asarray(block, dtype=np.int64), 2), minlength=3
+        )
+    called = np.zeros(int(guides.shape[0]), dtype=bool)
+    for block in _blocks(codes):
+        values = np.asarray(block, dtype=np.int64).ravel()
+        called[values[values >= 0]] = True
+    summary: dict[str, Any] = {
+        "cells": int(calls.sum()),
+        "negative": int(calls[0]),
+        "single": int(calls[1]),
+        "multiple": int(calls[2]),
+        "calledGuides": int(np.count_nonzero(called)),
+    }
+    # Imported calls count the barcodes of Cell Ranger's file.
+    for key, name in (
+        ("fileBarcodes", "n_file_barcodes"),
+        ("unmatchedBarcodes", "n_unmatched_barcodes"),
+    ):
+        if name in group.attrs:
+            summary[key] = int(group.attrs[name])
+    return summary
+
+
+def _perturbation_labels(group: Any) -> dict[str, Any]:
+    arrays = _arrays(
+        group, "n_targets", "is_control", "target_codes", "targets", "target_is_control"
+    )
+    if arrays is None:
+        return {}
+    n_targets, is_control, target_codes, targets, target_is_control = arrays
+    names = np.asarray(targets[:]).astype(str)
+    rows = ~np.asarray(target_is_control[:]).astype(bool)
+    # Each target's cells that carry it alone, and the cells of each label.
+    single_cells = np.zeros(len(names), dtype=np.int64)
+    counts = np.zeros(4, dtype=np.int64)
+    for start, stop in _row_ranges(n_targets):
+        n = np.asarray(n_targets[start:stop]).astype(np.int64)
+        control = np.asarray(is_control[start:stop]).astype(bool)
+        first = np.asarray(target_codes[start:stop, 0]).astype(np.int64)
+        single_cells += np.bincount(first[n == 1], minlength=len(names))
+        counts += np.asarray(
+            [
+                len(n),
+                np.count_nonzero(control),
+                np.count_nonzero((n == 0) & ~control),
+                np.count_nonzero(n > 1),
+            ],
+            dtype=np.int64,
+        )
+    target_cells = single_cells[rows]
+    target_names = names[rows]
+    few = np.flatnonzero(target_cells < FEW_TARGET_CELLS)
+    few = few[np.lexsort((target_names[few], target_cells[few]))]
+    return {
+        "cells": int(counts[0]),
+        "controls": int(counts[1]),
+        "negative": int(counts[2]),
+        "multipleTargets": int(counts[3]),
+        "targets": int(len(target_names)),
+        "targetCells": (
+            {
+                "min": int(target_cells.min()),
+                "median": _float(np.median(target_cells)),
+                "max": int(target_cells.max()),
+            }
+            if len(target_cells)
+            else None
+        ),
+        "fewCellTargets": {
+            str(target_names[row]): int(target_cells[row])
+            for row in few[:SUMMARY_ITEM_LIMIT]
+        },
+        "fewCellTargetCount": int(len(few)),
+    }
+
+
+def _row_table(group: Any, names: Sequence[str]) -> dict[str, np.ndarray] | None:
+    """Read the arrays of a table with one row per perturbation, or None."""
+    arrays = _arrays(group, "status", *names)
+    if arrays is None:
+        return None
+    return {
+        name: np.asarray(array[:])
+        for name, array in zip(("status", *names), arrays, strict=True)
+    }
+
+
+def _status_code(group: Any, status: str) -> int:
+    return [str(name) for name in group.attrs["status_names"]].index(status)
+
+
+def _efficiency(group: Any) -> dict[str, Any]:
+    table = _row_table(group, ("names", "remaining_fraction", "adjusted_p_value"))
+    if table is None:
+        return {}
+    codes = table["status"].astype(np.int64)
+    tested = codes == _status_code(group, "tested")
+    fraction = table["remaining_fraction"].astype(np.float64)
+    adjusted = table["adjusted_p_value"].astype(np.float64)
+    measured = fraction[tested & np.isfinite(fraction)]
+    unmatched = table["names"].astype(str)[codes == _status_code(group, "no_feature")]
+    return {
+        "by": str(group.attrs.get("by")),
+        "rows": int(len(codes)),
+        "statuses": _status_counts(group, codes),
+        "knockedDown": int(
+            np.count_nonzero(tested & (adjusted < SIGNIFICANT_P) & (fraction < 1))
+        ),
+        "medianRemainingFraction": (
+            _float(np.median(measured)) if len(measured) else None
+        ),
+        "noFeature": unmatched[:SUMMARY_ITEM_LIMIT].tolist(),
+    }
+
+
+def _edistance(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
+    table = _row_table(group, ("p_value", "adjusted_p_value"))
+    if table is None:
+        return {}
+    codes = table["status"].astype(np.int64)
+    tested = codes == _status_code(group, "tested")
+    permutations = int(parameters["n_permutations"])
+    # No draw reached the observed E-distance: the smallest p-value a test of
+    # these permutations gives. Without permutations p-values are NaN.
+    floor = 1.0 / (permutations + 1)
+    p_value = table["p_value"].astype(np.float64)
+    adjusted = table["adjusted_p_value"].astype(np.float64)
+    return {
+        "by": str(group.attrs.get("by")),
+        "rows": int(len(codes)),
+        "statuses": _status_counts(group, codes),
+        "significant": int(np.count_nonzero(tested & (adjusted < SIGNIFICANT_P))),
+        "atFloor": int(np.count_nonzero(tested & (p_value <= floor * (1 + 1e-9)))),
+        "nPermutations": permutations,
+    }
+
+
+def _signature(group: Any) -> dict[str, Any]:
+    arrays = _arrays(group, "values", "neighbors", "is_control")
+    if arrays is None:
+        return {}
+    values, neighbors, is_control = arrays
+    # The samples of the sample column, which the loader's cells name. Without
+    # a sample column every cell is in one sample named None, which counts as
+    # none, as pandas counts the loader's labels.
+    samples = group.attrs.get("sample_names") or ()
+    return {
+        "cells": int(values.shape[0]),
+        "features": int(values.shape[1]),
+        "controls": _true_count(is_control),
+        "samples": sum(name is not None for name in samples),
+        "neighbors": int(neighbors.shape[1]),
+    }
+
+
+def _mixscape(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
+    table = _row_table(group, ("targets", "n_cells", "n_ko"))
+    if table is None:
+        return {}
+    codes = table["status"].astype(np.int64)
+    few = codes == _status_code(group, "few_de_genes")
+    return {
+        "rows": int(len(codes)),
+        "statuses": _status_counts(group, codes),
+        "cells": int(table["n_cells"].sum()),
+        "knockedOut": int(table["n_ko"].sum()),
+        "fewDeGenes": sorted(set(table["targets"].astype(str)[few].tolist()))[
+            :SUMMARY_ITEM_LIMIT
+        ],
+        "perturbationType": str(parameters["perturbation_type"]),
+    }
+
+
+def _associations(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
+    arrays = _arrays(group, "sets", "pass_qc", "significant", "groups", "group_guides")
+    if arrays is None:
+        return {}
+    sets, pass_qc, significant, pair_groups, group_guides = arrays
+    names = [str(name) for name in group.attrs["set_names"]]
+    discovery, calibration, positive = (
+        names.index(name) for name in ("discovery", "calibration", "positive")
+    )
+    # Each set's pairs, those that pass QC, and those found significant, read
+    # in bounded blocks, since a trans run holds millions of pairs.
+    pairs = np.zeros(len(names), dtype=np.int64)
+    passing = np.zeros(len(names), dtype=np.int64)
+    found = np.zeros(len(names), dtype=np.int64)
+    false_groups: list[np.ndarray] = []
+    for start, stop in _row_ranges(sets):
+        codes = np.asarray(sets[start:stop]).astype(np.int64)
+        qc = np.asarray(pass_qc[start:stop]).astype(bool)
+        hits = np.asarray(significant[start:stop]).astype(bool)
+        pairs += np.bincount(codes, minlength=len(names))
+        passing += np.bincount(codes[qc], minlength=len(names))
+        found += np.bincount(codes[hits], minlength=len(names))
+        false = hits & (codes == calibration)
+        if false.any():
+            false_groups.append(np.asarray(pair_groups[start:stop])[false])
+    # The false discoveries of each group of control guides, most first.
+    guides = np.asarray(group_guides[:]).astype(str)
+    labels, counts = np.unique(
+        guides[np.concatenate(false_groups or [np.empty(0, dtype=np.int64)])],
+        return_counts=True,
+    )
+    order = np.lexsort((labels, -counts))[:SUMMARY_ITEM_LIMIT]
+    return {
+        "discoveryPairs": int(pairs[discovery]),
+        "testedDiscoveryPairs": int(passing[discovery]),
+        "discoveries": int(found[discovery]),
+        "calibrationPairs": int(pairs[calibration]),
+        "falseDiscoveries": int(group.attrs["n_false_discoveries"]),
+        "calibrationGrade": str(group.attrs["calibration_grade"]),
+        "calibrationStatus": str(group.attrs["calibration_status"]),
+        "falseDiscoveriesByControlGuides": {
+            str(labels[index]): int(counts[index]) for index in order
+        },
+        "positivePairs": int(pairs[positive]),
+        "positiveDetected": int(found[positive]),
+        "alpha": float(parameters["alpha"]),
+    }
+
+
+def _profiles(group: Any) -> dict[str, Any]:
+    arrays = _arrays(group, "values", "left_out", "n_zero_sd")
+    if arrays is None:
+        return {}
+    values, left_out, n_zero_sd = arrays
+    return {
+        "perturbations": int(values.shape[0]),
+        "features": int(values.shape[1]),
+        "leftOut": int(left_out.shape[0]),
+        "zeroSdFeatures": int(np.count_nonzero(np.asarray(n_zero_sd[:]))),
+        "samples": len(group.attrs.get("sample_names") or ()),
+    }
+
+
+def _perturbation_clusters(group: Any) -> dict[str, Any]:
+    cluster = _array(group, "cluster")
+    if cluster is None:
+        return {}
+    labels = np.asarray(cluster[:], dtype=np.int64)
+    sizes = np.bincount(labels[labels >= 0])
+    return {
+        "perturbations": int(len(labels)),
+        "clusters": int(np.count_nonzero(sizes)),
+        "unassigned": int(np.count_nonzero(labels < 0)),
+        "largestCluster": int(sizes.max(initial=0)),
+    }
+
+
 def _integrated(group: Any) -> dict[str, Any]:
     assays = group.attrs.get("assays")
     summary: dict[str, Any] = {"assays": list(assays) if assays else []}
@@ -296,6 +599,21 @@ _BY_KIND: Mapping[str, Callable[[Any], dict[str, Any]]] = {
     "integrated_graph": _integrated,
     "hto_identity": _hashtags,
     "cell_calling": _cell_calling,
+    "guide_thresholds": _guide_thresholds,
+    "guide_calls": _guide_calls,
+    "perturbation_labels": _perturbation_labels,
+    "perturbation_efficiency": _efficiency,
+    "perturbation_signature": _signature,
+    "perturbation_profiles": _profiles,
+    "perturbation_clusters": _perturbation_clusters,
+}
+# The summaries that also read the artifact's recorded parameters.
+_BY_KIND_WITH_PARAMETERS: Mapping[
+    str, Callable[[Any, Mapping[str, Any]], dict[str, Any]]
+] = {
+    "perturbation_edistance": _edistance,
+    "mixscape_classes": _mixscape,
+    "perturbation_associations": _associations,
 }
 
 
@@ -317,6 +635,10 @@ def summarize_stage(
         group = artifact_group(root, ref)
         if ref.kind == "cell_selection":
             summary = _selection(root, ref, group)
+        elif ref.kind in _BY_KIND_WITH_PARAMETERS:
+            summary = _BY_KIND_WITH_PARAMETERS[ref.kind](
+                group, inspect_artifact(root, ref).parameters or {}
+            )
         else:
             summarize = _BY_KIND.get(ref.kind)
             if summarize is None:

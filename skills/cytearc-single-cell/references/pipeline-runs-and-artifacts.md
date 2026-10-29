@@ -1,6 +1,6 @@
 # Pipeline runs and artifacts
 
-Run the modality recipes (RNA, ATAC, ADT, and their multimodal integration), follow and stop a
+Run the modality recipes (RNA, ATAC, ADT, their multimodal integration, and CRISPR screens), follow and stop a
 run, reopen and audit runs, inspect and trace immutable artifacts, branch from a run with exact
 refs, and record the analysis for handoff. Docs:
 <https://docs.nygen.io/CyteArc/api/pipeline.html>, <https://docs.nygen.io/CyteArc/api/artifacts.html>,
@@ -13,6 +13,8 @@ refs, and record the analysis for handoff. Docs:
   graph, UMAP, Leiden candidates, doublet scores and markers as one durable record.
   `ds.pipeline.atac()` and `ds.pipeline.adt()` do the same for peaks and antibodies, and
   `ds.pipeline.multimodal([...])` integrates runs of the same cells (CITE-seq, multiome, TEA-seq).
+- Pooled CRISPR screen: `ds.pipeline.perturbation(labels={"controls": [...]})` calls guides,
+  labels cells and measures each perturbation as one run (`perturbation-screens.md`).
 - Resuming work: open a run by label or id; inspect any result before consuming it.
 - Alternatives outside the fixed recipe: take refs from a completed run and pass them on.
 
@@ -56,8 +58,8 @@ refs, and record the analysis for handoff. Docs:
   columns, and needs `zarr_mode="r+"` (the default); a read-only store raises `PermissionError`,
   though `open`, reports and plots still work.
 - `PipelineRun` is a read-only `Mapping[str, ArtifactRef]` (`keys`, `items`, `values`, `get`,
-  `run["pca"]`) plus `run_id`, `label`, `status`, `recipe` (`"rna"`, `"atac"`, `"adt"` or
-  `"multimodal"`), `assay`, `started_at_ns`, `finished_at_ns`, `report()`, `cells`, `features`.
+  `run["pca"]`) plus `run_id`, `label`, `status`, `recipe` (`"rna"`, `"atac"`, `"adt"`,
+  `"multimodal"` or `"perturbation"`), `assay`, `started_at_ns`, `finished_at_ns`, `report()`, `cells`, `features`.
   Outputs and views work only on `status == "completed"`; otherwise they raise `RuntimeError`.
   Runs saved by earlier releases record recipe `"basic_rna_analysis"` and still open.
 - Labels are immutable. Only a completed run acquires its label; until then `run.label` is `None`
@@ -110,11 +112,14 @@ run["clusters"] == run["leiden_0.5"]  # True on the 10x 5K PBMC docs dataset
 | `atac` | `filtering` on `<assay>_nCounts` and `<assay>_nFeatures`; `prevalent_peaks` (`top_n` `min(10000, peaks - 1)`); TF-IDF `normalization`; `lsi` (`dims` 11, first component skipped); `harmony` off | `prevalent_peaks` | `lsi`; no doublets or cell cycle |
 | `adt` | `filtering` off unless asked (then on `<assay>_nCounts`); `panel` (leaves out names matching `DEFAULT_PANEL_EXCLUDE`, `(?i)isotype\|control\|ctrl`); CLR `normalization`; `pca` (`dims` one fewer than the panel, at most 21); `harmony` off | `panel` | `pca` |
 | `multimodal` | `integration` of the source runs' graphs (`method="wnn"` or `"snn"`) | none; `run.features` and `assay` are the first run's | `integrated_graph` in place of the three graph outputs; no `cluster_selection`; `markers_<assay>` per source run instead of `markers` |
+| `perturbation` | the RNA head (`filtering`, `hvg`, `normalization`, `pca`, `harmony` off) with `guide_calling` and `labels` (`controls` required) before it, and `efficiency` and `edistance` on; `signature`, `mixscape`, `associations`, `profiles` and `clusters` off | `highly_variable_features` | no graph, UMAP, Leiden or markers; `guide_thresholds` (fitted calls), `guide_calls`, `perturbation_labels`, `efficiency`, `edistance`, `signature`, `mixscape`, `associations`, `profiles`, `perturbation_clusters`; `run.assay` is the RNA assay |
 
 `run.cells` holds the frozen fields of the stages that ran: `I, ids, names`, any
 `snapshot_columns`, `s_score, g2m_score, cell_cycle_phase` (RNA), `umap_1, umap_2`, `tsne_1,
 tsne_2`, `leiden_*`, `paris`, `clusters`, `membership_strength`, `doublet_score,
-predicted_doublet` (RNA), and `weight_<assay>` for each modality of a WNN run.
+predicted_doublet` (RNA), `weight_<assay>` for each modality of a WNN run, and
+`mixscape_class, mixscape_posterior` for a perturbation run with Mixscape; its guide calls and
+labels belong to the guide assay and are no fields (read them with their loaders).
 
 ### Analyze several modalities of the same cells
 

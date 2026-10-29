@@ -310,6 +310,21 @@ For P perturbations in F features, the distances hold 8 P² bytes and the profil
 
 `ds.plots.perturbation_clusters` draws the clusters in one of two panels. The heatmap holds the correlations of the profiles in leaf order on a fixed scale from -1 to 1, or their Euclidean distances, beside a bar that colours each perturbation by its cluster, grey when it is unassigned, and numbers the clusters; it names the perturbations when it draws at most 50, and `perturbations` or `cluster_ids` keep fewer. The embedding places each perturbation in the layout, coloured by its cluster with the unassigned perturbations in grey beneath, numbers each cluster at its median, and names the perturbations of `label`. A cluster keeps its colour in both panels and whatever the plot draws.
 
+## Run the steps as one recipe
+
+{meth}`ds.pipeline.perturbation <cytearc.datastore.pipeline_accessor.PipelineAccessor.perturbation>` runs these steps as one durable run: the QC filtering, highly variable genes, PCA, and Harmony of the RNA recipe, the guide calls, the labels, the efficiency, and the E-distances, and on request the signatures and Mixscape, the association tests of every target against every highly variable gene, and the profiles and their clusters. It checks every setting before it writes anything, reuses the artifacts of earlier calls with the same refs and settings, and records each stage's numbers as the stage's summary, such as the cells of each label, the knocked-down targets, and the calibration grade of the tests ([Perturbation recipe](pipeline.md#perturbation)).
+
+```python
+screen = ds.pipeline.perturbation(
+    labels={"controls": ["Non-Targeting"]},
+    signature={"sample_column": "lane"},
+    mixscape=True,
+    associations={"sample_column": "lane"},
+    label="screen",
+)
+ds.perturbation.load_mixscape(screen["mixscape"]).targets
+```
+
 ## Guide calls
 
 ```{eval-rst}

@@ -39,6 +39,9 @@ import pandas as pd
 from numba import njit, prange
 from scipy import stats
 
+from cytearc.perturbation.efficiency import id_column_setting
+from cytearc.utils.arguments import float_argument, integer_argument
+
 __all__ = [
     "ASSOCIATION_SETS",
     "RECORD_BYTES",
@@ -49,6 +52,8 @@ __all__ = [
     "TreatmentGroups",
     "adjusted_p_values",
     "association_covariates",
+    "association_settings",
+    "covariate_columns",
     "calibration_grade",
     "calibration_pairs",
     "fit_null_models",
@@ -1594,6 +1599,112 @@ def skew_normal_p_values(
     left = np.exp(stats.skewnorm.logcdf(standardized, shape))
     right = np.exp(stats.skewnorm.logsf(standardized, shape))
     return _sided(left, right, side)
+
+
+def association_settings(
+    positive_controls: object,
+    id_column: object,
+    integration: object,
+    side: object,
+    approximation: object,
+    n_resamples: object,
+    stage_threshold: object,
+    min_nonzero: object,
+    n_calibration_pairs: object,
+    alpha: object,
+    seed: object,
+) -> tuple[tuple[int, int, int], float, int, int | None, float, int]:
+    """Check the settings of association tests, as ``associations`` takes them.
+
+    The pipeline recipe checks the same settings before its run starts. The
+    pairs, features, samples and covariates are checked against the store.
+
+    Args:
+        positive_controls: ``"targets"``, a table of pairs, or None; any
+            other string is refused.
+        id_column: The guide assay's column of target feature IDs, or None.
+        integration: ``"union"`` or ``"singleton"``.
+        side: One of :data:`SIDES`.
+        approximation: ``"skew_normal"`` or ``"none"``.
+        n_resamples: The random sets of the three rounds, a sequence of three
+            integers.
+        stage_threshold: The p-value at or below which a pair takes the
+            second round.
+        min_nonzero: The fewest perturbed and control cells that express a
+            tested gene.
+        n_calibration_pairs: The calibration pairs, or None.
+        alpha: The false discovery rate.
+        seed: The seed of the random sets and the calibration pairs.
+
+    Returns:
+        The random sets of each round, the stage threshold, ``min_nonzero``,
+        the calibration pairs, the false discovery rate and the seed, as
+        Python numbers.
+
+    Raises:
+        TypeError: If a setting has the wrong type.
+        ValueError: If a setting is unknown or out of range.
+    """
+    if isinstance(positive_controls, str) and positive_controls != "targets":
+        raise ValueError(
+            "positive_controls must be 'targets', a DataFrame or None, not "
+            f"{positive_controls!r}"
+        )
+    id_column_setting(id_column)
+    if integration not in ("union", "singleton"):
+        raise ValueError(
+            f"integration must be 'union' or 'singleton', not {integration!r}"
+        )
+    if side not in SIDES:
+        raise ValueError(f"side must be 'both', 'left' or 'right', not {side!r}")
+    if approximation not in ("skew_normal", "none"):
+        raise ValueError(
+            f"approximation must be 'skew_normal' or 'none', not {approximation!r}"
+        )
+    if (
+        isinstance(n_resamples, str | bytes)
+        or not isinstance(n_resamples, Sequence)
+        or len(n_resamples) != 3
+    ):
+        raise TypeError("n_resamples must be a sequence of three integers")
+    # A list, such as a JSON configuration gives, and the equal tuple record
+    # the same tests.
+    resamples = tuple(n_resamples)
+    draws = (
+        integer_argument(resamples[0], "n_resamples[0]", minimum=1),
+        integer_argument(resamples[1], "n_resamples[1]", minimum=2),
+        integer_argument(resamples[2], "n_resamples[2]", minimum=1),
+    )
+    threshold = float_argument(stage_threshold, "stage_threshold")
+    if not 0 <= threshold <= 1:
+        raise ValueError("stage_threshold must be from 0 to 1")
+    floor = integer_argument(min_nonzero, "min_nonzero", minimum=1)
+    requested = (
+        None
+        if n_calibration_pairs is None
+        else integer_argument(n_calibration_pairs, "n_calibration_pairs", minimum=0)
+    )
+    rate = float_argument(alpha, "alpha")
+    if not 0 < rate < 1:
+        raise ValueError("alpha must be above 0 and below 1")
+    resolved_seed = integer_argument(seed, "seed", minimum=0)
+    return draws, threshold, floor, requested, rate, resolved_seed
+
+
+def covariate_columns(covariates: Sequence[str] | None) -> tuple[str, ...]:
+    """Check ``covariates``, the cell columns to adjust for, and return them.
+
+    Whether the columns exist and hold numbers is checked against the store.
+
+    Raises:
+        TypeError: If ``covariates`` is not a sequence of column names or None.
+    """
+    if covariates is not None and (
+        isinstance(covariates, str)
+        or not all(isinstance(column, str) for column in covariates)
+    ):
+        raise TypeError("covariates must be a sequence of column names or None")
+    return tuple(covariates or ())
 
 
 def calibration_grade(n_false_discoveries: int) -> str:

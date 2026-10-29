@@ -22,10 +22,13 @@ complexes and pathways. These functions cluster the profiles of
 These functions read profiles that a caller passes and never touch storage.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+
+from cytearc.utils.arguments import integer_argument
 
 __all__ = [
     "METRICS",
@@ -34,10 +37,12 @@ __all__ = [
     "PerturbationClusters",
     "cluster_memory_bytes",
     "cluster_profiles",
+    "cluster_settings",
     "embed_profiles",
     "hdbscan_clusters",
     "leaf_order",
     "nearest_profiles",
+    "perturbation_names",
     "profile_distances",
 ]
 
@@ -45,6 +50,9 @@ __all__ = [
 METRICS = ("correlation", "euclidean")
 #: How HDBSCAN selects clusters from its tree: excess of mass or leaves.
 SELECTIONS = ("eom", "leaf")
+#: The largest seed of the layout: scikit-learn's PCA, which starts it,
+#: accepts 32-bit unsigned random states only.
+MAX_SEED = 2**32 - 1
 
 # The layout's settings, umap-learn's defaults for a few thousand points: the
 # nearest perturbations of each, the spread and smallest distance of the
@@ -79,6 +87,55 @@ class ClusterArrays:
     probability: np.ndarray
     order: np.ndarray
     embedding: np.ndarray
+
+
+def cluster_settings(
+    metric: object,
+    min_cluster_size: object,
+    min_samples: object,
+    selection: object,
+    seed: object,
+) -> tuple[int, int, int]:
+    """Check the settings of perturbation clusters, as ``cluster`` takes them.
+
+    The pipeline recipe checks the same settings before its run starts.
+
+    Returns:
+        ``min_cluster_size``, ``min_samples`` and ``seed`` as Python integers.
+
+    Raises:
+        TypeError: If a number is not an integer.
+        ValueError: If ``metric`` or ``selection`` is unknown, or a number is
+            out of range.
+    """
+    if metric not in METRICS:
+        raise ValueError(f"metric must be 'correlation' or 'euclidean', not {metric!r}")
+    cluster_size = integer_argument(min_cluster_size, "min_cluster_size", minimum=2)
+    core_size = integer_argument(min_samples, "min_samples", minimum=1)
+    if selection not in SELECTIONS:
+        raise ValueError(f"selection must be 'eom' or 'leaf', not {selection!r}")
+    resolved_seed = integer_argument(seed, "seed", minimum=0, maximum=MAX_SEED)
+    return cluster_size, core_size, resolved_seed
+
+
+def perturbation_names(perturbations: object) -> list[str]:
+    """Check the perturbations to cluster, and return their names as a list.
+
+    Raises:
+        TypeError: If ``perturbations`` is not a sequence of names.
+    """
+    if isinstance(perturbations, str | bytes) or not isinstance(
+        perturbations, Iterable
+    ):
+        raise TypeError(
+            "perturbations must be a sequence of perturbation names or None"
+        )
+    requested = list(perturbations)
+    if not all(isinstance(name, str) for name in requested):
+        raise TypeError(
+            "perturbations must be a sequence of perturbation names or None"
+        )
+    return requested
 
 
 def _unit_rows(values: np.ndarray) -> np.ndarray:

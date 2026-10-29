@@ -13,7 +13,9 @@ from types import MappingProxyType
 import numpy as np
 import pandas as pd
 
+from cytearc.perturbation.histograms import MAX_COUNT
 from cytearc.perturbation.mixtures import FIT_STATUSES
+from cytearc.utils.arguments import float_argument, integer_argument
 
 __all__ = [
     "DEFAULT_FRACTION_THRESHOLD",
@@ -22,6 +24,7 @@ __all__ = [
     "METHODS",
     "METHOD_PARAMETERS",
     "GuideThresholds",
+    "call_settings",
     "call_thresholds",
     "guide_threshold_frames",
 ]
@@ -84,6 +87,68 @@ class GuideThresholds:
     method: str
     sample_column: str | None
     min_umi: int | None
+
+
+def call_settings(
+    method: object,
+    min_umi: object,
+    fraction_threshold: object,
+    sample_column: object,
+) -> tuple[int, float]:
+    """Check the settings of guide calling, as ``call_guides`` takes them.
+
+    The pipeline recipe checks the same settings before its run starts.
+
+    Args:
+        method: One of :data:`METHODS`.
+        min_umi: The fewest UMIs of a called guide, or None for the method's
+            default.
+        fraction_threshold: The share of a cell's guide UMIs that its top
+            guide must exceed, for ``"top_guide"`` only, or None.
+        sample_column: The name of the column whose samples are fitted
+            apart, for the fitted methods only, or None. Whether the column
+            exists is not checked here.
+
+    Returns:
+        The UMI floor and the share that the calls use.
+
+    Raises:
+        TypeError: If a setting has the wrong type.
+        ValueError: If a setting is out of range or does not apply to the
+            method.
+    """
+    if not isinstance(method, str) or method not in METHODS:
+        raise ValueError(
+            "method must be 'poisson_gaussian', 'gaussian', 'fixed' or "
+            f"'top_guide', not {method!r}"
+        )
+    if min_umi is not None:
+        resolved_min_umi = integer_argument(
+            min_umi, "min_umi", minimum=1, maximum=MAX_COUNT
+        )
+    elif method == "fixed":
+        raise ValueError(
+            "method='fixed' needs min_umi, the UMI count from which every "
+            "guide is called"
+        )
+    else:
+        resolved_min_umi = DEFAULT_MIN_UMI[method]
+    fraction = DEFAULT_FRACTION_THRESHOLD
+    if method != "top_guide" and fraction_threshold is not None:
+        raise ValueError("fraction_threshold applies only to method='top_guide'")
+    if fraction_threshold is not None:
+        fraction = float_argument(fraction_threshold, "fraction_threshold")
+        if not 0.0 <= fraction < 1.0:
+            raise ValueError("fraction_threshold must be at least 0 and below 1")
+    if sample_column is not None:
+        if method not in FITTED_METHODS:
+            raise ValueError(
+                "sample_column applies only to method='poisson_gaussian' and "
+                "method='gaussian', which fit each sample alone"
+            )
+        if not isinstance(sample_column, str) or not sample_column:
+            raise TypeError("sample_column must be a non-empty string or None")
+    return resolved_min_umi, fraction
 
 
 def call_thresholds(threshold: np.ndarray, min_umi: int) -> np.ndarray:

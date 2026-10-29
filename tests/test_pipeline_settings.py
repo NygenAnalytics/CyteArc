@@ -166,20 +166,25 @@ def adt_store(datastore_zarr_root: str, tmp_path_factory) -> DataStore:
 
 # Settings that configure the recipe, not the stage's method: the Leiden
 # candidates, the HTO assay that hashing reads, the capture column whose
-# captures cell calling calls apart, and the antibodies the panel leaves out.
+# captures cell calling calls apart, the antibodies the panel leaves out, and
+# the Cell Ranger call file that guide calling imports in place of calling.
 _RECIPE_SETTINGS: dict[str, frozenset[str]] = {
     "leiden": frozenset({"partitions", "selected"}),
     "hashing": frozenset({"assay"}),
     "cell_calling": frozenset({"sample_column"}),
     "panel": frozenset({"exclude"}),
+    "guide_calling": frozenset({"path", "barcode_prefix"}),
 }
 # Method keywords without a default, which the settings must give: Harmony's
-# batch columns. The doublet sample_column is a method keyword with the
-# method's default, except that a run with Harmony omitting it scores doublets
-# within each Harmony batch.
-_REQUIRED_SETTINGS = {"harmony": {"batch_columns"}}
+# batch columns and the controls of perturbation labels. The doublet
+# sample_column is a method keyword with the method's default, except that a
+# run with Harmony omitting it scores doublets within each Harmony batch.
+_REQUIRED_SETTINGS = {"harmony": {"batch_columns"}, "labels": {"controls"}}
 # Settings whose default, an infinity, is no JSON value; a run omits them.
 _INFINITE_DEFAULTS = {"hvg": {"min_var", "max_var", "min_mean", "max_mean"}}
+# Settings whose default is a tuple, recorded as the equal JSON list, which
+# the method takes too.
+_TUPLE_DEFAULTS = {"associations": {"n_resamples"}}
 # The public method whose keywords each stage's settings are, then the method
 # that the stage passes them to where that is another one.
 _STAGE_METHODS: dict[str, tuple[str, ...]] = {
@@ -202,6 +207,15 @@ _STAGE_METHODS: dict[str, tuple[str, ...]] = {
     "leiden": ("_clusters_leiden", "_run_leiden_artifact"),
     "paris": ("_clusters_paris", "_run_paris_artifact"),
     "doublets": ("_qc_doublets", "_run_doublet_detection_artifact"),
+    "guide_calling": ("_perturbation_call_guides",),
+    "labels": ("_perturbation_labels",),
+    "efficiency": ("_perturbation_efficiency",),
+    "edistance": ("_perturbation_edistance",),
+    "signature": ("_perturbation_signature",),
+    "mixscape": ("_perturbation_mixscape",),
+    "associations": ("_perturbation_associations",),
+    "profiles": ("_perturbation_profiles",),
+    "clusters": ("_perturbation_cluster",),
 }
 # The filtering settings of each method: automatic filtering takes the
 # keywords of qc.auto_filter and manual filtering those of qc.filter.
@@ -248,6 +262,9 @@ def test_stage_settings_are_keywords_of_the_methods_they_configure(readonly_stor
             assert all(keywords[key] == default for keywords in called), (stage, key)
             if key in _INFINITE_DEFAULTS.get(stage, set()):
                 assert default in (-np.inf, np.inf), (stage, key, default)
+            elif key in _TUPLE_DEFAULTS.get(stage, set()):
+                assert isinstance(default, tuple), (stage, key, default)
+                assert _is_json_value(list(default)), (stage, key, default)
             else:
                 assert _is_json_value(default), (stage, key, default)
 

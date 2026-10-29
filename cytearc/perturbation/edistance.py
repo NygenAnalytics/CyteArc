@@ -37,6 +37,9 @@ import pandas as pd
 from numba import njit
 from scipy.stats import false_discovery_control
 
+from cytearc.perturbation.efficiency import rows_setting
+from cytearc.utils.arguments import integer_argument
+
 __all__ = [
     "EDISTANCE_STATUSES",
     "TESTED",
@@ -46,6 +49,7 @@ __all__ = [
     "edistance_arrays",
     "edistance_from_sums",
     "edistance_memory_bytes",
+    "edistance_settings",
 ]
 
 #: Row statuses, stored as positions in this tuple.
@@ -54,6 +58,8 @@ EDISTANCE_STATUSES = ("tested", "too_few_cells")
 TESTED = 0
 #: Fewer than two perturbed cells, so the within-group mean is undefined.
 TOO_FEW_CELLS = 1
+#: The most permutations of one row's test.
+MAX_PERMUTATIONS = 1_000_000
 
 # The most bytes of uniform numbers that a thread draws at once. The generator
 # yields the same numbers however they are split, so the p-values do not
@@ -158,6 +164,28 @@ def _count_reached(
         if distance >= threshold:
             reached += 1
     return reached
+
+
+def edistance_settings(
+    by: object, n_permutations: object, random_seed: object
+) -> tuple[int, int]:
+    """Check the settings of E-distances, as ``edistance`` takes them.
+
+    The pipeline recipe checks the same settings before its run starts.
+
+    Returns:
+        The permutations of each test and the seed.
+
+    Raises:
+        TypeError: If a number is not an integer.
+        ValueError: If ``by`` is unknown, or a number is out of range.
+    """
+    rows_setting(by)
+    permutations = integer_argument(
+        n_permutations, "n_permutations", minimum=0, maximum=MAX_PERMUTATIONS
+    )
+    seed = integer_argument(random_seed, "random_seed", minimum=0)
+    return permutations, seed
 
 
 def edistance_memory_bytes(

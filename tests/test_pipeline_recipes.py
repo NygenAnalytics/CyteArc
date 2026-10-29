@@ -1558,7 +1558,9 @@ def test_cell_calling_per_capture_needs_a_label_for_every_input_cell(
 
     # The stage checks the labels it froze, which can differ from the live
     # column that the recipe checked.
-    monkeypatch.setattr(rna_recipe, "_check_capture_labels", lambda *_args: None)
+    monkeypatch.setattr(
+        rna_recipe, "check_labeled_cells", lambda *_args, **_keywords: None
+    )
     with pytest.raises(PipelineExecutionError) as failed:
         datastore.pipeline.rna(
             cell_calling={**CELL_CALLING, "sample_column": "capture_gaps"},

@@ -16,7 +16,7 @@ These functions resolve the target of each guide and turn calls into the arrays
 of a ``perturbation_labels`` artifact. They never touch storage.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -32,6 +32,7 @@ __all__ = [
     "PerturbationLabelArrays",
     "PerturbationLabels",
     "guide_targets",
+    "label_settings",
     "perturbation_label_arrays",
     "perturbation_label_frames",
 ]
@@ -144,6 +145,70 @@ def guide_targets(
         is_control=np.isin(distinct, list(controls)),
         guide_codes=guide_codes.astype(np.int32),
     )
+
+
+def label_settings(
+    controls: object,
+    target_column: object,
+    targets: object,
+    policy: object,
+) -> tuple[str, ...]:
+    """Check the settings of perturbation labels, as ``labels`` takes them.
+
+    The pipeline recipe checks the same settings before its run starts.
+    Whether the target column exists, and the targets that it and
+    ``targets`` give, are checked by :func:`guide_targets` against the guide
+    assay.
+
+    Args:
+        controls: The targets of control guides.
+        target_column: The name of the guide assay's feature column that holds
+            each guide's target, or None.
+        targets: Targets by guide ID, or None.
+        policy: One of :data:`POLICIES`.
+
+    Returns:
+        The control targets, stripped, without repeats and sorted.
+
+    Raises:
+        TypeError: If a setting has the wrong type.
+        ValueError: If ``controls`` names no target or a blank one, neither
+            ``target_column`` nor ``targets`` is given, or ``policy`` is
+            unknown.
+    """
+    if (
+        isinstance(controls, str)
+        or not isinstance(controls, Sequence)
+        or not all(isinstance(name, str) for name in controls)
+    ):
+        raise TypeError(
+            "controls must be a sequence of target names, such as ['Non-Targeting']"
+        )
+    control_names = tuple(sorted({name.strip() for name in controls}))
+    if not control_names or "" in control_names:
+        raise ValueError(
+            "controls must name at least one target, and no name may be blank"
+        )
+    if target_column is not None and (
+        not isinstance(target_column, str) or not target_column
+    ):
+        raise TypeError("target_column must be a feature column name or None")
+    if targets is not None and (
+        not isinstance(targets, Mapping)
+        or not all(
+            isinstance(guide, str) and isinstance(target, str)
+            for guide, target in targets.items()
+        )
+    ):
+        raise TypeError("targets must map guide IDs to target names, or be None")
+    if target_column is None and not targets:
+        raise ValueError(
+            "Pass target_column, targets, or both, so that every called guide "
+            "has a target"
+        )
+    if not isinstance(policy, str) or policy not in POLICIES:
+        raise ValueError(f"policy must be 'single' or 'combinations', not {policy!r}")
+    return control_names
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,9 +1,10 @@
 # Pooled CRISPR screens
 
-Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CRISPR Guide Capture) by the guides they carry, check those calls, label each cell by the genes its guides target, check that each perturbation changed its own target gene, and rank perturbations by how far they move their cells from the control cells. Docs: <https://docs.nygen.io/CyteArc/api/perturbation.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CRISPR Guide Capture) by the guides they carry, check those calls, label each cell by the genes its guides target, check that each perturbation changed its own target gene, and rank perturbations by how far they move their cells from the control cells, step by step or as one durable `ds.pipeline.perturbation` run. Docs: <https://docs.nygen.io/CyteArc/api/perturbation.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 
+- The whole analysis as one durable run, `ds.pipeline.perturbation(labels={"controls": [...]})`, once the guide assay, the control targets and the expression assay are known; the step-by-step methods below when a step needs a choice that the recipe does not offer, such as a table of pairs to test.
 - A store whose guide counts imported as an assay declared `CRISPR`: 10x HDF5, Matrix Market and H5AD imports send "CRISPR Guide Capture" and "CRISPR Direct Capture" features there (`data-access.md`). `call_guides` calls guides from these counts.
 - To import Cell Ranger's calls instead, its call file of the same run: `outs/crispr_analysis/protospacer_calls_per_cell.csv` from `cellranger count`, or `outs/per_sample_outs/<sample>/count/crispr_analysis/protospacer_calls_per_cell.csv` from `cellranger multi`.
 - To label cells by perturbation, each guide's target: the guide assay's `target_gene_name` column, which 10x imports fill from Cell Ranger's feature reference, or a mapping of guide IDs to targets.
@@ -12,6 +13,13 @@ Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CR
 
 ## Key concepts
 
+- `ds.pipeline.perturbation(*, assay=None, guide_assay=None, label=None, cells="I", filtering=None, guide_calling=None, labels, efficiency=True, hvg=None, normalization=None, pca=None, harmony=None, edistance=True, signature=None, mixscape=False, associations=False, profiles=None, clusters=False, snapshot_columns=(), callback=None, cancel=None)` runs, in order, `input_snapshot`, `filtering`, `guide_calling`, `perturbation_labels`, `efficiency`, `highly_variable_features`, `normalization`, `pca`, `harmony`, `edistance`, `signature`, `mixscape`, `associations`, `profiles`, `perturbation_clusters`, and returns a `PipelineRun` of recipe `"perturbation"` whose `assay` is the RNA assay. Each stage keyword takes the keywords of its `ds.perturbation` method (`guide_calling` those of `call_guides`, or `path` and `barcode_prefix` to import Cell Ranger's calls), and the head (`filtering` to `harmony`) is the RNA recipe's (`pipeline-runs-and-artifacts.md`).
+- `labels` is required and must hold `controls`. `guide_assay` defaults to the store's only assay declared `CRISPR`. `signature` configures the signature that `mixscape=True` computes, and `profiles` the profiles that `clusters=True` clusters; their settings without that stage are refused. The signature holds the HVGs and finds near controls in the Harmony coordinates, else the PCA, as E-distances do; its `dims` (default 15) must not exceed `pca` `dims`. `associations` tests every target against every HVG (`pairs="trans"`), with `positive_controls` `"targets"` or None only. With Mixscape the profiles average each target's knocked-out cells (`config["profileLabels"] == "mixscape"`).
+- Before writing anything the recipe refuses what its stages would refuse: missing `controls`, a control no guide has, a reserved or `+` target, unknown guides in `targets`, a `target_column` or `id_column` the guide assay lacks (efficiency's default `"target_gene_id"` included: pass `efficiency={"id_column": None}` for a store without it), missing sample, split or covariate columns (`KeyError`), a `sample_column` of guide calling, the signature, the associations or the profiles, or a Mixscape `split_column`, that leaves a cell of `cells` unlabelled (missing, NaN, or empty or whitespace text), non-numeric covariates or covariates without a finite value for every cell of `cells`, a call file that is not a file or cannot reach every cell of `cells` (below), `pca` `dims` of 0, and every out-of-range number. The methods need labels and covariates only on the cells they read (controls and tested targets), which depend on the data, so the recipe asks for them on every cell of `cells`; narrow `cells` instead. A called guide without a target fails the `perturbation_labels` stage, since only the calls show it.
+- A recipe imports one call file, which Cell Ranger writes per sample, against the analysis cells: with `barcode_prefix` every cell ID of `cells` must start with it, and without one `cells` must not span several samples of a merged store (`<sample>__<barcode>` IDs); a cell no barcode can reach would turn `"Negative"` and drop out of every stage. In a merged store pass the cells of one sample with its prefix (`barcode_prefix="lane1__"`), or call guides from counts (`guide_calling` without `path`). `unmatchedBarcodes` counts the file's barcodes that match no analysis cell, so with the default filtering it includes the cells that QC removed: compare it with the `filtering` summary's `removedCells` before suspecting the prefix.
+- Each stage calls its method with the run's refs and settings, so the method called alike returns the run's artifact, and the run reuses artifacts that earlier calls made. With `cells=rna_run` and that run's `hvg`, `normalization`, `pca` and `harmony`, the run reuses the RNA run's HVGs, PCA and Harmony.
+- The run's cell view holds `mixscape_class` and `mixscape_posterior` with Mixscape. The guide calls and labels are scoped to the guide assay, which a view of the RNA cells refuses, so read them with `load_guide_calls(run["guide_calls"])` and `load_labels(run["perturbation_labels"])`.
+- Stage summaries (`run.report()["stages"][i]["summary"]`, and the Diagnostics section of `run.report(format="markdown")`), equal to the loaders' numbers: `guide_calling` `guide_calls` (`cells`, `negative`, `single`, `multiple`, `calledGuides`; imports add `fileBarcodes`, `unmatchedBarcodes`) and, for fitted calls, `guide_thresholds` (`samples`, 1 without `sample_column`, `guides`, `statuses`); `perturbation_labels` (`cells`, `controls`, `negative`, `multipleTargets`, `targets`, `targetCells` min/median/max of single-target cells, `fewCellTargets` under 25 cells fewest first, `fewCellTargetCount`); `efficiency` (`by`, `rows`, `statuses`, `knockedDown` with adjusted p below 0.05 and a fraction below 1, `medianRemainingFraction`, `noFeature`); `edistance` (`by`, `rows`, `statuses`, `significant` below 0.05, `atFloor`, `nPermutations`); `signature` (`cells`, `features`, `controls`, `samples` as `cells["sample"].nunique()`, 0 without `sample_column`, `neighbors`); `mixscape` (`rows`, `statuses`, `cells`, `knockedOut`, `fewDeGenes`, `perturbationType`); `associations` (`discoveryPairs`, `testedDiscoveryPairs`, `discoveries`, `calibrationPairs`, `falseDiscoveries`, `calibrationGrade`, `calibrationStatus`, `falseDiscoveriesByControlGuides`, `positivePairs`, `positiveDetected`, `alpha`); `profiles` (`perturbations`, `features`, `leftOut`, `zeroSdFeatures`, `samples` as `len(samples)`, 1 without `sample_column`); `perturbation_clusters` (`perturbations`, `clusters`, `unassigned`, `largestCluster`). Lists hold at most 50 names.
 - A guide call decides that a cell carries a guide. Every cell also holds a few ambient guide molecules, so a nonzero count is not a call.
 - `ds.perturbation.call_guides(cells)` calls guides from the counts, and `ds.perturbation.import_guide_calls(path, cell_selection=cells)` saves Cell Ranger's calls. Both save an assay-scoped `guide_calls` artifact. Its canonical `values` label each cell with its one called guide, `"Negative"` (no call), or `"Multiple"` (several calls); its other arrays are `n_guides`, `top_guide`, `top_umi`, `top_fraction` and `total_umi`, plus the two-dimensional `guide_codes` and `guide_umis`.
 - `method=` of `call_guides`, with its default `min_umi`:
@@ -72,6 +80,71 @@ Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CR
 - `ds.plots.edistance(edistance)` draws each `"tested"` row's E-distance, largest at the top, coloured by `adjusted_p_value < alpha` (0.05) and sized by its cells; with more than `max_rows=40` tested rows it keeps those with the largest E-distances. Rows of other statuses are not drawn; the title counts them. Table: `edistance` (the drawn rows, every column, in drawing order).
 
 ## Recipe
+
+Run the screen as one durable run, read its stage summaries, and join one row per target:
+
+```python
+import numpy as np
+import pandas as pd
+
+import cytearc
+
+ds = cytearc.DataStore("screen.zarr")
+rna = ds.pipeline.rna(label="rna", hvg={"top_n": 2000}, pca={"dims": 30})
+run = ds.pipeline.perturbation(
+    cells=rna,  # the RNA run's cells, HVGs and PCA
+    labels={"controls": ["Non-Targeting"]},
+    hvg={"top_n": 2000},
+    pca={"dims": 30},
+    signature={"dims": 30, "sample_column": "lane"},
+    mixscape=True,  # knockout screens
+    associations={"sample_column": "lane"},
+    clusters=True,
+    profiles={"sample_column": "lane"},
+    label="screen",
+)
+summaries = {stage["stage"]: stage["summary"] for stage in run.report()["stages"]}
+for stage in ("guide_calling", "perturbation_labels", "efficiency", "edistance", "mixscape", "associations"):
+    print(stage, summaries[stage])
+for warning in run.report()["summary"]["warnings"]:
+    print(warning["stage"], warning["message"])
+
+# One row per target: cells, remaining fraction, E-distance, KO share and discoveries.
+effects = ds.perturbation.load_efficiency(run["efficiency"]).table.set_index("target")
+effects = effects[["n_cells", "remaining_fraction"]]
+distances = ds.perturbation.load_edistance(run["edistance"]).table.set_index("target")
+effects = effects.join(distances[["edistance", "adjusted_p_value"]].add_prefix("ed_"))
+classes = ds.perturbation.load_mixscape(run["mixscape"]).targets.groupby("target")[["n_ko", "n_cells"]].sum()
+effects["ko_share"] = classes["n_ko"] / classes["n_cells"]
+tests = ds.perturbation.load_associations(run["associations"])
+found = tests.discovery[tests.discovery["significant"]].groupby("target").size()
+effects["discoveries"] = found.reindex(effects.index, fill_value=0)
+print(effects.sort_values("ed_edistance", ascending=False))
+
+# False discoveries of the calibration check, by control guide group.
+calibration = tests.calibration
+print(calibration.loc[calibration["significant"], "control_guides"].value_counts())
+
+# Control guides with effects of their own: leave out the cells that called them, so that
+# they are no controls, and run again on the other analysis cells (taken as filtered).
+offending = {"<guide>"}  # guide IDs of the groups above, which join them with "+"
+called = ds.perturbation.load_guide_calls(run["guide_calls"]).calls
+carriers = np.isin(ds.cells.fetch_all("ids"), called.loc[called["guide"].isin(offending), "ids"])
+analysed = ds.artifacts.load(run["analysis_cell_selection"])["values"][:]
+ds.cells.insert("screen_v2_cells", analysed & ~carriers, overwrite=True)
+again = ds.pipeline.perturbation(
+    cells=ds.snapshot_cell_selection("screen_v2_cells"),
+    labels={"controls": ["Non-Targeting"]},
+    hvg={"top_n": 2000},
+    pca={"dims": 30},
+    associations={"sample_column": "lane"},
+    label="screen_v2",
+)
+calls = ds.perturbation.load_guide_calls(again["guide_calls"]).calls
+print(calls["guide"].isin(offending).sum())  # 0, else a refit called them from ambient UMIs
+```
+
+Or step by step:
 
 ```python
 import warnings
@@ -205,6 +278,8 @@ imported_labels = ds.perturbation.labels(imported, controls=["Non-Targeting"])
 
 ## Checks
 
+- In a recipe run, read the stage summaries in stage order before any result: `guide_calling` (fit `statuses`, and the `single` share of called cells in a low-MOI screen), `perturbation_labels` (`controls` near 5% of cells or more, `fewCellTargets`), `efficiency` (`knockedDown`, `noFeature`), `edistance` (`significant`, `atFloor`), `mixscape` (`fewDeGenes`), then `associations` (`calibrationGrade` before `discoveries`, and `positiveDetected` against `positivePairs`). The run's warnings are in `run.report()["summary"]["warnings"]` with the stage that issued them. The thresholds of 0.05 and 25 cells are fixed; use the loaders for others.
+- When `calibrationGrade` is `"moderate"` or `"severe"`, count the calibration table's significant rows by `control_guides` (`falseDiscoveriesByControlGuides` in a recipe run). False discoveries that concentrate in a few control guides, as large shifts of single genes, point at those guides having effects of their own, such as off-target repression, not at a miscalibrated test: on Replogle's K562 screen, 37 false discoveries fell in 18 of 97 non-targeting guide pairs, 12 in one. Leave those guides out of the controls by leaving out the cells that called them, from `load_guide_calls(calls).calls`, and test the other cells again (the recipe example above shows how); check that the new calls call none of those guides, since a refit can call them from ambient UMIs. Do not relabel them with `targets=`: a target of their own makes every later stage (efficiency, E-distance, Mixscape, discoveries, profiles) test them as perturbations. False discoveries spread over many groups point at a missing covariate instead.
 - Read every warning of `call_guides`. A `"no_cells"` or `"too_sparse"` fit has too few UMIs of the guide to fit; inspect `"no_fit"` and `"no_positive"` fits with `plots.guide_thresholds(calls, guides=[...])` before reporting their guides as absent.
 - With `method="gaussian"`, the warning that most called cells have several guides means thresholds among the ambient counts: check `plots.guide_thresholds`, or call with `"poisson_gaussian"`.
 - Compare UMI floors on the calls they make: another `min_umi` reuses the fits, so trying one costs a single pass over the counts.
@@ -212,7 +287,7 @@ imported_labels = ds.perturbation.labels(imported, controls=["Non-Targeting"])
 - Read the share of cells in each call before going on: a low-MOI screen should have most called cells with one guide. A large `"Multiple"` share points to doublets or to a high-MOI design.
 - `"Multiple"` cells whose `top_fraction` is near 1 may carry one guide plus ambient molecules of others. Report how many there are; do not reassign them.
 - `"Negative"` cells are not controls. Controls are cells that carry control guides only, which `labels` names `"control"` from the targets given as `controls=`.
-- Check `n_unmatched_barcodes` after each import. Many unmatched barcodes mean a wrong `barcode_prefix`, a call file from another run, or a cell selection that leaves out filtered cells.
+- Check `n_unmatched_barcodes` after each import (`unmatchedBarcodes` in a recipe run). Many unmatched barcodes mean a wrong `barcode_prefix`, a call file from another run, or a cell selection that leaves out filtered cells; in a recipe run with the default filtering, the cells that QC removed count, so compare with the `filtering` summary's `removedCells`.
 - `select_cells` reads one-dimensional arrays only; read `guide_codes` and `guide_umis` with `ds.artifacts.load_values(calls, value="guide_codes")` or from `load_guide_calls(calls).calls`.
 - Read the label counts before comparing genes: `"control"`, `"Negative"`, `"Multiple"` and the cells of each gene. Report genes with few cells instead of pooling them with others.
 - Count the cells that the merge moved: a `guide_label` of `"Multiple"` beside a gene's label means several guides of that gene, or a gene's guides and control guides. Dual-guide constructs and higher MOI move the most cells.
@@ -231,7 +306,7 @@ imported_labels = ds.perturbation.labels(imported, controls=["Non-Targeting"])
 - Check the log message of `edistance` for labelled cells without coordinates: coordinates fitted on a subset of cells leave the rest out.
 - Run Mixscape in knockout screens. Report each target's KO share (`n_ko / n_cells`) beside its remaining fraction; `"few_de_genes"` means no detectable effect, not a failed edit. In CRISPRi or CRISPRa screens prefer efficiency and E-distance over discarding escapers.
 - Measure a target's downstream effects on its KO cells (`select_cells(classes, include=["GENE1 KO"])`) so escapers do not dilute them; read `posterior` near 0.5 as uncertain.
-- Read `calibration_grade` before any discovery of `associations`: a `"moderate"` or `"severe"` grade means the test is miscalibrated here (a control guide unlike the others, or a confounder missing from the covariates); add the covariate or drop the guide and test again. `"none"` means no check ran: `n_calibration_pairs=0`; fewer than 2 control guides that are the one guide of a control cell; no discovery pair passing QC with the default `n_calibration_pairs=None` (pass a number to check a run of positive controls only); or no calibration pair passing QC. A warning names the cause in all but the first case.
+- Read `calibration_grade` before any discovery of `associations`: a `"moderate"` or `"severe"` grade means the test is miscalibrated here (a control guide unlike the others, or a confounder missing from the covariates); add the covariate, or leave out the cells that called the guide (above), and test again. `"none"` means no check ran: `n_calibration_pairs=0`; fewer than 2 control guides that are the one guide of a control cell; no discovery pair passing QC with the default `n_calibration_pairs=None` (pass a number to check a run of positive controls only); or no calibration pair passing QC. A warning names the cause in all but the first case.
 - Read the positive controls as the power check: knockout and CRISPRi targets should lower their own gene. Check a target whose own gene did not move against its efficiency before calling its trans effects absent.
 - `log2_fold_change` follows SCEPTRE's estimator from the pair's own fit, which shrinks toward 0 when a target has many cells next to the controls; use it for direction and ranking, and report effect sizes from a direct comparison such as `efficiency`.
 - Say which features were tested: the Benjamini-Hochberg adjustment spans every discovery pair, so restricting `features` to the HVGs changes which effects pass.

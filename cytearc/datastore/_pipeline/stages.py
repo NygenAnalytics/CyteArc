@@ -253,6 +253,23 @@ def filtering_stage(
     return PlannedStage("filtering", action)
 
 
+def hvg_stage(settings: Mapping[str, Any]) -> PlannedStage:
+    """Select the highly variable genes of the run's analysis cells."""
+
+    def action(state: RunState) -> Outputs:
+        ref = state.store._select_hvgs_artifact(
+            assay=state.assay,
+            cell_selection=state.artifacts["analysis_cell_selection"],
+            feature_names=state.feature_names,
+            feature_snapshot=state.artifacts["feature_snapshot"],
+            show_plot=False,
+            **settings,
+        )
+        return (("highly_variable_features", ref),)
+
+    return PlannedStage("highly_variable_features", action)
+
+
 def normalization_stage(features_key: str, settings: Mapping[str, Any]) -> PlannedStage:
     def action(state: RunState) -> Outputs:
         ref = state.store._features_normalize(

@@ -1,6 +1,6 @@
 import hashlib
 import os
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -40,12 +40,10 @@ from ...perturbation.guide_calls import (
     validated_guide_ids,
 )
 from ...perturbation.guide_thresholds import (
-    DEFAULT_FRACTION_THRESHOLD,
-    DEFAULT_MIN_UMI,
     FITTED_METHODS,
     METHOD_PARAMETERS,
-    METHODS,
     GuideThresholds,
+    call_settings,
     call_thresholds,
     guide_threshold_frames,
 )
@@ -54,27 +52,36 @@ from ...perturbation.edistance import (
     PerturbationEDistance,
     edistance_arrays,
     edistance_memory_bytes,
+    edistance_settings,
 )
 from ...perturbation.efficiency import (
     EFFICIENCY_STATUSES,
     PerturbationEfficiency,
     efficiency_arrays,
+    efficiency_settings,
     target_features,
 )
 from ...perturbation.labels import (
-    POLICIES,
     PerturbationLabels,
     guide_targets,
+    label_settings,
     perturbation_label_arrays,
     perturbation_label_frames,
 )
-from ...perturbation.associations import PerturbationAssociations
-from ...perturbation.clusters import PerturbationClusters
-from ...perturbation.mixscape import MixscapeResult
-from ...perturbation.profiles import PerturbationProfiles
-from ...perturbation.signature import PerturbationSignature
+from ...perturbation.associations import (
+    PerturbationAssociations,
+    association_settings,
+    covariate_columns,
+)
+from ...perturbation.clusters import (
+    PerturbationClusters,
+    cluster_settings,
+    perturbation_names,
+)
+from ...perturbation.mixscape import MixscapeResult, mixscape_settings
+from ...perturbation.profiles import PerturbationProfiles, profile_settings
+from ...perturbation.signature import PerturbationSignature, signature_settings
 from ...perturbation.histograms import (
-    MAX_COUNT,
     GuideCountHistograms,
     guide_count_histograms,
     histogram_bytes,
@@ -105,7 +112,6 @@ from ...storage.artifacts import (
 from ...storage.selections import read_stored_selection_indices
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import float_argument, integer_argument
 from ...utils.logging import logger
 from ...utils.warnings import warn
 
@@ -438,6 +444,28 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 f"{name!r} stores {count_dtype} counts"
             )
         return assay
+
+    def _guide_feature_column(
+        self, assay: Any, column: str | None, name: str
+    ) -> np.ndarray | None:
+        """Read a feature column of the guide assay, or return None without one.
+
+        Args:
+            assay: The guide assay.
+            column: The feature column, such as each guide's target, or None.
+            name: The argument that names the column, for the error message.
+
+        Raises:
+            ValueError: If ``column`` is not a feature column of the assay.
+        """
+        if column is None:
+            return None
+        if column not in assay.feats.columns:
+            raise ValueError(
+                f"{name} {column!r} is not a feature column of assay {assay.name!r}"
+            )
+        values: np.ndarray = np.asarray(assay.feats.fetch_all(column), dtype=object)
+        return values
 
     @validation_scoped
     def _perturbation_import_guide_calls(
@@ -1026,38 +1054,11 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         """
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
-        if not isinstance(method, str) or method not in METHODS:
-            raise ValueError(
-                "method must be 'poisson_gaussian', 'gaussian', 'fixed' or "
-                f"'top_guide', not {method!r}"
-            )
+        resolved_min_umi, fraction = call_settings(
+            method, min_umi, fraction_threshold, sample_column
+        )
         fitted = method in FITTED_METHODS
-        if min_umi is not None:
-            resolved_min_umi = integer_argument(
-                min_umi, "min_umi", minimum=1, maximum=MAX_COUNT
-            )
-        elif method == "fixed":
-            raise ValueError(
-                "method='fixed' needs min_umi, the UMI count from which every "
-                "guide is called"
-            )
-        else:
-            resolved_min_umi = DEFAULT_MIN_UMI[method]
-        fraction = DEFAULT_FRACTION_THRESHOLD
-        if method != "top_guide" and fraction_threshold is not None:
-            raise ValueError("fraction_threshold applies only to method='top_guide'")
-        if fraction_threshold is not None:
-            fraction = float_argument(fraction_threshold, "fraction_threshold")
-            if not 0.0 <= fraction < 1.0:
-                raise ValueError("fraction_threshold must be at least 0 and below 1")
         if sample_column is not None:
-            if not fitted:
-                raise ValueError(
-                    "sample_column applies only to method='poisson_gaussian' and "
-                    "method='gaussian', which fit each sample alone"
-                )
-            if not isinstance(sample_column, str) or not sample_column:
-                raise TypeError("sample_column must be a non-empty string or None")
             if sample_column not in self.cells.columns:
                 raise ValueError(
                     f"sample_column '{sample_column}' not found in cell metadata"
@@ -1491,40 +1492,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             raise ValueError(
                 f"calls must be a guide_calls artifact, not {calls.kind!r}"
             )
-        if (
-            isinstance(controls, str)
-            or not isinstance(controls, Sequence)
-            or not all(isinstance(name, str) for name in controls)
-        ):
-            raise TypeError(
-                "controls must be a sequence of target names, such as ['Non-Targeting']"
-            )
-        control_names = tuple(sorted({name.strip() for name in controls}))
-        if not control_names or "" in control_names:
-            raise ValueError(
-                "controls must name at least one target, and no name may be blank"
-            )
-        if target_column is not None and (
-            not isinstance(target_column, str) or not target_column
-        ):
-            raise TypeError("target_column must be a feature column name or None")
-        if targets is not None and (
-            not isinstance(targets, Mapping)
-            or not all(
-                isinstance(guide, str) and isinstance(target, str)
-                for guide, target in targets.items()
-            )
-        ):
-            raise TypeError("targets must map guide IDs to target names, or be None")
-        if target_column is None and not targets:
-            raise ValueError(
-                "Pass target_column, targets, or both, so that every called guide "
-                "has a target"
-            )
-        if not isinstance(policy, str) or policy not in POLICIES:
-            raise ValueError(
-                f"policy must be 'single' or 'combinations', not {policy!r}"
-            )
+        control_names = label_settings(controls, target_column, targets, policy)
         if not isinstance(invalidate_cache, bool):
             raise TypeError("invalidate_cache must be a boolean")
         status = require_complete_artifact(self.zw, calls)
@@ -1533,14 +1501,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         guide_ids = np.asarray(as_zarr_array(group["guides"], name="guides")[:]).astype(
             str
         )
-        column = None
-        if target_column is not None:
-            if target_column not in assay.feats.columns:
-                raise ValueError(
-                    f"target_column {target_column!r} is not a feature column of "
-                    f"assay {assay.name!r}"
-                )
-            column = np.asarray(assay.feats.fetch_all(target_column), dtype=object)
+        column = self._guide_feature_column(assay, target_column, "target_column")
         resolved = guide_targets(
             guide_ids, column, targets, control_names, policy=policy
         )
@@ -1840,10 +1801,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             )
         if not isinstance(from_assay, str) or from_assay not in self.assay_names:
             raise ValueError(f"from_assay must name an assay, not {from_assay!r}")
-        if not isinstance(by, str) or by not in ("target", "guide"):
-            raise ValueError(f"by must be 'target' or 'guide', not {by!r}")
-        if id_column is not None and (not isinstance(id_column, str) or not id_column):
-            raise TypeError("id_column must be a feature column name or None")
+        efficiency_settings(by, id_column)
         if not isinstance(invalidate_cache, bool):
             raise TypeError("invalidate_cache must be a boolean")
         rows = self._label_rows(labels, by)
@@ -1852,14 +1810,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         row_codes, row_names = rows.codes, rows.names
         guide_assay = self._get_assay(str(labels.assay))
         expression = self._get_assay(from_assay)
-        column = None
-        if id_column is not None:
-            if id_column not in guide_assay.feats.columns:
-                raise ValueError(
-                    f"id_column {id_column!r} is not a feature column of assay "
-                    f"{guide_assay.name!r}"
-                )
-            column = np.asarray(guide_assay.feats.fetch_all(id_column), dtype=object)
+        column = self._guide_feature_column(guide_assay, id_column, "id_column")
         self._require_measured_cells(
             expression.name,
             status.input_ref("cell_selection"),
@@ -2115,12 +2066,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 "coordinates must be a reduction, batch_correction, "
                 f"imported_coordinates or normalized artifact, not {coordinates.kind!r}"
             )
-        if not isinstance(by, str) or by not in ("target", "guide"):
-            raise ValueError(f"by must be 'target' or 'guide', not {by!r}")
-        permutations = integer_argument(
-            n_permutations, "n_permutations", minimum=0, maximum=1_000_000
-        )
-        seed = integer_argument(random_seed, "random_seed", minimum=0)
+        permutations, seed = edistance_settings(by, n_permutations, random_seed)
         if not isinstance(invalidate_cache, bool):
             raise TypeError("invalidate_cache must be a boolean")
         rows = self._label_rows(labels, by)
@@ -2431,14 +2377,10 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                     "features must be a feature_selection artifact, not "
                     f"{features.kind!r}"
                 )
-        resolved_dims = integer_argument(dims, "dims", minimum=1)
-        neighbors_k = integer_argument(n_neighbors, "n_neighbors", minimum=1)
-        factor = float_argument(scale_factor, "scale_factor")
-        if factor <= 0:
-            raise ValueError("scale_factor must be above 0")
+        resolved_dims, neighbors_k, factor = signature_settings(
+            dims, n_neighbors, scale_factor, sample_column
+        )
         if sample_column is not None:
-            if not isinstance(sample_column, str) or not sample_column:
-                raise TypeError("sample_column must be a non-empty string or None")
             if sample_column not in self.cells.columns:
                 raise ValueError(
                     f"sample_column '{sample_column}' not found in cell metadata"
@@ -2918,30 +2860,18 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 "signature must be a perturbation_signature artifact, not "
                 f"{signature.kind!r}"
             )
-        de_floor = integer_argument(min_de_genes, "min_de_genes", minimum=1)
-        cell_floor = integer_argument(min_cells, "min_cells", minimum=1)
-        iterations = integer_argument(max_iterations, "max_iterations", minimum=1)
-        fold = float_argument(logfc_threshold, "logfc_threshold")
-        fraction = float_argument(min_fraction, "min_fraction")
-        cutoff = float_argument(p_value_cutoff, "p_value_cutoff")
-        if fold < 0:
-            raise ValueError("logfc_threshold must be at least 0")
-        if not 0 <= fraction <= 1:
-            raise ValueError("min_fraction must be from 0 to 1")
-        if not 0 < cutoff <= 1:
-            raise ValueError("p_value_cutoff must be above 0 and at most 1")
-        if not isinstance(scale, bool):
-            raise TypeError("scale must be a boolean")
-        if not isinstance(perturbation_type, str):
-            raise TypeError("perturbation_type must be a string")
-        if not perturbation_type or " " in perturbation_type:
-            raise ValueError(
-                "perturbation_type must be one word, such as 'KO', not "
-                f"{perturbation_type!r}"
-            )
+        de_floor, cell_floor, iterations, fold, fraction, cutoff = mixscape_settings(
+            min_de_genes,
+            min_cells,
+            max_iterations,
+            logfc_threshold,
+            min_fraction,
+            p_value_cutoff,
+            scale,
+            perturbation_type,
+            split_column,
+        )
         if split_column is not None:
-            if not isinstance(split_column, str) or not split_column:
-                raise TypeError("split_column must be a non-empty string or None")
             if split_column not in self.cells.columns:
                 raise ValueError(
                     f"split_column '{split_column}' not found in cell metadata"
@@ -3690,7 +3620,6 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         from ...metadata.selection import NormalizationSpec
         from ...perturbation.associations import (
             ASSOCIATION_SETS,
-            SIDES,
             TreatmentGroups,
             adjusted_p_values,
             association_covariates,
@@ -3727,50 +3656,19 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             raise ValueError(
                 f"features must be a feature_selection artifact, not {features.kind!r}"
             )
-        if isinstance(positive_controls, str) and positive_controls != "targets":
-            raise ValueError(
-                "positive_controls must be 'targets', a DataFrame or None, not "
-                f"{positive_controls!r}"
-            )
-        if id_column is not None and (not isinstance(id_column, str) or not id_column):
-            raise TypeError("id_column must be a feature column name or None")
-        if integration not in ("union", "singleton"):
-            raise ValueError(
-                f"integration must be 'union' or 'singleton', not {integration!r}"
-            )
-        if side not in SIDES:
-            raise ValueError(f"side must be 'both', 'left' or 'right', not {side!r}")
-        if approximation not in ("skew_normal", "none"):
-            raise ValueError(
-                f"approximation must be 'skew_normal' or 'none', not {approximation!r}"
-            )
-        if (
-            isinstance(n_resamples, str | bytes)
-            or not isinstance(n_resamples, Sequence)
-            or len(n_resamples) != 3
-        ):
-            raise TypeError("n_resamples must be a sequence of three integers")
-        # A list, such as a JSON configuration gives, and the equal tuple
-        # record the same tests.
-        resamples = tuple(n_resamples)
-        draws = (
-            integer_argument(resamples[0], "n_resamples[0]", minimum=1),
-            integer_argument(resamples[1], "n_resamples[1]", minimum=2),
-            integer_argument(resamples[2], "n_resamples[2]", minimum=1),
+        draws, threshold, floor, requested, rate, resolved_seed = association_settings(
+            positive_controls,
+            id_column,
+            integration,
+            side,
+            approximation,
+            n_resamples,
+            stage_threshold,
+            min_nonzero,
+            n_calibration_pairs,
+            alpha,
+            seed,
         )
-        threshold = float_argument(stage_threshold, "stage_threshold")
-        if not 0 <= threshold <= 1:
-            raise ValueError("stage_threshold must be from 0 to 1")
-        floor = integer_argument(min_nonzero, "min_nonzero", minimum=1)
-        requested = (
-            None
-            if n_calibration_pairs is None
-            else integer_argument(n_calibration_pairs, "n_calibration_pairs", minimum=0)
-        )
-        rate = float_argument(alpha, "alpha")
-        if not 0 < rate < 1:
-            raise ValueError("alpha must be above 0 and below 1")
-        resolved_seed = integer_argument(seed, "seed", minimum=0)
         if sample_column is not None:
             if not isinstance(sample_column, str) or not sample_column:
                 raise TypeError("sample_column must be a non-empty string or None")
@@ -3778,13 +3676,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 raise ValueError(
                     f"sample_column '{sample_column}' not found in cell metadata"
                 )
-        if covariates is not None and (
-            isinstance(covariates, str)
-            or not all(isinstance(column, str) for column in covariates)
-        ):
-            raise TypeError("covariates must be a sequence of column names or None")
-        covariate_columns = tuple(covariates or ())
-        for column in covariate_columns:
+        covariate_names = covariate_columns(covariates)
+        for column in covariate_names:
             if column not in self.cells.columns:
                 raise ValueError(f"covariate '{column}' not found in cell metadata")
         if not isinstance(invalidate_cache, bool):
@@ -3836,17 +3729,9 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         if positive_controls is None:
             positive = (np.empty(0, np.int64), np.empty(0, np.int64))
         elif isinstance(positive_controls, str):
-            guide_assay = self._get_assay(str(labels.assay))
-            guide_feature_ids: np.ndarray | None = None
-            if id_column is not None:
-                if id_column not in guide_assay.feats.columns:
-                    raise ValueError(
-                        f"id_column {id_column!r} is not a feature column of assay "
-                        f"{guide_assay.name!r}"
-                    )
-                guide_feature_ids = np.asarray(
-                    guide_assay.feats.fetch_all(id_column), dtype=object
-                )
+            guide_feature_ids = self._guide_feature_column(
+                self._get_assay(str(labels.assay)), id_column, "id_column"
+            )
             row_features = target_features(
                 rows.target_names,
                 rows.guide_targets,
@@ -3914,9 +3799,9 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         )
         extra: np.ndarray | None = None
         covariates_fingerprint = None
-        if covariate_columns:
+        if covariate_names:
             columns = []
-            for column in covariate_columns:
+            for column in covariate_names:
                 values = np.asarray(
                     read_metadata_rows_chunkwise(self.cells, column, tested_cells)
                 )
@@ -3947,7 +3832,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             alpha=rate,
             seed=resolved_seed,
             sample_columns=sample_columns,
-            covariate_columns=covariate_columns,
+            covariate_columns=covariate_names,
             invalidate_cache=invalidate_cache,
         )
         planned = arguments.plan(
@@ -4082,7 +3967,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             ),
             samples if sample_columns else None,
             extra,
-            names=covariate_columns,
+            names=covariate_names,
         )
         n_covariates = design.shape[1]
         # The units of the QC counts: each tested row, each control guide, and
@@ -4117,7 +4002,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         # positions, sample, unit and control guide, and its covariates as read
         # and as fitted; and the treatment cells of every group.
         resident = n_labelled * 48 + groups.members.nbytes
-        resident += n_tested * (80 + 8 * (n_covariates + len(covariate_columns)))
+        resident += n_tested * (80 + 8 * (n_covariates + len(covariate_names)))
         resident += _ASSOCIATION_PAIR_BYTES * n_pairs_most
         resident += 4 * n_units * len(checked) + 9 * n_groups_nt * len(checked)
         # Each thread's buffers of one pair's fit and the records of a batch of
@@ -4687,16 +4572,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             raise ValueError(
                 f"features must be a feature_selection artifact, not {features.kind!r}"
             )
-        if not isinstance(by, str) or by not in ("target", "guide"):
-            raise ValueError(f"by must be 'target' or 'guide', not {by!r}")
-        floor = integer_argument(min_cells, "min_cells", minimum=1)
-        if not isinstance(mask_targets, bool):
-            raise TypeError("mask_targets must be a boolean")
-        if id_column is not None and (not isinstance(id_column, str) or not id_column):
-            raise TypeError("id_column must be a feature column name or None")
+        floor = profile_settings(by, min_cells, mask_targets, id_column, sample_column)
         if sample_column is not None:
-            if not isinstance(sample_column, str) or not sample_column:
-                raise TypeError("sample_column must be a non-empty string or None")
             if sample_column not in self.cells.columns:
                 raise ValueError(
                     f"sample_column '{sample_column}' not found in cell metadata"
@@ -4740,17 +4617,9 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         masked = np.full(n_kept, -1, dtype=np.int64)
         targets_fingerprint = None
         if mask_targets:
-            guide_assay = self._get_assay(str(cells.labels.assay))
-            guide_feature_ids: np.ndarray | None = None
-            if id_column is not None:
-                if id_column not in guide_assay.feats.columns:
-                    raise ValueError(
-                        f"id_column {id_column!r} is not a feature column of assay "
-                        f"{guide_assay.name!r}"
-                    )
-                guide_feature_ids = np.asarray(
-                    guide_assay.feats.fetch_all(id_column), dtype=object
-                )
+            guide_feature_ids = self._guide_feature_column(
+                self._get_assay(str(cells.labels.assay)), id_column, "id_column"
+            )
             matched = target_features(
                 rows.target_names,
                 rows.guide_targets,
@@ -5162,8 +5031,6 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         from threadpoolctl import threadpool_limits
 
         from ...perturbation.clusters import (
-            METRICS,
-            SELECTIONS,
             cluster_memory_bytes,
             cluster_profiles,
         )
@@ -5175,17 +5042,9 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 "profiles must be a perturbation_profiles artifact, not "
                 f"{profiles.kind!r}"
             )
-        if metric not in METRICS:
-            raise ValueError(
-                f"metric must be 'correlation' or 'euclidean', not {metric!r}"
-            )
-        cluster_size = integer_argument(min_cluster_size, "min_cluster_size", minimum=2)
-        core_size = integer_argument(min_samples, "min_samples", minimum=1)
-        if selection not in SELECTIONS:
-            raise ValueError(f"selection must be 'eom' or 'leaf', not {selection!r}")
-        # scikit-learn's PCA, which starts the layout, accepts 32-bit unsigned
-        # random states only.
-        resolved_seed = integer_argument(seed, "seed", minimum=0, maximum=2**32 - 1)
+        cluster_size, core_size, resolved_seed = cluster_settings(
+            metric, min_cluster_size, min_samples, selection, seed
+        )
         if not isinstance(invalidate_cache, bool):
             raise TypeError("invalidate_cache must be a boolean")
         require_complete_artifact(self.zw, profiles)
@@ -5196,17 +5055,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         if perturbations is None:
             chosen = np.arange(len(names))
         else:
-            if isinstance(perturbations, str | bytes) or not isinstance(
-                perturbations, Iterable
-            ):
-                raise TypeError(
-                    "perturbations must be a sequence of perturbation names or None"
-                )
-            requested = list(perturbations)
-            if not all(isinstance(name, str) for name in requested):
-                raise TypeError(
-                    "perturbations must be a sequence of perturbation names or None"
-                )
+            requested = perturbation_names(perturbations)
             positions = pd.Index(names).get_indexer(requested)
             unknown = sorted(
                 {
