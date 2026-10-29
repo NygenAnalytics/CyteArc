@@ -99,6 +99,7 @@ def test_writers_facade_surface_is_stable():
         "to_h5ad",
         "to_mtx",
         "CSVtoZarr",
+        "write_airr_rearrangements",
     ]
     expected = set(writers_module.__all__)
     assert expected.issubset(dir(writers_module))

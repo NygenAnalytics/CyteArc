@@ -2462,6 +2462,120 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             n_cells=n_cells,
         )
 
+    @validation_scoped
+    def _repertoire_export_airr(
+        self,
+        source: ArtifactRef,
+        path: str | os.PathLike[str],
+        *,
+        fields: Sequence[str] | None = None,
+        chains_only: bool = False,
+    ) -> int:
+        """Write imported contigs as an AIRR Rearrangement file.
+
+        The AIRR Community's Rearrangement TSV is what Immcantation
+        (Change-O, SHazaM, dowser), dandelion and scirpy read, so exported
+        contigs carry a CyteArc analysis to their clonal lineage, somatic
+        hypermutation or other analyses. Each row is one contig: its
+        ``cell_id``, the cell's ID in this store, the AIRR fields that the
+        receptors store, and with a ``clonotypes`` artifact as ``source``,
+        ``clone_id``, the cell's clonotype label, empty for a cell without
+        one, replacing any imported ``clone_id``. The schema's required
+        fields come first, empty when the receptors do not store them;
+        logical fields are written ``T`` and ``F``. A ``sequence_id`` that
+        repeats, such as ``<barcode>_contig_1`` of the TCR and the BCR files
+        of one cell, gets ``_2``, ``_3`` and so on from its second
+        occurrence, in the order of the contigs, since the schema requires
+        unique identifiers. A path ending in ``.gz`` is gzip-compressed.
+
+        Args:
+            source: An ``immune_receptors`` or ``clonotypes`` artifact.
+            path: The file to write.
+            fields: The stored fields to write, or None for every stored
+                field; ``sequence_id`` is always written.
+            chains_only: Write only the contigs that count as chains.
+
+        Returns:
+            The number of contigs written.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``source`` is another kind of artifact or a field
+                is not stored.
+            MemoryError: If the contigs do not fit the memory budget.
+        """
+        from ...writers.airr import write_airr_rearrangements
+
+        if not isinstance(chains_only, bool):
+            raise TypeError("chains_only must be a boolean")
+        if not isinstance(path, str | os.PathLike):
+            raise TypeError("path must be a path")
+        if not isinstance(source, ArtifactRef):
+            raise TypeError("source must be an ArtifactRef")
+        if source.kind == ClonotypeArguments.artifact_kind:
+            self._clonotype_group(source)
+            receptors = inspect_artifact(self.zw, source).input_ref("receptors")
+        elif source.kind == ImmuneReceptorImportArguments.artifact_kind:
+            receptors = source
+        else:
+            raise ValueError(
+                "source must be an immune_receptors or clonotypes artifact, not "
+                f"{source.kind!r}"
+            )
+        if fields is not None:
+            if isinstance(fields, str) or not isinstance(fields, Sequence):
+                raise TypeError("fields must be a sequence of field names or None")
+            # Every row needs its contig ID.
+            fields = [
+                "sequence_id",
+                *[name for name in fields if name != "sequence_id"],
+            ]
+        loaded = self._repertoire_load_receptors(receptors, fields=fields)
+        contigs = loaded.chains
+        if chains_only:
+            contigs = contigs[contigs["chain"].to_numpy(dtype=bool)]
+        table = contigs.drop(columns=["slot", "chain"]).rename(
+            columns={"ids": "cell_id"}
+        )
+        if source.kind == ClonotypeArguments.artifact_kind:
+            labels = self._artifacts_load_values(source)
+            clone = pd.Series(
+                np.asarray(labels.values, dtype=object),
+                index=np.asarray(labels.cell_ids),
+            )
+            mapped = clone.reindex(table["cell_id"].to_numpy()).to_numpy(
+                dtype=object, copy=True
+            )
+            mapped[pd.isna(mapped) | (mapped == "")] = None
+            table["clone_id"] = pd.array(mapped, dtype="string")
+        identifiers = table["sequence_id"].astype(str)
+        repeat = identifiers.groupby(identifiers, sort=False).cumcount().to_numpy()
+        if (repeat > 0).any():
+            renamed = identifiers.to_numpy(dtype=object).copy()
+            used = set(renamed.tolist())
+            for at in np.flatnonzero(repeat > 0).tolist():
+                # The next suffix from the occurrence's number that names no
+                # other contig.
+                suffix = int(repeat[at]) + 1
+                while f"{renamed[at]}_{suffix}" in used:
+                    suffix += 1
+                renamed[at] = f"{renamed[at]}_{suffix}"
+                used.add(renamed[at])
+            table["sequence_id"] = renamed
+            logger.warning(
+                f"{int((repeat > 0).sum())} contig IDs repeat; their later occurrences "
+                "are written with a suffix such as _2"
+            )
+        leading = [
+            name
+            for name in ("cell_id", "clone_id", "locus", "c_call", "umi_count")
+            if name in table.columns
+        ]
+        rest = [name for name in table.columns if name not in leading]
+        written = write_airr_rearrangements(table, path, columns=[*leading, *rest])
+        logger.info(f"Wrote {written} contigs to {os.fspath(path)}")
+        return written
+
 
 def _labels_or_none(values: np.ndarray, missing: Any) -> np.ndarray:
     """Return labels as objects, None where a label is missing or blank."""

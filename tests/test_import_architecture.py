@@ -1110,6 +1110,7 @@ def test_writer_implementations_are_runtime_isolated():
         "__init__.py",
         "_materialize.py",
         "_store.py",
+        "airr.py",
         "cellranger.py",
         "counts_t.py",
         "csv.py",
@@ -1129,6 +1130,7 @@ def test_writer_implementations_are_runtime_isolated():
     # Shared RNA classifier is the intentional write/load boundary for countsT.
     allowed_assay_imports = {"assay.classification", "assay.normalization"}
     format_modules = {
+        "writers.airr",
         "writers.cellranger",
         "writers.csv",
         "writers.h5ad",

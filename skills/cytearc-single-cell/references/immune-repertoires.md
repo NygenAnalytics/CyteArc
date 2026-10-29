@@ -1,6 +1,6 @@
 # Immune receptor repertoires
 
-Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, BD Rhapsody, TRUST4 and other AIRR producers), check each cell's chains, label cells by receptor type, subtype and chain pairing, group them into clonotypes, measure clonal expansion within samples, measure clonal diversity with rarefaction and extrapolation, compare samples or cell types by the clonotypes they share, and count gene usage and junction lengths. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, BD Rhapsody, TRUST4 and other AIRR producers), check each cell's chains, label cells by receptor type, subtype and chain pairing, group them into clonotypes, measure clonal expansion within samples, measure clonal diversity with rarefaction and extrapolation, compare samples or cell types by the clonotypes they share, count gene usage and junction lengths, and export AIRR Rearrangement files. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 
@@ -56,6 +56,7 @@ Import the T cell and B cell receptor contigs of single-cell immune profiling (1
 - `ds.repertoire.spectratype(source, sequence="aa" or "nt", slots=..., count=..., group_by=...)` returns a `Spectratype` record: `.table` (group key columns, `locus`, `length`, count, `fraction`).
 - Plots: `ds.plots.gene_usage(source, gene="v_call", group_by=..., top=30)` (one panel per locus; heatmap of fractions by group, bars without groups; table `usage`), `ds.plots.gene_pairing(source, cell_selection=..., top=20)` (V × J heatmap per locus, of its `top` V and `top` J genes; table `pairs`), `ds.plots.spectratype(source, group_by=...)` (lines per group per locus; table `spectratype`).
 - Validated: every V, J and V-J pair count and junction length count of `VJ_1` and `VDJ_1` equals scirpy 0.25.1 `group_abundance` and `spectratype` on PBMC 10k pseudo samples. scRepertoire's `percentGenes` counts via immApex string parsing and is not comparable.
+- `ds.repertoire.export_airr(source, path, fields=None, chains_only=False)` writes an AIRR Rearrangement TSV (`.gz` compressed) and returns the contigs written: required AIRR fields first (empty when not stored, e.g. sequences from Cell Ranger CSVs), then `cell_id` (store cell IDs), `clone_id` (each cell's clonotype when `source` is a `clonotypes` artifact), `locus`, `c_call`, `umi_count`, other fields; logical fields `T`/`F`; repeated `sequence_id`s (shared by TCR and BCR files) get `_2`, `_3` with a warning. Validated: the `airr` library accepts the file; scirpy `read_airr` gives the same chains as from the 10x CSVs; CyteArc re-import gives the same receptors and clonotypes. `cytearc.writers.write_airr_rearrangements(table, path)` writes any contig table.
 - `ds.plots.clonal_rarefaction(clonotypes, group_by=..., cell_selection=..., orders=(0, 1, 2), base="size" or "coverage")`: one panel per order (`order_0`, `order_1`, `order_2`) plus `coverage` (sample completeness) with `base="size"`; solid rarefied, dashed extrapolated, a point at the observed size. Table: `curves` (with `group`).
 - Validated: Hill-number curves within 1.4e-12 of iNEXT 3.0.2 (its Shannon extrapolation is Chao et al. 2023's), asymptotic estimates within 7e-13, `estimateD` within 1e-7; every index within 6e-14 of scRepertoire 2.8.0 `clonalDiversity` (no bootstraps), immunarch 0.10.3 `repDiversity` and vegan 2.7.6 `estimateR`.
 
@@ -129,6 +130,7 @@ print(overlap.pairs[["group_1", "group_2", "shared", "morisita_horn", "shared_fr
 plot = ds.plots.clonal_overlap(clonotypes, group_by="tissue", cell_selection=t_cells, show=False)
 plot.save("clonal_overlap.png")
 plot.close()
+ds.repertoire.export_airr(clonotypes, "repertoire.tsv.gz")  # for Immcantation, dandelion, scirpy
 usage = ds.repertoire.gene_usage(clonotypes, genes="v_call", count="clonotypes", group_by="sample")
 print(usage.table.query("locus == 'TRB'").head())
 pairs = ds.repertoire.gene_usage(receptors, genes=("v_call", "j_call"))
