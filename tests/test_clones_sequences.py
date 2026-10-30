@@ -329,7 +329,8 @@ _VARIANTS = [_BASE] + [
 
 def _encoding_bytes(texts: list[str]) -> int:
     """The bytes the encoded texts hold, as the search documents them."""
-    return len(texts) * (3 * max(map(len, texts)) + 64)
+    width = max(map(len, texts))
+    return len(texts) * (3 * width + 64) + 8 * 257 * width
 
 
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
@@ -350,6 +351,36 @@ def test_a_budget_below_the_pairs_found_raises_memory_error(
     assert _pairs(*roomy) == expected
 
 
+@pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
+def test_pairs_found_hold_memory_while_later_lengths_are_searched(
+    monkeypatch, metric
+) -> None:
+    _force(monkeypatch, "pairwise")
+    # Two families of near variants, of 8 and 12 letters, more than one edit
+    # apart: the shorter family's 36 pairs are found first and hold 32 bytes
+    # each while the longer family's 180 pairs are collected.
+    short = [letter + "CDEFGHIK"[1:] for letter in "PQRSTVWYC"]
+    texts = short + _VARIANTS
+    expected = _expected(texts, metric, 1)
+    assert len(expected) == 36 + 180
+    needed = _encoding_bytes(texts) + 32 * len(expected)
+    with pytest.raises(MemoryError, match="for the pairs found"):
+        neighbor_pairs(texts, metric, 1, max_bytes=needed - 1)
+    assert _pairs(*neighbor_pairs(texts, metric, 1, max_bytes=needed)) == expected
+
+
+def test_the_hash_codes_of_long_texts_count_against_the_budget() -> None:
+    # Two texts of 2,000 letters need 2,000 positions of 257 codes of 8 bytes,
+    # about 4 MB, beside a few kilobytes of encoded text.
+    texts = ["A" * 2_000, "A" * 1_999 + "C"]
+    with pytest.raises(MemoryError, match="for the encoded texts"):
+        neighbor_pairs(texts, "hamming", 1, max_bytes=8 * 257 * 2_000 - 1)
+    found = neighbor_pairs(
+        texts, "hamming", 1, max_bytes=_encoding_bytes(texts) + 2**20
+    )
+    assert _pairs(*found) == {(0, 1)}
+
+
 def test_the_encoded_texts_must_fit_the_budget() -> None:
     texts = ["CASSLGF", "CASSLGY", "CAVF"]
     with pytest.raises(MemoryError, match="for the encoded texts"):
@@ -367,15 +398,19 @@ def test_candidate_pairs_of_a_pass_must_fit_the_budget(monkeypatch) -> None:
     _force(monkeypatch, "keyed")
     # Every variant at position 0 shares the key that masks it: 9 texts, 36
     # candidate pairs, all within one substitution. The keys of the 9 texts
-    # number 9 * 12; the candidates need 8 bytes each beside them.
+    # number 9 * 12, beside the 12 of one text's scratch space; the
+    # candidates need 8 bytes each beside them.
     texts = [letter + _BASE[1:] for letter in "PQRSTVWYC"]
-    keys = 8 * len(texts) * len(_BASE)
+    keys = 8 * (len(texts) + 1) * len(_BASE)
     encoded = _encoding_bytes(texts)
     with pytest.raises(MemoryError, match="the candidate pairs of texts"):
         neighbor_pairs(texts, "hamming", 1, max_bytes=encoded + keys + 8 * 36 - 1)
     with pytest.raises(MemoryError, match="the pairs found"):
         neighbor_pairs(texts, "hamming", 1, max_bytes=encoded + keys + 8 * 36)
-    found = neighbor_pairs(texts, "hamming", 1, max_bytes=encoded + 48 * 36)
+    # One text's scratch beside 48 bytes for each pair kept and joined.
+    found = neighbor_pairs(
+        texts, "hamming", 1, max_bytes=encoded + 8 * len(_BASE) + 48 * 36
+    )
     assert _pairs(*found) == _expected(texts, "hamming", 1)
 
 

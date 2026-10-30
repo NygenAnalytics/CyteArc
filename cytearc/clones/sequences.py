@@ -306,6 +306,11 @@ _TABLE_SEED = 20_240_601
 _MASKED = 256
 
 
+def _table_bytes(width: int) -> int:
+    """The bytes of the codes that hash the keys of texts up to ``width`` long."""
+    return 8 * width * (_MASKED + 1)
+
+
 def _zobrist_table(width: int) -> np.ndarray:
     """Random 64-bit codes of each character at each position below ``width``.
 
@@ -574,9 +579,12 @@ def _keyed_pairs(
     n_parts = max(1, -(-total // keys_per_pass))
     no_keys = np.empty(0, dtype=np.uint64)
     no_counts = np.empty(0, dtype=np.int64)
-    hashes = np.empty(
-        _key_count(len(per_length) - 1, limit, deletions), dtype=np.uint64
-    )
+    entry = memory.held
+    # The scratch space of one text's keys, held while the search runs.
+    scratch = _key_count(len(per_length) - 1, limit, deletions)
+    memory.check(_KEY_BYTES * scratch, "the variant keys of one text")
+    hashes = np.empty(scratch, dtype=np.uint64)
+    memory.held += _KEY_BYTES * scratch
     sizes = np.full(1, total, dtype=np.int64)
     if n_parts > 1:
         sizes = np.zeros(n_parts, dtype=np.int64)
@@ -638,7 +646,7 @@ def _keyed_pairs(
         found.clear()
         near = sorted_unique(merged)
         del merged
-    memory.held = held
+    memory.held = entry
     return np.divmod(near, n_rows)
 
 
@@ -683,8 +691,9 @@ def _encoded(texts: list[str], memory: _Memory) -> tuple[np.ndarray, np.ndarray]
     characters = int(lengths.sum())
     # The matrix, and two copies of the rows of one length or block while
     # they are searched, such as the rows and their words or the rows of two
-    # lengths, held until the search returns.
-    held = 3 * len(texts) * width + _TEXT_BYTES * len(texts)
+    # lengths, and the codes that hash the keys, 257 for each position, held
+    # until the search returns.
+    held = 3 * len(texts) * width + _TEXT_BYTES * len(texts) + _table_bytes(width)
     what = "the encoded texts"
     # Joined, the texts take a byte per character, and their codes another.
     memory.check(held + 2 * characters, what)
@@ -789,8 +798,9 @@ def neighbor_pairs(
             compares all.
         max_bytes: The most bytes the search may hold: the encoded texts,
             about three times their longest length and 64 bytes more per
-            text, the variant keys and candidate pairs of one pass, 8 bytes
-            each, and 32 bytes for each pair it finds. None sets no limit.
+            text, with 2 KiB of hash codes for each position of the longest,
+            the variant keys and candidate pairs of one pass, 8 bytes each,
+            and 32 bytes for each pair it finds. None sets no limit.
 
     Returns:
         The positions of the pairs as int64, the first below the second,

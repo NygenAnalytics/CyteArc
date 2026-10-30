@@ -472,12 +472,13 @@ def test_figure_labels_read_the_clonotype_ids_within_the_budget(
 ) -> None:
     store, receptors = _receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
-    # Four IDs of 11 characters, stored as fixed-width text of 4 bytes per
-    # character: 176 bytes, read twice, and a comparison of 1 byte each.
-    monkeypatch.setattr(store, "memoryBytes", 2 * 176 + 2 * 4 - 1)
+    # Four IDs of 11 characters, read as fixed-width text of 4 bytes per
+    # character: 176 bytes, three times with the buffers of the read, and 2
+    # bytes each for a comparison.
+    monkeypatch.setattr(store, "memoryBytes", 3 * 176 + 2 * 4 - 1)
     with pytest.raises(MemoryError, match="Labelling clonotypes reads the IDs of 4"):
         store._clone_figure_labels(ref, ["clonotype_1"])
-    monkeypatch.setattr(store, "memoryBytes", 2 * 176 + 2 * 4)
+    monkeypatch.setattr(store, "memoryBytes", 3 * 176 + 2 * 4)
     assert store._clone_figure_labels(ref, ["clonotype_1"]).tolist() == [
         "clonotype_1 (CASSA)"
     ]
@@ -1089,6 +1090,22 @@ def test_clonotype_clusters_need_room_for_their_search(tmp_path, monkeypatch) ->
     assert store.repertoire.clonotypes(receptors).kind == "clonotypes"
     with pytest.raises(MemoryError, match="Raise mem_budget"):
         store.repertoire.clonotypes(receptors, metric="hamming", cutoff=1)
+
+
+def test_clonotype_clusters_get_what_the_budget_leaves_for_their_pairs(
+    tmp_path, monkeypatch
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    # Within three substitutions, cell0's alpha junction pairs with cell2's
+    # (3 substitutions) and with cell4's second one (2): two pairs of chains
+    # of about 80 bytes each beyond the 1,000 bytes per cell and the search.
+    reserved = 1_000 * N_CELLS + 512 * 2**20
+    monkeypatch.setattr(store, "memoryBytes", reserved + 2 * 80 - 1)
+    with pytest.raises(MemoryError, match="The 2 pairs of chains within the cutoff"):
+        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    assert store.artifacts.list(kind="clonotypes", scope="datastore") == []
+    monkeypatch.setattr(store, "memoryBytes", reserved + 2 * 80)
+    assert store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
 
 
 def test_clonotype_clusters_link_similar_junctions(tmp_path) -> None:

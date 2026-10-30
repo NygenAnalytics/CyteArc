@@ -1169,8 +1169,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             TypeError: If ``clones`` is not an ArtifactRef.
             ValueError: If it is not a complete clone artifact, an ID names no
                 clonotype, or a representative has no junction to show.
-            MemoryError: If reading the clonotypes' IDs, twice their stored
-                size, does not fit the memory budget.
+            MemoryError: If reading the clonotypes' IDs, three times their
+                size as read, does not fit the memory budget.
         """
         group = self._clone_group(clones)
         names = np.asarray([str(name) for name in ids], dtype=object)
@@ -1178,9 +1178,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             return names
         stored_ids = as_zarr_array(group["clonotype_ids"], name="clonotype_ids")
         n_clonotypes = int(stored_ids.shape[0])
-        # The IDs as read, through a buffer of their size, and a comparison of
-        # them with an ID given: 10.1 MB for 83,417 IDs of up to 15 characters.
-        resident = 2 * int(stored_ids.nbytes) + 2 * n_clonotypes
+        # The IDs as read, the buffer they are decoded from and their
+        # compressed bytes, each at most their size, and a comparison of them
+        # with an ID given: 56 MiB traced for 410,365 IDs of up to 16
+        # characters, 26 MB as read.
+        resident = 3 * int(stored_ids.nbytes) + 2 * n_clonotypes
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Labelling clonotypes reads the IDs of {n_clonotypes} clonotypes, "
