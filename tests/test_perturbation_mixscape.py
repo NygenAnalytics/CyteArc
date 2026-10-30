@@ -1,7 +1,15 @@
+"""Mixscape classes of the cells of a screen with knocked-out cells and escapers.
+
+The module writes the screen and its perturbation signature once, as a
+template. A test that writes copies the template, and the tests of refused
+calls share one copy, which they check is left as it was.
+"""
+
 import math
 import warnings
+from collections.abc import Iterator
 from dataclasses import fields
-from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -28,8 +36,13 @@ from cytearc.perturbation.mixscape import (
 from cytearc.perturbation.signature import normalize_counts
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.utils.logging import logger
-from tests.perturbation_helpers import use_python_kernels
-from tests.storage_helpers import write_count_store
+from tests.perturbation_helpers import (
+    copy_store,
+    open_store,
+    use_python_kernels,
+    write_screen,
+    written,
+)
 
 N_A, N_B, N_C, N_CONTROL, N_GENES = 90, 60, 2, 150, 60
 # Guide 0 targets GENE_A, guide 1 GENE_B, guide 2 GENE_C, and guide 3 is
@@ -60,19 +73,6 @@ CARRIED, KNOCKED, RNA, GUIDES, COORDINATES, RUNS = _screen()
 N_CELLS = len(RNA)
 
 
-def _store(tmp_path: Path) -> DataStore:
-    path = tmp_path / "store.zarr"
-    write_count_store(str(path), {"RNA": RNA, "CRISPR": GUIDES}, "uint16")
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=2
-    )
-    store._get_assay("CRISPR").feats.insert(
-        "target_gene_name", np.asarray(TARGETS, dtype=object)
-    )
-    store.cells.insert("run", np.asarray(RUNS, dtype=object))
-    return store
-
-
 def _signature(store: DataStore, cells=None):
     """A signature of genes 5 to 59 over every cell, from labels of ``cells``."""
     calls = store.perturbation.call_guides(
@@ -89,9 +89,39 @@ def _signature(store: DataStore, cells=None):
     )
 
 
-def test_mixscape_separates_knocked_out_cells_from_escapers(tmp_path) -> None:
-    store = _store(tmp_path)
-    signature = _signature(store)
+@pytest.fixture(scope="module")
+def template(tmp_path_factory) -> Iterator[SimpleNamespace]:
+    """The screen and its signature, which every test starts from."""
+    path = tmp_path_factory.mktemp("mixscape") / "store.zarr"
+    store = write_screen(
+        path,
+        RNA,
+        GUIDES,
+        targets=TARGETS,
+        cell_columns={"run": np.asarray(RUNS, dtype=object)},
+        nthreads=2,
+    )
+    screen = SimpleNamespace(path=path, signature=_signature(store))
+    saved = written(store)
+    yield screen
+    assert written(open_store(path)) == saved
+
+
+@pytest.fixture
+def store(template, tmp_path) -> DataStore:
+    """A copy of the template, for a test that writes."""
+    return copy_store(template.path, tmp_path, nthreads=2)
+
+
+@pytest.fixture(scope="module")
+def shared_store(template, tmp_path_factory) -> DataStore:
+    """One writable copy of the template for the calls that must be refused."""
+    folder = tmp_path_factory.mktemp("mixscape_refused")
+    return copy_store(template.path, folder, nthreads=2)
+
+
+def test_mixscape_separates_knocked_out_cells_from_escapers(store, template) -> None:
+    signature = template.signature
 
     classes = store.perturbation.mixscape(signature)
 
@@ -138,10 +168,9 @@ def test_mixscape_separates_knocked_out_cells_from_escapers(tmp_path) -> None:
     assert status.parameters["perturbation_type"] == "KO"
 
 
-def test_mixscape_classifies_each_split_apart(tmp_path) -> None:
-    store = _store(tmp_path)
+def test_mixscape_classifies_each_split_apart(store, template) -> None:
     classes = store.perturbation.mixscape(
-        _signature(store), split_column="run", perturbation_type="KD"
+        template.signature, split_column="run", perturbation_type="KD"
     )
     result = store.perturbation.load_mixscape(classes)
     assert result.split_column == "run"
@@ -161,8 +190,7 @@ def test_mixscape_classifies_each_split_apart(tmp_path) -> None:
     assert called.eq("GENE_A KD").to_numpy().tolist() == KNOCKED[:N_A].tolist()
 
 
-def test_cells_outside_the_labels_are_unlabelled(tmp_path) -> None:
-    store = _store(tmp_path)
+def test_cells_outside_the_labels_are_unlabelled(store) -> None:
     # Labels of every cell but the last ten controls.
     keep = np.ones(N_CELLS, dtype=bool)
     keep[-11:-1] = False
@@ -174,16 +202,15 @@ def test_cells_outside_the_labels_are_unlabelled(tmp_path) -> None:
     assert labels.iloc[N_A + N_B + N_C : -11].eq("control").all()
 
 
-def test_mixscape_marks_targets_with_few_knocked_out_cells(tmp_path) -> None:
-    store = _store(tmp_path)
+def test_mixscape_marks_targets_with_few_knocked_out_cells(store, template) -> None:
     result = store.perturbation.load_mixscape(
-        store.perturbation.mixscape(_signature(store), min_cells=61)
+        store.perturbation.mixscape(template.signature, min_cells=61)
     )
     assert result.targets["status"].iloc[0] == "few_cells"
     assert result.cells["global_class"].iloc[:N_A].eq("NP").all()
     # No gene changes 100-fold in log2, so no gene is tested.
     untested = store.perturbation.load_mixscape(
-        store.perturbation.mixscape(_signature(store), logfc_threshold=100)
+        store.perturbation.mixscape(template.signature, logfc_threshold=100)
     )
     assert untested.targets["n_de_genes"].eq(0).all()
     assert untested.de_genes.empty
@@ -207,30 +234,25 @@ def test_mixscape_marks_targets_with_few_knocked_out_cells(tmp_path) -> None:
     ],
 )
 def test_mixscape_refuses_arguments_it_cannot_use(
-    tmp_path, arguments, error, message
+    shared_store, template, arguments, error, message
 ) -> None:
-    store = _store(tmp_path)
-    signature = _signature(store)
+    saved = written(shared_store)
     with pytest.raises(error, match=message):
-        store.perturbation.mixscape(signature, **arguments)
+        shared_store.perturbation.mixscape(template.signature, **arguments)
+    assert written(shared_store) == saved
 
 
 def test_mixscape_refuses_inputs_and_budgets_it_cannot_use(
-    tmp_path, monkeypatch
+    shared_store, template, monkeypatch
 ) -> None:
-    store = _store(tmp_path)
-    signature = _signature(store)
+    store = shared_store
+    signature = template.signature
+    saved = written(store)
     with pytest.raises(TypeError, match="signature must be an ArtifactRef"):
         store.perturbation.mixscape("signature")
     with pytest.raises(ValueError, match="not 'cell_selection'"):
         store.perturbation.mixscape(store.select_measured_cells("RNA"))
-    reader = DataStore(
-        str(tmp_path / "store.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-        zarr_mode="r",
-    )
+    reader = open_store(template.path, zarr_mode="r")
     with pytest.raises(PermissionError, match="run_mixscape"):
         reader.perturbation.mixscape(signature)
     monkeypatch.setattr(store, "memoryBytes", 1_000)
@@ -242,14 +264,13 @@ def test_mixscape_refuses_inputs_and_budgets_it_cannot_use(
         MemoryError, match="90 cells of GENE_A and of the 150 control cells in its 12"
     ):
         store.perturbation.mixscape(signature)
-    assert not store.artifacts.list(kind="mixscape_classes")
+    assert written(store) == saved
 
 
 def test_mixscape_classifies_in_batches_that_fit_the_budget(
-    tmp_path, monkeypatch
+    store, template, monkeypatch
 ) -> None:
-    store = _store(tmp_path)
-    signature = _signature(store)
+    signature = template.signature
     whole = store.perturbation.load_mixscape(
         store.perturbation.mixscape(signature, split_column="run")
     )
@@ -276,10 +297,9 @@ def test_mixscape_classifies_in_batches_that_fit_the_budget(
 
 
 def test_classes_that_name_their_statuses_otherwise_are_not_reused_or_read(
-    tmp_path,
+    store, template
 ) -> None:
-    store = _store(tmp_path)
-    signature = _signature(store)
+    signature = template.signature
     classes = store.perturbation.mixscape(signature)
     statuses = store.perturbation.load_mixscape(classes).targets["status"].tolist()
     # Classes whose codes name the statuses in another order, as a release
@@ -297,12 +317,13 @@ def test_classes_that_name_their_statuses_otherwise_are_not_reused_or_read(
     )
 
 
-def test_loading_mixscape_refuses_other_artifacts(tmp_path) -> None:
-    store = _store(tmp_path)
+def test_loading_mixscape_refuses_other_artifacts(shared_store, template) -> None:
+    saved = written(shared_store)
     with pytest.raises(TypeError, match="classes must be an ArtifactRef"):
-        store.perturbation.load_mixscape("classes")
+        shared_store.perturbation.load_mixscape("classes")
     with pytest.raises(ValueError, match="not 'perturbation_signature'"):
-        store.perturbation.load_mixscape(_signature(store))
+        shared_store.perturbation.load_mixscape(template.signature)
+    assert written(shared_store) == saved
 
 
 def test_scaling_follows_seurat() -> None:

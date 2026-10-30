@@ -721,7 +721,10 @@ def test_connectivity_peak_bytes_bounds_the_allocated_peak() -> None:
                 bandwidth=1.5,
             )
 
-        peak = max(_allocated_peak(allocated, convert) for _ in range(2))
+        # A thread samples the count, so a run can miss the short peak of the
+        # kernel fit, about one run in eight on a quiet laptop; the largest of
+        # eight runs is kept, which only raises the measured peak.
+        peak = max(_allocated_peak(allocated, convert) for _ in range(8))
         estimate = connectivity_peak_bytes(n_cells, k)
         assert peak <= estimate <= 2 * peak, (n_cells, k, peak, estimate)
 
@@ -804,11 +807,14 @@ def test_native_leiden_peak_bytes_bounds_the_allocated_peak(structure, symmetric
         graph = (graph + graph.T) - graph.multiply(graph.T)
     leiden_membership(graph[:300, :300], 1.0, 0, nthreads=2)
 
+    # A thread samples the count, so under load a run could miss the peak;
+    # Leiden holds its graphs for most of a run, and the largest of three
+    # runs is kept.
     peak = max(
         _allocated_peak(
             allocated, lambda: leiden_membership(graph, 1.0, 4444, nthreads=2)
         )
-        for _ in range(2)
+        for _ in range(3)
     )
     # As clusters.leiden bounds W + W^T: twice the stored edges, which is
     # also the most entries of a symmetrized graph.

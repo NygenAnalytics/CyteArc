@@ -1,5 +1,13 @@
+"""Knockdown efficiency of the targets of a fourteen-cell screen.
+
+The module writes the screen, its guide calls and its labels once, as a
+template. A test that writes copies the template, and the tests of refused
+calls share one copy, which they check is left as it was.
+"""
+
 import warnings
-from pathlib import Path
+from collections.abc import Iterator
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -9,7 +17,13 @@ from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationEfficiency
 from cytearc.perturbation.efficiency import efficiency_arrays, target_features
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
-from tests.storage_helpers import write_count_store
+from tests.perturbation_helpers import (
+    copy_store,
+    fixed_labels,
+    open_store,
+    write_screen,
+    written,
+)
 
 # Guides, their targets and the feature IDs of the targets. RNA4 has no ID and
 # matches the RNA feature named RNA4; GENE_C's ID matches no feature; GENE_D
@@ -34,22 +48,32 @@ def _counts() -> tuple[np.ndarray, np.ndarray]:
 GUIDES, RNA = _counts()
 
 
-def _store(tmp_path: Path) -> DataStore:
-    path = tmp_path / "store.zarr"
-    write_count_store(str(path), {"RNA": RNA, "CRISPR": GUIDES}, "uint16")
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+@pytest.fixture(scope="module")
+def template(tmp_path_factory) -> Iterator[SimpleNamespace]:
+    """The screen with its labels, and labels whose control no cell carries."""
+    path = tmp_path_factory.mktemp("efficiency") / "store.zarr"
+    store = write_screen(path, RNA, GUIDES, targets=TARGETS, target_ids=IDS)
+    screen = SimpleNamespace(
+        path=path,
+        labels=fixed_labels(store, ["Non-Targeting"]),
+        # GENE_D's guide is in no cell.
+        without_controls=fixed_labels(store, ["GENE_D"]),
     )
-    features = store._get_assay("CRISPR").feats
-    features.insert("target_gene_name", np.asarray(TARGETS, dtype=object))
-    features.insert("target_gene_id", np.asarray(IDS, dtype=object))
-    return store
+    saved = written(store)
+    yield screen
+    assert written(open_store(path)) == saved
 
 
-def _labels(store: DataStore, controls=("Non-Targeting",)):
-    cells = store.select_measured_cells("CRISPR")
-    calls = store.perturbation.call_guides(cells, method="fixed", min_umi=10)
-    return store.perturbation.labels(calls, controls=list(controls))
+@pytest.fixture
+def store(template, tmp_path) -> DataStore:
+    """A copy of the template, for a test that writes."""
+    return copy_store(template.path, tmp_path)
+
+
+@pytest.fixture(scope="module")
+def shared_store(template, tmp_path_factory) -> DataStore:
+    """One writable copy of the template for the calls that must be refused."""
+    return copy_store(template.path, tmp_path_factory.mktemp("efficiency_refused"))
 
 
 def _expected(rows: list[list[int]], genes: list[int]) -> dict[str, np.ndarray]:
@@ -125,9 +149,8 @@ def test_status_constants_name_their_method_and_keep_their_codes() -> None:
     assert len(exported) == len(set(exported))
 
 
-def test_efficiency_compares_each_target_with_the_controls(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
+def test_efficiency_compares_each_target_with_the_controls(store, template) -> None:
+    labels = template.labels
 
     with pytest.warns(UserWarning, match="1 of 5 rows have no feature of assay 'RNA'"):
         ref = store.perturbation.efficiency(labels)
@@ -173,9 +196,8 @@ def test_efficiency_compares_each_target_with_the_controls(tmp_path) -> None:
     assert table.loc[~with_p, "adjusted_p_value"].isna().all()
 
 
-def test_efficiency_by_guide_takes_each_cell_with_one_guide(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
+def test_efficiency_by_guide_takes_each_cell_with_one_guide(store, template) -> None:
+    labels = template.labels
     with pytest.warns(UserWarning, match="no feature"):
         ref = store.perturbation.efficiency(labels, by="guide")
     table = store.perturbation.load_efficiency(ref).table.set_index("guide")
@@ -195,9 +217,8 @@ def test_efficiency_by_guide_takes_each_cell_with_one_guide(tmp_path) -> None:
     )
 
 
-def test_targets_match_by_name_without_an_id_column(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
+def test_targets_match_by_name_without_an_id_column(store, template) -> None:
+    labels = template.labels
     with pytest.warns(UserWarning, match="4 of 5 rows have no feature"):
         ref = store.perturbation.efficiency(labels, id_column=None)
     table = store.perturbation.load_efficiency(ref).table.set_index("target")
@@ -225,9 +246,10 @@ def _warned_efficiency(
     ]
 
 
-def test_a_reused_table_repeats_the_warning_of_the_measured_one(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
+def test_a_reused_table_repeats_the_warning_of_the_measured_one(
+    store, template
+) -> None:
+    labels = template.labels
 
     measured, messages = _warned_efficiency(store, labels)
 
@@ -247,15 +269,14 @@ def test_a_reused_table_repeats_the_warning_of_the_measured_one(tmp_path) -> Non
     assert _warned_efficiency(store, labels, id_column=None) == (by_name, messages)
     # With GENE_C a control, every row matches a feature, and neither the
     # measured nor the reused table warns.
-    matched = _labels(store, controls=("Non-Targeting", "GENE_C"))
+    matched = fixed_labels(store, ["Non-Targeting", "GENE_C"])
     quiet = _warned_efficiency(store, matched)
     assert quiet[1] == []
     assert _warned_efficiency(store, matched) == quiet
 
 
-def test_efficiency_is_reused_and_follows_its_inputs(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
+def test_efficiency_is_reused_and_follows_its_inputs(store, template) -> None:
+    labels = template.labels
     ref, messages = _warned_efficiency(store, labels)
     assert _warned_efficiency(store, labels) == (ref, messages)
     status = inspect_artifact(store.zw, ref)
@@ -268,13 +289,7 @@ def test_efficiency_is_reused_and_follows_its_inputs(tmp_path) -> None:
     with pytest.warns(UserWarning):
         by_name = store.perturbation.efficiency(labels, id_column=None)
     assert by_name != ref
-    reader = DataStore(
-        str(tmp_path / "store.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-        zarr_mode="r",
-    )
+    reader = open_store(store.zarr_loc, zarr_mode="r")
     # A store opened read-only reuses the table, and its warning.
     assert _warned_efficiency(reader, labels) == (ref, messages)
     with pytest.raises(PermissionError, match="measure_perturbation_efficiency"):
@@ -292,41 +307,43 @@ def test_efficiency_is_reused_and_follows_its_inputs(tmp_path) -> None:
     ],
 )
 def test_efficiency_refuses_arguments_it_cannot_use(
-    tmp_path, arguments, error, message
+    shared_store, template, arguments, error, message
 ) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
+    saved = written(shared_store)
     with pytest.raises(error, match=message):
-        store.perturbation.efficiency(labels, **arguments)
+        shared_store.perturbation.efficiency(template.labels, **arguments)
+    assert written(shared_store) == saved
 
 
-def test_efficiency_refuses_labels_it_cannot_measure(tmp_path, monkeypatch) -> None:
-    store = _store(tmp_path)
+def test_efficiency_refuses_labels_it_cannot_measure(
+    shared_store, template, monkeypatch
+) -> None:
+    store = shared_store
+    saved = written(store)
     with pytest.raises(TypeError, match="labels must be an ArtifactRef"):
         store.perturbation.efficiency("labels")
     cells = store.select_measured_cells("CRISPR")
     with pytest.raises(ValueError, match="not 'cell_selection'"):
         store.perturbation.efficiency(cells)
     # Labels whose controls are GENE_D, which no cell carries, have no control cell.
-    no_controls = _labels(store, controls=("GENE_D",))
     with pytest.raises(
         ValueError, match="No labelled cell carries control guides only"
     ):
-        store.perturbation.efficiency(no_controls)
-    labels = _labels(store)
+        store.perturbation.efficiency(template.without_controls)
     monkeypatch.setattr(store, "memoryBytes", 100)
     # RNA1, RNA2, RNA4 and RNA5 over the 8 perturbed and 4 control cells.
     with pytest.raises(MemoryError, match="Comparing 4 target genes over 12 cells"):
-        store.perturbation.efficiency(labels)
-    assert not store.artifacts.list(kind="perturbation_efficiency")
+        store.perturbation.efficiency(template.labels)
+    assert written(store) == saved
 
 
-def test_loading_efficiency_refuses_other_artifacts(tmp_path) -> None:
-    store = _store(tmp_path)
+def test_loading_efficiency_refuses_other_artifacts(shared_store, template) -> None:
+    saved = written(shared_store)
     with pytest.raises(TypeError, match="efficiency must be an ArtifactRef"):
-        store.perturbation.load_efficiency("efficiency")
+        shared_store.perturbation.load_efficiency("efficiency")
     with pytest.raises(ValueError, match="not 'perturbation_labels'"):
-        store.perturbation.load_efficiency(_labels(store))
+        shared_store.perturbation.load_efficiency(template.labels)
+    assert written(shared_store) == saved
 
 
 def test_efficiency_arrays_check_their_inputs() -> None:

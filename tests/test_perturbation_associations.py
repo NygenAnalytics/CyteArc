@@ -38,8 +38,13 @@ from cytearc.perturbation.associations import (
 )
 from cytearc.perturbation.random_sets import resampling_keys
 from cytearc.storage.artifacts import ArtifactRef
-from tests.perturbation_helpers import dense_pair, size_root, use_python_kernels
-from tests.storage_helpers import write_count_store
+from tests.perturbation_helpers import (
+    dense_pair,
+    fixed_labels,
+    size_root,
+    use_python_kernels,
+    write_screen,
+)
 
 
 def _python_kernels(monkeypatch: pytest.MonkeyPatch, python_kernels: bool) -> None:
@@ -256,11 +261,17 @@ def test_resampling_keys_differ_by_seed_group_and_stage() -> None:
     assert not set(keys.tolist()) & set(resampling_keys(1, np.arange(3), 1).tolist())
 
 
-def test_counts_are_kept_as_float32_or_made_float64() -> None:
+def test_counts_are_held_as_contiguous_float32() -> None:
     single = np.ones((2, 3), dtype=np.float32)
+    # Every count below 2**24 keeps its value.
+    counts = np.array([[0, 1, 2**24 - 1], [7, 65_535, 2**20 + 3]], dtype=np.uint32)
+    strided = np.arange(12, dtype=np.float64).reshape(3, 4)[:, ::2]
 
     assert glm.count_array(single) is single
-    assert glm.count_array(np.ones((2, 3), np.uint16)).dtype == np.float64
+    for values in (counts, strided):
+        held = glm.count_array(values)
+        assert held.dtype == np.float32 and held.flags.c_contiguous
+        assert held.tolist() == values.tolist()
 
 
 # Random sets -------------------------------------------------------------------
@@ -1049,32 +1060,16 @@ def _operation_store(
     targets: list[str] = GUIDE_TARGETS,
     gene_ids: list[str] = GUIDE_GENE_IDS,
 ) -> DataStore:
-    path = tmp_path / name
-    write_count_store(
-        str(path),
-        {
-            "RNA": OPERATION_RNA if rna is None else rna,
-            "CRISPR": OPERATION_GUIDES if guides is None else guides,
-        },
-        "uint16",
+    runs = np.asarray(OPERATION_RUNS, dtype=object)
+    return write_screen(
+        tmp_path / name,
+        OPERATION_RNA if rna is None else rna,
+        OPERATION_GUIDES if guides is None else guides,
+        targets=targets,
+        target_ids=gene_ids,
+        cell_columns={"run": runs, "mito": OPERATION_MITO, "label": runs},
+        nthreads=2,
     )
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=2
-    )
-    features = store._get_assay("CRISPR").feats
-    features.insert("target_gene_name", np.asarray(targets, dtype=object))
-    features.insert("target_gene_id", np.asarray(gene_ids, dtype=object))
-    store.cells.insert("run", np.asarray(OPERATION_RUNS, dtype=object))
-    store.cells.insert("mito", OPERATION_MITO)
-    store.cells.insert("label", np.asarray(OPERATION_RUNS, dtype=object))
-    return store
-
-
-def _operation_labels(store: DataStore) -> ArtifactRef:
-    calls = store.perturbation.call_guides(
-        store.select_measured_cells("CRISPR"), method="fixed", min_umi=10
-    )
-    return store.perturbation.labels(calls, controls=["NT"])
 
 
 def _every_gene(store: DataStore) -> ArtifactRef:
@@ -1105,7 +1100,7 @@ def shared(tmp_path_factory) -> _Shared:
     """One store of the screen for the tests that keep its data."""
     folder = tmp_path_factory.mktemp("associations")
     store = _operation_store(folder)
-    return _Shared(folder / "store.zarr", store, _operation_labels(store))
+    return _Shared(folder / "store.zarr", store, fixed_labels(store, ["NT"]))
 
 
 def test_associations_find_the_planted_effects(shared) -> None:
@@ -1470,7 +1465,7 @@ def test_associations_plan_only_the_calibration_pairs_a_check_can_draw(
     guides[:, [6, 7]] = 0
     store = _operation_store(tmp_path, guides=guides)
     arguments = {
-        "labels": _operation_labels(store),
+        "labels": fixed_labels(store, ["NT"]),
         "features": _every_gene(store),
         "integration": "singleton",
         **FAST,
@@ -1510,7 +1505,7 @@ def test_associations_without_a_calibration_check(shared, tmp_path) -> None:
     guides[:, 5:] = 0
     single = _operation_store(tmp_path, guides=guides, name="single.zarr")
     arguments = {"features": _every_gene(single), **FAST}
-    single_labels = _operation_labels(single)
+    single_labels = fixed_labels(single, ["NT"])
     tests, messages = _warned_associations(single, single_labels, **arguments)
     assert len(messages) == 1 and messages[0].startswith(
         "Control cells with one guide carry 1 control guide, fewer than the 2"
@@ -1582,7 +1577,7 @@ def test_associations_warn_about_targets_without_a_gene(tmp_path) -> None:
         targets=["RNA0", "RNA0", "GENE9", "GENE9", "NT", "NT", "NT", "NT"],
         gene_ids=["RNA0", "RNA0", "", "", "", "", "", ""],
     )
-    labels = _operation_labels(store)
+    labels = fixed_labels(store, ["NT"])
     arguments = {"features": _every_gene(store), **FAST}
 
     tests, messages = _warned_associations(store, labels, **arguments)
@@ -1621,7 +1616,7 @@ def test_associations_warn_about_miscalibration(tmp_path) -> None:
     lowered = np.ix_(guide_four, np.arange(17, 27))
     rna[lowered] = rng.binomial(rna[lowered], 0.25)
     store = _operation_store(tmp_path, rna=rna.astype(np.uint16))
-    labels = _operation_labels(store)
+    labels = fixed_labels(store, ["NT"])
     arguments = {"features": _every_gene(store), "n_calibration_pairs": 60, **FAST}
 
     tests, messages = _warned_associations(store, labels, **arguments)

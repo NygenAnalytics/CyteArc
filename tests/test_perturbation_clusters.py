@@ -22,7 +22,7 @@ from cytearc.perturbation.clusters import (
     profile_distances,
 )
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
-from tests.storage_helpers import write_count_store
+from tests.perturbation_helpers import fixed_labels, write_screen
 
 
 def _planted(seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
@@ -247,17 +247,8 @@ def shared(tmp_path_factory) -> _Shared:
     """One store of the screen with its profiles."""
     path = tmp_path_factory.mktemp("clusters") / "store.zarr"
     rna, guides = _screen()
-    write_count_store(str(path), {"RNA": rna, "CRISPR": guides}, "uint16")
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=2
-    )
-    store._get_assay("CRISPR").feats.insert(
-        "target_gene_name", np.asarray([*TARGETS, "NT"], dtype=object)
-    )
-    calls = store.perturbation.call_guides(
-        store.select_measured_cells("CRISPR"), method="fixed", min_umi=10
-    )
-    labels = store.perturbation.labels(calls, controls=["NT"])
+    store = write_screen(path, rna, guides, targets=[*TARGETS, "NT"], nthreads=2)
+    labels = fixed_labels(store, ["NT"])
     features = store.features.snapshot(feature_indexes=np.arange(N_GENES))
     profiles = store.perturbation.profiles(
         labels, features, min_cells=10, id_column=None

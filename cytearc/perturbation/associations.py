@@ -677,7 +677,11 @@ def _score_groups(
         design = _union_design(covariates, n_controls, cells, among)
         treated = _treated_positions(n_controls, cells, among)
         draws = np.empty((n_draws, len(cells)), dtype=np.int32)
-        draw_uniform_range(keys[group], 0, 1, len(cells), design.shape[0], draws)
+        # int() gives int64 values rather than literals, so every call uses one
+        # compiled version of the kernel.
+        draw_uniform_range(
+            keys[group], int(0), int(1), len(cells), design.shape[0], draws
+        )
         records = np.empty((design.shape[0], batch * (p + 1)))
         factors = np.empty((batch, p, p))
         for start in range(first, last, batch):
@@ -1564,7 +1568,7 @@ def nonzero_counts(values: np.ndarray, units: np.ndarray, n_units: int) -> np.nd
     """Return how many cells of each unit hold counts of each feature.
 
     Args:
-        values: Counts, features x cells, float32 or float64.
+        values: Counts, features x cells, held as float32.
         units: Each cell's unit from 0, or -1 for a cell in none.
         n_units: The number of units.
 

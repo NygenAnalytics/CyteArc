@@ -325,9 +325,11 @@ def rank_sum_p_values(
         ValueError: If the arrays do not align.
     """
     held = np.ascontiguousarray(values, dtype=np.float64)
-    rows = np.asarray(features, dtype=np.int64)
+    # Contiguous indexes, so that strided ones compile no second version of the
+    # kernel.
+    rows = np.ascontiguousarray(features, dtype=np.int64)
     columns = np.asarray(cells, dtype=np.int64)
-    places = np.asarray(slots, dtype=np.int64)
+    places = np.ascontiguousarray(slots, dtype=np.int64)
     controls = np.ascontiguousarray(sorted_controls, dtype=np.float64)
     ties = np.asarray(control_ties, dtype=np.float64)
     if (

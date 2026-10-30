@@ -1,4 +1,12 @@
-from pathlib import Path
+"""Perturbation labels of the cells of a nine-cell screen.
+
+The module writes the screen and its guide calls once, as a template. A test
+that writes copies the template, and the tests of refused calls share one
+copy, which they check is left as it was.
+"""
+
+from collections.abc import Iterator
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -13,8 +21,13 @@ from cytearc.perturbation.labels import (
 )
 from cytearc.storage.artifacts import inspect_artifact
 from cytearc.storage.selections import read_stored_selection_indices
-from tests.perturbation_helpers import record_cell_reads
-from tests.storage_helpers import write_count_store
+from tests.perturbation_helpers import (
+    copy_store,
+    open_store,
+    record_cell_reads,
+    write_screen,
+    written,
+)
 
 # Guides CRISPR0 and CRISPR1 target GENE_A, CRISPR2 targets GENE_B, and
 # CRISPR3 and CRISPR4 are controls. Every count of 20 is called at min_umi=10.
@@ -32,6 +45,7 @@ COUNTS = np.asarray(
     ],
     dtype=np.uint16,
 )
+RNA = np.random.default_rng(7).poisson(2.0, size=(len(COUNTS), 10))
 TARGETS = np.asarray(["GENE_A", "GENE_A", "GENE_B", "Non-Targeting", "Scrambled"])
 CONTROLS = ["Non-Targeting", "Scrambled"]
 SINGLE = [
@@ -47,28 +61,36 @@ SINGLE = [
 ]
 
 
-def _store(tmp_path: Path, targets=TARGETS) -> DataStore:
-    rna = np.random.default_rng(7).poisson(2.0, size=(len(COUNTS), 10))
-    path = tmp_path / "store.zarr"
-    write_count_store(str(path), {"RNA": rna, "CRISPR": COUNTS}, "uint16")
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
-    if targets is not None:
-        store._get_assay("CRISPR").feats.insert(
-            "target_gene_name", np.asarray(targets, dtype=object)
-        )
-    return store
-
-
 def _calls(store: DataStore):
     cells = store.select_measured_cells("CRISPR")
     return store.perturbation.call_guides(cells, method="fixed", min_umi=10)
 
 
-def test_labels_name_the_genes_of_each_cells_guides(tmp_path) -> None:
-    store = _store(tmp_path)
-    calls = _calls(store)
+@pytest.fixture(scope="module")
+def template(tmp_path_factory) -> Iterator[SimpleNamespace]:
+    """The screen and its guide calls, which every test starts from."""
+    path = tmp_path_factory.mktemp("labels") / "store.zarr"
+    store = write_screen(path, RNA, COUNTS, targets=TARGETS)
+    screen = SimpleNamespace(path=path, calls=_calls(store))
+    saved = written(store)
+    yield screen
+    assert written(open_store(path)) == saved
+
+
+@pytest.fixture
+def store(template, tmp_path) -> DataStore:
+    """A copy of the template, for a test that writes."""
+    return copy_store(template.path, tmp_path)
+
+
+@pytest.fixture(scope="module")
+def shared_store(template, tmp_path_factory) -> DataStore:
+    """One writable copy of the template for the calls that must be refused."""
+    return copy_store(template.path, tmp_path_factory.mktemp("labels_refused"))
+
+
+def test_labels_name_the_genes_of_each_cells_guides(store, template) -> None:
+    calls = template.calls
 
     single = store.perturbation.labels(calls, controls=CONTROLS)
     combined = store.perturbation.labels(
@@ -133,8 +155,7 @@ def test_labels_name_the_genes_of_each_cells_guides(tmp_path) -> None:
     assert np.asarray(codes).tolist()[5] == [0, 1]
 
 
-def test_imported_calls_get_labels_too(tmp_path) -> None:
-    store = _store(tmp_path)
+def test_imported_calls_get_labels_too(store, tmp_path) -> None:
     cells = store.select_measured_cells("CRISPR")
     path = tmp_path / "calls.csv"
     path.write_text(
@@ -148,9 +169,8 @@ def test_imported_calls_get_labels_too(tmp_path) -> None:
     assert labels[:6] == ["GENE_A", NEGATIVE, NEGATIVE, NEGATIVE, NEGATIVE, MULTIPLE]
 
 
-def test_targets_replace_the_column_for_the_guides_they_name(tmp_path) -> None:
-    store = _store(tmp_path)
-    calls = _calls(store)
+def test_targets_replace_the_column_for_the_guides_they_name(store, template) -> None:
+    calls = template.calls
     ref = store.perturbation.labels(
         calls, controls=["Non-Targeting"], targets={"CRISPR4": "GENE_C"}
     )
@@ -173,9 +193,8 @@ def test_targets_replace_the_column_for_the_guides_they_name(tmp_path) -> None:
     assert labels[7] == "C"
 
 
-def test_labels_are_reused_and_follow_their_inputs(tmp_path) -> None:
-    store = _store(tmp_path)
-    calls = _calls(store)
+def test_labels_are_reused_and_follow_their_inputs(store, template) -> None:
+    calls = template.calls
     ref = store.perturbation.labels(calls, controls=CONTROLS)
     # The order and repeats of the controls do not change the identity.
     same = store.perturbation.labels(
@@ -201,28 +220,21 @@ def test_labels_are_reused_and_follow_their_inputs(tmp_path) -> None:
     assert labels == SINGLE
 
 
-def test_read_only_store_reuses_labels_but_cannot_label(tmp_path) -> None:
-    store = _store(tmp_path)
-    calls = _calls(store)
+def test_read_only_store_reuses_labels_but_cannot_label(store, template) -> None:
+    calls = template.calls
     ref = store.perturbation.labels(calls, controls=CONTROLS)
-    reader = DataStore(
-        str(tmp_path / "store.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-        zarr_mode="r",
-    )
+    reader = open_store(store.zarr_loc, zarr_mode="r")
     assert reader.perturbation.labels(calls, controls=CONTROLS) == ref
     with pytest.raises(PermissionError, match="label_perturbations"):
         reader.perturbation.labels(calls, controls=CONTROLS, policy="combinations")
 
 
-def test_labels_read_the_cell_ids_only_to_load_them(tmp_path, monkeypatch) -> None:
-    store = _store(tmp_path)
-    calls = _calls(store)
+def test_labels_read_the_cell_ids_only_to_load_them(
+    store, template, monkeypatch
+) -> None:
     reads = record_cell_reads(monkeypatch, store, {"ids"})
 
-    labels = store.perturbation.labels(calls, controls=CONTROLS)
+    labels = store.perturbation.labels(template.calls, controls=CONTROLS)
     # The cells of one guide alone, which a comparison by guide reads.
     by_guide = store.perturbation.efficiency(labels, by="guide", id_column=None)
 
@@ -238,10 +250,9 @@ def test_labels_read_the_cell_ids_only_to_load_them(tmp_path, monkeypatch) -> No
 
 
 def test_loading_labels_checks_the_budget_of_every_array_at_once(
-    tmp_path, monkeypatch
+    store, template, monkeypatch
 ) -> None:
-    store = _store(tmp_path)
-    labels = store.perturbation.labels(_calls(store), controls=CONTROLS)
+    labels = store.perturbation.labels(template.calls, controls=CONTROLS)
 
     def fits(name: str, budget: int) -> bool:
         monkeypatch.setattr(store, "memoryBytes", budget)
@@ -295,16 +306,23 @@ def test_loading_labels_checks_the_budget_of_every_array_at_once(
     ],
 )
 def test_labels_refuse_arguments_they_cannot_use(
-    tmp_path, arguments, error, message
+    shared_store, template, arguments, error, message
 ) -> None:
-    store = _store(tmp_path)
-    calls = _calls(store)
+    saved = written(shared_store)
     with pytest.raises(error, match=message):
-        store.perturbation.labels(calls, **({"controls": CONTROLS} | arguments))
+        shared_store.perturbation.labels(
+            template.calls, **({"controls": CONTROLS} | arguments)
+        )
+    assert written(shared_store) == saved
 
 
 def test_labels_refuse_calls_they_cannot_label(tmp_path, monkeypatch) -> None:
-    store = _store(tmp_path, targets=["GENE_A", "", "GENE_B", "Non-Targeting", None])
+    store = write_screen(
+        tmp_path / "store.zarr",
+        RNA,
+        COUNTS,
+        targets=["GENE_A", "", "GENE_B", "Non-Targeting", None],
+    )
     calls = _calls(store)
     with pytest.raises(TypeError, match="calls must be an ArtifactRef"):
         store.perturbation.labels("calls", controls=["Non-Targeting"])
@@ -313,13 +331,7 @@ def test_labels_refuse_calls_they_cannot_label(tmp_path, monkeypatch) -> None:
         store.perturbation.labels(cells, controls=["Non-Targeting"])
     # CRISPR1 and CRISPR4 are called but have no target in the column; a
     # read-only store says so too, rather than refusing to write.
-    reader = DataStore(
-        str(tmp_path / "store.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-        zarr_mode="r",
-    )
+    reader = open_store(store.zarr_loc, zarr_mode="r")
     for source in (store, reader):
         with pytest.raises(
             ValueError,
@@ -333,12 +345,13 @@ def test_labels_refuse_calls_they_cannot_label(tmp_path, monkeypatch) -> None:
     assert not store.artifacts.list(kind="perturbation_labels")
 
 
-def test_loading_labels_refuses_other_artifacts(tmp_path) -> None:
-    store = _store(tmp_path)
+def test_loading_labels_refuses_other_artifacts(shared_store, template) -> None:
+    saved = written(shared_store)
     with pytest.raises(TypeError, match="labels must be an ArtifactRef"):
-        store.perturbation.load_labels("labels")
+        shared_store.perturbation.load_labels("labels")
     with pytest.raises(ValueError, match="not 'guide_calls'"):
-        store.perturbation.load_labels(_calls(store))
+        shared_store.perturbation.load_labels(template.calls)
+    assert written(shared_store) == saved
 
 
 def test_label_arrays_without_targets_keep_one_column() -> None:

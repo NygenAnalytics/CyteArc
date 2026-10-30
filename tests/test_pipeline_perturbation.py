@@ -35,6 +35,7 @@ from cytearc.datastore._pipeline.recipes.perturbation import resolve_perturbatio
 from cytearc.datastore._pipeline.settings import LABELS_NEED_CONTROLS, stage_settings
 from cytearc.datastore.pipeline_accessor import PipelineAccessor
 from cytearc.metadata.membership import UnmeasuredCellsError, membership_attributes
+from tests.perturbation_helpers import written
 from tests.storage_helpers import insert_nullable_cell_column, write_count_store
 
 N_GENES = 120
@@ -207,16 +208,6 @@ def _copy(location: Path, tmp_path: Path) -> DataStore:
     target = tmp_path / "copy.zarr"
     shutil.copytree(location, target)
     return _open(target)
-
-
-def _written(store: DataStore) -> tuple[Any, ...]:
-    """Return what a run writes: run records, and every artifact it can make."""
-    return (
-        [run.run_id for run in store.pipeline.list_runs(limit=1000)],
-        store.artifacts.list(scope="datastore"),
-        store.artifacts.list(from_assay="RNA"),
-        store.artifacts.list(from_assay="CRISPR"),
-    )
 
 
 def _stages(run: PipelineRun) -> dict[str, dict[str, Any]]:
@@ -980,6 +971,7 @@ def test_a_run_with_mixscape_can_profile_every_labelled_cell(runs, tmp_path) -> 
     assert named.report()["run"]["config"]["profileLabels"] == "mixscape"
 
 
+@pytest.mark.slow
 def test_a_run_after_an_rna_run_reuses_its_cells_genes_and_coordinates(
     screen, tmp_path
 ) -> None:
@@ -995,14 +987,20 @@ def test_a_run_after_an_rna_run_reuses_its_cells_genes_and_coordinates(
     )
     head = ("analysis_cell_selection", "highly_variable_features", "normalized", "pca")
 
+    # Fixed guide calling, without efficiency and E-distances, which the head
+    # does not depend on.
+    quick = {
+        "labels": LABELS,
+        "guide_calling": {"method": "fixed", "min_umi": 10},
+        "efficiency": False,
+        "edistance": False,
+        "harmony": {"batch_columns": ["lane"]},
+        **HEAD,
+    }
     # The same cells and settings filter, select, normalize and reduce alike.
-    same = store.pipeline.perturbation(
-        labels=LABELS, harmony={"batch_columns": ["lane"]}, **HEAD
-    )
+    same = store.pipeline.perturbation(**quick)
     # A run given the RNA run's cells takes them as they are.
-    given = store.pipeline.perturbation(
-        cells=rna, labels=LABELS, harmony={"batch_columns": ["lane"]}, **HEAD
-    )
+    given = store.pipeline.perturbation(cells=rna, **quick)
 
     for run in (same, given):
         assert all(run[key] == rna[key] for key in (*head, "harmony"))
@@ -1022,13 +1020,15 @@ def test_a_run_after_an_rna_run_reuses_its_cells_genes_and_coordinates(
 # Guide calls imported from Cell Ranger ----------------------------------------
 
 
-def test_guide_calling_imports_cell_rangers_calls(screen, tmp_path) -> None:
-    store = _copy(screen, tmp_path)
+def test_guide_calling_imports_cell_rangers_calls(runs, tmp_path) -> None:
+    # The full run's genes, normalization and PCA serve the runs here.
+    store = _copy(runs.location, tmp_path)
     path = _call_file(tmp_path / "protospacer_calls_per_cell.csv")
+    settings = {"efficiency": False, "edistance": False, **QUICK}
 
     # A path object is recorded as the text of its path.
     run = store.pipeline.perturbation(
-        labels=LABELS, guide_calling={"path": path}, efficiency=False, **QUICK
+        labels=LABELS, guide_calling={"path": path}, **settings
     )
 
     calls = store.artifacts.inspect(run["guide_calls"])
@@ -1058,7 +1058,7 @@ def test_guide_calling_imports_cell_rangers_calls(screen, tmp_path) -> None:
     assert _stages(run)["guide_calling"]["warnings"] == warned
     # A run that reuses the calls records the import's warning again.
     again = store.pipeline.perturbation(
-        labels=LABELS, guide_calling={"path": path}, efficiency=False, **QUICK
+        labels=LABELS, guide_calling={"path": path}, **settings
     )
     assert again["guide_calls"] == run["guide_calls"]
     assert _reused(again)["guide_calls"]
@@ -1079,7 +1079,7 @@ def test_one_call_file_reaches_the_cells_of_one_sample(screen, tmp_path) -> None
     remedy = (
         "or call the guides from their counts with guide_calling settings without path"
     )
-    before = _written(store)
+    before = written(store)
 
     # The file reaches neither the cells of both lanes without a prefix nor the
     # other lane's cells with one.
@@ -1112,7 +1112,7 @@ def test_one_call_file_reaches_the_cells_of_one_sample(screen, tmp_path) -> None
                 guide_calling={"path": path, "barcode_prefix": prefix},
                 **HEAD,
             )
-    assert _written(store) == before
+    assert written(store) == before
 
     # One lane's cells with its prefix: the barcodes of the other lane's cells,
     # and of the cells that QC filtering removed, match no analysis cell.
@@ -1592,13 +1592,13 @@ def test_a_call_is_refused_before_anything_is_written(
     rejection_store, keywords, error, match
 ) -> None:
     store = rejection_store
-    before = _written(store)
+    before = written(store)
     call: dict[str, Any] = {"labels": LABELS, **HEAD, **keywords}
 
     with pytest.raises(error, match=match):
         store.pipeline.perturbation(**call)
 
-    assert _written(store) == before
+    assert written(store) == before
 
 
 def test_label_settings_need_controls_wherever_they_are_checked() -> None:
@@ -1630,7 +1630,7 @@ def test_cells_that_the_guide_assay_did_not_measure_are_refused(
     )
     measured.attrs.update(membership_attributes("CRISPR"))
     store = _open(location)
-    before = _written(store)
+    before = written(store)
 
     with pytest.raises(UnmeasuredCellsError) as raised:
         store.pipeline.perturbation(labels=LABELS, **HEAD)
@@ -1639,7 +1639,7 @@ def test_cells_that_the_guide_assay_did_not_measure_are_refused(
         "CRISPR",
         "pipeline.perturbation",
     )
-    assert _written(store) == before
+    assert written(store) == before
 
 
 def test_a_path_object_names_the_call_file(readonly, tmp_path) -> None:
@@ -1686,7 +1686,7 @@ def test_a_run_with_association_tests_refuses_cells_without_counts(tmp_path) -> 
     rna[np.flatnonzero(GUIDE_OF == 6)[0]] = 0
     store = _write(tmp_path / "screen.zarr", rna=rna)
     store.cells.insert("every", np.ones(N_CELLS, dtype=bool))
-    before = _written(store)
+    before = written(store)
 
     # The tests would refuse the cell after nine stages had written.
     with pytest.raises(
@@ -1702,7 +1702,7 @@ def test_a_run_with_association_tests_refuses_cells_without_counts(tmp_path) -> 
             **QUICK,
         )
 
-    assert _written(store) == before
+    assert written(store) == before
     # A run without the tests takes the cell.
     plan = _resolve(store, cells="every", **QUICK)
     assert plan.config["stages"]["associations"] is False

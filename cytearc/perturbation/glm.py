@@ -58,15 +58,12 @@ _FINITE_SUM_COUNTS = 8
 
 
 def count_array(values: np.ndarray) -> np.ndarray:
-    """Return counts as a C-contiguous float32 or float64 array.
+    """Return counts as a C-contiguous float32 array, without a copy if they are one.
 
-    float32 holds every count below 2^24 exactly, at half the memory, and is
-    kept as it is; other types become float64.
+    float32 holds every count below 2^24 exactly, at half the memory of
+    float64, and with one type each kernel compiles once.
     """
-    array = np.asarray(values)
-    if array.dtype not in (np.float32, np.float64):
-        array = array.astype(np.float64)
-    return np.ascontiguousarray(array)
+    return np.ascontiguousarray(values, dtype=np.float32)
 
 
 @njit(cache=True, nogil=True)

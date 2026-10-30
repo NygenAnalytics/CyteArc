@@ -1,4 +1,12 @@
-from pathlib import Path
+"""Perturbation signatures of the cells of a 48-cell screen in two runs.
+
+The module writes the screen, its labels, coordinates and detected features
+once, as a template. A test that writes copies the template, and the tests of
+refused calls share one copy, which they check is left as it was.
+"""
+
+from collections.abc import Iterator
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -16,8 +24,14 @@ from cytearc.perturbation.signature import (
 )
 from cytearc.storage.artifacts import inspect_artifact
 from cytearc.utils.logging import logger
-from tests.perturbation_helpers import use_python_kernels
-from tests.storage_helpers import write_count_store
+from tests.perturbation_helpers import (
+    copy_store,
+    fixed_labels,
+    open_store,
+    use_python_kernels,
+    write_screen,
+    written,
+)
 
 N_CELLS = 48
 # Guide 0 targets GENE_A, guide 1 GENE_B, and guide 2 is non-targeting.
@@ -39,25 +53,6 @@ CARRIED, GUIDES, RNA, COORDINATES, SAMPLES = _screen()
 CONTROLS = np.flatnonzero(CARRIED == 2)
 
 
-def _store(tmp_path: Path) -> DataStore:
-    path = tmp_path / "store.zarr"
-    write_count_store(str(path), {"RNA": RNA, "CRISPR": GUIDES}, "uint16")
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
-    store._get_assay("CRISPR").feats.insert(
-        "target_gene_name", np.asarray(TARGETS, dtype=object)
-    )
-    store.cells.insert("run", np.asarray(SAMPLES, dtype=object))
-    return store
-
-
-def _labels(store: DataStore):
-    cells = store.select_measured_cells("CRISPR")
-    calls = store.perturbation.call_guides(cells, method="fixed", min_umi=10)
-    return store.perturbation.labels(calls, controls=["NT"])
-
-
 def _coordinates(store: DataStore, cells=None):
     """Import COORDINATES for ``cells``, every cell by default."""
     cells = cells or store.select_measured_cells("RNA")
@@ -71,6 +66,40 @@ def _features(store: DataStore):
     return store.features.detected(
         store.select_measured_cells("RNA"), from_assay="RNA", min_cells=0
     )
+
+
+@pytest.fixture(scope="module")
+def template(tmp_path_factory) -> Iterator[SimpleNamespace]:
+    """The screen with its labels, coordinates and detected features."""
+    path = tmp_path_factory.mktemp("signature") / "store.zarr"
+    store = write_screen(
+        path,
+        RNA,
+        GUIDES,
+        targets=TARGETS,
+        cell_columns={"run": np.asarray(SAMPLES, dtype=object)},
+    )
+    screen = SimpleNamespace(
+        path=path,
+        labels=fixed_labels(store, ["NT"]),
+        coordinates=_coordinates(store),
+        features=_features(store),
+    )
+    saved = written(store)
+    yield screen
+    assert written(open_store(path)) == saved
+
+
+@pytest.fixture
+def store(template, tmp_path) -> DataStore:
+    """A copy of the template, for a test that writes."""
+    return copy_store(template.path, tmp_path)
+
+
+@pytest.fixture(scope="module")
+def shared_store(template, tmp_path_factory) -> DataStore:
+    """One writable copy of the template for the calls that must be refused."""
+    return copy_store(template.path, tmp_path_factory.mktemp("signature_refused"))
 
 
 def _expected(
@@ -109,11 +138,10 @@ def _stored_coordinates(store: DataStore, ref, cells: np.ndarray) -> np.ndarray:
     return values
 
 
-def test_signature_subtracts_each_cells_nearest_controls(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
-    coordinates = _coordinates(store)
-    features = _features(store)
+def test_signature_subtracts_each_cells_nearest_controls(store, template) -> None:
+    labels = template.labels
+    coordinates = template.coordinates
+    features = template.features
 
     ref = store.perturbation.signature(
         labels, coordinates, features=features, dims=3, n_neighbors=4
@@ -175,12 +203,13 @@ def test_signature_subtracts_each_cells_nearest_controls(tmp_path) -> None:
     )
 
 
-def test_loading_a_signature_holds_its_values_once(tmp_path, monkeypatch) -> None:
-    store = _store(tmp_path)
+def test_loading_a_signature_holds_its_values_once(
+    store, template, monkeypatch
+) -> None:
     ref = store.perturbation.signature(
-        _labels(store),
-        _coordinates(store),
-        features=_features(store),
+        template.labels,
+        template.coordinates,
+        features=template.features,
         dims=3,
         n_neighbors=4,
     )
@@ -212,14 +241,12 @@ def test_loading_a_signature_holds_its_values_once(tmp_path, monkeypatch) -> Non
     assert np.shares_memory(loaded.values.to_numpy(), read[0])
 
 
-def test_signature_keeps_each_sample_to_its_own_controls(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
-    coordinates = _coordinates(store)
+def test_signature_keeps_each_sample_to_its_own_controls(store, template) -> None:
+    coordinates = template.coordinates
     ref = store.perturbation.signature(
-        labels,
+        template.labels,
         coordinates,
-        features=_features(store),
+        features=template.features,
         dims=4,
         n_neighbors=3,
         sample_column="run",
@@ -241,16 +268,15 @@ def test_signature_keeps_each_sample_to_its_own_controls(tmp_path) -> None:
         ]
 
 
-def test_cells_without_coordinates_get_no_signature(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
+def test_cells_without_coordinates_get_no_signature(store, template) -> None:
+    labels = template.labels
     subset = store.select_cells(labels, include=["GENE_A", "control"])
     coordinates = _coordinates(store, subset)
     messages: list[str] = []
     sink = logger.add(lambda message: messages.append(message.record["message"]))
     try:
         ref = store.perturbation.signature(
-            labels, coordinates, features=_features(store), dims=2, n_neighbors=2
+            labels, coordinates, features=template.features, dims=2, n_neighbors=2
         )
     finally:
         logger.remove(sink)
@@ -266,9 +292,8 @@ def test_cells_without_coordinates_get_no_signature(tmp_path) -> None:
     )
 
 
-def test_signature_defaults_to_the_features_of_the_coordinates(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
+def test_signature_defaults_to_the_features_of_the_coordinates(store, template) -> None:
+    labels = template.labels
     cells = store.select_measured_cells("RNA")
     features = store.features.snapshot(feature_indexes=np.asarray([1, 3, 4]))
     normalized = store.features.normalize(cells, features)
@@ -278,7 +303,7 @@ def test_signature_defaults_to_the_features_of_the_coordinates(tmp_path) -> None
     columns = store.perturbation.load_signature(ref).values.columns
     assert columns.tolist() == ["RNA1", "RNA3", "RNA4"]
     with pytest.raises(ValueError, match="record no feature selection; pass features"):
-        store.perturbation.signature(labels, _coordinates(store))
+        store.perturbation.signature(labels, template.coordinates)
 
 
 @pytest.mark.parametrize(
@@ -296,21 +321,27 @@ def test_signature_defaults_to_the_features_of_the_coordinates(tmp_path) -> None
     ],
 )
 def test_signature_refuses_arguments_it_cannot_use(
-    tmp_path, arguments, error, message
+    shared_store, template, arguments, error, message
 ) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
+    saved = written(shared_store)
     with pytest.raises(error, match=message):
-        store.perturbation.signature(
-            labels, _coordinates(store), features=_features(store), **arguments
+        shared_store.perturbation.signature(
+            template.labels,
+            template.coordinates,
+            features=template.features,
+            **arguments,
         )
+    assert written(shared_store) == saved
 
 
-def test_signature_refuses_inputs_it_cannot_use(tmp_path, monkeypatch) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
-    coordinates = _coordinates(store)
-    features = _features(store)
+def test_signature_refuses_inputs_it_cannot_use(
+    shared_store, template, monkeypatch
+) -> None:
+    store = shared_store
+    labels = template.labels
+    coordinates = template.coordinates
+    features = template.features
+    saved = written(store)
     cells = store.select_measured_cells("RNA")
     with pytest.raises(TypeError, match="labels must be an ArtifactRef"):
         store.perturbation.signature("labels", coordinates)
@@ -338,22 +369,15 @@ def test_signature_refuses_inputs_it_cannot_use(tmp_path, monkeypatch) -> None:
         store.perturbation.signature(
             labels, coordinates, features=features, n_neighbors=5
         )
-    assert not store.artifacts.list(kind="perturbation_signature")
+    assert written(store) == saved
 
 
-def test_signature_is_reused_read_only_and_refused_when_new(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
-    coordinates = _coordinates(store)
-    settings = {"features": _features(store), "n_neighbors": 5}
+def test_signature_is_reused_read_only_and_refused_when_new(store, template) -> None:
+    labels = template.labels
+    coordinates = template.coordinates
+    settings = {"features": template.features, "n_neighbors": 5}
     ref = store.perturbation.signature(labels, coordinates, **settings)
-    reader = DataStore(
-        str(tmp_path / "store.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-        zarr_mode="r",
-    )
+    reader = open_store(store.zarr_loc, zarr_mode="r")
     assert reader.perturbation.signature(labels, coordinates, **settings) == ref
     with pytest.raises(PermissionError, match="compute_perturbation_signature"):
         reader.perturbation.signature(labels, coordinates, dims=2, **settings)
@@ -365,12 +389,14 @@ def test_signature_is_reused_read_only_and_refused_when_new(tmp_path) -> None:
     )
 
 
-def test_loading_a_signature_refuses_what_it_cannot_read(tmp_path, monkeypatch) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
+def test_loading_a_signature_refuses_what_it_cannot_read(
+    store, template, monkeypatch
+) -> None:
+    labels = template.labels
     ref = store.perturbation.signature(
-        labels, _coordinates(store), features=_features(store), n_neighbors=3
+        labels, template.coordinates, features=template.features, n_neighbors=3
     )
+    saved = written(store)
     with pytest.raises(TypeError, match="signature must be an ArtifactRef"):
         store.perturbation.load_signature("signature")
     with pytest.raises(ValueError, match="not 'perturbation_labels'"):
@@ -382,6 +408,7 @@ def test_loading_a_signature_refuses_what_it_cannot_read(tmp_path, monkeypatch) 
     monkeypatch.setattr(store, "memoryBytes", 100)
     with pytest.raises(MemoryError, match="48 cells in 6 features"):
         store.perturbation.load_signature(ref)
+    assert written(store) == saved
 
 
 def _brute_nearest(query: np.ndarray, controls: np.ndarray, k: int) -> np.ndarray:
