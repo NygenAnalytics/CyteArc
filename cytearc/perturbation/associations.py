@@ -30,7 +30,7 @@ These functions hold counts in memory and never touch storage.
 
 import itertools
 import math
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 
 import numba
@@ -40,6 +40,20 @@ from numba import njit, prange
 from scipy import stats
 
 from cytearc.perturbation.efficiency import id_column_setting
+from cytearc.perturbation.glm import (
+    cholesky,
+    count_array,
+    fit_poisson,
+    log2_fold_change,
+    negative_binomial_information,
+    score_statistic,
+    size_dispersion,
+)
+from cytearc.perturbation.random_sets import (
+    draw_uniform_range,
+    draw_uniform_sets,
+    resampling_keys,
+)
 from cytearc.utils.arguments import float_argument, integer_argument
 
 __all__ = [
@@ -64,10 +78,10 @@ __all__ = [
     "record_batch",
     "resampled_statistics",
     "resampling_counts",
-    "resampling_keys",
     "resampling_p_values",
     "skew_normal_p_values",
     "skew_normal_tail_ratios",
+    "staged_p_values",
 ]
 
 #: The sets of pairs that an association test holds.
@@ -79,28 +93,9 @@ CALIBRATION_GRADES = ((1, "excellent"), (6, "mild"), (14, "moderate"))
 #: The alternatives of a test: either direction, a decrease or an increase.
 SIDES = ("both", "left", "right")
 
-_GOLDEN = np.uint64(0x9E3779B97F4A7C15)
-_MIX_1 = np.uint64(0xBF58476D1CE4E5B9)
-_MIX_2 = np.uint64(0x94D049BB133111EB)
-_SALT = np.uint64(0x5CE97E2A55A0C1A7)
-_SHIFT_11 = np.uint64(11)
-_SHIFT_27 = np.uint64(27)
-_SHIFT_30 = np.uint64(30)
-_SHIFT_31 = np.uint64(31)
-_UNIT_INTERVAL = 2.0**-53
-# Linear predictors are kept within exp's range; exp(-700) is still above 0.
-_LINEAR_LIMIT = 700.0
-# A Cholesky pivot this small against its diagonal marks a direction that the
-# cells do not determine, such as a covariate that is 0 on all of them.
-_PIVOT_TOLERANCE = 1e-10
-# Above this log size, about 1.6e15, the negative binomial is Poisson to
-# double precision at the means of counts.
-_LOG_SIZE_LIMIT = 35.0
-_FIT_ITERATIONS = 100
 # A start of a pair's fit with a coefficient beyond this size, on covariates
 # that are standardized or indicators, sits where the fit cannot move.
 _START_LIMIT = 10.0
-_FIT_TOLERANCE = 1e-12
 # Above this skewness the moment equations of the skew-normal have no
 # solution; its largest skewness is about 0.9953.
 _SKEWNESS_LIMIT = 0.995
@@ -298,384 +293,6 @@ def association_covariates(
     return np.ascontiguousarray(np.column_stack([column for column, _, _ in columns]))
 
 
-def resampling_keys(seed: int, codes: np.ndarray, stage: int) -> np.ndarray:
-    """Return the key of the random sets of each group in one round.
-
-    Args:
-        seed: The seed of the test.
-        codes: A distinct, non-negative code for each group, such as its
-            target's position in the labels.
-        stage: The round, 1 or 2.
-
-    Returns:
-        One unsigned 64-bit key per group.
-    """
-    base = _mix_array(np.array([seed % 2**64], dtype=np.uint64) ^ _SALT)
-    groups = _mix_array(np.asarray(codes, dtype=np.int64).astype(np.uint64) + _GOLDEN)
-    rounds = _mix_array(np.array([stage], dtype=np.uint64) + _GOLDEN)
-    keys: np.ndarray = _mix_array(_mix_array(base ^ groups) ^ rounds)
-    return keys
-
-
-def _count_array(values: np.ndarray) -> np.ndarray:
-    """Return counts as a C-contiguous float32 or float64 array.
-
-    float32 holds every count below 2^24 exactly, at half the memory, and is
-    kept as it is; other types become float64.
-    """
-    array = np.asarray(values)
-    if array.dtype not in (np.float32, np.float64):
-        array = array.astype(np.float64)
-    return np.ascontiguousarray(array)
-
-
-def _mix_array(values: np.ndarray) -> np.ndarray:
-    """Return the SplitMix64 finaliser of each unsigned 64-bit integer.
-
-    Array products wrap around without warnings, as the compiled form's do.
-    """
-    mixed = (values ^ (values >> _SHIFT_30)) * _MIX_1
-    mixed = (mixed ^ (mixed >> _SHIFT_27)) * _MIX_2
-    finalised: np.ndarray = mixed ^ (mixed >> _SHIFT_31)
-    return finalised
-
-
-@njit(cache=True, nogil=True)
-def _mix64(value: np.uint64) -> np.uint64:
-    """Return the SplitMix64 finaliser of a 64-bit unsigned integer."""
-    mixed = (value ^ (value >> _SHIFT_30)) * _MIX_1
-    mixed = (mixed ^ (mixed >> _SHIFT_27)) * _MIX_2
-    return mixed ^ (mixed >> _SHIFT_31)
-
-
-@njit(cache=True, nogil=True)
-def _draw_set(
-    key: np.uint64, size: int, n_union: int, marked: np.ndarray, out: np.ndarray
-) -> None:
-    """Draw a uniformly random set of ``size`` of ``n_union`` positions.
-
-    Floyd's algorithm takes one draw per member; ``marked`` is all False
-    before and after. A uniform of 53 bits is at most 1 - 2^-53, and its
-    product with ``last + 1`` rounds below ``last + 1``, so ``pick`` is at
-    most ``last``.
-    """
-    for count in range(size):
-        last = n_union - size + count
-        mixed = _mix64(key + np.uint64(count) * _GOLDEN)
-        pick = int(np.float64(mixed >> _SHIFT_11) * _UNIT_INTERVAL * (last + 1))
-        if marked[pick]:
-            pick = last
-        marked[pick] = True
-        out[count] = pick
-    for count in range(size):
-        marked[out[count]] = False
-
-
-@njit(cache=True, nogil=True)
-def _cholesky(matrix: np.ndarray, out: np.ndarray) -> None:
-    """Write the lower Cholesky factor of a symmetric positive semidefinite matrix.
-
-    A direction that the matrix does not determine gets an infinite pivot, so
-    solves give it 0.
-    """
-    p = matrix.shape[0]
-    for r in range(p):
-        for c in range(r + 1):
-            total = matrix[r, c]
-            for k in range(c):
-                total -= out[r, k] * out[c, k]
-            if r == c:
-                if total > _PIVOT_TOLERANCE * matrix[r, r] and total > 0:
-                    out[r, r] = math.sqrt(total)
-                else:
-                    out[r, r] = np.inf
-            else:
-                out[r, c] = total / out[c, c]
-        for c in range(r + 1, p):
-            out[r, c] = 0.0
-
-
-@njit(cache=True, nogil=True)
-def _forward(factor: np.ndarray, vector: np.ndarray, out: np.ndarray) -> None:
-    """Solve ``factor @ out = vector`` for a lower triangular factor."""
-    for r in range(len(vector)):
-        total = vector[r]
-        for k in range(r):
-            total -= factor[r, k] * out[k]
-        out[r] = total / factor[r, r]
-
-
-@njit(cache=True, nogil=True)
-def _solve(factor: np.ndarray, vector: np.ndarray, out: np.ndarray) -> None:
-    """Solve ``factor @ factor.T @ out = vector``."""
-    p = len(vector)
-    _forward(factor, vector, out)
-    for r in range(p - 1, -1, -1):
-        total = out[r]
-        for k in range(r + 1, p):
-            total -= factor[k, r] * out[k]
-        out[r] = total / factor[r, r]
-
-
-@njit(cache=True, nogil=True)
-def _linear(
-    covariates: np.ndarray, coefficients: np.ndarray, eta: np.ndarray, mu: np.ndarray
-) -> None:
-    """Write each cell's linear predictor and mean."""
-    n, p = covariates.shape
-    for i in range(n):
-        total = 0.0
-        for c in range(p):
-            total += covariates[i, c] * coefficients[c]
-        total = min(max(total, -_LINEAR_LIMIT), _LINEAR_LIMIT)
-        eta[i] = total
-        mu[i] = math.exp(total)
-
-
-@njit(cache=True, nogil=True)
-def _information(
-    covariates: np.ndarray, mu: np.ndarray, dispersion: float, out: np.ndarray
-) -> None:
-    """Write the negative binomial information of the coefficients."""
-    n, p = covariates.shape
-    out[:, :] = 0.0
-    for i in range(n):
-        weight = mu[i] / (1.0 + dispersion * mu[i])
-        for r in range(p):
-            weighted = weight * covariates[i, r]
-            for c in range(r + 1):
-                out[r, c] += weighted * covariates[i, c]
-    for r in range(p):
-        for c in range(r + 1, p):
-            out[r, c] = out[c, r]
-
-
-@njit(cache=True, nogil=True)
-def _fit_poisson(
-    y: np.ndarray,
-    covariates: np.ndarray,
-    coefficients: np.ndarray,
-    eta: np.ndarray,
-    mu: np.ndarray,
-) -> None:
-    """Fit Poisson coefficients by Newton's method, from ``coefficients``.
-
-    Each step halves until the log-likelihood does not fall, and the fit stops
-    when a step raises it by less than the tolerance. ``eta`` and ``mu`` end
-    at the fit.
-    """
-    n, p = covariates.shape
-    information = np.empty((p, p))
-    gradient = np.empty(p)
-    factor = np.empty((p, p))
-    step = np.empty(p)
-    trial = np.empty(p)
-    _linear(covariates, coefficients, eta, mu)
-    current = 0.0
-    for i in range(n):
-        current += y[i] * eta[i] - mu[i]
-    for _ in range(_FIT_ITERATIONS):
-        _information(covariates, mu, 0.0, information)
-        gradient[:] = 0.0
-        for i in range(n):
-            residual = y[i] - mu[i]
-            for c in range(p):
-                gradient[c] += residual * covariates[i, c]
-        _cholesky(information, factor)
-        _solve(factor, gradient, step)
-        scale = 1.0
-        candidate = current
-        for _half in range(60):
-            for c in range(p):
-                trial[c] = coefficients[c] + scale * step[c]
-            _linear(covariates, trial, eta, mu)
-            candidate = 0.0
-            for i in range(n):
-                candidate += y[i] * eta[i] - mu[i]
-            if candidate >= current:
-                break
-            scale *= 0.5
-        coefficients[:] = trial
-        change = candidate - current
-        current = candidate
-        if change <= _FIT_TOLERANCE * (abs(current) + 1.0):
-            break
-
-
-@njit(cache=True, nogil=True)
-def _pearson_dispersion(y: np.ndarray, mu: np.ndarray, degrees: float) -> float:
-    """Return the dispersion that solves the Pearson moment equation.
-
-    The sum of (y - mu)^2 / (mu + dispersion mu^2) equals ``degrees``, the
-    cells less the coefficients; without overdispersion the dispersion is 0.
-    The sum is convex and falling in the dispersion, so Newton's method from 0
-    rises to the root without passing it.
-    """
-    excess = 0.0
-    for i in range(len(y)):
-        excess += (y[i] - mu[i]) ** 2 / mu[i]
-    if excess <= degrees:
-        return 0.0
-    dispersion = 0.0
-    for _ in range(200):
-        value = -degrees
-        slope = 0.0
-        for i in range(len(y)):
-            pearson = (y[i] - mu[i]) ** 2 / mu[i]
-            scale = 1.0 + dispersion * mu[i]
-            value += pearson / scale
-            slope -= pearson * mu[i] / (scale * scale)
-        following = dispersion - value / slope
-        settled = following - dispersion <= 1e-12 * following
-        dispersion = following
-        if settled:
-            break
-    return dispersion
-
-
-@njit(cache=True, nogil=True)
-def _digamma(x: float) -> float:
-    """Return the digamma function of a positive number.
-
-    The recurrence psi(x) = psi(x + 1) - 1 / x carries x to 10 or more, where
-    the asymptotic series is accurate to about 1e-15.
-    """
-    result = 0.0
-    while x < 10.0:
-        result -= 1.0 / x
-        x += 1.0
-    inverse = 1.0 / x
-    square = inverse * inverse
-    series = square * (
-        1.0 / 12.0
-        - square
-        * (
-            1.0 / 120.0
-            - square
-            * (
-                1.0 / 252.0
-                - square
-                * (
-                    1.0 / 240.0
-                    - square
-                    * (1.0 / 132.0 - square * (691.0 / 32760.0 - square / 12.0))
-                )
-            )
-        )
-    )
-    return result + math.log(x) - 0.5 * inverse - series
-
-
-@njit(cache=True, nogil=True)
-def _trigamma(x: float) -> float:
-    """Return the trigamma function of a positive number, as :func:`_digamma` does."""
-    result = 0.0
-    while x < 10.0:
-        result += 1.0 / (x * x)
-        x += 1.0
-    inverse = 1.0 / x
-    square = inverse * inverse
-    series = (
-        inverse
-        + 0.5 * square
-        + inverse
-        * square
-        * (
-            1.0 / 6.0
-            - square
-            * (
-                1.0 / 30.0
-                - square
-                * (
-                    1.0 / 42.0
-                    - square
-                    * (
-                        1.0 / 30.0
-                        - square
-                        * (5.0 / 66.0 - square * (691.0 / 2730.0 - square * 7.0 / 6.0))
-                    )
-                )
-            )
-        )
-    )
-    return result + series
-
-
-# Counts up to this sum their digamma differences term by term.
-_FINITE_SUM_COUNTS = 8
-
-
-@njit(cache=True, nogil=True)
-def _size_derivatives(
-    y: np.ndarray, mu: np.ndarray, size: float
-) -> tuple[float, float]:
-    """Return the first two derivatives of the log-likelihood in log(size).
-
-    The means are held fixed. For an integer count y, psi(size + y) -
-    psi(size) is the sum of 1 / (size + k) for k below y.
-    """
-    first = 0.0
-    second = 0.0
-    base_first = _digamma(size)
-    base_second = _trigamma(size)
-    for i in range(len(y)):
-        count = y[i]
-        mean = mu[i]
-        gap_first = 0.0
-        gap_second = 0.0
-        if count > 0:
-            if count <= _FINITE_SUM_COUNTS and count == math.floor(count):
-                for k in range(int(count)):
-                    inverse = 1.0 / (size + k)
-                    gap_first += inverse
-                    gap_second -= inverse * inverse
-            else:
-                gap_first = _digamma(size + count) - base_first
-                gap_second = _trigamma(size + count) - base_second
-        total = size + mean
-        first += gap_first + math.log(size / total) + (mean - count) / total
-        second += (
-            gap_second + 1.0 / size - 1.0 / total - (mean - count) / (total * total)
-        )
-    return size * first, size * first + size * size * second
-
-
-@njit(cache=True, nogil=True)
-def _size_dispersion(y: np.ndarray, mu: np.ndarray, degrees: float) -> float:
-    """Return the dispersion, 1 / size, of negative binomial counts with known means.
-
-    The size is the maximum likelihood estimate with the means held fixed,
-    found by Newton's method in log(size) from the moment estimate. When the
-    counts show no overdispersion that the likelihood can see, the sum of
-    (y - mu)^2 - y being at most 0, the likelihood has no finite maximum and
-    the dispersion solves the Pearson moment equation instead, or is 0.
-    """
-    excess = 0.0
-    squares = 0.0
-    for i in range(len(y)):
-        excess += (y[i] - mu[i]) ** 2 - y[i]
-        squares += mu[i] * mu[i]
-    if excess <= 0.0:
-        return _pearson_dispersion(y, mu, degrees)
-    log_size = math.log(squares / excess)
-    for _ in range(100):
-        gradient, curvature = _size_derivatives(y, mu, math.exp(log_size))
-        # Newton's step where the likelihood curves down enough, and otherwise
-        # a step of at most 1 uphill.
-        step = -gradient / min(curvature, -abs(gradient) - 1e-300)
-        step = min(max(step, -3.0), 3.0)
-        log_size += step
-        if log_size > _LOG_SIZE_LIMIT:
-            return 0.0
-        if log_size < -_LOG_SIZE_LIMIT:
-            # Counts without a positive count: no finite maximum either.
-            log_size = -_LOG_SIZE_LIMIT
-            break
-        if abs(step) < 1e-10:
-            break
-    return math.exp(-log_size)
-
-
 @njit(cache=True, nogil=True, parallel=True)
 def _fit_null(
     values: np.ndarray,
@@ -699,7 +316,7 @@ def _fit_null(
         fitted[0] = math.log(total / n)
         eta = np.empty(n)
         mu = np.empty(n)
-        _fit_poisson(y, covariates, fitted, eta, mu)
+        fit_poisson(y, covariates, fitted, eta, mu)
         coefficients[feature, :] = fitted
 
 
@@ -729,7 +346,7 @@ def fit_null_models(
         ValueError: If the shapes disagree or the control cells do not
             outnumber the covariates.
     """
-    counts = _count_array(values)
+    counts = count_array(values)
     design = np.ascontiguousarray(covariates, dtype=np.float64)
     if counts.ndim != 2 or design.ndim != 2 or counts.shape[1] != design.shape[0]:
         raise ValueError("values must be genes x cells with one covariate row per cell")
@@ -747,28 +364,6 @@ def fit_null_models(
         coefficients,
     )
     return coefficients
-
-
-@njit(cache=True, nogil=True)
-def _statistic(
-    score_sum: float,
-    weight_sum: float,
-    weighted: np.ndarray,
-    factor: np.ndarray,
-    solved: np.ndarray,
-) -> float:
-    """Return the standardized score statistic of one set of cells.
-
-    ``weighted`` sums each cell's weight times its covariates, and ``factor``
-    is the Cholesky factor of the information of the pair's fit.
-    """
-    _forward(factor, weighted, solved)
-    variance = weight_sum
-    for c in range(len(solved)):
-        variance -= solved[c] * solved[c]
-    if variance > 0:
-        return score_sum / math.sqrt(variance)
-    return np.nan
 
 
 @njit(cache=True, nogil=True)
@@ -791,35 +386,6 @@ def _treated_positions(n_controls: int, members: np.ndarray, among: bool) -> np.
     if among:
         return members.copy()
     return np.arange(n_controls, n_controls + len(members))
-
-
-@njit(cache=True, nogil=True)
-def _draw_range(
-    key: np.uint64, first: int, step: int, size: int, n_union: int, draws: np.ndarray
-) -> None:
-    """Draw the random sets ``first``, ``first + step``, ... of a group."""
-    marked = np.zeros(n_union, dtype=np.bool_)
-    picks = np.empty(size, dtype=np.int64)
-    for d in range(first, draws.shape[0], step):
-        _draw_set(
-            _mix64(key ^ _mix64(np.uint64(d) + _GOLDEN)), size, n_union, marked, picks
-        )
-        for i in range(size):
-            draws[d, i] = picks[i]
-
-
-@njit(cache=True, nogil=True, parallel=True)
-def _draw_sets(key: np.uint64, n_draws: int, size: int, n_union: int) -> np.ndarray:
-    """Return a group's random sets, sets x members, as positions among its cells.
-
-    Set ``d`` depends only on ``key`` and ``d``, so the sets do not depend on
-    how the draws are split among threads.
-    """
-    draws = np.empty((n_draws, size), dtype=np.int32)
-    n_chunks = min(n_draws, 64)
-    for chunk in prange(n_chunks):
-        _draw_range(key, chunk, n_chunks, size, n_union, draws)
-    return draws
 
 
 @njit(cache=True, nogil=True)
@@ -862,8 +428,8 @@ def _fit_pair(
     if np.abs(fitted).max() > _START_LIMIT:
         fitted[:] = 0.0
         fitted[0] = math.log(y.sum() / n_union)
-    _fit_poisson(y, design, fitted, eta, mu)
-    dispersion = _size_dispersion(y, mu, float(n_union - p))
+    fit_poisson(y, design, fitted, eta, mu)
+    dispersion = size_dispersion(y, mu, float(n_union - p))
     for j in range(n_union):
         scale = 1.0 + dispersion * mu[j]
         weight = mu[j] / scale
@@ -871,16 +437,15 @@ def _fit_pair(
         for c in range(p):
             records[j, column + 1 + c] = weight * design[j, c]
     information = np.empty((p, p))
-    _information(design, mu, dispersion, information)
-    _cholesky(information, factor)
+    negative_binomial_information(design, mu, dispersion, information)
+    cholesky(information, factor)
     sums = np.zeros(p + 1)
     for j in treated:
         for c in range(p + 1):
             sums[c] += records[j, column + c]
     solved = np.empty(p)
-    observed = _statistic(sums[0], sums[1], sums[1:], factor, solved)
-    # sum(y) / sum(mu) over the treatment cells, with mu from the pair's fit,
-    # and a delta-method standard error of its logarithm.
+    observed = score_statistic(sums[0], sums[1], sums[1:], factor, solved)
+    # sum(y) / sum(mu) over the treatment cells, with mu from the pair's fit.
     count_sum = 0.0
     mean_sum = 0.0
     square_sum = 0.0
@@ -891,18 +456,10 @@ def _fit_pair(
         square_sum += mu[j] * mu[j]
         for c in range(p):
             tangent[c] += mu[j] * design[j, c]
-    ratio = count_sum / mean_sum
-    for c in range(p):
-        tangent[c] /= mean_sum
-    _forward(factor, tangent, solved)
-    variance = 0.0
-    for c in range(p):
-        variance += solved[c] * solved[c]
-    if count_sum > 0:
-        spread = count_sum + dispersion * ratio * ratio * square_sum
-        variance += spread / (count_sum * count_sum)
-    fold = math.log2(ratio) if ratio > 0 else -np.inf
-    return observed, fold, math.sqrt(variance) / math.log(2.0)
+    fold, error = log2_fold_change(
+        count_sum, mean_sum, square_sum, tangent, factor, dispersion, solved
+    )
+    return observed, fold, error
 
 
 @njit(cache=True, nogil=True)
@@ -974,7 +531,7 @@ def _score_batch(
             base = k * width
             value = np.nan
             if not np.isnan(observed[k]):
-                value = _statistic(
+                value = score_statistic(
                     sums[base],
                     sums[base + 1],
                     sums[base + 1 : base + width],
@@ -1075,7 +632,7 @@ def _score_groups(
         design = _union_design(covariates, n_controls, cells, among)
         treated = _treated_positions(n_controls, cells, among)
         draws = np.empty((n_draws, len(cells)), dtype=np.int32)
-        _draw_range(keys[group], 0, 1, len(cells), design.shape[0], draws)
+        draw_uniform_range(keys[group], 0, 1, len(cells), design.shape[0], draws)
         records = np.empty((design.shape[0], batch * (p + 1)))
         factors = np.empty((batch, p, p))
         for start in range(first, last, batch):
@@ -1153,7 +710,7 @@ def _run_pairs(
     se = np.empty(n_pairs if with_fold else 0)
     counts = np.zeros((0 if store else n_pairs, 2), dtype=np.int64)
     statistics = np.empty((n_pairs if store else 0, n_draws))
-    counts_values = _count_array(values)
+    counts_values = count_array(values)
     design_all = np.ascontiguousarray(covariates, dtype=np.float64)
     members = np.ascontiguousarray(groups.members, dtype=np.int64)
     offsets = np.ascontiguousarray(groups.offsets, dtype=np.int64)
@@ -1210,7 +767,7 @@ def _run_pairs(
             cells,
             bool(among[group]),
             _treated_positions(groups.n_controls, cells, bool(among[group])),
-            _draw_sets(group_keys[group], n_draws, len(cells), design.shape[0]),
+            draw_uniform_sets(group_keys[group], n_draws, len(cells), design.shape[0]),
             np.arange(pair_offsets[group], pair_offsets[group + 1]),
             rows,
             order,
@@ -1715,6 +1272,96 @@ def calibration_grade(n_false_discoveries: int) -> str:
     return "severe"
 
 
+def staged_p_values(
+    z: np.ndarray,
+    counts: np.ndarray,
+    second_statistics: Callable[[np.ndarray, int], np.ndarray],
+    third_counts: Callable[[np.ndarray, int], np.ndarray],
+    *,
+    n_resamples: tuple[int, int, int],
+    stage_threshold: float,
+    approximation: str,
+    side: str,
+    statistics_bytes: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return each pair's p-value from up to three rounds of random sets.
+
+    The first round's counts give each pair's p-value. A pair whose p-value
+    is then at most ``stage_threshold`` is compared with ``n_resamples[1]``
+    fresh sets, and with ``approximation="skew_normal"`` a skew-normal fit to
+    their statistics gives the p-value, unless its tail beyond their 99th
+    percentile, on the observed statistic's side, holds less than half of the
+    statistics' own share there; then ``n_resamples[2]`` fresh sets give the
+    p-value. With ``approximation="none"``, the second round's sets give it.
+    The second round takes its pairs in batches whose statistics fit
+    ``statistics_bytes``. Both tests of this package, against control cells
+    and against all other cells, take their p-values this way.
+
+    Args:
+        z: Each pair's statistic, NaN for a pair without one.
+        counts: Per pair, the first round's sets with a statistic at most and
+            at least ``z``, pairs x 2.
+        second_statistics: Returns the statistics of the second round's sets
+            of the pairs it is given, pairs x sets, from their positions and
+            the number of sets.
+        third_counts: Returns the third round's counts of the pairs it is
+            given, pairs x 2, likewise.
+        n_resamples: The random sets of the three rounds.
+        stage_threshold: The p-value at or below which a pair takes the
+            second round.
+        approximation: ``"skew_normal"`` or ``"none"``.
+        side: ``"both"``, ``"left"`` or ``"right"``.
+        statistics_bytes: The memory that the second round's statistics may
+            hold at once, at least one pair's.
+
+    Returns:
+        Each pair's p-value, NaN without a statistic; the round that gave it;
+        and the location, scale and shape of the skew-normal fit that gave
+        it, NaN where random sets gave it.
+    """
+    first_draws, second_draws, third_draws = n_resamples
+    p_value = resampling_p_values(counts, first_draws, side)
+    p_value[np.isnan(z)] = np.nan
+    n_pairs = len(z)
+    stage = np.ones(n_pairs, dtype=np.int8)
+    location = np.full(n_pairs, np.nan)
+    scale = np.full(n_pairs, np.nan)
+    shape = np.full(n_pairs, np.nan)
+    second = np.flatnonzero(p_value <= stage_threshold)
+    batch = max(1, statistics_bytes // (8 * second_draws))
+    third: list[np.ndarray] = []
+    for begin in range(0, len(second), batch):
+        chosen = second[begin : begin + batch]
+        statistics = second_statistics(chosen, second_draws)
+        empirical = _counts_beyond(statistics, z[chosen])
+        p_value[chosen] = resampling_p_values(empirical, second_draws, side)
+        stage[chosen] = 2
+        if approximation == "skew_normal":
+            fit_location, fit_scale, fit_shape = fit_skew_normals(statistics)
+            ratios = skew_normal_tail_ratios(
+                statistics, z[chosen], fit_location, fit_scale, fit_shape, side
+            )
+            good = ratios >= _TAIL_RATIO_FLOOR
+            p_value[chosen[good]] = skew_normal_p_values(
+                z[chosen][good],
+                fit_location[good],
+                fit_scale[good],
+                fit_shape[good],
+                side,
+            )
+            location[chosen[good]] = fit_location[good]
+            scale[chosen[good]] = fit_scale[good]
+            shape[chosen[good]] = fit_shape[good]
+            third.append(chosen[~good])
+    if third:
+        poor = np.concatenate(third)
+        if len(poor):
+            counted = third_counts(poor, third_draws)
+            p_value[poor] = resampling_p_values(counted, third_draws, side)
+            stage[poor] = 3
+    return p_value, stage, location, scale, shape
+
+
 def pair_tests(
     values: np.ndarray,
     covariates: np.ndarray,
@@ -1766,7 +1413,6 @@ def pair_tests(
     Returns:
         Each pair's test.
     """
-    first_draws, second_draws, third_draws = n_resamples
     rows = np.asarray(pair_rows, dtype=np.int64)
     pair_group = np.asarray(pair_groups, dtype=np.int64)
     coefficients = fit_null_models(values, covariates, groups.n_controls, rows)
@@ -1777,65 +1423,45 @@ def pair_tests(
         pair_group,
         rows,
         coefficients,
-        first_draws,
+        n_resamples[0],
         draw_bytes=draw_bytes,
     )
-    p_value = resampling_p_values(counts, first_draws, side)
-    p_value[np.isnan(z)] = np.nan
-    n_pairs = len(z)
-    stage = np.ones(n_pairs, dtype=np.int8)
-    location = np.full(n_pairs, np.nan)
-    scale = np.full(n_pairs, np.nan)
-    shape = np.full(n_pairs, np.nan)
-    second = np.flatnonzero(p_value <= stage_threshold)
     second_keys = resampling_keys(seed, groups.codes, 2)
-    batch = max(1, statistics_bytes // (8 * second_draws))
-    third: list[np.ndarray] = []
-    for begin in range(0, len(second), batch):
-        chosen = second[begin : begin + batch]
-        statistics = resampled_statistics(
+
+    def second_statistics(chosen: np.ndarray, n_draws: int) -> np.ndarray:
+        return resampled_statistics(
             *shared,
             second_keys,
             pair_group[chosen],
             rows[chosen],
             coefficients,
-            second_draws,
+            n_draws,
             draw_bytes=draw_bytes,
         )
-        empirical = _counts_beyond(statistics, z[chosen])
-        p_value[chosen] = resampling_p_values(empirical, second_draws, side)
-        stage[chosen] = 2
-        if approximation == "skew_normal":
-            fit_location, fit_scale, fit_shape = fit_skew_normals(statistics)
-            ratios = skew_normal_tail_ratios(
-                statistics, z[chosen], fit_location, fit_scale, fit_shape, side
-            )
-            good = ratios >= _TAIL_RATIO_FLOOR
-            p_value[chosen[good]] = skew_normal_p_values(
-                z[chosen][good],
-                fit_location[good],
-                fit_scale[good],
-                fit_shape[good],
-                side,
-            )
-            location[chosen[good]] = fit_location[good]
-            scale[chosen[good]] = fit_scale[good]
-            shape[chosen[good]] = fit_shape[good]
-            third.append(chosen[~good])
-    if third:
-        poor = np.concatenate(third)
-        if len(poor):
-            _, counted, _, _ = resampling_counts(
-                *shared,
-                resampling_keys(seed, groups.codes, 3),
-                pair_group[poor],
-                rows[poor],
-                coefficients,
-                third_draws,
-                draw_bytes=draw_bytes,
-            )
-            p_value[poor] = resampling_p_values(counted, third_draws, side)
-            stage[poor] = 3
+
+    def third_counts(chosen: np.ndarray, n_draws: int) -> np.ndarray:
+        _, counted, _, _ = resampling_counts(
+            *shared,
+            resampling_keys(seed, groups.codes, 3),
+            pair_group[chosen],
+            rows[chosen],
+            coefficients,
+            n_draws,
+            draw_bytes=draw_bytes,
+        )
+        return counted
+
+    p_value, stage, location, scale, shape = staged_p_values(
+        z,
+        counts,
+        second_statistics,
+        third_counts,
+        n_resamples=n_resamples,
+        stage_threshold=stage_threshold,
+        approximation=approximation,
+        side=side,
+        statistics_bytes=statistics_bytes,
+    )
     return PairResults(
         z=z,
         p_value=p_value,
@@ -1871,7 +1497,7 @@ def nonzero_counts(values: np.ndarray, units: np.ndarray, n_units: int) -> np.nd
     """
     out = np.zeros((n_units, values.shape[0]), dtype=np.int64)
     _nonzero_counts(
-        _count_array(values), np.ascontiguousarray(units, dtype=np.int64), out
+        count_array(values), np.ascontiguousarray(units, dtype=np.int64), out
     )
     return out
 
