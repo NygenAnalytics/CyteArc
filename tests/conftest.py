@@ -112,3 +112,16 @@ def _reset_zarr_runtime() -> None:
     reset_zarr_runtime()
     yield
     reset_zarr_runtime()
+
+
+@pytest.fixture
+def figures_closed():
+    """Fail a test that leaves matplotlib figures open, and close them."""
+    import matplotlib.pyplot as plt
+
+    before = set(plt.get_fignums())
+    yield
+    leaked = set(plt.get_fignums()) - before
+    for number in leaked:
+        plt.close(number)
+    assert not leaked, f"Figures left open: {sorted(leaked)}"

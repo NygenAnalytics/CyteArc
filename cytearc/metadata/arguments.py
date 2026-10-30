@@ -461,6 +461,36 @@ class GuideCallImportArguments(OperationArguments):
     call_file_fingerprint: str = artifact_input()
     barcode_prefix: str | None = parameter()
     invalidate_cache: bool = execution()
+    # Recorded only when given, so imports without them keep their identities.
+    barcode_suffix: str | None = parameter(None, omit_if_none=True)
+    barcode_pattern: str | None = parameter(None, omit_if_none=True)
+
+
+@dataclass(frozen=True, slots=True)
+class CloneImportArguments(OperationArguments):
+    operation: ClassVar[str] = "import_clones"
+    artifact_kind: ClassVar[str] = "clones"
+
+    cell_selection: ArtifactRef = artifact_input()
+    # Each clone file's format, the SHA-256 of its bytes and of the files it
+    # reads beside it, the columns it reads, how its barcodes name cells and
+    # the namespace of its clone labels, in canonical order; paths are not
+    # part of the identity.
+    sources: tuple[dict[str, Any], ...] = artifact_input()
+    multiple: Literal["error", "drop"] = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class CloneColumnArguments(OperationArguments):
+    operation: ClassVar[str] = "clones_from_column"
+    artifact_kind: ClassVar[str] = "clones"
+
+    cell_selection: ArtifactRef = artifact_input()
+    # The fingerprint of each selected cell's label in the column.
+    labels_fingerprint: str = artifact_input()
+    column: str = parameter()
+    invalidate_cache: bool = execution()
 
 
 @dataclass(frozen=True, slots=True)

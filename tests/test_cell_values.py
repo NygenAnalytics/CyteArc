@@ -541,7 +541,7 @@ def test_a_snapshot_whose_cell_selection_input_is_malformed_stays_corrupt(
     assert raised.value.code == "corrupt_payload"
 
 
-def test_real_producers_store_the_declared_arrays(store) -> None:
+def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
     cells = store.snapshot_cell_selection("selected")
     ids = np.asarray(store.cells.fetch_all("ids"))[SELECTED]
     clusters = store.snapshot_cluster_labels("cluster", cell_selection=cells)
@@ -576,12 +576,23 @@ def test_real_producers_store_the_declared_arrays(store) -> None:
         n_up=2,
     )
     scores = np.asarray(store.artifacts.load(enrichment)["scores"][:])
+    # Numbat's posteriors give clones every declared per-cell array.
+    numbat = tmp_path / "clone_post_1.tsv"
+    numbat.write_text(
+        "cell\tclone_opt\tp_opt\n"
+        + "".join(
+            f"{cell}\t{clone}\t0.75\n"
+            for cell, clone in zip(ids, ["2", "2", "1", "NA", "1", "1"], strict=True)
+        )
+    )
+    clones = store.clones.import_clones(numbat, cell_selection=cells)
 
     for ref, expected in (
         (clusters, np.array(list("aabbcc"))),
         (snapshot, vector),
         (imported, coordinates),
         (enrichment, scores),
+        (clones, np.array(["2", "2", "1", "", "1", "1"])),
     ):
         loaded = store.artifacts.load_values(ref)
         np.testing.assert_array_equal(loaded.values, expected)

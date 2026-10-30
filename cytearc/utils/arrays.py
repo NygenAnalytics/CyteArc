@@ -35,6 +35,24 @@ def has_duplicates(values: Any) -> bool:
     return bool(np.any(ordered[1:] == ordered[:-1]))
 
 
+def sorted_unique(values: Any) -> np.ndarray:
+    """Return the distinct values of a one-dimensional integer array, ascending.
+
+    It equals ``np.unique(values)``, by sorting and comparing neighbours, which
+    stays fast where ``np.unique`` hashes many distinct integers slowly.
+    """
+    array = np.asarray(values)
+    if array.ndim != 1 or array.dtype.kind not in "biu":
+        raise TypeError("sorted_unique needs a one-dimensional array of integers")
+    ordered = np.sort(array)
+    if len(ordered) < 2:
+        return ordered
+    keep = np.empty(len(ordered), dtype=bool)
+    keep[0] = True
+    np.not_equal(ordered[1:], ordered[:-1], out=keep[1:])
+    return ordered[keep]
+
+
 def read_only_copy(values: Any, dtype: DTypeLike | None = None) -> np.ndarray:
     """Return a C-ordered copy of ``values`` that cannot be made writable.
 

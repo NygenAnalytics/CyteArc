@@ -5,6 +5,7 @@ from typing import Any, Concatenate, cast
 
 from ._operations.ambient import _AmbientOperationsMixin
 from ._operations.cell_calling import _CellCallingOperationsMixin
+from ._operations.clones import _CloneOperationsMixin
 from ._operations.clustering import _ClusteringOperationsMixin
 from ._operations.embeddings import _EmbeddingOperationsMixin
 from ._operations.features import _FeatureOperationsMixin
@@ -27,6 +28,7 @@ from ._operations.trajectory import _TrajectoryOperationsMixin
 from .datastore import DataStore
 
 __all__ = [
+    "ClonesAccessor",
     "ClustersAccessor",
     "CompareAccessor",
     "EmbeddingsAccessor",
@@ -69,6 +71,15 @@ class _Accessor:
 
     def __init__(self, store: DataStore) -> None:
         self._store = store
+
+
+class ClonesAccessor(_Accessor):
+    __slots__ = ()
+
+    import_clones = _bind(_CloneOperationsMixin._clones_import_clones)
+    from_column = _bind(_CloneOperationsMixin._clones_from_column)
+    load_clones = _bind(_CloneOperationsMixin._clones_load_clones)
+    export_clones = _bind(_CloneOperationsMixin._clones_export_clones)
 
 
 class ClustersAccessor(_Accessor):

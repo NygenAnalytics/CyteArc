@@ -85,3 +85,45 @@ def import_case(
     return store.perturbation.import_guide_calls(
         write_case(name, folder), cell_selection=selection, barcode_prefix=prefix
     )
+
+
+# Cells of the join store: two samples merged with "<sample>__" prefixes and
+# 10x's "-1" suffixes, so file barcodes need a prefix, a suffix or a pattern.
+JOIN_CELLS = ("s1__AAAC-1", "s1__CCCG-1", "s1__TTTA-1", "s2__AAAC-1", "s2__GGGT-1")
+
+
+def build_join_store(path: Path) -> tuple["DataStore", "ArtifactRef"]:
+    """Write a store of ``JOIN_CELLS`` with RNA and guide counts, and select them."""
+    from tests.perturbation_helpers import open_store
+    from tests.storage_helpers import write_count_store
+
+    n_cells = len(JOIN_CELLS)
+    rng = np.random.default_rng(11)
+    write_count_store(
+        str(path),
+        {
+            "RNA": rng.poisson(2.0, size=(n_cells, 6)),
+            "CRISPR": rng.poisson(3.0, size=(n_cells, 2)),
+        },
+        "uint16",
+        cell_ids=JOIN_CELLS,
+    )
+    store = open_store(path)
+    store.cells.insert("joined", np.ones(n_cells, dtype=bool))
+    return store, store.snapshot_cell_selection("joined")
+
+
+def write_guide_call_file(path: Path, barcodes: list[str]) -> Path:
+    """A Cell Ranger call file that calls CRISPR0 in each barcode."""
+    path.write_text(
+        HEADER + "".join(f"{barcode},1,CRISPR0,5\n" for barcode in barcodes)
+    )
+    return path
+
+
+def write_clone_file(path: Path, barcodes: list[str]) -> Path:
+    """A TREX clones.txt that puts every barcode in clone 1."""
+    path.write_text(
+        "clone_nr\tcell_id\n" + "".join(f"1\t{barcode}\n" for barcode in barcodes)
+    )
+    return path

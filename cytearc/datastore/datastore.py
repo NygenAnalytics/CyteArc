@@ -11,6 +11,7 @@ from ..storage.stores import create_matrix_source
 from ..storage.validation_scope import scope_public_methods
 from ._operations.ambient import _AmbientOperationsMixin
 from ._operations.cell_calling import _CellCallingOperationsMixin
+from ._operations.clones import _CloneOperationsMixin
 from ._operations.features import _FeatureOperationsMixin
 from ._operations.integration_metrics import _IntegrationMetricsOperationsMixin
 from ._operations.perturbation_associations import (
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from ..storage.budget import ResourceBudget
     from .artifact_accessor import ArtifactAccessor
     from .namespaces import (
+        ClonesAccessor,
         ClustersAccessor,
         CompareAccessor,
         EmbeddingsAccessor,
@@ -209,6 +211,7 @@ class DataStore(
     _PerturbationMixscapeOperationsMixin,
     _PerturbationAssociationOperationsMixin,
     _PerturbationProfileOperationsMixin,
+    _CloneOperationsMixin,
     MappingDatastore,
 ):
     """This class extends MappingDatastore and consequently inherits methods of
@@ -311,6 +314,12 @@ class DataStore(
         from .namespaces import EmbeddingsAccessor
 
         return EmbeddingsAccessor(self)
+
+    @property
+    def clones(self) -> "ClonesAccessor":
+        from .namespaces import ClonesAccessor
+
+        return ClonesAccessor(self)
 
     @property
     def clusters(self) -> "ClustersAccessor":

@@ -564,6 +564,22 @@ class DataStorePlotAccessor:
         """Plot held-out label accuracy against retained coverage per threshold."""
         return self._forward(PlotResult, "mapping_calibration", locals())
 
+    def clone_abundance(
+        self,
+        clones: ArtifactRef,
+        *,
+        group_by: str | None = None,
+        groups: ArtifactRef | None = None,
+        top: int = 20,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot how many clones have each size, and the largest clones."""
+        return self._forward(PlotResult, "clone_abundance", locals())
+
     def guide_calls(
         self,
         calls: ArtifactRef,

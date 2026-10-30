@@ -11,6 +11,7 @@ from functools import cache
 import pytest
 
 from cytearc.datastore.namespaces import (
+    ClonesAccessor,
     ClustersAccessor,
     CompareAccessor,
     EmbeddingsAccessor,
@@ -264,6 +265,31 @@ _CONTRACTS = (
             "cell_selection",
             "connectivity_map",
         ),
+    ),
+    OperationContract(
+        ClonesAccessor.import_clones,
+        metadata_arguments.CloneImportArguments,
+        # Each file is identified by its format and columns, the SHA-256 of
+        # its bytes and of the lists beside a matrix, how its barcodes name
+        # cells and the namespace of its labels, in canonical order; its path
+        # is not recorded.
+        signature_only=_classified(
+            "transformed",
+            "paths",
+            "barcode_prefix",
+            "barcode_suffix",
+            "barcode_pattern",
+            "format",
+            "columns",
+        ),
+        model_only=_classified("resolved_input", "sources"),
+    ),
+    OperationContract(
+        ClonesAccessor.from_column,
+        metadata_arguments.CloneColumnArguments,
+        # The selected cells' labels in the column are recorded by their
+        # fingerprint.
+        model_only=_classified("resolved_input", "labels_fingerprint"),
     ),
     OperationContract(
         PerturbationAccessor.import_guide_calls,

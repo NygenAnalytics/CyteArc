@@ -9,6 +9,7 @@ from cytearc.datastore.datastore import DataStore
 from cytearc.datastore.graph_datastore import GraphDataStore
 from cytearc.datastore.mapping_datastore import MappingDatastore
 from cytearc.datastore.namespaces import (
+    ClonesAccessor,
     ClustersAccessor,
     CompareAccessor,
     EmbeddingsAccessor,
@@ -158,6 +159,7 @@ _SIGNATURE_DIGESTS = {
 
 _ACCESSORS = {
     "artifacts": ArtifactAccessor,
+    "clones": ClonesAccessor,
     "clusters": ClustersAccessor,
     "compare": CompareAccessor,
     "embeddings": EmbeddingsAccessor,
@@ -197,8 +199,15 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # perturbation.mixscape and perturbation.load_mixscape, then
     # perturbation.associations and perturbation.load_associations, then
     # perturbation.profiles, perturbation.load_profiles, perturbation.cluster
-    # and perturbation.load_clusters.
-    assert len(_NAMESPACE_METHODS) == 114
+    # and perturbation.load_clusters, then clones.import_clones,
+    # clones.from_column, clones.load_clones and clones.export_clones.
+    assert len(_NAMESPACE_METHODS) == 118
+    assert {
+        "import_clones",
+        "from_column",
+        "load_clones",
+        "export_clones",
+    } == {name for namespace, _, name, _ in _NAMESPACE_METHODS if namespace == "clones"}
     assert {
         "import_guide_calls",
         "load_guide_calls",
@@ -373,6 +382,7 @@ def test_datastore_accessor_namespace_contract_is_stable():
         "compare",
         "regulons",
         "perturbation",
+        "clones",
     ):
         descriptor = inspect.getattr_static(DataStore, name)
         assert isinstance(descriptor, property)
@@ -449,6 +459,7 @@ def test_mapping_datastore_private_mixin_order_is_stable():
 def test_datastore_private_mixin_order_is_stable():
     from cytearc.datastore._operations.ambient import _AmbientOperationsMixin
     from cytearc.datastore._operations.cell_calling import _CellCallingOperationsMixin
+    from cytearc.datastore._operations.clones import _CloneOperationsMixin
     from cytearc.datastore._operations.features import _FeatureOperationsMixin
     from cytearc.datastore._operations.integration_metrics import (
         _IntegrationMetricsOperationsMixin,
@@ -491,9 +502,10 @@ def test_datastore_private_mixin_order_is_stable():
         _PerturbationMixscapeOperationsMixin,
         _PerturbationAssociationOperationsMixin,
         _PerturbationProfileOperationsMixin,
+        _CloneOperationsMixin,
         MappingDatastore,
     )
-    assert DataStore.mro()[:15] == [
+    assert DataStore.mro()[:16] == [
         DataStore,
         _CellCallingOperationsMixin,
         _QualityControlOperationsMixin,
@@ -508,6 +520,7 @@ def test_datastore_private_mixin_order_is_stable():
         _PerturbationMixscapeOperationsMixin,
         _PerturbationAssociationOperationsMixin,
         _PerturbationProfileOperationsMixin,
+        _CloneOperationsMixin,
         MappingDatastore,
     ]
 
@@ -532,6 +545,7 @@ def test_datastore_facades_only_own_composition_methods():
 
 def test_datastore_operation_mixins_have_unique_method_owners():
     from cytearc.datastore._operations.cell_calling import _CellCallingOperationsMixin
+    from cytearc.datastore._operations.clones import _CloneOperationsMixin
     from cytearc.datastore._operations.clustering import _ClusteringOperationsMixin
     from cytearc.datastore._operations.embeddings import _EmbeddingOperationsMixin
     from cytearc.datastore._operations.features import _FeatureOperationsMixin
@@ -587,6 +601,7 @@ def test_datastore_operation_mixins_have_unique_method_owners():
         _PerturbationMixscapeOperationsMixin,
         _PerturbationAssociationOperationsMixin,
         _PerturbationProfileOperationsMixin,
+        _CloneOperationsMixin,
     )
     owners: dict[str, list[str]] = {}
     for mixin in mixins:

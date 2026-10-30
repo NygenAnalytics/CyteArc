@@ -24,6 +24,7 @@ from ..storage.selections import read_stored_selection_indices, validate_cell_se
 from ..storage.types import as_zarr_array
 from ..storage.validation_scope import validation_scope
 from ..utils.arguments import integer_argument
+from ..utils.arrays import sort_categories
 from .rows import (
     apply_missing_mask,
     array_row_selection_parts,
@@ -56,6 +57,7 @@ __all__ = [
     "ResolvedGrouping",
     "Standardize",
     "StudyDesign",
+    "category_codes",
     "cell_selection_indices",
     "cell_value_array",
     "cell_value_spec",
@@ -129,6 +131,13 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
         ),
         "cell_cycle": CellValueSpec(
             "phase", True, {"s_score": False, "g2m_score": False}
+        ),
+        # clone_probability is stored when the clone source gives each cell's
+        # posterior, such as Numbat's p_opt.
+        "clones": CellValueSpec(
+            "values",
+            True,
+            {"codes": True, "clone_size": False, "clone_probability": False},
         ),
         "cluster_cut": CellValueSpec("labels", True),
         "cluster_labels": CellValueSpec("values", True),
@@ -265,6 +274,63 @@ def valid_category_mask(
             raise ValueError("missing mask must align with category values")
         valid &= ~missing
     return valid
+
+
+def category_codes(
+    values: Any, missing_mask: Any | None = None
+) -> tuple[np.ndarray, list[str]]:
+    """Code labels by their text, in the natural order of the texts.
+
+    A value names its category by its text, ``str(value)``, so values that
+    read alike share a code. Missing and blank values get -1, as
+    :func:`valid_category_mask` marks them, and so do the values that
+    ``missing_mask`` marks. Each distinct value is checked and named once, so
+    a million labels of a few categories cost one factorization.
+
+    Returns:
+        Each value's code, as int64, and the categories' texts in the order of
+        :func:`~cytearc.utils.arrays.sort_categories`, so that code ``i`` names
+        the ``i``-th text.
+
+    Raises:
+        ValueError: If the values are not one-dimensional or the mask does not
+            align with them.
+    """
+    array = (
+        values if isinstance(values, np.ndarray) else np.asarray(values, dtype=object)
+    )
+    if array.ndim != 1:
+        raise ValueError("category values must be one-dimensional")
+    try:
+        factorized, distinct = pd.factorize(array, use_na_sentinel=True)
+    except TypeError:
+        # Unhashable labels, such as lists, are coded by their text.
+        labelled = valid_category_mask(array)
+        as_text = np.full(len(array), None, dtype=object)
+        as_text[labelled] = [str(value) for value in array[labelled].tolist()]
+        factorized, distinct = pd.factorize(as_text, use_na_sentinel=True)
+    distinct_values = np.asarray(distinct, dtype=object)
+    present = factorized >= 0
+    if missing_mask is not None:
+        missing = np.asarray(missing_mask, dtype=bool)
+        if missing.shape != array.shape:
+            raise ValueError("missing mask must align with category values")
+        present &= ~missing
+    # Only the labels that some value holds name a category.
+    held = np.bincount(factorized[present], minlength=len(distinct_values)) > 0
+    valid = (held & valid_category_mask(distinct_values)).tolist()
+    texts = [str(value) for value in distinct_values.tolist()]
+    names = sort_categories(
+        dict.fromkeys(text for text, ok in zip(texts, valid, strict=True) if ok)
+    )
+    rank = {name: position for position, name in enumerate(names)}
+    lookup = np.asarray(
+        [rank[text] if ok else -1 for text, ok in zip(texts, valid, strict=True)],
+        dtype=np.int64,
+    )
+    codes = np.full(len(array), -1, dtype=np.int64)
+    codes[present] = lookup[factorized[present]]
+    return codes, names
 
 
 def sample_codes(
