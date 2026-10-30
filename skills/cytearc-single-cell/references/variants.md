@@ -1,6 +1,6 @@
 # Mitochondrial and targeted variants
 
-Import each cell's counts of each allele at variant sites, from mitochondrial lineage tracing (mtscATAC-seq, MAESTER) or targeted genotyping (GoT, GIFT), join them to the store's cells, check depth, and read the counts as tables. Docs: <https://docs.nygen.io/CyteArc/api/variants.html>.
+Import each cell's counts of each allele at variant sites, from mitochondrial lineage tracing (mtscATAC-seq, MAESTER) or targeted genotyping (GoT, GIFT), join them to the store's cells, check depth, read the counts as tables, select informative mitochondrial variants and call the clones they mark. Docs: <https://docs.nygen.io/CyteArc/api/variants.html>.
 
 ## When to use
 
@@ -20,6 +20,12 @@ Import each cell's counts of each allele at variant sites, from mitochondrial li
 - The artifact: canonical `mean_depth` (depth summed over sites over the number of sites; NaN for a cell no file names), `covered_sites`, `listed`. `ds.select_cells(counts, low=10)` keeps cells with a mean depth above 10. mgatk scores cells by the same bound but averages over every reference position, the `N` at 3107 included, so cells within a few thousandths of 10 can differ.
 - `ds.variants.load_counts(counts, *, sites=None, cells=None)` returns a `VariantCounts` record: `.sites` (indexed by label such as `chrM:310`: `contig`, `position`, `name`, `channel`, `reference`, `depth`, `cells`), `.alleles`, `.cells` (`listed`, `mean_depth`, `covered_sites`), `.depth` (`cell`, `site`, `depth`), `.counts` (`cell`, `site`, `allele`, `count`, plus `forward`, `reverse`, `quality_forward`, `quality_reverse`, `reads`, `support` where the source has them), `.calls` (`cell`, `site`, `allele`, `source`, `call`), `.contigs`, `.format`, `.count_unit`, `.depth_definition`. `sites` takes labels or positions (one contig), `cells` a cell selection or IDs, as a list, NumPy array or pandas index; `cells=[]` gives only the sites with their sums.
 - `ds.plots.variant_depth(counts, group_by=None, groups=None)` draws each site's mean depth over named cells and the distribution of the cells' mean depth, one histogram per group. Tables: `sites` and `cells`.
+- `ds.variants.informative(counts, *, cells=None, preset=None, min_cells=None, min_strand_correlation=None, min_vmr=None, min_depth=None, min_quality=None, mask=None, invalidate_cache=False)` scores every variant (alternative allele) that a chosen cell shows with mgatk's statistics and saves a `variant_selection` artifact. `preset="atac"`: `n_cells_conf_detected >= 5`, `strand_correlation >= 0.65`, `vmr > 0.01` (mtscATAC-seq). `preset="rna"`: `mean_coverage > 20`, `mean_quality > 30`, `vmr > 0.01`, no strand test (MAESTER). A threshold given by name replaces the preset's; a test the counts cannot make (strands of cellsnp-lite counts, quality of four-column mgatk) raises `ValueError`. `cells=ds.select_cells(counts, low=10)` scores the cells mgatk scores.
+- `mask`: `"numt"` (25 NUMT false positives, Laricchia et al. 2022), `"rna_editing"` (295, 2617, 13710, Bar-Yaacov et al. 2013), `"artifact_prone"` (301, 302, 310, 316, 3107, 16182). Masked variants are scored but never informative; masks need a 16,569-base rCRS contig (hg38 `chrM`, GRCh38 `MT`) and refuse hg19.
+- Allele frequencies are undefined where a cell was not covered, never 0: the variance covers covered cells, as in mgatk. Signac sets them to 0 and stabilises the variance of low-depth cells, so its VMRs differ where coverage is sparse.
+- `ds.variants.load_informative(informative)` returns a `VariantSelection`: `.variants` indexed by label (`chrM:310T>C`) with `site`, `position`, `reference`, `alternative`, `mean`, `variance`, `vmr`, `n_cells_conf_detected`, `strand_correlation`, `n_cells_over_5/10/20/95`, `max_heteroplasmy`, `mean_coverage`, `n_cells_covered`, `mean_quality`, `masked`, `informative`; plus `.counts`, `.cells`, `.preset`, `.thresholds`, `.masks`, `.n_cells`.
+- `ds.variants.clones(counts, *, variants, n_neighbors=10, resolution=1.0, within=None, invalidate_cache=False)` calls clones as Signac's `FindClonotypes`: cosine similarity of square-root allele frequencies over the variants two cells both cover, Seurat's Jaccard shared-neighbour graph (k includes the cell, joins below 1/15 dropped), Leiden. Cells without coverage, without any alternative read, or similar to no cell get no clone (attributes `n_cells_without_coverage`, `n_cells_without_alternative`, `n_cells_without_neighbors`). `within="donor"` keeps groups apart and labels clones `donor1:3`. Saves a `clones` artifact that every clone summary reads.
+- `ds.plots.variant_statistics(informative)` draws VMR against strand correlation (mean depth without strands); `ds.plots.allele_frequencies(informative, clones=clones)` draws cells by informative variants, ordered by clone, uncovered entries grey.
 
 ## Recipe
 
@@ -38,6 +44,18 @@ table["frequency"] = table["count"] / table["depth"]
 ```
 
 ```python
+# Informative mitochondrial variants and the clones they mark (mtscATAC-seq).
+deep = ds.select_cells(counts, low=10)
+informative = ds.variants.informative(counts, cells=deep, preset="atac", mask=["numt", "artifact_prone"])
+selection = ds.variants.load_informative(informative)
+selection.variants[selection.variants["informative"]].sort_values("vmr", ascending=False).head()
+ds.plots.variant_statistics(informative)
+clones = ds.variants.clones(counts, variants=informative)
+ds.plots.allele_frequencies(informative, clones=clones)
+ds.clones.load_clones(clones).clones.head()
+```
+
+```python
 # GoT-Multi's stage 1 counts and refined genotypes together.
 evidence = ds.variants.import_counts(
     ["got_multi/ironthrone_out_pp.csv", "got_multi/ml_denoise/got_multi_out_refined.csv"],
@@ -53,3 +71,5 @@ calls[calls["source"] == "genotype_final"]["call"].value_counts()
 - Check `.contigs`: mgatk picks hg19's 16,571-bp sequence when the BAM's contig has that length, and nf-MiTo's `refAllele.txt` names no contig, which then never combines with a named one.
 - Look at the depth plot before calling variants: most cells should cover most positions in mtscATAC-seq, while MAESTER and targeted panels cover few sites deeply.
 - Frequencies need the depth: never treat a missing depth row as frequency 0.
+- Check `ds.plots.variant_statistics` before trusting a preset: informative variants should sit apart, top right. Too many informative variants usually means noise passed the thresholds; raise `min_vmr` or add `mask`.
+- Check the clone attributes: many `n_cells_without_coverage` or `n_cells_without_alternative` cells mean shallow coverage or variants that mark few clones; such cells are not clones.

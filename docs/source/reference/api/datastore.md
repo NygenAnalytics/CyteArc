@@ -252,11 +252,11 @@ functions in {doc}`regulons` turn them into regulons.
 
 ### `ds.variants`
 
-`import_counts` reads the per-cell allele counts of mitochondrial and targeted variants that mgatk, maegatk, cellsnp-lite, MQuad, VarTrix, MiTo, giftwrap and the GoT tools write, joins their cells to a cell selection by barcode, and saves a `variant_counts` artifact of the sites, their alleles and each cell's depth, counts and calls. `load_counts` reads the artifact as tables of sites, alleles, cells and stored entries. {doc}`variants` lists the formats and describes count units, depth and the `VariantCounts` record.
+`import_counts` reads the per-cell allele counts of mitochondrial and targeted variants that mgatk, maegatk, cellsnp-lite, MQuad, VarTrix, MiTo, giftwrap and the GoT tools write, joins their cells to a cell selection by barcode, and saves a `variant_counts` artifact of the sites, their alleles and each cell's depth, counts and calls. `load_counts` reads the artifact as tables of sites, alleles, cells and stored entries. `informative` scores every variant across cells with mgatk's statistics and selects the informative ones by Signac's or MAESTER's thresholds, saved as a `variant_selection` artifact that `load_informative` reads, and `clones` calls the clones that the informative variants mark, as Signac's `FindClonotypes` does. {doc}`variants` lists the formats and describes count units, depth, the statistics, the presets and masks, and the `VariantCounts` and `VariantSelection` records.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.VariantsAccessor
-    :members: import_counts, load_counts
+    :members: import_counts, load_counts, informative, load_informative, clones
 ```
 
 ### `ds.imputation`
