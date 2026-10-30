@@ -17,7 +17,8 @@ from ...perturbation.mixscape import MIXSCAPE_STATUSES
 from ...perturbation.mixtures import FIT_STATUSES
 from ...storage.artifacts import ArtifactRef, artifact_group, inspect_artifact
 from ...storage.types import as_zarr_array
-from .._operations.perturbation import _PerturbationOperationsMixin, _status_labels
+from .._operations.perturbation_profiles import _PerturbationProfileOperationsMixin
+from .._operations.perturbation_store import _status_labels
 from .settings import keyword_default
 
 # A summary lists at most this many samples, clusters, or components.
@@ -26,7 +27,7 @@ SUMMARY_ITEM_LIMIT = 50
 # summary: the fewest cells of a perturbation profile by default, as in
 # Replogle et al. (2022).
 FEW_TARGET_CELLS: int = keyword_default(
-    _PerturbationOperationsMixin._perturbation_profiles, "min_cells"
+    _PerturbationProfileOperationsMixin._perturbation_profiles, "min_cells"
 )
 # The adjusted p-value at or below which a perturbation's test counts as
 # significant in a summary, as a pair of the association tests does.

@@ -11,7 +11,10 @@ import pytest
 import statsmodels.api as sm
 from scipy import special, stats
 
-from cytearc.datastore._operations import perturbation as perturbation_operations
+from cytearc.datastore._operations import (
+    perturbation_associations as perturbation_operations,
+)
+from cytearc.datastore._operations.perturbation_store import _label_rows
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationAssociations
 from cytearc.perturbation import associations as associations_module
@@ -1334,7 +1337,7 @@ def test_associations_test_tables_of_pairs_one_guide_at_a_time(shared) -> None:
 
 def test_association_pairs_match_features_by_id_then_name(shared) -> None:
     store = shared.store
-    rows = store._label_rows(shared.labels, "target")
+    rows = _label_rows(store, shared.labels, "target")
     ids = np.array(["ENSG0", "ENSG1", "ENSG2", "ENSG3"])
     names = np.array(["A", "B", "B", "ENSG0"])
     frame = pd.DataFrame(

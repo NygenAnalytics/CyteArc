@@ -29,7 +29,9 @@ from cytearc.datastore._operations.clustering import _ClusteringOperationsMixin
 from cytearc.datastore._operations.embeddings import _EmbeddingOperationsMixin
 from cytearc.datastore._operations.features import _FeatureOperationsMixin
 from cytearc.datastore._operations.graph import _GraphOperationsMixin
-from cytearc.datastore._operations.perturbation import _PerturbationOperationsMixin
+from cytearc.datastore._operations.perturbation_guides import (
+    _PerturbationGuideOperationsMixin,
+)
 from cytearc.datastore._operations.quality_control import _QualityControlOperationsMixin
 from cytearc.graph import arguments as graph_arguments
 from cytearc.graph.arguments import OperationArguments
@@ -293,7 +295,7 @@ _CONTRACTS = (
     OperationContract(
         PerturbationAccessor.call_guides,
         metadata_arguments.GuideThresholdArguments,
-        constructor=_PerturbationOperationsMixin._plan_guide_thresholds,
+        constructor=_PerturbationGuideOperationsMixin._plan_guide_thresholds,
         aliases={"sample_column": "sample_columns"},
         signature_only={
             **_classified("routing", "from_assay"),

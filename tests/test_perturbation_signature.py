@@ -12,7 +12,9 @@ import numpy as np
 import pytest
 
 import cytearc.perturbation.signature as signature_module
-from cytearc.datastore._operations import perturbation as perturbation_operations
+from cytearc.datastore._operations import (
+    perturbation_mixscape as perturbation_operations,
+)
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationSignature
 from cytearc.perturbation.signature import (

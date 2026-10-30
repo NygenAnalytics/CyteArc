@@ -12,7 +12,13 @@ from ._operations.graph import _GraphOperationsMixin
 from ._operations.integration_metrics import _IntegrationMetricsOperationsMixin
 from ._operations.mapping import _MappingOperationsMixin
 from ._operations.mapping_reference import _MappingReferenceOperationsMixin
-from ._operations.perturbation import _PerturbationOperationsMixin
+from ._operations.perturbation_associations import (
+    _PerturbationAssociationOperationsMixin,
+)
+from ._operations.perturbation_effects import _PerturbationEffectOperationsMixin
+from ._operations.perturbation_guides import _PerturbationGuideOperationsMixin
+from ._operations.perturbation_mixscape import _PerturbationMixscapeOperationsMixin
+from ._operations.perturbation_profiles import _PerturbationProfileOperationsMixin
 from ._operations.presentation import _PresentationOperationsMixin
 from ._operations.quality_control import _QualityControlOperationsMixin
 from ._operations.regulons import _RegulonOperationsMixin
@@ -171,33 +177,47 @@ class PerturbationAccessor(_Accessor):
     __slots__ = ()
 
     import_guide_calls = _bind(
-        _PerturbationOperationsMixin._perturbation_import_guide_calls
+        _PerturbationGuideOperationsMixin._perturbation_import_guide_calls
     )
     load_guide_calls = _bind(
-        _PerturbationOperationsMixin._perturbation_load_guide_calls
+        _PerturbationGuideOperationsMixin._perturbation_load_guide_calls
     )
-    call_guides = _bind(_PerturbationOperationsMixin._perturbation_call_guides)
+    call_guides = _bind(_PerturbationGuideOperationsMixin._perturbation_call_guides)
     load_guide_thresholds = _bind(
-        _PerturbationOperationsMixin._perturbation_load_guide_thresholds
+        _PerturbationGuideOperationsMixin._perturbation_load_guide_thresholds
     )
-    labels = _bind(_PerturbationOperationsMixin._perturbation_labels)
-    load_labels = _bind(_PerturbationOperationsMixin._perturbation_load_labels)
-    efficiency = _bind(_PerturbationOperationsMixin._perturbation_efficiency)
-    load_efficiency = _bind(_PerturbationOperationsMixin._perturbation_load_efficiency)
-    edistance = _bind(_PerturbationOperationsMixin._perturbation_edistance)
-    load_edistance = _bind(_PerturbationOperationsMixin._perturbation_load_edistance)
-    signature = _bind(_PerturbationOperationsMixin._perturbation_signature)
-    load_signature = _bind(_PerturbationOperationsMixin._perturbation_load_signature)
-    mixscape = _bind(_PerturbationOperationsMixin._perturbation_mixscape)
-    load_mixscape = _bind(_PerturbationOperationsMixin._perturbation_load_mixscape)
-    associations = _bind(_PerturbationOperationsMixin._perturbation_associations)
+    labels = _bind(_PerturbationGuideOperationsMixin._perturbation_labels)
+    load_labels = _bind(_PerturbationGuideOperationsMixin._perturbation_load_labels)
+    efficiency = _bind(_PerturbationEffectOperationsMixin._perturbation_efficiency)
+    load_efficiency = _bind(
+        _PerturbationEffectOperationsMixin._perturbation_load_efficiency
+    )
+    edistance = _bind(_PerturbationEffectOperationsMixin._perturbation_edistance)
+    load_edistance = _bind(
+        _PerturbationEffectOperationsMixin._perturbation_load_edistance
+    )
+    signature = _bind(_PerturbationMixscapeOperationsMixin._perturbation_signature)
+    load_signature = _bind(
+        _PerturbationMixscapeOperationsMixin._perturbation_load_signature
+    )
+    mixscape = _bind(_PerturbationMixscapeOperationsMixin._perturbation_mixscape)
+    load_mixscape = _bind(
+        _PerturbationMixscapeOperationsMixin._perturbation_load_mixscape
+    )
+    associations = _bind(
+        _PerturbationAssociationOperationsMixin._perturbation_associations
+    )
     load_associations = _bind(
-        _PerturbationOperationsMixin._perturbation_load_associations
+        _PerturbationAssociationOperationsMixin._perturbation_load_associations
     )
-    profiles = _bind(_PerturbationOperationsMixin._perturbation_profiles)
-    load_profiles = _bind(_PerturbationOperationsMixin._perturbation_load_profiles)
-    cluster = _bind(_PerturbationOperationsMixin._perturbation_cluster)
-    load_clusters = _bind(_PerturbationOperationsMixin._perturbation_load_clusters)
+    profiles = _bind(_PerturbationProfileOperationsMixin._perturbation_profiles)
+    load_profiles = _bind(
+        _PerturbationProfileOperationsMixin._perturbation_load_profiles
+    )
+    cluster = _bind(_PerturbationProfileOperationsMixin._perturbation_cluster)
+    load_clusters = _bind(
+        _PerturbationProfileOperationsMixin._perturbation_load_clusters
+    )
 
 
 class QcAccessor(_Accessor):

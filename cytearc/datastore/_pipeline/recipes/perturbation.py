@@ -24,6 +24,7 @@ from ....perturbation.guide_calls import validated_guide_ids
 from ....perturbation.labels import guide_targets, label_settings
 from ....storage.artifacts import ArtifactRef, inspect_artifact
 from ....storage.types import as_zarr_group
+from ..._operations.perturbation_store import _require_cell_column
 from ..executor import PlannedStage, RecipePlan, RunState
 from ..fields import (
     PERTURBATION_CELL_FIELDS,
@@ -114,7 +115,7 @@ def _cell_column(store: Any, settings: Mapping[str, Any], stage: str, key: str) 
 
     The stage's settings check has refused a value that is not a name.
     """
-    store._require_cell_column(settings.get(key), f"{stage}['{key}']")
+    _require_cell_column(store, settings.get(key), f"{stage}['{key}']")
 
 
 def _resolve_guide_calling(store: Any, value: object) -> dict[str, Any]:
@@ -183,7 +184,7 @@ def _resolve_associations(
         _require_id_column(store, guide, settings, "associations")
     _cell_column(store, settings, "associations", "sample_column")
     for column in covariate_columns(settings.get("covariates")):
-        store._require_cell_column(column, "covariate")
+        _require_cell_column(store, column, "covariate")
         # The tests adjust for numbers only, as associations checks them.
         if np.dtype(store.cells.get_dtype(column)).kind not in "biuf":
             raise ValueError(f"covariate '{column}' must be numeric")

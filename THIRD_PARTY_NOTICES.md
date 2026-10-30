@@ -60,7 +60,7 @@ use but does not install.
   non-targeting cells within its split, and its log-normalized values against the log of their
   mean normalized values, normalized in the order of the operations of `LogNorm` in
   `src/data_manipulation.cpp`), `cytearc/perturbation/mixscape.py` and the `mixscape` operation in
-  `cytearc/datastore/_operations/perturbation.py` (the iterations of `RunMixscape` and
+  `cytearc/datastore/_operations/perturbation_mixscape.py` (the iterations of `RunMixscape` and
   `TopDEGenesMixscape` in the same file, the filters, fold change and Bonferroni adjustment of
   `FindMarkers` and `FoldChange` in `R/differential_expression.R`, and the scaling of
   `FastDenseRowScale` in `src/data_manipulation.cpp`).

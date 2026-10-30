@@ -13,7 +13,13 @@ from ._operations.ambient import _AmbientOperationsMixin
 from ._operations.cell_calling import _CellCallingOperationsMixin
 from ._operations.features import _FeatureOperationsMixin
 from ._operations.integration_metrics import _IntegrationMetricsOperationsMixin
-from ._operations.perturbation import _PerturbationOperationsMixin
+from ._operations.perturbation_associations import (
+    _PerturbationAssociationOperationsMixin,
+)
+from ._operations.perturbation_effects import _PerturbationEffectOperationsMixin
+from ._operations.perturbation_guides import _PerturbationGuideOperationsMixin
+from ._operations.perturbation_mixscape import _PerturbationMixscapeOperationsMixin
+from ._operations.perturbation_profiles import _PerturbationProfileOperationsMixin
 from ._operations.presentation import _PresentationOperationsMixin
 from ._operations.quality_control import _QualityControlOperationsMixin
 from ._operations.regulons import _RegulonOperationsMixin
@@ -198,7 +204,11 @@ class DataStore(
     _IntegrationMetricsOperationsMixin,
     _PresentationOperationsMixin,
     _RegulonOperationsMixin,
-    _PerturbationOperationsMixin,
+    _PerturbationGuideOperationsMixin,
+    _PerturbationEffectOperationsMixin,
+    _PerturbationMixscapeOperationsMixin,
+    _PerturbationAssociationOperationsMixin,
+    _PerturbationProfileOperationsMixin,
     MappingDatastore,
 ):
     """This class extends MappingDatastore and consequently inherits methods of
