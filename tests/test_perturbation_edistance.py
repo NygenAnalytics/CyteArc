@@ -5,6 +5,7 @@ template. A test that writes copies the template, and the tests of refused
 calls share one copy, which they check is left as it was.
 """
 
+import re
 import threading
 import tracemalloc
 from collections.abc import Iterator
@@ -12,10 +13,12 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import zarr
 from scipy.spatial.distance import cdist, pdist
 from scipy.stats import false_discovery_control, kstest
 
 import cytearc.perturbation.edistance as edistance_module
+from cytearc.datastore._operations import perturbation as operations
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationEDistance
 from cytearc.perturbation.edistance import (
@@ -587,3 +590,120 @@ def test_each_thread_holds_no_more_than_the_estimate_adds_for_it(monkeypatch) ->
 
     # Seven more threads hold seven more blocks, kernel arrays and threads.
     assert held[8] - held[1] <= estimate(8) - estimate(1)
+
+
+@pytest.fixture(scope="module")
+def large_screen(tmp_path_factory) -> SimpleNamespace:
+    """20,000 cells that carry one of five guides each, and their coordinates.
+
+    The coordinates come in 2 and 4 dimensions, written in chunks of 1,024
+    rows, and in 50 dimensions, written in one chunk.
+    """
+    n_cells = 20_000
+    rng = np.random.default_rng(8)
+    guides = np.zeros((n_cells, len(TARGETS) - 1), dtype=np.uint16)
+    guides[np.arange(n_cells), rng.integers(0, guides.shape[1], n_cells)] = 20
+    rna = rng.poisson(1.0, size=(n_cells, 2)) + 1
+    path = tmp_path_factory.mktemp("edistance_large") / "store.zarr"
+    store = write_screen(path, rna, guides, targets=TARGETS[:-1])
+    cells = store.select_measured_cells("RNA")
+    coordinates = {}
+    for n_dims, chunk_rows in ((2, 1_024), (4, 1_024), (50, None)):
+        values = rng.normal(size=(n_cells, n_dims)).astype(np.float32)
+        budget = store.memoryBytes
+        if chunk_rows is not None:
+            # An import writes chunks of the rows that fit an eighth of its
+            # budget.
+            store.memoryBytes = 8 * values[0].nbytes * chunk_rows
+        coordinates[n_dims] = store.reduction.import_coordinates(
+            values, cell_selection=cells, name=f"X_{n_dims}"
+        )
+        store.memoryBytes = budget
+    return SimpleNamespace(
+        path=path,
+        labels=fixed_labels(store, ["Non-Targeting"]),
+        coordinates=coordinates,
+    )
+
+
+@pytest.mark.parametrize(
+    ("n_dims", "nthreads"),
+    [
+        # Coordinates in chunks of 1,024 rows: the measurement holds the most.
+        (4, 1),
+        (2, 2),
+        # One chunk of 20,000 rows in 50 dimensions: reading it holds the most.
+        (50, 1),
+    ],
+)
+def test_the_memory_check_bounds_what_the_operation_holds(
+    large_screen, tmp_path, monkeypatch, n_dims, nthreads
+) -> None:
+    store = copy_store(large_screen.path, tmp_path, nthreads=nthreads)
+    labels, coordinates = large_screen.labels, large_screen.coordinates[n_dims]
+    # Blocks of 64 kB instead of 8 MB keep the threads' draws small, and the
+    # kernels run as Python, so that tracemalloc sees their arrays.
+    monkeypatch.setattr(edistance_module, "_DRAW_BYTES", 1 << 16)
+    use_python_kernels(monkeypatch, edistance_module)
+    # The first call imports what the measured call uses.
+    store.perturbation.edistance(labels, coordinates, n_permutations=1)
+    # A budget of one byte is refused with the bytes that the check counts.
+    budget = store.memoryBytes
+    monkeypatch.setattr(store, "memoryBytes", 1)
+    with pytest.raises(MemoryError, match="E-distances of 20000 cells") as refused:
+        store.perturbation.edistance(
+            labels, coordinates, n_permutations=1, invalidate_cache=True
+        )
+    found = re.search(r"hold about (\d+) bytes", str(refused.value))
+    assert found is not None
+    planned = int(found[1])
+    monkeypatch.setattr(store, "memoryBytes", budget)
+    # The labels are read and the coordinates checked before the memory
+    # check, which covers what the operation holds from then on.
+    check = operations.edistance_memory_bytes
+
+    def check_from_here(*args, **kwargs):
+        tracemalloc.reset_peak()
+        return check(*args, **kwargs)
+
+    monkeypatch.setattr(operations, "edistance_memory_bytes", check_from_here)
+    tracemalloc.start()
+    try:
+        store.perturbation.edistance(
+            labels, coordinates, n_permutations=1, invalidate_cache=True
+        )
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak <= planned
+
+
+class _RecordedReads:
+    """A two-dimensional Zarr array that notes the rows of each orthogonal read."""
+
+    def __init__(self, array: zarr.Array) -> None:
+        self.shape = array.shape
+        self.chunks = array.chunks
+        self.reads: list[list[int]] = []
+        reads, oindex = self.reads, array.oindex
+
+        class _Index:
+            def __getitem__(self, selection):
+                reads.append(np.asarray(selection[0]).tolist())
+                return oindex[selection]
+
+        self.oindex = _Index()
+
+
+def test_coordinate_rows_are_read_one_chunk_at_a_time(tmp_path) -> None:
+    array = zarr.create_array(
+        tmp_path / "coordinates.zarr", shape=(10, 3), chunks=(3, 3), dtype="float32"
+    )
+    array[:] = (np.arange(30, dtype=np.float32) / 7).reshape(10, 3)
+    recorded = _RecordedReads(array)
+    # No row of the chunk of rows 3 to 5 is read.
+    rows = np.asarray([0, 2, 7, 9])
+    found = operations._float64_rows(recorded, rows)
+    assert found.dtype == np.float64
+    np.testing.assert_array_equal(found, np.asarray(array[:], dtype=np.float64)[rows])
+    assert recorded.reads == [[0, 2], [7], [9]]

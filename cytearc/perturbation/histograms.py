@@ -10,7 +10,9 @@ The histograms are exact, so a fit on a histogram equals the fit on every cell.
 Counts up to :data:`DENSE_COUNTS`, which hold the ambient molecules that most
 cells carry, go to a dense array of samples x guides x :data:`DENSE_COUNTS`
 cells. The larger counts, mostly those of the cells that carry a guide, are
-kept as exact (count, cells) pairs.
+kept as exact (count, cells) pairs. A buffer of fixed size gathers them, and
+they join the pairs whenever it fills, so the memory follows the distinct
+counts that the histograms hold, which only the counts tell.
 """
 
 from collections.abc import Iterable
@@ -19,6 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from cytearc.perturbation.guide_calls import checked_count_blocks
+from cytearc.utils.arguments import integer_argument
 from cytearc.utils.numba import njit
 
 __all__ = [
@@ -35,20 +38,18 @@ DENSE_COUNTS = 32
 #: The largest UMI count of one guide in one cell, the uint32 maximum.
 MAX_COUNT = 0xFFFFFFFF
 
-# A sparse count is stored as one uint64 key: the histogram's position in the
+# A larger count is stored as one uint64 key: the histogram's position in the
 # high 32 bits and the count, which never exceeds MAX_COUNT, in the low.
 _COUNT_BITS = np.uint64(32)
 _COUNT_MASK = np.uint64(MAX_COUNT)
-# Each block reserves room for this many sparse counts per row before a second
-# pass is needed; cells rarely carry more than two guides above DENSE_COUNTS.
-_SPARSE_PER_ROW = 2
-# Sparse counts merge into distinct keys once this many wait to be merged, so
-# that repeated counts do not pile up. A merge sorts every key merged so far,
-# so this does not bound its memory.
-_MERGE_ENTRIES = 1 << 22
-# The distinct counts up to DENSE_COUNTS that histogram_bytes expects for one
-# guide in one sample; ambient counts rarely reach ten.
-_EXPECTED_DENSE_DISTINCT = 8
+# The buffer of larger counts holds two keys per cell and at most this many
+# keys, 8 MiB, and never fewer than two rows of keys; the counts of a screen
+# whose cells carry more fill it again.
+_KEYS_PER_CELL = 2
+_MOST_KEYS = 1 << 20
+# The bytes of Python objects and of the sort's scratch that a call holds;
+# about 4 kB in Python 3.13 with NumPy 2.5.
+_CALL_BYTES = 1 << 14
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,52 +123,68 @@ class GuideCountHistograms:
         return largest.reshape(self.n_samples, self.n_guides)
 
 
-def histogram_bytes(n_samples: int, n_guides: int, n_cells: int) -> int:
-    """Estimate the memory that :func:`guide_count_histograms` holds besides its blocks.
+def histogram_bytes(
+    n_samples: int, n_guides: int, n_cells: int, *, n_distinct: int
+) -> int:
+    """Return the memory that :func:`guide_count_histograms` holds besides its blocks.
 
-    The estimate counts the dense array and two distinct counts above
-    :data:`DENSE_COUNTS` per cell. A merge of the larger counts sorts every
-    count merged so far, and holds 64 bytes per count: the batches, their
-    sorted copies, the order that sorts them, the start of each distinct
-    count, and the merged keys and cells. Assembling the histograms then
-    holds 56 bytes per larger count, and 16 bytes per distinct count up to
-    :data:`DENSE_COUNTS`, eight for each guide in each sample. Each block
-    also reserves 16 bytes per row while it is counted.
+    The memory grows with ``n_distinct``, the distinct nonzero counts of all
+    histograms together, the length of their ``counts``, which only reading
+    the counts tells; with 0 it is the least memory of any call. It covers
+    the dense array, the buffer that gathers the counts above
+    :data:`DENSE_COUNTS`, two keys per cell and at most 8 MiB but at least two
+    per guide, 16 KiB of Python objects and sorting, and 32 bytes per
+    distinct count: a merge holds the merged larger counts beside the new
+    ones, 16 bytes each, and assembling the histograms holds them beside the
+    16 bytes of each count of the histograms. The sample codes, as int64,
+    belong to the caller.
 
     Args:
         n_samples: The number of samples.
         n_guides: The number of guides.
         n_cells: The number of cells.
+        n_distinct: The distinct nonzero counts of all histograms together.
 
     Returns:
-        The estimated peak in bytes.
+        The most bytes held at once.
     """
     n_entries = n_samples * n_guides
     dense = n_entries * DENSE_COUNTS * np.dtype(np.uint32).itemsize
-    sparse = _SPARSE_PER_ROW * n_cells
-    assembled = 8 * (n_entries + 1) + 16 * n_entries * _EXPECTED_DENSE_DISTINCT
-    return dense + 64 * sparse + assembled
+    buffer = 8 * _buffer_keys(n_cells, n_guides)
+    # The offsets of the histograms and the cells of each sample.
+    assembled = 8 * (n_entries + 1) + 16 * n_samples
+    return dense + buffer + assembled + _CALL_BYTES + 32 * n_distinct
+
+
+def _buffer_keys(n_cells: int, n_guides: int) -> int:
+    """Return how many keys the buffer of larger counts holds."""
+    return max(2 * n_guides, min(_KEYS_PER_CELL * n_cells + 64, _MOST_KEYS))
 
 
 @njit(cache=True, nogil=True)
-def _add_block(
+def _add_counts(
     block: np.ndarray,
     sample_codes: np.ndarray,
     n_guides: int,
     dense: np.ndarray,
-    sparse_keys: np.ndarray,
-) -> int:
-    """Add one row block of counts to the histograms.
+    keys: np.ndarray,
+    n_keys: int,
+    first_row: int,
+) -> tuple[int, int]:
+    """Add the counts of one row block, from row ``first_row`` on.
 
-    Counts up to the dense width are added to ``dense``. The keys of larger
-    counts are written to ``sparse_keys`` while it has room. Returns the number
-    of larger counts, which may exceed the room, or -1 when a count does not
-    fit in uint32.
+    Counts up to the dense width are added to ``dense``, and the key of each
+    larger count is written to ``keys`` after the ``n_keys`` that it holds.
+    The pass ends before a row whose counts might not all fit in ``keys``.
+    Returns the row where the pass ended, which is the block's number of rows
+    once every row is added and -1 when a count does not fit in uint32, and
+    the number of keys that ``keys`` then holds.
     """
     width = dense.shape[2]
-    room = sparse_keys.shape[0]
-    n_sparse = 0
-    for row in range(block.shape[0]):
+    room = keys.shape[0]
+    for row in range(first_row, block.shape[0]):
+        if room - n_keys < block.shape[1]:
+            return row, n_keys
         sample = sample_codes[row]
         base = sample * n_guides
         for guide in range(block.shape[1]):
@@ -176,35 +193,88 @@ def _add_block(
                 continue
             # A uint64 count above the int64 range wraps to a negative value.
             if count < 0 or count > MAX_COUNT:
-                return -1
+                return -1, n_keys
             if count <= width:
                 dense[sample, guide, count - 1] += 1
                 continue
-            if n_sparse < room:
-                sparse_keys[n_sparse] = (np.uint64(base + guide) << _COUNT_BITS) | (
-                    np.uint64(count)
-                )
-            n_sparse += 1
-    return n_sparse
+            keys[n_keys] = (np.uint64(base + guide) << _COUNT_BITS) | (np.uint64(count))
+            n_keys += 1
+    return block.shape[0], n_keys
+
+
+@njit(cache=True, nogil=True)
+def _merged_size(keys: np.ndarray, run: np.ndarray) -> int:
+    """Return how many distinct keys sorted distinct ``keys`` and a sorted ``run`` hold."""
+    size = int(keys.shape[0])
+    held = 0
+    position = 0
+    while position < run.shape[0]:
+        key = run[position]
+        while held < keys.shape[0] and keys[held] < key:
+            held += 1
+        if held == keys.shape[0] or keys[held] != key:
+            size += 1
+        while position < run.shape[0] and run[position] == key:
+            position += 1
+    return size
+
+
+@njit(cache=True, nogil=True)
+def _merge_run(
+    keys: np.ndarray,
+    cells: np.ndarray,
+    run: np.ndarray,
+    merged_keys: np.ndarray,
+    merged_cells: np.ndarray,
+) -> None:
+    """Merge a sorted ``run`` of keys, one cell each, into distinct keys and their cells.
+
+    ``keys`` are sorted and distinct, ``cells`` hold their cells, and the
+    merged arrays have the length that :func:`_merged_size` returns.
+    """
+    held = 0
+    position = 0
+    written = 0
+    while position < run.shape[0]:
+        key = run[position]
+        while held < keys.shape[0] and keys[held] < key:
+            merged_keys[written] = keys[held]
+            merged_cells[written] = cells[held]
+            written += 1
+            held += 1
+        total = 0
+        if held < keys.shape[0] and keys[held] == key:
+            total = cells[held]
+            held += 1
+        while position < run.shape[0] and run[position] == key:
+            total += 1
+            position += 1
+        merged_keys[written] = key
+        merged_cells[written] = total
+        written += 1
+    while held < keys.shape[0]:
+        merged_keys[written] = keys[held]
+        merged_cells[written] = cells[held]
+        written += 1
+        held += 1
 
 
 @njit(cache=True, nogil=True)
 def _assemble(
     dense: np.ndarray,
-    sparse_entries: np.ndarray,
-    sparse_counts: np.ndarray,
-    sparse_cells: np.ndarray,
+    keys: np.ndarray,
+    key_cells: np.ndarray,
     offsets: np.ndarray,
     counts: np.ndarray,
     cells: np.ndarray,
 ) -> None:
-    """Write every histogram: its dense counts in ascending order, then its sparse ones.
+    """Write every histogram: its dense counts in ascending order, then its larger ones.
 
-    The sparse counts are sorted by histogram and count, and every one exceeds
-    the dense range, so each histogram comes out in ascending order.
+    The keys of the larger counts are sorted by histogram and count, and every
+    one exceeds the dense range, so each histogram comes out in ascending order.
     """
     position = 0
-    sparse = 0
+    larger = 0
     for entry in range(dense.shape[0]):
         offsets[entry] = position
         for bin_index in range(dense.shape[1]):
@@ -212,85 +282,77 @@ def _assemble(
                 counts[position] = bin_index + 1
                 cells[position] = dense[entry, bin_index]
                 position += 1
-        while sparse < sparse_entries.shape[0] and sparse_entries[sparse] == entry:
-            counts[position] = sparse_counts[sparse]
-            cells[position] = sparse_cells[sparse]
+        while larger < keys.shape[0] and np.int64(keys[larger] >> _COUNT_BITS) == entry:
+            counts[position] = np.int64(keys[larger] & _COUNT_MASK)
+            cells[position] = key_cells[larger]
             position += 1
-            sparse += 1
+            larger += 1
     offsets[dense.shape[0]] = position
 
 
-def _merged(
-    keys: list[np.ndarray], cells: list[np.ndarray]
-) -> tuple[np.ndarray, np.ndarray]:
-    """Merge keyed cell counts into one sorted array of distinct keys."""
-    all_keys = np.concatenate(keys)
-    all_cells = np.concatenate(cells)
-    if not len(all_keys):
-        return all_keys, all_cells
-    order = np.argsort(all_keys, kind="stable")
-    all_keys = all_keys[order]
-    all_cells = all_cells[order]
-    starts = np.flatnonzero(np.r_[True, all_keys[1:] != all_keys[:-1]])
-    return all_keys[starts], np.add.reduceat(all_cells, starts)
+def _require_memory(needed: int, memory_bytes: int | None, n_distinct: int) -> None:
+    """Raise MemoryError when the histograms need more than ``memory_bytes``."""
+    if memory_bytes is not None and needed > memory_bytes:
+        raise MemoryError(
+            f"The guide count histograms need about {needed} bytes for "
+            f"{n_distinct} distinct counts, more than the {memory_bytes} bytes "
+            "they may hold. Raise mem_budget."
+        )
 
 
-def _block_counts(
-    block: np.ndarray, codes: np.ndarray, n_guides: int, dense: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Add one row block of counts to the histograms, and count its larger counts.
-
-    Counts up to the dense width are added to ``dense``. Returns the distinct
-    keys of the larger counts, sorted, and the number of cells that hold each.
-    """
-    room = np.empty(_SPARSE_PER_ROW * block.shape[0] + 64, dtype=np.uint64)
-    n_sparse = _add_block(block, codes, n_guides, dense, room)
-    if n_sparse < 0:
-        raise ValueError(f"Guide UMI counts must be at most {MAX_COUNT}")
-    if n_sparse > len(room):
-        rows, guides = np.nonzero(block > DENSE_COUNTS)
-        groups = (codes[rows] * n_guides + guides).astype(np.uint64)
-        values = block[rows, guides].astype(np.uint64)
-        keys = (groups << _COUNT_BITS) | values
-    else:
-        keys = room[:n_sparse]
-    distinct, multiplicity = np.unique(keys, return_counts=True)
-    return distinct, multiplicity.astype(np.int64)
-
-
-def _sparse_counts(
-    blocks: Iterable[np.ndarray], codes: np.ndarray, n_guides: int, dense: np.ndarray
+def _larger_counts(
+    blocks: Iterable[np.ndarray],
+    codes: np.ndarray,
+    n_guides: int,
+    dense: np.ndarray,
+    held: int,
+    memory_bytes: int | None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Add every row block of counts to the histograms, and merge the larger counts.
 
     Counts up to the dense width are added to ``dense``. Returns the distinct
     keys of the larger counts, sorted, and the number of cells that hold
-    each. The batches that waited to be merged are released when it returns.
+    each. ``held`` counts the bytes that the caller holds beside them; the
+    buffer is released when this returns.
     """
-    merged_keys = np.zeros(0, dtype=np.uint64)
-    merged_cells = np.zeros(0, dtype=np.int64)
-    pending_keys: list[np.ndarray] = []
-    pending_cells: list[np.ndarray] = []
-    n_pending = 0
+    buffer = np.empty(_buffer_keys(len(codes), n_guides), dtype=np.uint64)
+    keys = np.zeros(0, dtype=np.uint64)
+    cells = np.zeros(0, dtype=np.int64)
+
+    def merged(n_keys: int) -> tuple[np.ndarray, np.ndarray]:
+        run = buffer[:n_keys]
+        run.sort()
+        size = int(_merged_size(keys, run))
+        _require_memory(
+            held + buffer.nbytes + keys.nbytes + cells.nbytes + 16 * size,
+            memory_bytes,
+            size,
+        )
+        merged_keys = np.empty(size, dtype=np.uint64)
+        merged_cells = np.empty(size, dtype=np.int64)
+        _merge_run(keys, cells, run, merged_keys, merged_cells)
+        return merged_keys, merged_cells
+
+    n_keys = 0
     for start, block in checked_count_blocks(
         blocks, n_cells=len(codes), n_guides=n_guides
     ):
-        keys, cells = _block_counts(
-            block, codes[start : start + block.shape[0]], n_guides, dense
-        )
-        if len(keys):
-            pending_keys.append(keys)
-            pending_cells.append(cells)
-            n_pending += len(keys)
-        if n_pending > _MERGE_ENTRIES:
-            merged_keys, merged_cells = _merged(
-                [merged_keys, *pending_keys], [merged_cells, *pending_cells]
+        block_codes = codes[start : start + block.shape[0]]
+        row = 0
+        while row < block.shape[0]:
+            row, n_keys = _add_counts(
+                block, block_codes, n_guides, dense, buffer, n_keys, row
             )
-            # The merged arrays now hold this block's counts, so its own
-            # arrays go with the batches instead of through the next merge.
-            del keys, cells
-            pending_keys, pending_cells, n_pending = [], [], 0
-    return _merged([merged_keys, *pending_keys], [merged_cells, *pending_cells])
+            if row < 0:
+                raise ValueError(f"Guide UMI counts must be at most {MAX_COUNT}")
+            if row < block.shape[0]:
+                # The next row might not fit, so the buffer's keys join the
+                # merged ones.
+                keys, cells = merged(n_keys)
+                n_keys = 0
+    if n_keys:
+        keys, cells = merged(n_keys)
+    return keys, cells
 
 
 def checked_sample_codes(sample_codes: object, n_samples: int) -> np.ndarray:
@@ -323,8 +385,13 @@ def guide_count_histograms(
     *,
     n_samples: int,
     n_guides: int,
+    memory_bytes: int | None = None,
 ) -> GuideCountHistograms:
     """Count the cells that hold each UMI count of each guide, per sample.
+
+    The memory grows with the distinct counts that the histograms hold, as
+    :func:`histogram_bytes` counts it, and what the histograms would hold is
+    checked against ``memory_bytes`` before each array is allocated.
 
     Args:
         blocks: Consecutive row blocks of the cells x guides counts, which
@@ -333,15 +400,21 @@ def guide_count_histograms(
             ``n_samples - 1``. Without samples, every cell has code 0.
         n_samples: The number of samples.
         n_guides: The number of guides, the width of every block.
+        memory_bytes: The most bytes that the histograms may hold besides the
+            blocks and the caller's sample codes, or None for no limit.
 
     Returns:
         The exact histogram of every guide in every sample.
 
     Raises:
-        TypeError: If a block holds counts that are not unsigned integers.
+        TypeError: If a block holds counts that are not unsigned integers, or
+            ``memory_bytes`` is not an integer.
         ValueError: If there is no sample or no guide, a sample code is out of
             range, a block has the wrong width, the blocks hold more or fewer
-            rows than there are cells, or a count exceeds the uint32 range.
+            rows than there are cells, a count exceeds the uint32 range, or
+            ``memory_bytes`` is negative.
+        MemoryError: If the histograms need more than ``memory_bytes``. The
+            message names the bytes that they need.
     """
     if n_samples < 1 or n_guides < 1:
         raise ValueError("Histograms need at least one sample and one guide")
@@ -349,25 +422,40 @@ def guide_count_histograms(
         raise ValueError(
             f"{n_samples} samples of {n_guides} guides exceed 2**31 histograms"
         )
+    if memory_bytes is not None:
+        memory_bytes = integer_argument(memory_bytes, "memory_bytes", minimum=0)
     codes = checked_sample_codes(sample_codes, n_samples)
-    dense = np.zeros((n_samples, n_guides, DENSE_COUNTS), dtype=np.uint32)
-    merged_keys, merged_cells = _sparse_counts(blocks, codes, n_guides, dense)
-
+    # Codes that are not int64 already are held as an int64 copy.
+    copied = 0 if codes is sample_codes else codes.nbytes
     n_entries = n_samples * n_guides
+    _require_memory(
+        copied + histogram_bytes(n_samples, n_guides, len(codes), n_distinct=0),
+        memory_bytes,
+        0,
+    )
+    held = copied + _CALL_BYTES
+    dense = np.zeros((n_samples, n_guides, DENSE_COUNTS), dtype=np.uint32)
+    keys, key_cells = _larger_counts(
+        blocks, codes, n_guides, dense, held + dense.nbytes, memory_bytes
+    )
+
     flat = dense.reshape(n_entries, DENSE_COUNTS)
-    total = int(np.count_nonzero(flat)) + len(merged_keys)
+    total = int(np.count_nonzero(flat)) + len(keys)
+    _require_memory(
+        held
+        + dense.nbytes
+        + keys.nbytes
+        + key_cells.nbytes
+        + 8 * (n_entries + 1)
+        + 16 * n_samples
+        + 16 * total,
+        memory_bytes,
+        total,
+    )
     offsets = np.empty(n_entries + 1, dtype=np.int64)
     counts = np.empty(total, dtype=np.int64)
     cells = np.empty(total, dtype=np.int64)
-    _assemble(
-        flat,
-        (merged_keys >> _COUNT_BITS).astype(np.int64),
-        (merged_keys & _COUNT_MASK).astype(np.int64),
-        merged_cells,
-        offsets,
-        counts,
-        cells,
-    )
+    _assemble(flat, keys, key_cells, offsets, counts, cells)
     return GuideCountHistograms(
         n_cells=np.bincount(codes, minlength=n_samples).astype(np.int64),
         n_guides=n_guides,

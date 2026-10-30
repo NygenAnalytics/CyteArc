@@ -7,6 +7,7 @@ write their own stores.
 """
 
 import re
+import tracemalloc
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
@@ -21,7 +22,7 @@ from cytearc.datastore._operations import perturbation as operations
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import MULTIPLE, NEGATIVE, GuideThresholds
 from cytearc.perturbation.guide_thresholds import call_thresholds
-from cytearc.perturbation.histograms import guide_count_histograms
+from cytearc.perturbation.histograms import guide_count_histograms, histogram_bytes
 from cytearc.perturbation.mixtures import (
     FIT_STATUSES,
     fit_gaussian,
@@ -508,23 +509,27 @@ def test_call_guides_refuses_a_selection_of_no_cell(store) -> None:
 def test_call_guides_checks_the_memory_budget(store, template, monkeypatch) -> None:
     cells = template.cells
     saved = written(store)
-    # Enough for 16 bytes per cell of the fit, too little for the histograms
-    # and for the calls.
+    # Enough for 16 bytes per cell of the fit, too little for the least that
+    # the histograms of 3 lanes and 7 guides hold, and for the calls.
+    least = 16 * 600 + histogram_bytes(3, 7, 600, n_distinct=0)
     monkeypatch.setattr(store, "memoryBytes", 20_000)
     with pytest.raises(
-        MemoryError, match="Fitting guide thresholds for 600 cells in 3"
+        MemoryError,
+        match=f"Fitting guide thresholds for 600 cells in 3 samples and 7 "
+        f"guides holds at least {least} bytes",
     ):
         store.perturbation.call_guides(cells, sample_column="lane")
     with pytest.raises(MemoryError, match="Calling guides makes"):
         store.perturbation.call_guides(cells, method="fixed", min_umi=2)
     assert written(store) == saved
-    # With the histograms counted as free, the counts stream within 50,000
-    # bytes, but the calls of 600 cells do not fit. The fits, which count the
-    # calls, are saved; the calls are not.
-    monkeypatch.setattr(operations, "histogram_bytes", lambda *_args: 0)
-    monkeypatch.setattr(store, "memoryBytes", 50_000)
+    # Within 100,000 bytes, the counts stream beside the histograms, which
+    # may hold half of the memory, but 160 bytes for each of the 600 cells
+    # and 48 for each call do not fit. The fits, which count the calls, are
+    # saved; the calls are not.
+    monkeypatch.setattr(store, "memoryBytes", 100_000)
     with pytest.raises(MemoryError, match="Calling guides makes"):
         store.perturbation.call_guides(cells, method="gaussian")
+    assert store.artifacts.list(kind="guide_thresholds", from_assay="CRISPR")
     assert not store.artifacts.list(kind="guide_calls", from_assay="CRISPR")
     # Saved fits are read again only within the budget.
     monkeypatch.undo()
@@ -532,6 +537,57 @@ def test_call_guides_checks_the_memory_budget(store, template, monkeypatch) -> N
     monkeypatch.setattr(store, "memoryBytes", 100)
     with pytest.raises(MemoryError, match="Reading the saved guide fits"):
         store.perturbation.call_guides(cells, method="gaussian", min_umi=9)
+
+
+def test_fits_of_a_high_moi_screen_stay_within_the_memory_budget(
+    tmp_path, monkeypatch
+) -> None:
+    # 10,000 cells carry 30 of 60 guides each, at counts that most cells
+    # hold alone, so that the histograms hold about 200,000 distinct counts,
+    # 20 per cell.
+    n_cells, n_guides = 10_000, 60
+    rng = np.random.default_rng(5)
+    counts = rng.poisson(0.2, size=(n_cells, n_guides)).astype(np.uint16)
+    cells = np.arange(n_cells)
+    for carried in range(30):
+        guides = (cells * 30 + carried) % n_guides
+        counts[cells, guides] = 33 + rng.integers(0, 20_000, n_cells)
+    rna = rng.poisson(1.0, size=(n_cells, 2)) + 1
+    store = write_screen(tmp_path / "store.zarr", rna, counts, nthreads=2)
+    selected = store.select_measured_cells("CRISPR")
+    # A first call on a few cells loads the kernels.
+    store.cells.insert("few", cells < 50)
+    store.perturbation.call_guides(store.snapshot_cell_selection("few"))
+    fit = operations._PerturbationOperationsMixin._fit_guide_thresholds
+    peaks: list[int] = []
+
+    def measured_fit(self, *args, **kwargs):
+        tracemalloc.reset_peak()
+        try:
+            return fit(self, *args, **kwargs)
+        finally:
+            peaks.append(tracemalloc.get_traced_memory()[1])
+
+    monkeypatch.setattr(
+        operations._PerturbationOperationsMixin, "_fit_guide_thresholds", measured_fit
+    )
+    saved = written(store)
+    tracemalloc.start()
+    try:
+        # Within 12 MB the histograms may hold about 6 MB, need more, and
+        # say so before they take it.
+        monkeypatch.setattr(store, "memoryBytes", 12_000_000)
+        with pytest.raises(MemoryError, match="The guide count histograms need about"):
+            store.perturbation.call_guides(selected)
+        assert written(store) == saved
+        # Within 20 MB the counts stream beside the histograms, and both
+        # passes run.
+        monkeypatch.setattr(store, "memoryBytes", 20_000_000)
+        store.perturbation.call_guides(selected)
+    finally:
+        tracemalloc.stop()
+    assert peaks[0] <= 12_000_000
+    assert peaks[1] <= 20_000_000
 
 
 def test_gaussian_warns_when_most_calls_carry_several_guides(tmp_path) -> None:

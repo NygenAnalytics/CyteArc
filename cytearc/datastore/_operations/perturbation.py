@@ -26,6 +26,7 @@ from ...metadata.arguments import (
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from ...metadata.rows import (
     apply_missing_mask,
+    array_row_selection_parts,
     read_array_rows_chunkwise,
     read_metadata_missing_rows_chunkwise,
     read_metadata_rows_chunkwise,
@@ -452,6 +453,24 @@ def _called_cells(histograms: GuideCountHistograms, table: np.ndarray) -> int:
     limits = np.asarray(table, dtype=np.int64).reshape(-1)[entries]
     called = (limits > 0) & (histograms.counts >= limits)
     return int(histograms.cells[called].sum())
+
+
+def _float64_rows(data: zarr.Array, rows: np.ndarray) -> np.ndarray:
+    """Read ascending rows of a two-dimensional array as float64.
+
+    The rows are read one chunk of rows at a time, so that a read holds the
+    values of one chunk in their stored type, not those of every row.
+    """
+    values = np.empty((len(rows), int(data.shape[1])))
+    step = int(data.chunks[0])
+    # Where the rows of each chunk start among the rows, once per chunk that
+    # holds any.
+    edges = np.unique(
+        np.searchsorted(rows, np.arange(0, int(data.shape[0]) + step, step))
+    )
+    for start, stop in zip(edges[:-1], edges[1:], strict=True):
+        values[start:stop] = data.oindex[rows[start:stop], :]
+    return values
 
 
 def _unmatched_barcodes_warning(attributes: Mapping[str, Any]) -> str | None:
@@ -1155,25 +1174,37 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         n_cells = len(cell_index)
         n_samples = len(samples)
         n_guides = len(guide_ids)
-        resident = histogram_bytes(n_samples, n_guides, n_cells) + 16 * n_cells
-        if resident > self.memoryBytes:
+        # Each cell's position and sample code stay beside the histograms.
+        held = 16 * n_cells
+        least = held + histogram_bytes(n_samples, n_guides, n_cells, n_distinct=0)
+        if least > self.memoryBytes:
             raise MemoryError(
                 f"Fitting guide thresholds for {n_cells} cells in {n_samples} "
-                f"samples and {n_guides} guides holds about {resident} bytes, more "
+                f"samples and {n_guides} guides holds at least {least} bytes, more "
                 f"than the memory budget of {self.memoryBytes} bytes. Raise "
                 "mem_budget, or pass a smaller cell_selection or fewer samples."
             )
         self._require_writable(operation)
+        # The histograms grow with the distinct counts that the cells hold,
+        # which only reading the counts tells. They may hold half of the
+        # memory that the cells' arrays leave, never less than their least,
+        # and raise MemoryError before they need more; the counts stream
+        # within the rest.
+        histogram_memory = max(least - held, (self.memoryBytes - held) // 2)
         blocks = assay.rawData[cell_index, :]._stream_blocks(
             nthreads=self.nthreads,
             msg=f"({assay.name}) Counting guide UMIs",
             prefetch=None,
             row_mask=None,
-            resident_bytes=resident,
+            resident_bytes=held + histogram_memory,
             memory_bytes=self.memoryBytes,
         )
         histograms = guide_count_histograms(
-            blocks, codes, n_samples=n_samples, n_guides=n_guides
+            blocks,
+            codes,
+            n_samples=n_samples,
+            n_guides=n_guides,
+            memory_bytes=histogram_memory,
         )
         with _numba_threads(self.nthreads):
             fits = (
@@ -1316,7 +1347,10 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         record as an input. ``min_umi`` raises each threshold and belongs to
         the calls, so calling again with another floor reuses the fits and
         reads the counts once. The counts are read in row blocks within the
-        memory budget: once to count each guide's UMIs and once to call.
+        memory budget: once to count each guide's UMIs and once to call. The
+        histograms grow with the distinct UMI counts of each guide in each
+        sample, many more in a screen whose cells carry many guides, and may
+        hold half of the memory budget.
 
         The calls are saved as a ``guide_calls`` artifact, as
         :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.import_guide_calls`
@@ -1364,7 +1398,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             PermissionError: If the store is read-only and the calls are not
                 saved yet.
             MemoryError: If the histograms or the calls do not fit the memory
-                budget.
+                budget. The histograms raise it while the counts are read,
+                before they would hold more than their half.
         """
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
@@ -2440,7 +2475,14 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 "have no coordinates and are left out"
             )
         kept = compared[present]
-        n_control = int(np.count_nonzero(control[kept]))
+        # The measurement needs only the kept cells' coordinate rows, groups
+        # and flags, so the arrays of every labelled cell are released here.
+        coordinate_rows = positions[present]
+        kept_groups = groups[kept]
+        kept_control = control[kept]
+        del groups, control, labelled, located, compared, positions, present, kept
+        n_kept = len(kept_groups)
+        n_control = int(np.count_nonzero(kept_control))
         if n_control < 2:
             raise ValueError(
                 f"E-distances need at least two control cells with coordinates, "
@@ -2448,21 +2490,34 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             )
         data = as_zarr_array(artifact_group(self.zw, coordinates)["data"], name="data")
         n_dims = int(data.shape[1])
-        resident = edistance_memory_bytes(
-            len(kept), n_dims, n_control, n_rows=n_rows, nthreads=self.nthreads
+        # The coordinates are read as float64 one chunk of rows at a time,
+        # beside each kept cell's group, flag and row, and the measurement
+        # then holds what edistance_memory_bytes counts.
+        read_fixed, read_per_row = array_row_selection_parts(data)
+        reading = (
+            n_kept * (8 * n_dims + 17)
+            + read_fixed
+            + read_per_row * min(n_kept, int(data.chunks[0]))
+        )
+        resident = max(
+            edistance_memory_bytes(
+                n_kept, n_dims, n_control, n_rows=n_rows, nthreads=self.nthreads
+            ),
+            reading,
         )
         if resident > self.memoryBytes:
             raise MemoryError(
-                f"The E-distances of {len(kept)} cells in {n_dims} dimensions "
+                f"The E-distances of {n_kept} cells in {n_dims} dimensions "
                 f"hold about {resident} bytes, more than the memory budget of "
                 f"{self.memoryBytes} bytes. Raise mem_budget."
             )
         self._require_writable(arguments.operation)
-        values = np.asarray(data.oindex[positions[present], :], dtype=np.float64)
+        values = _float64_rows(data, coordinate_rows)
+        del coordinate_rows
         arrays = edistance_arrays(
             values,
-            groups[kept],
-            control[kept],
+            kept_groups,
+            kept_control,
             n_rows,
             n_permutations=permutations,
             random_seed=seed,
