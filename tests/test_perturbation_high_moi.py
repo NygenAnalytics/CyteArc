@@ -26,7 +26,13 @@ from cytearc.perturbation.high_moi import (
     nonzero_group_counts,
 )
 from cytearc.perturbation.random_sets import N_BUCKETS, resampling_keys
-from tests.perturbation_helpers import dense_pair, size_root, use_python_kernels
+from tests.perturbation_helpers import (
+    dense_pair,
+    fixed_labels,
+    size_root,
+    use_python_kernels,
+    write_screen,
+)
 
 
 def _python_kernels(monkeypatch: pytest.MonkeyPatch, python_kernels: bool) -> None:
@@ -976,33 +982,22 @@ CALLED = SCREEN_GUIDE_COUNTS >= SCREEN_FLOOR
 
 
 def _screen_store(path, guides: np.ndarray | None = None):
-    from cytearc.datastore.datastore import DataStore
-    from tests.storage_helpers import write_count_store
-
-    write_count_store(
-        str(path),
-        {
-            "RNA": SCREEN_RNA,
-            "CRISPR": SCREEN_GUIDE_COUNTS if guides is None else guides,
+    return write_screen(
+        path,
+        SCREEN_RNA,
+        SCREEN_GUIDE_COUNTS if guides is None else guides,
+        targets=SCREEN_TARGETS,
+        target_ids=SCREEN_GENE_IDS,
+        cell_columns={
+            "run": np.asarray(SCREEN_RUNS, dtype=object),
+            "score": SCREEN_SCORE,
         },
-        "uint16",
+        nthreads=2,
     )
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=2
-    )
-    features = store._get_assay("CRISPR").feats
-    features.insert("target_gene_name", np.asarray(SCREEN_TARGETS, dtype=object))
-    features.insert("target_gene_id", np.asarray(SCREEN_GENE_IDS, dtype=object))
-    store.cells.insert("run", np.asarray(SCREEN_RUNS, dtype=object))
-    store.cells.insert("score", SCREEN_SCORE)
-    return store
 
 
 def _screen_labels(store):
-    calls = store.perturbation.call_guides(
-        store.select_measured_cells("CRISPR"), method="fixed", min_umi=SCREEN_FLOOR
-    )
-    return store.perturbation.labels(calls, controls=["NT"])
+    return fixed_labels(store, ["NT"], min_umi=SCREEN_FLOOR)
 
 
 def _every_screen_gene(store):

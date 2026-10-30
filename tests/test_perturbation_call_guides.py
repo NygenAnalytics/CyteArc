@@ -1,6 +1,16 @@
+"""Guide calls fitted to the UMI counts of a three-lane screen.
+
+The module writes the screen and its measured cells once, as a template. A
+test that writes copies the template, and the tests of refused calls share
+one copy, which they check is left as it was; tests of other counts or assays
+write their own stores.
+"""
+
 import re
 import warnings
+from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import numba
 import numpy as np
@@ -18,7 +28,13 @@ from cytearc.perturbation.mixtures import (
     fit_poisson_gaussian,
 )
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
-from tests.perturbation_helpers import record_cell_reads
+from tests.perturbation_helpers import (
+    copy_store,
+    open_store,
+    record_cell_reads,
+    write_screen,
+    written,
+)
 from tests.storage_helpers import write_count_store
 
 N_PER_LANE = 200
@@ -55,20 +71,38 @@ def _counts(seed: int = 3) -> np.ndarray:
 COUNTS = _counts()
 
 
-def _store(tmp_path: Path, counts: np.ndarray = COUNTS, *, lanes=LANES) -> DataStore:
+def _store(path: Path, counts: np.ndarray = COUNTS, *, lanes=LANES) -> DataStore:
     rna = np.random.default_rng(7).poisson(2.0, size=(len(counts), 10))
-    path = tmp_path / "store.zarr"
-    write_count_store(str(path), {"RNA": rna, "CRISPR": counts}, "uint16")
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=2
-    )
-    if lanes is not None:
-        store.cells.insert("lane", np.asarray(lanes, dtype=object))
-    return store
+    columns = {} if lanes is None else {"lane": np.asarray(lanes, dtype=object)}
+    return write_screen(path, rna, counts, cell_columns=columns, nthreads=2)
 
 
 def _cells(store: DataStore):
     return store.select_measured_cells("CRISPR")
+
+
+@pytest.fixture(scope="module")
+def template(tmp_path_factory) -> Iterator[SimpleNamespace]:
+    """The screen and its measured cells, which most tests start from."""
+    path = tmp_path_factory.mktemp("call_guides") / "store.zarr"
+    store = _store(path)
+    screen = SimpleNamespace(path=path, cells=_cells(store))
+    saved = written(store)
+    yield screen
+    assert written(open_store(path)) == saved
+
+
+@pytest.fixture
+def store(template, tmp_path) -> DataStore:
+    """A copy of the template, for a test that writes."""
+    return copy_store(template.path, tmp_path, nthreads=2)
+
+
+@pytest.fixture(scope="module")
+def shared_store(template, tmp_path_factory) -> DataStore:
+    """One writable copy of the template for the calls that must be refused."""
+    folder = tmp_path_factory.mktemp("call_guides_refused")
+    return copy_store(template.path, folder, nthreads=2)
 
 
 def _call_sets(store: DataStore, ref) -> set[tuple[str, str, int]]:
@@ -103,13 +137,13 @@ def _lane_codes() -> np.ndarray:
         ("gaussian", fit_gaussian, 3),
     ],
 )
-def test_fitted_methods_call_from_each_lane_fit(tmp_path, method, fit, min_umi) -> None:
-    store = _store(tmp_path)
-
+def test_fitted_methods_call_from_each_lane_fit(
+    store, template, method, fit, min_umi
+) -> None:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         ref = store.perturbation.call_guides(
-            _cells(store), method=method, sample_column="lane"
+            template.cells, method=method, sample_column="lane"
         )
 
     codes = _lane_codes()
@@ -148,9 +182,8 @@ def test_fitted_methods_call_from_each_lane_fit(tmp_path, method, fit, min_umi) 
     assert any("'CRISPR3' in sample 'L2'" in message for message in messages)
 
 
-def test_histograms_of_the_fits_hold_every_count_and_zero(tmp_path) -> None:
-    store = _store(tmp_path)
-    ref = store.perturbation.call_guides(_cells(store), sample_column="lane")
+def test_histograms_of_the_fits_hold_every_count_and_zero(store, template) -> None:
+    ref = store.perturbation.call_guides(template.cells, sample_column="lane")
     thresholds = store.perturbation.load_guide_thresholds(ref, guides=["CRISPR0"])
     frame = thresholds.histograms
     for lane in SORTED_LANES:
@@ -174,9 +207,8 @@ def artifact_group_input(store: DataStore, ref):
     return inspect_artifact(store.zw, ref).input_ref("guide_thresholds")
 
 
-def test_one_fit_without_a_sample_column(tmp_path) -> None:
-    store = _store(tmp_path, lanes=None)
-    ref = store.perturbation.call_guides(_cells(store), method="gaussian", min_umi=2)
+def test_one_fit_without_a_sample_column(store, template) -> None:
+    ref = store.perturbation.call_guides(template.cells, method="gaussian", min_umi=2)
     codes = np.zeros(len(COUNTS), dtype=np.int64)
     histograms = guide_count_histograms([COUNTS], codes, n_samples=1, n_guides=7)
     table = call_thresholds(fit_gaussian(histograms).threshold, 2)
@@ -190,9 +222,8 @@ def test_one_fit_without_a_sample_column(tmp_path) -> None:
     }
 
 
-def test_fixed_calls_every_guide_from_min_umi(tmp_path) -> None:
-    store = _store(tmp_path)
-    ref = store.perturbation.call_guides(_cells(store), method="fixed", min_umi=4)
+def test_fixed_calls_every_guide_from_min_umi(store, template) -> None:
+    ref = store.perturbation.call_guides(template.cells, method="fixed", min_umi=4)
     table = np.full((1, 7), 4)
     codes = np.zeros(len(COUNTS), dtype=np.int64)
     assert _call_sets(store, ref) == _expected_calls(COUNTS, codes, table)
@@ -201,7 +232,7 @@ def test_fixed_calls_every_guide_from_min_umi(tmp_path) -> None:
     assert status.parameters == {"method": "fixed", "min_umi": 4}
 
 
-def _top_guide_store(tmp_path: Path) -> DataStore:
+def _top_guide_store(folder: Path) -> DataStore:
     counts = np.asarray(
         [
             [4, 1, 0],  # a share of exactly 0.8: not above it
@@ -214,7 +245,7 @@ def _top_guide_store(tmp_path: Path) -> DataStore:
         ],
         dtype=np.uint16,
     )
-    return _store(tmp_path, counts, lanes=None)
+    return _store(folder / "store.zarr", counts, lanes=None)
 
 
 def test_top_guide_calls_the_top_guide_above_the_fraction(tmp_path) -> None:
@@ -266,10 +297,9 @@ def test_top_guide_calls_the_top_guide_above_the_fraction(tmp_path) -> None:
 
 
 def test_identical_calls_are_reused_without_reading_counts(
-    tmp_path, monkeypatch
+    store, template, monkeypatch
 ) -> None:
-    store = _store(tmp_path)
-    cells = _cells(store)
+    cells = template.cells
     with warnings.catch_warnings(record=True) as first:
         warnings.simplefilter("always")
         ref = store.perturbation.call_guides(cells, sample_column="lane")
@@ -299,17 +329,10 @@ def test_identical_calls_are_reused_without_reading_counts(
     assert _call_sets(store, fresh) == _call_sets(store, ref)
 
 
-def test_read_only_store_reuses_but_cannot_call_again(tmp_path) -> None:
-    store = _store(tmp_path)
-    cells = _cells(store)
+def test_read_only_store_reuses_but_cannot_call_again(store, template) -> None:
+    cells = template.cells
     ref = store.perturbation.call_guides(cells, sample_column="lane")
-    reader = DataStore(
-        str(tmp_path / "store.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-        zarr_mode="r",
-    )
+    reader = open_store(store.zarr_loc, zarr_mode="r")
     assert reader.perturbation.call_guides(cells, sample_column="lane") == ref
     with pytest.raises(PermissionError, match="call_guides"):
         reader.perturbation.call_guides(cells, sample_column="lane", min_umi=7)
@@ -322,13 +345,7 @@ def _guide_store(tmp_path: Path, guide_assays: dict[str, str]) -> DataStore:
     write_count_store(
         str(path), {"RNA": rna, **{name: COUNTS for name in guide_assays}}, "uint16"
     )
-    return DataStore(
-        str(path),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-        assay_types=guide_assays,
-    )
+    return open_store(path, assay_types=guide_assays)
 
 
 def test_the_guide_assay_is_the_stores_only_crispr_assay_whatever_its_name(
@@ -379,26 +396,20 @@ def test_a_store_without_one_crispr_assay_needs_from_assay(
         f"{found} declared 'CRISPR', and guide calls read one; name the guide "
         "assay with from_assay=..."
     )
+    saved = written(store)
 
     with pytest.raises(ValueError, match=f"^{message}$"):
         store.perturbation.call_guides(cells)
     with pytest.raises(ValueError, match=f"^{message}$"):
         store.perturbation.import_guide_calls(path, cell_selection=cells)
-    assert store.artifacts.list(kind="guide_calls", from_assay="RNA") == []
+    assert written(store) == saved
 
 
 def test_a_read_only_store_checks_the_budget_before_writing(
-    tmp_path, monkeypatch
+    template, monkeypatch
 ) -> None:
-    store = _store(tmp_path)
-    cells = _cells(store)
-    reader = DataStore(
-        str(tmp_path / "store.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-        zarr_mode="r",
-    )
+    cells = template.cells
+    reader = open_store(template.path, zarr_mode="r")
 
     # Neither the fits nor the calls fit the budget, which is checked before
     # the store must be writable.
@@ -413,8 +424,7 @@ def test_a_read_only_store_checks_the_budget_before_writing(
             reader.perturbation.call_guides(cells, **arguments)
 
 
-def test_fixed_calls_of_one_lane_read_only_its_counts(tmp_path, monkeypatch) -> None:
-    store = _store(tmp_path)
+def test_fixed_calls_of_one_lane_read_only_its_counts(store, monkeypatch) -> None:
     store.cells.insert("in_l0", LANES == "L0")
     lane = store.snapshot_cell_selection("in_l0")
     reads = record_cell_reads(monkeypatch, store, {"CRISPR_nFeatures"})
@@ -432,19 +442,18 @@ def test_fixed_calls_of_one_lane_read_only_its_counts(tmp_path, monkeypatch) -> 
     }
 
 
-def test_sample_labels_must_cover_every_selected_cell(tmp_path) -> None:
-    store = _store(tmp_path)
+def test_sample_labels_must_cover_every_selected_cell(store, template) -> None:
     blank = LANES.astype(object).copy()
     blank[3] = " "
     store.cells.insert("blank_lane", blank)
     masked = pd.array(LANES.tolist(), dtype="string")
     masked[4] = pd.NA
     store.cells.insert("masked_lane", masked)
+    saved = written(store)
     for column in ("blank_lane", "masked_lane"):
         with pytest.raises(ValueError, match="has no label for 1 selected cells"):
-            store.perturbation.call_guides(_cells(store), sample_column=column)
-    assert not store.artifacts.list(kind="guide_thresholds")
-    assert not store.artifacts.list(kind="guide_calls")
+            store.perturbation.call_guides(template.cells, sample_column=column)
+    assert written(store) == saved
 
 
 @pytest.mark.parametrize(
@@ -477,25 +486,28 @@ def test_sample_labels_must_cover_every_selected_cell(tmp_path) -> None:
     ],
 )
 def test_call_guides_refuses_arguments_it_cannot_use(
-    tmp_path, arguments, error, message
+    shared_store, template, arguments, error, message
 ) -> None:
-    store = _store(tmp_path)
+    saved = written(shared_store)
     with pytest.raises(error, match=message):
-        store.perturbation.call_guides(_cells(store), **arguments)
+        shared_store.perturbation.call_guides(template.cells, **arguments)
+    assert written(shared_store) == saved
 
 
-def test_call_guides_refuses_a_selection_of_no_cell(tmp_path) -> None:
-    store = _store(tmp_path)
+def test_call_guides_refuses_a_selection_of_no_cell(store) -> None:
+    store.cells.insert("none", np.zeros(len(COUNTS), dtype=bool))
+    nobody = store.snapshot_cell_selection("none")
+    saved = written(store)
     with pytest.raises(TypeError, match="cell_selection must be an ArtifactRef"):
         store.perturbation.call_guides("cells")
-    store.cells.insert("none", np.zeros(len(COUNTS), dtype=bool))
     with pytest.raises(ValueError, match="selects no cell"):
-        store.perturbation.call_guides(store.snapshot_cell_selection("none"))
+        store.perturbation.call_guides(nobody)
+    assert written(store) == saved
 
 
-def test_call_guides_checks_the_memory_budget(tmp_path, monkeypatch) -> None:
-    store = _store(tmp_path)
-    cells = _cells(store)
+def test_call_guides_checks_the_memory_budget(store, template, monkeypatch) -> None:
+    cells = template.cells
+    saved = written(store)
     # Enough for 16 bytes per cell of the fit, too little for the histograms
     # and for the calls.
     monkeypatch.setattr(store, "memoryBytes", 20_000)
@@ -505,12 +517,15 @@ def test_call_guides_checks_the_memory_budget(tmp_path, monkeypatch) -> None:
         store.perturbation.call_guides(cells, sample_column="lane")
     with pytest.raises(MemoryError, match="Calling guides makes"):
         store.perturbation.call_guides(cells, method="fixed", min_umi=2)
+    assert written(store) == saved
     # With the histograms counted as free, the counts stream within 50,000
-    # bytes, but the calls of 600 cells do not fit.
+    # bytes, but the calls of 600 cells do not fit. The fits, which count the
+    # calls, are saved; the calls are not.
     monkeypatch.setattr(operations, "histogram_bytes", lambda *_args: 0)
     monkeypatch.setattr(store, "memoryBytes", 50_000)
     with pytest.raises(MemoryError, match="Calling guides makes"):
         store.perturbation.call_guides(cells, method="gaussian")
+    assert not store.artifacts.list(kind="guide_calls", from_assay="CRISPR")
     # Saved fits are read again only within the budget.
     monkeypatch.undo()
     store.perturbation.call_guides(cells, method="gaussian")
@@ -527,7 +542,7 @@ def test_gaussian_warns_when_most_calls_carry_several_guides(tmp_path) -> None:
     counts = rng.poisson(0.3, size=(1000, 15))
     carriers = rng.choice(1000, size=20, replace=False)
     counts[carriers, rng.integers(0, 15, size=20)] += 100
-    store = _store(tmp_path, counts.astype(np.uint16), lanes=None)
+    store = _store(tmp_path / "store.zarr", counts.astype(np.uint16), lanes=None)
     cells = _cells(store)
     with warnings.catch_warnings(record=True) as first:
         warnings.simplefilter("always")
@@ -543,8 +558,9 @@ def test_gaussian_warns_when_most_calls_carry_several_guides(tmp_path) -> None:
     assert [str(entry.message) for entry in again] == messages
 
 
-def test_fits_run_on_the_store_threads_and_restore_them(tmp_path, monkeypatch) -> None:
-    store = _store(tmp_path)
+def test_fits_run_on_the_store_threads_and_restore_them(
+    store, template, monkeypatch
+) -> None:
     seen = []
     fit = operations.fit_poisson_gaussian
 
@@ -555,14 +571,15 @@ def test_fits_run_on_the_store_threads_and_restore_them(tmp_path, monkeypatch) -
     monkeypatch.setattr(operations, "fit_poisson_gaussian", recording)
     monkeypatch.setattr(operations, "MAX_ITERATIONS", 1)
     before = numba.get_num_threads()
-    store.perturbation.call_guides(_cells(store))
+    store.perturbation.call_guides(template.cells)
     assert seen == [min(2, numba.config.NUMBA_NUM_THREADS)]
     assert numba.get_num_threads() == before
 
 
-def test_loading_thresholds_refuses_calls_without_fits(tmp_path) -> None:
-    store = _store(tmp_path)
-    cells = _cells(store)
+def test_loading_thresholds_refuses_calls_without_fits(
+    store, template, tmp_path
+) -> None:
+    cells = template.cells
     calls_path = tmp_path / "calls.csv"
     calls_path.write_text(
         "cell_barcode,num_features,feature_call,num_umis\ncell0,1,CRISPR0,30\n"
@@ -591,10 +608,9 @@ def test_loading_thresholds_refuses_calls_without_fits(tmp_path) -> None:
 
 
 def test_loading_thresholds_checks_the_budget_and_the_samples(
-    tmp_path, monkeypatch
+    store, template, monkeypatch
 ) -> None:
-    store = _store(tmp_path)
-    ref = store.perturbation.call_guides(_cells(store), sample_column="lane")
+    ref = store.perturbation.call_guides(template.cells, sample_column="lane")
     fits = artifact_group_input(store, ref)
     group = artifact_group(store.zw, fits)
     group.attrs["samples"] = "L0"

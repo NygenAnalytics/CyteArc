@@ -1,4 +1,13 @@
-from pathlib import Path
+"""E-distances between the perturbed and control cells of a small screen.
+
+The module writes the screen, its labels and its coordinates once, as a
+template. A test that writes copies the template, and the tests of refused
+calls share one copy, which they check is left as it was.
+"""
+
+import tracemalloc
+from collections.abc import Iterator
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,8 +24,14 @@ from cytearc.perturbation.edistance import (
 )
 from cytearc.storage.artifacts import inspect_artifact
 from cytearc.utils.logging import logger
-from tests.perturbation_helpers import use_python_kernels
-from tests.storage_helpers import write_count_store
+from tests.perturbation_helpers import (
+    copy_store,
+    fixed_labels,
+    open_store,
+    use_python_kernels,
+    write_screen,
+    written,
+)
 
 # Guides and their targets; no cell carries GENE_D's guide.
 TARGETS = ["GENE_A", "GENE_A", "GENE_B", "Non-Targeting", "GENE_C", "GENE_D"]
@@ -44,27 +59,6 @@ def _coordinates() -> np.ndarray:
 COORDINATES = _coordinates()
 
 
-def _store(tmp_path: Path) -> DataStore:
-    guides = np.zeros((len(CARRIED), len(TARGETS)), dtype=np.uint16)
-    for cell, carried in enumerate(CARRIED):
-        guides[cell, list(carried)] = 20
-    rna = np.random.default_rng(5).poisson(6.0, size=(len(CARRIED), 4))
-    path = tmp_path / "store.zarr"
-    write_count_store(str(path), {"RNA": rna, "CRISPR": guides}, "uint16")
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
-    )
-    features = store._get_assay("CRISPR").feats
-    features.insert("target_gene_name", np.asarray(TARGETS, dtype=object))
-    return store
-
-
-def _labels(store: DataStore, controls=("Non-Targeting",)):
-    cells = store.select_measured_cells("CRISPR")
-    calls = store.perturbation.call_guides(cells, method="fixed", min_umi=10)
-    return store.perturbation.labels(calls, controls=list(controls))
-
-
 def _coordinate_ref(store: DataStore, cells=None):
     """Import COORDINATES for ``cells``, every cell by default."""
     cells = cells or store.select_measured_cells("RNA")
@@ -72,6 +66,39 @@ def _coordinate_ref(store: DataStore, cells=None):
     return store.reduction.import_coordinates(
         COORDINATES[selected], cell_selection=cells, name="X_test"
     )
+
+
+@pytest.fixture(scope="module")
+def template(tmp_path_factory) -> Iterator[SimpleNamespace]:
+    """The screen with its labels and coordinates, and labels without controls."""
+    guides = np.zeros((len(CARRIED), len(TARGETS)), dtype=np.uint16)
+    for cell, carried in enumerate(CARRIED):
+        guides[cell, list(carried)] = 20
+    rna = np.random.default_rng(5).poisson(6.0, size=(len(CARRIED), 4))
+    path = tmp_path_factory.mktemp("edistance") / "store.zarr"
+    store = write_screen(path, rna, guides, targets=TARGETS)
+    screen = SimpleNamespace(
+        path=path,
+        labels=fixed_labels(store, ["Non-Targeting"]),
+        coordinates=_coordinate_ref(store),
+        # Labels whose controls are GENE_D, which no cell carries.
+        without_controls=fixed_labels(store, ["GENE_D"]),
+    )
+    saved = written(store)
+    yield screen
+    assert written(open_store(path)) == saved
+
+
+@pytest.fixture
+def store(template, tmp_path) -> DataStore:
+    """A copy of the template, for a test that writes."""
+    return copy_store(template.path, tmp_path)
+
+
+@pytest.fixture(scope="module")
+def shared_store(template, tmp_path_factory) -> DataStore:
+    """One writable copy of the template for the calls that must be refused."""
+    return copy_store(template.path, tmp_path_factory.mktemp("edistance_refused"))
 
 
 def _brute(x: np.ndarray, y: np.ndarray) -> float:
@@ -107,10 +134,9 @@ def _replayed_p_value(
     return (reached + 1) / (n_permutations + 1)
 
 
-def test_edistance_measures_each_target_against_the_controls(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
-    coordinates = _coordinate_ref(store)
+def test_edistance_measures_each_target_against_the_controls(store, template) -> None:
+    labels = template.labels
+    coordinates = template.coordinates
 
     ref = store.perturbation.edistance(
         labels, coordinates, n_permutations=200, random_seed=7
@@ -165,10 +191,9 @@ def test_edistance_measures_each_target_against_the_controls(tmp_path) -> None:
     assert table.loc[["GENE_C", "GENE_D"], "adjusted_p_value"].isna().all()
 
 
-def test_edistance_by_guide_takes_each_cell_with_one_guide(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
-    coordinates = _coordinate_ref(store)
+def test_edistance_by_guide_takes_each_cell_with_one_guide(store, template) -> None:
+    labels = template.labels
+    coordinates = template.coordinates
     ref = store.perturbation.edistance(labels, coordinates, by="guide")
     loaded = store.perturbation.load_edistance(ref)
     assert (loaded.by, loaded.n_permutations, loaded.random_seed) == ("guide", 1000, 0)
@@ -194,9 +219,8 @@ def test_edistance_by_guide_takes_each_cell_with_one_guide(tmp_path) -> None:
     assert table.loc["CRISPR0", "p_value"] < 2 / 84
 
 
-def test_cells_without_coordinates_are_left_out(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
+def test_cells_without_coordinates_are_left_out(store, template) -> None:
+    labels = template.labels
     # Coordinates of every cell but the GENE_C and unlabelled ones.
     cells = store.select_cells(
         labels, include=["GENE_A", "GENE_B", "control", "Multiple"]
@@ -225,10 +249,9 @@ def test_cells_without_coordinates_are_left_out(tmp_path) -> None:
         store.perturbation.edistance(labels, _coordinate_ref(store, without_controls))
 
 
-def test_edistance_is_reused_and_follows_its_inputs(tmp_path) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
-    coordinates = _coordinate_ref(store)
+def test_edistance_is_reused_and_follows_its_inputs(store, template) -> None:
+    labels = template.labels
+    coordinates = template.coordinates
     ref = store.perturbation.edistance(labels, coordinates, n_permutations=50)
     assert store.perturbation.edistance(labels, coordinates, n_permutations=50) == ref
     status = inspect_artifact(store.zw, ref)
@@ -246,13 +269,7 @@ def test_edistance_is_reused_and_follows_its_inputs(tmp_path) -> None:
         labels, coordinates, n_permutations=50, invalidate_cache=True
     )
     assert again != ref
-    reader = DataStore(
-        str(tmp_path / "store.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-        zarr_mode="r",
-    )
+    reader = open_store(store.zarr_loc, zarr_mode="r")
     assert reader.perturbation.edistance(labels, coordinates, n_permutations=50) in (
         ref,
         again,
@@ -277,19 +294,23 @@ def test_edistance_is_reused_and_follows_its_inputs(tmp_path) -> None:
     ],
 )
 def test_edistance_refuses_arguments_it_cannot_use(
-    tmp_path, arguments, error, message
+    shared_store, template, arguments, error, message
 ) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
-    coordinates = _coordinate_ref(store)
+    saved = written(shared_store)
     with pytest.raises(error, match=message):
-        store.perturbation.edistance(labels, coordinates, **arguments)
+        shared_store.perturbation.edistance(
+            template.labels, template.coordinates, **arguments
+        )
+    assert written(shared_store) == saved
 
 
-def test_edistance_refuses_inputs_it_cannot_measure(tmp_path, monkeypatch) -> None:
-    store = _store(tmp_path)
-    labels = _labels(store)
-    coordinates = _coordinate_ref(store)
+def test_edistance_refuses_inputs_it_cannot_measure(
+    shared_store, template, monkeypatch
+) -> None:
+    store = shared_store
+    labels = template.labels
+    coordinates = template.coordinates
+    saved = written(store)
     cells = store.select_measured_cells("CRISPR")
     with pytest.raises(TypeError, match="labels must be an ArtifactRef"):
         store.perturbation.edistance("labels", coordinates)
@@ -303,19 +324,20 @@ def test_edistance_refuses_inputs_it_cannot_measure(tmp_path, monkeypatch) -> No
     with pytest.raises(
         ValueError, match="No labelled cell carries control guides only"
     ):
-        store.perturbation.edistance(_labels(store, controls=("GENE_D",)), coordinates)
+        store.perturbation.edistance(template.without_controls, coordinates)
     monkeypatch.setattr(store, "memoryBytes", 100)
     with pytest.raises(MemoryError, match="E-distances of 15 cells in 3 dimensions"):
         store.perturbation.edistance(labels, coordinates)
-    assert not store.artifacts.list(kind="perturbation_edistance")
+    assert written(store) == saved
 
 
-def test_loading_edistance_refuses_other_artifacts(tmp_path) -> None:
-    store = _store(tmp_path)
+def test_loading_edistance_refuses_other_artifacts(shared_store, template) -> None:
+    saved = written(shared_store)
     with pytest.raises(TypeError, match="edistance must be an ArtifactRef"):
-        store.perturbation.load_edistance("edistance")
+        shared_store.perturbation.load_edistance("edistance")
     with pytest.raises(ValueError, match="not 'perturbation_labels'"):
-        store.perturbation.load_edistance(_labels(store))
+        shared_store.perturbation.load_edistance(template.labels)
+    assert written(shared_store) == saved
 
 
 def _screen(
@@ -437,9 +459,39 @@ def test_edistance_from_sums_equals_the_mean_distances() -> None:
     assert distance == pytest.approx(_brute(x, y))
 
 
-def test_edistance_memory_grows_with_cells_and_threads() -> None:
-    one = edistance_memory_bytes(1_000, 50, 100)
-    assert one == 1_000 * (16 * 50 + 40) + (1 << 23)
-    assert edistance_memory_bytes(1_000, 50, 100, nthreads=4) == one + 3 * (1 << 23)
-    # A control group larger than a block reserves one permutation of it.
-    assert edistance_memory_bytes(10, 2, 2_000_000) == 10 * 72 + 16_000_000
+@pytest.mark.parametrize(
+    ("n_control", "sizes", "n_dims", "n_permutations", "nthreads"),
+    [
+        # Many cells, whose coordinates and indexes take most of the memory.
+        (2_000, [3_000] * 6, 8, 3, 1),
+        (2_000, [3_000] * 6, 8, 3, 2),
+        # Few cells: each row draws its 81 permutations of 100 cells in one
+        # block of uniform numbers, which takes most of the memory.
+        (300, [100, 100], 4, 81, 1),
+    ],
+)
+def test_the_memory_estimate_bounds_the_edistances_peak(
+    monkeypatch, n_control, sizes, n_dims, n_permutations, nthreads
+) -> None:
+    # Blocks of 64 kB instead of 8 MB keep the screens small.
+    monkeypatch.setattr(edistance_module, "_DRAW_BYTES", 1 << 16)
+    # The first call loads the kernels.
+    edistance_arrays(*_screen(5, [3, 3], 10), 2, n_permutations=5, random_seed=0)
+    values, groups, control = _screen(6, sizes, n_control, n_dims=n_dims)
+    tracemalloc.start()
+    try:
+        # The estimate counts the arrays that the operation passes.
+        edistance_arrays(
+            values.copy(),
+            groups.copy(),
+            control.copy(),
+            len(sizes),
+            n_permutations=n_permutations,
+            random_seed=0,
+            nthreads=nthreads,
+        )
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    estimate = edistance_memory_bytes(len(values), n_dims, n_control, nthreads)
+    assert peak <= estimate

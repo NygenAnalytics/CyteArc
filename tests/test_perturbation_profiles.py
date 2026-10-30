@@ -21,8 +21,13 @@ from cytearc.perturbation.profiles import (
     z_score_sums,
 )
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
-from tests.perturbation_helpers import record_cell_reads, use_python_kernels
-from tests.storage_helpers import insert_nullable_cell_column, write_count_store
+from tests.perturbation_helpers import (
+    fixed_labels,
+    record_cell_reads,
+    use_python_kernels,
+    write_screen,
+)
+from tests.storage_helpers import insert_nullable_cell_column
 
 # Tests that check the warning about thin perturbations catch it themselves.
 pytestmark = pytest.mark.filterwarnings("ignore:.*and get no profile")
@@ -241,31 +246,33 @@ def test_profile_values_make_no_copy_of_the_sums() -> None:
     assert peak < sums.nbytes / 16
 
 
+# The count blocks are uint16, as the stores hold, so the kernels compile for
+# one count type.
 @pytest.mark.parametrize(
     ("call", "message"),
     [
         (lambda: depth_target(np.ones(3), np.zeros(3, bool)), "no control cell"),
         (
             lambda: control_moments(
-                [np.ones((2, 3))], np.ones(2), 1.0, np.array([0, 2]), 2, 3
+                [np.ones((2, 3), np.uint16)], np.ones(2), 1.0, np.array([0, 2]), 2, 3
             ),
             "one sample from 0 to 1 per cell",
         ),
         (
             lambda: control_moments(
-                [np.ones((2, 4))], np.ones(2), 1.0, np.zeros(2, int), 1, 3
+                [np.ones((2, 4), np.uint16)], np.ones(2), 1.0, np.zeros(2, int), 1, 3
             ),
             "cells x 3 features",
         ),
         (
             lambda: control_moments(
-                [np.ones((2, 3))], np.ones(3), 1.0, np.zeros(3, int), 1, 3
+                [np.ones((2, 3), np.uint16)], np.ones(3), 1.0, np.zeros(3, int), 1, 3
             ),
             "hold 2 of the 3 cells",
         ),
         (
             lambda: control_moments(
-                [np.ones((2, 3)), np.ones((2, 3))],
+                [np.ones((2, 3), np.uint16), np.ones((2, 3), np.uint16)],
                 np.ones(3),
                 1.0,
                 np.zeros(3, int),
@@ -426,23 +433,15 @@ CONTROL[114:234] = True
 
 
 def _store(tmp_path: Path) -> DataStore:
-    path = tmp_path / "store.zarr"
-    write_count_store(str(path), {"RNA": RNA, "CRISPR": GUIDES}, "uint16")
-    store = DataStore(
-        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=2
+    return write_screen(
+        tmp_path / "store.zarr",
+        RNA,
+        GUIDES,
+        targets=GUIDE_TARGETS,
+        target_ids=GUIDE_GENE_IDS,
+        cell_columns={"run": np.asarray(RUNS, dtype=object)},
+        nthreads=2,
     )
-    features = store._get_assay("CRISPR").feats
-    features.insert("target_gene_name", np.asarray(GUIDE_TARGETS, dtype=object))
-    features.insert("target_gene_id", np.asarray(GUIDE_GENE_IDS, dtype=object))
-    store.cells.insert("run", np.asarray(RUNS, dtype=object))
-    return store
-
-
-def _labels(store: DataStore) -> ArtifactRef:
-    calls = store.perturbation.call_guides(
-        store.select_measured_cells("CRISPR"), method="fixed", min_umi=10
-    )
-    return store.perturbation.labels(calls, controls=["NT"])
 
 
 def _selected(store: DataStore) -> ArtifactRef:
@@ -489,7 +488,9 @@ def shared(tmp_path_factory) -> _Shared:
     """One store of the screen for the tests that keep its data."""
     folder = tmp_path_factory.mktemp("profiles")
     store = _store(folder)
-    return _Shared(folder / "store.zarr", store, _labels(store), _selected(store))
+    return _Shared(
+        folder / "store.zarr", store, fixed_labels(store, ["NT"]), _selected(store)
+    )
 
 
 def test_profiles_equal_a_direct_computation(shared) -> None:
@@ -655,7 +656,7 @@ def test_profiles_of_mixscape_classes_average_knocked_out_cells(
     tmp_path, monkeypatch
 ) -> None:
     store = _store(tmp_path)
-    labels = _labels(store)
+    labels = fixed_labels(store, ["NT"])
     coordinates = store.reduction.import_coordinates(
         COORDINATES, cell_selection=store.select_measured_cells("RNA"), name="X"
     )
@@ -803,7 +804,7 @@ def test_profiles_refuse_arguments_they_cannot_use(
 
 def test_profiles_refuse_inputs_they_cannot_use(tmp_path) -> None:
     store = _store(tmp_path)
-    labels = _labels(store)
+    labels = fixed_labels(store, ["NT"])
     features = _selected(store)
     with pytest.raises(TypeError, match="labels must be an ArtifactRef"):
         store.perturbation.profiles("labels", features)

@@ -565,7 +565,9 @@ def _gaussian_splits(
         if cost < best_cost:
             best_cost = cost
             best = index
-    n_splits = _add_split(splits, 0, best)
+    # int() gives int64 values rather than literals, so every call uses one
+    # compiled version of the kernel.
+    n_splits = _add_split(splits, int(0), int(best))
     widest = -1.0
     gap = 0
     for index in range(size - 1):
@@ -573,7 +575,7 @@ def _gaussian_splits(
         if width > widest:
             widest = width
             gap = index
-    n_splits = _add_split(splits, n_splits, gap)
+    n_splits = _add_split(splits, n_splits, int(gap))
     for tail in tails:
         target = tail * total
         upper = 0.0
@@ -583,7 +585,7 @@ def _gaussian_splits(
             if upper >= target:
                 split = index - 1
                 break
-        n_splits = _add_split(splits, n_splits, split)
+        n_splits = _add_split(splits, n_splits, int(split))
     return splits[:n_splits]
 
 

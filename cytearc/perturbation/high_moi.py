@@ -300,7 +300,7 @@ def nonzero_group_counts(
     each cell's groups takes 16 bytes per cell and 24 per member.
 
     Args:
-        values: Counts, features x cells, float32 or float64.
+        values: Counts, features x cells, held as float32.
         groups: The groups of treatment cells.
 
     Returns:
@@ -476,7 +476,7 @@ def fit_genes(values: np.ndarray, covariates: np.ndarray) -> GeneFits:
     weights take 16 bytes per cell and gene.
 
     Args:
-        values: Counts, genes x cells, float32 or float64.
+        values: Counts, genes x cells, held as float32.
         covariates: The covariates of the cells, cells x covariates, the
             intercept first.
 
@@ -578,7 +578,7 @@ def _accumulate(
 
 @njit(cache=True, nogil=True)
 def _score_sets(
-    first_set: int,
+    first_set: int | np.int64,
     step: int,
     n_draws: int,
     key: np.uint64,
@@ -689,9 +689,11 @@ def _score_groups(
                 column = unit_first[u]
             start = pair_offsets[u]
             end = pair_offsets[u + 1]
+            # int() gives int64 values rather than literals, so every call uses
+            # one compiled version of the kernel.
             _score_sets(
-                0,
-                1,
+                int(0),
+                int(1),
                 n_draws,
                 keys[group],
                 conditional,
@@ -748,8 +750,10 @@ def _score_blocks(
     block_counts = np.zeros((n_blocks, 0 if store else n_pairs, 2), dtype=np.int64)
     slots = pair_slots if store else np.arange(n_pairs)
     for block in prange(n_blocks):
+        # prange's index is unsigned; np.int64 keeps every call on one compiled
+        # version of the kernel.
         _score_sets(
-            block,
+            np.int64(block),
             n_blocks,
             n_draws,
             key,

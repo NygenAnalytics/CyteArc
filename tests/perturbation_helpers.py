@@ -1,13 +1,90 @@
 """Shared helpers for the tests of ``cytearc.perturbation``."""
 
+import shutil
 import warnings
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
 import statsmodels.api as sm
 from scipy import optimize, special, stats
+
+from tests.storage_helpers import write_count_store
+
+if TYPE_CHECKING:
+    from cytearc.datastore.datastore import DataStore
+    from cytearc.storage.refs import ArtifactRef
+
+
+def open_store(path: str | Path, **options: Any) -> "DataStore":
+    """Open a screen store with RNA as its default assay, on one thread by default."""
+    # Imported here, so that the domain tests do not import the datastore.
+    from cytearc.datastore.datastore import DataStore
+
+    return DataStore(
+        str(path),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        **{"nthreads": 1, **options},
+    )
+
+
+def write_screen(
+    path: Path,
+    rna: np.ndarray,
+    guides: np.ndarray,
+    *,
+    targets: Sequence[str | None] | None = None,
+    target_ids: Sequence[str] | None = None,
+    cell_columns: Mapping[str, np.ndarray] | None = None,
+    dtype: str = "uint16",
+    **options: Any,
+) -> "DataStore":
+    """Write RNA and guide counts, cells x features, to a store and open it.
+
+    The guide assay is named CRISPR. ``targets`` and ``target_ids`` fill its
+    ``target_gene_name`` and ``target_gene_id`` columns, and ``cell_columns``
+    adds cell columns.
+    """
+    write_count_store(str(path), {"RNA": rna, "CRISPR": guides}, dtype)
+    store = open_store(path, **options)
+    features = store._get_assay("CRISPR").feats
+    if targets is not None:
+        features.insert("target_gene_name", np.asarray(targets, dtype=object))
+    if target_ids is not None:
+        features.insert("target_gene_id", np.asarray(target_ids, dtype=object))
+    for name, values in (cell_columns or {}).items():
+        store.cells.insert(name, values)
+    return store
+
+
+def fixed_labels(
+    store: "DataStore", controls: Sequence[str], *, min_umi: int = 10
+) -> "ArtifactRef":
+    """Call every guide with at least ``min_umi`` UMIs, and label the cells."""
+    calls = store.perturbation.call_guides(
+        store.select_measured_cells("CRISPR"), method="fixed", min_umi=min_umi
+    )
+    return store.perturbation.labels(calls, controls=list(controls))
+
+
+def copy_store(template: Path, folder: Path, **options: Any) -> "DataStore":
+    """Copy a template store into ``folder`` and open the copy."""
+    target = folder / template.name
+    shutil.copytree(template, target)
+    return open_store(target, **options)
+
+
+def written(store: "DataStore") -> tuple[Any, ...]:
+    """Return what a call can write: run records, and every artifact of the store."""
+    return (
+        [run.run_id for run in store.pipeline.list_runs(limit=1000)],
+        store.artifacts.list(scope="datastore"),
+        *(store.artifacts.list(from_assay=assay) for assay in store.assay_names),
+    )
 
 
 class _RecordedRows:

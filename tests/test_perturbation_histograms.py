@@ -1,3 +1,5 @@
+import tracemalloc
+
 import numpy as np
 import pytest
 
@@ -156,22 +158,30 @@ def test_sample_codes_are_returned_as_int64() -> None:
     assert codes.tolist() == [0, 1, 1]
 
 
-def test_histogram_bytes_cover_what_a_screen_holds() -> None:
-    # One sample of 93 guides and 5,867 cells, as the 10x A549 run.
-    counts = screen_counts(5_867, 93, seed=7)
-    found = guide_count_histograms(
-        [counts], np.zeros(5_867, dtype=np.int64), n_samples=1, n_guides=93
+@pytest.mark.parametrize("n_samples", [1, 2])
+def test_the_memory_estimate_bounds_the_histograms_peak(n_samples) -> None:
+    # The first call loads the kernels.
+    guide_count_histograms(
+        [np.full((2, 3), 40, np.uint32)], np.zeros(2, np.int64), n_samples=1, n_guides=3
     )
-    held = found.offsets.nbytes + found.counts.nbytes + found.cells.nbytes
-    estimate = histogram_bytes(1, 93, 5_867)
-    assert estimate > held + 93 * DENSE_COUNTS * 4
-    # Dense bins grow with samples and guides, large counts with cells.
-    assert histogram_bytes(2, 93, 5_867) - estimate == 93 * (
-        DENSE_COUNTS * 4 + 8 * 16 + 8
-    )
-    assert histogram_bytes(1, 93, 5_868) - estimate == 2 * 16 + 2 * 32 + 2 * 16
-    # Merges stop growing once their batch is full.
-    assert (
-        histogram_bytes(1, 1, 2**30) - histogram_bytes(1, 1, 2**30 - 1)
-        == 2 * 16 + 2 * 16
-    )
+    # Every cell carries one guide above the dense counts and every other cell
+    # a second, each at a count of its own, so the merges hold one and a half
+    # large counts per cell.
+    n_cells, n_guides, rows = 20_000, 50, 2_000
+    rng = np.random.default_rng(3)
+    counts = rng.poisson(0.3, size=(n_cells, n_guides)).astype(np.uint32)
+    cells = np.arange(n_cells)
+    counts[cells, cells % n_guides] = 33 + cells
+    second = cells[::2]
+    counts[second, (second + 1) % n_guides] = 33 + n_cells + second
+    blocks = [counts[start : start + rows] for start in range(0, n_cells, rows)]
+    tracemalloc.start()
+    try:
+        guide_count_histograms(
+            blocks, cells % n_samples, n_samples=n_samples, n_guides=n_guides
+        )
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    # Each block also reserves 16 bytes per row while it is counted.
+    assert peak <= histogram_bytes(n_samples, n_guides, n_cells) + 16 * rows

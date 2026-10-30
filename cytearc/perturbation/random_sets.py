@@ -132,7 +132,12 @@ def draw_uniform_set(
 
 @njit(cache=True, nogil=True)
 def draw_uniform_range(
-    key: np.uint64, first: int, step: int, size: int, n_union: int, draws: np.ndarray
+    key: np.uint64,
+    first: int | np.int64,
+    step: int,
+    size: int,
+    n_union: int,
+    draws: np.ndarray,
 ) -> None:
     """Draw the uniform sets ``first``, ``first + step``, ... of a group."""
     marked = np.zeros(n_union, dtype=np.bool_)
@@ -155,7 +160,9 @@ def draw_uniform_sets(
     draws = np.empty((n_draws, size), dtype=np.int32)
     n_chunks = min(n_draws, 64)
     for chunk in prange(n_chunks):
-        draw_uniform_range(key, chunk, n_chunks, size, n_union, draws)
+        # prange's index is unsigned; np.int64 keeps every call on one compiled
+        # version of the kernel.
+        draw_uniform_range(key, np.int64(chunk), n_chunks, size, n_union, draws)
     return draws
 
 
@@ -294,7 +301,11 @@ def draw_bernoulli_set(
         The number of cells drawn.
     """
     n = len(probabilities)
-    count, counter = _draw_bernoulli(key, 0, probabilities, order, offsets, bounds, out)
+    # int() gives an int64 counter rather than a literal, as the later draws
+    # pass, so every call uses one compiled version of the kernel.
+    count, counter = _draw_bernoulli(
+        key, int(0), probabilities, order, offsets, bounds, out
+    )
     while count == 0 or count == n:
         count, counter = _draw_bernoulli(
             key, counter, probabilities, order, offsets, bounds, out
