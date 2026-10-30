@@ -42,7 +42,9 @@ _COUNT_MASK = np.uint64(MAX_COUNT)
 # Each block reserves room for this many sparse counts per row before a second
 # pass is needed; cells rarely carry more than two guides above DENSE_COUNTS.
 _SPARSE_PER_ROW = 2
-# Sparse counts merge into distinct keys once this many wait to be merged.
+# Sparse counts merge into distinct keys once this many wait to be merged, so
+# that repeated counts do not pile up. A merge sorts every key merged so far,
+# so this does not bound its memory.
 _MERGE_ENTRIES = 1 << 22
 # The distinct counts up to DENSE_COUNTS that histogram_bytes expects for one
 # guide in one sample; ambient counts rarely reach ten.
@@ -123,11 +125,14 @@ class GuideCountHistograms:
 def histogram_bytes(n_samples: int, n_guides: int, n_cells: int) -> int:
     """Estimate the memory that :func:`guide_count_histograms` holds besides its blocks.
 
-    The estimate counts the dense array, two counts above :data:`DENSE_COUNTS`
-    per cell at 16 bytes each, which a merge holds three times over, and the
-    histograms it returns, with eight distinct counts up to
-    :data:`DENSE_COUNTS` for each guide in each sample. Each block also
-    reserves 16 bytes per row while it is counted.
+    The estimate counts the dense array and two distinct counts above
+    :data:`DENSE_COUNTS` per cell. A merge of the larger counts sorts every
+    count merged so far, and holds 64 bytes per count: the batches, their
+    sorted copies, the order that sorts them, the start of each distinct
+    count, and the merged keys and cells. Assembling the histograms then
+    holds 56 bytes per larger count, and 16 bytes per distinct count up to
+    :data:`DENSE_COUNTS`, eight for each guide in each sample. Each block
+    also reserves 16 bytes per row while it is counted.
 
     Args:
         n_samples: The number of samples.
@@ -140,9 +145,8 @@ def histogram_bytes(n_samples: int, n_guides: int, n_cells: int) -> int:
     n_entries = n_samples * n_guides
     dense = n_entries * DENSE_COUNTS * np.dtype(np.uint32).itemsize
     sparse = _SPARSE_PER_ROW * n_cells
-    merging = 16 * sparse + 32 * min(sparse, _MERGE_ENTRIES)
-    result = 8 * (n_entries + 1) + 16 * (n_entries * _EXPECTED_DENSE_DISTINCT + sparse)
-    return dense + merging + result
+    assembled = 8 * (n_entries + 1) + 16 * n_entries * _EXPECTED_DENSE_DISTINCT
+    return dense + 64 * sparse + assembled
 
 
 @njit(cache=True, nogil=True)
@@ -231,6 +235,64 @@ def _merged(
     return all_keys[starts], np.add.reduceat(all_cells, starts)
 
 
+def _block_counts(
+    block: np.ndarray, codes: np.ndarray, n_guides: int, dense: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Add one row block of counts to the histograms, and count its larger counts.
+
+    Counts up to the dense width are added to ``dense``. Returns the distinct
+    keys of the larger counts, sorted, and the number of cells that hold each.
+    """
+    room = np.empty(_SPARSE_PER_ROW * block.shape[0] + 64, dtype=np.uint64)
+    n_sparse = _add_block(block, codes, n_guides, dense, room)
+    if n_sparse < 0:
+        raise ValueError(f"Guide UMI counts must be at most {MAX_COUNT}")
+    if n_sparse > len(room):
+        rows, guides = np.nonzero(block > DENSE_COUNTS)
+        groups = (codes[rows] * n_guides + guides).astype(np.uint64)
+        values = block[rows, guides].astype(np.uint64)
+        keys = (groups << _COUNT_BITS) | values
+    else:
+        keys = room[:n_sparse]
+    distinct, multiplicity = np.unique(keys, return_counts=True)
+    return distinct, multiplicity.astype(np.int64)
+
+
+def _sparse_counts(
+    blocks: Iterable[np.ndarray], codes: np.ndarray, n_guides: int, dense: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Add every row block of counts to the histograms, and merge the larger counts.
+
+    Counts up to the dense width are added to ``dense``. Returns the distinct
+    keys of the larger counts, sorted, and the number of cells that hold
+    each. The batches that waited to be merged are released when it returns.
+    """
+    merged_keys = np.zeros(0, dtype=np.uint64)
+    merged_cells = np.zeros(0, dtype=np.int64)
+    pending_keys: list[np.ndarray] = []
+    pending_cells: list[np.ndarray] = []
+    n_pending = 0
+    for start, block in checked_count_blocks(
+        blocks, n_cells=len(codes), n_guides=n_guides
+    ):
+        keys, cells = _block_counts(
+            block, codes[start : start + block.shape[0]], n_guides, dense
+        )
+        if len(keys):
+            pending_keys.append(keys)
+            pending_cells.append(cells)
+            n_pending += len(keys)
+        if n_pending > _MERGE_ENTRIES:
+            merged_keys, merged_cells = _merged(
+                [merged_keys, *pending_keys], [merged_cells, *pending_cells]
+            )
+            # The merged arrays now hold this block's counts, so its own
+            # arrays go with the batches instead of through the next merge.
+            del keys, cells
+            pending_keys, pending_cells, n_pending = [], [], 0
+    return _merged([merged_keys, *pending_keys], [merged_cells, *pending_cells])
+
+
 def checked_sample_codes(sample_codes: object, n_samples: int) -> np.ndarray:
     """Return the sample position of each cell after checking its range.
 
@@ -288,41 +350,8 @@ def guide_count_histograms(
             f"{n_samples} samples of {n_guides} guides exceed 2**31 histograms"
         )
     codes = checked_sample_codes(sample_codes, n_samples)
-    n_cells = len(codes)
     dense = np.zeros((n_samples, n_guides, DENSE_COUNTS), dtype=np.uint32)
-    merged_keys = np.zeros(0, dtype=np.uint64)
-    merged_cells = np.zeros(0, dtype=np.int64)
-    pending_keys: list[np.ndarray] = []
-    pending_cells: list[np.ndarray] = []
-    n_pending = 0
-    for start, block in checked_count_blocks(
-        blocks, n_cells=n_cells, n_guides=n_guides
-    ):
-        stop = start + block.shape[0]
-        room = np.empty(_SPARSE_PER_ROW * block.shape[0] + 64, dtype=np.uint64)
-        n_sparse = _add_block(block, codes[start:stop], n_guides, dense, room)
-        if n_sparse < 0:
-            raise ValueError(f"Guide UMI counts must be at most {MAX_COUNT}")
-        if n_sparse > len(room):
-            rows, guides = np.nonzero(block > DENSE_COUNTS)
-            groups = (codes[start + rows] * n_guides + guides).astype(np.uint64)
-            values = block[rows, guides].astype(np.uint64)
-            keys = (groups << _COUNT_BITS) | values
-        else:
-            keys = room[:n_sparse]
-        if len(keys):
-            distinct, multiplicity = np.unique(keys, return_counts=True)
-            pending_keys.append(distinct)
-            pending_cells.append(multiplicity.astype(np.int64))
-            n_pending += len(distinct)
-        if n_pending > _MERGE_ENTRIES:
-            merged_keys, merged_cells = _merged(
-                [merged_keys, *pending_keys], [merged_cells, *pending_cells]
-            )
-            pending_keys, pending_cells, n_pending = [], [], 0
-    merged_keys, merged_cells = _merged(
-        [merged_keys, *pending_keys], [merged_cells, *pending_cells]
-    )
+    merged_keys, merged_cells = _sparse_counts(blocks, codes, n_guides, dense)
 
     n_entries = n_samples * n_guides
     flat = dense.reshape(n_entries, DENSE_COUNTS)

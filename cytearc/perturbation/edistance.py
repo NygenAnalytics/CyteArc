@@ -31,6 +31,7 @@ These functions read coordinates that a caller passes and never touch storage.
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from threading import Lock
 
 import numpy as np
 import pandas as pd
@@ -65,6 +66,9 @@ MAX_PERMUTATIONS = 1_000_000
 # yields the same numbers however they are split, so the p-values do not
 # depend on it.
 _DRAW_BYTES = 1 << 23
+# The bytes of Python objects that a thread holds while it tests rows, such
+# as its state and the generator of its row; about 8 kB in Python 3.13.
+_THREAD_BYTES = 1 << 16
 # A permuted distance that falls short of the observed one by less than this
 # share of the pooled cells' mean squared norm reaches it.
 _TIE_TOLERANCE = 1e-9
@@ -189,20 +193,35 @@ def edistance_settings(
 
 
 def edistance_memory_bytes(
-    n_cells: int, n_dims: int, n_control: int, nthreads: int = 1
+    n_cells: int, n_dims: int, n_control: int, *, n_rows: int, nthreads: int = 1
 ) -> int:
-    """Return the bytes that :func:`edistance_arrays` holds for its cells.
+    """Return the bytes that :func:`edistance_arrays` holds.
+
+    The count includes the float64 coordinates, int64 groups and boolean
+    control flags that the caller passes.
 
     Args:
         n_cells: The compared cells, perturbed and control.
         n_dims: The dimensions of their coordinates.
         n_control: The control cells among them.
+        n_rows: The rows, tested or not.
         nthreads: The threads that test rows at once.
     """
-    # The coordinates as passed and as sorted, the cells' norms, groups and
-    # order, and one block of uniform numbers per thread, which holds at least
-    # one permutation of the smaller group.
-    return n_cells * (16 * n_dims + 40) + nthreads * max(_DRAW_BYTES, 8 * n_control)
+    # The coordinates as passed and as sorted take 16 bytes per cell and
+    # dimension. The groups and flags as passed, the squared norms and the
+    # positions that sort the cells by row take at most 41 bytes per cell,
+    # which also leaves room for a flag per perturbed cell of the rows that
+    # the threads test. Each row's bounds, results and adjustment take at
+    # most 128 bytes.
+    held = n_cells * (16 * n_dims + 41) + 128 * n_rows
+    # Each thread holds one block of uniform numbers, which holds at least
+    # one permutation of the smaller group, its kernel a flag per control
+    # cell, the position of each drawn cell and the sums of the two groups,
+    # and its own Python objects.
+    per_thread = (
+        max(_DRAW_BYTES, 8 * n_control) + 9 * n_control + 32 * n_dims + _THREAD_BYTES
+    )
+    return held + nthreads * per_thread
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,25 +305,31 @@ def edistance_arrays(
     squares_c = float(squares[:n_c].sum())
     bounds = n_c + np.searchsorted(groups[members], np.arange(n_rows + 1))
     sizes = np.diff(bounds).astype(np.int64)
+    status = np.full(n_rows, EDISTANCE_TOO_FEW_CELLS, dtype=np.int8)
+    distance = np.full(n_rows, np.nan)
+    p_values = np.full(n_rows, np.nan)
 
-    def measure(row: int) -> tuple[float, float]:
+    def measure(row: int) -> None:
         start, n_p = int(bounds[row]), int(sizes[row])
         sum_p = values[start : start + n_p].sum(axis=0)
         squares_p = float(squares[start : start + n_p].sum())
         observed = float(
             edistance_from_sums(sum_p, squares_p, n_p, sum_c, squares_c, n_c)
         )
+        distance[row] = observed
         if not n_permutations:
-            return observed, np.nan
+            return
         n_pool = n_c + n_p
         pooled_squares = squares_c + squares_p
         threshold = observed - _TIE_TOLERANCE * pooled_squares / n_pool
         n_drawn = min(n_p, n_c)
         block = max(1, _DRAW_BYTES // (8 * n_drawn))
         rng = np.random.default_rng([random_seed, row])
+        # One block of uniform numbers, filled again for each block of
+        # permutations, so that a thread never holds two.
+        uniforms = np.empty((min(block, n_permutations), n_drawn))
         reached = 0
         for first in range(0, n_permutations, block):
-            uniforms = rng.random((min(block, n_permutations - first), n_drawn))
             reached += int(
                 _count_reached(
                     values,
@@ -312,28 +337,38 @@ def edistance_arrays(
                     n_c,
                     start,
                     n_p,
-                    uniforms,
+                    rng.random(out=uniforms[: n_permutations - first]),
                     sum_c + sum_p,
                     pooled_squares,
                     threshold,
                 )
             )
-        return observed, (reached + 1) / (n_permutations + 1)
+        p_values[row] = (reached + 1) / (n_permutations + 1)
 
-    tested_rows = np.flatnonzero(sizes >= 2).tolist()
-    if nthreads > 1 and len(tested_rows) > 1:
-        # The kernel releases the GIL, and each row draws from its own seed.
-        with ThreadPoolExecutor(max_workers=min(nthreads, len(tested_rows))) as pool:
-            results = list(pool.map(measure, tested_rows))
+    tested_rows = np.flatnonzero(sizes >= 2)
+    status[tested_rows] = EDISTANCE_TESTED
+    threads = min(nthreads, len(tested_rows))
+    if threads > 1:
+        # Each thread measures the next row until none is left, so that no
+        # object is kept for each row. The kernel releases the GIL, and each
+        # row draws from its own seed.
+        next_rows = iter(tested_rows)
+        lock = Lock()
+
+        def measure_rows() -> None:
+            while True:
+                with lock:
+                    row = next(next_rows, None)
+                if row is None:
+                    return
+                measure(int(row))
+
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            for running in [pool.submit(measure_rows) for _ in range(threads)]:
+                running.result()
     else:
-        results = [measure(row) for row in tested_rows]
-    status = np.full(n_rows, EDISTANCE_TOO_FEW_CELLS, dtype=np.int8)
-    distance = np.full(n_rows, np.nan)
-    p_values = np.full(n_rows, np.nan)
-    for row, (observed, p_value) in zip(tested_rows, results, strict=True):
-        status[row] = EDISTANCE_TESTED
-        distance[row] = observed
-        p_values[row] = p_value
+        for row in tested_rows:
+            measure(int(row))
     adjusted = np.full(n_rows, np.nan)
     tested = np.isfinite(p_values)
     if tested.any():
