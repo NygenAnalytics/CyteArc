@@ -83,13 +83,14 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 
 - [API overview](api/index.html): exact public signatures and result contracts
 - [DataStore](api/datastore.html): open stores, select cells and features, run analyses, and access saved results
-- [Analysis pipelines](api/pipeline.html): run the RNA, ATAC, ADT, and multimodal recipes, configure their stages, follow and cancel runs, inspect durable runs, and access frozen outputs
+- [Analysis pipelines](api/pipeline.html): run the RNA, ATAC, ADT, multimodal, and CRISPR screen recipes, configure their stages, follow and cancel runs, inspect durable runs, and access frozen outputs
 - [Graph construction](api/graph_construction.html): normalization, reduction, neighbour search, and connectivity stages
 - [Reference mapping](api/mapping.html): build references, project query cells, and transfer labels
 - [Integration and metrics](api/integration.html): WNN, SNN, Harmony2 batch correction and its parameters, and integration diagnostics
 - [Assays and metadata](api/assays.html): assay types, count blocks, cell and feature metadata, and selections
 - [Artifacts and lineage](api/artifacts.html): find saved results, trace their inputs, and summarize analyses
 - [Import and export](api/import_export.html): readers, writers, dataset merging, and storage controls
+- [Perturbation](api/perturbation.html): guide calls, perturbation labels, efficiency, E-distances, Mixscape, association tests, and perturbation profiles and clusters of pooled CRISPR screens, with their records
 - [Plotting](api/plotting.html): embeddings, expression, clusters, trajectories, and diagnostics
 - [Example datasets](api/datasets.html): list and download the public example datasets that the tutorials use
 - [Utilities](api/utilities.html): store loading, computation settings, gene sets, logging, standard-library log forwarding, and progress
