@@ -1,8 +1,8 @@
 import numpy as np
-from numba import njit
 from scipy.sparse import csr_matrix
 
 from ..utils.arrays import sparse_matrix_bytes
+from ..utils.numba import njit
 
 _INT32_MAX = int(np.iinfo(np.int32).max)
 _FLOAT64_SIZE = int(np.dtype(np.float64).itemsize)

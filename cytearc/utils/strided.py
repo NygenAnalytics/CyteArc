@@ -1,7 +1,8 @@
 """Compiled copies between strided arrays."""
 
 import numpy as np
-from numba import njit
+
+from .numba import njit
 
 _TILE = 32
 

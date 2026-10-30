@@ -774,6 +774,82 @@ def test_unix_only_modules_are_imported_only_at_call_time():
     assert violations == []
 
 
+_NUMBA_COMPILERS = frozenset({"jit", "njit"})
+
+
+def _numba_compiler_uses(tree: ast.Module) -> list[tuple[int, str]]:
+    """Return the lines where a source takes jit or njit from Numba."""
+    numba_names = {
+        alias.asname or alias.name.partition(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name.partition(".")[0] == "numba"
+    }
+    uses = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.level == 0
+            and (node.module or "").partition(".")[0] == "numba"
+        ):
+            uses.extend(
+                (node.lineno, f"from {node.module} import {alias.name}")
+                for alias in node.names
+                if alias.name in _NUMBA_COMPILERS
+            )
+        elif isinstance(node, ast.Attribute) and node.attr in _NUMBA_COMPILERS:
+            root = node.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in numba_names:
+                uses.append((node.lineno, ast.unparse(node)))
+    return sorted(uses)
+
+
+def test_kernels_compile_with_cytearcs_njit():
+    # Numba checks a cached kernel only against the file that defines it.
+    # cytearc.utils.numba.njit also ties the cache to every CyteArc module that
+    # uses njit, so a kernel compiles again when a kernel it calls changes.
+    uses = {
+        path.relative_to(_CYTEARC_ROOT).as_posix(): found
+        for path in _CYTEARC_ROOT.rglob("*.py")
+        if path != _CYTEARC_ROOT / "utils" / "numba.py"
+        and (found := _numba_compiler_uses(_tree(path)))
+    }
+    assert uses == {}, (
+        "Compile CyteArc's kernels with cytearc.utils.numba.njit, not with "
+        f"Numba's jit or njit: {uses}"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from numba import njit",
+        "from numba import jit as compile_kernel",
+        "from numba.core.decorators import njit",
+        "import numba\n\nkernel = numba.njit(lambda value: value)",
+        "import numba as nb\n\n\n@nb.jit(nopython=True)\ndef kernel(value):\n"
+        "    return value",
+        "import numba.core.decorators\n\nnumba.core.decorators.njit",
+    ],
+    ids=["njit", "jit_alias", "submodule", "attribute", "module_alias", "chain"],
+)
+def test_the_numba_compiler_check_finds_each_form(source):
+    assert len(_numba_compiler_uses(ast.parse(source))) == 1
+
+
+def test_the_numba_compiler_check_allows_cytearcs_njit():
+    source = (
+        "import numba\nfrom numba import prange\n\n"
+        "from cytearc.utils.numba import njit as absolute_njit\n"
+        "from ..utils.numba import njit\n\n\n"
+        "@njit(cache=True)\ndef kernel(value):\n    return numba.get_num_threads()\n"
+    )
+    assert _numba_compiler_uses(ast.parse(source)) == []
+
+
 def test_compatibility_only_modules_are_removed():
     retired = {
         _CYTEARC_ROOT / "_types.py",

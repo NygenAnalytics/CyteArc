@@ -4,7 +4,6 @@ from typing import Any, Literal, cast
 import numpy as np
 import pandas as pd
 import zarr
-from numba import njit
 
 from ..matrix import ChunkedArray
 from ..metadata import MetaData
@@ -21,6 +20,7 @@ from ..utils.arguments import integer_argument
 from ..utils.compute import compute_with_progress
 from ..utils.logging import logger
 from ..utils.moments import ColumnMoments, add_implicit_zeros, welford_add
+from ..utils.numba import njit
 from .base import Assay
 from .hvg_statistics import (
     BatchHvgScores,

@@ -2,12 +2,12 @@ from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
-from numba import config, njit, prange, set_num_threads
+from numba import config, prange, set_num_threads
 from scipy.sparse import coo_matrix
 
 from ..utils.arguments import integer_argument
 from ..utils.logging import logger
-from ..utils.numba import restore_numba_threads
+from ..utils.numba import njit, restore_numba_threads
 from ..utils.progress import iter_progress
 
 # Rows that the input checks of WNN integration scan at once.

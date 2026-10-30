@@ -2,8 +2,10 @@ import math
 from typing import cast
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 from scipy.stats import t as student_t
+
+from ...utils.numba import njit
 
 _LINREGRESS_TINY = 1.0e-20
 _REG_OK = 0

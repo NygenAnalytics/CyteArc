@@ -31,7 +31,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import zarr
-from numba import njit
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
 from ..matrix import ChunkedArray
@@ -54,6 +53,7 @@ from ..storage.materialize import (
 )
 from ..utils.compute import controlled_compute
 from ..utils.moments import ColumnMoments
+from ..utils.numba import njit
 from ..storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
 from ..storage.errors import ArtifactResolutionError
 from ..storage.feature_selection import validate_feature_selection

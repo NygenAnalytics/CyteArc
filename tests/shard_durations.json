@@ -178,7 +178,7 @@
   "tests/test_neighbor_stages.py": 14.9,
   "tests/test_normalization_flags.py": 25.6,
   "tests/test_normalized_coordinates.py": 11.5,
-  "tests/test_numba_dispatcher_cache.py": 58.0,
+  "tests/test_numba_dispatcher_cache.py": 71.8,
   "tests/test_numba_kernel_parity.py": 26.0,
   "tests/test_numba_workqueue.py": 7.4,
   "tests/test_operation_argument_contracts.py": 1.1,

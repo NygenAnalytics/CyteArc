@@ -16,10 +16,10 @@ from dataclasses import dataclass
 from numbers import Real
 
 import numpy as np
-from numba import njit
 
 from cytearc.perturbation.guide_calls import GuideCountSummary, checked_count_blocks
 from cytearc.perturbation.histograms import MAX_COUNT, checked_sample_codes
+from cytearc.utils.numba import njit
 
 __all__ = ["CalledGuides", "threshold_calls", "top_guide_calls"]
 

@@ -14,13 +14,13 @@ from typing import Any
 
 import numba
 import numpy as np
-from numba import njit, prange, set_num_threads
+from numba import prange, set_num_threads
 from scipy.sparse import csc_matrix, spmatrix
 from scipy.stats import norm
 
 from ..features.markers.regression import _regression_p_values
 from ..features.statistical import adjust_pvalues
-from ..utils.numba import restore_numba_threads
+from ..utils.numba import njit, restore_numba_threads
 
 __all__ = [
     "LINEAGE_NONFINITE",

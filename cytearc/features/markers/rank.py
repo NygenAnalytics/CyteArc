@@ -2,8 +2,10 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
-from numba import njit, prange
+from numba import prange
 from scipy.special import ndtr
+
+from ...utils.numba import njit
 
 __all__ = [
     "MARKER_SORT_KEYS",

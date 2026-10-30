@@ -1,15 +1,23 @@
-"""On-disk caching of Numba kernels that third-party packages compile without it."""
+"""On-disk caching of Numba kernels: CyteArc's own, and those that third-party
+packages compile without a cache."""
 
+import ast
+import builtins
+import dis
 import importlib
+import inspect
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
+import types
+from collections import defaultdict
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -20,17 +28,27 @@ from numba.core.caching import FunctionCache, IndexDataCacheFile, NullCache
 from numba.core.dispatcher import Dispatcher
 from scipy import sparse
 
+import cytearc
 from cytearc.embeddings.umap import fit_transform
 from cytearc.neighbors.graph import build_connectivity_arrays
+from cytearc.utils.arrays import rolling_window
 from cytearc.utils.logging import logger
 from cytearc.utils.numba import (
+    _build_token,
     _caching_import_time_kernels,
+    _cytearc_build_token,
     _has_cache_entry,
+    _kernel_cache_class,
+    _kernel_module_sources,
+    _package_digest,
+    _source_digest,
     cache_directory_lock,
     enable_dispatcher_cache,
+    njit,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+CYTEARC_DIR = REPOSITORY_ROOT / "cytearc"
 UMAP_KERNELS = {
     "smooth_knn_dist": ("umap.umap_", "smooth_knn_dist"),
     "compute_membership_strengths": ("umap.umap_", "compute_membership_strengths"),
@@ -727,3 +745,802 @@ def test_a_later_process_loads_the_kernels_that_importing_umap_compiles(
     assert (later["compiled"], later["loaded"]) == (0, first["compiled"])
     for name in ("edges", "weights", "layout"):
         assert later[name] == first[name], name
+
+
+# CyteArc's kernels compile with cytearc.utils.numba.njit, whose caches also
+# hold CyteArc's version and a digest of its modules that use njit.
+
+
+# A package in which a caller kernel calls a callee kernel and reads a constant
+# of the callee's file. Version 1 computes run(1) == 20; version 2, which
+# changes only the callee's file, computes run(1) == 300.
+_TWO_FILE_PACKAGE = "kernel_cache_probe"
+_CALLEE_SOURCE = """{imports}
+
+SCALE = {scale}
+
+
+{decorator}
+def step(value):
+    return value + {increment}
+"""
+_CALLER_SOURCE = """{imports}
+
+from .callee import SCALE, step
+
+
+{decorator}
+def run(value):
+    return step(value) * SCALE
+"""
+# How each kind of package imports and compiles its kernels. The third-party
+# package compiles them without a cache, as umap-learn does, and its files
+# never use njit.
+_KERNEL_STYLES = {
+    "cytearc": ("from ..utils.numba import njit", "@njit(cache=True)"),
+    "numba": ("from numba import njit", "@njit(cache=True)"),
+    "third_party": ("import numba", "@numba.jit(nopython=True)"),
+}
+_TWO_FILE_PROCESS = """
+import importlib
+import json
+import sys
+
+caller = importlib.import_module(sys.argv[1])
+if sys.argv[2] == "enable_dispatcher_cache":
+    from cytearc.utils.numba import enable_dispatcher_cache
+
+    enable_dispatcher_cache(caller.run)
+value = caller.run(1)
+cytearc = sys.modules.get("cytearc")
+print(json.dumps({
+    "value": int(value),
+    "compiled": sum(caller.run.stats.cache_misses.values()),
+    "loaded": sum(caller.run.stats.cache_hits.values()),
+    "cachePath": caller.run.stats.cache_path,
+    "cytearc": None if cytearc is None else cytearc.__file__,
+}))
+"""
+
+
+def _write_callee(package: Path, style: str, *, increment: int, scale: int) -> None:
+    imports, decorator = _KERNEL_STYLES[style]
+    (package / "callee.py").write_text(
+        _CALLEE_SOURCE.format(
+            imports=imports, decorator=decorator, increment=increment, scale=scale
+        )
+    )
+
+
+def _write_two_file_package(package: Path, style: str) -> None:
+    imports, decorator = _KERNEL_STYLES[style]
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "caller.py").write_text(
+        _CALLER_SOURCE.format(imports=imports, decorator=decorator)
+    )
+    _write_callee(package, style, increment=1, scale=10)
+
+
+def _cytearc_copy(root: Path) -> Path:
+    """Copy CyteArc's package into ``root`` and return the copy."""
+    copy = root / "cytearc"
+    shutil.copytree(CYTEARC_DIR, copy, ignore=shutil.ignore_patterns("__pycache__"))
+    return copy
+
+
+def _probe_environment(**variables: str) -> dict[str, str]:
+    """Return this process's environment for a probe process, without the
+    variables that choose where or whether Numba caches, plus ``variables``."""
+    unset = {"NUMBA_CACHE_DIR", "NUMBA_CACHE_LOCATOR_CLASSES", "NUMBA_DISABLE_JIT"}
+    environment = {
+        name: value for name, value in os.environ.items() if name not in unset
+    }
+    return {**environment, "PYTHONDONTWRITEBYTECODE": "1", **variables}
+
+
+def _user_directories(root: Path) -> dict[str, str]:
+    """Return the variables that put the user's cache directory, where Numba
+    caches the kernels of read-only packages, under ``root / "user"``:
+    ``XDG_CACHE_HOME`` on Linux and the home directory on macOS."""
+    return {
+        "HOME": str(root / "user"),
+        "XDG_CACHE_HOME": str(root / "user" / "cache"),
+    }
+
+
+@contextmanager
+def _read_only(directory: Path) -> Iterator[None]:
+    """Make ``directory`` read-only in the block, skipping the test where it
+    stays writable, as it does for root."""
+    mode = directory.stat().st_mode
+    directory.chmod(0o555)
+    try:
+        if os.access(directory, os.W_OK):
+            pytest.skip("the directory stays writable, as it does for root")
+        yield
+    finally:
+        directory.chmod(mode)
+
+
+def _runs_across_a_callee_change(
+    package: Path,
+    style: str,
+    caller: str,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    enable_cache: bool = False,
+) -> list[tuple[int, int, int, dict[str, Any]]]:
+    """Run the caller in two processes, change only the callee's file, and run
+    it in two more.
+
+    Returns, for each process, the value of ``run(1)``, how many signatures of
+    ``run`` it compiled and loaded, and its whole report.
+    """
+
+    def run() -> tuple[int, int, int, dict[str, Any]]:
+        mode = "enable_dispatcher_cache" if enable_cache else "own_cache"
+        process = subprocess.run(
+            [sys.executable, "-c", _TWO_FILE_PROCESS, caller, mode],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert process.returncode == 0, process.stderr
+        report = json.loads(process.stdout.splitlines()[-1])
+        return report["value"], report["compiled"], report["loaded"], report
+
+    results = [run(), run()]
+    _write_callee(package, style, increment=2, scale=100)
+    return [*results, run(), run()]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("location", ["in_tree", "cache_dir", "read_only"])
+def test_a_caller_compiles_again_when_its_callees_file_changes(
+    tmp_path: Path, location: str
+) -> None:
+    # The package sits in a copy of CyteArc, so its kernels are CyteArc's
+    # kernels and their token digests the copy.
+    root = tmp_path / "copy"
+    package = _cytearc_copy(root) / _TWO_FILE_PACKAGE
+    _write_two_file_package(package, "cytearc")
+    env = _probe_environment(PYTHONPATH=str(root), **_user_directories(tmp_path))
+    # Coverage cannot map the copy's sources onto this checkout's.
+    for name in ("COVERAGE_PROCESS_CONFIG", "COVERAGE_PROCESS_START"):
+        env.pop(name, None)
+    if location == "cache_dir":
+        env["NUMBA_CACHE_DIR"] = str(tmp_path / "cache")
+    cache_root = {
+        "in_tree": package / "__pycache__",
+        "cache_dir": tmp_path / "cache",
+        # Numba falls back to the user's cache directory.
+        "read_only": tmp_path / "user",
+    }[location]
+
+    with _read_only(package) if location == "read_only" else nullcontext():
+        results = _runs_across_a_callee_change(
+            package, "cytearc", f"cytearc.{_TWO_FILE_PACKAGE}.caller", cwd=root, env=env
+        )
+
+    assert [result[:3] for result in results] == [
+        (20, 1, 0),
+        (20, 0, 1),
+        (300, 1, 0),
+        (300, 0, 1),
+    ]
+    for *_, report in results:
+        assert Path(report["cytearc"]).is_relative_to(root)
+        assert Path(report["cachePath"]).is_relative_to(cache_root)
+
+
+@pytest.mark.slow
+def test_numbas_own_cache_keeps_the_old_callee(tmp_path: Path) -> None:
+    # Numba checks a cached kernel only against the file that defines it. If
+    # this fails, Numba tracks the files of the kernels a kernel calls, and
+    # CyteArc's build token is no longer needed.
+    package = tmp_path / _TWO_FILE_PACKAGE
+    _write_two_file_package(package, "numba")
+
+    results = _runs_across_a_callee_change(
+        package,
+        "numba",
+        f"{_TWO_FILE_PACKAGE}.caller",
+        cwd=tmp_path,
+        env=_probe_environment(PYTHONPATH=str(tmp_path)),
+    )
+
+    assert [result[:3] for result in results] == [
+        (20, 1, 0),
+        (20, 0, 1),
+        (20, 0, 1),
+        (20, 0, 1),
+    ]
+
+
+@pytest.mark.slow
+def test_a_third_party_caller_compiles_again_when_its_callees_file_changes(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / _TWO_FILE_PACKAGE
+    _write_two_file_package(package, "third_party")
+
+    results = _runs_across_a_callee_change(
+        package,
+        "third_party",
+        f"{_TWO_FILE_PACKAGE}.caller",
+        cwd=tmp_path,
+        env=_probe_environment(PYTHONPATH=str(tmp_path)),
+        enable_cache=True,
+    )
+
+    assert [result[:3] for result in results] == [
+        (20, 1, 0),
+        (20, 0, 1),
+        (300, 1, 0),
+        (300, 0, 1),
+    ]
+    for *_, report in results:
+        assert Path(report["cachePath"]) == package / "__pycache__"
+
+
+def _kernel_digest(directory: Path) -> str:
+    return _source_digest(_kernel_module_sources(directory))
+
+
+def _append(path: Path, text: str) -> None:
+    path.write_text(path.read_text() + text)
+
+
+def test_editing_a_kernel_module_changes_the_build_token(tmp_path: Path) -> None:
+    copy = _cytearc_copy(tmp_path)
+    before = _kernel_digest(copy)
+
+    _append(copy / "perturbation" / "glm.py", "\n# A comment.\n")
+
+    assert _kernel_digest(copy) != before
+
+
+def test_editing_a_module_without_njit_keeps_the_build_token(tmp_path: Path) -> None:
+    copy = _cytearc_copy(tmp_path)
+    before = _kernel_digest(copy)
+    module = copy / "datastore" / "datastore.py"
+    assert b"njit" not in module.read_bytes()
+
+    _append(module, "\n# A comment.\n")
+
+    assert _kernel_digest(copy) == before
+
+
+def test_renaming_a_kernel_module_changes_the_build_token(tmp_path: Path) -> None:
+    copy = _cytearc_copy(tmp_path)
+    before = _kernel_digest(copy)
+
+    (copy / "utils" / "strided.py").rename(copy / "utils" / "strided_views.py")
+
+    assert _kernel_digest(copy) != before
+
+
+def test_one_tree_at_two_paths_has_one_build_token(tmp_path: Path) -> None:
+    first = _cytearc_copy(tmp_path / "first")
+    second = _cytearc_copy(tmp_path / "second" / "nested")
+
+    assert _kernel_digest(first) == _kernel_digest(second)
+    assert _kernel_digest(first) == _kernel_digest(CYTEARC_DIR)
+
+
+def test_the_build_token_holds_cytearcs_version() -> None:
+    assert _cytearc_build_token() == (cytearc.__version__, _kernel_digest(CYTEARC_DIR))
+
+
+def test_the_source_digest_keeps_file_boundaries_and_ignores_order() -> None:
+    # Moving bytes across a boundary between files, or between a file's path
+    # and its source, gives the same byte stream without each part's length.
+    assert _source_digest({"a.py": b"xy", "b.py": b"z"}) != _source_digest(
+        {"a.py": b"x", "b.py": b"yz"}
+    )
+    assert _source_digest({"a.py": b"bx"}) != _source_digest({"a.pyb": b"x"})
+    assert _source_digest({"a.py": b"x", "b.py": b"y"}) == _source_digest(
+        {"b.py": b"y", "a.py": b"x"}
+    )
+
+
+def _function_in_file(path: Path, name: str = "increment") -> Callable[..., Any]:
+    """Write a module that defines the function ``name`` and return the
+    function, defined from that file as an import would define it."""
+    source = f"def {name}(value):\n    return value + 1\n"
+    path.write_text(source)
+    namespace: dict[str, Any] = {"__name__": path.stem}
+    exec(compile(source, str(path), "exec"), namespace)
+    return namespace[name]
+
+
+def test_a_third_party_kernels_token_covers_every_file_of_its_package(
+    tmp_path: Path,
+) -> None:
+    outer = tmp_path / "outer"
+    (outer / "inner").mkdir(parents=True)
+    (outer / "__init__.py").write_text("")
+    (outer / "inner" / "__init__.py").write_text("")
+    (outer / "settings.py").write_text("SCALE = 10\n")
+    (tmp_path / "unrelated.py").write_text("SCALE = 10\n")
+    in_package = _function_in_file(outer / "inner" / "kernels.py")
+    alone = _function_in_file(tmp_path / "alone.py")
+
+    def tokens() -> tuple[tuple[str, ...], tuple[str, ...]]:
+        # Each process digests a package once.
+        _package_digest.cache_clear()
+        return _build_token(in_package), _build_token(alone)
+
+    first = tokens()
+    (tmp_path / "unrelated.py").write_text("SCALE = 100\n")
+    assert tokens() == first
+    # A file without kernels in the outermost package, beside the kernel's own
+    # subpackage, changes the package kernel's token only.
+    (outer / "settings.py").write_text("SCALE = 100\n")
+    second = tokens()
+    assert second[0] != first[0]
+    assert second[1] == first[1]
+    _append(tmp_path / "alone.py", "\n# A comment.\n")
+    assert tokens()[1] != second[1]
+
+
+@pytest.mark.parametrize("location", ["in_tree", "cache_dir", "user_cache"])
+def test_scoped_caches_stay_where_numba_puts_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
+) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    function = _function_in_file(package / "kernels.py")
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(
+        numba.config, "CACHE_DIR", str(cache_dir) if location == "cache_dir" else ""
+    )
+    for name, value in _user_directories(tmp_path).items():
+        monkeypatch.setenv(name, value)
+    cache_root = {
+        "in_tree": package / "__pycache__",
+        "cache_dir": cache_dir,
+        "user_cache": tmp_path / "user",
+    }[location]
+
+    with _read_only(package) if location == "user_cache" else nullcontext():
+        cache_path = njit(cache=True)(function)._cache.cache_path
+        numba_cache_path = FunctionCache(function).cache_path
+
+    assert cache_path == numba_cache_path
+    assert Path(cache_path).is_relative_to(cache_root)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("float64(float64)",),
+        (["int64(int64)", "float64(float64)"],),
+        (numba.float64(numba.float64),),
+        (is_nan, is_nan),
+    ],
+    ids=["text", "list", "signature", "two_functions"],
+)
+def test_njit_takes_no_signature(arguments: tuple[Any, ...]) -> None:
+    with pytest.raises(TypeError, match="takes no signature"):
+        njit(*arguments)
+
+
+def test_njit_refuses_a_cache_option_other_than_true_or_false() -> None:
+    with pytest.raises(
+        TypeError, match="^njit's cache option must be True or False; got 'yes'$"
+    ):
+        njit(cache="yes")
+
+
+def test_njit_returns_the_python_function_without_the_jit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(numba.config, "DISABLE_JIT", True)
+
+    assert njit(is_nan) is is_nan
+    assert njit(cache=True)(is_nan) is is_nan
+
+
+def test_njit_without_a_cache_leaves_numbas_null_cache() -> None:
+    for kernel in (njit(is_nan), njit(cache=False)(is_nan)):
+        assert isinstance(kernel, Dispatcher)
+        assert isinstance(kernel._cache, NullCache)
+    # Numba's other options reach the dispatcher.
+    assert njit(is_nan, nogil=True).targetoptions["nogil"] is True
+
+
+def test_a_kernel_that_njit_caches_loads_in_a_new_dispatcher(cache_dir: Path) -> None:
+    kernel = njit(cache=True, nogil=True)(is_nan)
+
+    assert type(kernel._cache) is _kernel_cache_class()
+    assert kernel(math.nan)
+    assert (compiled(kernel), loaded(kernel)) == (1, 0)
+    # A new dispatcher of the function, as in a new process, loads its code.
+    later = njit(cache=True, nogil=True)(is_nan)
+    assert later(math.nan)
+    assert (compiled(later), loaded(later)) == (0, 1)
+    assert Path(later.stats.cache_path).is_relative_to(cache_dir)
+
+
+def _module_name(package: str, relative: str) -> str:
+    parts = [package, *Path(relative).with_suffix("").parts]
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
+def _is_njit(node: ast.expr) -> bool:
+    target = node.func if isinstance(node, ast.Call) else node
+    return isinstance(target, ast.Name) and target.id == "njit"
+
+
+def _kernels(directory: Path, package: str) -> dict[str, tuple[Any, bool]]:
+    """Import each module of the package that uses njit and return each kernel
+    it compiles, by qualified name, with whether a call wraps its function."""
+    kernels: dict[str, tuple[Any, bool]] = {}
+    for relative in sorted(_kernel_module_sources(directory)):
+        name = _module_name(package, relative)
+        module = importlib.import_module(name)
+        for node in ast.walk(ast.parse((directory / relative).read_text())):
+            if isinstance(node, ast.FunctionDef):
+                if not any(_is_njit(decorator) for decorator in node.decorator_list):
+                    continue
+                kernel, wrapped = node.name, False
+            elif (
+                isinstance(node, ast.Call)
+                and _is_njit(node.func)
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+            ):
+                kernel, wrapped = node.args[0].id, True
+            else:
+                continue
+            # A kernel defined inside a function is out of this walk's reach.
+            assert hasattr(module, kernel), f"{name}.{kernel} is not a module global"
+            kernels[f"{name}.{kernel}"] = getattr(module, kernel), wrapped
+    return kernels
+
+
+def test_every_cytearc_kernel_has_the_build_scoped_cache() -> None:
+    kernels = _kernels(CYTEARC_DIR, "cytearc")
+    wrapped = sorted(name for name, (_, is_wrapped) in kernels.items() if is_wrapped)
+    # rolling_window compiles its kernel at its first call; a new kernel that
+    # compiles the same way needs its own line here.
+    assert wrapped == ["cytearc.utils.arrays._rolling_window_kernel"]
+    rolling_window(np.ones((3, 1)), 2)
+    dispatchers = {
+        name: kernel for name, (kernel, is_wrapped) in kernels.items() if not is_wrapped
+    }
+    dispatchers[wrapped[0]] = importlib.import_module(
+        "cytearc.utils.arrays"
+    )._rollingWindowImpl
+
+    assert len(dispatchers) > 200
+    token = _cytearc_build_token()
+    for name, kernel in dispatchers.items():
+        assert isinstance(kernel, Dispatcher), name
+        assert type(kernel._cache) is _kernel_cache_class(), name
+        stamp = kernel._cache._cache_file._source_stamp
+        assert len(stamp) == 3 and stamp[1:] == token, name
+
+
+def _code_objects(code: types.CodeType) -> Iterator[types.CodeType]:
+    yield code
+    for constant in code.co_consts:
+        if isinstance(constant, types.CodeType):
+            yield from _code_objects(constant)
+
+
+def _global_reads(function: Any) -> set[tuple[str, ...]]:
+    """Return each global name that ``function``'s code reads, with the
+    attributes that it reads from the global in a row."""
+    reads: set[tuple[str, ...]] = set()
+    for code in _code_objects(function.__code__):
+        chain: tuple[str, ...] = ()
+        for instruction in dis.get_instructions(code):
+            if instruction.opname == "LOAD_ATTR" and chain:
+                chain = (*chain, instruction.argval)
+                continue
+            if instruction.opname == "EXTENDED_ARG":
+                continue
+            if chain:
+                reads.add(chain)
+            chain = (instruction.argval,) if instruction.opname == "LOAD_GLOBAL" else ()
+        if chain:
+            reads.add(chain)
+    return reads
+
+
+def _module_level_statements(statements: list[ast.stmt]) -> Iterator[ast.stmt]:
+    for statement in statements:
+        yield statement
+        if not isinstance(
+            statement, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+        ):
+            for field in ("body", "orelse", "finalbody", "handlers"):
+                yield from _module_level_statements(getattr(statement, field, []))
+
+
+def _bound_names(target: ast.expr) -> list[str]:
+    return [node.id for node in ast.walk(target) if isinstance(node, ast.Name)]
+
+
+def _free_names(expression: ast.expr) -> set[str]:
+    """Return the names that ``expression`` reads from its module."""
+    names = {node.id for node in ast.walk(expression) if isinstance(node, ast.Name)}
+    local = {
+        node.id
+        for node in ast.walk(expression)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
+    local |= {node.arg for node in ast.walk(expression) if isinstance(node, ast.arg)}
+    return names - local
+
+
+class _ModuleBindings:
+    """Where each module-level name of a module comes from, read from its source."""
+
+    def __init__(self, module: types.ModuleType) -> None:
+        self.path = Path(inspect.getfile(module)).resolve()
+        self.imports: dict[str, list[tuple[str, str | None]]] = defaultdict(list)
+        self.values: dict[str, list[ast.expr]] = defaultdict(list)
+        self.definitions: set[str] = set()
+        for statement in _module_level_statements(
+            ast.parse(self.path.read_text()).body
+        ):
+            match statement:
+                case ast.Import(names=aliases):
+                    for alias in aliases:
+                        if alias.asname:
+                            self.imports[alias.asname].append((alias.name, None))
+                        else:
+                            root = alias.name.partition(".")[0]
+                            self.imports[root].append((root, None))
+                case ast.ImportFrom(module=source, names=aliases, level=level):
+                    origin = importlib.util.resolve_name(
+                        "." * level + (source or ""), module.__package__
+                    )
+                    for alias in aliases:
+                        self.imports[alias.asname or alias.name].append(
+                            (origin, alias.name)
+                        )
+                case ast.Assign(targets=targets, value=value):
+                    for target in targets:
+                        for name in _bound_names(target):
+                            self.values[name].append(value)
+                case (
+                    ast.AnnAssign(target=target, value=value)
+                    | ast.AugAssign(target=target, value=value)
+                ) if value is not None:
+                    for name in _bound_names(target):
+                        self.values[name].append(value)
+                case ast.For(target=target, iter=value):
+                    for name in _bound_names(target):
+                        self.values[name].append(value)
+                case ast.FunctionDef(name=name) | ast.ClassDef(name=name):
+                    self.definitions.add(name)
+
+    def binds(self, name: str) -> bool:
+        return name in self.imports or name in self.values or name in self.definitions
+
+
+class _KernelWalk:
+    """Find the files whose source a package's kernels compile into their
+    machine code: their own, those of the kernels they call, and those of the
+    constants they read, following imports and the names that module
+    constants are computed from."""
+
+    def __init__(self, directory: Path, package: str) -> None:
+        self.directory = directory.resolve()
+        self.package = package
+        self.bindings: dict[str, _ModuleBindings] = {}
+
+    def in_package(self, module_name: str) -> bool:
+        return module_name == self.package or module_name.startswith(f"{self.package}.")
+
+    def module_bindings(self, module_name: str) -> _ModuleBindings:
+        if module_name not in self.bindings:
+            self.bindings[module_name] = _ModuleBindings(sys.modules[module_name])
+        return self.bindings[module_name]
+
+    def origin(
+        self, module_name: str, name: str, seen: set[tuple[str, str]]
+    ) -> set[Path]:
+        """Return the files whose source sets the global ``name`` of a module
+        of the package."""
+        if (module_name, name) in seen:
+            return set()
+        seen.add((module_name, name))
+        bindings = self.module_bindings(module_name)
+        assert bindings.binds(name), f"cannot tell where {module_name}.{name} is set"
+        files = {bindings.path}
+        for source, attribute in bindings.imports.get(name, []):
+            submodule = sys.modules.get(f"{source}.{attribute}")
+            if attribute is None or submodule is not None:
+                # A module bound to the name: any global it holds may count.
+                imported = sys.modules[source] if submodule is None else submodule
+                if self.in_package(imported.__name__):
+                    files.add(Path(inspect.getfile(imported)).resolve())
+            elif self.in_package(source):
+                files |= self.origin(source, attribute, seen)
+        for value in bindings.values.get(name, []):
+            for free in _free_names(value):
+                if bindings.binds(free) or free not in vars(builtins):
+                    files |= self.origin(module_name, free, seen)
+        return files
+
+    def files_read(self, function: Any, pending: list[Any]) -> set[Path]:
+        """Return the files that ``function``'s machine code depends on, and
+        add the kernels of the package that it calls to ``pending``."""
+        assert function.__closure__ is None, f"{function.__qualname__} has a closure"
+        files = {Path(inspect.getfile(function)).resolve()}
+        module_globals = function.__globals__
+        for root, *attributes in _global_reads(function):
+            if root not in module_globals:
+                # A builtin, which Numba compiles itself.
+                continue
+            owner, name, value = module_globals["__name__"], root, module_globals[root]
+            for attribute in attributes:
+                if not isinstance(value, types.ModuleType) or not self.in_package(
+                    value.__name__
+                ):
+                    # Numba compiles its own versions of other packages'
+                    # functions, such as NumPy's, and reads their constants.
+                    break
+                owner, name = value.__name__, attribute
+                value = getattr(value, attribute)
+            if isinstance(value, types.ModuleType):
+                continue
+            python_function = getattr(value, "py_func", value)
+            if isinstance(value, Dispatcher) or (
+                isinstance(value, types.FunctionType | type)
+                and self.in_package(value.__module__ or "")
+            ):
+                files.add(Path(inspect.getfile(python_function)).resolve())
+                if isinstance(python_function, types.FunctionType):
+                    pending.append(python_function)
+            elif self.in_package(owner) and not isinstance(
+                value, types.FunctionType | types.BuiltinFunctionType | type
+            ):
+                files |= self.origin(owner, name, set())
+        return files
+
+    def dependencies(self) -> dict[str, set[str]]:
+        """Return, for each kernel of the package and each kernel it calls,
+        the files whose source its machine code holds, relative to the package
+        where they lie in it."""
+        pending = [
+            getattr(kernel, "py_func", kernel)
+            for kernel, _ in _kernels(self.directory, self.package).values()
+        ]
+        dependencies: dict[str, set[str]] = {}
+        while pending:
+            function = pending.pop()
+            name = f"{function.__module__}.{function.__qualname__}"
+            if name in dependencies:
+                continue
+            files = self.files_read(function, pending)
+            dependencies[name] = {
+                path.relative_to(self.directory).as_posix()
+                if path.is_relative_to(self.directory)
+                else str(path)
+                for path in files
+            }
+        return dependencies
+
+
+def test_kernels_read_globals_only_from_kernel_modules() -> None:
+    # The build token digests only the modules that use njit, so every file
+    # that a kernel's machine code depends on has to be one of them.
+    dependencies = _KernelWalk(CYTEARC_DIR, "cytearc").dependencies()
+    digested = set(_kernel_module_sources(CYTEARC_DIR))
+
+    assert {
+        kernel: sorted(files - digested)
+        for kernel, files in dependencies.items()
+        if files - digested
+    } == {}
+    # The walk sees the kernels that call kernels or read constants of other
+    # files, such as Leiden's and those of the perturbation tests.
+    assert dependencies["cytearc.perturbation.calling._call_block"] == {
+        "perturbation/calling.py",
+        "perturbation/histograms.py",
+    }
+    assert sum(len(files) > 1 for files in dependencies.values()) > 30
+
+
+_WALK_PACKAGE = "kernel_walk_probe"
+_WALK_SOURCES = {
+    "__init__.py": "",
+    # No kernel, and no use of njit.
+    "settings.py": "SCALE = 10\n",
+    # A kernel compiled by Numba's own decorator, without njit.
+    "legacy.py": """import numba
+
+
+@numba.jit(nopython=True)
+def triple(value):
+    return 3 * value
+""",
+    "helpers.py": """from cytearc.utils.numba import njit
+
+STEP = 1
+
+
+@njit
+def step(value):
+    return value + STEP
+""",
+    "kernels.py": """from cytearc.utils.numba import njit
+
+from . import settings
+from .helpers import STEP, step
+from .legacy import triple
+from .settings import SCALE
+
+LIMIT = tuple(SCALE * factor for factor in range(2))[-1]
+
+
+@njit
+def scaled(value):
+    return value * SCALE
+
+
+@njit
+def limited(value):
+    return min(value, LIMIT)
+
+
+@njit
+def shifted(value):
+    return value + settings.SCALE
+
+
+@njit
+def tripled(value):
+    return triple(value)
+
+
+@njit
+def stepped(value):
+    return step(value) + STEP
+""",
+}
+
+
+def test_the_kernel_walk_reports_files_without_njit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / _WALK_PACKAGE
+    package.mkdir()
+    for name, source in _WALK_SOURCES.items():
+        (package / name).write_text(source)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        dependencies = _KernelWalk(package, _WALK_PACKAGE).dependencies()
+    finally:
+        for name in [name for name in sys.modules if name.startswith(_WALK_PACKAGE)]:
+            del sys.modules[name]
+    digested = set(_kernel_module_sources(package))
+
+    assert digested == {"helpers.py", "kernels.py"}
+    # An imported constant, a module constant computed from it, a constant read
+    # through its module, and a kernel of a file without njit.
+    assert {
+        kernel.removeprefix(f"{_WALK_PACKAGE}."): sorted(files - digested)
+        for kernel, files in dependencies.items()
+        if files - digested
+    } == {
+        "kernels.scaled": ["settings.py"],
+        "kernels.limited": ["settings.py"],
+        "kernels.shifted": ["settings.py"],
+        "kernels.tripled": ["legacy.py"],
+        "legacy.triple": ["legacy.py"],
+    }
+    assert dependencies[f"{_WALK_PACKAGE}.kernels.stepped"] == {
+        "helpers.py",
+        "kernels.py",
+    }

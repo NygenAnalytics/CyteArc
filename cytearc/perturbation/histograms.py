@@ -17,9 +17,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 import numpy as np
-from numba import njit
 
 from cytearc.perturbation.guide_calls import checked_count_blocks
+from cytearc.utils.numba import njit
 
 __all__ = [
     "DENSE_COUNTS",

@@ -29,11 +29,11 @@ from typing import Any, Literal, NamedTuple, cast
 
 import numpy as np
 import pandas as pd
-from numba import njit
 
 from ..utils.arguments import float_argument, integer_argument
 from ..utils.arrays import regex_match_mask, within_bounds
 from ..utils.logging import logger
+from ..utils.numba import njit
 from .gene_families import GENE_FAMILY_PATTERNS
 
 __all__ = [

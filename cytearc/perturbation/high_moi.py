@@ -36,7 +36,7 @@ from dataclasses import dataclass
 
 import numba
 import numpy as np
-from numba import njit, prange
+from numba import prange
 
 from cytearc.perturbation.associations import PairResults, staged_p_values
 from cytearc.perturbation.glm import (
@@ -58,6 +58,7 @@ from cytearc.perturbation.random_sets import (
     resampling_keys,
     set_key,
 )
+from cytearc.utils.numba import njit
 
 __all__ = [
     "RESAMPLING",

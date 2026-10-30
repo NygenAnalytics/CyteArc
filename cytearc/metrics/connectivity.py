@@ -1,10 +1,10 @@
 from collections.abc import Sequence
 
-from numba import njit
 import numpy as np
 import pandas as pd
 import zarr
 
+from ..utils.numba import njit
 from ..utils.progress import iter_progress
 from ._types import ZarrArray
 

@@ -65,12 +65,7 @@ These calls do not create module-load cycles.
   `/proc/<pid>/task/<tid>/children` lists, and reads the parent of every process only where the
   kernel has no such lists.
   It also owns streamed column moments (`utils/moments.py`) and the one warning helper (`utils/warnings.py`), which points each warning at the caller's code.
-  `utils/numba.py` gives third-party Numba kernels compiled without a cache, such as umap-learn's,
-  an on-disk cache with its own files for each set of compile options, once per process and before
-  their first use. `import_umap` imports umap-learn so that the kernels its import compiles, most of
-  them pynndescent's, get that cache too. A lock on each cache directory, which every process
-  shares, keeps those caches' saves atomic, so processes that import at once compile each kernel
-  once.
+  `utils/numba.py` defines `njit`, which compiles every CyteArc kernel, and gives third-party Numba kernels compiled without a cache, such as umap-learn's, an on-disk cache once per process and before their first use. Each cache it gives a kernel keeps its own files for each set of compile options and is tied to the source of the package that defines the kernel: for CyteArc's kernels, CyteArc's version and a digest of every module that uses `njit`; for a third-party kernel, a digest of every Python file of its package. A kernel then compiles again when a kernel it calls or a constant it reads changes in another file, which Numba's own cache misses. Constants that kernels read belong in modules that use `njit`, as `tests/test_numba_dispatcher_cache.py` checks. `import_umap` imports umap-learn so that the kernels its import compiles, most of them pynndescent's, get that cache too. A lock on each cache directory, which every process shares, keeps those caches' saves atomic, so processes that import at once compile each kernel once.
   Zarr-specific helpers belong in `storage`, not `utils`.
 
 Facade aliases do not change implementation ownership.

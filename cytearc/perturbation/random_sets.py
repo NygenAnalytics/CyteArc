@@ -21,7 +21,9 @@ the sets hold some cells but not all, as the groups they stand for do.
 import math
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
+
+from cytearc.utils.numba import njit
 
 __all__ = [
     "N_BUCKETS",

@@ -2,13 +2,13 @@ import math
 from typing import Any
 
 import numpy as np
-from numba import njit
 from scipy.sparse import csr_matrix, diags
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import LinearOperator, gmres, splu
 
 from ..neighbors.graph import csr_symmetry_error
 from ..utils.logging import logger
+from ..utils.numba import njit
 
 _GMRES_RESTART = 20
 # Coarse aggregates above this count are merged into fewer pseudotime bins so

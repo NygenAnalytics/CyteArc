@@ -7,11 +7,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 from scipy.sparse import csr_matrix
 
 from ...utils.arguments import integer_argument
 from ...utils.arrays import read_only_copy
+from ...utils.numba import njit
 
 if TYPE_CHECKING:
     import pandas as pd

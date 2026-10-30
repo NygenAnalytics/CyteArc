@@ -34,10 +34,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from numba import njit, prange
+from numba import prange
 
 from ..utils.arguments import integer_argument
 from ..utils.moments import welford_add
+from ..utils.numba import njit
 from .efficiency import id_column_setting, rows_setting
 
 __all__ = [

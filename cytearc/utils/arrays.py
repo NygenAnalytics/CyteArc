@@ -375,7 +375,7 @@ def rolling_window(a: np.ndarray, w: int) -> np.ndarray:
     """Apply a centered rolling mean along the first axis."""
     global _rollingWindowImpl
     if _rollingWindowImpl is None:
-        from numba import jit
+        from .numba import njit
 
-        _rollingWindowImpl = jit(nopython=True, cache=True)(_rolling_window_kernel)
+        _rollingWindowImpl = njit(cache=True)(_rolling_window_kernel)
     return np.asarray(_rollingWindowImpl(a, w))
