@@ -402,7 +402,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         sites and divided by their number, NaN for a selected cell that no
         file names; ``covered_sites`` counts its sites with depth above 0 and
         ``listed`` marks the cells a file names. ``ds.select_cells(counts,
-        low=10)`` keeps cells with a mean depth of at least 10.
+        low=10)`` keeps cells with a mean depth above 10.
 
         Args:
             paths: One file or folder, or several of one format.

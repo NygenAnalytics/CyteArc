@@ -66,7 +66,7 @@ counts = ds.variants.import_counts(
 
 The unit of the counts is the format's own, except for cellsnp-lite, MQuad and VarTrix, which count UMIs or reads depending on how they ran: their import needs `count_unit="umis"` or `count_unit="reads"`. Tools define depth two ways, which the artifact's `depth_definition` records: every read or UMI at the site (`"all"`), or those of the reference and alternative only (`"reference_and_alternative"`). cellsnp-lite's reference count is DP less AD, and its depth DP plus OTH.
 
-Depth 0 means the cell was not covered at the site, so an allele frequency there is undefined rather than 0. Signac's `AlleleFreq` and VarTrix's explicit zeros turn such cells into frequency 0; CyteArc stores no entry for them, so a reader can tell "not covered" from "covered, without the allele".
+Depth 0 means the cell was not covered at the site, so an allele frequency there is undefined rather than 0. Signac's `AlleleFreq` turns such cells into frequency 0; CyteArc stores no depth for them, so a reader can tell "not covered" from "covered, without the allele", which VarTrix's explicit zeros mark.
 
 ## Read counts
 
@@ -84,7 +84,7 @@ table["frequency"] = table["count"] / table["depth"]
 
 ## The variant_counts artifact
 
-The artifact holds a row per selected cell in its canonical `mean_depth`, the cell's depth summed over the sites and divided by their number, NaN for a cell that no file names, `covered_sites` and `listed`, so `ds.select_cells(counts, low=10)` keeps cells with a mean depth of at least 10. {ref}`Read per-cell values <cell_aligned_kinds>` lists them, and {doc}`artifacts` describes the sites, alleles and long tables, which are sorted by cell in row bands.
+The artifact holds a row per selected cell in its canonical `mean_depth`, the cell's depth summed over the sites and divided by their number, NaN for a cell that no file names, `covered_sites` and `listed`, so `ds.select_cells(counts, low=10)` keeps cells with a mean depth above 10, the cells whose variants mgatk scores. {ref}`Read per-cell values <cell_aligned_kinds>` lists them, and {doc}`artifacts` describes the sites, alleles and long tables, which are sorted by cell in row bands.
 
 ## Plot depth
 
