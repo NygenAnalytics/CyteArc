@@ -38,6 +38,7 @@ from tests.barcode_join_helpers import (
     write_clone_file,
     write_contig_file,
     write_guide_call_file,
+    write_variant_file,
 )
 from tests.perturbation_helpers import traced_peak
 
@@ -187,6 +188,15 @@ def _cells_with_barcodes(store, ref) -> set[str]:
     return set(cells.index[cells["n_barcodes"] > 0])
 
 
+def _variant_counts(store, paths, **options):
+    return store.variants.import_counts(paths, **options)
+
+
+def _listed_cells(store, ref) -> set[str]:
+    cells = store.variants.load_counts(ref, sites=[]).cells
+    return set(cells.index[cells["listed"]])
+
+
 IMPORTERS = {
     "import_guide_calls": Importer(
         name="import_guide_calls",
@@ -220,6 +230,14 @@ IMPORTERS = {
         run=_barcodes,
         joined=_cells_with_barcodes,
         files=("the barcode file", "the barcode files"),
+    ),
+    "import_counts": Importer(
+        name="import_counts",
+        several_files=True,
+        write=write_variant_file,
+        run=_variant_counts,
+        joined=_listed_cells,
+        files=("the variant file", "the variant files"),
     ),
 }
 MULTI_FILE = [name for name, importer in IMPORTERS.items() if importer.several_files]

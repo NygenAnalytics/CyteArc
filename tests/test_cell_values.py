@@ -625,6 +625,23 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
     # Each cell's barcode set differs from the others', so each cell with a
     # barcode is a clone of one, numbered in the order of the cells.
     barcode_clones = store.clones.barcode_clones(barcodes, method="sets")
+    # A GoT table names five of the cells; the sixth has no mean depth. Its
+    # long tables hold other numbers of rows than cells.
+    got = tmp_path / "CALR.tsv"
+    got.write_text(
+        "BC\tWT.calls\tMUT.calls\tGenotype\n"
+        + "".join(
+            f"{cell}\t{wild_type}\t{mutant}\t{call}\n"
+            for cell, wild_type, mutant, call in zip(
+                ids[:5],
+                [3, 0, 2, 1, 4],
+                [1, 2, 2, 0, 1],
+                ["MUT", "MUT", "MUT", "WT", "MUT"],
+                strict=True,
+            )
+        )
+    )
+    variant_counts = store.variants.import_counts(got, cell_selection=cells)
     stored: dict[str, set[str]] = {}
 
     for ref, expected in (
@@ -656,6 +673,7 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
             barcode_clones,
             np.array(["clone_1", "clone_2", "", "clone_3", "", "clone_4"]),
         ),
+        (variant_counts, np.array([4.0, 2.0, 4.0, 1.0, 5.0, np.nan])),
     ):
         loaded = store.artifacts.load_values(ref)
         np.testing.assert_array_equal(loaded.values, expected)

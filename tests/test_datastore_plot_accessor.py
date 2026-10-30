@@ -58,6 +58,7 @@ _STORE_PLOT_METHODS = (
     "receptor_qc",
     "run_recipe",
     "spectratype",
+    "variant_depth",
 )
 
 _GRAPH_REF = ArtifactRef(
@@ -185,6 +186,11 @@ _BARCODES_REF = ArtifactRef(
     scope="datastore",
     kind="lineage_barcodes",
     artifact_id="a" * 64,
+)
+_VARIANT_COUNTS_REF = ArtifactRef(
+    scope="datastore",
+    kind="variant_counts",
+    artifact_id="b" * 64,
 )
 
 
@@ -431,6 +437,7 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
         ("gene_pairing", (_CLONOTYPES_REF,), {"count": "clonotypes", "top": 5}),
         ("spectratype", (_RECEPTORS_REF,), {"sequence": "nt", "group_by": "sample"}),
         ("barcode_calls", (_BARCODES_REF,), {"max_barcodes": 6}),
+        ("variant_depth", (_VARIANT_COUNTS_REF,), {"group_by": "sample"}),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -495,6 +502,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("source"))
     elif name == "barcode_calls":
         expected_args.append(expected_kwargs.pop("barcodes"))
+    elif name == "variant_depth":
+        expected_args.append(expected_kwargs.pop("counts"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

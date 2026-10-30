@@ -177,6 +177,7 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "run_recipe",
     "spectratype",
     "theme_context",
+    "variant_depth",
 )
 
 
@@ -443,6 +444,7 @@ concrete = (
     "cytearc.plotting.recipes",
     "cytearc.plotting.repertoire",
     "cytearc.plotting.summary",
+    "cytearc.plotting.variants",
 )
 print(json.dumps({{
     "advertised": sorted(name for name in exports if name in dir(plotting)),

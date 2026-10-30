@@ -772,6 +772,21 @@ class DataStorePlotAccessor:
         """Plot the barcodes per cell, UMIs per barcode and reads per molecule of lineage barcodes."""
         return self._forward(PlotResult, "barcode_calls", locals())
 
+    def variant_depth(
+        self,
+        counts: ArtifactRef,
+        *,
+        group_by: str | None = None,
+        groups: ArtifactRef | None = None,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the depth of variant counts at each site and in each cell."""
+        return self._forward(PlotResult, "variant_depth", locals())
+
     def guide_calls(
         self,
         calls: ArtifactRef,

@@ -498,6 +498,7 @@ def test_matrix_has_no_domain_or_orchestration_dependencies():
                 "regulons",
                 "repertoire",
                 "trajectory",
+                "variants",
                 "writers",
             },
         )
@@ -558,6 +559,7 @@ def test_algorithm_domains_do_not_import_orchestration_or_io():
         "regulons": set(),
         "repertoire": set(),
         "trajectory": {"artifacts.py"},
+        "variants": set(),
     }
     for package_name, allowed_storage_importers in storage_exceptions.items():
         assert _upward_imports(package_name, forbidden) == set()
@@ -1091,14 +1093,21 @@ def test_reader_implementations_are_runtime_isolated():
         "_delimited.py",
         "_text.py",
         "_sparse.py",
+        "_variant_files.py",
         "airr.py",
         "cellranger.py",
+        "cellsnp.py",
         "clone_tables.py",
         "csv.py",
+        "giftwrap.py",
+        "got.py",
         "h5ad.py",
         "lineage_barcodes.py",
+        "mgatk.py",
+        "mito_afm.py",
         "mtx.py",
         "seurat.py",
+        "vartrix.py",
     }
     assert required_files.issubset(path.name for path in readers_root.glob("*.py"))
     assert _runtime_import_modules(
@@ -1110,11 +1119,17 @@ def test_reader_implementations_are_runtime_isolated():
     format_modules = {
         "readers.airr",
         "readers.cellranger",
+        "readers.cellsnp",
         "readers.clone_tables",
         "readers.csv",
+        "readers.giftwrap",
+        "readers.got",
         "readers.h5ad",
         "readers.lineage_barcodes",
+        "readers.mgatk",
+        "readers.mito_afm",
         "readers.mtx",
+        "readers.vartrix",
         "readers.seurat",
     }
     shared_reader_imports = {
@@ -1125,17 +1140,23 @@ def test_reader_implementations_are_runtime_isolated():
             "readers._sparse",
             "readers._text",
         },
+        "cellsnp.py": {"readers._variant_files"},
         "clone_tables.py": {
             "readers._delimited",
             "readers._h5ad_columns",
             "readers._text",
         },
         "csv.py": {"readers._text"},
+        "giftwrap.py": {"readers._variant_files"},
+        "got.py": {"readers._variant_files"},
         "lineage_barcodes.py": {
             "readers._delimited",
             "readers._h5ad_columns",
             "readers._text",
         },
+        "mgatk.py": {"readers._variant_files"},
+        "mito_afm.py": {"readers._h5ad_columns", "readers._text"},
+        "vartrix.py": {"readers._variant_files"},
         "h5ad.py": {
             "readers._assay_names",
             "readers._h5ad_columns",
@@ -1417,6 +1438,8 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         }
         assert operation_imports.issubset(allowed_operation_helpers)
 
+    from cytearc.datastore._operations.variants import _VariantOperationsMixin
+
     mixins = (
         _AmbientOperationsMixin,
         _EmbeddingOperationsMixin,
@@ -1440,6 +1463,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         _CloneOperationsMixin,
         _LineageBarcodeOperationsMixin,
         _RepertoireOperationsMixin,
+        _VariantOperationsMixin,
     )
     assert all("__init__" not in mixin.__dict__ for mixin in mixins)
     assert all(mixin.__bases__ == (object,) for mixin in mixins)

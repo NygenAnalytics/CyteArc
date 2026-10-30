@@ -13,7 +13,7 @@ import hashlib
 import os
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -110,8 +110,9 @@ class BarcodeFile:
     """One file of an import and how its barcodes name cells.
 
     Attributes:
-        path: The file.
-        sha256: The SHA-256 of its bytes, which identifies it.
+        path: The file, or the folder of files that one source writes.
+        sha256: The SHA-256 of its bytes, or of the files of a folder, which
+            identifies it.
         barcode_prefix: Text before each barcode in the cell IDs, or None.
         barcode_suffix: Text after each barcode in the cell IDs, or None.
         barcode_pattern: A regular expression whose ``barcode`` group is the
@@ -266,6 +267,7 @@ def barcode_files(
     barcode_suffix: Any = None,
     barcode_pattern: Any = None,
     what: str = "file",
+    identify: Callable[[str | os.PathLike[str]], str] = file_sha256,
 ) -> tuple[BarcodeFile, ...]:
     """Check the files of an import and their options, in canonical order.
 
@@ -280,6 +282,9 @@ def barcode_files(
         barcode_suffix: Text after each barcode in the cell IDs.
         barcode_pattern: A regular expression with a named group ``barcode``.
         what: What a file is, such as ``"clone file"``, for the errors.
+        identify: Returns the SHA-256 that identifies a path: by default the
+            digest of a file's bytes; an importer whose sources are folders
+            of files passes one that digests the files a folder holds.
 
     Raises:
         TypeError: If an argument has the wrong type.
@@ -311,7 +316,7 @@ def barcode_files(
     files = [
         BarcodeFile(
             path=path,
-            sha256=file_sha256(path),
+            sha256=identify(path),
             barcode_prefix=prefix,
             barcode_suffix=suffix,
             barcode_pattern=pattern,
