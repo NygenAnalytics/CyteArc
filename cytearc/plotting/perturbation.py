@@ -1,6 +1,6 @@
 """Figures of pooled CRISPR screens."""
 
-from collections.abc import Callable, Collection, Hashable, Sequence
+from collections.abc import Callable, Collection, Hashable, Iterable, Sequence
 from typing import Any, Literal
 
 import numpy as np
@@ -27,6 +27,7 @@ from ._figure import (
 )
 from ._labels import place_layout_labels, register_layout_labels
 from ._style import (
+    COLORBLIND_PALETTE,
     DEFAULT_RASTERIZE_THRESHOLD,
     apply_figure_chrome,
     default_point_size,
@@ -36,22 +37,30 @@ from ._style import (
     theme_context,
 )
 
+# Colours by role, which every screen figure shares. The highlight marks what
+# a figure is about: called cells, fitted fits, significant rows and pairs,
+# knocked-out cells, discovery pairs and positive controls; the muted grey
+# marks the rest. Cells without a call take a lighter grey, cells with several
+# called guides red, and the reference colour marks what a figure is read
+# against: thresholds, the Benjamini-Hochberg cut, the fitted perturbed
+# component and the negative controls.
+_HIGHLIGHT_COLOR = "#2b6cb0"
+_MUTED_COLOR = "#9e9e9e"
+_UNCALLED_COLOR = "#bdbdbd"
+_SEVERAL_GUIDES_COLOR = "#d1495b"
+_REFERENCE_COLOR = "#d55e00"
+
 _PANELS = ("guides_per_cell", "cells_per_guide", "top_fraction")
 # A library of at most this many guides gets one labelled bar per guide; a
 # larger one is drawn as guides ranked by their cells.
 _LABELLED_GUIDES = 40
-_NEGATIVE_COLOR = "#bdbdbd"
-_ONE_GUIDE_COLOR = "#2b6cb0"
-_MULTIPLE_COLOR = "#d1495b"
 _CALL_GROUPS = (
-    ("No guide called", _NEGATIVE_COLOR),
-    ("One guide called", _ONE_GUIDE_COLOR),
-    ("Several guides called", _MULTIPLE_COLOR),
+    ("No guide called", _UNCALLED_COLOR),
+    ("One guide called", _HIGHLIGHT_COLOR),
+    ("Several guides called", _SEVERAL_GUIDES_COLOR),
 )
 
 _OVERVIEW_PANELS = ("thresholds", "statuses")
-_THRESHOLD_COLOR = "#d55e00"
-_OTHER_STATUS_COLOR = "#9e9e9e"
 # The statuses whose fits keep their parameters, so a panel can draw the model.
 _MODEL_STATUSES = ("fitted", "no_positive")
 # The posterior of each fitted method and the columns that hold its parameters.
@@ -62,9 +71,10 @@ _POSTERIORS: dict[str, tuple[Callable[..., np.ndarray], tuple[str, ...]]] = {
     ),
     "gaussian": (gaussian_posterior, ("low_mean", "high_mean", "std", "high_weight")),
 }
-# A panel draws the posterior at every count of a guide whose largest count is
-# at most this, and at this many counts spread on the log scale otherwise.
-_POSTERIOR_COUNTS = 1000
+# A curve over the integers from 1 to n, such as the posterior at each UMI
+# count of a guide or the QQ band of n p-values, is drawn at every integer
+# when n is at most this, and at this many spread on the log scale otherwise.
+_LOG_SPREAD_POINTS = 1000
 _CALLED_LABEL = "Cells called"
 _NOT_CALLED_LABEL = "Cells not called"
 _POSTERIOR_LABEL = "Posterior of the guide population"
@@ -79,27 +89,22 @@ _LEGEND_ORDER = (
 )
 
 _EFFICIENCY_PANEL = "efficiency"
-_SIGNIFICANT_COLOR = _ONE_GUIDE_COLOR
-_NOT_SIGNIFICANT_COLOR = _OTHER_STATUS_COLOR
 # A point's area, in points squared, grows linearly with the row's perturbed
 # cells from the first area to the second, which the row with the most takes.
 _POINT_AREAS = (16.0, 144.0)
 # A fold change of minus infinity is drawn at the left edge with this marker.
-_NO_UMI_MARKER = "<"
+_MINUS_INFINITY_MARKER = "<"
 _NO_UMI_LABEL = "No UMI remains in the perturbed cells"
 
 _EDISTANCE_PANEL = "edistance"
 
 _CLASSES_PANEL = "classes"
 _SCORES_PANEL = "scores"
-_KO_COLOR = _SIGNIFICANT_COLOR
-_NP_COLOR = _NOT_SIGNIFICANT_COLOR
 _NP_LABEL = "NP (not perturbed)"
 # A bar's share of the space between two neighbouring targets.
 _CLASS_BAR_HEIGHT = 0.7
 _CONTROL_CURVE_LABEL = "Fitted control component"
 _PERTURBED_CURVE_LABEL = "Fitted perturbed component"
-_PERTURBED_CURVE_COLOR = _THRESHOLD_COLOR
 # A scores panel sorts its cells' scores into this many bins of equal width.
 _SCORE_BINS = 30
 # A fitted normal is drawn at this many points, from the first bin or 3
@@ -123,19 +128,16 @@ _TOP_EDGE_LABEL = "p-value below 1e-300"
 _BEYOND_AXIS_LABEL = "Beyond the axis"
 _NO_COUNTS_LABEL = "No counts in the perturbed cells"
 _CUT_LABEL = "Benjamini-Hochberg cut"
-_TARGETING_COLOR = _SIGNIFICANT_COLOR
-_NEGATIVE_CONTROL_COLOR = _THRESHOLD_COLOR
 # The label of a p-value axis names the side of a one-sided test.
 _SIDE_WORDS = {"left": " for a decrease", "right": " for an increase"}
-# A volcano label sits this many points beside its point. A label that would
-# overlap another steps up or down by its height and this gap, in points, at
-# most this many times each way.
+# The label of a point, such as a volcano's pair or a named perturbation,
+# sits this many points beside it. A label that would overlap another steps
+# up or down by its height and this gap, in points, at most this many times
+# each way.
 _LABEL_OFFSET = 5.0
 _LABEL_GAP = 2.0
 _LABEL_STEPS = 8
-# A QQ band is drawn at every rank of at most this many p-values, and at this
-# many ranks spread evenly on the log scale otherwise.
-_BAND_RANKS = 1000
+# A QQ band holds this share of the null distribution of each ranked p-value.
 _BAND_PROBABILITY = 0.95
 # The points of a strip of control p-values spread at random, with a fixed
 # seed, over this distance on each side of the strip's position.
@@ -150,15 +152,10 @@ _UNASSIGNED = -1
 # Clusters take CyteArc's colourblind-safe palette without its black, its
 # yellow and the two colours that read as grey, in the order in which they
 # first appear in the leaf order, and the ninth takes the first colour again.
-_CLUSTER_COLORS = (
-    "#0072B2",
-    "#E69F00",
-    "#009E73",
-    "#D55E00",
-    "#CC79A7",
-    "#56B4E9",
-    "#2E8B57",
-    "#A05195",
+_CLUSTER_COLORS = tuple(
+    color
+    for color in COLORBLIND_PALETTE
+    if color not in {"#F0E442", "#000000", "#6F4E7C", "#8C564B"}
 )
 # The grey of unassigned perturbations recedes on each theme and stays apart
 # from every cluster colour, even with colour vision deficiency.
@@ -185,12 +182,12 @@ _DISTANCE_CMAP = "Blues_r"
 _RING_AREA = 4.0
 
 
-def _guide_calls(store: Any, calls: ArtifactRef) -> Any:
-    """Load saved guide calls through the store's narrow loader."""
-    loader = getattr(getattr(store, "perturbation", None), "load_guide_calls", None)
+def _load(store: Any, method: str, ref: ArtifactRef, **keywords: Any) -> Any:
+    """Read a saved record with the store's narrow loader ``perturbation.<method>``."""
+    loader = getattr(getattr(store, "perturbation", None), method, None)
     if not callable(loader):
-        raise TypeError("store does not provide guide calls")
-    return loader(calls)
+        raise TypeError(f"store does not provide perturbation.{method}")
+    return loader(ref, **keywords)
 
 
 def _call_group(n_guides: np.ndarray) -> np.ndarray:
@@ -231,7 +228,7 @@ def guide_calls(
         max_guides_per_cell, "max_guides_per_cell", minimum=2
     )
     bins = integer_argument(bins, "bins", minimum=1)
-    loaded = _guide_calls(store, calls)
+    loaded = _load(store, "load_guide_calls", calls)
     cells = loaded.cells
     if cells.empty:
         raise ValueError("The guide calls hold no cell, so there is nothing to plot")
@@ -288,7 +285,7 @@ def guide_calls(
             target, panel_keys=list(_PANELS), figsize=figsize, n_columns=3
         )
         ax = axes["guides_per_cell"]
-        bar_colors = [_NEGATIVE_COLOR, _ONE_GUIDE_COLOR] + [_MULTIPLE_COLOR] * (
+        bar_colors = [_UNCALLED_COLOR, _HIGHLIGHT_COLOR] + [_SEVERAL_GUIDES_COLOR] * (
             max_guides_per_cell - 1
         )
         ax.bar(guides_per_cell["guides"], guides_per_cell["cells"], color=bar_colors)
@@ -302,14 +299,14 @@ def guide_calls(
             ax.barh(
                 positions,
                 cells_per_guide["one_guide_cells"],
-                color=_ONE_GUIDE_COLOR,
+                color=_HIGHLIGHT_COLOR,
                 label="Only guide called",
             )
             ax.barh(
                 positions,
                 cells_per_guide["several_guide_cells"],
                 left=cells_per_guide["one_guide_cells"],
-                color=_MULTIPLE_COLOR,
+                color=_SEVERAL_GUIDES_COLOR,
                 label="One of several called",
             )
             ax.set_yticks(positions, cells_per_guide["guide"].tolist())
@@ -325,7 +322,7 @@ def guide_calls(
             ax.plot(
                 ranks,
                 cells_per_guide["one_guide_cells"],
-                color=_ONE_GUIDE_COLOR,
+                color=_HIGHLIGHT_COLOR,
                 label="Only guide called",
             )
             ax.set_xlabel("Guides, ranked by cells")
@@ -372,6 +369,7 @@ def guide_calls(
                 "guide_calls": calls.to_dict(),
                 "source": loaded.source,
                 "max_guides_per_cell": max_guides_per_cell,
+                "bins": bins,
             },
         ),
         owns_figure=owns,
@@ -382,33 +380,30 @@ def guide_calls(
     return plot_result
 
 
-def _guide_thresholds(
-    store: Any, thresholds: ArtifactRef, guides: list[str] | None
-) -> Any:
-    """Load saved guide thresholds through the store's narrow loader."""
-    loader = getattr(
-        getattr(store, "perturbation", None), "load_guide_thresholds", None
-    )
-    if not callable(loader):
-        raise TypeError("store does not provide guide thresholds")
-    return loader(thresholds, guides=guides)
+def _distinct_values(
+    values: Sequence[Any] | None, name: str, noun: str, *, numbers: bool = False
+) -> list[Any] | None:
+    """Return the distinct labels of ``values`` in their order, or None.
 
-
-def _distinct_labels(
-    values: Sequence[str] | None, name: str, noun: str
-) -> list[str] | None:
-    """Return the distinct labels of ``values`` in their order, or None."""
+    With ``numbers``, the values are whole numbers instead, which may be NumPy
+    integers but not booleans and come back as Python integers.
+    """
     if values is None:
         return None
     if (
-        isinstance(values, str)
+        isinstance(values, str | bytes)
         or not isinstance(values, Sequence)
-        or not all(isinstance(value, str) for value in values)
+        or not all(
+            isinstance(value, int | np.integer) and not isinstance(value, bool)
+            if numbers
+            else isinstance(value, str)
+            for value in values
+        )
     ):
         raise TypeError(f"{name} must be a sequence of {noun}s or None")
     if not values:
         raise ValueError(f"{name} must name at least one {noun}")
-    return list(dict.fromkeys(values))
+    return list(dict.fromkeys(int(value) if numbers else value for value in values))
 
 
 def _quoted(values: Sequence[Any]) -> str:
@@ -433,6 +428,20 @@ def _require_known(
     unknown = [name for name in requested or () if name not in known]
     if unknown:
         raise ValueError(f"{holder} have no {noun} named {_quoted(unknown)}")
+
+
+def _status_counts(
+    counts: pd.Series, statuses: Sequence[str], *, leave_out: str | None = None
+) -> list[str]:
+    """Count the rows of each status of ``statuses`` but ``leave_out``, as "3 no_cells".
+
+    ``counts`` counts rows by status; a status without rows is left out.
+    """
+    return [
+        f"{int(counts[status]):,} {status}"
+        for status in statuses
+        if status != leave_out and status in counts.index
+    ]
 
 
 def _untested_message(by: str, value: str, others: list[str]) -> str:
@@ -483,17 +492,60 @@ def _log_count_scale(ax: Any, axis: str, largest: float) -> None:
     ticks.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
 
 
-def _posterior_counts(max_umi: int) -> np.ndarray:
-    """Return the counts from 1 to ``max_umi`` at which a panel draws the posterior.
+def _log_spread_integers(n: int) -> np.ndarray:
+    """Return the integers from 1 to ``n`` at which a curve over them is drawn.
 
-    Every count when ``max_umi`` is at most 1,000, and otherwise 1,000 counts
+    Every integer when ``n`` is at most 1,000, and otherwise 1,000 integers
     spread evenly on the log scale and rounded, without repeats.
     """
-    if max_umi <= _POSTERIOR_COUNTS:
-        return np.arange(1, max_umi + 1, dtype=np.int64)
-    spread = np.rint(np.geomspace(1.0, float(max_umi), _POSTERIOR_COUNTS))
-    counts: np.ndarray = np.unique(spread.astype(np.int64))
-    return counts
+    if n <= _LOG_SPREAD_POINTS:
+        return np.arange(1, n + 1, dtype=np.int64)
+    spread = np.rint(np.geomspace(1.0, float(n), _LOG_SPREAD_POINTS))
+    integers: np.ndarray = np.unique(spread.astype(np.int64))
+    return integers
+
+
+def _legend_entries(
+    axes: Iterable[Any], order: Sequence[str]
+) -> tuple[list[Any], list[str]]:
+    """Return the first handle of each label that ``axes`` draw, in ``order``."""
+    entries: dict[str, Any] = {}
+    for ax in axes:
+        for handle, label in zip(*ax.get_legend_handles_labels(), strict=True):
+            entries.setdefault(label, handle)
+    labels = [label for label in order if label in entries]
+    return [entries[label] for label in labels], labels
+
+
+def _place_legend(
+    figure: Any,
+    ax: Any,
+    handles: list[Any],
+    labels: list[str],
+    *,
+    owns: bool,
+    show_legend: bool,
+    loc: str = "best",
+    bbox_to_anchor: tuple[float, float] | None = None,
+) -> None:
+    """Centre the legend right of the plot's own figure, clear of a long title.
+
+    In a caller's figure the legend goes in ``ax`` at ``loc``, so that a
+    composed figure keeps it with its panel.
+    """
+    if not (show_legend and handles):
+        return
+    if owns:
+        figure.legend(handles, labels, loc="outside right center", frameon=False)
+    else:
+        ax.legend(
+            handles,
+            labels,
+            loc=loc,
+            bbox_to_anchor=bbox_to_anchor,
+            frameon=False,
+            fontsize="small",
+        )
 
 
 def _threshold_panels(
@@ -541,19 +593,11 @@ def _threshold_panels(
             posteriors.append(
                 (row["sample"], row["guide"], posterior_counts, posterior)
             )
-    entries: dict[str, Any] = {}
-    for each in [*axes.values(), *twins.values()]:
-        for handle, label in zip(*each.get_legend_handles_labels(), strict=True):
-            entries.setdefault(label, handle)
-    labels = [label for label in _LEGEND_ORDER if label in entries]
-    if show_legend and labels:
-        handles = [entries[label] for label in labels]
-        if owns:
-            figure.legend(handles, labels, loc="outside right center", frameon=False)
-        else:
-            # The posterior axes lies over its panel, so the legend goes on top.
-            first = twins.get(keys[0], axes[keys[0]])
-            first.legend(handles, labels, loc="best", frameon=False, fontsize="small")
+    handles, labels = _legend_entries([*axes.values(), *twins.values()], _LEGEND_ORDER)
+    # The posterior axes lies over its panel, so a legend in the panel goes on
+    # top of it.
+    first = twins.get(keys[0], axes[keys[0]])
+    _place_legend(figure, first, handles, labels, owns=owns, show_legend=show_legend)
     apply_figure_chrome(figure, theme)
     for twin in twins.values():
         twin.spines["right"].set_visible(True)
@@ -588,8 +632,8 @@ def _threshold_panel(
     _log_count_scale(ax, "x", max(int(umis.max(initial=0)), limit))
     ax.set_yscale("log")
     for chosen, color, label in (
-        (called, _ONE_GUIDE_COLOR, _CALLED_LABEL),
-        (~called, _NEGATIVE_COLOR, _NOT_CALLED_LABEL),
+        (called, _HIGHLIGHT_COLOR, _CALLED_LABEL),
+        (~called, _UNCALLED_COLOR, _NOT_CALLED_LABEL),
     ):
         if chosen.any():
             # The edge keeps the narrow bars of large counts visible.
@@ -607,7 +651,7 @@ def _threshold_panel(
     if threshold > 0:
         ax.axvline(
             threshold,
-            color=_THRESHOLD_COLOR,
+            color=_REFERENCE_COLOR,
             linestyle="--",
             linewidth=1.2,
             label=_THRESHOLD_LABEL,
@@ -615,7 +659,7 @@ def _threshold_panel(
     if limit != threshold:
         ax.axvline(
             limit,
-            color=_THRESHOLD_COLOR,
+            color=_REFERENCE_COLOR,
             linestyle=":",
             linewidth=1.6,
             label=_RAISED_LABEL,
@@ -638,7 +682,7 @@ def _threshold_panel(
     if status not in _MODEL_STATUSES:
         return None
     function, names = _POSTERIORS[method]
-    posterior_counts = _posterior_counts(int(row["max_umi"]))
+    posterior_counts = _log_spread_integers(int(row["max_umi"]))
     posterior = function(posterior_counts, **{name: float(row[name]) for name in names})
     twin = ax.twinx()
     twin.plot(
@@ -684,6 +728,7 @@ def _posterior_table(
 def _threshold_overview(
     selected: pd.DataFrame,
     *,
+    rasterized: bool,
     target: Any | None,
     figsize: tuple[float, float] | None,
     theme: str,
@@ -702,8 +747,8 @@ def _threshold_overview(
     _log_count_scale(ax, "x", n_umi_cells.max(initial=0))
     _log_count_scale(ax, "y", threshold.max(initial=0))
     for chosen, color, label, order in (
-        (fitted, _ONE_GUIDE_COLOR, "fitted", 3.0),
-        (~fitted, _OTHER_STATUS_COLOR, "other statuses", 2.0),
+        (fitted, _HIGHLIGHT_COLOR, "fitted", 3.0),
+        (~fitted, _MUTED_COLOR, "other statuses", 2.0),
     ):
         if chosen.any():
             ax.scatter(
@@ -715,7 +760,7 @@ def _threshold_overview(
                 linewidths=0,
                 label=label,
                 zorder=order,
-                rasterized=len(selected) > DEFAULT_RASTERIZE_THRESHOLD,
+                rasterized=rasterized,
             )
     ax.set_xlabel("Cells with a UMI of the guide")
     ax.set_ylabel("Threshold of the model, UMIs")
@@ -729,7 +774,7 @@ def _threshold_overview(
         positions,
         fits.to_numpy(dtype=np.int64),
         color=[
-            _ONE_GUIDE_COLOR if status == "fitted" else _OTHER_STATUS_COLOR
+            _HIGHLIGHT_COLOR if status == "fitted" else _MUTED_COLOR
             for status in FIT_STATUSES
         ],
     )
@@ -776,7 +821,7 @@ def guide_thresholds(
     Without ``guides``, the plot gives an overview of every fit: the model's
     threshold against the number of cells with a UMI of the guide, one point
     per guide and sample on log scales of count + 1, and the number of fits of
-    each status.
+    each status. The points are rasterized when there are more than 50,000.
 
     ``samples`` keeps the panels or points of those sample labels. When
     ``guides`` and ``samples`` select more than ``max_panels`` panels, the plot
@@ -790,9 +835,9 @@ def guide_thresholds(
     and otherwise 1,000 counts spread evenly on the log scale.
     """
     max_panels = integer_argument(max_panels, "max_panels", minimum=1)
-    requested = _distinct_labels(guides, "guides", "guide ID")
-    kept = _distinct_labels(samples, "samples", "sample label")
-    loaded = _guide_thresholds(store, thresholds, requested)
+    requested = _distinct_values(guides, "guides", "guide ID")
+    kept = _distinct_values(samples, "samples", "sample label")
+    loaded = _load(store, "load_guide_thresholds", thresholds, guides=requested)
     table = loaded.table
     histograms = loaded.histograms
     stored = list(dict.fromkeys(table["sample"].tolist()))
@@ -824,12 +869,15 @@ def guide_thresholds(
                 f"guides and samples select {len(selected)} panels, more than "
                 f"max_panels={max_panels}"
             )
+    # The overview's points are rasterized beyond 50,000; the panels draw bars.
+    rasterized = requested is None and len(selected) > DEFAULT_RASTERIZE_THRESHOLD
     require_matplotlib()
     legends: tuple[LegendSpec, ...]
     with theme_context(theme):
         if requested is None:
             figure, axes, owns = _threshold_overview(
                 selected,
+                rasterized=rasterized,
                 target=target,
                 figsize=figsize,
                 theme=theme,
@@ -880,6 +928,7 @@ def guide_thresholds(
                 "guides": requested,
                 "samples": None if loaded.sample_column is None else sample_order,
                 "max_panels": max_panels,
+                "rasterized": rasterized,
             },
         ),
         owns_figure=owns,
@@ -890,14 +939,6 @@ def guide_thresholds(
     return plot_result
 
 
-def _perturbation_efficiency(store: Any, efficiency: ArtifactRef) -> Any:
-    """Load a saved perturbation efficiency table through the store's narrow loader."""
-    loader = getattr(getattr(store, "perturbation", None), "load_efficiency", None)
-    if not callable(loader):
-        raise TypeError("store does not provide perturbation efficiency")
-    return loader(efficiency)
-
-
 def _point_areas(n_cells: np.ndarray, most: int) -> np.ndarray:
     """Return point areas that grow linearly with ``n_cells``, largest at ``most``."""
     smallest, largest = _POINT_AREAS
@@ -905,73 +946,112 @@ def _point_areas(n_cells: np.ndarray, most: int) -> np.ndarray:
     return areas
 
 
-def _fold_change_limits(fold_changes: np.ndarray) -> tuple[float, float, float]:
-    """Return the limits of the fold change axis and the position of minus infinity.
+def _axis_limits(values: np.ndarray) -> tuple[float, float, float]:
+    """Return the limits of an axis of ``values`` and the position of minus infinity.
 
-    The axis holds 0 and every finite fold change, with a margin of 5% of their
-    range on each side; the range runs from -1 to 1 when no finite fold change
-    differs from 0. Minus infinity sits at the left edge, three margins left of
-    the smallest fold change, and the axis reaches one margin past it when a
-    fold change is minus infinity.
+    The axis holds 0 and every finite value, with a margin of 5% of their
+    range on each side; the range runs from -1 to 1 when no finite value
+    differs from 0. Minus infinity, such as the fold change of a gene without
+    counts, sits at the left edge, three margins left of the smallest value,
+    and the axis reaches one margin past it when a value is minus infinity.
     """
-    finite = fold_changes[np.isfinite(fold_changes)]
+    finite = values[np.isfinite(values)]
     low = float(finite.min(initial=0.0))
     high = float(finite.max(initial=0.0))
     if low == high:
         low, high = -1.0, 1.0
     margin = 0.05 * (high - low)
     edge = low - 3.0 * margin
-    left = edge - margin if np.isneginf(fold_changes).any() else low - margin
+    left = edge - margin if np.isneginf(values).any() else low - margin
     return left, high + margin, edge
 
 
-def _efficiency_legend(
+def _row_figsize(
+    n_rows: int, n_title: int, *, legend_inches: float
+) -> tuple[float, float]:
+    """Size a figure of ``n_rows`` labelled rows under ``n_title`` lines of title."""
+    return (6.2 + legend_inches, max(3.0, 0.22 * n_rows + 1.0 + 0.25 * n_title))
+
+
+def _draw_rows(
+    ax: Any,
+    values: np.ndarray,
+    n_cells: np.ndarray,
     significant: np.ndarray,
-    no_umi: np.ndarray,
+    labels: list[str],
+    *,
+    foreground: str,
+) -> None:
+    """Draw one labelled row per perturbation, the first at the top.
+
+    Each row's point is highlighted when it is significant, grows with its
+    ``n_cells``, and marks minus infinity at the left edge.
+    """
+    positions = np.arange(len(values), dtype=np.float64)[::-1]
+    colors = np.where(significant, _HIGHLIGHT_COLOR, _MUTED_COLOR)
+    areas = _point_areas(n_cells, int(n_cells.max(initial=0)))
+    left, right, edge = _axis_limits(values)
+    minus_infinity = np.isneginf(values)
+    x = np.where(minus_infinity, edge, values)
+    ax.axvline(0.0, color=foreground, linewidth=0.8, zorder=1)
+    for chosen, shape in (
+        (~minus_infinity, "o"),
+        (minus_infinity, _MINUS_INFINITY_MARKER),
+    ):
+        if chosen.any():
+            ax.scatter(
+                x[chosen],
+                positions[chosen],
+                s=areas[chosen],
+                c=colors[chosen].tolist(),
+                marker=shape,
+                linewidths=0,
+                zorder=3,
+            )
+    ax.set_xlim(left, right)
+    ax.set_yticks(positions, labels)
+    ax.set_ylim(-0.7, len(values) - 0.3)
+    # Faint lines lead from each label to its point.
+    ax.tick_params(axis="y", length=0)
+    ax.grid(axis="y", color=foreground, alpha=0.15, linewidth=0.5)
+    ax.set_axisbelow(True)
+
+
+def _row_legend(
     n_cells: np.ndarray,
     *,
+    significant: np.ndarray | None,
+    no_umi: np.ndarray | None,
     alpha: float,
     foreground: str,
 ) -> tuple[list[Any], list[str]]:
     """Return the legend handles and labels of the drawn rows.
 
-    Filled points give the colours of the drawn rows. Hollow markers give the
-    marker of minus infinity and the point areas of the smallest, middle and
-    largest perturbed cell counts.
+    Filled points give the colours of the rows, unless ``significant`` is None
+    because no row has a p-value. Hollow markers give the marker of the rows
+    that ``no_umi`` marks, if any, and the point areas of the smallest, middle
+    and largest perturbed cell counts.
     """
-    from matplotlib.lines import Line2D
-
-    def marker(shape: str, color: str | None, size: float) -> Any:
-        return Line2D(
-            [],
-            [],
-            marker=shape,
-            linestyle="",
-            markerfacecolor="none" if color is None else color,
-            markeredgecolor=foreground if color is None else "none",
-            markersize=size,
-        )
-
     handles: list[Any] = []
     labels: list[str] = []
-    for chosen, color, label in (
-        (significant, _SIGNIFICANT_COLOR, f"Significant at FDR {alpha:g}"),
-        (~significant, _NOT_SIGNIFICANT_COLOR, "Not significant"),
-    ):
-        if chosen.any():
-            handles.append(marker("o", color, 7.0))
-            labels.append(label)
-    if no_umi.any():
-        handles.append(marker(_NO_UMI_MARKER, None, 7.0))
-        labels.append(_NO_UMI_LABEL)
-    if len(n_cells):
-        ordered = np.sort(n_cells)
-        counts = np.unique(ordered[[0, len(ordered) // 2, -1]])
-        for count, area in zip(
-            counts.tolist(), _point_areas(counts, int(ordered[-1])), strict=True
+    if significant is not None:
+        for chosen, color, label in (
+            (significant, _HIGHLIGHT_COLOR, f"Significant at FDR {alpha:g}"),
+            (~significant, _MUTED_COLOR, "Not significant"),
         ):
-            handles.append(marker("o", None, float(np.sqrt(area))))
-            labels.append(f"{count:,} perturbed cell" + ("" if count == 1 else "s"))
+            if chosen.any():
+                handles.append(_legend_marker("o", color, foreground))
+                labels.append(label)
+    if no_umi is not None and no_umi.any():
+        handles.append(_legend_marker(_MINUS_INFINITY_MARKER, None, foreground))
+        labels.append(_NO_UMI_LABEL)
+    ordered = np.sort(n_cells)
+    counts = np.unique(ordered[[0, len(ordered) // 2, -1]])
+    for count, area in zip(
+        counts.tolist(), _point_areas(counts, int(ordered[-1])), strict=True
+    ):
+        handles.append(_legend_marker("o", None, foreground, size=float(np.sqrt(area))))
+        labels.append(f"{count:,} perturbed cell" + ("" if count == 1 else "s"))
     return handles, labels
 
 
@@ -1013,7 +1093,7 @@ def efficiency(
     """
     max_rows = integer_argument(max_rows, "max_rows", minimum=1)
     alpha = _alpha_argument(alpha)
-    loaded = _perturbation_efficiency(store, efficiency)
+    loaded = _load(store, "load_efficiency", efficiency)
     table = loaded.table
     by = str(loaded.by)
     tested_status = EFFICIENCY_STATUSES[EFFICIENCY_TESTED]
@@ -1032,11 +1112,7 @@ def efficiency(
             f"The {max_rows:,} of {n_tested:,} tested {by}s with the smallest "
             "adjusted p-values"
         )
-    others = [
-        f"{int(statuses[status]):,} {status}"
-        for status in EFFICIENCY_STATUSES
-        if status != tested_status and status in statuses.index
-    ]
+    others = _status_counts(statuses, EFFICIENCY_STATUSES, leave_out=tested_status)
     if drawn.empty:
         raise ValueError(_untested_message(by, "fold change", others))
     if others:
@@ -1051,15 +1127,9 @@ def efficiency(
         f"{name} (no UMI remains)" if missing else str(name)
         for name, missing in zip(drawn[by].tolist(), no_umi.tolist(), strict=True)
     ]
-    positions = np.arange(len(drawn), dtype=np.float64)[::-1]
-    colors = np.where(significant, _SIGNIFICANT_COLOR, _NOT_SIGNIFICANT_COLOR)
-    areas = _point_areas(n_cells, int(n_cells.max(initial=0)))
-    left, right, edge = _fold_change_limits(fold_changes)
-    x = np.where(no_umi, edge, fold_changes)
     if figsize is None and target is None:
-        figsize = (
-            6.2 + (2.6 if show_legend else 0.0),
-            max(3.0, 0.22 * len(drawn) + 1.0 + 0.25 * len(title)),
+        figsize = _row_figsize(
+            len(drawn), len(title), legend_inches=2.6 if show_legend else 0.0
         )
     require_matplotlib()
     with theme_context(theme):
@@ -1068,37 +1138,19 @@ def efficiency(
         )
         ax = axes[_EFFICIENCY_PANEL]
         foreground = foreground_color(theme)
-        ax.axvline(0.0, color=foreground, linewidth=0.8, zorder=1)
-        for chosen, shape in ((~no_umi, "o"), (no_umi, _NO_UMI_MARKER)):
-            if chosen.any():
-                ax.scatter(
-                    x[chosen],
-                    positions[chosen],
-                    s=areas[chosen],
-                    c=colors[chosen].tolist(),
-                    marker=shape,
-                    linewidths=0,
-                    zorder=3,
-                )
-        ax.set_xlim(left, right)
-        ax.set_yticks(positions, labels)
-        ax.set_ylim(-0.7, max(len(drawn), 1) - 0.3)
-        # Faint lines lead from each label to its point.
-        ax.tick_params(axis="y", length=0)
-        ax.grid(axis="y", color=foreground, alpha=0.15, linewidth=0.5)
-        ax.set_axisbelow(True)
+        _draw_rows(
+            ax, fold_changes, n_cells, significant, labels, foreground=foreground
+        )
         ax.set_xlabel("Log2 fold change against control cells")
         ax.set_title("\n".join(title))
-        handles, texts = _efficiency_legend(
-            significant, no_umi, n_cells, alpha=alpha, foreground=foreground
+        handles, texts = _row_legend(
+            n_cells,
+            significant=significant,
+            no_umi=no_umi,
+            alpha=alpha,
+            foreground=foreground,
         )
-        if show_legend and handles:
-            if owns:
-                # Centred beside the axes, so the multi-line title never runs
-                # into it.
-                figure.legend(handles, texts, loc="outside right center", frameon=False)
-            else:
-                ax.legend(handles, texts, loc="best", frameon=False, fontsize="small")
+        _place_legend(figure, ax, handles, texts, owns=owns, show_legend=show_legend)
         apply_figure_chrome(figure, theme)
     controls = table["n_control_cells"].to_numpy(dtype=np.int64)
     plot_result = PlotResult(
@@ -1136,30 +1188,6 @@ def efficiency(
     if show:
         plot_result.show()
     return plot_result
-
-
-def _perturbation_edistance(store: Any, edistance: ArtifactRef) -> Any:
-    """Load saved perturbation E-distances through the store's narrow loader."""
-    loader = getattr(getattr(store, "perturbation", None), "load_edistance", None)
-    if not callable(loader):
-        raise TypeError("store does not provide perturbation E-distances")
-    return loader(edistance)
-
-
-def _edistance_limits(distances: np.ndarray) -> tuple[float, float]:
-    """Return the limits of the E-distance axis.
-
-    The axis holds 0 and every finite E-distance, with a margin of 5% of their
-    range on each side; the range runs from -1 to 1 when no E-distance differs
-    from 0.
-    """
-    finite = distances[np.isfinite(distances)]
-    low = float(finite.min(initial=0.0))
-    high = float(finite.max(initial=0.0))
-    if low == high:
-        low, high = -1.0, 1.0
-    margin = 0.05 * (high - low)
-    return low - margin, high + margin
 
 
 @close_figures_on_error
@@ -1201,7 +1229,7 @@ def edistance(
     """
     max_rows = integer_argument(max_rows, "max_rows", minimum=1)
     alpha = _alpha_argument(alpha)
-    loaded = _perturbation_edistance(store, edistance)
+    loaded = _load(store, "load_edistance", edistance)
     table = loaded.table
     by = str(loaded.by)
     tested_status = EDISTANCE_STATUSES[EDISTANCE_TESTED]
@@ -1231,23 +1259,15 @@ def edistance(
         )
     if len(drawn) and not permuted:
         title.append("Without permutation tests")
-    others = [
-        f"{int(statuses[status]):,} {status}"
-        for status in EDISTANCE_STATUSES
-        if status != tested_status and status in statuses.index
-    ]
+    others = _status_counts(statuses, EDISTANCE_STATUSES, leave_out=tested_status)
     if drawn.empty:
         raise ValueError(_untested_message(by, "E-distance", others))
     if others:
         title.append("Not plotted: " + ", ".join(others))
-    positions = np.arange(len(drawn), dtype=np.float64)[::-1]
-    colors = np.where(significant, _SIGNIFICANT_COLOR, _NOT_SIGNIFICANT_COLOR)
-    areas = _point_areas(n_cells, int(n_cells.max(initial=0)))
-    left, right = _edistance_limits(distances)
+    labels = [str(name) for name in drawn[by].tolist()]
     if figsize is None and target is None:
-        figsize = (
-            6.2 + (2.6 if show_legend else 0.0),
-            max(3.0, 0.22 * len(drawn) + 1.0 + 0.25 * len(title)),
+        figsize = _row_figsize(
+            len(drawn), len(title), legend_inches=2.6 if show_legend else 0.0
         )
     require_matplotlib()
     with theme_context(theme):
@@ -1256,42 +1276,19 @@ def edistance(
         )
         ax = axes[_EDISTANCE_PANEL]
         foreground = foreground_color(theme)
-        ax.axvline(0.0, color=foreground, linewidth=0.8, zorder=1)
-        if len(drawn):
-            ax.scatter(
-                distances,
-                positions,
-                s=areas,
-                c=colors.tolist(),
-                marker="o",
-                linewidths=0,
-                zorder=3,
-            )
-        ax.set_xlim(left, right)
-        ax.set_yticks(positions, [str(name) for name in drawn[by].tolist()])
-        ax.set_ylim(-0.7, max(len(drawn), 1) - 0.3)
-        # Faint lines lead from each label to its point.
-        ax.tick_params(axis="y", length=0)
-        ax.grid(axis="y", color=foreground, alpha=0.15, linewidth=0.5)
-        ax.set_axisbelow(True)
+        _draw_rows(ax, distances, n_cells, significant, labels, foreground=foreground)
         ax.set_xlabel("E-distance to control cells")
         ax.set_title("\n".join(title))
-        # The entries of the efficiency legend, without minus infinity, and
-        # without the p-values when no row has one.
-        handles, texts = _efficiency_legend(
-            significant if permuted else significant[:0],
-            np.zeros(len(drawn), dtype=bool),
+        # An E-distance is never minus infinity, and without permutation tests
+        # no row has a p-value.
+        handles, texts = _row_legend(
             n_cells,
+            significant=significant if permuted else None,
+            no_umi=None,
             alpha=alpha,
             foreground=foreground,
         )
-        if show_legend and handles:
-            if owns:
-                # Centred beside the axes, so the multi-line title never runs
-                # into it.
-                figure.legend(handles, texts, loc="outside right center", frameon=False)
-            else:
-                ax.legend(handles, texts, loc="best", frameon=False, fontsize="small")
+        _place_legend(figure, ax, handles, texts, owns=owns, show_legend=show_legend)
         apply_figure_chrome(figure, theme)
     controls = table["n_control_cells"].to_numpy(dtype=np.int64)
     plot_result = PlotResult(
@@ -1330,14 +1327,6 @@ def edistance(
     if show:
         plot_result.show()
     return plot_result
-
-
-def _mixscape_classes(store: Any, classes: ArtifactRef) -> Any:
-    """Load saved Mixscape classes through the store's narrow loader."""
-    loader = getattr(getattr(store, "perturbation", None), "load_mixscape", None)
-    if not callable(loader):
-        raise TypeError("store does not provide Mixscape classes")
-    return loader(classes)
 
 
 def _ko_label(perturbation_type: str) -> str:
@@ -1386,11 +1375,7 @@ def _unfitted_statuses(rows: pd.DataFrame, names: Sequence[str]) -> list[str]:
     fitted = chosen.loc[chosen["status"] == "fitted", "target"]
     unfitted = chosen[~chosen["target"].isin(fitted)]
     counts = unfitted.drop_duplicates(["target", "status"])["status"].value_counts()
-    return [
-        f"{int(counts[status]):,} {status}"
-        for status in MIXSCAPE_STATUSES
-        if status in counts.index
-    ]
+    return _status_counts(counts, MIXSCAPE_STATUSES)
 
 
 def _class_bars(
@@ -1436,9 +1421,8 @@ def _class_bars(
         for name, count in zip(drawn["target"].tolist(), n_cells.tolist(), strict=True)
     ]
     if figsize is None and target is None:
-        figsize = (
-            6.2 + (2.2 if show_legend else 0.0),
-            max(3.0, 0.22 * len(drawn) + 1.0 + 0.25 * len(title)),
+        figsize = _row_figsize(
+            len(drawn), len(title), legend_inches=2.2 if show_legend else 0.0
         )
     figure, axes, owns = normalize_axes_target(
         target, panel_keys=[_CLASSES_PANEL], figsize=figsize
@@ -1450,7 +1434,7 @@ def _class_bars(
                 positions,
                 ko_share,
                 height=_CLASS_BAR_HEIGHT,
-                color=_KO_COLOR,
+                color=_HIGHLIGHT_COLOR,
                 label=_ko_label(perturbation_type),
             ),
             ko_share,
@@ -1461,7 +1445,7 @@ def _class_bars(
                 np_share,
                 height=_CLASS_BAR_HEIGHT,
                 left=ko_share,
-                color=_NP_COLOR,
+                color=_MUTED_COLOR,
                 label=_NP_LABEL,
             ),
             np_share,
@@ -1476,20 +1460,18 @@ def _class_bars(
     ax.set_xlabel("Share of the target's cells")
     ax.set_title("\n".join(title))
     handles = [container for container, shares in bars if (shares > 0).any()]
-    if show_legend and handles:
-        texts = [container.get_label() for container in handles]
-        if owns:
-            figure.legend(handles, texts, loc="outside right center", frameon=False)
-        else:
-            # Every bar spans the axes, so the legend goes beside them.
-            ax.legend(
-                handles,
-                texts,
-                loc="center left",
-                bbox_to_anchor=(1.02, 0.5),
-                frameon=False,
-                fontsize="small",
-            )
+    # Every bar spans the axes, so a legend in a caller's figure goes beside
+    # them.
+    _place_legend(
+        figure,
+        ax,
+        handles,
+        [container.get_label() for container in handles],
+        owns=owns,
+        show_legend=show_legend,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+    )
     apply_figure_chrome(figure, theme)
     return figure, axes, owns, drawn
 
@@ -1526,7 +1508,7 @@ def _score_panel(
             ko_counts,
             width=widths,
             align="edge",
-            color=_KO_COLOR,
+            color=_HIGHLIGHT_COLOR,
             label=_ko_label(perturbation_type),
         )
     if np_counts.any():
@@ -1536,7 +1518,7 @@ def _score_panel(
             width=widths,
             bottom=ko_counts,
             align="edge",
-            color=_NP_COLOR,
+            color=_MUTED_COLOR,
             label=_NP_LABEL,
         )
     # Each normal is scaled to the cells of its class, so that it covers as
@@ -1553,7 +1535,7 @@ def _score_panel(
             float(fit["perturbed_mean"]),
             float(fit["perturbed_sd"]),
             int(np.count_nonzero(ko)),
-            _PERTURBED_CURVE_COLOR,
+            _REFERENCE_COLOR,
             _PERTURBED_CURVE_LABEL,
         ),
     )
@@ -1653,24 +1635,17 @@ def _score_panels(
             split_column=loaded.split_column,
             foreground=foreground,
         )
-    entries: dict[str, Any] = {}
-    for ax in axes.values():
-        for handle, label in zip(*ax.get_legend_handles_labels(), strict=True):
-            entries.setdefault(label, handle)
-    order = (
-        _ko_label(perturbation_type),
-        _NP_LABEL,
-        _CONTROL_CURVE_LABEL,
-        _PERTURBED_CURVE_LABEL,
+    handles, labels = _legend_entries(
+        axes.values(),
+        (
+            _ko_label(perturbation_type),
+            _NP_LABEL,
+            _CONTROL_CURVE_LABEL,
+            _PERTURBED_CURVE_LABEL,
+        ),
     )
-    labels = [label for label in order if label in entries]
     first = axes[names[0]]
-    if show_legend:
-        handles = [entries[label] for label in labels]
-        if owns:
-            figure.legend(handles, labels, loc="outside right center", frameon=False)
-        else:
-            first.legend(handles, labels, loc="best", frameon=False, fontsize="small")
+    _place_legend(figure, first, handles, labels, owns=owns, show_legend=show_legend)
     if owns:
         figure.suptitle("\n".join(title))
     else:
@@ -1686,7 +1661,7 @@ def mixscape(
     store: Any,
     classes: ArtifactRef,
     *,
-    panel: str = "classes",
+    panel: Literal["classes", "scores"] = "classes",
     targets: Sequence[str] | None = None,
     max_targets: int = 40,
     target: Any | None = None,
@@ -1741,13 +1716,13 @@ def mixscape(
     if not isinstance(panel, str) or panel not in (_CLASSES_PANEL, _SCORES_PANEL):
         raise ValueError(f"panel must be 'classes' or 'scores', not {panel!r}")
     max_targets = integer_argument(max_targets, "max_targets", minimum=1)
-    requested = _distinct_labels(targets, "targets", "target")
+    requested = _distinct_values(targets, "targets", "target")
     if requested is not None and len(requested) > max_targets:
         raise ValueError(
             f"targets names {len(requested)} targets, more than "
             f"max_targets={max_targets}"
         )
-    loaded = _mixscape_classes(store, classes)
+    loaded = _load(store, "load_mixscape", classes)
     rows = loaded.targets
     perturbation_type = str(loaded.perturbation_type)
     pooled = _pooled_targets(rows)
@@ -1831,14 +1806,6 @@ def mixscape(
     return plot_result
 
 
-def _perturbation_associations(store: Any, tests: ArtifactRef) -> Any:
-    """Load saved association tests through the store's narrow loader."""
-    loader = getattr(getattr(store, "perturbation", None), "load_associations", None)
-    if not callable(loader):
-        raise TypeError("store does not provide perturbation associations")
-    return loader(tests)
-
-
 def _tested_pairs(pairs: pd.DataFrame) -> pd.DataFrame:
     """Return the pairs that passed QC and have a p-value."""
     tested = pairs["pass_qc"].to_numpy(dtype=bool) & ~np.isnan(
@@ -1870,8 +1837,10 @@ def _height_limits(high: float, edged: bool) -> tuple[float, float, float]:
     return -margin, (edge + margin) if edged else (high + margin), edge
 
 
-def _legend_marker(shape: str, color: str | None, foreground: str) -> Any:
-    """Return the legend handle of a marker filled with ``color``, or hollow."""
+def _legend_marker(
+    shape: str, color: str | None, foreground: str, size: float = 7.0
+) -> Any:
+    """Return the legend handle of a marker ``size`` points wide, filled or hollow."""
     from matplotlib.lines import Line2D
 
     return Line2D(
@@ -1881,7 +1850,7 @@ def _legend_marker(shape: str, color: str | None, foreground: str) -> Any:
         linestyle="",
         markerfacecolor="none" if color is None else color,
         markeredgecolor=foreground if color is None else "none",
-        markersize=7.0,
+        markersize=size,
     )
 
 
@@ -1969,6 +1938,47 @@ def _place_labels(
         label.arrow_patch.set_visible(dy != 0)
 
 
+def _callouts(
+    ax: Any,
+    texts: list[str],
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    middle: float,
+    color: str,
+    zorder: float,
+) -> list[Any]:
+    """Label each point beside it, on the side towards ``middle``, where there is room.
+
+    A label's line to its point stays hidden until :func:`_place_labels` moves
+    the label above or below the point.
+    """
+    labels = []
+    for text, point_x, point_y in zip(texts, x.tolist(), y.tolist(), strict=True):
+        rightward = point_x < middle
+        label = ax.annotate(
+            text,
+            (point_x, point_y),
+            xytext=(_LABEL_OFFSET if rightward else -_LABEL_OFFSET, 0.0),
+            textcoords="offset points",
+            ha="left" if rightward else "right",
+            va="center",
+            fontsize="small",
+            color=color,
+            zorder=zorder,
+            arrowprops={
+                "arrowstyle": "-",
+                "color": color,
+                "linewidth": 0.6,
+                "shrinkA": 0.0,
+                "shrinkB": 2.0,
+            },
+        )
+        label.arrow_patch.set_visible(False)
+        labels.append(label)
+    return labels
+
+
 def _volcano_legend(
     significant: np.ndarray,
     at_top: np.ndarray,
@@ -1983,13 +1993,13 @@ def _volcano_legend(
     if significant.any():
         entries.append(
             (
-                _legend_marker("o", _SIGNIFICANT_COLOR, foreground),
+                _legend_marker("o", _HIGHLIGHT_COLOR, foreground),
                 f"Significant at FDR {alpha:g}",
             )
         )
     if not significant.all():
         entries.append(
-            (_legend_marker("o", _NOT_SIGNIFICANT_COLOR, foreground), "Not significant")
+            (_legend_marker("o", _MUTED_COLOR, foreground), "Not significant")
         )
     if at_top.any():
         entries.append(
@@ -1997,10 +2007,10 @@ def _volcano_legend(
         )
     if no_counts.any():
         entries.append(
-            (_legend_marker(_NO_UMI_MARKER, None, foreground), _NO_COUNTS_LABEL)
+            (_legend_marker(_MINUS_INFINITY_MARKER, None, foreground), _NO_COUNTS_LABEL)
         )
     if cut:
-        entries.append((_legend_line(_THRESHOLD_COLOR, "--", 1.2), _CUT_LABEL))
+        entries.append((_legend_line(_REFERENCE_COLOR, "--", 1.2), _CUT_LABEL))
     return [handle for handle, _ in entries], [label for _, label in entries]
 
 
@@ -2037,7 +2047,8 @@ def association_volcano(
     the target's cells hold no counts of the gene, is drawn as a triangle at
     the left edge. The ``label_top`` pairs with the smallest p-values, ties
     broken by the larger size of ``z`` and then by target and gene, are
-    labelled ``target:feature`` beside their points, and ``label_top=0``
+    labelled ``target:feature_name`` beside their points, with the gene's
+    name from the record's ``feature_name`` column, and ``label_top=0``
     labels none. A label that would overlap a label of a smaller p-value
     moves to the other side of its point, or above or below it with a thin
     line to it. The points are rasterized when there are more than 100,000.
@@ -2052,8 +2063,8 @@ def association_volcano(
     are the labelled pairs.
     """
     label_top = integer_argument(label_top, "label_top", minimum=0)
-    requested = _distinct_labels(targets, "targets", "target")
-    loaded = _perturbation_associations(store, tests)
+    requested = _distinct_values(targets, "targets", "target")
+    loaded = _load(store, "load_associations", tests)
     side = str(loaded.side)
     alpha = float(loaded.alpha)
     discovery = loaded.discovery
@@ -2091,7 +2102,7 @@ def association_volcano(
     fold_changes = drawn["log2_fold_change"].to_numpy(dtype=np.float64)
     significant = drawn["significant"].to_numpy(dtype=bool)
     no_counts = np.isneginf(fold_changes)
-    left, right, left_edge = _fold_change_limits(fold_changes)
+    left, right, left_edge = _axis_limits(fold_changes)
     x = np.where(no_counts, left_edge, fold_changes)
     heights = _p_value_heights(drawn["p_value"].to_numpy(dtype=np.float64))
     at_top = ~np.isfinite(heights)
@@ -2106,7 +2117,7 @@ def association_volcano(
     )
     y = np.where(at_top, top_edge, heights)
     shapes = np.where(
-        no_counts, _NO_UMI_MARKER, np.where(at_top, _TOP_EDGE_MARKER, "o")
+        no_counts, _MINUS_INFINITY_MARKER, np.where(at_top, _TOP_EDGE_MARKER, "o")
     )
     size, edge_size = _point_sizes(n_drawn)
     rasterized = n_drawn > _ASSOCIATION_RASTERIZE_THRESHOLD
@@ -2132,10 +2143,10 @@ def association_volcano(
         ax.axvline(0.0, color=foreground, linewidth=0.8, zorder=1)
         # The significant pairs are drawn over the others.
         for chosen_significance, color, order in (
-            (False, _NOT_SIGNIFICANT_COLOR, 2.0),
-            (True, _SIGNIFICANT_COLOR, 3.0),
+            (False, _MUTED_COLOR, 2.0),
+            (True, _HIGHLIGHT_COLOR, 3.0),
         ):
-            for shape in ("o", _TOP_EDGE_MARKER, _NO_UMI_MARKER):
+            for shape in ("o", _TOP_EDGE_MARKER, _MINUS_INFINITY_MARKER):
                 chosen = (significant == chosen_significance) & (shapes == shape)
                 if chosen.any():
                     ax.scatter(
@@ -2152,41 +2163,31 @@ def association_volcano(
         if cut_height is not None:
             ax.axhline(
                 top_edge if np.isinf(cut_height) else cut_height,
-                color=_THRESHOLD_COLOR,
+                color=_REFERENCE_COLOR,
                 linestyle="--",
                 linewidth=1.2,
                 zorder=3.5,
             )
-        targets_drawn = drawn["target"].tolist()
+        labelled = drawn.head(label_top)
         # Labels name genes by name, such as IFNGR1, rather than by ID.
-        features_drawn = drawn[
-            "feature_name" if "feature_name" in drawn else "feature"
-        ].tolist()
-        labels = []
-        for row in range(min(label_top, n_drawn)):
-            # A label starts on the side towards the middle, where a volcano
-            # has room.
-            towards = 1.0 if x[row] < 0 else -1.0
-            label = ax.annotate(
-                f"{targets_drawn[row]}:{features_drawn[row]}",
-                (float(x[row]), float(y[row])),
-                xytext=(towards * _LABEL_OFFSET, 0.0),
-                textcoords="offset points",
-                ha="left" if towards > 0 else "right",
-                va="center",
-                fontsize="small",
-                color=foreground,
-                zorder=4,
-                arrowprops={
-                    "arrowstyle": "-",
-                    "color": foreground,
-                    "linewidth": 0.6,
-                    "shrinkA": 0.0,
-                    "shrinkB": 2.0,
-                },
+        texts = [
+            f"{target}:{feature}"
+            for target, feature in zip(
+                labelled["target"].tolist(),
+                labelled["feature_name"].tolist(),
+                strict=True,
             )
-            label.arrow_patch.set_visible(False)
-            labels.append(label)
+        ]
+        n_labels = len(texts)
+        labels = _callouts(
+            ax,
+            texts,
+            x[:n_labels],
+            y[:n_labels],
+            middle=0.0,
+            color=foreground,
+            zorder=4,
+        )
         ax.set_xlim(left, right)
         ax.set_ylim(bottom, top)
         # At high MOI a target's cells are compared with all other cells.
@@ -2202,11 +2203,7 @@ def association_volcano(
             alpha=alpha,
             foreground=foreground,
         )
-        if show_legend:
-            if owns:
-                figure.legend(handles, texts, loc="outside right center", frameon=False)
-            else:
-                ax.legend(handles, texts, loc="best", frameon=False, fontsize="small")
+        _place_legend(figure, ax, handles, texts, owns=owns, show_legend=show_legend)
         apply_figure_chrome(figure, theme)
         if len(labels) > 1:
             _place_labels(figure, ax, labels)
@@ -2280,27 +2277,14 @@ def _set_rows(sets: dict[str, pd.DataFrame]) -> pd.DataFrame:
     )
 
 
-def _band_ranks(n: int) -> np.ndarray:
-    """Return the ranks at which the band of ``n`` uniform p-values is drawn.
-
-    Every rank when ``n`` is at most 1,000, and otherwise 1,000 ranks spread
-    evenly on the log scale and rounded, without repeats.
-    """
-    if n <= _BAND_RANKS:
-        return np.arange(1, n + 1, dtype=np.int64)
-    spread = np.rint(np.geomspace(1.0, float(n), _BAND_RANKS))
-    ranks: np.ndarray = np.unique(spread.astype(np.int64))
-    return ranks
-
-
 def _qq_band(n: int) -> pd.DataFrame:
     """Return the 95% band of the i-th smallest of ``n`` uniform p-values.
 
     The i-th smallest follows Beta(i, n - i + 1), whose mean is i / (n + 1),
     so its 2.5% and 97.5% quantiles bound the band, at the ranks of
-    :func:`_band_ranks`.
+    :func:`_log_spread_integers`.
     """
-    ranks = _band_ranks(n)
+    ranks = _log_spread_integers(n)
     first = ranks.astype(np.float64)
     second = n - first + 1.0
     tail = (1.0 - _BAND_PROBABILITY) / 2.0
@@ -2340,8 +2324,11 @@ def _qq_panel(
     side: str,
     foreground: str,
     show_legend: bool,
-) -> None:
-    """Draw the QQ plot of the negative-control and discovery p-values."""
+) -> bool:
+    """Draw the QQ plot of the negative-control and discovery p-values.
+
+    Returns whether the points are rasterized.
+    """
     from matplotlib.patches import Patch
 
     sets = points["set"].to_numpy(dtype=object)
@@ -2377,8 +2364,8 @@ def _qq_panel(
     rasterized = len(points) > _ASSOCIATION_RASTERIZE_THRESHOLD
     # The discovery p-values are drawn over the negative controls.
     for name, color, order in (
-        ("calibration", _NEGATIVE_CONTROL_COLOR, 2.0),
-        ("discovery", _TARGETING_COLOR, 3.0),
+        ("calibration", _REFERENCE_COLOR, 2.0),
+        ("discovery", _HIGHLIGHT_COLOR, 3.0),
     ):
         in_set = sets == name
         for shape, chosen in (
@@ -2407,13 +2394,13 @@ def _qq_panel(
         # Short labels keep the legend clear of the points.
         entries = [
             (
-                _legend_marker("o", _NEGATIVE_CONTROL_COLOR, foreground),
+                _legend_marker("o", _REFERENCE_COLOR, foreground),
                 "Negative controls",
             )
         ]
         if not calibration.all():
             entries.append(
-                (_legend_marker("o", _TARGETING_COLOR, foreground), "Discovery pairs")
+                (_legend_marker("o", _HIGHLIGHT_COLOR, foreground), "Discovery pairs")
             )
         entries.append((_legend_line(foreground, "-", 0.8), "Null expectation"))
         entries.append(
@@ -2437,6 +2424,7 @@ def _qq_panel(
             frameon=False,
             fontsize="small",
         )
+    return rasterized
 
 
 def _fold_change_panel(
@@ -2464,7 +2452,7 @@ def _fold_change_panel(
             counts,
             width=np.diff(edges),
             align="edge",
-            color=_NEGATIVE_CONTROL_COLOR,
+            color=_REFERENCE_COLOR,
             linewidth=0,
         )
         mean = float(values.mean())
@@ -2494,10 +2482,10 @@ def _controls_panel(
     side: str,
     foreground: str,
     show_legend: bool,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, bool]:
     """Draw the p-values of the positive and negative controls as two strips.
 
-    Returns the drawn controls.
+    Returns the drawn controls and whether their points are rasterized.
     """
     controls = _set_rows({"positive": positive, "calibration": calibration})
     sets = controls["set"].to_numpy(dtype=object)
@@ -2513,8 +2501,8 @@ def _controls_panel(
     size, edge_size = _point_sizes(len(controls))
     rasterized = len(controls) > _ASSOCIATION_RASTERIZE_THRESHOLD
     for name, color in (
-        ("positive", _TARGETING_COLOR),
-        ("calibration", _NEGATIVE_CONTROL_COLOR),
+        ("positive", _HIGHLIGHT_COLOR),
+        ("calibration", _REFERENCE_COLOR),
     ):
         in_set = sets == name
         for shape, chosen in (
@@ -2567,7 +2555,7 @@ def _controls_panel(
             frameon=False,
             fontsize="small",
         )
-    return controls
+    return controls, rasterized
 
 
 @close_figures_on_error
@@ -2623,7 +2611,7 @@ def association_calibration(
     ``bin_stop`` and ``pairs``; and ``"controls"`` holds the drawn controls
     with ``set``, ``target``, ``feature`` and ``p_value``.
     """
-    loaded = _perturbation_associations(store, tests)
+    loaded = _load(store, "load_associations", tests)
     side = str(loaded.side)
     alpha = float(loaded.alpha)
     calibration = _tested_pairs(loaded.calibration)
@@ -2650,7 +2638,7 @@ def association_calibration(
             target, panel_keys=list(_CALIBRATION_PANELS), figsize=figsize, n_columns=3
         )
         foreground = foreground_color(theme)
-        _qq_panel(
+        qq_rasterized = _qq_panel(
             axes["qq"],
             points,
             band,
@@ -2669,7 +2657,7 @@ def association_calibration(
             ),
             foreground=foreground,
         )
-        controls = _controls_panel(
+        controls, controls_rasterized = _controls_panel(
             axes["controls"],
             positive,
             calibration,
@@ -2715,11 +2703,13 @@ def association_calibration(
                 "n_false_discoveries": n_false,
                 "calibration_grade": grade,
                 "mean_log2_fold_change": mean,
-                "n_tested": {
+                "n_tested_pairs": {
                     "discovery": len(discovery),
                     "calibration": len(calibration),
                     "positive": len(positive),
                 },
+                # Whether either panel of points is rasterized.
+                "rasterized": qq_rasterized or controls_rasterized,
             },
         ),
         owns_figure=owns,
@@ -2728,32 +2718,6 @@ def association_calibration(
     if show:
         plot_result.show()
     return plot_result
-
-
-def _perturbation_clusters(store: Any, clusters: ArtifactRef) -> Any:
-    """Load saved perturbation clusters through the store's narrow loader."""
-    loader = getattr(getattr(store, "perturbation", None), "load_clusters", None)
-    if not callable(loader):
-        raise TypeError("store does not provide perturbation clusters")
-    return loader(clusters)
-
-
-def _distinct_cluster_ids(values: Sequence[int] | None) -> list[int] | None:
-    """Return the distinct cluster numbers of ``values`` in their order, or None."""
-    if values is None:
-        return None
-    if (
-        isinstance(values, str | bytes)
-        or not isinstance(values, Sequence)
-        or not all(
-            isinstance(value, int | np.integer) and not isinstance(value, bool)
-            for value in values
-        )
-    ):
-        raise TypeError("cluster_ids must be a sequence of cluster numbers or None")
-    if not values:
-        raise ValueError("cluster_ids must name at least one cluster")
-    return list(dict.fromkeys(int(value) for value in values))
 
 
 def _cluster_palette(codes: np.ndarray) -> dict[int, str]:
@@ -3028,31 +2992,15 @@ def _cluster_map(
             zorder=4,
             rasterized=rasterized,
         )
-        middle = 0.5 * (xlim[0] + xlim[1])
-        for row, name in zip(rows.tolist(), named, strict=True):
-            # A name starts on the side towards the middle, where there is
-            # room.
-            towards = 1.0 if x[row] < middle else -1.0
-            label = ax.annotate(
-                name,
-                (float(x[row]), float(y[row])),
-                xytext=(towards * _LABEL_OFFSET, 0.0),
-                textcoords="offset points",
-                ha="left" if towards > 0 else "right",
-                va="center",
-                fontsize="small",
-                color=foreground,
-                zorder=6,
-                arrowprops={
-                    "arrowstyle": "-",
-                    "color": foreground,
-                    "linewidth": 0.6,
-                    "shrinkA": 0.0,
-                    "shrinkB": 2.0,
-                },
-            )
-            label.arrow_patch.set_visible(False)
-            labels.append(label)
+        labels = _callouts(
+            ax,
+            named,
+            x[rows],
+            y[rows],
+            middle=0.5 * (xlim[0] + xlim[1]),
+            color=foreground,
+            zorder=6,
+        )
     return clusters, numbers, labels, rasterized
 
 
@@ -3061,7 +3009,7 @@ def perturbation_clusters(
     store: Any,
     clusters: ArtifactRef,
     *,
-    panel: str = "heatmap",
+    panel: Literal["heatmap", "embedding"] = "heatmap",
     perturbations: Sequence[str] | None = None,
     cluster_ids: Sequence[int] | None = None,
     label: Sequence[str] | None = None,
@@ -3130,17 +3078,19 @@ def perturbation_clusters(
     """
     if not isinstance(panel, str) or panel not in (_HEATMAP_PANEL, _EMBEDDING_PANEL):
         raise ValueError(f"panel must be 'heatmap' or 'embedding', not {panel!r}")
-    requested = _distinct_labels(perturbations, "perturbations", "perturbation")
-    chosen = _distinct_cluster_ids(cluster_ids)
+    requested = _distinct_values(perturbations, "perturbations", "perturbation")
+    chosen = _distinct_values(
+        cluster_ids, "cluster_ids", "cluster number", numbers=True
+    )
     if requested is not None and chosen is not None:
         raise ValueError("Pass perturbations or cluster_ids, not both")
-    named = _distinct_labels(label, "label", "perturbation")
+    named = _distinct_values(label, "label", "perturbation")
     if named is not None and panel == _HEATMAP_PANEL:
         raise ValueError(
             "label names perturbations in the embedding; the heatmap names every "
             f"perturbation when it draws at most {_NAMED_PERTURBATIONS}"
         )
-    loaded = _perturbation_clusters(store, clusters)
+    loaded = _load(store, "load_clusters", clusters)
     table = loaded.table
     if table.empty:
         raise ValueError(
@@ -3292,7 +3242,12 @@ def perturbation_clusters(
                 ),
                 category_scale,
             )
-            extras = {"named": named_axes, "color_limits": list(limits)}
+            # The matrix and the cluster bar are always drawn as images.
+            extras = {
+                "named": named_axes,
+                "color_limits": list(limits),
+                "rasterized": True,
+            }
         else:
             cluster_table, numbers, labels, rasterized = _cluster_map(
                 ax,

@@ -629,7 +629,7 @@ class DataStorePlotAccessor:
         self,
         classes: ArtifactRef,
         *,
-        panel: str = "classes",
+        panel: Literal["classes", "scores"] = "classes",
         targets: Sequence[str] | None = None,
         max_targets: int = 40,
         target: Any | None = None,
@@ -653,7 +653,7 @@ class DataStorePlotAccessor:
         show_legend: bool = True,
         show: bool = True,
     ) -> PlotResult:
-        """Plot the fold change and p-value of each tested pair of a target and a gene."""
+        """Plot how much and how significantly each perturbation changes each gene."""
         return self._forward(PlotResult, "association_volcano", locals())
 
     def association_calibration(
@@ -666,14 +666,14 @@ class DataStorePlotAccessor:
         show_legend: bool = True,
         show: bool = True,
     ) -> PlotResult:
-        """Plot the calibration of association tests on negative and positive controls."""
+        """Plot whether the association tests keep their error rate, and find effects."""
         return self._forward(PlotResult, "association_calibration", locals())
 
     def perturbation_clusters(
         self,
         clusters: ArtifactRef,
         *,
-        panel: str = "heatmap",
+        panel: Literal["heatmap", "embedding"] = "heatmap",
         perturbations: Sequence[str] | None = None,
         cluster_ids: Sequence[int] | None = None,
         label: Sequence[str] | None = None,

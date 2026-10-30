@@ -1,3 +1,4 @@
+import inspect
 import warnings
 from collections.abc import Sequence
 from types import SimpleNamespace
@@ -209,7 +210,7 @@ def test_guide_calls_without_a_cell_draw_nothing() -> None:
     assert set(plt.get_fignums()) == figures
 
 
-def test_the_plot_refuses_settings_and_stores_it_cannot_use() -> None:
+def test_the_plot_refuses_settings_it_cannot_use() -> None:
     with pytest.raises(ValueError, match="^bins must be at least 1$"):
         guide_calls(_store(5), CALLS, bins=0, show=False)
     with pytest.raises(TypeError, match="^bins must be an integer$"):
@@ -218,8 +219,6 @@ def test_the_plot_refuses_settings_and_stores_it_cannot_use() -> None:
         guide_calls(_store(5), CALLS, max_guides_per_cell=1, show=False)
     with pytest.raises(TypeError, match="^max_guides_per_cell must be an integer$"):
         guide_calls(_store(5), CALLS, max_guides_per_cell=True, show=False)
-    with pytest.raises(TypeError, match="store does not provide guide calls"):
-        guide_calls(SimpleNamespace(), CALLS, show=False)
 
 
 def _threshold(method: str, parameters: dict[str, float], max_umi: int) -> int:
@@ -426,6 +425,8 @@ def test_threshold_panels_of_one_sample_draw_the_record() -> None:
         assert provenance.extras["samples"] is None
         assert provenance.extras["min_umi"] is None
         assert provenance.extras["thresholds"] == THRESHOLDS.to_dict()
+        # The panels draw bars, which are never rasterized.
+        assert provenance.extras["rasterized"] is False
     finally:
         result.close()
 
@@ -552,8 +553,30 @@ def test_the_threshold_overview_draws_every_fit(
         )
         assert result.legends[0].label == "Status"
         assert result.provenance.extras["guides"] is None
+        assert result.provenance.extras["rasterized"] is False
+        assert not any(collection.get_rasterized() for collection in ax.collections)
     finally:
         result.close()
+
+
+def test_the_threshold_overview_rasterizes_crowded_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The overview of one sample draws three fits.
+    monkeypatch.setattr("cytearc.plotting.perturbation.DEFAULT_RASTERIZE_THRESHOLD", 2)
+    store = _threshold_store("poisson_gaussian", ONE_SAMPLE, min_umi=None)
+
+    overview = guide_thresholds(store, THRESHOLDS, show=False)
+    panels = guide_thresholds(store, THRESHOLDS, guides=["g1"], show=False)
+
+    try:
+        collections = overview.axes["thresholds"].collections
+        assert collections and all(c.get_rasterized() for c in collections)
+        assert overview.provenance.extras["rasterized"] is True
+        assert panels.provenance.extras["rasterized"] is False
+    finally:
+        overview.close()
+        panels.close()
 
 
 def test_threshold_panels_draw_into_caller_axes() -> None:
@@ -620,6 +643,13 @@ def test_showing_the_threshold_plot_releases_its_figure() -> None:
             "guides must be a sequence of guide IDs or None",
         ),
         (ONE, {"guides": []}, ValueError, "guides must name at least one"),
+        # Bytes are not a sequence of labels, even without a byte.
+        (
+            ONE,
+            {"guides": b""},
+            TypeError,
+            "^guides must be a sequence of guide IDs or None$",
+        ),
         (
             TWO,
             {"samples": "s1"},
@@ -682,11 +712,6 @@ def test_the_threshold_plot_without_a_guide_draws_nothing(
     ):
         guide_thresholds(store, THRESHOLDS, guides=guides, show=False)
     assert set(plt.get_fignums()) == figures
-
-
-def test_the_threshold_plot_needs_a_store_with_guide_thresholds() -> None:
-    with pytest.raises(TypeError, match="store does not provide guide thresholds"):
-        guide_thresholds(SimpleNamespace(), THRESHOLDS, show=False)
 
 
 # The settings that the efficiency and E-distance plots refuse alike.
@@ -780,17 +805,28 @@ def _efficiency_record(
     return PerturbationEfficiency(table=pd.DataFrame(columns), by=by, from_assay="RNA")
 
 
-def _efficiency_store(
-    record: PerturbationEfficiency, requests: list[ArtifactRef] | None = None
+# The store's loader of each kind of record.
+RECORD_LOADERS = {
+    PerturbationEfficiency: "load_efficiency",
+    PerturbationEDistance: "load_edistance",
+    MixscapeResult: "load_mixscape",
+    PerturbationAssociations: "load_associations",
+    PerturbationClusters: "load_clusters",
+}
+
+
+def _record_store(
+    record: Any, requests: list[ArtifactRef] | None = None
 ) -> SimpleNamespace:
     """A store whose loader returns ``record`` and notes each reference it reads."""
 
-    def load(ref: ArtifactRef) -> PerturbationEfficiency:
+    def load(ref: ArtifactRef) -> Any:
         if requests is not None:
             requests.append(ref)
         return record
 
-    return SimpleNamespace(perturbation=SimpleNamespace(load_efficiency=load))
+    loader = RECORD_LOADERS[type(record)]
+    return SimpleNamespace(perturbation=SimpleNamespace(**{loader: load}))
 
 
 def _row_labels(ax: Any) -> list[str]:
@@ -861,7 +897,7 @@ def test_efficiency_draws_each_tested_target_from_knockdown_to_activation() -> N
     requests: list[ArtifactRef] = []
     record = _efficiency_record(TARGET_ROWS)
 
-    result = efficiency(_efficiency_store(record, requests), EFFICIENCY, show=False)
+    result = efficiency(_record_store(record, requests), EFFICIENCY, show=False)
 
     try:
         assert requests == [EFFICIENCY]
@@ -922,7 +958,7 @@ def test_efficiency_by_guide_draws_each_tested_guide() -> None:
     record = _efficiency_record(GUIDE_ROWS, by="guide")
 
     result = efficiency(
-        _efficiency_store(record), EFFICIENCY, alpha=np.float64(0.01), show=False
+        _record_store(record), EFFICIENCY, alpha=np.float64(0.01), show=False
     )
 
     try:
@@ -962,7 +998,7 @@ def test_efficiency_by_guide_draws_each_tested_guide() -> None:
 
 def test_efficiency_keeps_the_rows_with_the_smallest_adjusted_p_values() -> None:
     record = _efficiency_record(MANY_ROWS)
-    store = _efficiency_store(record)
+    store = _record_store(record)
 
     kept = efficiency(store, EFFICIENCY, max_rows=np.int64(2), show=False)
     every = efficiency(store, EFFICIENCY, max_rows=5, show=False)
@@ -1002,7 +1038,7 @@ def test_efficiency_keeps_the_rows_with_the_smallest_adjusted_p_values() -> None
 
 def test_efficiency_without_a_finite_fold_change_still_shows_zero() -> None:
     lost = efficiency(
-        _efficiency_store(_efficiency_record([("A", "tested", 1, -np.inf, 0.5)])),
+        _record_store(_efficiency_record([("A", "tested", 1, -np.inf, 0.5)])),
         EFFICIENCY,
         show=False,
     )
@@ -1029,12 +1065,12 @@ def test_efficiency_without_a_tested_row_draws_nothing() -> None:
         match=r"^No target was tested \(1 no_feature, 1 no_cells\), so there is "
         "no fold change to plot$",
     ):
-        efficiency(_efficiency_store(untested), EFFICIENCY, show=False)
+        efficiency(_record_store(untested), EFFICIENCY, show=False)
     with pytest.raises(
         ValueError, match="^No guide was tested, so there is no fold change to plot$"
     ):
         efficiency(
-            _efficiency_store(_efficiency_record([], by="guide")),
+            _record_store(_efficiency_record([], by="guide")),
             EFFICIENCY,
             show=False,
         )
@@ -1043,7 +1079,7 @@ def test_efficiency_without_a_tested_row_draws_nothing() -> None:
 
 def test_efficiency_draws_into_caller_axes_in_the_theme() -> None:
     figure, ax = plt.subplots()
-    store = _efficiency_store(_efficiency_record(TARGET_ROWS))
+    store = _record_store(_efficiency_record(TARGET_ROWS))
 
     try:
         result = efficiency(store, EFFICIENCY, target=ax, theme="dark", show=False)
@@ -1064,7 +1100,7 @@ def test_efficiency_draws_into_caller_axes_in_the_theme() -> None:
 
 
 def test_efficiency_can_drop_the_legend() -> None:
-    store = _efficiency_store(_efficiency_record(TARGET_ROWS))
+    store = _record_store(_efficiency_record(TARGET_ROWS))
 
     plain = efficiency(store, EFFICIENCY, show_legend=False, show=False)
     legended = efficiency(store, EFFICIENCY, show=False)
@@ -1080,7 +1116,7 @@ def test_efficiency_can_drop_the_legend() -> None:
 
 
 def test_showing_the_efficiency_plot_releases_its_figure() -> None:
-    store = _efficiency_store(_efficiency_record(TARGET_ROWS))
+    store = _record_store(_efficiency_record(TARGET_ROWS))
 
     result = efficiency(store, EFFICIENCY)
 
@@ -1097,28 +1133,12 @@ def test_the_efficiency_plot_refuses_settings_it_cannot_use(
     arguments: dict[str, Any], error: type[Exception], message: str
 ) -> None:
     requests: list[ArtifactRef] = []
-    store = _efficiency_store(_efficiency_record(TARGET_ROWS), requests)
+    store = _record_store(_efficiency_record(TARGET_ROWS), requests)
 
     with pytest.raises(error, match=message):
         efficiency(store, EFFICIENCY, show=False, **arguments)
     # The settings are checked before the record is read.
     assert requests == []
-
-
-@pytest.mark.parametrize(
-    "store",
-    [
-        SimpleNamespace(),
-        SimpleNamespace(perturbation=SimpleNamespace(load_guide_calls=lambda ref: ref)),
-    ],
-)
-def test_the_efficiency_plot_needs_a_store_with_perturbation_efficiency(
-    store: SimpleNamespace,
-) -> None:
-    with pytest.raises(
-        TypeError, match="store does not provide perturbation efficiency"
-    ):
-        efficiency(store, EFFICIENCY, show=False)
 
 
 EDISTANCE = ArtifactRef(
@@ -1188,19 +1208,6 @@ def _edistance_record(
     )
 
 
-def _edistance_store(
-    record: PerturbationEDistance, requests: list[ArtifactRef] | None = None
-) -> SimpleNamespace:
-    """A store whose loader returns ``record`` and notes each reference it reads."""
-
-    def load(ref: ArtifactRef) -> PerturbationEDistance:
-        if requests is not None:
-            requests.append(ref)
-        return record
-
-    return SimpleNamespace(perturbation=SimpleNamespace(load_edistance=load))
-
-
 def _check_edistance_rows(result: Any, *, alpha: float) -> None:
     """Check that each row of the table is drawn at its height, colour and area."""
     ax = result.axes["edistance"]
@@ -1259,7 +1266,7 @@ def test_edistance_draws_each_tested_target_from_the_largest_distance_down() -> 
     requests: list[ArtifactRef] = []
     record = _edistance_record(EDISTANCE_TARGETS)
 
-    result = edistance(_edistance_store(record, requests), EDISTANCE, show=False)
+    result = edistance(_record_store(record, requests), EDISTANCE, show=False)
 
     try:
         assert requests == [EDISTANCE]
@@ -1317,7 +1324,7 @@ def test_edistance_by_guide_draws_each_tested_guide() -> None:
     record = _edistance_record(EDISTANCE_GUIDES, by="guide")
 
     result = edistance(
-        _edistance_store(record), EDISTANCE, alpha=np.float64(0.01), show=False
+        _record_store(record), EDISTANCE, alpha=np.float64(0.01), show=False
     )
 
     try:
@@ -1355,7 +1362,7 @@ def test_edistance_by_guide_draws_each_tested_guide() -> None:
 
 def test_edistance_keeps_the_rows_with_the_largest_e_distances() -> None:
     record = _edistance_record(EDISTANCE_MANY)
-    store = _edistance_store(record)
+    store = _record_store(record)
 
     kept = edistance(store, EDISTANCE, max_rows=np.int64(2), show=False)
     every = edistance(store, EDISTANCE, max_rows=5, show=False)
@@ -1397,7 +1404,7 @@ def test_edistance_keeps_the_rows_with_the_largest_e_distances() -> None:
 
 def test_edistance_without_permutation_tests_draws_every_point_blue() -> None:
     record = _edistance_record(EDISTANCE_TARGETS, n_permutations=0)
-    store = _edistance_store(record)
+    store = _record_store(record)
 
     every = edistance(store, EDISTANCE, show=False)
     kept = edistance(store, EDISTANCE, max_rows=3, show=False)
@@ -1449,13 +1456,13 @@ def test_edistance_without_a_tested_row_draws_nothing() -> None:
         match=r"^No target was tested \(2 too_few_cells\), so there is no "
         "E-distance to plot$",
     ):
-        edistance(_edistance_store(record), EDISTANCE, show=False)
+        edistance(_record_store(record), EDISTANCE, show=False)
     assert set(plt.get_fignums()) == figures
 
 
 def test_edistance_without_a_nonzero_distance_still_shows_zero() -> None:
     zero = edistance(
-        _edistance_store(_edistance_record([("C", "tested", 4, 0.0, 1.0)])),
+        _record_store(_edistance_record([("C", "tested", 4, 0.0, 1.0)])),
         EDISTANCE,
         show=False,
     )
@@ -1475,7 +1482,7 @@ def test_edistance_without_a_nonzero_distance_still_shows_zero() -> None:
 
 def test_edistance_draws_into_caller_axes_in_the_theme() -> None:
     figure, ax = plt.subplots()
-    store = _edistance_store(_edistance_record(EDISTANCE_TARGETS))
+    store = _record_store(_edistance_record(EDISTANCE_TARGETS))
 
     try:
         result = edistance(store, EDISTANCE, target=ax, theme="dark", show=False)
@@ -1498,7 +1505,7 @@ def test_edistance_draws_into_caller_axes_in_the_theme() -> None:
 
 
 def test_edistance_can_drop_the_legend() -> None:
-    store = _edistance_store(_edistance_record(EDISTANCE_TARGETS))
+    store = _record_store(_edistance_record(EDISTANCE_TARGETS))
 
     plain = edistance(store, EDISTANCE, show_legend=False, show=False)
     legended = edistance(store, EDISTANCE, show=False)
@@ -1514,7 +1521,7 @@ def test_edistance_can_drop_the_legend() -> None:
 
 
 def test_showing_the_edistance_plot_releases_its_figure() -> None:
-    store = _edistance_store(_edistance_record(EDISTANCE_TARGETS))
+    store = _record_store(_edistance_record(EDISTANCE_TARGETS))
 
     result = edistance(store, EDISTANCE)
 
@@ -1531,28 +1538,12 @@ def test_the_edistance_plot_refuses_settings_it_cannot_use(
     arguments: dict[str, Any], error: type[Exception], message: str
 ) -> None:
     requests: list[ArtifactRef] = []
-    store = _edistance_store(_edistance_record(EDISTANCE_TARGETS), requests)
+    store = _record_store(_edistance_record(EDISTANCE_TARGETS), requests)
 
     with pytest.raises(error, match=message):
         edistance(store, EDISTANCE, show=False, **arguments)
     # The settings are checked before the record is read.
     assert requests == []
-
-
-@pytest.mark.parametrize(
-    "store",
-    [
-        SimpleNamespace(),
-        SimpleNamespace(perturbation=SimpleNamespace(load_efficiency=lambda ref: ref)),
-    ],
-)
-def test_the_edistance_plot_needs_a_store_with_perturbation_edistances(
-    store: SimpleNamespace,
-) -> None:
-    with pytest.raises(
-        TypeError, match="store does not provide perturbation E-distances"
-    ):
-        edistance(store, EDISTANCE, show=False)
 
 
 MIXSCAPE = ArtifactRef(
@@ -1725,19 +1716,6 @@ def _mixscape_record(
     )
 
 
-def _mixscape_store(
-    record: MixscapeResult, requests: list[ArtifactRef] | None = None
-) -> SimpleNamespace:
-    """A store whose loader returns ``record`` and notes each reference it reads."""
-
-    def load(ref: ArtifactRef) -> MixscapeResult:
-        if requests is not None:
-            requests.append(ref)
-        return record
-
-    return SimpleNamespace(perturbation=SimpleNamespace(load_mixscape=load))
-
-
 def _drawn_cells(record: MixscapeResult, names: list[str]) -> pd.DataFrame:
     """Return the cells of ``names`` that have scores, target by target."""
     cells = record.cells
@@ -1854,7 +1832,7 @@ def test_mixscape_classes_draw_each_target_from_the_largest_ko_share_down() -> N
     requests: list[ArtifactRef] = []
     record = _mixscape_record(MIXSCAPE_TARGETS)
 
-    result = mixscape(_mixscape_store(record, requests), MIXSCAPE, show=False)
+    result = mixscape(_record_store(record, requests), MIXSCAPE, show=False)
 
     try:
         assert requests == [MIXSCAPE]
@@ -1902,7 +1880,7 @@ def test_mixscape_classes_draw_each_target_from_the_largest_ko_share_down() -> N
 
 
 def test_mixscape_classes_keep_the_targets_with_the_most_cells() -> None:
-    store = _mixscape_store(_mixscape_record(MIXSCAPE_MANY))
+    store = _record_store(_mixscape_record(MIXSCAPE_MANY))
 
     kept = mixscape(store, MIXSCAPE, max_targets=np.int64(3), show=False)
     every = mixscape(store, MIXSCAPE, max_targets=5, show=False)
@@ -1933,7 +1911,7 @@ def test_mixscape_classes_keep_the_targets_with_the_most_cells() -> None:
 
 
 def test_mixscape_classes_keep_the_chosen_targets_in_their_order() -> None:
-    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+    store = _record_store(_mixscape_record(MIXSCAPE_TARGETS))
 
     result = mixscape(
         store,
@@ -1961,7 +1939,7 @@ def test_mixscape_classes_pool_the_splits_of_each_target() -> None:
         MIXSCAPE_SPLITS, perturbation_type="KD", split_column="run"
     )
 
-    result = mixscape(_mixscape_store(record), MIXSCAPE, show=False)
+    result = mixscape(_record_store(record), MIXSCAPE, show=False)
 
     try:
         table = result.tables["classes"]
@@ -2000,15 +1978,13 @@ def test_mixscape_classes_without_a_target_draw_nothing(panel: str) -> None:
         ValueError,
         match="^The Mixscape classes hold no target, so there is nothing to plot$",
     ):
-        mixscape(
-            _mixscape_store(_mixscape_record([])), MIXSCAPE, panel=panel, show=False
-        )
+        mixscape(_record_store(_mixscape_record([])), MIXSCAPE, panel=panel, show=False)
     assert set(plt.get_fignums()) == figures
 
 
 def test_mixscape_classes_without_a_fitted_target_still_draw() -> None:
     unfitted = mixscape(
-        _mixscape_store(_mixscape_record(MIXSCAPE_MANY[3:])), MIXSCAPE, show=False
+        _record_store(_mixscape_record(MIXSCAPE_MANY[3:])), MIXSCAPE, show=False
     )
 
     try:
@@ -2024,7 +2000,7 @@ def test_mixscape_classes_without_a_fitted_target_still_draw() -> None:
 
 def test_mixscape_classes_draw_into_caller_axes_in_the_theme() -> None:
     figure, ax = plt.subplots()
-    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+    store = _record_store(_mixscape_record(MIXSCAPE_TARGETS))
 
     try:
         result = mixscape(store, MIXSCAPE, target=ax, theme="dark", show=False)
@@ -2048,7 +2024,7 @@ def test_mixscape_scores_draw_one_panel_per_fitted_target() -> None:
     record = _mixscape_record(MIXSCAPE_TARGETS)
 
     result = mixscape(
-        _mixscape_store(record, requests), MIXSCAPE, panel="scores", show=False
+        _record_store(record, requests), MIXSCAPE, panel="scores", show=False
     )
 
     try:
@@ -2095,7 +2071,7 @@ def test_mixscape_scores_keep_the_fitted_targets_with_the_most_cells() -> None:
     record = _mixscape_record(MIXSCAPE_MANY)
 
     result = mixscape(
-        _mixscape_store(record), MIXSCAPE, panel="scores", max_targets=2, show=False
+        _record_store(record), MIXSCAPE, panel="scores", max_targets=2, show=False
     )
 
     try:
@@ -2131,7 +2107,7 @@ def test_mixscape_scores_fill_rows_of_four_panels() -> None:
     ]
 
     result = mixscape(
-        _mixscape_store(_mixscape_record(rows)), MIXSCAPE, panel="scores", show=False
+        _record_store(_mixscape_record(rows)), MIXSCAPE, panel="scores", show=False
     )
 
     try:
@@ -2153,7 +2129,7 @@ def test_mixscape_scores_skip_chosen_targets_without_a_fit() -> None:
     record = _mixscape_record(MIXSCAPE_TARGETS)
 
     result = mixscape(
-        _mixscape_store(record),
+        _record_store(record),
         MIXSCAPE,
         panel="scores",
         targets=["TP53", "GATA1", "MYC"],
@@ -2179,7 +2155,7 @@ def test_mixscape_scores_pool_the_splits_and_draw_the_first_fit() -> None:
         MIXSCAPE_SPLITS, perturbation_type="KD", split_column="run"
     )
 
-    result = mixscape(_mixscape_store(record), MIXSCAPE, panel="scores", show=False)
+    result = mixscape(_record_store(record), MIXSCAPE, panel="scores", show=False)
 
     try:
         assert list(result.axes) == ["KLF1", "MYC"]
@@ -2208,7 +2184,7 @@ def test_mixscape_scores_pool_the_splits_and_draw_the_first_fit() -> None:
 def test_mixscape_scores_draw_into_caller_axes_in_the_theme() -> None:
     figure, axes = plt.subplots(1, 3)
     figure.suptitle("The caller's figure")
-    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+    store = _record_store(_mixscape_record(MIXSCAPE_TARGETS))
 
     try:
         result = mixscape(
@@ -2245,7 +2221,7 @@ def test_mixscape_scores_draw_into_caller_axes_in_the_theme() -> None:
 
 
 def test_mixscape_can_drop_the_legend() -> None:
-    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+    store = _record_store(_mixscape_record(MIXSCAPE_TARGETS))
 
     results = {
         (panel, legend): mixscape(
@@ -2270,7 +2246,7 @@ def test_mixscape_can_drop_the_legend() -> None:
 
 
 def test_showing_the_mixscape_plot_releases_its_figure() -> None:
-    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+    store = _record_store(_mixscape_record(MIXSCAPE_TARGETS))
 
     classes = mixscape(store, MIXSCAPE)
     scores = mixscape(store, MIXSCAPE, panel="scores")
@@ -2316,7 +2292,7 @@ def test_the_mixscape_plot_refuses_settings_it_cannot_use(
     arguments: dict[str, Any], error: type[Exception], message: str
 ) -> None:
     requests: list[ArtifactRef] = []
-    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS), requests)
+    store = _record_store(_mixscape_record(MIXSCAPE_TARGETS), requests)
 
     with pytest.raises(error, match=message):
         mixscape(store, MIXSCAPE, show=False, **arguments)
@@ -2326,7 +2302,7 @@ def test_the_mixscape_plot_refuses_settings_it_cannot_use(
 
 @pytest.mark.parametrize("panel", ["classes", "scores"])
 def test_the_mixscape_plot_names_a_target_the_classes_lack(panel: str) -> None:
-    store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+    store = _record_store(_mixscape_record(MIXSCAPE_TARGETS))
 
     with pytest.raises(
         ValueError, match="The Mixscape classes have no target named 'SOX2'"
@@ -2343,24 +2319,10 @@ def test_the_mixscape_plot_names_a_target_the_classes_lack(panel: str) -> None:
 def test_the_mixscape_scores_need_a_fitted_target(
     rows: list[MixscapeRow], targets: list[str] | None
 ) -> None:
-    store = _mixscape_store(_mixscape_record(rows))
+    store = _record_store(_mixscape_record(rows))
 
     with pytest.raises(ValueError, match="None of the targets has a fitted split"):
         mixscape(store, MIXSCAPE, panel="scores", targets=targets, show=False)
-
-
-@pytest.mark.parametrize(
-    "store",
-    [
-        SimpleNamespace(),
-        SimpleNamespace(perturbation=SimpleNamespace(load_edistance=lambda ref: ref)),
-    ],
-)
-def test_the_mixscape_plot_needs_a_store_with_mixscape_classes(
-    store: SimpleNamespace,
-) -> None:
-    with pytest.raises(TypeError, match="store does not provide Mixscape classes"):
-        mixscape(store, MIXSCAPE, show=False)
 
 
 ASSOCIATIONS = ArtifactRef(
@@ -2470,7 +2432,8 @@ def _pair_table(
 ) -> pd.DataFrame:
     """Build a table of pairs as ``load_associations`` returns it.
 
-    A pair with a NaN p-value failed QC and holds NaN in every test column.
+    Each gene is named by its ID. A pair with a NaN p-value failed QC and
+    holds NaN in every test column.
     Benjamini-Hochberg adjusts the p-values of the other pairs, and those
     adjusted to at most ``alpha`` are significant. There are 300 control
     cells. Each target has 20 cells and 5 more for each target before it, or,
@@ -2493,6 +2456,7 @@ def _pair_table(
         {
             "target": names,
             "feature": np.asarray(feature, dtype=object),
+            "feature_name": np.asarray(feature, dtype=object),
             "n_cells": n_cells,
             "n_control_cells": 300 - (0 if group_cells is None else n_cells),
             "n_nonzero_cells": np.where(passed, 12, 3),
@@ -2568,19 +2532,6 @@ def _associations_record(
         n_false_discoveries=n_false,
         calibration_grade=_grade(n_false),
     )
-
-
-def _associations_store(
-    record: PerturbationAssociations, requests: list[ArtifactRef] | None = None
-) -> SimpleNamespace:
-    """A store whose loader returns ``record`` and notes each reference it reads."""
-
-    def load(ref: ArtifactRef) -> PerturbationAssociations:
-        if requests is not None:
-            requests.append(ref)
-        return record
-
-    return SimpleNamespace(perturbation=SimpleNamespace(load_associations=load))
 
 
 def _tested(pairs: pd.DataFrame) -> pd.DataFrame:
@@ -2684,7 +2635,7 @@ def _check_volcano(result: Any) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _label_text(table: pd.DataFrame) -> list[str]:
-    return (table["target"] + ":" + table["feature"]).tolist()
+    return (table["target"] + ":" + table["feature_name"]).tolist()
 
 
 def _check_labels_apart(result: Any) -> None:
@@ -2711,7 +2662,7 @@ def test_association_volcano_draws_each_tested_discovery_pair() -> None:
     record = _associations_record()
 
     result = association_volcano(
-        _associations_store(record, requests), ASSOCIATIONS, show=False
+        _record_store(record, requests), ASSOCIATIONS, show=False
     )
 
     try:
@@ -2790,7 +2741,7 @@ def test_association_volcano_breaks_ties_by_z_and_then_by_name() -> None:
     ]
 
     result = association_volcano(
-        _associations_store(_associations_record(rows)),
+        _record_store(_associations_record(rows)),
         ASSOCIATIONS,
         label_top=2,
         show=False,
@@ -2806,7 +2757,7 @@ def test_association_volcano_breaks_ties_by_z_and_then_by_name() -> None:
 
 
 def test_association_volcano_keeps_the_chosen_targets() -> None:
-    store = _associations_store(_associations_record())
+    store = _record_store(_associations_record())
 
     kept = association_volcano(
         store, ASSOCIATIONS, targets=["CD4", "GATA1", "CD4"], show=False
@@ -2855,7 +2806,7 @@ def test_association_volcano_keeps_the_chosen_targets() -> None:
 
 
 def test_association_volcano_names_the_targets_it_lacks() -> None:
-    store = _associations_store(_associations_record())
+    store = _record_store(_associations_record())
 
     with pytest.raises(
         ValueError, match="The discovery pairs have no target named 'SOX2', 'PAX5'"
@@ -2870,9 +2821,7 @@ def test_association_volcano_draws_extreme_pairs_at_the_edges() -> None:
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        result = association_volcano(
-            _associations_store(record), ASSOCIATIONS, show=False
-        )
+        result = association_volcano(_record_store(record), ASSOCIATIONS, show=False)
 
     try:
         table = result.tables["volcano"]
@@ -2917,7 +2866,7 @@ def test_association_volcano_draws_a_cut_below_1e_300_at_the_top_edge() -> None:
     ]
 
     result = association_volcano(
-        _associations_store(_associations_record(rows)), ASSOCIATIONS, show=False
+        _record_store(_associations_record(rows)), ASSOCIATIONS, show=False
     )
 
     try:
@@ -2937,7 +2886,7 @@ def test_association_volcano_without_a_significant_pair_draws_no_cut() -> None:
     ]
 
     result = association_volcano(
-        _associations_store(_associations_record(rows)), ASSOCIATIONS, show=False
+        _record_store(_associations_record(rows)), ASSOCIATIONS, show=False
     )
 
     try:
@@ -2967,10 +2916,10 @@ def test_association_volcano_without_a_finite_height_still_shows_zero() -> None:
     ]
 
     flat = association_volcano(
-        _associations_store(_associations_record(ones)), ASSOCIATIONS, show=False
+        _record_store(_associations_record(ones)), ASSOCIATIONS, show=False
     )
     edged = association_volcano(
-        _associations_store(_associations_record(zeros)), ASSOCIATIONS, show=False
+        _record_store(_associations_record(zeros)), ASSOCIATIONS, show=False
     )
 
     try:
@@ -2992,7 +2941,7 @@ def test_association_volcano_without_a_finite_height_still_shows_zero() -> None:
 
 
 def test_association_volcano_labels_the_chosen_number_of_pairs() -> None:
-    store = _associations_store(_associations_record())
+    store = _record_store(_associations_record())
 
     three = association_volcano(store, ASSOCIATIONS, label_top=np.int64(3), show=False)
     none = association_volcano(store, ASSOCIATIONS, label_top=0, show=False)
@@ -3015,8 +2964,8 @@ def test_association_volcano_labels_the_chosen_number_of_pairs() -> None:
 
 def test_association_volcano_labels_genes_by_name() -> None:
     discovery = _pairs(DISCOVERY_ROWS)
-    discovery.insert(2, "feature_name", "name-" + discovery["feature"])
-    store = _associations_store(_associations_record(discovery))
+    discovery["feature_name"] = "name-" + discovery["feature"]
+    store = _record_store(_associations_record(discovery))
 
     plot = association_volcano(store, ASSOCIATIONS, label_top=3, show=False)
 
@@ -3029,6 +2978,15 @@ def test_association_volcano_labels_genes_by_name() -> None:
         plot.close()
 
 
+def test_association_volcano_needs_the_gene_names_of_the_record() -> None:
+    # The loader always adds the names, so the plot never labels genes by ID.
+    discovery = _pairs(DISCOVERY_ROWS).drop(columns="feature_name")
+    store = _record_store(_associations_record(discovery))
+
+    with pytest.raises(KeyError, match="feature_name"):
+        association_volcano(store, ASSOCIATIONS, show=False)
+
+
 def test_association_volcano_moves_crowded_labels_apart() -> None:
     # Five pairs share almost one place, near the top right of the volcano.
     rows: list[AssociationRow] = [
@@ -3038,7 +2996,7 @@ def test_association_volcano_moves_crowded_labels_apart() -> None:
     rows.append(("A", "OTHER", 0.5, -1.0, -0.7))
 
     result = association_volcano(
-        _associations_store(_associations_record(rows)), ASSOCIATIONS, show=False
+        _record_store(_associations_record(rows)), ASSOCIATIONS, show=False
     )
 
     try:
@@ -3074,7 +3032,7 @@ def test_association_volcano_rasterizes_more_than_100000_points() -> None:
         np.linspace(-1.0, 1.0, n_pairs + 1),
         np.linspace(2.0, 0.0, n_pairs + 1),
     )
-    store = _associations_store(_associations_record(discovery))
+    store = _record_store(_associations_record(discovery))
 
     every = association_volcano(store, ASSOCIATIONS, label_top=0, show=False)
     most = association_volcano(
@@ -3099,7 +3057,7 @@ def test_association_volcano_rasterizes_more_than_100000_points() -> None:
     [("both", ""), ("left", " for a decrease"), ("right", " for an increase")],
 )
 def test_the_association_plots_name_the_side_tested(side: str, words: str) -> None:
-    store = _associations_store(_associations_record(side=side))
+    store = _record_store(_associations_record(side=side))
 
     volcano = association_volcano(store, ASSOCIATIONS, show=False)
     calibration = association_calibration(store, ASSOCIATIONS, show=False)
@@ -3119,7 +3077,7 @@ def test_the_association_plots_name_the_side_tested(side: str, words: str) -> No
 
 def test_association_volcano_draws_into_caller_axes_in_the_theme() -> None:
     figure, ax = plt.subplots()
-    store = _associations_store(_associations_record(EDGE_ROWS))
+    store = _record_store(_associations_record(EDGE_ROWS))
 
     try:
         result = association_volcano(
@@ -3143,7 +3101,7 @@ def test_association_volcano_draws_into_caller_axes_in_the_theme() -> None:
 
 
 def test_association_volcano_can_drop_the_legend() -> None:
-    store = _associations_store(_associations_record())
+    store = _record_store(_associations_record())
 
     plain = association_volcano(store, ASSOCIATIONS, show_legend=False, show=False)
     legended = association_volcano(store, ASSOCIATIONS, show=False)
@@ -3159,7 +3117,7 @@ def test_association_volcano_can_drop_the_legend() -> None:
 
 
 def test_showing_the_association_plots_releases_their_figures() -> None:
-    store = _associations_store(_associations_record())
+    store = _record_store(_associations_record())
 
     volcano = association_volcano(store, ASSOCIATIONS)
     calibration = association_calibration(store, ASSOCIATIONS)
@@ -3184,7 +3142,7 @@ def test_the_association_volcano_refuses_settings_it_cannot_use(
     arguments: dict[str, Any], error: type[Exception], message: str
 ) -> None:
     requests: list[ArtifactRef] = []
-    store = _associations_store(_associations_record(), requests)
+    store = _record_store(_associations_record(), requests)
 
     with pytest.raises(error, match=message):
         association_volcano(store, ASSOCIATIONS, show=False, **arguments)
@@ -3207,7 +3165,7 @@ def test_the_association_volcano_refuses_settings_it_cannot_use(
 def test_the_association_volcano_needs_a_tested_discovery_pair(
     rows: list[AssociationRow], targets: list[str] | None, message: str
 ) -> None:
-    store = _associations_store(_associations_record(rows))
+    store = _record_store(_associations_record(rows))
 
     with pytest.raises(ValueError, match=message):
         association_volcano(store, ASSOCIATIONS, targets=targets, show=False)
@@ -3389,7 +3347,7 @@ def test_association_calibration_draws_the_three_panels() -> None:
     record = _associations_record()
 
     result = association_calibration(
-        _associations_store(record, requests), ASSOCIATIONS, show=False
+        _record_store(record, requests), ASSOCIATIONS, show=False
     )
 
     try:
@@ -3445,7 +3403,8 @@ def test_association_calibration_draws_the_three_panels() -> None:
             "n_false_discoveries": 2,
             "calibration_grade": "mild",
             "mean_log2_fold_change": pytest.approx(mean),
-            "n_tested": {"discovery": 11, "calibration": 14, "positive": 3},
+            "n_tested_pairs": {"discovery": 11, "calibration": 14, "positive": 3},
+            "rasterized": False,
         }
     finally:
         result.close()
@@ -3453,7 +3412,7 @@ def test_association_calibration_draws_the_three_panels() -> None:
 
 def test_association_plots_compare_with_all_other_cells_at_high_moi() -> None:
     record = _associations_record(moi="high")
-    store = _associations_store(record)
+    store = _record_store(record)
 
     volcano = association_volcano(store, ASSOCIATIONS, show=False)
     calibration = association_calibration(store, ASSOCIATIONS, show=False)
@@ -3471,7 +3430,7 @@ def test_association_plots_compare_with_all_other_cells_at_high_moi() -> None:
         _check_fold_changes(calibration, record, compared="all other cells")
         # The tables are those of low MOI.
         low = association_volcano(
-            _associations_store(_associations_record()), ASSOCIATIONS, show=False
+            _record_store(_associations_record()), ASSOCIATIONS, show=False
         )
         try:
             assert low.provenance.n_cells == 20 + 25 + 30 + 35 + 300
@@ -3494,9 +3453,7 @@ def test_association_calibration_spreads_a_large_band_on_the_log_scale() -> None
     ]
     record = _associations_record(calibration=rows)
 
-    result = association_calibration(
-        _associations_store(record), ASSOCIATIONS, show=False
-    )
+    result = association_calibration(_record_store(record), ASSOCIATIONS, show=False)
 
     try:
         band = result.tables["band"]
@@ -3533,9 +3490,7 @@ def test_association_calibration_says_when_no_positive_control_was_tested(
 ) -> None:
     record = _associations_record(positive=positive)
 
-    result = association_calibration(
-        _associations_store(record), ASSOCIATIONS, show=False
-    )
+    result = association_calibration(_record_store(record), ASSOCIATIONS, show=False)
 
     try:
         _check_controls(result, record)
@@ -3546,7 +3501,7 @@ def test_association_calibration_says_when_no_positive_control_was_tested(
         assert (result.tables["controls"]["set"] == "calibration").all()
         # Without a p-value below 1e-300 the panel needs no legend.
         assert ax.get_legend() is None
-        assert result.provenance.extras["n_tested"]["positive"] == 0
+        assert result.provenance.extras["n_tested_pairs"]["positive"] == 0
     finally:
         result.close()
 
@@ -3556,9 +3511,7 @@ def test_association_calibration_without_tested_discovery_pairs_draws_no_overlay
 ):
     record = _associations_record([("MYC", "NPM1", NAN, NAN, NAN)])
 
-    result = association_calibration(
-        _associations_store(record), ASSOCIATIONS, show=False
-    )
+    result = association_calibration(_record_store(record), ASSOCIATIONS, show=False)
 
     try:
         _check_qq(result, record)
@@ -3579,9 +3532,7 @@ def test_association_calibration_draws_negative_controls_below_1e_300_at_the_top
     rows = [*CALIBRATION_ROWS, ("NT4", "ACTB", 0.0, 0.3, 39.0)]
     record = _associations_record(calibration=rows)
 
-    result = association_calibration(
-        _associations_store(record), ASSOCIATIONS, show=False
-    )
+    result = association_calibration(_record_store(record), ASSOCIATIONS, show=False)
 
     try:
         _check_qq(result, record)
@@ -3604,10 +3555,8 @@ def test_association_calibration_leaves_out_infinite_fold_changes() -> None:
         ]
     )
 
-    partly = association_calibration(
-        _associations_store(some), ASSOCIATIONS, show=False
-    )
-    none = association_calibration(_associations_store(every), ASSOCIATIONS, show=False)
+    partly = association_calibration(_record_store(some), ASSOCIATIONS, show=False)
+    none = association_calibration(_record_store(every), ASSOCIATIONS, show=False)
 
     try:
         _check_fold_changes(partly, some)
@@ -3637,23 +3586,36 @@ def test_association_calibration_leaves_out_infinite_fold_changes() -> None:
         none.close()
 
 
+@pytest.mark.parametrize(
+    ("threshold", "discovery", "crowded"),
+    [
+        # The QQ panel draws 14 negative controls and 11 discovery pairs, and
+        # the controls panel 3 positive and 14 negative controls.
+        (20, DISCOVERY_ROWS, "qq"),
+        # Without discovery pairs, the QQ panel draws the 14 negative controls.
+        (15, [], "controls"),
+    ],
+)
 def test_association_calibration_rasterizes_crowded_panels(
     monkeypatch: pytest.MonkeyPatch,
+    threshold: int,
+    discovery: list[AssociationRow],
+    crowded: str,
 ) -> None:
-    # The QQ panel draws 14 negative controls and 11 discovery pairs, and the
-    # controls panel 3 positive and 14 negative controls.
     monkeypatch.setattr(
-        "cytearc.plotting.perturbation._ASSOCIATION_RASTERIZE_THRESHOLD", 20
+        "cytearc.plotting.perturbation._ASSOCIATION_RASTERIZE_THRESHOLD", threshold
     )
-    store = _associations_store(_associations_record())
+    store = _record_store(_associations_record(discovery))
 
     result = association_calibration(store, ASSOCIATIONS, show=False)
 
     try:
-        qq = _point_groups(result.axes["qq"])
-        assert qq and all(collection.get_rasterized() for collection in qq)
-        controls = _point_groups(result.axes["controls"])
-        assert controls and not any(c.get_rasterized() for c in controls)
+        for panel in ("qq", "controls"):
+            points = _point_groups(result.axes[panel])
+            assert points
+            assert all(c.get_rasterized() is (panel == crowded) for c in points)
+        # The figure records that one of its panels is rasterized.
+        assert result.provenance.extras["rasterized"] is True
     finally:
         result.close()
 
@@ -3664,7 +3626,7 @@ def test_association_calibration_draws_into_caller_axes_in_the_theme() -> None:
 
     try:
         result = association_calibration(
-            _associations_store(record),
+            _record_store(record),
             ASSOCIATIONS,
             target={"qq": axes[2], "fold_changes": axes[0], "controls": axes[1]},
             theme="dark",
@@ -3691,7 +3653,7 @@ def test_association_calibration_draws_into_caller_axes_in_the_theme() -> None:
 
 def test_association_calibration_takes_a_sequence_of_axes_but_not_one_axes() -> None:
     figure, axes = plt.subplots(1, 3)
-    store = _associations_store(_associations_record())
+    store = _record_store(_associations_record())
 
     try:
         result = association_calibration(
@@ -3705,7 +3667,7 @@ def test_association_calibration_takes_a_sequence_of_axes_but_not_one_axes() -> 
 
 
 def test_association_calibration_can_drop_the_legends() -> None:
-    store = _associations_store(_associations_record())
+    store = _record_store(_associations_record())
 
     result = association_calibration(store, ASSOCIATIONS, show_legend=False, show=False)
 
@@ -3723,29 +3685,12 @@ def test_association_calibration_can_drop_the_legends() -> None:
 def test_the_association_calibration_needs_a_tested_negative_control(
     calibration: list[AssociationRow],
 ) -> None:
-    store = _associations_store(_associations_record(calibration=calibration))
+    store = _record_store(_associations_record(calibration=calibration))
 
     with pytest.raises(
         ValueError, match="None of the negative-control pairs passed QC"
     ):
         association_calibration(store, ASSOCIATIONS, show=False)
-
-
-@pytest.mark.parametrize("plot", [association_volcano, association_calibration])
-@pytest.mark.parametrize(
-    "store",
-    [
-        SimpleNamespace(),
-        SimpleNamespace(perturbation=SimpleNamespace(load_mixscape=lambda ref: ref)),
-    ],
-)
-def test_the_association_plots_need_a_store_with_associations(
-    plot: Any, store: SimpleNamespace
-) -> None:
-    with pytest.raises(
-        TypeError, match="store does not provide perturbation associations"
-    ):
-        plot(store, ASSOCIATIONS, show=False)
 
 
 CLUSTERS = ArtifactRef(
@@ -3837,19 +3782,6 @@ def _clusters_record(
     )
 
 
-def _clusters_store(
-    record: PerturbationClusters, requests: list[ArtifactRef] | None = None
-) -> SimpleNamespace:
-    """A store whose loader returns ``record`` and notes each reference it reads."""
-
-    def load(ref: ArtifactRef) -> PerturbationClusters:
-        if requests is not None:
-            requests.append(ref)
-        return record
-
-    return SimpleNamespace(perturbation=SimpleNamespace(load_clusters=load))
-
-
 def _cluster_hexes(record: PerturbationClusters) -> dict[int, str]:
     """Each cluster's colour, by the order in which it first appears in leaf order."""
     in_order = record.table["cluster"].reindex(record.order).tolist()
@@ -3911,6 +3843,9 @@ def _check_heatmap(
         np.asarray(strip.get_array())[:, 0, :], _drawn_colors(result, record, theme)
     )
     assert bar.get_ylim() == ax.get_ylim() == (n_drawn - 0.5, -0.5)
+    # Both images are rasterized, as the record says.
+    assert image.get_rasterized() is strip.get_rasterized() is True
+    assert result.provenance.extras["rasterized"] is True
     # The bar stands left of the heatmap and as high as it.
     result.figure.draw_without_rendering()
     box = ax.get_window_extent()
@@ -4006,7 +3941,7 @@ def test_cluster_heatmap_draws_the_correlations_in_leaf_order() -> None:
     record = _clusters_record()
 
     result = perturbation_clusters(
-        _clusters_store(record, requests), CLUSTERS, show=False
+        _record_store(record, requests), CLUSTERS, show=False
     )
 
     try:
@@ -4080,6 +4015,7 @@ def test_cluster_heatmap_draws_the_correlations_in_leaf_order() -> None:
             "n_unassigned": 2,
             "named": True,
             "color_limits": [-1.0, 1.0],
+            "rasterized": True,
         }
     finally:
         result.close()
@@ -4087,7 +4023,7 @@ def test_cluster_heatmap_draws_the_correlations_in_leaf_order() -> None:
 
 def test_cluster_heatmap_keeps_the_chosen_perturbations_or_clusters() -> None:
     record = _clusters_record()
-    store = _clusters_store(record)
+    store = _record_store(record)
 
     named = perturbation_clusters(
         store, CLUSTERS, perturbations=["MYC", "CCT2", "RPL7", "CCT2"], show=False
@@ -4131,7 +4067,7 @@ def test_cluster_heatmap_keeps_the_chosen_perturbations_or_clusters() -> None:
 
 def test_cluster_heatmap_by_euclidean_distance() -> None:
     record = _clusters_record(metric="euclidean")
-    store = _clusters_store(record)
+    store = _record_store(record)
 
     every = perturbation_clusters(store, CLUSTERS, show=False)
     alone = perturbation_clusters(store, CLUSTERS, perturbations=["MYC"], show=False)
@@ -4172,7 +4108,7 @@ def test_cluster_heatmap_names_at_most_50_perturbations(
     ]
     record = _clusters_record(rows, [row[0] for row in rows])
 
-    result = perturbation_clusters(_clusters_store(record), CLUSTERS, show=False)
+    result = perturbation_clusters(_record_store(record), CLUSTERS, show=False)
 
     try:
         _check_heatmap(result, record)
@@ -4197,7 +4133,7 @@ def test_cluster_heatmap_numbers_longer_runs_first_without_overlaps() -> None:
     ]
     record = _clusters_record(rows, [row[0] for row in rows])
 
-    result = perturbation_clusters(_clusters_store(record), CLUSTERS, show=False)
+    result = perturbation_clusters(_record_store(record), CLUSTERS, show=False)
 
     try:
         _check_heatmap(result, record)
@@ -4234,7 +4170,7 @@ def test_cluster_heatmap_keeps_a_chosen_figure_size() -> None:
     record = _clusters_record()
 
     result = perturbation_clusters(
-        _clusters_store(record), CLUSTERS, figsize=(8.0, 5.0), show=False
+        _record_store(record), CLUSTERS, figsize=(8.0, 5.0), show=False
     )
 
     try:
@@ -4250,7 +4186,7 @@ def test_clusters_take_eight_colours_in_leaf_order_and_keep_them() -> None:
         (f"P{index:02d}", index // 2, 30, float(index), 0.0) for index in range(20)
     ]
     record = _clusters_record(rows, [row[0] for row in reversed(rows)])
-    store = _clusters_store(record)
+    store = _record_store(record)
 
     every = perturbation_clusters(store, CLUSTERS, show=False)
     some = perturbation_clusters(store, CLUSTERS, cluster_ids=[0, 1], show=False)
@@ -4283,7 +4219,7 @@ def test_cluster_map_draws_each_perturbation_coloured_by_cluster() -> None:
     record = _clusters_record()
 
     result = perturbation_clusters(
-        _clusters_store(record, requests), CLUSTERS, panel="embedding", show=False
+        _record_store(record, requests), CLUSTERS, panel="embedding", show=False
     )
 
     try:
@@ -4333,7 +4269,7 @@ def test_cluster_map_names_chosen_perturbations_clear_of_the_numbers() -> None:
     record = _clusters_record()
 
     result = perturbation_clusters(
-        _clusters_store(record),
+        _record_store(record),
         CLUSTERS,
         panel="embedding",
         label=["MED12", "TP53", "RPL7", "MED12"],
@@ -4381,7 +4317,7 @@ def test_cluster_map_keeps_the_chosen_clusters(
     record = _clusters_record()
 
     result = perturbation_clusters(
-        _clusters_store(record),
+        _record_store(record),
         CLUSTERS,
         panel="embedding",
         cluster_ids=cluster_ids,
@@ -4408,7 +4344,7 @@ def test_cluster_plots_without_a_cluster_draw_every_perturbation_grey(
     record = _clusters_record(loners)
 
     result = perturbation_clusters(
-        _clusters_store(record), CLUSTERS, panel=panel, show=False
+        _record_store(record), CLUSTERS, panel=panel, show=False
     )
 
     try:
@@ -4435,7 +4371,7 @@ def test_cluster_plots_draw_into_caller_axes_in_the_theme(panel: str) -> None:
 
     try:
         result = perturbation_clusters(
-            _clusters_store(record),
+            _record_store(record),
             CLUSTERS,
             panel=panel,
             label=["MYC"] if panel == "embedding" else None,
@@ -4482,13 +4418,13 @@ def test_cluster_plots_without_a_perturbation_draw_nothing(panel: str) -> None:
         ValueError,
         match="^The clusters hold no perturbation, so there is nothing to plot$",
     ):
-        perturbation_clusters(_clusters_store(empty), CLUSTERS, panel=panel, show=False)
+        perturbation_clusters(_record_store(empty), CLUSTERS, panel=panel, show=False)
     assert set(plt.get_fignums()) == figures
 
 
 @pytest.mark.parametrize("panel", ["heatmap", "embedding"])
 def test_cluster_plots_can_drop_the_legend(panel: str) -> None:
-    store = _clusters_store(_clusters_record())
+    store = _record_store(_clusters_record())
 
     plain = perturbation_clusters(
         store, CLUSTERS, panel=panel, show_legend=False, show=False
@@ -4541,7 +4477,7 @@ def test_cluster_map_rasterizes_more_than_50000_points() -> None:
         seed=0,
         from_assay="RNA",
     )
-    store = _clusters_store(record)
+    store = _record_store(record)
 
     every = perturbation_clusters(store, CLUSTERS, panel="embedding", show=False)
     fewer = perturbation_clusters(
@@ -4560,7 +4496,7 @@ def test_cluster_map_rasterizes_more_than_50000_points() -> None:
 
 
 def test_showing_the_cluster_plots_releases_their_figures() -> None:
-    store = _clusters_store(_clusters_record())
+    store = _record_store(_clusters_record())
 
     heatmap = perturbation_clusters(store, CLUSTERS)
     embedding = perturbation_clusters(store, CLUSTERS, panel="embedding")
@@ -4594,7 +4530,11 @@ def test_showing_the_cluster_plots_releases_their_figures() -> None:
         ({"cluster_ids": [True]}, TypeError, "cluster_ids must be a sequence"),
         ({"cluster_ids": [1.0]}, TypeError, "cluster_ids must be a sequence"),
         ({"cluster_ids": np.array([0])}, TypeError, "cluster_ids must be a sequence"),
-        ({"cluster_ids": []}, ValueError, "cluster_ids must name at least one"),
+        (
+            {"cluster_ids": []},
+            ValueError,
+            "^cluster_ids must name at least one cluster number$",
+        ),
         (
             {"perturbations": ["MYC"], "cluster_ids": [0]},
             ValueError,
@@ -4622,7 +4562,7 @@ def test_the_cluster_plot_refuses_settings_it_cannot_use(
     arguments: dict[str, Any], error: type[Exception], message: str
 ) -> None:
     requests: list[ArtifactRef] = []
-    store = _clusters_store(_clusters_record(), requests)
+    store = _record_store(_clusters_record(), requests)
 
     with pytest.raises(error, match=message):
         perturbation_clusters(store, CLUSTERS, show=False, **arguments)
@@ -4657,7 +4597,7 @@ def test_the_cluster_plot_refuses_settings_it_cannot_use(
 def test_the_cluster_plot_names_what_the_clusters_lack(
     arguments: dict[str, Any], message: str
 ) -> None:
-    store = _clusters_store(_clusters_record())
+    store = _record_store(_clusters_record())
 
     with pytest.raises(ValueError, match=message):
         perturbation_clusters(store, CLUSTERS, show=False, **arguments)
@@ -4674,7 +4614,7 @@ def test_the_cluster_plot_names_the_clusters_of_a_record_without_some() -> None:
         ValueError, match="^No perturbation is in cluster -1; the clusters run from 0"
     ):
         perturbation_clusters(
-            _clusters_store(_clusters_record(assigned, order)),
+            _record_store(_clusters_record(assigned, order)),
             CLUSTERS,
             cluster_ids=[-1],
             show=False,
@@ -4685,25 +4625,55 @@ def test_the_cluster_plot_names_the_clusters_of_a_record_without_some() -> None:
         "in cluster -1$",
     ):
         perturbation_clusters(
-            _clusters_store(_clusters_record(loners)),
+            _record_store(_clusters_record(loners)),
             CLUSTERS,
             cluster_ids=[0],
             show=False,
         )
 
 
-@pytest.mark.parametrize(
-    "store",
-    [
-        SimpleNamespace(),
-        SimpleNamespace(perturbation=SimpleNamespace(load_profiles=lambda ref: ref)),
-    ],
-)
-def test_the_cluster_plot_needs_a_store_with_perturbation_clusters(
-    store: SimpleNamespace,
+# Each screen figure, a record it plots, and the loader that reads the record.
+SCREEN_LOADERS = [
+    (guide_calls, CALLS, "load_guide_calls"),
+    (guide_thresholds, THRESHOLDS, "load_guide_thresholds"),
+    (efficiency, EFFICIENCY, "load_efficiency"),
+    (edistance, EDISTANCE, "load_edistance"),
+    (mixscape, MIXSCAPE, "load_mixscape"),
+    (association_volcano, ASSOCIATIONS, "load_associations"),
+    (association_calibration, ASSOCIATIONS, "load_associations"),
+    (perturbation_clusters, CLUSTERS, "load_clusters"),
+]
+
+
+@pytest.mark.parametrize(("plot", "ref", "loader"), SCREEN_LOADERS)
+def test_screen_figures_need_a_store_with_their_loader(
+    plot: Any, ref: ArtifactRef, loader: str
 ) -> None:
-    with pytest.raises(TypeError, match="store does not provide perturbation clusters"):
-        perturbation_clusters(store, CLUSTERS, show=False)
+    # Every other figure's loader, which a figure that asks for the wrong
+    # loader would call.
+    others = {name: lambda ref: ref for _, _, name in SCREEN_LOADERS if name != loader}
+    stores = [
+        SimpleNamespace(),
+        SimpleNamespace(perturbation=SimpleNamespace(**others)),
+        SimpleNamespace(perturbation=SimpleNamespace(**{loader: "not a loader"})),
+    ]
+
+    for store in stores:
+        with pytest.raises(
+            TypeError, match=rf"^store does not provide perturbation\.{loader}$"
+        ):
+            plot(store, ref, show=False)
+
+
+@pytest.mark.parametrize("plot", [plot for plot, _, _ in SCREEN_LOADERS])
+def test_the_store_accessor_summarizes_each_screen_figure_as_it_does(
+    plot: Any,
+) -> None:
+    from cytearc.datastore.plot_accessor import DataStorePlotAccessor
+
+    method = getattr(DataStorePlotAccessor, plot.__name__)
+
+    assert inspect.getdoc(method) == inspect.getdoc(plot).splitlines()[0]
 
 
 @pytest.mark.parametrize("panel", ["efficiency", "edistance"])
@@ -4712,14 +4682,14 @@ def test_a_row_whose_adjusted_p_value_is_alpha_is_significant(panel: str) -> Non
     # as a pair of the association tests would be.
     result = (
         efficiency(
-            _efficiency_store(_efficiency_record(TARGET_ROWS)),
+            _record_store(_efficiency_record(TARGET_ROWS)),
             EFFICIENCY,
             alpha=0.01,
             show=False,
         )
         if panel == "efficiency"
         else edistance(
-            _edistance_store(_edistance_record(EDISTANCE_TARGETS)),
+            _record_store(_edistance_record(EDISTANCE_TARGETS)),
             EDISTANCE,
             alpha=0.01,
             show=False,
@@ -4765,27 +4735,27 @@ def test_screen_figures_take_numpy_numbers() -> None:
             show=False,
         ),
         "max_rows": efficiency(
-            _efficiency_store(_efficiency_record(TARGET_ROWS)),
+            _record_store(_efficiency_record(TARGET_ROWS)),
             EFFICIENCY,
             max_rows=np.int64(2),
             alpha=np.float64(0.01),
             show=False,
         ),
         "alpha": edistance(
-            _edistance_store(_edistance_record(EDISTANCE_TARGETS)),
+            _record_store(_edistance_record(EDISTANCE_TARGETS)),
             EDISTANCE,
             max_rows=np.int16(3),
             alpha=np.float64(0.01),
             show=False,
         ),
         "max_targets": mixscape(
-            _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS)),
+            _record_store(_mixscape_record(MIXSCAPE_TARGETS)),
             MIXSCAPE,
             max_targets=np.int64(2),
             show=False,
         ),
         "label_top": association_volcano(
-            _associations_store(_associations_record()),
+            _record_store(_associations_record()),
             ASSOCIATIONS,
             label_top=np.int64(2),
             show=False,
@@ -4808,9 +4778,14 @@ def test_screen_figures_take_numpy_numbers() -> None:
         assert {type(value) for value in recorded.values()} == {int, float}
         assert len(results["max_rows"].tables["efficiency"]) == 2
         assert len(results["alpha"].tables["edistance"]) == 3
-        assert results["max_guides_per_cell"].tables["guides_per_cell"][
-            "guides"
-        ].tolist() == ["0", "1", "2", "3+"]
+        calls = results["max_guides_per_cell"]
+        guides = calls.tables["guides_per_cell"]["guides"].tolist()
+        assert guides == ["0", "1", "2", "3+"]
+        # The guide calls also record their bins, which split the top guide's
+        # share into five.
+        assert len(calls.tables["top_fraction"]) == 5
+        bins = calls.provenance.extras["bins"]
+        assert bins == 5 and type(bins) is int
     finally:
         for result in results.values():
             result.close()
@@ -4879,13 +4854,13 @@ def _draw_screen_figure(name: str, axes: list[Any]) -> Any:
             store, THRESHOLDS, guides=["g2", "g1"], target=axes[:2], show=False
         )
     if name == "efficiency":
-        store = _efficiency_store(_efficiency_record(TARGET_ROWS))
+        store = _record_store(_efficiency_record(TARGET_ROWS))
         return efficiency(store, EFFICIENCY, target=axes[0], show=False)
     if name == "edistance":
-        store = _edistance_store(_edistance_record(EDISTANCE_TARGETS))
+        store = _record_store(_edistance_record(EDISTANCE_TARGETS))
         return edistance(store, EDISTANCE, target=axes[0], show=False)
     if name.startswith("mixscape"):
-        store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+        store = _record_store(_mixscape_record(MIXSCAPE_TARGETS))
         if name == "mixscape_classes":
             return mixscape(store, MIXSCAPE, target=axes[0], show=False)
         return mixscape(
@@ -4897,10 +4872,10 @@ def _draw_screen_figure(name: str, axes: list[Any]) -> Any:
             show=False,
         )
     if name == "association_volcano":
-        store = _associations_store(_associations_record(EDGE_ROWS))
+        store = _record_store(_associations_record(EDGE_ROWS))
         return association_volcano(store, ASSOCIATIONS, target=axes[0], show=False)
     return association_calibration(
-        _associations_store(_associations_record()),
+        _record_store(_associations_record()),
         ASSOCIATIONS,
         target=axes,
         show=False,
@@ -4935,7 +4910,7 @@ def test_composed_cluster_plots_share_their_cluster_legend(panel: str) -> None:
 
     try:
         result = perturbation_clusters(
-            _clusters_store(_clusters_record()),
+            _record_store(_clusters_record()),
             CLUSTERS,
             panel=panel,
             target=ax,
