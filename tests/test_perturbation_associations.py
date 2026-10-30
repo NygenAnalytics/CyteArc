@@ -8,12 +8,13 @@ import numpy as np
 import pandas as pd
 import pytest
 import statsmodels.api as sm
-from scipy import optimize, special, stats
+from scipy import special, stats
 
 from cytearc.datastore._operations import perturbation as perturbation_operations
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationAssociations
 from cytearc.perturbation import associations as associations_module
+from cytearc.perturbation import glm, random_sets
 from cytearc.perturbation.associations import (
     RECORD_BYTES,
     TreatmentGroups,
@@ -29,20 +30,20 @@ from cytearc.perturbation.associations import (
     record_batch,
     resampled_statistics,
     resampling_counts,
-    resampling_keys,
     resampling_p_values,
     skew_normal_p_values,
     skew_normal_tail_ratios,
 )
+from cytearc.perturbation.random_sets import resampling_keys
 from cytearc.storage.artifacts import ArtifactRef
-from tests.perturbation_helpers import use_python_kernels
+from tests.perturbation_helpers import dense_pair, size_root, use_python_kernels
 from tests.storage_helpers import write_count_store
 
 
 def _python_kernels(monkeypatch: pytest.MonkeyPatch, python_kernels: bool) -> None:
     """Run the kernels uncompiled, whose 64-bit products wrap as compiled ones do."""
     if python_kernels:
-        use_python_kernels(monkeypatch, associations_module)
+        use_python_kernels(monkeypatch, associations_module, glm, random_sets)
         np.seterr(over="ignore")
 
 
@@ -96,75 +97,6 @@ def _screen(
     members = [np.arange(bounds[k], bounds[k + 1]) for k in range(len(sizes))]
     groups = _groups(n_controls, members, [False] * len(sizes))
     return counts, association_covariates(library, detected), groups
-
-
-def _size_root(y: np.ndarray, mu: np.ndarray, degrees: float) -> float:
-    """The dispersion by a root of the likelihood's score, or the Pearson fallback."""
-    if ((y - mu) ** 2 - y).sum() <= 0:
-        pearson = (y - mu) ** 2 / mu
-        if pearson.sum() <= degrees:
-            return 0.0
-        return optimize.brentq(
-            lambda value: (pearson / (1 + value * mu)).sum() - degrees,
-            0.0,
-            1e6,
-            xtol=1e-15,
-        )
-
-    def score(log_size: float) -> float:
-        size = np.exp(log_size)
-        return float(
-            (
-                special.digamma(y + size)
-                - special.digamma(size)
-                + np.log(size / (size + mu))
-                + (mu - y) / (size + mu)
-            ).sum()
-        )
-
-    # The best size on a grid, then the root of the score beside it. Beyond
-    # sizes of e^18 SciPy's likelihood and the score are lost in rounding,
-    # so the Poisson likelihood stands for them.
-    grid = np.linspace(-18.0, 18.0, 361)
-    likelihood = [
-        stats.nbinom.logpmf(y, np.exp(g), np.exp(g) / (np.exp(g) + mu)).sum()
-        for g in grid
-    ]
-    best = int(np.argmax(likelihood))
-    if best == len(grid) - 1 or likelihood[best] <= stats.poisson.logpmf(y, mu).sum():
-        return 0.0
-    root = optimize.brentq(score, grid[max(best - 1, 0)], grid[best + 1], xtol=1e-14)
-    return float(np.exp(-root))
-
-
-def _dense_pair(
-    y: np.ndarray, design: np.ndarray, treated: np.ndarray
-) -> tuple[float, float, float]:
-    """A pair's statistic, fold change and standard error, computed densely."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        mu = sm.GLM(y, design, family=sm.families.Poisson()).fit(tol=1e-14).mu
-    dispersion = _size_root(y, mu, len(y) - design.shape[1])
-    weights = mu / (1 + dispersion * mu)
-    scores = (y - mu) / (1 + dispersion * mu)
-    weighted = (weights[treated, None] * design[treated]).sum(axis=0)
-    information = design.T @ (weights[:, None] * design)
-    variance = weights[treated].sum() - weighted @ np.linalg.solve(
-        information, weighted
-    )
-    observed = y[treated].sum()
-    ratio = observed / mu[treated].sum()
-    tangent = (mu[treated, None] * design[treated]).sum(axis=0) / mu[treated].sum()
-    spread = tangent @ np.linalg.solve(information, tangent)
-    if observed > 0:
-        spread += (observed + dispersion * ratio**2 * (mu[treated] ** 2).sum()) / (
-            observed**2
-        )
-    return (
-        scores[treated].sum() / np.sqrt(variance),
-        np.log2(ratio) if ratio > 0 else -np.inf,
-        np.sqrt(spread) / np.log(2),
-    )
 
 
 # Covariates and keys -----------------------------------------------------------
@@ -232,10 +164,8 @@ def test_resampling_keys_differ_by_seed_group_and_stage() -> None:
 def test_counts_are_kept_as_float32_or_made_float64() -> None:
     single = np.ones((2, 3), dtype=np.float32)
 
-    assert associations_module._count_array(single) is single
-    assert associations_module._count_array(np.ones((2, 3), np.uint16)).dtype == (
-        np.float64
-    )
+    assert glm.count_array(single) is single
+    assert glm.count_array(np.ones((2, 3), np.uint16)).dtype == np.float64
 
 
 # Random sets -------------------------------------------------------------------
@@ -249,10 +179,10 @@ def test_random_sets_are_uniform_sets_that_do_not_depend_on_threads(
     key = resampling_keys(3, np.array([7]), 1)[0]
     n_draws = 4000 if not python_kernels else 600
 
-    draws = associations_module._draw_sets(key, n_draws, 3, 9)
+    draws = random_sets.draw_uniform_sets(key, n_draws, 3, 9)
 
     serial = np.empty_like(draws)
-    associations_module._draw_range(key, 0, 1, 3, 9, serial)
+    random_sets.draw_uniform_range(key, 0, 1, 3, 9, serial)
     np.testing.assert_array_equal(draws, serial)
     assert draws.dtype == np.int32
     assert all(len(set(row)) == 3 for row in draws.tolist())
@@ -264,7 +194,7 @@ def test_a_set_of_every_position_holds_them_all() -> None:
     marked = np.zeros(5, dtype=bool)
     out = np.empty(5, dtype=np.int64)
 
-    associations_module._draw_set(np.uint64(11), 5, 5, marked, out)
+    random_sets.draw_uniform_set(np.uint64(11), 5, 5, marked, out)
 
     assert sorted(out.tolist()) == [0, 1, 2, 3, 4]
     assert not marked.any()
@@ -285,15 +215,15 @@ def test_cholesky_solves_and_drops_directions_without_information(
     factor = np.empty((3, 3))
     solved = np.empty(3)
 
-    associations_module._cholesky(matrix, factor)
-    associations_module._solve(factor, vector, solved)
+    glm.cholesky(matrix, factor)
+    glm.cholesky_solve(factor, vector, solved)
 
     np.testing.assert_allclose(factor, np.linalg.cholesky(matrix))
     np.testing.assert_allclose(solved, np.linalg.solve(matrix, vector))
     singular = np.zeros((3, 3))
     singular[:2, :2] = matrix[:2, :2]
-    associations_module._cholesky(singular, factor)
-    associations_module._solve(factor, vector, solved)
+    glm.cholesky(singular, factor)
+    glm.cholesky_solve(factor, vector, solved)
     assert np.isinf(factor[2, 2])
     np.testing.assert_allclose(solved[:2], np.linalg.solve(matrix[:2, :2], vector[:2]))
     assert solved[2] == 0.0
@@ -304,8 +234,8 @@ def test_digamma_and_trigamma_match_scipy(monkeypatch, python_kernels) -> None:
     _python_kernels(monkeypatch, python_kernels)
     x = np.r_[np.geomspace(1e-5, 1e5, 60), 9.99, 10.0, 10.01]
 
-    digamma = np.array([associations_module._digamma(v) for v in x])
-    trigamma = np.array([associations_module._trigamma(v) for v in x])
+    digamma = np.array([glm.digamma(v) for v in x])
+    trigamma = np.array([glm.trigamma(v) for v in x])
 
     np.testing.assert_allclose(digamma, special.digamma(x), rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(trigamma, special.polygamma(1, x), rtol=1e-13)
@@ -324,9 +254,9 @@ def test_sizes_maximize_the_likelihood_with_the_means_held_fixed(
         mu = rng.lognormal(np.log(scale), 0.5, 400)
         y = rng.negative_binomial(size, size / (size + mu)).astype(np.float64)
 
-        dispersion = associations_module._size_dispersion(y, mu, 397.0)
+        dispersion = glm.size_dispersion(y, mu, 397.0)
 
-        np.testing.assert_allclose(dispersion, _size_root(y, mu, 397.0), rtol=1e-8)
+        np.testing.assert_allclose(dispersion, size_root(y, mu, 397.0), rtol=1e-8)
 
 
 @pytest.mark.parametrize("python_kernels", [False, True])
@@ -339,26 +269,26 @@ def test_sizes_without_overdispersion_fall_back_to_the_pearson_equation(
     pearson = np.array([0.0, 0.0, 2.0, 2.0, 2.0, 3.0])
     poisson = np.array([1.0, 2.0, 1.0, 2.0, 1.0, 2.0])
 
-    dispersion = associations_module._size_dispersion(pearson, mu, 4.0)
+    dispersion = glm.size_dispersion(pearson, mu, 4.0)
 
-    np.testing.assert_allclose(dispersion, _size_root(pearson, mu, 4.0), rtol=1e-10)
+    np.testing.assert_allclose(dispersion, size_root(pearson, mu, 4.0), rtol=1e-10)
     assert dispersion > 0
-    assert associations_module._size_dispersion(poisson, mu, 4.0) == 0.0
+    assert glm.size_dispersion(poisson, mu, 4.0) == 0.0
 
 
 def test_sizes_stop_at_their_limits(monkeypatch) -> None:
     # Compiled kernels fix the limit when they compile, so this runs as Python.
     _python_kernels(monkeypatch, True)
-    monkeypatch.setattr(associations_module, "_LOG_SIZE_LIMIT", 1.0)
+    monkeypatch.setattr(glm, "_LOG_SIZE_LIMIT", 1.0)
     rng = np.random.default_rng(6)
     mu = rng.lognormal(0.5, 0.3, 300)
     # A size of about 5, above the limit of e: Poisson.
     y = rng.negative_binomial(5.0, 5.0 / (5.0 + mu)).astype(np.float64)
 
-    assert associations_module._size_dispersion(y, mu, 298.0) == 0.0
+    assert glm.size_dispersion(y, mu, 298.0) == 0.0
     # Without a count, the likelihood rises as the size falls: the floor.
     zeros = np.zeros(300)
-    assert associations_module._size_dispersion(zeros, mu, 298.0) == pytest.approx(np.e)
+    assert glm.size_dispersion(zeros, mu, 298.0) == pytest.approx(np.e)
 
 
 @pytest.mark.parametrize("python_kernels", [False, True])
@@ -368,7 +298,7 @@ def test_large_counts_take_the_digamma_function(monkeypatch, python_kernels) -> 
     mu = rng.lognormal(np.log(40.0), 0.3, 200)
     y = rng.negative_binomial(3.0, 3.0 / (3.0 + mu)).astype(np.float64) + 0.5
 
-    first, second = associations_module._size_derivatives(y, mu, 2.5)
+    first, second = glm.size_derivatives(y, mu, 2.5)
 
     expected = (
         special.digamma(y + 2.5)
@@ -415,7 +345,7 @@ def test_poisson_fits_halve_steps_that_lower_the_likelihood(
     eta = np.empty(50)
     mu = np.empty(50)
 
-    associations_module._fit_poisson(y, design, fitted, eta, mu)
+    glm.fit_poisson(y, design, fitted, eta, mu)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -467,7 +397,7 @@ def test_pairs_are_scored_by_the_fit_on_their_treatment_and_control_cells(
         else:
             union = np.r_[np.arange(60), cells]
             treated = np.arange(60, len(union))
-        expected = _dense_pair(counts[row, union], design[union], treated)
+        expected = dense_pair(counts[row, union], design[union], treated)
         np.testing.assert_allclose([z[pair], fold[pair], se[pair]], expected, rtol=1e-6)
     np.testing.assert_array_equal(
         counted,
@@ -509,7 +439,7 @@ def test_a_sample_without_control_counts_still_fits_the_pair(
     )
 
     assert np.abs(coefficients[0]).max() > 10
-    expected = _dense_pair(counts[0], design, np.arange(n_controls, n_cells))
+    expected = dense_pair(counts[0], design, np.arange(n_controls, n_cells))
     np.testing.assert_allclose([z[0], fold[0], se[0]], expected, rtol=1e-6)
 
 
@@ -636,9 +566,7 @@ def test_a_set_without_spread_has_no_statistic(monkeypatch, python_kernels) -> N
     solved = np.empty(1)
 
     # One cell's weight is all the information of the fit.
-    value = associations_module._statistic(
-        1.0, 1.0, np.array([1.0]), np.array([[1.0]]), solved
-    )
+    value = glm.score_statistic(1.0, 1.0, np.array([1.0]), np.array([[1.0]]), solved)
 
     assert np.isnan(value)
 

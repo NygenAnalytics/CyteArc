@@ -74,6 +74,10 @@ After adding slow test files or changing how long existing ones take, refresh th
 
     NUMBA_CACHE_DIR=$(mktemp -d) uv run pytest --store-shard-durations
 
+Numba saves compiled kernels in `__pycache__` folders as `.nbi` and `.nbc` files, and reuses a saved kernel while the source file that defines it is unchanged. A saved kernel includes the kernels it calls from other modules, so after editing a module whose Numba kernels other modules call, such as `cytearc/perturbation/glm.py`, delete the saved kernels before testing, or the callers keep running the old code:
+
+    find cytearc -name '*.nb[ic]' -delete
+
 For full CI parity, also run the visual regression step (or see `AGENTS.md`):
 
     MPLBACKEND=Agg CYTEARC_RUN_VISUAL_REGRESSION=1 \
