@@ -26,6 +26,38 @@ def float_argument(value: object, name: str) -> float:
     return resolved
 
 
+def bool_argument(value: object, name: str) -> bool:
+    """Return ``value`` after checking that it is ``True`` or ``False``.
+
+    NumPy booleans and integers are rejected.
+
+    Raises:
+        TypeError: If ``value`` is not a Python boolean.
+    """
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} must be a boolean")
+    return value
+
+
+def optional_name_argument(
+    value: object, name: str, *, noun: str = "a non-empty string"
+) -> str | None:
+    """Return ``value``, a name such as a column's, or None.
+
+    Args:
+        value: The argument to validate.
+        name: Argument name used in error messages.
+        noun: What the name must be, for the error message, such as
+            ``"a feature column name"``.
+
+    Raises:
+        TypeError: If ``value`` is neither None nor a non-empty string.
+    """
+    if value is not None and (not isinstance(value, str) or not value):
+        raise TypeError(f"{name} must be {noun} or None")
+    return value
+
+
 def clip_fraction_argument(value: object, name: str = "clip_fraction") -> float:
     """Return a two-sided clipping fraction as a Python float."""
     resolved = float_argument(value, name)

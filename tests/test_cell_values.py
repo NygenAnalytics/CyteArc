@@ -358,7 +358,7 @@ def test_values_beyond_the_memory_budget_are_refused_before_anything_is_read(
         return record
 
     for module, name in (
-        (selection_module, "_selection_indices"),
+        (selection_module, "cell_selection_indices"),
         (selection_module, "read_array_rows_chunkwise"),
         (base_datastore_module, "read_metadata_rows_chunkwise"),
     ):

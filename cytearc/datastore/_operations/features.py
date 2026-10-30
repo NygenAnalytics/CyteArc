@@ -1,7 +1,7 @@
 import os
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -139,6 +139,7 @@ from ...utils.arrays import (
     sort_categories,
 )
 from ...utils.logging import logger
+from ...utils.numba import numba_threads
 from ...utils.warnings import warn
 from .enrichment_store import (
     _ENRICHMENT_LAYOUT,
@@ -1462,19 +1463,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     n_up=resolved_n_up,
                 )
 
-        @contextmanager
-        def aucell_write_context() -> Iterator[None]:
-            import numba
-
-            previous_threads = numba.get_num_threads()
-            numba.set_num_threads(
-                min(max(1, int(self.nthreads)), numba.config.NUMBA_NUM_THREADS)
-            )
-            try:
-                yield
-            finally:
-                numba.set_num_threads(previous_threads)
-
         return self._run_enrichment(
             assay=assay,
             invalidate_cache=invalidate_cache,
@@ -1504,7 +1492,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     ),
                 ),
                 score_batches=score_batches,
-                write_context=aucell_write_context,
+                write_context=partial(numba_threads, self.nthreads),
             ),
         )
 
@@ -1726,19 +1714,6 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
             (background,) = background_holder
             return (("background_index", feature_index[background]),)
 
-        @contextmanager
-        def chromvar_write_context() -> Iterator[None]:
-            import numba
-
-            previous_threads = numba.get_num_threads()
-            numba.set_num_threads(
-                min(max(1, int(self.nthreads)), numba.config.NUMBA_NUM_THREADS)
-            )
-            try:
-                yield
-            finally:
-                numba.set_num_threads(previous_threads)
-
         return self._run_enrichment(
             assay=assay,
             invalidate_cache=invalidate_cache,
@@ -1776,7 +1751,7 @@ class _FeatureOperationsMixin(_FeatureOperationsBase):
                     ),
                 ),
                 score_batches=score_batches,
-                write_context=chromvar_write_context,
+                write_context=partial(numba_threads, self.nthreads),
                 allow_missing=True,
                 extra_dense=("deviations",),
                 extra_arrays=extra_arrays,

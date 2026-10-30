@@ -581,3 +581,35 @@ def test_guide_calls_plot_summarises_the_calls(store, template, tmp_path) -> Non
         result.close()
     with pytest.raises(ValueError, match="max_guides_per_cell"):
         store.plots.guide_calls(ref, max_guides_per_cell=1, show=False)
+
+
+def test_reference_checks_name_the_kinds_they_take() -> None:
+    from cytearc.datastore._operations.perturbation import (
+        _COORDINATE_KINDS,
+        _require_ref,
+    )
+    from cytearc.graph.feature_projection import NATIVE_COORDINATE_KINDS
+
+    ref = ArtifactRef(scope="datastore", kind="cell_selection", artifact_id="a" * 64)
+    _require_ref(ref, "cells")
+    _require_ref(ref, "cells", "cell_selection")
+    _require_ref(None, "features", "feature_selection", optional=True)
+    with pytest.raises(TypeError, match="^cells must be an ArtifactRef$"):
+        _require_ref("cells", "cells")
+    with pytest.raises(TypeError, match="^cells must be an ArtifactRef$"):
+        _require_ref(None, "cells", "cell_selection")
+    with pytest.raises(TypeError, match="^features must be an ArtifactRef or None$"):
+        _require_ref("hvg", "features", "feature_selection", optional=True)
+    for kinds, named in (
+        (("guide_calls",), "a guide_calls artifact"),
+        (("perturbation_labels", "mixscape_classes"), "a perturbation_labels or "),
+        (
+            _COORDINATE_KINDS,
+            "a reduction, batch_correction, imported_coordinates or normalized "
+            "artifact",
+        ),
+    ):
+        with pytest.raises(ValueError, match=f"^labels must be {named}"):
+            _require_ref(ref, "labels", *kinds)
+    # The refusal names every coordinate kind that the graph reads.
+    assert set(_COORDINATE_KINDS) == NATIVE_COORDINATE_KINDS

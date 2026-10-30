@@ -576,7 +576,7 @@ def test_row_summary_python_kernel_matches_compiled_kernel(monkeypatch) -> None:
 
     compiled = run(digest.summarize_rows)
     # Called from Python, the compiled mixer would type small ints as int64.
-    monkeypatch.setattr(digest, "_mix", digest._mix.py_func)
+    monkeypatch.setattr(digest, "mix64", digest.mix64.py_func)
     with np.errstate(over="ignore"):
         python = run(digest.summarize_rows.py_func)
 

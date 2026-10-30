@@ -315,7 +315,8 @@ def test_assay_read_block_facade_remains_patchable(monkeypatch):
     rna.name = "RNA"
     rna.normMethod = norm_lib_size
     rna.sf = 10
-    rna.cells = SimpleNamespace(fetch_all=lambda _column: totals)
+    # The totals column, which the assay reads at the selected cells only.
+    rna.cells = SimpleNamespace(_get_array=lambda _column: totals)
     rna.rawData = SimpleNamespace(_backing=counts)
     # Every RNA assay holds countsT. Its one chunk covers all the cells, so
     # reading it touches no fewer bytes and the rows come from counts.

@@ -1,5 +1,6 @@
 from typing import Literal, overload
 
+import numpy as np
 import zarr
 from zarr.errors import GroupNotFoundError
 
@@ -16,6 +17,15 @@ def as_zarr_array(
         return node
     label = f" at {name!r}" if name else ""
     raise TypeError(f"Expected Zarr array{label}, got {type(node).__name__}")
+
+
+def read_array(group: zarr.Group, name: str) -> np.ndarray:
+    """Read the whole array ``name`` of ``group`` into memory.
+
+    Raises:
+        TypeError: If ``name`` is a group, not an array.
+    """
+    return np.asarray(as_zarr_array(group[name], name=name)[:])
 
 
 def writable(array: zarr.Array) -> zarr.Array:

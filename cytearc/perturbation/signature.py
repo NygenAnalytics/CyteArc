@@ -28,7 +28,11 @@ import numpy as np
 import pandas as pd
 from numba import prange
 
-from cytearc.utils.arguments import float_argument, integer_argument
+from cytearc.utils.arguments import (
+    float_argument,
+    integer_argument,
+    optional_name_argument,
+)
 from cytearc.utils.numba import njit
 
 __all__ = [
@@ -72,10 +76,7 @@ def signature_settings(
     factor = float_argument(scale_factor, "scale_factor")
     if factor <= 0:
         raise ValueError("scale_factor must be above 0")
-    if sample_column is not None and (
-        not isinstance(sample_column, str) or not sample_column
-    ):
-        raise TypeError("sample_column must be a non-empty string or None")
+    optional_name_argument(sample_column, "sample_column")
     return resolved_dims, neighbors_k, factor
 
 

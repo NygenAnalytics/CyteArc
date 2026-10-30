@@ -549,20 +549,22 @@ def test_cell_aligned_artifact_validation_reports_each_broken_contract(monkeypat
     def out_of_bounds(_root, ref):
         return np.array([1, 3]) if ref == source else np.array([5])
 
-    monkeypatch.setattr(selection, "_selection_indices", out_of_bounds)
+    monkeypatch.setattr(selection, "cell_selection_indices", out_of_bounds)
     with pytest.raises(ValueError, match="must be a subset"):
         resolve_cell_aligned_artifact(None, artifact, cell_selection=target)
 
     def not_a_member(_root, ref):
         return np.array([1, 3]) if ref == source else np.array([2])
 
-    monkeypatch.setattr(selection, "_selection_indices", not_a_member)
+    monkeypatch.setattr(selection, "cell_selection_indices", not_a_member)
     with pytest.raises(ValueError, match="must be a subset"):
         resolve_cell_aligned_artifact(None, artifact, cell_selection=target)
 
     # The linked mask is resolved before any value is read, so that the
     # memory admission counts it.
-    monkeypatch.setattr(selection, "_selection_indices", lambda *_: np.array([1, 3]))
+    monkeypatch.setattr(
+        selection, "cell_selection_indices", lambda *_: np.array([1, 3])
+    )
     monkeypatch.setattr(
         selection,
         "read_array_rows_chunkwise",

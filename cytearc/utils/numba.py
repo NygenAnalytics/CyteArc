@@ -35,6 +35,22 @@ def restore_numba_threads[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
     return wrapped
 
 
+@contextmanager
+def numba_threads(nthreads: int) -> Iterator[None]:
+    """Run Numba's parallel kernels on ``nthreads`` threads, then restore the count.
+
+    The count is at least 1 and at most the threads that Numba started with.
+    """
+    import numba
+
+    previous = numba.get_num_threads()
+    numba.set_num_threads(min(max(1, int(nthreads)), numba.config.NUMBA_NUM_THREADS))
+    try:
+        yield
+    finally:
+        numba.set_num_threads(previous)
+
+
 # Typed as numba.njit is, so each kernel keeps its function's signature.
 @overload
 def njit[F: Callable[..., Any]](function: F, /, **options: Any) -> "Dispatcher[F]": ...

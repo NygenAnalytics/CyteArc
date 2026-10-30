@@ -12,6 +12,7 @@ from cytearc.storage.types import (
     array_metadata_shards,
     as_zarr_array,
     as_zarr_group,
+    read_array,
     read_fresh_group,
 )
 from cytearc.utils import (
@@ -26,10 +27,14 @@ from cytearc.utils import (
     tqdmbar,
 )
 from cytearc.utils.arguments import (
+    bool_argument,
     clip_fraction_argument,
     float_argument,
     integer_argument,
+    optional_name_argument,
 )
+from cytearc.utils.digest import mix64, mix64_array
+from cytearc.utils.numba import numba_threads
 from cytearc.utils.arrays import (
     _rolling_window_kernel,
     assay_feature_ranges,
@@ -532,3 +537,81 @@ def test_assay_feature_ranges_group_spans_in_first_seen_order():
         "RNA": ((0, 3), (5, 6)),
         "ADT": ((3, 5),),
     }
+
+
+def test_read_array_reads_a_whole_array_and_refuses_a_group():
+    group = zarr.open_group(MemoryStore(), mode="w")
+    group.create_array("values", data=np.arange(12, dtype=np.int32).reshape(3, 4))
+    group.create_group("nested")
+
+    found = read_array(group, "values")
+
+    assert isinstance(found, np.ndarray) and found.dtype == np.int32
+    np.testing.assert_array_equal(found, np.arange(12).reshape(3, 4))
+    with pytest.raises(TypeError, match="Expected Zarr array at 'nested'"):
+        read_array(group, "nested")
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_bool_argument_returns_a_boolean(value):
+    assert bool_argument(value, "flag") is value
+
+
+@pytest.mark.parametrize("value", [1, 0, np.True_, "yes", None])
+def test_bool_argument_refuses_anything_but_a_python_boolean(value):
+    with pytest.raises(TypeError, match="^flag must be a boolean$"):
+        bool_argument(value, "flag")
+
+
+def test_optional_name_argument_takes_a_name_or_none():
+    assert optional_name_argument("lane", "sample_column") == "lane"
+    assert optional_name_argument(None, "sample_column") is None
+    for value in ("", 3, ["lane"]):
+        with pytest.raises(
+            TypeError, match="^sample_column must be a non-empty string or None$"
+        ):
+            optional_name_argument(value, "sample_column")
+    with pytest.raises(
+        TypeError, match="^id_column must be a feature column name or None$"
+    ):
+        optional_name_argument("", "id_column", noun="a feature column name")
+
+
+def _splitmix64(value: int) -> int:
+    """SplitMix64's finaliser in Python integers, from its published constants."""
+    mask = (1 << 64) - 1
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & mask
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & mask
+    return value ^ (value >> 31)
+
+
+def test_mix64_is_splitmix64s_finaliser_compiled_and_on_arrays():
+    values = np.array([0, 1, 2**63, 2**64 - 1, 0x9E3779B97F4A7C15], dtype=np.uint64)
+    expected = [_splitmix64(int(value)) for value in values]
+
+    mixed = mix64_array(values)
+
+    assert mixed.dtype == np.uint64
+    assert mixed.tolist() == expected
+    assert [int(mix64(value)) for value in values] == expected
+    # The first output of SplitMix64 seeded with 0, from its reference code.
+    assert _splitmix64(0x9E3779B97F4A7C15) == 0xE220A8397B1DCDAF
+
+
+def test_numba_threads_sets_a_bounded_count_and_restores_the_last():
+    import numba
+
+    previous = numba.get_num_threads()
+    most = numba.config.NUMBA_NUM_THREADS
+    with numba_threads(1):
+        assert numba.get_num_threads() == 1
+        with numba_threads(most + 5):
+            assert numba.get_num_threads() == most
+        assert numba.get_num_threads() == 1
+    with numba_threads(0):
+        assert numba.get_num_threads() == 1
+    assert numba.get_num_threads() == previous
+    with pytest.raises(RuntimeError, match="inside"):
+        with numba_threads(1):
+            raise RuntimeError("inside")
+    assert numba.get_num_threads() == previous

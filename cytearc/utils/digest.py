@@ -1,4 +1,10 @@
-"""Compiled per-row digests and totals for dense count blocks."""
+"""Compiled per-row digests and totals for dense count blocks, and SplitMix64.
+
+SplitMix64's finaliser (Steele, Lea and Flood 2014) mixes a 64-bit integer
+into one whose bits each depend on all of its bits. The digests mix each
+count's column and value with it, and counter-based generators, such as the
+random sets of the association tests, key their streams through it.
+"""
 
 import numpy as np
 
@@ -11,10 +17,23 @@ _ODD = np.uint64(0xD6E8FEB86659FD93)
 
 
 @njit(cache=True, inline="always")
-def _mix(value: np.uint64) -> np.uint64:
+def mix64(value: np.uint64) -> np.uint64:
+    """Return the SplitMix64 finaliser of a 64-bit unsigned integer."""
     value = (value ^ (value >> np.uint64(30))) * _M1
     value = (value ^ (value >> np.uint64(27))) * _M2
     return value ^ (value >> np.uint64(31))
+
+
+def mix64_array(values: np.ndarray) -> np.ndarray:
+    """Return the SplitMix64 finaliser of each unsigned 64-bit integer.
+
+    Each value equals :func:`mix64` of it; array products wrap around without
+    warnings, as the compiled products do.
+    """
+    mixed = (values ^ (values >> np.uint64(30))) * _M1
+    mixed = (mixed ^ (mixed >> np.uint64(27))) * _M2
+    finalised: np.ndarray = mixed ^ (mixed >> np.uint64(31))
+    return finalised
 
 
 @njit(cache=True, nogil=True)
@@ -49,18 +68,18 @@ def summarize_rows(
                     raise ValueError(
                         "Count matrices must hold finite values; found NaN or infinity"
                     )
-                key = _mix(
+                key = mix64(
                     ((np.uint64(column) + np.uint64(1)) * _GOLDEN)
                     ^ np.uint64(bits[row, column])
                 )
-                first = _mix(first ^ key)
+                first = mix64(first ^ key)
                 second = (second + key) * _ODD
                 nonzero += np.uint64(1)
                 total += value
                 if value > 0:
                     positive += 1
                     column_positive[column] += 1
-        digests[row, 0] = _mix(first ^ nonzero)
-        digests[row, 1] = _mix(second ^ (nonzero * _GOLDEN))
+        digests[row, 0] = mix64(first ^ nonzero)
+        digests[row, 1] = mix64(second ^ (nonzero * _GOLDEN))
         row_sums[row] = total
         row_positive[row] = positive

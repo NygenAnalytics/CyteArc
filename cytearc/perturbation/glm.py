@@ -26,6 +26,7 @@ __all__ = [
     "count_array",
     "digamma",
     "fit_logistic",
+    "fit_negative_binomial",
     "fit_poisson",
     "forward_substitution",
     "log2_fold_change",
@@ -34,6 +35,7 @@ __all__ = [
     "negative_binomial_information",
     "pearson_dispersion",
     "score_statistic",
+    "set_test",
     "size_derivatives",
     "size_dispersion",
     "trigamma",
@@ -434,6 +436,76 @@ def log2_fold_change(
         variance += spread / (count_sum * count_sum)
     fold = math.log2(ratio) if ratio > 0 else -np.inf
     return fold, math.sqrt(variance) / math.log(2.0)
+
+
+@njit(cache=True, nogil=True)
+def fit_negative_binomial(
+    y: np.ndarray,
+    covariates: np.ndarray,
+    coefficients: np.ndarray,
+    eta: np.ndarray,
+    mu: np.ndarray,
+    factor: np.ndarray,
+) -> float:
+    """Fit a negative binomial regression of counts under the null, from ``coefficients``.
+
+    The fit takes Poisson coefficients by Newton's method, then the size that
+    maximizes the likelihood with the Poisson means held fixed: the null fit
+    of a pair in the test against control cells and of a gene in the test
+    against all other cells. ``coefficients``, ``eta`` and ``mu`` end at the
+    fit, and ``factor`` receives the lower Cholesky factor of its negative
+    binomial information. Returns the dispersion, 1 / size.
+    """
+    n, p = covariates.shape
+    fit_poisson(y, covariates, coefficients, eta, mu)
+    dispersion = size_dispersion(y, mu, float(n - p))
+    information = np.empty((p, p))
+    negative_binomial_information(covariates, mu, dispersion, information)
+    cholesky(information, factor)
+    return dispersion
+
+
+@njit(cache=True, nogil=True)
+def set_test(
+    y: np.ndarray,
+    mu: np.ndarray,
+    covariates: np.ndarray,
+    dispersion: float,
+    cells: np.ndarray,
+    factor: np.ndarray,
+    solved: np.ndarray,
+) -> tuple[float, float, float]:
+    """Return a set of cells' score statistic, log2 fold change and its standard error.
+
+    Under a fit with means ``mu``, dispersion phi and the Cholesky factor
+    ``factor`` of its information, a cell's score is (y - mu) / (1 + phi mu)
+    and its weight mu / (1 + phi mu). The statistic standardizes the set's
+    summed score, as :func:`score_statistic` does, and the fold change is
+    :func:`log2_fold_change` of the set. ``cells`` lists at least one cell,
+    and they add up in its order; ``solved`` is room for one covariate vector.
+    """
+    p = covariates.shape[1]
+    sums = np.zeros(p + 1)
+    tangent = np.zeros(p)
+    count_sum = 0.0
+    mean_sum = 0.0
+    square_sum = 0.0
+    for j in cells:
+        scale = 1.0 + dispersion * mu[j]
+        weight = mu[j] / scale
+        sums[0] += (y[j] - mu[j]) / scale
+        for c in range(p):
+            sums[1 + c] += weight * covariates[j, c]
+        count_sum += y[j]
+        mean_sum += mu[j]
+        square_sum += mu[j] * mu[j]
+        for c in range(p):
+            tangent[c] += mu[j] * covariates[j, c]
+    statistic = score_statistic(sums[0], sums[1], sums[1:], factor, solved)
+    fold, error = log2_fold_change(
+        count_sum, mean_sum, square_sum, tangent, factor, dispersion, solved
+    )
+    return statistic, fold, error
 
 
 @njit(cache=True, nogil=True)

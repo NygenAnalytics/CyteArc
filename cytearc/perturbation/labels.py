@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from cytearc.perturbation.guide_calls import MULTIPLE, NEGATIVE
+from cytearc.utils.arguments import optional_name_argument
 
 __all__ = [
     "CONTROL",
@@ -189,10 +190,7 @@ def label_settings(
         raise ValueError(
             "controls must name at least one target, and no name may be blank"
         )
-    if target_column is not None and (
-        not isinstance(target_column, str) or not target_column
-    ):
-        raise TypeError("target_column must be a feature column name or None")
+    optional_name_argument(target_column, "target_column", noun="a feature column name")
     if targets is not None and (
         not isinstance(targets, Mapping)
         or not all(

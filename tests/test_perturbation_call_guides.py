@@ -676,3 +676,23 @@ def test_loading_thresholds_checks_the_budget_and_the_samples(
     monkeypatch.setattr(store, "memoryBytes", 100)
     with pytest.raises(MemoryError, match="Pass guides to read fewer"):
         store.perturbation.load_guide_thresholds(fits)
+
+
+def test_loading_thresholds_needs_the_status_names_that_decode_them(
+    store, template
+) -> None:
+    ref = store.perturbation.call_guides(template.cells, sample_column="lane")
+    group = artifact_group(store.zw, artifact_group_input(store, ref))
+    table = store.perturbation.load_guide_thresholds(ref).table
+    assert set(table["status"]) <= set(FIT_STATUSES)
+    # Status codes saved under other names would be read as the wrong
+    # statuses, through the calls or on their own.
+    for names in (list(reversed(FIT_STATUSES)), None):
+        group.attrs["status_names"] = names
+        for source in (ref, artifact_group_input(store, ref)):
+            with pytest.raises(ValueError, match="names its statuses"):
+                store.perturbation.load_guide_thresholds(source)
+    group.attrs["status_names"] = list(FIT_STATUSES)
+    pd.testing.assert_frame_equal(
+        store.perturbation.load_guide_thresholds(ref).table, table
+    )

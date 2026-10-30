@@ -13,7 +13,7 @@ from cytearc.perturbation.histograms import (
     guide_count_histograms,
     histogram_bytes,
 )
-from tests.perturbation_helpers import screen_counts, use_python_kernels
+from tests.perturbation_helpers import histogram_of, screen_counts, use_python_kernels
 
 
 def _blocks(counts: np.ndarray, *sizes: int) -> list[np.ndarray]:
@@ -30,7 +30,7 @@ def _check_against_numpy(found, counts: np.ndarray, samples: np.ndarray) -> None
         for guide in range(counts.shape[1]):
             column = rows[:, guide]
             values, cells = np.unique(column[column > 0], return_counts=True)
-            found_values, found_cells = found.histogram(sample, guide)
+            found_values, found_cells = histogram_of(found, sample, guide)
             np.testing.assert_array_equal(found_values, values)
             np.testing.assert_array_equal(found_cells, cells)
             assert found.nonzero_cells()[sample, guide] == (column > 0).sum()
@@ -63,9 +63,9 @@ def test_histograms_hold_samples_and_guides_without_counts() -> None:
     samples = np.asarray([0, 0, 2, 2])
     found = guide_count_histograms([counts], samples, n_samples=3, n_guides=3)
     _check_against_numpy(found, counts, samples)
-    assert found.histogram(0, 0)[0].tolist() == [2]
-    assert found.histogram(0, 0)[1].tolist() == [2]
-    assert found.histogram(1, 0)[0].tolist() == []
+    assert histogram_of(found, 0, 0)[0].tolist() == [2]
+    assert histogram_of(found, 0, 0)[1].tolist() == [2]
+    assert histogram_of(found, 1, 0)[0].tolist() == []
     assert found.max_counts().tolist() == [[2, 0, 0], [0, 0, 0], [70, 0, 0]]
 
 
@@ -354,3 +354,22 @@ def test_histograms_refuse_memory_below_their_least_before_reading() -> None:
         [counts], samples, n_samples=2, n_guides=3, memory_bytes=least
     )
     assert found.zero_cells().tolist() == [[2, 2, 2], [2, 2, 2]]
+
+
+def test_the_calls_of_thresholds_count_each_cell_at_or_above_its_guides_threshold():
+    counts = screen_counts(300, 6, seed=8)
+    samples = np.arange(300) % 3
+    found = guide_count_histograms([counts], samples, n_samples=3, n_guides=6)
+    thresholds = np.array(
+        [[1, 40, 0, 7, 200, 65], [3, 0, 0, 2, 64, 65], [0, 0, 0, 0, 0, 0]]
+    )
+
+    # A guide whose threshold is 0 calls nothing in that sample.
+    expected = sum(
+        int(((counts[samples == s, g] >= t) & (t > 0)).sum())
+        for s in range(3)
+        for g, t in enumerate(thresholds[s])
+    )
+    assert found.n_calls(thresholds) == expected
+    assert found.n_calls(np.zeros((3, 6), dtype=np.int64)) == 0
+    assert found.n_calls(np.ones((3, 6), dtype=np.int64)) == int((counts > 0).sum())

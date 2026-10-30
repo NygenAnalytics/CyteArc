@@ -31,11 +31,15 @@ from cytearc import (
 from cytearc.datastore._pipeline import summaries
 from cytearc.datastore._pipeline.executor import RecipePlan
 from cytearc.datastore._pipeline.recipes.common import require_labeled_cells
-from cytearc.datastore._pipeline.recipes.perturbation import resolve_perturbation
+from cytearc.datastore._pipeline.recipes.perturbation import (
+    _check_call_file_cells,
+    resolve_perturbation,
+)
 from cytearc.datastore._pipeline.settings import LABELS_NEED_CONTROLS, stage_settings
+from cytearc.datastore._pipeline.stages import CellSource
 from cytearc.datastore.pipeline_accessor import PipelineAccessor
 from cytearc.metadata.membership import UnmeasuredCellsError, membership_attributes
-from tests.perturbation_helpers import written
+from tests.perturbation_helpers import record_cell_reads, written
 from tests.storage_helpers import insert_nullable_cell_column, write_count_store
 
 N_GENES = 120
@@ -1139,6 +1143,23 @@ def test_one_call_file_reaches_the_cells_of_one_sample(screen, tmp_path) -> None
     assert int((cells["n_guides"] > 0).sum()) == int(
         np.count_nonzero(called & analysed)
     )
+
+
+def test_the_call_file_check_reads_the_ids_of_the_runs_cells_only(
+    screen, tmp_path, monkeypatch
+) -> None:
+    store = _copy(screen, tmp_path)
+    store.cells.insert("lane1", LANES == "L1")
+    reads = record_cell_reads(monkeypatch, store, {"ids"})
+
+    for prefix in (None, "cell"):
+        reads["ids"].clear()
+        _check_call_file_cells(
+            store, CellSource(column="lane1", selection=None), prefix
+        )
+
+        read = np.concatenate(reads["ids"])
+        assert set(read.tolist()) == set(np.flatnonzero(LANES == "L1").tolist())
 
 
 # Failures and cancellation ----------------------------------------------------

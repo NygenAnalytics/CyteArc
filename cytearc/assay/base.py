@@ -9,6 +9,7 @@ from scipy.sparse import csr_matrix, vstack
 
 from ..matrix import ChunkedArray
 from ..metadata import MetaData
+from ..metadata.rows import read_metadata_rows_chunkwise
 from ..storage.artifacts import provenance_hash
 from ..storage.budget import ResourceBudget, resolve_budget
 from ..storage.types import (
@@ -285,11 +286,23 @@ class Assay:
         return f"{self.name}_nCounts"
 
     def _cell_count_totals(self, cell_idx: np.ndarray) -> np.ndarray:
-        """Read the prepared cell totals as a new float64 array."""
-        if len(cell_idx) == 0:
+        """Read the prepared totals of the cells at ``cell_idx`` as a new float64 array.
+
+        Only the chunks of the totals column that hold those cells are read,
+        one at a time, so the read holds one chunk beside the totals it
+        returns. The positions may come in any order and repeat.
+        """
+        rows = np.asarray(cell_idx, dtype=np.int64)
+        if rows.size == 0:
             return np.empty(0, dtype=np.float64)
-        totals = self.cells.fetch_all(self._totals_name)[cell_idx]
-        return np.asarray(totals, dtype=np.float64)
+        if rows.size > 1 and not np.all(rows[1:] > rows[:-1]):
+            distinct, positions = np.unique(rows, return_inverse=True)
+            totals: np.ndarray = self._cell_count_totals(distinct)[positions]
+            return totals
+        return np.asarray(
+            read_metadata_rows_chunkwise(self.cells, self._totals_name, rows),
+            dtype=np.float64,
+        )
 
     @normalizes_per_cell(norm_dummy)
     def normed(

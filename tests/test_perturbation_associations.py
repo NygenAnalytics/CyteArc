@@ -16,22 +16,32 @@ from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationAssociations
 from cytearc.perturbation import associations as associations_module
 from cytearc.perturbation import glm, random_sets
+from cytearc.perturbation import p_values as p_values_module
 from cytearc.perturbation.associations import (
     ASSOCIATION_SETS,
+    CALIBRATION_STATUSES,
     RECORD_BYTES,
     TreatmentGroups,
-    adjusted_p_values,
     association_covariates,
+    association_pairs,
     calibration_grade,
+    calibration_group_size,
     calibration_pairs,
+    calibration_runs,
+    calibration_status,
     fit_null_models,
-    fit_skew_normals,
+    most_calibration_pairs,
     negative_control_groups,
     nonzero_counts,
+    pair_table_rows,
     pair_tests,
     record_batch,
     resampled_statistics,
     resampling_counts,
+)
+from cytearc.perturbation.p_values import (
+    adjusted_p_values,
+    fit_skew_normals,
     resampling_p_values,
     skew_normal_p_values,
     skew_normal_tail_ratios,
@@ -41,6 +51,7 @@ from cytearc.storage.artifacts import ArtifactRef
 from tests.perturbation_helpers import (
     dense_pair,
     fixed_labels,
+    record_cell_reads,
     size_root,
     use_python_kernels,
     write_screen,
@@ -767,11 +778,11 @@ def test_fits_and_their_checks_do_not_depend_on_their_spans(
     whole = fit_skew_normals(statistics)
     whole_ratios = skew_normal_tail_ratios(statistics, z, *whole, "both")
     # Spans of one row, or of three rows and a last one of two.
-    monkeypatch.setattr(associations_module, "_SPAN_BYTES", 8 * 101 * span_rows)
+    monkeypatch.setattr(p_values_module, "_SPAN_BYTES", 8 * 101 * span_rows)
 
     fitted = fit_skew_normals(statistics)
     ratios = skew_normal_tail_ratios(statistics, z, *fitted, "both")
-    counted = associations_module._counts_beyond(statistics, z)
+    counted = p_values_module._counts_beyond(statistics, z)
 
     for value, expected in zip(fitted, whole, strict=True):
         np.testing.assert_array_equal(value, expected)
@@ -789,7 +800,7 @@ def test_fits_and_their_checks_do_not_depend_on_their_spans(
             math.ceil(0.99 * n_draws) - 1,
             math.floor(0.01 * n_draws),
         ]
-        found = associations_module._order_statistics(statistics[:, :n_draws], ranks)
+        found = p_values_module._order_statistics(statistics[:, :n_draws], ranks)
         ordered = np.sort(statistics[:, :n_draws], axis=1)
         np.testing.assert_array_equal(found, ordered[:, ranks])
 
@@ -842,6 +853,124 @@ def test_adjusted_p_values_adjust_the_tested_pairs() -> None:
 
 
 # Calibration groups and pairs ----------------------------------------------------
+
+
+def _pairs_of(rows_in_reference: bool, n_calibration_pairs: int | None):
+    """The pairs of three label rows, two of them tested, and one calibration group.
+
+    Row 0 is tested group 0 and row 2 group 1; row 0's pair with feature 1
+    has 2 expressing cells of 5, row 2's with feature 3 has 1 of 4, and the
+    calibration group of 3 cells expresses features 0 and 2 in 3 and 4 cells.
+    """
+    return association_pairs(
+        (np.array([0, 2]), np.array([1, 3])),
+        (np.array([2]), np.array([3])),
+        row_groups=np.array([0, -1, 1]),
+        sizes=np.array([5, 4, 3]),
+        row_counts=np.array([[2, 9], [4, 1]], dtype=np.int32),
+        row_features=np.array([1, 3]),
+        calibration_counts=np.array([[3, 0, 4, 1]], dtype=np.int64),
+        checked=np.arange(4),
+        reference=np.array([10, 6, 8, 5], dtype=np.int64),
+        n_reference=20,
+        rows_in_reference=rows_in_reference,
+        min_nonzero=2,
+        n_calibration_pairs=n_calibration_pairs,
+        seed=0,
+    )
+
+
+def test_pairs_count_their_cells_against_the_control_cells_or_all_others() -> None:
+    against_controls = _pairs_of(False, 5)
+    against_others = _pairs_of(True, 5)
+
+    for pairs in (against_controls, against_others):
+        assert pairs.sets.tolist() == [0, 0, 1, 1, 2]
+        assert pairs.groups.tolist() == [0, 1, 2, 2, 1]
+        assert pairs.features.tolist() == [1, 3, 0, 2, 3]
+        assert all(counts.dtype == np.int64 for counts in pairs.qc)
+        # Only the first discovery pair has 2 expressing treatment cells.
+        assert pairs.passing_discovery == 1
+    # Tested cells are compared with all 20 control cells, or with the other
+    # cells; a calibration group always with the other cells.
+    assert [counts.tolist() for counts in against_controls.qc] == [
+        [5, 4, 3, 3, 4],
+        [20, 20, 17, 17, 20],
+        [2, 1, 3, 4, 1],
+        [6, 5, 7, 4, 5],
+    ]
+    assert [counts.tolist() for counts in against_others.qc] == [
+        [5, 4, 3, 3, 4],
+        [15, 16, 17, 17, 16],
+        [2, 1, 3, 4, 1],
+        [4, 4, 7, 4, 4],
+    ]
+    assert against_controls.pass_qc.tolist() == [True, False, True, True, False]
+
+
+def test_calibration_pairs_are_drawn_among_those_that_pass_qc() -> None:
+    # By default as many as the discovery pairs that pass QC, one here.
+    drawn = _pairs_of(False, None)
+    calibration = drawn.sets == 1
+    assert calibration.sum() == 1
+    assert drawn.features[calibration][0] in (0, 2)
+    assert drawn.pass_qc[calibration].all()
+    # None when the check is off or no group passes.
+    assert not (_pairs_of(False, 0).sets == 1).any()
+    none = association_pairs(
+        (np.array([0]), np.array([1])),
+        (np.empty(0, np.int64), np.empty(0, np.int64)),
+        row_groups=np.array([0]),
+        sizes=np.array([5]),
+        row_counts=np.array([[2, 9]], dtype=np.int32),
+        row_features=np.array([1, 3]),
+        calibration_counts=np.zeros((0, 4), dtype=np.int64),
+        checked=np.arange(4),
+        reference=np.array([10, 6, 8, 5]),
+        n_reference=20,
+        rows_in_reference=False,
+        min_nonzero=2,
+        n_calibration_pairs=None,
+        seed=0,
+    )
+    assert none.sets.tolist() == [0] and none.pass_qc.tolist() == [True]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "status"),
+    [
+        ((3, None, 0, 0, "low"), "checked"),
+        ((0, 0, 5, 9, "low"), "off"),
+        ((0, None, 1, 9, "low"), "few_control_guides"),
+        ((0, None, 0, 9, "high"), "few_control_guides"),
+        ((0, None, 1, 0, "high"), "no_passing_discovery"),
+        ((0, None, 2, 0, "low"), "no_passing_discovery"),
+        ((0, 5, 2, 0, "low"), "no_passing_calibration"),
+        ((0, None, 2, 3, "low"), "no_passing_calibration"),
+    ],
+)
+def test_the_calibration_status_says_why_no_check_ran(arguments, status) -> None:
+    assert calibration_status(*arguments) == status
+    assert status in CALIBRATION_STATUSES
+
+
+def test_a_calibration_check_runs_unless_off_or_without_discovery_pairs() -> None:
+    assert not calibration_runs(0, 10)
+    assert not calibration_runs(None, 0)
+    assert calibration_runs(None, 3)
+    assert calibration_runs(5, 0)
+    assert most_calibration_pairs(2, 10, 5, None) == 5
+    assert most_calibration_pairs(2, 10, 50, None) == 20
+    assert most_calibration_pairs(2, 10, 50, 7) == 7
+
+
+def test_calibration_groups_hold_the_median_tested_targets_guides() -> None:
+    guide_targets = np.array([0, 0, 1, -1, 2, 2, 2])
+
+    assert calibration_group_size("target", guide_targets, 3, np.array([1])) == 1
+    assert calibration_group_size("target", guide_targets, 3, np.array([0, 2])) == 2
+    assert calibration_group_size("target", guide_targets, 3, np.array([2])) == 3
+    assert calibration_group_size("guide", guide_targets, 3, np.array([2])) == 1
 
 
 def test_negative_control_groups_are_distinct_random_sets_of_guides() -> None:
@@ -951,7 +1080,7 @@ def test_pair_tests_without_the_approximation_keep_the_sets_p_values() -> None:
 
 def test_pair_tests_take_a_third_round_when_the_fit_fails(monkeypatch) -> None:
     counts, design, groups = _screen(n_controls=200, sizes=(80,), n_genes=2, effect=0.3)
-    monkeypatch.setattr(associations_module, "_TAIL_RATIO_FLOOR", np.inf)
+    monkeypatch.setattr(p_values_module, "_TAIL_RATIO_FLOOR", np.inf)
 
     result = pair_tests(
         counts,
@@ -1211,7 +1340,7 @@ def test_association_pairs_match_features_by_id_then_name(shared) -> None:
         {"target": ["RNA1", "RNA0", "RNA0"], "feature": ["A", "ENSG0", "ENSG3"]}
     )
 
-    matched = store._association_pairs(frame, "pairs", rows, "target", ids, names)
+    matched = pair_table_rows(frame, "pairs", rows.names, ids, names)
 
     assert [values.tolist() for values in matched] == [[0, 0, 1], [0, 3, 0]]
     for wrong, message in (
@@ -1223,17 +1352,62 @@ def test_association_pairs_match_features_by_id_then_name(shared) -> None:
     ):
         error = TypeError if isinstance(wrong, list) else ValueError
         with pytest.raises(error, match=message):
-            store._association_pairs(wrong, "pairs", rows, "target", ids, names)
+            pair_table_rows(wrong, "pairs", rows.names, ids, names)
     # Repeated IDs match nothing, so names decide.
-    repeated = store._association_pairs(
+    repeated = pair_table_rows(
         pd.DataFrame({"target": ["RNA0"], "feature": ["A"]}),
         "pairs",
-        rows,
-        "target",
+        rows.names,
         np.array(["X", "X", "Y", "Z"]),
         names,
     )
     assert [values.tolist() for values in repeated] == [[0], [0]]
+
+
+def test_cell_totals_read_only_the_cells_they_return(shared, monkeypatch) -> None:
+    store = shared.store
+    every = np.asarray(store.cells.fetch_all("RNA_nCounts"), dtype=np.float64)
+    reads = record_cell_reads(monkeypatch, store, {"RNA_nCounts"})
+    for rows in (
+        np.array([3, 4, 5, 90, 91, 400], dtype=np.int64),
+        np.array([400, 3, 91, 4], dtype=np.int64),
+        np.array([91, 3, 91, 3, 0], dtype=np.int64),
+    ):
+        reads["RNA_nCounts"].clear()
+
+        totals = store.RNA._cell_count_totals(rows)
+
+        assert totals.dtype == np.float64
+        np.testing.assert_array_equal(totals, every[rows])
+        # Only the rows asked for are read, never the whole column.
+        read = np.concatenate(reads["RNA_nCounts"])
+        assert set(read.tolist()) == set(rows.tolist())
+    empty = store.RNA._cell_count_totals(np.empty(0, dtype=np.int64))
+    assert empty.dtype == np.float64 and empty.shape == (0,)
+
+
+def test_association_tests_read_the_totals_of_their_tested_cells_only(
+    shared, monkeypatch
+) -> None:
+    store, labels = shared.store, shared.labels
+    reads = record_cell_reads(monkeypatch, store, {"RNA_nCounts"})
+
+    store.perturbation.associations(
+        labels,
+        pairs=pd.DataFrame({"target": ["RNA0"], "feature": ["RNA0"]}),
+        positive_controls=None,
+        n_calibration_pairs=0,
+        invalidate_cache=True,
+        **FAST,
+    )
+
+    # The control cells and the cells of RNA0 alone, not those of RNA1, of
+    # two targets or without a guide.
+    read = set(np.concatenate(reads["RNA_nCounts"]).tolist())
+    guides = OPERATION_GUIDES > 0
+    tested = guides[:, 4:].any(axis=1) & ~guides[:, :4].any(axis=1)
+    tested |= guides[:, :2].any(axis=1) & ~guides[:, 2:].any(axis=1)
+    assert read == set(np.flatnonzero(tested).tolist())
 
 
 def test_associations_are_reused_read_only_and_refused_when_new(shared) -> None:
@@ -1351,7 +1525,7 @@ def test_associations_held_and_streamed_counts_agree(shared, monkeypatch) -> Non
 
     # Counts that may not be held are read again in bands of 4 features.
     monkeypatch.setattr(perturbation_operations, "_ASSOCIATION_HELD_SHARE", 0.0)
-    monkeypatch.setattr(perturbation_operations, "_MIXSCAPE_BAND_BYTES", 8 * 540 * 4)
+    monkeypatch.setattr(perturbation_operations, "_BAND_BYTES", 8 * 540 * 4)
     streamed = store.perturbation.associations(
         labels, features=features, invalidate_cache=True, **FAST
     )

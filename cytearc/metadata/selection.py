@@ -56,6 +56,7 @@ __all__ = [
     "ResolvedGrouping",
     "Standardize",
     "StudyDesign",
+    "cell_selection_indices",
     "cell_value_array",
     "cell_value_spec",
     "grouping_value_name",
@@ -532,7 +533,11 @@ def require_complete_cluster_labels(
         raise ValueError(f"{name} contains missing cluster labels")
 
 
-def _selection_indices(root: Any, selection: ArtifactRef) -> np.ndarray:
+def cell_selection_indices(root: Any, selection: ArtifactRef) -> np.ndarray:
+    """Return the store positions of a cell selection's cells, ascending, as int64.
+
+    The selection is checked against the cell table first.
+    """
     return read_stored_selection_indices(
         root,
         selection,
@@ -717,12 +722,12 @@ def resolve_cell_aligned_artifact(
                     "cell_selection, or raise mem_budget."
                 )
 
-        source_idx = _selection_indices(root, source_selection)
+        source_idx = cell_selection_indices(root, source_selection)
         if same_selection:
             target_idx = source_idx
             compact_idx = np.arange(len(source_idx), dtype=np.int64)
         else:
-            target_idx = _selection_indices(root, target_selection)
+            target_idx = cell_selection_indices(root, target_selection)
             compact_idx = np.searchsorted(source_idx, target_idx).astype(
                 np.int64,
                 copy=False,
@@ -773,7 +778,7 @@ def resolve_grouping(
         cell_idx = (
             np.arange(cells.N, dtype=np.int64)
             if cell_selection is None
-            else _selection_indices(root, cell_selection)
+            else cell_selection_indices(root, cell_selection)
         )
         labels = np.asarray(read_metadata_rows(cells, grouping.key, cell_idx))
         missing = read_metadata_missing_rows(cells, grouping.key, cell_idx)

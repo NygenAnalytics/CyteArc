@@ -27,7 +27,13 @@ import pandas as pd
 from numba import prange
 from scipy.special import ndtr
 
-from cytearc.utils.arguments import float_argument, integer_argument
+from cytearc.perturbation.labels import CONTROL
+from cytearc.utils.arguments import (
+    bool_argument,
+    float_argument,
+    integer_argument,
+    optional_name_argument,
+)
 from cytearc.utils.numba import njit
 
 __all__ = [
@@ -36,11 +42,15 @@ __all__ = [
     "MIXSCAPE_FITTED",
     "MIXSCAPE_NO_FIT",
     "MIXSCAPE_STATUSES",
+    "UNLABELLED",
+    "MixscapeClasses",
     "MixscapeFit",
     "MixscapeResult",
+    "band_de_genes",
     "classify_target",
     "constrained_mixture",
     "group_totals",
+    "mixscape_classes",
     "mixscape_settings",
     "rank_sum_p_values",
     "scale_like_seurat",
@@ -49,6 +59,8 @@ __all__ = [
 
 #: Target statuses, stored as positions in this tuple.
 MIXSCAPE_STATUSES = ("fitted", "few_de_genes", "few_cells", "no_fit")
+#: The class of a cell of the signature that the labels do not cover.
+UNLABELLED = "unlabelled"
 #: The mixture classified the target's cells.
 MIXSCAPE_FITTED = 0
 #: Fewer DE genes than ``min_de_genes``: every cell is an escaper.
@@ -104,8 +116,7 @@ def mixscape_settings(
         raise ValueError("min_fraction must be from 0 to 1")
     if not 0 < cutoff <= 1:
         raise ValueError("p_value_cutoff must be above 0 and at most 1")
-    if not isinstance(scale, bool):
-        raise TypeError("scale must be a boolean")
+    bool_argument(scale, "scale")
     if not isinstance(perturbation_type, str):
         raise TypeError("perturbation_type must be a string")
     if not perturbation_type or " " in perturbation_type:
@@ -113,10 +124,7 @@ def mixscape_settings(
             "perturbation_type must be one word, such as 'KO', not "
             f"{perturbation_type!r}"
         )
-    if split_column is not None and (
-        not isinstance(split_column, str) or not split_column
-    ):
-        raise TypeError("split_column must be a non-empty string or None")
+    optional_name_argument(split_column, "split_column")
     return de_floor, cell_floor, iterations, fold, fraction, cutoff
 
 
@@ -349,6 +357,98 @@ def rank_sum_p_values(
     _rank_sum_z(held, rows, columns, places, controls, ties, z)
     p_values: np.ndarray = np.clip(2.0 * ndtr(-z), 0.0, 1.0)
     return p_values
+
+
+def band_de_genes(
+    values: np.ndarray,
+    member_groups: np.ndarray,
+    by_group: np.ndarray,
+    bounds: np.ndarray,
+    rows: list[int],
+    row_splits: np.ndarray,
+    *,
+    min_fraction: float,
+    logfc_threshold: float,
+    p_value_cutoff: float,
+    n_features: int,
+) -> dict[int, np.ndarray]:
+    """Return the DE genes of each row among a band of features, as positions in it.
+
+    The members of the groups are the control cells of each split, the
+    groups from 0, and the cells of each row of a target and a split, the
+    groups after them. A row's genes are tested on its cells and the control
+    cells of its split, as Seurat's ``FindMarkers`` tests them: a gene is
+    tested when at least ``min_fraction`` of either group's cells express it,
+    rounded to 3 digits, and its log2 fold change of the mean values with a
+    pseudocount of 1 is at least ``logfc_threshold`` in size, and it is DE
+    when its Wilcoxon p-value times ``n_features``, Bonferroni's correction
+    over every feature, is below ``p_value_cutoff``.
+
+    Args:
+        values: The log-normalized values of the band's features over the
+            members, features x members.
+        member_groups: Each member's group.
+        by_group: The members in the order of their groups, group after
+            group.
+        bounds: Where each group's members start in ``by_group``, and the
+            end of the last.
+        rows: The rows to test, each with at least 3 cells, as is its split's
+            control group.
+        row_splits: Each row's split.
+        min_fraction: The smallest share of either group's cells that express
+            a tested gene.
+        logfc_threshold: The smallest absolute log2 fold change of a tested
+            gene.
+        p_value_cutoff: The corrected p-value below which a gene is DE.
+        n_features: The features of the assay, which the correction counts.
+
+    Returns:
+        The DE genes of each row with any tested gene.
+    """
+    # The groups of the splits' control cells come first, one per split.
+    n_splits = len(bounds) - 1 - len(row_splits)
+    sizes = np.diff(bounds)
+
+    def members(group: int) -> np.ndarray:
+        cells: np.ndarray = by_group[bounds[group] : bounds[group + 1]]
+        return cells
+
+    sums, detected = group_totals(values, member_groups, len(sizes))
+    tested: dict[int, np.ndarray] = {}
+    for row in rows:
+        pair = [n_splits + row, int(row_splits[row])]
+        counts = sizes[pair].astype(np.float64)
+        pct = np.round(detected[pair] / counts[:, None], 3)
+        change = np.log2((sums[pair[0]] + 1) / counts[0]) - np.log2(
+            (sums[pair[1]] + 1) / counts[1]
+        )
+        genes = np.flatnonzero(
+            (pct.max(axis=0) >= min_fraction) & (np.abs(change) >= logfc_threshold)
+        )
+        if len(genes):
+            tested[row] = genes
+    found: dict[int, np.ndarray] = {}
+    # The control cells' sorted values of a split serve every row of the split.
+    for split in range(n_splits):
+        split_rows = [row for row in tested if row_splits[row] == split]
+        if not split_rows:
+            continue
+        union = np.unique(np.concatenate([tested[row] for row in split_rows]))
+        slot_of = np.full(len(values), -1, dtype=np.int64)
+        slot_of[union] = np.arange(len(union))
+        sorted_controls, control_ties = sorted_log_values(values, union, members(split))
+        for row in split_rows:
+            genes = tested[row]
+            p_values = rank_sum_p_values(
+                values,
+                genes,
+                members(n_splits + row),
+                slot_of[genes],
+                sorted_controls,
+                control_ties,
+            )
+            found[row] = genes[p_values * n_features < p_value_cutoff]
+    return found
 
 
 def scale_like_seurat(values: np.ndarray, scale_max: float = 10.0) -> np.ndarray:
@@ -619,6 +719,109 @@ def classify_target(
         perturbed_mean=fit.mean,
         perturbed_sd=fit.sd,
         perturbed_weight=fit.weight,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MixscapeClasses:
+    """Each cell's Mixscape class, and the fit of each target in each split.
+
+    Attributes:
+        classes: Each cell's class, such as ``"GENE1 KO"``, ``"GENE1 NP"``,
+            ``"control"``, or its label without a single target.
+        global_class: Each cell's class without its target: ``"KO"``,
+            ``"NP"``, ``"control"`` or its label.
+        posterior: Each cell's probability of being knocked out, NaN off
+            target or without a fit.
+        score: Each cell's projection onto its target's perturbation
+            direction, NaN off target or without a fit.
+        status: Each row's status, as a position in
+            :data:`MIXSCAPE_STATUSES`.
+        n_cells: Each row's cells.
+        n_ko: Each row's knocked-out cells.
+        n_de_genes: Each row's DE genes.
+        iterations: Each row's iterations.
+        converged: Whether each row's calls stopped changing.
+        control_mean: Each row's control component mean.
+        control_sd: Each row's control component standard deviation.
+        perturbed_mean: Each row's fitted component mean.
+        perturbed_sd: Each row's fitted component standard deviation.
+        perturbed_weight: Each row's fitted component weight.
+    """
+
+    classes: np.ndarray
+    global_class: np.ndarray
+    posterior: np.ndarray
+    score: np.ndarray
+    status: np.ndarray
+    n_cells: np.ndarray
+    n_ko: np.ndarray
+    n_de_genes: np.ndarray
+    iterations: np.ndarray
+    converged: np.ndarray
+    control_mean: np.ndarray
+    control_sd: np.ndarray
+    perturbed_mean: np.ndarray
+    perturbed_sd: np.ndarray
+    perturbed_weight: np.ndarray
+
+
+def mixscape_classes(
+    labels: np.ndarray,
+    is_control: np.ndarray,
+    row_cells: list[np.ndarray],
+    row_targets: list[str],
+    fits: list[MixscapeFit],
+    n_de_genes: list[int],
+    perturbation_type: str,
+) -> MixscapeClasses:
+    """Assemble each cell's class from the fits of the rows of a target and a split.
+
+    A row's cells are ``"<target> <perturbation_type>"`` when knocked out and
+    ``"<target> NP"`` otherwise; a control cell is ``"control"``, and any
+    other cell keeps its label.
+
+    Args:
+        labels: Each cell's label, such as ``"Negative"``, ``"Multiple"`` or
+            ``"unlabelled"``.
+        is_control: Whether each cell is a control cell.
+        row_cells: Each row's cells, as positions among the cells.
+        row_targets: Each row's target.
+        fits: Each row's fit.
+        n_de_genes: Each row's DE genes.
+        perturbation_type: The word that names knocked-out cells.
+    """
+    classes = np.where(is_control, CONTROL, labels).astype(object)
+    global_class = classes.copy()
+    posterior = np.full(len(labels), np.nan)
+    score = np.full(len(labels), np.nan)
+    for cells, name, fit in zip(row_cells, row_targets, fits, strict=True):
+        classes[cells] = np.where(fit.ko, f"{name} {perturbation_type}", f"{name} NP")
+        global_class[cells] = np.where(fit.ko, perturbation_type, "NP")
+        posterior[cells] = fit.posterior
+        score[cells] = fit.score
+
+    def each(field_name: str, dtype: type) -> np.ndarray:
+        return np.asarray([getattr(fit, field_name) for fit in fits], dtype=dtype)
+
+    return MixscapeClasses(
+        classes=classes,
+        global_class=global_class,
+        posterior=posterior,
+        score=score,
+        status=np.asarray([fit.status for fit in fits], dtype=np.int8),
+        n_cells=np.asarray([len(cells) for cells in row_cells], dtype=np.int64),
+        n_ko=np.asarray(
+            [int(np.count_nonzero(fit.ko)) for fit in fits], dtype=np.int64
+        ),
+        n_de_genes=np.asarray(n_de_genes, dtype=np.int64),
+        iterations=each("iterations", np.int64),
+        converged=each("converged", bool),
+        control_mean=each("control_mean", np.float64),
+        control_sd=each("control_sd", np.float64),
+        perturbed_mean=each("perturbed_mean", np.float64),
+        perturbed_sd=each("perturbed_sd", np.float64),
+        perturbed_weight=each("perturbed_weight", np.float64),
     )
 
 

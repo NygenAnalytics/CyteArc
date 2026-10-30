@@ -33,60 +33,71 @@ These functions hold counts in memory and never touch storage.
 
 import itertools
 import math
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numba
 import numpy as np
 import pandas as pd
 from numba import prange
-from scipy import stats
 
 from cytearc.perturbation.efficiency import id_column_setting
 from cytearc.perturbation.glm import (
-    cholesky,
     count_array,
+    fit_negative_binomial,
     fit_poisson,
-    log2_fold_change,
-    negative_binomial_information,
     score_statistic,
-    size_dispersion,
+    set_test,
+)
+from cytearc.perturbation.p_values import (
+    RESAMPLING,
+    STATISTICS_BYTES,
+    PairResults,
+    staged_p_values,
 )
 from cytearc.perturbation.random_sets import (
     draw_uniform_range,
     draw_uniform_sets,
     resampling_keys,
 )
-from cytearc.utils.arguments import float_argument, integer_argument
+from cytearc.utils.arguments import (
+    float_argument,
+    integer_argument,
+    optional_name_argument,
+)
 from cytearc.utils.numba import njit
 
 __all__ = [
     "ASSOCIATION_SETS",
-    "RECORD_BYTES",
     "CALIBRATION_GRADES",
+    "CALIBRATION_GROUPS",
+    "CALIBRATION_STATUSES",
     "MOIS",
+    "RECORD_BYTES",
     "SIDES",
-    "PairResults",
+    "AssociationPairs",
+    "AssociationTables",
     "PerturbationAssociations",
     "TreatmentGroups",
-    "adjusted_p_values",
     "association_covariates",
+    "association_pairs",
     "association_settings",
-    "covariate_columns",
     "calibration_grade",
+    "calibration_group_size",
     "calibration_pairs",
+    "calibration_runs",
+    "calibration_status",
+    "covariate_columns",
     "fit_null_models",
-    "fit_skew_normals",
+    "most_calibration_pairs",
     "negative_control_groups",
     "nonzero_counts",
+    "pair_table_rows",
+    "pair_test_bytes",
     "pair_tests",
     "record_batch",
     "resampled_statistics",
     "resampling_counts",
-    "resampling_p_values",
-    "skew_normal_p_values",
-    "skew_normal_tail_ratios",
-    "staged_p_values",
 ]
 
 #: The sets of pairs that an association test holds.
@@ -101,19 +112,23 @@ SIDES = ("both", "left", "right")
 #: cells that carry a target alone with the control cells, and ``"high"`` the
 #: cells that carry any of its guides with all other cells.
 MOIS = ("low", "high")
+#: The most negative-control groups of a calibration check.
+CALIBRATION_GROUPS = 100
+#: Whether a calibration check ran, saved with the tests: it ran, it was
+#: turned off, or it could not run for too few control guides, for no
+#: discovery pair that passes QC by default, or for no calibration pair that
+#: passes QC.
+CALIBRATION_STATUSES = (
+    "checked",
+    "off",
+    "few_control_guides",
+    "no_passing_discovery",
+    "no_passing_calibration",
+)
 
 # A start of a pair's fit with a coefficient beyond this size, on covariates
 # that are standardized or indicators, sits where the fit cannot move.
 _START_LIMIT = 10.0
-# Above this skewness the moment equations of the skew-normal have no
-# solution; its largest skewness is about 0.9953.
-_SKEWNESS_LIMIT = 0.995
-# sceptre's fits take this skewness, with its sign, for a sample beyond the
-# skew-normal's reach.
-_SKEWNESS_FALLBACK = 0.9 * _SKEWNESS_LIMIT
-# A fit whose tail at the 99th percentile holds less than this share of the
-# statistics' own gives way to the third round.
-_TAIL_RATIO_FLOOR = 0.5
 #: The memory that one thread's records of a batch of pairs may take: about a
 #: thread's share of a core's L2 cache, so the rows that each random set reads
 #: stay in cache when every core is busy.
@@ -122,10 +137,6 @@ RECORD_BYTES = 1 << 20
 # pairs use more of each cache line they read than one, even past RECORD_BYTES.
 _BATCH_FLOOR = 2
 _BATCH_LIMIT = 32
-# The second round's statistics that its counts, fits and checks work on at
-# once, in whole rows: a working copy that stays in a core's L2 cache through
-# its passes.
-_SPAN_BYTES = 1 << 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,33 +169,51 @@ class TreatmentGroups:
 
 
 @dataclass(frozen=True, slots=True)
-class PairResults:
-    """The test of each pair of a group and a gene.
+class AssociationPairs:
+    """The pairs of association tests, with the QC counts of each.
 
     Attributes:
-        z: The standardized score statistic; positive when the treatment
-            cells express the gene more than the fit predicts.
-        p_value: The p-value of the side tested.
-        stage: The round whose random sets gave the p-value: 1, 2 with a
-            skew-normal fit or without the approximation, or 3 when the fit
-            failed its check.
-        skew_location: The location of the skew-normal fit that gave the
-            p-value, NaN when the random sets gave it.
-        skew_scale: The scale of that fit.
-        skew_shape: The shape of that fit.
-        log2_fold_change: log2 of the treatment cells' counts over their
-            means under the pair's fit.
-        se_log2_fold_change: The standard error of ``log2_fold_change``.
+        sets: Each pair's set, as a position in :data:`ASSOCIATION_SETS`.
+        groups: Each pair's group of treatment cells: a tested row, as its
+            position among the tested rows, or after them a calibration group.
+        features: Each pair's feature.
+        qc: Each pair's ``n_cells``, ``n_control_cells``, ``n_nonzero_cells``
+            and ``n_nonzero_control_cells``.
+        pass_qc: Whether each pair passes QC.
+        passing_discovery: The discovery pairs that pass QC.
     """
 
-    z: np.ndarray
-    p_value: np.ndarray
+    sets: np.ndarray
+    groups: np.ndarray
+    features: np.ndarray
+    qc: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+    pass_qc: np.ndarray
+    passing_discovery: int
+
+
+@dataclass(frozen=True, slots=True)
+class AssociationTables:
+    """The tested pairs of association tests and the calibration groups behind them.
+
+    Attributes:
+        pairs: The pairs and their QC counts.
+        values: Each pair's statistic, p-value, fold change and skew-normal
+            fit by their names in the saved table, NaN for an untested pair;
+            the adjusted p-values are filled in when the tests are saved.
+        stage: The round that gave each pair's p-value, 0 for an untested pair.
+        group_size: The guides of each calibration group.
+        control_guides: The IDs of the control guides that the calibration
+            groups draw from.
+        calibration_groups: Each calibration group's guides, as positions in
+            ``control_guides``.
+    """
+
+    pairs: AssociationPairs
+    values: dict[str, np.ndarray]
     stage: np.ndarray
-    skew_location: np.ndarray
-    skew_scale: np.ndarray
-    skew_shape: np.ndarray
-    log2_fold_change: np.ndarray
-    se_log2_fold_change: np.ndarray
+    group_size: int
+    control_guides: np.ndarray
+    calibration_groups: list[np.ndarray]
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,38 +502,14 @@ def _fit_pair(
     if np.abs(fitted).max() > _START_LIMIT:
         fitted[:] = 0.0
         fitted[0] = math.log(y.sum() / n_union)
-    fit_poisson(y, design, fitted, eta, mu)
-    dispersion = size_dispersion(y, mu, float(n_union - p))
+    dispersion = fit_negative_binomial(y, design, fitted, eta, mu, factor)
     for j in range(n_union):
         scale = 1.0 + dispersion * mu[j]
         weight = mu[j] / scale
         records[j, column] = (y[j] - mu[j]) / scale
         for c in range(p):
             records[j, column + 1 + c] = weight * design[j, c]
-    information = np.empty((p, p))
-    negative_binomial_information(design, mu, dispersion, information)
-    cholesky(information, factor)
-    sums = np.zeros(p + 1)
-    for j in treated:
-        for c in range(p + 1):
-            sums[c] += records[j, column + c]
-    solved = np.empty(p)
-    observed = score_statistic(sums[0], sums[1], sums[1:], factor, solved)
-    # sum(y) / sum(mu) over the treatment cells, with mu from the pair's fit.
-    count_sum = 0.0
-    mean_sum = 0.0
-    square_sum = 0.0
-    tangent = np.zeros(p)
-    for j in treated:
-        count_sum += y[j]
-        mean_sum += mu[j]
-        square_sum += mu[j] * mu[j]
-        for c in range(p):
-            tangent[c] += mu[j] * design[j, c]
-    fold, error = log2_fold_change(
-        count_sum, mean_sum, square_sum, tangent, factor, dispersion, solved
-    )
-    return observed, fold, error
+    return set_test(y, mu, design, dispersion, treated, factor, np.empty(p))
 
 
 @njit(cache=True, nogil=True)
@@ -706,6 +711,21 @@ def _score_groups(
                 records,
                 factors,
             )
+
+
+def pair_test_bytes(n_union: int, n_covariates: int) -> int:
+    """Return the bytes that each thread of :func:`pair_tests` holds for a group.
+
+    For a group of ``n_union`` treatment and control cells, a thread holds
+    the buffers of one pair's fit and the records of a batch of pairs, as
+    :func:`record_batch` sizes it, beside the random sets of the group.
+    """
+    batch = record_batch(n_union, n_covariates)
+    return (
+        8 * n_union * (n_covariates + 4)
+        + 8 * n_union * (n_covariates + 1) * batch
+        + 8 * n_covariates * n_covariates * (batch + 4)
+    )
 
 
 def record_batch(n_union: int, n_covariates: int) -> int:
@@ -940,273 +960,6 @@ def resampled_statistics(
     return statistics
 
 
-def resampling_p_values(counts: np.ndarray, n_draws: int, side: str) -> np.ndarray:
-    """Return the p-values that the random sets give.
-
-    With ``n_draws`` sets, the left p-value is (1 + sets at most the observed
-    statistic) / (n_draws + 1) and the right one counts sets at least the
-    observed statistic; ``"both"`` doubles the smaller, up to 1.
-
-    Args:
-        counts: Per pair, the sets at most and at least the observed
-            statistic, from :func:`resampling_counts`.
-        n_draws: The number of sets.
-        side: ``"both"``, ``"left"`` or ``"right"``.
-
-    Returns:
-        Each pair's p-value.
-    """
-    left = (1.0 + counts[:, 0]) / (n_draws + 1.0)
-    right = (1.0 + counts[:, 1]) / (n_draws + 1.0)
-    return _sided(left, right, side)
-
-
-def _sided(left: np.ndarray, right: np.ndarray, side: str) -> np.ndarray:
-    """Return the p-value of ``side`` from the two one-sided p-values."""
-    if side == "left":
-        return left
-    if side == "right":
-        return right
-    both: np.ndarray = np.minimum(1.0, 2.0 * np.minimum(left, right))
-    return both
-
-
-def _span_rows(n_columns: int) -> int:
-    """Return how many rows of ``n_columns`` float64 values a span holds, at least 1."""
-    return max(1, _SPAN_BYTES // (8 * max(n_columns, 1)))
-
-
-def _row_spans(values: np.ndarray) -> Iterator[tuple[slice, np.ndarray]]:
-    """Yield spans of a matrix's rows and their values as C-contiguous float64.
-
-    The rows of a C-contiguous float64 matrix are views, not copies.
-    """
-    step = _span_rows(values.shape[1])
-    for begin in range(0, values.shape[0], step):
-        rows = slice(begin, begin + step)
-        yield rows, np.ascontiguousarray(values[rows], dtype=np.float64)
-
-
-def _working_copy(values: np.ndarray) -> np.ndarray:
-    """Return room for one span of a matrix's rows, uninitialized."""
-    n_rows, n_columns = values.shape
-    return np.empty((min(_span_rows(n_columns), n_rows), n_columns))
-
-
-def _row_moments(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return each row's mean and its second and third central moments, divisor n.
-
-    Each span of rows is centered in one working copy and squared, then
-    centered again and cubed, so the moments take one span beyond the values.
-    """
-    n_rows = values.shape[0]
-    mean = np.empty(n_rows)
-    second = np.empty(n_rows)
-    third = np.empty(n_rows)
-    work = _working_copy(values)
-    for rows, block in _row_spans(values):
-        centered = work[: len(block)]
-        middle = block.mean(axis=1, keepdims=True)
-        mean[rows] = middle[:, 0]
-        np.subtract(block, middle, out=centered)
-        np.square(centered, out=centered)
-        second[rows] = centered.mean(axis=1)
-        np.subtract(block, middle, out=centered)
-        np.power(centered, 3, out=centered)
-        third[rows] = centered.mean(axis=1)
-    return mean, second, third
-
-
-def _select_ranks(ordered: np.ndarray, ranks: list[int]) -> None:
-    """Partially sort each row in place so that it holds its sorted values at ``ranks``.
-
-    ``ranks`` are sorted and distinct. NumPy selects one rank much faster than
-    several at once, so the rows are split at the middle rank, and each side
-    then selects the ranks it holds.
-    """
-    if ranks:
-        middle = len(ranks) // 2
-        rank = ranks[middle]
-        ordered.partition(rank, axis=1)
-        _select_ranks(ordered[:, :rank], ranks[:middle])
-        _select_ranks(
-            ordered[:, rank + 1 :], [other - rank - 1 for other in ranks[middle + 1 :]]
-        )
-
-
-def _order_statistics(values: np.ndarray, ranks: list[int]) -> np.ndarray:
-    """Return the values at ``ranks`` of each row sorted, rows x ranks.
-
-    A partial sort of one working copy of a span of rows at a time finds the
-    same values as a full sort, NaN last, in one span beyond the values.
-    """
-    found = np.empty((values.shape[0], len(ranks)))
-    work = _working_copy(values)
-    for rows, block in _row_spans(values):
-        ordered = work[: len(block)]
-        ordered[...] = block
-        _select_ranks(ordered, sorted(set(ranks)))
-        found[rows] = ordered[:, ranks]
-    return found
-
-
-def _counts_beyond(statistics: np.ndarray, observed: np.ndarray) -> np.ndarray:
-    """Return each row's statistics at most and at least its observed one, rows x 2.
-
-    The rows are compared a span at a time.
-    """
-    counts = np.empty((len(observed), 2), dtype=np.int64)
-    for rows, block in _row_spans(statistics):
-        point = observed[rows, None]
-        counts[rows, 0] = (block <= point).sum(axis=1)
-        counts[rows, 1] = (block >= point).sum(axis=1)
-    return counts
-
-
-def fit_skew_normals(
-    statistics: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Fit a skew-normal distribution to each row of statistics by its moments.
-
-    From the mean m, the standard deviation s with divisor n and the skewness
-    g, the fit takes |delta| = sqrt(pi/2 |g|^(2/3) / (|g|^(2/3) + ((4 -
-    pi)/2)^(2/3))) with the sign of g, shape alpha = delta / sqrt(1 -
-    delta^2), scale omega = s / sqrt(1 - 2 delta^2 / pi) and location
-    xi = m - omega delta sqrt(2 / pi). A skewness beyond 0.995 in size, more
-    than a skew-normal reaches, becomes 0.9 times 0.995 with its sign, as in
-    sceptre's fits.
-
-    The moments are taken a span of rows at a time, so besides a few values
-    per row the fit holds one working copy of about 1 MiB of the statistics,
-    or of one row when a row is larger, never more than the statistics
-    themselves; statistics that are not C-contiguous float64 take a float64
-    copy of each span too.
-
-    Args:
-        statistics: Statistics, pairs x sets.
-
-    Returns:
-        Each row's location, scale and shape; a row without spread or with a
-        missing statistic gets NaN.
-    """
-    values = np.asarray(statistics)
-    n_rows = values.shape[0]
-    location = np.full(n_rows, np.nan)
-    scale = np.full(n_rows, np.nan)
-    shape = np.full(n_rows, np.nan)
-    mean, second, third = _row_moments(values)
-    usable = np.isfinite(second) & (second > 0)
-    if not usable.any():
-        return location, scale, shape
-    deviation = np.sqrt(second[usable])
-    skewness = third[usable] / deviation**3
-    skewness = np.where(
-        np.abs(skewness) > _SKEWNESS_LIMIT,
-        np.sign(skewness) * _SKEWNESS_FALLBACK,
-        skewness,
-    )
-    power = np.abs(skewness) ** (2.0 / 3.0)
-    delta = np.sign(skewness) * np.sqrt(
-        np.pi / 2.0 * power / (power + ((4.0 - np.pi) / 2.0) ** (2.0 / 3.0))
-    )
-    fitted_scale = deviation / np.sqrt(1.0 - 2.0 * delta**2 / np.pi)
-    location[usable] = mean[usable] - fitted_scale * delta * np.sqrt(2.0 / np.pi)
-    scale[usable] = fitted_scale
-    shape[usable] = delta / np.sqrt(1.0 - delta**2)
-    return location, scale, shape
-
-
-def skew_normal_tail_ratios(
-    statistics: np.ndarray,
-    z: np.ndarray,
-    location: np.ndarray,
-    scale: np.ndarray,
-    shape: np.ndarray,
-    side: str,
-) -> np.ndarray:
-    """Return how each fitted tail compares with its statistics' own.
-
-    On the side tested, or with ``side="both"`` the side of the statistics'
-    median that ``z`` lies on, the fitted tail probability beyond the
-    statistics' 99th percentile, or 1st for the left side, is divided by the
-    share of the statistics beyond it. Below 1, the fitted tail is thinner
-    there than the statistics', and the p-values it gives farther out are too
-    small.
-
-    The percentiles and the median are the statistics at those positions of
-    each row sorted, found by a partial sort of a span of rows at a time, so
-    besides a few values per row the check holds one working copy of about
-    1 MiB of the statistics, or of one row when a row is larger, never more
-    than the statistics themselves; statistics that are not C-contiguous
-    float64 take a float64 copy of each span too.
-
-    Args:
-        statistics: Statistics, pairs x sets.
-        z: Each pair's observed statistic.
-        location: Each pair's fitted location.
-        scale: Each pair's fitted scale.
-        shape: Each pair's fitted shape.
-        side: ``"both"``, ``"left"`` or ``"right"``.
-
-    Returns:
-        Each pair's ratio, NaN without a fit.
-    """
-    values = np.asarray(statistics)
-    n_draws = values.shape[1]
-    observed = np.asarray(z, dtype=np.float64)
-    median, upper, lower = _order_statistics(
-        values,
-        [n_draws // 2, math.ceil(0.99 * n_draws) - 1, math.floor(0.01 * n_draws)],
-    ).T
-    above = np.empty(len(upper))
-    below = np.empty(len(lower))
-    for rows, block in _row_spans(values):
-        above[rows] = (block >= upper[rows, None]).mean(axis=1)
-        below[rows] = (block <= lower[rows, None]).mean(axis=1)
-    if side == "both":
-        right = observed >= median
-    else:
-        right = np.full(len(observed), side == "right")
-    point = np.where(right, upper, lower)
-    beyond = np.where(right, above, below)
-    standardized = (point - location) / scale
-    fitted = np.where(
-        right,
-        stats.skewnorm.sf(standardized, shape),
-        stats.skewnorm.cdf(standardized, shape),
-    )
-    ratios: np.ndarray = fitted / beyond
-    return ratios
-
-
-def skew_normal_p_values(
-    z: np.ndarray,
-    location: np.ndarray,
-    scale: np.ndarray,
-    shape: np.ndarray,
-    side: str,
-) -> np.ndarray:
-    """Return the p-values of statistics under fitted skew-normal distributions.
-
-    The tails are computed in log space, so they stay accurate far beyond the
-    random sets.
-
-    Args:
-        z: Each pair's statistic.
-        location: Each pair's fitted location.
-        scale: Each pair's fitted scale.
-        shape: Each pair's fitted shape.
-        side: ``"both"``, ``"left"`` or ``"right"``.
-
-    Returns:
-        Each pair's p-value.
-    """
-    standardized = (np.asarray(z, dtype=np.float64) - location) / scale
-    left = np.exp(stats.skewnorm.logcdf(standardized, shape))
-    right = np.exp(stats.skewnorm.logsf(standardized, shape))
-    return _sided(left, right, side)
-
-
 def association_settings(
     positive_controls: object,
     id_column: object,
@@ -1260,10 +1013,6 @@ def association_settings(
         ValueError: If a setting is unknown or out of range, or
             ``resampling="conditional"`` goes with ``moi="low"``.
     """
-    # The test against all other cells draws its sets either way; it imports
-    # this module, so its resampling names are read when the check runs.
-    from cytearc.perturbation.high_moi import RESAMPLING
-
     if isinstance(positive_controls, str) and positive_controls != "targets":
         raise ValueError(
             "positive_controls must be 'targets', a DataFrame or None, not "
@@ -1321,10 +1070,7 @@ def association_settings(
             "resampling='conditional' goes with moi='high'; the low-MOI test "
             "compares each target with the control cells by permutation"
         )
-    if sample_column is not None and (
-        not isinstance(sample_column, str) or not sample_column
-    ):
-        raise TypeError("sample_column must be a non-empty string or None")
+    optional_name_argument(sample_column, "sample_column")
     return draws, threshold, floor, requested, rate, resolved_seed, resampling
 
 
@@ -1352,96 +1098,6 @@ def calibration_grade(n_false_discoveries: int) -> str:
     return "severe"
 
 
-def staged_p_values(
-    z: np.ndarray,
-    counts: np.ndarray,
-    second_statistics: Callable[[np.ndarray, int], np.ndarray],
-    third_counts: Callable[[np.ndarray, int], np.ndarray],
-    *,
-    n_resamples: tuple[int, int, int],
-    stage_threshold: float,
-    approximation: str,
-    side: str,
-    statistics_bytes: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return each pair's p-value from up to three rounds of random sets.
-
-    The first round's counts give each pair's p-value. A pair whose p-value
-    is then at most ``stage_threshold`` is compared with ``n_resamples[1]``
-    fresh sets, and with ``approximation="skew_normal"`` a skew-normal fit to
-    their statistics gives the p-value, unless its tail beyond their 99th
-    percentile, on the observed statistic's side, holds less than half of the
-    statistics' own share there; then ``n_resamples[2]`` fresh sets give the
-    p-value. With ``approximation="none"``, the second round's sets give it.
-    The second round takes its pairs in batches whose statistics fit
-    ``statistics_bytes``. Both tests of this package, against control cells
-    and against all other cells, take their p-values this way.
-
-    Args:
-        z: Each pair's statistic, NaN for a pair without one.
-        counts: Per pair, the first round's sets with a statistic at most and
-            at least ``z``, pairs x 2.
-        second_statistics: Returns the statistics of the second round's sets
-            of the pairs it is given, pairs x sets, from their positions and
-            the number of sets.
-        third_counts: Returns the third round's counts of the pairs it is
-            given, pairs x 2, likewise.
-        n_resamples: The random sets of the three rounds.
-        stage_threshold: The p-value at or below which a pair takes the
-            second round.
-        approximation: ``"skew_normal"`` or ``"none"``.
-        side: ``"both"``, ``"left"`` or ``"right"``.
-        statistics_bytes: The memory that the second round's statistics may
-            hold at once, at least one pair's.
-
-    Returns:
-        Each pair's p-value, NaN without a statistic; the round that gave it;
-        and the location, scale and shape of the skew-normal fit that gave
-        it, NaN where random sets gave it.
-    """
-    first_draws, second_draws, third_draws = n_resamples
-    p_value = resampling_p_values(counts, first_draws, side)
-    p_value[np.isnan(z)] = np.nan
-    n_pairs = len(z)
-    stage = np.ones(n_pairs, dtype=np.int8)
-    location = np.full(n_pairs, np.nan)
-    scale = np.full(n_pairs, np.nan)
-    shape = np.full(n_pairs, np.nan)
-    second = np.flatnonzero(p_value <= stage_threshold)
-    batch = max(1, statistics_bytes // (8 * second_draws))
-    third: list[np.ndarray] = []
-    for begin in range(0, len(second), batch):
-        chosen = second[begin : begin + batch]
-        statistics = second_statistics(chosen, second_draws)
-        empirical = _counts_beyond(statistics, z[chosen])
-        p_value[chosen] = resampling_p_values(empirical, second_draws, side)
-        stage[chosen] = 2
-        if approximation == "skew_normal":
-            fit_location, fit_scale, fit_shape = fit_skew_normals(statistics)
-            ratios = skew_normal_tail_ratios(
-                statistics, z[chosen], fit_location, fit_scale, fit_shape, side
-            )
-            good = ratios >= _TAIL_RATIO_FLOOR
-            p_value[chosen[good]] = skew_normal_p_values(
-                z[chosen][good],
-                fit_location[good],
-                fit_scale[good],
-                fit_shape[good],
-                side,
-            )
-            location[chosen[good]] = fit_location[good]
-            scale[chosen[good]] = fit_scale[good]
-            shape[chosen[good]] = fit_shape[good]
-            third.append(chosen[~good])
-    if third:
-        poor = np.concatenate(third)
-        if len(poor):
-            counted = third_counts(poor, third_draws)
-            p_value[poor] = resampling_p_values(counted, third_draws, side)
-            stage[poor] = 3
-    return p_value, stage, location, scale, shape
-
-
 def pair_tests(
     values: np.ndarray,
     covariates: np.ndarray,
@@ -1454,7 +1110,7 @@ def pair_tests(
     stage_threshold: float = 0.02,
     approximation: str = "skew_normal",
     side: str = "both",
-    statistics_bytes: int = 1 << 28,
+    statistics_bytes: int = STATISTICS_BYTES,
     draw_bytes: int = 1 << 28,
 ) -> PairResults:
     """Test pairs of groups of treatment cells and genes in up to three rounds.
@@ -1582,6 +1238,305 @@ def nonzero_counts(values: np.ndarray, units: np.ndarray, n_units: int) -> np.nd
     return out
 
 
+def pair_table_rows(
+    frame: object,
+    name: str,
+    row_targets: np.ndarray,
+    feature_ids: np.ndarray,
+    feature_names: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Resolve a table of target and feature pairs to rows and features.
+
+    A target names every row whose target it is: the row of a target, or with
+    rows by guide every guide of the target. A feature is matched by ID, or by
+    name when no ID matches and one feature has the name.
+
+    Args:
+        frame: The table, with columns ``target`` and ``feature``.
+        name: The argument that gives the table, for the error messages.
+        row_targets: Each row's target.
+        feature_ids: The IDs of the expression features.
+        feature_names: The names of the expression features.
+
+    Returns:
+        The row and the feature position of each distinct pair, sorted by
+        row, then feature.
+
+    Raises:
+        TypeError: If ``frame`` is not a DataFrame.
+        ValueError: If it lacks a column, or names a target or feature that
+            is not there.
+    """
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError(f"{name} must be a DataFrame of target and feature")
+    missing = [column for column in ("target", "feature") if column not in frame]
+    if missing:
+        raise ValueError(f"{name} needs the columns 'target' and 'feature'")
+    targets = frame["target"].astype(str).to_numpy()
+    wanted = frame["feature"].astype(str).to_numpy()
+    row_targets = np.asarray(row_targets).astype(str)
+    known = set(row_targets.tolist())
+    unknown = sorted(set(targets.tolist()) - known)
+    if unknown:
+        raise ValueError(
+            f"{name} names targets that the labels do not test: "
+            + ", ".join(repr(target) for target in unknown[:5])
+        )
+    by_id = pd.Index(feature_ids)
+    positions = (
+        by_id.get_indexer(wanted) if by_id.is_unique else np.full(len(wanted), -1)
+    )
+    names = pd.Series(np.arange(len(feature_names)), index=feature_names)
+    counts = names.index.value_counts()
+    for k in np.flatnonzero(positions < 0):
+        if counts.get(wanted[k], 0) == 1:
+            positions[k] = int(names[wanted[k]])
+    if (positions < 0).any():
+        absent = sorted(set(wanted[positions < 0].tolist()))
+        raise ValueError(
+            f"{name} names features that are not one feature of the assay: "
+            + ", ".join(repr(feature) for feature in absent[:5])
+        )
+    row_lists = (
+        pd.Series(np.arange(len(row_targets))).groupby(row_targets).apply(np.asarray)
+    )
+    pair_rows = np.concatenate(
+        [row_lists[target] for target in targets] or [np.empty(0, np.int64)]
+    ).astype(np.int64)
+    repeats = np.asarray([len(row_lists[target]) for target in targets], np.int64)
+    pair_features = np.repeat(positions.astype(np.int64), repeats)
+    keys = np.unique(pair_rows * len(feature_ids) + pair_features)
+    return keys // len(feature_ids), keys % len(feature_ids)
+
+
+def calibration_runs(n_calibration_pairs: int | None, n_discovery: int) -> bool:
+    """Return whether a calibration check runs.
+
+    It runs unless it is turned off, ``n_calibration_pairs=0``, or by default,
+    None, when there is no discovery pair whose number it matches.
+    """
+    return n_calibration_pairs != 0 and (
+        n_calibration_pairs is not None or n_discovery > 0
+    )
+
+
+def calibration_group_size(
+    by: str, guide_targets: np.ndarray, n_targets: int, tested_targets: np.ndarray
+) -> int:
+    """Return the guides of each calibration group: the median of the tested targets'.
+
+    Each guide tested alone, ``by="guide"``, makes groups of one guide.
+
+    Args:
+        by: ``"target"`` or ``"guide"``.
+        guide_targets: Each guide's target, -1 without one.
+        n_targets: The number of targets.
+        tested_targets: The target of each tested row.
+    """
+    if by != "target":
+        return 1
+    targeted = guide_targets[guide_targets >= 0]
+    per_target = np.bincount(targeted, minlength=n_targets)
+    return max(1, int(round(float(np.median(per_target[tested_targets])))))
+
+
+def most_calibration_pairs(
+    n_groups: int, n_features: int, n_discovery: int, requested: int | None
+) -> int:
+    """Return the most calibration pairs that a check can draw, for a memory plan.
+
+    A check draws as many pairs as requested, or by default as the discovery
+    pairs that pass QC, and at most every pair of one of its ``n_groups``
+    groups and one of the assay's ``n_features`` features.
+    """
+    wanted = n_discovery if requested is None else requested
+    return min(wanted, n_groups * n_features)
+
+
+def _pair_sets(
+    *parts: tuple[np.ndarray, np.ndarray, tuple[np.ndarray, ...]],
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+]:
+    """Join the pairs of each set, in the order of ``ASSOCIATION_SETS``.
+
+    Each part holds its pairs' groups, features and four QC counts; the
+    result holds every pair's set, group, feature and QC counts.
+    """
+    sets = np.concatenate(
+        [np.full(len(part[0]), code, np.int8) for code, part in enumerate(parts)]
+    )
+    groups = np.concatenate([part[0] for part in parts]).astype(np.int64)
+    features = np.concatenate([part[1] for part in parts]).astype(np.int64)
+    n_cells, n_control_cells, n_nonzero_cells, n_nonzero_control_cells = (
+        np.concatenate([part[2][k] for part in parts]).astype(np.int64)
+        for k in range(4)
+    )
+    return (
+        sets,
+        groups,
+        features,
+        (n_cells, n_control_cells, n_nonzero_cells, n_nonzero_control_cells),
+    )
+
+
+def association_pairs(
+    discovery: tuple[np.ndarray, np.ndarray],
+    positive: tuple[np.ndarray, np.ndarray],
+    *,
+    row_groups: np.ndarray,
+    sizes: np.ndarray,
+    row_counts: np.ndarray,
+    row_features: np.ndarray,
+    calibration_counts: np.ndarray,
+    checked: np.ndarray,
+    reference: np.ndarray,
+    n_reference: int,
+    rows_in_reference: bool,
+    min_nonzero: int,
+    n_calibration_pairs: int | None,
+    seed: int,
+) -> AssociationPairs:
+    """Count the cells of every pair for its QC, and draw the calibration pairs.
+
+    Each group of treatment cells is compared with the reference cells: the
+    control cells at low MOI, all cells at high MOI. A group whose cells lie
+    among the reference cells, every calibration group and at high MOI every
+    tested row, is compared with the other reference cells. A pair passes QC
+    when at least ``min_nonzero`` of its treatment cells and of its
+    comparison cells express its feature. The calibration pairs are drawn at
+    random among the pairs of a calibration group and a checked feature that
+    pass QC: as many as requested, or by default as the discovery pairs that
+    pass QC.
+
+    Args:
+        discovery: The row and feature of each discovery pair.
+        positive: The row and feature of each positive-control pair.
+        row_groups: The group of each row of the labels, -1 for a row that is
+            not tested.
+        sizes: The treatment cells of each group: the tested rows, then the
+            calibration groups.
+        row_counts: The expressing cells of each tested row's group, tested
+            rows x ``row_features``.
+        row_features: The features of ``row_counts``' columns, ascending,
+            every feature of a discovery or positive-control pair among them.
+        calibration_counts: The expressing cells of each calibration group,
+            calibration groups x ``checked``.
+        checked: The features of ``calibration_counts``' columns and of
+            ``reference``, ascending, ``row_features`` among them.
+        reference: The expressing reference cells of each checked feature.
+        n_reference: The reference cells.
+        rows_in_reference: Whether the tested rows' cells lie among the
+            reference cells.
+        min_nonzero: The fewest expressing treatment and comparison cells of a
+            pair that passes QC.
+        n_calibration_pairs: The calibration pairs to draw, or None for as
+            many as the discovery pairs that pass QC.
+        seed: The seed of the calibration pairs.
+    """
+    n_rows = row_counts.shape[0]
+
+    def target_qc(pair_rows: np.ndarray, pair_features: np.ndarray) -> tuple:
+        groups = row_groups[pair_rows]
+        inside = row_counts[groups, np.searchsorted(row_features, pair_features)]
+        outside = reference[np.searchsorted(checked, pair_features)]
+        if rows_in_reference:
+            inside = inside.astype(np.int64)
+            return (
+                sizes[groups],
+                n_reference - sizes[groups],
+                inside,
+                outside - inside,
+            )
+        return (
+            sizes[groups],
+            np.full(len(pair_rows), n_reference, dtype=np.int64),
+            inside,
+            outside,
+        )
+
+    discovery_qc = target_qc(*discovery)
+    positive_qc = target_qc(*positive)
+    passing_discovery = int(
+        np.count_nonzero(
+            (discovery_qc[2] >= min_nonzero) & (discovery_qc[3] >= min_nonzero)
+        )
+    )
+    if len(calibration_counts):
+        passing = (calibration_counts >= min_nonzero) & (
+            reference[None, :] - calibration_counts >= min_nonzero
+        )
+        chosen_groups, chosen_columns = calibration_pairs(
+            passing,
+            passing_discovery if n_calibration_pairs is None else n_calibration_pairs,
+            seed,
+        )
+        calibration_in = calibration_counts[chosen_groups, chosen_columns].astype(
+            np.int64
+        )
+        del passing
+    else:
+        chosen_groups = chosen_columns = np.empty(0, dtype=np.int64)
+        calibration_in = np.empty(0, dtype=np.int64)
+    calibration_sizes = sizes[n_rows + chosen_groups]
+    calibration_qc = (
+        calibration_sizes,
+        n_reference - calibration_sizes,
+        calibration_in,
+        reference[chosen_columns] - calibration_in,
+    )
+    sets, groups, features, qc = _pair_sets(
+        (row_groups[discovery[0]], discovery[1], discovery_qc),
+        (n_rows + chosen_groups, checked[chosen_columns], calibration_qc),
+        (row_groups[positive[0]], positive[1], positive_qc),
+    )
+    return AssociationPairs(
+        sets=sets,
+        groups=groups,
+        features=features,
+        qc=qc,
+        pass_qc=(qc[2] >= min_nonzero) & (qc[3] >= min_nonzero),
+        passing_discovery=passing_discovery,
+    )
+
+
+def calibration_status(
+    n_calibration: int,
+    n_calibration_pairs: int | None,
+    n_control_guides: int,
+    passing_discovery: int,
+    moi: str,
+) -> str:
+    """Return whether a calibration check ran, and why not when it did not.
+
+    At low MOI a group leaves one control guide for its comparison cells, so
+    a check needs 2 control guides; at high MOI all other cells are a group's
+    comparison, and one is enough.
+
+    Args:
+        n_calibration: The calibration pairs drawn.
+        n_calibration_pairs: The calibration pairs requested, or None.
+        n_control_guides: The control guides that the groups draw from.
+        passing_discovery: The discovery pairs that pass QC.
+        moi: ``"low"`` or ``"high"``.
+
+    Returns:
+        One of :data:`CALIBRATION_STATUSES`.
+    """
+    if n_calibration:
+        return "checked"
+    if n_calibration_pairs == 0:
+        return "off"
+    if n_control_guides < (1 if moi == "high" else 2):
+        return "few_control_guides"
+    if n_calibration_pairs is None and not passing_discovery:
+        return "no_passing_discovery"
+    return "no_passing_calibration"
+
+
 def negative_control_groups(
     n_guides: int, group_size: int, n_groups: int, seed: int
 ) -> list[np.ndarray]:
@@ -1642,28 +1597,3 @@ def calibration_pairs(
     chosen.sort()
     n_features = passing.shape[1]
     return chosen // n_features, chosen % n_features
-
-
-def adjusted_p_values(
-    p_values: np.ndarray, tested: np.ndarray, alpha: float
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return Benjamini-Hochberg adjusted p-values and the pairs significant at ``alpha``.
-
-    Args:
-        p_values: Each pair's p-value.
-        tested: Whether each pair was tested; the others get NaN and are not
-            significant.
-        alpha: The false discovery rate.
-
-    Returns:
-        The adjusted p-values and whether each is at most ``alpha``.
-    """
-    adjusted = np.full(len(p_values), np.nan)
-    chosen = np.flatnonzero(np.asarray(tested, dtype=bool) & ~np.isnan(p_values))
-    if len(chosen):
-        adjusted[chosen] = stats.false_discovery_control(
-            np.asarray(p_values, dtype=np.float64)[chosen], method="bh"
-        )
-    significant = np.zeros(len(p_values), dtype=bool)
-    significant[chosen] = adjusted[chosen] <= alpha
-    return adjusted, significant
