@@ -35,7 +35,13 @@ from .._operations.cell_calling import _CellCallingOperationsMixin
 from .._operations.embeddings import _EmbeddingOperationsMixin
 from .._operations.features import _FeatureOperationsMixin
 from .._operations.graph import _GraphOperationsMixin
-from .._operations.perturbation import _PerturbationOperationsMixin
+from .._operations.perturbation_associations import (
+    _PerturbationAssociationOperationsMixin,
+)
+from .._operations.perturbation_effects import _PerturbationEffectOperationsMixin
+from .._operations.perturbation_guides import _PerturbationGuideOperationsMixin
+from .._operations.perturbation_mixscape import _PerturbationMixscapeOperationsMixin
+from .._operations.perturbation_profiles import _PerturbationProfileOperationsMixin
 from .._operations.quality_control import _QualityControlOperationsMixin
 
 
@@ -391,29 +397,31 @@ _CELL_CALLING_DEFAULTS: Mapping[str, Any] = MappingProxyType(
 # Each perturbation stage's check, which its method runs on the same settings,
 # and the method whose defaults the settings omit. A check takes the settings
 # by the method's keyword names.
-_PERTURBATION = _PerturbationOperationsMixin
+_GUIDES = _PerturbationGuideOperationsMixin
+_EFFECTS = _PerturbationEffectOperationsMixin
+_MIXSCAPE = _PerturbationMixscapeOperationsMixin
+_ASSOCIATIONS = _PerturbationAssociationOperationsMixin
+_PROFILES = _PerturbationProfileOperationsMixin
 _PERTURBATION_CHECKS: Mapping[str, tuple[Callable[..., Any], Callable[..., Any]]] = (
     MappingProxyType(
         {
-            "guide_calling": (call_settings, _PERTURBATION._perturbation_call_guides),
-            "labels": (label_settings, _PERTURBATION._perturbation_labels),
-            "efficiency": (efficiency_settings, _PERTURBATION._perturbation_efficiency),
-            "edistance": (edistance_settings, _PERTURBATION._perturbation_edistance),
-            "signature": (signature_settings, _PERTURBATION._perturbation_signature),
-            "mixscape": (mixscape_settings, _PERTURBATION._perturbation_mixscape),
+            "guide_calling": (call_settings, _GUIDES._perturbation_call_guides),
+            "labels": (label_settings, _GUIDES._perturbation_labels),
+            "efficiency": (efficiency_settings, _EFFECTS._perturbation_efficiency),
+            "edistance": (edistance_settings, _EFFECTS._perturbation_edistance),
+            "signature": (signature_settings, _MIXSCAPE._perturbation_signature),
+            "mixscape": (mixscape_settings, _MIXSCAPE._perturbation_mixscape),
             "associations": (
                 association_settings,
-                _PERTURBATION._perturbation_associations,
+                _ASSOCIATIONS._perturbation_associations,
             ),
-            "profiles": (profile_settings, _PERTURBATION._perturbation_profiles),
-            "clusters": (cluster_settings, _PERTURBATION._perturbation_cluster),
+            "profiles": (profile_settings, _PROFILES._perturbation_profiles),
+            "clusters": (cluster_settings, _PROFILES._perturbation_cluster),
         }
     )
 )
 # The dimensions of a perturbation signature whose settings omit them.
-SIGNATURE_DIMS_DEFAULT: int = keyword_default(
-    _PERTURBATION._perturbation_signature, "dims"
-)
+SIGNATURE_DIMS_DEFAULT: int = keyword_default(_MIXSCAPE._perturbation_signature, "dims")
 
 
 def method_setting(stage: str, settings: Mapping[str, Any], name: str) -> Any:

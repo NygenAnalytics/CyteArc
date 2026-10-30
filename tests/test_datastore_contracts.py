@@ -453,8 +453,20 @@ def test_datastore_private_mixin_order_is_stable():
     from cytearc.datastore._operations.integration_metrics import (
         _IntegrationMetricsOperationsMixin,
     )
-    from cytearc.datastore._operations.perturbation import (
-        _PerturbationOperationsMixin,
+    from cytearc.datastore._operations.perturbation_associations import (
+        _PerturbationAssociationOperationsMixin,
+    )
+    from cytearc.datastore._operations.perturbation_effects import (
+        _PerturbationEffectOperationsMixin,
+    )
+    from cytearc.datastore._operations.perturbation_guides import (
+        _PerturbationGuideOperationsMixin,
+    )
+    from cytearc.datastore._operations.perturbation_mixscape import (
+        _PerturbationMixscapeOperationsMixin,
+    )
+    from cytearc.datastore._operations.perturbation_profiles import (
+        _PerturbationProfileOperationsMixin,
     )
     from cytearc.datastore._operations.presentation import _PresentationOperationsMixin
     from cytearc.datastore._operations.quality_control import (
@@ -474,10 +486,14 @@ def test_datastore_private_mixin_order_is_stable():
         _IntegrationMetricsOperationsMixin,
         _PresentationOperationsMixin,
         _RegulonOperationsMixin,
-        _PerturbationOperationsMixin,
+        _PerturbationGuideOperationsMixin,
+        _PerturbationEffectOperationsMixin,
+        _PerturbationMixscapeOperationsMixin,
+        _PerturbationAssociationOperationsMixin,
+        _PerturbationProfileOperationsMixin,
         MappingDatastore,
     )
-    assert DataStore.mro()[:11] == [
+    assert DataStore.mro()[:15] == [
         DataStore,
         _CellCallingOperationsMixin,
         _QualityControlOperationsMixin,
@@ -487,7 +503,11 @@ def test_datastore_private_mixin_order_is_stable():
         _IntegrationMetricsOperationsMixin,
         _PresentationOperationsMixin,
         _RegulonOperationsMixin,
-        _PerturbationOperationsMixin,
+        _PerturbationGuideOperationsMixin,
+        _PerturbationEffectOperationsMixin,
+        _PerturbationMixscapeOperationsMixin,
+        _PerturbationAssociationOperationsMixin,
+        _PerturbationProfileOperationsMixin,
         MappingDatastore,
     ]
 
@@ -523,8 +543,20 @@ def test_datastore_operation_mixins_have_unique_method_owners():
     from cytearc.datastore._operations.mapping_reference import (
         _MappingReferenceOperationsMixin,
     )
-    from cytearc.datastore._operations.perturbation import (
-        _PerturbationOperationsMixin,
+    from cytearc.datastore._operations.perturbation_associations import (
+        _PerturbationAssociationOperationsMixin,
+    )
+    from cytearc.datastore._operations.perturbation_effects import (
+        _PerturbationEffectOperationsMixin,
+    )
+    from cytearc.datastore._operations.perturbation_guides import (
+        _PerturbationGuideOperationsMixin,
+    )
+    from cytearc.datastore._operations.perturbation_mixscape import (
+        _PerturbationMixscapeOperationsMixin,
+    )
+    from cytearc.datastore._operations.perturbation_profiles import (
+        _PerturbationProfileOperationsMixin,
     )
     from cytearc.datastore._operations.presentation import _PresentationOperationsMixin
     from cytearc.datastore._operations.quality_control import (
@@ -550,7 +582,11 @@ def test_datastore_operation_mixins_have_unique_method_owners():
         _PresentationOperationsMixin,
         _RegulonOperationsMixin,
         _CellCallingOperationsMixin,
-        _PerturbationOperationsMixin,
+        _PerturbationGuideOperationsMixin,
+        _PerturbationEffectOperationsMixin,
+        _PerturbationMixscapeOperationsMixin,
+        _PerturbationAssociationOperationsMixin,
+        _PerturbationProfileOperationsMixin,
     )
     owners: dict[str, list[str]] = {}
     for mixin in mixins:

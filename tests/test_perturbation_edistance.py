@@ -18,7 +18,7 @@ from scipy.spatial.distance import cdist, pdist
 from scipy.stats import false_discovery_control, kstest
 
 import cytearc.perturbation.edistance as edistance_module
-from cytearc.datastore._operations import perturbation as operations
+from cytearc.datastore._operations import perturbation_effects as operations
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationEDistance
 from cytearc.perturbation.edistance import (

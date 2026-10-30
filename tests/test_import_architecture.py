@@ -1327,8 +1327,20 @@ def test_datastore_operation_mixins_are_runtime_isolated():
     from cytearc.datastore._operations.mapping_reference import (
         _MappingReferenceOperationsMixin,
     )
-    from cytearc.datastore._operations.perturbation import (
-        _PerturbationOperationsMixin,
+    from cytearc.datastore._operations.perturbation_associations import (
+        _PerturbationAssociationOperationsMixin,
+    )
+    from cytearc.datastore._operations.perturbation_effects import (
+        _PerturbationEffectOperationsMixin,
+    )
+    from cytearc.datastore._operations.perturbation_guides import (
+        _PerturbationGuideOperationsMixin,
+    )
+    from cytearc.datastore._operations.perturbation_mixscape import (
+        _PerturbationMixscapeOperationsMixin,
+    )
+    from cytearc.datastore._operations.perturbation_profiles import (
+        _PerturbationProfileOperationsMixin,
     )
     from cytearc.datastore._operations.presentation import _PresentationOperationsMixin
     from cytearc.datastore._operations.quality_control import (
@@ -1350,6 +1362,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
     allowed_operation_helpers = {
         "datastore._operations.enrichment_store",
         "datastore._operations.paris_persistence",
+        "datastore._operations.perturbation_store",
         "datastore._operations.statistical_store",
     }
     for path in operations_root.glob("*.py"):
@@ -1378,7 +1391,11 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         _PresentationOperationsMixin,
         _RegulonOperationsMixin,
         _CellCallingOperationsMixin,
-        _PerturbationOperationsMixin,
+        _PerturbationGuideOperationsMixin,
+        _PerturbationEffectOperationsMixin,
+        _PerturbationMixscapeOperationsMixin,
+        _PerturbationAssociationOperationsMixin,
+        _PerturbationProfileOperationsMixin,
     )
     assert all("__init__" not in mixin.__dict__ for mixin in mixins)
     assert all(mixin.__bases__ == (object,) for mixin in mixins)

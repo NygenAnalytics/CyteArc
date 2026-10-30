@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cytearc.datastore._operations import perturbation as operations
+from cytearc.datastore._operations import perturbation_guides as operations
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import MULTIPLE, NEGATIVE, GuideThresholds
 from cytearc.perturbation.guide_thresholds import call_thresholds
@@ -558,7 +558,7 @@ def test_fits_of_a_high_moi_screen_stay_within_the_memory_budget(
     # A first call on a few cells loads the kernels.
     store.cells.insert("few", cells < 50)
     store.perturbation.call_guides(store.snapshot_cell_selection("few"))
-    fit = operations._PerturbationOperationsMixin._fit_guide_thresholds
+    fit = operations._PerturbationGuideOperationsMixin._fit_guide_thresholds
     peaks: list[int] = []
 
     def measured_fit(self, *args, **kwargs):
@@ -569,7 +569,9 @@ def test_fits_of_a_high_moi_screen_stay_within_the_memory_budget(
             peaks.append(tracemalloc.get_traced_memory()[1])
 
     monkeypatch.setattr(
-        operations._PerturbationOperationsMixin, "_fit_guide_thresholds", measured_fit
+        operations._PerturbationGuideOperationsMixin,
+        "_fit_guide_thresholds",
+        measured_fit,
     )
     saved = written(store)
     tracemalloc.start()

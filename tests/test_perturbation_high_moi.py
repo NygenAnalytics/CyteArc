@@ -1279,7 +1279,7 @@ def test_high_moi_pairs_keep_their_tests_whatever_else_is_tested(screen) -> None
 
 
 def test_high_moi_held_and_streamed_counts_agree(screen, monkeypatch) -> None:
-    from cytearc.datastore._operations import perturbation as operations
+    from cytearc.datastore._operations import perturbation_associations as operations
 
     store, labels, genes = screen
     arguments = {"features": genes, "moi": "high", "n_calibration_pairs": 20}
@@ -1379,7 +1379,7 @@ def test_high_moi_refusals_name_the_budget_that_runs_the_tests(
 def test_high_moi_plans_only_the_calibration_pairs_a_check_can_draw(
     screen, monkeypatch
 ) -> None:
-    from cytearc.datastore._operations import perturbation as operations
+    from cytearc.datastore._operations import perturbation_associations as operations
 
     store, labels, genes = screen
     # The 2 called control guides make one calibration group, which can draw

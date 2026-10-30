@@ -585,7 +585,7 @@ def test_guide_calls_plot_summarises_the_calls(store, template, tmp_path) -> Non
 
 
 def test_reference_checks_name_the_kinds_they_take() -> None:
-    from cytearc.datastore._operations.perturbation import (
+    from cytearc.datastore._operations.perturbation_store import (
         _COORDINATE_KINDS,
         _require_ref,
     )

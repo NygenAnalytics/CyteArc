@@ -9,7 +9,9 @@ import pandas as pd
 import pytest
 
 from cytearc.assay import normalization
-from cytearc.datastore._operations import perturbation as perturbation_operations
+from cytearc.datastore._operations import (
+    perturbation_profiles as perturbation_operations,
+)
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationProfiles
 from cytearc.perturbation import profiles as profiles_module
