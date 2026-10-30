@@ -13,6 +13,7 @@ Public CyteArc surfaces for analysts:
 - `cytearc.regulons` for SCENIC-style regulons, chromVAR motif activity, cistromes from motifs or
   CUT&RUN peaks, region-to-gene links, and co-regulated gene programs
 - `cytearc.perturbation` for pooled CRISPR screens: guide calls made from the guide counts or imported from Cell Ranger, the thresholds fitted to each guide, perturbation labels that name the genes each cell's guides target, the efficiency of each perturbation on its target gene, the E-distance of each perturbation's cells from the control cells, Mixscape's signatures and calls of knocked-out cells and escapers, calibrated tests of whether each perturbation changes each gene, and each perturbation's mean expression against the control cells with clusters of the perturbations whose profiles agree
+- `cytearc.clones` for lineage tracing: clones imported from the files that lineage tracing tools write or from a cell metadata column, read as tables of cells and clones
 - Readers that ingest source formats; writers that create or export Zarr stores (and other exports)
 - `cytearc.plotting`
 - `cytearc.datasets` for the public example datasets that the tutorials download
@@ -36,6 +37,7 @@ Prefer calling methods on `DataStore`.
 | Mapping | [Mapping API reference](/api/mapping.html) |
 | Regulons and gene programs | [Regulons API reference](/api/regulons.html) |
 | CRISPR screens | [Perturbation API reference](/api/perturbation.html) |
+| Clones and lineage tracing | [Clones API reference](/api/clones.html) |
 | Plotting | [Plotting API reference](/api/plotting.html) |
 | Example datasets | [Example datasets API reference](/api/datasets.html) |
 | Utilities | [Utilities API reference](/api/utilities.html) |

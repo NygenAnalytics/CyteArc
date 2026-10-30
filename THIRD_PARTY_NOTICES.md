@@ -188,6 +188,15 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
   genes in `cytearc/quality_control/cell_cycle_genes.py` (`cell_cycle_previous_symbols`), from the
   HGNC REST service in October 2026. Seal et al. (2023), Nucleic Acids Research,
   doi:10.1093/nar/gkac888.
+- **TREX** (<https://github.com/frisen-lab/TREX>), MIT, Copyright 2018 Leonie von Berlin:
+  `tests/data/clones/trex_clones.txt` holds 41 rows of `tests/expected/clones.txt` at commit
+  c1ade47971bfcb5242ebf213f7160215567647b4, every cell of three clones and 30 cells of the fourth.
+  The license text is at the end of this file.
+- **CellTag-multi**, CC BY 4.0: `tests/data/clones/celltag_multi_iep_clones.csv` holds the 24
+  rows of six clones of `b4.rna&atac.r1&2_master_rev1_annotated.csv`, the iEP clone table of
+  "Processed single-cell RNA and ATAC data for the CellTag-multi iEP reprogramming time course"
+  by Samantha Annette Morris and Kunal Jindal (Zenodo, version 1.1.0,
+  doi:10.5281/zenodo.23442375), with its columns unchanged.
 - **Color palettes** in `cytearc/plotting/_style.py`: the 10- and 20-color sets are Tableau 10 and
   20 as distributed with matplotlib (the 10-color set with Scanpy's colorblind substitutions), the
   28-color set is from Zeileis, Hornik, and Murrell (2009), Computational Statistics & Data
@@ -230,6 +239,11 @@ package.
 | `toy_cr_dir.tar.gz`, `toy_cr_dir_empty.tar.gz` | Synthetic Cell Ranger-style directories | BSD-3-Clause, as in `LICENSE` |
 | `seurat_assay5_synthetic.rds` | `tests/data/synthetic.rds` from <https://github.com/harryhaller001/readseurat> at commit 8a688b47df27f90e98a4c57ddd9e47c0e5ded01e | MIT, Copyright (c) 2026 harryhaller001 |
 | `seurat_v4_1_3_pbmc_mye.rds` | `pbmc10k_mye_small_velocyto.rds` by Hua Yichao, SeuratExtend example data (Zenodo, doi:10.5281/zenodo.10944066), derived from 10x Genomics PBMC data | CC0 1.0; the underlying 10x Genomics data are CC BY 4.0 |
+
+`tests/test_clone_files.py` downloads `GSM4185644_stateFate_cytokinePerturbation_clone_matrix.mtx.gz`
+and `GSM4185644_stateFate_cytokinePerturbation_metadata.txt.gz` from GEO GSE140802 (Weinreb et al.
+(2020), Science 367:eaaw3381, doi:10.1126/science.aaw3381) for a test marked `integration`; GEO
+states no license, and the NCBI places no restrictions on the use of its data.
 
 The Seurat import tutorial also uses `seurat_v4_1_3_pbmc_mye.rds` and embeds a 581-byte
 compressed synthetic RDS with three cells and two genes. The synthetic object was authored
@@ -788,4 +802,28 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### TREX (MIT License)
+
+```text
+Copyright 2018 Leonie von Berlin
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```

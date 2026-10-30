@@ -232,6 +232,15 @@ functions in {doc}`regulons` turn them into regulons.
     :members: call_guides, load_guide_thresholds, import_guide_calls, load_guide_calls, labels, load_labels, efficiency, load_efficiency, edistance, load_edistance, signature, load_signature, mixscape, load_mixscape, associations, load_associations, profiles, load_profiles, cluster, load_clusters
 ```
 
+### `ds.clones`
+
+`import_clones` reads the clones that lineage tracing tools write, such as TREX's `clones.txt`, CellTag-multi's clone tables, Numbat's clone posteriors or LARRY's clone matrices, joins their cells to a cell selection by barcode, and saves a `clones` artifact that labels each cell with its clone. `from_column` saves the clones of a cell metadata column instead. `load_clones` reads the artifact as tables of cells and clones, and `export_clones` writes it as CoSpar's clone table or a Matrix Market file. {doc}`clones` lists the formats and describes the join of barcodes to cells, files from several runs, cells in several clones and the `Clones` record.
+
+```{eval-rst}
+.. autoclass:: cytearc.datastore.namespaces.ClonesAccessor
+    :members: import_clones, from_column, load_clones, export_clones
+```
+
 ### `ds.imputation`
 
 ```{eval-rst}
