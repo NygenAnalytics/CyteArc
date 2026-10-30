@@ -487,6 +487,21 @@ def test_got_multi_keeps_each_channel_and_the_target_calls(store, tmp_path) -> N
                 calls[calls["source"] == source],
                 expected_got_calls(TRUTH, site=name, target=target, source=source),
             )
+    # Each cell's stored calls follow the allele, then the source's position
+    # among the sorted source names, whatever order the file's columns have.
+    group = store.artifacts.load(ref)
+    names = group["call_source_names"][:].astype(str).tolist()
+    assert names == ["genotype_geneseq", "genotype_merged", "genotype_probebc"]
+    offsets = group["call_offsets"][:]
+    rows = np.stack(
+        [
+            np.repeat(np.arange(len(offsets) - 1), np.diff(offsets)),
+            group["call_alleles"][:],
+            group["call_sources"][:],
+        ]
+    )
+    assert len(np.unique(rows[2])) == 3
+    np.testing.assert_array_equal(np.lexsort(rows[::-1]), np.arange(rows.shape[1]))
     # Reads come with the counts: each call's reads, the probe barcode
     # channel's WT reads one more.
     reads = loaded.counts.assign(cell=loaded.counts["cell"].astype(str))

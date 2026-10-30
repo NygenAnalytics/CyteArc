@@ -41,7 +41,7 @@ from ...variants.counts import (
     merge_sites,
     variant_count_frames,
 )
-from ...variants.sorting import CellRowSorter
+from ...variants.sorting import CellRowSorter, sort_rows
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
     BarcodeFile,
@@ -848,6 +848,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                         f"for the allele {allele_text(int(call_rows['key'][conflict]))}"
                     )
                 repeated_calls += n_repeats
+                # The rows came sorted by the order in which sources first
+                # appeared; stored, they follow the sorted source names.
+                call_rows = call_rows.copy()
+                call_rows["source"] = source_remap[call_rows["source"]]
+                call_rows = sort_rows(call_rows, ("cell", "key", "source"))
                 depth_out, counts_out = finish_band(
                     counts_rows,
                     depth_rows,
@@ -886,7 +891,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 for name in fields:
                     appender.append(f"counts_{name}", counts_out[name])
                 appender.append("call_alleles", call_rows["key"])
-                appender.append("call_sources", source_remap[call_rows["source"]])
+                appender.append("call_sources", call_rows["source"])
                 appender.append("call_values", value_remap[call_rows["value"]])
             mean_depth = np.where(listed, depth_total / max(sites.n_sites, 1), np.nan)
             _write_array(group, "mean_depth", mean_depth)
