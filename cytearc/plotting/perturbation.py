@@ -1,18 +1,14 @@
 """Figures of pooled CRISPR screens."""
 
-from collections.abc import Callable, Hashable, Sequence
-from numbers import Real
+from collections.abc import Callable, Collection, Hashable, Sequence
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 from scipy.special import betaincinv
 
-from ..perturbation.edistance import (
-    EDISTANCE_STATUSES,
-    TESTED as EDISTANCE_TESTED,
-)
-from ..perturbation.efficiency import EFFICIENCY_STATUSES, TESTED
+from ..perturbation.edistance import EDISTANCE_STATUSES, EDISTANCE_TESTED
+from ..perturbation.efficiency import EFFICIENCY_STATUSES, EFFICIENCY_TESTED
 from ..perturbation.mixscape import MIXSCAPE_STATUSES
 from ..perturbation.mixtures import (
     FIT_STATUSES,
@@ -20,6 +16,7 @@ from ..perturbation.mixtures import (
     poisson_gaussian_posterior,
 )
 from ..storage.refs import ArtifactRef
+from ..utils.arguments import float_argument, integer_argument
 from ._contracts import CategoricalScale, ColorScale, PlotProvenance
 from ._deps import require_matplotlib
 from ._figure import (
@@ -228,17 +225,16 @@ def guide_calls(
     guide's share of each cell's guide UMIs, for cells with guide UMIs, by
     call. A cell with several called guides whose top guide holds nearly all
     of its guide UMIs may carry one guide and ambient molecules of the others.
+    The plot raises ValueError when the calls hold no cell.
     """
-    if (
-        isinstance(max_guides_per_cell, bool)
-        or not isinstance(max_guides_per_cell, int)
-        or max_guides_per_cell < 2
-    ):
-        raise ValueError("max_guides_per_cell must be an integer of at least 2")
-    if isinstance(bins, bool) or not isinstance(bins, int) or bins < 1:
-        raise ValueError("bins must be a positive integer")
+    max_guides_per_cell = integer_argument(
+        max_guides_per_cell, "max_guides_per_cell", minimum=2
+    )
+    bins = integer_argument(bins, "bins", minimum=1)
     loaded = _guide_calls(store, calls)
     cells = loaded.cells
+    if cells.empty:
+        raise ValueError("The guide calls hold no cell, so there is nothing to plot")
     n_guides = cells["n_guides"].to_numpy(dtype=np.int64)
     bucket_counts = np.bincount(
         np.minimum(n_guides, max_guides_per_cell), minlength=max_guides_per_cell + 1
@@ -413,6 +409,47 @@ def _distinct_labels(
     if not values:
         raise ValueError(f"{name} must name at least one {noun}")
     return list(dict.fromkeys(values))
+
+
+def _quoted(values: Sequence[Any]) -> str:
+    """Return the first five values quoted, and how many more there are."""
+    shown = ", ".join(repr(value) for value in values[:5])
+    return shown if len(values) <= 5 else f"{shown} and {len(values) - 5:,} more"
+
+
+def _require_known(
+    requested: Sequence[Any] | None,
+    known: Collection[Any],
+    *,
+    holder: str,
+    noun: str,
+) -> None:
+    """Refuse the names of ``requested`` that ``known`` lacks, if any.
+
+    Raises:
+        ValueError: Naming the first five of them, such as "The clusters have
+            no perturbation named 'A'".
+    """
+    unknown = [name for name in requested or () if name not in known]
+    if unknown:
+        raise ValueError(f"{holder} have no {noun} named {_quoted(unknown)}")
+
+
+def _untested_message(by: str, value: str, others: list[str]) -> str:
+    """Say that no row was tested, so the plot has no ``value`` to draw.
+
+    ``others`` counts the rows of each other status, if any.
+    """
+    held = f" ({', '.join(others)})" if others else ""
+    return f"No {by} was tested{held}, so there is no {value} to plot"
+
+
+def _alpha_argument(alpha: object) -> float:
+    """Check the false discovery rate of a figure's significant rows."""
+    resolved = float_argument(alpha, "alpha")
+    if not 0 < resolved < 1:
+        raise ValueError("alpha must be above 0 and below 1")
+    return resolved
 
 
 def _log_plus_one(values: np.ndarray) -> np.ndarray:
@@ -743,7 +780,8 @@ def guide_thresholds(
 
     ``samples`` keeps the panels or points of those sample labels. When
     ``guides`` and ``samples`` select more than ``max_panels`` panels, the plot
-    raises ValueError rather than draw a crowded figure. A
+    raises ValueError rather than draw a crowded figure, as it does when the
+    fits hold no guide. A
     panel's axes take the guide as key, or ``(sample, guide)`` when the fits
     have a sample column, and its posterior axes take ``(key, "posterior")``.
     The tables ``"thresholds"`` and ``"histograms"`` hold the selected rows of
@@ -751,12 +789,7 @@ def guide_thresholds(
     each drawn count: every count when the guide's largest is at most 1,000,
     and otherwise 1,000 counts spread evenly on the log scale.
     """
-    if (
-        isinstance(max_panels, bool)
-        or not isinstance(max_panels, int)
-        or max_panels < 1
-    ):
-        raise ValueError("max_panels must be a positive integer")
+    max_panels = integer_argument(max_panels, "max_panels", minimum=1)
     requested = _distinct_labels(guides, "guides", "guide ID")
     kept = _distinct_labels(samples, "samples", "sample label")
     loaded = _guide_thresholds(store, thresholds, requested)
@@ -765,14 +798,11 @@ def guide_thresholds(
     stored = list(dict.fromkeys(table["sample"].tolist()))
     sample_order = stored if kept is None else kept
     if kept is not None:
-        unknown = [label for label in kept if label not in stored]
-        if unknown:
-            raise ValueError(
-                "The fits have no samples named "
-                + ", ".join(repr(label) for label in unknown[:5])
-            )
+        _require_known(kept, stored, holder="The fits", noun="sample")
         table = table[table["sample"].isin(kept)]
         histograms = histograms[histograms["sample"].isin(kept)]
+    if table.empty:
+        raise ValueError("The fits hold no guide, so there is nothing to plot")
     if requested is None:
         selected = table.reset_index(drop=True)
     else:
@@ -925,12 +955,8 @@ def _efficiency_legend(
     handles: list[Any] = []
     labels: list[str] = []
     for chosen, color, label in (
-        (significant, _SIGNIFICANT_COLOR, f"Adjusted p-value below {alpha:g}"),
-        (
-            ~significant,
-            _NOT_SIGNIFICANT_COLOR,
-            f"Adjusted p-value of {alpha:g} or more",
-        ),
+        (significant, _SIGNIFICANT_COLOR, f"Significant at FDR {alpha:g}"),
+        (~significant, _NOT_SIGNIFICANT_COLOR, "Not significant"),
     ):
         if chosen.any():
             handles.append(marker("o", color, 7.0))
@@ -970,9 +996,10 @@ def efficiency(
     measured by guide, gets one row labelled with its name. A point marks the
     log2 fold change of the target gene's mean expression in the cells that
     carry the perturbation against control cells, so a knockdown falls left of
-    the line at 0 and an activation right of it. A point is blue when its
-    adjusted p-value is below ``alpha`` and grey otherwise, and its area grows
-    with the cells that carry the perturbation. When no UMI of the gene remains
+    the line at 0 and an activation right of it. A point is blue when the row
+    is significant at the false discovery rate ``alpha``, its adjusted p-value
+    at most ``alpha``, and grey otherwise, and its area grows with the cells
+    that carry the perturbation. When no UMI of the gene remains
     in those cells, the fold change is minus infinity: a triangle at the left
     edge marks it, and the row's label says that no UMI remains.
 
@@ -980,23 +1007,16 @@ def efficiency(
     ``max_rows`` rows with the smallest adjusted p-values, ties broken by name.
     The rows run from the strongest knockdown at the top to the strongest
     activation at the bottom. Rows whose status is not ``"tested"`` are left
-    out, and the title counts them by status. The table ``"efficiency"`` holds
+    out, and the title counts them by status; the plot raises ValueError when
+    no row was tested. The table ``"efficiency"`` holds
     the drawn rows of the record, with every column, in drawing order.
     """
-    if (
-        isinstance(max_rows, bool)
-        or not isinstance(max_rows, int | np.integer)
-        or max_rows < 1
-    ):
-        raise ValueError("max_rows must be a positive integer")
-    if isinstance(alpha, bool) or not isinstance(alpha, Real) or not 0 < alpha < 1:
-        raise ValueError("alpha must be a number above 0 and below 1")
-    max_rows = int(max_rows)
-    alpha = float(alpha)
+    max_rows = integer_argument(max_rows, "max_rows", minimum=1)
+    alpha = _alpha_argument(alpha)
     loaded = _perturbation_efficiency(store, efficiency)
     table = loaded.table
     by = str(loaded.by)
-    tested_status = EFFICIENCY_STATUSES[TESTED]
+    tested_status = EFFICIENCY_STATUSES[EFFICIENCY_TESTED]
     tested = table[table["status"] == tested_status]
     n_tested = len(tested)
     if n_tested > max_rows:
@@ -1017,11 +1037,15 @@ def efficiency(
         for status in EFFICIENCY_STATUSES
         if status != tested_status and status in statuses.index
     ]
+    if drawn.empty:
+        raise ValueError(_untested_message(by, "fold change", others))
     if others:
         title.append("Not plotted: " + ", ".join(others))
     fold_changes = drawn["log2_fold_change"].to_numpy(dtype=np.float64)
     n_cells = drawn["n_cells"].to_numpy(dtype=np.int64)
-    significant = drawn["adjusted_p_value"].to_numpy(dtype=np.float64) < alpha
+    # A row is significant at the false discovery rate alpha, as a pair of
+    # the association tests is.
+    significant = drawn["adjusted_p_value"].to_numpy(dtype=np.float64) <= alpha
     no_umi = np.isneginf(fold_changes)
     labels = [
         f"{name} (no UMI remains)" if missing else str(name)
@@ -1162,8 +1186,9 @@ def edistance(
     perturbation moves its cells away from the control cells. The E-distance
     is an unbiased estimate, so a perturbation whose cells look like the
     control cells can fall a little left of the line at 0. A point is blue when
-    its adjusted p-value is below ``alpha`` and grey otherwise, and its area
-    grows with the cells that carry the perturbation. When the E-distances
+    the row is significant at the false discovery rate ``alpha``, its adjusted
+    p-value at most ``alpha``, and grey otherwise, and its area grows with the
+    cells that carry the perturbation. When the E-distances
     were measured without permutation tests, no row has a p-value: every point
     is blue, and the title says so.
 
@@ -1171,19 +1196,11 @@ def edistance(
     ``max_rows`` rows with the largest E-distances, ties broken by name. The
     rows run from the largest E-distance at the top to the smallest at the
     bottom. Rows whose status is not ``"tested"`` are left out, and the title
-    counts them by status. The table ``"edistance"`` holds the drawn rows of the
+    counts them by status; the plot raises ValueError when no row was tested. The table ``"edistance"`` holds the drawn rows of the
     record, with every column, in drawing order.
     """
-    if (
-        isinstance(max_rows, bool)
-        or not isinstance(max_rows, int | np.integer)
-        or max_rows < 1
-    ):
-        raise ValueError("max_rows must be a positive integer")
-    if isinstance(alpha, bool) or not isinstance(alpha, Real) or not 0 < alpha < 1:
-        raise ValueError("alpha must be a number above 0 and below 1")
-    max_rows = int(max_rows)
-    alpha = float(alpha)
+    max_rows = integer_argument(max_rows, "max_rows", minimum=1)
+    alpha = _alpha_argument(alpha)
     loaded = _perturbation_edistance(store, edistance)
     table = loaded.table
     by = str(loaded.by)
@@ -1204,7 +1221,7 @@ def edistance(
     adjusted = drawn["adjusted_p_value"].to_numpy(dtype=np.float64)
     # Without permutation tests no row has a p-value, and every point is blue.
     permuted = bool(np.isfinite(adjusted).any())
-    significant = (adjusted < alpha) if permuted else np.ones(len(drawn), dtype=bool)
+    significant = (adjusted <= alpha) if permuted else np.ones(len(drawn), dtype=bool)
     statuses = table["status"].value_counts()
     title = [f"E-distance by {by}"]
     if n_tested > max_rows:
@@ -1219,6 +1236,8 @@ def edistance(
         for status in EDISTANCE_STATUSES
         if status != tested_status and status in statuses.index
     ]
+    if drawn.empty:
+        raise ValueError(_untested_message(by, "E-distance", others))
     if others:
         title.append("Not plotted: " + ", ".join(others))
     positions = np.arange(len(drawn), dtype=np.float64)[::-1]
@@ -1692,7 +1711,7 @@ def mixscape(
     its fit collapsed, has only NP cells, and the title counts such targets by
     status. The table ``"classes"`` holds one row per drawn target, with
     ``target``, ``n_cells``, ``n_ko``, ``n_np`` and ``ko_share``, in drawing
-    order.
+    order. Either panel raises ValueError when the classes hold no target.
 
     With ``panel="scores"``, each target with a fitted split gets a panel: a
     histogram of its cells' scores, their projections onto the target's
@@ -1721,13 +1740,7 @@ def mixscape(
     """
     if not isinstance(panel, str) or panel not in (_CLASSES_PANEL, _SCORES_PANEL):
         raise ValueError(f"panel must be 'classes' or 'scores', not {panel!r}")
-    if (
-        isinstance(max_targets, bool)
-        or not isinstance(max_targets, int | np.integer)
-        or max_targets < 1
-    ):
-        raise ValueError("max_targets must be a positive integer")
-    max_targets = int(max_targets)
+    max_targets = integer_argument(max_targets, "max_targets", minimum=1)
     requested = _distinct_labels(targets, "targets", "target")
     if requested is not None and len(requested) > max_targets:
         raise ValueError(
@@ -1738,13 +1751,16 @@ def mixscape(
     rows = loaded.targets
     perturbation_type = str(loaded.perturbation_type)
     pooled = _pooled_targets(rows)
-    if requested is not None:
-        known = set(pooled["target"].tolist())
-        unknown = [name for name in requested if name not in known]
-        if unknown:
-            raise ValueError(
-                f"The Mixscape classes have no target named {unknown[0]!r}"
-            )
+    if pooled.empty:
+        raise ValueError(
+            "The Mixscape classes hold no target, so there is nothing to plot"
+        )
+    _require_known(
+        requested,
+        set(pooled["target"].tolist()),
+        holder="The Mixscape classes",
+        noun="target",
+    )
     statuses = rows["status"].value_counts()
     require_matplotlib()
     tables: dict[str, pd.DataFrame]
@@ -2035,13 +2051,7 @@ def association_volcano(
     largest, ties broken as for the labels, so its first ``label_top`` rows
     are the labelled pairs.
     """
-    if (
-        isinstance(label_top, bool)
-        or not isinstance(label_top, int | np.integer)
-        or label_top < 0
-    ):
-        raise ValueError("label_top must be a non-negative integer")
-    label_top = int(label_top)
+    label_top = integer_argument(label_top, "label_top", minimum=0)
     requested = _distinct_labels(targets, "targets", "target")
     loaded = _perturbation_associations(store, tests)
     side = str(loaded.side)
@@ -2055,13 +2065,12 @@ def association_volcano(
     ]
     cut = float(called.max()) if len(called) else None
     if requested is not None:
-        known = set(discovery["target"].tolist())
-        unknown = [name for name in requested if name not in known]
-        if unknown:
-            raise ValueError(
-                "The discovery pairs have no target named "
-                + ", ".join(repr(name) for name in unknown)
-            )
+        _require_known(
+            requested,
+            set(discovery["target"].tolist()),
+            holder="The discovery pairs",
+            noun="target",
+        )
         discovery = discovery[discovery["target"].isin(requested)]
     tested = _tested_pairs(discovery)
     tested = tested[~np.isnan(tested["log2_fold_change"].to_numpy(dtype=np.float64))]
@@ -2225,6 +2234,7 @@ def association_volcano(
                 "tests": tests.to_dict(),
                 "side": side,
                 "integration": str(loaded.integration),
+                "moi": str(loaded.moi),
                 "from_assay": str(loaded.from_assay),
                 "alpha": alpha,
                 "targets": requested,
@@ -2687,8 +2697,9 @@ def association_calibration(
         provenance=PlotProvenance(
             assay=tests.assay,
             cell_key=None,
-            # The control cells, which each negative-control pair splits into
-            # its group's cells and the others.
+            # The cells that each negative-control pair splits into its
+            # group's cells and the others: the control cells, or at high MOI
+            # every labelled cell.
             n_cells=int(
                 (calibration["n_cells"] + calibration["n_control_cells"]).max()
             ),
@@ -2698,6 +2709,7 @@ def association_calibration(
                 "tests": tests.to_dict(),
                 "side": side,
                 "integration": str(loaded.integration),
+                "moi": str(loaded.moi),
                 "from_assay": str(loaded.from_assay),
                 "alpha": alpha,
                 "n_false_discoveries": n_false,
@@ -2742,12 +2754,6 @@ def _distinct_cluster_ids(values: Sequence[int] | None) -> list[int] | None:
     if not values:
         raise ValueError("cluster_ids must name at least one cluster")
     return list(dict.fromkeys(int(value) for value in values))
-
-
-def _quoted(values: Sequence[Any]) -> str:
-    """Return the first five values quoted, and how many more there are."""
-    shown = ", ".join(repr(value) for value in values[:5])
-    return shown if len(values) <= 5 else f"{shown} and {len(values) - 5:,} more"
 
 
 def _cluster_palette(codes: np.ndarray) -> dict[int, str]:
@@ -3115,7 +3121,8 @@ def perturbation_clusters(
     cannot be combined. The plot raises ValueError when either names a
     perturbation or a cluster that the clusters lack, and when ``label``
     names a perturbation that the plot does not draw or comes with
-    ``panel="heatmap"``. The title counts the drawn perturbations, out of
+    ``panel="heatmap"``, and when the clusters hold no perturbation. The
+    title counts the drawn perturbations, out of
     the clustered ones when some are left out, and the drawn clusters and
     unassigned perturbations. ``show_legend=False`` leaves out the colorbar
     and the cluster numbers. The table ``"perturbations"`` holds the drawn
@@ -3135,16 +3142,18 @@ def perturbation_clusters(
         )
     loaded = _perturbation_clusters(store, clusters)
     table = loaded.table
+    if table.empty:
+        raise ValueError(
+            "The clusters hold no perturbation, so there is nothing to plot"
+        )
     # Every clustered perturbation, in leaf order.
     in_order = table.reindex(pd.Index(loaded.order, name=table.index.name))
     every_code = in_order["cluster"].to_numpy(dtype=np.int64)
     palette = _cluster_palette(every_code)
     for names in (requested, named):
-        unknown = [name for name in names or () if name not in in_order.index]
-        if unknown:
-            raise ValueError(
-                f"The clusters have no perturbation named {_quoted(unknown)}"
-            )
+        _require_known(
+            names, set(in_order.index), holder="The clusters", noun="perturbation"
+        )
     if chosen is not None:
         present = set(every_code.tolist())
         missing = [cluster for cluster in chosen if cluster not in present]

@@ -42,8 +42,8 @@ from cytearc.utils.arguments import integer_argument
 
 __all__ = [
     "EDISTANCE_STATUSES",
-    "TESTED",
-    "TOO_FEW_CELLS",
+    "EDISTANCE_TESTED",
+    "EDISTANCE_TOO_FEW_CELLS",
     "EDistanceArrays",
     "PerturbationEDistance",
     "edistance_arrays",
@@ -55,9 +55,9 @@ __all__ = [
 #: Row statuses, stored as positions in this tuple.
 EDISTANCE_STATUSES = ("tested", "too_few_cells")
 #: The E-distance was computed.
-TESTED = 0
+EDISTANCE_TESTED = 0
 #: Fewer than two perturbed cells, so the within-group mean is undefined.
-TOO_FEW_CELLS = 1
+EDISTANCE_TOO_FEW_CELLS = 1
 #: The most permutations of one row's test.
 MAX_PERMUTATIONS = 1_000_000
 
@@ -327,11 +327,11 @@ def edistance_arrays(
             results = list(pool.map(measure, tested_rows))
     else:
         results = [measure(row) for row in tested_rows]
-    status = np.full(n_rows, TOO_FEW_CELLS, dtype=np.int8)
+    status = np.full(n_rows, EDISTANCE_TOO_FEW_CELLS, dtype=np.int8)
     distance = np.full(n_rows, np.nan)
     p_values = np.full(n_rows, np.nan)
     for row, (observed, p_value) in zip(tested_rows, results, strict=True):
-        status[row] = TESTED
+        status[row] = EDISTANCE_TESTED
         distance[row] = observed
         p_values[row] = p_value
     adjusted = np.full(n_rows, np.nan)

@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 __all__ = [
+    "GUIDE_ASSAY_TYPE",
     "MULTIPLE",
     "NEGATIVE",
     "RESERVED_LABELS",
@@ -41,6 +42,8 @@ __all__ = [
     "validated_guide_ids",
 ]
 
+#: The declared type of an assay of guide counts, which guides are called from.
+GUIDE_ASSAY_TYPE = "CRISPR"
 #: The label of a cell with no called guide.
 NEGATIVE = "Negative"
 #: The label of a cell with two or more called guides.

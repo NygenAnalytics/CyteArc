@@ -10,11 +10,11 @@ from cytearc.perturbation import mixtures
 from cytearc.perturbation.histograms import GuideCountHistograms, guide_count_histograms
 from cytearc.perturbation.mixtures import (
     FIT_STATUSES,
-    FITTED,
-    NO_CELLS,
-    NO_FIT,
-    NO_POSITIVE,
-    TOO_SPARSE,
+    GUIDE_FIT_FITTED,
+    GUIDE_FIT_NO_CELLS,
+    GUIDE_FIT_NO_FIT,
+    GUIDE_FIT_NO_POSITIVE,
+    GUIDE_FIT_TOO_SPARSE,
     fit_gaussian,
     fit_poisson_gaussian,
     gaussian_posterior,
@@ -74,7 +74,14 @@ _STATUS_GUIDES = [
     ([2, 7, 10, 12, 18, 31, 34], [3, 5_000, 1, 10, 1, 100, 100]),  # no count is called
     ([1, 2, 3, 40, 60, 80], [400, 60, 5, 30, 50, 20]),  # carriers above ambient counts
 ]
-_STATUS_EXPECTED = [NO_CELLS, TOO_SPARSE, TOO_SPARSE, NO_FIT, NO_POSITIVE, FITTED]
+_STATUS_EXPECTED = [
+    GUIDE_FIT_NO_CELLS,
+    GUIDE_FIT_TOO_SPARSE,
+    GUIDE_FIT_TOO_SPARSE,
+    GUIDE_FIT_NO_FIT,
+    GUIDE_FIT_NO_POSITIVE,
+    GUIDE_FIT_FITTED,
+]
 
 
 def _poisson_gaussian_loss(
@@ -106,7 +113,7 @@ def test_poisson_gaussian_separates_carriers_from_ambient_counts() -> None:
     counts, samples, found = _screen(10)
     fits = fit_poisson_gaussian(found)
 
-    assert fits.status.tolist() == [[FITTED] * 4] * 2
+    assert fits.status.tolist() == [[GUIDE_FIT_FITTED] * 4] * 2
     assert fits.threshold.dtype == np.int64
     assert ((fits.threshold > 3) & (fits.threshold < 30)).all()
     np.testing.assert_allclose(fits.gaussian_mean, 6.0, atol=0.3)
@@ -216,7 +223,7 @@ def test_each_fit_status_of_the_poisson_gaussian() -> None:
     ]
     assert fits.threshold[0, :5].tolist() == [0, 0, 0, 0, 0]
     assert 3 < fits.threshold[0, 5] <= 40
-    unfitted = fits.status[0] != FITTED
+    unfitted = fits.status[0] != GUIDE_FIT_FITTED
     assert np.isnan(fits.gaussian_mean[0, :4]).all()
     assert fits.iterations[0, :4].tolist() == [0, 0, 0, 0]
     assert np.isfinite(fits.gaussian_mean[0, 4:]).all()
@@ -229,7 +236,7 @@ def test_gaussian_matches_scikit_learn() -> None:
         [counts], np.zeros(3_000, dtype=np.int64), n_samples=1, n_guides=3
     )
     fits = fit_gaussian(found)
-    assert fits.status.tolist() == [[FITTED] * 3]
+    assert fits.status.tolist() == [[GUIDE_FIT_FITTED] * 3]
     for guide in range(3):
         values = np.log10(counts[:, guide].astype(np.float64) + 1).reshape(-1, 1)
         model = max(
@@ -271,7 +278,7 @@ def test_gaussian_finds_carriers_beside_many_ambient_cells() -> None:
     # in the higher group, so only the other starts find the carriers.
     found = _guides([([1, 2, 150, 170, 200], [300, 50, 4, 3, 3])], n_cells=5_360)
     fits = fit_gaussian(found)
-    assert fits.status.tolist() == [[FITTED]]
+    assert fits.status.tolist() == [[GUIDE_FIT_FITTED]]
     assert fits.high_mean[0, 0] == pytest.approx(math.log10(171), abs=0.1)
     assert fits.high_weight[0, 0] == pytest.approx(10 / 5_360, rel=1e-3)
     assert 2 < fits.threshold[0, 0] <= 150
@@ -297,7 +304,11 @@ def test_gaussian_statuses_without_cells_or_with_one_count() -> None:
     # The third guide holds 105 cells of a 10-cell sample only in this stub,
     # which keeps every cell of the second guide at one count.
     fits = fit_gaussian(found)
-    assert fits.status[0].tolist() == [NO_CELLS, TOO_SPARSE, FITTED]
+    assert fits.status[0].tolist() == [
+        GUIDE_FIT_NO_CELLS,
+        GUIDE_FIT_TOO_SPARSE,
+        GUIDE_FIT_FITTED,
+    ]
     assert np.isnan(fits.high_mean[0, :2]).all()
 
 
@@ -315,7 +326,7 @@ def test_gaussian_statuses_of_degenerate_fits(monkeypatch) -> None:
     monkeypatch.setattr(mixtures, "_gaussian_group", first_degenerate)
     monkeypatch.setattr(mixtures, "_gaussian_threshold", lambda *args: 0)
     fits = fit_gaussian(found)
-    assert fits.status[0].tolist() == [NO_FIT, NO_POSITIVE]
+    assert fits.status[0].tolist() == [GUIDE_FIT_NO_FIT, GUIDE_FIT_NO_POSITIVE]
     assert fits.threshold[0].tolist() == [0, 0]
     assert np.isnan(fits.low_mean[0, 0])
     assert np.isfinite(fits.low_mean[0, 1])

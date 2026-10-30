@@ -13,6 +13,7 @@ from cytearc.perturbation.labels import (
 )
 from cytearc.storage.artifacts import inspect_artifact
 from cytearc.storage.selections import read_stored_selection_indices
+from tests.perturbation_helpers import record_cell_reads
 from tests.storage_helpers import write_count_store
 
 # Guides CRISPR0 and CRISPR1 target GENE_A, CRISPR2 targets GENE_B, and
@@ -214,6 +215,55 @@ def test_read_only_store_reuses_labels_but_cannot_label(tmp_path) -> None:
     assert reader.perturbation.labels(calls, controls=CONTROLS) == ref
     with pytest.raises(PermissionError, match="label_perturbations"):
         reader.perturbation.labels(calls, controls=CONTROLS, policy="combinations")
+
+
+def test_labels_read_the_cell_ids_only_to_load_them(tmp_path, monkeypatch) -> None:
+    store = _store(tmp_path)
+    calls = _calls(store)
+    reads = record_cell_reads(monkeypatch, store, {"ids"})
+
+    labels = store.perturbation.labels(calls, controls=CONTROLS)
+    # The cells of one guide alone, which a comparison by guide reads.
+    by_guide = store.perturbation.efficiency(labels, by="guide", id_column=None)
+
+    assert reads["ids"] == []
+    assert store.perturbation.load_efficiency(by_guide).table["guide"].tolist() == [
+        "CRISPR0",
+        "CRISPR1",
+        "CRISPR2",
+    ]
+    loaded = store.perturbation.load_labels(labels)
+    assert loaded.cells["label"].tolist() == SINGLE
+    assert [rows.tolist() for rows in reads["ids"]] == [list(range(len(COUNTS)))]
+
+
+def test_loading_labels_checks_the_budget_of_every_array_at_once(
+    tmp_path, monkeypatch
+) -> None:
+    store = _store(tmp_path)
+    labels = store.perturbation.labels(_calls(store), controls=CONTROLS)
+
+    def fits(name: str, budget: int) -> bool:
+        monkeypatch.setattr(store, "memoryBytes", budget)
+        try:
+            store.artifacts.load_values(labels, value=name)
+        except MemoryError:
+            return False
+        return True
+
+    def smallest(name: str) -> int:
+        low, high = 0, 1 << 30
+        while high - low > 1:
+            middle = (low + high) // 2
+            low, high = (low, middle) if fits(name, middle) else (middle, high)
+        return high
+
+    # A budget that reads any one array with the cell IDs, but not all of them.
+    names = ("values", "guide_label", "is_control", "n_targets", "target_codes")
+    monkeypatch.setattr(store, "memoryBytes", max(smallest(name) for name in names))
+
+    with pytest.raises(MemoryError, match="memory budget"):
+        store.perturbation.load_labels(labels)
 
 
 @pytest.mark.parametrize(

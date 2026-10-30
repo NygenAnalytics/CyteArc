@@ -156,7 +156,7 @@ def test_signature_subtracts_each_cells_nearest_controls(tmp_path) -> None:
     assert set(status.inputs) == {
         "labels",
         "coordinates",
-        "features",
+        "feature_selection",
         "dataset_fingerprint",
         "sample_assignments_fingerprint",
         "cell_selection",
@@ -274,7 +274,7 @@ def test_signature_defaults_to_the_features_of_the_coordinates(tmp_path) -> None
     normalized = store.features.normalize(cells, features)
     pca = store.reduction.pca(normalized, dims=2, local_cache=False)
     ref = store.perturbation.signature(labels, pca, dims=2, n_neighbors=3)
-    assert inspect_artifact(store.zw, ref).input_ref("features") == features
+    assert inspect_artifact(store.zw, ref).input_ref("feature_selection") == features
     columns = store.perturbation.load_signature(ref).values.columns
     assert columns.tolist() == ["RNA1", "RNA3", "RNA4"]
     with pytest.raises(ValueError, match="record no feature selection; pass features"):

@@ -30,11 +30,11 @@ from scipy.special import ndtr
 from cytearc.utils.arguments import float_argument, integer_argument
 
 __all__ = [
-    "FEW_CELLS",
-    "FEW_DE_GENES",
-    "FITTED",
+    "MIXSCAPE_FEW_CELLS",
+    "MIXSCAPE_FEW_DE_GENES",
+    "MIXSCAPE_FITTED",
+    "MIXSCAPE_NO_FIT",
     "MIXSCAPE_STATUSES",
-    "NO_FIT",
     "MixscapeFit",
     "MixscapeResult",
     "classify_target",
@@ -49,13 +49,13 @@ __all__ = [
 #: Target statuses, stored as positions in this tuple.
 MIXSCAPE_STATUSES = ("fitted", "few_de_genes", "few_cells", "no_fit")
 #: The mixture classified the target's cells.
-FITTED = 0
+MIXSCAPE_FITTED = 0
 #: Fewer DE genes than ``min_de_genes``: every cell is an escaper.
-FEW_DE_GENES = 1
+MIXSCAPE_FEW_DE_GENES = 1
 #: Fewer KO cells than ``min_cells``: every cell is an escaper.
-FEW_CELLS = 2
+MIXSCAPE_FEW_CELLS = 2
 #: The perturbed component collapsed: every cell is an escaper.
-NO_FIT = 3
+MIXSCAPE_NO_FIT = 3
 
 _LOG_SQRT_2PI = 0.5 * np.log(2.0 * np.pi)
 # Smallest standard deviation of the fitted component before it counts as
@@ -491,8 +491,6 @@ class MixscapeFit:
             priors, NaN without a fit.
         score: Each cell's projection onto the perturbation direction of the
             last iteration, NaN without a fit.
-        control_scores: The control cells' projections of the last
-            iteration, empty without a fit.
         status: The position of the target's status in
             :data:`MIXSCAPE_STATUSES`.
         iterations: The iterations run.
@@ -507,7 +505,6 @@ class MixscapeFit:
     ko: np.ndarray
     posterior: np.ndarray
     score: np.ndarray
-    control_scores: np.ndarray
     status: int
     iterations: int
     converged: bool
@@ -524,7 +521,6 @@ def _escapers(n_cells: int, status: int, iterations: int = 0) -> MixscapeFit:
         ko=np.zeros(n_cells, dtype=bool),
         posterior=np.full(n_cells, np.nan),
         score=np.full(n_cells, np.nan),
-        control_scores=np.empty(0),
         status=status,
         iterations=iterations,
         converged=False,
@@ -560,7 +556,7 @@ def classify_target(
     """
     n_target = len(target_values)
     if n_de_genes < min_de_genes:
-        return _escapers(n_target, FEW_DE_GENES)
+        return _escapers(n_target, MIXSCAPE_FEW_DE_GENES)
     data = np.concatenate(
         [
             np.asarray(target_values, dtype=np.float64),
@@ -583,7 +579,7 @@ def classify_target(
         direction = target[ko].mean(axis=0) - control_center
         length = float(direction @ direction)
         if not length > 0:
-            return _escapers(n_target, NO_FIT, iterations)
+            return _escapers(n_target, MIXSCAPE_NO_FIT, iterations)
         projections = data @ direction / length
         control_mean = float(projections[n_target:].mean())
         control_sd = float(projections[n_target:].std(ddof=1))
@@ -596,7 +592,7 @@ def classify_target(
             float(started.std(ddof=1)) if len(started) > 1 else 0.0,
         )
         if fit.collapsed or not control_sd > 0:
-            return _escapers(n_target, NO_FIT, iterations)
+            return _escapers(n_target, MIXSCAPE_NO_FIT, iterations)
         scores = projections[:n_target]
         log_ratio = _log_normal(scores, control_mean, control_sd) - _log_normal(
             scores, fit.mean, fit.sd
@@ -604,7 +600,7 @@ def classify_target(
         posterior = _knocked_out_posterior(log_ratio)
         called = np.where(posterior > 0.5, True, np.where(posterior < 0.5, False, ko))
         if np.count_nonzero(called) < min_cells:
-            return _escapers(n_target, FEW_CELLS, iterations)
+            return _escapers(n_target, MIXSCAPE_FEW_CELLS, iterations)
         converged = bool(np.array_equal(called, ko))
         ko = called
     assert fit is not None
@@ -612,8 +608,7 @@ def classify_target(
         ko=ko,
         posterior=posterior,
         score=projections[:n_target].copy(),
-        control_scores=projections[n_target:].copy(),
-        status=FITTED,
+        status=MIXSCAPE_FITTED,
         iterations=iterations,
         converged=converged,
         control_mean=control_mean,

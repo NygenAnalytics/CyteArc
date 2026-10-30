@@ -82,6 +82,49 @@ def _expected(rows: list[list[int]], genes: list[int]) -> dict[str, np.ndarray]:
     }
 
 
+def test_status_constants_name_their_method_and_keep_their_codes() -> None:
+    from cytearc.perturbation import edistance, efficiency, mixscape, mixtures
+
+    # The codes that saved artifacts hold, by the method that stored them.
+    codes = {
+        efficiency: {
+            "EFFICIENCY_TESTED": 0,
+            "EFFICIENCY_NO_FEATURE": 1,
+            "EFFICIENCY_NO_CELLS": 2,
+            "EFFICIENCY_NO_CONTROL_EXPRESSION": 3,
+        },
+        edistance: {"EDISTANCE_TESTED": 0, "EDISTANCE_TOO_FEW_CELLS": 1},
+        mixscape: {
+            "MIXSCAPE_FITTED": 0,
+            "MIXSCAPE_FEW_DE_GENES": 1,
+            "MIXSCAPE_FEW_CELLS": 2,
+            "MIXSCAPE_NO_FIT": 3,
+        },
+        mixtures: {
+            "GUIDE_FIT_FITTED": 0,
+            "GUIDE_FIT_NO_CELLS": 1,
+            "GUIDE_FIT_TOO_SPARSE": 2,
+            "GUIDE_FIT_NO_FIT": 3,
+            "GUIDE_FIT_NO_POSITIVE": 4,
+        },
+    }
+    statuses = {
+        efficiency: efficiency.EFFICIENCY_STATUSES,
+        edistance: edistance.EDISTANCE_STATUSES,
+        mixscape: mixscape.MIXSCAPE_STATUSES,
+        mixtures: mixtures.FIT_STATUSES,
+    }
+    for module, constants in codes.items():
+        assert {name: getattr(module, name) for name in constants} == constants
+        # Each constant is the position of the status that its name ends with.
+        for name, code in constants.items():
+            assert name.lower().endswith(statuses[module][code])
+    # No module exports a name of another, so a status imported from the
+    # wrong module fails to import.
+    exported = [name for module in codes for name in module.__all__]
+    assert len(exported) == len(set(exported))
+
+
 def test_efficiency_compares_each_target_with_the_controls(tmp_path) -> None:
     store = _store(tmp_path)
     labels = _labels(store)

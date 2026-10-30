@@ -1,3 +1,4 @@
+import re
 import warnings
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from cytearc.perturbation.mixtures import (
     fit_poisson_gaussian,
 )
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
+from tests.perturbation_helpers import record_cell_reads
 from tests.storage_helpers import write_count_store
 
 N_PER_LANE = 200
@@ -311,6 +313,123 @@ def test_read_only_store_reuses_but_cannot_call_again(tmp_path) -> None:
     assert reader.perturbation.call_guides(cells, sample_column="lane") == ref
     with pytest.raises(PermissionError, match="call_guides"):
         reader.perturbation.call_guides(cells, sample_column="lane", min_umi=7)
+
+
+def _guide_store(tmp_path: Path, guide_assays: dict[str, str]) -> DataStore:
+    """A store of RNA and of these guide assays, each declared as its type."""
+    rna = np.random.default_rng(7).poisson(2.0, size=(len(COUNTS), 10))
+    path = tmp_path / "guides.zarr"
+    write_count_store(
+        str(path), {"RNA": rna, **{name: COUNTS for name in guide_assays}}, "uint16"
+    )
+    return DataStore(
+        str(path),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        nthreads=1,
+        assay_types=guide_assays,
+    )
+
+
+def test_the_guide_assay_is_the_stores_only_crispr_assay_whatever_its_name(
+    tmp_path,
+) -> None:
+    store = _guide_store(tmp_path, {"GUIDES": "CRISPR"})
+    cells = store.select_measured_cells("GUIDES")
+
+    calls = store.perturbation.call_guides(cells, method="fixed", min_umi=10)
+
+    assert calls.assay == "GUIDES"
+    loaded = store.perturbation.load_guide_calls(calls)
+    assert len(loaded.calls) == int((COUNTS >= 10).sum())
+    assert set(loaded.calls["guide"]) <= {f"GUIDES{guide}" for guide in range(7)}
+    # Naming the assay gives the same calls.
+    assert (
+        store.perturbation.call_guides(
+            cells, method="fixed", min_umi=10, from_assay="GUIDES"
+        )
+        == calls
+    )
+    path = tmp_path / "calls.csv"
+    path.write_text(
+        "cell_barcode,num_features,feature_call,num_umis\ncell5,1,GUIDES4,50\n"
+    )
+    imported = store.perturbation.import_guide_calls(path, cell_selection=cells)
+    assert imported.assay == "GUIDES"
+
+
+@pytest.mark.parametrize(
+    ("guide_assays", "found"),
+    [
+        ({}, "No assay of the store is"),
+        (
+            {"CRISPR": "CRISPR", "GUIDES": "CRISPR"},
+            "2 assays of the store, 'CRISPR', 'GUIDES', are",
+        ),
+    ],
+)
+def test_a_store_without_one_crispr_assay_needs_from_assay(
+    tmp_path, guide_assays, found
+) -> None:
+    store = _guide_store(tmp_path, guide_assays)
+    cells = store.select_measured_cells("RNA")
+    path = tmp_path / "calls.csv"
+    path.write_text("cell_barcode,num_features,feature_call,num_umis\n")
+    message = re.escape(
+        f"{found} declared 'CRISPR', and guide calls read one; name the guide "
+        "assay with from_assay=..."
+    )
+
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        store.perturbation.call_guides(cells)
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        store.perturbation.import_guide_calls(path, cell_selection=cells)
+    assert store.artifacts.list(kind="guide_calls", from_assay="RNA") == []
+
+
+def test_a_read_only_store_checks_the_budget_before_writing(
+    tmp_path, monkeypatch
+) -> None:
+    store = _store(tmp_path)
+    cells = _cells(store)
+    reader = DataStore(
+        str(tmp_path / "store.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        nthreads=1,
+        zarr_mode="r",
+    )
+
+    # Neither the fits nor the calls fit the budget, which is checked before
+    # the store must be writable.
+    monkeypatch.setattr(reader, "memoryBytes", 100)
+    with pytest.raises(MemoryError, match="Fitting guide thresholds for 600"):
+        reader.perturbation.call_guides(cells, sample_column="lane")
+    with pytest.raises(MemoryError, match="Calling guides makes"):
+        reader.perturbation.call_guides(cells, method="fixed", min_umi=2)
+    monkeypatch.undo()
+    for arguments in ({"sample_column": "lane"}, {"method": "fixed", "min_umi": 2}):
+        with pytest.raises(PermissionError, match="call_guides"):
+            reader.perturbation.call_guides(cells, **arguments)
+
+
+def test_fixed_calls_of_one_lane_read_only_its_counts(tmp_path, monkeypatch) -> None:
+    store = _store(tmp_path)
+    store.cells.insert("in_l0", LANES == "L0")
+    lane = store.snapshot_cell_selection("in_l0")
+    reads = record_cell_reads(monkeypatch, store, {"CRISPR_nFeatures"})
+
+    ref = store.perturbation.call_guides(lane, method="fixed", min_umi=2)
+
+    in_lane = np.flatnonzero(LANES == "L0")
+    assert set(np.concatenate(reads["CRISPR_nFeatures"]).tolist()) == set(
+        in_lane.tolist()
+    )
+    table = np.full((1, COUNTS.shape[1]), 2, dtype=np.int64)
+    expected = _expected_calls(COUNTS, np.zeros(len(COUNTS), dtype=np.int64), table)
+    assert _call_sets(store, ref) == {
+        call for call in expected if int(call[0][4:]) in set(in_lane.tolist())
+    }
 
 
 def test_sample_labels_must_cover_every_selected_cell(tmp_path) -> None:

@@ -39,13 +39,13 @@ from scipy.special import gammaln
 from cytearc.perturbation.histograms import GuideCountHistograms
 
 __all__ = [
-    "FITTED",
     "FIT_STATUSES",
+    "GUIDE_FIT_FITTED",
+    "GUIDE_FIT_NO_CELLS",
+    "GUIDE_FIT_NO_FIT",
+    "GUIDE_FIT_NO_POSITIVE",
+    "GUIDE_FIT_TOO_SPARSE",
     "MAX_ITERATIONS",
-    "NO_CELLS",
-    "NO_FIT",
-    "NO_POSITIVE",
-    "TOO_SPARSE",
     "GaussianFits",
     "PoissonGaussianFits",
     "fit_gaussian",
@@ -57,17 +57,17 @@ __all__ = [
 #: Fit statuses, stored as positions in this tuple.
 FIT_STATUSES = ("fitted", "no_cells", "too_sparse", "no_fit", "no_positive")
 #: The fit is admissible and calls the guide's largest count.
-FITTED = 0
+GUIDE_FIT_FITTED = 0
 #: No cell of the sample has a UMI of the guide.
-NO_CELLS = 1
+GUIDE_FIT_NO_CELLS = 1
 #: The guide has too few cells or counts to fit: for ``poisson_gaussian``
 #: fewer than 2 cells with a UMI of the guide or a largest count below 2, and
 #: for ``gaussian`` a single distinct count.
-TOO_SPARSE = 2
+GUIDE_FIT_TOO_SPARSE = 2
 #: No starting point led to an admissible fit.
-NO_FIT = 3
+GUIDE_FIT_NO_FIT = 3
 #: The fit is admissible but calls no count up to the guide's largest.
-NO_POSITIVE = 4
+GUIDE_FIT_NO_POSITIVE = 4
 #: The most EM iterations of one start, as in pertpy.
 MAX_ITERATIONS = 1000
 
@@ -483,7 +483,11 @@ def fit_poisson_gaussian(histograms: GuideCountHistograms) -> PoissonGaussianFit
     nonzero = histograms.nonzero_cells().reshape(-1)
     max_counts = histograms.max_counts().reshape(-1)
     fit = (nonzero >= 2) & (max_counts >= 2)
-    status = np.where(nonzero == 0, NO_CELLS, np.where(fit, FITTED, TOO_SPARSE))
+    status = np.where(
+        nonzero == 0,
+        GUIDE_FIT_NO_CELLS,
+        np.where(fit, GUIDE_FIT_FITTED, GUIDE_FIT_TOO_SPARSE),
+    )
     out = np.full((len(fit), 6), np.nan)
     out[:, 5] = 0
     _fit_poisson_gaussian_groups(
@@ -498,12 +502,12 @@ def fit_poisson_gaussian(histograms: GuideCountHistograms) -> PoissonGaussianFit
         out,
     )
     admissible = fit & np.isfinite(out[:, 4])
-    status[fit & ~admissible] = NO_FIT
+    status[fit & ~admissible] = GUIDE_FIT_NO_FIT
     out[~admissible] = np.nan
     out[~admissible, 5] = 0
     threshold = np.zeros(len(fit), dtype=np.int64)
     _poisson_gaussian_thresholds(out, admissible, max_counts, threshold)
-    status[admissible & (threshold == 0)] = NO_POSITIVE
+    status[admissible & (threshold == 0)] = GUIDE_FIT_NO_POSITIVE
     return PoissonGaussianFits(
         status=status.astype(np.int8).reshape(shape),
         threshold=threshold.reshape(shape),
@@ -798,7 +802,11 @@ def fit_gaussian(histograms: GuideCountHistograms) -> GaussianFits:
     zero = histograms.zero_cells().reshape(-1)
     distinct = histograms.distinct_counts().reshape(-1) + (zero > 0)
     fit = (nonzero > 0) & (distinct >= 2)
-    status = np.where(nonzero == 0, NO_CELLS, np.where(fit, FITTED, TOO_SPARSE))
+    status = np.where(
+        nonzero == 0,
+        GUIDE_FIT_NO_CELLS,
+        np.where(fit, GUIDE_FIT_FITTED, GUIDE_FIT_TOO_SPARSE),
+    )
     out = np.full((len(fit), 7), np.nan)
     out[:, 5:] = 0
     _fit_gaussian_groups(
@@ -813,10 +821,10 @@ def fit_gaussian(histograms: GuideCountHistograms) -> GaussianFits:
         out,
     )
     admissible = fit & np.isfinite(out[:, 4])
-    status[fit & ~admissible] = NO_FIT
+    status[fit & ~admissible] = GUIDE_FIT_NO_FIT
     out[fit & ~admissible, :5] = np.nan
     threshold = out[:, 6].astype(np.int64)
-    status[admissible & (threshold == 0)] = NO_POSITIVE
+    status[admissible & (threshold == 0)] = GUIDE_FIT_NO_POSITIVE
     return GaussianFits(
         status=status.astype(np.int8).reshape(shape),
         threshold=threshold.reshape(shape),

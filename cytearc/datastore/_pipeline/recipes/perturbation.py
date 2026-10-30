@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 
 from ....assay import RNAassay
+from ....metadata.rows import read_metadata_rows_chunkwise
 from ....perturbation.associations import covariate_columns
 from ....perturbation.guide_calls import validated_guide_ids
 from ....perturbation.labels import guide_targets, label_settings
@@ -62,8 +63,6 @@ from .rna import FILTER_SUFFIXES
 
 RECIPE = "perturbation"
 OPERATION = "pipeline.perturbation"
-# The declared type of the guide assay whose counts the guides are called from.
-GUIDE_ASSAY_TYPE = "CRISPR"
 # The run's cell fields of each cell's guide call and perturbation label, and
 # of Mixscape's classes, which no snapshot column may take, whether or not the
 # run runs Mixscape.
@@ -112,24 +111,13 @@ CONTROL_CELL_STAGES = ("efficiency", "edistance", "mixscape", "clusters")
 def _resolve_guide_assay(store: Any, name: object) -> tuple[str, Any]:
     """Return the guide assay, given or the store's only CRISPR assay, by name.
 
-    The assay must be declared ``CRISPR`` and store unsigned counts, as guide
-    calling needs.
+    The perturbation methods choose the assay by the same rule. The assay must
+    be declared ``CRISPR`` and store unsigned counts, as guide calling needs.
     """
-    if name is None:
-        crispr = [
-            str(assay)
-            for assay in store.assay_names
-            if getattr(store._get_assay(assay), "assayType", None) == GUIDE_ASSAY_TYPE
-        ]
-        if len(crispr) != 1:
-            raise ValueError(
-                f"The perturbation recipe needs an assay declared {GUIDE_ASSAY_TYPE!r}; "
-                f"name it with guide_assay=...; CRISPR assays: {crispr!r}"
-            )
-        name = crispr[0]
-    elif not isinstance(name, str) or not name:
+    if name is not None and (not isinstance(name, str) or not name):
         raise TypeError("guide_assay must be a non-empty string or None")
-    return name, store._guide_assay(name)
+    guide = store._guide_assay(name, argument="guide_assay")
+    return str(guide.name), guide
 
 
 def _cell_column(store: Any, settings: Mapping[str, Any], stage: str, key: str) -> None:
@@ -487,26 +475,52 @@ def _check_high_moi_stages(
         )
 
 
-def _check_guide_umis(
-    store: Any, source: CellSource, guide: Any, associations: Mapping[str, Any]
+def _check_association_counts(
+    store: Any,
+    source: CellSource,
+    expression: Any,
+    guide: Any,
+    associations: Mapping[str, Any] | None,
 ) -> None:
-    """Refuse input cells without guide UMIs when the association tests run at high MOI.
+    """Refuse input cells without the counts that the association tests adjust for.
 
-    The high-MOI tests adjust for the log of each tested cell's guide UMIs and
-    test every labelled cell, and every input cell can be one.
+    The tests adjust for the log of each tested cell's UMIs in the expression
+    assay, and at high MOI also for the log of its guide UMIs, and every input
+    cell can be a tested cell. ``associations`` holds the tests' settings, or
+    None when they do not run. Only the input cells' totals are read.
     """
-    if associations.get("moi") != "high":
+    if associations is None:
         return
-    active = input_cell_mask(store, source)
-    totals = np.asarray(store.cells.fetch_all(f"{guide.name}_nCounts"))
-    count = int(np.count_nonzero(active & ~(totals > 0)))
-    if count:
-        verb = "has" if count == 1 else "have"
-        raise ValueError(
-            "High-MOI association tests adjust for the log of each cell's guide "
-            f"UMIs, but {count} of the run's cells {verb} none; restrict cells to "
-            "cells with guide UMIs"
+    rows = np.flatnonzero(input_cell_mask(store, source))
+    checks = [
+        (
+            expression,
+            "Association tests adjust for the log of each cell's UMIs in assay "
+            f"{expression.name!r}",
+            "cells with counts",
         )
+    ]
+    if associations.get("moi") == "high":
+        checks.append(
+            (
+                guide,
+                "High-MOI association tests adjust for the log of each cell's "
+                "guide UMIs",
+                "cells with guide UMIs",
+            )
+        )
+    for assay, adjusted, remedy in checks:
+        totals = np.asarray(
+            read_metadata_rows_chunkwise(store.cells, assay._totals_name, rows),
+            dtype=np.float64,
+        )
+        count = int(np.count_nonzero(~(totals > 0)))
+        if count:
+            verb = "has" if count == 1 else "have"
+            raise ValueError(
+                f"{adjusted}, but {count} of the run's cells {verb} none; restrict "
+                f"cells to {remedy}"
+            )
 
 
 def _check_call_file_cells(
@@ -691,7 +705,13 @@ def resolve_perturbation(
     _check_covariates(
         store, source, covariate_columns(association_settings.get("covariates"))
     )
-    _check_guide_umis(store, source, guide, association_settings)
+    _check_association_counts(
+        store,
+        source,
+        store._get_assay(assay_name),
+        guide,
+        association_settings if associations_enabled else None,
+    )
     cell_columns, extra_snapshots = cell_snapshots(
         filtering_config, harmony_columns=harmony_columns, snapshot_columns=snapshots
     )

@@ -30,9 +30,14 @@ from ...metadata.rows import (
     read_metadata_missing_rows_chunkwise,
     read_metadata_rows_chunkwise,
 )
-from ...metadata.selection import sample_codes
+from ...metadata.selection import (
+    cell_value_array,
+    resolve_cell_aligned_artifact,
+    sample_codes,
+)
 from ...perturbation.calling import threshold_calls, top_guide_calls
 from ...perturbation.guide_calls import (
+    GUIDE_ASSAY_TYPE,
     GuideCalls,
     guide_call_arrays,
     guide_calls_frames,
@@ -55,8 +60,8 @@ from ...perturbation.edistance import (
     edistance_settings,
 )
 from ...perturbation.efficiency import (
+    EFFICIENCY_NO_FEATURE,
     EFFICIENCY_STATUSES,
-    NO_FEATURE,
     PerturbationEfficiency,
     efficiency_arrays,
     efficiency_settings,
@@ -89,12 +94,12 @@ from ...perturbation.histograms import (
 )
 from ...perturbation.mixtures import (
     FIT_STATUSES,
+    GUIDE_FIT_FITTED,
+    GUIDE_FIT_NO_CELLS,
+    GUIDE_FIT_NO_FIT,
+    GUIDE_FIT_NO_POSITIVE,
+    GUIDE_FIT_TOO_SPARSE,
     MAX_ITERATIONS,
-    FITTED,
-    NO_CELLS,
-    NO_FIT,
-    NO_POSITIVE,
-    TOO_SPARSE,
     fit_gaussian,
     fit_poisson_gaussian,
 )
@@ -121,7 +126,6 @@ if TYPE_CHECKING:
 else:
     _PerturbationOperationsBase = object
 
-_GUIDE_ASSAY = "CRISPR"
 _GUIDE_CALL_ARRAYS = (
     "values",
     "n_guides",
@@ -145,10 +149,10 @@ _BYTES_PER_CALL = 48
 # Fits named in the warning about guides that call nothing.
 _FIT_EXAMPLES = 5
 _STATUS_TEXT = {
-    NO_CELLS: "have no cell with a UMI of the guide",
-    TOO_SPARSE: "have too few cells or counts to fit",
-    NO_FIT: "have no admissible fit",
-    NO_POSITIVE: "have no guide population above the background",
+    GUIDE_FIT_NO_CELLS: "have no cell with a UMI of the guide",
+    GUIDE_FIT_TOO_SPARSE: "have too few cells or counts to fit",
+    GUIDE_FIT_NO_FIT: "have no admissible fit",
+    GUIDE_FIT_NO_POSITIVE: "have no guide population above the background",
 }
 # Above this share of called cells with several guides, a gaussian fit over
 # every cell has likely set thresholds among the ambient counts.
@@ -216,7 +220,7 @@ _EFFICIENCY_VALUES = (
 )
 
 
-def _file_sha256(path: str | os.PathLike[str]) -> str:
+def _call_file_fingerprint(path: str | os.PathLike[str]) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
         for block in iter(lambda: handle.read(1 << 20), b""):
@@ -375,6 +379,21 @@ def _calibration_group_size(rows: _LabelRows, by: str, used: np.ndarray) -> int:
     return max(1, int(round(float(np.median(per_target[rows.codes[used]])))))
 
 
+def _require_budget(needed: int, budget: int, holding: str) -> None:
+    """Refuse a memory budget below the ``needed`` bytes of the tests.
+
+    ``needed`` is the least that the tests hold, so any budget of at least
+    ``needed`` bytes runs them. ``holding`` starts the message and names what
+    the tests hold.
+    """
+    if needed > budget:
+        raise MemoryError(
+            f"{holding} about {needed} bytes with the tests and their random "
+            f"sets, more than the memory budget of {budget} bytes. Raise "
+            f"mem_budget to at least {needed} bytes."
+        )
+
+
 @contextmanager
 def _numba_threads(nthreads: int) -> Iterator[None]:
     """Run the parallel fits on ``nthreads`` Numba threads, then restore them."""
@@ -397,6 +416,32 @@ def _stored_samples(group: zarr.Group, name: str = "samples") -> list[str | None
             f"The {group.attrs.get('kind')} artifact has no list of samples"
         )
     return [None if label is None else str(label) for label in labels]
+
+
+def _status_labels(
+    group: zarr.Group, statuses: Sequence[str], codes: np.ndarray | None = None
+) -> np.ndarray:
+    """Return the status of each stored code, after checking the stored names.
+
+    The artifact's ``status_names`` attribute must equal ``statuses``, the
+    status names of the method's module, so that every reader, a loader or a
+    stage summary, decodes a code as the same status. ``codes`` defaults to
+    the artifact's ``status`` array.
+
+    Raises:
+        ValueError: If the artifact names its statuses otherwise.
+    """
+    stored = group.attrs.get("status_names")
+    if not isinstance(stored, list) or [str(name) for name in stored] != list(statuses):
+        raise ValueError(
+            f"The {group.attrs.get('kind')} artifact names its statuses "
+            f"{stored!r}, not {list(statuses)!r}, so its status codes cannot be "
+            "read; compute it again"
+        )
+    if codes is None:
+        codes = np.asarray(as_zarr_array(group["status"], name="status")[:])
+    labels: np.ndarray = np.asarray(statuses, dtype=object)[codes]
+    return labels
 
 
 def _called_cells(histograms: GuideCountHistograms, table: np.ndarray) -> int:
@@ -437,7 +482,7 @@ def _unfitted_warning(
     status: np.ndarray, samples: list[str | None], guide_ids: np.ndarray
 ) -> str | None:
     """Describe the fits that call no cell, or return None when every fit calls."""
-    unfitted = status != FITTED
+    unfitted = status != GUIDE_FIT_FITTED
     total = int(np.count_nonzero(unfitted))
     if not total:
         return None
@@ -476,7 +521,7 @@ def _unmatched_targets_warning(
         status: Each row's status, as a position in ``EFFICIENCY_STATUSES``.
         assay: The expression assay.
     """
-    unmatched = names[np.asarray(status) == NO_FEATURE]
+    unmatched = names[np.asarray(status) == EFFICIENCY_NO_FEATURE]
     if not len(unmatched):
         return None
     return (
@@ -588,21 +633,54 @@ def _left_out_warning(
 
 
 class _PerturbationOperationsMixin(_PerturbationOperationsBase):
-    def _guide_assay(self, from_assay: str | None) -> Any:
-        """Return the guide assay after checking its declared type and counts."""
+    def _guide_assay(
+        self, from_assay: str | None, *, argument: str = "from_assay"
+    ) -> Any:
+        """Return the guide assay after checking its declared type and counts.
+
+        ``from_assay`` names the assay, or None takes the store's only assay
+        declared ``CRISPR``, whatever its name. ``argument`` names the keyword
+        that the messages ask for, such as the recipe's ``guide_assay``.
+
+        Raises:
+            TypeError: If ``from_assay`` is not a name or None, or the assay
+                is not declared ``CRISPR`` or does not store unsigned counts.
+            ValueError: If ``from_assay`` is None and the store holds no
+                assay declared ``CRISPR``, or several.
+        """
         from ...assay.classification import declared_assay_type
 
-        name = _GUIDE_ASSAY if from_assay is None else from_assay
-        if not isinstance(name, str):
-            raise TypeError("from_assay must be an assay name or None")
+        if from_assay is None:
+            declared_crispr = [
+                name
+                for name in self.assay_names
+                if declared_assay_type(self._get_assay(name)) == GUIDE_ASSAY_TYPE
+            ]
+            if len(declared_crispr) != 1:
+                found = (
+                    "No assay of the store is"
+                    if not declared_crispr
+                    else f"{len(declared_crispr)} assays of the store, "
+                    + ", ".join(repr(name) for name in declared_crispr)
+                    + ", are"
+                )
+                raise ValueError(
+                    f"{found} declared {GUIDE_ASSAY_TYPE!r}, and guide calls read "
+                    f"one; name the guide assay with {argument}=..."
+                )
+            name = declared_crispr[0]
+        elif not isinstance(from_assay, str):
+            raise TypeError(f"{argument} must be an assay name or None")
+        else:
+            name = from_assay
         declared = (
             declared_assay_type(self._get_assay(name))
             if name in self.assay_names
             else None
         )
-        if declared != _GUIDE_ASSAY:
+        if declared != GUIDE_ASSAY_TYPE:
             raise TypeError(
-                "Guide calls need an assay declared with type 'CRISPR'; "
+                f"Guide calls need an assay declared with type {GUIDE_ASSAY_TYPE!r}; "
                 f"{name!r} is declared as {declared!r}"
             )
         assay = self._get_assay(name)
@@ -662,8 +740,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         and two underscores, so import each sample's file with its own prefix
         and a cell selection of that sample. Barcodes that match no selected
         cell are counted, saved in the artifact's ``n_unmatched_barcodes`` and
-        ``unmatched_barcode_examples`` attributes, and named in a logged
-        warning, which a reused import logs again.
+        ``unmatched_barcode_examples`` attributes, and named in a warning,
+        which a reused import gives again.
 
         The artifact's ``values`` hold the called guide's ID for a cell with
         one call, ``"Negative"`` for a cell with none, and ``"Multiple"`` for a
@@ -681,8 +759,9 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             path: Cell Ranger's ``protospacer_calls_per_cell.csv``, plain or
                 gzip-compressed.
             cell_selection: The cells that the calls label.
-            from_assay: The guide assay, declared with type ``CRISPR``
-                (default: ``'CRISPR'``).
+            from_assay: The guide assay, declared with type ``CRISPR``, or
+                None for the store's only assay declared ``CRISPR``, whatever
+                its name.
             barcode_prefix: Text that precedes each barcode in the cell IDs,
                 such as ``"lane1__"`` in a merged store. None adds nothing.
             invalidate_cache: Import again instead of reusing saved calls.
@@ -695,6 +774,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type, or the assay is not
                 declared ``CRISPR`` or does not store unsigned integer counts.
+            ValueError: Without ``from_assay``, if the store holds no assay
+                declared ``CRISPR``, or several.
             ValueError: If the call file is malformed, a guide ID is empty,
                 repeated, or a label reserved for cells without one guide, or a
                 called guide is not a feature of the assay.
@@ -737,7 +818,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             cell_selection=cell_selection,
             dataset_fingerprint=self._ensure_dataset_fingerprint(assay.name),
             guide_ids_fingerprint=fingerprint_strings(guide_ids.astype(str)),
-            file_sha256=_file_sha256(path),
+            call_file_fingerprint=_call_file_fingerprint(path),
             barcode_prefix=barcode_prefix,
             invalidate_cache=invalidate_cache,
         )
@@ -782,20 +863,11 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 artifact_group(self.zw, planned.ref).attrs
             )
             if message is not None:
-                logger.warning(message)
+                warn(message)
             return planned.ref
-        self._require_writable(arguments.operation)
 
         file_calls = read_protospacer_calls(path)
         n_calls = len(file_calls.features)
-        resident = _BYTES_PER_CELL * n_cells + _BYTES_PER_CALL * n_calls
-        if resident > self.memoryBytes:
-            raise MemoryError(
-                f"Importing {n_calls} guide calls for {n_cells} cells holds about "
-                f"{resident} bytes, more than the memory budget of "
-                f"{self.memoryBytes} bytes. Raise mem_budget, or pass a smaller "
-                "cell_selection."
-            )
         guide_positions = pd.Index(guide_ids.astype(str)).get_indexer(
             file_calls.features.astype(str)
         )
@@ -815,7 +887,19 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 + ", ".join(repr(example) for example in examples)
                 + hint
             )
-        cell_ids = np.asarray(self.cells.fetch_all("ids"))[cell_index].astype(str)
+        resident = _BYTES_PER_CELL * n_cells + _BYTES_PER_CALL * n_calls
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Importing {n_calls} guide calls for {n_cells} cells holds about "
+                f"{resident} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Raise mem_budget, or pass a smaller "
+                "cell_selection."
+            )
+        self._require_writable(arguments.operation)
+        # Only the selected cells' IDs are read, a sample's in a merged store.
+        cell_ids = np.asarray(
+            read_metadata_rows_chunkwise(self.cells, "ids", cell_index)
+        ).astype(str)
         prefix = "" if barcode_prefix is None else barcode_prefix
         row_cells = pd.Index(cell_ids).get_indexer(
             np.char.add(prefix, file_calls.barcodes.astype(str))
@@ -867,7 +951,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         )
         message = _unmatched_barcodes_warning(attributes)
         if message is not None:
-            logger.warning(message)
+            warn(message)
         logger.info(
             f"Imported guide calls of {int(np.count_nonzero(arrays.n_guides))} of "
             f"{n_cells} cells"
@@ -902,24 +986,68 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         guide_ids = np.asarray(as_zarr_array(group["guides"], name="guides")[:]).astype(
             str
         )
-        # The canonical labels are read by default; the others by name.
-        loaded = {
-            name: self._artifacts_load_values(
-                calls, value=None if name == "values" else name
-            )
-            for name in _GUIDE_CALL_ARRAYS
-        }
-        cells, call_table = guide_calls_frames(
-            loaded["values"].cell_ids,
-            **{name: np.asarray(values.values) for name, values in loaded.items()},
-            guide_ids=guide_ids,
-        )
+        cell_ids, arrays = self._cell_arrays(calls, _GUIDE_CALL_ARRAYS)
+        cells, call_table = guide_calls_frames(cell_ids, **arrays, guide_ids=guide_ids)
         return GuideCalls(
             cells=cells,
             calls=call_table,
             guides=pd.Index(guide_ids, name="guide"),
             source=str(status.operation),
         )
+
+    def _cell_values(self, ref: ArtifactRef, value: str | None = None) -> np.ndarray:
+        """Read one per-cell array of a cell-aligned artifact, without cell IDs.
+
+        ``value`` names the array, None for the canonical one. The read is
+        checked against the memory budget.
+        """
+        resolved = resolve_cell_aligned_artifact(
+            self.zw, ref, value_name=value, ndim=None, max_bytes=self.memoryBytes
+        )
+        values: np.ndarray = np.asarray(resolved.values)
+        return values
+
+    def _cell_arrays(
+        self, ref: ArtifactRef, names: Sequence[str]
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        """Read per-cell arrays of a cell-aligned artifact and the cells' IDs.
+
+        One check of the memory budget covers every array and the IDs, and
+        the IDs are read once.
+
+        Raises:
+            ValueError: If a name is not a per-cell array of the artifact's
+                kind, or an array does not hold one row per cell.
+            MemoryError: If the arrays and the IDs do not fit the budget.
+        """
+        for name in names[1:]:
+            cell_value_array(ref.kind, name)
+        group = artifact_group(self.zw, ref)
+        others = {name: as_zarr_array(group[name], name=name) for name in names[1:]}
+        resolved = resolve_cell_aligned_artifact(
+            self.zw,
+            ref,
+            value_name=names[0],
+            ndim=None,
+            max_bytes=self.memoryBytes,
+            # The other arrays and the IDs are read at the same rows.
+            caller_reads=(self.cells._get_array("ids"), *others.values()),
+        )
+        n_cells = len(resolved.cell_idx)
+        rows = np.arange(n_cells, dtype=np.int64)
+        arrays = {names[0]: np.asarray(resolved.values)}
+        for name, array in others.items():
+            if tuple(array.shape[:1]) != (n_cells,):
+                raise ValueError(
+                    f"The {ref.kind} artifact's {name!r} array must hold one row "
+                    f"per cell of its cell selection, {n_cells} rows, not "
+                    f"{array.shape[0] if array.shape else 0}"
+                )
+            arrays[name] = np.asarray(read_array_rows_chunkwise(array, rows))
+        cell_ids = np.asarray(
+            read_metadata_rows_chunkwise(self.cells, "ids", resolved.cell_idx)
+        )
+        return cell_ids, arrays
 
     def _guide_sample_labels(
         self, sample_column: str, cell_index: np.ndarray
@@ -1016,10 +1144,13 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         samples: list[str | None],
         method: str,
         guide_ids: np.ndarray,
+        operation: str,
     ) -> tuple[np.ndarray, np.ndarray, GuideCountHistograms]:
         """Count the UMIs of each guide, fit it in every sample, and save the fits.
 
-        Returns the fitted thresholds, the statuses and the histograms.
+        The store must be writable for ``operation`` once the memory budget
+        is checked. Returns the fitted thresholds, the statuses and the
+        histograms.
         """
         n_cells = len(cell_index)
         n_samples = len(samples)
@@ -1032,6 +1163,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 f"than the memory budget of {self.memoryBytes} bytes. Raise "
                 "mem_budget, or pass a smaller cell_selection or fewer samples."
             )
+        self._require_writable(operation)
         blocks = assay.rawData[cell_index, :]._stream_blocks(
             nthreads=self.nthreads,
             msg=f"({assay.name}) Counting guide UMIs",
@@ -1195,8 +1327,9 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
 
         Args:
             cell_selection: The cells to call.
-            from_assay: The guide assay, declared with type ``CRISPR``
-                (default: ``'CRISPR'``).
+            from_assay: The guide assay, declared with type ``CRISPR``, or
+                None for the store's only assay declared ``CRISPR``, whatever
+                its name.
             method: ``"poisson_gaussian"``, ``"gaussian"``, ``"fixed"`` or
                 ``"top_guide"``.
             min_umi: The fewest UMIs of a called guide. None takes the
@@ -1221,6 +1354,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type, or the assay is not
                 declared ``CRISPR`` or does not store unsigned integer counts.
+            ValueError: Without ``from_assay``, if the store holds no assay
+                declared ``CRISPR``, or several.
             ValueError: If an argument is out of range or does not apply to
                 the method, a sample column is unknown or lacks a label for a
                 selected cell, or a guide ID is empty, repeated, or reserved.
@@ -1345,18 +1480,21 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 np.asarray(as_zarr_array(stored["n_guides"], name="n_guides")[:]),
             )
             return planned.ref
-        self._require_writable(arguments.operation)
         if thresholds is None:
             table = np.full(
                 (1, n_guide_ids),
                 resolved_min_umi if method == "fixed" else 0,
                 dtype=np.int64,
             )
+            # A fixed floor calls at most each cell's detected guides; only
+            # the selected cells' counts are read.
             n_calls = (
                 int(
-                    np.asarray(self.cells.fetch_all(f"{assay.name}_nFeatures"))[
-                        cell_index
-                    ].sum()
+                    np.asarray(
+                        read_metadata_rows_chunkwise(
+                            self.cells, f"{assay.name}_nFeatures", cell_index
+                        )
+                    ).sum()
                 )
                 if method == "fixed"
                 else n_cells
@@ -1375,6 +1513,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                     samples=samples,
                     method=method,
                     guide_ids=guide_ids,
+                    operation=arguments.operation,
                 )
             table = call_thresholds(threshold, resolved_min_umi)
             n_calls = _called_cells(histograms, table)
@@ -1388,6 +1527,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 f"{self.memoryBytes} bytes. Raise mem_budget, or pass a smaller "
                 "cell_selection."
             )
+        self._require_writable(arguments.operation)
         blocks = assay.rawData[cell_index, :]._stream_blocks(
             nthreads=self.nthreads,
             msg=f"({assay.name}) Calling guides",
@@ -1746,6 +1886,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 + ", ".join(repr(str(guide)) for guide in guide_ids[untargeted[:5]])
                 + "; pass targets or choose a target_column that names them"
             )
+        guide_label = self._cell_values(calls)
         self._require_writable(arguments.operation)
         arrays = perturbation_label_arrays(guide_codes, resolved, policy=policy)
         write_cell_data_artifact(
@@ -1753,7 +1894,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             planned,
             {
                 "values": arrays.values,
-                "guide_label": np.asarray(self._artifacts_load_values(calls).values),
+                "guide_label": guide_label,
                 "is_control": arrays.is_control,
                 "n_targets": arrays.n_targets,
                 "target_codes": arrays.target_codes,
@@ -1800,25 +1941,12 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         def read(stored: zarr.Group, name: str) -> np.ndarray:
             return np.asarray(as_zarr_array(stored[name], name=name)[:])
 
-        loaded = {
-            name: self._artifacts_load_values(
-                labels, value=None if name == "values" else name
-            )
-            for name in (
-                "values",
-                "guide_label",
-                "is_control",
-                "n_targets",
-                "target_codes",
-            )
-        }
+        cell_ids, loaded = self._cell_arrays(
+            labels, ("values", "guide_label", "is_control", "n_targets", "target_codes")
+        )
         cells, targets, guides = perturbation_label_frames(
-            loaded["values"].cell_ids,
-            values=np.asarray(loaded["values"].values),
-            guide_label=np.asarray(loaded["guide_label"].values),
-            is_control=np.asarray(loaded["is_control"].values),
-            n_targets=np.asarray(loaded["n_targets"].values),
-            target_codes=np.asarray(loaded["target_codes"].values),
+            cell_ids,
+            **loaded,
             target_names=read(group, "targets").astype(str),
             target_is_control=read(group, "target_is_control"),
             guide_ids=read(calls, "guides").astype(str),
@@ -1903,9 +2031,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 as_zarr_array(group["target_codes"], name="target_codes")[:, 0]
             )
             return np.where(single, row_of[np.maximum(first, 0)], -1), control
-        guide_labels = np.asarray(
-            self._artifacts_load_values(labels, value="guide_label").values
-        ).astype(str)
+        guide_labels = self._cell_values(labels, "guide_label").astype(str)
         return pd.Index(rows.names).get_indexer(guide_labels).astype(np.int64), control
 
     @validation_scoped
@@ -2162,9 +2288,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         columns["feature"] = pd.Series(
             [None if feature == "" else feature for feature in features], dtype=object
         )
-        columns["status"] = np.asarray(EFFICIENCY_STATUSES, dtype=object)[
-            read("status")
-        ]
+        columns["status"] = _status_labels(group, EFFICIENCY_STATUSES)
         for name in ("n_cells", "n_control_cells", *_EFFICIENCY_VALUES):
             columns[name] = read(name)
         return PerturbationEfficiency(
@@ -2405,7 +2529,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         if by == "guide":
             columns["guide"] = read("names").astype(str)
         columns["target"] = read("targets").astype(str)
-        columns["status"] = np.asarray(EDISTANCE_STATUSES, dtype=object)[read("status")]
+        columns["status"] = _status_labels(group, EDISTANCE_STATUSES)
         for name in (
             "n_cells",
             "n_control_cells",
@@ -2635,7 +2759,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         arguments = PerturbationSignatureArguments(
             labels=labels,
             coordinates=coordinates,
-            features=features,
+            feature_selection=features,
             dataset_fingerprint=self._ensure_dataset_fingerprint(assay.name),
             sample_assignments_fingerprint=assignments,
             dims=resolved_dims,
@@ -3125,6 +3249,9 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 isinstance(stored_rows, zarr.Array)
                 and stored_rows.shape == (n_rows,)
                 and group.attrs.get("split_names") == split_names
+                # Saved classes are reused only when their status codes mean
+                # the statuses of this version.
+                and group.attrs.get("status_names") == list(MIXSCAPE_STATUSES)
             )
 
         planned = plan_cell_data_artifact(
@@ -3551,12 +3678,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         split_names = np.asarray(_stored_samples(group, "split_names"), dtype=object)
         cells = pd.DataFrame(
             {
-                "mixscape_class": np.asarray(
-                    self._artifacts_load_values(classes).values
-                ).astype(str),
-                "global_class": np.asarray(
-                    self._artifacts_load_values(classes, value="global_class").values
-                ).astype(str),
+                "mixscape_class": self._cell_values(classes).astype(str),
+                "global_class": self._cell_values(classes, "global_class").astype(str),
                 "posterior": read("posterior"),
                 "score": read("score"),
                 "split": split_names[read("splits")],
@@ -3568,7 +3691,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         table: dict[str, Any] = {
             "target": targets,
             "split": row_splits,
-            "status": np.asarray(MIXSCAPE_STATUSES, dtype=object)[read("status")],
+            "status": _status_labels(group, MIXSCAPE_STATUSES),
         }
         for name in (
             "n_cells",
@@ -3836,7 +3959,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             PermissionError: If the store is read-only and the tests are not
                 saved yet.
             MemoryError: If one feature's counts over the tested cells, or at
-                high MOI the tests of one gene, do not fit the memory budget.
+                high MOI the tests of one gene, do not fit the memory budget;
+                the message names the smallest budget that runs the tests.
         """
         from ...perturbation.associations import (
             ASSOCIATION_SETS,
@@ -3896,15 +4020,13 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             seed,
             moi,
             resampling,
+            sample_column,
         )
         high = moi == "high"
-        if sample_column is not None:
-            if not isinstance(sample_column, str) or not sample_column:
-                raise TypeError("sample_column must be a non-empty string or None")
-            if sample_column not in self.cells.columns:
-                raise ValueError(
-                    f"sample_column '{sample_column}' not found in cell metadata"
-                )
+        if sample_column is not None and sample_column not in self.cells.columns:
+            raise ValueError(
+                f"sample_column '{sample_column}' not found in cell metadata"
+            )
         covariate_names = covariate_columns(covariates)
         for column in covariate_names:
             if column not in self.cells.columns:
@@ -4051,7 +4173,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         arguments = PerturbationAssociationArguments(
             labels=labels,
             dataset_fingerprint=self._ensure_dataset_fingerprint(expression.name),
-            features=features,
+            feature_selection=features,
             pairs_fingerprint=pairs_fingerprint,
             positive_controls_fingerprint=positive_fingerprint,
             sample_assignments_fingerprint=assignments,
@@ -4121,7 +4243,6 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 warn(message)
             return planned.ref
         if high:
-            self._require_writable(arguments.operation)
             complement = self._complement_association_tables(
                 labels,
                 rows,
@@ -4142,6 +4263,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 n_calibration_pairs=requested,
                 seed=resolved_seed,
                 resampling=resolved_resampling,
+                operation=arguments.operation,
             )
             return self._save_association_tables(
                 planned,
@@ -4279,30 +4401,29 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             + 8 * n_covariates * n_covariates * (batch + 4)
         )
         one_set = 4 * max(draws) * largest
-        spare = max(self.memoryBytes - resident - scratch - one_set, 0)
-        draw_bytes = one_set + min((self.nthreads - 1) * one_set, spare // 4)
-        statistics_bytes = max(8 * draws[1], min(1 << 28, spare // 4))
         # One feature of a band: its float32 counts over the tested cells, the
         # block they are read from, and its QC counts and fit.
         per_feature = (
             24 * n_tested + 16 * n_units + 8 * n_covariates * (n_covariates + 2)
         )
-        # The memory left for the counts: the second round holds its
-        # statistics and one working copy no larger than them, so twice
-        # statistics_bytes is kept for it.
-        free = max(
-            self.memoryBytes - resident - scratch - draw_bytes - 2 * statistics_bytes,
-            0,
+        # The least that the tests hold: one thread's random sets, the second
+        # round's statistics and one working copy no larger than them, and
+        # one feature's counts.
+        least_statistics = 8 * draws[1]
+        needed = resident + scratch + one_set + 2 * least_statistics + per_feature
+        _require_budget(
+            needed,
+            self.memoryBytes,
+            f"The counts of one feature over {n_tested} tested cells hold",
         )
+        # The random sets of the other threads and the statistics may each
+        # take a quarter of the rest, and the counts take what they leave.
+        spare = self.memoryBytes - needed
+        draw_bytes = one_set + min((self.nthreads - 1) * one_set, spare // 4)
+        statistics_bytes = max(least_statistics, min(1 << 28, spare // 4))
+        free = self.memoryBytes - resident - scratch - draw_bytes - 2 * statistics_bytes
         band_cap = max(1, _MIXSCAPE_BAND_BYTES // (8 * max(n_tested, 1)))
         width = min(max(len(checked), 1), free // per_feature, band_cap)
-        if width < 1:
-            raise MemoryError(
-                f"The counts of one feature over {n_tested} tested cells hold about "
-                f"{self.memoryBytes - free + per_feature} bytes with the tests and "
-                f"their random sets, more than the memory budget of "
-                f"{self.memoryBytes} bytes. Raise mem_budget."
-            )
         # The counts are read once and held for the tests when they take at
         # most a share of the memory left, so that the reads keep the rest;
         # otherwise the tests read them again.
@@ -4521,6 +4642,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         n_calibration_pairs: int | None,
         seed: int,
         resampling: str,
+        operation: str,
     ) -> _AssociationTables:
         """Test each tested row and calibration group against all other labelled cells.
 
@@ -4530,7 +4652,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         labelled cell's positions in the store. The counts are read once for
         the QC, every feature of the assay when a calibration check runs, and
         held for the tests when they fit half the memory left; the tests take
-        bands of genes, each gene fitted once on all cells.
+        bands of genes, each gene fitted once on all cells. The store must be
+        writable for ``operation`` once the memory budget is checked.
         """
         from ...perturbation.associations import (
             association_covariates,
@@ -4672,37 +4795,42 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         resident += _ASSOCIATION_PAIR_BYTES * n_pairs_most
         resident += 4 * len(used) * len(target_features)
         resident += 13 * n_groups_nt * len(checked) + 8 * len(checked)
-        # Each thread draws a group's conditional sets in 24 bytes per cell
-        # and copies some of its genes, 16 bytes per cell and gene, which also
-        # bounds its gene and logistic fits; the second round holds its
-        # statistics and one working copy no larger than them.
-        one_copy = 16 * n_cells
-        spare = max(
-            self.memoryBytes
-            - resident
-            - threads * (24 * n_cells + one_copy)
-            - 16 * n_resamples[1],
-            0,
-        )
-        gather_bytes = one_copy + min(
-            max(_ASSOCIATION_GATHER_BYTES - one_copy, 0), spare // (4 * threads)
-        )
-        statistics_bytes = max(8 * n_resamples[1], min(1 << 28, spare // 4))
-        scratch = threads * (24 * n_cells + gather_bytes)
-        free = max(self.memoryBytes - resident - scratch - 2 * statistics_bytes, 0)
         # A feature of the QC pass: its float32 counts, the block they are read
         # from and its QC counts. A gene of a band of tests: its scores and
         # weights on every cell and its fit, beside its counts when they are
         # read again.
         per_feature = 24 * n_cells + 16 * len(sizes)
         per_gene = 16 * n_cells + 8 * n_covariates * (n_covariates + 2)
-        if free < per_feature + per_gene:
-            raise MemoryError(
-                f"Testing one gene over {n_cells} labelled cells holds about "
-                f"{self.memoryBytes - free + per_feature + per_gene} bytes with the "
-                "tests and their random sets, more than the memory budget of "
-                f"{self.memoryBytes} bytes. Raise mem_budget."
-            )
+        # The least that the tests hold: each thread draws a group's
+        # conditional sets in 24 bytes per cell and copies one of its genes,
+        # 16 bytes per cell, which also bounds its gene and logistic fits; the
+        # second round holds its statistics and one working copy no larger
+        # than them; and the QC reads one feature and the tests one gene.
+        one_copy = 16 * n_cells
+        least_statistics = 8 * n_resamples[1]
+        needed = (
+            resident
+            + threads * (24 * n_cells + one_copy)
+            + 2 * least_statistics
+            + per_feature
+            + per_gene
+        )
+        _require_budget(
+            needed,
+            self.memoryBytes,
+            f"Testing one gene over {n_cells} labelled cells holds",
+        )
+        self._require_writable(operation)
+        # Each thread's copy may take more genes, up to a quarter of the rest
+        # among the threads, and the statistics a quarter of the rest; the
+        # counts and the tests take what they leave.
+        spare = self.memoryBytes - needed
+        gather_bytes = one_copy + min(
+            max(_ASSOCIATION_GATHER_BYTES - one_copy, 0), spare // (4 * threads)
+        )
+        statistics_bytes = max(least_statistics, min(1 << 28, spare // 4))
+        scratch = threads * (24 * n_cells + gather_bytes)
+        free = self.memoryBytes - resident - scratch - 2 * statistics_bytes
         # The counts are read once and held for the tests when they take at
         # most a share of the memory left and leave room for a feature and a
         # gene; otherwise the tests read them again.
@@ -5061,9 +5189,9 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
 
         Raises:
             TypeError: If ``tests`` is not an ArtifactRef.
-            ValueError: If it is not a ``perturbation_associations`` artifact,
-                or a development build saved it before high-MOI tests, without
-                their ``moi`` and ``resampling``.
+            ValueError: If it is not a ``perturbation_associations`` artifact.
+            MemoryError: If the tables of its pairs do not fit the datastore
+                memory budget.
         """
         from ...perturbation.associations import ASSOCIATION_SETS
 
@@ -5075,36 +5203,18 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 f"{tests.kind!r}"
             )
         status = require_complete_artifact(self.zw, tests)
-        parameters = status.parameters or {}
-        if "moi" not in parameters or "resampling" not in parameters:
-            raise ValueError(
-                "These association tests were saved by a development build before "
-                "high-MOI tests, so their record lacks moi and resampling; call "
-                "perturbation.associations again with the same arguments, which "
-                "tests again and saves new tests"
-            )
         group = artifact_group(self.zw, tests)
         assay = self._get_assay(str(tests.assay))
 
-        def read(name: str) -> np.ndarray:
-            return np.asarray(as_zarr_array(group[name], name=name)[:])
+        def array(name: str) -> zarr.Array:
+            return as_zarr_array(group[name], name=name)
 
+        def read(name: str) -> np.ndarray:
+            return np.asarray(array(name)[:])
+
+        parameters = status.parameters or {}
         integration = str(parameters["integration"])
-        feature_positions = read("features")
-        # Each pair names its group of treatment cells, whose target and
-        # guides are stored once.
-        groups = read("groups")
-        group_guides = read("group_guides").astype(str)
-        table: dict[str, Any] = {
-            "target": read("group_targets").astype(str)[groups],
-            "feature": np.asarray(assay.feats.fetch_all("ids")).astype(str)[
-                feature_positions
-            ],
-            "feature_name": np.asarray(assay.feats.fetch_all("names")).astype(str)[
-                feature_positions
-            ],
-        }
-        for name in (
+        numbers = (
             "n_cells",
             "n_control_cells",
             "n_nonzero_cells",
@@ -5120,7 +5230,40 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             "skew_location",
             "skew_scale",
             "skew_shape",
-        ):
+        )
+        # Each pair names its group of treatment cells, whose target and
+        # guides are stored once.
+        group_targets = read("group_targets").astype(str)
+        group_guides = read("group_guides").astype(str)
+        feature_ids = np.asarray(assay.feats.fetch_all("ids")).astype(str)
+        feature_names = np.asarray(assay.feats.fetch_all("names")).astype(str)
+        # Each pair's numbers as read, in the table and in its set's table,
+        # and each of its four texts as read and as a Python string, to which
+        # both tables point.
+        n_pairs = int(array("sets").shape[0])
+        row_bytes = sum(
+            np.dtype(array(name).dtype).itemsize
+            for name in ("sets", "groups", "features", *numbers)
+        )
+        text_bytes = sum(
+            5 * (texts.dtype.itemsize // 4) + 80
+            for texts in (group_targets, group_guides, feature_ids, feature_names)
+        )
+        n_bytes = n_pairs * (3 * row_bytes + text_bytes)
+        if n_bytes > self.memoryBytes:
+            raise MemoryError(
+                f"The association tests of {n_pairs} pairs hold about {n_bytes} "
+                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
+                "Raise mem_budget."
+            )
+        feature_positions = read("features")
+        groups = read("groups")
+        table: dict[str, Any] = {
+            "target": group_targets[groups],
+            "feature": feature_ids[feature_positions],
+            "feature_name": feature_names[feature_positions],
+        }
+        for name in numbers:
             table[name] = read(name)
         frame = pd.DataFrame(table)
         sets = read("sets")
@@ -5200,9 +5343,9 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             aligned[positions[present]] = groups[present]
             control_flags = np.zeros(len(classified), dtype=bool)
             control_flags[positions[present]] = control[present]
-            knocked_out = np.asarray(
-                self._artifacts_load_values(labels, value="global_class").values
-            ).astype(str) == str((classes.parameters or {})["perturbation_type"])
+            knocked_out = self._cell_values(labels, "global_class").astype(str) == str(
+                (classes.parameters or {})["perturbation_type"]
+            )
             kept = aligned >= 0
             kept[kept] = knocked_out[kept] | row_control[aligned[kept]]
             cell_index, groups, control = (

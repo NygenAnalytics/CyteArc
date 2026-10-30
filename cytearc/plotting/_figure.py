@@ -536,227 +536,298 @@ def _place_boxed_legend_blocks(
         )
 
 
-def _render_shared_legends(
-    figure: Any,
-    results: Sequence[PlotResult],
-) -> None:
-    plt, mpl = require_matplotlib()
-    categorical_seen: set[tuple[Any, ...]] = set()
-    continuous_seen: set[tuple[Any, ...]] = set()
-    size_seen: set[tuple[Any, ...]] = set()
-    marker_seen: set[tuple[Any, ...]] = set()
-    blocks: list[_BoxedLegendBlock] = []
-    for result in results:
-        categorical = [
-            scale for scale in result.scales if isinstance(scale, CategoricalScale)
-        ]
-        continuous = [scale for scale in result.scales if isinstance(scale, ColorScale)]
-        sizes = [scale for scale in result.scales if isinstance(scale, SizeScale)]
-        categorical_scale_index = 0
-        continuous_scale_index = 0
-        size_scale_index = 0
-        for legend in result.legends:
-            if legend.kind == "categorical" and categorical:
-                categorical_scale = categorical[
-                    min(categorical_scale_index, len(categorical) - 1)
-                ]
-                categorical_scale_index += 1
-                order = tuple(categorical_scale.order or ())
-                if not order or categorical_scale.palette is None:
-                    continue
-                categorical_key = (
-                    legend.label,
-                    order,
-                    tuple(
-                        (str(value), categorical_scale.palette[value])
-                        for value in order
-                    ),
+@dataclass(frozen=True, slots=True)
+class _SharedColorbar:
+    """A colorbar that the shared legends draw under ``axes``.
+
+    ``under_panel`` is True for one of the colorbars that a child with
+    per-panel limits keeps under each of its panels.
+    """
+
+    axes: tuple[Any, ...]
+    vmin: float
+    vmax: float
+    scale: ColorScale
+    label: str | None
+    under_panel: bool
+
+
+# One element of the shared legends: a key, which elements that draw the same
+# legend share, and an outside legend block or a colorbar.
+_SharedLegendPart = tuple[tuple[Any, ...], _BoxedLegendBlock | _SharedColorbar]
+
+
+def _shared_legend_parts(result: PlotResult) -> list[_SharedLegendPart] | None:
+    """Return the shared legend elements that redraw each legend of ``result``.
+
+    Returns None when ``result`` reports no legend, or a legend that the
+    shared legends cannot draw, such as a line legend or a categorical legend
+    whose scale has no order or palette. Such a child keeps the legends that
+    it drew.
+    """
+    if not result.legends:
+        return None
+    _, mpl = require_matplotlib()
+    categorical = [
+        scale for scale in result.scales if isinstance(scale, CategoricalScale)
+    ]
+    continuous = [scale for scale in result.scales if isinstance(scale, ColorScale)]
+    sizes = [scale for scale in result.scales if isinstance(scale, SizeScale)]
+    categorical_scale_index = 0
+    continuous_scale_index = 0
+    size_scale_index = 0
+    parts: list[_SharedLegendPart] = []
+    for legend in result.legends:
+        if legend.kind == "categorical" and categorical:
+            categorical_scale = categorical[
+                min(categorical_scale_index, len(categorical) - 1)
+            ]
+            categorical_scale_index += 1
+            order = tuple(categorical_scale.order or ())
+            if not order or categorical_scale.palette is None:
+                return None
+            categorical_key = (
+                "categorical",
+                legend.label,
+                order,
+                tuple(
+                    (str(value), categorical_scale.palette[value]) for value in order
+                ),
+            )
+            handles = [
+                mpl.lines.Line2D(
+                    [],
+                    [],
+                    marker="o",
+                    linestyle="",
+                    markerfacecolor=categorical_scale.palette[value],
+                    markeredgecolor="none",
+                    markersize=5,
                 )
-                if categorical_key in categorical_seen:
-                    continue
-                categorical_seen.add(categorical_key)
-                handles = [
-                    mpl.lines.Line2D(
-                        [],
-                        [],
-                        marker="o",
-                        linestyle="",
-                        markerfacecolor=categorical_scale.palette[value],
-                        markeredgecolor="none",
-                        markersize=5,
-                    )
-                    for value in order
+                for value in order
+            ]
+            labels = [
+                (
+                    categorical_scale.labels.get(value, str(value))
+                    if categorical_scale.labels is not None
+                    else str(value)
+                )
+                for value in order
+            ]
+            parts.append((categorical_key, (legend.label, handles, labels, None)))
+        elif legend.kind == "colorbar" and continuous:
+            color_scale = continuous[min(continuous_scale_index, len(continuous) - 1)]
+            continuous_scale_index += 1
+            panel_limits = legend.extras.get("panel_limits")
+            targets: list[tuple[tuple[Any, ...], Any, Any, bool]]
+            if panel_limits:
+                # Per-panel limits keep one colorbar under each panel.
+                panels = {
+                    str(key): ax
+                    for key, ax in result.axes.items()
+                    if not is_colorbar_axes(ax)
+                }
+                if any(name not in panels for name in panel_limits):
+                    return None
+                targets = [
+                    ((panels[name],), limits[0], limits[1], True)
+                    for name, limits in panel_limits.items()
                 ]
-                labels = [
+            else:
+                vmin = legend.extras.get("vmin", color_scale.vmin)
+                vmax = legend.extras.get("vmax", color_scale.vmax)
+                if vmin is None or vmax is None:
+                    return None
+                targets = [
                     (
-                        categorical_scale.labels.get(value, str(value))
-                        if categorical_scale.labels is not None
-                        else str(value)
+                        tuple(
+                            ax
+                            for ax in dict.fromkeys(result.axes.values())
+                            if not is_colorbar_axes(ax)
+                        ),
+                        vmin,
+                        vmax,
+                        False,
                     )
-                    for value in order
                 ]
-                blocks.append((legend.label, handles, labels, None))
-            elif legend.kind == "colorbar" and continuous:
-                color_scale = continuous[
-                    min(continuous_scale_index, len(continuous) - 1)
-                ]
-                continuous_scale_index += 1
-                panel_limits = legend.extras.get("panel_limits")
-                if panel_limits:
-                    # Per-panel limits keep one colorbar under each panel.
-                    panels = {
-                        str(key): ax
-                        for key, ax in result.axes.items()
-                        if not is_colorbar_axes(ax)
-                    }
-                    targets = [
-                        ([panels[name]], limits[0], limits[1], name)
-                        for name, limits in panel_limits.items()
-                        if name in panels
-                    ]
-                else:
-                    vmin = legend.extras.get("vmin", color_scale.vmin)
-                    vmax = legend.extras.get("vmax", color_scale.vmax)
-                    if vmin is None or vmax is None:
-                        continue
-                    targets = [
-                        (
-                            [
-                                ax
-                                for ax in dict.fromkeys(result.axes.values())
-                                if not is_colorbar_axes(ax)
-                            ],
-                            vmin,
-                            vmax,
-                            None,
-                        )
-                    ]
-                for target_axes, vmin, vmax, panel in targets:
-                    continuous_key = (
-                        legend.label,
-                        color_scale.cmap,
-                        float(vmin),
-                        float(vmax),
-                        color_scale.vcenter,
-                        color_scale.scale,
-                        None if panel is None else id(target_axes[0]),
-                    )
-                    if continuous_key in continuous_seen:
-                        continue
-                    continuous_seen.add(continuous_key)
-                    mappable = plt.cm.ScalarMappable(
-                        cmap=color_scale.cmap or "viridis",
-                        norm=continuous_norm(
-                            mpl,
+            for target_axes, vmin, vmax, under_panel in targets:
+                continuous_key = (
+                    "colorbar",
+                    legend.label,
+                    color_scale.cmap,
+                    float(vmin),
+                    float(vmax),
+                    color_scale.vcenter,
+                    color_scale.scale,
+                    id(target_axes[0]) if under_panel else None,
+                )
+                parts.append(
+                    (
+                        continuous_key,
+                        _SharedColorbar(
+                            axes=target_axes,
                             vmin=float(vmin),
                             vmax=float(vmax),
-                            vcenter=color_scale.vcenter,
-                            scale=color_scale.scale,
+                            scale=color_scale,
+                            label=legend.label,
+                            under_panel=under_panel,
                         ),
                     )
-                    colorbar = figure.colorbar(
-                        mappable,
-                        ax=target_axes,
-                        location="bottom",
-                        orientation="horizontal",
-                        shrink=0.45 if panel is None else 0.8,
-                        fraction=0.04,
-                        pad=0.04,
-                    )
-                    colorbar.set_label(legend.label or "")
-            elif legend.kind == "size" and sizes:
-                size_scale = sizes[min(size_scale_index, len(sizes) - 1)]
-                size_scale_index += 1
-                domain = legend.extras.get(
-                    "domain",
-                    [size_scale.vmin, size_scale.vmax],
                 )
-                low, high = float(domain[0]), float(domain[1])
-                values = np.asarray(
-                    legend.extras.get("values", np.linspace(low, high, 4)),
-                    dtype=np.float64,
+        elif legend.kind == "size" and sizes:
+            size_scale = sizes[min(size_scale_index, len(sizes) - 1)]
+            size_scale_index += 1
+            domain = legend.extras.get(
+                "domain",
+                [size_scale.vmin, size_scale.vmax],
+            )
+            low, high = float(domain[0]), float(domain[1])
+            values = np.asarray(
+                legend.extras.get("values", np.linspace(low, high, 4)),
+                dtype=np.float64,
+            )
+            if values.ndim != 1 or not values.size:
+                return None
+            size_key = (
+                "size",
+                legend.label,
+                low,
+                high,
+                tuple(values.tolist()),
+                size_scale.size_min,
+                size_scale.size_max,
+            )
+            # The shared legend draws the child's final areas exactly.
+            areas, boxes = size_legend_layout(size_scale, values)
+            handles = [
+                mpl.lines.Line2D(
+                    [],
+                    [],
+                    marker="o",
+                    linestyle="",
+                    markerfacecolor="#bdbdbd",
+                    markeredgecolor="#666666",
+                    markersize=float(np.sqrt(area)),
                 )
-                if values.ndim != 1 or not values.size:
-                    continue
-                size_key = (
-                    legend.label,
-                    low,
-                    high,
-                    tuple(values.tolist()),
-                    size_scale.size_min,
-                    size_scale.size_max,
+                for area in areas
+            ]
+            labels = (
+                [f"{value:.0%}" for value in values]
+                if low >= 0 and high <= 1
+                else [f"{value:g}" for value in values]
+            )
+            parts.append((size_key, (legend.label, handles, labels, boxes)))
+        elif legend.kind == "marker":
+            marker_values = list(legend.extras.get("values", ()))
+            markers = list(legend.extras.get("markers", ()))
+            if not marker_values or len(marker_values) != len(markers):
+                return None
+            marker_key = (
+                "marker",
+                legend.label,
+                tuple(map(str, marker_values)),
+                tuple(map(str, markers)),
+            )
+            handles = [
+                mpl.lines.Line2D(
+                    [],
+                    [],
+                    marker=marker,
+                    linestyle="",
+                    markerfacecolor="#9e9e9e",
+                    markeredgecolor="#4d4d4d",
+                    markersize=5,
                 )
-                if size_key in size_seen:
-                    continue
-                size_seen.add(size_key)
-                # The shared legend draws the child's final areas exactly.
-                areas, boxes = size_legend_layout(size_scale, values)
-                handles = [
-                    mpl.lines.Line2D(
-                        [],
-                        [],
-                        marker="o",
-                        linestyle="",
-                        markerfacecolor="#bdbdbd",
-                        markeredgecolor="#666666",
-                        markersize=float(np.sqrt(area)),
-                    )
-                    for area in areas
-                ]
-                labels = (
-                    [f"{value:.0%}" for value in values]
-                    if low >= 0 and high <= 1
-                    else [f"{value:g}" for value in values]
-                )
-                blocks.append((legend.label, handles, labels, boxes))
-            elif legend.kind == "marker":
-                marker_values = list(legend.extras.get("values", ()))
-                markers = list(legend.extras.get("markers", ()))
-                marker_key = (
-                    legend.label,
-                    tuple(map(str, marker_values)),
-                    tuple(map(str, markers)),
-                )
-                if not marker_values or len(marker_values) != len(markers):
-                    continue
-                if marker_key in marker_seen:
-                    continue
-                marker_seen.add(marker_key)
-                handles = [
-                    mpl.lines.Line2D(
-                        [],
-                        [],
-                        marker=marker,
-                        linestyle="",
-                        markerfacecolor="#9e9e9e",
-                        markeredgecolor="#4d4d4d",
-                        markersize=5,
-                    )
-                    for marker in markers
-                ]
-                blocks.append(
+                for marker in markers
+            ]
+            parts.append(
+                (
+                    marker_key,
                     (
                         legend.label,
                         handles,
                         [str(value) for value in marker_values],
                         None,
-                    )
+                    ),
                 )
+            )
+        else:
+            return None
+    return parts
+
+
+def _render_shared_legends(figure: Any, parts: Sequence[_SharedLegendPart]) -> None:
+    """Draw each shared legend element once, in order."""
+    plt, mpl = require_matplotlib()
+    seen: set[tuple[Any, ...]] = set()
+    blocks: list[_BoxedLegendBlock] = []
+    for key, part in parts:
+        if key in seen:
+            continue
+        seen.add(key)
+        if not isinstance(part, _SharedColorbar):
+            blocks.append(part)
+            continue
+        mappable = plt.cm.ScalarMappable(
+            cmap=part.scale.cmap or "viridis",
+            norm=continuous_norm(
+                mpl,
+                vmin=part.vmin,
+                vmax=part.vmax,
+                vcenter=part.scale.vcenter,
+                scale=part.scale.scale,
+            ),
+        )
+        colorbar = figure.colorbar(
+            mappable,
+            ax=list(part.axes),
+            location="bottom",
+            orientation="horizontal",
+            shrink=0.8 if part.under_panel else 0.45,
+            fraction=0.04,
+            pad=0.04,
+        )
+        colorbar.set_label(part.label or "")
     _place_boxed_legend_blocks(figure, blocks)
 
 
-def _remove_child_legend_artists(figure: Any, axes: Sequence[Any]) -> None:
-    """Remove rendered child legends and colorbars before shared equivalents."""
+def _child_colorbar_axes(figure: Any, child: PlotResult) -> list[Any]:
+    """Return the colorbar axes among the axes of ``child`` or attached to them."""
+    own = set(child.axes.values())
+    return [
+        ax
+        for ax in figure.axes
+        if is_colorbar_axes(ax)
+        and (
+            ax in own
+            or any(
+                parent in own
+                for parent in getattr(ax, "_colorbar_info", {}).get("parents", ())
+            )
+        )
+    ]
+
+
+def _remove_child_legend_artists(figure: Any, children: Sequence[PlotResult]) -> None:
+    """Remove the legends and colorbars of ``children`` before shared equivalents.
+
+    A child's legends are those of its axes, and those of the figure when the
+    child owns the figure; its colorbars are the colorbar axes among its axes
+    or attached to them.
+    """
     from matplotlib.legend import Legend
 
-    for ax in set(axes):
-        for artist in list(ax.get_children()):
-            if isinstance(artist, Legend):
-                artist.remove()
-    for legend in list(figure.legends):
-        legend.remove()
-    for ax in list(figure.axes):
-        if is_colorbar_axes(ax):
+    for child in children:
+        for ax in dict.fromkeys(child.axes.values()):
+            if is_colorbar_axes(ax):
+                continue
+            for artist in list(ax.get_children()):
+                if isinstance(artist, Legend):
+                    artist.remove()
+        if child.owns_figure:
+            for legend in list(figure.legends):
+                legend.remove()
+        for ax in _child_colorbar_axes(figure, child):
             figure.delaxes(ax)
 
 
@@ -769,7 +840,15 @@ def compose_results(
     owns_figure: bool = False,
     theme: str | None = None,
 ) -> PlotResult:
-    """Merge caller-targeted plot results into one inspectable figure result."""
+    """Merge caller-targeted plot results into one inspectable figure result.
+
+    With ``shared_legends=True``, the legends of the children are drawn again
+    beside the figure and their colorbars below their axes, once for legends
+    that several children share. A child that reports no legend, or one that
+    cannot be drawn this way, such as a line legend or a categorical legend
+    whose scale has no order or palette, keeps the legends and colorbars it
+    drew.
+    """
     if isinstance(results, Mapping):
         named_results = list(results.items())
     else:
@@ -803,21 +882,22 @@ def compose_results(
         for result in children
     ]
     with theme_context(resolved_theme):
+        # A child whose legends the shared legends cannot all redraw keeps
+        # the legends it drew, and adds none to the shared legends.
+        shared: list[PlotResult] = []
+        parts: list[_SharedLegendPart] = []
         if shared_legends:
-            _remove_child_legend_artists(
-                figure,
-                [
-                    ax
-                    for result in children
-                    for ax in result.axes.values()
-                    if not is_colorbar_axes(ax)
-                ],
-            )
+            for result in children:
+                child_parts = _shared_legend_parts(result)
+                if child_parts is not None:
+                    shared.append(result)
+                    parts.extend(child_parts)
+            _remove_child_legend_artists(figure, shared)
         if panel_labels:
             labels = None if panel_labels is True else list(panel_labels)
             label_panels(label_axes, labels=labels)
         if shared_legends:
-            _render_shared_legends(figure, children)
+            _render_shared_legends(figure, parts)
         refresh_layout_point_sizes(figure)
         place_layout_labels(figure)
     remaining_axes = set(figure.axes)

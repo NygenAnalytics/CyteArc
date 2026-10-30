@@ -24,11 +24,11 @@ import pandas as pd
 from scipy.stats import false_discovery_control, mannwhitneyu
 
 __all__ = [
+    "EFFICIENCY_NO_CELLS",
+    "EFFICIENCY_NO_CONTROL_EXPRESSION",
+    "EFFICIENCY_NO_FEATURE",
     "EFFICIENCY_STATUSES",
-    "NO_CELLS",
-    "NO_CONTROL_EXPRESSION",
-    "NO_FEATURE",
-    "TESTED",
+    "EFFICIENCY_TESTED",
     "EfficiencyArrays",
     "PerturbationEfficiency",
     "efficiency_arrays",
@@ -41,13 +41,13 @@ __all__ = [
 #: Row statuses, stored as positions in this tuple.
 EFFICIENCY_STATUSES = ("tested", "no_feature", "no_cells", "no_control_expression")
 #: The target gene was compared between perturbed and control cells.
-TESTED = 0
+EFFICIENCY_TESTED = 0
 #: The target matches no feature of the expression assay.
-NO_FEATURE = 1
+EFFICIENCY_NO_FEATURE = 1
 #: No cell carries the perturbation alone.
-NO_CELLS = 2
+EFFICIENCY_NO_CELLS = 2
 #: The control cells hold no UMI of the target gene, so no fraction remains.
-NO_CONTROL_EXPRESSION = 3
+EFFICIENCY_NO_CONTROL_EXPRESSION = 3
 
 
 def rows_setting(by: object) -> str:
@@ -225,7 +225,7 @@ def efficiency_arrays(
     order = np.argsort(groups, kind="stable")
     bounds = np.searchsorted(groups[order], np.arange(n_rows + 1))
     controls = np.flatnonzero(control)
-    status = np.full(n_rows, TESTED, dtype=np.int8)
+    status = np.full(n_rows, EFFICIENCY_TESTED, dtype=np.int8)
     shape = n_rows
     out = {
         name: np.full(shape, np.nan)
@@ -244,10 +244,10 @@ def efficiency_arrays(
         column = row_columns[row]
         members = order[bounds[row] : bounds[row + 1]]
         if column < 0:
-            status[row] = NO_FEATURE
+            status[row] = EFFICIENCY_NO_FEATURE
             continue
         if not len(members):
-            status[row] = NO_CELLS
+            status[row] = EFFICIENCY_NO_CELLS
             continue
         out["mean_umi"][row] = counts[members, column].mean()
         out["control_mean_umi"][row] = counts[controls, column].mean()
@@ -257,7 +257,7 @@ def efficiency_arrays(
         out["control_mean_expression"][row] = reference.mean()
         out["p_value"][row] = _two_sided_p(perturbed, reference)
         if out["control_mean_expression"][row] == 0:
-            status[row] = NO_CONTROL_EXPRESSION
+            status[row] = EFFICIENCY_NO_CONTROL_EXPRESSION
             continue
         fraction = out["mean_expression"][row] / out["control_mean_expression"][row]
         out["remaining_fraction"][row] = fraction
