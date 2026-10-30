@@ -13,7 +13,6 @@ Their calls feed :func:`~cytearc.perturbation.guide_calls.guide_call_arrays`.
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from numbers import Real
 
 import numpy as np
 
@@ -195,27 +194,13 @@ def top_guide_calls(
         summary: Each cell's top guide and guide UMIs.
         min_umi: The fewest UMIs of the top guide that are called, at least 1.
         fraction_threshold: The share of the cell's guide UMIs that the top
-            guide must exceed, at least 0 and below 1.
+            guide must exceed, at least 0 and below 1. Both settings are
+            checked by
+            :func:`~cytearc.perturbation.guide_thresholds.call_settings`.
 
     Returns:
         The calls, ordered by cell.
-
-    Raises:
-        ValueError: If ``min_umi`` is not a positive integer or
-            ``fraction_threshold`` does not lie in [0, 1).
     """
-    if (
-        isinstance(min_umi, bool)
-        or not isinstance(min_umi, int | np.integer)
-        or min_umi < 1
-    ):
-        raise ValueError("min_umi must be a positive integer")
-    if (
-        isinstance(fraction_threshold, bool)
-        or not isinstance(fraction_threshold, Real)
-        or not 0 <= fraction_threshold < 1
-    ):
-        raise ValueError("fraction_threshold must be at least 0 and below 1")
     called = (
         (summary.total_umi > 0)
         & (summary.top_umi >= min_umi)

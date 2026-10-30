@@ -125,6 +125,19 @@ def record_cell_reads(
     return reads
 
 
+def histogram_of(
+    histograms: Any, sample: int, guide: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return one guide's distinct nonzero counts in one sample, and their cells.
+
+    The counts are in ascending order, as histogram entry
+    ``sample * n_guides + guide`` lists them.
+    """
+    entry = sample * histograms.n_guides + guide
+    start, stop = histograms.offsets[entry], histograms.offsets[entry + 1]
+    return histograms.counts[start:stop], histograms.cells[start:stop]
+
+
 def use_python_kernels(monkeypatch: pytest.MonkeyPatch, *modules: ModuleType) -> None:
     """Replace every numba kernel of ``modules`` with its Python function.
 

@@ -82,20 +82,6 @@ class GuideCountHistograms:
         """The number of samples."""
         return len(self.n_cells)
 
-    def histogram(self, sample: int, guide: int) -> tuple[np.ndarray, np.ndarray]:
-        """Return the distinct nonzero counts of one guide in one sample.
-
-        Args:
-            sample: The position of the sample.
-            guide: The position of the guide.
-
-        Returns:
-            The counts in ascending order and the number of cells holding each.
-        """
-        entry = sample * self.n_guides + guide
-        start, stop = self.offsets[entry], self.offsets[entry + 1]
-        return self.counts[start:stop], self.cells[start:stop]
-
     def nonzero_cells(self) -> np.ndarray:
         """Return the cells with at least one UMI of each guide, samples x guides."""
         cumulative = np.zeros(len(self.cells) + 1, dtype=np.int64)
@@ -109,6 +95,18 @@ class GuideCountHistograms:
         """Return the cells with no UMI of each guide, samples x guides."""
         zeros: np.ndarray = self.n_cells[:, None] - self.nonzero_cells()
         return zeros
+
+    def n_calls(self, thresholds: np.ndarray) -> int:
+        """Return how many calls a table of smallest called counts makes.
+
+        ``thresholds`` holds the smallest called count of each guide in each
+        sample, samples x guides, 0 where a guide calls nothing; each cell
+        whose count of a guide reaches it is one call.
+        """
+        entries = np.repeat(np.arange(len(self.offsets) - 1), np.diff(self.offsets))
+        limits = np.asarray(thresholds, dtype=np.int64).reshape(-1)[entries]
+        called = (limits > 0) & (self.counts >= limits)
+        return int(self.cells[called].sum())
 
     def distinct_counts(self) -> np.ndarray:
         """Return the number of distinct nonzero counts of each guide, samples x guides."""

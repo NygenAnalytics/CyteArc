@@ -10,21 +10,20 @@ from scipy import stats
 
 from cytearc.perturbation import associations as associations_module
 from cytearc.perturbation import glm, high_moi, random_sets
+from cytearc.perturbation import p_values as p_values_module
 from cytearc.perturbation.associations import (
     TreatmentGroups,
     association_covariates,
     fit_null_models,
-    fit_skew_normals,
     pair_tests,
-    skew_normal_p_values,
 )
 from cytearc.perturbation.high_moi import (
     ComplementGroups,
     complement_tests,
     fit_detection_models,
-    fit_genes,
     nonzero_group_counts,
 )
+from cytearc.perturbation.p_values import fit_skew_normals, skew_normal_p_values
 from cytearc.perturbation.random_sets import N_BUCKETS, resampling_keys
 from tests.perturbation_helpers import (
     dense_pair,
@@ -47,6 +46,21 @@ def _restore_floating_point_errors():
     previous = np.geterr()
     yield
     np.seterr(**previous)
+
+
+def _gene_fits(values: np.ndarray, covariates: np.ndarray) -> high_moi.GeneFits:
+    """Fit each gene on all cells, as a band of the tests fits its genes."""
+    empty = np.empty(0, dtype=np.int64)
+    fits, _, _, _ = high_moi._band_fits(
+        glm.count_array(values),
+        np.ascontiguousarray(covariates, dtype=np.float64),
+        np.arange(len(values)),
+        empty,
+        np.zeros(1, dtype=np.int64),
+        empty,
+        empty,
+    )
+    return fits
 
 
 def _groups(members: list[np.ndarray]) -> ComplementGroups:
@@ -186,11 +200,17 @@ def test_covariates_need_more_cells_and_the_intercept_first() -> None:
     with pytest.raises(ValueError, match="cells x covariates"):
         fit_detection_models(design[:, 1], groups)
     with pytest.raises(ValueError, match="must outnumber the 4 covariates"):
-        fit_genes(counts[:, :4], design[:4])
+        complement_tests(
+            counts[:, :4], design[:4], groups, [0], [0], resampling="permutation"
+        )
     with pytest.raises(ValueError, match="intercept"):
-        fit_genes(counts, design[:, ::-1])
+        complement_tests(
+            counts, design[:, ::-1], groups, [0], [0], resampling="permutation"
+        )
     with pytest.raises(ValueError, match="genes x cells"):
-        fit_genes(counts[:, :-1], design)
+        complement_tests(
+            counts[:, :-1], design, groups, [0], [0], resampling="permutation"
+        )
     with pytest.raises(ValueError, match="genes x cells"):
         complement_tests(counts[0], design, groups, [0], [0], resampling="permutation")
     with pytest.raises(ValueError, match="features x cells"):
@@ -204,8 +224,6 @@ def test_covariates_must_be_finite(value) -> None:
     design[7, 2] = value
     message = "covariates must be finite, but those of 2 of the 40 cells are not"
 
-    with pytest.raises(ValueError, match=message):
-        fit_genes(counts, design)
     with pytest.raises(ValueError, match=message):
         fit_detection_models(design, groups)
     with pytest.raises(ValueError, match=message):
@@ -335,7 +353,7 @@ def test_gene_fits_on_all_cells_are_the_null_fits_of_the_low_moi_test(
     counts[2] = 0.0  # a gene without counts
     p = design.shape[1]
 
-    fits = fit_genes(counts.astype(np.float32), design)
+    fits = _gene_fits(counts.astype(np.float32), design)
 
     # The same Newton steps from the log of the mean as the low-MOI null fits
     # on control cells that are all cells.
@@ -460,7 +478,7 @@ def test_rounds_count_and_fit_the_statistics_of_their_random_sets(
     conditional = resampling == "conditional"
     pair_groups = np.array([0, 1, 0, 1])
     pair_rows = np.array([0, 0, 1, 1])
-    fits = fit_genes(counts, design)
+    fits = _gene_fits(counts, design)
     settings = {
         "resampling": resampling,
         "detection_models": models if conditional else None,
@@ -491,11 +509,11 @@ def test_rounds_count_and_fit_the_statistics_of_their_random_sets(
         **settings,
     )
     # Every fit passes its check, or every fit fails it.
-    monkeypatch.setattr(associations_module, "_TAIL_RATIO_FLOOR", -np.inf)
+    monkeypatch.setattr(p_values_module, "_TAIL_RATIO_FLOOR", -np.inf)
     fitted = complement_tests(
         counts, design, groups, pair_groups, pair_rows, stage_threshold=1.0, **settings
     )
-    monkeypatch.setattr(associations_module, "_TAIL_RATIO_FLOOR", np.inf)
+    monkeypatch.setattr(p_values_module, "_TAIL_RATIO_FLOOR", np.inf)
     third = complement_tests(
         counts, design, groups, pair_groups, pair_rows, stage_threshold=1.0, **settings
     )
@@ -578,7 +596,7 @@ def test_conditional_sets_of_a_small_group_all_hold_cells(
     assert np.prod(1 - probabilities) > 0.1
     key = resampling_keys(1, groups.codes, 1)[0]
     statistics = _dense_null(
-        fit_genes(counts, design), design, middle, key, 0, n_draws, models[0]
+        _gene_fits(counts, design), design, middle, key, 0, n_draws, models[0]
     )
     assert np.isfinite(statistics).all()
     assert result.p_value[0] == _sided(statistics, result.z[0], "both")
@@ -651,7 +669,7 @@ def test_a_group_of_nearly_every_cell_has_null_statistics_of_the_score_formula(
     assert np.prod(probabilities) > 0.02
     (statistics,) = recorded
     key = resampling_keys(5, groups.codes, 2)[0]
-    fits = fit_genes(counts, design)
+    fits = _gene_fits(counts, design)
     for gene in range(3):
         expected = _dense_null(
             fits, design, members, key, gene, 999, models[0] if conditional else None
@@ -685,7 +703,7 @@ def test_separated_cells_never_enter_a_conditional_set(
 
     assert probabilities[1::2].max() < 1e-6
     key = resampling_keys(0, groups.codes, 1)[0]
-    fits = fit_genes(counts, design)
+    fits = _gene_fits(counts, design)
     out = np.empty(n_cells, dtype=np.int64)
     order = np.empty(n_cells, dtype=np.int64)
     offsets = np.empty(N_BUCKETS + 1, dtype=np.int64)
@@ -1272,7 +1290,7 @@ def test_high_moi_held_and_streamed_counts_agree(screen, monkeypatch) -> None:
     # Counts that may not be held are read again; bands hold 3 genes' scores
     # and weights, and the QC reads 6 features at a time.
     monkeypatch.setattr(operations, "_ASSOCIATION_HELD_SHARE", 0.0)
-    monkeypatch.setattr(operations, "_MIXSCAPE_BAND_BYTES", 16 * N_SCREEN_CELLS * 3)
+    monkeypatch.setattr(operations, "_BAND_BYTES", 16 * N_SCREEN_CELLS * 3)
     streamed = store.perturbation.load_associations(
         store.perturbation.associations(
             labels, invalidate_cache=True, **arguments, **FAST

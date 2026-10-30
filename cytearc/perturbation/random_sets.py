@@ -23,6 +23,7 @@ import math
 import numpy as np
 from numba import prange
 
+from cytearc.utils.digest import mix64, mix64_array
 from cytearc.utils.numba import njit
 
 __all__ = [
@@ -31,7 +32,6 @@ __all__ = [
     "draw_uniform_range",
     "draw_uniform_set",
     "draw_uniform_sets",
-    "mix64",
     "probability_buckets",
     "resampling_keys",
     "set_key",
@@ -39,13 +39,8 @@ __all__ = [
 ]
 
 _GOLDEN = np.uint64(0x9E3779B97F4A7C15)
-_MIX_1 = np.uint64(0xBF58476D1CE4E5B9)
-_MIX_2 = np.uint64(0x94D049BB133111EB)
 _SALT = np.uint64(0x5CE97E2A55A0C1A7)
 _SHIFT_11 = np.uint64(11)
-_SHIFT_27 = np.uint64(27)
-_SHIFT_30 = np.uint64(30)
-_SHIFT_31 = np.uint64(31)
 _UNIT_INTERVAL = 2.0**-53
 #: The buckets of probability of a Bernoulli set: bucket 0 holds the
 #: probabilities of 1/2 or more, bucket k the probabilities from 2^-(k+1) up
@@ -65,30 +60,11 @@ def resampling_keys(seed: int, codes: np.ndarray, stage: int) -> np.ndarray:
     Returns:
         One unsigned 64-bit key per group.
     """
-    base = _mix_array(np.array([seed % 2**64], dtype=np.uint64) ^ _SALT)
-    groups = _mix_array(np.asarray(codes, dtype=np.int64).astype(np.uint64) + _GOLDEN)
-    rounds = _mix_array(np.array([stage], dtype=np.uint64) + _GOLDEN)
-    keys: np.ndarray = _mix_array(_mix_array(base ^ groups) ^ rounds)
+    base = mix64_array(np.array([seed % 2**64], dtype=np.uint64) ^ _SALT)
+    groups = mix64_array(np.asarray(codes, dtype=np.int64).astype(np.uint64) + _GOLDEN)
+    rounds = mix64_array(np.array([stage], dtype=np.uint64) + _GOLDEN)
+    keys: np.ndarray = mix64_array(mix64_array(base ^ groups) ^ rounds)
     return keys
-
-
-def _mix_array(values: np.ndarray) -> np.ndarray:
-    """Return the SplitMix64 finaliser of each unsigned 64-bit integer.
-
-    Array products wrap around without warnings, as the compiled form's do.
-    """
-    mixed = (values ^ (values >> _SHIFT_30)) * _MIX_1
-    mixed = (mixed ^ (mixed >> _SHIFT_27)) * _MIX_2
-    finalised: np.ndarray = mixed ^ (mixed >> _SHIFT_31)
-    return finalised
-
-
-@njit(cache=True, nogil=True)
-def mix64(value: np.uint64) -> np.uint64:
-    """Return the SplitMix64 finaliser of a 64-bit unsigned integer."""
-    mixed = (value ^ (value >> _SHIFT_30)) * _MIX_1
-    mixed = (mixed ^ (mixed >> _SHIFT_27)) * _MIX_2
-    return mixed ^ (mixed >> _SHIFT_31)
 
 
 @njit(cache=True, nogil=True)

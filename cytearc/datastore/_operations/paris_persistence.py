@@ -17,7 +17,7 @@ from ...storage.artifact_writer import (
 from ...storage.artifacts import ArtifactRef
 from ...storage.arrays import create_zarr_dataset
 from ...storage.budget import ResourceBudget
-from ...storage.types import as_zarr_array, as_zarr_group
+from ...storage.types import as_zarr_array, as_zarr_group, read_array
 
 _PARIS_HIERARCHY_ARRAYS = (
     "children",
@@ -407,10 +407,6 @@ def write_paris_dendrogram(
         output[:] = dendrogram
 
 
-def _read_array(group: zarr.Group, name: str) -> np.ndarray:
-    return np.asarray(as_zarr_array(group[name], name=name)[:])
-
-
 def load_hierarchy_group(
     generation: zarr.Group,
     label: str,
@@ -426,11 +422,11 @@ def load_hierarchy_group(
         raise ValueError(f"Paris hierarchy {label!r} is missing plateau arrays")
     n_leaves = cast(int, generation.attrs["n_leaves"])
     hierarchy = ParisHierarchy(
-        children=_read_array(generation, "children"),
-        heights=_read_array(generation, "heights"),
-        sizes=_read_array(generation, "sizes"),
-        component_roots=_read_array(generation, "component_roots"),
-        synthetic_joins=_read_array(generation, "synthetic_joins").astype(
+        children=read_array(generation, "children"),
+        heights=read_array(generation, "heights"),
+        sizes=read_array(generation, "sizes"),
+        component_roots=read_array(generation, "component_roots"),
+        synthetic_joins=read_array(generation, "synthetic_joins").astype(
             bool,
             copy=False,
         ),
@@ -438,14 +434,14 @@ def load_hierarchy_group(
         total_weight=cast(float, generation.attrs["total_weight"]),
     )
     plateau_forest = PlateauForest(
-        representatives=_read_array(plateau_group, "representatives"),
-        heights=_read_array(plateau_group, "heights"),
-        sizes=_read_array(plateau_group, "sizes"),
-        parent_events=_read_array(plateau_group, "parent_events"),
-        child_offsets=_read_array(plateau_group, "child_offsets"),
-        child_refs=_read_array(plateau_group, "child_refs"),
-        min_leaves=_read_array(plateau_group, "min_leaves"),
-        component_roots=_read_array(plateau_group, "component_roots"),
+        representatives=read_array(plateau_group, "representatives"),
+        heights=read_array(plateau_group, "heights"),
+        sizes=read_array(plateau_group, "sizes"),
+        parent_events=read_array(plateau_group, "parent_events"),
+        child_offsets=read_array(plateau_group, "child_offsets"),
+        child_refs=read_array(plateau_group, "child_refs"),
+        min_leaves=read_array(plateau_group, "min_leaves"),
+        component_roots=read_array(plateau_group, "component_roots"),
         n_leaves=n_leaves,
     )
     return hierarchy, plateau_forest

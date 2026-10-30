@@ -20,7 +20,7 @@ from cytearc.perturbation.mixtures import (
     gaussian_posterior,
     poisson_gaussian_posterior,
 )
-from tests.perturbation_helpers import screen_counts, use_python_kernels
+from tests.perturbation_helpers import histogram_of, screen_counts, use_python_kernels
 
 
 def _guides(
@@ -141,7 +141,7 @@ def test_poisson_gaussian_estimate_is_a_maximum_of_the_posterior() -> None:
     _, _, found = _screen(11, n_samples=1, n_guides=2)
     fits = fit_poisson_gaussian(found)
     for guide in range(2):
-        counts, cells = found.histogram(0, guide)
+        counts, cells = histogram_of(found, 0, guide)
         values = np.log2(counts.astype(np.float64))
         estimate = np.asarray(
             [

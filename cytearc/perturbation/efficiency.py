@@ -23,6 +23,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import false_discovery_control, mannwhitneyu
 
+from cytearc.utils.arguments import optional_name_argument
+
 __all__ = [
     "EFFICIENCY_NO_CELLS",
     "EFFICIENCY_NO_CONTROL_EXPRESSION",
@@ -62,9 +64,7 @@ def id_column_setting(id_column: object) -> str | None:
 
     Whether the column exists is checked against the guide assay.
     """
-    if id_column is not None and (not isinstance(id_column, str) or not id_column):
-        raise TypeError("id_column must be a feature column name or None")
-    return id_column
+    return optional_name_argument(id_column, "id_column", noun="a feature column name")
 
 
 def efficiency_settings(by: object, id_column: object) -> None:

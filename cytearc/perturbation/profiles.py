@@ -36,7 +36,11 @@ import numpy as np
 import pandas as pd
 from numba import prange
 
-from ..utils.arguments import integer_argument
+from ..utils.arguments import (
+    bool_argument,
+    integer_argument,
+    optional_name_argument,
+)
 from ..utils.moments import welford_add
 from ..utils.numba import njit
 from .efficiency import id_column_setting, rows_setting
@@ -79,13 +83,9 @@ def profile_settings(
     """
     rows_setting(by)
     floor = integer_argument(min_cells, "min_cells", minimum=1)
-    if not isinstance(mask_targets, bool):
-        raise TypeError("mask_targets must be a boolean")
+    bool_argument(mask_targets, "mask_targets")
     id_column_setting(id_column)
-    if sample_column is not None and (
-        not isinstance(sample_column, str) or not sample_column
-    ):
-        raise TypeError("sample_column must be a non-empty string or None")
+    optional_name_argument(sample_column, "sample_column")
     return floor
 
 

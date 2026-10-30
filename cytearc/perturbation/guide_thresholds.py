@@ -15,7 +15,11 @@ import pandas as pd
 
 from cytearc.perturbation.histograms import MAX_COUNT
 from cytearc.perturbation.mixtures import FIT_STATUSES
-from cytearc.utils.arguments import float_argument, integer_argument
+from cytearc.utils.arguments import (
+    float_argument,
+    integer_argument,
+    optional_name_argument,
+)
 
 __all__ = [
     "DEFAULT_FRACTION_THRESHOLD",
@@ -140,14 +144,12 @@ def call_settings(
         fraction = float_argument(fraction_threshold, "fraction_threshold")
         if not 0.0 <= fraction < 1.0:
             raise ValueError("fraction_threshold must be at least 0 and below 1")
-    if sample_column is not None:
-        if method not in FITTED_METHODS:
-            raise ValueError(
-                "sample_column applies only to method='poisson_gaussian' and "
-                "method='gaussian', which fit each sample alone"
-            )
-        if not isinstance(sample_column, str) or not sample_column:
-            raise TypeError("sample_column must be a non-empty string or None")
+    if sample_column is not None and method not in FITTED_METHODS:
+        raise ValueError(
+            "sample_column applies only to method='poisson_gaussian' and "
+            "method='gaussian', which fit each sample alone"
+        )
+    optional_name_argument(sample_column, "sample_column")
     return resolved_min_umi, fraction
 
 

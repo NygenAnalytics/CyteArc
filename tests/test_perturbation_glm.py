@@ -5,7 +5,7 @@ import pytest
 import statsmodels.api as sm
 
 from cytearc.perturbation import glm
-from tests.perturbation_helpers import use_python_kernels
+from tests.perturbation_helpers import dense_pair, use_python_kernels
 
 
 def _python_kernels(monkeypatch: pytest.MonkeyPatch, python_kernels: bool) -> None:
@@ -125,3 +125,39 @@ def test_logistic_probabilities_stay_within_the_unit_interval(
     np.testing.assert_array_equal(eta, [-700.0, -1.0, 0.0, 1.0, 700.0])
     assert 0 < probabilities[0] < 1e-300 and probabilities[-1] == 1.0
     np.testing.assert_allclose(probabilities[1:4], 1 / (1 + np.exp(-eta[1:4])))
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_set_test_under_a_negative_binomial_fit_matches_a_dense_one(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
+    rng = np.random.default_rng(4)
+    n = 400 if not python_kernels else 120
+    design = np.column_stack([np.ones(n), rng.normal(size=(n, 2))])
+    mu = np.exp(design @ np.array([1.0, 0.4, -0.3]))
+    y = rng.negative_binomial(2.0, 2.0 / (2.0 + mu)).astype(np.float64)
+    cells = np.flatnonzero(rng.random(n) < 0.3)
+    treated = np.zeros(n, dtype=bool)
+    treated[cells] = True
+    coefficients = np.zeros(3)
+    coefficients[0] = np.log(y.mean())
+    eta, fitted, factor = np.empty(n), np.empty(n), np.empty((3, 3))
+
+    dispersion = glm.fit_negative_binomial(y, design, coefficients, eta, fitted, factor)
+    statistic, fold, error = glm.set_test(
+        y, fitted, design, dispersion, cells, factor, np.empty(3)
+    )
+
+    # The fit's means are those of the Poisson fit, its factor that of its
+    # information, and the set's statistic, fold change and standard error
+    # those of a dense computation with statsmodels' fit and SciPy's size.
+    expected = dense_pair(y, design, treated)
+    np.testing.assert_allclose(
+        fitted, np.exp(design @ coefficients), rtol=1e-12, atol=0
+    )
+    weights = fitted / (1 + dispersion * fitted)
+    np.testing.assert_allclose(
+        factor @ factor.T, design.T @ (weights[:, None] * design), rtol=1e-10
+    )
+    np.testing.assert_allclose((statistic, fold, error), expected, rtol=1e-6)

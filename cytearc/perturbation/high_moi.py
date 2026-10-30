@@ -38,17 +38,19 @@ import numba
 import numpy as np
 from numba import prange
 
-from cytearc.perturbation.associations import PairResults, staged_p_values
 from cytearc.perturbation.glm import (
-    cholesky,
     count_array,
     fit_logistic,
-    fit_poisson,
-    log2_fold_change,
+    fit_negative_binomial,
     logistic_probabilities,
-    negative_binomial_information,
     score_statistic,
-    size_dispersion,
+    set_test,
+)
+from cytearc.perturbation.p_values import (
+    RESAMPLING,
+    STATISTICS_BYTES,
+    PairResults,
+    staged_p_values,
 )
 from cytearc.perturbation.random_sets import (
     N_BUCKETS,
@@ -61,18 +63,18 @@ from cytearc.perturbation.random_sets import (
 from cytearc.utils.numba import njit
 
 __all__ = [
-    "RESAMPLING",
+    "GATHER_BYTES",
     "ComplementGroups",
     "GeneFits",
+    "cells_by_code",
     "complement_tests",
+    "complement_thread_bytes",
     "fit_detection_models",
-    "fit_genes",
     "nonzero_group_counts",
 ]
 
-#: The ways of drawing random sets: each cell with its fitted probability, the
-#: conditional randomization test, or as many cells as the group uniformly.
-RESAMPLING = ("conditional", "permutation")
+#: The most that each thread's copy of a group's genes takes, by default.
+GATHER_BYTES = 1 << 26
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,46 +376,27 @@ def _fit_band(
         fitted[0] = math.log(total / n)
         eta = np.empty(n)
         mu = np.empty(n)
-        fit_poisson(y, covariates, fitted, eta, mu)
-        phi = size_dispersion(y, mu, float(n - p))
+        phi = fit_negative_binomial(y, covariates, fitted, eta, mu, factors[k])
         coefficients[k, :] = fitted
         dispersion[k] = phi
-        # eta becomes each cell's score.
-        weight = np.empty(n)
         for i in range(n):
             scale = 1.0 + phi * mu[i]
-            weight[i] = mu[i] / scale
-            eta[i] = (y[i] - mu[i]) / scale
-            scores[i, k] = eta[i]
-            weights[i, k] = weight[i]
-        information = np.empty((p, p))
-        negative_binomial_information(covariates, mu, phi, information)
-        cholesky(information, factors[k])
-        sums = np.empty(p + 1)
-        tangent = np.empty(p)
+            scores[i, k] = (y[i] - mu[i]) / scale
+            weights[i, k] = mu[i] / scale
         solved = np.empty(p)
         for t in range(pair_offsets[k], pair_offsets[k + 1]):
             pair = pair_order[t]
             group = pair_groups[pair]
-            sums[:] = 0.0
-            tangent[:] = 0.0
-            count_sum = 0.0
-            mean_sum = 0.0
-            square_sum = 0.0
-            for m in range(offsets[group], offsets[group + 1]):
-                j = members[m]
-                sums[0] += eta[j]
-                for c in range(p):
-                    sums[1 + c] += weight[j] * covariates[j, c]
-                count_sum += y[j]
-                mean_sum += mu[j]
-                square_sum += mu[j] * mu[j]
-                for c in range(p):
-                    tangent[c] += mu[j] * covariates[j, c]
-            z[pair] = score_statistic(sums[0], sums[1], sums[1:], factors[k], solved)
-            change, error = log2_fold_change(
-                count_sum, mean_sum, square_sum, tangent, factors[k], phi, solved
+            statistic, change, error = set_test(
+                y,
+                mu,
+                covariates,
+                phi,
+                members[offsets[group] : offsets[group + 1]],
+                factors[k],
+                solved,
             )
+            z[pair] = statistic
             fold[pair] = change
             se[pair] = error
 
@@ -463,46 +446,6 @@ def _band_fits(
         se,
     )
     return fits, z, fold, se
-
-
-def fit_genes(values: np.ndarray, covariates: np.ndarray) -> GeneFits:
-    """Fit each gene's negative binomial regression on all cells under the null.
-
-    Each fit takes Poisson coefficients by Newton's method from the log of
-    the gene's mean, then the size that maximizes the likelihood with the
-    Poisson means held fixed, as the low-MOI test fits a pair on its cells. A
-    gene without counts gets no fit. The genes are fitted in parallel: each
-    thread holds 32 bytes per cell while it fits a gene, and the scores and
-    weights take 16 bytes per cell and gene.
-
-    Args:
-        values: Counts, genes x cells, held as float32.
-        covariates: The covariates of the cells, cells x covariates, the
-            intercept first.
-
-    Returns:
-        Each gene's fit, with each cell's score and weight.
-
-    Raises:
-        ValueError: If the shapes disagree, the cells do not outnumber the
-            covariates, the first covariate is not the intercept, or a
-            covariate is not finite.
-    """
-    counts = count_array(values)
-    design = _design(covariates)
-    if counts.ndim != 2 or counts.shape[1] != design.shape[0]:
-        raise ValueError("values must be genes x cells with one covariate row per cell")
-    empty = np.empty(0, dtype=np.int64)
-    fits, _, _, _ = _band_fits(
-        counts,
-        design,
-        np.arange(counts.shape[0]),
-        empty,
-        np.zeros(1, dtype=np.int64),
-        empty,
-        empty,
-    )
-    return fits
 
 
 @njit(cache=True, nogil=True)
@@ -999,6 +942,33 @@ def _resampling_models(
     return models
 
 
+def cells_by_code(codes: np.ndarray, n_codes: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return the cells that hold each code, ascending, and where each code's cells start.
+
+    ``codes`` holds each cell's codes from 0, padded with -1, cells x slots,
+    and a cell holds each of its codes once.
+    """
+    cells, slots = np.nonzero(codes >= 0)
+    held = codes[cells, slots].astype(np.int64)
+    # A stable sort keeps each code's cells in the ascending order of nonzero.
+    members = cells[np.argsort(held, kind="stable")].astype(np.int64)
+    offsets = np.zeros(n_codes + 1, dtype=np.int64)
+    np.cumsum(np.bincount(held, minlength=n_codes), out=offsets[1:])
+    return members, offsets
+
+
+def complement_thread_bytes(n_cells: int, gather_bytes: int) -> int:
+    """Return the most bytes that each thread of :func:`complement_tests` holds.
+
+    Beyond the band, the pairs' arrays and the second round's statistics, a
+    thread holds a group's conditional sets, 24 bytes per cell, and its copy
+    of some of the group's genes, at least one gene of 16 bytes per cell and
+    at most ``gather_bytes`` otherwise; 24 bytes per cell also bound the
+    permutation sets and 32 bytes per cell the fit of a gene.
+    """
+    return 24 * n_cells + max(gather_bytes, 16 * n_cells)
+
+
 def complement_tests(
     values: np.ndarray,
     covariates: np.ndarray,
@@ -1013,13 +983,16 @@ def complement_tests(
     stage_threshold: float = 0.02,
     approximation: str = "skew_normal",
     side: str = "both",
-    statistics_bytes: int = 1 << 28,
-    gather_bytes: int = 1 << 26,
+    statistics_bytes: int = STATISTICS_BYTES,
+    gather_bytes: int = GATHER_BYTES,
 ) -> PairResults:
     """Test pairs of a group and a gene of a band against all other cells.
 
-    Each gene paired in the band is fitted once on all cells, by
-    :func:`fit_genes`. With mean mu and dispersion phi = 1 / size, a cell's
+    Each gene paired in the band is fitted once on all cells: Poisson
+    coefficients by Newton's method from the log of the gene's mean, then the
+    size that maximizes the likelihood with the Poisson means held fixed, as
+    the low-MOI test fits a pair on its cells; a gene without counts gets no
+    fit. With mean mu and dispersion phi = 1 / size, a cell's
     weight is w = mu / (1 + phi mu) and its score a = (y - mu) / (1 + phi
     mu), and the statistic of a set X of cells is sum(a over X) / sqrt(sum(w
     over X) - v' J^-1 v), where v sums w times the covariates over X and J
@@ -1028,7 +1001,7 @@ def complement_tests(
     their means under the fit, with a delta-method standard error.
 
     The p-values come from random sets in up to three rounds, as
-    :func:`~cytearc.perturbation.associations.staged_p_values` describes.
+    :func:`~cytearc.perturbation.p_values.staged_p_values` describes.
     With ``resampling="conditional"`` each set takes every cell independently
     with its probability under the group's detection model, and a set that
     holds no cell or every cell, which has no statistic, is drawn again, as

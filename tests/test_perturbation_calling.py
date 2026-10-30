@@ -3,6 +3,7 @@ import pytest
 
 from cytearc.perturbation import calling
 from cytearc.perturbation.calling import threshold_calls, top_guide_calls
+from cytearc.perturbation.guide_thresholds import call_settings
 from cytearc.perturbation.guide_calls import GuideCountSummary, summarize_guide_counts
 from cytearc.perturbation.histograms import MAX_COUNT
 from tests.perturbation_helpers import screen_counts, use_python_kernels
@@ -145,19 +146,25 @@ def test_top_guide_calls_give_ties_to_the_first_guide() -> None:
 
 
 @pytest.mark.parametrize(
-    ("arguments", "message"),
+    ("arguments", "error", "message"),
     [
-        ({"min_umi": True}, "min_umi must be a positive integer"),
-        ({"min_umi": 0}, "min_umi must be a positive integer"),
-        ({"min_umi": 1.5}, "min_umi must be a positive integer"),
-        ({"fraction_threshold": 1}, "at least 0 and below 1"),
-        ({"fraction_threshold": -0.1}, "at least 0 and below 1"),
-        ({"fraction_threshold": float("nan")}, "at least 0 and below 1"),
-        ({"fraction_threshold": True}, "at least 0 and below 1"),
-        ({"fraction_threshold": "0.8"}, "at least 0 and below 1"),
+        ({"min_umi": True}, TypeError, "min_umi must be an integer"),
+        ({"min_umi": 0}, ValueError, "min_umi must be at least 1"),
+        ({"min_umi": 1.5}, TypeError, "min_umi must be an integer"),
+        ({"fraction_threshold": 1}, ValueError, "at least 0 and below 1"),
+        ({"fraction_threshold": -0.1}, ValueError, "at least 0 and below 1"),
+        ({"fraction_threshold": float("nan")}, ValueError, "must be finite"),
+        ({"fraction_threshold": True}, TypeError, "must be a real number"),
+        ({"fraction_threshold": "0.8"}, TypeError, "must be a real number"),
     ],
 )
-def test_top_guide_calls_refuse_settings_they_cannot_use(arguments, message) -> None:
+def test_top_guide_settings_that_calls_cannot_use_are_refused(
+    arguments, error, message
+) -> None:
+    # The settings are checked once, before any count is read; the calls
+    # take them as checked.
     settings = {"min_umi": 5, "fraction_threshold": 0.8} | arguments
-    with pytest.raises(ValueError, match=message):
-        top_guide_calls(_summary(), **settings)
+    with pytest.raises(error, match=message):
+        call_settings(
+            "top_guide", settings["min_umi"], settings["fraction_threshold"], None
+        )

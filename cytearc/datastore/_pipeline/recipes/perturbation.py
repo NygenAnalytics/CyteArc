@@ -533,8 +533,9 @@ def _check_call_file_cells(
     by the barcode. A cell that no barcode can reach would be labelled
     ``"Negative"`` and left out of every later stage.
     """
-    ids = np.asarray(store.cells.fetch_all("ids"))[input_cell_mask(store, source)]
-    ids = ids.astype(str)
+    # Only the input cells' IDs are read.
+    rows = np.flatnonzero(input_cell_mask(store, source))
+    ids = np.asarray(read_metadata_rows_chunkwise(store.cells, "ids", rows)).astype(str)
     remedy = (
         "or call the guides from their counts with guide_calling settings without path"
     )
