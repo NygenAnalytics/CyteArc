@@ -26,8 +26,8 @@ from ._operations.presentation import _PresentationOperationsMixin
 from ._operations.quality_control import _QualityControlOperationsMixin
 from ._operations.regulons import _RegulonOperationsMixin
 from ._operations.repertoire import _RepertoireOperationsMixin
-from ._operations.variants import _VariantOperationsMixin
 from ._operations.trajectory import _TrajectoryFeatureOperationsMixin
+from ._operations.variants import _VariantOperationsMixin
 from .mapping_datastore import MappingDatastore
 
 if TYPE_CHECKING:

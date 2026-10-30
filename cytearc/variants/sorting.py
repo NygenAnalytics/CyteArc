@@ -193,7 +193,9 @@ class CellRowSorter:
             self._folder = Path(
                 tempfile.mkdtemp(prefix="cytearc-sorted-runs-", dir=self._temp_dir)
             )
-            self._group = zarr.open_group(str(self._folder), mode="w")
+            self._group = zarr.open_group(
+                str(self._folder), mode="w", use_consolidated=False
+            )
         return self._group
 
     def _spill(self, state: _Stream) -> None:
