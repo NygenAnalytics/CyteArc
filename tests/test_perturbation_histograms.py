@@ -158,30 +158,49 @@ def test_sample_codes_are_returned_as_int64() -> None:
     assert codes.tolist() == [0, 1, 1]
 
 
-@pytest.mark.parametrize("n_samples", [1, 2])
-def test_the_memory_estimate_bounds_the_histograms_peak(n_samples) -> None:
+@pytest.mark.parametrize(
+    ("n_samples", "merge_entries", "rows"),
+    [
+        # The larger counts merge once, after the last block.
+        (1, None, 2_000),
+        (2, None, 2_000),
+        # They merge after every block, each merge sorting every count so far.
+        (1, 1_000, 2_000),
+        # One block holds every count, which one merge sorts, and the last
+        # merge sorts them again.
+        (1, 1_000, 20_000),
+    ],
+)
+def test_the_memory_estimate_bounds_the_histograms_peak(
+    monkeypatch, n_samples, merge_entries, rows
+) -> None:
+    if merge_entries is not None:
+        monkeypatch.setattr(histograms, "_MERGE_ENTRIES", merge_entries)
     # The first call loads the kernels.
     guide_count_histograms(
         [np.full((2, 3), 40, np.uint32)], np.zeros(2, np.int64), n_samples=1, n_guides=3
     )
-    # Every cell carries one guide above the dense counts and every other cell
-    # a second, each at a count of its own, so the merges hold one and a half
-    # large counts per cell.
-    n_cells, n_guides, rows = 20_000, 50, 2_000
+    # Every cell carries two guides above the dense counts, as many as the
+    # estimate expects, each at a count of its own, so that no two cells
+    # share a count and the merges keep every one.
+    n_cells, n_guides = 20_000, 50
     rng = np.random.default_rng(3)
     counts = rng.poisson(0.3, size=(n_cells, n_guides)).astype(np.uint32)
     cells = np.arange(n_cells)
     counts[cells, cells % n_guides] = 33 + cells
-    second = cells[::2]
-    counts[second, (second + 1) % n_guides] = 33 + n_cells + second
+    counts[cells, (cells + 1) % n_guides] = 33 + n_cells + cells
     blocks = [counts[start : start + rows] for start in range(0, n_cells, rows)]
+    # The sample codes, like the blocks, belong to the caller.
+    samples = cells % n_samples
     tracemalloc.start()
     try:
-        guide_count_histograms(
-            blocks, cells % n_samples, n_samples=n_samples, n_guides=n_guides
+        found = guide_count_histograms(
+            blocks, samples, n_samples=n_samples, n_guides=n_guides
         )
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
+    # Each larger count is a histogram entry of its own.
+    assert np.count_nonzero(found.counts > DENSE_COUNTS) == 2 * n_cells
     # Each block also reserves 16 bytes per row while it is counted.
     assert peak <= histogram_bytes(n_samples, n_guides, n_cells) + 16 * rows

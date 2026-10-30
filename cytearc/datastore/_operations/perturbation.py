@@ -2449,7 +2449,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         data = as_zarr_array(artifact_group(self.zw, coordinates)["data"], name="data")
         n_dims = int(data.shape[1])
         resident = edistance_memory_bytes(
-            len(kept), n_dims, n_control, nthreads=self.nthreads
+            len(kept), n_dims, n_control, n_rows=n_rows, nthreads=self.nthreads
         )
         if resident > self.memoryBytes:
             raise MemoryError(
