@@ -71,6 +71,8 @@ project:
       title: Regulons and gene programs
     - file: tutorials/hto_demultiplexing.ipynb
       title: HTO demultiplexing
+    - file: tutorials/crispr_screens.ipynb
+      title: Pooled CRISPR screens
   - title: Integration and mapping
     children:
     - file: tutorials/composite_datasets.ipynb
