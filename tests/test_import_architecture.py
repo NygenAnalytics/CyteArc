@@ -1088,6 +1088,7 @@ def test_reader_implementations_are_runtime_isolated():
     required_files = {
         "__init__.py",
         "_contigs.py",
+        "_delimited.py",
         "_text.py",
         "_sparse.py",
         "airr.py",
@@ -1122,7 +1123,11 @@ def test_reader_implementations_are_runtime_isolated():
             "readers._sparse",
             "readers._text",
         },
-        "clone_tables.py": {"readers._h5ad_columns", "readers._text"},
+        "clone_tables.py": {
+            "readers._delimited",
+            "readers._h5ad_columns",
+            "readers._text",
+        },
         "csv.py": {"readers._text"},
         "h5ad.py": {
             "readers._assay_names",
@@ -1387,6 +1392,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         "datastore._operations.enrichment_store",
         "datastore._operations.paris_persistence",
         "datastore._operations.perturbation_store",
+        "datastore._operations.record_tables",
         "datastore._operations.statistical_store",
     }
     for path in operations_root.glob("*.py"):

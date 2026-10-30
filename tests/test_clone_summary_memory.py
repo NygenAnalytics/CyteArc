@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import cytearc.datastore._operations.record_tables as record_tables
 import cytearc.datastore._operations.repertoire as repertoire_operations
 import cytearc.repertoire.clonotypes as clonotypes_module
 from cytearc.datastore.datastore import DataStore
@@ -1179,7 +1180,7 @@ def _export_store(folder: Path, ids: list[str]) -> DataStore:
 
 def _import_in_small_chunks(store: DataStore, files: list[Path]) -> ArtifactRef:
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(repertoire_operations, "_CONTIG_CHUNK_BYTES", _EXPORT_CHUNK_BYTES)
+        patch.setattr(record_tables, "_RECORD_CHUNK_BYTES", _EXPORT_CHUNK_BYTES)
         return store.repertoire.import_receptors(
             files, cell_selection=store.snapshot_cell_selection()
         )

@@ -20,6 +20,7 @@ import pytest
 
 import cytearc.datastore._operations.repertoire as repertoire_operations
 from cytearc import plotting
+from cytearc.datastore._operations.record_tables import stored_text
 from cytearc.datastore.datastore import DataStore
 from cytearc.metadata.rows import (
     READ_OBJECT_BYTES,
@@ -1417,7 +1418,7 @@ def test_clusters_ignore_the_junctions_of_contigs_that_are_not_chains(
 def test_decoded_values_read_only_the_codes_given(tmp_path, monkeypatch) -> None:
     store, receptors = clonal_receptors(tmp_path)
     group = artifact_group(store.zw, receptors)
-    every = repertoire_operations._stored_text(group, "junction").categories
+    every = stored_text(group, "contig", "junction").categories
     chunked: list[str] = []
     rows = repertoire_operations._Reads.rows
 

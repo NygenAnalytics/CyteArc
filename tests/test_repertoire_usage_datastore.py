@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 import zarr
 
+import cytearc.datastore._operations.record_tables as record_tables
 import cytearc.datastore._operations.repertoire as repertoire_operations
 from cytearc import plotting
 from cytearc.datastore._operations.cell_groups import (
@@ -922,7 +923,7 @@ def test_junctions_that_span_stored_chunks_are_measured_whole(
 ) -> None:
     # Chunks of 7 bytes split the junctions, and the characters of two and
     # four bytes, between them.
-    monkeypatch.setattr(repertoire_operations, "_CONTIG_CHUNK_BYTES", 7)
+    monkeypatch.setattr(record_tables, "_RECORD_CHUNK_BYTES", 7)
     junctions = ["CAŚSF", "C\U0001f600\U0001f600F", "CASSLGQAYEQYF", "Cé"]
     rows = [
         f"cell{cell},true,cell{cell}_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,"
@@ -976,14 +977,14 @@ def test_every_stored_array_is_read_a_chunk_at_a_time(tmp_path, monkeypatch) -> 
     # The checks count one decoded chunk of each array read, which zarr's
     # default concurrency would exceed for arrays of several chunks.
     store, _receptors, clonotypes = _sources(tmp_path)
-    read = repertoire_operations._read
+    read = repertoire_operations.read_array
     limits = []
 
     def recorded(group, name):
         limits.append((name, zarr.config.get("async.concurrency")))
         return read(group, name)
 
-    monkeypatch.setattr(repertoire_operations, "_read", recorded)
+    monkeypatch.setattr(repertoire_operations, "read_array", recorded)
     store.repertoire.gene_usage(clonotypes, genes=("v_call", "j_call"))
     store.repertoire.spectratype(clonotypes, sequence="nt")
     names = {name for name, _limit in limits}
