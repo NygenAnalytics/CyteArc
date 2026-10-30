@@ -1,14 +1,14 @@
 ---
 myst:
   html_meta:
-    description: CyteArc clones API for lineage tracing, with clones imported from CoSpar, TREX, CellTag-multi, CellTagR, STICR, Cassiopeia, Numbat, MiTo and LARRY's clone matrices or from a cell metadata column, joined to cells by barcode prefix, suffix or pattern, saved as a clones artifact, read as tables of cells and clones, exported as CoSpar's clone table or a Matrix Market file, drawn as clone sizes, and measured within groups of cells as clonal expansion, diversity indices and Hill numbers with rarefaction and extrapolation.
+    description: CyteArc clones API for lineage tracing, with clones imported from CoSpar, TREX, CellTag-multi, CellTagR, STICR, Cassiopeia, Numbat, MiTo and LARRY's clone matrices or from a cell metadata column, joined to cells by barcode prefix, suffix or pattern, saved as a clones artifact, read as tables of cells and clones, exported as CoSpar's clone table or a Matrix Market file, drawn as clone sizes, measured within groups of cells as clonal expansion, diversity indices and Hill numbers with rarefaction and extrapolation, and compared between groups by the clones they share, with chosen clones followed across groups.
 ---
 
 # Clones API reference
 
 A clone is the set of cells that descend from one ancestor cell. Lineage tracing methods mark the ancestor with a heritable barcode, such as LARRY's, CellTag's or TREX's expressed barcodes, and other methods infer clones from the cells' own mutations, such as copy-number changes or mitochondrial variants. Each tool writes which clone each cell belongs to in its own format. `ds.clones` reads those files, joins their cells to a store's cells, and saves the clones as a `clones` artifact that CyteArc's clone analyses read whatever defined the clones.
 
-{meth}`ds.clones.import_clones <cytearc.datastore.namespaces.ClonesAccessor.import_clones>` imports the clones of one file or several, and {meth}`ds.clones.from_column <cytearc.datastore.namespaces.ClonesAccessor.from_column>` takes them from a cell metadata column. {meth}`ds.clones.load_clones <cytearc.datastore.namespaces.ClonesAccessor.load_clones>` reads the artifact as a {class}`~cytearc.clones.Clones` record, {meth}`ds.clones.export_clones <cytearc.datastore.namespaces.ClonesAccessor.export_clones>` writes it as a file that other tools read, and {meth}`ds.plots.clone_abundance <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clone_abundance>` draws how many clones have each size. {meth}`ds.clones.expansion <cytearc.datastore.namespaces.ClonesAccessor.expansion>` places each cell in an expansion category by its clone's size within its sample or other group, and {meth}`ds.clones.diversity <cytearc.datastore.namespaces.ClonesAccessor.diversity>` and {meth}`ds.clones.rarefaction <cytearc.datastore.namespaces.ClonesAccessor.rarefaction>` measure how many clones each group holds and how evenly its cells spread over them.
+{meth}`ds.clones.import_clones <cytearc.datastore.namespaces.ClonesAccessor.import_clones>` imports the clones of one file or several, and {meth}`ds.clones.from_column <cytearc.datastore.namespaces.ClonesAccessor.from_column>` takes them from a cell metadata column. {meth}`ds.clones.load_clones <cytearc.datastore.namespaces.ClonesAccessor.load_clones>` reads the artifact as a {class}`~cytearc.clones.Clones` record, {meth}`ds.clones.export_clones <cytearc.datastore.namespaces.ClonesAccessor.export_clones>` writes it as a file that other tools read, and {meth}`ds.plots.clone_abundance <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clone_abundance>` draws how many clones have each size. {meth}`ds.clones.expansion <cytearc.datastore.namespaces.ClonesAccessor.expansion>` places each cell in an expansion category by its clone's size within its sample or other group, {meth}`ds.clones.diversity <cytearc.datastore.namespaces.ClonesAccessor.diversity>` and {meth}`ds.clones.rarefaction <cytearc.datastore.namespaces.ClonesAccessor.rarefaction>` measure how many clones each group holds and how evenly its cells spread over them, and {meth}`ds.clones.overlap <cytearc.datastore.namespaces.ClonesAccessor.overlap>` and {meth}`ds.clones.track <cytearc.datastore.namespaces.ClonesAccessor.track>` compare groups by the clones they share and follow chosen clones across them.
 
 ```python
 cells = ds.snapshot_cell_selection("I")
@@ -199,6 +199,37 @@ Every summary checks the memory budget before each step that reads or allocates,
 
 A grouping with a label for each cell therefore needs far more memory than its cells. A step that reads two cell selections one after the other, the measured cells and the clones' cells, also counts the read before: the thread of Zarr's pool that decoded a stored chunk lets go of it only when that thread next runs, which on a busy machine can come after the next read has begun, so the largest stored chunk of the selections and the clones' codes, as stored and decoded, and 64 KiB for the objects of both reads are held beside the next read. Grouping reads its columns a stored chunk at a time, so when it reads more than one chunk, of several columns and labels or of a column stored in several chunks, it counts the largest chunk again for the read before. A selection stores a flag for each cell of the store, so its chunk can outweigh the cells it selects. Reading cell IDs as text holds one chunk of the stored IDs, by default 100,000 of them, both decoded and as stored, and for each cell three times the stored width of an ID, 128 bytes of positions, and a string of 64 bytes and four per character. Peaks that tracemalloc recorded stayed within these budgets on long and emoji labels, long clone labels, a few measured cells of many clone cells, label artifacts and selections of more cells than the clones hold, and a label for each cell.
 
+## Compare groups
+
+Two samples of one animal share the clones that both sampled, such as two time points or two tissues, and two cell types share the clones whose cells took both fates. {meth}`ds.clones.overlap <cytearc.datastore.namespaces.ClonesAccessor.overlap>` compares every pair of groups by their clones. The groups are the combinations of the labels of `group_by` cell metadata columns and of a `groups` label artifact, among the cells of `cell_selection`, as for diversity. Cells without a clone or a label are left out, and at least two groups must hold a cell with a clone. Nothing is saved.
+
+```python
+result = ds.clones.overlap(clones, group_by="sample")
+result.pairs  # one row per pair of samples
+ds.plots.clonal_overlap(clones, group_by="cell_type")
+tracked = ds.clones.track(clones, group_by="time_point", top=10)
+ds.plots.clone_tracking(clones, group_by="time_point", order=["day 2", "day 4", "day 6"])
+```
+
+The `pairs` table holds one row per pair, `group_1` and `group_2` named by their labels joined by commas, with these columns, for groups of `S1` and `S2` clones and clone sizes `x` and `y` of `X` and `Y` cells:
+
+| Column | Definition | As in |
+|---|---|---|
+| `shared` | The clones of both groups | scRepertoire's `raw`, immunarch's `public` |
+| `jaccard` | `shared / (S1 + S2 - shared)` | scRepertoire's and immunarch's `jaccard` |
+| `sorensen` | `2 shared / (S1 + S2)` | immunarch's `tversky` with its default weights |
+| `overlap` | `shared / min(S1, S2)` | scRepertoire's and immunarch's `overlap` |
+| `cosine` | `shared / sqrt(S1 S2)`, the cosine of presence | scRepertoire's `cosine` |
+| `morisita_horn` | `2 sum(x y) / ((sum(x^2) / X^2 + sum(y^2) / Y^2) X Y)` ([Horn 1966](https://doi.org/10.1086/282436)) | scRepertoire's and immunarch's `morisita` |
+| `abundance_cosine` | `sum(x y) / sqrt(sum(x^2) sum(y^2))`, the cosine of the clone sizes | immunarch's `cosine` |
+| `shared_fraction_1`, `shared_fraction_2` | The share of each group's cells whose clone the other group holds | |
+
+The first five count clones and grow with the cells of both groups, since larger samples find more of the rare clones that two samples share by chance; the Morisita-Horn index and the cosine of clone sizes weigh clones by their cells, depend little on sample size, and come near 1 when the same expanded clones dominate both groups. `group_sizes` holds each group's cells with a clone and its clones; `cytearc.clones.OVERLAP_INDICES` names the indices. The comparison is checked against the memory budget at about 250 bytes per pair of groups, 24 bytes for each product of two groups and 40 bytes for each clone of each group; a comparison beyond it raises a `MemoryError`, which fewer groups, from fewer `group_by` columns or a `cell_selection`, avoid. {meth}`ds.plots.clonal_overlap <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonal_overlap>` draws one `index` as a heatmap of the pairs, `"morisita_horn"` by default, with values printed for at most 12 groups; its tables are `matrix` and `pairs`.
+
+{meth}`ds.clones.track <cytearc.datastore.namespaces.ClonesAccessor.track>` follows clones across groups, such as time points: by default the `top` (10) with the most cells in each group, together, as scRepertoire's `clonalCompare` chooses them, with ties going to the larger clone overall; `labels` names them instead. Its `cells` table holds each chosen clone's cells and share of the cells with a clone of every group, zeros included, so a clone that expands between time points or spreads between cell types shows it. The table is checked against the memory budget at about 150 bytes per row, which a smaller `top` or fewer groups shortens. {meth}`ds.plots.clone_tracking <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clone_tracking>` draws one line per clone, labelled with its ID, across the groups, in their natural order or in `order`; its table is `cells`.
+
+The indices were validated on the clonotypes of the two 10x runs above. On the four pseudo samples of CD8+ donor 1, which share about 500 clonotypes per pair and whose expanded clones give a Morisita-Horn index of 0.994 to 0.997, and on PBMC 10k with clonotypes equal to scRepertoire's `CTstrict` and `CTaa`, every index equals immunarch 0.10.3's `repOverlap` and scRepertoire 2.8.0's `clonalOverlap` within 5e-14, for every pair. scRepertoire's help page gives abundance-weighted formulas for its `overlap`, `raw` and `cosine`, but its outputs follow the presence formulas above, which CyteArc reproduces. On the same million simulated cells in eight samples, `overlap` takes about 0.5 s and `track` 0.6 s, each holding at most 130 MiB of arrays. Split into 2,000 groups of samples by clusters, the cells take 1.7 s and 490 MiB for `overlap`, which compares 2 million pairs, and 1.0 s and 145 MiB for following the largest clone of each group, 546,000 rows.
+
 ## Clones
 
 ```{eval-rst}
@@ -216,4 +247,11 @@ A grouping with a label for each cell therefore needs far more memory than its c
 ```{eval-rst}
 .. autoclass:: cytearc.clones.ClonalDiversity
 .. autoclass:: cytearc.clones.Rarefaction
+```
+
+## Clone overlap
+
+```{eval-rst}
+.. autoclass:: cytearc.clones.CloneOverlap
+.. autoclass:: cytearc.clones.CloneTracking
 ```

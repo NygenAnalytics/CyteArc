@@ -71,6 +71,8 @@ Granular workflows pass exact refs to the same datastore-owned plotting surface:
 | clones per clone size and the largest clones | `clone_abundance(clones_ref)`, or `clone_abundance(clones_ref, group_by="sample")` for one line per group |
 | expansion categories and the clonal space of each group of cells | `clonal_expansion(expansion_ref)`, or `clonal_expansion(expansion_ref, group_by="cell_type")` to regroup the cells |
 | rarefaction and extrapolation curves of the Hill numbers of each group | `clonal_rarefaction(clones_ref, group_by="sample")`, or `base="coverage"` against the sample coverage |
+| clones shared between samples or cell types | `clonal_overlap(clones_ref, group_by="cell_type")`, or `index="jaccard"` for another index |
+| chosen clones across time points or cell types | `clone_tracking(clones_ref, group_by="time_point", order=[...])` |
 
 `layout_key` and string forms on plotters that still accept them refer to deliberate live metadata
 inputs. Distribution grouping instead requires either an exact categorical artifact or an explicit
@@ -162,7 +164,7 @@ Helpers differ: `label_panels` returns `None`, `theme_context` is an iterator, a
 
 ```{eval-rst}
 .. automodule:: cytearc.plotting
-    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, mixscape, association_volcano, association_calibration, perturbation_clusters, clone_abundance, clonal_expansion, clonal_rarefaction, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
+    :members: embedding, embedding_raster, dotplot, matrixplot, modality_weights, composition, distribution, cluster_connectivity, mapping_score, mapping_evidence, mapping_confusion, mapping_calibration, guide_calls, guide_thresholds, efficiency, edistance, mixscape, association_volcano, association_calibration, perturbation_clusters, clone_abundance, clonal_expansion, clonal_rarefaction, clonal_overlap, clone_tracking, qc, graph_qc, elbow, highly_variable_features, label_panels, compose_results, theme_context, marker_heatmap, cluster_tree, pseudotime_heatmap, lineage_heatmap, lineage_trends, lineage_curves, lineage_tree, run_recipe
     :imported-members:
     :undoc-members:
     :show-inheritance:

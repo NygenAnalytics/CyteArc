@@ -234,11 +234,11 @@ functions in {doc}`regulons` turn them into regulons.
 
 ### `ds.clones`
 
-`import_clones` reads the clones that lineage tracing tools write, such as TREX's `clones.txt`, CellTag-multi's clone tables, Numbat's clone posteriors or LARRY's clone matrices, joins their cells to a cell selection by barcode, and saves a `clones` artifact that labels each cell with its clone. `from_column` saves the clones of a cell metadata column instead. `load_clones` reads the artifact as tables of cells and clones, and `export_clones` writes it as CoSpar's clone table or a Matrix Market file. `expansion` saves each cell's expansion category, by its clone's size within its group of cells, and `load_expansion` reads it as tables of cells, categories and rank windows; `diversity` and `rarefaction` measure each group's diversity indices and Hill numbers, rarefied and extrapolated, and save nothing. {doc}`clones` lists the formats and describes the join of barcodes to cells, files from several runs, cells in several clones, the summaries and their records.
+`import_clones` reads the clones that lineage tracing tools write, such as TREX's `clones.txt`, CellTag-multi's clone tables, Numbat's clone posteriors or LARRY's clone matrices, joins their cells to a cell selection by barcode, and saves a `clones` artifact that labels each cell with its clone. `from_column` saves the clones of a cell metadata column instead. `load_clones` reads the artifact as tables of cells and clones, and `export_clones` writes it as CoSpar's clone table or a Matrix Market file. `expansion` saves each cell's expansion category, by its clone's size within its group of cells, and `load_expansion` reads it as tables of cells, categories and rank windows; `diversity` and `rarefaction` measure each group's diversity indices and Hill numbers, rarefied and extrapolated, and `overlap` and `track` compare groups by the clones they share and follow chosen clones across them; these four save nothing. {doc}`clones` lists the formats and describes the join of barcodes to cells, files from several runs, cells in several clones, the summaries and their records.
 
 ```{eval-rst}
 .. autoclass:: cytearc.datastore.namespaces.ClonesAccessor
-    :members: import_clones, from_column, load_clones, export_clones, expansion, load_expansion, diversity, rarefaction
+    :members: import_clones, from_column, load_clones, export_clones, expansion, load_expansion, diversity, rarefaction, overlap, track
 ```
 
 ### `ds.imputation`

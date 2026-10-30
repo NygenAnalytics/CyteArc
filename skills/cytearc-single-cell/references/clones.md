@@ -1,6 +1,6 @@
 # Clones and lineage tracing
 
-Import the clones that a lineage tracing tool or a study assigned to cells, join them to the store's cells, check how many barcodes joined, see how large the clones are, and measure clonal expansion and diversity within samples or other groups of cells. Docs: <https://docs.nygen.io/CyteArc/api/clones.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Import the clones that a lineage tracing tool or a study assigned to cells, join them to the store's cells, check how many barcodes joined, see how large the clones are, measure clonal expansion and diversity within samples or other groups of cells, and compare groups by the clones they share. Docs: <https://docs.nygen.io/CyteArc/api/clones.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 
@@ -32,7 +32,10 @@ Import the clones that a lineage tracing tool or a study assigned to cells, join
 - `ds.clones.diversity(clones, group_by=None, groups=None, cell_selection=None, size=None, coverage=None)` returns a `ClonalDiversity` record and saves nothing: `.indices`, one row per group (`group`, key columns, `cells`, `clones`, `singletons`, `doubletons`, `coverage`, `shannon` in nats, `pielou`, `simpson`, `inverse_simpson`, `gini_simpson`, `gini`, `d50`, `chao1`, `chao1_bias_corrected`, `ace`), and `.hill`, one row per group and order 0, 1, 2 (`observed`, `estimated` asymptotic, `at_size`, `coverage_at_size`, `method_at_size`, `at_coverage`, `size_at_coverage`, `method_at_coverage`; methods `"rarefaction"`, `"observed"`, `"extrapolation"`), with `.size` and `.coverage`, by default iNEXT's smallest doubled size and lowest coverage at doubled sizes. `cytearc.clones.ORDERS` is `(0, 1, 2)`.
 - `ds.clones.rarefaction(clones, group_by, groups, cell_selection, orders=(0, 1, 2), sizes=None, endpoint=None, knots=40)` returns a `Rarefaction` record: `.curves` (`group`, key columns, `order`, `size`, `method`, `diversity`, `coverage`); default sizes are iNEXT's 40 knots per group (half up to its size, half to twice it); `sizes` gives every group the same sizes.
 - `ds.plots.clonal_rarefaction(clones, group_by=..., cell_selection=..., orders=(0, 1, 2), base="size" or "coverage")`: one panel per order (`order_0`, `order_1`, `order_2`) plus `coverage` (sample completeness) with `base="size"`; solid rarefied, dashed extrapolated, a point at the observed size. Table: `curves`.
-- Validated on immune receptor clonotypes: every cell's category equals scirpy 0.25.1's `clonal_expansion`, frequency fractions equal scRepertoire 2.8.0's `clonalHomeostasis` and rank windows its `clonalProportion`; Hill-number curves within 1.4e-12 of iNEXT 3.0.2, `estimateD` within 1e-7, every index within 6e-14 of scRepertoire 2.8.0 `clonalDiversity`, immunarch 0.10.3 `repDiversity` and vegan 2.7.6 `estimateR`.
+- `ds.clones.overlap(clones, group_by=None, groups=None, cell_selection=None)` returns a `CloneOverlap` record and saves nothing; at least two groups must hold a cell with a clone. `.group_sizes`: `group`, key columns, `cells`, `clones`. `.pairs`, one row per pair of groups: `group_1`, `group_2`, `shared`, `jaccard`, `sorensen`, `overlap` (shared over the smaller group's clones), `cosine` (of presence), `morisita_horn`, `abundance_cosine` (of clone sizes), `shared_fraction_1`, `shared_fraction_2` (the share of each group's cells whose clone the other holds). `cytearc.clones.OVERLAP_INDICES` names the indices. Pairs are checked against the memory budget (about 250 bytes each).
+- `ds.clones.track(clones, group_by, groups, cell_selection, top=10, labels=None)` returns a `CloneTracking` record: `.tracked` (labels, largest first) and `.cells`, one row per chosen clone and group, zeros included: `clone`, `group`, key columns, `cells`, `fraction` (of the group's cells with a clone). By default the union of each group's `top` largest clones (scRepertoire's `clonalCompare`; ties to the larger clone overall); `labels` names clones instead.
+- `ds.plots.clonal_overlap(clones, group_by=..., index="morisita_horn")` draws one index as a heatmap of the pairs (values printed for at most 12 groups; tables `matrix`, `pairs`); `ds.plots.clone_tracking(clones, group_by=..., top=10, labels=None, order=None)` draws one line per clone of its share of each group's cells (table `cells`).
+- Validated on immune receptor clonotypes: every cell's category equals scirpy 0.25.1's `clonal_expansion`, frequency fractions equal scRepertoire 2.8.0's `clonalHomeostasis` and rank windows its `clonalProportion`; Hill-number curves within 1.4e-12 of iNEXT 3.0.2, `estimateD` within 1e-7, every index within 6e-14 of scRepertoire 2.8.0 `clonalDiversity`, immunarch 0.10.3 `repDiversity` and vegan 2.7.6 `estimateR`; every overlap index within 5e-14 of immunarch 0.10.3 `repOverlap` and scRepertoire 2.8.0 `clonalOverlap`.
 
 ## Recipe
 
@@ -57,6 +60,9 @@ diversity = ds.clones.diversity(clones, group_by="sample")
 print(diversity.indices[["sample", "cells", "clones", "coverage", "shannon", "inverse_simpson", "chao1"]])
 print(diversity.hill.pivot(index="sample", columns="order", values="at_coverage"))
 ds.plots.clonal_rarefaction(clones, group_by="sample", show=False).save("clonal_rarefaction.png")
+overlap = ds.clones.overlap(clones, group_by="cell_type")
+print(overlap.pairs[["group_1", "group_2", "shared", "morisita_horn", "shared_fraction_1", "shared_fraction_2"]])
+ds.plots.clone_tracking(clones, group_by="time_point", top=5, show=False).save("clone_tracking.png")
 ```
 
 ```python
@@ -75,4 +81,5 @@ clones = ds.clones.import_clones(
 - With several files, check that `table.clones["clone"]` carries each file's namespace, and that clones expected to span samples were called jointly in one run; clones of separate runs never merge.
 - Measure expansion and diversity `group_by` the sample: without it, a clone's cells in all samples add up. Frequency categories depend on sample size (one cell of 1,000 is already 0.001), so compare them only between samples of similar size; bounds in cells compare any samples.
 - Compare diversity by Hill numbers at a common coverage or size (`hill.at_coverage`, `hill.at_size`), not observed indices, which grow with the cells sampled. Check `plots.clonal_rarefaction`: steep curves at the observed point mean richness and Chao1 are poorly determined; order 2 is stable. Name the Chao1 form reported. Leave out tiny groups with `cell_selection`, or set `size`/`coverage`, since the smallest group sets the defaults.
+- Read overlap by the Morisita-Horn index and the shared fractions; presence indices (Jaccard, Sørensen, overlap, cosine) grow with both groups' cells, so compare them only between pairs of similar depth. A clone seen in one group only may be below detection in the others.
 - Compare conditions with one value per sample (such as the fraction of cells in clones of more than two cells), never with cells as replicates; test such values with a method that treats samples as replicates, such as CytePool's (https://docs.nygen.io/CytePool/).
