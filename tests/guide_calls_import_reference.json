@@ -1,0 +1,47 @@
+{
+  "plain": {
+    "parameters": {"barcode_prefix": null},
+    "attributes": {"complete": true, "execution_options": {"invalidate_cache": false}, "kind": "guide_calls", "n_file_barcodes": 7, "n_unmatched_barcodes": 2, "provenance": {"inputs": {"call_file_fingerprint": "2524e3eb6abb6b94b4ebb3694add8c5ff9da80cfce0caa2f89c9fc94bcd00c71", "cell_selection": {"kind": "cell_selection", "scope": "datastore", "type": "artifact"}, "dataset_fingerprint": "472a263d78606990f8abb540acdca4be961b9e7456ca3d865cc7361d6a5a5fae", "guide_ids_fingerprint": "73e8fb3bbc09d6eaf68f3a5c86856e22d96631e81a08b6591efb19aad7fa9ea0"}, "operation": "import_guide_calls", "parameters": {"barcode_prefix": null}}, "unmatched_barcode_examples": ["cell6", "outside-1"]},
+    "arrays": {
+      "guide_codes": {"dtype": "<i4", "shape": [7, 2], "values": [0, -1, 1, -1, 0, 1, -1, -1, -1, -1, 2, 3, 1, -1]},
+      "guide_umis": {"dtype": "<u4", "shape": [7, 2], "values": [30, 0, 25, 0, 20, 20, 0, 0, 0, 0, 40, 3, 9, 0]},
+      "guides": {"dtype": "text", "shape": [4], "values": ["CRISPR0", "CRISPR1", "CRISPR2", "CRISPR3"]},
+      "n_guides": {"dtype": "<i4", "shape": [7], "values": [1, 1, 2, 0, 0, 2, 1]},
+      "top_fraction": {"dtype": "<f8", "shape": [7], "values": [0.967741935483871, 0.9259259259259259, 0.5, null, 0.6666666666666666, 0.9302325581395349, 1.0]},
+      "top_guide": {"dtype": "text", "shape": [7], "values": ["CRISPR0", "CRISPR1", "CRISPR0", "", "CRISPR2", "CRISPR2", "CRISPR1"]},
+      "top_umi": {"dtype": "<u4", "shape": [7], "values": [30, 25, 20, 0, 2, 40, 9]},
+      "total_umi": {"dtype": "<u8", "shape": [7], "values": [31, 27, 40, 0, 3, 43, 9]},
+      "values": {"dtype": "text", "shape": [7], "values": ["CRISPR0", "CRISPR1", "Multiple", "Negative", "Negative", "Multiple", "CRISPR1"]}
+    }
+  },
+  "prefix": {
+    "parameters": {"barcode_prefix": "cell"},
+    "attributes": {"complete": true, "execution_options": {"invalidate_cache": false}, "kind": "guide_calls", "n_file_barcodes": 3, "n_unmatched_barcodes": 1, "provenance": {"inputs": {"call_file_fingerprint": "861cbb8d85d164f62bc3d9b0e7abaf8877fcc17eea35fbc8af0aec9be2c18b39", "cell_selection": {"kind": "cell_selection", "scope": "datastore", "type": "artifact"}, "dataset_fingerprint": "472a263d78606990f8abb540acdca4be961b9e7456ca3d865cc7361d6a5a5fae", "guide_ids_fingerprint": "73e8fb3bbc09d6eaf68f3a5c86856e22d96631e81a08b6591efb19aad7fa9ea0"}, "operation": "import_guide_calls", "parameters": {"barcode_prefix": "cell"}}, "unmatched_barcode_examples": ["9"]},
+    "arrays": {
+      "guide_codes": {"dtype": "<i4", "shape": [7, 2], "values": [0, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 3, -1, -1]},
+      "guide_umis": {"dtype": "<u4", "shape": [7, 2], "values": [30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 3, 0, 0]},
+      "guides": {"dtype": "text", "shape": [4], "values": ["CRISPR0", "CRISPR1", "CRISPR2", "CRISPR3"]},
+      "n_guides": {"dtype": "<i4", "shape": [7], "values": [1, 0, 0, 0, 0, 2, 0]},
+      "top_fraction": {"dtype": "<f8", "shape": [7], "values": [0.967741935483871, 0.9259259259259259, 0.5, null, 0.6666666666666666, 0.9302325581395349, 1.0]},
+      "top_guide": {"dtype": "text", "shape": [7], "values": ["CRISPR0", "CRISPR1", "CRISPR0", "", "CRISPR2", "CRISPR2", "CRISPR1"]},
+      "top_umi": {"dtype": "<u4", "shape": [7], "values": [30, 25, 20, 0, 2, 40, 9]},
+      "total_umi": {"dtype": "<u8", "shape": [7], "values": [31, 27, 40, 0, 3, 43, 9]},
+      "values": {"dtype": "text", "shape": [7], "values": ["CRISPR0", "Negative", "Negative", "Negative", "Negative", "Multiple", "Negative"]}
+    }
+  },
+  "gzip": {
+    "parameters": {"barcode_prefix": null},
+    "attributes": {"complete": true, "execution_options": {"invalidate_cache": false}, "kind": "guide_calls", "n_file_barcodes": 6, "n_unmatched_barcodes": 1, "provenance": {"inputs": {"call_file_fingerprint": "ea4285c64f4f47a31e5603744db9ca1dfd0f8bbe48ef93d50b47a9ea0b88ed24", "cell_selection": {"kind": "cell_selection", "scope": "datastore", "type": "artifact"}, "dataset_fingerprint": "472a263d78606990f8abb540acdca4be961b9e7456ca3d865cc7361d6a5a5fae", "guide_ids_fingerprint": "73e8fb3bbc09d6eaf68f3a5c86856e22d96631e81a08b6591efb19aad7fa9ea0"}, "operation": "import_guide_calls", "parameters": {"barcode_prefix": null}}, "unmatched_barcode_examples": ["cell6"]},
+    "arrays": {
+      "guide_codes": {"dtype": "<i4", "shape": [7, 2], "values": [0, -1, 1, -1, 0, 1, -1, -1, -1, -1, 2, 3, 1, -1]},
+      "guide_umis": {"dtype": "<u4", "shape": [7, 2], "values": [30, 0, 25, 0, 20, 20, 0, 0, 0, 0, 40, 3, 9, 0]},
+      "guides": {"dtype": "text", "shape": [4], "values": ["CRISPR0", "CRISPR1", "CRISPR2", "CRISPR3"]},
+      "n_guides": {"dtype": "<i4", "shape": [7], "values": [1, 1, 2, 0, 0, 2, 1]},
+      "top_fraction": {"dtype": "<f8", "shape": [7], "values": [0.967741935483871, 0.9259259259259259, 0.5, null, 0.6666666666666666, 0.9302325581395349, 1.0]},
+      "top_guide": {"dtype": "text", "shape": [7], "values": ["CRISPR0", "CRISPR1", "CRISPR0", "", "CRISPR2", "CRISPR2", "CRISPR1"]},
+      "top_umi": {"dtype": "<u4", "shape": [7], "values": [30, 25, 20, 0, 2, 40, 9]},
+      "total_umi": {"dtype": "<u8", "shape": [7], "values": [31, 27, 40, 0, 3, 43, 9]},
+      "values": {"dtype": "text", "shape": [7], "values": ["CRISPR0", "CRISPR1", "Multiple", "Negative", "Negative", "Multiple", "CRISPR1"]}
+    }
+  }
+}
