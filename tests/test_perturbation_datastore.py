@@ -346,6 +346,7 @@ def test_import_refuses_counts_that_are_not_unsigned_integers(tmp_path) -> None:
     ("arguments", "message"),
     [
         ({"path": 7}, "path must be a path"),
+        ({"path": ""}, "^path must be a path to Cell Ranger's call file$"),
         ({"from_assay": 7}, "from_assay must be an assay name"),
         ({"invalidate_cache": "yes"}, "invalidate_cache must be a boolean"),
     ],

@@ -17,14 +17,17 @@ from ...perturbation.mixscape import MIXSCAPE_STATUSES
 from ...perturbation.mixtures import FIT_STATUSES
 from ...storage.artifacts import ArtifactRef, artifact_group, inspect_artifact
 from ...storage.types import as_zarr_array
-from .._operations.perturbation import _status_labels
+from .._operations.perturbation import _PerturbationOperationsMixin, _status_labels
+from .settings import keyword_default
 
 # A summary lists at most this many samples, clusters, or components.
 SUMMARY_ITEM_LIMIT = 50
 # A target with fewer single-target cells than this is named in the labels'
 # summary: the fewest cells of a perturbation profile by default, as in
 # Replogle et al. (2022).
-FEW_TARGET_CELLS = 25
+FEW_TARGET_CELLS: int = keyword_default(
+    _PerturbationOperationsMixin._perturbation_profiles, "min_cells"
+)
 # The adjusted p-value at or below which a perturbation's test counts as
 # significant in a summary, as a pair of the association tests does.
 SIGNIFICANT_P = 0.05
@@ -43,11 +46,9 @@ def _arrays(group: Any, *names: str) -> list[Any] | None:
     return [as_zarr_array(group[name], name=name) for name in names]
 
 
-def _blocks(array: Any) -> Any:
-    rows = int(array.shape[0])
-    block = array_block_rows(array, rows)
-    for start in range(0, rows, block):
-        yield np.asarray(array[start : min(start + block, rows)])
+def _blocks(array: Any) -> Iterator[np.ndarray]:
+    for start, stop in _row_ranges(array):
+        yield np.asarray(array[start:stop])
 
 
 def _true_count(array: Any) -> int:
@@ -403,7 +404,7 @@ def _row_table(group: Any, names: Sequence[str]) -> dict[str, np.ndarray] | None
     }
 
 
-def _efficiency(group: Any) -> dict[str, Any]:
+def _efficiency(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
     table = _row_table(group, ("names", "remaining_fraction", "adjusted_p_value"))
     if table is None:
         return {}
@@ -414,7 +415,7 @@ def _efficiency(group: Any) -> dict[str, Any]:
     measured = fraction[tested & np.isfinite(fraction)]
     unmatched = table["names"].astype(str)[labels == "no_feature"]
     return {
-        "by": str(group.attrs.get("by")),
+        "by": str(parameters["by"]),
         "rows": int(len(labels)),
         "statuses": _status_counts(labels, EFFICIENCY_STATUSES),
         "knockedDown": int(
@@ -440,7 +441,7 @@ def _edistance(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
     p_value = table["p_value"].astype(np.float64)
     adjusted = table["adjusted_p_value"].astype(np.float64)
     return {
-        "by": str(group.attrs.get("by")),
+        "by": str(parameters["by"]),
         "rows": int(len(labels)),
         "statuses": _status_counts(labels, EDISTANCE_STATUSES),
         "significant": int(np.count_nonzero(tested & (adjusted <= SIGNIFICANT_P))),
@@ -603,7 +604,6 @@ _BY_KIND: Mapping[str, Callable[[Any], dict[str, Any]]] = {
     "guide_thresholds": _guide_thresholds,
     "guide_calls": _guide_calls,
     "perturbation_labels": _perturbation_labels,
-    "perturbation_efficiency": _efficiency,
     "perturbation_signature": _signature,
     "perturbation_profiles": _profiles,
     "perturbation_clusters": _perturbation_clusters,
@@ -612,6 +612,7 @@ _BY_KIND: Mapping[str, Callable[[Any], dict[str, Any]]] = {
 _BY_KIND_WITH_PARAMETERS: Mapping[
     str, Callable[[Any, Mapping[str, Any]], dict[str, Any]]
 ] = {
+    "perturbation_efficiency": _efficiency,
     "perturbation_edistance": _edistance,
     "mixscape_classes": _mixscape,
     "perturbation_associations": _associations,

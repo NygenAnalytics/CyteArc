@@ -33,7 +33,7 @@ These functions hold counts in memory and never touch storage.
 
 import itertools
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
 import numba
@@ -975,12 +975,13 @@ def association_settings(
     moi: object,
     resampling: object,
     sample_column: object,
+    covariates: object,
 ) -> tuple[tuple[int, int, int], float, int, int | None, float, int, str]:
     """Check the settings of association tests, as ``associations`` takes them.
 
     The pipeline recipe checks the same settings before its run starts. The
-    pairs, features, covariates, and whether the sample column exists, are
-    checked against the store.
+    pairs, the features, and whether the sample column and the covariates
+    exist and the covariates hold numbers, are checked against the store.
 
     Args:
         positive_controls: ``"targets"``, a table of pairs, or None; any
@@ -1002,6 +1003,8 @@ def association_settings(
         resampling: ``"conditional"``, ``"permutation"``, or None for
             ``"conditional"`` at high MOI and ``"permutation"`` at low MOI.
         sample_column: The cell column whose samples get indicators, or None.
+        covariates: The cell columns to adjust for, a sequence of names, or
+            None.
 
     Returns:
         The random sets of each round, the stage threshold, ``min_nonzero``,
@@ -1071,10 +1074,11 @@ def association_settings(
             "compares each target with the control cells by permutation"
         )
     optional_name_argument(sample_column, "sample_column")
+    covariate_columns(covariates)
     return draws, threshold, floor, requested, rate, resolved_seed, resampling
 
 
-def covariate_columns(covariates: Sequence[str] | None) -> tuple[str, ...]:
+def covariate_columns(covariates: object) -> tuple[str, ...]:
     """Check ``covariates``, the cell columns to adjust for, and return them.
 
     Whether the columns exist and hold numbers is checked against the store.
@@ -1082,12 +1086,16 @@ def covariate_columns(covariates: Sequence[str] | None) -> tuple[str, ...]:
     Raises:
         TypeError: If ``covariates`` is not a sequence of column names or None.
     """
-    if covariates is not None and (
-        isinstance(covariates, str)
-        or not all(isinstance(column, str) for column in covariates)
-    ):
+    if covariates is None:
+        return ()
+    columns = (
+        tuple(covariates)
+        if isinstance(covariates, Iterable) and not isinstance(covariates, str)
+        else None
+    )
+    if columns is None or not all(isinstance(column, str) for column in columns):
         raise TypeError("covariates must be a sequence of column names or None")
-    return tuple(covariates or ())
+    return columns
 
 
 def calibration_grade(n_false_discoveries: int) -> str:

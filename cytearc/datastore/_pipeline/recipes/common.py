@@ -12,10 +12,12 @@ from ....storage.artifacts import ArtifactRef
 from ....storage.selections import read_stored_selection_mask
 from ....storage.types import as_zarr_group
 from ....utils.arguments import integer_argument
+from ..executor import PlannedStage
 from ..fields import reserved_fields
 from ..filtering import filter_columns, resolve_filtering, snapshot_column_values
 from ..settings import (
     HVG_TOP_N_DEFAULT,
+    PCA_DIMS_DEFAULT,
     TSNE_DIMS_DEFAULT,
     UMAP_DIMS_DEFAULT,
     column_sequence,
@@ -23,7 +25,13 @@ from ..settings import (
     stage_settings,
     warn_without_sgtsnepi,
 )
-from ..stages import CellSource
+from ..stages import (
+    CellSource,
+    harmony_stage,
+    hvg_stage,
+    normalization_stage,
+    pca_stage,
+)
 
 
 def selection_mask(store: Any, ref: ArtifactRef) -> np.ndarray:
@@ -294,6 +302,83 @@ def harmony_config(
     if not columns:
         return False
     return {"batch_columns": list(columns), **settings}
+
+
+@dataclass(frozen=True, slots=True)
+class RNAHeadSettings:
+    """The settings of the RNA stages from highly variable genes to Harmony.
+
+    The RNA and perturbation recipes run these stages alike, so a
+    perturbation run with an RNA run's settings reuses that run's artifacts.
+    """
+
+    hvg: dict[str, Any]
+    normalization: dict[str, Any]
+    pca_dims: int
+    pca: dict[str, Any]
+    harmony_columns: tuple[str, ...]
+    harmony: dict[str, Any]
+
+    def stages(self) -> tuple[PlannedStage, ...]:
+        return (
+            hvg_stage(self.hvg),
+            normalization_stage("highly_variable_features", self.normalization),
+            pca_stage(self.pca_dims, self.pca),
+            harmony_stage(self.harmony_columns, self.harmony),
+        )
+
+    def to_config(self) -> dict[str, Any]:
+        return {
+            "hvg": self.hvg,
+            "normalization": self.normalization,
+            "pca": {"dims": self.pca_dims, **self.pca},
+            "harmony": harmony_config(self.harmony_columns, self.harmony),
+        }
+
+
+def resolve_rna_head(
+    store: Any,
+    *,
+    hvg: object,
+    normalization: object,
+    pca: object,
+    harmony: object,
+    min_dims: int,
+) -> RNAHeadSettings:
+    """Return the settings of the RNA stages from highly variable genes to Harmony.
+
+    ``min_dims`` is the fewest PCA dimensions: the RNA recipe takes 0, which
+    builds its graph on the normalized values, and the perturbation recipe
+    1, since its E-distances and signatures read the PCA.
+
+    Raises:
+        TypeError: If a setting has the wrong type.
+        KeyError: If the ``hvg`` batch or a Harmony batch column is not a cell
+            column.
+        ValueError: If PCA has fewer than ``min_dims`` dimensions, settings
+            besides ``dims=0``, or as many dimensions as the highly variable
+            genes, or another setting is out of range.
+    """
+    hvg_settings = resolve_hvg(store, hvg)
+    _norm_enabled, normalization_settings = stage_settings(
+        "normalization", normalization, optional=False
+    )
+    _pca_enabled, pca_settings = stage_settings("pca", pca, optional=False)
+    dims = integer_argument(
+        pca_settings.pop("dims", PCA_DIMS_DEFAULT), "pca dims", minimum=min_dims
+    )
+    if dims == 0 and pca_settings:
+        raise ValueError("PCA settings need dims above 0; dims=0 skips PCA")
+    check_pca_features(dims, hvg_settings)
+    harmony_columns, harmony_settings = resolve_harmony(store, harmony)
+    return RNAHeadSettings(
+        hvg=hvg_settings,
+        normalization=normalization_settings,
+        pca_dims=dims,
+        pca=pca_settings,
+        harmony_columns=harmony_columns,
+        harmony=harmony_settings,
+    )
 
 
 def resolve_snapshot_columns(

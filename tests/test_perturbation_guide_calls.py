@@ -1,4 +1,5 @@
 import gzip
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,7 @@ from cytearc.perturbation.guide_calls import (
     NEGATIVE,
     guide_call_arrays,
     guide_calls_frames,
+    import_settings,
     summarize_guide_counts,
     validated_guide_ids,
 )
@@ -36,6 +38,31 @@ def test_guide_ids_are_returned_as_text() -> None:
 def test_guide_ids_that_cannot_label_cells_are_refused(ids, message) -> None:
     with pytest.raises(ValueError, match=message):
         validated_guide_ids(np.asarray(ids, dtype=object))
+
+
+@pytest.mark.parametrize(
+    ("path", "prefix", "message"),
+    [
+        (7, None, "^path must be a path to Cell Ranger's call file$"),
+        ("", None, "^path must be a path to Cell Ranger's call file$"),
+        (b"calls.csv", None, "^path must be a path to Cell Ranger's call file$"),
+        ("calls.csv", 1, "^barcode_prefix must be text or None$"),
+        (Path("calls.csv"), b"L1__", "^barcode_prefix must be text or None$"),
+    ],
+)
+def test_import_settings_refuse_what_the_import_cannot_use(
+    path, prefix, message
+) -> None:
+    # The pipeline recipe runs the same check on its guide_calling settings.
+    with pytest.raises(TypeError, match=message):
+        import_settings(path, prefix)
+
+
+def test_import_settings_take_text_or_path_objects() -> None:
+    # Whether the path names a file is checked when the file is read.
+    for path in ("missing.csv", Path("missing.csv")):
+        for prefix in (None, "", "L1__"):
+            import_settings(path, prefix)
 
 
 def test_count_summary_breaks_ties_by_assay_position() -> None:
