@@ -2,6 +2,7 @@ import warnings
 
 import numba
 import numpy as np
+import pandas as pd
 import pytest
 import statsmodels.api as sm
 from scipy import stats
@@ -920,3 +921,539 @@ def test_conditional_sets_stay_calibrated_where_permutations_fail(
         assert (permutation <= 0.05).mean() < 0.15
     else:
         assert (permutation <= 0.05).mean() > 0.4
+
+
+# The operation -------------------------------------------------------------------
+
+# Guides 0 and 1 target the enhancer ENH_A, guides 2 and 3 the gene RNA1, guide
+# 4 the enhancer ENH_B, and guides 5 to 7 are non-targeting; no cell holds
+# enough UMIs of guide 7 for a call.
+SCREEN_TARGETS = ["ENH_A", "ENH_A", "RNA1", "RNA1", "ENH_B", "NT", "NT", "NT"]
+SCREEN_GENE_IDS = ["", "", "RNA1", "RNA1", "", "", "", ""]
+SCREEN_GUIDES = {"ENH_A": [0, 1], "RNA1": [2, 3], "ENH_B": [4]}
+N_SCREEN_CELLS = 400
+N_SCREEN_GENES = 12
+SCREEN_FLOOR = 10
+FAST = {"n_resamples": (199, 999, 1999)}
+
+
+def _multi_guide_screen() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """RNA and guide counts of a screen whose cells carry guides at random.
+
+    Cell 0 carries both guides of ENH_A, cell 1 guides of ENH_A and RNA1, cell
+    2 no guide, cell 3 one control guide and cell 4 two. ENH_A lowers RNA0 to
+    30%, the guides of RNA1 lower RNA1 to 20%, and ENH_B raises RNA2 2.5-fold.
+    Every cell holds ambient guide UMIs, below the floor of the calls. Returns
+    the counts, cells x features, each cell's run and a numeric covariate.
+    """
+    rng = np.random.default_rng(31)
+    carried = rng.random((N_SCREEN_CELLS, 8)) < np.array(
+        [0.15, 0.15, 0.12, 0.12, 0.2, 0.2, 0.2, 0.0]
+    )
+    carried[:5] = False
+    carried[0, [0, 1]] = True
+    carried[1, [0, 2]] = True
+    carried[3, 5] = True
+    carried[4, [5, 6]] = True
+    guides = rng.poisson(0.3, size=carried.shape)
+    guides[carried] += rng.integers(20, 80, size=int(carried.sum()))
+    guides[:, 7] = np.maximum(guides[:, 7], 1)
+    library = rng.lognormal(np.log(2500), 0.4, N_SCREEN_CELLS)
+    base = rng.normal(-5.0, 0.6, N_SCREEN_GENES)
+    mu = np.exp(base[None, :] + np.log(library)[:, None])
+    mu[carried[:, :2].any(axis=1), 0] *= 0.3
+    mu[carried[:, 2:4].any(axis=1), 1] *= 0.2
+    mu[carried[:, 4], 2] *= 2.5
+    rna = rng.negative_binomial(3.0, 3.0 / (3.0 + mu))
+    runs = np.where(np.arange(N_SCREEN_CELLS) % 3 == 0, "run1", "run2")
+    score = rng.normal(size=N_SCREEN_CELLS)
+    return rna.astype(np.uint16), guides.astype(np.uint16), runs, score
+
+
+SCREEN_RNA, SCREEN_GUIDE_COUNTS, SCREEN_RUNS, SCREEN_SCORE = _multi_guide_screen()
+CALLED = SCREEN_GUIDE_COUNTS >= SCREEN_FLOOR
+
+
+def _screen_store(path, guides: np.ndarray | None = None):
+    from cytearc.datastore.datastore import DataStore
+    from tests.storage_helpers import write_count_store
+
+    write_count_store(
+        str(path),
+        {
+            "RNA": SCREEN_RNA,
+            "CRISPR": SCREEN_GUIDE_COUNTS if guides is None else guides,
+        },
+        "uint16",
+    )
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=2
+    )
+    features = store._get_assay("CRISPR").feats
+    features.insert("target_gene_name", np.asarray(SCREEN_TARGETS, dtype=object))
+    features.insert("target_gene_id", np.asarray(SCREEN_GENE_IDS, dtype=object))
+    store.cells.insert("run", np.asarray(SCREEN_RUNS, dtype=object))
+    store.cells.insert("score", SCREEN_SCORE)
+    return store
+
+
+def _screen_labels(store):
+    calls = store.perturbation.call_guides(
+        store.select_measured_cells("CRISPR"), method="fixed", min_umi=SCREEN_FLOOR
+    )
+    return store.perturbation.labels(calls, controls=["NT"])
+
+
+def _every_screen_gene(store):
+    return store.features.snapshot(feature_indexes=np.arange(N_SCREEN_GENES))
+
+
+def _expected_qc(group: np.ndarray, gene: int) -> tuple[int, int, int, int]:
+    """A group's cells and expressing cells, and those of all other cells."""
+    expressing = SCREEN_RNA[:, gene] > 0
+    return (
+        int(group.sum()),
+        int((~group).sum()),
+        int((expressing & group).sum()),
+        int((expressing & ~group).sum()),
+    )
+
+
+def _qc_of(row) -> tuple[int, int, int, int]:
+    return (
+        row.n_cells,
+        row.n_control_cells,
+        row.n_nonzero_cells,
+        row.n_nonzero_control_cells,
+    )
+
+
+def _warned(store, *args, **kwargs):
+    """Run association tests, and return them with the messages they warn."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        tests = store.perturbation.associations(*args, **kwargs)
+    return tests, [
+        str(entry.message) for entry in caught if entry.category is UserWarning
+    ]
+
+
+@pytest.fixture(scope="module")
+def screen(tmp_path_factory):
+    """One store of the multi-guide screen, its labels and its genes."""
+    store = _screen_store(tmp_path_factory.mktemp("high_moi") / "store.zarr")
+    return store, _screen_labels(store), _every_screen_gene(store)
+
+
+@pytest.mark.parametrize("integration", ["union", "singleton"])
+def test_high_moi_groups_hold_every_cell_that_carries_their_guides(
+    screen, integration
+) -> None:
+    store, labels, genes = screen
+    # The hand-placed cells: sibling guides, two targets, no guide, control
+    # guides only.
+    assert CALLED[0, [0, 1]].all() and CALLED[1, [0, 2]].all()
+    assert not CALLED[2].any() and not CALLED[3:5, :5].any()
+
+    tests = store.perturbation.associations(
+        labels,
+        features=genes,
+        moi="high",
+        integration=integration,
+        positive_controls=None,
+        n_calibration_pairs=0,
+        **FAST,
+    )
+
+    discovery = store.perturbation.load_associations(tests).discovery
+    if integration == "union":
+        guides_of = SCREEN_GUIDES
+        names = discovery["target"]
+    else:
+        guides_of = {f"CRISPR{guide}": [guide] for guide in range(5)}
+        names = discovery["guide"]
+    assert sorted(set(names)) == sorted(guides_of)
+    assert len(discovery) == len(guides_of) * N_SCREEN_GENES
+    # Each group holds the labelled cells that carry any of its guides, each
+    # once, and every other labelled cell is its comparison: cells of other
+    # targets or of sibling guides, cells with control guides and cells
+    # without a call.
+    for name, row in zip(names, discovery.itertuples(), strict=True):
+        group = CALLED[:, guides_of[name]].any(axis=1)
+        gene = int(row.feature.removeprefix("RNA"))
+        assert _qc_of(row) == _expected_qc(group, gene)
+    assert discovery["pass_qc"].all()
+
+
+def test_high_moi_statistics_are_those_of_one_fit_on_every_labelled_cell(
+    screen,
+) -> None:
+    store, labels, _ = screen
+    pairs = pd.DataFrame(
+        {
+            "target": ["ENH_A", "ENH_A", "RNA1", "ENH_B", "ENH_B"],
+            "feature": ["RNA0", "RNA5", "RNA1", "RNA2", "RNA0"],
+        }
+    )
+
+    tests = store.perturbation.associations(
+        labels,
+        pairs=pairs,
+        positive_controls=None,
+        moi="high",
+        sample_column="run",
+        covariates=["score"],
+        n_calibration_pairs=0,
+        **FAST,
+    )
+
+    result = store.perturbation.load_associations(tests)
+    assert (result.moi, result.resampling) == ("high", "conditional")
+    rna = SCREEN_RNA.astype(np.float64)
+    guide_counts = SCREEN_GUIDE_COUNTS.astype(np.float64)
+    # sceptre's high-MOI formula: log detected genes and UMIs, log detected
+    # guides and guide UMIs, the run and the extra covariate.
+    design = np.column_stack(
+        [
+            np.ones(N_SCREEN_CELLS),
+            np.log((rna > 0).sum(axis=1)),
+            np.log(rna.sum(axis=1)),
+            np.log((guide_counts > 0).sum(axis=1)),
+            np.log(guide_counts.sum(axis=1)),
+            SCREEN_RUNS == "run2",
+            SCREEN_SCORE,
+        ]
+    )
+    without_guides = np.delete(design, [3, 4], axis=1)
+    for row in result.discovery.itertuples():
+        treated = np.flatnonzero(CALLED[:, SCREEN_GUIDES[row.target]].any(axis=1))
+        y = rna[:, int(row.feature.removeprefix("RNA"))]
+        found = [row.z, row.log2_fold_change, row.se_log2_fold_change]
+        np.testing.assert_allclose(found, dense_pair(y, design, treated), rtol=1e-6)
+        # The guide covariates move every statistic beyond that tolerance.
+        assert not np.isclose(
+            row.z, dense_pair(y, without_guides, treated)[0], rtol=1e-4
+        )
+
+
+def test_high_moi_calibration_groups_take_the_called_control_guides(
+    screen, tmp_path
+) -> None:
+    from cytearc.storage.artifacts import artifact_group
+
+    store, labels, genes = screen
+
+    tests = store.perturbation.associations(
+        labels, features=genes, moi="high", n_calibration_pairs=8, **FAST
+    )
+
+    result = store.perturbation.load_associations(tests)
+    # Guide 7 is never called, so the groups take guides 5 and 6, as many as
+    # the median target's guides.
+    calibration = result.calibration
+    assert len(calibration) == 8
+    assert set(calibration["control_guides"]) == {"CRISPR5+CRISPR6"}
+    group = CALLED[:, [5, 6]].any(axis=1)
+    for row in calibration.itertuples():
+        gene = int(row.feature.removeprefix("RNA"))
+        assert _qc_of(row) == _expected_qc(group, gene)
+    stored = artifact_group(store.zw, tests).attrs
+    assert stored["n_control_guides"] == 2
+    assert stored["calibration_group_size"] == 2
+    assert stored["calibration_status"] == "checked"
+    assert result.calibration_grade in ("excellent", "mild")
+    # One control guide is enough, since a group is compared with all other
+    # cells; at low MOI the same screen has too few.
+    guides = SCREEN_GUIDE_COUNTS.copy()
+    guides[:, 6] = 0
+    single = _screen_store(tmp_path / "single.zarr", guides=guides)
+    single_labels = _screen_labels(single)
+    arguments = {"features": _every_screen_gene(single), "n_calibration_pairs": 5}
+    checked = single.perturbation.associations(
+        single_labels, moi="high", **arguments, **FAST
+    )
+    one = single.perturbation.load_associations(checked).calibration
+    assert len(one) == 5 and set(one["control_guides"]) == {"CRISPR5"}
+    alone = CALLED[:, 5]
+    for row in one.itertuples():
+        gene = int(row.feature.removeprefix("RNA"))
+        assert _qc_of(row) == _expected_qc(alone, gene)
+    assert artifact_group(single.zw, checked).attrs["calibration_group_size"] == 1
+    _, messages = _warned(single, single_labels, **arguments, **FAST)
+    assert len(messages) == 2 and messages[1].startswith(
+        "Control cells with one guide carry 1 control guide"
+    )
+
+
+def test_high_moi_without_a_called_control_guide_runs_no_check(tmp_path) -> None:
+    guides = SCREEN_GUIDE_COUNTS.copy()
+    guides[:, [5, 6]] = 0
+    store = _screen_store(tmp_path / "store.zarr", guides=guides)
+    labels = _screen_labels(store)
+    arguments = {
+        "features": _every_screen_gene(store),
+        "positive_controls": None,
+        "moi": "high",
+        **FAST,
+    }
+
+    tests, messages = _warned(store, labels, **arguments)
+
+    assert messages == [
+        "No labelled cell carries a control guide, which a calibration group "
+        "needs, so no calibration check was run"
+    ]
+    result = store.perturbation.load_associations(tests)
+    assert result.calibration.empty and result.calibration_grade == "none"
+    # Saved tests warn again, alike.
+    assert _warned(store, labels, **arguments) == (tests, messages)
+
+
+def test_high_moi_finds_the_planted_effects_with_either_resampling(screen) -> None:
+    store, labels, genes = screen
+    planted = {("ENH_A", "RNA0"): -1, ("RNA1", "RNA1"): -1, ("ENH_B", "RNA2"): 1}
+
+    for resampling in ("conditional", "permutation"):
+        tests, messages = _warned(
+            store, labels, features=genes, moi="high", resampling=resampling, **FAST
+        )
+
+        result = store.perturbation.load_associations(tests)
+        assert (result.moi, result.resampling) == ("high", resampling)
+        discovery = result.discovery.set_index(["target", "feature"])
+        for pair, sign in planted.items():
+            row = discovery.loc[pair]
+            assert row["significant"] and np.sign(row["z"]) == sign
+            assert row["stage"] == 2 and np.sign(row["log2_fold_change"]) == sign
+        # The planted pairs come first. In a screen of 12 genes, raising RNA2
+        # lowers the other genes' shares of ENH_B's counts, so one of them
+        # can pass too.
+        ranked = discovery.sort_values("p_value").index[: len(planted)]
+        assert set(ranked) == set(planted)
+        assert discovery["significant"].sum() <= len(planted) + 1
+        assert result.calibration_grade in ("excellent", "mild")
+        positive = result.positive.set_index("target")
+        assert positive["feature"].to_dict() == {"RNA1": "RNA1"}
+        assert positive.loc["RNA1", "significant"]
+        # The enhancers have no gene of their own.
+        assert messages == [
+            "2 of 3 targets have no feature of assay 'RNA' for a positive control, "
+            "for example 'ENH_A', 'ENH_B'. A target that is not a gene, such as an "
+            "enhancer, has none; for a gene, check id_column, or the target names "
+            "against the feature names."
+        ]
+
+
+def test_high_moi_pairs_keep_their_tests_whatever_else_is_tested(screen) -> None:
+    store, labels, genes = screen
+    settings = {"positive_controls": None, "n_calibration_pairs": 0, "moi": "high"}
+    every = store.perturbation.load_associations(
+        store.perturbation.associations(labels, features=genes, **settings, **FAST)
+    ).discovery.set_index(["target", "feature"])
+
+    alone = store.perturbation.load_associations(
+        store.perturbation.associations(
+            labels,
+            pairs=pd.DataFrame({"target": ["ENH_B"], "feature": ["RNA2"]}),
+            **settings,
+            **FAST,
+        )
+    ).discovery.set_index(["target", "feature"])
+
+    # A group's random sets follow its code, not the other groups tested.
+    pd.testing.assert_frame_equal(alone, every.loc[[("ENH_B", "RNA2")]])
+
+
+def test_high_moi_held_and_streamed_counts_agree(screen, monkeypatch) -> None:
+    from cytearc.datastore._operations import perturbation as operations
+
+    store, labels, genes = screen
+    arguments = {"features": genes, "moi": "high", "n_calibration_pairs": 20}
+    held = store.perturbation.load_associations(
+        store.perturbation.associations(labels, **arguments, **FAST)
+    )
+
+    # Counts that may not be held are read again; bands hold 3 genes' scores
+    # and weights, and the QC reads 6 features at a time.
+    monkeypatch.setattr(operations, "_ASSOCIATION_HELD_SHARE", 0.0)
+    monkeypatch.setattr(operations, "_MIXSCAPE_BAND_BYTES", 16 * N_SCREEN_CELLS * 3)
+    streamed = store.perturbation.load_associations(
+        store.perturbation.associations(
+            labels, invalidate_cache=True, **arguments, **FAST
+        )
+    )
+
+    for name in ("discovery", "calibration", "positive"):
+        pd.testing.assert_frame_equal(getattr(streamed, name), getattr(held, name))
+
+
+def test_high_moi_refuses_a_budget_without_room_for_one_gene(
+    screen, monkeypatch
+) -> None:
+    store, labels, genes = screen
+    monkeypatch.setattr(store, "memoryBytes", 100_000)
+
+    with pytest.raises(MemoryError, match="one gene over 400 labelled cells"):
+        store.perturbation.associations(
+            labels, features=genes, moi="high", invalidate_cache=True, **FAST
+        )
+
+
+def test_high_moi_plans_only_the_calibration_pairs_a_check_can_draw(
+    screen, monkeypatch
+) -> None:
+    from cytearc.datastore._operations import perturbation as operations
+
+    store, labels, genes = screen
+    # The 2 called control guides make one calibration group, which can draw
+    # at most its 12 pairs, while the 3 targets make 36 trans pairs and RNA1 a
+    # positive control. A pair holds a MiB here, so the pairs' arrays decide
+    # the budget: 49 pairs fit in 61 MiB, which 73 pairs, with as many
+    # calibration pairs as discovery pairs, would not.
+    mib = 1 << 20
+    monkeypatch.setattr(operations, "_ASSOCIATION_PAIR_BYTES", mib)
+    arguments = {"features": genes, "moi": "high", "invalidate_cache": True, **FAST}
+    monkeypatch.setattr(store, "memoryBytes", 48 * mib)
+    with pytest.raises(MemoryError, match="one gene over 400 labelled cells"):
+        store.perturbation.associations(labels, **arguments)
+
+    monkeypatch.setattr(store, "memoryBytes", 61 * mib)
+    tests = store.perturbation.associations(labels, **arguments)
+
+    result = store.perturbation.load_associations(tests)
+    assert (len(result.discovery), len(result.positive)) == (36, 1)
+    assert 0 < len(result.calibration) <= 12
+
+
+def _calls_fingerprint(store, labels) -> str:
+    """The dataset fingerprint of the guide counts that the labels' calls record."""
+    from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
+
+    calls = inspect_artifact(store.zw, labels).inputs["guide_calls"]
+    status = inspect_artifact(store.zw, ArtifactRef.from_dict(dict(calls)))
+    return str(status.inputs["dataset_fingerprint"])
+
+
+def test_high_moi_tests_follow_moi_resampling_and_guide_counts(
+    screen, tmp_path
+) -> None:
+    from cytearc.storage.artifacts import inspect_artifact
+
+    store, labels, genes = screen
+    settings = {"n_calibration_pairs": 0, **FAST}
+    high = store.perturbation.associations(
+        labels, features=genes, moi="high", **settings
+    )
+
+    # None resolves to conditional resampling at high MOI and is recorded so.
+    assert (
+        store.perturbation.associations(
+            labels, features=genes, moi="high", resampling="conditional", **settings
+        )
+        == high
+    )
+    permutation = store.perturbation.associations(
+        labels, features=genes, moi="high", resampling="permutation", **settings
+    )
+    low = store.perturbation.associations(labels, features=genes, **settings)
+    assert len({high, permutation, low}) == 3
+    recorded = [
+        inspect_artifact(store.zw, ref).parameters for ref in (high, permutation, low)
+    ]
+    assert [(record["moi"], record["resampling"]) for record in recorded] == [
+        ("high", "conditional"),
+        ("high", "permutation"),
+        ("low", "permutation"),
+    ]
+    loaded = store.perturbation.load_associations(low)
+    assert (loaded.moi, loaded.resampling) == ("low", "permutation")
+    # The guide covariates come from the guide counts, which the calls'
+    # dataset fingerprint covers: other ambient guide UMIs call the same
+    # guides but make other tests, and the same counts make the same tests.
+    guides = SCREEN_GUIDE_COUNTS.copy()
+    guides[:, 7] += 1
+    tables = store.perturbation.load_associations(high).discovery
+    cells = store.perturbation.load_labels(labels).cells
+    found = {}
+    for name, counts in (("same", None), ("other", guides)):
+        other = _screen_store(tmp_path / f"{name}.zarr", guides=counts)
+        other_labels = _screen_labels(other)
+        pd.testing.assert_frame_equal(
+            other.perturbation.load_labels(other_labels).cells, cells
+        )
+        tests = other.perturbation.associations(
+            other_labels, features=_every_screen_gene(other), moi="high", **settings
+        )
+        found[name] = (
+            _calls_fingerprint(other, other_labels),
+            other.perturbation.load_associations(tests).discovery,
+        )
+    assert found["same"][0] == _calls_fingerprint(store, labels) != found["other"][0]
+    pd.testing.assert_frame_equal(found["same"][1], tables)
+    assert not np.isclose(found["other"][1]["z"], tables["z"], rtol=1e-6).any()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (
+            {"moi": "low", "resampling": "conditional"},
+            "resampling='conditional' goes with moi='high'",
+        ),
+        ({"moi": "medium"}, "moi must be 'low' or 'high'"),
+        ({"moi": "high", "resampling": "crt"}, "resampling must be"),
+    ],
+)
+def test_associations_refuse_moi_and_resampling_they_cannot_use(
+    screen, arguments, message
+) -> None:
+    store, labels, genes = screen
+
+    with pytest.raises(ValueError, match=message):
+        store.perturbation.associations(labels, features=genes, **arguments)
+
+
+def test_high_moi_needs_guide_umis_samples_and_covariates_on_every_cell(
+    tmp_path,
+) -> None:
+    from tests.storage_helpers import insert_nullable_cell_column
+
+    # Cell 2 carries no guide, and here holds no guide UMI either.
+    guides = SCREEN_GUIDE_COUNTS.copy()
+    guides[2] = 0
+    stores = {
+        "bare": _screen_store(tmp_path / "bare.zarr", guides=guides),
+        "guided": _screen_store(tmp_path / "guided.zarr"),
+    }
+    # Cell 2 is also the one cell without a run or a score.
+    missing = np.arange(N_SCREEN_CELLS) == 2
+    for store in stores.values():
+        insert_nullable_cell_column(store, "run_gap", SCREEN_RUNS, missing)
+        insert_nullable_cell_column(store, "score_gap", SCREEN_SCORE, missing)
+    store = stores["bare"]
+    labels = _screen_labels(store)
+
+    # At low MOI cell 2 is not tested, so none of this matters.
+    low = store.perturbation.associations(
+        labels,
+        pairs=pd.DataFrame({"target": ["RNA1"], "feature": ["RNA1"]}),
+        sample_column="run_gap",
+        covariates=["score_gap"],
+        **FAST,
+    )
+    assert store.perturbation.load_associations(low).discovery["pass_qc"].all()
+    with pytest.raises(ValueError, match="1 of the 400 tested cells has no guide UMIs"):
+        store.perturbation.associations(
+            labels, features=_every_screen_gene(store), moi="high"
+        )
+    # At high MOI every labelled cell needs a sample label and covariates.
+    guided = stores["guided"]
+    arguments = {
+        "labels": _screen_labels(guided),
+        "features": _every_screen_gene(guided),
+        "moi": "high",
+    }
+    with pytest.raises(ValueError, match="so every labelled cell needs one"):
+        guided.perturbation.associations(sample_column="run_gap", **arguments)
+    with pytest.raises(ValueError, match="'score_gap' has values that are not"):
+        guided.perturbation.associations(covariates=["score_gap"], **arguments)

@@ -165,6 +165,9 @@ _ASSOCIATION_HELD_SHARE = 0.5
 # counts and results, and the copies that the tests, the adjustment and the
 # write make of them.
 _ASSOCIATION_PAIR_BYTES = 320
+# The most that each thread's copy of a group's genes takes in the high-MOI
+# tests, the default of their engine, when the memory budget leaves room.
+_ASSOCIATION_GATHER_BYTES = 1 << 26
 # The most negative-control groups of a calibration check.
 _CALIBRATION_GROUPS = 100
 # Whether a calibration check ran, saved with the tests: it ran, it was turned
@@ -263,6 +266,113 @@ class _ProfileCells:
     cell_index: np.ndarray
     groups: np.ndarray
     control: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class _AssociationTables:
+    """The tested pairs of association tests and the calibration groups behind them.
+
+    Attributes:
+        sets: Each pair's set, as a position in ``ASSOCIATION_SETS``.
+        groups: Each pair's group of treatment cells: a tested row, as its
+            position among the tested rows, or after them a calibration group.
+        features: Each pair's feature.
+        qc: Each pair's ``n_cells``, ``n_control_cells``, ``n_nonzero_cells``
+            and ``n_nonzero_control_cells``.
+        pass_qc: Whether each pair passes QC.
+        values: Each pair's statistic, p-value, fold change and skew-normal
+            fit by their names in the table, NaN for an untested pair; the
+            adjusted p-values are filled in when the tests are saved.
+        stage: The round that gave each pair's p-value, 0 for an untested pair.
+        group_size: The guides of each calibration group.
+        control_guides: The IDs of the control guides that the calibration
+            groups draw from.
+        calibration_groups: Each calibration group's guides, as positions in
+            ``control_guides``.
+        passing_discovery: The discovery pairs that pass QC.
+    """
+
+    sets: np.ndarray
+    groups: np.ndarray
+    features: np.ndarray
+    qc: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+    pass_qc: np.ndarray
+    values: dict[str, np.ndarray]
+    stage: np.ndarray
+    group_size: int
+    control_guides: np.ndarray
+    calibration_groups: list[np.ndarray]
+    passing_discovery: int
+
+
+def _cells_by_code(codes: np.ndarray, n_codes: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return the cells that hold each code, ascending, and where each code's cells start.
+
+    ``codes`` holds each cell's codes from 0, padded with -1, cells x slots,
+    and a cell holds each of its codes once.
+    """
+    cells, slots = np.nonzero(codes >= 0)
+    held = codes[cells, slots].astype(np.int64)
+    # A stable sort keeps each code's cells in the ascending order of nonzero.
+    members = cells[np.argsort(held, kind="stable")].astype(np.int64)
+    offsets = np.zeros(n_codes + 1, dtype=np.int64)
+    np.cumsum(np.bincount(held, minlength=n_codes), out=offsets[1:])
+    return members, offsets
+
+
+def _pair_sets(
+    *parts: tuple[np.ndarray, np.ndarray, tuple[np.ndarray, ...]],
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+]:
+    """Join the pairs of each set, in the order of ``ASSOCIATION_SETS``.
+
+    Each part holds its pairs' groups, features and four QC counts; the
+    result holds every pair's set, group, feature and QC counts.
+    """
+    sets = np.concatenate(
+        [np.full(len(part[0]), code, np.int8) for code, part in enumerate(parts)]
+    )
+    groups = np.concatenate([part[0] for part in parts]).astype(np.int64)
+    features = np.concatenate([part[1] for part in parts]).astype(np.int64)
+    n_cells, n_control_cells, n_nonzero_cells, n_nonzero_control_cells = (
+        np.concatenate([part[2][k] for part in parts]).astype(np.int64)
+        for k in range(4)
+    )
+    return (
+        sets,
+        groups,
+        features,
+        (n_cells, n_control_cells, n_nonzero_cells, n_nonzero_control_cells),
+    )
+
+
+def _most_calibration_pairs(
+    n_groups: int, n_features: int, n_discovery: int, requested: int | None
+) -> int:
+    """Return the most calibration pairs that a check can draw, for the memory plan.
+
+    A check draws as many pairs as requested, or by default as the discovery
+    pairs that pass QC, and at most every pair of one of its ``n_groups``
+    groups and one of the assay's ``n_features`` features.
+    """
+    wanted = n_discovery if requested is None else requested
+    return min(wanted, n_groups * n_features)
+
+
+def _calibration_group_size(rows: _LabelRows, by: str, used: np.ndarray) -> int:
+    """Return the guides of each calibration group: the median of the tested targets'.
+
+    Each guide tested alone makes groups of one guide.
+    """
+    if by != "target":
+        return 1
+    targeted = rows.guide_targets[rows.guide_targets >= 0]
+    per_target = np.bincount(targeted, minlength=len(rows.target_names))
+    return max(1, int(round(float(np.median(per_target[rows.codes[used]])))))
 
 
 @contextmanager
@@ -383,6 +493,7 @@ def _association_warnings(
     by: str,
     assay: str,
     attributes: Mapping[str, Any],
+    moi: str,
 ) -> list[str]:
     """Describe what association tests warn about, whether computed or reused.
 
@@ -395,6 +506,8 @@ def _association_warnings(
         attributes: The attributes of the tests: ``calibration_status``,
             ``n_control_guides``, ``calibration_grade``,
             ``n_false_discoveries`` and ``n_negative_control_pairs``.
+        moi: ``"low"`` or ``"high"``, which choose the control guides of the
+            calibration groups.
     """
     messages = []
     if len(unmatched):
@@ -402,10 +515,17 @@ def _association_warnings(
             f"{len(unmatched)} of {n_rows} {by}s have no feature of assay "
             f"{assay!r} for a positive control, for example "
             + ", ".join(repr(str(name)) for name in unmatched[:5])
-            + ". Check id_column, or the target names against the feature names."
+            + ". A target that is not a gene, such as an enhancer, has none; for "
+            "a gene, check id_column, or the target names against the feature "
+            "names."
         )
     status = attributes["calibration_status"]
-    if status == "few_control_guides":
+    if status == "few_control_guides" and moi == "high":
+        messages.append(
+            "No labelled cell carries a control guide, which a calibration group "
+            "needs, so no calibration check was run"
+        )
+    elif status == "few_control_guides":
         n_guides = int(attributes["n_control_guides"])
         guides = "1 control guide" if n_guides == 1 else f"{n_guides} control guides"
         messages.append(
@@ -1759,7 +1879,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         and no other, and a guide alone when it is the cell's one called guide.
 
         Raises:
-            ValueError: If no labelled cell is a control cell.
+            ValueError: If no labelled cell carries control guides only.
         """
         group = artifact_group(self.zw, labels)
 
@@ -1769,8 +1889,10 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         control = read("is_control").astype(bool)
         if not control.any():
             raise ValueError(
-                "The labels have no control cell; label cells with controls that "
-                "the guides target"
+                "No labelled cell carries control guides only, and each "
+                "perturbation is compared with such cells; check the controls "
+                "passed to perturbation.labels, or in a screen whose cells carry "
+                "several guides, test associations with moi='high'"
             )
         if by == "target":
             row_of = np.full(len(rows.target_names), -1, dtype=np.int64)
@@ -1843,7 +1965,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             ValueError: If ``labels`` is not a ``perturbation_labels``
                 artifact, ``from_assay`` is not an assay, ``by`` is unknown,
                 ``id_column`` is not a feature column of the guide assay, or
-                the labels have no control cell.
+                no labelled cell carries control guides only.
             PermissionError: If the store is read-only and the table is not
                 saved yet.
             MemoryError: If the target genes of the compared cells do not fit
@@ -3556,6 +3678,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         positive_controls: str | pd.DataFrame | None = "targets",
         id_column: str | None = "target_gene_id",
         integration: str = "union",
+        moi: str = "low",
+        resampling: str | None = None,
         sample_column: str | None = None,
         covariates: Sequence[str] | None = None,
         side: str = "both",
@@ -3570,22 +3694,23 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
     ) -> ArtifactRef:
         """Test whether each perturbation changes each gene, with calibrated p-values.
 
-        SCEPTRE's low-MOI test (Barry et al. 2024) compares, for each pair of
-        a perturbation and a gene, the cells that carry the perturbation alone
-        with the control cells of the labels. A negative binomial regression
-        of the gene's counts on the cells' covariates, fitted on those cells
-        together under the null hypothesis, scores each cell, and the pair's
-        statistic is the perturbed cells' standardized score. The fit takes
-        Poisson coefficients and the size that maximizes the likelihood with
-        the Poisson means held fixed. Its p-value comes from the same
-        statistic over random sets of as many cells drawn from the perturbed
-        and control cells: ``n_resamples[0]`` sets first; for a pair whose
-        p-value is then at most ``stage_threshold``, ``n_resamples[1]`` fresh
-        sets whose statistics a skew-normal fit extends to far smaller
-        p-values; and when the fit's tail beyond those statistics' 99th
-        percentile holds less than half of their own share there,
-        ``n_resamples[2]`` fresh sets (``approximation="none"`` keeps the
-        second round's p-values). The fit does not depend on which of the
+        SCEPTRE's low-MOI test (Barry et al. 2024), the default, compares, for
+        each pair of a perturbation and a gene, the cells that carry the
+        perturbation alone with the control cells of the labels;
+        ``moi="high"`` runs its high-MOI test, described below. A negative
+        binomial regression of the gene's counts on the cells' covariates,
+        fitted on those cells together under the null hypothesis, scores each
+        cell, and the pair's statistic is the perturbed cells' standardized
+        score. The fit takes Poisson coefficients and the size that maximizes
+        the likelihood with the Poisson means held fixed. Its p-value comes
+        from the same statistic over random sets of as many cells drawn from
+        the perturbed and control cells: ``n_resamples[0]`` sets first; for a
+        pair whose p-value is then at most ``stage_threshold``,
+        ``n_resamples[1]`` fresh sets whose statistics a skew-normal fit
+        extends to far smaller p-values; and when the fit's tail beyond those
+        statistics' 99th percentile holds less than half of their own share
+        there, ``n_resamples[2]`` fresh sets (``approximation="none"`` keeps
+        the second round's p-values). The fit does not depend on which of the
         pair's cells carry the perturbation, so the test is exact.
 
         The covariates are log detected features and log UMIs of each cell in
@@ -3630,6 +3755,32 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         of the guides of a target together, and the calibration groups hold
         one control guide each.
 
+        In a high-MOI screen each cell carries several guides, so few cells
+        carry a target alone and almost none carry control guides only. With
+        ``moi="high"``, as in SCEPTRE's high-MOI test (Barry et al. 2021,
+        2024), a target's treatment cells are the labelled cells whose guides
+        target it, or with ``"singleton"`` the cells that carry the guide,
+        whatever else they carry, and every other labelled cell is its
+        comparison: cells of other targets or of sibling guides, cells with
+        control guides and cells without a called guide. Every labelled cell
+        is tested, so each one needs a sample label, covariate values, and
+        guide UMIs, since the covariates add log detected guides and log guide
+        UMIs of the guide assay. Each gene is fitted once on all labelled
+        cells, and all of its pairs share that fit.
+        ``resampling="conditional"``, the default at high MOI, fits a logistic
+        regression of each group's cells on the covariates and draws every
+        cell into a random set with its fitted probability, the conditional
+        randomization test, which stays valid when sequencing depth drives
+        both the detection of guides and the expression of genes;
+        ``"permutation"`` draws as many cells as the group uniformly from all
+        cells. The calibration groups take any control guide called in a
+        labelled cell, as many guides as the median target or all of them when
+        fewer, and their treatment cells, the cells that carry any guide of
+        the group, are compared with all other labelled cells, so one control
+        guide is enough; the grade is ``"none"`` when no labelled cell carries
+        one. QC counts the expressing cells of each group against all other
+        cells.
+
         Args:
             labels: A ``perturbation_labels`` artifact.
             from_assay: The expression assay, whose counts are tested.
@@ -3642,6 +3793,11 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             id_column: The feature column of the guide assay that holds each
                 guide's target feature ID, or None to match targets by name.
             integration: ``"union"`` or ``"singleton"``.
+            moi: ``"low"`` for a screen of one guide per cell, or ``"high"``
+                for a screen of several guides per cell.
+            resampling: ``"conditional"`` or ``"permutation"`` at high MOI,
+                or None for ``"conditional"`` there and ``"permutation"``,
+                the only choice, at low MOI.
             sample_column: A cell metadata column whose samples get
                 indicators, or None.
             covariates: Numeric cell metadata columns to adjust for, or None.
@@ -3671,23 +3827,21 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``labels`` is not a ``perturbation_labels``
                 artifact, an assay, column, target or feature is unknown, a
-                number is out of range, trans pairs have no ``features``, a
-                table of pairs is malformed, the labels have no control cell,
-                or a tested cell has no sample label or a covariate value that
-                is missing or not finite.
+                number is out of range, ``resampling="conditional"`` goes
+                with ``moi="low"``, trans pairs have no ``features``, a table
+                of pairs is malformed, at low MOI no labelled cell carries
+                control guides only, or a tested cell has no sample label, a
+                covariate value that is missing or not finite, or at high MOI
+                no guide UMIs.
             PermissionError: If the store is read-only and the tests are not
                 saved yet.
-            MemoryError: If one feature's counts over the tested cells do not
-                fit the memory budget.
+            MemoryError: If one feature's counts over the tested cells, or at
+                high MOI the tests of one gene, do not fit the memory budget.
         """
-        from ...assay.normalization import feature_value_blocks
-        from ...metadata.selection import NormalizationSpec
         from ...perturbation.associations import (
             ASSOCIATION_SETS,
             TreatmentGroups,
-            adjusted_p_values,
             association_covariates,
-            calibration_grade,
             calibration_pairs,
             negative_control_groups,
             nonzero_counts,
@@ -3720,7 +3874,15 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             raise ValueError(
                 f"features must be a feature_selection artifact, not {features.kind!r}"
             )
-        draws, threshold, floor, requested, rate, resolved_seed = association_settings(
+        (
+            draws,
+            threshold,
+            floor,
+            requested,
+            rate,
+            resolved_seed,
+            resolved_resampling,
+        ) = association_settings(
             positive_controls,
             id_column,
             integration,
@@ -3732,7 +3894,10 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             n_calibration_pairs,
             alpha,
             seed,
+            moi,
+            resampling,
         )
+        high = moi == "high"
         if sample_column is not None:
             if not isinstance(sample_column, str) or not sample_column:
                 raise TypeError("sample_column must be a non-empty string or None")
@@ -3834,19 +3999,27 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         ).astype(np.int64, copy=False)
         n_labelled = len(cell_index)
         n_discovery = len(discovery[0])
-        # The tested cells: the control cells, then the cells of each tested
-        # row, row by row. Only their samples and covariates enter the tests.
-        row_of, control = self._label_groups(labels, rows, by)
         used = np.unique(np.concatenate([discovery[0], positive[0]]))
         compact = np.full(n_rows, -1, dtype=np.int64)
         compact[used] = np.arange(len(used))
-        controls = np.flatnonzero(control)
-        target_row = np.where(row_of >= 0, compact[np.maximum(row_of, 0)], -1)
-        targets_cells = np.flatnonzero(~control & (target_row >= 0))
-        targets_cells = targets_cells[
-            np.argsort(target_row[targets_cells], kind="stable")
-        ]
-        tested = np.concatenate([controls, targets_cells])
+        if high:
+            # Every labelled cell is tested, as a treatment cell of its
+            # groups and a comparison cell of the others.
+            tested = np.arange(n_labelled, dtype=np.int64)
+            needing = "every labelled cell needs one"
+        else:
+            # The tested cells: the control cells, then the cells of each
+            # tested row, row by row. Only their samples and covariates enter
+            # the tests.
+            row_of, control = self._label_groups(labels, rows, by)
+            controls = np.flatnonzero(control)
+            target_row = np.where(row_of >= 0, compact[np.maximum(row_of, 0)], -1)
+            targets_cells = np.flatnonzero(~control & (target_row >= 0))
+            targets_cells = targets_cells[
+                np.argsort(target_row[targets_cells], kind="stable")
+            ]
+            tested = np.concatenate([controls, targets_cells])
+            needing = f"every control cell and every cell of a tested {by} needs one"
         tested_cells = cell_index[tested]
         sample_columns = () if sample_column is None else (sample_column,)
         samples, _, assignments = sample_codes(
@@ -3856,10 +4029,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 for column in sample_columns
             ],
             len(tested),
-            reason=(
-                "Each sample gets an indicator, so every control cell and every "
-                f"cell of a tested {by} needs one"
-            ),
+            reason=f"Each sample gets an indicator, so {needing}",
         )
         extra: np.ndarray | None = None
         covariates_fingerprint = None
@@ -3887,6 +4057,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             sample_assignments_fingerprint=assignments,
             covariates_fingerprint=covariates_fingerprint,
             integration=integration,
+            moi=moi,
+            resampling=resolved_resampling,
             side=side,
             n_resamples=draws,
             stage_threshold=threshold,
@@ -3944,9 +4116,45 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 by,
                 expression.name,
                 artifact_group(self.zw, planned.ref).attrs,
+                moi,
             ):
                 warn(message)
             return planned.ref
+        if high:
+            self._require_writable(arguments.operation)
+            complement = self._complement_association_tables(
+                labels,
+                rows,
+                by,
+                used,
+                discovery,
+                positive,
+                expression,
+                tested_cells,
+                samples if sample_columns else None,
+                extra,
+                covariate_names,
+                n_resamples=draws,
+                stage_threshold=threshold,
+                approximation=approximation,
+                side=side,
+                min_nonzero=floor,
+                n_calibration_pairs=requested,
+                seed=resolved_seed,
+                resampling=resolved_resampling,
+            )
+            return self._save_association_tables(
+                planned,
+                complement,
+                rows=rows,
+                by=by,
+                used=used,
+                unmatched=unmatched,
+                assay=expression.name,
+                alpha=rate,
+                requested=requested,
+                moi=moi,
+            )
         calls = artifact_group(self.zw, status.input_ref("guide_calls"))
         guide_names = np.asarray(
             as_zarr_array(calls["guides"], name="guides")[:]
@@ -3976,17 +4184,10 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         )
         control_guides = control_guides[np.isin(control_guides, one_guide)]
         n_control_guides = len(control_guides)
-        if by == "target":
-            per_target = np.bincount(
-                guide_targets_of[guide_targets_of >= 0],
-                minlength=len(rows.target_names),
-            )
-            median = float(np.median(per_target[rows.codes[used]]))
-            group_size = max(1, int(round(median)))
-        else:
-            group_size = 1
         # A group leaves at least one control guide for its control cells.
-        group_size = min(group_size, max(n_control_guides - 1, 1))
+        group_size = min(
+            _calibration_group_size(rows, by, used), max(n_control_guides - 1, 1)
+        )
         # A check runs unless it is turned off, or by default when there is no
         # discovery pair whose number it matches.
         checking = requested != 0 and (requested is not None or n_discovery > 0)
@@ -4052,16 +4253,15 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             else target_features_checked
         )
         largest = int(np.diff(groups.offsets).max(initial=0))
-        # Every discovery and positive-control pair, and at most as many
-        # calibration pairs as requested, or as the discovery pairs by default.
-        n_calibration_most = 0
-        if n_groups_nt:
-            n_calibration_most = (
-                n_discovery
-                if requested is None
-                else min(requested, n_groups_nt * len(feature_ids))
+        # Every discovery and positive-control pair, and the most calibration
+        # pairs that the check can draw.
+        n_pairs_most = (
+            n_discovery
+            + len(positive[0])
+            + _most_calibration_pairs(
+                n_groups_nt, len(feature_ids), n_discovery, requested
             )
-        n_pairs_most = n_discovery + len(positive[0]) + n_calibration_most
+        )
         # Each labelled cell's position, row and flags; each tested cell's
         # positions, sample, unit and control guide, and its covariates as read
         # and as fitted; and the treatment cells of every group.
@@ -4116,20 +4316,14 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
 
         def counts_of(band: np.ndarray, out: np.ndarray) -> np.ndarray:
             """Write the counts of features over the tested cells, features x cells."""
-            _, blocks = feature_value_blocks(
+            return self._association_counts(
                 expression,
                 band,
                 sorted_cells,
-                NormalizationSpec(source="raw"),
-                nthreads=self.nthreads,
-                resident_bytes=resident + scratch + holding + per_feature * len(band),
-                scratch_bytes_per_row=8 * len(band),
+                order,
+                out,
+                resident + scratch + holding + per_feature * len(band),
             )
-            offset = 0
-            for block in blocks:
-                out[:, order[offset : offset + len(block)]] = np.asarray(block).T
-                offset += len(block)
-            return out
 
         held: np.ndarray | None = None
         if hold:
@@ -4195,25 +4389,11 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             calibration_in,
             control_detected[chosen_columns] - calibration_in,
         )
-        sets = np.concatenate(
-            [
-                np.zeros(n_discovery, np.int8),
-                np.ones(len(chosen_groups), np.int8),
-                np.full(len(positive[0]), 2, np.int8),
-            ]
+        sets, pair_group, pair_feature, qc = _pair_sets(
+            (compact[discovery[0]], discovery[1], discovery_qc),
+            (len(used) + chosen_groups, calibration_features, calibration_qc),
+            (compact[positive[0]], positive[1], positive_qc),
         )
-        pair_group = np.concatenate(
-            [compact[discovery[0]], len(used) + chosen_groups, compact[positive[0]]]
-        ).astype(np.int64)
-        pair_feature = np.concatenate(
-            [discovery[1], calibration_features, positive[1]]
-        ).astype(np.int64)
-        qc = [
-            np.concatenate([discovery_qc[k], calibration_qc[k], positive_qc[k]]).astype(
-                np.int64
-            )
-            for k in range(4)
-        ]
         pass_qc = (qc[2] >= floor) & (qc[3] >= floor)
         n_pairs = len(sets)
         values_out = {name: np.full(n_pairs, np.nan) for name in _ASSOCIATION_VALUES}
@@ -4261,40 +4441,553 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         # Only the pairs' arrays remain for the tables: the counts, the QC
         # counts and the inputs of the tests go first.
         del held, detected, guide_detected, design, groups
-        significant = np.zeros(n_pairs, dtype=bool)
+        tables = _AssociationTables(
+            sets=sets,
+            groups=pair_group,
+            features=pair_feature,
+            qc=qc,
+            pass_qc=pass_qc,
+            values=values_out,
+            stage=stage,
+            group_size=group_size,
+            control_guides=guide_names[control_guides],
+            calibration_groups=nt_groups,
+            passing_discovery=passing_discovery,
+        )
+        return self._save_association_tables(
+            planned,
+            tables,
+            rows=rows,
+            by=by,
+            used=used,
+            unmatched=unmatched,
+            assay=expression.name,
+            alpha=rate,
+            requested=requested,
+            moi=moi,
+        )
+
+    def _association_counts(
+        self,
+        expression: Any,
+        features: np.ndarray,
+        sorted_cells: np.ndarray,
+        order: np.ndarray,
+        out: np.ndarray,
+        resident_bytes: int,
+    ) -> np.ndarray:
+        """Write the counts of features over cells into ``out``, features x cells.
+
+        The cells are read in store order, ``sorted_cells``, and ``order``
+        gives the column of ``out`` that each of them fills.
+        """
+        from ...assay.normalization import feature_value_blocks
+        from ...metadata.selection import NormalizationSpec
+
+        _, blocks = feature_value_blocks(
+            expression,
+            features,
+            sorted_cells,
+            NormalizationSpec(source="raw"),
+            nthreads=self.nthreads,
+            resident_bytes=resident_bytes,
+            scratch_bytes_per_row=8 * len(features),
+        )
+        offset = 0
+        for block in blocks:
+            out[:, order[offset : offset + len(block)]] = np.asarray(block).T
+            offset += len(block)
+        return out
+
+    def _complement_association_tables(
+        self,
+        labels: ArtifactRef,
+        rows: _LabelRows,
+        by: str,
+        used: np.ndarray,
+        discovery: tuple[np.ndarray, np.ndarray],
+        positive: tuple[np.ndarray, np.ndarray],
+        expression: Any,
+        cells: np.ndarray,
+        samples: np.ndarray | None,
+        extra: np.ndarray | None,
+        covariate_names: tuple[str, ...],
+        *,
+        n_resamples: tuple[int, int, int],
+        stage_threshold: float,
+        approximation: str,
+        side: str,
+        min_nonzero: int,
+        n_calibration_pairs: int | None,
+        seed: int,
+        resampling: str,
+    ) -> _AssociationTables:
+        """Test each tested row and calibration group against all other labelled cells.
+
+        A row's treatment cells are the labelled cells whose guides target it,
+        or with ``by="guide"`` that carry the guide, and a calibration group's
+        those that carry any of its control guides; ``cells`` are every
+        labelled cell's positions in the store. The counts are read once for
+        the QC, every feature of the assay when a calibration check runs, and
+        held for the tests when they fit half the memory left; the tests take
+        bands of genes, each gene fitted once on all cells.
+        """
+        from ...perturbation.associations import (
+            association_covariates,
+            calibration_pairs,
+            negative_control_groups,
+        )
+        from ...perturbation.high_moi import (
+            ComplementGroups,
+            complement_tests,
+            fit_detection_models,
+            nonzero_group_counts,
+        )
+
+        def read(stored: zarr.Group, name: str) -> np.ndarray:
+            return np.asarray(as_zarr_array(stored[name], name=name)[:])
+
+        calls = artifact_group(self.zw, rows.status.input_ref("guide_calls"))
+        label_group = artifact_group(self.zw, labels)
+        guide_names = read(calls, "guides").astype(str)
+        target_is_control = read(label_group, "target_is_control").astype(bool)
+        guide_codes = read(calls, "guide_codes")
+        n_cells = len(cells)
+        n_rows = len(rows.names)
+        n_discovery = len(discovery[0])
+        floor = min_nonzero
+        # The control guides that some labelled cell carries make up the
+        # calibration groups, which hold the median target's guides, or every
+        # control guide when there are fewer; one is enough, since a group is
+        # compared with all other cells.
+        called = np.zeros(len(guide_names), dtype=bool)
+        called[guide_codes[guide_codes >= 0]] = True
+        targets_of = rows.guide_targets
+        control_guides = np.flatnonzero(
+            called & (targets_of >= 0) & target_is_control[np.maximum(targets_of, 0)]
+        )
+        n_control_guides = len(control_guides)
+        group_size = min(
+            _calibration_group_size(rows, by, used), max(n_control_guides, 1)
+        )
+        # A check runs unless it is turned off, or by default when there is no
+        # discovery pair whose number it matches.
+        checking = n_calibration_pairs != 0 and (
+            n_calibration_pairs is not None or n_discovery > 0
+        )
+        nt_groups = (
+            negative_control_groups(
+                n_control_guides, group_size, _CALIBRATION_GROUPS, seed
+            )
+            if checking and n_control_guides
+            else []
+        )
+        n_groups_nt = len(nt_groups)
+        # Each tested row's cells: the cells whose target codes hold its
+        # target, or whose called guides hold its guide.
+        if by == "target":
+            row_codes = read(label_group, "target_codes")
+            lookup = np.full(len(rows.target_names), -1, dtype=np.int64)
+            lookup[rows.codes[used]] = np.arange(len(used))
+        else:
+            row_codes = guide_codes
+            lookup = np.full(len(guide_names), -1, dtype=np.int64)
+            lookup[pd.Index(guide_names).get_indexer(rows.names[used])] = np.arange(
+                len(used)
+            )
+        row_members, row_offsets = _cells_by_code(
+            np.where(row_codes >= 0, lookup[np.maximum(row_codes, 0)], -1), len(used)
+        )
+        # Each calibration group's cells: those that carry any of its guides.
+        slot = np.full(len(guide_names), -1, dtype=np.int64)
+        slot[control_guides] = np.arange(n_control_guides)
+        guide_members, guide_offsets = _cells_by_code(
+            np.where(guide_codes >= 0, slot[np.maximum(guide_codes, 0)], -1),
+            n_control_guides,
+        )
+        del row_codes, guide_codes
+        nt_members = [
+            np.unique(
+                np.concatenate(
+                    [
+                        guide_members[guide_offsets[g] : guide_offsets[g + 1]]
+                        for g in group
+                    ]
+                )
+            )
+            for group in nt_groups
+        ]
+        del guide_members
+        members = np.concatenate([row_members, *nt_members]).astype(np.int64)
+        offsets = np.concatenate(
+            [
+                row_offsets,
+                row_offsets[-1]
+                + np.cumsum([len(cells_of) for cells_of in nt_members], dtype=np.int64),
+            ]
+        ).astype(np.int64)
+        del row_members, nt_members
+        sizes = np.diff(offsets)
+        codes = np.concatenate([used, n_rows + np.arange(n_groups_nt)]).astype(np.int64)
+        guide_assay = self._get_assay(str(labels.assay))
+        design = association_covariates(
+            expression._cell_count_totals(cells),
+            read_metadata_rows_chunkwise(
+                self.cells, f"{expression.name}_nFeatures", cells
+            ),
+            samples,
+            extra,
+            names=covariate_names,
+            guide_umis=guide_assay._cell_count_totals(cells),
+            guide_detected=read_metadata_rows_chunkwise(
+                self.cells, f"{guide_assay.name}_nFeatures", cells
+            ),
+        )
+        n_covariates = design.shape[1]
+        # The QC counts each row's expressing cells in the features of its
+        # pairs and each calibration group's in every feature, which its pairs
+        # may take.
+        n_features = int(expression.feats.N)
+        target_features = np.unique(np.concatenate([discovery[1], positive[1]]))
+        checked = (
+            np.arange(n_features, dtype=np.int64) if n_groups_nt else target_features
+        )
+        column_of = np.full(n_features, -1, dtype=np.int64)
+        column_of[checked] = np.arange(len(checked))
+        target_column = np.full(n_features, -1, dtype=np.int64)
+        target_column[target_features] = np.arange(len(target_features))
+        n_pairs_most = (
+            n_discovery
+            + len(positive[0])
+            + _most_calibration_pairs(
+                n_groups_nt, n_features, n_discovery, n_calibration_pairs
+            )
+        )
+        # Each labelled cell's positions, sample, totals and covariates as read
+        # and as fitted; every group's cells, with the cells' groups that the
+        # QC finds; every pair's arrays; and the QC counts.
+        threads = self.nthreads
+        resident = n_cells * (144 + 8 * (n_covariates + len(covariate_names)))
+        resident += 32 * len(members)
+        resident += _ASSOCIATION_PAIR_BYTES * n_pairs_most
+        resident += 4 * len(used) * len(target_features)
+        resident += 13 * n_groups_nt * len(checked) + 8 * len(checked)
+        # Each thread draws a group's conditional sets in 24 bytes per cell
+        # and copies some of its genes, 16 bytes per cell and gene, which also
+        # bounds its gene and logistic fits; the second round holds its
+        # statistics and one working copy no larger than them.
+        one_copy = 16 * n_cells
+        spare = max(
+            self.memoryBytes
+            - resident
+            - threads * (24 * n_cells + one_copy)
+            - 16 * n_resamples[1],
+            0,
+        )
+        gather_bytes = one_copy + min(
+            max(_ASSOCIATION_GATHER_BYTES - one_copy, 0), spare // (4 * threads)
+        )
+        statistics_bytes = max(8 * n_resamples[1], min(1 << 28, spare // 4))
+        scratch = threads * (24 * n_cells + gather_bytes)
+        free = max(self.memoryBytes - resident - scratch - 2 * statistics_bytes, 0)
+        # A feature of the QC pass: its float32 counts, the block they are read
+        # from and its QC counts. A gene of a band of tests: its scores and
+        # weights on every cell and its fit, beside its counts when they are
+        # read again.
+        per_feature = 24 * n_cells + 16 * len(sizes)
+        per_gene = 16 * n_cells + 8 * n_covariates * (n_covariates + 2)
+        if free < per_feature + per_gene:
+            raise MemoryError(
+                f"Testing one gene over {n_cells} labelled cells holds about "
+                f"{self.memoryBytes - free + per_feature + per_gene} bytes with the "
+                "tests and their random sets, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Raise mem_budget."
+            )
+        # The counts are read once and held for the tests when they take at
+        # most a share of the memory left and leave room for a feature and a
+        # gene; otherwise the tests read them again.
+        held_bytes = 4 * n_cells * len(checked)
+        hold = (
+            held_bytes <= _ASSOCIATION_HELD_SHARE * free
+            and free - held_bytes >= per_feature + per_gene
+        )
+        room = free - held_bytes if hold else free
+        # A band holds at most so many bytes of float64 values, or of scores
+        # and weights, whatever the budget.
+        qc_width = min(
+            len(checked),
+            room // per_feature,
+            max(1, _MIXSCAPE_BAND_BYTES // (8 * max(n_cells, 1))),
+        )
+        test_width = min(
+            room // (per_gene + (0 if hold else per_feature)),
+            max(1, _MIXSCAPE_BAND_BYTES // (16 * max(n_cells, 1))),
+        )
+        order = np.argsort(cells, kind="stable")
+        sorted_cells = cells[order]
+        # The reads keep clear of the held counts, which fill as they go.
+        holding = held_bytes if hold else 0
+
+        def counts_of(band: np.ndarray, out: np.ndarray) -> np.ndarray:
+            """Write the counts of features over the labelled cells, features x cells."""
+            return self._association_counts(
+                expression,
+                band,
+                sorted_cells,
+                order,
+                out,
+                resident + scratch + holding + per_feature * len(band),
+            )
+
+        proper = (sizes > 0) & (sizes < n_cells)
+
+        def counted_groups(chosen: np.ndarray) -> ComplementGroups:
+            """Return the groups of ``chosen`` that hold some cells but not all."""
+            kept = chosen[proper[chosen]]
+            return ComplementGroups(
+                members=np.concatenate(
+                    [np.empty(0, dtype=np.int64)]
+                    + [members[offsets[g] : offsets[g + 1]] for g in kept]
+                ),
+                offsets=np.concatenate([[0], np.cumsum(sizes[kept])]).astype(np.int64),
+                codes=np.arange(len(kept), dtype=np.int64),
+            )
+
+        row_groups = np.arange(len(used))
+        nt_groups_of = len(used) + np.arange(n_groups_nt)
+        row_counting = counted_groups(row_groups)
+        nt_counting = counted_groups(nt_groups_of)
+
+        def group_counts(
+            values: np.ndarray, chosen: np.ndarray, counting: ComplementGroups
+        ) -> tuple[np.ndarray, np.ndarray]:
+            """Count the expressing cells of the groups ``chosen`` and of all cells.
+
+            An empty group holds none of a feature's expressing cells and a
+            group of every cell holds them all.
+            """
+            in_groups, totals = nonzero_group_counts(values, counting)
+            counted = np.zeros((len(chosen), values.shape[0]), dtype=np.int64)
+            counted[proper[chosen]] = in_groups
+            counted[sizes[chosen] == n_cells] = totals
+            return counted, totals
+
+        held: np.ndarray | None = None
+        if hold:
+            held = np.empty((len(checked), n_cells), dtype=np.float32)
+        row_detected = np.zeros((len(used), len(target_features)), dtype=np.int32)
+        nt_detected = np.zeros((n_groups_nt, len(checked)), dtype=np.int32)
+        expressing = np.zeros(len(checked), dtype=np.int64)
+        with _numba_threads(self.nthreads):
+            for start in range(0, len(checked), qc_width):
+                band = checked[start : start + qc_width]
+                span = slice(start, start + len(band))
+                values = counts_of(
+                    band,
+                    np.empty((len(band), n_cells), dtype=np.float32)
+                    if held is None
+                    else held[span],
+                )
+                if n_groups_nt:
+                    nt_detected[:, span], expressing[span] = group_counts(
+                        values, nt_groups_of, nt_counting
+                    )
+                targeted = np.flatnonzero(target_column[band] >= 0)
+                if len(targeted) == len(band):
+                    counted, expressing[span] = group_counts(
+                        values, row_groups, row_counting
+                    )
+                    row_detected[:, target_column[band]] = counted
+                elif len(targeted):
+                    counted, _ = group_counts(
+                        values[targeted], row_groups, row_counting
+                    )
+                    row_detected[:, target_column[band[targeted]]] = counted
+                del values
+        del row_counting, nt_counting
+        compact = np.full(n_rows, -1, dtype=np.int64)
+        compact[used] = np.arange(len(used))
+        row_sizes = sizes[: len(used)]
+        nt_sizes = sizes[len(used) :]
+
+        def target_qc(
+            pair_rows: np.ndarray, pair_features: np.ndarray, counted: np.ndarray
+        ) -> tuple[np.ndarray, ...]:
+            groups_of = compact[pair_rows]
+            in_group = counted[groups_of, target_column[pair_features]].astype(np.int64)
+            return (
+                row_sizes[groups_of],
+                n_cells - row_sizes[groups_of],
+                in_group,
+                expressing[column_of[pair_features]] - in_group,
+            )
+
+        discovery_qc = target_qc(*discovery, row_detected)
+        positive_qc = target_qc(*positive, row_detected)
+        passing_discovery = int(
+            np.count_nonzero((discovery_qc[2] >= floor) & (discovery_qc[3] >= floor))
+        )
+        if n_groups_nt:
+            passing = (nt_detected >= floor) & (
+                expressing[None, :] - nt_detected >= floor
+            )
+            chosen_groups, chosen_columns = calibration_pairs(
+                passing,
+                passing_discovery
+                if n_calibration_pairs is None
+                else n_calibration_pairs,
+                seed,
+            )
+            calibration_in = nt_detected[chosen_groups, chosen_columns].astype(np.int64)
+            del passing
+        else:
+            chosen_groups = chosen_columns = np.empty(0, dtype=np.int64)
+            calibration_in = np.empty(0, dtype=np.int64)
+        calibration_qc = (
+            nt_sizes[chosen_groups],
+            n_cells - nt_sizes[chosen_groups],
+            calibration_in,
+            expressing[chosen_columns] - calibration_in,
+        )
+        sets, pair_group, pair_feature, qc = _pair_sets(
+            (compact[discovery[0]], discovery[1], discovery_qc),
+            (len(used) + chosen_groups, checked[chosen_columns], calibration_qc),
+            (compact[positive[0]], positive[1], positive_qc),
+        )
+        del row_detected, nt_detected
+        pass_qc = (qc[2] >= floor) & (qc[3] >= floor)
+        n_pairs = len(sets)
+        values_out = {name: np.full(n_pairs, np.nan) for name in _ASSOCIATION_VALUES}
+        stage = np.zeros(n_pairs, dtype=np.int64)
+        # The groups of the tested pairs keep their codes, which key their
+        # random sets, so that the sets do not depend on the other groups.
+        active = np.unique(pair_group[pass_qc])
+        engine_group = np.full(len(sizes), -1, dtype=np.int64)
+        engine_group[active] = np.arange(len(active))
+        engine = ComplementGroups(
+            members=np.concatenate(
+                [np.empty(0, dtype=np.int64)]
+                + [members[offsets[g] : offsets[g + 1]] for g in active]
+            ),
+            offsets=np.concatenate([[0], np.cumsum(sizes[active])]).astype(np.int64),
+            codes=codes[active],
+        )
+        tested_features = np.unique(pair_feature[pass_qc])
+        with _numba_threads(self.nthreads):
+            models = (
+                fit_detection_models(design, engine)
+                if resampling == "conditional" and len(active)
+                else None
+            )
+            for start in range(0, len(tested_features), test_width):
+                band = tested_features[start : start + test_width]
+                chosen = np.flatnonzero(pass_qc & np.isin(pair_feature, band))
+                if held is not None:
+                    values, rows_of = held, column_of[pair_feature[chosen]]
+                else:
+                    values = counts_of(
+                        band, np.empty((len(band), n_cells), dtype=np.float32)
+                    )
+                    rows_of = np.searchsorted(band, pair_feature[chosen])
+                result = complement_tests(
+                    values,
+                    design,
+                    engine,
+                    engine_group[pair_group[chosen]],
+                    rows_of,
+                    resampling=resampling,
+                    detection_models=models,
+                    seed=seed,
+                    n_resamples=n_resamples,
+                    stage_threshold=stage_threshold,
+                    approximation=approximation,
+                    side=side,
+                    statistics_bytes=statistics_bytes,
+                    gather_bytes=gather_bytes,
+                )
+                for name in _ASSOCIATION_VALUES:
+                    if name != "adjusted_p_value":
+                        values_out[name][chosen] = getattr(result, name)
+                stage[chosen] = result.stage
+                del values, result
+        return _AssociationTables(
+            sets=sets,
+            groups=pair_group,
+            features=pair_feature,
+            qc=qc,
+            pass_qc=pass_qc,
+            values=values_out,
+            stage=stage,
+            group_size=group_size,
+            control_guides=guide_names[control_guides],
+            calibration_groups=nt_groups,
+            passing_discovery=passing_discovery,
+        )
+
+    def _save_association_tables(
+        self,
+        planned: PlannedArtifact,
+        tables: _AssociationTables,
+        *,
+        rows: _LabelRows,
+        by: str,
+        used: np.ndarray,
+        unmatched: np.ndarray,
+        assay: str,
+        alpha: float,
+        requested: int | None,
+        moi: str,
+    ) -> ArtifactRef:
+        """Adjust the tested pairs' p-values, grade the calibration and save the tests.
+
+        The p-values are adjusted by Benjamini-Hochberg within each set of
+        pairs. The attributes also hold what the warnings name, so that saved
+        tests warn again as they did.
+        """
+        from ...perturbation.associations import (
+            ASSOCIATION_SETS,
+            adjusted_p_values,
+            calibration_grade,
+        )
+
+        sets, pass_qc, values_out = tables.sets, tables.pass_qc, tables.values
+        n_calibration = int(np.count_nonzero(sets == 1))
+        significant = np.zeros(len(sets), dtype=bool)
         for code in range(len(ASSOCIATION_SETS)):
             members = np.flatnonzero(sets == code)
             adjusted, found = adjusted_p_values(
-                values_out["p_value"][members], pass_qc[members], rate
+                values_out["p_value"][members], pass_qc[members], alpha
             )
             values_out["adjusted_p_value"][members] = adjusted
             significant[members] = found
         n_false = int(np.count_nonzero(significant & (sets == 1)))
-        grade = calibration_grade(n_false) if len(chosen_groups) else "none"
-        if len(chosen_groups):
+        grade = calibration_grade(n_false) if n_calibration else "none"
+        n_control_guides = len(tables.control_guides)
+        # At low MOI a group leaves one control guide for its comparison
+        # cells; at high MOI all other cells are its comparison.
+        if n_calibration:
             calibration_status = "checked"
         elif requested == 0:
             calibration_status = "off"
-        elif n_control_guides < 2:
+        elif n_control_guides < (1 if moi == "high" else 2):
             calibration_status = "few_control_guides"
-        elif requested is None and not passing_discovery:
+        elif requested is None and not tables.passing_discovery:
             calibration_status = "no_passing_discovery"
         else:
             calibration_status = "no_passing_calibration"
-        # The attributes also hold what the warnings name, so that saved tests
-        # warn again as they did.
         attributes = {
             "set_names": list(ASSOCIATION_SETS),
             "calibration_grade": grade,
             "n_false_discoveries": n_false,
-            "calibration_group_size": group_size,
+            "calibration_group_size": tables.group_size,
             "calibration_status": calibration_status,
             "n_control_guides": n_control_guides,
-            "n_negative_control_pairs": len(chosen_groups),
+            "n_negative_control_pairs": n_calibration,
         }
         # Each group of treatment cells, the tested rows and then the
         # calibration groups, names its target and guides once, and each pair
         # names its group.
+        n_groups_nt = len(tables.calibration_groups)
         row_targets = rows.names if by == "target" else rows.target_names[rows.codes]
         group_targets = np.concatenate(
             [
@@ -4312,42 +5005,44 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 else rows.names[used].astype(object),
                 np.asarray(
                     [
-                        "+".join(guide_names[control_guides[members]])
-                        for members in nt_groups
+                        "+".join(tables.control_guides[members])
+                        for members in tables.calibration_groups
                     ],
                     dtype=object,
                 ),
             ]
         )
+        qc = tables.qc
         write_cell_data_artifact(
             self.zw,
             planned,
             {
                 "sets": sets,
-                "groups": pair_group,
+                "groups": tables.groups,
                 "group_targets": group_targets,
                 "group_guides": group_guides,
-                "features": pair_feature,
+                "features": tables.features,
                 "n_cells": qc[0],
                 "n_control_cells": qc[1],
                 "n_nonzero_cells": qc[2],
                 "n_nonzero_control_cells": qc[3],
                 "pass_qc": pass_qc,
                 "significant": significant,
-                "stage": stage,
+                "stage": tables.stage,
                 **values_out,
             },
             attributes=attributes,
         )
         for message in _association_warnings(
-            unmatched, n_rows, by, expression.name, attributes
+            unmatched, len(rows.names), by, assay, attributes, moi
         ):
             warn(message)
         logger.info(
-            f"Tested {int(np.count_nonzero(pass_qc[sets == 0]))} of {n_discovery} "
-            f"discovery pairs: {int(np.count_nonzero(significant[sets == 0]))} "
-            f"significant at {rate}; calibration {grade} with {n_false} false "
-            f"discoveries in {len(chosen_groups)} pairs"
+            f"Tested {int(np.count_nonzero(pass_qc[sets == 0]))} of "
+            f"{int(np.count_nonzero(sets == 0))} discovery pairs: "
+            f"{int(np.count_nonzero(significant[sets == 0]))} significant at "
+            f"{alpha}; calibration {grade} with {n_false} false discoveries in "
+            f"{n_calibration} pairs"
         )
         return planned.ref
 
@@ -4366,7 +5061,9 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
 
         Raises:
             TypeError: If ``tests`` is not an ArtifactRef.
-            ValueError: If it is not a ``perturbation_associations`` artifact.
+            ValueError: If it is not a ``perturbation_associations`` artifact,
+                or a development build saved it before high-MOI tests, without
+                their ``moi`` and ``resampling``.
         """
         from ...perturbation.associations import ASSOCIATION_SETS
 
@@ -4378,13 +5075,20 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
                 f"{tests.kind!r}"
             )
         status = require_complete_artifact(self.zw, tests)
+        parameters = status.parameters or {}
+        if "moi" not in parameters or "resampling" not in parameters:
+            raise ValueError(
+                "These association tests were saved by a development build before "
+                "high-MOI tests, so their record lacks moi and resampling; call "
+                "perturbation.associations again with the same arguments, which "
+                "tests again and saves new tests"
+            )
         group = artifact_group(self.zw, tests)
         assay = self._get_assay(str(tests.assay))
 
         def read(name: str) -> np.ndarray:
             return np.asarray(as_zarr_array(group[name], name=name)[:])
 
-        parameters = status.parameters or {}
         integration = str(parameters["integration"])
         feature_positions = read("features")
         # Each pair names its group of treatment cells, whose target and
@@ -4436,6 +5140,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             alpha=float(parameters["alpha"]),
             side=str(parameters["side"]),
             integration=integration,
+            moi=str(parameters["moi"]),
+            resampling=str(parameters["resampling"]),
             from_assay=str(tests.assay),
             n_false_discoveries=int(str(group.attrs["n_false_discoveries"])),
             calibration_grade=str(group.attrs["calibration_grade"]),
@@ -4451,7 +5157,7 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         a control guide only those that Mixscape called knocked out count.
 
         Raises:
-            ValueError: If the labels have no control cell.
+            ValueError: If no labelled cell carries control guides only.
         """
 
         def selected_cells(selection: ArtifactRef) -> np.ndarray:

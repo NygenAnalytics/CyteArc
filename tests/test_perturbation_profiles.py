@@ -829,7 +829,13 @@ def test_profiles_refuse_inputs_they_cannot_use(tmp_path) -> None:
         ),
         controls=["GENE_D"],
     )
-    with pytest.raises(ValueError, match="The labels have no control cell"):
+    with pytest.raises(
+        ValueError,
+        match="No labelled cell carries control guides only, and each perturbation "
+        "is compared with such cells; check the controls passed to "
+        "perturbation.labels, or in a screen whose cells carry several guides, test "
+        "associations with moi='high'",
+    ):
         store.perturbation.profiles(controls, features)
     assert not store.artifacts.list(kind="perturbation_profiles")
 

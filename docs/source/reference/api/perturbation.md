@@ -221,7 +221,7 @@ On the THP-1 screen of Seurat's Mixscape vignette ([Papalexi et al. 2021](https:
 
 ## Test which genes each perturbation changes
 
-A screen asks which genes each perturbation changes, and the answer is only as good as the calibration of its p-values: single-cell counts are sparse and overdispersed, cells differ in depth, and a screen makes many thousands of tests. SCEPTRE ([Barry et al. 2024](https://doi.org/10.1186/s13059-024-03254-2)) keeps the p-values calibrated with permutations of a score statistic, and `associations` runs its low-MOI test. A pair is a target and a feature, and its treatment cells are the cells that carry the target alone, compared with the `"control"` cells of the labels; with `integration="singleton"`, each guide is tested alone.
+A screen asks which genes each perturbation changes, and the answer is only as good as the calibration of its p-values: single-cell counts are sparse and overdispersed, cells differ in depth, and a screen makes many thousands of tests. SCEPTRE ([Barry et al. 2024](https://doi.org/10.1186/s13059-024-03254-2)) keeps the p-values calibrated with permutations of a score statistic, and `associations` runs its low-MOI test, or with `moi="high"` its test for screens with several guides per cell ([below](#screens-with-several-guides-per-cell)). A pair is a target and a feature, and its treatment cells are the cells that carry the target alone, compared with the `"control"` cells of the labels; with `integration="singleton"`, each guide is tested alone.
 
 For each pair, a negative binomial regression of the feature's counts on the cells' covariates is fitted under the null hypothesis on the pair's treatment and control cells together: Poisson coefficients, then the size that maximizes the likelihood with the Poisson means held fixed, as the SCEPTRE book describes it and as sceptre's results show. The covariates are an intercept, log detected features and log UMIs of each cell in `from_assay`, indicators of the samples of `sample_column` and the numeric cell columns of `covariates`, sceptre's default formula. Only the tested cells, the control cells and the cells of the tested targets or guides, need a sample label and covariate values, and a missing value among them is refused. The statistic is the treatment cells' summed score divided by its standard deviation under the fit, positive when they express the feature more than the fit predicts. When the counts show no overdispersion that the likelihood can see, the size solves the Pearson moment equation instead, or the counts are taken as Poisson.
 
@@ -249,11 +249,48 @@ ds.plots.association_calibration(tests)
 ds.plots.association_volcano(tests, targets=["IFNGR1", "JAK2"])
 ```
 
-`load_associations` returns a {class}`~cytearc.perturbation.PerturbationAssociations` record with one table per set. Each row holds the `target`, its `guide` with `integration="singleton"` or the `control_guides` of a calibration group, the `feature` ID and `feature_name`, `n_cells`, `n_control_cells`, `n_nonzero_cells`, `n_nonzero_control_cells`, `pass_qc`, `z`, `p_value`, `adjusted_p_value`, `significant`, `log2_fold_change`, `se_log2_fold_change`, `stage`, the round that gave the p-value (0 for an untested pair), and the skew-normal fit of the second round, `skew_location`, `skew_scale` and `skew_shape`, NaN unless that fit gave the p-value. The record keeps `alpha`, `side`, `integration`, `from_assay`, `n_false_discoveries` and `calibration_grade`. The tests record the labels, the counts, the features or tables of pairs, each tested cell's sample and covariates, and every setting above, so testing again with the same values returns the saved tests and repeats their warnings.
+`load_associations` returns a {class}`~cytearc.perturbation.PerturbationAssociations` record with one table per set. Each row holds the `target`, its `guide` with `integration="singleton"` or the `control_guides` of a calibration group, the `feature` ID and `feature_name`, `n_cells`, `n_control_cells`, `n_nonzero_cells`, `n_nonzero_control_cells`, `pass_qc`, `z`, `p_value`, `adjusted_p_value`, `significant`, `log2_fold_change`, `se_log2_fold_change`, `stage`, the round that gave the p-value (0 for an untested pair), and the skew-normal fit of the second round, `skew_location`, `skew_scale` and `skew_shape`, NaN unless that fit gave the p-value. The record keeps `alpha`, `side`, `integration`, `moi`, `resampling`, `from_assay`, `n_false_discoveries` and `calibration_grade`. The tests record the labels, the counts, the features or tables of pairs, each tested cell's sample and covariates, and every setting above, so testing again with the same values returns the saved tests and repeats their warnings.
 
 `associations` reads the counts once, in bands of features, to count each feature's expressing cells in each target, each control guide and the other control cells, which gives every pair's QC; it holds the counts as float32 for the tests when they fit half the memory left, and reads them again in bands otherwise. Each thread fits a batch of a target's pairs and scores the batch's random sets together, one contiguous record per cell.
 
 `ds.plots.association_volcano` draws each tested discovery pair's log2 fold change against its -log10 p-value, coloured by significance, with the Benjamini-Hochberg cut and the `label_top` (10) pairs of smallest p-values labelled. `ds.plots.association_calibration` draws the book's calibration figure: the negative-control p-values against uniform quantiles with a 95% band and the discovery p-values beside them, the negative-control fold changes, and the positive-control and negative-control p-values with the count of false discoveries.
+
+### Screens with several guides per cell
+
+In a high-MOI screen each cell carries several guides at random, so few cells carry a target alone and almost none carry control guides only. `moi="high"` runs SCEPTRE's high-MOI test ([Barry et al. 2021](https://doi.org/10.1186/s13059-021-02545-2)). A target's treatment cells are the labelled cells whose guides target it, whatever else they carry, or with `integration="singleton"` the cells that carry the guide. Every other labelled cell is its comparison: cells of other targets and of sibling guides, cells with control guides only, and `"Negative"` cells. `n_control_cells` counts them, and QC counts the expressing cells of a target against all of them.
+
+Every labelled cell is tested, so each one needs a sample label, covariate values and guide UMIs. The covariates add each cell's log detected guides and log guide UMIs in the guide assay, the terms of sceptre's default formula at high MOI, since sequencing depth drives both the detection of guides and the expression of genes; a cell without guide UMIs is refused, and `select_cells(calls, value="total_umi", low=1, keep_bounds=True)` selects the cells to call guides on instead. Every target is compared within the same cells, so each feature's regression is fitted once, on all labelled cells, and the feature's pairs share that fit. The fold change barely shrinks, since a target's cells are a small share of all cells.
+
+`resampling` chooses the random sets. `"conditional"`, the default at high MOI, is the conditional randomization test: a logistic regression of the target's cells on the covariates gives each cell its probability of carrying the target, and each set takes every cell independently with that probability, so the sets keep the link between the covariates and guide detection that would otherwise confound the test. `"permutation"` draws as many cells as the target's, uniformly from all cells; the SCEPTRE book describes permutations as faster and slightly better with sparse genes, and conditional sets as slightly better with confounding covariates, and suggests trying both. Each target draws its own sets in both. At low MOI the sets are permutations, and `"conditional"` is refused.
+
+The calibration groups draw from the control guides that some labelled cell carries, as many as the median target's guides or all of them when there are fewer. A group's treatment cells carry any of its guides, and all other labelled cells are its comparison, so one control guide is enough; the grade is `"none"` when no labelled cell carries a control guide. The comparison cells hold the cells of every target, so a target that strongly lowers a gene lowers it in the comparison cells of every other group too, and a calibration group can then show that gene as raised.
+
+```python
+import pandas as pd
+
+# Each candidate enhancer with the genes near it
+cis_pairs = pd.DataFrame(
+    {
+        "target": ["candidate_enh_1", "candidate_enh_1"],
+        "feature": ["ENSG00000174529", "ENSG00000117222"],
+    }
+)
+tests = ds.perturbation.associations(
+    labels,
+    moi="high",
+    pairs=cis_pairs,
+    side="left",  # CRISPRi of an enhancer lowers its genes
+    sample_column="gem_group",
+    # An enhancer has no gene of its own; a table like cis_pairs of targets at
+    # transcription start sites and their genes checks the tests' power instead
+    positive_controls=None,
+)
+result = ds.perturbation.load_associations(tests)
+result.calibration_grade  # read before the discoveries
+result.discovery[result.discovery["significant"]]
+```
+
+The tests read the counts once for the QC, every feature of the assay when a calibration check runs, and hold them as float32 when they fit half the memory left. They then test bands of genes: each gene is fitted on all n labelled cells, and its scores and weights, 16 n bytes, are held cell by cell so that each cell of a random set adds one row of the band. Each thread holds 32 n bytes while it fits a gene, and while it draws a target's conditional sets, 24 n bytes plus a copy of some of the target's genes, which takes at most the larger of 16 n bytes and 64 MiB. The memory budget sets the band, so a run that cannot hold one gene is refused. A random set costs about its cells times the target's genes in the band times the covariates plus 2 multiply-adds, so round 1 of P pairs of targets of m cells costs about 499 P m (p + 2) for p covariates, and the second round about 10 times that for each pair that takes it. On sceptredata's example of 45,919 cells and 526 genes, the 18,410 pairs of 35 targets with every gene, with the calibration check and the positive controls, took 132 s on one thread of a laptop.
 
 ## Average each perturbation's expression into a profile
 

@@ -13,12 +13,15 @@ that p-values far below the reciprocal of the number of sets come from the
 fitted tail.
 
 Each pair's regression is fitted on its treatment and control cells together,
-as the SCEPTRE book describes: Poisson coefficients, and a negative binomial
-size from their Pearson residuals. That fit does not depend on which of those
+as the SCEPTRE book describes: Poisson coefficients, and the negative binomial
+size that maximizes the likelihood with the Poisson means held fixed, or the
+root of the Pearson equation when the likelihood shows no overdispersion. That
+fit does not depend on which of those
 cells are the treatment cells, so the treatment cells and every random set are
 scored by one function of the pair's cells, and the permutation test is exact.
-Each gene's fit on the control cells starts the fits of its pairs and gives the
-fold changes.
+Each gene's fit on the control cells starts the fits of its pairs, and each
+pair's fit gives its fold change: the treatment cells' counts over their means
+under that fit.
 
 The random sets of a group of treatment cells come from a counter-based
 generator keyed by the seed, the group and the round, so every gene paired with
@@ -60,6 +63,7 @@ __all__ = [
     "ASSOCIATION_SETS",
     "RECORD_BYTES",
     "CALIBRATION_GRADES",
+    "MOIS",
     "SIDES",
     "PairResults",
     "PerturbationAssociations",
@@ -92,6 +96,10 @@ ASSOCIATION_SETS = ("discovery", "calibration", "positive")
 CALIBRATION_GRADES = ((1, "excellent"), (6, "mild"), (14, "moderate"))
 #: The alternatives of a test: either direction, a decrease or an increase.
 SIDES = ("both", "left", "right")
+#: The multiplicities of infection that the tests take: ``"low"`` compares the
+#: cells that carry a target alone with the control cells, and ``"high"`` the
+#: cells that carry any of its guides with all other cells.
+MOIS = ("low", "high")
 
 # A start of a pair's fit with a coefficient beyond this size, on covariates
 # that are standardized or indicators, sits where the fit cannot move.
@@ -200,6 +208,12 @@ class PerturbationAssociations:
         side: The alternative tested: ``"both"``, ``"left"`` or ``"right"``.
         integration: ``"union"`` when a target's guides are tested together,
             ``"singleton"`` when each guide is tested alone.
+        moi: ``"low"`` when a target's cells carry it alone and are compared
+            with the control cells, ``"high"`` when they carry any of its
+            guides and are compared with all other cells.
+        resampling: How the random sets were drawn: ``"permutation"``, as
+            many cells as the treatment cells, or ``"conditional"``, each
+            cell with its fitted probability of carrying the perturbation.
         from_assay: The expression assay.
         n_false_discoveries: The negative-control pairs found significant.
         calibration_grade: That count's grade, ``"excellent"``, ``"mild"``,
@@ -213,6 +227,8 @@ class PerturbationAssociations:
     alpha: float
     side: str
     integration: str
+    moi: str
+    resampling: str
     from_assay: str
     n_false_discoveries: int
     calibration_grade: str
@@ -225,13 +241,17 @@ def association_covariates(
     extra: np.ndarray | None = None,
     *,
     names: Sequence[str] = (),
+    guide_umis: np.ndarray | None = None,
+    guide_detected: np.ndarray | None = None,
 ) -> np.ndarray:
     """Return the covariates of the regressions, cells x covariates.
 
     The columns are an intercept, log detected features and log UMIs of each
-    cell, indicators of every sample but the first, and any ``extra``
-    columns. The continuous columns are centered and scaled, which leaves the
-    fits unchanged but keeps their linear systems well conditioned.
+    cell, with guide counts its log detected guides and log guide UMIs, then
+    indicators of every sample but the first, and any ``extra`` columns, the
+    terms of sceptre's default formula. The continuous columns are centered
+    and scaled, which leaves the fits unchanged but keeps their linear
+    systems well conditioned.
 
     Args:
         n_umis: Each cell's total counts in the expression assay.
@@ -239,13 +259,18 @@ def association_covariates(
         samples: Each cell's sample as a code from 0, or None for one sample.
         extra: More numeric covariates, cells x columns, or None.
         names: The names of the ``extra`` columns, for error messages.
+        guide_umis: Each cell's total counts in the guide assay, which the
+            high-MOI test adjusts for, or None.
+        guide_detected: Each cell's number of guides with counts, given with
+            ``guide_umis``.
 
     Returns:
         The covariates as float64, the intercept first.
 
     Raises:
-        ValueError: If a cell has no counts, a sample has no cell, or a
-            covariate is constant or not finite.
+        ValueError: If a cell has no counts or, with guide counts, no guide
+            UMIs, a sample has no cell, or a covariate is constant or not
+            finite.
     """
     umis = np.asarray(n_umis, dtype=np.float64)
     detected = np.asarray(n_detected, dtype=np.float64)
@@ -261,6 +286,25 @@ def association_covariates(
         (np.log(detected), "log detected features", True),
         (np.log(umis), "log UMIs", True),
     ]
+    if (guide_umis is None) != (guide_detected is None):
+        raise ValueError("guide_umis and guide_detected go together")
+    if guide_umis is not None:
+        guide_total = np.asarray(guide_umis, dtype=np.float64)
+        guides = np.asarray(guide_detected, dtype=np.float64)
+        if guide_total.shape != umis.shape or guides.shape != umis.shape:
+            raise ValueError("guide_umis and guide_detected need one value per cell")
+        without = int(np.count_nonzero((guide_total <= 0) | (guides <= 0)))
+        if without:
+            verb = "has" if without == 1 else "have"
+            raise ValueError(
+                f"{without} of the {len(umis)} tested cells {verb} no guide UMIs, "
+                "and the test adjusts for the log of each cell's guide UMIs; "
+                "select cells with guide UMIs"
+            )
+        columns += [
+            (np.log(guides), "log detected guides", True),
+            (np.log(guide_total), "log guide UMIs", True),
+        ]
     if samples is not None:
         codes = np.asarray(samples, dtype=np.int64)
         if codes.shape != umis.shape or (len(codes) and codes.min() < 0):
@@ -1170,7 +1214,9 @@ def association_settings(
     n_calibration_pairs: object,
     alpha: object,
     seed: object,
-) -> tuple[tuple[int, int, int], float, int, int | None, float, int]:
+    moi: object,
+    resampling: object,
+) -> tuple[tuple[int, int, int], float, int, int | None, float, int, str]:
     """Check the settings of association tests, as ``associations`` takes them.
 
     The pipeline recipe checks the same settings before its run starts. The
@@ -1192,16 +1238,24 @@ def association_settings(
         n_calibration_pairs: The calibration pairs, or None.
         alpha: The false discovery rate.
         seed: The seed of the random sets and the calibration pairs.
+        moi: One of :data:`MOIS`.
+        resampling: ``"conditional"``, ``"permutation"``, or None for
+            ``"conditional"`` at high MOI and ``"permutation"`` at low MOI.
 
     Returns:
         The random sets of each round, the stage threshold, ``min_nonzero``,
         the calibration pairs, the false discovery rate and the seed, as
-        Python numbers.
+        Python numbers, and the resampling.
 
     Raises:
         TypeError: If a setting has the wrong type.
-        ValueError: If a setting is unknown or out of range.
+        ValueError: If a setting is unknown or out of range, or
+            ``resampling="conditional"`` goes with ``moi="low"``.
     """
+    # The test against all other cells draws its sets either way; it imports
+    # this module, so its resampling names are read when the check runs.
+    from cytearc.perturbation.high_moi import RESAMPLING
+
     if isinstance(positive_controls, str) and positive_controls != "targets":
         raise ValueError(
             "positive_controls must be 'targets', a DataFrame or None, not "
@@ -1245,7 +1299,21 @@ def association_settings(
     if not 0 < rate < 1:
         raise ValueError("alpha must be above 0 and below 1")
     resolved_seed = integer_argument(seed, "seed", minimum=0)
-    return draws, threshold, floor, requested, rate, resolved_seed
+    if not isinstance(moi, str) or moi not in MOIS:
+        raise ValueError(f"moi must be 'low' or 'high', not {moi!r}")
+    if resampling is None:
+        resampling = "conditional" if moi == "high" else "permutation"
+    elif not isinstance(resampling, str) or resampling not in RESAMPLING:
+        raise ValueError(
+            "resampling must be 'conditional', 'permutation' or None, not "
+            f"{resampling!r}"
+        )
+    elif resampling == "conditional" and moi == "low":
+        raise ValueError(
+            "resampling='conditional' goes with moi='high'; the low-MOI test "
+            "compares each target with the control cells by permutation"
+        )
+    return draws, threshold, floor, requested, rate, resolved_seed, resampling
 
 
 def covariate_columns(covariates: Sequence[str] | None) -> tuple[str, ...]:

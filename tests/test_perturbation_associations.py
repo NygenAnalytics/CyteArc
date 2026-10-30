@@ -151,6 +151,98 @@ def test_covariates_refuse_cells_and_columns_they_cannot_use(
         association_covariates(*arguments)
 
 
+def test_covariates_add_log_guide_counts_after_the_expression_columns() -> None:
+    umis = np.array([100.0, 400.0, 900.0, 1600.0, 2500.0])
+    detected = np.array([50.0, 100.0, 300.0, 400.0, 700.0])
+    guide_umis = np.array([3.0, 40.0, 8.0, 120.0, 15.0])
+    guide_detected = np.array([1.0, 3.0, 2.0, 6.0, 2.0])
+    samples = np.array([0, 1, 1, 0, 1])
+
+    design = association_covariates(
+        umis,
+        detected,
+        samples,
+        guide_umis=guide_umis,
+        guide_detected=guide_detected,
+    )
+
+    # sceptre's high-MOI formula: the expression terms, the guide terms, then
+    # the samples.
+    assert design.shape == (5, 6)
+    np.testing.assert_array_equal(
+        design[:, [0, 1, 2, 5]], association_covariates(umis, detected, samples)
+    )
+    np.testing.assert_allclose(design[:, 3], stats.zscore(np.log(guide_detected)))
+    np.testing.assert_allclose(design[:, 4], stats.zscore(np.log(guide_umis)))
+
+
+@pytest.mark.parametrize(
+    ("guides", "message"),
+    [
+        ({"guide_umis": np.ones(3)}, "go together"),
+        ({"guide_detected": np.ones(3)}, "go together"),
+        (
+            {"guide_umis": np.ones(2), "guide_detected": np.ones(2)},
+            "one value per cell",
+        ),
+        (
+            {"guide_umis": np.array([4.0, 0.0, 6.0]), "guide_detected": np.ones(3)},
+            "1 of the 3 tested cells has no guide UMIs",
+        ),
+        (
+            {
+                "guide_umis": np.array([0.0, 0.0, 6.0]),
+                "guide_detected": np.array([0.0, 0.0, 2.0]),
+            },
+            "2 of the 3 tested cells have no guide UMIs, and the test adjusts for "
+            "the log of each cell's guide UMIs; select cells with guide UMIs",
+        ),
+    ],
+)
+def test_covariates_refuse_guide_counts_they_cannot_use(guides, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        association_covariates(
+            np.array([10.0, 20.0, 30.0]), np.array([5.0, 6.0, 9.0]), **guides
+        )
+
+
+def _settings(**changes: object) -> tuple:
+    """Check association settings at the defaults of ``associations`` but ``changes``."""
+    settings: dict[str, object] = {
+        "positive_controls": "targets",
+        "id_column": "target_gene_id",
+        "integration": "union",
+        "side": "both",
+        "approximation": "skew_normal",
+        "n_resamples": (499, 4999, 24999),
+        "stage_threshold": 0.02,
+        "min_nonzero": 7,
+        "n_calibration_pairs": None,
+        "alpha": 0.1,
+        "seed": 0,
+        "moi": "low",
+        "resampling": None,
+    }
+    settings.update(changes)
+    return associations_module.association_settings(**settings)
+
+
+def test_association_settings_resolve_the_resampling_of_each_moi() -> None:
+    assert _settings()[-1] == "permutation"
+    assert _settings(moi="high")[-1] == "conditional"
+    assert _settings(moi="high", resampling="permutation")[-1] == "permutation"
+    assert _settings(resampling="permutation")[-1] == "permutation"
+    for changes, message in (
+        ({"resampling": "conditional"}, "goes with moi='high'"),
+        ({"moi": "medium"}, "moi must be 'low' or 'high', not 'medium'"),
+        ({"moi": None}, "moi must be"),
+        ({"moi": "high", "resampling": "crt"}, "not 'crt'"),
+        ({"moi": "high", "resampling": 1}, "resampling must be"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            _settings(**changes)
+
+
 def test_resampling_keys_differ_by_seed_group_and_stage() -> None:
     keys = resampling_keys(0, np.arange(3), 1)
 
@@ -1313,6 +1405,39 @@ def test_associations_refuse_a_budget_without_room_for_one_feature(
         )
 
 
+def test_associations_plan_only_the_calibration_pairs_a_check_can_draw(
+    tmp_path, monkeypatch
+) -> None:
+    # Two control guides make two calibration groups of one guide, which can
+    # draw at most 2 x 30 pairs, while the four guides tested one at a time
+    # make 4 x 30 trans pairs and 4 positive controls.
+    guides = OPERATION_GUIDES.copy()
+    guides[:, [6, 7]] = 0
+    store = _operation_store(tmp_path, guides=guides)
+    arguments = {
+        "labels": _operation_labels(store),
+        "features": _every_gene(store),
+        "integration": "singleton",
+        **FAST,
+    }
+    mib = 1 << 20
+    # A pair holds a MiB here, so the pairs' arrays decide the budget: 184
+    # pairs fit in 214 MiB, which 244 pairs, with as many calibration pairs as
+    # discovery pairs, would not.
+    monkeypatch.setattr(perturbation_operations, "_ASSOCIATION_PAIR_BYTES", mib)
+    monkeypatch.setattr(store, "memoryBytes", 183 * mib)
+    with pytest.raises(MemoryError, match="one feature over"):
+        store.perturbation.associations(**arguments)
+
+    monkeypatch.setattr(store, "memoryBytes", 214 * mib)
+    tests = store.perturbation.associations(**arguments)
+
+    result = store.perturbation.load_associations(tests)
+    assert (len(result.discovery), len(result.positive)) == (120, 4)
+    assert 0 < len(result.calibration) <= 60
+    assert set(result.calibration["control_guides"]) == {"CRISPR4", "CRISPR5"}
+
+
 def test_associations_without_a_calibration_check(shared, tmp_path) -> None:
     store, labels = shared.store, shared.labels
 
@@ -1418,8 +1543,9 @@ def test_associations_warn_about_targets_without_a_gene(tmp_path) -> None:
     )
     assert single_messages == [
         "2 of 4 guides have no feature of assay 'RNA' for a positive control, for "
-        "example 'CRISPR2', 'CRISPR3'. Check id_column, or the target names against "
-        "the feature names."
+        "example 'CRISPR2', 'CRISPR3'. A target that is not a gene, such as an "
+        "enhancer, has none; for a gene, check id_column, or the target names "
+        "against the feature names."
     ]
     positive = store.perturbation.load_associations(singles).positive
     assert positive["guide"].tolist() == ["CRISPR0", "CRISPR1"]
@@ -1541,6 +1667,40 @@ def test_trans_features_must_belong_to_the_tested_assay(shared) -> None:
 
     with pytest.raises(ValueError, match="feature selection of assay 'RNA'"):
         store.perturbation.associations(labels, features=guides)
+
+
+def test_tests_saved_before_high_moi_are_refused_and_tested_again(tmp_path) -> None:
+    from cytearc.storage.artifacts import artifact_group
+
+    store = _operation_store(tmp_path)
+    labels = _operation_labels(store)
+    arguments = {
+        "features": _every_gene(store),
+        "positive_controls": None,
+        "n_calibration_pairs": 0,
+        **FAST,
+    }
+    tests = store.perturbation.associations(labels, **arguments)
+    # A development build saved its tests without moi and resampling.
+    group = artifact_group(store.zw, tests)
+    provenance = dict(group.attrs["provenance"])
+    parameters = dict(provenance["parameters"])
+    del parameters["moi"], parameters["resampling"]
+    group.attrs["provenance"] = {**provenance, "parameters": parameters}
+
+    with pytest.raises(
+        ValueError,
+        match="saved by a development build before high-MOI tests, so their record "
+        "lacks moi and resampling; call perturbation.associations again",
+    ):
+        store.perturbation.load_associations(tests)
+
+    # Testing again with the same arguments saves new tests, which load.
+    again = store.perturbation.associations(labels, **arguments)
+    assert again != tests
+    loaded = store.perturbation.load_associations(again)
+    assert (loaded.moi, loaded.resampling) == ("low", "permutation")
+    assert loaded.discovery["pass_qc"].any()
 
 
 def test_loading_associations_refuses_other_artifacts(shared) -> None:

@@ -175,8 +175,8 @@ def _open(location: str | Path, **options: Any) -> DataStore:
     )
 
 
-def _write(location: Path) -> DataStore:
-    write_count_store(str(location), {"RNA": RNA, "CRISPR": GUIDE_COUNTS}, "uint16")
+def _write(location: Path, guides: np.ndarray = GUIDE_COUNTS) -> DataStore:
+    write_count_store(str(location), {"RNA": RNA, "CRISPR": guides}, "uint16")
     store = _open(location)
     features = store._get_assay("CRISPR").feats
     features.insert(
@@ -1472,6 +1472,46 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
             ValueError,
             r"associations\['id_column'\] 'missing' is not a feature column",
         ),
+        (
+            {"associations": {"resampling": "conditional"}},
+            ValueError,
+            "resampling='conditional' goes with moi='high'",
+        ),
+        ({"associations": {"moi": "medium"}}, ValueError, "moi must be"),
+        # At high MOI the stages that compare perturbations with control-only
+        # cells, efficiency and E-distances by default, are refused.
+        (
+            {"associations": {"moi": "high"}},
+            ValueError,
+            re.escape(
+                "associations={'moi': 'high'} tests a screen whose cells carry "
+                "several guides, where hardly any cell carries control guides only, "
+                "but efficiency and edistance compare each perturbation with such "
+                "cells; switch them off for a high-MOI screen with "
+                "efficiency=False, edistance=False"
+            ),
+        ),
+        (
+            {
+                "associations": {"moi": "high"},
+                "efficiency": False,
+                "mixscape": True,
+                "signature": {"dims": 5},
+                "clusters": True,
+            },
+            ValueError,
+            "but edistance, mixscape and clusters compare each perturbation with "
+            "such cells; switch them off for a high-MOI screen with "
+            "edistance=False, mixscape=False, clusters=False",
+        ),
+        # One cell of the screen holds no guide UMI.
+        (
+            {"associations": {"moi": "high"}, "efficiency": False, "edistance": False},
+            ValueError,
+            "High-MOI association tests adjust for the log of each cell's guide "
+            "UMIs, but 1 of the run's cells has none; restrict cells to cells with "
+            "guide UMIs",
+        ),
         ({"clusters": {"metric": "cosine"}}, ValueError, "metric must be"),
         (
             {"clusters": {"perturbations": "GENE_A"}},
@@ -1626,6 +1666,60 @@ def test_only_the_runs_cells_need_labels_and_covariates(readonly) -> None:
         "sample_column": "lane_gaps",
         "covariates": ["depth_gaps", "depth_inf"],
     }
+
+
+def test_the_recipe_passes_the_moi_to_the_association_tests(tmp_path) -> None:
+    # As in a high-MOI screen, no cell carries control guides only: each cell of
+    # a non-targeting guide also carries the guide of GENE_D.
+    guides = GUIDE_COUNTS.astype(np.int64)
+    guides[np.flatnonzero(GUIDE_OF >= 6), 5] += 60
+    store = _write(tmp_path / "screen.zarr", guides=guides.astype(np.uint16))
+    # The high-MOI tests adjust for the log of each cell's guide UMIs, so the
+    # run's cells hold some.
+    with_guides = guides.sum(axis=1) > 0
+    assert not with_guides.all()
+    store.cells.insert("with_guides", with_guides)
+    settings = {"moi": "high", "n_resamples": [99, 499, 999]}
+
+    # The efficiency and E-distance stages compare with control-only cells,
+    # so they are off.
+    run = store.pipeline.perturbation(
+        cells="with_guides",
+        labels=LABELS,
+        efficiency=False,
+        edistance=False,
+        associations=settings,
+        **QUICK,
+    )
+
+    assert (
+        not store.perturbation.load_labels(run["perturbation_labels"])
+        .cells["is_control"]
+        .any()
+    )
+    assert not {"efficiency", "edistance"} & set(dict(run))
+    assert run.report()["run"]["config"]["stages"]["associations"] == settings
+    tests = store.perturbation.load_associations(run["associations"])
+    assert (tests.moi, tests.resampling) == ("high", "conditional")
+    # The control guides, which share cells with GENE_D, make the calibration
+    # groups.
+    assert not tests.calibration.empty
+    # Each target is compared with all other cells of the run.
+    assert (
+        (tests.discovery["n_control_cells"] + tests.discovery["n_cells"])
+        .eq(int(with_guides.sum()))
+        .all()
+    )
+    # The run's tests are those of the method's call with the same settings.
+    assert (
+        store.perturbation.associations(
+            run["perturbation_labels"],
+            features=run["highly_variable_features"],
+            moi="high",
+            n_resamples=(99, 499, 999),
+        )
+        == run["associations"]
+    )
 
 
 def test_a_blank_capture_is_a_label_and_a_blank_sample_is_none() -> None:
