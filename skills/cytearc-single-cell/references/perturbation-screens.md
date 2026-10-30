@@ -1,6 +1,6 @@
 # Pooled CRISPR screens
 
-Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CRISPR Guide Capture) by the guides they carry, check those calls, label each cell by the genes its guides target, check that each perturbation changed its own target gene, and rank perturbations by how far they move their cells from the control cells, step by step or as one durable `ds.pipeline.perturbation` run. Docs: <https://docs.nygen.io/CyteArc/api/perturbation.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Label cells of a pooled CRISPR screen (Perturb-seq, CROP-seq, ECCITE-seq, 10x CRISPR Guide Capture) by the guides they carry, check those calls, label each cell by the genes its guides target, check that each perturbation changed its own target gene, and rank perturbations by how far they move their cells from the control cells, step by step or as one durable `ds.pipeline.perturbation` run. Docs: <https://docs.nygen.io/CyteArc/api/perturbation.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>, <https://docs.nygen.io/CyteArc/tutorials/crispr-screens>.
 
 ## When to use
 

@@ -82,6 +82,7 @@ memory on your workload.
   pipeline. Review [](tutorials/quality_control.ipynb) before interpreting the results.
 - **Use another assay:** follow [](tutorials/scatac_seq.ipynb), [](tutorials/cite_seq.ipynb), or
   [](tutorials/tea_seq.ipynb).
+- **Analyze a CRISPR screen:** [](tutorials/crispr_screens.ipynb) calls guides, separates knocked-out cells from escapers, and tests what each perturbation changes.
 
 Start with {ref}`Installation <installation>` to set up your environment, then follow the
 {ref}`Quick start <quickstart>`. For importing an existing analysis or translating individual

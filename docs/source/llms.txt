@@ -36,6 +36,7 @@ CyteBase, the catalog of public datasets stored as cloud-hosted CyteArc DataStor
 - [TEA-seq](tutorials/tea-seq/): prepared RNA, ATAC, and protein analysis with three-way WNN
 - [WNN and SNN integration](tutorials/multimodal-diagnostics/): compare SNN and WNN and inspect modality weights
 - [HTO demultiplexing](tutorials/hto-demultiplexing/): sample-tag classification and Seurat comparison
+- [Pooled CRISPR screens](tutorials/crispr-screens/): guide calls, perturbation labels, target knockdown, E-distances, Mixscape escapers with protein checks, calibrated association tests and perturbation clusters in an ECCITE-seq screen
 
 ## Integration and mapping
 
