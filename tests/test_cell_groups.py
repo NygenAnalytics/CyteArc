@@ -175,8 +175,12 @@ def test_key_columns_are_checked(store) -> None:
     store.cells.insert("cluster_labels", CLUSTERS.astype(object), overwrite=True)
     with pytest.raises(ValueError, match="name 'cluster_labels' twice"):
         _group(store, group_by="cluster_labels", groups=labels)
-    with pytest.raises(ValueError, match="name 'batch' twice"):
+    # A group_by column whose labels the artifact keeps apart is named as such,
+    # and a label artifact of the kept column's name names it twice.
+    with pytest.raises(ValueError, match="'batch', whose labels the artifact keeps"):
         _group(store, group_by="batch", kept_apart=(("batch", BATCHES),))
+    with pytest.raises(ValueError, match="name 'cluster_labels' twice"):
+        _group(store, groups=labels, kept_apart=(("cluster_labels", BATCHES),))
     with pytest.raises(ValueError, match="key column 'cluster_labels' is also a"):
         _group(store, groups=labels, reserved=frozenset({"cluster_labels"}))
     with pytest.raises(ValueError, match="'absent', which is not a cell metadata"):

@@ -543,6 +543,25 @@ class ImmuneReceptorImportArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class ClonotypeArguments(OperationArguments):
+    operation: ClassVar[str] = "define_clonotypes"
+    artifact_kind: ClassVar[str] = "clonotypes"
+
+    receptors: ArtifactRef = artifact_input()
+    # The fingerprint of each receptor cell's labels in the within columns, or
+    # None without columns.
+    within_fingerprint: str | None = artifact_input()
+    sequence: str = parameter()
+    receptor_arms: str = parameter()
+    dual_ir: str = parameter()
+    same_v_gene: bool = parameter()
+    same_j_gene: bool = parameter()
+    within: tuple[str, ...] = parameter()
+    within_receptor_type: bool = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class GuideThresholdArguments(OperationArguments):
     operation: ClassVar[str] = "fit_guide_thresholds"
     artifact_kind: ClassVar[str] = "guide_thresholds"

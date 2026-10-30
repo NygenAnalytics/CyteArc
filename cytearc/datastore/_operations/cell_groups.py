@@ -238,9 +238,9 @@ def cell_groups(
 
     Raises:
         TypeError: If an argument has the wrong type.
-        ValueError: If a ``group_by`` column is missing or named twice, two
-            key columns share a name, a key column names a column of the
-            result, or two groups get one name.
+        ValueError: If a ``group_by`` column is missing, named twice or kept
+            apart already, two key columns share a name, a key column names a
+            column of the result, or two groups get one name.
         MemoryError: If grouping the cells does not fit the memory budget.
     """
     columns = group_columns(group_by, "group_by", reserved)
@@ -248,7 +248,14 @@ def cell_groups(
         raise TypeError("groups must be an ArtifactRef or None")
     if cell_selection is not None and not isinstance(cell_selection, ArtifactRef):
         raise TypeError("cell_selection must be an ArtifactRef or None")
+    kept = {name for name, _labels in kept_apart}
     for column in columns:
+        if column in kept:
+            raise ValueError(
+                f"group_by names {column!r}, whose labels the artifact keeps apart "
+                "already; leave it out, or copy the cell metadata column under "
+                "another name"
+            )
         if column not in cells.columns:
             raise ValueError(
                 f"group_by names {column!r}, which is not a cell metadata column"

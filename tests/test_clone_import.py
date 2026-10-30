@@ -764,7 +764,9 @@ def test_load_and_export_refuse_other_artifacts(shared, tmp_path) -> None:
         shared.store.clones.load_clones,
         lambda ref: shared.store.clones.export_clones(ref, tmp_path / "x.csv"),
     ):
-        with pytest.raises(ValueError, match="clones must be a clones artifact"):
+        with pytest.raises(
+            ValueError, match="clones must be a clones or clonotypes artifact"
+        ):
             method(other)
         with pytest.raises(TypeError, match="clones must be an ArtifactRef"):
             method("clones")

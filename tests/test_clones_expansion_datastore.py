@@ -326,7 +326,16 @@ def test_expansion_is_reused_and_selected_like_labels(copied) -> None:
     store.cells.insert("sample", TRUTH.samples.astype(object), overwrite=True)
     assert store.clones.expansion(clones, group_by="sample") == by_sample
     store.cells.insert("sample", TRUTH.samples[::-1].astype(object), overwrite=True)
-    assert store.clones.expansion(clones, group_by="sample") != by_sample
+    reversed_samples = store.clones.expansion(clones, group_by="sample")
+    assert reversed_samples != by_sample
+    # Renamed labels that keep every cell's group give another result too, and
+    # the same labels again reuse it.
+    renamed = np.where(TRUTH.samples[::-1] == "d2", "day2", "day4").astype(object)
+    store.cells.insert("sample", renamed, overwrite=True)
+    by_renamed = store.clones.expansion(clones, group_by="sample")
+    assert by_renamed not in (by_sample, reversed_samples)
+    store.cells.insert("sample", renamed.copy(), overwrite=True)
+    assert store.clones.expansion(clones, group_by="sample") == by_renamed
 
 
 def test_cells_without_a_label_are_counted_in_no_group(copied) -> None:
@@ -458,7 +467,9 @@ def test_the_cells_table_orders_the_labels_of_key_columns_naturally(copied) -> N
 def test_expansion_refuses_other_artifacts(shared) -> None:
     store, clones = shared.store, shared.clones
     expansion = store.clones.expansion(clones)
-    with pytest.raises(ValueError, match="clones must be a clones artifact"):
+    with pytest.raises(
+        ValueError, match="clones must be a clones or clonotypes artifact"
+    ):
         store.clones.expansion(shared.cells)
     with pytest.raises(TypeError, match="clones must be an ArtifactRef"):
         store.clones.expansion("clones")

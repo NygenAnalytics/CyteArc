@@ -4,7 +4,8 @@ Each source saves the synthetic truth's clones its own way, in a store of the
 truth's cells, and every summary must measure the truth's clones whatever
 saved them. The expected values are counted cell by cell from the truth, so
 they never come from the code under test. A pull request that adds a clone
-source adds a row to ``SOURCES``; one that adds a summary adds a test here.
+source adds a row to ``SOURCES``, and to ``KEPT_APART`` when its clones keep
+labels apart; one that adds a summary adds a test here.
 """
 
 from collections.abc import Callable
@@ -21,15 +22,17 @@ from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
     coupling_reference,
     import_truth_clones,
+    import_truth_receptors,
     overlap_reference,
     write_truth_store,
 )
-from tests.clone_truth import N_CELLS, clone_truth, number_label
+from tests.clone_truth import N_CELLS, clone_truth, number_label, receptor_truth
 from tests.storage_helpers import insert_nullable_cell_column
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
 TRUTH = clone_truth()
+RECEPTORS = receptor_truth(TRUTH)
 SAMPLES = ("d2", "d4")
 
 
@@ -37,10 +40,28 @@ def _imported_clones(store: DataStore, folder: Path) -> ArtifactRef:
     return import_truth_clones(store, TRUTH, folder)
 
 
+def _clonotypes(store: DataStore, folder: Path) -> ArtifactRef:
+    # Under receptor_arms="any" a cell that lost one of its clone's chains
+    # still joins the clone, so within each receptor type the clonotypes are
+    # the truth's clones; its multichain and ambiguous cells are receptor
+    # types of their own.
+    receptors = import_truth_receptors(store, RECEPTORS, folder)
+    return store.repertoire.clonotypes(receptors, receptor_arms="any")
+
+
 #: How each clone source saves the truth's clones, in the order the stack adds
 #: them.
 SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
     "imported clones": _imported_clones,
+    "clonotypes": _clonotypes,
+}
+#: The labels that a source's clones keep apart, by key column, for each of the
+#: truth's cells: every summary measures the cells of each label apart, so T
+#: cells and B cells never share a group.
+KEPT_APART: dict[str, dict[str, np.ndarray]] = {
+    "clonotypes": {
+        "receptor_type": RECEPTORS.expected["receptor_type"].to_numpy(dtype=object)
+    },
 }
 
 
@@ -53,11 +74,36 @@ def source(request, tmp_path_factory) -> SimpleNamespace:
     insert_nullable_cell_column(
         store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
     )
-    return SimpleNamespace(store=store, clones=SOURCES[request.param](store, folder))
+    return SimpleNamespace(
+        store=store,
+        clones=SOURCES[request.param](store, folder),
+        kept_apart=KEPT_APART.get(request.param, {}),
+    )
 
 
-def _by_sample(cells: np.ndarray | None = None) -> dict[object, list[int]]:
-    return TRUTH.group_clone_sizes(TRUTH.samples, cells=cells)
+def _groups(source, labels: np.ndarray | None = None) -> np.ndarray:
+    """Each of the truth's cells' group, named as the summaries name it.
+
+    A group is named by the cell's labels joined by commas: the labels given,
+    then those that the source's clones keep apart; without any, every cell
+    is in ``"all cells"``.
+    """
+    columns = [] if labels is None else [np.asarray(labels, dtype=object)]
+    columns += [
+        np.asarray(values, dtype=object) for values in source.kept_apart.values()
+    ]
+    if not columns:
+        return np.full(N_CELLS, "all cells", dtype=object)
+    return np.asarray(
+        [", ".join(str(label) for label in parts) for parts in zip(*columns)],
+        dtype=object,
+    )
+
+
+def _by_group(
+    source, labels: np.ndarray | None = None, cells: np.ndarray | None = None
+) -> dict[object, list[int]]:
+    return TRUTH.group_clone_sizes(_groups(source, labels), cells=cells)
 
 
 def test_clone_abundance_counts_the_clones_of_each_size(source) -> None:
@@ -65,9 +111,10 @@ def test_clone_abundance_counts_the_clones_of_each_size(source) -> None:
         source.clones, group_by="sample", show=False
     )
     sizes = result.tables["sizes"]
-    for sample in SAMPLES:
-        rows = sizes[sizes["group"] == sample]
-        found = _by_sample()[sample]
+    expected = _by_group(source, TRUTH.samples)
+    assert set(sizes["group"]) == set(expected)
+    for group, found in expected.items():
+        rows = sizes[sizes["group"] == group]
         assert dict(zip(rows["clone_size"], rows["n_clones"], strict=True)) == {
             size: found.count(size) for size in set(found)
         }
@@ -81,21 +128,25 @@ def test_expansion_counts_each_clone_within_each_sample(source) -> None:
     )
     cells = loaded.cells.loc[TRUTH.cell_ids]
     np.testing.assert_array_equal(
-        cells["group_clone_size"], TRUTH.cell_clone_sizes(TRUTH.samples)
+        cells["group_clone_size"],
+        TRUTH.cell_clone_sizes(_groups(source, TRUTH.samples)),
     )
-    totals = loaded.categories.groupby("sample")["cells"].sum().to_dict()
-    assert totals == {sample: sum(_by_sample()[sample]) for sample in SAMPLES}
-    clones = loaded.categories.groupby("sample")["clones"].sum().to_dict()
-    assert clones == {sample: len(_by_sample()[sample]) for sample in SAMPLES}
+    expected = _by_group(source, TRUTH.samples)
+    totals = loaded.categories.groupby("group")["cells"].sum().to_dict()
+    assert totals == {group: sum(found) for group, found in expected.items()}
+    clones = loaded.categories.groupby("group")["clones"].sum().to_dict()
+    assert clones == {group: len(found) for group, found in expected.items()}
 
 
 def test_diversity_measures_the_clone_sizes_of_each_sample(source) -> None:
     result = source.store.clones.diversity(source.clones, group_by="sample")
-    indices = result.indices.set_index("sample")
-    for sample in SAMPLES:
-        found = np.asarray(_by_sample()[sample])
+    indices = result.indices.set_index("group")
+    expected = _by_group(source, TRUTH.samples)
+    assert sorted(indices.index) == sorted(expected)
+    for group, sizes in expected.items():
+        found = np.asarray(sizes)
         shares = found / found.sum()
-        row = indices.loc[sample]
+        row = indices.loc[group]
         assert row[["cells", "clones", "singletons", "doubletons"]].tolist() == [
             found.sum(),
             len(found),
@@ -111,10 +162,12 @@ def test_rarefaction_reaches_each_samples_observed_diversity(source) -> None:
         source.clones, group_by="sample", orders=(0, 2)
     )
     observed = result.curves[result.curves["method"] == "observed"]
-    for sample in SAMPLES:
-        found = np.asarray(_by_sample()[sample])
+    expected = _by_group(source, TRUTH.samples)
+    assert set(observed["group"]) == set(expected)
+    for group, sizes in expected.items():
+        found = np.asarray(sizes)
         shares = found / found.sum()
-        rows = observed[observed["sample"] == sample].set_index("order")
+        rows = observed[observed["group"] == group].set_index("order")
         assert rows.loc[0, "size"] == found.sum()
         assert rows.loc[0, "diversity"] == len(found)
         assert rows.loc[2, "diversity"] == pytest.approx(1 / np.sum(shares**2))
@@ -192,21 +245,54 @@ def test_fate_bias_follows_early_cells_to_their_clones_late_cells(source) -> Non
     }
 
 
+def test_summaries_report_each_label_their_clones_keep_apart(source) -> None:
+    store = source.store
+    columns = ["sample", *source.kept_apart]
+    clonal = TRUTH.clones >= 0
+    labels = [TRUTH.samples, *source.kept_apart.values()]
+    # Each group's labels in the key columns, from the truth's cells with a
+    # clone.
+    expected = sorted(
+        {
+            tuple(str(values[cell]) for values in labels)
+            for cell in np.flatnonzero(clonal)
+        }
+    )
+    diversity = store.clones.diversity(source.clones, group_by="sample").indices
+    assert sorted(map(tuple, diversity[columns].values.tolist())) == expected
+    curves = store.clones.rarefaction(source.clones, group_by="sample").curves
+    assert sorted(set(map(tuple, curves[columns].values.tolist()))) == expected
+    expansion = store.clones.load_expansion(
+        store.clones.expansion(source.clones, group_by="sample")
+    )
+    assert sorted(set(map(tuple, expansion.categories[columns].values.tolist()))) == (
+        expected
+    )
+    if source.kept_apart:
+        # T cells and B cells of one sample are measured apart.
+        types = {key[:2] for key in expected}
+        assert {("d2", "TCR"), ("d2", "BCR")} <= types
+
+
 def test_summaries_keep_to_a_cell_selection(source) -> None:
     store = source.store
     d2 = TRUTH.samples == "d2"
     selection = store.snapshot_cell_selection("is_d2")
-    found = _by_sample(cells=d2)["d2"]
+    expected = _by_group(source, cells=d2)
     diversity = store.clones.diversity(source.clones, cell_selection=selection)
-    assert diversity.indices[["cells", "clones"]].values.tolist() == [
-        [sum(found), len(found)]
-    ]
+    assert {
+        group: [cells, clones]
+        for group, cells, clones in diversity.indices[
+            ["group", "cells", "clones"]
+        ].values.tolist()
+    } == {group: [sum(found), len(found)] for group, found in expected.items()}
     expansion = store.clones.load_expansion(
         store.clones.expansion(source.clones, cell_selection=selection)
     )
     assert expansion.cells.index.tolist() == TRUTH.cell_ids[d2].tolist()
     np.testing.assert_array_equal(
-        expansion.cells["group_clone_size"], TRUTH.cell_clone_sizes(cells=d2)[d2]
+        expansion.cells["group_clone_size"],
+        TRUTH.cell_clone_sizes(_groups(source), cells=d2)[d2],
     )
     by_type = TRUTH.group_clone_cells(TRUTH.cell_types, cells=d2)
     overlap = store.clones.overlap(

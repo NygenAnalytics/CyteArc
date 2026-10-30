@@ -1,11 +1,12 @@
-"""Benchmarks of the import of immune receptor contigs.
+"""Benchmarks of the import of immune receptor contigs and of clonotypes.
 
 An import encodes the parsed contigs chunk by chunk, holding each distinct
 gene call and junction once, and then ranks each cell's chains and labels its
-receptor. Each benchmark runs one step on a simulated T cell repertoire in
-which most cells carry one alpha and one beta chain, some a second alpha
-chain, and clones of many sizes share their junctions, and checks the result,
-so it doubles as a test at the smoke size.
+receptor; clonotypes group the cells by identical chains. Each benchmark runs
+one step on a simulated T cell repertoire in which most cells carry one alpha
+and one beta chain, some a second alpha chain, and clones of many sizes share
+their junctions, and checks the result, so it doubles as a test at the smoke
+size.
 """
 
 from functools import lru_cache
@@ -153,3 +154,38 @@ def test_index_chains(bench) -> None:
         }
 
     bench("repertoire.index_chains", make, LADDER, check=check)
+
+
+@lru_cache(maxsize=1)
+def _slot_junctions(n_cells: int) -> np.ndarray:
+    """Return the junction code in each cell's four chain slots."""
+    from cytearc.repertoire.chains import index_chains
+
+    table = _table(n_cells)
+    index = index_chains(table, n_cells, locus=table.text["locus"])
+    codes = np.asarray(table.text["junction_aa"].codes, dtype=np.int64)
+    slots = np.full(index.slots.shape, -1, dtype=np.int64)
+    filled = index.slots >= 0
+    slots[filled] = codes[index.slots[filled]]
+    return slots
+
+
+def test_assign_clonotypes(bench) -> None:
+    from cytearc.repertoire.clonotypes import assign_clonotypes
+
+    def make(n_cells: int):
+        sequences = _slot_junctions(n_cells)
+        groups = np.where((sequences >= 0).any(axis=1), 0, -1)
+        return lambda: assign_clonotypes(sequences, groups=groups)
+
+    def check(n_cells: int, assignment) -> None:
+        sequences = _slot_junctions(n_cells)
+        has = (sequences >= 0).any(axis=1)
+        np.testing.assert_array_equal(assignment.codes >= 0, has)
+        assert assignment.sizes.sum() == has.sum()
+        assert (np.diff(assignment.sizes) <= 0).all()
+        # Cells with the same chains in every slot share a clonotype.
+        frame = pd.DataFrame(sequences[has]).assign(code=assignment.codes[has])
+        assert (frame.groupby([0, 1, 2, 3])["code"].nunique() == 1).all()
+
+    bench("repertoire.assign_clonotypes", make, LADDER, check=check)

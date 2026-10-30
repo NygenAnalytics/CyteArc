@@ -9,7 +9,14 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from tests.clone_truth import N_CELLS, CloneTruth, write_cospar
+from tests.clone_truth import (
+    N_CELLS,
+    SAMPLES,
+    CloneTruth,
+    ReceptorTruth,
+    write_cellranger_contigs,
+    write_cospar,
+)
 from tests.storage_helpers import write_count_store
 
 if TYPE_CHECKING:
@@ -166,6 +173,39 @@ def benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
     adjusted = np.empty_like(p)
     adjusted[order] = np.minimum(np.minimum.accumulate(ranked[::-1])[::-1], 1.0)
     return adjusted
+
+
+def import_truth_receptors(
+    store: "DataStore",
+    receptors: ReceptorTruth,
+    folder: Path,
+    *,
+    cell_selection: "ArtifactRef | None" = None,
+) -> "ArtifactRef":
+    """Import the truth's receptors from each sample's contig annotations.
+
+    Each sample's T cell and B cell contigs of called cells go in files of
+    their own, as ``cellranger multi`` writes them, joined to the store's
+    cells with the sample's prefix. The files also list barcodes outside the
+    store, about which the import warns.
+    """
+    paths = [
+        write_cellranger_contigs(
+            receptors,
+            folder / f"{sample}_{receptor}_contigs.csv",
+            sample=sample,
+            receptor=receptor,
+        )
+        for sample in SAMPLES
+        for receptor in ("TCR", "BCR")
+    ]
+    selection = every_cell(store) if cell_selection is None else cell_selection
+    with pytest.warns(UserWarning, match="match no selected cell"):
+        return store.repertoire.import_receptors(
+            paths,
+            cell_selection=selection,
+            barcode_prefix=[f"{sample}__" for sample in SAMPLES for _ in range(2)],
+        )
 
 
 # The cells of the receptor store are cell0 to cell7.

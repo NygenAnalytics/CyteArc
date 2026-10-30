@@ -9,10 +9,11 @@ import pandas as pd
 from ..clones.diversity import ORDERS
 from ..clones.fate import CloneCoupling, dominant_fates
 from ..clones.expansion import DEFAULT_RANK_SPLITS, rank_window_labels, rank_windows
+from ..clones.groups import group_names
 from ..clones.overlap import OVERLAP_INDICES
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import integer_argument
-from ..utils.arrays import sort_categories, sorted_unique
+from ..utils.arrays import sort_categories, sorted_unique, unique_rows
 from ._contracts import PlotProvenance
 from ._deps import require_matplotlib
 from ._figure import (
@@ -64,6 +65,48 @@ def _load_clones(store: Any, clones: ArtifactRef) -> Any:
     return _clones_method(store, "load_clones")(clones)
 
 
+def _kept_apart_groups(
+    loaded: Any, labels: np.ndarray | None, names: list[str]
+) -> tuple[np.ndarray, list[str]]:
+    """Each cell's group by its plotted group and the labels its clones keep apart.
+
+    The groups are the combinations of a cell's plotted group, when there is
+    a grouping, and its labels in each column of ``loaded.kept_apart``, such
+    as its receptor type, in the natural order of the labels; each is named
+    by its labels joined by commas.
+
+    Returns:
+        Each cell's group, a position in the names, -1 without one, and the
+        names of the groups that some cell holds.
+    """
+    coded: list[tuple[np.ndarray, list[str]]] = []
+    if labels is not None:
+        coded.append((np.asarray(labels, dtype=np.int64), list(names)))
+    for column in loaded.kept_apart:
+        values = loaded.cells[column]
+        coded.append(
+            (
+                np.asarray(values.cat.codes, dtype=np.int64),
+                [str(label) for label in values.cat.categories],
+            )
+        )
+    stacked = np.column_stack([codes for codes, _names in coded])
+    keep = (stacked >= 0).all(axis=1)
+    combinations, group_codes = unique_rows(stacked[keep])
+    keys = [
+        {
+            str(position): column_names[code]
+            for position, ((_codes, column_names), code) in enumerate(
+                zip(coded, row, strict=True)
+            )
+        }
+        for row in combinations.tolist()
+    ]
+    cell_group = np.full(len(stacked), -1, dtype=np.int64)
+    cell_group[keep] = group_codes
+    return cell_group, group_names(keys)
+
+
 @close_figures_on_error
 def clone_abundance(
     store: Any,
@@ -80,33 +123,46 @@ def clone_abundance(
 ) -> PlotResult:
     """Plot how many clones have each size, and the largest clones.
 
-    ``clones`` is a ``clones`` artifact, such as one from
-    ``ds.clones.import_clones``. The first panel counts clones by their
-    number of cells on log scales: in most experiments many clones hold one
-    or a few cells, and expanded clones form the tail. The second panel draws
-    the ``top`` clones with the most cells, labelled with their IDs.
+    ``clones`` is a clone artifact, such as one from
+    ``ds.clones.import_clones`` or ``ds.repertoire.clonotypes``. The first
+    panel counts clones by their number of cells on log scales: in most
+    experiments many clones hold one or a few cells, and expanded clones form
+    the tail. The second panel draws the ``top`` clones with the most cells,
+    labelled with their IDs.
 
     ``group_by`` names a cell metadata column, such as the sample or time
     point, and ``groups`` a cell-label artifact, such as a clustering; with
     either, the first panel draws one line per group, counting the cells of
     each clone within the group, and the second stacks each clone's cells by
     group. Cells without a group are left out. The plot raises ``ValueError``
-    when no cell with a group has a clone.
+    when no cell with a group has a clone. Clonotypes are counted within each
+    receptor type, as every clone summary counts them, so their groups are
+    the receptor types, or each group's receptor types, named like
+    ``"s1, TCR"``.
 
     Tables: ``sizes`` (``group``, ``clone_size``, ``n_clones``) and ``top``
     (``clone``, then the cells of each group, or ``cells``).
     """
     top = integer_argument(top, "top", minimum=1)
     loaded = _load_clones(store, clones)
+    if group_by in loaded.kept_apart:
+        raise ValueError(
+            f"group_by names {group_by!r}, whose labels the clones keep apart "
+            "already; leave it out, or copy the cell metadata column under "
+            "another name"
+        )
     group_labels, names, group_name = cell_groups(
         store, clones, group_by=group_by, groups=groups
     )
     codes = np.asarray(loaded.cells["clone"].cat.codes, dtype=np.int64)
-    if group_labels is None:
+    grouped = group_labels is not None or bool(loaded.kept_apart)
+    if not grouped:
         cell_group = np.zeros(len(codes), dtype=np.int64)
         names = ["all cells"]
     else:
-        cell_group = group_labels
+        cell_group, names = _kept_apart_groups(loaded, group_labels, names)
+        plotted = [] if group_name is None else [group_name]
+        group_name = ", ".join([*plotted, *loaded.kept_apart])
     keep = (codes >= 0) & (cell_group >= 0)
     if not keep.any():
         raise ValueError(
@@ -148,7 +204,7 @@ def clone_abundance(
         matrix, columns=pd.Index([str(name) for name in group_order])
     )
     top_table.insert(0, "clone", ids[chosen])
-    if group_labels is None:
+    if not grouped:
         top_table = top_table.rename(columns={"all cells": "cells"})
     if figsize is None and target is None:
         figsize = (12.0, max(3.6, 0.28 * len(top_table) + 1.2))
@@ -179,7 +235,7 @@ def clone_abundance(
         ax.set_xlabel("Cells of the clone")
         ax.set_ylabel("Clones")
         ax.set_title("Clone sizes")
-        if show_legend and group_labels is not None:
+        if show_legend and grouped:
             ax.legend(frameon=False, fontsize="small")
         ax = axes["top"]
         positions = np.arange(len(top_table))[::-1]
@@ -193,16 +249,14 @@ def clone_abundance(
         )
         ax.set_xlabel("Cells")
         ax.set_title(f"Largest {len(top_table)} clones")
-        if show_legend and group_labels is not None:
+        if show_legend and grouped:
             ax.legend(frameon=False, fontsize="small", loc="lower right")
         apply_figure_chrome(figure, theme)
     plot_result = PlotResult(
         figure=figure,
         axes=axes,
         tables={"sizes": sizes, "top": top_table},
-        legends=(LegendSpec(kind="categorical", label=group_name),)
-        if group_labels is not None
-        else (),
+        legends=(LegendSpec(kind="categorical", label=group_name),) if grouped else (),
         scales=(),
         provenance=PlotProvenance(
             assay=None,
@@ -463,7 +517,7 @@ def clonal_rarefaction(
 ) -> PlotResult:
     """Plot the rarefaction and extrapolation curves of groups of cells.
 
-    ``clones`` is a ``clones`` artifact. Each panel draws one order of Hill
+    ``clones`` is a clone artifact. Each panel draws one order of Hill
     numbers, the effective number of clones, against the cells sampled
     (``base="size"``) or the sample coverage (``base="coverage"``), as
     iNEXT's ``ggiNEXT`` draws them: one line per group, solid where the group
