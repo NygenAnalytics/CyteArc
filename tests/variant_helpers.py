@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -290,3 +291,70 @@ def download_or_skip(url: str, path: Path) -> Path:
         partial.replace(path)
         return path
     pytest.skip(f"{url} could not be downloaded whole: {failure}")
+
+
+def expected_mito_statistics(truth: VariantTruth, rows: list[int]) -> pd.DataFrame:
+    """mgatk's per-variant statistics of the chosen rows, from the truth's reads.
+
+    Every alternative base that some chosen cell reads is scored over the
+    chosen cells: the pooled frequency, the sample variance of the covered
+    cells' frequencies, the cells read twice on each strand, the strand
+    correlation of the cells that read it, the cells over each level, the
+    largest frequency, the mean depth, and MAESTER's mean base quality.
+    """
+    reads = truth.mito[rows]
+    quality = truth.quality[rows]
+    depth = reads.sum(axis=(2, 3))
+    records = {}
+    for position in SITE_POSITIONS:
+        reference = REFERENCE[position - 1]
+        site_depth = depth[:, position - 1]
+        covered = site_depth > 0
+        for base_index, base in enumerate(BASES):
+            if base == reference:
+                continue
+            forward = reads[:, position - 1, base_index, 0]
+            reverse = reads[:, position - 1, base_index, 1]
+            alternative = forward + reverse
+            if not alternative.sum():
+                continue
+            frequency = alternative[covered] / site_depth[covered]
+            shown = alternative > 0
+            f, r = forward[shown].astype(float), reverse[shown].astype(float)
+            correlation = (
+                float(np.corrcoef(f, r)[0, 1])
+                if shown.sum() > 1 and f.std() > 0 and r.std() > 0
+                else np.nan
+            )
+            strand_quality = np.concatenate(
+                [
+                    quality[:, position - 1, base_index, 0][forward > 0],
+                    quality[:, position - 1, base_index, 1][reverse > 0],
+                ]
+            )
+            mean = alternative.sum() / site_depth.sum()
+            variance = frequency.var(ddof=1) if covered.sum() > 1 else np.nan
+            records[f"{CONTIG}:{position}{reference}>{base}"] = {
+                "mean": mean,
+                "variance": variance,
+                "vmr": variance / (mean + 1e-11),
+                "n_cells_conf_detected": int(((forward >= 2) & (reverse >= 2)).sum()),
+                "strand_correlation": correlation,
+                "n_cells_over_5": int((frequency >= 0.05).sum()),
+                "n_cells_over_10": int((frequency >= 0.10).sum()),
+                "n_cells_over_20": int((frequency >= 0.20).sum()),
+                "n_cells_over_95": int((frequency >= 0.95).sum()),
+                "max_heteroplasmy": frequency.max(),
+                "mean_coverage": site_depth.sum() / len(rows),
+                "n_cells_covered": int(covered.sum()),
+                "mean_quality": strand_quality.mean(),
+            }
+    return pd.DataFrame.from_dict(records, orient="index")
+
+
+def mito_variant_labels(truth: VariantTruth) -> set[str]:
+    """The labels of the truth's clone variants, such as ``chrM:13A>G``."""
+    return {
+        f"{CONTIG}:{position}{reference}>{alternative}"
+        for position, reference, alternative in truth.variant_sites()
+    }

@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from ..storage.refs import ArtifactRef
+from ..utils.arguments import integer_argument
 from ._contracts import PlotProvenance
 from ._deps import require_matplotlib
 from ._figure import (
@@ -15,12 +16,19 @@ from ._figure import (
     normalize_axes_target,
 )
 from ._groups import cell_groups
-from ._style import apply_figure_chrome, theme_context
+from ._style import apply_figure_chrome, palette_for_n, theme_context
 
-__all__ = ["variant_depth"]
+__all__ = ["allele_frequencies", "variant_depth", "variant_statistics"]
 
 # Bins of the histogram of the cells' mean depth, on a log scale.
 _DEPTH_BINS = 40
+# The smallest VMR drawn on the log scale; variants that no covered cell
+# varies in sit there.
+_VMR_FLOOR = 1e-6
+# The colour of uncovered entries of the allele frequency heatmap.
+_UNCOVERED_COLOR = "#d9d9d9"
+# The height of the bar of clone colours above the heatmap.
+_CLONE_BAR_INCHES = 0.25
 
 
 def _load_counts(store: Any, counts: ArtifactRef, **options: Any) -> Any:
@@ -28,6 +36,13 @@ def _load_counts(store: Any, counts: ArtifactRef, **options: Any) -> Any:
     if not callable(loader):
         raise TypeError("store does not provide variants.load_counts")
     return loader(counts, **options)
+
+
+def _load_selection(store: Any, variants: ArtifactRef) -> Any:
+    loader = getattr(getattr(store, "variants", None), "load_informative", None)
+    if not callable(loader):
+        raise TypeError("store does not provide variants.load_informative")
+    return loader(variants)
 
 
 @close_figures_on_error
@@ -185,6 +200,314 @@ def variant_depth(
                 "counts": counts.to_dict(),
                 "grouping": group_name,
                 "count_unit": by_site.count_unit,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+@close_figures_on_error
+def variant_statistics(
+    store: Any,
+    variants: ArtifactRef,
+    *,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot each variant's VMR against its strand correlation.
+
+    ``variants`` is a ``variant_selection`` artifact from
+    ``ds.variants.informative``. Each point is a variant that some cell
+    shows: the Pearson correlation of its forward and reverse counts across
+    cells, against the ratio of the variance of its allele frequency to its
+    mean, on a log scale, as mgatk draws it. Sequencing errors sit on one
+    strand and spread evenly across cells, so informative variants sit at
+    the top right. Informative variants are marked, masked ones drawn as
+    crosses, and the selection's VMR and strand correlation thresholds drawn
+    as lines. A variant without a strand correlation, such as one that a
+    single cell shows, is left out; for counts without strands, the x axis is
+    the mean depth at the site instead.
+
+    Tables: ``variants`` (``variant``, ``vmr``, ``strand_correlation``,
+    ``mean_coverage``, ``masked``, ``informative``).
+
+    Raises:
+        ValueError: If no variant has a value on the x axis.
+    """
+    selection = _load_selection(store, variants)
+    frame = selection.variants
+    strand = frame["strand_correlation"].to_numpy(dtype=np.float64)
+    stranded = bool(np.isfinite(strand).any())
+    x_values = strand if stranded else frame["mean_coverage"].to_numpy(dtype=np.float64)
+    shown = np.isfinite(x_values)
+    if not shown.any():
+        raise ValueError("No variant has a strand correlation or a mean depth to plot")
+    vmr = frame["vmr"].to_numpy(dtype=np.float64)
+    table = pd.DataFrame(
+        {
+            "variant": frame.index.to_numpy(dtype=object),
+            "vmr": vmr,
+            "strand_correlation": strand,
+            "mean_coverage": frame["mean_coverage"].to_numpy(dtype=np.float64),
+            "masked": frame["masked"].to_numpy(dtype=bool),
+            "informative": frame["informative"].to_numpy(dtype=bool),
+        }
+    )
+    if figsize is None and target is None:
+        figsize = (6.0, 4.8)
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=["variants"], figsize=figsize
+        )
+        ax = axes["variants"]
+        y_values = np.where(np.isfinite(vmr) & (vmr > _VMR_FLOOR), vmr, _VMR_FLOOR)
+        informative = table["informative"].to_numpy() & shown
+        masked = table["masked"].to_numpy() & shown
+        other = shown & ~informative & ~masked
+        colors = palette_for_n(2)
+        ax.scatter(
+            x_values[other], y_values[other], s=6, color="#9e9e9e", label="other"
+        )
+        ax.scatter(
+            x_values[informative],
+            y_values[informative],
+            s=14,
+            color=colors[0],
+            label="informative",
+        )
+        if masked.any():
+            ax.scatter(
+                x_values[masked],
+                y_values[masked],
+                s=18,
+                marker="x",
+                color=colors[1],
+                label="masked",
+            )
+        thresholds = selection.thresholds
+        if thresholds.get("min_vmr") is not None:
+            ax.axhline(float(thresholds["min_vmr"]), color="#c0392b", linestyle=":")
+        if stranded and thresholds.get("min_strand_correlation") is not None:
+            ax.axvline(
+                float(thresholds["min_strand_correlation"]),
+                color="#c0392b",
+                linestyle=":",
+            )
+        if not stranded and thresholds.get("min_depth") is not None:
+            ax.axvline(float(thresholds["min_depth"]), color="#c0392b", linestyle=":")
+        ax.set_yscale("log")
+        if not stranded:
+            ax.set_xscale("log")
+        ax.set_xlabel("Strand correlation" if stranded else "Mean depth at the site")
+        ax.set_ylabel("Variance-mean ratio")
+        ax.set_title(f"{int(informative.sum())} informative of {int(shown.sum())}")
+        if show_legend:
+            ax.legend(frameon=False, fontsize="small")
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"variants": table},
+        legends=(LegendSpec(kind="categorical", label="variants"),),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(selection.n_cells),
+            renderer="matplotlib",
+            notes=("variant_selection",),
+            extras={
+                "variants": variants.to_dict(),
+                "x": "strand_correlation" if stranded else "mean_coverage",
+                "thresholds": dict(selection.thresholds),
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+@close_figures_on_error
+def allele_frequencies(
+    store: Any,
+    variants: ArtifactRef,
+    *,
+    clones: ArtifactRef | None = None,
+    max_cells: int = 2000,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot each cell's allele frequency of each informative variant.
+
+    ``variants`` is a ``variant_selection`` artifact from
+    ``ds.variants.informative``; its informative variants are the rows, in
+    their order along the genome, and cells are the columns. With ``clones``,
+    such as one from ``ds.variants.clones``, the cells with a clone are drawn
+    ordered by clone, largest first, under a bar of clone colours; without
+    it, the cells that the statistics covered are drawn in their order. A
+    cell that was not covered at a variant's site has no allele frequency
+    and is drawn grey, apart from a frequency of 0. At most ``max_cells``
+    cells are drawn, chosen evenly along the order so that each clone keeps
+    its share.
+
+    Tables: ``frequencies`` (``cell``, ``variant``, ``frequency``, NaN where
+    the cell was not covered) and ``cells`` (``cell``, ``clone``, NA without
+    clones).
+
+    Raises:
+        ValueError: If the selection has no informative variant, or no cell
+            has a clone.
+    """
+    max_cells = integer_argument(max_cells, "max_cells", minimum=1)
+    selection = _load_selection(store, variants)
+    chosen = selection.variants[selection.variants["informative"]]
+    if chosen.empty:
+        raise ValueError("The selection has no informative variant to plot")
+    if clones is not None:
+        loader = getattr(getattr(store, "clones", None), "load_clones", None)
+        if not callable(loader):
+            raise TypeError("store does not provide clones.load_clones")
+        clone_cells = loader(clones).cells
+        codes = np.asarray(clone_cells["clone"].cat.codes, dtype=np.int64)
+        held = codes >= 0
+        if not held.any():
+            raise ValueError("No cell has a clone, so there is nothing to plot")
+        order = np.flatnonzero(held)[np.argsort(codes[held], kind="stable")]
+        cell_ids = clone_cells.index.to_numpy(dtype=object)[order]
+        cell_clones = clone_cells["clone"].astype(object).to_numpy(dtype=object)[order]
+    else:
+        listed = _load_counts(
+            store, selection.counts, sites=[], cells=selection.cells
+        ).cells
+        listed = listed[listed["listed"].to_numpy(dtype=bool)]
+        cell_ids = listed.index.to_numpy(dtype=object)
+        cell_clones = np.full(len(cell_ids), None, dtype=object)
+    if len(cell_ids) > max_cells:
+        picked = np.unique(np.linspace(0, len(cell_ids) - 1, max_cells).round())
+        cell_ids = cell_ids[picked.astype(np.int64)]
+        cell_clones = cell_clones[picked.astype(np.int64)]
+    site_labels = list(dict.fromkeys(chosen["site"].tolist()))
+    loaded = _load_counts(
+        store, selection.counts, sites=site_labels, cells=list(cell_ids)
+    )
+    column = {cell: position for position, cell in enumerate(cell_ids.tolist())}
+    depth = np.zeros((len(site_labels), len(cell_ids)), dtype=np.float64)
+    site_row = {site: position for position, site in enumerate(site_labels)}
+    depth_frame = loaded.depth
+    depth[
+        [site_row[site] for site in depth_frame["site"].astype(str)],
+        [column[cell] for cell in depth_frame["cell"].astype(str)],
+    ] = depth_frame["depth"].to_numpy(dtype=np.float64)
+    count_frame = loaded.counts
+    keys = {
+        (site, allele): position
+        for position, (site, allele) in enumerate(
+            zip(chosen["site"].tolist(), chosen["alternative"].tolist(), strict=True)
+        )
+    }
+    counts = np.zeros((len(chosen), len(cell_ids)), dtype=np.float64)
+    for site, allele, cell, count in zip(
+        count_frame["site"].astype(str).tolist(),
+        count_frame["allele"].astype(str).tolist(),
+        count_frame["cell"].astype(str).tolist(),
+        count_frame["count"].tolist(),
+        strict=True,
+    ):
+        row = keys.get((site, allele))
+        if row is not None:
+            counts[row, column[cell]] = float(count)
+    variant_depth = depth[[site_row[site] for site in chosen["site"].tolist()]]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        matrix = np.where(variant_depth > 0, counts / variant_depth, np.nan)
+    frequencies = pd.DataFrame(
+        {
+            "cell": np.repeat(cell_ids, len(chosen)),
+            "variant": np.tile(chosen.index.to_numpy(dtype=object), len(cell_ids)),
+            "frequency": matrix.T.reshape(-1),
+        }
+    )
+    cells_table = pd.DataFrame(
+        {"cell": cell_ids, "clone": pd.array(cell_clones, dtype="string")}
+    )
+    if figsize is None and target is None:
+        figsize = (10.0, max(3.0, 0.25 * len(chosen) + 1.5))
+    plt, _ = require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=["frequencies"], figsize=figsize
+        )
+        colormap = plt.get_cmap("viridis").with_extremes(bad=_UNCOVERED_COLOR)
+        ax = axes["frequencies"]
+        image = ax.imshow(
+            np.ma.masked_invalid(matrix),
+            aspect="auto",
+            interpolation="nearest",
+            cmap=colormap,
+            vmin=0.0,
+            vmax=1.0,
+        )
+        ax.set_yticks(
+            np.arange(len(chosen)),
+            [str(label) for label in chosen.index.tolist()],
+            fontsize="small",
+        )
+        ax.set_xticks([])
+        ax.set_xlabel(f"Cells ({len(cell_ids)}; grey: not covered)")
+        if show_legend:
+            figure.colorbar(image, ax=ax, label="Allele frequency", fraction=0.03)
+        if clones is not None:
+            # A bar of clone colours, a quarter inch high, above the cells.
+            height = _CLONE_BAR_INCHES / max(
+                figure.get_figheight() * ax.get_position().height, 1e-6
+            )
+            strip = ax.inset_axes((0.0, 1.0 + height / 4, 1.0, height))
+            axes["clones"] = strip
+            names = list(dict.fromkeys(cell_clones.tolist()))
+            colors = palette_for_n(len(names))
+            lookup = {name: position for position, name in enumerate(names)}
+            from matplotlib.colors import ListedColormap
+
+            strip.imshow(
+                np.asarray([[lookup[name] for name in cell_clones.tolist()]]),
+                aspect="auto",
+                interpolation="nearest",
+                cmap=ListedColormap(colors),
+                vmin=-0.5,
+                vmax=len(names) - 0.5,
+            )
+            strip.set_xticks([])
+            strip.set_yticks([0], ["clone"])
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"frequencies": frequencies, "cells": cells_table},
+        legends=(LegendSpec(kind="continuous", label="Allele frequency"),),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=len(cell_ids),
+            renderer="matplotlib",
+            notes=("variant_selection",),
+            extras={
+                "variants": variants.to_dict(),
+                "clones": None if clones is None else clones.to_dict(),
+                "n_variants": len(chosen),
             },
         ),
         owns_figure=owns,

@@ -8,15 +8,29 @@ import numpy as np
 import pandas as pd
 import zarr
 
-from ...metadata.arguments import VariantCountImportArguments
+from ...clones.assignments import CloneAssignment, ranked_clones
+from ...metadata.arguments import (
+    VariantCloneArguments,
+    VariantCountImportArguments,
+    VariantSelectionArguments,
+)
 from ...metadata.artifacts import plan_cell_data_artifact
-from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
-from ...metadata.selection import cell_selection_indices
+from ...metadata.rows import (
+    read_metadata_missing_rows_chunkwise,
+    read_metadata_rows_chunkwise,
+    text_read_bytes,
+)
+from ...metadata.selection import category_codes, cell_selection_indices
 from ...storage.arrays import create_metadata_column
-from ...storage.artifact_writer import PlannedArtifact, artifact_transaction
+from ...storage.artifact_writer import (
+    PlannedArtifact,
+    artifact_transaction,
+    plan_artifact,
+)
 from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
+    fingerprint_strings,
     inspect_artifact,
     require_complete_artifact,
 )
@@ -43,7 +57,22 @@ from ...variants.counts import (
     merge_sites,
     variant_count_frames,
 )
+from ...variants.frequencies import (
+    FrequencyClones,
+    band_frequencies,
+    clone_status_counts,
+    frequency_clones,
+)
+from ...variants.masks import VARIANT_MASKS, masked_variants
 from ...variants.sorting import CellRowSorter, sort_rows
+from ...variants.statistics import (
+    HETEROPLASMY_LEVELS,
+    VariantSelection,
+    VariantStatisticsAccumulator,
+    informative_variants,
+    resolve_thresholds,
+    variant_selection_frame,
+)
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
     BarcodeFile,
@@ -51,6 +80,7 @@ from .cell_barcodes import (
     barcode_files,
     warn_unmatched_barcodes,
 )
+from .clone_artifacts import log_clones, plan_clones, write_clones
 
 if TYPE_CHECKING:
     from ..mapping_datastore import MappingDatastore as _VariantOperationsBase
@@ -98,6 +128,31 @@ _LOADED_BYTES_PER_COUNTS_CELL = 40
 # The per-cell arrays of a variant_counts artifact, its canonical one first.
 _CELL_ARRAYS = ("mean_depth", "covered_sites", "listed")
 _FILES_TEXT = ("the variant file", "the variant files")
+# Bytes per stored row of a band that statistics or allele frequencies read:
+# the depth and count rows with their cells, and the keys, lookups and
+# frequencies derived from them.
+_STATISTIC_BYTES_PER_ROW = 200
+# Bytes per allele of the per-variant sums that statistics keep.
+_STATISTIC_BYTES_PER_VARIANT = 240
+# Bytes per cell and informative variant of the allele frequency matrix.
+_FREQUENCY_BYTES_PER_ENTRY = 8
+# The Leiden seed of variant clones, CyteArc's default.
+_CLONE_SEED = 4444
+# The smallest Jaccard index of two neighbourhoods that Seurat's shared
+# neighbour graph keeps.
+_SHARED_NEIGHBOR_PRUNE = 1 / 15
+# The attributes that saved variant clones need to be reused.
+_CLONE_ATTRIBUTES = (
+    "n_clones",
+    "n_variants",
+    "n_cells_scored",
+    "n_cells_clustered",
+    "n_cells_without_coverage",
+    "n_cells_without_alternative",
+    "n_cells_without_neighbors",
+    "n_cells_without_group",
+    "n_edges",
+)
 
 
 def _read_source(
@@ -405,6 +460,56 @@ def _band_chunk_bytes(group: zarr.Group, tables: Mapping[str, Sequence[str]]) ->
             array = as_zarr_array(group[name], name=name)
             widest = max(widest, int(array.chunks[0]) * int(array.dtype.itemsize))
     return 2 * widest
+
+
+def _variant_bands(
+    group: zarr.Group,
+    tables: Mapping[str, Sequence[str]],
+    positions: np.ndarray,
+    max_rows: int,
+) -> Iterator[tuple[np.ndarray, dict[str, tuple[np.ndarray, dict[str, np.ndarray]]]]]:
+    """Yield bands of ``positions``' cells with their rows of long tables.
+
+    ``tables`` names each long table, such as ``"depth"``, with the arrays
+    to read from it. A band is a run of consecutive positions whose rows in
+    every table together number at most ``max_rows``, or one cell. Each band
+    gives its positions and, per table, each row's cell position and the
+    arrays, so a band holds every row of its cells.
+    """
+    if not len(positions):
+        return
+    offsets = {name: _read(group, f"{name}_offsets") for name in tables}
+    combined = np.sum(list(offsets.values()), axis=0)
+    # Runs of consecutive cells read as one range.
+    breaks = np.flatnonzero(np.diff(positions) != 1) + 1
+    for run in np.split(np.asarray(positions, dtype=np.int64), breaks):
+        start_cell = int(run[0])
+        last = int(run[-1])
+        while start_cell <= last:
+            start = int(combined[start_cell])
+            stop_cell = int(
+                np.searchsorted(combined, start + max_rows, side="right") - 1
+            )
+            stop_cell = min(last + 1, max(start_cell + 1, stop_cell))
+            band: dict[str, tuple[np.ndarray, dict[str, np.ndarray]]] = {}
+            for table, names in tables.items():
+                table_offsets = offsets[table]
+                first = int(table_offsets[start_cell])
+                stop = int(table_offsets[stop_cell])
+                band[table] = (
+                    np.repeat(
+                        np.arange(start_cell, stop_cell, dtype=np.int64),
+                        np.diff(table_offsets[start_cell : stop_cell + 1]),
+                    ),
+                    {
+                        name: np.asarray(
+                            as_zarr_array(group[name], name=name)[first:stop]
+                        )
+                        for name in names
+                    },
+                )
+            yield np.arange(start_cell, stop_cell, dtype=np.int64), band
+            start_cell = stop_cell
 
 
 class _VariantOperationsMixin(_VariantOperationsBase):
@@ -1191,30 +1296,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         Each piece holds each row's cell position and the arrays ``names``;
         a piece holds at most ``max_rows`` rows, or one cell's.
         """
-        offsets = _read(group, f"{table}_offsets")
-        if not len(positions):
-            return
-        # Runs of consecutive cells read as one range.
-        breaks = np.flatnonzero(np.diff(positions) != 1) + 1
-        for run in np.split(positions, breaks):
-            start_cell = int(run[0])
-            while start_cell <= int(run[-1]):
-                start = int(offsets[start_cell])
-                stop_cell = int(
-                    np.searchsorted(offsets, start + max_rows, side="right") - 1
-                )
-                stop_cell = min(int(run[-1]) + 1, max(start_cell + 1, stop_cell))
-                stop = int(offsets[stop_cell])
-                arrays = {
-                    name: np.asarray(as_zarr_array(group[name], name=name)[start:stop])
-                    for name in names
-                }
-                cells_of_rows = np.repeat(
-                    np.arange(start_cell, stop_cell, dtype=np.int64),
-                    np.diff(offsets[start_cell : stop_cell + 1]),
-                )
-                yield cells_of_rows, arrays
-                start_cell = stop_cell
+        for _cells, tables in _variant_bands(
+            group, {table: names}, positions, max_rows
+        ):
+            yield tables[table]
 
     @validation_scoped
     def _variants_load_counts(
@@ -1389,3 +1474,607 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             count_unit=str(attributes["count_unit"]),
             depth_definition=str(attributes["depth_definition"]),
         )
+
+    def _selection_group(self, informative: ArtifactRef) -> zarr.Group:
+        """Return a complete ``variant_selection`` artifact's group."""
+        if not isinstance(informative, ArtifactRef):
+            raise TypeError("variants must be an ArtifactRef")
+        if informative.kind != VariantSelectionArguments.artifact_kind:
+            raise ValueError(
+                "variants must be a variant_selection artifact from "
+                f"ds.variants.informative, not {informative.kind!r}"
+            )
+        require_complete_artifact(self.zw, informative)
+        return artifact_group(self.zw, informative)
+
+    def _statistic_positions(
+        self, counts: ArtifactRef, group: zarr.Group, cells: ArtifactRef | None
+    ) -> np.ndarray:
+        """The positions of the cells that statistics cover: the chosen cells
+        that a file names."""
+        cell_index = self._variant_cell_index(counts)
+        positions = self._variant_cell_positions(counts, cell_index, cells)
+        listed = _read(group, "listed").astype(bool)
+        positions = np.asarray(positions[listed[positions]], dtype=np.int64)
+        if not len(positions):
+            raise ValueError(
+                "No chosen cell is named by the counts' files, so no variant can be "
+                "scored; check the cells and the import's unmatched barcodes"
+            )
+        return positions
+
+    @validation_scoped
+    def _variants_informative(
+        self,
+        counts: ArtifactRef,
+        *,
+        cells: ArtifactRef | None = None,
+        preset: str | None = None,
+        min_cells: int | None = None,
+        min_strand_correlation: float | None = None,
+        min_vmr: float | None = None,
+        min_depth: float | None = None,
+        min_quality: float | None = None,
+        mask: str | Sequence[str] | None = None,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Score every variant across cells and select the informative ones.
+
+        A variant is an alternative allele at a site, such as ``310T>C``; the
+        variants scored are those that some chosen cell shows. Each variant
+        gets mgatk's per-variant statistics, computed over the chosen cells
+        in bands of cells, with an allele frequency only where a cell is
+        covered: the pooled ``mean`` frequency, the ``variance`` of the
+        covered cells' frequencies and their ratio ``vmr``, the cells with 2
+        or more reads of the allele on each strand
+        (``n_cells_conf_detected``), the Pearson correlation of the forward
+        and reverse counts over the cells that show the allele
+        (``strand_correlation``), the cells whose frequency reaches 5, 10,
+        20 and 95%, the highest frequency, the ``mean_coverage`` at the site
+        and MAESTER's mean base quality of the allele (``mean_quality``).
+
+        A variant is informative when it passes every threshold that is set
+        and no mask lists it. ``preset="atac"`` sets Signac's thresholds for
+        mtscATAC-seq: at least 5 confidently detected cells, a strand
+        correlation of at least 0.65 and a VMR above 0.01. ``preset="rna"``
+        sets MAESTER's for RNA libraries, whose strands follow the
+        transcript: a mean depth above 20 and a mean base quality above 30,
+        with a VMR above 0.01. A threshold given by name replaces the
+        preset's. VMR, depth and quality must exceed their thresholds; the
+        cell count and strand correlation must reach theirs, as the
+        published rules compare them, and a statistic that is undefined,
+        such as the strand correlation of a variant that one cell shows,
+        fails.
+
+        Signac computes the same statistics but sets the frequency of an
+        uncovered cell to 0 and, by default, replaces the frequency of a cell
+        with depth below 10 by the pooled mean before taking the variance;
+        here an uncovered cell has no frequency, as in mgatk, so variances
+        and VMRs differ where coverage is sparse.
+
+        Args:
+            counts: A ``variant_counts`` artifact, such as one from
+                :meth:`~cytearc.datastore.namespaces.VariantsAccessor.import_counts`.
+            cells: A cell selection within the counts' cells whose evidence
+                the statistics use, such as ``ds.select_cells(counts,
+                low=10)`` for the cells whose mean depth exceeds 10, as mgatk
+                scores them; None uses every cell that the counts' files
+                name. Cells that no file names are left out either way.
+            preset: ``"atac"``, ``"rna"`` or None.
+            min_cells: The fewest cells with 2 or more reads of the allele on
+                each strand.
+            min_strand_correlation: The lowest strand correlation.
+            min_vmr: The VMR that a variant must exceed.
+            min_depth: The mean depth at the site that a variant must exceed.
+            min_quality: The mean base quality that a variant must exceed.
+            mask: Names of lists of variants that artifacts mimic, which are
+                never informative: ``"numt"``, the 25 false positives of two
+                common NUMTs (Laricchia et al. 2022); ``"rna_editing"``, the
+                RNA-DNA differences at 295, 2617 and 13710 (Bar-Yaacov et al.
+                2013); and ``"artifact_prone"``, every variant at 301, 302,
+                310, 316, 3107 and 16182 (Laricchia et al. 2022). Masks list
+                rCRS positions, so they need a 16,569-base contig.
+            invalidate_cache: Score again instead of reusing saved statistics.
+
+        Returns:
+            A complete datastore-scoped ``variant_selection`` artifact. Read
+            it with
+            :meth:`~cytearc.datastore.namespaces.VariantsAccessor.load_informative`,
+            plot it with ``ds.plots.variant_statistics`` or call clones from
+            it with :meth:`~cytearc.datastore.namespaces.VariantsAccessor.clones`.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``counts`` is not a complete ``variant_counts``
+                artifact, the preset, a threshold or a mask is unknown or
+                invalid, no threshold is set, a threshold tests a statistic
+                that the counts cannot give (strand tests without strand
+                counts, quality without base qualities), a mask meets a
+                contig that is not rCRS-sized, or no chosen cell is named by
+                the counts' files.
+            PermissionError: If the store is read-only and the statistics are
+                not saved yet.
+            MemoryError: If the statistics do not fit the memory budget.
+        """
+        group = self._variant_group(counts)
+        if cells is not None and not isinstance(cells, ArtifactRef):
+            raise TypeError("cells must be a cell selection ArtifactRef or None")
+        if not isinstance(invalidate_cache, bool):
+            raise TypeError("invalidate_cache must be a boolean")
+        thresholds = resolve_thresholds(
+            preset,
+            {
+                "min_cells": min_cells,
+                "min_strand_correlation": min_strand_correlation,
+                "min_vmr": min_vmr,
+                "min_depth": min_depth,
+                "min_quality": min_quality,
+            },
+        )
+        masks = _mask_names(mask)
+        fields = [str(name) for name in cast(list[str], group.attrs["count_fields"])]
+        stranded = "forward" in fields
+        qualities = "quality_forward" in fields
+        # A test that the counts cannot make fails before any row is read.
+        available = {"n_cells_conf_detected": stranded, "strand_correlation": stranded}
+        available["mean_quality"] = qualities
+        informative_variants(
+            {
+                column: np.empty(0)
+                for column in (
+                    "n_cells_conf_detected",
+                    "strand_correlation",
+                    "vmr",
+                    "mean_coverage",
+                    "mean_quality",
+                )
+                if available.get(column, True)
+            },
+            thresholds,
+            n_variants=0,
+        )
+        sites = _stored_sites(group)
+        positions = self._statistic_positions(counts, group, cells)
+        arguments = VariantSelectionArguments(
+            counts=counts,
+            cells=cells,
+            preset=cast(Any, preset),
+            min_cells=thresholds["min_cells"],
+            min_strand_correlation=thresholds["min_strand_correlation"],
+            min_vmr=thresholds["min_vmr"],
+            min_depth=thresholds["min_depth"],
+            min_quality=thresholds["min_quality"],
+            mask=masks,
+            invalidate_cache=invalidate_cache,
+        )
+        planned = self._plan_variant_selection(arguments)
+        if planned.reused:
+            return planned.ref
+        self._require_writable(arguments.operation)
+        held = _STATISTIC_BYTES_PER_VARIANT * sites.n_alleles + 16 * sites.n_sites
+        max_rows = (self.memoryBytes - held) // _STATISTIC_BYTES_PER_ROW
+        if max_rows < 1:
+            raise MemoryError(
+                f"Scoring the variants of {sites.n_alleles} alleles holds about "
+                f"{held} bytes, more than the memory budget of {self.memoryBytes} "
+                "bytes. Raise mem_budget."
+            )
+        accumulator = VariantStatisticsAccumulator(
+            sites, stranded=stranded, qualities=qualities
+        )
+        count_arrays = ["count_alleles", "counts"]
+        if stranded:
+            count_arrays += ["counts_forward", "counts_reverse"]
+        if qualities:
+            count_arrays += ["counts_quality_forward", "counts_quality_reverse"]
+        for _band, rows in _variant_bands(
+            group,
+            {"depth": ("depth_sites", "depth"), "count": count_arrays},
+            positions,
+            int(max_rows),
+        ):
+            depth_cells, depth = rows["depth"]
+            count_cells, values = rows["count"]
+            accumulator.add(
+                depth_cells=depth_cells,
+                depth_sites=depth["depth_sites"],
+                depth=depth["depth"],
+                count_cells=count_cells,
+                count_alleles=values["count_alleles"],
+                counts=values["counts"],
+                forward=values.get("counts_forward"),
+                reverse=values.get("counts_reverse"),
+                quality_forward=values.get("counts_quality_forward"),
+                quality_reverse=values.get("counts_quality_reverse"),
+            )
+        statistics = accumulator.finish(len(positions))
+        variant_sites = sites.allele_site[statistics.alleles]
+        contig_lengths = np.asarray(
+            [
+                -1
+                if code < 0 or sites.contigs[code].length is None
+                else int(cast(int, sites.contigs[code].length))
+                for code in sites.site_contig[variant_sites].tolist()
+            ],
+            dtype=np.int64,
+        )
+        masked = masked_variants(
+            masks,
+            positions=sites.site_position[variant_sites],
+            alternatives=sites.allele[statistics.alleles],
+            contig_lengths=contig_lengths,
+        )
+        columns = statistics.arrays()
+        informative = (
+            informative_variants(columns, thresholds, n_variants=statistics.n_variants)
+            & ~masked
+        )
+        attributes = {
+            "preset": preset,
+            "thresholds": thresholds,
+            "masks": list(masks),
+            "n_cells": statistics.n_cells,
+            "n_variants": statistics.n_variants,
+            "n_informative": int(informative.sum()),
+            "n_masked": int(masked.sum()),
+            "stranded": stranded,
+            "qualities": qualities,
+        }
+        with artifact_transaction(self.zw, planned) as output:
+            _write_array(output, "variant_alleles", statistics.alleles.astype(np.int32))
+            _write_array(output, "informative", informative)
+            _write_array(output, "masked", masked)
+            for name, column in columns.items():
+                _write_array(output, name, np.asarray(column))
+            output.attrs.update(attributes)
+        logger.info(
+            f"Scored {statistics.n_variants} variants in {statistics.n_cells} cells; "
+            f"{int(informative.sum())} are informative"
+        )
+        return planned.ref
+
+    def _plan_variant_selection(
+        self, arguments: VariantSelectionArguments
+    ) -> PlannedArtifact:
+        record = arguments.to_record()
+
+        def has_statistics(_ref: ArtifactRef, group: zarr.Group) -> bool:
+            names = set(group.array_keys())
+            required = {
+                "variant_alleles",
+                "informative",
+                "masked",
+                "n_cells_covered",
+                "mean",
+                "variance",
+                "vmr",
+                "max_heteroplasmy",
+                "mean_coverage",
+                *HETEROPLASMY_LEVELS,
+            }
+            if not required <= names:
+                return False
+            lengths = {as_zarr_array(group[name], name=name).shape for name in required}
+            return len(lengths) == 1
+
+        return plan_artifact(
+            self.zw,
+            scope="datastore",
+            kind=arguments.artifact_kind,
+            operation=arguments.operation,
+            parameters=record.parameters,
+            inputs=record.inputs,
+            execution_options=record.execution_options,
+            invalidate_cache=arguments.invalidate_cache,
+            required_attributes=(
+                "thresholds",
+                "masks",
+                "n_cells",
+                "n_variants",
+                "stranded",
+                "qualities",
+            ),
+            reuse_validator=has_statistics,
+        )
+
+    @validation_scoped
+    def _variants_load_informative(self, informative: ArtifactRef) -> VariantSelection:
+        """Read saved per-variant statistics and the informative variants.
+
+        Args:
+            informative: A ``variant_selection`` artifact, such as one from
+                :meth:`~cytearc.datastore.namespaces.VariantsAccessor.informative`.
+
+        Returns:
+            A :class:`~cytearc.variants.VariantSelection` record whose
+            ``variants`` table holds one row per scored variant, with mgatk's
+            ``variant_stats`` columns and the ``informative`` flag.
+
+        Raises:
+            TypeError: If ``informative`` is not an ArtifactRef.
+            ValueError: If it is not a complete ``variant_selection``
+                artifact.
+        """
+        group = self._selection_group(informative)
+        counts = inspect_artifact(self.zw, informative).input_ref("counts")
+        sites = _stored_sites(self._variant_group(counts))
+        alleles = _read(group, "variant_alleles").astype(np.int64)
+        attributes = group.attrs
+        frame = variant_selection_frame(
+            sites,
+            alleles,
+            {name: _read(group, name) for name in group.array_keys()},
+        )
+        thresholds = cast(dict[str, float | None], attributes["thresholds"])
+        status = inspect_artifact(self.zw, informative)
+        return VariantSelection(
+            variants=frame,
+            counts=counts,
+            cells=None
+            if (status.inputs or {}).get("cells") is None
+            else status.input_ref("cells"),
+            preset=cast(str | None, attributes["preset"]),
+            thresholds=dict(thresholds),
+            masks=tuple(str(name) for name in cast(list[str], attributes["masks"])),
+            n_cells=int(cast(int, attributes["n_cells"])),
+        )
+
+    @validation_scoped
+    def _variants_clones(
+        self,
+        counts: ArtifactRef,
+        *,
+        variants: ArtifactRef,
+        n_neighbors: int = 10,
+        resolution: float = 1.0,
+        within: str | None = None,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Call clones from the allele frequencies of informative variants.
+
+        Cells that descend from one ancestor share its mitochondrial
+        variants, at similar frequencies. As Signac's ``FindClonotypes``
+        does, each cell's neighbourhood holds itself and the
+        ``n_neighbors - 1`` cells most similar to it by the cosine similarity
+        of the square roots of their allele frequencies of the informative
+        variants; two cells are joined with the Jaccard index of their
+        neighbourhoods, dropping joins below 1/15, as Seurat's
+        ``FindNeighbors`` builds its shared-neighbour graph; and the Leiden
+        algorithm partitions the graph at ``resolution`` where Signac uses
+        Seurat's ``FindClusters``.
+
+        A cell's frequency is undefined where it was not covered, so the
+        similarity of two cells counts only the variants that both cover,
+        where Signac counts an uncovered variant as frequency 0. Cells with
+        no coverage at any informative variant, cells that show none of
+        them and cells similar to no other cell carry no evidence of a clone
+        and get none; the artifact counts them in its
+        ``n_cells_without_coverage``, ``n_cells_without_alternative`` and
+        ``n_cells_without_neighbors`` attributes. The clones cover the cells
+        that the statistics of ``variants`` covered.
+
+        Args:
+            counts: The ``variant_counts`` artifact that ``variants`` scored.
+            variants: A ``variant_selection`` artifact from
+                :meth:`~cytearc.datastore.namespaces.VariantsAccessor.informative`.
+            n_neighbors: The cells of a full neighbourhood, the cell itself
+                included as Seurat counts it, at least 2.
+            resolution: The Leiden resolution; larger values give more,
+                smaller clones.
+            within: A cell metadata column, such as the donor or the mouse:
+                clones never join cells of two groups, and each clone's label
+                starts with its group. Cells without a group get no clone.
+            invalidate_cache: Call clones again instead of reusing them.
+
+        Returns:
+            A complete datastore-scoped ``clones`` artifact over the counts'
+            cells, which every clone summary reads. Read it with
+            :meth:`~cytearc.datastore.namespaces.ClonesAccessor.load_clones`.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``variants`` did not score ``counts``, selects no
+                informative variant, ``n_neighbors`` is below 2, the
+                resolution is not finite and positive, or ``within`` is not a
+                cell metadata column.
+            PermissionError: If the store is read-only and the clones are not
+                saved yet.
+            MemoryError: If the frequencies, similarities or graph do not fit
+                the memory budget.
+        """
+        from ...clustering.leiden import canonical_resolution
+
+        group = self._variant_group(counts)
+        selection = self._selection_group(variants)
+        status = inspect_artifact(self.zw, variants)
+        if status.input_ref("counts") != counts:
+            raise ValueError(
+                "variants scored other counts; pass the counts that "
+                "ds.variants.informative read"
+            )
+        if isinstance(n_neighbors, bool) or not isinstance(
+            n_neighbors, int | np.integer
+        ):
+            raise TypeError("n_neighbors must be an integer")
+        if int(n_neighbors) < 2:
+            raise ValueError(
+                "n_neighbors must be at least 2: a neighbourhood holds the cell "
+                "itself and its most similar cells"
+            )
+        resolution = canonical_resolution(resolution)
+        if within is not None and not isinstance(within, str):
+            raise TypeError("within must be a cell metadata column or None")
+        if within is not None and within not in self.cells.columns:
+            raise ValueError(f"{within!r} is not a cell metadata column")
+        if not isinstance(invalidate_cache, bool):
+            raise TypeError("invalidate_cache must be a boolean")
+        chosen = _read(selection, "informative").astype(bool)
+        alleles = _read(selection, "variant_alleles").astype(np.int64)[chosen]
+        if not len(alleles):
+            raise ValueError(
+                "variants selects no informative variant, so no clone can be called; "
+                "relax its thresholds"
+            )
+        cell_selection = inspect_artifact(self.zw, counts).input_ref("cell_selection")
+        cell_index = self._variant_cell_index(counts)
+        n_cells = len(cell_index)
+        # The statistics covered the chosen cells, or every listed cell.
+        chosen_cells = (
+            None
+            if (status.inputs or {}).get("cells") is None
+            else status.input_ref("cells")
+        )
+        positions = self._statistic_positions(counts, group, chosen_cells)
+        group_codes: np.ndarray | None = None
+        group_names: list[str] = []
+        fingerprint = None
+        if within is not None:
+            labels = np.asarray(
+                read_metadata_rows_chunkwise(self.cells, within, cell_index),
+                dtype=object,
+            )
+            missing = read_metadata_missing_rows_chunkwise(
+                self.cells, within, cell_index
+            )
+            codes, group_names = category_codes(labels, missing)
+            group_codes = codes
+            fingerprint = fingerprint_strings(
+                np.asarray(
+                    [group_names[code] if code >= 0 else "" for code in codes.tolist()],
+                    dtype=object,
+                ).astype(str)
+            )
+        arguments = VariantCloneArguments(
+            cell_selection=cell_selection,
+            counts=counts,
+            variants=variants,
+            within_fingerprint=fingerprint,
+            n_neighbors=int(n_neighbors),
+            resolution=resolution,
+            within=within,
+            random_seed=_CLONE_SEED,
+            shared_neighbor_prune=_SHARED_NEIGHBOR_PRUNE,
+            invalidate_cache=invalidate_cache,
+        )
+        planned = plan_clones(
+            self.zw,
+            arguments,
+            cell_selection,
+            n_cells,
+            with_probability=False,
+            required_attributes=_CLONE_ATTRIBUTES,
+            invalidate_cache=invalidate_cache,
+        )
+        if planned.reused:
+            return planned.ref
+        self._require_writable(arguments.operation)
+        sites = _stored_sites(group)
+        matrix_bytes = _FREQUENCY_BYTES_PER_ENTRY * len(positions) * len(alleles)
+        max_rows = (self.memoryBytes - matrix_bytes) // _STATISTIC_BYTES_PER_ROW
+        if max_rows < 1:
+            raise MemoryError(
+                f"The allele frequencies of {len(positions)} cells at "
+                f"{len(alleles)} variants take about {matrix_bytes} bytes, more than "
+                f"the memory budget of {self.memoryBytes} bytes. Raise mem_budget, "
+                "or select fewer informative variants."
+            )
+        frequencies = np.empty((len(positions), len(alleles)), dtype=np.float64)
+        row_of_position = np.full(n_cells, -1, dtype=np.int64)
+        row_of_position[positions] = np.arange(len(positions))
+        for band, rows in _variant_bands(
+            group,
+            {"depth": ("depth_sites", "depth"), "count": ("count_alleles", "counts")},
+            positions,
+            int(max_rows),
+        ):
+            depth_cells, depth = rows["depth"]
+            count_cells, values = rows["count"]
+            first = int(band[0])
+            frequencies[row_of_position[band]] = band_frequencies(
+                n_rows=len(band),
+                depth_rows=depth_cells - first,
+                depth_sites=depth["depth_sites"],
+                depth=depth["depth"],
+                count_rows=count_cells - first,
+                count_alleles=values["count_alleles"],
+                counts=values["counts"],
+                alleles=alleles,
+                sites=sites,
+            )
+        called = frequency_clones(
+            frequencies,
+            groups=None if group_codes is None else group_codes[positions],
+            n_neighbors=int(n_neighbors),
+            resolution=resolution,
+            random_seed=_CLONE_SEED,
+            memory_bytes=self.memoryBytes - matrix_bytes,
+            nthreads=self.nthreads,
+        )
+        del frequencies
+        assignment = _clone_assignment(
+            n_cells, positions, called, group_names if within is not None else None
+        )
+        counts_by_status = clone_status_counts(called.status)
+        attributes = {
+            "n_clones": len(assignment.clone_ids),
+            "n_variants": len(alleles),
+            "n_cells_scored": len(positions),
+            "n_cells_clustered": counts_by_status["clustered"],
+            "n_cells_without_coverage": counts_by_status["no_coverage"],
+            "n_cells_without_alternative": counts_by_status["no_alternative"],
+            "n_cells_without_neighbors": counts_by_status["no_neighbor"],
+            "n_cells_without_group": counts_by_status["no_group"],
+            "n_edges": called.n_edges,
+        }
+        write_clones(self.zw, planned, assignment, attributes)
+        log_clones(assignment, n_cells)
+        return planned.ref
+
+
+def _mask_names(mask: str | Sequence[str] | None) -> tuple[str, ...]:
+    """The masks that ``mask`` names, sorted and once each."""
+    if mask is None:
+        return ()
+    names = [mask] if isinstance(mask, str) else mask
+    if not isinstance(names, Sequence) or not all(
+        isinstance(name, str) for name in names
+    ):
+        raise TypeError("mask must be a mask name, a sequence of mask names, or None")
+    unknown = sorted({name for name in names if name not in VARIANT_MASKS})
+    if unknown:
+        raise ValueError(
+            f"Unknown masks {unknown}; masks are {', '.join(VARIANT_MASKS)}"
+        )
+    return tuple(sorted(set(names)))
+
+
+def _clone_assignment(
+    n_cells: int,
+    positions: np.ndarray,
+    called: FrequencyClones,
+    group_names: Sequence[str] | None,
+) -> CloneAssignment:
+    """Rank called clones over all of the counts' cells."""
+    clustered = called.clusters > 0
+    codes = np.full(n_cells, -1, dtype=np.int64)
+    if group_names is None:
+        labels = [
+            str(cluster)
+            for cluster in range(1, int(called.clusters.max(initial=0)) + 1)
+        ]
+        codes[positions[clustered]] = called.clusters[clustered] - 1
+    else:
+        pairs = np.stack([called.groups[clustered], called.clusters[clustered]], axis=1)
+        distinct, inverse = np.unique(pairs, axis=0, return_inverse=True)
+        labels = [
+            f"{group_names[group]}:{cluster}" for group, cluster in distinct.tolist()
+        ]
+        codes[positions[clustered]] = np.asarray(inverse, dtype=np.int64).reshape(-1)
+    ranked, clone_ids, clone_sizes = ranked_clones(codes, labels)
+    return CloneAssignment(
+        codes=ranked,
+        clone_ids=clone_ids,
+        clone_sizes=clone_sizes,
+        probabilities=None,
+        n_cells_in_several_clones=0,
+    )

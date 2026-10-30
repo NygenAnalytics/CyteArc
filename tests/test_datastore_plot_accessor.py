@@ -18,6 +18,7 @@ from cytearc.storage import ArtifactRef
 
 
 _STORE_PLOT_METHODS = (
+    "allele_frequencies",
     "association_calibration",
     "association_volcano",
     "barcode_calls",
@@ -59,6 +60,7 @@ _STORE_PLOT_METHODS = (
     "run_recipe",
     "spectratype",
     "variant_depth",
+    "variant_statistics",
 )
 
 _GRAPH_REF = ArtifactRef(
@@ -191,6 +193,11 @@ _VARIANT_COUNTS_REF = ArtifactRef(
     scope="datastore",
     kind="variant_counts",
     artifact_id="b" * 64,
+)
+_VARIANT_SELECTION_REF = ArtifactRef(
+    scope="datastore",
+    kind="variant_selection",
+    artifact_id="c" * 64,
 )
 
 
@@ -438,6 +445,12 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
         ("spectratype", (_RECEPTORS_REF,), {"sequence": "nt", "group_by": "sample"}),
         ("barcode_calls", (_BARCODES_REF,), {"max_barcodes": 6}),
         ("variant_depth", (_VARIANT_COUNTS_REF,), {"group_by": "sample"}),
+        ("variant_statistics", (_VARIANT_SELECTION_REF,), {"show_legend": False}),
+        (
+            "allele_frequencies",
+            (_VARIANT_SELECTION_REF,),
+            {"clones": _CLONES_REF, "max_cells": 50},
+        ),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -504,6 +517,8 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("barcodes"))
     elif name == "variant_depth":
         expected_args.append(expected_kwargs.pop("counts"))
+    elif name in {"variant_statistics", "allele_frequencies"}:
+        expected_args.append(expected_kwargs.pop("variants"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

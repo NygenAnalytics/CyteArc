@@ -1421,6 +1421,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
     allowed_operation_helpers = {
         "datastore._operations.cell_barcodes",
         "datastore._operations.cell_groups",
+        "datastore._operations.clone_artifacts",
         "datastore._operations.enrichment_store",
         "datastore._operations.paris_persistence",
         "datastore._operations.perturbation_store",

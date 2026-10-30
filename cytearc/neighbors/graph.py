@@ -425,6 +425,85 @@ def snn_merge_peak_bytes(
     return held + max(merging, graph) + _SNN_OBJECT_BYTES
 
 
+def _checked_neighborhoods(neighborhoods: np.ndarray) -> np.ndarray:
+    """Return neighbourhoods as int64, after checking their entries."""
+    array = np.asarray(neighborhoods)
+    if array.ndim != 2 or not np.issubdtype(array.dtype, np.integer):
+        raise ValueError("neighborhoods must be an integer matrix of cells by slots")
+    array = array.astype(np.int64, copy=False)
+    n_cells = array.shape[0]
+    if np.any(array < -1) or np.any(array >= n_cells):
+        raise ValueError("Neighbourhoods name cells outside 0 to the cells - 1")
+    ordered = np.sort(array, axis=1)
+    if np.any((ordered[:, 1:] == ordered[:, :-1]) & (ordered[:, 1:] >= 0)):
+        raise ValueError("A neighbourhood lists a cell twice")
+    return array
+
+
+def shared_neighbor_entries(neighborhoods: np.ndarray) -> int:
+    """Bound the pairs of cells whose neighbourhoods share a cell.
+
+    A cell that ``d`` neighbourhoods hold joins at most ``d * d`` ordered
+    pairs, so the sum of ``d * d`` over the cells bounds the entries that
+    :func:`shared_neighbor_graph` multiplies out.
+    """
+    array = _checked_neighborhoods(neighborhoods)
+    held = np.bincount(array[array >= 0], minlength=array.shape[0]).astype(np.int64)
+    return int(np.sum(held * held))
+
+
+def shared_neighbor_graph(
+    neighborhoods: np.ndarray, *, prune: float = 1 / 15
+) -> coo_matrix:
+    """Join cells by the overlap of their neighbourhoods, as Seurat's SNN does.
+
+    Each row of ``neighborhoods`` holds a cell's neighbourhood, the cell
+    itself included as Seurat's ``FindNeighbors`` includes it, padded with
+    -1. Two cells are joined with the Jaccard index of their neighbourhoods:
+    the cells they share over the cells in either. For full rows of ``k``
+    cells this is Seurat's ``shared / (k + (k - shared))``. Joins below
+    ``prune`` are dropped, as Seurat's ``ComputeSNN`` drops them, and a cell
+    is not joined to itself.
+
+    Args:
+        neighborhoods: Cells by neighbourhood slots, entries from -1 to the
+            cells - 1, each cell at most once per row.
+        prune: The smallest Jaccard index kept, in [0, 1].
+
+    Returns:
+        The joins, each pair once with its lower cell as the row, so that
+        ``W + W^T`` is the symmetric graph.
+
+    Raises:
+        ValueError: If the neighbourhoods are malformed or ``prune`` lies
+            outside [0, 1].
+    """
+    array = _checked_neighborhoods(neighborhoods)
+    if not isinstance(prune, Real) or not 0 <= float(prune) <= 1:
+        raise ValueError("prune must be a number in [0, 1]")
+    n_cells, slots = array.shape
+    valid = array >= 0
+    rows = np.repeat(np.arange(n_cells, dtype=np.int64), slots)[valid.ravel()]
+    columns = array[valid]
+    membership = csr_matrix(
+        (np.ones(len(rows), dtype=np.float64), (rows, columns)),
+        shape=(n_cells, n_cells),
+    )
+    shared = (membership @ membership.T).tocoo()
+    del membership
+    upper = shared.row < shared.col
+    first = shared.row[upper].astype(np.int64)
+    second = shared.col[upper].astype(np.int64)
+    counts = shared.data[upper]
+    del shared, upper
+    sizes = valid.sum(axis=1).astype(np.float64)
+    jaccard = counts / (sizes[first] + sizes[second] - counts)
+    kept = jaccard >= float(prune)
+    return coo_matrix(
+        (jaccard[kept], (first[kept], second[kept])), shape=(n_cells, n_cells)
+    )
+
+
 def weight_sort_indices(
     i: np.ndarray,
     w: np.ndarray,

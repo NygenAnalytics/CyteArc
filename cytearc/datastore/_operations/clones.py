@@ -104,6 +104,12 @@ from .cell_barcodes import (
     warn_unmatched_barcodes,
 )
 from .cell_groups import cell_groups, group_columns, selection_chunk_bytes
+from .clone_artifacts import (
+    check_clone_write_budget,
+    log_clones,
+    plan_clones,
+    write_clones,
+)
 
 if TYPE_CHECKING:
     from ...readers.clone_tables import CloneLayout
@@ -405,24 +411,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "mem_budget."
             )
 
-    def _check_clone_write_budget(
-        self, held: int, clone_ids: np.ndarray, n_cells: int
-    ) -> None:
-        """Refuse clones whose labels would not fit the memory budget as stored.
-
-        The store saves text at the width of the longest value, so each cell's
-        label takes four bytes per character of the longest as it is written.
-        """
-        width = max((len(str(label)) for label in clone_ids.tolist()), default=0)
-        peak = held + n_cells * (8 + 4 * width)
-        if peak > self.memoryBytes:
-            raise MemoryError(
-                f"Saving the clones of {n_cells} cells holds about {peak} bytes, "
-                f"more than the memory budget of {self.memoryBytes} bytes, since the "
-                "store saves each cell's clone label at the width of the longest, "
-                f"{width} characters. Raise mem_budget."
-            )
-
     @validation_scoped
     def _clones_import_clones(
         self,
@@ -569,7 +557,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             invalidate_cache=invalidate_cache,
         )
         with_probability = any(layout.probability is not None for layout in layouts)
-        planned = self._plan_clones(
+        planned = plan_clones(
+            self.zw,
             arguments,
             cell_selection,
             n_cells,
@@ -581,6 +570,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "n_clones",
                 "n_cells_in_several_clones",
             ),
+            invalidate_cache=invalidate_cache,
         )
         files_text = _files_text(len(files))
         if planned.reused:
@@ -635,7 +625,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 chunk_bytes=chunk_rows * row_bytes,
             )
         assignment = assigner.finish()
-        self._check_clone_write_budget(
+        check_clone_write_budget(
+            self.memoryBytes,
             held + _BYTES_PER_LABEL * assigner.n_labels + assigner.label_bytes,
             assignment.clone_ids,
             n_cells,
@@ -645,9 +636,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             "n_clones": len(assignment.clone_ids),
             "n_cells_in_several_clones": assignment.n_cells_in_several_clones,
         }
-        self._write_clones(planned, assignment, attributes)
+        write_clones(self.zw, planned, assignment, attributes)
         warn_unmatched_barcodes(attributes, files_text)
-        self._log_clones(assignment, n_cells)
+        log_clones(assignment, n_cells)
         return planned.ref
 
     def _assign_clone_file(
@@ -784,14 +775,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             arrays[name] = values
         write_cell_data_artifact(self.zw, planned, arrays, attributes=dict(attributes))
 
-    def _log_clones(self, assignment: CloneAssignment, n_cells: int) -> None:
-        n_assigned = int(np.count_nonzero(assignment.codes >= 0))
-        largest = int(assignment.clone_sizes[0]) if len(assignment.clone_sizes) else 0
-        logger.info(
-            f"Saved {len(assignment.clone_ids)} clones of {n_assigned} of {n_cells} "
-            f"cells; the largest holds {largest} cells"
-        )
-
     @validation_scoped
     def _clones_from_column(
         self,
@@ -859,12 +842,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             column=column,
             invalidate_cache=invalidate_cache,
         )
-        planned = self._plan_clones(
+        planned = plan_clones(
+            self.zw,
             arguments,
             cell_selection,
             n_cells,
             with_probability=False,
             required_attributes=("n_clones",),
+            invalidate_cache=invalidate_cache,
         )
         if planned.reused:
             return planned.ref
@@ -884,15 +869,18 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 held, assigner.n_labels, assigner.label_bytes, block_rows * row_bytes
             )
         assignment = assigner.finish()
-        self._check_clone_write_budget(
+        check_clone_write_budget(
+            self.memoryBytes,
             _ASSIGNER_BYTES_PER_CELL * n_cells
             + _BYTES_PER_LABEL * assigner.n_labels
             + assigner.label_bytes,
             assignment.clone_ids,
             n_cells,
         )
-        self._write_clones(planned, assignment, {"n_clones": len(assignment.clone_ids)})
-        self._log_clones(assignment, n_cells)
+        write_clones(
+            self.zw, planned, assignment, {"n_clones": len(assignment.clone_ids)}
+        )
+        log_clones(assignment, n_cells)
         return planned.ref
 
     def _clone_group(self, clones: ArtifactRef) -> zarr.Group:
