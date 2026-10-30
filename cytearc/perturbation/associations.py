@@ -34,7 +34,7 @@ These functions hold counts in memory and never touch storage.
 import itertools
 import math
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numba
 import numpy as np
@@ -221,9 +221,9 @@ class PerturbationAssociations:
             check ran.
     """
 
-    discovery: pd.DataFrame
-    calibration: pd.DataFrame
-    positive: pd.DataFrame
+    discovery: pd.DataFrame = field(repr=False)
+    calibration: pd.DataFrame = field(repr=False)
+    positive: pd.DataFrame = field(repr=False)
     alpha: float
     side: str
     integration: str
@@ -1216,11 +1216,13 @@ def association_settings(
     seed: object,
     moi: object,
     resampling: object,
+    sample_column: object,
 ) -> tuple[tuple[int, int, int], float, int, int | None, float, int, str]:
     """Check the settings of association tests, as ``associations`` takes them.
 
     The pipeline recipe checks the same settings before its run starts. The
-    pairs, features, samples and covariates are checked against the store.
+    pairs, features, covariates, and whether the sample column exists, are
+    checked against the store.
 
     Args:
         positive_controls: ``"targets"``, a table of pairs, or None; any
@@ -1241,6 +1243,7 @@ def association_settings(
         moi: One of :data:`MOIS`.
         resampling: ``"conditional"``, ``"permutation"``, or None for
             ``"conditional"`` at high MOI and ``"permutation"`` at low MOI.
+        sample_column: The cell column whose samples get indicators, or None.
 
     Returns:
         The random sets of each round, the stage threshold, ``min_nonzero``,
@@ -1313,6 +1316,10 @@ def association_settings(
             "resampling='conditional' goes with moi='high'; the low-MOI test "
             "compares each target with the control cells by permutation"
         )
+    if sample_column is not None and (
+        not isinstance(sample_column, str) or not sample_column
+    ):
+        raise TypeError("sample_column must be a non-empty string or None")
     return draws, threshold, floor, requested, rate, resolved_seed, resampling
 
 

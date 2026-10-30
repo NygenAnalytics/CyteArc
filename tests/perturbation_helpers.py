@@ -2,11 +2,50 @@
 
 import warnings
 from types import ModuleType
+from typing import Any
 
 import numpy as np
 import pytest
 import statsmodels.api as sm
 from scipy import optimize, special, stats
+
+
+class _RecordedRows:
+    """A cell column that notes the rows that each read of it takes."""
+
+    def __init__(self, array: Any, rows: list[np.ndarray]) -> None:
+        self._array = array
+        self._rows = rows
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._array, name)
+
+    def __getitem__(self, selection: Any) -> Any:
+        self._rows.append(np.arange(self._array.shape[0])[selection])
+        return self._array[selection]
+
+    def get_orthogonal_selection(self, selection: Any) -> Any:
+        self._rows.append(np.asarray(selection[0]).reshape(-1))
+        return self._array.get_orthogonal_selection(selection)
+
+
+def record_cell_reads(
+    monkeypatch: pytest.MonkeyPatch, store: Any, columns: set[str]
+) -> dict[str, list[np.ndarray]]:
+    """Note the rows that every read of these cell columns of ``store`` takes.
+
+    Each column maps to a list that gains the rows of each read, whether a
+    whole column, a slice or chosen rows.
+    """
+    reads: dict[str, list[np.ndarray]] = {column: [] for column in columns}
+    get_array = store.cells._get_array
+
+    def recording(column: str) -> Any:
+        array = get_array(column)
+        return _RecordedRows(array, reads[column]) if column in reads else array
+
+    monkeypatch.setattr(store.cells, "_get_array", recording)
+    return reads
 
 
 def use_python_kernels(monkeypatch: pytest.MonkeyPatch, *modules: ModuleType) -> None:

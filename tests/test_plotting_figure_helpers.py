@@ -21,6 +21,7 @@ from cytearc.plotting._figure import (
     PlotResult,
     _remove_child_legend_artists,
     compose_results,
+    is_colorbar_axes,
     label_panels,
     normalize_axes_target,
 )
@@ -1064,8 +1065,8 @@ def test_merged_shared_legends_hold_the_largest_size_marker():
     plt.close(figure)
 
 
-def test_child_legend_removal_clears_all_axis_and_figure_legends():
-    figure, ax = plt.subplots()
+def test_child_legend_removal_clears_only_the_childs_legends_and_colorbars():
+    figure, (ax, other) = plt.subplots(1, 2, layout="constrained")
     first = ax.legend(
         handles=[Line2D([], [], label="first")],
         loc="upper left",
@@ -1075,14 +1076,171 @@ def test_child_legend_removal_clears_all_axis_and_figure_legends():
         handles=[Line2D([], [], label="second")],
         loc="lower left",
     )
-    figure.legend(handles=[Line2D([], [], label="figure")])
-    colorbar = figure.colorbar(ax.imshow([[0.0, 1.0], [1.0, 0.0]]), ax=ax)
+    other_legend = other.legend(handles=[Line2D([], [], label="other")])
+    figure_legend = figure.legend(handles=[Line2D([], [], label="figure")])
+    image = [[0.0, 1.0], [1.0, 0.0]]
+    attached = figure.colorbar(ax.imshow(image), ax=ax)
+    other_colorbar = figure.colorbar(other.imshow(image), ax=other)
+    # A colorbar that the child lists among its axes, as heatmaps do.
+    listed_axes = figure.add_axes((0.0, 0.0, 0.1, 0.1))
+    listed = figure.colorbar(other.images[0], cax=listed_axes)
+    child = _child_result(figure, ax)
+    child.axes["colorbar"] = listed.ax
 
-    _remove_child_legend_artists(figure, [ax])
+    _remove_child_legend_artists(figure, [child])
 
     assert not any(isinstance(artist, Legend) for artist in ax.get_children())
+    assert other.get_legend() is other_legend
+    # The caller's figure, so its legends are not the child's.
+    assert figure.legends == [figure_legend]
+    assert attached.ax not in figure.axes
+    assert listed.ax not in figure.axes
+    assert other_colorbar.ax in figure.axes
+
+    # A child that owns its figure drew the figure's legends.
+    owner = PlotResult(
+        figure=figure,
+        axes={"main": other},
+        tables={},
+        legends=(),
+        scales=(),
+        provenance=splt.PlotProvenance(cytearc_version="test"),
+        owns_figure=True,
+    )
+    _remove_child_legend_artists(figure, [owner])
+
     assert figure.legends == []
+    assert other.get_legend() is None
+    assert other_colorbar.ax not in figure.axes
+    plt.close(figure)
+
+
+def _line_legend_child(figure, axis, label: str) -> PlotResult:
+    """A child that draws a line legend, which the shared legends cannot draw."""
+    axis.plot([0.0, 1.0], [0.0, 1.0], label=label)
+    axis.legend()
+    return _child_result(
+        figure, axis, legends=(splt.LegendSpec(kind="line", label=label),)
+    )
+
+
+def test_composition_keeps_the_legends_it_cannot_draw_again():
+    figure, axes = plt.subplots(1, 4, figsize=(10, 3), layout="constrained")
+    line = _line_legend_child(figure, axes[0], "Fit")
+    # A categorical legend without a scale, as the perturbation figures report.
+    axes[1].scatter([0.0], [0.0], label="Called")
+    axes[1].legend()
+    unscaled = _child_result(
+        figure, axes[1], legends=(splt.LegendSpec(kind="categorical", label="Call"),)
+    )
+    # A child that reports no legend has none to draw again.
+    axes[2].plot([0.0, 1.0], label="Unreported")
+    axes[2].legend()
+    unreported = _child_result(figure, axes[2])
+    # One legend that can be drawn again does not make the child shared.
+    axes[3].plot([0.0, 1.0], label="Mixed")
+    axes[3].legend()
+    mixed_colorbar = figure.colorbar(axes[3].imshow([[0.0, 1.0]]), ax=axes[3])
+    mixed = _child_result(
+        figure,
+        axes[3],
+        legends=(
+            splt.LegendSpec(kind="colorbar", label="Score"),
+            splt.LegendSpec(kind="line", label="Mixed"),
+        ),
+        scales=(splt.ColorScale(vmin=0.0, vmax=1.0),),
+    )
+
+    compose_results(figure, [line, unscaled, unreported, mixed], panel_labels=False)
+
+    assert [
+        [text.get_text() for text in axis.get_legend().get_texts()] for axis in axes
+    ] == [["Fit"], ["Called"], ["Unreported"], ["Mixed"]]
+    assert figure.legends == []
+    # The mixed child keeps its own colorbar, and no shared one is added.
+    assert [axis for axis in figure.axes if is_colorbar_axes(axis)] == [
+        mixed_colorbar.ax
+    ]
+    plt.close(figure)
+
+
+def test_composition_keeps_a_size_legend_without_values():
+    figure, axis = plt.subplots(figsize=(4, 3), layout="constrained")
+    axis.scatter([0.0], [0.0], s=[30.0], label="30 cells")
+    axis.legend()
+    child = _child_result(
+        figure,
+        axis,
+        legends=(splt.LegendSpec(kind="size", label="Cells", extras={"values": []}),),
+        scales=(splt.SizeScale(),),
+    )
+
+    compose_results(figure, [child], panel_labels=False)
+
+    assert [text.get_text() for text in axis.get_legend().get_texts()] == ["30 cells"]
+    assert figure.legends == []
+    plt.close(figure)
+
+
+def _panel_child(figure, axes, panel_limits) -> PlotResult:
+    """A child of two panels whose colorbar legend has per-panel limits."""
+    return PlotResult(
+        figure=figure,
+        axes={"a": axes[0], "b": axes[1]},
+        tables={},
+        legends=(
+            splt.LegendSpec(
+                kind="colorbar", label="Score", extras={"panel_limits": panel_limits}
+            ),
+        ),
+        scales=(splt.ColorScale(cmap="viridis"),),
+        provenance=splt.PlotProvenance(cytearc_version="test"),
+        owns_figure=False,
+    )
+
+
+def test_composition_draws_a_colorbar_under_each_panel_of_its_limits():
+    figure, axes = plt.subplots(1, 2, figsize=(6, 3), layout="constrained")
+    own = figure.colorbar(axes[0].imshow([[0.0, 1.0]]), ax=axes[0])
+    child = _panel_child(figure, axes, {"a": [0.0, 1.0], "b": [2.0, 5.0]})
+
+    compose_results(figure, [child], panel_labels=False)
+
+    colorbars = [axis for axis in figure.axes if is_colorbar_axes(axis)]
+    assert own.ax not in colorbars
+    assert [
+        (axis._colorbar.norm.vmin, axis._colorbar.norm.vmax, axis.get_xlabel())
+        for axis in colorbars
+    ] == [(0.0, 1.0, "Score"), (2.0, 5.0, "Score")]
+    plt.close(figure)
+
+    # Limits of a panel that the child lacks cannot be drawn under it, so the
+    # child keeps the colorbar it drew.
+    figure, axes = plt.subplots(1, 2, figsize=(6, 3), layout="constrained")
+    own = figure.colorbar(axes[0].imshow([[0.0, 1.0]]), ax=axes[0])
+    child = _panel_child(figure, axes, {"a": [0.0, 1.0], "c": [2.0, 5.0]})
+
+    compose_results(figure, [child], panel_labels=False)
+
+    assert [axis for axis in figure.axes if is_colorbar_axes(axis)] == [own.ax]
+    plt.close(figure)
+
+
+def test_composition_shares_the_legends_of_children_it_can_draw_again():
+    figure, axes = plt.subplots(1, 2, figsize=(7, 3), layout="constrained")
+    line = _line_legend_child(figure, axes[0], "Fit")
+    axes[1].scatter([0.0], [0.0], label="a")
+    axes[1].legend()
+    colorbar = figure.colorbar(axes[1].imshow([[0.0, 1.0]]), ax=axes[1])
+    shared = _categorical_child(figure, axes[1], "Group", ("a", "b"))
+
+    compose_results(figure, [line, shared], panel_labels=False)
+
+    assert [text.get_text() for text in axes[0].get_legend().get_texts()] == ["Fit"]
+    assert axes[1].get_legend() is None
     assert colorbar.ax not in figure.axes
+    assert [legend.get_title().get_text() for legend in figure.legends] == ["Group"]
+    assert [text.get_text() for text in figure.legends[0].get_texts()] == ["a", "b"]
     plt.close(figure)
 
 

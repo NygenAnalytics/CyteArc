@@ -92,7 +92,7 @@ def test_guide_count_histograms(bench) -> None:
 @pytest.mark.parametrize("method", ["poisson_gaussian", "gaussian"])
 def test_guide_threshold_fits(bench, method) -> None:
     from cytearc.perturbation.mixtures import (
-        FITTED,
+        GUIDE_FIT_FITTED,
         fit_gaussian,
         fit_poisson_gaussian,
     )
@@ -104,7 +104,7 @@ def test_guide_threshold_fits(bench, method) -> None:
         return lambda: fit(histograms)
 
     def check(n_cells: int, fits) -> None:
-        fitted = fits.status[0] == FITTED
+        fitted = fits.status[0] == GUIDE_FIT_FITTED
         assert (fits.threshold[0, ~fitted] == 0).all()
         thresholds = fits.threshold[0, fitted]
         # Over every cell, the two Gaussians split cells without UMIs from

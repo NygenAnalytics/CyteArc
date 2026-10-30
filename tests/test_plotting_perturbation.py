@@ -34,7 +34,7 @@ from cytearc.perturbation.mixtures import (
     poisson_gaussian_posterior,
 )
 from cytearc.plotting._contracts import CategoricalScale, ColorScale
-from cytearc.plotting._figure import LegendSpec
+from cytearc.plotting._figure import LegendSpec, compose_results
 from cytearc.plotting._style import default_point_size, foreground_color
 from cytearc.plotting.perturbation import (
     association_calibration,
@@ -189,10 +189,34 @@ def test_showing_the_plot_releases_its_figure() -> None:
     assert result.tables["guides_per_cell"]["cells"].sum() == 15
 
 
+def test_guide_calls_without_a_cell_draw_nothing() -> None:
+    loaded = _store(5).perturbation.load_guide_calls(CALLS)
+    empty = GuideCalls(
+        cells=loaded.cells.iloc[:0],
+        calls=loaded.calls.iloc[:0],
+        guides=loaded.guides,
+        source=loaded.source,
+    )
+    store = SimpleNamespace(
+        perturbation=SimpleNamespace(load_guide_calls=lambda ref: empty)
+    )
+    figures = set(plt.get_fignums())
+
+    with pytest.raises(
+        ValueError, match="^The guide calls hold no cell, so there is nothing to plot$"
+    ):
+        guide_calls(store, CALLS, show=False)
+    assert set(plt.get_fignums()) == figures
+
+
 def test_the_plot_refuses_settings_and_stores_it_cannot_use() -> None:
-    with pytest.raises(ValueError, match="bins must be a positive integer"):
+    with pytest.raises(ValueError, match="^bins must be at least 1$"):
         guide_calls(_store(5), CALLS, bins=0, show=False)
-    with pytest.raises(ValueError, match="max_guides_per_cell"):
+    with pytest.raises(TypeError, match="^bins must be an integer$"):
+        guide_calls(_store(5), CALLS, bins=2.0, show=False)
+    with pytest.raises(ValueError, match="^max_guides_per_cell must be at least 2$"):
+        guide_calls(_store(5), CALLS, max_guides_per_cell=1, show=False)
+    with pytest.raises(TypeError, match="^max_guides_per_cell must be an integer$"):
         guide_calls(_store(5), CALLS, max_guides_per_cell=True, show=False)
     with pytest.raises(TypeError, match="store does not provide guide calls"):
         guide_calls(SimpleNamespace(), CALLS, show=False)
@@ -580,9 +604,9 @@ def test_showing_the_threshold_plot_releases_its_figure() -> None:
 @pytest.mark.parametrize(
     ("case", "arguments", "error", "message"),
     [
-        (ONE, {"max_panels": 0}, ValueError, "max_panels must be a positive"),
-        (ONE, {"max_panels": True}, ValueError, "max_panels must be a positive"),
-        (ONE, {"max_panels": 2.0}, ValueError, "max_panels must be a positive"),
+        (ONE, {"max_panels": 0}, ValueError, "^max_panels must be at least 1$"),
+        (ONE, {"max_panels": True}, TypeError, "^max_panels must be an integer$"),
+        (ONE, {"max_panels": 2.0}, TypeError, "^max_panels must be an integer$"),
         (
             ONE,
             {"guides": "g1"},
@@ -607,13 +631,13 @@ def test_showing_the_threshold_plot_releases_its_figure() -> None:
             TWO,
             {"samples": ["s1", "s9", "s8"]},
             ValueError,
-            "The fits have no samples named 's9', 's8'",
+            "^The fits have no sample named 's9', 's8'$",
         ),
         (
             ONE,
             {"samples": ["s1"]},
             ValueError,
-            "The fits have no samples named 's1'",
+            "^The fits have no sample named 's1'$",
         ),
         (
             TWO,
@@ -635,11 +659,47 @@ def test_the_threshold_plot_refuses_settings_it_cannot_use(
         guide_thresholds(store, THRESHOLDS, show=False, **arguments)
 
 
+@pytest.mark.parametrize("guides", [None, ["g1"]])
+def test_the_threshold_plot_without_a_guide_draws_nothing(
+    guides: list[str] | None,
+) -> None:
+    def load(ref: ArtifactRef, *, guides: list[str] | None = None) -> GuideThresholds:
+        record = _record("poisson_gaussian", ONE_SAMPLE, min_umi=None)
+        return GuideThresholds(
+            table=record.table.iloc[:0],
+            histograms=record.histograms.iloc[:0],
+            guides=record.guides,
+            method=record.method,
+            sample_column=record.sample_column,
+            min_umi=record.min_umi,
+        )
+
+    store = SimpleNamespace(perturbation=SimpleNamespace(load_guide_thresholds=load))
+    figures = set(plt.get_fignums())
+
+    with pytest.raises(
+        ValueError, match="^The fits hold no guide, so there is nothing to plot$"
+    ):
+        guide_thresholds(store, THRESHOLDS, guides=guides, show=False)
+    assert set(plt.get_fignums()) == figures
+
+
 def test_the_threshold_plot_needs_a_store_with_guide_thresholds() -> None:
     with pytest.raises(TypeError, match="store does not provide guide thresholds"):
         guide_thresholds(SimpleNamespace(), THRESHOLDS, show=False)
 
 
+# The settings that the efficiency and E-distance plots refuse alike.
+ROW_REFUSALS = [
+    ({"max_rows": 0}, ValueError, "^max_rows must be at least 1$"),
+    ({"max_rows": True}, TypeError, "^max_rows must be an integer$"),
+    ({"max_rows": 2.0}, TypeError, "^max_rows must be an integer$"),
+    ({"alpha": 0}, ValueError, "^alpha must be above 0 and below 1$"),
+    ({"alpha": 1.0}, ValueError, "^alpha must be above 0 and below 1$"),
+    ({"alpha": True}, TypeError, "^alpha must be a real number$"),
+    ({"alpha": "0.05"}, TypeError, "^alpha must be a real number$"),
+    ({"alpha": float("nan")}, ValueError, "^alpha must be finite$"),
+]
 EFFICIENCY = ArtifactRef(
     scope="assay", assay="RNA", kind="perturbation_efficiency", artifact_id="c" * 64
 )
@@ -778,7 +838,7 @@ def _check_efficiency_rows(result: Any, *, alpha: float) -> None:
         assert (edge == edge[0]).all()
         assert edge[0] < fold[~no_umi].min(initial=0.0)
         assert edge[0] - left < 0.05 * (right - left)
-    significant = table["adjusted_p_value"].to_numpy() < alpha
+    significant = table["adjusted_p_value"].to_numpy() <= alpha
     expected_colors = np.asarray(
         [SIGNIFICANT if below else NOT_SIGNIFICANT for below in significant]
     ).reshape(-1, 4)
@@ -821,8 +881,8 @@ def test_efficiency_draws_each_tested_target_from_knockdown_to_activation() -> N
         ]
         (legend,) = result.figure.legends
         assert [text.get_text() for text in legend.get_texts()] == [
-            "Adjusted p-value below 0.05",
-            "Adjusted p-value of 0.05 or more",
+            "Significant at FDR 0.05",
+            "Not significant",
             "No UMI remains in the perturbed cells",
             "12 perturbed cells",
             "30 perturbed cells",
@@ -886,8 +946,8 @@ def test_efficiency_by_guide_draws_each_tested_guide() -> None:
         ]
         (legend,) = result.figure.legends
         assert [text.get_text() for text in legend.get_texts()] == [
-            "Adjusted p-value below 0.01",
-            "Adjusted p-value of 0.01 or more",
+            "Significant at FDR 0.01",
+            "Not significant",
             "No UMI remains in the perturbed cells",
             "6 perturbed cells",
             "15 perturbed cells",
@@ -946,36 +1006,39 @@ def test_efficiency_without_a_finite_fold_change_still_shows_zero() -> None:
         EFFICIENCY,
         show=False,
     )
-    record = _efficiency_record(
-        [("B", "no_feature", 3, np.nan, np.nan), ("C", "no_cells", 0, np.nan, np.nan)]
-    )
-    empty = efficiency(_efficiency_store(record), EFFICIENCY, show=False)
-
     try:
         _check_efficiency_rows(lost, alpha=0.05)
         (legend,) = lost.figure.legends
         assert [text.get_text() for text in legend.get_texts()] == [
-            "Adjusted p-value of 0.05 or more",
+            "Not significant",
             "No UMI remains in the perturbed cells",
             "1 perturbed cell",
         ]
-        _check_efficiency_rows(empty, alpha=0.05)
-        ax = empty.axes["efficiency"]
-        assert len(ax.collections) == 0
-        assert list(ax.get_yticks()) == []
-        assert ax.get_title().splitlines() == [
-            "Perturbation efficiency by target",
-            "Not plotted: 1 no_feature, 1 no_cells",
-        ]
-        assert empty.figure.legends == []
-        pd.testing.assert_frame_equal(
-            empty.tables["efficiency"], record.table.iloc[[]].reset_index(drop=True)
-        )
-        assert empty.provenance.n_cells == 50
-        assert empty.provenance.extras["n_tested"] == 0
     finally:
         lost.close()
-        empty.close()
+
+
+def test_efficiency_without_a_tested_row_draws_nothing() -> None:
+    untested = _efficiency_record(
+        [("B", "no_feature", 3, np.nan, np.nan), ("C", "no_cells", 0, np.nan, np.nan)]
+    )
+    figures = set(plt.get_fignums())
+
+    with pytest.raises(
+        ValueError,
+        match=r"^No target was tested \(1 no_feature, 1 no_cells\), so there is "
+        "no fold change to plot$",
+    ):
+        efficiency(_efficiency_store(untested), EFFICIENCY, show=False)
+    with pytest.raises(
+        ValueError, match="^No guide was tested, so there is no fold change to plot$"
+    ):
+        efficiency(
+            _efficiency_store(_efficiency_record([], by="guide")),
+            EFFICIENCY,
+            show=False,
+        )
+    assert set(plt.get_fignums()) == figures
 
 
 def test_efficiency_draws_into_caller_axes_in_the_theme() -> None:
@@ -989,8 +1052,8 @@ def test_efficiency_draws_into_caller_axes_in_the_theme() -> None:
         assert result.axes == {"efficiency": ax}
         assert figure.legends == []
         assert [text.get_text() for text in ax.get_legend().get_texts()][:3] == [
-            "Adjusted p-value below 0.05",
-            "Adjusted p-value of 0.05 or more",
+            "Significant at FDR 0.05",
+            "Not significant",
             "No UMI remains in the perturbed cells",
         ]
         _check_efficiency_rows(result, alpha=0.05)
@@ -1029,26 +1092,14 @@ def test_showing_the_efficiency_plot_releases_its_figure() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    ("arguments", "message"),
-    [
-        ({"max_rows": 0}, "max_rows must be a positive integer"),
-        ({"max_rows": True}, "max_rows must be a positive integer"),
-        ({"max_rows": 2.0}, "max_rows must be a positive integer"),
-        ({"alpha": 0}, "alpha must be a number above 0 and below 1"),
-        ({"alpha": 1.0}, "alpha must be a number above 0 and below 1"),
-        ({"alpha": True}, "alpha must be a number above 0 and below 1"),
-        ({"alpha": "0.05"}, "alpha must be a number above 0 and below 1"),
-        ({"alpha": float("nan")}, "alpha must be a number above 0 and below 1"),
-    ],
-)
+@pytest.mark.parametrize(("arguments", "error", "message"), ROW_REFUSALS)
 def test_the_efficiency_plot_refuses_settings_it_cannot_use(
-    arguments: dict[str, Any], message: str
+    arguments: dict[str, Any], error: type[Exception], message: str
 ) -> None:
     requests: list[ArtifactRef] = []
     store = _efficiency_store(_efficiency_record(TARGET_ROWS), requests)
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(error, match=message):
         efficiency(store, EFFICIENCY, show=False, **arguments)
     # The settings are checked before the record is read.
     assert requests == []
@@ -1173,7 +1224,7 @@ def _check_edistance_rows(result: Any, *, alpha: float) -> None:
         np.testing.assert_array_equal(offsets[:, 0], distances)
         # Every point is blue when no row has a p-value.
         significant = (
-            adjusted < alpha
+            adjusted <= alpha
             if np.isfinite(adjusted).any()
             else np.ones(len(table), dtype=bool)
         )
@@ -1229,8 +1280,8 @@ def test_edistance_draws_each_tested_target_from_the_largest_distance_down() -> 
         ]
         (legend,) = result.figure.legends
         assert [text.get_text() for text in legend.get_texts()] == [
-            "Adjusted p-value below 0.05",
-            "Adjusted p-value of 0.05 or more",
+            "Significant at FDR 0.05",
+            "Not significant",
             "12 perturbed cells",
             "30 perturbed cells",
             "40 perturbed cells",
@@ -1285,8 +1336,8 @@ def test_edistance_by_guide_draws_each_tested_guide() -> None:
         ]
         (legend,) = result.figure.legends
         assert [text.get_text() for text in legend.get_texts()] == [
-            "Adjusted p-value below 0.01",
-            "Adjusted p-value of 0.01 or more",
+            "Significant at FDR 0.01",
+            "Not significant",
             "6 perturbed cells",
             "15 perturbed cells",
             "20 perturbed cells",
@@ -1384,14 +1435,25 @@ def test_edistance_without_permutation_tests_draws_every_point_blue() -> None:
         kept.close()
 
 
-def test_edistance_without_a_nonzero_distance_still_shows_zero() -> None:
+def test_edistance_without_a_tested_row_draws_nothing() -> None:
     record = _edistance_record(
         [
             ("A", "too_few_cells", 1, np.nan, np.nan),
             ("B", "too_few_cells", 0, np.nan, np.nan),
         ]
     )
-    empty = edistance(_edistance_store(record), EDISTANCE, show=False)
+    figures = set(plt.get_fignums())
+
+    with pytest.raises(
+        ValueError,
+        match=r"^No target was tested \(2 too_few_cells\), so there is no "
+        "E-distance to plot$",
+    ):
+        edistance(_edistance_store(record), EDISTANCE, show=False)
+    assert set(plt.get_fignums()) == figures
+
+
+def test_edistance_without_a_nonzero_distance_still_shows_zero() -> None:
     zero = edistance(
         _edistance_store(_edistance_record([("C", "tested", 4, 0.0, 1.0)])),
         EDISTANCE,
@@ -1399,38 +1461,15 @@ def test_edistance_without_a_nonzero_distance_still_shows_zero() -> None:
     )
 
     try:
-        _check_edistance_rows(empty, alpha=0.05)
-        ax = empty.axes["edistance"]
-        assert len(ax.collections) == 0
-        assert list(ax.get_yticks()) == []
-        # The axis runs from -1 to 1, with its margins, when nothing differs
-        # from 0.
-        assert ax.get_xlim() == pytest.approx((-1.1, 1.1))
-        # No row is drawn, so the title says nothing of permutation tests.
-        assert ax.get_title().splitlines() == [
-            "E-distance by target",
-            "Not plotted: 2 too_few_cells",
-        ]
-        assert empty.figure.legends == []
-        pd.testing.assert_frame_equal(
-            empty.tables["edistance"], record.table.iloc[[]].reset_index(drop=True)
-        )
-        assert empty.provenance.n_cells == 50
-        assert empty.provenance.extras["n_tested"] == 0
-        assert empty.provenance.extras["statuses"] == {
-            "tested": 0,
-            "too_few_cells": 2,
-        }
         _check_edistance_rows(zero, alpha=0.05)
         assert zero.axes["edistance"].get_xlim() == pytest.approx((-1.1, 1.1))
         assert zero.axes["edistance"].get_title() == "E-distance by target"
         (legend,) = zero.figure.legends
         assert [text.get_text() for text in legend.get_texts()] == [
-            "Adjusted p-value of 0.05 or more",
+            "Not significant",
             "4 perturbed cells",
         ]
     finally:
-        empty.close()
         zero.close()
 
 
@@ -1445,8 +1484,8 @@ def test_edistance_draws_into_caller_axes_in_the_theme() -> None:
         assert result.axes == {"edistance": ax}
         assert figure.legends == []
         assert [text.get_text() for text in ax.get_legend().get_texts()] == [
-            "Adjusted p-value below 0.05",
-            "Adjusted p-value of 0.05 or more",
+            "Significant at FDR 0.05",
+            "Not significant",
             "12 perturbed cells",
             "30 perturbed cells",
             "40 perturbed cells",
@@ -1487,26 +1526,14 @@ def test_showing_the_edistance_plot_releases_its_figure() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    ("arguments", "message"),
-    [
-        ({"max_rows": 0}, "max_rows must be a positive integer"),
-        ({"max_rows": True}, "max_rows must be a positive integer"),
-        ({"max_rows": 2.0}, "max_rows must be a positive integer"),
-        ({"alpha": 0}, "alpha must be a number above 0 and below 1"),
-        ({"alpha": 1.0}, "alpha must be a number above 0 and below 1"),
-        ({"alpha": True}, "alpha must be a number above 0 and below 1"),
-        ({"alpha": "0.05"}, "alpha must be a number above 0 and below 1"),
-        ({"alpha": float("nan")}, "alpha must be a number above 0 and below 1"),
-    ],
-)
+@pytest.mark.parametrize(("arguments", "error", "message"), ROW_REFUSALS)
 def test_the_edistance_plot_refuses_settings_it_cannot_use(
-    arguments: dict[str, Any], message: str
+    arguments: dict[str, Any], error: type[Exception], message: str
 ) -> None:
     requests: list[ArtifactRef] = []
     store = _edistance_store(_edistance_record(EDISTANCE_TARGETS), requests)
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(error, match=message):
         edistance(store, EDISTANCE, show=False, **arguments)
     # The settings are checked before the record is read.
     assert requests == []
@@ -1965,27 +1992,26 @@ def test_mixscape_classes_pool_the_splits_of_each_target() -> None:
         result.close()
 
 
+@pytest.mark.parametrize("panel", ["classes", "scores"])
+def test_mixscape_classes_without_a_target_draw_nothing(panel: str) -> None:
+    figures = set(plt.get_fignums())
+
+    with pytest.raises(
+        ValueError,
+        match="^The Mixscape classes hold no target, so there is nothing to plot$",
+    ):
+        mixscape(
+            _mixscape_store(_mixscape_record([])), MIXSCAPE, panel=panel, show=False
+        )
+    assert set(plt.get_fignums()) == figures
+
+
 def test_mixscape_classes_without_a_fitted_target_still_draw() -> None:
-    empty = mixscape(_mixscape_store(_mixscape_record([])), MIXSCAPE, show=False)
     unfitted = mixscape(
         _mixscape_store(_mixscape_record(MIXSCAPE_MANY[3:])), MIXSCAPE, show=False
     )
 
     try:
-        _check_class_bars(empty)
-        ax = empty.axes["classes"]
-        assert len(ax.patches) == 0
-        assert list(ax.get_yticks()) == []
-        assert ax.get_title() == "Mixscape classes by target"
-        assert empty.figure.legends == []
-        assert empty.tables["classes"].empty
-        assert empty.provenance.n_cells == 0
-        assert empty.provenance.extras["statuses"] == {
-            "fitted": 0,
-            "few_de_genes": 0,
-            "few_cells": 0,
-            "no_fit": 0,
-        }
         # Every cell is NP, so the legend names only NP.
         _check_class_bars(unfitted)
         (legend,) = unfitted.figure.legends
@@ -1993,7 +2019,6 @@ def test_mixscape_classes_without_a_fitted_target_still_draw() -> None:
             "NP (not perturbed)"
         ]
     finally:
-        empty.close()
         unfitted.close()
 
 
@@ -2269,9 +2294,9 @@ def test_showing_the_mixscape_plot_releases_its_figure() -> None:
     [
         ({"panel": "violin"}, ValueError, "panel must be 'classes' or 'scores'"),
         ({"panel": None}, ValueError, "panel must be 'classes' or 'scores'"),
-        ({"max_targets": 0}, ValueError, "max_targets must be a positive integer"),
-        ({"max_targets": True}, ValueError, "max_targets must be a positive integer"),
-        ({"max_targets": 2.0}, ValueError, "max_targets must be a positive integer"),
+        ({"max_targets": 0}, ValueError, "^max_targets must be at least 1$"),
+        ({"max_targets": True}, TypeError, "^max_targets must be an integer$"),
+        ({"max_targets": 2.0}, TypeError, "^max_targets must be an integer$"),
         ({"targets": "MYC"}, TypeError, "targets must be a sequence of targets"),
         ({"targets": [1]}, TypeError, "targets must be a sequence of targets"),
         ({"targets": []}, ValueError, "targets must name at least one target"),
@@ -2742,6 +2767,7 @@ def test_association_volcano_draws_each_tested_discovery_pair() -> None:
             "tests": ASSOCIATIONS.to_dict(),
             "side": "both",
             "integration": "union",
+            "moi": "low",
             "from_assay": "RNA",
             "alpha": 0.1,
             "targets": None,
@@ -3145,10 +3171,10 @@ def test_showing_the_association_plots_releases_their_figures() -> None:
 @pytest.mark.parametrize(
     ("arguments", "error", "message"),
     [
-        ({"label_top": -1}, ValueError, "label_top must be a non-negative integer"),
-        ({"label_top": True}, ValueError, "label_top must be a non-negative integer"),
-        ({"label_top": 2.0}, ValueError, "label_top must be a non-negative integer"),
-        ({"label_top": "3"}, ValueError, "label_top must be a non-negative integer"),
+        ({"label_top": -1}, ValueError, "^label_top must be at least 0$"),
+        ({"label_top": True}, TypeError, "^label_top must be an integer$"),
+        ({"label_top": 2.0}, TypeError, "^label_top must be an integer$"),
+        ({"label_top": "3"}, TypeError, "^label_top must be an integer$"),
         ({"targets": "MYC"}, TypeError, "targets must be a sequence of targets"),
         ({"targets": [1]}, TypeError, "targets must be a sequence of targets"),
         ({"targets": []}, ValueError, "targets must name at least one target"),
@@ -3413,6 +3439,7 @@ def test_association_calibration_draws_the_three_panels() -> None:
             "tests": ASSOCIATIONS.to_dict(),
             "side": "both",
             "integration": "union",
+            "moi": "low",
             "from_assay": "RNA",
             "alpha": 0.1,
             "n_false_discoveries": 2,
@@ -3435,6 +3462,8 @@ def test_association_plots_compare_with_all_other_cells_at_high_moi() -> None:
         # Every pair's cells are all 300 cells, which its group splits.
         assert volcano.provenance.n_cells == 300
         assert calibration.provenance.n_cells == 300
+        assert volcano.provenance.extras["moi"] == "high"
+        assert calibration.provenance.extras["moi"] == "high"
         assert (
             volcano.axes["volcano"].get_xlabel()
             == "Log2 fold change against all other cells"
@@ -4434,6 +4463,30 @@ def test_cluster_plots_draw_into_caller_axes_in_the_theme(panel: str) -> None:
 
 
 @pytest.mark.parametrize("panel", ["heatmap", "embedding"])
+def test_cluster_plots_without_a_perturbation_draw_nothing(panel: str) -> None:
+    record = _clusters_record()
+    empty = PerturbationClusters(
+        table=record.table.iloc[:0],
+        order=record.order[:0],
+        distances=record.distances.iloc[:0, :0],
+        metric=record.metric,
+        min_cluster_size=record.min_cluster_size,
+        min_samples=record.min_samples,
+        selection=record.selection,
+        seed=record.seed,
+        from_assay=record.from_assay,
+    )
+    figures = set(plt.get_fignums())
+
+    with pytest.raises(
+        ValueError,
+        match="^The clusters hold no perturbation, so there is nothing to plot$",
+    ):
+        perturbation_clusters(_clusters_store(empty), CLUSTERS, panel=panel, show=False)
+    assert set(plt.get_fignums()) == figures
+
+
+@pytest.mark.parametrize("panel", ["heatmap", "embedding"])
 def test_cluster_plots_can_drop_the_legend(panel: str) -> None:
     store = _clusters_store(_clusters_record())
 
@@ -4651,3 +4704,260 @@ def test_the_cluster_plot_needs_a_store_with_perturbation_clusters(
 ) -> None:
     with pytest.raises(TypeError, match="store does not provide perturbation clusters"):
         perturbation_clusters(store, CLUSTERS, show=False)
+
+
+@pytest.mark.parametrize("panel", ["efficiency", "edistance"])
+def test_a_row_whose_adjusted_p_value_is_alpha_is_significant(panel: str) -> None:
+    # KLF1's adjusted p-value is 0.01, so it is significant at an FDR of 0.01,
+    # as a pair of the association tests would be.
+    result = (
+        efficiency(
+            _efficiency_store(_efficiency_record(TARGET_ROWS)),
+            EFFICIENCY,
+            alpha=0.01,
+            show=False,
+        )
+        if panel == "efficiency"
+        else edistance(
+            _edistance_store(_edistance_record(EDISTANCE_TARGETS)),
+            EDISTANCE,
+            alpha=0.01,
+            show=False,
+        )
+    )
+
+    try:
+        table = result.tables[panel]
+        heights = {
+            float(y): to_rgba(face)
+            for collection in result.axes[panel].collections
+            for (_, y), face in zip(
+                np.asarray(collection.get_offsets()),
+                np.broadcast_to(
+                    collection.get_facecolors(), (len(collection.get_offsets()), 4)
+                ),
+                strict=True,
+            )
+        }
+        row = int(np.flatnonzero(table["target"].to_numpy() == "KLF1")[0])
+        assert table["adjusted_p_value"].iloc[row] == 0.01
+        assert heights[float(len(table) - 1 - row)] == SIGNIFICANT
+        texts = [text.get_text() for text in result.figure.legends[0].get_texts()]
+        assert texts[:2] == ["Significant at FDR 0.01", "Not significant"]
+    finally:
+        result.close()
+
+
+def test_screen_figures_take_numpy_numbers() -> None:
+    results = {
+        "max_guides_per_cell": guide_calls(
+            _store(5),
+            CALLS,
+            max_guides_per_cell=np.int64(3),
+            bins=np.int32(5),
+            show=False,
+        ),
+        "max_panels": guide_thresholds(
+            _threshold_store("poisson_gaussian", ONE_SAMPLE, min_umi=None),
+            THRESHOLDS,
+            guides=["g1"],
+            max_panels=np.int64(12),
+            show=False,
+        ),
+        "max_rows": efficiency(
+            _efficiency_store(_efficiency_record(TARGET_ROWS)),
+            EFFICIENCY,
+            max_rows=np.int64(2),
+            alpha=np.float64(0.01),
+            show=False,
+        ),
+        "alpha": edistance(
+            _edistance_store(_edistance_record(EDISTANCE_TARGETS)),
+            EDISTANCE,
+            max_rows=np.int16(3),
+            alpha=np.float64(0.01),
+            show=False,
+        ),
+        "max_targets": mixscape(
+            _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS)),
+            MIXSCAPE,
+            max_targets=np.int64(2),
+            show=False,
+        ),
+        "label_top": association_volcano(
+            _associations_store(_associations_record()),
+            ASSOCIATIONS,
+            label_top=np.int64(2),
+            show=False,
+        ),
+    }
+
+    try:
+        # Each figure records its settings as Python numbers.
+        recorded = {
+            name: result.provenance.extras[name] for name, result in results.items()
+        }
+        assert recorded == {
+            "max_guides_per_cell": 3,
+            "max_panels": 12,
+            "max_rows": 2,
+            "alpha": 0.01,
+            "max_targets": 2,
+            "label_top": 2,
+        }
+        assert {type(value) for value in recorded.values()} == {int, float}
+        assert len(results["max_rows"].tables["efficiency"]) == 2
+        assert len(results["alpha"].tables["edistance"]) == 3
+        assert results["max_guides_per_cell"].tables["guides_per_cell"][
+            "guides"
+        ].tolist() == ["0", "1", "2", "3+"]
+    finally:
+        for result in results.values():
+            result.close()
+
+
+# The legends that each screen figure draws into caller axes, by the position
+# of their axes, which a composed figure keeps.
+COMPOSED_LEGENDS: dict[str, dict[int, list[str]]] = {
+    "guide_calls": {
+        1: ["Only guide called", "One of several called"],
+        2: ["One guide called", "Several guides called"],
+    },
+    "guide_threshold_panels": {
+        0: [
+            "Cells called",
+            "Cells not called",
+            "Posterior of the guide population",
+            "Threshold of the model",
+        ]
+    },
+    "guide_threshold_overview": {0: ["fitted", "other statuses"]},
+    "efficiency": {
+        0: [
+            "Significant at FDR 0.05",
+            "Not significant",
+            "No UMI remains in the perturbed cells",
+            "12 perturbed cells",
+            "30 perturbed cells",
+            "40 perturbed cells",
+        ]
+    },
+    "edistance": {
+        0: [
+            "Significant at FDR 0.05",
+            "Not significant",
+            "12 perturbed cells",
+            "30 perturbed cells",
+            "40 perturbed cells",
+        ]
+    },
+    "mixscape_classes": {0: MIXSCAPE_LEGEND[:2]},
+    "mixscape_scores": {1: MIXSCAPE_LEGEND},
+    "association_volcano": {0: EDGE_LEGEND},
+    "association_calibration": {
+        0: [
+            "Negative controls",
+            "Discovery pairs",
+            "Null expectation",
+            "95% null band",
+            "Beyond the axis",
+        ],
+        2: ["p-value below 1e-300"],
+    },
+}
+
+
+def _draw_screen_figure(name: str, axes: list[Any]) -> Any:
+    """Draw the screen figure ``name`` into the caller's ``axes``."""
+    if name == "guide_calls":
+        return guide_calls(_store(5), CALLS, target=axes, show=False)
+    if name.startswith("guide_threshold"):
+        store = _threshold_store("poisson_gaussian", ONE_SAMPLE, min_umi=None)
+        if name == "guide_threshold_overview":
+            return guide_thresholds(store, THRESHOLDS, target=axes[:2], show=False)
+        return guide_thresholds(
+            store, THRESHOLDS, guides=["g2", "g1"], target=axes[:2], show=False
+        )
+    if name == "efficiency":
+        store = _efficiency_store(_efficiency_record(TARGET_ROWS))
+        return efficiency(store, EFFICIENCY, target=axes[0], show=False)
+    if name == "edistance":
+        store = _edistance_store(_edistance_record(EDISTANCE_TARGETS))
+        return edistance(store, EDISTANCE, target=axes[0], show=False)
+    if name.startswith("mixscape"):
+        store = _mixscape_store(_mixscape_record(MIXSCAPE_TARGETS))
+        if name == "mixscape_classes":
+            return mixscape(store, MIXSCAPE, target=axes[0], show=False)
+        return mixscape(
+            store,
+            MIXSCAPE,
+            panel="scores",
+            targets=["TP53", "MYC"],
+            target={"TP53": axes[1], "MYC": axes[2]},
+            show=False,
+        )
+    if name == "association_volcano":
+        store = _associations_store(_associations_record(EDGE_ROWS))
+        return association_volcano(store, ASSOCIATIONS, target=axes[0], show=False)
+    return association_calibration(
+        _associations_store(_associations_record()),
+        ASSOCIATIONS,
+        target=axes,
+        show=False,
+    )
+
+
+@pytest.mark.parametrize("name", list(COMPOSED_LEGENDS))
+def test_composed_screen_figures_keep_their_legends(name: str) -> None:
+    figure, row = plt.subplots(1, 3, figsize=(12.0, 4.0), layout="constrained")
+    axes = list(row)
+
+    try:
+        result = _draw_screen_figure(name, axes)
+        composite = compose_results(figure, {name: result})
+
+        legends = {
+            position: [text.get_text() for text in axis.get_legend().get_texts()]
+            for position, axis in enumerate(axes)
+            if axis.get_legend() is not None
+        }
+        assert legends == COMPOSED_LEGENDS[name]
+        # The legends stay in the panels, and none is drawn again beside them.
+        assert figure.legends == []
+        assert composite.legends == result.legends
+    finally:
+        plt.close(figure)
+
+
+@pytest.mark.parametrize("panel", ["heatmap", "embedding"])
+def test_composed_cluster_plots_share_their_cluster_legend(panel: str) -> None:
+    figure, ax = plt.subplots(figsize=(6.0, 5.0), layout="constrained")
+
+    try:
+        result = perturbation_clusters(
+            _clusters_store(_clusters_record()),
+            CLUSTERS,
+            panel=panel,
+            target=ax,
+            show=False,
+        )
+        child_colorbar = result.axes.get("colorbar")
+        compose_results(figure, [result], panel_labels=False)
+
+        # Every legend of the clusters has a scale, so the composed figure
+        # draws the clusters beside the panel and the colorbar below it.
+        assert [
+            (
+                legend.get_title().get_text(),
+                [text.get_text() for text in legend.get_texts()],
+            )
+            for legend in figure.legends
+        ] == [("Cluster", ["0", "1", "2"])]
+        colorbars = [axis for axis in figure.axes if axis.get_label() == "<colorbar>"]
+        if panel == "heatmap":
+            assert child_colorbar not in figure.axes
+            assert [axis.get_xlabel() for axis in colorbars] == ["Pearson correlation"]
+        else:
+            assert colorbars == []
+    finally:
+        plt.close(figure)

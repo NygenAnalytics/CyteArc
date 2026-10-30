@@ -6,9 +6,10 @@ import pytest
 
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import MULTIPLE, NEGATIVE, GuideCalls
-from cytearc.storage.artifacts import ArtifactRef
+from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.storage.selections import read_stored_selection_indices
 from cytearc.utils.logging import collect_warnings
+from tests.perturbation_helpers import record_cell_reads
 from tests.storage_helpers import write_count_store
 
 # Guides are named CRISPR0 to CRISPR3 and cells cell0 to cell7.
@@ -36,6 +37,17 @@ CALL_FILE = (
     "outside-1,1,CRISPR0,4\n"
 )
 SELECTED = ["cell0", "cell1", "cell2", "cell3", "cell4", "cell5", "cell7"]
+# The per-cell arrays of guide calls, which artifacts.load_values reads.
+GUIDE_CALL_ARRAYS = (
+    "values",
+    "n_guides",
+    "top_guide",
+    "top_umi",
+    "top_fraction",
+    "total_umi",
+    "guide_codes",
+    "guide_umis",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -375,6 +387,112 @@ def test_a_read_only_store_refuses_to_import_new_calls(tmp_path) -> None:
     edited = _call_file(tmp_path, CALL_FILE.replace(",9\n", ",8\n"), "edited.csv")
     with pytest.raises(PermissionError, match="import_guide_calls"):
         reader.perturbation.import_guide_calls(edited, cell_selection=selection)
+
+
+def test_a_read_only_store_checks_the_file_and_the_budget_first(
+    tmp_path, monkeypatch
+) -> None:
+    store = _store(tmp_path)
+    selection = _selection(store)
+    reader = DataStore(
+        str(tmp_path / "store.zarr"), default_assay="RNA", zarr_mode="r", nthreads=1
+    )
+    unknown = _call_file(
+        tmp_path, CALL_FILE.replace("cell7,1,CRISPR1", "cell7,1,CRISPR9"), "bad.csv"
+    )
+
+    # The arguments, the call file and the budget are checked before the
+    # store must be writable.
+    with pytest.raises(ValueError, match="not features of assay 'CRISPR'"):
+        reader.perturbation.import_guide_calls(unknown, cell_selection=selection)
+    monkeypatch.setattr(reader, "memoryBytes", 1_000)
+    with pytest.raises(MemoryError, match="Raise mem_budget"):
+        reader.perturbation.import_guide_calls(
+            _call_file(tmp_path), cell_selection=selection
+        )
+
+
+def test_an_import_of_one_sample_reads_only_its_cell_ids(tmp_path, monkeypatch) -> None:
+    store = _store(tmp_path)
+    # A merged store imports each sample's call file for the cells of that
+    # sample, here the first four.
+    store.cells.insert("sample", np.arange(len(GUIDE_COUNTS)) < 4)
+    sample = store.snapshot_cell_selection("sample")
+    reads = record_cell_reads(monkeypatch, store, {"ids"})
+
+    with pytest.warns(UserWarning, match="4 of 7 barcodes of the call file"):
+        ref = store.perturbation.import_guide_calls(
+            _call_file(tmp_path), cell_selection=sample
+        )
+
+    assert set(np.concatenate(reads["ids"]).tolist()) == {0, 1, 2, 3}
+    assert store.perturbation.load_guide_calls(ref).cells["call"].tolist() == [
+        "CRISPR0",
+        "CRISPR1",
+        MULTIPLE,
+        NEGATIVE,
+    ]
+
+
+def test_loading_calls_reads_the_cell_ids_once(tmp_path, monkeypatch) -> None:
+    store = _store(tmp_path)
+    ref = store.perturbation.import_guide_calls(
+        _call_file(tmp_path), cell_selection=_selection(store)
+    )
+    reads = record_cell_reads(monkeypatch, store, {"ids"})
+
+    cells = store.perturbation.load_guide_calls(ref).cells
+
+    assert cells.index.tolist() == SELECTED
+    assert [rows.tolist() for rows in reads["ids"]] == [[0, 1, 2, 3, 4, 5, 7]]
+
+
+def test_loading_calls_checks_the_budget_of_every_array_at_once(
+    tmp_path, monkeypatch
+) -> None:
+    store = _store(tmp_path)
+    ref = store.perturbation.import_guide_calls(
+        _call_file(tmp_path), cell_selection=_selection(store)
+    )
+
+    def fits(name: str, budget: int) -> bool:
+        monkeypatch.setattr(store, "memoryBytes", budget)
+        try:
+            store.artifacts.load_values(ref, value=name)
+        except MemoryError:
+            return False
+        return True
+
+    def smallest(name: str) -> int:
+        low, high = 0, 1 << 30
+        while high - low > 1:
+            middle = (low + high) // 2
+            low, high = (low, middle) if fits(name, middle) else (middle, high)
+        return high
+
+    # A budget that reads any one array with the cell IDs, but not all of them.
+    budget = max(smallest(name) for name in GUIDE_CALL_ARRAYS)
+    monkeypatch.setattr(store, "memoryBytes", budget)
+
+    with pytest.raises(MemoryError, match="memory budget"):
+        store.perturbation.load_guide_calls(ref)
+
+
+def test_loading_calls_refuses_an_array_without_a_row_per_cell(tmp_path) -> None:
+    store = _store(tmp_path)
+    ref = store.perturbation.import_guide_calls(
+        _call_file(tmp_path), cell_selection=_selection(store)
+    )
+    group = artifact_group(store.zw, ref)
+    del group["top_umi"]
+    group.create_array("top_umi", data=np.zeros(3, dtype=np.uint32))
+
+    with pytest.raises(
+        ValueError,
+        match="^The guide_calls artifact's 'top_umi' array must hold one row per "
+        "cell of its cell selection, 7 rows, not 3$",
+    ):
+        store.perturbation.load_guide_calls(ref)
 
 
 def test_loading_refuses_other_artifact_kinds(tmp_path) -> None:

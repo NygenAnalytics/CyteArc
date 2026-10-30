@@ -11,8 +11,13 @@ from typing import Any
 import numpy as np
 
 from ...metadata.rows import array_block_rows
+from ...perturbation.edistance import EDISTANCE_STATUSES
+from ...perturbation.efficiency import EFFICIENCY_STATUSES
+from ...perturbation.mixscape import MIXSCAPE_STATUSES
+from ...perturbation.mixtures import FIT_STATUSES
 from ...storage.artifacts import ArtifactRef, artifact_group, inspect_artifact
 from ...storage.types import as_zarr_array
+from .._operations.perturbation import _status_labels
 
 # A summary lists at most this many samples, clusters, or components.
 SUMMARY_ITEM_LIMIT = 50
@@ -20,7 +25,8 @@ SUMMARY_ITEM_LIMIT = 50
 # summary: the fewest cells of a perturbation profile by default, as in
 # Replogle et al. (2022).
 FEW_TARGET_CELLS = 25
-# The adjusted p-value below which a perturbation's test counts in a summary.
+# The adjusted p-value at or below which a perturbation's test counts as
+# significant in a summary, as a pair of the association tests does.
 SIGNIFICANT_P = 0.05
 
 
@@ -56,12 +62,9 @@ def _row_ranges(array: Any) -> Iterator[tuple[int, int]]:
         yield start, min(start + block, rows)
 
 
-def _status_counts(group: Any, codes: np.ndarray) -> dict[str, int]:
-    """Count each status of the artifact's ``status_names`` among ``codes``."""
-    names = [str(name) for name in group.attrs.get("status_names") or ()]
-    return {
-        name: int(np.count_nonzero(codes == index)) for index, name in enumerate(names)
-    }
+def _status_counts(labels: np.ndarray, statuses: Sequence[str]) -> dict[str, int]:
+    """Count each of ``statuses`` among the decoded ``labels``."""
+    return {name: int(np.count_nonzero(labels == name)) for name in statuses}
 
 
 def _float(value: Any, digits: int = 4) -> float | None:
@@ -298,7 +301,9 @@ def _guide_thresholds(group: Any) -> dict[str, Any]:
     return {
         "samples": int(status.shape[0]),
         "guides": int(status.shape[1]),
-        "statuses": _status_counts(group, codes),
+        "statuses": _status_counts(
+            _status_labels(group, FIT_STATUSES, codes), FIT_STATUSES
+        ),
     }
 
 
@@ -398,26 +403,22 @@ def _row_table(group: Any, names: Sequence[str]) -> dict[str, np.ndarray] | None
     }
 
 
-def _status_code(group: Any, status: str) -> int:
-    return [str(name) for name in group.attrs["status_names"]].index(status)
-
-
 def _efficiency(group: Any) -> dict[str, Any]:
     table = _row_table(group, ("names", "remaining_fraction", "adjusted_p_value"))
     if table is None:
         return {}
-    codes = table["status"].astype(np.int64)
-    tested = codes == _status_code(group, "tested")
+    labels = _status_labels(group, EFFICIENCY_STATUSES, table["status"])
+    tested = labels == "tested"
     fraction = table["remaining_fraction"].astype(np.float64)
     adjusted = table["adjusted_p_value"].astype(np.float64)
     measured = fraction[tested & np.isfinite(fraction)]
-    unmatched = table["names"].astype(str)[codes == _status_code(group, "no_feature")]
+    unmatched = table["names"].astype(str)[labels == "no_feature"]
     return {
         "by": str(group.attrs.get("by")),
-        "rows": int(len(codes)),
-        "statuses": _status_counts(group, codes),
+        "rows": int(len(labels)),
+        "statuses": _status_counts(labels, EFFICIENCY_STATUSES),
         "knockedDown": int(
-            np.count_nonzero(tested & (adjusted < SIGNIFICANT_P) & (fraction < 1))
+            np.count_nonzero(tested & (adjusted <= SIGNIFICANT_P) & (fraction < 1))
         ),
         "medianRemainingFraction": (
             _float(np.median(measured)) if len(measured) else None
@@ -430,8 +431,8 @@ def _edistance(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
     table = _row_table(group, ("p_value", "adjusted_p_value"))
     if table is None:
         return {}
-    codes = table["status"].astype(np.int64)
-    tested = codes == _status_code(group, "tested")
+    labels = _status_labels(group, EDISTANCE_STATUSES, table["status"])
+    tested = labels == "tested"
     permutations = int(parameters["n_permutations"])
     # No draw reached the observed E-distance: the smallest p-value a test of
     # these permutations gives. Without permutations p-values are NaN.
@@ -440,9 +441,9 @@ def _edistance(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
     adjusted = table["adjusted_p_value"].astype(np.float64)
     return {
         "by": str(group.attrs.get("by")),
-        "rows": int(len(codes)),
-        "statuses": _status_counts(group, codes),
-        "significant": int(np.count_nonzero(tested & (adjusted < SIGNIFICANT_P))),
+        "rows": int(len(labels)),
+        "statuses": _status_counts(labels, EDISTANCE_STATUSES),
+        "significant": int(np.count_nonzero(tested & (adjusted <= SIGNIFICANT_P))),
         "atFloor": int(np.count_nonzero(tested & (p_value <= floor * (1 + 1e-9)))),
         "nPermutations": permutations,
     }
@@ -470,11 +471,11 @@ def _mixscape(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
     table = _row_table(group, ("targets", "n_cells", "n_ko"))
     if table is None:
         return {}
-    codes = table["status"].astype(np.int64)
-    few = codes == _status_code(group, "few_de_genes")
+    labels = _status_labels(group, MIXSCAPE_STATUSES, table["status"])
+    few = labels == "few_de_genes"
     return {
-        "rows": int(len(codes)),
-        "statuses": _status_counts(group, codes),
+        "rows": int(len(labels)),
+        "statuses": _status_counts(labels, MIXSCAPE_STATUSES),
         "cells": int(table["n_cells"].sum()),
         "knockedOut": int(table["n_ko"].sum()),
         "fewDeGenes": sorted(set(table["targets"].astype(str)[few].tolist()))[

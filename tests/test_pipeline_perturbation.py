@@ -175,8 +175,10 @@ def _open(location: str | Path, **options: Any) -> DataStore:
     )
 
 
-def _write(location: Path, guides: np.ndarray = GUIDE_COUNTS) -> DataStore:
-    write_count_store(str(location), {"RNA": RNA, "CRISPR": guides}, "uint16")
+def _write(
+    location: Path, guides: np.ndarray = GUIDE_COUNTS, rna: np.ndarray = RNA
+) -> DataStore:
+    write_count_store(str(location), {"RNA": rna, "CRISPR": guides}, "uint16")
     store = _open(location)
     features = store._get_assay("CRISPR").feats
     features.insert(
@@ -453,10 +455,15 @@ def test_a_full_run_runs_every_stage(runs) -> None:
     assert inspect_(run["edistance"]).inputs["coordinates"] == run["harmony"].to_dict()
     signature = inspect_(run["signature"])
     assert signature.inputs["coordinates"] == run["harmony"].to_dict()
-    assert signature.inputs["features"] == run["highly_variable_features"].to_dict()
+    assert (
+        signature.inputs["feature_selection"]
+        == run["highly_variable_features"].to_dict()
+    )
     # Trans pairs over the HVGs, with the list of random sets as given.
     tests = inspect_(run["associations"])
-    assert tests.inputs["features"] == run["highly_variable_features"].to_dict()
+    assert (
+        tests.inputs["feature_selection"] == run["highly_variable_features"].to_dict()
+    )
     assert tests.parameters["n_resamples"] == [99, 499, 999]
     # A run with Mixscape profiles the knocked-out cells of each target.
     profiles = inspect_(run["profiles"])
@@ -722,7 +729,7 @@ def test_each_stage_summary_equals_its_loader(runs) -> None:
         "knockedDown": int(
             (
                 tested
-                & (table["adjusted_p_value"] < 0.05)
+                & (table["adjusted_p_value"] <= 0.05)
                 & (table["remaining_fraction"] < 1)
             ).sum()
         ),
@@ -743,7 +750,7 @@ def test_each_stage_summary_equals_its_loader(runs) -> None:
             "too_few_cells": int((~tested).sum()),
         },
         "significant": int(
-            (tested & (distances.table["adjusted_p_value"] < 0.05)).sum()
+            (tested & (distances.table["adjusted_p_value"] <= 0.05)).sum()
         ),
         "atFloor": int((tested & np.isclose(distances.table["p_value"], floor)).sum()),
         "nPermutations": distances.n_permutations,
@@ -1258,15 +1265,19 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
         {"RNA": RNA, "CRISPR": GUIDE_COUNTS, "GUIDES": GUIDE_COUNTS},
         "uint16",
     )
-    for store, crispr in (
-        (_open(alone), []),
-        (_open(pair, assay_types={"GUIDES": "CRISPR"}), ["CRISPR", "GUIDES"]),
+    for store, found in (
+        (_open(alone), "No assay of the store is"),
+        (
+            _open(pair, assay_types={"GUIDES": "CRISPR"}),
+            "2 assays of the store, 'CRISPR', 'GUIDES', are",
+        ),
     ):
+        # The recipe asks for its own keyword, by the rule of the methods.
         with pytest.raises(
             ValueError,
             match=re.escape(
-                "The perturbation recipe needs an assay declared 'CRISPR'; name it "
-                f"with guide_assay=...; CRISPR assays: {crispr!r}"
+                f"{found} declared 'CRISPR', and guide calls read one; name the "
+                "guide assay with guide_assay=..."
             ),
         ):
             _resolve(store, **HEAD)
@@ -1447,7 +1458,7 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
         (
             {"associations": {"sample_column": 5}},
             TypeError,
-            r"associations\['sample_column'\] must be a non-empty string",
+            "^sample_column must be a non-empty string or None$",
         ),
         (
             {"associations": {"sample_column": "lane_gaps"}},
@@ -1668,6 +1679,35 @@ def test_only_the_runs_cells_need_labels_and_covariates(readonly) -> None:
     }
 
 
+def test_a_run_with_association_tests_refuses_cells_without_counts(tmp_path) -> None:
+    # A control cell without RNA counts, which the store's I column leaves
+    # out, enters a run whose cells name it.
+    rna = RNA.copy()
+    rna[np.flatnonzero(GUIDE_OF == 6)[0]] = 0
+    store = _write(tmp_path / "screen.zarr", rna=rna)
+    store.cells.insert("every", np.ones(N_CELLS, dtype=bool))
+    before = _written(store)
+
+    # The tests would refuse the cell after nine stages had written.
+    with pytest.raises(
+        ValueError,
+        match="^Association tests adjust for the log of each cell's UMIs in assay "
+        "'RNA', but 1 of the run's cells has none; restrict cells to cells with "
+        "counts$",
+    ):
+        store.pipeline.perturbation(
+            cells="every",
+            labels=LABELS,
+            associations={"n_resamples": [99, 499, 999]},
+            **QUICK,
+        )
+
+    assert _written(store) == before
+    # A run without the tests takes the cell.
+    plan = _resolve(store, cells="every", **QUICK)
+    assert plan.config["stages"]["associations"] is False
+
+
 def test_the_recipe_passes_the_moi_to_the_association_tests(tmp_path) -> None:
     # As in a high-MOI screen, no cell carries control guides only: each cell of
     # a non-targeting guide also carries the guide of GENE_D.
@@ -1853,6 +1893,89 @@ def test_summaries_name_what_their_tables_lack() -> None:
         {"n_permutations": 0},
     )
     assert (distances["significant"], distances["atFloor"]) == (0, 0)
+
+
+def test_summaries_count_an_adjusted_p_value_of_0_05_as_significant() -> None:
+    # As a pair of the association tests is significant at its alpha.
+    efficiency = summaries._efficiency(
+        _group(
+            {
+                "status": [0, 0],
+                "names": np.asarray(["GENE_X", "GENE_Y"]),
+                "remaining_fraction": [0.5, 0.5],
+                "adjusted_p_value": [0.05, 0.0501],
+            },
+            status_names=["tested", "no_feature", "no_cells", "no_control_expression"],
+            by="target",
+        )
+    )
+    distances = summaries._edistance(
+        _group(
+            {
+                "status": [0, 0],
+                "p_value": [0.01, 0.01],
+                "adjusted_p_value": [0.05, 0.0501],
+            },
+            status_names=["tested", "too_few_cells"],
+            by="target",
+        ),
+        {"n_permutations": 999},
+    )
+
+    assert efficiency["knockedDown"] == 1
+    assert distances["significant"] == 1
+
+
+def test_summaries_read_statuses_only_as_their_methods_name_them() -> None:
+    # A code means the status of the method's module, as for the loaders, so
+    # a table that names its statuses in another order is refused.
+    reordered = ["no_feature", "tested", "no_cells", "no_control_expression"]
+    efficiency = {
+        "status": [0, 1],
+        "names": np.asarray(["GENE_X", "GENE_Y"]),
+        "remaining_fraction": [0.5, np.nan],
+        "adjusted_p_value": [0.01, np.nan],
+    }
+    rows = {"status": [0], "p_value": [0.5], "adjusted_p_value": [0.5]}
+    mixscape = {
+        "status": [0],
+        "targets": np.asarray(["GENE_X"]),
+        "n_cells": [5],
+        "n_ko": [2],
+    }
+    for summarize, arrays, names in (
+        (summaries._efficiency, efficiency, reordered),
+        (summaries._edistance, rows, ["too_few_cells", "tested"]),
+        (summaries._mixscape, mixscape, ["few_de_genes", "fitted"]),
+    ):
+        group = _group(arrays, status_names=names, by="target")
+        with pytest.raises(ValueError, match="names its statuses"):
+            if summarize is summaries._efficiency:
+                summarize(group)
+            else:
+                summarize(group, {"n_permutations": 9, "perturbation_type": "KO"})
+    with pytest.raises(ValueError, match="names its statuses"):
+        summaries._guide_thresholds(
+            _group({"status": [[0, 1]]}, status_names=["no_cells", "fitted"])
+        )
+    # With the module's names, a code's status is the module's.
+    summary = summaries._efficiency(
+        _group(
+            efficiency,
+            status_names=["tested", "no_feature", "no_cells", "no_control_expression"],
+            by="target",
+        )
+    )
+    assert summary["statuses"] == {
+        "tested": 1,
+        "no_feature": 1,
+        "no_cells": 0,
+        "no_control_expression": 0,
+    }
+    assert (summary["noFeature"], summary["medianRemainingFraction"]) == (
+        ["GENE_Y"],
+        0.5,
+    )
 
 
 def test_false_discoveries_are_counted_by_their_control_guides() -> None:

@@ -21,7 +21,7 @@ from cytearc.perturbation.profiles import (
     z_score_sums,
 )
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
-from tests.perturbation_helpers import use_python_kernels
+from tests.perturbation_helpers import record_cell_reads, use_python_kernels
 from tests.storage_helpers import insert_nullable_cell_column, write_count_store
 
 # Tests that check the warning about thin perturbations catch it themselves.
@@ -651,7 +651,9 @@ def test_profiles_keep_each_target_without_masking(shared) -> None:
     assert status.inputs["target_features_fingerprint"] is None
 
 
-def test_profiles_of_mixscape_classes_average_knocked_out_cells(tmp_path) -> None:
+def test_profiles_of_mixscape_classes_average_knocked_out_cells(
+    tmp_path, monkeypatch
+) -> None:
     store = _store(tmp_path)
     labels = _labels(store)
     coordinates = store.reduction.import_coordinates(
@@ -661,13 +663,19 @@ def test_profiles_of_mixscape_classes_average_knocked_out_cells(tmp_path) -> Non
         labels, coordinates, features=_selected(store), dims=10, n_neighbors=10
     )
     classes = store.perturbation.mixscape(signature, perturbation_type="KD")
+    reads = record_cell_reads(monkeypatch, store, {"ids"})
     called = store.perturbation.load_mixscape(classes).cells["mixscape_class"]
     knocked = called.str.endswith(" KD").to_numpy()
+    # Loading the classes reads their cells' IDs once.
+    assert [rows.tolist() for rows in reads["ids"]] == [list(range(N_CELLS))]
+    reads["ids"].clear()
 
     profiles, messages = _warned_profiles(store, classes, _selected(store), min_cells=4)
     guides, guide_messages = _warned_profiles(
         store, classes, _selected(store), by="guide", min_cells=4
     )
+    # The profiles read the classes of their cells, not the cells' IDs.
+    assert reads["ids"] == []
 
     result = store.perturbation.load_profiles(profiles)
     assert result.labels_kind == "mixscape_classes"

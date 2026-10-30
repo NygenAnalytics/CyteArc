@@ -458,7 +458,7 @@ class GuideCallImportArguments(OperationArguments):
     dataset_fingerprint: str = artifact_input()
     guide_ids_fingerprint: str = artifact_input()
     # The SHA-256 of the call file's bytes; its path is not part of the identity.
-    file_sha256: str = artifact_input()
+    call_file_fingerprint: str = artifact_input()
     barcode_prefix: str | None = parameter()
     invalidate_cache: bool = execution()
 
@@ -529,10 +529,10 @@ class PerturbationSignatureArguments(OperationArguments):
     artifact_kind: ClassVar[str] = "perturbation_signature"
 
     # The labels name the control cells; the coordinates give the cells and
-    # their neighbors; the features are the signature's columns.
+    # their neighbors; the feature selection gives the signature's columns.
     labels: ArtifactRef = artifact_input()
     coordinates: ArtifactRef = artifact_input()
-    features: ArtifactRef = artifact_input()
+    feature_selection: ArtifactRef = artifact_input()
     dataset_fingerprint: str = artifact_input()
     # The fingerprint of each cell's sample, or None for one sample.
     sample_assignments_fingerprint: str | None = artifact_input()
@@ -577,7 +577,7 @@ class PerturbationAssociationArguments(OperationArguments):
     dataset_fingerprint: str = artifact_input()
     # Trans pairs test every feature of a feature selection; explicit pairs
     # and positive controls are fingerprinted as target and feature IDs.
-    features: ArtifactRef | None = artifact_input()
+    feature_selection: ArtifactRef | None = artifact_input()
     pairs_fingerprint: str | None = artifact_input()
     positive_controls_fingerprint: str | None = artifact_input()
     # The fingerprint of each cell's sample and of the covariate columns over

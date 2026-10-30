@@ -579,8 +579,9 @@ class PipelineAccessor:
         stage reads depends on the data, so every sample or split column that
         a stage reads must label every cell of ``cells``, with neither a
         missing value nor empty or whitespace text, every covariate of
-        ``associations`` must hold a finite value for each of them, and with
-        ``associations={"moi": "high"}`` each of them must have guide UMIs.
+        ``associations`` must hold a finite value for each of them, with
+        ``associations`` each of them must have counts in the RNA assay, and
+        with ``associations={"moi": "high"}`` guide UMIs too.
 
         Args:
             assay: The RNA assay. Defaults to the default assay when it is an

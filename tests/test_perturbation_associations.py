@@ -1,4 +1,5 @@
 import math
+import re
 import tracemalloc
 import warnings
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from cytearc.perturbation import PerturbationAssociations
 from cytearc.perturbation import associations as associations_module
 from cytearc.perturbation import glm, random_sets
 from cytearc.perturbation.associations import (
+    ASSOCIATION_SETS,
     RECORD_BYTES,
     TreatmentGroups,
     adjusted_p_values,
@@ -222,6 +224,7 @@ def _settings(**changes: object) -> tuple:
         "seed": 0,
         "moi": "low",
         "resampling": None,
+        "sample_column": None,
     }
     settings.update(changes)
     return associations_module.association_settings(**settings)
@@ -1405,6 +1408,58 @@ def test_associations_refuse_a_budget_without_room_for_one_feature(
         )
 
 
+def _needed_budget(refusal: pytest.ExceptionInfo[MemoryError]) -> int:
+    """The memory budget that a refusal asks for."""
+    found = re.search(r"holds? about (\d+) bytes", str(refusal.value))
+    assert found is not None, str(refusal.value)
+    assert str(refusal.value).endswith(
+        f"Raise mem_budget to at least {found.group(1)} bytes."
+    )
+    return int(found.group(1))
+
+
+def test_association_refusals_name_the_budget_that_runs_the_tests(
+    shared, monkeypatch
+) -> None:
+    store, labels = shared.store, shared.labels
+    features = _every_gene(store)
+    arguments = {"features": features, "invalidate_cache": True, **FAST}
+    default = store.perturbation.load_associations(
+        store.perturbation.associations(labels, **arguments)
+    )
+    # The tests hold far more than this budget, the pairs' arrays alone.
+    monkeypatch.setattr(store, "memoryBytes", 1000)
+    with pytest.raises(MemoryError, match="one feature over 540 tested cells") as low:
+        store.perturbation.associations(labels, **arguments)
+    needed = _needed_budget(low)
+
+    # A budget one byte short asks for the same budget, which runs the tests
+    # with the results of the default budget.
+    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    with pytest.raises(MemoryError) as short:
+        store.perturbation.associations(labels, **arguments)
+    assert _needed_budget(short) == needed
+    monkeypatch.setattr(store, "memoryBytes", needed)
+    tight = store.perturbation.load_associations(
+        store.perturbation.associations(labels, **arguments)
+    )
+    for name in ("discovery", "calibration", "positive"):
+        pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
+
+
+def test_loading_associations_checks_the_memory_budget(shared, monkeypatch) -> None:
+    store, labels = shared.store, shared.labels
+    tests = store.perturbation.associations(labels, features=_every_gene(store), **FAST)
+    loaded = store.perturbation.load_associations(tests)
+    n_pairs = sum(len(getattr(loaded, name)) for name in ASSOCIATION_SETS)
+
+    monkeypatch.setattr(store, "memoryBytes", 1000)
+    with pytest.raises(
+        MemoryError, match=f"^The association tests of {n_pairs} pairs hold about"
+    ):
+        store.perturbation.load_associations(tests)
+
+
 def test_associations_plan_only_the_calibration_pairs_a_check_can_draw(
     tmp_path, monkeypatch
 ) -> None:
@@ -1648,6 +1703,43 @@ def test_associations_refuse_arguments_they_cannot_use(
         store.perturbation.associations(**settings)
 
 
+def test_association_records_leave_their_tables_out_of_their_repr() -> None:
+    table = pd.DataFrame({"target": ["GENE_SHOWN_NOWHERE"], "feature": ["RNA0"]})
+    record = PerturbationAssociations(
+        discovery=table,
+        calibration=table,
+        positive=table,
+        alpha=0.1,
+        side="both",
+        integration="union",
+        moi="low",
+        resampling="permutation",
+        from_assay="RNA",
+        n_false_discoveries=0,
+        calibration_grade="none",
+    )
+
+    text = repr(record)
+
+    assert "GENE_SHOWN_NOWHERE" not in text
+    assert text == (
+        "PerturbationAssociations(alpha=0.1, side='both', integration='union', "
+        "moi='low', resampling='permutation', from_assay='RNA', "
+        "n_false_discoveries=0, calibration_grade='none')"
+    )
+
+
+def test_association_settings_check_the_sample_column() -> None:
+    # The pipeline recipe runs the same check on its settings.
+    for column in (4, "", ["lane"]):
+        with pytest.raises(
+            TypeError, match="^sample_column must be a non-empty string or None$"
+        ):
+            _settings(sample_column=column)
+    # Whether the column exists is checked against the store.
+    assert _settings(sample_column="lane") == _settings()
+
+
 def test_associations_take_the_resamples_as_any_sequence(shared) -> None:
     store, labels = shared.store, shared.labels
     features = _every_gene(store)
@@ -1667,40 +1759,6 @@ def test_trans_features_must_belong_to_the_tested_assay(shared) -> None:
 
     with pytest.raises(ValueError, match="feature selection of assay 'RNA'"):
         store.perturbation.associations(labels, features=guides)
-
-
-def test_tests_saved_before_high_moi_are_refused_and_tested_again(tmp_path) -> None:
-    from cytearc.storage.artifacts import artifact_group
-
-    store = _operation_store(tmp_path)
-    labels = _operation_labels(store)
-    arguments = {
-        "features": _every_gene(store),
-        "positive_controls": None,
-        "n_calibration_pairs": 0,
-        **FAST,
-    }
-    tests = store.perturbation.associations(labels, **arguments)
-    # A development build saved its tests without moi and resampling.
-    group = artifact_group(store.zw, tests)
-    provenance = dict(group.attrs["provenance"])
-    parameters = dict(provenance["parameters"])
-    del parameters["moi"], parameters["resampling"]
-    group.attrs["provenance"] = {**provenance, "parameters": parameters}
-
-    with pytest.raises(
-        ValueError,
-        match="saved by a development build before high-MOI tests, so their record "
-        "lacks moi and resampling; call perturbation.associations again",
-    ):
-        store.perturbation.load_associations(tests)
-
-    # Testing again with the same arguments saves new tests, which load.
-    again = store.perturbation.associations(labels, **arguments)
-    assert again != tests
-    loaded = store.perturbation.load_associations(again)
-    assert (loaded.moi, loaded.resampling) == ("low", "permutation")
-    assert loaded.discovery["pass_qc"].any()
 
 
 def test_loading_associations_refuses_other_artifacts(shared) -> None:

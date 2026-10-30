@@ -1,3 +1,4 @@
+import re
 import warnings
 
 import numba
@@ -1297,6 +1298,69 @@ def test_high_moi_refuses_a_budget_without_room_for_one_gene(
         store.perturbation.associations(
             labels, features=genes, moi="high", invalidate_cache=True, **FAST
         )
+
+
+def test_high_moi_checks_the_budget_before_the_store_must_be_writable(
+    screen, monkeypatch
+) -> None:
+    from cytearc.datastore.datastore import DataStore
+
+    store, labels, genes = screen
+    reader = DataStore(
+        store.zarr_loc,
+        default_assay="RNA",
+        min_features_per_cell=0,
+        nthreads=1,
+        zarr_mode="r",
+    )
+    # A seed whose tests are not saved yet.
+    arguments = {"features": genes, "moi": "high", "seed": 11, **FAST}
+
+    monkeypatch.setattr(reader, "memoryBytes", 1000)
+    with pytest.raises(MemoryError, match="one gene over 400 labelled cells"):
+        reader.perturbation.associations(labels, **arguments)
+    monkeypatch.undo()
+    with pytest.raises(PermissionError, match="perturbation_associations"):
+        reader.perturbation.associations(labels, **arguments)
+
+
+def _needed_budget(refusal: pytest.ExceptionInfo[MemoryError]) -> int:
+    """The memory budget that a refusal asks for."""
+    found = re.search(r"holds? about (\d+) bytes", str(refusal.value))
+    assert found is not None, str(refusal.value)
+    assert str(refusal.value).endswith(
+        f"Raise mem_budget to at least {found.group(1)} bytes."
+    )
+    return int(found.group(1))
+
+
+def test_high_moi_refusals_name_the_budget_that_runs_the_tests(
+    screen, monkeypatch
+) -> None:
+    store, labels, genes = screen
+    arguments = {"features": genes, "moi": "high", "invalidate_cache": True, **FAST}
+    default = store.perturbation.load_associations(
+        store.perturbation.associations(labels, **arguments)
+    )
+    # The tests hold far more than this budget, the labelled cells' arrays
+    # alone.
+    monkeypatch.setattr(store, "memoryBytes", 1000)
+    with pytest.raises(MemoryError, match="one gene over 400 labelled cells") as low:
+        store.perturbation.associations(labels, **arguments)
+    needed = _needed_budget(low)
+
+    # A budget one byte short asks for the same budget, which runs the tests
+    # with the results of the default budget.
+    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    with pytest.raises(MemoryError) as short:
+        store.perturbation.associations(labels, **arguments)
+    assert _needed_budget(short) == needed
+    monkeypatch.setattr(store, "memoryBytes", needed)
+    tight = store.perturbation.load_associations(
+        store.perturbation.associations(labels, **arguments)
+    )
+    for name in ("discovery", "calibration", "positive"):
+        pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
 
 
 def test_high_moi_plans_only_the_calibration_pairs_a_check_can_draw(

@@ -267,7 +267,7 @@ _CONTRACTS = (
         PerturbationAccessor.import_guide_calls,
         metadata_arguments.GuideCallImportArguments,
         # The file is identified by the SHA-256 of its bytes, not its path.
-        aliases={"path": "file_sha256"},
+        aliases={"path": "call_file_fingerprint"},
         signature_only=_classified("routing", "from_assay"),
         model_only=_classified(
             "resolved_input",
@@ -337,7 +337,7 @@ _CONTRACTS = (
     OperationContract(
         PerturbationAccessor.signature,
         metadata_arguments.PerturbationSignatureArguments,
-        aliases={"sample_column": "sample_columns"},
+        aliases={"features": "feature_selection", "sample_column": "sample_columns"},
         model_only=_classified(
             "resolved_input", "dataset_fingerprint", "sample_assignments_fingerprint"
         ),
@@ -353,7 +353,11 @@ _CONTRACTS = (
     OperationContract(
         PerturbationAccessor.associations,
         metadata_arguments.PerturbationAssociationArguments,
-        aliases={"sample_column": "sample_columns", "covariates": "covariate_columns"},
+        aliases={
+            "features": "feature_selection",
+            "sample_column": "sample_columns",
+            "covariates": "covariate_columns",
+        },
         signature_only={
             **_classified("routing", "from_assay"),
             # The pairs, the positive controls and the ID column that matches

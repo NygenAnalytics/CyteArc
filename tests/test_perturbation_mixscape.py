@@ -1,5 +1,6 @@
 import math
 import warnings
+from dataclasses import fields
 from pathlib import Path
 
 import numpy as np
@@ -13,10 +14,10 @@ from cytearc.features.markers.rank import tie_sum
 from cytearc.perturbation import MixscapeResult
 from cytearc.perturbation import mixscape as mixscape_module
 from cytearc.perturbation.mixscape import (
-    FEW_CELLS,
-    FEW_DE_GENES,
-    FITTED,
-    NO_FIT,
+    MIXSCAPE_FEW_CELLS,
+    MIXSCAPE_FEW_DE_GENES,
+    MIXSCAPE_FITTED,
+    MIXSCAPE_NO_FIT,
     classify_target,
     constrained_mixture,
     group_totals,
@@ -25,7 +26,7 @@ from cytearc.perturbation.mixscape import (
     sorted_log_values,
 )
 from cytearc.perturbation.signature import normalize_counts
-from cytearc.storage.artifacts import inspect_artifact
+from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.utils.logging import logger
 from tests.perturbation_helpers import use_python_kernels
 from tests.storage_helpers import write_count_store
@@ -274,6 +275,28 @@ def test_mixscape_classifies_in_batches_that_fit_the_budget(
     pd.testing.assert_frame_equal(batched.targets, whole.targets)
 
 
+def test_classes_that_name_their_statuses_otherwise_are_not_reused_or_read(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    signature = _signature(store)
+    classes = store.perturbation.mixscape(signature)
+    statuses = store.perturbation.load_mixscape(classes).targets["status"].tolist()
+    # Classes whose codes name the statuses in another order, as a release
+    # that renamed or reordered them would save.
+    stored = artifact_group(store.zw, classes)
+    stored.attrs["status_names"] = list(stored.attrs["status_names"])[::-1]
+
+    with pytest.raises(ValueError, match="names its statuses .*; compute it again"):
+        store.perturbation.load_mixscape(classes)
+    again = store.perturbation.mixscape(signature)
+
+    assert again != classes
+    assert store.perturbation.load_mixscape(again).targets["status"].tolist() == (
+        statuses
+    )
+
+
 def test_loading_mixscape_refuses_other_artifacts(tmp_path) -> None:
     store = _store(tmp_path)
     with pytest.raises(TypeError, match="classes must be an ArtifactRef"):
@@ -352,10 +375,16 @@ def test_classify_target_finds_the_knocked_out_cells() -> None:
         "max_iterations": 10,
     }
     fit = classify_target(target, control, **settings)
-    assert fit.status == FITTED
+    assert fit.status == MIXSCAPE_FITTED
     assert fit.ko.tolist() == knocked.tolist()
     assert fit.converged
-    assert len(fit.control_scores) == 100
+    # Every array of a target's fit holds one value per cell of the target,
+    # so the fits of many targets hold nothing of the control cells.
+    assert {
+        field.name: len(getattr(fit, field.name))
+        for field in fields(fit)
+        if isinstance(getattr(fit, field.name), np.ndarray)
+    } == {"ko": 60, "posterior": 60, "score": 60}
     # The classes do not depend on the sign of the signatures.
     flipped = classify_target(-target, -control, **settings)
     assert flipped.ko.tolist() == fit.ko.tolist()
@@ -369,12 +398,12 @@ def test_classify_target_statuses_without_a_fit() -> None:
     target, control, _ = _target(np.random.default_rng(6))
     settings = {"min_de_genes": 3, "min_cells": 5, "max_iterations": 10}
     few_genes = classify_target(target, control, n_de_genes=2, **settings)
-    assert few_genes.status == FEW_DE_GENES
+    assert few_genes.status == MIXSCAPE_FEW_DE_GENES
     assert not few_genes.ko.any() and np.isnan(few_genes.posterior).all()
     few_cells = classify_target(
         target, control, n_de_genes=8, **{**settings, "min_cells": 41}
     )
-    assert few_cells.status == FEW_CELLS
+    assert few_cells.status == MIXSCAPE_FEW_CELLS
     # Target cells equal to the controls' mean give no direction.
     same = classify_target(
         np.zeros((5, 3)),
@@ -383,7 +412,7 @@ def test_classify_target_statuses_without_a_fit() -> None:
         scale=False,
         **settings,
     )
-    assert same.status == NO_FIT
+    assert same.status == MIXSCAPE_NO_FIT
     # Identical target cells project to one point, which no component fits.
     collapsed = classify_target(
         np.ones((5, 3)),
@@ -392,7 +421,7 @@ def test_classify_target_statuses_without_a_fit() -> None:
         scale=False,
         **settings,
     )
-    assert collapsed.status == NO_FIT
+    assert collapsed.status == MIXSCAPE_NO_FIT
 
 
 def test_classify_target_posterior_does_not_overflow() -> None:
@@ -413,7 +442,7 @@ def test_classify_target_posterior_does_not_overflow() -> None:
             max_iterations=10,
             scale=False,
         )
-    assert fit.status == FITTED and fit.converged
+    assert fit.status == MIXSCAPE_FITTED and fit.converged
     assert fit.ko.tolist() == [True] * 30 + [False]
     log_ratio = mixscape_module._log_normal(
         fit.score, fit.control_mean, fit.control_sd
