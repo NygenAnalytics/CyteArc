@@ -29,11 +29,14 @@ from ...repertoire.chains import (
     receptor_quality,
 )
 from ...repertoire.clonotypes import (
+    CLUSTER_SEARCH_BYTES,
     DUAL_IR,
+    METRICS,
     RECEPTOR_ARMS,
     REPRESENTATIVE_FIELDS,
     SEQUENCES,
     Clonotypes,
+    assign_clonotype_clusters,
     assign_clonotypes,
     clonotype_frames,
     clonotype_labels,
@@ -823,6 +826,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         same_j_gene: bool = False,
         within: str | Sequence[str] | None = None,
         within_receptor_type: bool = True,
+        metric: str = "identity",
+        cutoff: int | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Group the cells of imported receptors into clonotypes.
@@ -843,6 +848,17 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         with different labels in the ``within`` cell metadata columns, such as
         the donor, never do. A cell without a receptor, or without a compared
         sequence among the chains that take part, has no clonotype.
+
+        ``metric`` links chains whose junctions are similar instead, as
+        scirpy's ``define_clonotype_clusters`` does: ``"hamming"`` (at most
+        ``cutoff`` substitutions between junctions of one length),
+        ``"normalized_hamming"`` (substitutions as a percentage of the length,
+        rounded half up, at most ``cutoff``) or ``"levenshtein"`` (at most
+        ``cutoff`` substitutions, insertions and deletions), under the same
+        rules for arms, dual chains, genes and groups. The resulting
+        clonotype clusters group T cells that likely share their epitope, or
+        B cells of one clone despite somatic mutations. ``cutoff`` has no
+        default for these metrics, since it decides the clusters.
 
         Clonotypes are numbered by size, so ``clonotype_1`` is the largest;
         ties follow the receptor type in sorted order, then the ``within``
@@ -866,6 +882,11 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 such as the donor; every cell with a receptor needs a label.
             within_receptor_type: Keep the clonotypes of each receptor type
                 apart.
+            metric: ``"identity"``, ``"hamming"``, ``"normalized_hamming"`` or
+                ``"levenshtein"``.
+            cutoff: The largest distance of linked chains for the distance
+                metrics: substitutions, percent, or edits; None with
+                ``"identity"``.
             invalidate_cache: Define again instead of reusing saved clonotypes.
 
         Returns:
@@ -876,17 +897,20 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``receptors`` is not an ``immune_receptors``
-                artifact, an option is unknown, the receptors store no
-                junction of the compared kind, or a ``within`` column is not a
-                cell metadata column or has no label for a cell with a
-                receptor.
+                artifact, an option is unknown, a distance metric has no
+                cutoff, the receptors store no junction of the compared kind,
+                or a ``within`` column is not a cell metadata column or has
+                no label for a cell with a receptor.
             KeyError: If the store holds no such receptors.
             RuntimeError: If the receptors are incomplete.
             PermissionError: If the store is read-only and the clonotypes are
                 not saved yet.
             MemoryError: If reading the receptor types, grouping the cells
                 by their ``within`` labels, or the definition, 1,000 bytes per
-                cell and 12 per contig, does not fit the memory budget.
+                cell and 12 per contig and with a distance metric the 512 MiB
+                of the search, does not fit the memory budget, or the pairs of
+                chains within the cutoff, about 80 bytes each, do not fit what
+                is left.
         """
         group, fields = self._receptor_group(receptors)
         if sequence not in SEQUENCES:
@@ -903,6 +927,25 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         ):
             bool_argument(flag, name)
         columns = group_columns(within, "within", _CLONOTYPE_COLUMNS)
+        if metric not in METRICS:
+            raise ValueError(f"metric must be one of {', '.join(METRICS)}")
+        if metric == "identity":
+            if cutoff not in (None, 0) or isinstance(cutoff, bool):
+                raise ValueError("metric='identity' takes no cutoff")
+            limit = 0
+        else:
+            if cutoff is None:
+                raise ValueError(
+                    f"metric={metric!r} needs a cutoff, such as 1 or 2 "
+                    "substitutions or edits, or 15 percent"
+                )
+            if isinstance(cutoff, bool) or not isinstance(cutoff, int | np.integer):
+                raise TypeError("cutoff must be a non-negative integer")
+            if cutoff < 0 or (metric == "normalized_hamming" and cutoff > 100):
+                raise ValueError(
+                    "cutoff must be a non-negative integer, at most 100 percent"
+                )
+            limit = int(cutoff)
         field_name = "junction" if sequence == "nt" else "junction_aa"
         if field_name not in fields:
             raise ValueError(
@@ -947,6 +990,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             same_j_gene=same_j_gene,
             within=columns,
             within_receptor_type=within_receptor_type,
+            metric=metric,
+            cutoff=limit,
             invalidate_cache=invalidate_cache,
         )
         record = arguments.to_record()
@@ -976,6 +1021,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         resident = _CLONOTYPE_BYTES_PER_CELL * n_cells + int(contig_codes.shape[0]) * (
             contig_codes.dtype.itemsize + _CODE_BYTES
         )
+        if metric != "identity":
+            # A cluster search holds its encoded junctions, one pass of keys
+            # with their candidate pairs, and one chunk of candidate cells.
+            resident += CLUSTER_SEARCH_BYTES
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Defining the clonotypes of {n_cells} cells holds about {resident} "
@@ -983,14 +1032,31 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 "Raise mem_budget."
             )
         slots = _read(group, "chain_slots")
-        assignment = assign_clonotypes(
-            _slot_codes(group, field_name, slots),
-            groups=groups,
-            v_genes=_slot_codes(group, "v_call", slots) if same_v_gene else None,
-            j_genes=_slot_codes(group, "j_call", slots) if same_j_gene else None,
-            receptor_arms=receptor_arms,
-            dual_ir=dual_ir,
-        )
+        compared = _slot_codes(group, field_name, slots)
+        v_genes = _slot_codes(group, "v_call", slots) if same_v_gene else None
+        j_genes = _slot_codes(group, "j_call", slots) if same_j_gene else None
+        if metric == "identity":
+            assignment = assign_clonotypes(
+                compared,
+                groups=groups,
+                v_genes=v_genes,
+                j_genes=j_genes,
+                receptor_arms=receptor_arms,
+                dual_ir=dual_ir,
+            )
+        else:
+            assignment = assign_clonotype_clusters(
+                compared,
+                _stored_text(group, field_name).categories,
+                groups=groups,
+                metric=metric,
+                cutoff=limit,
+                v_genes=v_genes,
+                j_genes=j_genes,
+                receptor_arms=receptor_arms,
+                dual_ir=dual_ir,
+                max_bytes=self.memoryBytes - resident,
+            )
         labels = clonotype_labels(assignment.n_clonotypes)
         has = assignment.codes >= 0
         values = np.full(n_cells, "", dtype=object)
@@ -1155,4 +1221,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             same_j_gene=bool(parameters["same_j_gene"]),
             within=within,
             within_receptor_type=bool(parameters["within_receptor_type"]),
+            metric=str(parameters["metric"]),
+            cutoff=int(parameters["cutoff"]),
         )

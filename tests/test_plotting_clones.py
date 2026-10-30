@@ -64,8 +64,10 @@ def test_without_groups_the_plot_counts_every_cell(plotted) -> None:
         "clone_size": [1, 3],
         "n_clones": [1, 1],
     }
+    # Clones are labelled by their IDs.
     assert result.tables["top"].to_dict("list") == {
         "clone": ["a", "b"],
+        "label": ["a", "b"],
         "cells": [3, 1],
     }
     assert set(result.axes) == {"sizes", "top"}
@@ -97,7 +99,12 @@ def test_a_grouping_column_splits_each_clone_by_group(plotted) -> None:
         "clone_size": [1, 2, 1],
         "n_clones": [1, 1, 1],
     }
-    assert result.tables["top"].to_dict("list") == {"clone": ["a"], "x": [2], "y": [1]}
+    assert result.tables["top"].to_dict("list") == {
+        "clone": ["a"],
+        "label": ["a"],
+        "x": [2],
+        "y": [1],
+    }
     assert result.legends[0].label == "group"
     assert len(result.axes["sizes"].get_lines()) == 2
     plt.close(result.figure)
@@ -114,6 +121,7 @@ def test_a_label_artifact_of_fewer_cells_leaves_the_others_ungrouped(plotted) ->
     # Of the first four cells, x holds a twice and b once and y holds a once.
     assert result.tables["top"].to_dict("list") == {
         "clone": ["a", "b"],
+        "label": ["a", "b"],
         "x": [2, 1],
         "y": [1, 0],
     }
@@ -147,6 +155,12 @@ def test_the_plot_refuses_clones_it_cannot_draw(plotted) -> None:
     )
     with pytest.raises(ValueError, match="^No cell with a group has a clone"):
         clone_abundance(store, clones, group_by="c4_group", show=False)
+    for name in ("label", "clone"):
+        store.cells.insert(
+            "named_group", np.asarray(["x", name, "x", "x", "x", None]), overwrite=True
+        )
+        with pytest.raises(ValueError, match=f"A group is named '{name}'"):
+            clone_abundance(store, clones, group_by="named_group", show=False)
     assert set(plt.get_fignums()) == figures
 
 

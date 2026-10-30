@@ -65,6 +65,14 @@ def _load_clones(store: Any, clones: ArtifactRef) -> Any:
     return _clones_method(store, "load_clones")(clones)
 
 
+def _figure_labels(store: Any, clones: ArtifactRef, ids: np.ndarray) -> list[str]:
+    """The labels of some clones in figures: their IDs, with junctions for clonotypes."""
+    method = getattr(store, "_clone_figure_labels", None)
+    if not callable(method):
+        raise TypeError("store does not provide the figure labels of clones")
+    return [str(label) for label in method(clones, ids.tolist())]
+
+
 def _kept_apart_groups(
     cells: pd.DataFrame,
     kept_apart: Sequence[str],
@@ -131,7 +139,9 @@ def clone_abundance(
     panel counts clones by their number of cells on log scales: in most
     experiments many clones hold one or a few cells, and expanded clones form
     the tail. The second panel draws the ``top`` clones with the most cells,
-    labelled with their IDs.
+    labelled with their IDs; a clonotype's label adds the junction amino
+    acids of its representative cell's ``VDJ_1`` chain, or of its ``VJ_1``
+    chain without a VDJ chain, such as ``clonotype_1 (CASSLGQAYEQYF)``.
 
     ``group_by`` names a cell metadata column, such as the sample or time
     point, and ``groups`` a cell-label artifact, such as a clustering; with
@@ -144,7 +154,7 @@ def clone_abundance(
     ``"s1, TCR"``.
 
     Tables: ``sizes`` (``group``, ``clone_size``, ``n_clones``) and ``top``
-    (``clone``, then the cells of each group, or ``cells``).
+    (``clone``, ``label``, then the cells of each group, or ``cells``).
     """
     top = integer_argument(top, "top", minimum=1)
     loaded = _load_clones(store, clones)
@@ -182,6 +192,12 @@ def clone_abundance(
     )
     held = sorted_unique(pairs // n_clones)
     group_order = [names[code] for code in held.tolist()]
+    clashing = sorted({"clone", "label"} & {str(name) for name in group_order})
+    if clashing:
+        raise ValueError(
+            f"A group is named {clashing[0]!r}, which the table of the largest "
+            "clones uses for a column of its own; rename that label"
+        )
     pair_groups = np.searchsorted(held, pairs // n_clones)
     pair_codes = pairs % n_clones
     width = int(pair_cells.max()) + 1
@@ -204,11 +220,12 @@ def clone_abundance(
     taken = rows[pair_codes] >= 0
     matrix = np.zeros((len(chosen), len(group_order)), dtype=np.int64)
     matrix[rows[pair_codes[taken]], pair_groups[taken]] = pair_cells[taken]
-    ids = loaded.clones["clone"].to_numpy(dtype=object)
+    ids = loaded.clones["clone"].to_numpy(dtype=object)[chosen]
     top_table = pd.DataFrame(
         matrix, columns=pd.Index([str(name) for name in group_order])
     )
-    top_table.insert(0, "clone", ids[chosen])
+    top_table.insert(0, "clone", ids)
+    top_table.insert(1, "label", _figure_labels(store, clones, ids))
     if not grouped:
         top_table = top_table.rename(columns={"all cells": "cells"})
     if figsize is None and target is None:
@@ -245,13 +262,11 @@ def clone_abundance(
         ax = axes["top"]
         positions = np.arange(len(top_table))[::-1]
         left = np.zeros(len(top_table))
-        for column in top_table.columns[1:]:
+        for column in top_table.columns[2:]:
             widths = top_table[column].to_numpy(dtype=np.float64)
             ax.barh(positions, widths, left=left, label=str(column))
             left += widths
-        ax.set_yticks(
-            positions, [str(clone) for clone in top_table["clone"]], fontsize="small"
-        )
+        ax.set_yticks(positions, top_table["label"].tolist(), fontsize="small")
         ax.set_xlabel("Cells")
         ax.set_title(f"Largest {len(top_table)} clones")
         if show_legend and grouped:

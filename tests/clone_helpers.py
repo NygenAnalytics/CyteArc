@@ -339,3 +339,38 @@ def bcr_file(folder: Path) -> Path:
 def airr_file(folder: Path) -> Path:
     """An AIRR Rearrangement file of cell6's B cell rows."""
     return write_lines(folder, "bcr.tsv", AIRR_HEADER, AIRR_ROWS)
+
+
+def levenshtein_distance(first: str, second: str) -> int:
+    """The substitutions, insertions and deletions between two texts, row by row."""
+    previous = list(range(len(second) + 1))
+    for row, left in enumerate(first, 1):
+        current = [row]
+        for column, right in enumerate(second, 1):
+            current.append(
+                min(
+                    previous[column - 1] + (left != right),
+                    previous[column] + 1,
+                    current[column - 1] + 1,
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def within_distance(first: str, second: str, metric: str, cutoff: int) -> bool:
+    """Whether two texts are within ``cutoff`` by ``metric``, as scirpy measures it.
+
+    ``normalized_hamming`` rounds the substitutions' percentage of the length
+    half up, in integers.
+    """
+    if metric == "identity":
+        return first == second
+    if metric == "levenshtein":
+        return levenshtein_distance(first, second) <= cutoff
+    if len(first) != len(second):
+        return False
+    mismatches = sum(a != b for a, b in zip(first, second, strict=True))
+    if metric == "hamming":
+        return mismatches <= cutoff
+    return not first or (200 * mismatches + len(first)) // (2 * len(first)) <= cutoff
