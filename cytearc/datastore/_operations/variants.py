@@ -67,6 +67,12 @@ _PARSE_BYTES_PER_ROW = 320
 # Each band row is held about this many times: the rows read, their sort, and
 # the stored rows derived from them.
 _BAND_COPIES = 6
+# How the memory left beside the per-cell state is shared: the parsed chunks
+# take a fifth; the sort buffer a tenth, since a spill holds about three
+# buffers; and the bands, read beside the last buffer, two fifths.
+_PARSE_SHARE = 5
+_BUFFER_SHARE = 10
+_BAND_SHARE = 2.5
 # The rows parsed at once lie in [_MIN_CHUNK_ROWS, _MAX_CHUNK_ROWS].
 _MIN_CHUNK_ROWS = 1_000
 _MAX_CHUNK_ROWS = 2_000_000
@@ -517,7 +523,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             return planned.ref
         held = (LOOKUP_BYTES_PER_CELL + _IMPORT_BYTES_PER_CELL) * n_cells
         room = self.memoryBytes - held
-        chunk_rows = int(min(room // (4 * _PARSE_BYTES_PER_ROW), _MAX_CHUNK_ROWS))
+        chunk_rows = int(
+            min(room // (_PARSE_SHARE * _PARSE_BYTES_PER_ROW), _MAX_CHUNK_ROWS)
+        )
         if chunk_rows < _MIN_CHUNK_ROWS:
             raise MemoryError(
                 f"Importing variant counts of {n_cells} cells holds about {held} "
@@ -542,7 +550,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "calls": (CALL_DTYPE, ("cell", "key", "source")),
             },
             n_cells=n_cells,
-            buffer_bytes=room // 4,
+            buffer_bytes=room // _BUFFER_SHARE,
         )
         call_sources = _Vocabulary()
         call_values = _Vocabulary()
@@ -577,7 +585,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 raise ValueError(
                     f"No row of counts, depth, calls or cells is in {files_text}"
                 )
-            band_rows = max(1, (room // 2) // (_BAND_COPIES * counts_dtype.itemsize))
+            band_rows = max(
+                1, int(room / _BAND_SHARE) // (_BAND_COPIES * counts_dtype.itemsize)
+            )
             attributes = {
                 **join.attributes(),
                 "format": first.format,

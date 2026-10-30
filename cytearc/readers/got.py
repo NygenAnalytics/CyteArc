@@ -251,7 +251,6 @@ class GotSource:
 
     def batches(self, chunk_rows: int) -> Iterator[EntryBatch]:
         """The listed cells, then each target's counts and calls."""
-        cells = pd.Index(self._cells)
         distinct, codes = np.unique(self._cells.astype(str), return_inverse=True)
         barcodes = np.asarray(distinct, dtype=object)
         codes = codes.astype(np.int64)
@@ -269,7 +268,7 @@ class GotSource:
             }
             offset += len(target.alleles)
             rows = (
-                np.arange(len(cells), dtype=np.int64)
+                np.arange(len(self._cells), dtype=np.int64)
                 if target.rows is None
                 else target.rows
             )

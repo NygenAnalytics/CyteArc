@@ -247,7 +247,7 @@ def test_cell_order_and_spills_to_disk_do_not_change_the_counts(
     ids = [str(cell) for cell in roomy.cells.fetch_all("ids")]
     folder = tmp_path / "final"
     drawn = _large_mgatk(folder, ids, seed=4)
-    tight.memoryBytes = 1_400_000
+    tight.memoryBytes = 1_700_000
     groups = []
     for store in (roomy, tight):
         ref, _ = _import(store, folder)

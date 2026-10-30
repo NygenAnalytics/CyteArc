@@ -52,7 +52,7 @@ Cell Ranger ARC writes the gene expression barcode into the ATAC BAM's `CB` tag,
 
 ### Several libraries
 
-Several paths of one format import together, such as one mgatk folder per Cell Ranger ATAC library, each with its own prefix. Their shared sites are one site, so they must lie on the same reference: a contig with another length or sequence raises `ValueError`, as do a named and an unnamed contig, files that give one allele two roles, and, outside GIFT's open set of gapfills, files that give a site different alleles. A cell that two files count at one site raises `ValueError`. A source is identified by the SHA-256 of its file, or of each file of a folder, so moved files reuse the saved counts and the order of the paths does not matter.
+Several paths of one format import together, such as one mgatk folder per Cell Ranger ATAC library, each with its own prefix. Their shared sites are one site, so they must lie on the same reference: a contig with another length or sequence raises `ValueError`, as do a named and an unnamed contig, files that give one allele two roles, and, outside GIFT's open set of gapfills, files that give a site different alleles. A cell that two files count at one site raises `ValueError`. A call that a source repeats for one cell and allele, as GoT-Multi-ML's refined table does for a few cells, is kept once and counted in the `n_repeated_calls` attribute, while two different calls raise `ValueError`. A source is identified by the SHA-256 of its file, or of each file of a folder, so moved files reuse the saved counts and the order of the paths does not matter.
 
 ```python
 counts = ds.variants.import_counts(

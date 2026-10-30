@@ -40,6 +40,7 @@ def sort_rows(rows: np.ndarray, keys: Sequence[str]) -> np.ndarray:
         # One stable sort of a 64-bit key is faster than a lexical sort.
         combined = (rows["cell"].astype(np.int64) << 32) | rows["key"].astype(np.int64)
         order = np.argsort(combined, kind="stable")
+        del combined
     else:
         order = np.lexsort(tuple(rows[name] for name in reversed(keys)))
     return rows[order]
@@ -100,7 +101,9 @@ class CellRowSorter:
     the streams' buffers together exceed ``buffer_bytes``; then each stream's
     buffer is sorted and written to a run in a temporary folder, compressed.
     :meth:`bands` returns every stream's rows of each band of cells, sorted
-    by the stream's keys, after the last :meth:`add`.
+    by the stream's keys, after the last :meth:`add`. A spill holds about
+    three times the buffer at its peak, and the last buffer stays in memory
+    while bands are read.
 
     Args:
         streams: Each stream's name, row dtype and sort keys, the first of
@@ -196,9 +199,7 @@ class CellRowSorter:
     def _spill(self, state: _Stream) -> None:
         if not state.buffered:
             return
-        rows = sort_rows(np.concatenate(state.buffered), state.keys)
-        state.buffered = []
-        state.buffered_bytes = 0
+        rows = self._take_buffer(state)
         group = self._runs_group().create_group(str(self._n_runs))
         self._n_runs += 1
         names = tuple(state.dtype.names or ())
@@ -227,11 +228,21 @@ class CellRowSorter:
         for state in self._streams.values():
             if not state.buffered:
                 continue
-            rows = sort_rows(np.concatenate(state.buffered), state.keys)
-            state.buffered = []
-            state.buffered_bytes = 0
+            rows = self._take_buffer(state)
             cells, starts = _run_index(rows["cell"])
             state.runs.append(_Run(cells=cells, starts=starts, rows=rows))
+
+    @staticmethod
+    def _take_buffer(state: _Stream) -> np.ndarray:
+        """A stream's buffered rows, sorted, with the buffer emptied first.
+
+        Its pieces are dropped once joined, so the sort holds about twice
+        the buffer and 16 bytes per row of keys at its peak.
+        """
+        rows = np.concatenate(state.buffered)
+        state.buffered = []
+        state.buffered_bytes = 0
+        return sort_rows(rows, state.keys)
 
     def band_plan(self, max_rows: int) -> np.ndarray:
         """The first cell of each band and the end, so that a band holds at most
