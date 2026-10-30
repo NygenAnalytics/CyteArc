@@ -14,6 +14,7 @@ from ._operations.cell_calling import _CellCallingOperationsMixin
 from ._operations.clones import _CloneOperationsMixin
 from ._operations.features import _FeatureOperationsMixin
 from ._operations.integration_metrics import _IntegrationMetricsOperationsMixin
+from ._operations.lineage_barcodes import _LineageBarcodeOperationsMixin
 from ._operations.perturbation_associations import (
     _PerturbationAssociationOperationsMixin,
 )
@@ -214,6 +215,7 @@ class DataStore(
     _PerturbationAssociationOperationsMixin,
     _PerturbationProfileOperationsMixin,
     _CloneOperationsMixin,
+    _LineageBarcodeOperationsMixin,
     _RepertoireOperationsMixin,
     MappingDatastore,
 ):

@@ -209,8 +209,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # repertoire.import_receptors and repertoire.load_receptors, then
     # repertoire.clonotypes and repertoire.load_clonotypes, then
     # repertoire.gene_usage and repertoire.spectratype, then
-    # repertoire.export_airr.
-    assert len(_NAMESPACE_METHODS) == 134
+    # repertoire.export_airr, then clones.import_barcodes and
+    # clones.load_barcodes.
+    assert len(_NAMESPACE_METHODS) == 136
     assert {
         "import_receptors",
         "load_receptors",
@@ -238,6 +239,8 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
         "coupling",
         "fate_bias",
         "load_fate_bias",
+        "import_barcodes",
+        "load_barcodes",
     } == {name for namespace, _, name, _ in _NAMESPACE_METHODS if namespace == "clones"}
     assert {
         "import_guide_calls",
@@ -496,6 +499,9 @@ def test_datastore_private_mixin_order_is_stable():
     from cytearc.datastore._operations.integration_metrics import (
         _IntegrationMetricsOperationsMixin,
     )
+    from cytearc.datastore._operations.lineage_barcodes import (
+        _LineageBarcodeOperationsMixin,
+    )
     from cytearc.datastore._operations.perturbation_associations import (
         _PerturbationAssociationOperationsMixin,
     )
@@ -536,10 +542,11 @@ def test_datastore_private_mixin_order_is_stable():
         _PerturbationAssociationOperationsMixin,
         _PerturbationProfileOperationsMixin,
         _CloneOperationsMixin,
+        _LineageBarcodeOperationsMixin,
         _RepertoireOperationsMixin,
         MappingDatastore,
     )
-    assert DataStore.mro()[:17] == [
+    assert DataStore.mro()[:18] == [
         DataStore,
         _CellCallingOperationsMixin,
         _QualityControlOperationsMixin,
@@ -555,6 +562,7 @@ def test_datastore_private_mixin_order_is_stable():
         _PerturbationAssociationOperationsMixin,
         _PerturbationProfileOperationsMixin,
         _CloneOperationsMixin,
+        _LineageBarcodeOperationsMixin,
         _RepertoireOperationsMixin,
         MappingDatastore,
     ]
@@ -587,6 +595,9 @@ def test_datastore_operation_mixins_have_unique_method_owners():
     from cytearc.datastore._operations.graph import _GraphOperationsMixin
     from cytearc.datastore._operations.integration_metrics import (
         _IntegrationMetricsOperationsMixin,
+    )
+    from cytearc.datastore._operations.lineage_barcodes import (
+        _LineageBarcodeOperationsMixin,
     )
     from cytearc.datastore._operations.mapping import _MappingOperationsMixin
     from cytearc.datastore._operations.mapping_reference import (
@@ -638,6 +649,7 @@ def test_datastore_operation_mixins_have_unique_method_owners():
         _PerturbationAssociationOperationsMixin,
         _PerturbationProfileOperationsMixin,
         _CloneOperationsMixin,
+        _LineageBarcodeOperationsMixin,
         _RepertoireOperationsMixin,
     )
     owners: dict[str, list[str]] = {}

@@ -33,6 +33,7 @@ __all__ = [
     "derived_id_bytes",
     "file_sha256",
     "join_bytes",
+    "texts_per_file",
     "unmatched_barcodes_warning",
     "warn_unmatched_barcodes",
 ]
@@ -113,6 +114,8 @@ class BarcodeFile:
         barcode_pattern: A regular expression whose ``barcode`` group is the
             part of each barcode that names the cell, or None for the whole
             barcode.
+        position: The file's position in the listing of the import's paths,
+            which options given per file follow; not part of its identity.
     """
 
     path: str | os.PathLike[str]
@@ -120,6 +123,7 @@ class BarcodeFile:
     barcode_prefix: str | None
     barcode_suffix: str | None
     barcode_pattern: str | None
+    position: int = 0
 
     def record(self) -> dict[str, Any]:
         """Return the file's identity: its bytes and how its barcodes name cells."""
@@ -227,7 +231,22 @@ def _listed(value: Any, n_files: int, name: str, what: str, expected: str) -> li
     raise TypeError(f"{name} must be {expected}")
 
 
-def _text_options(value: Any, n_files: int, name: str, what: str) -> list[str | None]:
+def texts_per_file(value: Any, n_files: int, name: str, what: str) -> list[str | None]:
+    """Return one text or None per file: ``value`` for every file, or its items.
+
+    An empty text is None, as it adds nothing.
+
+    Args:
+        value: Text, a sequence of text and None with one item per file, or
+            None.
+        n_files: The files listed.
+        name: The option, named in errors.
+        what: What a file is, such as ``"clone file"``, for the errors.
+
+    Raises:
+        TypeError: If ``value`` or an item is neither text nor None.
+        ValueError: If ``value`` lists a value for another number of files.
+    """
     options = _listed(value, n_files, name, what, _TEXT_OPTIONS)
     for option in options:
         if option is not None and not isinstance(option, str):
@@ -278,8 +297,8 @@ def barcode_files(
         if not isinstance(path, str | os.PathLike):
             raise TypeError("paths must be a path or a sequence of paths")
     n_files = len(listed)
-    prefixes = _text_options(barcode_prefix, n_files, "barcode_prefix", what)
-    suffixes = _text_options(barcode_suffix, n_files, "barcode_suffix", what)
+    prefixes = texts_per_file(barcode_prefix, n_files, "barcode_prefix", what)
+    suffixes = texts_per_file(barcode_suffix, n_files, "barcode_suffix", what)
     patterns = [
         _checked_pattern(option)
         for option in _listed(
@@ -293,9 +312,10 @@ def barcode_files(
             barcode_prefix=prefix,
             barcode_suffix=suffix,
             barcode_pattern=pattern,
+            position=position,
         )
-        for path, prefix, suffix, pattern in zip(
-            listed, prefixes, suffixes, patterns, strict=True
+        for position, (path, prefix, suffix, pattern) in enumerate(
+            zip(listed, prefixes, suffixes, patterns, strict=True)
         )
     ]
     keys = [

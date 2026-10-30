@@ -34,6 +34,7 @@ from tests.barcode_join_helpers import (
     build_guide_store,
     build_join_store,
     import_case,
+    write_barcode_file,
     write_clone_file,
     write_contig_file,
     write_guide_call_file,
@@ -177,6 +178,15 @@ def _cells_with_contigs(store, ref) -> set[str]:
     return set(cells.index[cells["n_contigs"] > 0])
 
 
+def _barcodes(store, paths, **options):
+    return store.clones.import_barcodes(paths, **options)
+
+
+def _cells_with_barcodes(store, ref) -> set[str]:
+    cells = store.clones.load_barcodes(ref).cells
+    return set(cells.index[cells["n_barcodes"] > 0])
+
+
 IMPORTERS = {
     "import_guide_calls": Importer(
         name="import_guide_calls",
@@ -202,6 +212,14 @@ IMPORTERS = {
         run=_receptors,
         joined=_cells_with_contigs,
         files=("the contig file", "the contig files"),
+    ),
+    "import_barcodes": Importer(
+        name="import_barcodes",
+        several_files=True,
+        write=write_barcode_file,
+        run=_barcodes,
+        joined=_cells_with_barcodes,
+        files=("the barcode file", "the barcode files"),
     ),
 }
 MULTI_FILE = [name for name, importer in IMPORTERS.items() if importer.several_files]

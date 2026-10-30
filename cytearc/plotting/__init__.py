@@ -57,6 +57,7 @@ if TYPE_CHECKING:
         marker_heatmap as marker_heatmap,
         pseudotime_heatmap as pseudotime_heatmap,
     )
+    from .lineage_barcodes import barcode_calls as barcode_calls
     from .lineages import (
         lineage_curves as lineage_curves,
         lineage_heatmap as lineage_heatmap,
@@ -111,6 +112,7 @@ __all__ = [
     "THEMES",
     "association_calibration",
     "association_volcano",
+    "barcode_calls",
     "clonal_expansion",
     "clonal_overlap",
     "clonal_rarefaction",
@@ -181,6 +183,7 @@ __getattr__, __dir__ = _lazy_facade(
         "THEMES": "._style",
         "association_calibration": ".perturbation",
         "association_volcano": ".perturbation",
+        "barcode_calls": ".lineage_barcodes",
         "clonal_expansion": ".clones",
         "clonal_overlap": ".clones",
         "clonal_rarefaction": ".clones",

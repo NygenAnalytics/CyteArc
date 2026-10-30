@@ -19,6 +19,7 @@ codes are read and written whole, which chunks of megabytes make fast.
 """
 
 from collections.abc import Mapping
+from types import MappingProxyType
 
 import numpy as np
 import zarr
@@ -39,6 +40,7 @@ __all__ = [
     "record_arrays",
     "record_chunk_lengths",
     "stored_column",
+    "stored_records",
     "stored_text",
 ]
 
@@ -102,3 +104,30 @@ def stored_column(
             read_array(group, f"{prefix}_{name}_offsets"),
         )
     return read_array(group, f"{prefix}_{name}")
+
+
+def stored_records(
+    group: zarr.Group, prefix: str, kinds: Mapping[str, FieldKind]
+) -> RecordTable:
+    """Read the stored records of the fields ``kinds`` names, encoded as stored."""
+    text: dict[str, EncodedText] = {}
+    ragged: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    values: dict[str, np.ndarray] = {}
+    for name, kind in kinds.items():
+        if kind == TEXT:
+            text[name] = stored_text(group, prefix, name)
+        elif kind == RAGGED:
+            ragged[name] = (
+                read_array(group, f"{prefix}_{name}"),
+                read_array(group, f"{prefix}_{name}_offsets"),
+            )
+        else:
+            values[name] = read_array(group, f"{prefix}_{name}")
+    return RecordTable(
+        cells=read_array(group, f"{prefix}_cells").astype(np.int64),
+        sources=read_array(group, f"{prefix}_sources"),
+        kinds=MappingProxyType(dict(kinds)),
+        text=MappingProxyType(text),
+        ragged=MappingProxyType(ragged),
+        values=MappingProxyType(values),
+    )

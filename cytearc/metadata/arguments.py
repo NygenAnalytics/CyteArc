@@ -565,6 +565,20 @@ class ClonotypeArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class LineageBarcodeImportArguments(OperationArguments):
+    operation: ClassVar[str] = "import_lineage_barcodes"
+    artifact_kind: ClassVar[str] = "lineage_barcodes"
+
+    cell_selection: ArtifactRef = artifact_input()
+    # Each barcode file's format, columns and library, the SHA-256 of its
+    # bytes and how its barcodes name cells, in canonical order; or the assay
+    # whose features are the barcodes, by its name, dataset fingerprint and
+    # feature IDs. Paths are not part of the identity.
+    sources: tuple[dict[str, Any], ...] = artifact_input()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class GuideThresholdArguments(OperationArguments):
     operation: ClassVar[str] = "fit_guide_thresholds"
     artifact_kind: ClassVar[str] = "guide_thresholds"

@@ -1096,6 +1096,7 @@ def test_reader_implementations_are_runtime_isolated():
         "clone_tables.py",
         "csv.py",
         "h5ad.py",
+        "lineage_barcodes.py",
         "mtx.py",
         "seurat.py",
     }
@@ -1112,6 +1113,7 @@ def test_reader_implementations_are_runtime_isolated():
         "readers.clone_tables",
         "readers.csv",
         "readers.h5ad",
+        "readers.lineage_barcodes",
         "readers.mtx",
         "readers.seurat",
     }
@@ -1129,6 +1131,11 @@ def test_reader_implementations_are_runtime_isolated():
             "readers._text",
         },
         "csv.py": {"readers._text"},
+        "lineage_barcodes.py": {
+            "readers._delimited",
+            "readers._h5ad_columns",
+            "readers._text",
+        },
         "h5ad.py": {
             "readers._assay_names",
             "readers._h5ad_columns",
@@ -1139,6 +1146,7 @@ def test_reader_implementations_are_runtime_isolated():
         "mtx.py": {"readers._sparse", "readers._text"},
     }
     reader_edges = {
+        "readers.lineage_barcodes": {"readers.cellranger"},
         "readers.mtx": {"readers.cellranger"},
         "readers.seurat": {
             "readers._rds",
@@ -1373,6 +1381,9 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         _QualityControlOperationsMixin,
     )
     from cytearc.datastore._operations.regulons import _RegulonOperationsMixin
+    from cytearc.datastore._operations.lineage_barcodes import (
+        _LineageBarcodeOperationsMixin,
+    )
     from cytearc.datastore._operations.repertoire import _RepertoireOperationsMixin
     from cytearc.datastore._operations.trajectory import (
         _TrajectoryFeatureOperationsMixin,
@@ -1427,6 +1438,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         _PerturbationAssociationOperationsMixin,
         _PerturbationProfileOperationsMixin,
         _CloneOperationsMixin,
+        _LineageBarcodeOperationsMixin,
         _RepertoireOperationsMixin,
     )
     assert all("__init__" not in mixin.__dict__ for mixin in mixins)

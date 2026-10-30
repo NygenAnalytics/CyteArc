@@ -329,6 +329,26 @@ _CONTRACTS = (
         model_only=_classified("resolved_input", "within_fingerprint"),
     ),
     OperationContract(
+        ClonesAccessor.import_barcodes,
+        metadata_arguments.LineageBarcodeImportArguments,
+        # Each file is identified by its format, columns and library, the
+        # SHA-256 of its bytes and how its barcodes name cells, in canonical
+        # order, or the assay by its name, dataset fingerprint and feature
+        # IDs; paths are not recorded.
+        signature_only=_classified(
+            "transformed",
+            "paths",
+            "from_assay",
+            "barcode_prefix",
+            "barcode_suffix",
+            "barcode_pattern",
+            "format",
+            "columns",
+            "library",
+        ),
+        model_only=_classified("resolved_input", "sources"),
+    ),
+    OperationContract(
         PerturbationAccessor.import_guide_calls,
         metadata_arguments.GuideCallImportArguments,
         # The file is identified by the SHA-256 of its bytes, not its path.
