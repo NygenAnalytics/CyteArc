@@ -27,6 +27,7 @@ Mount remote datasets, combine studies into **virtual datasets**, and run pipeli
 | **[Condition comparisons](https://docs.nygen.io/CyteArc/tutorials/condition-comparisons)** | Sample-level and paired comparisons across donors, with pseudobulk export for downstream differential expression |
 | **[Trajectories](https://docs.nygen.io/CyteArc/tutorials/lineage-dynamics)** | Population Balance Analysis pseudotime, fate probabilities, lineage-specific gene dynamics, and fate-weighted curves |
 | **[Gene activity and regulation](https://docs.nygen.io/CyteArc/api/regulons.html)** | AUCell/WAGGR gene-set scores, SCENIC-style regulons, chromVAR motif activity, region-to-gene links, and gene programs |
+| **[CRISPR screens](https://docs.nygen.io/CyteArc/tutorials/crispr-screens)** | Guide calling, perturbation labels, target knockdown and E-distances, Mixscape's knocked-out cells and escapers, calibrated association tests at low and high MOI, and perturbation clusters |
 | **[Import and export](https://docs.nygen.io/CyteArc/tutorials/import-and-export)** | Cell Ranger, Matrix Market, AnnData, and Seurat import; export counts and selected analysis results to AnnData |
 
 ## Install

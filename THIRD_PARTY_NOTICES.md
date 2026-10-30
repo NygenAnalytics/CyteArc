@@ -1,11 +1,6 @@
 # Third-party notices
 
-CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause License in the
-`LICENSE` file. Parts of CyteArc derive from the third-party software listed below, and the
-repository includes small excerpts of public data. Each keeps its own license, and the full
-license texts are at the end of this file. The dataset sections credit the data that the
-documentation and tests download, and a later section lists optional packages that CyteArc can
-use but does not install.
+CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause License in the `LICENSE` file. Parts of CyteArc derive from the third-party software listed below, and the repository includes small excerpts of public data. Each keeps its own license, and the full license texts are at the end of this file. The dataset sections credit the data that the documentation and tests download and the data that validated the screen methods, and a later section lists optional packages that CyteArc can use but does not install.
 
 ## Software
 
@@ -257,6 +252,18 @@ third-party observations and is licensed under BSD-3-Clause, as in `LICENSE`.
 | Cell calling | "1k PBMCs from a Healthy Donor (v2 chemistry)", raw feature-barcode matrix, 10x Genomics, <https://www.10xgenomics.com/datasets> | CC BY 4.0 |
 | Ambient RNA removal | "1k PBMCs from a Healthy Donor (v2 chemistry)", 10x Genomics, <https://www.10xgenomics.com/datasets>. Raw and filtered Cell Ranger matrices | CC BY 4.0 |
 | CyteBase datasets and CyteBase composite datasets | Datasets from CZ CELLxGENE Discover, each credited in its CyteBase catalog entry | The license of each dataset on CELLxGENE Discover, usually CC BY 4.0 |
+
+## Data that validated the screen methods
+
+The comparisons of pooled CRISPR screen methods in [Methods and limitations](https://docs.nygen.io/CyteArc/reference/methods) ran on these datasets. The repository holds none of them, and neither the tests nor the documentation download them.
+
+| Validation | Source | License or terms |
+| --- | --- | --- |
+| Guide calls, perturbation efficiency and E-distances | "5k A549, Lung Carcinoma Cells, No Treatment Transduced with a CRISPR Pool", Cell Ranger 6.0.0, 10x Genomics, <https://www.10xgenomics.com/datasets> | CC BY 4.0 |
+| Mixscape and association tests | Papalexi et al. (2021), Nature Genetics 53:322-331, doi:10.1038/s41588-021-00778-2, as the SeuratData package `thp1.eccite.SeuratData` 3.1.5 | CC BY 4.0 |
+| Association tests at high MOI | The high-MOI example of the `sceptredata` R package, <https://github.com/Katsevich-Lab/sceptredata>, downsampled from Gasperini et al. (2019), Cell 176:377-390.e19, doi:10.1016/j.cell.2018.11.029 | MIT |
+| Perturbation profiles, and the calibration check at genome scale | The K562 essential screen of Replogle et al. (2022), Cell 185:2559-2575.e28, doi:10.1016/j.cell.2022.05.013, from "Replogle et al. 2022 processed Perturb-seq datasets", figshare+, doi:10.25452/figshare.plus.20029387.v1 | CC BY 4.0 |
+| Perturbation clusters | The published genome-wide K562 profiles of Replogle et al. (2022) from the same figshare+ record, and Table S3 of the paper; the names of the 1,973 perturbations that they clustered, from the authors' data browser, <https://gwps.wi.mit.edu> | CC BY 4.0; the data browser states no license |
 
 ## Optional packages that CyteArc does not install
 

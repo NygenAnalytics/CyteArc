@@ -203,7 +203,8 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         statistics' 99th percentile holds less than half of their own share
         there, ``n_resamples[2]`` fresh sets (``approximation="none"`` keeps
         the second round's p-values). The fit does not depend on which of the
-        pair's cells carry the perturbation, so the test is exact.
+        pair's cells carry the perturbation, so the test is exact when those
+        cells are exchangeable under the null hypothesis.
 
         The covariates are log detected features and log UMIs of each cell in
         ``from_assay``, indicators of the samples of ``sample_column``, and the

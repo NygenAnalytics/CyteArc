@@ -213,9 +213,12 @@ def guide_calls(
     """Plot how many guides each cell carries and how many cells carry each guide.
 
     ``calls`` is a ``guide_calls`` artifact, such as one from
-    ``ds.perturbation.import_guide_calls``. The first panel counts cells by
-    their number of called guides; its last bar gathers the cells with
-    ``max_guides_per_cell`` or more. The second counts, for each guide, the
+    :meth:`ds.perturbation.call_guides
+    <cytearc.datastore.namespaces.PerturbationAccessor.call_guides>` or
+    :meth:`ds.perturbation.import_guide_calls
+    <cytearc.datastore.namespaces.PerturbationAccessor.import_guide_calls>`.
+    The first panel counts cells by their number of called guides; its last
+    bar gathers the cells with ``max_guides_per_cell`` or more. The second counts, for each guide, the
     cells in which it is the one called guide and the cells in which it is one
     of several: one labelled bar per guide for a library of at most 40 guides,
     and guides ranked by their cells for a larger one. The third shows the top
@@ -802,9 +805,12 @@ def guide_thresholds(
 ) -> PlotResult:
     """Plot the UMI thresholds that guide calling fitted to each guide in each sample.
 
-    ``thresholds`` is guide calls of ``ds.perturbation.call_guides`` with
+    ``thresholds`` is guide calls of :meth:`ds.perturbation.call_guides
+    <cytearc.datastore.namespaces.PerturbationAccessor.call_guides>` with
     ``method="poisson_gaussian"`` or ``"gaussian"``, or their
-    ``guide_thresholds`` artifact, as ``ds.perturbation.load_guide_thresholds``
+    ``guide_thresholds`` artifact, as
+    :meth:`ds.perturbation.load_guide_thresholds
+    <cytearc.datastore.namespaces.PerturbationAccessor.load_guide_thresholds>`
     reads them.
 
     With ``guides``, each selected guide gets one panel per sample. Bars count
@@ -1071,7 +1077,10 @@ def efficiency(
     """Plot how strongly each perturbation changes the expression of its target gene.
 
     ``efficiency`` is a ``perturbation_efficiency`` artifact of
-    ``ds.perturbation.efficiency``, as ``ds.perturbation.load_efficiency``
+    :meth:`ds.perturbation.efficiency
+    <cytearc.datastore.namespaces.PerturbationAccessor.efficiency>`, as
+    :meth:`ds.perturbation.load_efficiency
+    <cytearc.datastore.namespaces.PerturbationAccessor.load_efficiency>`
     reads it. Each tested target, or each tested guide when the efficiency was
     measured by guide, gets one row labelled with its name. A point marks the
     log2 fold change of the target gene's mean expression in the cells that
@@ -1206,7 +1215,10 @@ def edistance(
     """Plot how far each perturbation moves its cells from the control cells.
 
     ``edistance`` is a ``perturbation_edistance`` artifact of
-    ``ds.perturbation.edistance``, as ``ds.perturbation.load_edistance`` reads
+    :meth:`ds.perturbation.edistance
+    <cytearc.datastore.namespaces.PerturbationAccessor.edistance>`, as
+    :meth:`ds.perturbation.load_edistance
+    <cytearc.datastore.namespaces.PerturbationAccessor.load_edistance>` reads
     it. Each tested target, or each tested guide when the E-distances were
     measured by guide, gets one row labelled with its name. A point marks the
     E-distance between the cells that carry the perturbation and the control
@@ -1673,7 +1685,10 @@ def mixscape(
     """Plot the share of each target's cells that Mixscape calls knocked out, or their scores.
 
     ``classes`` is a ``mixscape_classes`` artifact of
-    ``ds.perturbation.mixscape``, as ``ds.perturbation.load_mixscape`` reads
+    :meth:`ds.perturbation.mixscape
+    <cytearc.datastore.namespaces.PerturbationAccessor.mixscape>`, as
+    :meth:`ds.perturbation.load_mixscape
+    <cytearc.datastore.namespaces.PerturbationAccessor.load_mixscape>` reads
     it. Among the cells that carry one target, Mixscape calls each cell
     knocked out (KO, or the ``perturbation_type`` of the classes) or an
     escaper (NP, not perturbed).
@@ -2030,7 +2045,10 @@ def association_volcano(
     """Plot how much and how significantly each perturbation changes each gene.
 
     ``tests`` is a ``perturbation_associations`` artifact of
-    ``ds.perturbation.associations``, as ``ds.perturbation.load_associations``
+    :meth:`ds.perturbation.associations
+    <cytearc.datastore.namespaces.PerturbationAccessor.associations>`, as
+    :meth:`ds.perturbation.load_associations
+    <cytearc.datastore.namespaces.PerturbationAccessor.load_associations>`
     reads it. Each discovery pair of a target and a gene that passed QC gets
     a point at its log2 fold change, the gene's counts in the target's cells
     against the counts that its null fit predicts for them, fitted on the
@@ -2572,7 +2590,10 @@ def association_calibration(
     """Plot whether the association tests keep their error rate, and find effects.
 
     ``tests`` is a ``perturbation_associations`` artifact of
-    ``ds.perturbation.associations``, as ``ds.perturbation.load_associations``
+    :meth:`ds.perturbation.associations
+    <cytearc.datastore.namespaces.PerturbationAccessor.associations>`, as
+    :meth:`ds.perturbation.load_associations
+    <cytearc.datastore.namespaces.PerturbationAccessor.load_associations>`
     reads it. Its negative-control pairs test groups of non-targeting guides
     against the other control cells, or against all other cells in tests at
     high MOI, so no gene should change, and its positive-control pairs, such
@@ -3022,7 +3043,10 @@ def perturbation_clusters(
     """Plot clusters of perturbations as a heatmap of their profiles or as a map.
 
     ``clusters`` is a ``perturbation_clusters`` artifact of
-    ``ds.perturbation.cluster``, as ``ds.perturbation.load_clusters`` reads
+    :meth:`ds.perturbation.cluster
+    <cytearc.datastore.namespaces.PerturbationAccessor.cluster>`, as
+    :meth:`ds.perturbation.load_clusters
+    <cytearc.datastore.namespaces.PerturbationAccessor.load_clusters>` reads
     it.
 
     With ``panel="heatmap"``, the perturbations run in the leaf order of

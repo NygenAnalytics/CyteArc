@@ -136,16 +136,7 @@ field descriptor's `display` are JSON mappings that readers do not check key by 
 release may add keys to them, and code that reads such a key treats its absence as the behavior
 of the release that wrote the run.
 
-A run's `recipe` names the recipe that wrote it: `rna`, `atac`, `adt`, `multimodal`, or
-`perturbation`. Runs of earlier 1.x releases record `basic_rna_analysis`, the RNA pipeline that
-`pipeline.run` executed.
-The `config` of a single-modality run records `cells` (the boolean cell column, or the cell
-selection and, when it came from a run, that run's ID and label), `snapshotColumns`, `species`, and
-under `stages` the resolved settings of each stage keyword, `false` for a skipped optional stage
-and `{"enabled": false}` for skipped filtering; an RNA run also records `doubletSampleColumns`. A
-multimodal run's `config` records its `method`, its source runs under `sources`, the shared cell
-selection under `cells`, `snapshotColumns`, and its `stages`. A perturbation run's `config` records `cells`, `snapshotColumns`, `guideAssay`, its guide assay, `profileLabels`, the output whose cells its profiles average (null without clusters), and under `stages` the settings of each stage keyword, `false` for an optional stage that is off and for `signature` and `profiles` whose stage does not run. Every run's `config` also records
-`shutdown`, whether the run could install its signal guard.
+A run's `recipe` names the recipe that wrote it: `rna`, `atac`, `adt`, `multimodal`, or `perturbation`. Runs of earlier 1.x releases record `basic_rna_analysis`, the RNA pipeline that `pipeline.run` executed. The `config` of a single-modality run records `cells` (the boolean cell column, or the cell selection and, when it came from a run, that run's ID and label), `snapshotColumns`, `species`, and under `stages` the resolved settings of each stage keyword, `false` for a skipped optional stage and `{"enabled": false}` for skipped filtering; an RNA run also records `doubletSampleColumns`. A multimodal run's `config` records its `method`, its source runs under `sources`, the shared cell selection under `cells`, `snapshotColumns`, and its `stages`. A perturbation run's `config` records `cells`, `snapshotColumns`, `guideAssay`, its guide assay, `profileLabels`, the output whose cells its profiles average (null without clusters), and under `stages` the settings of each stage keyword, `false` for an optional stage that is off and for `signature` and `profiles` whose stage does not run. Every run's `config` also records `shutdown`, whether the run could install its signal guard.
 
 Reopening a run reads its `config` as recorded and never checks it against the current recipe, so
 a run whose settings a later release rejects, such as the t-SNE setting `parallel`, still reopens
@@ -366,43 +357,7 @@ carry them into the merged column. A store without the column measured every cel
 A cell outside an assay holds none of its counts, so its `counts` row is zero and its
 `<assay>_nCounts` is 0. Those zeros are no measurement, so analysis fails closed on them.
 
-An operation that reads an assay's values over cells checks the cells against the assay's
-membership column after its own argument and assay-type checks and before it plans, reuses, or
-writes a result, on a read-only store too: `features.normalize`, `integration.modalities` (the shared cell
-selection against every source assay), `features.hvgs`, `features.detected`, `scores.waggr`,
-`scores.aucell`, `scores.chromvar`, `regulons.grn`, `regulons.profiles`, `markers.search`, `compare.compute_bulk` (the cells whose counts it reads: those of its bulk
-columns, or every selected cell for a mean that fits the assay's normalization over them, found
-from the live `I` column before a metadata grouping without `cell_selection` snapshots it),
-`compare.test` (feature keys, over the cells that the design keeps),
-`features.prevalent_peaks`, `scores.cell_cycle`, `qc.feature_percentage`,
-`qc.hto_demultiplexing`, `perturbation.import_guide_calls` and `perturbation.call_guides` (the guide assay), `perturbation.efficiency` (the expression assay), `qc.doublets`, `trajectory.markers` and
-`trajectory.aggregation` (the valid cells of the pseudotime), `trajectory.lineage_markers` and
-`trajectory.lineage_aggregation` (the valid cells of the fate map), `trajectory.drivers` (the
-cells it correlates), `imputation.compute_imputed` (feature names),
-`mapping.run` (the query assay), `to_anndata` with `matrix="normed"` and without a run,
-the recipes `pipeline.rna`, `pipeline.atac`, `pipeline.adt`, and `pipeline.perturbation`, which
-check the cells of `cells` before any stage runs and never narrow them, also for the HTO assay that
-an RNA run's hashing stage reads, for the guide assay of a perturbation run, and for each other assay whose metric its filtering stage names, and the quality-control filters
-`qc.auto_filter` and `qc.filter` for each metric of an assay that they filter on. A cell column is a metric of the assay whose preparation wrote it:
-`<assay>_nCounts`, `<assay>_nFeatures`, and the percentage columns that the assay records in its
-`percentFeatures` attribute (`cytearc.storage.identity.generated_cell_columns`); the column is found
-among each assay's own columns, never by parsing its name. A `quality_metric` artifact scoped to an
-assay is a metric of that assay. A cell that the column marks False raises
-`cytearc.metadata.membership.UnmeasuredCellsError`, a `ValueError` whose `operation`, `assay`,
-`column`, `unmeasured`, `selected`, `remedy`, and `cell_key` attributes name the refusal, and whose
-message names the remedy for the operation's input: a cell selection from `select_measured_cells`,
-passed as `cell_selection=` to `compare.compute_bulk`, `compare.test`, and the QC filters and as
-`cells=` to a pipeline recipe, labels narrowed with `snapshot_cluster_labels`, a graph built over
-measured cells, or a boolean column that is True only for the cells of the caller's column that
-the assay measured, passed as `cell_key` or as a recipe's `cells`, such as one that
-`ds.cells.insert("RNA_measured", ds.cells.fetch_all("I") & ds.cells.fetch_all("RNA_I"))` writes;
-the membership column alone also holds cells outside `I`. Operations that read only other results
-or metadata, such as PCA, neighbors, clustering, layouts, `snapshot_cluster_labels`, and `perturbation.labels` (the guide calls and the guide assay's target column), do not
-check; the operations at the roots of their lineage do. Derived assays copy the membership. Raw
-exports that can declare it keep unmeasured cells: `to_h5ad` and `to_anndata` without layers. An
-export that cannot declare it refuses them before it writes or reads anything: `to_mtx`, whose
-zero rows `MtxToZarr` would read back as measured cells, and a `to_anndata` layer of an assay other
-than the exported one.
+An operation that reads an assay's values over cells checks the cells against the assay's membership column after its own argument and assay-type checks and before it plans, reuses, or writes a result, on a read-only store too: `features.normalize`, `integration.modalities` (the shared cell selection against every source assay), `features.hvgs`, `features.detected`, `scores.waggr`, `scores.aucell`, `scores.chromvar`, `regulons.grn`, `regulons.profiles`, `markers.search`, `compare.compute_bulk` (the cells whose counts it reads: those of its bulk columns, or every selected cell for a mean that fits the assay's normalization over them, found from the live `I` column before a metadata grouping without `cell_selection` snapshots it), `compare.test` (feature keys, over the cells that the design keeps), `features.prevalent_peaks`, `scores.cell_cycle`, `qc.feature_percentage`, `qc.hto_demultiplexing`, `perturbation.import_guide_calls` and `perturbation.call_guides` (the guide assay), `perturbation.efficiency` and `perturbation.associations` (the expression assay), `perturbation.signature` and `perturbation.profiles` (the assay of their features), `qc.doublets`, `trajectory.markers` and `trajectory.aggregation` (the valid cells of the pseudotime), `trajectory.lineage_markers` and `trajectory.lineage_aggregation` (the valid cells of the fate map), `trajectory.drivers` (the cells it correlates), `imputation.compute_imputed` (feature names), `mapping.run` (the query assay), `to_anndata` with `matrix="normed"` and without a run, the recipes `pipeline.rna`, `pipeline.atac`, `pipeline.adt`, and `pipeline.perturbation`, which check the cells of `cells` before any stage runs and never narrow them, also for the HTO assay that an RNA run's hashing stage reads, for the guide assay of a perturbation run, and for each other assay whose metric its filtering stage names, and the quality-control filters `qc.auto_filter` and `qc.filter` for each metric of an assay that they filter on. A cell column is a metric of the assay whose preparation wrote it: `<assay>_nCounts`, `<assay>_nFeatures`, and the percentage columns that the assay records in its `percentFeatures` attribute (`cytearc.storage.identity.generated_cell_columns`); the column is found among each assay's own columns, never by parsing its name. A `quality_metric` artifact scoped to an assay is a metric of that assay. A cell that the column marks False raises `cytearc.metadata.membership.UnmeasuredCellsError`, a `ValueError` whose `operation`, `assay`, `column`, `unmeasured`, `selected`, `remedy`, and `cell_key` attributes name the refusal, and whose message names the remedy for the operation's input: a cell selection from `select_measured_cells`, passed as `cell_selection=` to `compare.compute_bulk`, `compare.test`, and the QC filters and as `cells=` to a pipeline recipe, labels narrowed with `snapshot_cluster_labels`, a graph built over measured cells, or a boolean column that is True only for the cells of the caller's column that the assay measured, passed as `cell_key` or as a recipe's `cells`, such as one that `ds.cells.insert("RNA_measured", ds.cells.fetch_all("I") & ds.cells.fetch_all("RNA_I"))` writes; the membership column alone also holds cells outside `I`. Operations that read only other results or metadata, such as PCA, neighbors, clustering, layouts, `snapshot_cluster_labels`, and `perturbation.labels` (the guide calls and the guide assay's target column), do not check; the operations at the roots of their lineage do. Derived assays copy the membership. Raw exports that can declare it keep unmeasured cells: `to_h5ad` and `to_anndata` without layers. An export that cannot declare it refuses them before it writes or reads anything: `to_mtx`, whose zero rows `MtxToZarr` would read back as measured cells, and a `to_anndata` layer of an assay other than the exported one.
 
 The checks read the membership column in bounded blocks. A boolean column or mask is read beside
 the column, block by block; a cell-selection artifact is read as its stored mask. Integer rows of

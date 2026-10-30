@@ -16,10 +16,10 @@ Each pair's regression is fitted on its treatment and control cells together,
 as the SCEPTRE book describes: Poisson coefficients, and the negative binomial
 size that maximizes the likelihood with the Poisson means held fixed, or the
 root of the Pearson equation when the likelihood shows no overdispersion. That
-fit does not depend on which of those
-cells are the treatment cells, so the treatment cells and every random set are
-scored by one function of the pair's cells, and the permutation test is exact.
-Each gene's fit on the control cells starts the fits of its pairs, and each
+fit does not depend on which of those cells are the treatment cells, so the
+treatment cells and every random set are scored by one function of the pair's
+cells, and the permutation test is exact when those cells are exchangeable
+under the null hypothesis. Each gene's fit on the control cells starts the fits of its pairs, and each
 pair's fit gives its fold change: the treatment cells' counts over their means
 under that fit.
 
@@ -193,7 +193,7 @@ class AssociationPairs:
 
 @dataclass(frozen=True, slots=True)
 class AssociationTables:
-    """The tested pairs of association tests and the calibration groups behind them.
+    """The tested pairs of association tests and their calibration groups.
 
     Attributes:
         pairs: The pairs and their QC counts.
@@ -220,12 +220,18 @@ class AssociationTables:
 class PerturbationAssociations:
     """The pairs of a ``perturbation_associations`` artifact.
 
-    Each table has one row per pair with ``target``, ``feature``, the cell
-    counts ``n_cells``, ``n_control_cells``, ``n_nonzero_cells`` and
-    ``n_nonzero_control_cells``, ``pass_qc``, and for pairs that pass QC
-    ``z``, ``p_value``, ``adjusted_p_value``, ``significant``,
-    ``log2_fold_change``, ``se_log2_fold_change``, ``stage`` and the
-    skew-normal fit, ``skew_location``, ``skew_scale`` and ``skew_shape``.
+    Each table has one row per pair with ``target``; with
+    ``integration="singleton"``, ``guide``, the tested guide, in the
+    discovery and positive-control tables; ``feature``, the feature ID, and
+    ``feature_name``; the cell counts ``n_cells``, ``n_control_cells``,
+    ``n_nonzero_cells`` and ``n_nonzero_control_cells``; ``pass_qc``; and
+    for pairs that pass QC ``z``, ``p_value``, ``adjusted_p_value``,
+    ``significant``, ``log2_fold_change``, ``se_log2_fold_change``,
+    ``stage`` and the skew-normal fit, ``skew_location``, ``skew_scale`` and
+    ``skew_shape``. ``n_cells`` counts a pair's treatment cells and
+    ``n_control_cells`` the cells they are compared with: at low MOI the
+    control cells, or for a calibration group the other control cells, and
+    at high MOI every other labelled cell.
 
     Attributes:
         discovery: The pairs asked about.
@@ -234,7 +240,8 @@ class PerturbationAssociations:
             ``control_guides`` its guides.
         positive: The positive-control pairs, such as each target with its own
             gene.
-        alpha: The false discovery rate of ``significant``.
+        alpha: The false discovery rate of ``significant``, which marks the
+            pairs whose adjusted p-value is at most ``alpha``.
         side: The alternative tested: ``"both"``, ``"left"`` or ``"right"``.
         integration: ``"union"`` when a target's guides are tested together,
             ``"singleton"`` when each guide is tested alone.

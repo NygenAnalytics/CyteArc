@@ -651,8 +651,11 @@ class PipelineAccessor:
         Raises:
             PermissionError: If the store is read-only.
             TypeError: If the call fails its checks; nothing is written.
-            ValueError: If the call fails its checks; nothing is written.
-            KeyError: If the call names a missing column; nothing is written.
+            ValueError: If the call fails its checks, such as a missing
+                sample, split or covariate column; nothing is written.
+            KeyError: If a column of ``cells``, ``filtering``, ``hvg``,
+                ``harmony`` or ``snapshot_columns`` is missing; nothing is
+                written.
             FileNotFoundError: If ``guide_calling`` ``path`` names no file.
             UnmeasuredCellsError: If the RNA or the guide assay did not
                 measure one of ``cells``; nothing is written.
