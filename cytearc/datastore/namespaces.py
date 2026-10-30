@@ -80,6 +80,10 @@ class ClonesAccessor(_Accessor):
     from_column = _bind(_CloneOperationsMixin._clones_from_column)
     load_clones = _bind(_CloneOperationsMixin._clones_load_clones)
     export_clones = _bind(_CloneOperationsMixin._clones_export_clones)
+    expansion = _bind(_CloneOperationsMixin._clones_expansion)
+    load_expansion = _bind(_CloneOperationsMixin._clones_load_expansion)
+    diversity = _bind(_CloneOperationsMixin._clones_diversity)
+    rarefaction = _bind(_CloneOperationsMixin._clones_rarefaction)
 
 
 class ClustersAccessor(_Accessor):

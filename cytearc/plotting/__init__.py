@@ -32,7 +32,11 @@ if TYPE_CHECKING:
         PlotStep as PlotStep,
         run_recipe as run_recipe,
     )
-    from .clones import clone_abundance as clone_abundance
+    from .clones import (
+        clonal_expansion as clonal_expansion,
+        clonal_rarefaction as clonal_rarefaction,
+        clone_abundance as clone_abundance,
+    )
     from .composition import composition as composition
     from .cluster_connectivity import cluster_connectivity as cluster_connectivity
     from .diagnostics import (
@@ -97,6 +101,8 @@ __all__ = [
     "THEMES",
     "association_calibration",
     "association_volcano",
+    "clonal_expansion",
+    "clonal_rarefaction",
     "clone_abundance",
     "cluster_tree",
     "cluster_connectivity",
@@ -157,6 +163,8 @@ __getattr__, __dir__ = _lazy_facade(
         "THEMES": "._style",
         "association_calibration": ".perturbation",
         "association_volcano": ".perturbation",
+        "clonal_expansion": ".clones",
+        "clonal_rarefaction": ".clones",
         "clone_abundance": ".clones",
         "cluster_tree": ".cluster_tree",
         "cluster_connectivity": ".cluster_connectivity",

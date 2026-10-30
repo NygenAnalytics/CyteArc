@@ -1,12 +1,22 @@
-"""The clone abundance plot, on clones whose sizes are counted by hand."""
+"""The clone plots, on clones whose sizes are counted by hand."""
+
+from collections import Counter
+from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
+from cytearc.clones import diversity as dv
 from cytearc.datastore.datastore import DataStore
-from cytearc.plotting import clone_abundance
+from cytearc.plotting import clonal_expansion, clonal_rarefaction, clone_abundance
 from cytearc.plotting._groups import cell_groups
+from tests.clone_helpers import (
+    every_cell,
+    import_truth_clones,
+    write_truth_store,
+)
+from tests.clone_truth import CELL_TYPES, N_CELLS, clone_truth
 from tests.storage_helpers import write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
@@ -172,3 +182,269 @@ def test_clones_of_equal_size_list_in_rank_order(plotted) -> None:
         "cells": [2, 2, 1],
     }
     plt.close(result.figure)
+
+
+TRUTH = clone_truth()
+CATEGORIES = (
+    "1 cell",
+    "2 cells",
+    "3 to 5 cells",
+    "6 to 20 cells",
+    "21 to 100 cells",
+    "more than 100 cells",
+)
+
+
+@pytest.fixture(scope="module")
+def truth_plot(tmp_path_factory) -> SimpleNamespace:
+    folder = tmp_path_factory.mktemp("clone_summary_plots")
+    store = write_truth_store(folder / "store.zarr", TRUTH)
+    clones = import_truth_clones(store, TRUTH, folder)
+    cells = every_cell(store)
+    return SimpleNamespace(
+        store=store,
+        clones=clones,
+        by_sample=store.clones.expansion(clones, group_by="sample"),
+        labels=store.snapshot_cluster_labels("cell_type", cell_selection=cells),
+    )
+
+
+def _in_sample() -> dict[str, int]:
+    """The cells with a clone of each sample."""
+    return {
+        sample: sum(found)
+        for sample, found in TRUTH.group_clone_sizes(TRUTH.samples).items()
+    }
+
+
+def test_the_expansion_plot_draws_the_expansions_own_groups(truth_plot) -> None:
+    result = truth_plot.store.plots.clonal_expansion(truth_plot.by_sample, show=False)
+
+    table = result.tables["categories"]
+    assert table.columns.tolist() == ["group", "category", "cells", "fraction"]
+    assert table["group"].tolist() == ["d2"] * 6 + ["d4"] * 6
+    # Each sample's cells per category, from its clone sizes.
+    expected = []
+    for sample in ("d2", "d4"):
+        cells = dict.fromkeys(CATEGORIES, 0)
+        for size in TRUTH.group_clone_sizes(TRUTH.samples)[sample]:
+            category = 0 if size == 1 else 1 if size == 2 else 2 if size <= 5 else 3
+            cells[CATEGORIES[category]] += size
+        expected += list(cells.values())
+    assert table["cells"].tolist() == expected
+    ranks = result.tables["rank_windows"]
+    first = ranks[ranks["window"] == "1 to 10"]
+    assert first["cells"].tolist() == [_in_sample()["d2"], _in_sample()["d4"]]
+    assert first["fraction"].tolist() == [1.0, 1.0]
+    assert result.provenance.n_cells == 32
+    assert result.provenance.extras["grouping"] == "sample"
+    assert result.provenance.extras["splits"] == [10, 100, 1000, 10000, 30000, 100000]
+    ax = result.axes["categories"]
+    assert ax.get_xlabel() == "Fraction of cells"
+    assert [tick.get_text() for tick in ax.get_yticklabels()] == ["d2", "d4"]
+    assert ax.get_legend().get_title().get_text() == "Clone size"
+    # Only the windows that hold cells are drawn.
+    legend = result.axes["rank_windows"].get_legend()
+    assert [text.get_text() for text in legend.get_texts()] == ["1 to 10"]
+    plt.close(result.figure)
+
+
+def test_the_expansion_plot_regroups_cells_by_another_column(truth_plot) -> None:
+    store = truth_plot.store
+    bounds = (0.1, 0.2, 1)
+    names = ("0 to 0.1", "0.1 to 0.2", "0.2 to 1")
+    ref = store.clones.expansion(
+        truth_plot.clones, group_by="sample", frequency_breakpoints=bounds
+    )
+    result = clonal_expansion(
+        store, ref, group_by="cell_type", normalize=False, splits=(1,), show=False
+    )
+    # Each cell keeps the category of its clone's share of its sample.
+    sizes = TRUTH.cell_clone_sizes(TRUTH.samples)
+    totals = _in_sample()
+    category = [
+        names[next(at for at, bound in enumerate(bounds) if size / totals[s] <= bound)]
+        if size
+        else None
+        for size, s in zip(sizes.tolist(), TRUTH.samples, strict=True)
+    ]
+    counted = Counter(
+        (cell_type, name)
+        for cell_type, name in zip(TRUTH.cell_types, category, strict=True)
+        if name is not None
+    )
+    table = result.tables["categories"].set_index(["group", "category"])
+    for cell_type in CELL_TYPES:
+        for name in names:
+            assert table.loc[(cell_type, name), "cells"] == counted[(cell_type, name)]
+    # The ranks are counted within the plotted groups.
+    ranks = result.tables["rank_windows"].set_index(["group", "window"])
+    for cell_type, found in TRUTH.group_clone_sizes(TRUTH.cell_types).items():
+        assert ranks.loc[(cell_type, "1"), "cells"] == found[0]
+        assert ranks.loc[(cell_type, "after 1"), "cells"] == sum(found[1:])
+    assert result.axes["categories"].get_xlabel() == "Cells"
+    assert (
+        result.axes["categories"].get_legend().get_title().get_text()
+        == "Clone frequency"
+    )
+    assert result.provenance.extras["grouping"] == "cell_type"
+    plt.close(result.figure)
+    clone_counts = clonal_expansion(
+        store, ref, group_by="cell_type", count="clones", show=False
+    )
+    # Each clone counts once per cell type and category it holds there.
+    triples = {
+        (cell_type, clone, name)
+        for cell_type, clone, name in zip(
+            TRUTH.cell_types, TRUTH.clones, category, strict=True
+        )
+        if name is not None
+    }
+    per_type = Counter((cell_type, name) for cell_type, _clone, name in triples)
+    table = clone_counts.tables["categories"].set_index(["group", "category"])
+    assert table.columns.tolist() == ["clones", "fraction"]
+    for cell_type in CELL_TYPES:
+        n_clones = sum(per_type[(cell_type, name)] for name in names)
+        for name in names:
+            assert table.loc[(cell_type, name), "clones"] == per_type[(cell_type, name)]
+            assert table.loc[(cell_type, name), "fraction"] == pytest.approx(
+                per_type[(cell_type, name)] / n_clones
+            )
+    assert clone_counts.axes["categories"].get_xlabel() == "Fraction of clones"
+    plt.close(clone_counts.figure)
+
+
+def test_the_expansion_plot_groups_cells_by_labels(truth_plot) -> None:
+    store = truth_plot.store
+    ref = store.clones.expansion(truth_plot.clones)
+    result = clonal_expansion(store, ref, groups=truth_plot.labels, show=False)
+    assert result.tables["categories"]["group"].unique().tolist() == sorted(CELL_TYPES)
+    assert result.provenance.extras["grouping"] == "cluster_labels"
+    plt.close(result.figure)
+    ungrouped = clonal_expansion(store, ref, show=False, show_legend=False)
+    assert ungrouped.tables["categories"]["group"].unique().tolist() == ["all cells"]
+    assert ungrouped.provenance.extras["grouping"] is None
+    assert ungrouped.axes["categories"].get_legend() is None
+    plt.close(ungrouped.figure)
+    # Shown by default: on Agg the owned figure is closed.
+    shown = clonal_expansion(store, ref)
+    assert shown.provenance.n_cells == 32
+    assert shown.figure.number not in plt.get_fignums()
+
+
+def test_the_expansion_plot_draws_on_caller_axes(truth_plot) -> None:
+    figure, axes = plt.subplots(1, 2)
+    result = clonal_expansion(
+        truth_plot.store,
+        truth_plot.by_sample,
+        target={"categories": axes[0], "rank_windows": axes[1]},
+        show=False,
+    )
+    assert result.figure is figure and result.owns_figure is False
+    plt.close(figure)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"count": "contigs"}, ValueError, "count must be 'cells' or 'clones'"),
+        ({"normalize": "yes"}, TypeError, "normalize must be a boolean"),
+        ({"splits": (5, 1)}, ValueError, "strictly increasing"),
+        ({"group_by": "sample", "groups": "x"}, ValueError, "not both"),
+    ],
+)
+def test_the_expansion_plot_checks_its_arguments(
+    truth_plot, kwargs, error, message
+) -> None:
+    with pytest.raises(error, match=message):
+        clonal_expansion(truth_plot.store, truth_plot.by_sample, show=False, **kwargs)
+    with pytest.raises(TypeError, match="store does not provide clones.load_expansion"):
+        clonal_expansion(object(), truth_plot.by_sample, show=False)
+
+
+def test_the_expansion_plot_of_cells_without_clones(truth_plot) -> None:
+    store = truth_plot.store
+    store.cells.insert("no_clone", np.full(N_CELLS, "", dtype=object), overwrite=True)
+    empty = store.clones.from_column("no_clone", cell_selection=every_cell(store))
+    result = clonal_expansion(store, store.clones.expansion(empty), show=False)
+    assert result.tables["categories"].empty
+    assert result.tables["rank_windows"].empty
+    assert result.provenance.n_cells == 0
+    plt.close(result.figure)
+
+
+def test_the_rarefaction_plot_draws_one_panel_per_order(truth_plot) -> None:
+    store = truth_plot.store
+    result = store.plots.clonal_rarefaction(
+        truth_plot.clones, group_by="sample", show=False
+    )
+    assert list(result.axes) == ["order_0", "order_1", "order_2", "coverage"]
+    curves = result.tables["curves"]
+    assert curves.columns[:2].tolist() == ["group", "sample"]
+    assert sorted(curves["group"].unique()) == ["d2", "d4"]
+    assert result.provenance.n_cells == 32
+    assert result.provenance.extras["grouping"] == "sample"
+    assert result.axes["order_1"].get_title() == "Shannon diversity (order 1)"
+    assert result.axes["coverage"].get_ylabel() == "Sample coverage"
+    legend = result.axes["coverage"].get_legend()
+    assert [text.get_text() for text in legend.get_texts()] == ["d2", "d4"]
+    # The first line of order 0 is d2's curve up to its observed size, which
+    # ends at its clones.
+    d2 = dv.CloneSizes.from_sizes(TRUTH.group_clone_sizes(TRUTH.samples)["d2"])
+    line = result.axes["order_0"].get_lines()[0]
+    assert line.get_label() == "d2"
+    assert line.get_xdata()[-1] == d2.n
+    assert line.get_ydata()[-1] == d2.richness
+    plt.close(result.figure)
+    by_coverage = clonal_rarefaction(
+        store, truth_plot.clones, orders=(0,), base="coverage", show=False
+    )
+    assert list(by_coverage.axes) == ["order_0"]
+    assert by_coverage.axes["order_0"].get_xlabel() == "Sample coverage"
+    assert set(by_coverage.tables["curves"]["group"]) == {"all cells"}
+    # One group needs no legend.
+    assert by_coverage.axes["order_0"].get_legend() is None
+    assert by_coverage.provenance.extras["grouping"] is None
+    plt.close(by_coverage.figure)
+    # Shown by default: on Agg the owned figure is closed.
+    shown = clonal_rarefaction(store, truth_plot.clones, orders=(2,))
+    assert shown.provenance.extras["orders"] == [2]
+    assert shown.figure.number not in plt.get_fignums()
+
+
+def test_the_rarefaction_plot_of_complete_samples(truth_plot) -> None:
+    store = truth_plot.store
+    expanded = store.select_cells(
+        truth_plot.clones, value="clone_size", low=2, keep_bounds=True
+    )
+    result = clonal_rarefaction(
+        store, truth_plot.clones, cell_selection=expanded, base="coverage", show=False
+    )
+    curves = result.tables["curves"]
+    # Without singletons, the observed sample is complete.
+    assert curves.loc[curves["method"] == "observed", "coverage"].tolist() == [1.0] * 3
+    plt.close(result.figure)
+
+
+def test_the_rarefaction_plot_draws_on_caller_axes(truth_plot) -> None:
+    figure, axes = plt.subplots(1, 2)
+    result = clonal_rarefaction(
+        truth_plot.store,
+        truth_plot.clones,
+        orders=(0,),
+        target={"order_0": axes[0], "coverage": axes[1]},
+        show_legend=False,
+        show=False,
+    )
+    assert result.figure is figure and result.owns_figure is False
+    assert axes[1].get_legend() is None
+    plt.close(figure)
+
+
+def test_the_rarefaction_plot_checks_its_arguments(truth_plot) -> None:
+    with pytest.raises(ValueError, match="base must be 'size' or 'coverage'"):
+        clonal_rarefaction(
+            truth_plot.store, truth_plot.clones, base="depth", show=False
+        )
+    with pytest.raises(TypeError, match="store does not provide clones.rarefaction"):
+        clonal_rarefaction(object(), truth_plot.clones, show=False)

@@ -132,6 +132,17 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
         "cell_cycle": CellValueSpec(
             "phase", True, {"s_score": False, "g2m_score": False}
         ),
+        # group_codes holds each cell's group, a position in the artifact's
+        # group_keys attribute, -1 for none.
+        "clonal_expansion": CellValueSpec(
+            "values",
+            True,
+            {
+                "group_codes": True,
+                "group_clone_size": False,
+                "group_clone_frequency": False,
+            },
+        ),
         # clone_probability is stored when the clone source gives each cell's
         # posterior, such as Numbat's p_opt.
         "clones": CellValueSpec(

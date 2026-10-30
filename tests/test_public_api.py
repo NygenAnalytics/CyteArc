@@ -132,6 +132,8 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "THEMES",
     "association_calibration",
     "association_volcano",
+    "clonal_expansion",
+    "clonal_rarefaction",
     "clone_abundance",
     "cluster_tree",
     "cluster_connectivity",

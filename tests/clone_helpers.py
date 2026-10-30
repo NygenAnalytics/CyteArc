@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pytest
 
-from tests.clone_truth import N_CELLS, CloneTruth
+from tests.clone_truth import N_CELLS, CloneTruth, write_cospar
 from tests.storage_helpers import write_count_store
 
 if TYPE_CHECKING:
@@ -70,3 +71,21 @@ def loaded_partition(store: "DataStore", clones: "ArtifactRef") -> set[frozenset
         frozenset(str(cell) for cell in members)
         for members in labelled.groupby(labelled, observed=True).groups.values()
     }
+
+
+def import_truth_clones(
+    store: "DataStore",
+    truth: CloneTruth,
+    folder: Path,
+    *,
+    cell_selection: "ArtifactRef | None" = None,
+) -> "ArtifactRef":
+    """Save the truth's clones by importing CoSpar's table of them.
+
+    The table also lists barcodes outside the store, about which the import
+    warns, as it does again when it reuses saved clones.
+    """
+    path = write_cospar(truth, folder / "truth_clones.csv")
+    selection = every_cell(store) if cell_selection is None else cell_selection
+    with pytest.warns(UserWarning, match="match no selected cell"):
+        return store.clones.import_clones(path, cell_selection=selection)
