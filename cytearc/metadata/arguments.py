@@ -530,6 +530,19 @@ class CloneFateBiasArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class ImmuneReceptorImportArguments(OperationArguments):
+    operation: ClassVar[str] = "import_immune_receptors"
+    artifact_kind: ClassVar[str] = "immune_receptors"
+
+    cell_selection: ArtifactRef = artifact_input()
+    # Each contig file's format, the SHA-256 of its bytes and how its barcodes
+    # name cells, in canonical order; paths are not part of the identity.
+    sources: tuple[dict[str, Any], ...] = artifact_input()
+    productive_only: bool = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class GuideThresholdArguments(OperationArguments):
     operation: ClassVar[str] = "fit_guide_thresholds"
     artifact_kind: ClassVar[str] = "guide_thresholds"

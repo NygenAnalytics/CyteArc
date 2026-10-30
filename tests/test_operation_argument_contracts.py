@@ -22,6 +22,7 @@ from cytearc.datastore.namespaces import (
     QcAccessor,
     ReductionAccessor,
     RegulonsAccessor,
+    RepertoireAccessor,
     ScoresAccessor,
     TrajectoryAccessor,
 )
@@ -304,6 +305,22 @@ _CONTRACTS = (
         # late cell's fate is recorded by its fingerprint.
         aliases={"early": "cell_selection"},
         model_only=_classified("resolved_input", "group_assignments_fingerprint"),
+    ),
+    OperationContract(
+        RepertoireAccessor.import_receptors,
+        metadata_arguments.ImmuneReceptorImportArguments,
+        # Each file is identified by its format, the SHA-256 of its bytes and
+        # how its barcodes name cells, in canonical order; its path is not
+        # recorded.
+        signature_only=_classified(
+            "transformed",
+            "paths",
+            "barcode_prefix",
+            "barcode_suffix",
+            "barcode_pattern",
+            "format",
+        ),
+        model_only=_classified("resolved_input", "sources"),
     ),
     OperationContract(
         PerturbationAccessor.import_guide_calls,

@@ -35,6 +35,7 @@ from tests.barcode_join_helpers import (
     build_join_store,
     import_case,
     write_clone_file,
+    write_contig_file,
     write_guide_call_file,
 )
 from tests.perturbation_helpers import traced_peak
@@ -167,6 +168,15 @@ def _cloned_cells(store, ref) -> set[str]:
     return set(cells.index[cells["clone"].notna()])
 
 
+def _receptors(store, paths, **options):
+    return store.repertoire.import_receptors(paths, **options)
+
+
+def _cells_with_contigs(store, ref) -> set[str]:
+    cells = store.repertoire.load_receptors(ref, fields=[]).cells
+    return set(cells.index[cells["n_contigs"] > 0])
+
+
 IMPORTERS = {
     "import_guide_calls": Importer(
         name="import_guide_calls",
@@ -184,6 +194,14 @@ IMPORTERS = {
         run=_clones,
         joined=_cloned_cells,
         files=("the clone file", "the clone files"),
+    ),
+    "import_receptors": Importer(
+        name="import_receptors",
+        several_files=True,
+        write=write_contig_file,
+        run=_receptors,
+        joined=_cells_with_contigs,
+        files=("the contig file", "the contig files"),
     ),
 }
 MULTI_FILE = [name for name, importer in IMPORTERS.items() if importer.several_files]
@@ -459,7 +477,9 @@ def test_a_file_listed_twice_with_the_same_prefix_and_suffix_is_refused(
         barcode_suffix="-1",
     )
     assert importer.joined(store, ref) == {"s1__AAAC-1", "s2__AAAC-1"}
-    with pytest.raises(ValueError, match="lists 3 values for 2 clone files"):
+    # "the clone files" names the files of a listing as the errors do.
+    noun = importer.files[1].removeprefix("the ")
+    with pytest.raises(ValueError, match=f"lists 3 values for 2 {noun}"):
         importer.run(
             store, [path, copy], cell_selection=cells, barcode_prefix=["a", "b", "c"]
         )

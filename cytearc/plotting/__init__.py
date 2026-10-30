@@ -80,6 +80,7 @@ if TYPE_CHECKING:
         mixscape as mixscape,
         perturbation_clusters as perturbation_clusters,
     )
+    from .repertoire import receptor_qc as receptor_qc
     from .summary import dotplot as dotplot
     from .summary import matrixplot as matrixplot
 
@@ -143,6 +144,7 @@ __all__ = [
     "perturbation_clusters",
     "pseudotime_heatmap",
     "qc",
+    "receptor_qc",
     "run_recipe",
     "theme_context",
 ]
@@ -209,6 +211,7 @@ __getattr__, __dir__ = _lazy_facade(
         "perturbation_clusters": ".perturbation",
         "pseudotime_heatmap": ".heatmaps",
         "qc": ".diagnostics",
+        "receptor_qc": ".repertoire",
         "run_recipe": ".recipes",
         "theme_context": "._style",
     },

@@ -496,6 +496,7 @@ def test_matrix_has_no_domain_or_orchestration_dependencies():
                 "quality_control",
                 "readers",
                 "regulons",
+                "repertoire",
                 "trajectory",
                 "writers",
             },
@@ -555,6 +556,7 @@ def test_algorithm_domains_do_not_import_orchestration_or_io():
         "embeddings": {"imported_storage.py"},
         "perturbation": set(),
         "regulons": set(),
+        "repertoire": set(),
         "trajectory": {"artifacts.py"},
     }
     for package_name, allowed_storage_importers in storage_exceptions.items():
@@ -1085,8 +1087,10 @@ def test_reader_implementations_are_runtime_isolated():
     assert not (_CYTEARC_ROOT / "readers.py").exists()
     required_files = {
         "__init__.py",
+        "_contigs.py",
         "_text.py",
         "_sparse.py",
+        "airr.py",
         "cellranger.py",
         "clone_tables.py",
         "csv.py",
@@ -1102,6 +1106,7 @@ def test_reader_implementations_are_runtime_isolated():
 
     forbidden_roots = {"datastore", "merge", "plotting", "storage", "writers"}
     format_modules = {
+        "readers.airr",
         "readers.cellranger",
         "readers.clone_tables",
         "readers.csv",
@@ -1110,7 +1115,13 @@ def test_reader_implementations_are_runtime_isolated():
         "readers.seurat",
     }
     shared_reader_imports = {
-        "cellranger.py": {"readers._assay_names", "readers._sparse", "readers._text"},
+        "airr.py": {"readers._contigs"},
+        "cellranger.py": {
+            "readers._assay_names",
+            "readers._contigs",
+            "readers._sparse",
+            "readers._text",
+        },
         "clone_tables.py": {"readers._h5ad_columns", "readers._text"},
         "csv.py": {"readers._text"},
         "h5ad.py": {
@@ -1355,6 +1366,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         _QualityControlOperationsMixin,
     )
     from cytearc.datastore._operations.regulons import _RegulonOperationsMixin
+    from cytearc.datastore._operations.repertoire import _RepertoireOperationsMixin
     from cytearc.datastore._operations.trajectory import (
         _TrajectoryFeatureOperationsMixin,
         _TrajectoryOperationsMixin,
@@ -1407,6 +1419,7 @@ def test_datastore_operation_mixins_are_runtime_isolated():
         _PerturbationAssociationOperationsMixin,
         _PerturbationProfileOperationsMixin,
         _CloneOperationsMixin,
+        _RepertoireOperationsMixin,
     )
     assert all("__init__" not in mixin.__dict__ for mixin in mixins)
     assert all(mixin.__bases__ == (object,) for mixin in mixins)

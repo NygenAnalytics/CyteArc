@@ -23,6 +23,7 @@ from ._operations.perturbation_profiles import _PerturbationProfileOperationsMix
 from ._operations.presentation import _PresentationOperationsMixin
 from ._operations.quality_control import _QualityControlOperationsMixin
 from ._operations.regulons import _RegulonOperationsMixin
+from ._operations.repertoire import _RepertoireOperationsMixin
 from ._operations.trajectory import _TrajectoryFeatureOperationsMixin
 from ._operations.trajectory import _TrajectoryOperationsMixin
 from .datastore import DataStore
@@ -42,6 +43,7 @@ __all__ = [
     "QcAccessor",
     "ReductionAccessor",
     "RegulonsAccessor",
+    "RepertoireAccessor",
     "ScoresAccessor",
     "TrajectoryAccessor",
 ]
@@ -278,6 +280,13 @@ class RegulonsAccessor(_Accessor):
     grn = _bind(_RegulonOperationsMixin._regulons_grn)
     load_grn = _bind(_RegulonOperationsMixin._regulons_load_grn)
     profiles = _bind(_RegulonOperationsMixin._regulons_profiles)
+
+
+class RepertoireAccessor(_Accessor):
+    __slots__ = ()
+
+    import_receptors = _bind(_RepertoireOperationsMixin._repertoire_import_receptors)
+    load_receptors = _bind(_RepertoireOperationsMixin._repertoire_load_receptors)
 
 
 class ScoresAccessor(_Accessor):
