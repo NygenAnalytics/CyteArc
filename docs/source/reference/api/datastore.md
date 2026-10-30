@@ -241,6 +241,15 @@ functions in {doc}`regulons` turn them into regulons.
     :members: import_clones, from_column, load_clones, export_clones, expansion, load_expansion, diversity, rarefaction, overlap, track, coupling, fate_bias, load_fate_bias
 ```
 
+### `ds.repertoire`
+
+`import_receptors` reads the T cell and B cell receptor contigs of a set of cells from Cell Ranger's contig annotations or AIRR Rearrangement files, joins them to the cells by barcode, and saves them as an `immune_receptors` artifact, which ranks each cell's chains and labels the cell with its receptor type, subtype and chain pairing; {doc}`repertoire` describes the receptor model and the record that `load_receptors` returns.
+
+```{eval-rst}
+.. autoclass:: cytearc.datastore.namespaces.RepertoireAccessor
+    :members: import_receptors, load_receptors
+```
+
 ### `ds.imputation`
 
 ```{eval-rst}

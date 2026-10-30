@@ -177,6 +177,13 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - License: MIT
 - Used in: `cytearc/clones/fate.py`, whose fate coupling methods follow the definitions of CoSpar 0.5.0's `get_normalized_covariance` and `coarse_grain_clone_over_cell_clusters` (the `"SW"`, `"Weinreb"` and `"Jaccard"` methods and the normalisation of each group and then each clone), whose null shuffles labels as `pvalue_for_fate_coupling` does, and whose fate fractions and Fisher tests follow `compute_state_potential` on the clonal transition map of `infer_Tmap_from_clonal_info_alone` and `clonal_fate_bias`, written from that source without its pseudocounts. `tests/cospar_0_5_0_golden.json` holds CoSpar 0.5.0's outputs on a synthetic experiment that the test suite compares with.
 
+### scirpy
+
+- Source: <https://github.com/scverse/scirpy>
+- Copyright (c) 2020 Gregor Sturm, Tamas Szabo, Francesca Finotello, and the Institute of Bioinformatics, Medical University of Innsbruck; Copyright (c) 2025 scverse®
+- License: BSD-3-Clause
+- Used in: `cytearc/repertoire/chains.py` (the receptor model of version 0.25.1: the loci of each receptor arm, the rules that make a contig a chain and rank a cell's chains into two slots per arm, the inference of a contig's locus from its gene calls, and the names and rules of the receptor types, subtypes and chain pairings of `index_chains` and `chain_qc`), reimplemented on encoded contigs.
+
 ## Data in this repository
 
 - **JASPAR** (<https://jaspar.elixir.no>), CC BY 4.0: the motif matrices MA0004.1 (Arnt) and
@@ -818,6 +825,44 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### scirpy (BSD 3-Clause License)
+
+```text
+BSD 3-Clause License
+
+Copyright (c) 2020 Gregor Sturm
+Copyright (c) 2020 Tamas Szabo
+Copyright (c) 2020 Francesca Finotello
+Copyright (c) 2020 Institute of Bioinformatics, Medical University of Innsbruck
+Copyright (c) 2025 scverse®
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ### TREX (MIT License)
