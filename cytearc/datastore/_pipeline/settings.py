@@ -18,9 +18,10 @@ from ...features.variability import (
 )
 from ...graph.arguments import graph_load_flags, umap_graph_flags
 from ...perturbation.associations import association_settings
-from ...perturbation.clusters import cluster_settings, perturbation_names
+from ...perturbation.clusters import cluster_settings
 from ...perturbation.edistance import edistance_settings
 from ...perturbation.efficiency import efficiency_settings
+from ...perturbation.guide_calls import import_settings
 from ...perturbation.guide_thresholds import call_settings
 from ...perturbation.labels import label_settings
 from ...perturbation.mixscape import mixscape_settings
@@ -432,12 +433,7 @@ def _check_perturbation_stage(stage: str, value: Mapping[str, Any]) -> None:
     if stage == "guide_calling" and "path" in value:
         if set(value) - GUIDE_IMPORT_SETTINGS:
             raise ValueError(_GUIDE_CALLING_EITHER)
-        path = value["path"]
-        if not isinstance(path, str) or not path:
-            raise TypeError("path must be a path to Cell Ranger's call file")
-        prefix = value.get("barcode_prefix")
-        if prefix is not None and not isinstance(prefix, str):
-            raise TypeError("barcode_prefix must be text or None")
+        import_settings(value["path"], value.get("barcode_prefix"))
         return
     if stage == "guide_calling" and "barcode_prefix" in value:
         raise ValueError(_GUIDE_CALLING_EITHER)
@@ -450,8 +446,6 @@ def _check_perturbation_stage(stage: str, value: Mapping[str, Any]) -> None:
             for name in inspect.signature(check).parameters
         }
     )
-    if stage == "clusters" and value.get("perturbations") is not None:
-        perturbation_names(value["perturbations"])
 
 
 def _check_stage_values(stage: str, value: Mapping[str, Any]) -> None:

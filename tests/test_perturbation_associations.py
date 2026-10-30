@@ -241,6 +241,7 @@ def _settings(**changes: object) -> tuple:
         "moi": "low",
         "resampling": None,
         "sample_column": None,
+        "covariates": None,
     }
     settings.update(changes)
     return associations_module.association_settings(**settings)
@@ -1842,7 +1843,17 @@ def test_associations_warn_about_miscalibration(tmp_path) -> None:
         ({"sample_column": 4}, TypeError, "sample_column must be"),
         ({"sample_column": "batch"}, ValueError, "sample_column 'batch'"),
         ({"covariates": "mito"}, TypeError, "covariates must be"),
-        ({"covariates": ["depth"]}, ValueError, "covariate 'depth'"),
+        (
+            {"covariates": 3},
+            TypeError,
+            "^covariates must be a sequence of column names or None$",
+        ),
+        # The pipeline recipe refuses a missing column with the same error.
+        (
+            {"covariates": ["depth"]},
+            ValueError,
+            "^covariate 'depth' not found in cell metadata$",
+        ),
         ({"covariates": ["label"]}, ValueError, "must be numeric"),
         ({"invalidate_cache": 1}, TypeError, "invalidate_cache must be"),
         (
@@ -1907,6 +1918,23 @@ def test_association_settings_check_the_sample_column() -> None:
             _settings(sample_column=column)
     # Whether the column exists is checked against the store.
     assert _settings(sample_column="lane") == _settings()
+
+
+def test_association_settings_check_the_covariates() -> None:
+    # The pipeline recipe runs the same check on its settings, so a stage
+    # setting such as {"covariates": "depth"} is refused before a run starts.
+    for covariates in ("depth", 3, [3], ["depth", None], b"depth"):
+        with pytest.raises(
+            TypeError, match="^covariates must be a sequence of column names or None$"
+        ):
+            _settings(covariates=covariates)
+    # Whether each column exists and holds numbers is checked against the store.
+    assert _settings(covariates=["depth", "mito"]) == _settings()
+    assert associations_module.covariate_columns(None) == ()
+    # Any iterable of names, read once, such as the columns of a table.
+    names = (name for name in ["depth", "mito"])
+    assert associations_module.covariate_columns(names) == ("depth", "mito")
+    assert associations_module.covariate_columns(pd.Index(["depth"])) == ("depth",)
 
 
 def test_associations_take_the_resamples_as_any_sequence(shared) -> None:

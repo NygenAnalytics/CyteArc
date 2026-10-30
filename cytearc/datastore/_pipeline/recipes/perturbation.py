@@ -11,25 +11,29 @@ reuses that run's artifacts.
 """
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
 
 from ....assay import RNAassay
+from ....merge.row_plan import MERGED_ID_SEPARATOR
 from ....metadata.rows import read_metadata_rows_chunkwise
 from ....perturbation.associations import covariate_columns
 from ....perturbation.guide_calls import validated_guide_ids
 from ....perturbation.labels import guide_targets, label_settings
 from ....storage.artifacts import ArtifactRef, inspect_artifact
 from ....storage.types import as_zarr_group
-from ....utils.arguments import integer_argument
 from ..executor import PlannedStage, RecipePlan, RunState
-from ..fields import cell_fields, feature_fields, reserved_fields
+from ..fields import (
+    PERTURBATION_CELL_FIELDS,
+    cell_fields,
+    feature_fields,
+    reserved_fields,
+)
 from ..filtering import default_filter_columns, snapshot_column_values
 from ..settings import (
     LABELS_NEED_CONTROLS,
-    PCA_DIMS_DEFAULT,
     SIGNATURE_DIMS_DEFAULT,
     method_setting,
     stage_settings,
@@ -38,24 +42,17 @@ from ..stages import (
     CellSource,
     Outputs,
     filtering_stage,
-    harmony_stage,
-    hvg_stage,
     input_snapshot_stage,
-    normalization_stage,
-    pca_stage,
     resolve_cells,
 )
 from ..summaries import summarize_stage
 from .common import (
     cell_snapshots,
     check_labeled_cells,
-    check_pca_features,
-    harmony_config,
     input_cell_mask,
     modality_assay,
-    resolve_harmony,
-    resolve_hvg,
     resolve_label,
+    resolve_rna_head,
     resolve_run_filtering,
     resolve_snapshot_columns,
 )
@@ -63,11 +60,6 @@ from .rna import FILTER_SUFFIXES
 
 RECIPE = "perturbation"
 OPERATION = "pipeline.perturbation"
-# The run's cell fields of each cell's guide call and perturbation label, and
-# of Mixscape's classes, which no snapshot column may take, whether or not the
-# run runs Mixscape.
-GUIDE_FIELDS = ("guide_call", "perturbation_label", "is_control")
-MIXSCAPE_FIELDS = ("mixscape_class", "mixscape_posterior")
 # The run's outputs, in record order; an output that the run did not produce
 # is left out.
 OUTPUT_KEYS = (
@@ -95,9 +87,6 @@ TRANS_PAIRS_ONLY = (
     "The recipe tests trans pairs over the run's highly variable genes; for "
     "tables of pairs or positive controls, call ds.perturbation.associations"
 )
-# The text between the sample's name and the cell's own ID in the cell IDs of
-# a merged store, as DataStoreMerge writes them.
-MERGED_SEPARATOR = "__"
 # The cells that the profiles average, by the output that holds them: every
 # cell of each label, or the cells that Mixscape calls knocked out.
 PROFILE_CELLS = {"labelled": "perturbation_labels", "knocked_out": "mixscape"}
@@ -121,14 +110,11 @@ def _resolve_guide_assay(store: Any, name: object) -> tuple[str, Any]:
 
 
 def _cell_column(store: Any, settings: Mapping[str, Any], stage: str, key: str) -> None:
-    """Refuse a setting that names a cell column the store lacks."""
-    column = settings.get(key)
-    if column is None:
-        return
-    if not isinstance(column, str) or not column:
-        raise TypeError(f"{stage}['{key}'] must be a non-empty string or None")
-    if column not in store.cells.columns:
-        raise KeyError(f"{stage}['{key}'] names {column!r}, which is not a cell column")
+    """Refuse a setting that names a cell column the store lacks, as its method does.
+
+    The stage's settings check has refused a value that is not a name.
+    """
+    store._require_cell_column(settings.get(key), f"{stage}['{key}']")
 
 
 def _resolve_guide_calling(store: Any, value: object) -> dict[str, Any]:
@@ -149,7 +135,9 @@ def _resolve_guide_calling(store: Any, value: object) -> dict[str, Any]:
 
 def _resolve_labels(store: Any, guide: Any, value: object) -> dict[str, Any]:
     """Return the label settings after checking every guide's target."""
-    if value is None or (isinstance(value, Mapping) and "controls" not in value):
+    # The settings check refuses a mapping without controls; None takes the
+    # method's defaults unchecked, and controls have no default.
+    if value is None:
         raise ValueError(LABELS_NEED_CONTROLS)
     _enabled, settings = stage_settings("labels", value, optional=False)
     target_column, targets, policy = (
@@ -195,11 +183,7 @@ def _resolve_associations(
         _require_id_column(store, guide, settings, "associations")
     _cell_column(store, settings, "associations", "sample_column")
     for column in covariate_columns(settings.get("covariates")):
-        if column not in store.cells.columns:
-            raise KeyError(
-                f"associations['covariates'] names {column!r}, which is not a "
-                "cell column"
-            )
+        store._require_cell_column(column, "covariate")
         # The tests adjust for numbers only, as associations checks them.
         if np.dtype(store.cells.get_dtype(column)).kind not in "biuf":
             raise ValueError(f"covariate '{column}' must be numeric")
@@ -281,131 +265,16 @@ def _guide_calling_stage(guide_assay: str, settings: Mapping[str, Any]) -> Plann
     return PlannedStage("guide_calling", action)
 
 
-def _labels_stage(settings: Mapping[str, Any]) -> PlannedStage:
-    def action(state: RunState) -> Outputs:
-        ref = state.store._perturbation_labels(
-            state.artifacts["guide_calls"], **settings
-        )
-        return (("perturbation_labels", ref),)
-
-    return PlannedStage("perturbation_labels", action)
-
-
-def _efficiency_stage(
-    enabled: bool, assay: str, settings: Mapping[str, Any]
+def _stage(
+    name: str, enabled: bool, compute: Callable[[RunState], ArtifactRef]
 ) -> PlannedStage:
-    if not enabled:
-        return PlannedStage("efficiency", None)
+    """Return the stage ``name``, which saves what ``compute`` returns under its name.
 
-    def action(state: RunState) -> Outputs:
-        ref = state.store._perturbation_efficiency(
-            state.artifacts["perturbation_labels"], from_assay=assay, **settings
-        )
-        return (("efficiency", ref),)
-
-    return PlannedStage("efficiency", action)
-
-
-def _edistance_stage(enabled: bool, settings: Mapping[str, Any]) -> PlannedStage:
-    """Measure E-distances in the Harmony coordinates, else the PCA."""
-    if not enabled:
-        return PlannedStage("edistance", None)
-
-    def action(state: RunState) -> Outputs:
-        assert state.coordinates is not None
-        ref = state.store._perturbation_edistance(
-            state.artifacts["perturbation_labels"], state.coordinates, **settings
-        )
-        return (("edistance", ref),)
-
-    return PlannedStage("edistance", action)
-
-
-def _signature_stage(enabled: bool, settings: Mapping[str, Any]) -> PlannedStage:
-    """Compute signatures in the highly variable genes against near controls.
-
-    The nearest controls are found in the Harmony coordinates, else the PCA.
+    A stage that is not enabled is recorded as skipped.
     """
     if not enabled:
-        return PlannedStage("signature", None)
-
-    def action(state: RunState) -> Outputs:
-        assert state.coordinates is not None
-        ref = state.store._perturbation_signature(
-            state.artifacts["perturbation_labels"],
-            state.coordinates,
-            features=state.artifacts["highly_variable_features"],
-            **settings,
-        )
-        return (("signature", ref),)
-
-    return PlannedStage("signature", action)
-
-
-def _mixscape_stage(enabled: bool, settings: Mapping[str, Any]) -> PlannedStage:
-    if not enabled:
-        return PlannedStage("mixscape", None)
-
-    def action(state: RunState) -> Outputs:
-        ref = state.store._perturbation_mixscape(
-            state.artifacts["signature"], **settings
-        )
-        return (("mixscape", ref),)
-
-    return PlannedStage("mixscape", action)
-
-
-def _associations_stage(
-    enabled: bool, assay: str, settings: Mapping[str, Any]
-) -> PlannedStage:
-    """Test every target against every highly variable gene."""
-    if not enabled:
-        return PlannedStage("associations", None)
-
-    def action(state: RunState) -> Outputs:
-        ref = state.store._perturbation_associations(
-            state.artifacts["perturbation_labels"],
-            from_assay=assay,
-            pairs="trans",
-            features=state.artifacts["highly_variable_features"],
-            **settings,
-        )
-        return (("associations", ref),)
-
-    return PlannedStage("associations", action)
-
-
-def _profiles_stage(
-    enabled: bool, labels_key: str, settings: Mapping[str, Any]
-) -> PlannedStage:
-    """Profile the highly variable genes of each perturbation's cells.
-
-    ``labels_key`` names the output whose cells count: the labels, or the
-    Mixscape classes, whose knocked-out cells alone count for a target.
-    """
-    if not enabled:
-        return PlannedStage("profiles", None)
-
-    def action(state: RunState) -> Outputs:
-        ref = state.store._perturbation_profiles(
-            state.artifacts[labels_key],
-            state.artifacts["highly_variable_features"],
-            **settings,
-        )
-        return (("profiles", ref),)
-
-    return PlannedStage("profiles", action)
-
-
-def _clusters_stage(enabled: bool, settings: Mapping[str, Any]) -> PlannedStage:
-    if not enabled:
-        return PlannedStage("perturbation_clusters", None)
-
-    def action(state: RunState) -> Outputs:
-        ref = state.store._perturbation_cluster(state.artifacts["profiles"], **settings)
-        return (("perturbation_clusters", ref),)
-
-    return PlannedStage("perturbation_clusters", action)
+        return PlannedStage(name, None)
+    return PlannedStage(name, lambda state: ((name, compute(state)),))
 
 
 def _check_labeled_inputs(
@@ -552,19 +421,19 @@ def _check_call_file_cells(
             )
         return
     # A merged store names each cell <sample>__<barcode>.
-    position = np.strings.find(ids, MERGED_SEPARATOR)
+    position = np.strings.find(ids, MERGED_ID_SEPARATOR)
     merged = np.flatnonzero(position >= 0)
     if not len(merged):
         return
     first = str(ids[merged[0]])[: int(position[merged[0]])]
-    other = merged[~np.strings.startswith(ids[merged], first + MERGED_SEPARATOR)]
+    other = merged[~np.strings.startswith(ids[merged], first + MERGED_ID_SEPARATOR)]
     if len(other):
         second = str(ids[other[0]])[: int(position[other[0]])]
         raise ValueError(
             "The call file holds the barcodes of one sample, but the run's cells "
             f"come from several samples of a merged store, such as {first!r} and "
             f"{second!r}; restrict cells to the cells of one sample and pass its "
-            f"barcode_prefix, such as {first + MERGED_SEPARATOR!r}, {remedy}"
+            f"barcode_prefix, such as {first + MERGED_ID_SEPARATOR!r}, {remedy}"
         )
 
 
@@ -604,17 +473,15 @@ def resolve_perturbation(
     )
     if efficiency_enabled:
         _require_id_column(store, guide, efficiency_settings, "efficiency")
-    hvg_settings = resolve_hvg(store, hvg)
-    _norm_enabled, normalization_settings = stage_settings(
-        "normalization", normalization, optional=False
-    )
-    _pca_enabled, pca_settings = stage_settings("pca", pca, optional=False)
     # E-distances and signatures read the PCA, so the recipe always runs it.
-    pca_dims = integer_argument(
-        pca_settings.pop("dims", PCA_DIMS_DEFAULT), "pca dims", minimum=1
+    head = resolve_rna_head(
+        store,
+        hvg=hvg,
+        normalization=normalization,
+        pca=pca,
+        harmony=harmony,
+        min_dims=1,
     )
-    check_pca_features(pca_dims, hvg_settings)
-    harmony_columns, harmony_settings = resolve_harmony(store, harmony)
     edistance_enabled, edistance_settings = stage_settings(
         "edistance", edistance, optional=True
     )
@@ -628,11 +495,11 @@ def resolve_perturbation(
         _cell_column(store, mixscape_settings, "mixscape", "split_column")
         _cell_column(store, signature_settings, "signature", "sample_column")
         signature_dims = signature_settings.get("dims", SIGNATURE_DIMS_DEFAULT)
-        if signature_dims > pca_dims:
+        if signature_dims > head.pca_dims:
             raise ValueError(
                 f"signature dims ({signature_dims}) must be at most pca dims "
-                f"({pca_dims}): the signature finds each cell's nearest controls "
-                "in the run's coordinates"
+                f"({head.pca_dims}): the signature finds each cell's nearest "
+                "controls in the run's coordinates"
             )
     associations_enabled, association_settings = _resolve_associations(
         store, guide, associations
@@ -657,6 +524,8 @@ def resolve_perturbation(
             "clusters": clusters_enabled,
         },
     )
+    # No snapshot column may take the cell field of a perturbation result,
+    # whether or not the run runs Mixscape.
     snapshots = resolve_snapshot_columns(
         store,
         snapshot_columns,
@@ -664,7 +533,7 @@ def resolve_perturbation(
             umap_dims=0,
             tsne_dims=0,
             leiden_keys=(),
-            extra=("highly_variable_features", *GUIDE_FIELDS, *MIXSCAPE_FIELDS),
+            extra=("highly_variable_features", *PERTURBATION_CELL_FIELDS),
         ),
     )
     # The settings are checked, so the run's cells are checked last: a run
@@ -714,8 +583,14 @@ def resolve_perturbation(
         association_settings if associations_enabled else None,
     )
     cell_columns, extra_snapshots = cell_snapshots(
-        filtering_config, harmony_columns=harmony_columns, snapshot_columns=snapshots
+        filtering_config,
+        harmony_columns=head.harmony_columns,
+        snapshot_columns=snapshots,
     )
+    # The profiles' cells setting configures the recipe, not the method.
+    profile_method_settings = {
+        key: value for key, value in profile_settings.items() if key != "cells"
+    }
     stages = (
         input_snapshot_stage(
             source,
@@ -725,23 +600,82 @@ def resolve_perturbation(
         ),
         filtering_stage(filtering_config, source),
         _guide_calling_stage(guide_name, calling_settings),
-        _labels_stage(label_settings_),
-        _efficiency_stage(efficiency_enabled, assay_name, efficiency_settings),
-        hvg_stage(hvg_settings),
-        normalization_stage("highly_variable_features", normalization_settings),
-        pca_stage(pca_dims, pca_settings),
-        harmony_stage(harmony_columns, harmony_settings),
-        _edistance_stage(edistance_enabled, edistance_settings),
-        _signature_stage(mixscape_enabled, signature_settings),
-        _mixscape_stage(mixscape_enabled, mixscape_settings),
-        _associations_stage(associations_enabled, assay_name, association_settings),
-        # The profiles' cells setting configures the recipe, not the method.
-        _profiles_stage(
-            clusters_enabled,
-            profile_labels,
-            {key: value for key, value in profile_settings.items() if key != "cells"},
+        _stage(
+            "perturbation_labels",
+            True,
+            lambda state: state.store._perturbation_labels(
+                state.artifacts["guide_calls"], **label_settings_
+            ),
         ),
-        _clusters_stage(clusters_enabled, cluster_settings),
+        _stage(
+            "efficiency",
+            efficiency_enabled,
+            lambda state: state.store._perturbation_efficiency(
+                state.artifacts["perturbation_labels"],
+                from_assay=state.assay.name,
+                **efficiency_settings,
+            ),
+        ),
+        *head.stages(),
+        # The E-distances and the signature's nearest controls are found in
+        # the Harmony coordinates, else the PCA; the signature covers the
+        # highly variable genes.
+        _stage(
+            "edistance",
+            edistance_enabled,
+            lambda state: state.store._perturbation_edistance(
+                state.artifacts["perturbation_labels"],
+                state.coordinates,
+                **edistance_settings,
+            ),
+        ),
+        _stage(
+            "signature",
+            mixscape_enabled,
+            lambda state: state.store._perturbation_signature(
+                state.artifacts["perturbation_labels"],
+                state.coordinates,
+                features=state.artifacts["highly_variable_features"],
+                **signature_settings,
+            ),
+        ),
+        _stage(
+            "mixscape",
+            mixscape_enabled,
+            lambda state: state.store._perturbation_mixscape(
+                state.artifacts["signature"], **mixscape_settings
+            ),
+        ),
+        # Every target against every highly variable gene.
+        _stage(
+            "associations",
+            associations_enabled,
+            lambda state: state.store._perturbation_associations(
+                state.artifacts["perturbation_labels"],
+                from_assay=state.assay.name,
+                pairs="trans",
+                features=state.artifacts["highly_variable_features"],
+                **association_settings,
+            ),
+        ),
+        # The profiles of the highly variable genes average each label's
+        # cells, or a target's knocked-out cells from Mixscape's classes.
+        _stage(
+            "profiles",
+            clusters_enabled,
+            lambda state: state.store._perturbation_profiles(
+                state.artifacts[profile_labels],
+                state.artifacts["highly_variable_features"],
+                **profile_method_settings,
+            ),
+        ),
+        _stage(
+            "perturbation_clusters",
+            clusters_enabled,
+            lambda state: state.store._perturbation_cluster(
+                state.artifacts["profiles"], **cluster_settings
+            ),
+        ),
     )
     config = {
         "cells": source.to_config(),
@@ -753,10 +687,7 @@ def resolve_perturbation(
             "guide_calling": calling_settings,
             "labels": label_settings_,
             "efficiency": efficiency_settings if efficiency_enabled else False,
-            "hvg": hvg_settings,
-            "normalization": normalization_settings,
-            "pca": {"dims": pca_dims, **pca_settings},
-            "harmony": harmony_config(harmony_columns, harmony_settings),
+            **head.to_config(),
             "edistance": edistance_settings if edistance_enabled else False,
             "signature": signature_settings if mixscape_enabled else False,
             "mixscape": mixscape_settings if mixscape_enabled else False,

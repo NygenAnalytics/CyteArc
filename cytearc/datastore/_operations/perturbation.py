@@ -45,6 +45,7 @@ from ...perturbation.guide_calls import (
     GuideCountSummary,
     guide_call_arrays,
     guide_calls_frames,
+    import_settings,
     summarize_guide_counts,
     validated_guide_ids,
 )
@@ -87,11 +88,7 @@ from ...perturbation.associations import (
     association_settings,
     covariate_columns,
 )
-from ...perturbation.clusters import (
-    PerturbationClusters,
-    cluster_settings,
-    perturbation_names,
-)
+from ...perturbation.clusters import PerturbationClusters, cluster_settings
 from ...perturbation.mixscape import UNLABELLED, MixscapeResult, mixscape_settings
 from ...perturbation.p_values import PairResults
 from ...perturbation.profiles import PerturbationProfiles, profile_settings
@@ -906,11 +903,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         """
         from ...readers.cellranger import read_protospacer_calls
 
-        if not isinstance(path, str | os.PathLike):
-            raise TypeError("path must be a path to Cell Ranger's call file")
+        import_settings(path, barcode_prefix)
         _require_ref(cell_selection, "cell_selection")
-        if barcode_prefix is not None and not isinstance(barcode_prefix, str):
-            raise TypeError("barcode_prefix must be text or None")
         bool_argument(invalidate_cache, "invalidate_cache")
         assay, guide_ids, cell_index = self._guide_call_cells(
             from_assay, cell_selection, GuideCallImportArguments.operation
@@ -2262,10 +2256,10 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         _require_ref(
             efficiency, "efficiency", PerturbationEfficiencyArguments.artifact_kind
         )
-        require_complete_artifact(self.zw, efficiency)
+        status = require_complete_artifact(self.zw, efficiency)
         group = artifact_group(self.zw, efficiency)
 
-        by = str(group.attrs["by"])
+        by = str((status.parameters or {})["by"])
         features = read_array(group, "features").astype(str)
         columns: dict[str, Any] = {}
         if by == "guide":
@@ -2498,7 +2492,8 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         status = require_complete_artifact(self.zw, edistance)
         group = artifact_group(self.zw, edistance)
 
-        by = str(group.attrs["by"])
+        parameters = status.parameters or {}
+        by = str(parameters["by"])
         columns: dict[str, Any] = {}
         if by == "guide":
             columns["guide"] = read_array(group, "names").astype(str)
@@ -2512,7 +2507,6 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             "adjusted_p_value",
         ):
             columns[name] = read_array(group, name)
-        parameters = status.parameters or {}
         return PerturbationEDistance(
             table=pd.DataFrame(columns),
             by=by,
@@ -3726,13 +3720,13 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
             moi,
             resampling,
             sample_column,
+            covariates,
         )
         high = moi == "high"
         self._require_cell_column(sample_column, "sample_column")
         covariate_names = covariate_columns(covariates)
         for column in covariate_names:
-            if column not in self.cells.columns:
-                raise ValueError(f"covariate '{column}' not found in cell metadata")
+            self._require_cell_column(column, "covariate")
         bool_argument(invalidate_cache, "invalidate_cache")
         by = "target" if integration == "union" else "guide"
         rows = self._label_rows(labels, by)
@@ -5552,17 +5546,16 @@ class _PerturbationOperationsMixin(_PerturbationOperationsBase):
         )
 
         _require_ref(profiles, "profiles", PerturbationProfileArguments.artifact_kind)
-        cluster_size, core_size, resolved_seed = cluster_settings(
-            metric, min_cluster_size, min_samples, selection, seed
+        cluster_size, core_size, resolved_seed, requested = cluster_settings(
+            metric, min_cluster_size, min_samples, selection, seed, perturbations
         )
         bool_argument(invalidate_cache, "invalidate_cache")
         require_complete_artifact(self.zw, profiles)
         group = artifact_group(self.zw, profiles)
         names = read_array(group, "perturbations").astype(str)
-        if perturbations is None:
+        if requested is None:
             chosen = np.arange(len(names))
         else:
-            requested = perturbation_names(perturbations)
             positions = pd.Index(names).get_indexer(requested)
             unknown = sorted(
                 {

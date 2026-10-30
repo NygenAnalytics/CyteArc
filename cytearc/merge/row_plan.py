@@ -8,6 +8,10 @@ from ..metadata.rows import read_metadata_rows_chunkwise
 from ..storage.partition import checked_indices
 from ..utils.arrays import permute_into_chunks
 
+# The text between a source's name and the source's own cell ID in each cell
+# ID of a merged store.
+MERGED_ID_SEPARATOR = "__"
+
 
 @dataclass(frozen=True, slots=True)
 class RowPlan:
@@ -152,12 +156,13 @@ def iter_row_plan_segments(
 
 def prefixed_cell_ids(name: str, source_ids: np.ndarray, dtype: Any) -> np.ndarray:
     """Return source cell IDs prefixed with ``{name}__`` in the merged dtype."""
+    prefix = f"{name}{MERGED_ID_SEPARATOR}"
     if source_ids.dtype.kind in "UT":
         # Text concatenates in one pass, as each value formats itself.
-        return np.asarray(np.char.add(f"{name}__", source_ids), dtype=np.dtype(dtype))
+        return np.asarray(np.char.add(prefix, source_ids), dtype=np.dtype(dtype))
     merged = np.empty(source_ids.size, dtype=np.dtype(dtype))
     for index, value in enumerate(source_ids):
-        merged[index] = f"{name}__{value}"
+        merged[index] = f"{prefix}{value}"
     return merged
 
 

@@ -20,6 +20,7 @@ streams and never touch storage.
   the guide that comes first in the assay among guides with equal UMIs.
 """
 
+import os
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -38,6 +39,7 @@ __all__ = [
     "checked_count_blocks",
     "guide_call_arrays",
     "guide_calls_frames",
+    "import_settings",
     "summarize_guide_counts",
     "validated_guide_ids",
 ]
@@ -93,6 +95,27 @@ def validated_guide_ids(guide_ids: Any) -> np.ndarray:
             + ", ".join(repr(value) for value in reserved)
         )
     return text
+
+
+def import_settings(path: object, barcode_prefix: object) -> None:
+    """Check the settings of ``import_guide_calls``, which imports Cell Ranger's calls.
+
+    The pipeline recipe checks the same settings before its run starts.
+    Whether ``path`` names a file is checked when the file is read.
+
+    Args:
+        path: Cell Ranger's call file, as text or a path object.
+        barcode_prefix: Text that precedes each barcode in the cell IDs, or
+            None.
+
+    Raises:
+        TypeError: If ``path`` is empty or not a path, or ``barcode_prefix``
+            is neither text nor None.
+    """
+    if not isinstance(path, str | os.PathLike) or path == "":
+        raise TypeError("path must be a path to Cell Ranger's call file")
+    if barcode_prefix is not None and not isinstance(barcode_prefix, str):
+        raise TypeError("barcode_prefix must be text or None")
 
 
 @dataclass(frozen=True, slots=True)

@@ -39,6 +39,8 @@ from cytearc.datastore._pipeline.settings import LABELS_NEED_CONTROLS, stage_set
 from cytearc.datastore._pipeline.stages import CellSource
 from cytearc.datastore.pipeline_accessor import PipelineAccessor
 from cytearc.metadata.membership import UnmeasuredCellsError, membership_attributes
+from cytearc.perturbation import PerturbationAssociations
+from cytearc.storage.artifacts import artifact_group
 from tests.perturbation_helpers import record_cell_reads, written
 from tests.storage_helpers import insert_nullable_cell_column, write_count_store
 
@@ -251,6 +253,29 @@ def _profile_summaries(store: DataStore, run: PipelineRun) -> dict[str, Any]:
             "unassigned": int((clusters.table["cluster"] < 0).sum()),
             "largestCluster": int(sizes.max()) if len(sizes) else 0,
         },
+    }
+
+
+def _association_summary(tests: PerturbationAssociations) -> dict[str, Any]:
+    """Return the summary of a run's association tests, from their loader.
+
+    The tests' calibration check ran, since every run here has calibration
+    pairs.
+    """
+    assert not tests.calibration.empty
+    false = tests.calibration.loc[tests.calibration["significant"], "control_guides"]
+    return {
+        "discoveryPairs": len(tests.discovery),
+        "testedDiscoveryPairs": int(tests.discovery["pass_qc"].sum()),
+        "discoveries": int(tests.discovery["significant"].sum()),
+        "calibrationPairs": len(tests.calibration),
+        "falseDiscoveries": tests.n_false_discoveries,
+        "calibrationGrade": tests.calibration_grade,
+        "calibrationStatus": "checked",
+        "falseDiscoveriesByControlGuides": false.value_counts().to_dict(),
+        "positivePairs": len(tests.positive),
+        "positiveDetected": int(tests.positive["significant"].sum()),
+        "alpha": tests.alpha,
     }
 
 
@@ -778,20 +803,7 @@ def test_each_stage_summary_equals_its_loader(runs) -> None:
         "perturbationType": mixscape.perturbation_type,
     }
     tests = store.perturbation.load_associations(runs.full["associations"])
-    false = tests.calibration.loc[tests.calibration["significant"], "control_guides"]
-    assert full["associations"] == {
-        "discoveryPairs": len(tests.discovery),
-        "testedDiscoveryPairs": int(tests.discovery["pass_qc"].sum()),
-        "discoveries": int(tests.discovery["significant"].sum()),
-        "calibrationPairs": len(tests.calibration),
-        "falseDiscoveries": tests.n_false_discoveries,
-        "calibrationGrade": tests.calibration_grade,
-        "calibrationStatus": "checked",
-        "falseDiscoveriesByControlGuides": false.value_counts().to_dict(),
-        "positivePairs": len(tests.positive),
-        "positiveDetected": int(tests.positive["significant"].sum()),
-        "alpha": tests.alpha,
-    }
+    assert full["associations"] == _association_summary(tests)
     assert {
         stage: full[stage] for stage in ("profiles", "perturbation_clusters")
     } == _profile_summaries(store, runs.full)
@@ -818,6 +830,25 @@ def test_a_signature_without_a_sample_column_counts_no_sample(runs, tmp_path) ->
     assert summary is not None
     assert summary["samples"] == loaded.cells["sample"].nunique() == 0
     assert summary["cells"] == len(loaded.cells)
+
+
+def test_the_effect_tables_take_their_rows_from_the_recorded_by(runs, tmp_path) -> None:
+    store = _copy(runs.location, tmp_path)
+    loaders = {
+        "efficiency": store.perturbation.load_efficiency,
+        "edistance": store.perturbation.load_edistance,
+    }
+    for key, load in loaders.items():
+        ref = runs.full[key]
+        # The tables also store by as an attribute; the loaders and the
+        # summaries read the parameter that the artifact's identity records.
+        artifact_group(store.zw, ref).attrs["by"] = "guide"
+        loaded = load(ref)
+        assert loaded.by == "target"
+        assert "guide" not in loaded.table.columns
+        summary = summaries.summarize_stage(store, key, ((key, ref),))
+        assert summary is not None
+        assert summary["by"] == "target"
 
 
 # Reuse -----------------------------------------------------------------------
@@ -1357,10 +1388,11 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
             ValueError,
             "sample_column applies only to",
         ),
+        # A missing column is refused as the stage's method refuses it.
         (
             {"guide_calling": {"sample_column": "missing"}},
-            KeyError,
-            "guide_calling\\['sample_column'\\] names 'missing'",
+            ValueError,
+            r"^guide_calling\['sample_column'\] 'missing' not found in cell metadata$",
         ),
         (
             {"guide_calling": {"sample_column": "lane_gaps"}},
@@ -1382,6 +1414,7 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
         ),
         ({"guide_calling": {"barcode_prefix": "L1__"}}, ValueError, "not both"),
         ({"guide_calling": {"path": 3}}, TypeError, "path must be a path"),
+        ({"guide_calling": {"path": ""}}, TypeError, "path must be a path"),
         (
             {"guide_calling": {"path": "/no/such/calls.csv"}},
             FileNotFoundError,
@@ -1419,13 +1452,13 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
         ),
         (
             {"mixscape": {"split_column": "missing"}, "signature": {"dims": 5}},
-            KeyError,
-            "mixscape\\['split_column'\\] names 'missing'",
+            ValueError,
+            r"^mixscape\['split_column'\] 'missing' not found in cell metadata$",
         ),
         (
             {"mixscape": True, "signature": {"dims": 5, "sample_column": "missing"}},
-            KeyError,
-            "signature\\['sample_column'\\] names 'missing'",
+            ValueError,
+            r"^signature\['sample_column'\] 'missing' not found in cell metadata$",
         ),
         (
             {"mixscape": {"split_column": "lane_gaps"}, "signature": {"dims": 5}},
@@ -1462,9 +1495,9 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
             r"n_resamples\[1\] must be at least 2",
         ),
         (
-            {"associations": {"covariates": ["missing"]}},
-            KeyError,
-            "names 'missing', which is not a cell column",
+            {"associations": {"covariates": ["depth", "missing"]}},
+            ValueError,
+            "^covariate 'missing' not found in cell metadata$",
         ),
         (
             {"associations": {"covariates": ["lane"]}},
@@ -1476,10 +1509,22 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
             TypeError,
             "covariates must be a sequence of column names",
         ),
+        # The settings check refuses covariates that are not names before the
+        # columns are looked up.
+        (
+            {"associations": {"covariates": 3, "sample_column": "missing"}},
+            TypeError,
+            "^covariates must be a sequence of column names or None$",
+        ),
         (
             {"associations": {"sample_column": 5}},
             TypeError,
             "^sample_column must be a non-empty string or None$",
+        ),
+        (
+            {"associations": {"sample_column": "missing"}},
+            ValueError,
+            r"^associations\['sample_column'\] 'missing' not found in cell metadata$",
         ),
         (
             {"associations": {"sample_column": "lane_gaps"}},
@@ -1550,6 +1595,12 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
             TypeError,
             "perturbations must be a sequence",
         ),
+        # The perturbations are checked after the other cluster settings.
+        (
+            {"clusters": {"perturbations": "GENE_A", "metric": "cosine"}},
+            ValueError,
+            "metric must be",
+        ),
         (
             {"profiles": {"min_cells": 5}},
             ValueError,
@@ -1557,8 +1608,8 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
         ),
         (
             {"clusters": True, "profiles": {"sample_column": "missing"}},
-            KeyError,
-            "profiles\\['sample_column'\\] names 'missing'",
+            ValueError,
+            r"^profiles\['sample_column'\] 'missing' not found in cell metadata$",
         ),
         (
             {"clusters": True, "profiles": {"id_column": "missing"}},
@@ -1604,7 +1655,7 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
                 ValueError,
                 "collide with reserved run fields",
             )
-            for field in ("mixscape_class", *GUIDE_FIELDS)
+            for field in ("mixscape_class", "mixscape_posterior", *GUIDE_FIELDS)
         ),
         ({"callback": 3}, TypeError, "callback must be callable"),
     ],
@@ -1765,6 +1816,8 @@ def test_the_recipe_passes_the_moi_to_the_association_tests(tmp_path) -> None:
     # The control guides, which share cells with GENE_D, make the calibration
     # groups.
     assert not tests.calibration.empty
+    # The stage's summary counts the pairs as the loader gives them.
+    assert _stages(run)["associations"]["summary"] == _association_summary(tests)
     # Each target is compared with all other cells of the run.
     assert (
         (tests.discovery["n_control_cells"] + tests.discovery["n_cells"])
@@ -1831,13 +1884,13 @@ def test_summaries_of_artifacts_without_their_arrays_are_empty() -> None:
         summaries._guide_thresholds,
         summaries._guide_calls,
         summaries._perturbation_labels,
-        summaries._efficiency,
         summaries._signature,
         summaries._profiles,
         summaries._perturbation_clusters,
     ):
         assert summarize(empty) == {}
     for summarize in (
+        summaries._efficiency,
         summaries._edistance,
         summaries._mixscape,
         summaries._associations,
@@ -1895,9 +1948,10 @@ def test_summaries_name_what_their_tables_lack() -> None:
                 "adjusted_p_value": [np.nan, np.nan],
             },
             status_names=["tested", "no_feature", "no_cells", "no_control_expression"],
-            by="target",
-        )
+        ),
+        {"by": "guide"},
     )
+    assert efficiency["by"] == "guide"
     assert efficiency["medianRemainingFraction"] is None
     assert efficiency["noFeature"] == ["GENE_X"]
     # Without permutations no p-value sits at the floor.
@@ -1909,10 +1963,10 @@ def test_summaries_name_what_their_tables_lack() -> None:
                 "adjusted_p_value": [np.nan],
             },
             status_names=["tested", "too_few_cells"],
-            by="target",
         ),
-        {"n_permutations": 0},
+        {"by": "target", "n_permutations": 0},
     )
+    assert distances["by"] == "target"
     assert (distances["significant"], distances["atFloor"]) == (0, 0)
 
 
@@ -1927,8 +1981,8 @@ def test_summaries_count_an_adjusted_p_value_of_0_05_as_significant() -> None:
                 "adjusted_p_value": [0.05, 0.0501],
             },
             status_names=["tested", "no_feature", "no_cells", "no_control_expression"],
-            by="target",
-        )
+        ),
+        {"by": "target"},
     )
     distances = summaries._edistance(
         _group(
@@ -1938,9 +1992,8 @@ def test_summaries_count_an_adjusted_p_value_of_0_05_as_significant() -> None:
                 "adjusted_p_value": [0.05, 0.0501],
             },
             status_names=["tested", "too_few_cells"],
-            by="target",
         ),
-        {"n_permutations": 999},
+        {"by": "target", "n_permutations": 999},
     )
 
     assert efficiency["knockedDown"] == 1
@@ -1969,12 +2022,10 @@ def test_summaries_read_statuses_only_as_their_methods_name_them() -> None:
         (summaries._edistance, rows, ["too_few_cells", "tested"]),
         (summaries._mixscape, mixscape, ["few_de_genes", "fitted"]),
     ):
-        group = _group(arrays, status_names=names, by="target")
+        group = _group(arrays, status_names=names)
+        parameters = {"by": "target", "n_permutations": 9, "perturbation_type": "KO"}
         with pytest.raises(ValueError, match="names its statuses"):
-            if summarize is summaries._efficiency:
-                summarize(group)
-            else:
-                summarize(group, {"n_permutations": 9, "perturbation_type": "KO"})
+            summarize(group, parameters)
     with pytest.raises(ValueError, match="names its statuses"):
         summaries._guide_thresholds(
             _group({"status": [[0, 1]]}, status_names=["no_cells", "fitted"])
@@ -1984,8 +2035,8 @@ def test_summaries_read_statuses_only_as_their_methods_name_them() -> None:
         _group(
             efficiency,
             status_names=["tested", "no_feature", "no_cells", "no_control_expression"],
-            by="target",
-        )
+        ),
+        {"by": "target"},
     )
     assert summary["statuses"] == {
         "tested": 1,

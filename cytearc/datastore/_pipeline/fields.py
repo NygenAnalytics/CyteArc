@@ -143,6 +143,21 @@ RESERVED_CELL_FIELDS = frozenset(
 )
 
 
+# The cell fields of a perturbation run's results, in field order, by key: the
+# output that holds each, the array it reads, and whether its values are
+# categories. The guide calls and labels belong to the guide assay; every
+# assay shares the store's cells, so the view reads them by the run's cell
+# selection. Mixscape classifies the run's cells; its other results describe
+# each target and stay in the artifact.
+PERTURBATION_CELL_FIELDS: Mapping[str, tuple[str, str, bool]] = {
+    "guide_call": ("guide_calls", "values", True),
+    "perturbation_label": ("perturbation_labels", "values", True),
+    "is_control": ("perturbation_labels", "is_control", True),
+    "mixscape_class": ("mixscape", "values", True),
+    "mixscape_posterior": ("mixscape", "posterior", False),
+}
+
+
 def reserved_fields(
     *,
     umap_dims: int,
@@ -302,31 +317,14 @@ def cell_fields(
                 root, key="predicted_doublet", ref=ref, source="predicted_doublets"
             )
         )
-    # The guide calls and labels belong to the guide assay. Every assay shares
-    # the store's cells, so the view reads them by the run's cell selection.
-    if "guide_calls" in artifacts:
+    for key, (output, source, categorical) in PERTURBATION_CELL_FIELDS.items():
+        if output not in artifacts:
+            continue
+        ref = artifacts[output]
         fields.append(
-            _categorical(
-                root, key="guide_call", ref=artifacts["guide_calls"], source="values"
-            )
-        )
-    if "perturbation_labels" in artifacts:
-        ref = artifacts["perturbation_labels"]
-        fields.append(
-            _categorical(root, key="perturbation_label", ref=ref, source="values")
-        )
-        fields.append(
-            _categorical(root, key="is_control", ref=ref, source="is_control")
-        )
-    if "mixscape" in artifacts:
-        # Mixscape classifies the run's cells; its other results describe
-        # each target and stay in the artifact.
-        ref = artifacts["mixscape"]
-        fields.append(
-            _categorical(root, key="mixscape_class", ref=ref, source="values")
-        )
-        fields.append(
-            _continuous(root, key="mixscape_posterior", ref=ref, source="posterior")
+            _categorical(root, key=key, ref=ref, source=source)
+            if categorical
+            else _continuous(root, key=key, ref=ref, source=source)
         )
     integrated = artifacts.get("integrated_graph")
     if integrated is not None:

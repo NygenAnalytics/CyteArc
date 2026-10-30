@@ -12,13 +12,11 @@ from ....storage.selections import (
     read_stored_selection_indices,
     resolve_generated_selection_artifact,
 )
-from ....utils.arguments import integer_argument
 from ..cluster_selection import cluster_label_values
 from ..executor import PlannedStage, RecipePlan, RunState
 from ..fields import cell_fields, feature_fields
 from ..filtering import default_filter_columns, hashtag_labels, snapshot_column_values
 from ..settings import (
-    PCA_DIMS_DEFAULT,
     leiden_config,
     resolve_leiden,
     resolve_species,
@@ -30,28 +28,21 @@ from ..stages import (
     filtering_stage,
     graph_output_keys,
     graph_stages,
-    harmony_stage,
-    hvg_stage,
     input_snapshot_stage,
     markers_stage,
-    normalization_stage,
-    pca_stage,
     resolve_cells,
 )
 from ..summaries import summarize_stage
 from .common import (
     cell_snapshots,
     check_labeled_cells,
-    check_pca_features,
     check_tsne,
-    harmony_config,
     modality_assay,
     resolve_embeddings,
     resolve_graph,
-    resolve_harmony,
-    resolve_hvg,
     require_bool,
     resolve_label,
+    resolve_rna_head,
     resolve_run_filtering,
     require_labeled_cells,
     resolve_snapshot_columns,
@@ -377,18 +368,14 @@ def resolve_rna(
     cell_cycle_enabled, cell_cycle_settings = stage_settings(
         "cell_cycle", cell_cycle, optional=True
     )
-    hvg_settings = resolve_hvg(store, hvg)
-    _norm_enabled, normalization_settings = stage_settings(
-        "normalization", normalization, optional=False
+    head = resolve_rna_head(
+        store,
+        hvg=hvg,
+        normalization=normalization,
+        pca=pca,
+        harmony=harmony,
+        min_dims=0,
     )
-    _pca_enabled, pca_settings = stage_settings("pca", pca, optional=False)
-    pca_dims = integer_argument(
-        pca_settings.pop("dims", PCA_DIMS_DEFAULT), "pca dims", minimum=0
-    )
-    if pca_dims == 0 and pca_settings:
-        raise ValueError("PCA settings need dims above 0; dims=0 skips PCA")
-    check_pca_features(pca_dims, hvg_settings)
-    harmony_columns, harmony_settings = resolve_harmony(store, harmony)
     graph = resolve_graph(
         ann_index=ann_index,
         neighbors=neighbors,
@@ -408,12 +395,12 @@ def resolve_rna(
     # Without PCA the graph is built on the normalized values themselves. The
     # stages that need reduced coordinates are refused here, before the run
     # record exists, never skipped on the run's behalf.
-    if pca_dims == 0 and harmony_columns:
+    if head.pca_dims == 0 and head.harmony_columns:
         raise ValueError(
             "pca={'dims': 0} builds the graph on normalized values, which Harmony "
             "cannot correct; set pca dims above 0 or omit harmony"
         )
-    if pca_dims == 0 and doublets_enabled:
+    if head.pca_dims == 0 and doublets_enabled:
         raise ValueError(
             "pca={'dims': 0} builds the graph on normalized values, but doublet "
             "scoring needs a PCA graph; pass doublets=False or set pca dims "
@@ -427,7 +414,7 @@ def resolve_rna(
         ),
     )
     doublet_samples = (
-        _resolve_doublet_samples(store, doublet_settings, harmony_columns)
+        _resolve_doublet_samples(store, doublet_settings, head.harmony_columns)
         if doublets_enabled
         else ()
     )
@@ -454,7 +441,7 @@ def resolve_rna(
         check_labeled_cells(store, source, capture_column, purpose=_CAPTURE_PURPOSE)
     cell_columns, extra_snapshots = cell_snapshots(
         filtering_config,
-        harmony_columns=harmony_columns,
+        harmony_columns=head.harmony_columns,
         snapshot_columns=snapshots,
         capture_column=capture_column,
         doublet_samples=doublet_samples,
@@ -502,10 +489,7 @@ def resolve_rna(
             called=calling_enabled,
         ),
         _cell_cycle_stage(cell_cycle_enabled, cell_cycle_settings),
-        hvg_stage(hvg_settings),
-        normalization_stage("highly_variable_features", normalization_settings),
-        pca_stage(pca_dims, pca_settings),
-        harmony_stage(harmony_columns, harmony_settings),
+        *head.stages(),
         *graph_stages(
             ann_index=graph.ann_index,
             neighbors=graph.neighbors,
@@ -543,10 +527,7 @@ def resolve_rna(
                 else filtering_config
             ),
             "cell_cycle": cell_cycle_settings if cell_cycle_enabled else False,
-            "hvg": hvg_settings,
-            "normalization": normalization_settings,
-            "pca": {"dims": pca_dims, **pca_settings},
-            "harmony": harmony_config(harmony_columns, harmony_settings),
+            **head.to_config(),
             **graph.to_config(),
             **embeddings.to_config(),
             "leiden": leiden_config(partitions, selected, leiden_settings),

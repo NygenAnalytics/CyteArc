@@ -95,16 +95,21 @@ def cluster_settings(
     min_samples: object,
     selection: object,
     seed: object,
-) -> tuple[int, int, int]:
+    perturbations: object,
+) -> tuple[int, int, int, list[str] | None]:
     """Check the settings of perturbation clusters, as ``cluster`` takes them.
 
     The pipeline recipe checks the same settings before its run starts.
+    Whether each of ``perturbations`` has a profile is checked against the
+    profiles.
 
     Returns:
-        ``min_cluster_size``, ``min_samples`` and ``seed`` as Python integers.
+        ``min_cluster_size``, ``min_samples`` and ``seed`` as Python
+        integers, and the names of ``perturbations`` as a list, or None.
 
     Raises:
-        TypeError: If a number is not an integer.
+        TypeError: If a number is not an integer, or ``perturbations`` is
+            neither a sequence of names nor None.
         ValueError: If ``metric`` or ``selection`` is unknown, or a number is
             out of range.
     """
@@ -115,7 +120,8 @@ def cluster_settings(
     if selection not in SELECTIONS:
         raise ValueError(f"selection must be 'eom' or 'leaf', not {selection!r}")
     resolved_seed = integer_argument(seed, "seed", minimum=0, maximum=MAX_SEED)
-    return cluster_size, core_size, resolved_seed
+    requested = None if perturbations is None else perturbation_names(perturbations)
+    return cluster_size, core_size, resolved_seed, requested
 
 
 def perturbation_names(perturbations: object) -> list[str]:

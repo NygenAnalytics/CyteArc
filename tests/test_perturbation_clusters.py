@@ -15,6 +15,7 @@ from cytearc.perturbation import clusters as clusters_module
 from cytearc.perturbation.clusters import (
     cluster_memory_bytes,
     cluster_profiles,
+    cluster_settings,
     embed_profiles,
     hdbscan_clusters,
     leaf_order,
@@ -184,6 +185,24 @@ def test_clustering_refuses_too_few_perturbations_or_features() -> None:
                 selection="eom",
                 seed=0,
             )
+
+
+def test_cluster_settings_return_the_perturbations_to_cluster() -> None:
+    settings = ("correlation", np.int64(4), 2, "leaf", 7)
+    assert cluster_settings(*settings, None) == (4, 2, 7, None)
+    # Any iterable of names, in the order given; whether each has a profile
+    # is checked against the profiles.
+    names = (name for name in ("T01", "T00"))
+    assert cluster_settings(*settings, names)[-1] == ["T01", "T00"]
+    for perturbations in ("T00", b"T00", 3, ["T00", 1]):
+        with pytest.raises(
+            TypeError,
+            match="^perturbations must be a sequence of perturbation names or None$",
+        ):
+            cluster_settings(*settings, perturbations)
+    # The other settings are checked first, as the pipeline recipe reports them.
+    with pytest.raises(ValueError, match="metric must be"):
+        cluster_settings("cosine", 4, 2, "eom", 0, "T00")
 
 
 def test_the_memory_estimate_bounds_the_clusterings_peak() -> None:
