@@ -1,6 +1,6 @@
 # Clones and lineage tracing
 
-Import the clones that a lineage tracing tool or a study assigned to cells, join them to the store's cells, check how many barcodes joined, and see how large the clones are. Docs: <https://docs.nygen.io/CyteArc/api/clones.html>.
+Import the clones that a lineage tracing tool or a study assigned to cells, join them to the store's cells, check how many barcodes joined, see how large the clones are, and measure clonal expansion and diversity within samples or other groups of cells. Docs: <https://docs.nygen.io/CyteArc/api/clones.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 
@@ -24,6 +24,15 @@ Import the clones that a lineage tracing tool or a study assigned to cells, join
 - `ds.clones.load_clones(clones)` returns a `Clones` record: `.cells` (indexed by cell ID: `clone` categorical in rank order, `clone_size`, `clone_probability` when stored), `.clones` (`clone`, `n_cells`, largest first) and `.source` (`"import_clones"` or `"clones_from_column"`).
 - `ds.clones.export_clones(clones, path, format="table")` writes CoSpar's `Cell_ID,Clone_ID` CSV; `format="matrix"` writes a cells by clones Matrix Market file with `cells.tsv` and `clones.tsv` beside it, replacing files of those names. Both import back to the same clones; probabilities are not written. The table refuses labels that read as no clone, such as `NA` from `from_column`, and the matrix refuses labels with line breaks: use the other format. Returns the cells written.
 - `ds.plots.clone_abundance(clones, group_by=None, groups=None, top=20)` draws clones per clone size on log scales and the largest clones; with a grouping, one line per group and each clone's cells stacked by group. Tables: `sizes` (`group`, `clone_size`, `n_clones`) and `top`.
+- Summaries take `clones, *, group_by=None, groups=None, cell_selection=None` and count each clone's cells within groups: the combinations of the `group_by` columns' labels and the `groups` label artifact's (key column named by its kind, such as `cluster_labels`). Cells without a clone or a label count in no group. A group is named by its labels joined by `", "`, or `"all cells"`; labels with commas that give two groups one name, and a key column named like a column of the result, raise `ValueError`.
+- `ds.clones.expansion(clones, group_by=None, groups=None, cell_selection=None, breakpoints=None, frequency_breakpoints=None, invalidate_cache=False)` saves a datastore-scoped `clonal_expansion` artifact (operation `measure_clonal_expansion`) of the cells of `cell_selection`, or of the clones' cells; a selected cell the clones do not hold has no clone. Pass at most one bound: `breakpoints`, default `(1, 2, 5, 20, 100)`, gives `"1 cell"`, `"2 cells"`, `"3 to 5 cells"`, `"6 to 20 cells"`, `"21 to 100 cells"`, `"more than 100 cells"` (scirpy's `clonal_expansion`); `frequency_breakpoints` (bins `(lower, upper]` ending at 1, such as scRepertoire's `(0.0001, 0.001, 0.01, 0.1, 1)`) bins each clone's share of its group's cells with a clone.
+- Expansion arrays: canonical `values` (category, empty without a clone or group), `group_clone_size`, `group_clone_frequency`, `group_codes`. `select_cells(expansion, include=["21 to 100 cells", "more than 100 cells"])` keeps the cells of large clones. Reuse follows the clones, cells, label artifact, bounds and each cell's `group_by` labels. About 300 bytes per cell at the peak.
+- `ds.clones.load_expansion(expansion, splits=(10, 100, 1000, 10000, 30000, 100000))` returns a `ClonalExpansion` record: `.cells` (`clone`, `category` (ordered), `group`, the key columns, `group_clone_size`, `group_clone_frequency`; labels are categoricals), `.categories` (`group`, key columns, `category`, `cells`, `clones`, `fraction`; every category of every group), `.rank_windows` (`group`, key columns, `window` such as `"1 to 10"`, ..., `"after 100000"`, `cells`, `fraction`: scRepertoire's `clonalProportion`), `.labels`, `.breakpoints`, `.frequency_breakpoints`, `.splits`, `.group_by`, `.groups`, `.cell_selection`, `.clones`.
+- `ds.plots.clonal_expansion(expansion, group_by=None, groups=None, count="cells", normalize=True, splits=...)` draws stacked bars per group of the categories (cells, or `count="clones"`) and of the rank windows. Groups default to the expansion's own; `group_by`/`groups` regroup the cells (categories stay those measured within the expansion's groups; ranks are recounted within the plotted groups). Tables: `categories` (`group`, `category`, `cells` or `clones`, `fraction`), `rank_windows` (`group`, `window`, `cells`, `fraction`).
+- `ds.clones.diversity(clones, group_by=None, groups=None, cell_selection=None, size=None, coverage=None)` returns a `ClonalDiversity` record and saves nothing: `.indices`, one row per group (`group`, key columns, `cells`, `clones`, `singletons`, `doubletons`, `coverage`, `shannon` in nats, `pielou`, `simpson`, `inverse_simpson`, `gini_simpson`, `gini`, `d50`, `chao1`, `chao1_bias_corrected`, `ace`), and `.hill`, one row per group and order 0, 1, 2 (`observed`, `estimated` asymptotic, `at_size`, `coverage_at_size`, `method_at_size`, `at_coverage`, `size_at_coverage`, `method_at_coverage`; methods `"rarefaction"`, `"observed"`, `"extrapolation"`), with `.size` and `.coverage`, by default iNEXT's smallest doubled size and lowest coverage at doubled sizes. `cytearc.clones.ORDERS` is `(0, 1, 2)`.
+- `ds.clones.rarefaction(clones, group_by, groups, cell_selection, orders=(0, 1, 2), sizes=None, endpoint=None, knots=40)` returns a `Rarefaction` record: `.curves` (`group`, key columns, `order`, `size`, `method`, `diversity`, `coverage`); default sizes are iNEXT's 40 knots per group (half up to its size, half to twice it); `sizes` gives every group the same sizes.
+- `ds.plots.clonal_rarefaction(clones, group_by=..., cell_selection=..., orders=(0, 1, 2), base="size" or "coverage")`: one panel per order (`order_0`, `order_1`, `order_2`) plus `coverage` (sample completeness) with `base="size"`; solid rarefied, dashed extrapolated, a point at the observed size. Table: `curves`.
+- Validated on immune receptor clonotypes: every cell's category equals scirpy 0.25.1's `clonal_expansion`, frequency fractions equal scRepertoire 2.8.0's `clonalHomeostasis` and rank windows its `clonalProportion`; Hill-number curves within 1.4e-12 of iNEXT 3.0.2, `estimateD` within 1e-7, every index within 6e-14 of scRepertoire 2.8.0 `clonalDiversity`, immunarch 0.10.3 `repDiversity` and vegan 2.7.6 `estimateR`.
 
 ## Recipe
 
@@ -41,6 +50,13 @@ print(attributes["n_unmatched_barcodes"], "of", attributes["n_file_barcodes"], "
 table = ds.clones.load_clones(clones)
 table.clones.head(10)
 ds.plots.clone_abundance(clones, group_by="sample")
+expansion = ds.clones.expansion(clones, group_by="sample")
+ds.clones.load_expansion(expansion).categories  # cells and clones per sample and category
+ds.plots.clonal_expansion(expansion, group_by="cell_type", show=False).save("clonal_expansion.png")
+diversity = ds.clones.diversity(clones, group_by="sample")
+print(diversity.indices[["sample", "cells", "clones", "coverage", "shannon", "inverse_simpson", "chao1"]])
+print(diversity.hill.pivot(index="sample", columns="order", values="at_coverage"))
+ds.plots.clonal_rarefaction(clones, group_by="sample", show=False).save("clonal_rarefaction.png")
 ```
 
 ```python
@@ -57,3 +73,6 @@ clones = ds.clones.import_clones(
 - Compare `n_unmatched_barcodes` with what the file should hold outside the selection before suspecting the prefix, suffix or pattern.
 - Check `table.clones["n_cells"]` against the study's reported clone count and sizes; LARRY's in vitro and cytokine sets hold only clones of two or more cells, while TREX keeps singletons.
 - With several files, check that `table.clones["clone"]` carries each file's namespace, and that clones expected to span samples were called jointly in one run; clones of separate runs never merge.
+- Measure expansion and diversity `group_by` the sample: without it, a clone's cells in all samples add up. Frequency categories depend on sample size (one cell of 1,000 is already 0.001), so compare them only between samples of similar size; bounds in cells compare any samples.
+- Compare diversity by Hill numbers at a common coverage or size (`hill.at_coverage`, `hill.at_size`), not observed indices, which grow with the cells sampled. Check `plots.clonal_rarefaction`: steep curves at the observed point mean richness and Chao1 are poorly determined; order 2 is stable. Name the Chao1 form reported. Leave out tiny groups with `cell_selection`, or set `size`/`coverage`, since the smallest group sets the defaults.
+- Compare conditions with one value per sample (such as the fraction of cells in clones of more than two cells), never with cells as replicates; test such values with a method that treats samples as replicates, such as CytePool's (https://docs.nygen.io/CytePool/).

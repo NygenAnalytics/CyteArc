@@ -1,14 +1,14 @@
 ---
 myst:
   html_meta:
-    description: CyteArc clones API for lineage tracing, with clones imported from CoSpar, TREX, CellTag-multi, CellTagR, STICR, Cassiopeia, Numbat, MiTo and LARRY's clone matrices or from a cell metadata column, joined to cells by barcode prefix, suffix or pattern, saved as a clones artifact, read as tables of cells and clones, exported as CoSpar's clone table or a Matrix Market file, and drawn as clone sizes.
+    description: CyteArc clones API for lineage tracing, with clones imported from CoSpar, TREX, CellTag-multi, CellTagR, STICR, Cassiopeia, Numbat, MiTo and LARRY's clone matrices or from a cell metadata column, joined to cells by barcode prefix, suffix or pattern, saved as a clones artifact, read as tables of cells and clones, exported as CoSpar's clone table or a Matrix Market file, drawn as clone sizes, and measured within groups of cells as clonal expansion, diversity indices and Hill numbers with rarefaction and extrapolation.
 ---
 
 # Clones API reference
 
 A clone is the set of cells that descend from one ancestor cell. Lineage tracing methods mark the ancestor with a heritable barcode, such as LARRY's, CellTag's or TREX's expressed barcodes, and other methods infer clones from the cells' own mutations, such as copy-number changes or mitochondrial variants. Each tool writes which clone each cell belongs to in its own format. `ds.clones` reads those files, joins their cells to a store's cells, and saves the clones as a `clones` artifact that CyteArc's clone analyses read whatever defined the clones.
 
-{meth}`ds.clones.import_clones <cytearc.datastore.namespaces.ClonesAccessor.import_clones>` imports the clones of one file or several, and {meth}`ds.clones.from_column <cytearc.datastore.namespaces.ClonesAccessor.from_column>` takes them from a cell metadata column. {meth}`ds.clones.load_clones <cytearc.datastore.namespaces.ClonesAccessor.load_clones>` reads the artifact as a {class}`~cytearc.clones.Clones` record, {meth}`ds.clones.export_clones <cytearc.datastore.namespaces.ClonesAccessor.export_clones>` writes it as a file that other tools read, and {meth}`ds.plots.clone_abundance <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clone_abundance>` draws how many clones have each size.
+{meth}`ds.clones.import_clones <cytearc.datastore.namespaces.ClonesAccessor.import_clones>` imports the clones of one file or several, and {meth}`ds.clones.from_column <cytearc.datastore.namespaces.ClonesAccessor.from_column>` takes them from a cell metadata column. {meth}`ds.clones.load_clones <cytearc.datastore.namespaces.ClonesAccessor.load_clones>` reads the artifact as a {class}`~cytearc.clones.Clones` record, {meth}`ds.clones.export_clones <cytearc.datastore.namespaces.ClonesAccessor.export_clones>` writes it as a file that other tools read, and {meth}`ds.plots.clone_abundance <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clone_abundance>` draws how many clones have each size. {meth}`ds.clones.expansion <cytearc.datastore.namespaces.ClonesAccessor.expansion>` places each cell in an expansion category by its clone's size within its sample or other group, and {meth}`ds.clones.diversity <cytearc.datastore.namespaces.ClonesAccessor.diversity>` and {meth}`ds.clones.rarefaction <cytearc.datastore.namespaces.ClonesAccessor.rarefaction>` measure how many clones each group holds and how evenly its cells spread over them.
 
 ```python
 cells = ds.snapshot_cell_selection("I")
@@ -111,8 +111,93 @@ ds.clones.export_clones(clones, "clones/matrix.mtx", format="matrix")
 
 `ds.plots.clone_abundance(clones)` draws two panels: the number of clones of each size, on log scales, and the `top` largest clones (default 20). `group_by` names a cell metadata column, such as the sample or time point, and `groups` a cell-label artifact, such as a clustering; with either, the first panel draws one line per group, counting each clone's cells within the group, and the second stacks each clone's cells by group. Cells without a group are left out, and the plot raises `ValueError` when no cell with a group has a clone. Its tables are `sizes` (`group`, `clone_size`, `n_clones`) and `top` (`clone`, then the cells of each group, or `cells`).
 
+## Measure clonal expansion
+
+A clone that holds more than one cell has expanded: its founding cell divided. {meth}`ds.clones.expansion <cytearc.datastore.namespaces.ClonesAccessor.expansion>` counts each clone's cells within groups of cells and places each cell in an expansion category by its clone's size in its group. The groups are the combinations of the labels of the `group_by` cell metadata columns, such as the sample, and of a `groups` label artifact, such as a clustering. Without a grouping, a clone's cells count in every sample together, as scirpy's `clonal_expansion` counts them without `expanded_in`. A cell without a clone or a label is counted in no group.
+
+```python
+expansion = ds.clones.expansion(clones, group_by="sample")
+table = ds.clones.load_expansion(expansion)
+table.categories  # cells and clones of each sample in each category
+large = ds.select_cells(expansion, include=["21 to 100 cells", "more than 100 cells"])
+ds.plots.clonal_expansion(expansion, group_by="cell_type")
+```
+
+One of two kinds of bounds sets the categories:
+
+| Option | Categories | As in |
+|---|---|---|
+| `breakpoints`, the default `(1, 2, 5, 20, 100)` | By the clone's cells in the group: `"1 cell"`, `"2 cells"`, `"3 to 5 cells"`, `"6 to 20 cells"`, `"21 to 100 cells"` and `"more than 100 cells"` | scirpy's `breakpoints`, whose categories are `"<= 1"`, `"<= 2"`, `"<= 5"` and so on |
+| `frequency_breakpoints`, such as `(0.0001, 0.001, 0.01, 0.1, 1)` | By the clone's frequency, its share of the group's cells with a clone, in bins `(lower, upper]` that end at 1: `"0 to 0.0001"`, `"0.0001 to 0.001"`, `"0.001 to 0.01"`, `"0.01 to 0.1"` and `"0.1 to 1"` | scRepertoire's `clonalHomeostasis` and `cloneSize`, which name these bins Rare, Small, Medium, Large and Hyperexpanded |
+
+A frequency depends on the size of its group: in a sample of 1,300 cells a clone of one cell already has the frequency 0.00077, so the first bin of these bounds stays empty, and a clone of two cells is Medium. Compare frequencies between groups of similar sizes, or use bounds in cells. The names of bounds in cells sort in their order, so groupings and legends that sort labels naturally keep them from the smallest clones to the largest.
+
+The artifact labels the cells of `cell_selection`, or the clones' cells without one; a selected cell that the clones do not hold has no clone. Its canonical `values` hold each cell's category, empty for a cell without a clone or a group, so `select_cells` keeps the cells of large clones and `ds.plots.embedding(layout=umap, color_by=expansion)` colours cells by category. `group_clone_size`, the cells of the cell's clone in its group, `group_clone_frequency`, their share of the group's cells with a clone, and `group_codes`, the cell's group, are its other per-cell arrays. The result records the clones, the cells, the label artifact, the bounds and, with `group_by`, each cell's group, so measuring again with the same values returns the saved result. The measurement holds about 300 bytes per cell at its peak.
+
+`load_expansion` returns a {class}`~cytearc.clones.ClonalExpansion` record with three tables, whose groups are keyed by the `group_by` columns and by the kind of the `groups` artifact, such as `cluster_labels`, and named in `group` by their labels joined by commas, or `"all cells"`:
+
+| Table | Rows | Columns |
+|---|---|---|
+| `cells` | One per cell | `clone`, `category`, `group`, the group's key, `group_clone_size`, `group_clone_frequency` |
+| `categories` | One per group and category, empty categories included | `group`, the group's key, `category`, `cells`, `clones`, and `fraction`, the share of the group's cells with a clone that the category holds |
+| `rank_windows` | One per group and window of ranks | `group`, the group's key, `window`, `cells`, `fraction` |
+
+The labels of the `cells` table are pandas categoricals, coded by the saved codes rather than held as text per cell; `category` is ordered, smallest clones first. Groups need one name each, so labels that hold commas and give two groups one name are refused when the expansion is measured, and a column of labels may not share the name of a column of the tables.
+
+The rank windows describe a group's clonal space as scRepertoire's `clonalProportion` does: the group's clones are ranked by their cells in the group, and each window counts the cells of the clones ranked in it. `splits` sets the windows; the default `(10, 100, 1000, 10000, 30000, 100000)` gives scRepertoire's windows `"1 to 10"` to `"30001 to 100000"`, and `"after 100000"` holds the cells that scRepertoire leaves out. Tied clones hold the same cells, so ties do not change the counts. A sample whose ten largest clones hold most of its cells is dominated by a few clones.
+
+{meth}`ds.plots.clonal_expansion <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonal_expansion>` draws one stacked bar per group of the share of its cells in each category, or of its clones with `count="clones"`, as scirpy's `summarize_clonal_expansion` counts them, and one stacked bar per group of the share of its cells in each rank window, leaving out windows without cells. The groups are the expansion's own unless `group_by` names a cell metadata column or `groups` a cell-label artifact: each cell keeps the category measured within its sample, so grouping by cell type shows which cell types hold the expanded cells of their samples, and the ranks are counted within the plotted groups. `normalize=False` draws counts. Its tables are `categories` and `rank_windows`.
+
+The categories were validated on the clonotypes of two 10x Genomics immune profiling runs, "Human PBMC from a Healthy Donor, 10k cells (v2)" (6,189 cells with a receptor) and "CD8+ T cells of Healthy Donor 1" (46,526 cells), whose expanded CD8+ T cell clones fill every category. Each run holds one donor, so four pseudo samples and six pseudo clusters were assigned from a hash of each barcode. With clonotypes equal to scirpy's, the category of every cell equals that of scirpy 0.25.1's `clonal_expansion`, within the pseudo samples and across all cells, with the default bounds and with `(1, 2)`, and `summarize_clonal_expansion` by pseudo cluster, counting cells and clones, equals the plot's tables. On the T cell clonotypes of the PBMC run, which equal scRepertoire's `CTstrict` and `CTaa` keys, the fractions of `frequency_breakpoints=(0.0001, 0.001, 0.01, 0.1, 1)` in the four pseudo samples equal scRepertoire 2.8.0's `clonalHomeostasis` within 4e-16, and the cells of the rank windows equal its `clonalProportion`. On a million simulated cells in eight samples, 899,879 of them in 314,595 clones of up to 465 cells, measuring takes about 0.9 s and holds 220 MiB of arrays, about 230 bytes per cell, and loading the tables takes about 0.7 s and 290 MiB.
+
+## Measure diversity
+
+The diversity of a population of cells is how many clones it holds and how evenly its cells spread over them. {meth}`ds.clones.diversity <cytearc.datastore.namespaces.ClonesAccessor.diversity>` measures it for groups of cells: the combinations of the labels of the `group_by` cell metadata columns, such as the sample, and of a `groups` label artifact, such as a clustering. `cell_selection` keeps only some cells, such as one cell type. Cells without a clone or a label are left out, and a clone's size in a group is its cells there. Nothing is saved: the result follows from the clones and the labels in about 0.3 s for a million cells.
+
+```python
+result = ds.clones.diversity(clones, group_by="sample")
+result.indices  # one row per sample: Shannon entropy, Simpson indices, Chao1, ...
+result.hill  # Hill numbers: observed, asymptotic, at a common size and coverage
+curves = ds.clones.rarefaction(clones, group_by="sample")
+ds.plots.clonal_rarefaction(clones, group_by="sample")
+```
+
+The `indices` table holds one row per group: `group`, its labels joined by commas (`"all cells"` without labels), each label in its key column, and, for its `n` cells and `S` clones of frequencies `p`, `f1` of one cell and `f2` of two:
+
+| Column | Definition | As in |
+|---|---|---|
+| `cells`, `clones`, `singletons`, `doubletons` | `n`, `S`, `f1`, `f2` | |
+| `coverage` | The sample coverage, the estimated share of the population's cells whose clone the sample holds: `1 - f1 / n * (n - 1) f1 / ((n - 1) f1 + 2 f2)`, or with `f1 - 1` and `f2 = 1` without doubletons ([Chao and Jost 2012](https://doi.org/10.1890/11-1952.1)) | iNEXT's `SC` |
+| `shannon` | `-sum(p log p)`, in nats | scRepertoire's `shannon` |
+| `pielou` | Shannon entropy over its maximum, `log S`; NaN for one clone | scRepertoire's `pielou` and `norm.entropy` |
+| `simpson`, `inverse_simpson`, `gini_simpson` | `sum(p**2)`, its inverse, and one minus it | scRepertoire's and immunarch's `inv.simpson` and `gini.simpson` |
+| `gini` | The Gini coefficient of the clone sizes, 0 when all are equal | scRepertoire's and immunarch's `gini` |
+| `d50` | The fewest clones, largest first, that hold at least half the cells | scRepertoire's and immunarch's `d50` |
+| `chao1` | `S + (n - 1) / n * f1**2 / (2 f2)`, or `S + (n - 1) / n * f1 (f1 - 1) / 2` without doubletons | iNEXT's and immunarch's Chao1 |
+| `chao1_bias_corrected` | `S + f1 (f1 - 1) / (2 (f2 + 1))` | vegan's `estimateR` and scRepertoire's `chao1` |
+| `ace` | The abundance-based coverage estimate with clones of at most 10 cells rare ([Chao and Lee 1992](https://doi.org/10.1080/01621459.1992.10475194)); NaN when every rare clone is a singleton | vegan's `estimateR` and scRepertoire's `ace` |
+
+Every observed index depends on how many cells a group holds: a larger sample finds more clones. Hill numbers ([Hill 1973](https://doi.org/10.2307/1934352)) put the indices on one scale, the effective number of clones: order 0 counts clones, order 1, the exponential of Shannon entropy, weighs them by frequency, and order 2, the inverse Simpson index, counts the dominant ones. The `hill` table holds, for each group, named in `group` and the key columns, and order 0, 1 and 2, the `observed` Hill number; the `estimated` asymptotic one of the whole population, Chao1 for order 0, the exponential of the entropy estimate of [Chao, Wang and Jost (2013)](https://doi.org/10.1111/2041-210X.12108) for order 1, and the inverse of Good's unbiased Simpson estimate for order 2, infinite when no clone holds two cells; the Hill number `at_size`, the common size, with its `coverage_at_size` and `method_at_size`; and the Hill number `at_coverage`, the common coverage, with its `size_at_coverage` and `method_at_coverage`. Below a group's size its Hill numbers are rarefied, the expected values of a random subsample, and above it extrapolated, as [Chao et al. (2014)](https://doi.org/10.1890/13-0133.1) derive, with the Shannon extrapolation of [Chao et al. (2023)](https://doi.org/10.1002/ecm.1588) that iNEXT 3.0.2 uses: the curve approaches the asymptote geometrically from the observed value and passes through the rarefied value one cell earlier. A size between whole numbers interpolates linearly, as iNEXT does. By default the common size is the smallest of the groups' doubled sizes and the common coverage the lowest of their coverages at doubled sizes, iNEXT's `estimateD` defaults, so no group is extrapolated beyond twice its size; `size` and `coverage` set them. Compare groups by the Hill numbers at a common coverage, or at a common size; a group far smaller than the others sets both defaults low, so pass `size` or `coverage`, or leave it out. When every group's coverage is 1, as when no clone of a group holds a single cell, the common coverage is 1, which each group reaches at its observed size, so the Hill numbers at it are the observed ones.
+
+{meth}`ds.clones.rarefaction <cytearc.datastore.namespaces.ClonesAccessor.rarefaction>` computes each group's curves: one row per group, order and size, with `group` and the key columns, the `size`, `method` (`"rarefaction"`, `"observed"` or `"extrapolation"`), `diversity` and `coverage`. By default each group gets iNEXT's 40 sizes, about half evenly from 1 cell to its size and half from there to twice its size; `endpoint` and `knots` change them, and `sizes` gives every group the same sizes. Compiled loops rarefy each group to all its sizes at once, for every order and the coverage. {meth}`ds.plots.clonal_rarefaction <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clonal_rarefaction>` draws one panel per order, the Hill number against the cells (`base="size"`) or against the sample coverage (`base="coverage"`), solid where rarefied, dashed where extrapolated, with a point at each group's observed size, and with `base="size"` a panel of each group's coverage against its size. A curve that still rises steeply at its observed point has not reached its plateau: more cells would find more clones. iNEXT's bootstrap confidence intervals are not computed; compare conditions with each sample's estimate as one observation, in a test that treats samples as replicates, such as those of [CytePool](https://docs.nygen.io/CytePool/).
+
+The implementation follows the papers rather than the code of iNEXT, which is licensed under the GPL, and validates against its outputs. On iNEXT's two example vectors, the clonotypes of the four pseudo samples of both 10x runs above (11,523 to 11,745 cells each in the CD8+ run), all 46,526 CD8+ cells together, and six edge cases (no singletons, no doubletons, every clone a singleton, a lone singleton, one clone, two cells), the Hill numbers of iNEXT 3.0.2's curves equal CyteArc's within 1.4e-12 at every size, rarefied, observed and extrapolated, the coverages within 3e-9, the asymptotic estimates within 7e-13, and `estimateD` by size within 5e-13 and by coverage within 1e-7, the tolerance of iNEXT's root finding; the default sizes are iNEXT's. Where the two differ, CyteArc's rarefied coverage equals exact rational arithmetic within 1e-16, where iNEXT's carries errors up to 3e-12, because the chance of missing a clone is computed as a product of ratios rather than from log-gamma functions. The indices equal scRepertoire 2.8.0's `clonalDiversity` without bootstraps for all twelve of its metrics, immunarch 0.10.3's `repDiversity` (`chao1`, `d50`, `div`, `gini`, `gini.simp`, `inv.simp` and Hill numbers of orders 1 to 6) and vegan 2.7.6's `estimateR` (`S.chao1`, `S.ACE`), within 6e-14, on the same pseudo samples and edge cases. On the same million simulated cells in eight samples, `diversity` takes about 0.3 s and `rarefaction` 0.7 s, holding at most 115 MiB of arrays; grouping the cells is checked against the memory budget at about 100 bytes per cell and 70 more for each column of labels. Split into 2,000 groups of about 450 cells, such as samples by clusters, the cells take 2.0 s for `diversity` and 1.4 s for `rarefaction`.
+
 ## Clones
 
 ```{eval-rst}
 .. autoclass:: cytearc.clones.Clones
+```
+
+## Clonal expansion
+
+```{eval-rst}
+.. autoclass:: cytearc.clones.ClonalExpansion
+```
+
+## Clonal diversity
+
+```{eval-rst}
+.. autoclass:: cytearc.clones.ClonalDiversity
+.. autoclass:: cytearc.clones.Rarefaction
 ```

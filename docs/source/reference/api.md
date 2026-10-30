@@ -13,7 +13,7 @@ Public CyteArc surfaces for analysts:
 - `cytearc.regulons` for SCENIC-style regulons, chromVAR motif activity, cistromes from motifs or
   CUT&RUN peaks, region-to-gene links, and co-regulated gene programs
 - `cytearc.perturbation` for pooled CRISPR screens: guide calls made from the guide counts or imported from Cell Ranger, the thresholds fitted to each guide, perturbation labels that name the genes each cell's guides target, the efficiency of each perturbation on its target gene, the E-distance of each perturbation's cells from the control cells, Mixscape's signatures and calls of knocked-out cells and escapers, calibrated tests of whether each perturbation changes each gene, and each perturbation's mean expression against the control cells with clusters of the perturbations whose profiles agree
-- `cytearc.clones` for lineage tracing: clones imported from the files that lineage tracing tools write or from a cell metadata column, read as tables of cells and clones
+- `cytearc.clones` for lineage tracing: clones imported from the files that lineage tracing tools write or from a cell metadata column, read as tables of cells and clones, and measured within groups of cells as clonal expansion, diversity indices and Hill numbers
 - Readers that ingest source formats; writers that create or export Zarr stores (and other exports)
 - `cytearc.plotting`
 - `cytearc.datasets` for the public example datasets that the tutorials download
