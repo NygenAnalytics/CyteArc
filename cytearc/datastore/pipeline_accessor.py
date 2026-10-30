@@ -578,8 +578,9 @@ class PipelineAccessor:
         The run checks its call before it writes anything. Which cells a
         stage reads depends on the data, so every sample or split column that
         a stage reads must label every cell of ``cells``, with neither a
-        missing value nor empty or whitespace text, and every covariate of
-        ``associations`` must hold a finite value for each of them.
+        missing value nor empty or whitespace text, every covariate of
+        ``associations`` must hold a finite value for each of them, and with
+        ``associations={"moi": "high"}`` each of them must have guide UMIs.
 
         Args:
             assay: The RNA assay. Defaults to the default assay when it is an
@@ -626,7 +627,11 @@ class PipelineAccessor:
             associations: Tests of every target against every highly variable
                 gene, with the keywords of ``perturbation.associations`` but
                 ``pairs`` and ``features``; ``positive_controls`` is
-                ``"targets"`` or None.
+                ``"targets"`` or None. With ``"moi": "high"``, for a screen
+                whose cells carry several guides, ``efficiency``,
+                ``edistance``, ``mixscape`` and ``clusters`` must be off,
+                since they compare each perturbation with cells that carry
+                control guides only.
             profiles: The keywords of ``perturbation.profiles`` (``by``,
                 ``sample_column``, ``min_cells``, ``mask_targets``, and
                 ``id_column``) for the profiles that ``clusters`` reads, of

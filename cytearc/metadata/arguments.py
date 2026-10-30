@@ -581,11 +581,16 @@ class PerturbationAssociationArguments(OperationArguments):
     pairs_fingerprint: str | None = artifact_input()
     positive_controls_fingerprint: str | None = artifact_input()
     # The fingerprint of each cell's sample and of the covariate columns over
-    # the tested cells, the control cells and the cells of the tested targets
-    # or guides, or None without them.
+    # the tested cells, or None without them: at low MOI the control cells
+    # and the cells of the tested targets or guides, at high MOI every
+    # labelled cell.
     sample_assignments_fingerprint: str | None = artifact_input()
     covariates_fingerprint: str | None = artifact_input()
     integration: str = parameter()
+    # "low" tests each target's cells against the control cells, "high"
+    # against all other cells, with the resampling resolved from None.
+    moi: str = parameter()
+    resampling: str = parameter()
     side: str = parameter()
     n_resamples: tuple[int, int, int] = parameter()
     stage_threshold: float = parameter()

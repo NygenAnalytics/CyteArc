@@ -300,7 +300,9 @@ def test_edistance_refuses_inputs_it_cannot_measure(tmp_path, monkeypatch) -> No
     with pytest.raises(ValueError, match="normalized artifact, not 'cell_selection'"):
         store.perturbation.edistance(labels, cells)
     # Labels whose controls are GENE_D, which no cell carries, have no control cell.
-    with pytest.raises(ValueError, match="no control cell"):
+    with pytest.raises(
+        ValueError, match="No labelled cell carries control guides only"
+    ):
         store.perturbation.edistance(_labels(store, controls=("GENE_D",)), coordinates)
     monkeypatch.setattr(store, "memoryBytes", 100)
     with pytest.raises(MemoryError, match="E-distances of 15 cells in 3 dimensions"):

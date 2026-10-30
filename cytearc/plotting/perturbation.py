@@ -2007,7 +2007,8 @@ def association_volcano(
     ``ds.perturbation.associations``, as ``ds.perturbation.load_associations``
     reads it. Each discovery pair of a target and a gene that passed QC gets
     a point at its log2 fold change, the gene's counts in the target's cells
-    against the counts that its fit on the control cells predicts for them,
+    against the counts that its null fit predicts for them, fitted on the
+    target's and the control cells, or on all cells in tests at high MOI,
     and at -log10 of its p-value. A point is blue when the pair is
     significant at the false discovery rate of the tests and grey otherwise.
     A dashed line marks the largest p-value of a significant pair, the cut of
@@ -2179,7 +2180,9 @@ def association_volcano(
             labels.append(label)
         ax.set_xlim(left, right)
         ax.set_ylim(bottom, top)
-        ax.set_xlabel("Log2 fold change against control cells")
+        # At high MOI a target's cells are compared with all other cells.
+        compared = "all other cells" if str(loaded.moi) == "high" else "control cells"
+        ax.set_xlabel(f"Log2 fold change against {compared}")
         ax.set_ylabel(f"-log10 p-value{_SIDE_WORDS.get(side, '')}")
         ax.set_title("\n".join(title))
         handles, texts = _volcano_legend(
@@ -2210,8 +2213,11 @@ def association_volcano(
         provenance=PlotProvenance(
             assay=tests.assay,
             cell_key=None,
-            # The cells of the drawn targets and the control cells.
-            n_cells=int(drawn.groupby("target", sort=False)["n_cells"].max().sum())
+            # The cells of the drawn targets and the control cells; at high
+            # MOI every pair's cells are all the cells.
+            n_cells=int((drawn["n_cells"] + drawn["n_control_cells"]).max())
+            if str(loaded.moi) == "high"
+            else int(drawn.groupby("target", sort=False)["n_cells"].max().sum())
             + int(drawn["n_control_cells"].max()),
             renderer="matplotlib",
             notes=("perturbation_associations",),
@@ -2424,11 +2430,13 @@ def _qq_panel(
 
 
 def _fold_change_panel(
-    ax: Any, calibration: pd.DataFrame, *, foreground: str
+    ax: Any, calibration: pd.DataFrame, *, compared: str, foreground: str
 ) -> tuple[pd.DataFrame, float | None]:
     """Draw the histogram of the negative-control fold changes and their mean.
 
-    Returns the histogram and the mean, None without a finite fold change.
+    ``compared`` names the cells that each group's fold change compares its
+    cells with. Returns the histogram and the mean, None without a finite
+    fold change.
     """
     from matplotlib.ticker import MaxNLocator
 
@@ -2457,7 +2465,7 @@ def _fold_change_panel(
         title.append(f"Not drawn: {n_infinite:,} without a finite fold change")
     # Bars count pairs, so the ticks fall on whole numbers.
     ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-    ax.set_xlabel("Log2 fold change against the other control cells")
+    ax.set_xlabel(f"Log2 fold change against {compared}")
     ax.set_ylabel("Negative-control pairs")
     ax.set_title("\n".join(title))
     histogram = pd.DataFrame(
@@ -2568,11 +2576,11 @@ def association_calibration(
     ``tests`` is a ``perturbation_associations`` artifact of
     ``ds.perturbation.associations``, as ``ds.perturbation.load_associations``
     reads it. Its negative-control pairs test groups of non-targeting guides
-    against the other control cells, so no gene should change, and its
-    positive-control pairs, such as each target with its own gene, should
-    change. Three panels in a row, whose axes take the keys ``"qq"``,
-    ``"fold_changes"`` and ``"controls"``, follow the calibration check of
-    the SCEPTRE book.
+    against the other control cells, or against all other cells in tests at
+    high MOI, so no gene should change, and its positive-control pairs, such
+    as each target with its own gene, should change. Three panels in a row,
+    whose axes take the keys ``"qq"``, ``"fold_changes"`` and
+    ``"controls"``, follow the calibration check of the SCEPTRE book.
 
     ``"qq"`` draws -log10 of the negative-control p-values against the
     quantiles of as many uniform p-values. Calibrated p-values follow the
@@ -2641,7 +2649,15 @@ def association_calibration(
             show_legend=show_legend,
         )
         fold_changes, mean = _fold_change_panel(
-            axes["fold_changes"], calibration, foreground=foreground
+            axes["fold_changes"],
+            calibration,
+            # At high MOI a group's cells are compared with all other cells.
+            compared=(
+                "all other cells"
+                if str(loaded.moi) == "high"
+                else "the other control cells"
+            ),
+            foreground=foreground,
         )
         controls = _controls_panel(
             axes["controls"],

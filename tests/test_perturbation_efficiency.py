@@ -266,7 +266,9 @@ def test_efficiency_refuses_labels_it_cannot_measure(tmp_path, monkeypatch) -> N
         store.perturbation.efficiency(cells)
     # Labels whose controls are GENE_D, which no cell carries, have no control cell.
     no_controls = _labels(store, controls=("GENE_D",))
-    with pytest.raises(ValueError, match="no control cell"):
+    with pytest.raises(
+        ValueError, match="No labelled cell carries control guides only"
+    ):
         store.perturbation.efficiency(no_controls)
     labels = _labels(store)
     monkeypatch.setattr(store, "memoryBytes", 100)

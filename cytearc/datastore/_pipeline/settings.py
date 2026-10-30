@@ -279,6 +279,8 @@ STAGE_SETTINGS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "positive_controls",
                 "id_column",
                 "integration",
+                "moi",
+                "resampling",
                 "sample_column",
                 "covariates",
                 "side",

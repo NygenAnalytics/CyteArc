@@ -2513,23 +2513,32 @@ def _associations_record(
     positive: list[AssociationRow] = POSITIVE_ROWS,
     *,
     side: str = "both",
+    moi: str = "low",
 ) -> PerturbationAssociations:
     """Build the record that ``load_associations`` returns for these pairs.
 
     The negative controls are groups of 30 control cells, and their false
-    discoveries and grade follow from their significant pairs.
+    discoveries and grade follow from their significant pairs. At high MOI
+    every group is compared with all other cells of the 300.
     """
     negative = _pairs(calibration, group_cells=30)
     n_false = int(negative["significant"].sum())
+    tables = [
+        discovery if isinstance(discovery, pd.DataFrame) else _pairs(discovery),
+        _pairs(positive),
+    ]
+    if moi == "high":
+        for table in tables:
+            table["n_control_cells"] = 300 - table["n_cells"]
     return PerturbationAssociations(
-        discovery=(
-            discovery if isinstance(discovery, pd.DataFrame) else _pairs(discovery)
-        ),
+        discovery=tables[0],
         calibration=negative,
-        positive=_pairs(positive),
+        positive=tables[1],
         alpha=0.1,
         side=side,
         integration="union",
+        moi=moi,
+        resampling="conditional" if moi == "high" else "permutation",
         from_assay="RNA",
         n_false_discoveries=n_false,
         calibration_grade=_grade(n_false),
@@ -3270,7 +3279,11 @@ def _check_qq(
     assert ax.get_title() == "Negative-control p-values"
 
 
-def _check_fold_changes(result: Any, record: PerturbationAssociations) -> None:
+def _check_fold_changes(
+    result: Any,
+    record: PerturbationAssociations,
+    compared: str = "the other control cells",
+) -> None:
     """Check the histogram of the negative-control fold changes and its mean."""
     ax = result.axes["fold_changes"]
     folds = _tested(record.calibration)["log2_fold_change"].to_numpy()
@@ -3293,7 +3306,7 @@ def _check_fold_changes(result: Any, record: PerturbationAssociations) -> None:
         values.mean()
     )
     assert (np.asarray(ax.get_yticks()) % 1 == 0).all()
-    assert ax.get_xlabel() == "Log2 fold change against the other control cells"
+    assert ax.get_xlabel() == f"Log2 fold change against {compared}"
     assert ax.get_ylabel() == "Negative-control pairs"
 
 
@@ -3409,6 +3422,39 @@ def test_association_calibration_draws_the_three_panels() -> None:
         }
     finally:
         result.close()
+
+
+def test_association_plots_compare_with_all_other_cells_at_high_moi() -> None:
+    record = _associations_record(moi="high")
+    store = _associations_store(record)
+
+    volcano = association_volcano(store, ASSOCIATIONS, show=False)
+    calibration = association_calibration(store, ASSOCIATIONS, show=False)
+
+    try:
+        # Every pair's cells are all 300 cells, which its group splits.
+        assert volcano.provenance.n_cells == 300
+        assert calibration.provenance.n_cells == 300
+        assert (
+            volcano.axes["volcano"].get_xlabel()
+            == "Log2 fold change against all other cells"
+        )
+        _check_fold_changes(calibration, record, compared="all other cells")
+        # The tables are those of low MOI.
+        low = association_volcano(
+            _associations_store(_associations_record()), ASSOCIATIONS, show=False
+        )
+        try:
+            assert low.provenance.n_cells == 20 + 25 + 30 + 35 + 300
+            pd.testing.assert_frame_equal(
+                volcano.tables["volcano"].drop(columns="n_control_cells"),
+                low.tables["volcano"].drop(columns="n_control_cells"),
+            )
+        finally:
+            low.close()
+    finally:
+        volcano.close()
+        calibration.close()
 
 
 def test_association_calibration_spreads_a_large_band_on_the_log_scale() -> None:

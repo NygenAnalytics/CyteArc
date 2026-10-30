@@ -102,6 +102,11 @@ MERGED_SEPARATOR = "__"
 # The cells that the profiles average, by the output that holds them: every
 # cell of each label, or the cells that Mixscape calls knocked out.
 PROFILE_CELLS = {"labelled": "perturbation_labels", "knocked_out": "mixscape"}
+# The stage keywords whose stages compare each perturbation with the cells that
+# carry control guides only, which a high-MOI screen hardly holds: the
+# efficiency, the E-distances, Mixscape with its signature, and the clusters
+# with the profiles, which z-score each cell against those cells.
+CONTROL_CELL_STAGES = ("efficiency", "edistance", "mixscape", "clusters")
 
 
 def _resolve_guide_assay(store: Any, name: object) -> tuple[str, Any]:
@@ -457,6 +462,53 @@ def _check_covariates(store: Any, source: CellSource, columns: Sequence[str]) ->
             )
 
 
+def _check_high_moi_stages(
+    associations: Mapping[str, Any], enabled: Mapping[str, bool]
+) -> None:
+    """Refuse the stages that need control-only cells in a run that tests at high MOI.
+
+    ``enabled`` holds whether each stage of :data:`CONTROL_CELL_STAGES` runs.
+    In a high-MOI screen each cell carries several guides, so hardly any cell
+    carries control guides only, and these stages would fail on such labels
+    after the stages before them had written their artifacts.
+    """
+    if associations.get("moi") != "high":
+        return
+    running = [stage for stage in CONTROL_CELL_STAGES if enabled[stage]]
+    if running:
+        names = running[-1]
+        if len(running) > 1:
+            names = ", ".join(running[:-1]) + " and " + names
+        raise ValueError(
+            "associations={'moi': 'high'} tests a screen whose cells carry several "
+            f"guides, where hardly any cell carries control guides only, but {names} "
+            "compare each perturbation with such cells; switch them off for a "
+            "high-MOI screen with " + ", ".join(f"{stage}=False" for stage in running)
+        )
+
+
+def _check_guide_umis(
+    store: Any, source: CellSource, guide: Any, associations: Mapping[str, Any]
+) -> None:
+    """Refuse input cells without guide UMIs when the association tests run at high MOI.
+
+    The high-MOI tests adjust for the log of each tested cell's guide UMIs and
+    test every labelled cell, and every input cell can be one.
+    """
+    if associations.get("moi") != "high":
+        return
+    active = input_cell_mask(store, source)
+    totals = np.asarray(store.cells.fetch_all(f"{guide.name}_nCounts"))
+    count = int(np.count_nonzero(active & ~(totals > 0)))
+    if count:
+        verb = "has" if count == 1 else "have"
+        raise ValueError(
+            "High-MOI association tests adjust for the log of each cell's guide "
+            f"UMIs, but {count} of the run's cells {verb} none; restrict cells to "
+            "cells with guide UMIs"
+        )
+
+
 def _check_call_file_cells(
     store: Any, source: CellSource, barcode_prefix: str | None
 ) -> None:
@@ -581,6 +633,15 @@ def resolve_perturbation(
         if method_setting("profiles", profile_settings, "mask_targets"):
             _require_id_column(store, guide, profile_settings, "profiles")
     profile_labels = _profile_labels(profile_settings, mixscape_enabled)
+    _check_high_moi_stages(
+        association_settings,
+        {
+            "efficiency": efficiency_enabled,
+            "edistance": edistance_enabled,
+            "mixscape": mixscape_enabled,
+            "clusters": clusters_enabled,
+        },
+    )
     snapshots = resolve_snapshot_columns(
         store,
         snapshot_columns,
@@ -630,6 +691,7 @@ def resolve_perturbation(
     _check_covariates(
         store, source, covariate_columns(association_settings.get("covariates"))
     )
+    _check_guide_umis(store, source, guide, association_settings)
     cell_columns, extra_snapshots = cell_snapshots(
         filtering_config, harmony_columns=harmony_columns, snapshot_columns=snapshots
     )
