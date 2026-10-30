@@ -250,6 +250,15 @@ functions in {doc}`regulons` turn them into regulons.
     :members: import_receptors, load_receptors, clonotypes, load_clonotypes, gene_usage, spectratype, export_airr
 ```
 
+### `ds.variants`
+
+`import_counts` reads the per-cell allele counts of mitochondrial and targeted variants that mgatk, maegatk, cellsnp-lite, MQuad, VarTrix, MiTo, giftwrap and the GoT tools write, joins their cells to a cell selection by barcode, and saves a `variant_counts` artifact of the sites, their alleles and each cell's depth, counts and calls. `load_counts` reads the artifact as tables of sites, alleles, cells and stored entries. {doc}`variants` lists the formats and describes count units, depth and the `VariantCounts` record.
+
+```{eval-rst}
+.. autoclass:: cytearc.datastore.namespaces.VariantsAccessor
+    :members: import_counts, load_counts
+```
+
 ### `ds.imputation`
 
 ```{eval-rst}
