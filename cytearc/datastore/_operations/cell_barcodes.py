@@ -45,6 +45,9 @@ LOOKUP_BYTES_PER_CELL = 100
 _UNMATCHED_BYTES_PER_BARCODE = 16
 # The named group of a barcode pattern that holds the barcode.
 _BARCODE_GROUP = "barcode"
+# What the options of an import may be, for their errors.
+_TEXT_OPTIONS = "text, a sequence of text, or None"
+_PATTERN_OPTIONS = "a regular expression, a sequence of regular expressions, or None"
 
 
 def file_sha256(path: str | os.PathLike[str]) -> str:
@@ -109,12 +112,10 @@ class BarcodeFile:
         }
 
 
-def _listed(
-    value: Any, n_files: int, name: str, what: str, takes: str = "text"
-) -> list[Any]:
+def _listed(value: Any, n_files: int, name: str, what: str, expected: str) -> list[Any]:
     """Return one value per file: ``value`` for every file, or its items.
 
-    ``takes`` names one value, such as ``"text"``, for the error.
+    ``expected`` says what the option may be, for the error.
     """
     if value is None or isinstance(value, str):
         return [value] * n_files
@@ -126,14 +127,14 @@ def _listed(
                 f"one per {what}, or one for every {what}"
             )
         return items
-    raise TypeError(f"{name} must be {takes}, a sequence of {takes}, or None")
+    raise TypeError(f"{name} must be {expected}")
 
 
 def _text_options(value: Any, n_files: int, name: str, what: str) -> list[str | None]:
-    options = _listed(value, n_files, name, what)
+    options = _listed(value, n_files, name, what, _TEXT_OPTIONS)
     for option in options:
         if option is not None and not isinstance(option, str):
-            raise TypeError(f"{name} must be text, a sequence of text, or None")
+            raise TypeError(f"{name} must be {_TEXT_OPTIONS}")
     # An empty prefix or suffix adds nothing, as None does, and identifies
     # the file alike.
     return [option or None for option in options]
@@ -185,11 +186,7 @@ def barcode_files(
     patterns = [
         _checked_pattern(option)
         for option in _listed(
-            barcode_pattern,
-            n_files,
-            "barcode_pattern",
-            what,
-            takes="a regular expression",
+            barcode_pattern, n_files, "barcode_pattern", what, _PATTERN_OPTIONS
         )
     ]
     files = [
@@ -222,11 +219,9 @@ def barcode_files(
 
 
 def _checked_pattern(value: Any) -> str | None:
+    """Check one file's pattern; ``barcode_files`` names its option alike."""
     if value is not None and not isinstance(value, str):
-        raise TypeError(
-            "barcode_pattern must be a regular expression, a sequence of a "
-            "regular expression, or None"
-        )
+        raise TypeError(f"barcode_pattern must be {_PATTERN_OPTIONS}")
     return barcode_pattern(value)
 
 

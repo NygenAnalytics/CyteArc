@@ -100,7 +100,7 @@ def test_a_label_artifact_of_fewer_cells_leaves_the_others_ungrouped(plotted) ->
     plt.close(result.figure)
 
 
-def test_the_plot_refuses_clones_it_cannot_draw(plotted, tmp_path) -> None:
+def test_the_plot_refuses_clones_it_cannot_draw(plotted) -> None:
     store, clones = plotted
     figures = set(plt.get_fignums())
     store.cells.insert("only_c4", np.arange(6) == 4, overwrite=True)

@@ -374,6 +374,7 @@ def _columns_mapping(columns: Any) -> dict[str, tuple[str, ...]]:
 
 
 def _require_columns(layout: _TextLayout, names: Sequence[str]) -> None:
+    """Refuse a table that lacks a column to read, or names it twice."""
     missing = [name for name in names if name not in layout.names]
     if missing:
         shown = ", ".join(repr(name) for name in layout.names if name)
@@ -381,6 +382,13 @@ def _require_columns(layout: _TextLayout, names: Sequence[str]) -> None:
             f"{layout.path} has no column "
             + ", ".join(repr(name) for name in missing)
             + f"; its columns are {shown}"
+        )
+    repeated = sorted({name for name in names if layout.names.count(name) > 1})
+    if repeated:
+        raise ValueError(
+            f"{layout.path} names the column "
+            + ", ".join(repr(name) for name in repeated)
+            + " more than once, so which one to read is unclear"
         )
 
 

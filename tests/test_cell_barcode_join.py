@@ -529,3 +529,14 @@ def test_the_join_refuses_repeated_cell_ids_and_budgets_too_small() -> None:
         join.cells(
             _plain(), np.asarray([f"x{index}" for index in range(20)], dtype=object)
         )
+
+
+def test_very_long_and_unicode_cell_ids_join_exactly() -> None:
+    long_id = "s1__" + "ACGT" * 2500 + "-1"
+    join = CellBarcodeJoin(np.asarray([long_id, "s1__κύτταρο-1"]), memory_bytes=10**6)
+    positions = join.cells(
+        _plain(prefix="s1__", suffix="-1"),
+        np.asarray(["ACGT" * 2500, "κύτταρο", "ACGT" * 2499], dtype=object),
+    )
+    assert positions.tolist() == [0, 1, -1]
+    assert join.examples == ["ACGT" * 2499]

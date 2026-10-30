@@ -285,8 +285,8 @@ def test_files_of_each_sample_join_by_prefix_and_keep_their_clones_apart(
     paths = _per_sample_files(tmp_path, bare=True)
 
     # Each file lists the three barcodes outside the store, under its prefix.
-    matched = N_IN_CLONES + 2 * N_OUTSIDE
-    with pytest.warns(UserWarning, match=f"6 of {matched} barcodes of the clone files"):
+    listed = N_IN_CLONES + 2 * N_OUTSIDE
+    with pytest.warns(UserWarning, match=f"6 of {listed} barcodes of the clone files"):
         ref = shared.store.clones.import_clones(
             paths,
             cell_selection=shared.cells,

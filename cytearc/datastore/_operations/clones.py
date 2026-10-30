@@ -226,7 +226,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 ``"-1"``: one for every file, or one per file.
             barcode_pattern: A regular expression whose named group
                 ``barcode`` is the part of each barcode that names the cell,
-                found as :func:`re.search` finds it, such as
+                found as ``re.search`` finds it, such as
                 ``r"_(?P<barcode>[ACGT]{16}-1)$"``; a barcode it does not match
                 names no cell. One for every file, or one per file.
             format: One of ``"cospar"``, ``"trex"``, ``"celltag_multi"``,
@@ -409,12 +409,17 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             listed.append(join.cells(file, barcodes))
             n_listed += len(barcodes)
             self._check_clone_import_budget(
-                held + _BYTES_PER_LISTED_CELL * n_listed, 0, chunk_bytes
+                held + _BYTES_PER_LISTED_CELL * n_listed,
+                assigner.n_labels,
+                chunk_bytes,
             )
         cells = np.concatenate(listed) if listed else np.empty(0, dtype=np.int64)
         labels = _namespaced(matrix_clone_ids(layout), namespace)
+        # The matrix's labels are held beside those of earlier files.
         self._check_clone_import_budget(
-            held + _BYTES_PER_LISTED_CELL * n_listed, len(labels), chunk_bytes
+            held + _BYTES_PER_LISTED_CELL * n_listed,
+            assigner.n_labels + len(labels),
+            chunk_bytes,
         )
         for entries in matrix_entries(layout, chunk_rows):
             assigner.add(cells[entries.cells], labels[entries.clones], source=source)

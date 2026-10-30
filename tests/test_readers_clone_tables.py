@@ -224,6 +224,11 @@ def test_a_header_alone_holds_no_rows(tmp_path) -> None:
         ),
         ("Cell_ID,Clone_ID\nA,1\n", {"format": "table"}, "needs the clone column"),
         (
+            "Cell_ID,Clone_ID,Clone_ID\nA,1,2\n",
+            {},
+            "names the column 'Clone_ID' more than once",
+        ),
+        (
             "Cell_ID,Clone_ID\nA,1\n",
             {"format": "mito"},
             "is a text table, not format='mito'",
