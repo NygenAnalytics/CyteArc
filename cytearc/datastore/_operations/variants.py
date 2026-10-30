@@ -1837,11 +1837,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         does, each cell's neighbourhood holds itself and the
         ``n_neighbors - 1`` cells most similar to it by the cosine similarity
         of the square roots of their allele frequencies of the informative
-        variants; two cells are joined with the Jaccard index of their
-        neighbourhoods, dropping joins below 1/15, as Seurat's
-        ``FindNeighbors`` builds its shared-neighbour graph; and the Leiden
+        variants; a cell is joined to each neighbour with the Jaccard index
+        of their neighbourhoods, dropping joins below 1/15, as Seurat's
+        ``FindNeighbors`` weighs its shared-neighbour graph; and the Leiden
         algorithm partitions the graph at ``resolution`` where Signac uses
-        Seurat's ``FindClusters``.
+        Seurat's ``FindClusters``. Seurat also joins cells that only share
+        neighbours, which makes the graph quadratic in the cells that tie,
+        such as cells that show one informative variant each.
 
         A cell's frequency is undefined where it was not covered, so the
         similarity of two cells counts only the variants that both cover,

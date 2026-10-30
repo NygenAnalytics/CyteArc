@@ -358,3 +358,17 @@ def mito_variant_labels(truth: VariantTruth) -> set[str]:
         f"{CONTIG}:{position}{reference}>{alternative}"
         for position, reference, alternative in truth.variant_sites()
     }
+
+
+def download_or_skip(url: str, path: Path) -> Path:
+    """Download a file for a test marked integration, skipping the test when
+    the host is unreachable."""
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url, timeout=120) as response:
+            path.write_bytes(response.read())
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        pytest.skip(f"{url} is unreachable: {error}")
+    return path

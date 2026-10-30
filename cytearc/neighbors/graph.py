@@ -440,67 +440,131 @@ def _checked_neighborhoods(neighborhoods: np.ndarray) -> np.ndarray:
     return array
 
 
-def shared_neighbor_entries(neighborhoods: np.ndarray) -> int:
-    """Bound the pairs of cells whose neighbourhoods share a cell.
+def shared_neighbor_bounds(neighborhoods: np.ndarray) -> np.ndarray:
+    """Bound each cell's joins in :func:`shared_neighbor_graph`.
 
-    A cell that ``d`` neighbourhoods hold joins at most ``d * d`` ordered
-    pairs, so the sum of ``d * d`` over the cells bounds the entries that
-    :func:`shared_neighbor_graph` multiplies out.
+    A cell shares a neighbour ``j`` with the cells whose neighbourhoods hold
+    ``j``, so the sum over its neighbours of how many neighbourhoods hold
+    each bounds the cells it shares one with.
     """
     array = _checked_neighborhoods(neighborhoods)
     held = np.bincount(array[array >= 0], minlength=array.shape[0]).astype(np.int64)
-    return int(np.sum(held * held))
+    return np.where(array >= 0, held[np.maximum(array, 0)], 0).sum(axis=1)
 
 
 def shared_neighbor_graph(
-    neighborhoods: np.ndarray, *, prune: float = 1 / 15
+    neighborhoods: np.ndarray,
+    *,
+    prune: float = 1 / 15,
+    max_joins: int | None = None,
+    max_entries: int = 1 << 24,
 ) -> coo_matrix:
     """Join cells by the overlap of their neighbourhoods, as Seurat's SNN does.
 
     Each row of ``neighborhoods`` holds a cell's neighbourhood, the cell
     itself included as Seurat's ``FindNeighbors`` includes it, padded with
-    -1. Two cells are joined with the Jaccard index of their neighbourhoods:
-    the cells they share over the cells in either. For full rows of ``k``
-    cells this is Seurat's ``shared / (k + (k - shared))``. Joins below
-    ``prune`` are dropped, as Seurat's ``ComputeSNN`` drops them, and a cell
-    is not joined to itself.
+    -1. Two cells that share a neighbour are joined with the Jaccard index of
+    their neighbourhoods: the cells they share over the cells in either,
+    which for full rows of ``k`` cells is Seurat's
+    ``shared / (k + (k - shared))``. Joins below ``prune`` are dropped, as
+    Seurat's ``ComputeSNN`` drops them, and a cell is not joined to itself.
+
+    Cells that tie, such as cells with one profile, take the same few cells
+    as neighbours, and every pair of them shares those, so Seurat's graph
+    grows with the square of their number. A cell with more than
+    ``max_joins`` joins keeps only those to its neighbours and to the cells
+    whose neighbourhoods hold it, so the cells of a tie join the few they
+    share, which keeps them together; a pair stays joined when either cell
+    keeps it. The joins are computed for blocks of cells whose bounded joins
+    number at most ``max_entries``, which leaves them unchanged.
 
     Args:
         neighborhoods: Cells by neighbourhood slots, entries from -1 to the
             cells - 1, each cell at most once per row.
         prune: The smallest Jaccard index kept, in [0, 1].
+        max_joins: The most joins of a cell beyond its neighbour edges, or
+            None for no limit.
+        max_entries: The most candidate joins held at once.
 
     Returns:
         The joins, each pair once with its lower cell as the row, so that
         ``W + W^T`` is the symmetric graph.
 
     Raises:
-        ValueError: If the neighbourhoods are malformed or ``prune`` lies
-            outside [0, 1].
+        ValueError: If the neighbourhoods are malformed, ``prune`` lies
+            outside [0, 1], or ``max_joins`` or ``max_entries`` is below 1.
+        MemoryError: If one cell's candidate joins exceed ``max_entries``.
     """
     array = _checked_neighborhoods(neighborhoods)
     if not isinstance(prune, Real) or not 0 <= float(prune) <= 1:
         raise ValueError("prune must be a number in [0, 1]")
+    if max_joins is not None:
+        max_joins = integer_argument(max_joins, "max_joins", minimum=1)
+    max_entries = integer_argument(max_entries, "max_entries", minimum=1)
     n_cells, slots = array.shape
     valid = array >= 0
     rows = np.repeat(np.arange(n_cells, dtype=np.int64), slots)[valid.ravel()]
-    columns = array[valid]
     membership = csr_matrix(
-        (np.ones(len(rows), dtype=np.float64), (rows, columns)),
+        (np.ones(len(rows), dtype=np.float64), (rows, array[valid])),
         shape=(n_cells, n_cells),
     )
-    shared = (membership @ membership.T).tocoo()
-    del membership
-    upper = shared.row < shared.col
-    first = shared.row[upper].astype(np.int64)
-    second = shared.col[upper].astype(np.int64)
-    counts = shared.data[upper]
-    del shared, upper
+    held_by = membership.T.tocsr()
     sizes = valid.sum(axis=1).astype(np.float64)
-    jaccard = counts / (sizes[first] + sizes[second] - counts)
-    kept = jaccard >= float(prune)
+    # Each neighbour edge, as the sorted key of its lower and upper cell.
+    columns = array[valid]
+    others = rows != columns
+    neighbor_keys = np.unique(
+        np.minimum(rows[others], columns[others]) * n_cells
+        + np.maximum(rows[others], columns[others])
+    )
+    bounds = shared_neighbor_bounds(array)
+    if n_cells and int(bounds.max()) > max_entries:
+        cell = int(np.argmax(bounds))
+        raise MemoryError(
+            f"Cell {cell} may share neighbours with {int(bounds[cell])} cells, more "
+            f"than the {max_entries} joins that fit at once"
+        )
+    firsts: list[np.ndarray] = []
+    seconds: list[np.ndarray] = []
+    weights: list[np.ndarray] = []
+    start = 0
+    ends = np.cumsum(bounds)
+    while start < n_cells:
+        # The block's bounded joins fit max_entries.
+        base = ends[start - 1] if start else 0
+        stop = int(np.searchsorted(ends, base + max_entries, side="right"))
+        stop = max(stop, start + 1)
+        shared = (membership[start:stop] @ held_by).tocoo()
+        row = shared.row.astype(np.int64) + start
+        column = shared.col.astype(np.int64)
+        jaccard = shared.data / (sizes[row] + sizes[column] - shared.data)
+        kept = (jaccard >= float(prune)) & (row != column)
+        row, column, jaccard = row[kept], column[kept], jaccard[kept]
+        if max_joins is not None and len(row):
+            # A cell over the limit keeps its joins along neighbour edges.
+            joins = np.bincount(row - start, minlength=stop - start)
+            over = joins[row - start] > max_joins
+            if over.any():
+                keys = np.minimum(row, column) * n_cells + np.maximum(row, column)
+                along = np.zeros(len(row), dtype=bool)
+                at = np.searchsorted(neighbor_keys, keys[over])
+                inside = at < len(neighbor_keys)
+                inside[inside] = neighbor_keys[at[inside]] == keys[over][inside]
+                along[np.flatnonzero(over)] = inside
+                kept = ~over | along
+                row, column, jaccard = row[kept], column[kept], jaccard[kept]
+        firsts.append(np.minimum(row, column))
+        seconds.append(np.maximum(row, column))
+        weights.append(jaccard)
+        start = stop
+    first = np.concatenate(firsts) if firsts else np.empty(0, dtype=np.int64)
+    second = np.concatenate(seconds) if seconds else np.empty(0, dtype=np.int64)
+    weight = np.concatenate(weights) if weights else np.empty(0, dtype=np.float64)
+    # A pair that both cells keep is listed twice, with one Jaccard index.
+    keys, positions = np.unique(first * n_cells + second, return_index=True)
     return coo_matrix(
-        (jaccard[kept], (first[kept], second[kept])), shape=(n_cells, n_cells)
+        (weight[positions], (keys // max(n_cells, 1), keys % max(n_cells, 1))),
+        shape=(n_cells, n_cells),
     )
 
 

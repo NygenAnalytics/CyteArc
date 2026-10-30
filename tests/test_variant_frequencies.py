@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from scipy.sparse import coo_matrix
 
-from cytearc.neighbors.graph import shared_neighbor_entries, shared_neighbor_graph
+from cytearc.neighbors.graph import shared_neighbor_graph
 from cytearc.variants.counts import Contig, SiteTable
 from cytearc.variants.frequencies import (
     CLONE_STATUSES,
@@ -144,6 +144,7 @@ def test_neighbourhoods_of_small_inputs_and_bad_arguments() -> None:
 
 
 def _jaccard_by_sets(neighborhoods: np.ndarray) -> dict[tuple[int, int], float]:
+    """The Jaccard index of every pair of cells that share a neighbour."""
     sets = [set(row[row >= 0].tolist()) for row in neighborhoods]
     pairs = {}
     for first in range(len(sets)):
@@ -181,7 +182,38 @@ def test_shared_neighbour_graph_weighs_the_jaccard_index_of_neighbourhoods() -> 
     pruned = shared_neighbor_graph(neighborhoods)
     assert np.all(pruned.data >= 1 / 15)
     assert len(pruned.data) == sum(value >= 1 / 15 for value in expected.values())
-    assert shared_neighbor_entries(neighborhoods) >= 2 * len(expected) + 30
+    # Blocks of cells change nothing.
+    blocked = shared_neighbor_graph(neighborhoods, prune=0.0, max_entries=40)
+    assert sorted(zip(blocked.row, blocked.col, blocked.data, strict=True)) == sorted(
+        zip(graph.row, graph.col, graph.data, strict=True)
+    )
+    # A cell with more joins than the limit keeps those along neighbour
+    # edges; a pair stays when either cell keeps it.
+    capped = shared_neighbor_graph(neighborhoods, prune=0.0, max_joins=3)
+    kept = {(int(r), int(c)) for r, c in zip(capped.row, capped.col, strict=True)}
+    sets = [set(row[row >= 0].tolist()) for row in neighborhoods]
+    joins = {cell: [pair for pair in expected if cell in pair] for cell in range(30)}
+    for (first, second), _value in expected.items():
+        along = second in sets[first] or first in sets[second]
+        either_within = len(joins[first]) <= 3 or len(joins[second]) <= 3
+        assert ((first, second) in kept) == (along or either_within)
+    with pytest.raises(MemoryError, match="may share neighbours with"):
+        shared_neighbor_graph(neighborhoods, max_entries=3)
+
+
+def test_cells_that_tie_join_through_shared_neighbours_not_a_clique() -> None:
+    # 200 identical cells take the lowest positions as neighbours, so every
+    # pair shares them: Seurat's graph joins every pair, and the limit keeps
+    # each cell's joins to those few.
+    values = np.full((200, 3), 0.5)
+    neighborhoods = cosine_neighborhoods(values, n_neighbors=10, block_rows=50)
+    assert len(shared_neighbor_graph(neighborhoods).data) == 200 * 199 // 2
+    capped = shared_neighbor_graph(neighborhoods, max_joins=100)
+    assert len(capped.data) <= 200 * 9
+    called = frequency_clones(
+        values**2, n_neighbors=10, resolution=1.0, random_seed=1, memory_bytes=1 << 30
+    )
+    assert set(called.clusters.tolist()) == {1}
 
 
 def test_shared_neighbour_graph_refuses_malformed_neighbourhoods() -> None:
@@ -322,7 +354,7 @@ def test_frequency_clones_check_inputs_and_memory() -> None:
             n_neighbors=5,
             resolution=1.0,
             random_seed=1,
-            memory_bytes=30_000,
+            memory_bytes=40_000,
         )
 
 

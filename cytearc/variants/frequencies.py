@@ -12,8 +12,9 @@ frequencies as Signac's ``FindClonotypes`` does: each cell's neighbourhood
 is itself and the cells most similar to it by the cosine similarity of
 square-root allele frequencies; neighbourhoods give a shared-neighbour graph
 whose edges weigh the Jaccard index of two neighbourhoods, as Seurat's
-``FindNeighbors`` builds it; and the Leiden algorithm partitions the graph
-where Seurat uses SLM. The similarity of two cells counts only the variants
+``FindNeighbors`` builds it, except that a cell with more than ``k**2``
+joins, which only cells that tie reach, keeps its neighbour edges; and the
+Leiden algorithm partitions the graph where Seurat uses SLM. The similarity of two cells counts only the variants
 that both cover. Cells that cover no chosen variant, that show none, or
 that are similar to no other cell carry no evidence of a clone and get
 none. These functions never touch storage.
@@ -53,6 +54,12 @@ _SIMILARITY_DECIMALS = 12
 # neighbours are chosen: the products, the similarities, and the masks and
 # ranks of the selection.
 _BLOCK_ARRAYS = 8
+# Bytes of a kept join of the shared-neighbour graph (its cells, weight and
+# pair key, and their copies while joins are merged), and of a candidate
+# join while a block is computed (the product's entries, their cells,
+# Jaccard indices, masks and ranks).
+_JOIN_BYTES = 64
+_CANDIDATE_BYTES = 96
 
 
 def band_frequencies(
@@ -285,10 +292,13 @@ def frequency_clones(
 
     Within each group, each cell's neighbourhood holds itself and its most
     similar cells by :func:`cosine_neighborhoods` of the square roots of its
-    frequencies. Two cells are joined with the Jaccard index of their
-    neighbourhoods, the shared cells over the cells in either, and joins
-    below 1/15 are dropped, as in Seurat's ``FindNeighbors``. The Leiden
-    algorithm partitions each group's graph at ``resolution``. A cell
+    frequencies. Two cells that share a neighbour are joined with the Jaccard
+    index of their neighbourhoods, the shared cells over the cells in either,
+    and joins below 1/15 are dropped, as in Seurat's ``FindNeighbors``. A cell
+    with more than ``n_neighbors**2`` joins, which only cells that tie reach,
+    keeps its joins along neighbour edges, so the graph stays linear in the
+    cells. The Leiden algorithm partitions each group's graph at
+    ``resolution``. A cell
     without coverage of any variant, without an alternative allele at any
     covered variant, or without a join, gets no clone.
 
@@ -315,7 +325,7 @@ def frequency_clones(
     from scipy.sparse import coo_matrix
 
     from ..clustering.leiden import leiden_membership, native_leiden_peak_bytes
-    from ..neighbors.graph import shared_neighbor_entries, shared_neighbor_graph
+    from ..neighbors.graph import shared_neighbor_graph
 
     frequencies = np.asarray(frequencies, dtype=np.float64)
     if frequencies.ndim != 2:
@@ -357,17 +367,24 @@ def frequency_clones(
         neighborhoods = cosine_neighborhoods(
             values, n_neighbors=n_neighbors, block_rows=min(block_rows, len(members))
         )
-        entries = shared_neighbor_entries(neighborhoods)
-        # The shared counts, their Jaccard indices and the kept graph.
-        graph_bytes = 3 * 24 * entries + 16 * neighborhoods.size
-        if graph_bytes > memory_bytes:
+        # A cell with more than n_neighbors**2 joins, which only cells that
+        # tie reach, keeps its neighbour edges; candidate joins are computed in
+        # blocks that fit the budget left beside the kept joins.
+        max_joins = n_neighbors * n_neighbors
+        kept_bytes = _JOIN_BYTES * (max_joins + 2 * n_neighbors) * len(members)
+        room = memory_bytes - kept_bytes
+        if room < _CANDIDATE_BYTES * n_neighbors * n_neighbors:
             raise MemoryError(
-                f"The shared-neighbour graph of {len(members)} cells may hold "
-                f"{entries} entries, about {graph_bytes} bytes, more than the memory "
-                f"budget of {memory_bytes} bytes. Raise mem_budget, lower "
-                "n_neighbors, or call clones within smaller groups."
+                f"The shared-neighbour graph of {len(members)} cells takes about "
+                f"{kept_bytes} bytes, more than the memory budget of {memory_bytes} "
+                "bytes. Raise mem_budget, lower n_neighbors, or call clones within "
+                "smaller groups."
             )
-        graph = shared_neighbor_graph(neighborhoods)
+        graph = shared_neighbor_graph(
+            neighborhoods,
+            max_joins=max_joins,
+            max_entries=room // _CANDIDATE_BYTES,
+        )
         degree = np.bincount(graph.row, minlength=len(members)) + np.bincount(
             graph.col, minlength=len(members)
         )
