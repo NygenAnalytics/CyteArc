@@ -182,7 +182,7 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - Source: <https://github.com/scverse/scirpy>
 - Copyright (c) 2020 Gregor Sturm, Tamas Szabo, Francesca Finotello, and the Institute of Bioinformatics, Medical University of Innsbruck; Copyright (c) 2025 scverse®
 - License: BSD-3-Clause
-- Used in: `cytearc/repertoire/chains.py` (the receptor model of version 0.25.1: the loci of each receptor arm, the rules that make a contig a chain and rank a cell's chains into two slots per arm, the inference of a contig's locus from its gene calls, and the names and rules of the receptor types, subtypes and chain pairings of `index_chains` and `chain_qc`), reimplemented on encoded contigs.
+- Used in: `cytearc/repertoire/chains.py` (the receptor model of version 0.25.1: the loci of each receptor arm, the rules that make a contig a chain and rank a cell's chains into two slots per arm, the inference of a contig's locus from its gene calls, and the names and rules of the receptor types, subtypes and chain pairings of `index_chains` and `chain_qc`), reimplemented on encoded contigs, and `cytearc/repertoire/clonotypes.py` (the options and rules of `define_clonotypes` that decide which chains of two cells must match), reimplemented on encoded chains.
 
 ## Data in this repository
 

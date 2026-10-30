@@ -1,14 +1,14 @@
 ---
 myst:
   html_meta:
-    description: CyteArc repertoire API for single-cell T cell and B cell receptor data, with contigs imported from Cell Ranger and AIRR Rearrangement files and joined to cells by barcode prefix, suffix or pattern, the ranked chains of each cell, its receptor type, subtype and chain pairing, and the record of the imported receptors.
+    description: CyteArc repertoire API for single-cell T cell and B cell receptor data, with contigs imported from Cell Ranger and AIRR Rearrangement files and joined to cells by barcode prefix, suffix or pattern, the ranked chains of each cell, its receptor type, subtype and chain pairing, clonotypes of cells that share their receptor, and the records of the receptors and clonotypes.
 ---
 
 # Repertoire API reference
 
 Single-cell immune profiling reads the T cell receptor (TCR) or B cell receptor (BCR) of each cell beside its transcriptome. A V(D)J library, such as 10x Genomics Chromium Single Cell Immune Profiling, assembles each cell's receptor transcripts into contigs: one chain each, with its locus, its V, D, J and constant genes, and its junction, the CDR3 with the conserved cysteine and phenylalanine or tryptophan on either side. A T cell receptor pairs an alpha chain (TRA) with a beta chain (TRB), or a gamma chain (TRG) with a delta chain (TRD), and a B cell receptor pairs a heavy chain (IGH) with a kappa (IGK) or lambda (IGL) light chain. `cytearc.repertoire` holds the record of the imported receptors and the constants of the receptor model; contig fields keep their names in the AIRR Community's Rearrangement schema ([Vander Heiden et al. 2018](https://doi.org/10.3389/fimmu.2018.02206)).
 
-The steps run on a `DataStore` whose cells are the cells of the expression library. {meth}`ds.repertoire.import_receptors <cytearc.datastore.namespaces.RepertoireAccessor.import_receptors>` reads the contigs of those cells and saves an `immune_receptors` artifact, {meth}`ds.repertoire.load_receptors <cytearc.datastore.namespaces.RepertoireAccessor.load_receptors>` reads it as an {class}`~cytearc.repertoire.ImmuneReceptors` record, and {meth}`ds.plots.receptor_qc <cytearc.datastore.plot_accessor.DataStorePlotAccessor.receptor_qc>` plots the receptor types, chain pairings and chains per cell.
+The steps run on a `DataStore` whose cells are the cells of the expression library. {meth}`ds.repertoire.import_receptors <cytearc.datastore.namespaces.RepertoireAccessor.import_receptors>` reads the contigs of those cells and saves an `immune_receptors` artifact, {meth}`ds.repertoire.load_receptors <cytearc.datastore.namespaces.RepertoireAccessor.load_receptors>` reads it as an {class}`~cytearc.repertoire.ImmuneReceptors` record, and {meth}`ds.plots.receptor_qc <cytearc.datastore.plot_accessor.DataStorePlotAccessor.receptor_qc>` plots the receptor types, chain pairings and chains per cell. {meth}`ds.repertoire.clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.clonotypes>` groups the cells into clonotypes and saves a `clonotypes` artifact, which {meth}`ds.repertoire.load_clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.load_clonotypes>` reads as a {class}`~cytearc.repertoire.Clonotypes` record; the clone summaries that the {doc}`clones` describes measure clonotypes, each receptor type apart.
 
 ## Import contigs
 
@@ -77,8 +77,60 @@ On the public 10x Genomics run "Human PBMC from a Healthy Donor, 10k cells (v2)"
 
 `ds.plots.receptor_qc` draws cells by receptor type, cells by chain pairing, and cells by their number of chains of each arm, three or more sharing the last bar. Many `"orphan VDJ"` or `"orphan VJ"` cells point to chains lost in capture, and many `"multichain"` or `"ambiguous"` cells to doublets. `group_by` names a cell metadata column, such as the sample, and `groups` a cell-label artifact, such as a clustering, which may hold fewer cells than the receptors; either draws one stacked bar per group, of the fraction of its cells unless `normalize=False`. Its tables are `receptor_type`, `chain_pairing` and `chains_per_cell`.
 
+## Define clonotypes
+
+A clonotype groups the cells of one T or B cell clone, which share their receptor because they descend from one cell. `clonotypes` links two cells when the junctions of their chains are identical, as scirpy's `define_clonotypes` does, and takes the connected groups of these links as clonotypes, so a cell whose chains match two cells that do not match each other joins them. The options set which chains must agree:
+
+| Option | Values | Two cells are linked when |
+|---|---|---|
+| `sequence` | `"nt"`, the default, or `"aa"` | Their junctions are identical in nucleotides, or in amino acids |
+| `receptor_arms` | `"all"`, the default | Both arms agree, for cells with a primary chain in both; one arm agrees, for cells with one; a cell with both arms is never linked to a cell with one |
+| | `"any"` | Either arm agrees |
+| | `"VJ"`, `"VDJ"` | That arm agrees; cells without a chain of that arm have no clonotype |
+| `dual_ir` | `"any"`, the default | One chain of an arm matches one chain of the other cell's arm |
+| | `"all"` | The cells have the same number of chains in the arm and every chain matches, in either order |
+| | `"primary_only"` | The primary chains match; second chains are ignored |
+| `same_v_gene`, `same_j_gene` | `False`, the defaults, or `True` | Matched chains also share their V or J gene call |
+
+Cells of different receptor types never share a clonotype unless `within_receptor_type=False`, so the beta chain of an ambiguous cell does not join a T cell clonotype to its heavy chain's B cells, and `within` names cell metadata columns, such as the donor, whose labels keep clonotypes apart: identical receptors of two donors are public receptors, not one clone. Every cell with a receptor needs a label in the `within` columns. A cell without a receptor, or without a compared sequence among the chains that take part, has no clonotype.
+
+```python
+clonotypes = ds.repertoire.clonotypes(receptors)  # nucleotide junctions, both arms
+same_residues = ds.repertoire.clonotypes(receptors, sequence="aa", within="donor")
+table = ds.repertoire.load_clonotypes(clonotypes)
+table.clonotypes.head(10)  # the largest clonotypes with their chains
+ds.select_cells(clonotypes, value="clone_size", low=2, keep_bounds=True)  # expanded cells
+ds.plots.clone_abundance(clonotypes, group_by="sample")
+ds.clones.diversity(clonotypes, group_by="sample")  # each sample's T and B cells apart
+```
+
+Clonotypes are numbered by size: `clonotype_1` holds the most cells, and clonotypes of equal size follow their sorted chains, so the numbers do not depend on the order of the cells. The artifact's canonical `values` hold each cell's clonotype label, empty for a cell without one, which groupings and `select_cells` treat as missing and embeddings draw in the missing color; `clone_size` holds the cells of each cell's clonotype, 0 without one, and `codes` its number minus one, -1 without one. Defining clonotypes reads the chains of the receptors, not the contig files: a million cells of about two chains each take about 2 s and hold about 340 bytes per cell at the peak, and the memory budget must allow 1,000 bytes per cell, which leaves room for cells with more chains. The clonotypes record the receptors, the options and, with `within`, the cells' labels, so defining them again with the same values returns the saved clonotypes. In the record that `load_clonotypes` returns, each cell's `clonotype` is a pandas categorical whose categories are the clonotype labels in rank order.
+
+Each distinct combination of a cell's compared chains, its configuration, gets keys that the rules derive from its chains: under `"any"` one key per chain, under `"all"` the arm's sorted chains as one key, and with both arms required every combination of a VJ and a VDJ key. Two configurations are linked exactly when they share a key, and clonotypes are the connected components of the graph of configurations and keys, so the cost grows with the number of chains rather than the number of pairs of cells.
+
+On "Human PBMC from a Healthy Donor, 10k cells (v2)", 6,189 cells with a receptor, and "CD8+ T cells of Healthy Donor 1", 46,526 cells with a receptor, the clonotypes equal scirpy 0.25.1's `define_clonotype_clusters` with the identity metric, cell for cell, for ten combinations of the options: `"nt"` and `"aa"`, every value of `receptor_arms` and `dual_ir`, the V and J gene matches, and without receptor types. With `dual_ir="all"` they also equal the clone keys of scRepertoire 2.8.0's `combineTCR` for all 5,213 PBMC T cells (`CTnt` with `"nt"`, `CTaa` with `"aa"`, and `CTstrict` with `"nt"` and both gene matches), and Cell Ranger 3.0.2's clonotypes, sets of identical productive junctions, for all 46,342 T cells of donor 1. Cell Ranger 5.0.0 groups clonotypes with enclone, which also merges cells that lack a chain, and agrees for 5,155 of the 5,213 PBMC T cells. On one core, defining the clonotypes of donor 1 takes 0.2 s, where scirpy's `ir_dist` and `define_clonotype_clusters` take 3.9 s on the same cells.
+
+`load_clonotypes` returns a {class}`~cytearc.repertoire.Clonotypes` record. Its `cells` table holds each cell's `clonotype` and `clone_size`, and its `clonotypes` table one row per clonotype, largest first: `n_cells`, `fraction` (its share of the cells with a clonotype), `n_configurations`, its `receptor_type` and `within` labels, and the chains of its representative cell, the first cell of its most frequent configuration, slot by slot, such as `VDJ_1_junction_aa`, `VDJ_1_v_call` and `VJ_1_junction`.
+
+### Measure clonotypes as clones
+
+Clonotypes are clones to every clone summary that the {doc}`clones` describes. {meth}`ds.clones.load_clones <cytearc.datastore.namespaces.ClonesAccessor.load_clones>` reads them as a {class}`~cytearc.clones.Clones` record whose `cells` table also holds each cell's `receptor_type`, {meth}`ds.plots.clone_abundance <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clone_abundance>` draws their sizes, labelled by rank, and {meth}`ds.clones.expansion <cytearc.datastore.namespaces.ClonesAccessor.expansion>`, {meth}`ds.clones.diversity <cytearc.datastore.namespaces.ClonesAccessor.diversity>` and {meth}`ds.clones.rarefaction <cytearc.datastore.namespaces.ClonesAccessor.rarefaction>` measure them within groups of cells. Each summary measures each receptor type apart, since T cell and B cell repertoires are populations of their own: the receptor type joins the groups' key columns as `receptor_type`, so the T cells and B cells of a sample are two groups, named `"s1, TCR"` and `"s1, BCR"`, and without a grouping the groups are the receptor types. A clonotype of several receptor types, which only `within_receptor_type=False` can give, counts its cells of each type in that type's group. `group_by="receptor_type"` is refused, since the labels are kept apart already.
+
+```python
+expansion = ds.clones.expansion(clonotypes, group_by="sample")
+ds.clones.load_expansion(expansion).categories  # each sample's T and B cells
+ds.clones.rarefaction(clonotypes, group_by="sample")
+ds.clones.export_clones(clonotypes, "clonotypes.csv")  # CoSpar's clone table
+```
+
 ## Immune receptors
 
 ```{eval-rst}
 .. autoclass:: cytearc.repertoire.ImmuneReceptors
+```
+
+## Clonotypes
+
+```{eval-rst}
+.. autoclass:: cytearc.repertoire.Clonotypes
 ```
