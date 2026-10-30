@@ -13,12 +13,20 @@ if TYPE_CHECKING:
         Rarefaction as Rarefaction,
     )
     from .expansion import ClonalExpansion as ClonalExpansion
+    from .overlap import (
+        OVERLAP_INDICES as OVERLAP_INDICES,
+        CloneOverlap as CloneOverlap,
+        CloneTracking as CloneTracking,
+    )
 
 __all__ = [
     "MULTIPLE_POLICIES",
     "ORDERS",
+    "OVERLAP_INDICES",
     "ClonalDiversity",
     "ClonalExpansion",
+    "CloneOverlap",
+    "CloneTracking",
     "Clones",
     "Rarefaction",
 ]
@@ -28,8 +36,11 @@ __getattr__, __dir__ = _lazy_facade(
     {
         "MULTIPLE_POLICIES": ".assignments",
         "ORDERS": ".diversity",
+        "OVERLAP_INDICES": ".overlap",
         "ClonalDiversity": ".diversity",
         "ClonalExpansion": ".expansion",
+        "CloneOverlap": ".overlap",
+        "CloneTracking": ".overlap",
         "Clones": ".assignments",
         "Rarefaction": ".diversity",
     },

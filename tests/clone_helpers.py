@@ -1,7 +1,8 @@
 """Stores and checks shared by the tests of clones."""
 
 import shutil
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from math import sqrt
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -96,3 +97,28 @@ def import_truth_clones(
     selection = every_cell(store) if cell_selection is None else cell_selection
     with pytest.warns(UserWarning, match="match no selected cell"):
         return store.clones.import_clones(path, cell_selection=selection)
+
+
+def overlap_reference(x: Mapping[object, int], y: Mapping[object, int]) -> dict:
+    """The overlap indices of two groups, from each one's cells of each clone.
+
+    Set by set, as the published definitions read: ``shared`` counts the
+    clones of both groups, the presence indices compare the two sets of
+    clones, and the abundance indices weigh each clone by its cells.
+    """
+    shared = set(x) & set(y)
+    s1, s2, both = len(x), len(y), len(shared)
+    n1, n2 = sum(x.values()), sum(y.values())
+    dot = sum(x[c] * y[c] for c in shared)
+    q1, q2 = sum(v * v for v in x.values()), sum(v * v for v in y.values())
+    return {
+        "shared": both,
+        "jaccard": both / (s1 + s2 - both),
+        "sorensen": 2 * both / (s1 + s2),
+        "overlap": both / min(s1, s2),
+        "cosine": both / sqrt(s1 * s2),
+        "morisita_horn": 2 * dot / ((q1 / n1**2 + q2 / n2**2) * n1 * n2),
+        "abundance_cosine": dot / sqrt(q1 * q2),
+        "shared_fraction_1": sum(x[c] for c in shared) / n1,
+        "shared_fraction_2": sum(y[c] for c in shared) / n2,
+    }

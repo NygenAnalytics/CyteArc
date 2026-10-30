@@ -18,8 +18,12 @@ import pytest
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
-from tests.clone_helpers import import_truth_clones, write_truth_store
-from tests.clone_truth import N_CELLS, clone_truth
+from tests.clone_helpers import (
+    import_truth_clones,
+    overlap_reference,
+    write_truth_store,
+)
+from tests.clone_truth import N_CELLS, clone_truth, number_label
 from tests.storage_helpers import insert_nullable_cell_column
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
@@ -114,6 +118,35 @@ def test_rarefaction_reaches_each_samples_observed_diversity(source) -> None:
         assert rows.loc[2, "diversity"] == pytest.approx(1 / np.sum(shares**2))
 
 
+def test_overlap_compares_the_clones_that_samples_share(source) -> None:
+    result = source.store.clones.overlap(source.clones, group_by="sample")
+    by_sample = TRUTH.group_clone_cells(TRUTH.samples)
+    assert result.group_sizes[["sample", "cells", "clones"]].values.tolist() == [
+        [sample, sum(by_sample[sample].values()), len(by_sample[sample])]
+        for sample in SAMPLES
+    ]
+    (row,) = result.pairs.to_dict("records")
+    assert (row["group_1"], row["group_2"]) == SAMPLES
+    for column, value in overlap_reference(by_sample["d2"], by_sample["d4"]).items():
+        assert row[column] == pytest.approx(value, rel=1e-12)
+
+
+def test_track_follows_each_samples_largest_clones(source) -> None:
+    tracked = source.store.clones.track(source.clones, group_by="sample", top=2)
+    by_sample = TRUTH.group_clone_cells(TRUTH.samples)
+    # Each sample's two largest clones, ties to the larger clone overall.
+    chosen: set[int] = set()
+    for found in by_sample.values():
+        ranked = sorted(found.items(), key=lambda item: (-item[1], item[0]))
+        chosen |= {clone for clone, _cells in ranked[:2]}
+    assert tracked.tracked == tuple(number_label(clone) for clone in sorted(chosen))
+    assert tracked.cells[["clone", "sample", "cells"]].values.tolist() == [
+        [number_label(clone), sample, by_sample[sample].get(clone, 0)]
+        for clone in sorted(chosen)
+        for sample in SAMPLES
+    ]
+
+
 def test_summaries_keep_to_a_cell_selection(source) -> None:
     store = source.store
     d2 = TRUTH.samples == "d2"
@@ -130,6 +163,17 @@ def test_summaries_keep_to_a_cell_selection(source) -> None:
     np.testing.assert_array_equal(
         expansion.cells["group_clone_size"], TRUTH.cell_clone_sizes(cells=d2)[d2]
     )
+    by_type = TRUTH.group_clone_cells(TRUTH.cell_types, cells=d2)
+    overlap = store.clones.overlap(
+        source.clones, group_by="cell_type", cell_selection=selection
+    )
+    assert overlap.group_sizes["cells"].tolist() == [
+        sum(by_type[name].values()) for name in sorted(by_type)
+    ]
+    tracked = store.clones.track(source.clones, labels=["1"], cell_selection=selection)
+    assert tracked.cells[["clone", "cells"]].values.tolist() == [
+        ["1", TRUTH.group_clone_cells(cells=d2)[0][0]]
+    ]
 
 
 def test_summaries_refuse_a_grouping_that_leaves_out_every_clone(source) -> None:

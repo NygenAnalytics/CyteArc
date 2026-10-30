@@ -135,6 +135,21 @@ class CloneTruth:
             sizes.setdefault(group, []).append(size)
         return {group: sorted(found, reverse=True) for group, found in sizes.items()}
 
+    def group_clone_cells(
+        self, groups: np.ndarray | None = None, cells: np.ndarray | None = None
+    ) -> dict[object, dict[int, int]]:
+        """Each group's cells of each of its clones, counted cell by cell.
+
+        Returns:
+            The groups in sorted order, each with its clones by rank and their
+            cells in the group.
+        """
+        _pairs, counts = self._counted(groups, cells)
+        found: dict[object, dict[int, int]] = {}
+        for (group, clone), size in sorted(counts.items()):
+            found.setdefault(group, {})[clone] = size
+        return found
+
 
 def clone_truth(seed: int = 0) -> CloneTruth:
     """Draw a synthetic experiment with clones of the sizes in ``CLONE_SIZES``."""

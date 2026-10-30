@@ -618,6 +618,42 @@ class DataStorePlotAccessor:
         """Plot the rarefaction and extrapolation curves of groups of cells."""
         return self._forward(PlotResult, "clonal_rarefaction", locals())
 
+    def clonal_overlap(
+        self,
+        clones: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        cell_selection: ArtifactRef | None = None,
+        index: str = "morisita_horn",
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot an overlap index between every pair of groups as a heatmap."""
+        return self._forward(PlotResult, "clonal_overlap", locals())
+
+    def clone_tracking(
+        self,
+        clones: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        cell_selection: ArtifactRef | None = None,
+        top: int = 10,
+        labels: Sequence[str] | None = None,
+        order: Sequence[str] | None = None,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the share of cells of chosen clones across groups of cells."""
+        return self._forward(PlotResult, "clone_tracking", locals())
+
     def guide_calls(
         self,
         calls: ArtifactRef,
