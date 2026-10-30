@@ -20,11 +20,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from numba import njit
 
 from ..storage.geometry import array_geometry
 from ..utils.compute import pairwise_merge_tree
 from ..utils.moments import add_implicit_zeros, welford_add
+from ..utils.numba import njit
 from .normalization import library_size_divisors
 
 if TYPE_CHECKING:

@@ -33,10 +33,11 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 from scipy.special import gammaln
 
 from cytearc.perturbation.histograms import GuideCountHistograms
+from cytearc.utils.numba import njit
 
 __all__ = [
     "FIT_STATUSES",

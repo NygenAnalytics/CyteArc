@@ -17,7 +17,8 @@ call them choose how to hold and share them.
 import math
 
 import numpy as np
-from numba import njit
+
+from cytearc.utils.numba import njit
 
 __all__ = [
     "cholesky",

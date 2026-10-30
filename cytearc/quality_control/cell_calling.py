@@ -42,7 +42,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from numba import njit, prange
+from numba import prange
 from scipy import sparse
 from scipy.interpolate import make_smoothing_spline
 from scipy.optimize import brentq
@@ -50,6 +50,7 @@ from scipy.special import gammaln
 
 from ..utils.arguments import float_argument, integer_argument
 from ..utils.logging import logger
+from ..utils.numba import njit
 
 __all__ = [
     "BarcodeRanks",

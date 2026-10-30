@@ -5,12 +5,13 @@ import numpy as np
 from numba import (
     config,
     get_num_threads,
-    njit,
     prange,
     set_num_threads,
 )
 from scipy.sparse import csr_matrix, spmatrix
 from scipy.sparse.csgraph import connected_components
+
+from ..utils.numba import njit
 
 
 @dataclass(frozen=True)

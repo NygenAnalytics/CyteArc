@@ -38,7 +38,9 @@ Reference:
 """
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
+
+from ..utils.numba import njit
 
 # Counter-based random numbers. Fixed forever (see the module docstring).
 GOLDEN = np.uint64(0x9E3779B97F4A7C15)

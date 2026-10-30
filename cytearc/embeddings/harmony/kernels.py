@@ -14,7 +14,9 @@ References:
 import math
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
+
+from ...utils.numba import njit
 
 
 @njit(cache=True, nogil=True, parallel=True)

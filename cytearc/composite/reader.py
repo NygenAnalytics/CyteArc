@@ -8,10 +8,10 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import zarr
-from numba import njit
 
 from ..storage.geometry import ArrayGeometry, array_geometry
 from ..storage.virtual_arrays import AxisSelection
+from ..utils.numba import njit
 from .source_cache import _finish_io
 
 if TYPE_CHECKING:

@@ -25,10 +25,10 @@ from dataclasses import dataclass
 
 import numba
 import numpy as np
-from numba import njit, prange, set_num_threads
+from numba import prange, set_num_threads
 from scipy.interpolate import BSpline
 
-from ..utils.numba import restore_numba_threads
+from ..utils.numba import njit, restore_numba_threads
 
 __all__ = [
     "CURVE_FIT_BINS",

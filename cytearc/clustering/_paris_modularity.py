@@ -1,10 +1,10 @@
 from dataclasses import dataclass
 
 import numpy as np
-from numba import njit
 from scipy.sparse import csr_matrix
 
 from ..neighbors.graph import csr_symmetry_error
+from ..utils.numba import njit
 from ._paris_core import ParisHierarchy, canonicalize_paris_graph
 from .paris_multiscale import PlateauForest, _validate_hierarchy
 

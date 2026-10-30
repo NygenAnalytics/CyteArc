@@ -1,14 +1,22 @@
 import hashlib
 import importlib
+import inspect
 import os
 import threading
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from functools import cache, wraps
-from typing import IO, Any
+from pathlib import Path
+from typing import IO, TYPE_CHECKING, Any, overload
 
 from .logging import logger
+
+if TYPE_CHECKING:
+    from numba.core.dispatcher import Dispatcher
+
+# The directory of the cytearc package.
+_CYTEARC_DIR = Path(__file__).resolve().parent.parent
 
 
 def restore_numba_threads[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
@@ -25,6 +33,47 @@ def restore_numba_threads[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
             numba.set_num_threads(previous)
 
     return wrapped
+
+
+# Typed as numba.njit is, so each kernel keeps its function's signature.
+@overload
+def njit[F: Callable[..., Any]](function: F, /, **options: Any) -> "Dispatcher[F]": ...
+@overload
+def njit[F: Callable[..., Any]](**options: Any) -> "Callable[[F], Dispatcher[F]]": ...
+def njit(*args: Any, **options: Any) -> Any:
+    """Compile a CyteArc kernel with ``numba.njit``.
+
+    Use it as ``@njit`` or ``@njit(**options)``, with Numba's options. Numba
+    checks a cached kernel only against the file that defines it, although
+    the machine code also holds the kernels it calls and the constants it
+    reads from other files. With ``cache=True``, the kernel gets the cache of
+    :func:`enable_dispatcher_cache`, whose entries also hold CyteArc's version
+    and a digest of every CyteArc module that uses ``njit``, so a change to
+    any of those modules compiles the kernel again.
+
+    Kernels compile at their first call, so ``njit`` takes no signature. With
+    ``NUMBA_DISABLE_JIT`` set, it returns the Python function.
+    """
+    if len(args) > 1 or (args and not callable(args[0])):
+        raise TypeError(
+            "njit compiles a kernel at its first call and takes no signature: "
+            f"pass the kernel function or Numba's keyword options, not {args!r}"
+        )
+    cached = options.pop("cache", False)
+    if not isinstance(cached, bool):
+        raise TypeError(f"njit's cache option must be True or False; got {cached!r}")
+
+    def compile_kernel(function: Callable[..., Any]) -> Any:
+        import numba
+        from numba.core.dispatcher import Dispatcher
+
+        kernel = numba.njit(**options)(function)
+        # With NUMBA_DISABLE_JIT set, numba.njit returns the Python function.
+        if cached and isinstance(kernel, Dispatcher):
+            kernel._cache = _kernel_cache_class()(kernel)
+        return kernel
+
+    return compile_kernel(args[0]) if args else compile_kernel
 
 
 _CACHE_LOCK = threading.Lock()
@@ -52,6 +101,12 @@ def enable_dispatcher_cache(*dispatchers: object) -> None:
     such as umap-learn's serial and parallel layout epochs, never load each
     other's machine code, even when processes compile them at the same time.
 
+    Numba checks a cache entry only against the file that defines the
+    function, although the machine code also holds the kernels it calls and
+    the constants it reads from other files. These caches also stamp each
+    entry with a digest of every Python file of the package that defines the
+    function, so a change to any of those files compiles it again.
+
     Caching never fails a computation. A dispatcher for which Numba finds no
     writable cache directory, as when ``NUMBA_CACHE_DIR`` is unset and neither
     the package's directory nor the user's cache directory is writable, stays
@@ -65,7 +120,7 @@ def enable_dispatcher_cache(*dispatchers: object) -> None:
         from numba.core.caching import NullCache
         from numba.core.dispatcher import Dispatcher
 
-        cache_class = _option_keyed_cache_class()
+        cache_class = _kernel_cache_class()
     except Exception as error:
         logger.debug(f"Numba dispatchers stay uncached: {error}")
         return
@@ -94,12 +149,15 @@ def _function_name(function: Any) -> str:
 
 
 @cache
-def _option_keyed_cache_class() -> type[Any]:
-    """Return a Numba function cache with its own files for each set of
-    target options."""
+def _kernel_cache_class() -> type[Any]:
+    """Return the Numba function cache of every kernel that CyteArc caches.
+
+    Each set of target options keeps its own files, and each index is stamped
+    with the build token of the package that defines the kernel.
+    """
     from numba.core.caching import FunctionCache, IndexDataCacheFile
 
-    class OptionKeyedFunctionCache(FunctionCache):
+    class KernelCache(FunctionCache):
         def __init__(self, dispatcher: Any) -> None:
             self._label = _function_name(dispatcher.py_func)
             self._target_options = repr(sorted(dispatcher.targetoptions.items()))
@@ -113,7 +171,13 @@ def _option_keyed_cache_class() -> type[Any]:
             self._cache_file = IndexDataCacheFile(
                 cache_path=self._cache_path,
                 filename_base=f"{self._impl.filename_base}-{digest}",
-                source_stamp=self._impl.locator.get_source_stamp(),
+                # Numba loads an entry only while the index holds this stamp,
+                # and its own stamp covers only the file that defines the
+                # kernel, so the stamp adds the build token.
+                source_stamp=(
+                    self._impl.locator.get_source_stamp(),
+                    *_build_token(dispatcher.py_func),
+                ),
             )
 
         def _index_key(self, sig: Any, codegen: Any) -> tuple[Any, ...]:
@@ -143,7 +207,80 @@ def _option_keyed_cache_class() -> type[Any]:
                     f"process compiles it again: {error}"
                 )
 
-    return OptionKeyedFunctionCache
+    return KernelCache
+
+
+def _build_token(function: Callable[..., Any]) -> tuple[str, ...]:
+    """Return the build token of a kernel compiled from ``function``: values
+    that change whenever the source that its machine code holds may change.
+
+    For CyteArc's kernels, these are CyteArc's version and a digest of every
+    CyteArc module that uses ``njit``. For another package's kernels, which
+    nobody edits, the token is a digest of every Python file of the package.
+    """
+    path = Path(inspect.getfile(function)).resolve()
+    if path.is_relative_to(_CYTEARC_DIR):
+        return _cytearc_build_token()
+    return (_package_digest(_outermost_package(path)),)
+
+
+@cache
+def _cytearc_build_token() -> tuple[str, str]:
+    """Return CyteArc's version and a digest of its modules that use ``njit``.
+
+    Every file that a kernel's machine code depends on uses ``njit``, as
+    ``tests/test_numba_dispatcher_cache.py`` checks, so editing any other
+    module compiles no kernel again. The version also covers a release whose
+    kernel modules are unchanged; an editable install keeps the version that
+    it was installed with while its sources change.
+    """
+    from .. import __version__
+
+    return __version__, _source_digest(_kernel_module_sources(_CYTEARC_DIR))
+
+
+def _kernel_module_sources(directory: Path) -> dict[str, bytes]:
+    """Return the source of each module under ``directory`` that uses
+    ``njit``, by its path relative to ``directory``."""
+    sources = {}
+    for path in directory.rglob("*.py"):
+        source = path.read_bytes()
+        if b"njit" in source:
+            sources[path.relative_to(directory).as_posix()] = source
+    return sources
+
+
+@cache
+def _package_digest(location: Path) -> str:
+    """Return a digest of every Python file of the package directory
+    ``location``, or of ``location`` itself, a module outside any package."""
+    if location.is_dir():
+        directory, files = location, list(location.rglob("*.py"))
+    else:
+        directory, files = location.parent, [location]
+    return _source_digest(
+        {path.relative_to(directory).as_posix(): path.read_bytes() for path in files}
+    )
+
+
+def _outermost_package(path: Path) -> Path:
+    """Return the outermost package directory that holds the module at
+    ``path``, or ``path`` for a module outside any package."""
+    package = path
+    while (package.parent / "__init__.py").is_file():
+        package = package.parent
+    return package
+
+
+def _source_digest(sources: Mapping[str, bytes]) -> str:
+    """Return the SHA-256 digest of source files given by their relative paths."""
+    digest = hashlib.sha256()
+    for name in sorted(sources):
+        for part in (name.encode(), sources[name]):
+            # Each part's length keeps different files from giving one stream.
+            digest.update(len(part).to_bytes(8, "little"))
+            digest.update(part)
+    return digest.hexdigest()
 
 
 # Each Numba cache directory holds this lock file beside its index and data

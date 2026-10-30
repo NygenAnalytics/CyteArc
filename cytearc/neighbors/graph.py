@@ -2,11 +2,11 @@ from dataclasses import dataclass
 from numbers import Real
 
 import numpy as np
-from numba import jit, njit, prange
+from numba import prange
 from scipy.sparse import coo_matrix, csr_matrix
 
 from ..utils.arguments import integer_argument
-from ..utils.numba import enable_dispatcher_cache, import_umap
+from ..utils.numba import enable_dispatcher_cache, import_umap, njit
 from ..utils.progress import iter_progress
 
 # Python objects a graph load or a connectivity conversion holds whatever the
@@ -323,7 +323,7 @@ def _count_shared_neighbors(indices: np.ndarray, out: np.ndarray) -> None:
     _count_sorted_shared_neighbors(indices, ordered, out)
 
 
-@jit(nopython=True, cache=True)
+@njit(cache=True)
 def calc_snn(indices: np.ndarray) -> np.ndarray:
     """Calculate shared-neighbor fractions for a KNN index matrix."""
     ncells, nk = indices.shape

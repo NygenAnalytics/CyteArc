@@ -34,11 +34,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from numba import njit
 from scipy.stats import false_discovery_control
 
 from cytearc.perturbation.efficiency import rows_setting
 from cytearc.utils.arguments import integer_argument
+from cytearc.utils.numba import njit
 
 __all__ = [
     "EDISTANCE_STATUSES",

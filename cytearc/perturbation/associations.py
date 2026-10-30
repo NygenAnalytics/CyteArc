@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 import numba
 import numpy as np
 import pandas as pd
-from numba import njit, prange
+from numba import prange
 from scipy import stats
 
 from cytearc.perturbation.efficiency import id_column_setting
@@ -58,6 +58,7 @@ from cytearc.perturbation.random_sets import (
     resampling_keys,
 )
 from cytearc.utils.arguments import float_argument, integer_argument
+from cytearc.utils.numba import njit
 
 __all__ = [
     "ASSOCIATION_SETS",

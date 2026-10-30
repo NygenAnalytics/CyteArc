@@ -27,9 +27,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 from scipy import sparse
 
+from ..utils.numba import njit
 from ._leiden_primitives import (
     FLOAT_SUM_BLOCK,
     PARALLEL_MIN_ITEMS,

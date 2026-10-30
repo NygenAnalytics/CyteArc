@@ -13,10 +13,11 @@ value for it.
 from dataclasses import dataclass
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 from scipy.sparse import csc_matrix, csr_matrix
 
 from ...utils.arguments import float_argument, integer_argument
+from ...utils.numba import njit
 
 __all__ = [
     "ChromvarModel",

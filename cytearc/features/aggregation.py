@@ -12,7 +12,7 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 import zarr
-from numba import njit, prange
+from numba import prange
 from numpy.typing import NDArray
 
 from ..assay import Assay, RNAassay, lib_size_feature_stream_eligible
@@ -25,6 +25,7 @@ from ..storage.feature_stream import FeatureCellBand, map_feature_cell_bands
 from ..storage.geometry import array_geometry
 from ..storage.io_policy import DEFAULT_STORAGE_IO_POLICY, StorageIoPolicy
 from ..utils.arguments import integer_argument
+from ..utils.numba import njit
 
 BULK_AGGREGATIONS = ("mean", "sum")
 BULK_FEATURE_LABELS = ("index", "id", "name")

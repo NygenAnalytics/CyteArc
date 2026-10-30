@@ -14,17 +14,15 @@ squared sums.
 
 Kernels over sparse values update a running mean and ``m2`` over the stored
 values with ``welford_add`` and then add the implicit zeros with
-``add_implicit_zeros``. Numba caches a kernel together with the helpers it
-calls and does not notice a change to a helper defined in another file, so
-after changing these helpers, delete the Numba caches of the kernels that
-call them (the ``*.nbi`` and ``*.nbc`` files under ``__pycache__``).
+``add_implicit_zeros``.
 """
 
 from dataclasses import dataclass
 
 import numpy as np
-from numba import njit
 from numpy.typing import NDArray
+
+from .numba import njit
 
 __all__ = [
     "ColumnMoments",

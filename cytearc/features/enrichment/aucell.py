@@ -1,11 +1,12 @@
 from dataclasses import dataclass
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 from numpy.typing import NDArray
 
 from ...utils.arrays import read_only_copy
 from ...utils.count_values import is_real_count_dtype
+from ...utils.numba import njit
 from .net import PreparedNetwork
 
 __all__ = [

@@ -1,7 +1,8 @@
 """Compiled per-row digests and totals for dense count blocks."""
 
 import numpy as np
-from numba import njit
+
+from .numba import njit
 
 _M1 = np.uint64(0xBF58476D1CE4E5B9)
 _M2 = np.uint64(0x94D049BB133111EB)

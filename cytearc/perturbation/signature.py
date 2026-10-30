@@ -26,9 +26,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from numba import njit, prange
+from numba import prange
 
 from cytearc.utils.arguments import float_argument, integer_argument
+from cytearc.utils.numba import njit
 
 __all__ = [
     "PerturbationSignature",

@@ -2,10 +2,10 @@ from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
-from numba import jit
 from scipy.sparse import coo_matrix, csc_matrix
 
 from ...utils.logging import logger
+from ...utils.numba import njit
 from .sequence import parse_coordinate_ids
 
 __all__ = [
@@ -34,7 +34,7 @@ def create_bed_from_coord_ids(ids: Iterable[str]) -> pd.DataFrame:
     return df.sort_values(by=[0, 1])
 
 
-@jit(nopython=True, cache=True)
+@njit(cache=True)
 def binary_search(ranges: np.ndarray, queries: np.ndarray) -> np.ndarray:
     """Find the positions of the ranges that each query interval overlaps.
 

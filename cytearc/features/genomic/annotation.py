@@ -9,9 +9,9 @@ from urllib.parse import unquote
 
 import numpy as np
 import pandas as pd
-from numba import njit
 
 from ...utils.arguments import integer_argument
+from ...utils.numba import njit
 from .sequence import parse_coordinate_ids
 
 __all__ = [

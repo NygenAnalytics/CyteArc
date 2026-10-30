@@ -33,8 +33,9 @@ References:
 """
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 
+from ..utils.numba import njit
 from ._leiden_primitives import (
     WORKER_BLOCK,
     acc_add,
