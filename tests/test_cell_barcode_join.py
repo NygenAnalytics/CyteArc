@@ -525,7 +525,10 @@ def test_the_join_refuses_repeated_cell_ids_and_budgets_too_small() -> None:
             np.asarray(["a"] * 0 + ["a", "b", "c"]), memory_bytes=500, held_bytes=300
         )
     join = CellBarcodeJoin(np.asarray(["a"]), memory_bytes=200)
-    with pytest.raises(MemoryError, match="Check barcode_prefix and cell_selection"):
+    with pytest.raises(
+        MemoryError,
+        match="Check barcode_prefix, barcode_suffix, barcode_pattern and cell_selection",
+    ):
         join.cells(
             _plain(), np.asarray([f"x{index}" for index in range(20)], dtype=object)
         )

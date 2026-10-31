@@ -400,11 +400,17 @@ def test_files_that_share_a_namespace_are_refused(shared, tmp_path) -> None:
     write_trex(TRUTH, first / "clones.txt", cells=TRUTH.samples == "d2")
     write_trex(TRUTH, second / "clones.txt", cells=TRUTH.samples == "d4")
 
-    with pytest.raises(ValueError, match="share the namespace 'clones_'"):
+    # Files named alike are renamed; a prefix would change the cells they name.
+    with pytest.raises(
+        ValueError,
+        match="share the namespace 'clones_' .* rename one of the files so",
+    ):
         shared.store.clones.import_clones(
             [first / "clones.txt", second / "clones.txt"], cell_selection=shared.cells
         )
-    with pytest.raises(ValueError, match="share the namespace 's1'"):
+    with pytest.raises(
+        ValueError, match="share the namespace 's1' .* give each file its own"
+    ):
         shared.store.clones.import_clones(
             [first / "clones.txt", second / "clones.txt"],
             cell_selection=shared.cells,

@@ -126,11 +126,18 @@ def _namespaces(files: Sequence[BarcodeFile]) -> list[str | None]:
     for file, namespace in zip(files, namespaces, strict=True):
         other = seen.setdefault(namespace, file)
         if other is not file:
+            # A file's name namespaces its labels only without a prefix, and a
+            # prefix also changes the cells that its barcodes name.
+            remedy = (
+                "give each file its own barcode_prefix"
+                if file.barcode_prefix is not None
+                else "rename one of the files so their names differ before the "
+                "first '.'"
+            )
             raise ValueError(
                 f"The clone files {os.fspath(other.path)!r} and "
                 f"{os.fspath(file.path)!r} share the namespace {namespace!r} of "
-                "their clone labels, so equal clone IDs would merge; give each "
-                "file its own barcode_prefix"
+                f"their clone labels, so equal clone IDs would merge; {remedy}"
             )
     return list(namespaces)
 

@@ -346,8 +346,9 @@ class CellBarcodeJoin:
                 raise MemoryError(
                     "Counting the distinct barcodes that match no selected cell "
                     f"holds about {held} bytes, more than the memory budget of "
-                    f"{self._memory_bytes} bytes. Check barcode_prefix and "
-                    "cell_selection, or raise mem_budget."
+                    f"{self._memory_bytes} bytes. Check barcode_prefix, "
+                    "barcode_suffix, barcode_pattern and cell_selection, or raise "
+                    "mem_budget."
                 )
             self._unmatched = sorted_unique(np.concatenate([self._unmatched, hashes]))
             if len(self._examples) < UNMATCHED_EXAMPLES:
