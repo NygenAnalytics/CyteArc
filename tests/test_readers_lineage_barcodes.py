@@ -1564,3 +1564,11 @@ def test_a_fatemap_table_without_a_header_names_its_short_row(tmp_path) -> None:
     assert (layout.format, layout.level) == ("fatemap", "molecules")
     with pytest.raises(ValueError, match="without BC50StarcodeD8 on line 2"):
         _rows(layout, 10)
+
+
+def test_a_gzip_file_of_no_text_is_refused_as_empty(tmp_path) -> None:
+    # Its bytes are a gzip header, but it holds no line to recognise.
+    path = tmp_path / "molecules.txt.gz"
+    path.write_bytes(gzip.compress(b""))
+    with pytest.raises(ValueError, match="is empty; a barcode table needs a header"):
+        barcode_layout(path)

@@ -474,3 +474,8 @@ def test_keys_listed_twice_in_many_parts_are_counted_at_once() -> None:
     began = time.perf_counter()
     assert repeated_keys(parts) == 500_000
     assert time.perf_counter() - began < 30
+
+
+def test_pair_keys_need_a_second_text_for_each_first() -> None:
+    with pytest.raises(ValueError, match="Each pair needs two texts"):
+        pair_keys(["AAAC", "CCCG"], ["TT"])

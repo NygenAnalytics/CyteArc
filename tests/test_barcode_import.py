@@ -1363,3 +1363,41 @@ def test_the_join_s_unmatched_barcodes_count_beside_the_records(
             barcode_suffix="-1",
         )
     assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []
+
+
+def test_the_lookup_of_the_selected_cells_counts_as_the_records_grow(
+    tmp_path, monkeypatch
+) -> None:
+    from cytearc.clones import barcodes as barcodes_module
+    from cytearc.datastore._operations import lineage_barcodes as operations
+    from cytearc.datastore._operations.cell_barcodes import LOOKUP_BYTES_PER_CELL
+
+    # 2,000 selected cells, whose lookup outweighs a chunk of a small file.
+    cell_ids = np.asarray([f"C{index:05d}-1" for index in range(2_000)])
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((2_000, 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=cell_ids,
+    )
+    store = open_clone_store(tmp_path / "store.zarr")
+    path = tmp_path / "counts.tsv"
+    path.write_text(
+        "gene\tcell\tcount\n"
+        + "".join(f"LB{row % 3}\tC{row:05d}-1\t2\n" for row in range(20))
+    )
+    budget = 4 * 2**20
+    lookup = (LOOKUP_BYTES_PER_CELL + operations._CELL_BYTES) * len(cell_ids)
+    monkeypatch.setattr(store, "memoryBytes", budget)
+    # Once rows arrive, the records fill what the lookup leaves of the budget.
+    monkeypatch.setattr(
+        barcodes_module.BarcodeCounter,
+        "peak_bytes",
+        property(lambda self: budget - lookup + 1 if self.n_rows else 0),
+    )
+    store.cells.insert("every_cell", np.ones(len(cell_ids), dtype=bool))
+    with pytest.raises(MemoryError, match="Raise mem_budget"):
+        store.clones.import_barcodes(
+            path, cell_selection=store.snapshot_cell_selection("every_cell")
+        )
+    assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []
