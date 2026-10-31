@@ -23,7 +23,7 @@ from cytearc.perturbation.clusters import (
     profile_distances,
 )
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
-from tests.perturbation_helpers import fixed_labels, write_screen
+from tests.perturbation_helpers import fixed_labels, open_store, write_screen
 
 
 def _planted(seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
@@ -216,7 +216,9 @@ def test_the_memory_estimate_bounds_the_clusterings_peak() -> None:
     }
     # The first call imports and compiles what the layout needs.
     cluster_profiles(rng.normal(size=(20, 10)), **settings)
-    for shape in ((600, 40), (150, 900)):
+    # Below 12 perturbations, the randomized PCA's matrices of features x 12
+    # outweigh the profiles, which the estimate once left out.
+    for shape in ((600, 40), (150, 900), (6, 4000), (3, 4000)):
         values = rng.normal(size=shape)
         tracemalloc.start()
         try:
@@ -436,7 +438,7 @@ def test_cluster_refuses_arguments_it_cannot_use(
         shared.store.perturbation.cluster(shared.profiles, **arguments)
 
 
-def test_cluster_refuses_inputs_and_budgets_it_cannot_use(shared, monkeypatch) -> None:
+def test_cluster_refuses_inputs_and_budgets_it_cannot_use(shared) -> None:
     store, profiles = shared.store, shared.profiles
     clusters = store.perturbation.cluster(profiles, min_cluster_size=3)
     with pytest.raises(TypeError, match="profiles must be an ArtifactRef"):
@@ -448,8 +450,8 @@ def test_cluster_refuses_inputs_and_budgets_it_cannot_use(shared, monkeypatch) -
     with pytest.raises(ValueError, match="not 'perturbation_profiles'"):
         store.perturbation.load_clusters(profiles)
     # The clustering takes about 30 kB, and the distances on loading 12 kB.
-    monkeypatch.setattr(store, "memoryBytes", 10_000)
+    budgeted = open_store(store.zarr_loc, mem_budget=10_000)
     with pytest.raises(MemoryError, match="Clustering 12 perturbations in 40"):
-        store.perturbation.cluster(profiles, min_cluster_size=6)
+        budgeted.perturbation.cluster(profiles, min_cluster_size=6)
     with pytest.raises(MemoryError, match="distances between 12 profiles"):
-        store.perturbation.load_clusters(clusters)
+        budgeted.perturbation.load_clusters(clusters)

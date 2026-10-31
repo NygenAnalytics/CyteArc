@@ -55,8 +55,10 @@ from cytearc.utils.logging import logger
 from tests.perturbation_helpers import (
     dense_pair,
     fixed_labels,
+    open_store,
     record_cell_reads,
     size_root,
+    smallest_budget,
     use_python_kernels,
     write_screen,
 )
@@ -1786,15 +1788,13 @@ def test_association_reads_leave_room_for_the_held_counts(shared, monkeypatch) -
     assert held[1] - reads[0][1] == 4 * 540 * N_OPERATION_GENES
 
 
-def test_associations_refuse_a_budget_without_room_for_one_feature(
-    shared, monkeypatch
-) -> None:
+def test_associations_refuse_a_budget_without_room_for_one_feature(shared) -> None:
     store, labels = shared.store, shared.labels
     # The second round's random sets of the 150 cells of a group fill it.
-    monkeypatch.setattr(store, "memoryBytes", 8_000_000)
+    budgeted = open_store(store.zarr_loc, mem_budget=8_000_000)
 
     with pytest.raises(MemoryError, match="one feature over 540 tested cells"):
-        store.perturbation.associations(
+        budgeted.perturbation.associations(
             labels, features=_every_gene(store), n_resamples=(200, 1000, 100_000)
         )
 
@@ -1809,33 +1809,70 @@ def _needed_budget(refusal: pytest.ExceptionInfo[MemoryError]) -> int:
     return int(found.group(1))
 
 
-def test_association_refusals_name_the_budget_that_runs_the_tests(
-    shared, monkeypatch
-) -> None:
+def test_association_refusals_name_the_budget_that_runs_the_tests(shared) -> None:
     store, labels = shared.store, shared.labels
     features = _every_gene(store)
     arguments = {"features": features, "invalidate_cache": True, **FAST}
     default = store.perturbation.load_associations(
         store.perturbation.associations(labels, **arguments)
     )
+
+    def run(budgeted: DataStore) -> ArtifactRef:
+        return budgeted.perturbation.associations(labels, **arguments)
+
     # The tests hold far more than this budget, the pairs' arrays alone.
-    monkeypatch.setattr(store, "memoryBytes", 1000)
     with pytest.raises(MemoryError, match="one feature over 540 tested cells") as low:
-        store.perturbation.associations(labels, **arguments)
+        run(open_store(store.zarr_loc, nthreads=2, mem_budget=1000))
     needed = _needed_budget(low)
 
     # A budget one byte short asks for the same budget, which runs the tests
-    # with the results of the default budget.
-    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    # with the results of the default budget; the wide count chunk below
+    # checks the traced peak.
     with pytest.raises(MemoryError) as short:
-        store.perturbation.associations(labels, **arguments)
+        run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed - 1))
     assert _needed_budget(short) == needed
-    monkeypatch.setattr(store, "memoryBytes", needed)
     tight = store.perturbation.load_associations(
-        store.perturbation.associations(labels, **arguments)
+        run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed))
     )
     for name in ("discovery", "calibration", "positive"):
         pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
+
+
+@pytest.mark.slow
+def test_association_refusals_count_the_read_of_a_wide_count_chunk(tmp_path) -> None:
+    # 1,000 more genes widen the stored chunk of counts, which a read of one
+    # gene decodes whole, beyond the slack of the tests' other arrays; the
+    # tests take the first 5 genes, without calibration pairs.
+    rng = np.random.default_rng(23)
+    wide = np.concatenate(
+        [OPERATION_RNA, rng.poisson(2.0, size=(len(OPERATION_RNA), 1000))], axis=1
+    ).astype(np.uint16)
+    store = _operation_store(tmp_path, rna=wide)
+    labels = fixed_labels(store, ["NT"])
+    arguments = {
+        "features": store.features.snapshot(feature_indexes=np.arange(5)),
+        "n_calibration_pairs": 0,
+        "invalidate_cache": True,
+        **FAST,
+    }
+    default = store.perturbation.load_associations(
+        store.perturbation.associations(labels, **arguments)
+    )
+
+    def run(budgeted: DataStore) -> ArtifactRef:
+        return budgeted.perturbation.associations(labels, **arguments)
+
+    needed, tests, peak = smallest_budget(store.zarr_loc, run)
+
+    # The named budget runs the tests within it; it once left out the read,
+    # which then failed in the stream planner.
+    assert peak <= needed
+    tight = store.perturbation.load_associations(tests)
+    for name in ("discovery", "positive"):
+        pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
+    with pytest.raises(MemoryError) as short:
+        run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed - 1))
+    assert _needed_budget(short) == needed
 
 
 def test_loading_associations_checks_the_memory_budget(shared, monkeypatch) -> None:
@@ -1844,11 +1881,11 @@ def test_loading_associations_checks_the_memory_budget(shared, monkeypatch) -> N
     loaded = store.perturbation.load_associations(tests)
     n_pairs = sum(len(getattr(loaded, name)) for name in ASSOCIATION_SETS)
 
-    monkeypatch.setattr(store, "memoryBytes", 1000)
+    budgeted = open_store(store.zarr_loc, mem_budget=1000)
     with pytest.raises(
         MemoryError, match=f"^The association tests of {n_pairs} pairs hold about"
     ):
-        store.perturbation.load_associations(tests)
+        budgeted.perturbation.load_associations(tests)
 
 
 def test_associations_plan_only_the_calibration_pairs_a_check_can_draw(
@@ -1871,12 +1908,14 @@ def test_associations_plan_only_the_calibration_pairs_a_check_can_draw(
     # pairs fit in 214 MiB, which 244 pairs, with as many calibration pairs as
     # discovery pairs, would not.
     monkeypatch.setattr(perturbation_operations, "_ASSOCIATION_PAIR_BYTES", mib)
-    monkeypatch.setattr(store, "memoryBytes", 183 * mib)
     with pytest.raises(MemoryError, match="one feature over"):
-        store.perturbation.associations(**arguments)
+        open_store(store.zarr_loc, mem_budget=183 * mib).perturbation.associations(
+            **arguments
+        )
 
-    monkeypatch.setattr(store, "memoryBytes", 214 * mib)
-    tests = store.perturbation.associations(**arguments)
+    tests = open_store(store.zarr_loc, mem_budget=214 * mib).perturbation.associations(
+        **arguments
+    )
 
     result = store.perturbation.load_associations(tests)
     assert (len(result.discovery), len(result.positive)) == (120, 4)

@@ -44,7 +44,9 @@ from .perturbation_store import (
     _BAND_BYTES,
     _LabelRows,
     _cell_samples,
+    _count_bands,
     _count_blocks,
+    _count_stream_bytes,
     _label_groups,
     _label_rows,
     _pairs_fingerprint,
@@ -895,9 +897,18 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         )
         # The least that the tests hold: one thread's random sets, the second
         # round's statistics and one working copy no larger than them, and
-        # one feature's counts.
+        # one feature's counts; or, while those counts are read, their
+        # stream.
         least_statistics = 8 * n_resamples[1]
-        needed = resident + scratch + one_set + 2 * least_statistics + per_feature
+        stream = _count_stream_bytes(
+            expression, checked[:1], tested_cells, scratch_bytes_per_row=8
+        )
+        needed = (
+            resident
+            + scratch
+            + per_feature
+            + max(one_set + 2 * least_statistics, stream)
+        )
         _require_budget(
             needed,
             self.memoryBytes,
@@ -917,10 +928,14 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         # most a share of the memory left, so that the reads keep the rest;
         # otherwise the tests read them again.
         held_bytes = 4 * n_tested * len(checked)
-        hold = held_bytes <= _ASSOCIATION_HELD_SHARE * free
+        hold = (
+            held_bytes <= _ASSOCIATION_HELD_SHARE * free
+            and self.memoryBytes - resident - scratch - held_bytes
+            >= per_feature + stream
+        )
         self._require_writable(operation)
         # The reads keep clear of the held counts, which fill as they go.
-        counts_of = self._band_reader(
+        counts_of, bands_of = self._band_reader(
             expression,
             tested_cells,
             resident + scratch + (held_bytes if hold else 0),
@@ -933,9 +948,9 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             held = np.empty((len(checked), n_tested), dtype=np.float32)
         detected = np.zeros((n_units, len(checked)), dtype=np.int32)
         with numba_threads(self.nthreads):
-            for start in range(0, len(checked), width):
-                band = checked[start : start + width]
-                detected[:, start : start + len(band)] = nonzero_counts(
+            for start, stop in bands_of(checked, width):
+                band = checked[start:stop]
+                detected[:, start:stop] = nonzero_counts(
                     counts_of(
                         band,
                         np.empty((len(band), n_tested), dtype=np.float32)
@@ -994,7 +1009,13 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         # of features at a time, read again.
         with numba_threads(self.nthreads):
             pair_values, stage = self._test_bands(
-                pairs, None if hold else width, held, checked, counts_of, n_tested, test
+                pairs,
+                None if hold else lambda tested: bands_of(tested, width),
+                held,
+                checked,
+                counts_of,
+                n_tested,
+                test,
             )
         return AssociationTables(
             pairs=pairs,
@@ -1007,12 +1028,17 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
 
     def _band_reader(
         self, expression: Any, cells: np.ndarray, held_bytes: int, per_feature: int
-    ) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
-        """Return a reader of a band of features' counts over ``cells`` into ``out``.
+    ) -> tuple[
+        Callable[[np.ndarray, np.ndarray], np.ndarray],
+        Callable[[np.ndarray, int], list[tuple[int, int]]],
+    ]:
+        """Return a reader of a band of features' counts over ``cells``, and its bands.
 
-        The reader writes features x cells. The cells are read in store order,
-        and each read keeps clear of ``held_bytes`` and of ``per_feature``
-        bytes for each feature of the band.
+        The reader writes features x cells into ``out``. The cells are read in
+        store order, and each read keeps clear of ``held_bytes`` and of
+        ``per_feature`` bytes for each feature of the band. The second
+        function splits features into bands of at most ``most`` whose reads
+        fit the memory budget, as start and stop positions.
         """
         order = np.argsort(cells, kind="stable")
         sorted_cells = cells[order]
@@ -1032,23 +1058,36 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 offset += len(block)
             return out
 
-        return counts_of
+        def bands_of(features: np.ndarray, most: int) -> list[tuple[int, int]]:
+            return _count_bands(
+                expression,
+                features,
+                (sorted_cells,),
+                budget=self.memoryBytes,
+                held_bytes=held_bytes,
+                per_feature=per_feature,
+                scratch_per_feature=8,
+                most=most,
+            )
+
+        return counts_of, bands_of
 
     def _test_bands(
         self,
         pairs: AssociationPairs,
-        width: int | None,
+        bands_of: Callable[[np.ndarray], list[tuple[int, int]]] | None,
         held: np.ndarray | None,
         checked: np.ndarray,
         counts_of: Callable[[np.ndarray, np.ndarray], np.ndarray],
         n_cells: int,
         test: Callable[[np.ndarray, np.ndarray, np.ndarray], PairResults],
     ) -> tuple[dict[str, np.ndarray], np.ndarray]:
-        """Test the pairs that pass QC, ``width`` features at a time or all at once.
+        """Test the pairs that pass QC, in the bands of ``bands_of`` or all at once.
 
         With ``held`` counts of the ``checked`` features over the ``n_cells``
-        tested cells, every band reads them; otherwise ``counts_of`` reads
-        each band's counts again. ``test`` tests the chosen pairs on a band's
+        tested cells, every band reads them; otherwise ``bands_of`` splits
+        the tested features into bands, and ``counts_of`` reads each band's
+        counts again. ``test`` tests the chosen pairs on a band's
         counts, given the row of each pair's feature among them. Returns each
         pair's values by their names in the table, NaN for an untested pair,
         and the round that gave its p-value, 0 for an untested pair or one
@@ -1060,10 +1099,8 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         tested = np.unique(pairs.features[pairs.pass_qc])
         bands = (
             [tested]
-            if width is None
-            else [
-                tested[start : start + width] for start in range(0, len(tested), width)
-            ]
+            if bands_of is None
+            else [tested[start:stop] for start, stop in bands_of(tested)]
         )
         for band in bands:
             chosen = np.flatnonzero(pairs.pass_qc & np.isin(pairs.features, band))
@@ -1258,11 +1295,15 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         # than them; and the QC reads one feature and the tests one gene.
         one_copy = 16 * n_cells
         least_statistics = 8 * n_resamples[1]
+        # The counts of one feature stream beside the threads' buffers, while
+        # the tests hold nothing else.
+        stream = _count_stream_bytes(
+            expression, checked[:1], cells, scratch_bytes_per_row=8
+        )
         testing = (
             threads * complement_thread_bytes(n_cells, 0)
-            + 2 * least_statistics
             + per_feature
-            + per_gene
+            + max(2 * least_statistics + per_gene, stream)
         )
         # Before the tests, placing the groups' cells reads one stored chunk
         # of codes at a time, and the calibration groups hold the control
@@ -1331,6 +1372,8 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         hold = (
             held_bytes <= _ASSOCIATION_HELD_SHARE * free
             and free - held_bytes >= per_feature + per_gene
+            and self.memoryBytes - resident - scratch - held_bytes
+            >= per_feature + stream
         )
         room = free - held_bytes if hold else free
         # A band holds at most so many bytes of float64 values, or of scores
@@ -1345,7 +1388,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             max(1, _BAND_BYTES // (16 * max(n_cells, 1))),
         )
         # The reads keep clear of the held counts, which fill as they go.
-        counts_of = self._band_reader(
+        counts_of, bands_of = self._band_reader(
             expression,
             cells,
             resident + scratch + (held_bytes if hold else 0),
@@ -1392,9 +1435,9 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         nt_detected = np.zeros((n_groups_nt, len(checked)), dtype=np.int32)
         expressing = np.zeros(len(checked), dtype=np.int64)
         with numba_threads(self.nthreads):
-            for start in range(0, len(checked), qc_width):
-                band = checked[start : start + qc_width]
-                span = slice(start, start + len(band))
+            for start, stop in bands_of(checked, qc_width):
+                band = checked[start:stop]
+                span = slice(start, stop)
                 values = counts_of(
                     band,
                     np.empty((len(band), n_cells), dtype=np.float32)
@@ -1477,8 +1520,18 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                     gather_bytes=gather_bytes,
                 )
 
+            def test_bands(tested: np.ndarray) -> list[tuple[int, int]]:
+                """Bands of at most test_width genes, whose reads fit the
+                budget when the counts are read again."""
+                if hold:
+                    return [
+                        (start, min(start + test_width, len(tested)))
+                        for start in range(0, len(tested), test_width)
+                    ]
+                return bands_of(tested, test_width)
+
             pair_values, stage = self._test_bands(
-                pairs, test_width, held, checked, counts_of, n_cells, test
+                pairs, test_bands, held, checked, counts_of, n_cells, test
             )
         return AssociationTables(
             pairs=pairs,

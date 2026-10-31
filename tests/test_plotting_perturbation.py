@@ -4010,13 +4010,14 @@ def test_cluster_heatmap_draws_the_correlations_in_leaf_order() -> None:
         # The plot's own figure makes the heatmap's box square.
         box = ax.get_window_extent()
         assert box.width == pytest.approx(box.height, abs=2.0)
+        # The legend lists the unassigned perturbations, which the plot draws.
         assert result.legends == (
             LegendSpec(
                 kind="colorbar",
                 label="Pearson correlation",
                 extras={"vmin": -1.0, "vmax": 1.0},
             ),
-            LegendSpec(kind="categorical", label="Cluster"),
+            LegendSpec(kind="categorical", label="Cluster", extras={"missing": True}),
         )
         assert result.scales == (
             ColorScale(cmap="RdBu_r", vmin=-1.0, vmax=1.0, vcenter=0.0),
@@ -4282,7 +4283,9 @@ def test_cluster_map_draws_each_perturbation_coloured_by_cluster() -> None:
             "12 perturbations: 3 clusters, 2 unassigned in grey",
         ]
         assert ax.get_xticks().size == 0 and ax.get_yticks().size == 0
-        assert result.legends == (LegendSpec(kind="categorical", label="Cluster"),)
+        assert result.legends == (
+            LegendSpec(kind="categorical", label="Cluster", extras={"missing": True}),
+        )
         assert result.scales == (
             CategoricalScale(
                 order=(0, 1, 2),
@@ -4954,19 +4957,45 @@ def test_composed_cluster_plots_share_their_cluster_legend(panel: str) -> None:
         compose_results(figure, [result], panel_labels=False)
 
         # Every legend of the clusters has a scale, so the composed figure
-        # draws the clusters beside the panel and the colorbar below it.
+        # draws the clusters beside the panel and the colorbar below it; the
+        # legend lists the unassigned perturbations that the panel draws grey.
         assert [
             (
                 legend.get_title().get_text(),
                 [text.get_text() for text in legend.get_texts()],
             )
             for legend in figure.legends
-        ] == [("Cluster", ["0", "1", "2"])]
+        ] == [("Cluster", ["0", "1", "2", "Unassigned"])]
         colorbars = [axis for axis in figure.axes if axis.get_label() == "<colorbar>"]
         if panel == "heatmap":
             assert child_colorbar not in figure.axes
             assert [axis.get_xlabel() for axis in colorbars] == ["Pearson correlation"]
         else:
             assert colorbars == []
+    finally:
+        plt.close(figure)
+
+
+@pytest.mark.parametrize("panel", ["heatmap", "embedding"])
+def test_composing_cluster_plots_without_legends_draws_none(panel: str) -> None:
+    figure, ax = plt.subplots(figsize=(6.0, 5.0), layout="constrained")
+
+    try:
+        result = perturbation_clusters(
+            _record_store(_clusters_record()),
+            CLUSTERS,
+            panel=panel,
+            target=ax,
+            show=False,
+            show_legend=False,
+        )
+        drawn = list(figure.axes)
+        composite = compose_results(figure, [result], panel_labels=False)
+
+        # A figure drawn without legends reports none, so the composed
+        # figure draws neither the cluster legend nor a colorbar.
+        assert result.legends == () and composite.legends == ()
+        assert figure.legends == []
+        assert list(figure.axes) == drawn
     finally:
         plt.close(figure)

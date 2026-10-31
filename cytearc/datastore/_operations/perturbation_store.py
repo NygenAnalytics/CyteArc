@@ -231,9 +231,11 @@ def _count_blocks(
 ) -> tuple[int, Iterable[np.ndarray]]:
     """Stream the raw counts of features over cells, cells x features.
 
-    The blocks fit the memory budget beside ``resident_bytes`` and the
-    ``scratch_bytes_per_row`` that the caller makes of each block. Returns
-    the most rows of one block and the blocks, in the order of ``cells``.
+    The blocks hold the rows of a stored chunk beside ``resident_bytes``
+    and the ``scratch_bytes_per_row`` that the caller makes of each row,
+    which :func:`_count_stream_bytes` counts, and shrink to fit the memory
+    budget when it leaves less room. Returns the most rows of one block as
+    stored and the blocks, in the order of ``cells``.
     """
     from ...assay.normalization import feature_value_blocks
     from ...metadata.selection import NormalizationSpec
@@ -246,7 +248,116 @@ def _count_blocks(
         nthreads=store.nthreads,
         resident_bytes=resident_bytes,
         scratch_bytes_per_row=scratch_bytes_per_row,
+        memory_bytes=store.memoryBytes,
     )
+
+
+def _count_matrix(assay: Any, features: np.ndarray, cells: np.ndarray) -> Any:
+    """Return the lazy raw counts of features over cells that :func:`_count_blocks` streams."""
+    from ...assay.normalization import feature_values
+    from ...metadata.selection import NormalizationSpec
+
+    return feature_values(
+        assay, np.asarray(features), np.asarray(cells), NormalizationSpec(source="raw")
+    )
+
+
+def _count_stream_bytes(
+    assay: Any, features: np.ndarray, cells: np.ndarray, *, scratch_bytes_per_row: int
+) -> int:
+    """Return the bytes that :func:`_count_blocks` holds beside its caller's.
+
+    That is the stream's index arrays and one block of the counts of
+    ``features`` over the ``cells`` of a stored chunk, with its decode and
+    the ``scratch_bytes_per_row`` that the caller makes of each row.
+    """
+    held: int = _count_matrix(assay, features, cells).stream_bytes(
+        scratch_bytes_per_row
+    )
+    return held
+
+
+def _band_bytes(
+    assay: Any,
+    features: np.ndarray,
+    cell_sets: Sequence[np.ndarray],
+    *,
+    held_bytes: int,
+    per_feature: int,
+    scratch_per_feature: int,
+) -> int:
+    """Return the bytes that reading one band of ``features`` holds.
+
+    The band holds ``held_bytes``, ``per_feature`` bytes for each of its
+    features, and the stream of its counts over each of ``cell_sets`` in
+    turn, with ``scratch_per_feature`` bytes for each feature of a row, as
+    :func:`_count_stream_bytes` counts it. A band of one feature holds this
+    for ``features[:1]``, and as much for any other feature.
+    """
+    width = len(features)
+    return (
+        held_bytes
+        + per_feature * width
+        + max(
+            _count_stream_bytes(
+                assay,
+                features,
+                cells,
+                scratch_bytes_per_row=scratch_per_feature * width,
+            )
+            for cells in cell_sets
+        )
+    )
+
+
+def _count_bands(
+    assay: Any,
+    features: np.ndarray,
+    cell_sets: Sequence[np.ndarray],
+    *,
+    budget: int,
+    held_bytes: int,
+    per_feature: int,
+    scratch_per_feature: int,
+    most: int,
+) -> list[tuple[int, int]]:
+    """Split ``features`` into consecutive bands whose reads fit ``budget``.
+
+    A band holds what :func:`_band_bytes` counts for it. Each band takes as
+    many features as fit, at most ``most``; a band of one feature is taken
+    whatever it holds, since the caller refuses a budget that it does not
+    fit. What a stream decodes depends on the stored chunks of the band's
+    features, so each band is sized on its own.
+
+    Returns:
+        Each band's first position in ``features`` and the position past
+        its last feature, in order.
+    """
+    matrices = [_count_matrix(assay, features, cells) for cells in cell_sets]
+
+    def fits(start: int, stop: int) -> bool:
+        width = stop - start
+        streams: int = max(
+            matrix[:, start:stop].stream_bytes(scratch_per_feature * width)
+            for matrix in matrices
+        )
+        return held_bytes + per_feature * width + streams <= budget
+
+    bands: list[tuple[int, int]] = []
+    start = 0
+    while start < len(features):
+        widest = max(1, min(most, len(features) - start))
+        low, high = (widest, widest) if fits(start, start + widest) else (1, widest - 1)
+        # The widest band from ``start`` that fits, by bisection.
+        while low < high:
+            middle = (low + high + 1) // 2
+            if fits(start, start + middle):
+                low = middle
+            else:
+                high = middle - 1
+        bands.append((start, start + low))
+        start += low
+    return bands
 
 
 def _plan_cells(

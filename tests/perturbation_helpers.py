@@ -6,7 +6,7 @@ import tracemalloc
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -311,4 +311,111 @@ def dense_pair(
         scores[treated].sum() / np.sqrt(variance),
         np.log2(ratio) if ratio > 0 else -np.inf,
         np.sqrt(spread) / np.log(2),
+    )
+
+
+def needed_budget(refusal: BaseException) -> int:
+    """Return the memory budget that a refusal names, its first number of bytes."""
+    found = re.search(r"(\d+) bytes", str(refusal))
+    assert found is not None, str(refusal)
+    return int(found.group(1))
+
+
+def smallest_budget(
+    path: str | Path, run: Callable[["DataStore"], Any]
+) -> tuple[int, Any, int]:
+    """Return the smallest memory budget that every check of ``run`` accepts.
+
+    ``run`` calls an operation on the store at ``path``, opened with a real
+    memory budget. From 1,000 bytes, each refusal names a budget, and a check
+    that a later step makes may refuse that one and name more, until a budget
+    runs; every named budget exceeds the one it refuses. Each call is traced,
+    as :func:`traced_run` traces it. tracemalloc counts every allocation in
+    the process while the call runs, other threads' included, so a peak above
+    the budget is traced again on a second run: a call that holds more than
+    its budget does so in both runs.
+
+    Returns:
+        The budget, and the result and the smaller traced peak of the runs.
+    """
+    budget = 1000
+    for _ in range(10):
+        try:
+            result, peak = traced_run(path, run, budget)
+        except MemoryError as refusal:
+            named = needed_budget(refusal)
+            assert named > budget, str(refusal)
+            budget = named
+        else:
+            if peak > budget:
+                result, again = traced_run(path, run, budget)
+                peak = min(peak, again)
+            return budget, result, peak
+    raise AssertionError("Ten refusals did not name a budget that runs")
+
+
+def traced_run(
+    path: str | Path, run: Callable[["DataStore"], Any], budget: int
+) -> tuple[Any, int]:
+    """Run ``run`` on the store opened with ``budget``; return its result and traced peak.
+
+    The peak counts what the call allocates above what was held when it
+    started, as tracemalloc traces it.
+    """
+    store = open_store(path, nthreads=2, mem_budget=budget)
+    tracemalloc.start()
+    try:
+        start = tracemalloc.get_traced_memory()[0]
+        result = run(store)
+        peak = tracemalloc.get_traced_memory()[1] - start
+    finally:
+        tracemalloc.stop()
+    return result, peak
+
+
+def memory_screen(path: Path) -> SimpleNamespace:
+    """Write a screen whose counts and signatures outweigh what every call reads besides.
+
+    4,000 cells in 400 genes: 16 targets of 175 cells each, a target lowering
+    its own gene and 10 others to a tenth in 80% of its cells, and 1,200
+    control cells. The coordinates hold 20 dimensions, and the features are
+    the first 200 genes. A store keeps its cell and feature columns in
+    chunks of 100,000 rows, which Zarr decodes whole for any row, so a
+    smaller screen's budgets would not cover these reads.
+
+    Returns:
+        The store's path, labels, coordinates and features.
+    """
+    rng = np.random.default_rng(5)
+    n_cells, n_genes, n_targets, n_controls = 4000, 400, 16, 1200
+    carried = np.r_[
+        np.arange(n_cells - n_controls) % n_targets, np.full(n_controls, n_targets)
+    ]
+    base = rng.gamma(2.0, 3.0, size=n_genes)
+    rates = np.outer(rng.lognormal(0, 0.2, size=n_cells), base)
+    for target in range(n_targets):
+        cells = np.flatnonzero(carried == target)
+        genes = np.r_[target, rng.choice(np.arange(n_targets, n_genes), 10, False)]
+        rates[np.ix_(cells[: int(0.8 * len(cells))], genes)] *= 0.1
+    guides = np.zeros((n_cells, n_targets + 1), dtype=np.uint16)
+    guides[np.arange(n_cells), carried] = 20
+    store = write_screen(
+        path,
+        rng.poisson(rates).astype(np.uint16),
+        guides,
+        targets=[f"RNA{target}" for target in range(n_targets)] + ["NT"],
+        cell_columns={
+            "run": np.where(np.arange(n_cells) % 3 == 0, "run1", "run2").astype(object)
+        },
+        nthreads=2,
+    )
+    labels = fixed_labels(store, ["NT"])
+    coordinates = store.reduction.import_coordinates(
+        rng.normal(size=(n_cells, 20)),
+        cell_selection=store.select_measured_cells("RNA"),
+        name="X",
+    )
+    features = store.features.snapshot(feature_indexes=np.arange(200))
+    return SimpleNamespace(
+        path=path, labels=labels, coordinates=coordinates, features=features
     )

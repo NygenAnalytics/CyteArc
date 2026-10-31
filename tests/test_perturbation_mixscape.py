@@ -38,7 +38,10 @@ from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.utils.logging import logger
 from tests.perturbation_helpers import (
     copy_store,
+    memory_screen,
+    needed_budget,
     open_store,
+    smallest_budget,
     use_python_kernels,
     write_screen,
     written,
@@ -229,6 +232,14 @@ def test_mixscape_marks_targets_with_few_knocked_out_cells(store, template) -> N
         ({"scale": "yes"}, TypeError, "scale must be a boolean"),
         ({"perturbation_type": 1}, TypeError, "perturbation_type must be a string"),
         ({"perturbation_type": "K O"}, ValueError, "must be one word"),
+        *(
+            (
+                {"perturbation_type": word},
+                ValueError,
+                f"perturbation_type '{word}' is the class of other cells",
+            )
+            for word in ("NP", "control", "Negative", "Multiple", "unlabelled")
+        ),
         ({"split_column": ""}, TypeError, "split_column must be a non-empty"),
         ({"split_column": "lane"}, ValueError, "'lane' not found in cell metadata"),
         ({"invalidate_cache": "no"}, TypeError, "invalidate_cache must be a boolean"),
@@ -244,7 +255,7 @@ def test_mixscape_refuses_arguments_it_cannot_use(
 
 
 def test_mixscape_refuses_inputs_and_budgets_it_cannot_use(
-    shared_store, template, monkeypatch
+    shared_store, template
 ) -> None:
     store = shared_store
     signature = template.signature
@@ -256,42 +267,46 @@ def test_mixscape_refuses_inputs_and_budgets_it_cannot_use(
     reader = open_store(template.path, zarr_mode="r")
     with pytest.raises(PermissionError, match="run_mixscape"):
         reader.perturbation.mixscape(signature)
-    monkeypatch.setattr(store, "memoryBytes", 1_000)
-    with pytest.raises(MemoryError, match="one feature over 302 cells"):
-        store.perturbation.mixscape(signature)
-    # One feature at a time fits the DE tests, but not GENE_A's classification.
-    monkeypatch.setattr(store, "memoryBytes", 70_000)
+    budgeted = open_store(store.zarr_loc, nthreads=2, mem_budget=1_000)
+    with pytest.raises(MemoryError, match="one feature over 302 cells") as low:
+        budgeted.perturbation.mixscape(signature)
+    # The budget that this names fits the DE tests, but not GENE_A's
+    # classification.
+    budgeted = open_store(
+        store.zarr_loc, nthreads=2, mem_budget=needed_budget(low.value)
+    )
     with pytest.raises(
         MemoryError, match="90 cells of GENE_A and of the 150 control cells in its 12"
     ):
-        store.perturbation.mixscape(signature)
+        budgeted.perturbation.mixscape(signature)
     assert written(store) == saved
 
 
-def test_mixscape_classifies_in_batches_that_fit_the_budget(
-    store, template, monkeypatch
-) -> None:
+def test_mixscape_classifies_in_batches_that_fit_the_budget(store, template) -> None:
     signature = template.signature
     whole = store.perturbation.load_mixscape(
         store.perturbation.mixscape(signature, split_column="run")
     )
-    # The operation's accounting: the 302 cells of a group, with 10 neighbors
-    # each, and the batch of GENE_A's 45 cells of one run with the 150 control
-    # cells, in its 12 DE genes, and the classification of the run's cells.
-    resident = (48 + 4 * 10) * N_CELLS + 8 * (10 + 2) * 302
-    one_run = 4 * (45 + 150) * 12 + 16 * (45 + 150) + 24 * (45 + 75) * 12
-    budget = store.memoryBytes
-    monkeypatch.setattr(store, "memoryBytes", resident + one_run + 1_000)
+
+    def run(budget: int):
+        return open_store(
+            store.zarr_loc, nthreads=2, mem_budget=budget
+        ).perturbation.mixscape(signature, split_column="run", invalidate_cache=True)
+
+    # The budget that the DE tests name refuses GENE_A's classification, and
+    # the one that this names fits the classification of its cells of one
+    # run with the control cells, but not of both runs at once.
+    with pytest.raises(MemoryError) as low:
+        run(1_000)
+    with pytest.raises(MemoryError, match="cells of GENE_A") as batch:
+        run(needed_budget(low.value))
     messages: list[str] = []
     sink = logger.add(lambda message: messages.append(message.record["message"]))
     try:
-        classes = store.perturbation.mixscape(
-            signature, split_column="run", invalidate_cache=True
-        )
+        classes = run(needed_budget(batch.value))
     finally:
         logger.remove(sink)
     assert "Classifying 2 targets and splits in 2 batches" in messages
-    monkeypatch.setattr(store, "memoryBytes", budget)
     batched = store.perturbation.load_mixscape(classes)
     pd.testing.assert_frame_equal(batched.cells, whole.cells)
     pd.testing.assert_frame_equal(batched.targets, whole.targets)
@@ -566,3 +581,99 @@ def test_de_kernels_check_their_inputs() -> None:
     ordered, ties = sorted_log_values(values, np.r_[0], np.r_[0, 1])
     with pytest.raises(ValueError, match="one tie term per slot"):
         rank_sum_p_values(values, np.r_[0], np.r_[2, 3], np.r_[1], ordered, ties)
+
+
+def test_de_genes_follow_seurat_on_normalized_values() -> None:
+    # The function sums the values for the fold changes and ranks their log1p,
+    # so its documentation names normalized values, not log-normalized ones.
+    doc = mixscape_module.band_de_genes.__doc__ or ""
+    assert "values: The normalized values" in doc and "log-normalized" not in doc
+    rng = np.random.default_rng(17)
+    # 40 features over 20 control cells and 15 cells of a target, which
+    # lowers the first 6 features.
+    counts = rng.poisson(3.0, size=(40, 35)).astype(np.float64)
+    counts[:6, 20:] = rng.poisson(0.6, size=(6, 15))
+    values = counts / counts.sum(axis=0) * 10_000
+    found = mixscape_module.band_de_genes(
+        values,
+        np.r_[np.zeros(20, int), np.ones(15, int)],
+        np.arange(35),
+        np.r_[0, 20, 35],
+        [0],
+        np.r_[0],
+        min_fraction=0.1,
+        logfc_threshold=0.25,
+        p_value_cutoff=0.05,
+        n_features=40,
+    )
+
+    expected = []
+    for feature in range(40):
+        target, control = values[feature, 20:], values[feature, :20]
+        expressing = max(round(np.mean(target > 0), 3), round(np.mean(control > 0), 3))
+        change = np.log2((target.sum() + 1) / 15) - np.log2((control.sum() + 1) / 20)
+        if expressing < 0.1 or abs(change) < 0.25:
+            continue
+        p_value = mannwhitneyu(
+            np.log1p(target),
+            np.log1p(control),
+            alternative="two-sided",
+            method="asymptotic",
+            use_continuity=True,
+        ).pvalue
+        if p_value * 40 < 0.05:
+            expected.append(feature)
+    assert found[0].tolist() == expected and len(expected) >= 5
+
+
+@pytest.fixture(scope="module")
+def memory(tmp_path_factory) -> SimpleNamespace:
+    """A screen whose reads outweigh what every call reads besides, and its classes."""
+    screen = memory_screen(tmp_path_factory.mktemp("mixscape_memory") / "store.zarr")
+    store = open_store(screen.path, nthreads=2)
+    screen.signature = store.perturbation.signature(
+        screen.labels, screen.coordinates, features=screen.features, dims=10
+    )
+    screen.whole = store.perturbation.load_mixscape(
+        store.perturbation.mixscape(screen.signature)
+    )
+    return screen
+
+
+@pytest.mark.slow
+def test_mixscape_runs_within_the_budget_it_names(memory, monkeypatch) -> None:
+    bands: list[int] = []
+    messages: list[str] = []
+
+    def run(store: DataStore):
+        bands.clear()
+        messages.clear()
+        return store.perturbation.mixscape(memory.signature, invalidate_cache=True)
+
+    band_de_genes = mixscape_module.band_de_genes
+
+    def counting(values, *args, **kwargs):
+        bands.append(len(values))
+        return band_de_genes(values, *args, **kwargs)
+
+    monkeypatch.setattr(mixscape_module, "band_de_genes", counting)
+    sink = logger.add(lambda message: messages.append(message.record["message"]))
+    try:
+        needed, classes, peak = smallest_budget(memory.path, run)
+    finally:
+        logger.remove(sink)
+
+    # The DE tests read the counts in several bands and the targets are
+    # classified in several batches, within the budget that the refusal
+    # names; the bands once never fitted a limited budget, and a batch's
+    # read of the signatures took 17 times what it returned.
+    assert len(bands) > 1 and sum(bands) == 400
+    assert "Classifying 16 targets and splits in 16 batches" in messages
+    assert peak <= needed
+    result = open_store(memory.path).perturbation.load_mixscape(classes)
+    pd.testing.assert_frame_equal(result.cells, memory.whole.cells)
+    pd.testing.assert_frame_equal(result.targets, memory.whole.targets)
+    pd.testing.assert_frame_equal(result.de_genes, memory.whole.de_genes)
+    with pytest.raises(MemoryError) as short:
+        run(open_store(memory.path, nthreads=2, mem_budget=needed - 1))
+    assert needed_budget(short.value) == needed

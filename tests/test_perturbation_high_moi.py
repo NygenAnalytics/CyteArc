@@ -28,6 +28,7 @@ from cytearc.perturbation.random_sets import N_BUCKETS, resampling_keys
 from tests.perturbation_helpers import (
     dense_pair,
     fixed_labels,
+    open_store,
     size_root,
     use_python_kernels,
     write_screen,
@@ -1449,38 +1450,27 @@ def test_high_moi_held_and_streamed_counts_agree(screen, monkeypatch) -> None:
         pd.testing.assert_frame_equal(getattr(streamed, name), getattr(held, name))
 
 
-def test_high_moi_refuses_a_budget_without_room_for_one_gene(
-    screen, monkeypatch
-) -> None:
+def test_high_moi_refuses_a_budget_without_room_for_one_gene(screen) -> None:
     store, labels, genes = screen
-    monkeypatch.setattr(store, "memoryBytes", 100_000)
+    budgeted = open_store(store.zarr_loc, mem_budget=100_000)
 
     with pytest.raises(MemoryError, match="one gene over 400 labelled cells"):
-        store.perturbation.associations(
+        budgeted.perturbation.associations(
             labels, features=genes, moi="high", invalidate_cache=True, **FAST
         )
 
 
 def test_high_moi_checks_the_budget_before_the_store_must_be_writable(
-    screen, monkeypatch
+    screen,
 ) -> None:
-    from cytearc.datastore.datastore import DataStore
-
     store, labels, genes = screen
-    reader = DataStore(
-        store.zarr_loc,
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-        zarr_mode="r",
-    )
     # A seed whose tests are not saved yet.
     arguments = {"features": genes, "moi": "high", "seed": 11, **FAST}
 
-    monkeypatch.setattr(reader, "memoryBytes", 1000)
+    reader = open_store(store.zarr_loc, zarr_mode="r", mem_budget=1000)
     with pytest.raises(MemoryError, match="one gene over 400 labelled cells"):
         reader.perturbation.associations(labels, **arguments)
-    monkeypatch.undo()
+    reader = open_store(store.zarr_loc, zarr_mode="r")
     with pytest.raises(PermissionError, match="perturbation_associations"):
         reader.perturbation.associations(labels, **arguments)
 
@@ -1495,30 +1485,33 @@ def _needed_budget(refusal: pytest.ExceptionInfo[MemoryError]) -> int:
     return int(found.group(1))
 
 
-def test_high_moi_refusals_name_the_budget_that_runs_the_tests(
-    screen, monkeypatch
-) -> None:
+def test_high_moi_refusals_name_the_budget_that_runs_the_tests(screen) -> None:
     store, labels, genes = screen
     arguments = {"features": genes, "moi": "high", "invalidate_cache": True, **FAST}
     default = store.perturbation.load_associations(
         store.perturbation.associations(labels, **arguments)
     )
+
+    def run(budgeted):
+        return budgeted.perturbation.associations(labels, **arguments)
+
     # The tests hold far more than this budget, the labelled cells' arrays
     # alone.
-    monkeypatch.setattr(store, "memoryBytes", 1000)
     with pytest.raises(MemoryError, match="one gene over 400 labelled cells") as low:
-        store.perturbation.associations(labels, **arguments)
+        run(open_store(store.zarr_loc, nthreads=2, mem_budget=1000))
     needed = _needed_budget(low)
 
     # A budget one byte short asks for the same budget, which runs the tests
-    # with the results of the default budget.
-    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    # with the results of the default budget; it once left out the read of a
+    # gene's counts, which then failed in the stream planner. On these 400
+    # cells every call's reads of the store's cell and feature columns,
+    # whole chunks of 100,000 rows, outweigh the tests, so the wide screen
+    # below checks the traced peak.
     with pytest.raises(MemoryError) as short:
-        store.perturbation.associations(labels, **arguments)
+        run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed - 1))
     assert _needed_budget(short) == needed
-    monkeypatch.setattr(store, "memoryBytes", needed)
     tight = store.perturbation.load_associations(
-        store.perturbation.associations(labels, **arguments)
+        run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed))
     )
     for name in ("discovery", "calibration", "positive"):
         pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
@@ -1560,7 +1553,7 @@ def _wide_screen_store(path):
 
 
 def test_high_moi_stays_within_the_budget_it_names_with_a_few_wide_cells(
-    tmp_path, monkeypatch
+    tmp_path,
 ) -> None:
     import tracemalloc
 
@@ -1580,11 +1573,12 @@ def test_high_moi_stays_within_the_budget_it_names_with_a_few_wide_cells(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         store.perturbation.associations(labels, **arguments)
-    monkeypatch.setattr(store, "memoryBytes", 1000)
     with pytest.raises(MemoryError) as refusal:
-        store.perturbation.associations(labels, **arguments)
+        open_store(
+            store.zarr_loc, nthreads=2, mem_budget=1000
+        ).perturbation.associations(labels, **arguments)
     needed = _needed_budget(refusal)
-    monkeypatch.setattr(store, "memoryBytes", needed)
+    budgeted = open_store(store.zarr_loc, nthreads=2, mem_budget=needed)
 
     def traced_peak() -> int:
         tracemalloc.start()
@@ -1593,7 +1587,7 @@ def test_high_moi_stays_within_the_budget_it_names_with_a_few_wide_cells(
             tracemalloc.reset_peak()
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                store.perturbation.associations(labels, **arguments)
+                budgeted.perturbation.associations(labels, **arguments)
             return tracemalloc.get_traced_memory()[1] - start
         finally:
             tracemalloc.stop()
@@ -1680,12 +1674,14 @@ def test_high_moi_plans_only_the_calibration_pairs_a_check_can_draw(
     mib = 1 << 20
     monkeypatch.setattr(operations, "_ASSOCIATION_PAIR_BYTES", mib)
     arguments = {"features": genes, "moi": "high", "invalidate_cache": True, **FAST}
-    monkeypatch.setattr(store, "memoryBytes", 48 * mib)
     with pytest.raises(MemoryError, match="one gene over 400 labelled cells"):
-        store.perturbation.associations(labels, **arguments)
+        open_store(store.zarr_loc, mem_budget=48 * mib).perturbation.associations(
+            labels, **arguments
+        )
 
-    monkeypatch.setattr(store, "memoryBytes", 61 * mib)
-    tests = store.perturbation.associations(labels, **arguments)
+    tests = open_store(store.zarr_loc, mem_budget=61 * mib).perturbation.associations(
+        labels, **arguments
+    )
 
     result = store.perturbation.load_associations(tests)
     assert (len(result.discovery), len(result.positive)) == (36, 1)
