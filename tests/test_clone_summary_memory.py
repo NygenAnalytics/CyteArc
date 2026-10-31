@@ -33,6 +33,10 @@ pytestmark = pytest.mark.slow
 N_CELLS = 10_000
 N_MEASURED = 500
 N_LONG_IDS = 2_000
+# Clonotypes of one cell each, as in most T cell repertoires, cost more for
+# their clonotypes than for their cells; with more cells than one chunk of
+# cell IDs holds, the IDs' chunk does not hide their cost.
+N_SINGLETONS = 50_000
 
 
 @pytest.fixture(scope="module")
@@ -734,5 +738,44 @@ def test_loaded_clonotypes_of_long_cell_ids_fit_the_smallest_budget(
     peak, budget = _traced_at_smallest_budget(
         long_ids.store,
         lambda: long_ids.store.repertoire.load_clonotypes(long_ids.clonotypes),
+    )
+    assert peak <= budget, (peak, budget)
+
+
+@pytest.fixture(scope="module")
+def singletons(tmp_path_factory) -> SimpleNamespace:
+    """Clonotypes of one cell each, every cell with two chains of each arm."""
+    path = tmp_path_factory.mktemp("clonotype_singletons") / "store.zarr"
+    ids = np.asarray([f"c{i}" for i in range(N_SINGLETONS)])
+    counts = np.ones((N_SINGLETONS, 2), dtype=np.uint16)
+    write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=ids)
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+    contigs = write_clone_contigs(
+        path.parent,
+        "contigs.csv",
+        ids,
+        np.arange(N_SINGLETONS),
+        chains_per_arm=2,
+    )
+    every = store.snapshot_cell_selection()
+    clonotypes = store.repertoire.clonotypes(
+        store.repertoire.import_receptors(contigs, cell_selection=every)
+    )
+    return SimpleNamespace(store=store, clonotypes=clonotypes)
+
+
+def test_loaded_clonotypes_of_one_cell_each_fit_the_smallest_budget(
+    singletons,
+) -> None:
+    store, clonotypes = singletons.store, singletons.clonotypes
+    loaded = store.repertoire.load_clonotypes(clonotypes)
+    assert len(loaded.clonotypes) == N_SINGLETONS
+    # Each of the 50,000 clonotypes has four chains to decode, so their
+    # values pass through several batches.
+    assert loaded.clonotypes["VJ_2_junction_aa"].notna().all()
+    peak, budget = _traced_at_smallest_budget(
+        store, lambda: store.repertoire.load_clonotypes(clonotypes)
     )
     assert peak <= budget, (peak, budget)

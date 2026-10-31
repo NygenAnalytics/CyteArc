@@ -302,6 +302,15 @@ The clone sizes that `ds.clones.import_clones` saves were checked against counts
 | Clones of LARRY's in vitro clone matrix | `GSM4185642_stateFate_inVitro_clone_matrix.mtx.gz` and `GSM4185642_stateFate_inVitro_metadata.txt.gz` from GEO GSE140802, Weinreb et al. (2020), Science 367:eaaw3381, doi:10.1126/science.aaw3381 | GEO; no license stated |
 | Clones of CellTag-multi's clone table | `b4.rna&atac.r1&2_master_rev1_annotated.csv` of "Processed single-cell RNA and ATAC data for the CellTag-multi iEP reprogramming time course" by Samantha Annette Morris and Kunal Jindal (Zenodo, version 1.1.0, doi:10.5281/zenodo.23442375) | CC BY 4.0 |
 
+## Data that validated the immune repertoire methods
+
+The receptor import and the clonotypes in the [repertoire API page](https://docs.nygen.io/CyteArc/api/repertoire.html) were compared with scirpy, scRepertoire and Cell Ranger on these datasets. The repository holds none of them, and neither the tests nor the documentation download them.
+
+| Validation | Source | License or terms |
+| --- | --- | --- |
+| Receptor import and clonotypes | "Human PBMC from a Healthy Donor, 10k cells (v2)", Single Cell Immune Profiling, the TCR and BCR contig annotations of Cell Ranger 5.0.0, and for the import also those of Cell Ranger 4.0.0, 10x Genomics, <https://www.10xgenomics.com/datasets> | CC BY 4.0 |
+| Receptor import and clonotypes | "CD8+ T cells of Healthy Donor 1", Single Cell Immune Profiling, the contig annotations of Cell Ranger 3.0.2, 10x Genomics, <https://www.10xgenomics.com/datasets> | CC BY 4.0 |
+
 ## Optional packages that CyteArc does not install
 
 CyteArc contains no code from these GPL-licensed packages, and its default installation does not

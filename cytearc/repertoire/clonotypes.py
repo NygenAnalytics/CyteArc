@@ -47,6 +47,7 @@ import pandas as pd
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
+from ..storage.refs import ArtifactRef
 from ..utils.arrays import unique_rows
 from .chains import SLOTS
 
@@ -61,6 +62,7 @@ __all__ = [
     "clonotype_frames",
     "clonotype_labels",
     "representative_cells",
+    "shared_text",
 ]
 
 #: The values of ``receptor_arms``.
@@ -462,7 +464,8 @@ class Clonotypes:
             representative cell, the first cell of its most frequent
             configuration: for each slot, ``VJ_1`` to ``VDJ_2``, the slot's
             ``junction_aa``, ``junction``, ``v_call`` and ``j_call`` that the
-            receptors store, such as ``VDJ_1_junction_aa``.
+            receptors store, such as ``VDJ_1_junction_aa``, as pandas text,
+            missing where the slot is empty.
         receptors: The ``immune_receptors`` artifact that the clonotypes group.
         sequence: ``"nt"`` or ``"aa"``.
         receptor_arms: The arms that had to agree.
@@ -475,7 +478,7 @@ class Clonotypes:
 
     cells: pd.DataFrame = field(repr=False)
     clonotypes: pd.DataFrame = field(repr=False)
-    receptors: Any
+    receptors: ArtifactRef
     sequence: str
     receptor_arms: str
     dual_ir: str
@@ -515,28 +518,30 @@ def clonotype_frames(
         chains: Each representative field's decoded values per contig.
     """
     # The labels are categories coded by the stored codes, ordered as the
-    # clonotypes rank, so the table holds no text per cell.
+    # clonotypes rank, so the table holds no text per cell; both tables share
+    # one string per label.
+    labels = np.asarray(clonotype_ids, dtype=object)
     cells = pd.DataFrame(
         {
             "clonotype": pd.Categorical.from_codes(
-                np.asarray(codes, dtype=np.int64),
-                categories=pd.Index(np.asarray(clonotype_ids, dtype=object)),
+                np.asarray(codes, dtype=np.int64), categories=pd.Index(labels)
             ),
             "clone_size": np.asarray(clone_size, dtype=np.int64),
         },
         index=pd.Index(np.asarray(cell_ids), name="ids"),
+        copy=False,
     )
     sizes = np.asarray(clonotype_sizes, dtype=np.int64)
     total = int(sizes.sum())
     table: dict[str, Any] = {
-        "clonotype": np.asarray(clonotype_ids, dtype=object),
+        "clonotype": labels,
         "n_cells": sizes,
         "fraction": sizes / total if total else np.zeros(len(sizes)),
         "n_configurations": np.asarray(n_configurations, dtype=np.int64),
-        "receptor_type": np.asarray(receptor_type, dtype=object),
+        "receptor_type": shared_text(receptor_type),
     }
     for column, column_labels in within.items():
-        table[column] = np.asarray(column_labels, dtype=object)
+        table[column] = shared_text(column_labels)
     slots = np.asarray(slots, dtype=np.int64).reshape(len(sizes), 4)
     for position, slot in enumerate(SLOTS):
         contigs = slots[:, position]
@@ -546,5 +551,20 @@ def clonotype_frames(
                 continue
             taken = np.full(len(sizes), None, dtype=object)
             taken[filled] = np.asarray(chains[name], dtype=object)[contigs[filled]]
-            table[f"{slot}_{name}"] = pd.array(taken)
-    return cells, pd.DataFrame(table)
+            table[f"{slot}_{name}"] = pd.array(taken, dtype="string")
+    # The columns are not copied again.
+    return cells, pd.DataFrame(table, copy=False)
+
+
+def shared_text(values: Any) -> np.ndarray:
+    """Return text as objects, with one string for each distinct value.
+
+    Fixed-width text becomes a string per value when it is converted; coding
+    it first makes the few distinct values, such as receptor types, the only
+    strings. Missing values stay None.
+    """
+    array = np.asarray(values)
+    if array.dtype.kind != "U":
+        return np.asarray(array, dtype=object)
+    distinct, inverse = np.unique(array, return_inverse=True)
+    return np.asarray(distinct.tolist(), dtype=object)[inverse.reshape(array.shape)]

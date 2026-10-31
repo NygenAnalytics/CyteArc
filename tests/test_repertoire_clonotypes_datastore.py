@@ -16,9 +16,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import cytearc.datastore._operations.repertoire as repertoire_operations
 from cytearc import plotting
+from cytearc.datastore.datastore import DataStore
 from cytearc.metadata.rows import text_read_bytes
-from cytearc.repertoire import Clonotypes
+from cytearc.repertoire import SLOTS, Clonotypes
 from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import (
     CELLRANGER_HEADER,
@@ -28,11 +30,13 @@ from tests.clone_helpers import (
     receptor_store,
     write_lines,
 )
-from tests.storage_helpers import insert_nullable_cell_column
+from tests.storage_helpers import insert_nullable_cell_column, write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
 N_CELLS = N_RECEPTOR_CELLS
+# The fields of each slot of a clonotype's representative chains.
+FIELDS = ("junction_aa", "junction", "v_call", "j_call")
 
 # cell0 and cell1 share an alpha and a beta chain. cell2 has the same alpha
 # residues from other nucleotides, cell3 the beta chain alone, and cell4 a
@@ -682,19 +686,27 @@ def test_loaded_clonotypes_are_checked_against_the_memory_budget(
     store, receptors = _receptors(tmp_path)
     store.cells.insert("donor", np.asarray(["d1", "d2"] * 4))
     receptor_group = artifact_group(store.zw, receptors)
-    # Each representative field's packed text is read whole, and its needed
-    # values decoded: twice its bytes, and its int64 offsets.
-    text = sum(
-        2 * receptor_group[f"contig_{name}_values"].nbytes
-        + receptor_group[f"contig_{name}_offsets"].nbytes
-        for name in ("junction_aa", "junction", "v_call", "j_call")
+    # The four representative fields store these values and packed bytes.
+    values, packed = [5, 6, 6, 5], [21, 75, 30, 25]
+    assert [
+        receptor_group[f"contig_{name}_offsets"].shape[0] - 1 for name in FIELDS
+    ] == values
+    assert [receptor_group[f"contig_{name}_values"].nbytes for name in FIELDS] == (
+        packed
     )
-    assert text == 2 * (21 + 75 + 30 + 25) + 8 * (6 + 7 + 7 + 6)
-    for within in ((), ("donor",)):
+    # Each field takes 25 bytes for each value it stores, 64 for each that a
+    # representative holds, here every one, and 7 for each byte of its packed
+    # text; one batch of decoding takes 160 bytes for each value of the widest.
+    fields = sum(89 * n + 7 * size for n, size in zip(values, packed, strict=True))
+    assert fields + 160 * 6 == 3_015 + 960
+    for within, n_clonotypes in (((), 4), (("donor",), 6)):
         ref = store.repertoire.clonotypes(receptors, within=list(within))
-        # The tables take 300 bytes per cell, beside the cells' IDs as text,
-        # the representatives' text, and the within groups' labels.
-        needed = 8 * 300 + ids_read_bytes(store, 8) + text
+        assert artifact_group(store.zw, ref)["clonotype_ids"].shape == (n_clonotypes,)
+        # The tables take 300 bytes per cell and 700 per clonotype, beside the
+        # cells' IDs as text, the fields, and the within groups' labels.
+        needed = (
+            8 * 300 + 700 * n_clonotypes + ids_read_bytes(store, 8) + fields + 160 * 6
+        )
         if within:
             labels = artifact_group(store.zw, ref)["within_labels"]
             assert labels.dtype == np.dtype("<U2") and labels.shape == (2,)
@@ -705,8 +717,116 @@ def test_loaded_clonotypes_are_checked_against_the_memory_budget(
         ):
             store.repertoire.load_clonotypes(ref)
         monkeypatch.setattr(store, "memoryBytes", needed)
-        assert len(store.repertoire.load_clonotypes(ref).clonotypes) >= 4
+        assert len(store.repertoire.load_clonotypes(ref).clonotypes) == n_clonotypes
         monkeypatch.undo()
+
+
+def test_loaded_chains_do_not_depend_on_the_decoding_batch(
+    tmp_path, monkeypatch
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    ref = store.repertoire.clonotypes(receptors)
+    whole = store.repertoire.load_clonotypes(ref).clonotypes
+    assert whole.set_index("clonotype").loc["clonotype_1", "VDJ_1_junction_aa"] == (
+        "CASSA"
+    )
+    for batch in (1, 2, 3):
+        monkeypatch.setattr(repertoire_operations, "_DECODE_BATCH_VALUES", batch)
+        pd.testing.assert_frame_equal(
+            store.repertoire.load_clonotypes(ref).clonotypes, whole
+        )
+
+
+def test_every_chain_column_holds_text(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    table = store.repertoire.load_clonotypes(
+        store.repertoire.clonotypes(receptors)
+    ).clonotypes
+    columns = [f"{slot}_{name}" for slot in SLOTS for name in FIELDS]
+    assert all(isinstance(table[column].dtype, pd.StringDtype) for column in columns)
+    # No representative has a second chain of an arm, and the table holds
+    # those slots as missing text all the same.
+    assert table[[f"VJ_2_{name}" for name in FIELDS]].isna().all().all()
+    assert table[[f"VDJ_2_{name}" for name in FIELDS]].isna().all().all()
+
+
+def test_clonotype_numbers_do_not_follow_the_order_of_the_cells(tmp_path) -> None:
+    # A T cell and a B cell clonotype of two cells each tie on size: BCR sorts
+    # before TCR, so the B cells' clonotype is clonotype_1 in either store.
+    rows = [
+        "t1,true,t1_contig_1,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,true,CAVA,TGTGCTGTGGCC,90,9,ct1,ct1_1",
+        "t1,true,t1_contig_2,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,80,8,ct1,ct1_2",
+        "t2,true,t2_contig_1,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,true,CAVA,TGTGCTGTGGCC,70,7,ct1,ct1_1",
+        "t2,true,t2_contig_2,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,60,6,ct1,ct1_2",
+        "b1,true,b1_contig_1,true,500,IGH,IGHV1,,IGHJ1,IGHM,true,true,CARW,TGTGCGAGATGG,500,20,cb1,cb1_1",
+        "b1,true,b1_contig_2,true,500,IGK,IGKV1,,IGKJ1,IGKC,true,true,CQQY,TGTCAGCAGTAT,400,15,cb1,cb1_2",
+        "b2,true,b2_contig_1,true,500,IGH,IGHV1,,IGHJ1,IGHM,true,true,CARW,TGTGCGAGATGG,300,12,cb1,cb1_1",
+        "b2,true,b2_contig_2,true,500,IGK,IGKV1,,IGKJ1,IGKC,true,true,CQQY,TGTCAGCAGTAT,200,10,cb1,cb1_2",
+    ]
+    found = []
+    for order in (["t1", "t2", "b1", "b2"], ["b2", "b1", "t2", "t1"]):
+        folder = tmp_path / "_".join(order)
+        folder.mkdir()
+        path = folder / "store.zarr"
+        counts = np.ones((len(order), 2), dtype=np.uint16)
+        write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=order)
+        store = DataStore(
+            str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+        )
+        receptors = store.repertoire.import_receptors(
+            write_lines(folder, "contigs.csv", CELLRANGER_HEADER, rows),
+            cell_selection=store.snapshot_cell_selection(),
+        )
+        loaded = store.repertoire.load_clonotypes(
+            store.repertoire.clonotypes(receptors)
+        )
+        found.append(loaded.cells["clonotype"].astype(str).to_dict())
+    assert (
+        found[0]
+        == found[1]
+        == {
+            "b1": "clonotype_1",
+            "b2": "clonotype_1",
+            "t1": "clonotype_2",
+            "t2": "clonotype_2",
+        }
+    )
+
+
+def test_receptor_types_and_within_labels_never_share_a_group(tmp_path) -> None:
+    # cell0, a T cell of donor d2, and cell1, a cell of donor d1 with T cell
+    # and B cell chains, share a beta chain; comparing beta chains alone, their
+    # receptor types and their donors each keep them apart.
+    rows = [
+        "cell0,true,cell0_contig_1,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,true,CAVA,TGTGCTGTGGCC,90,9,ct1,ct1_1",
+        "cell0,true,cell0_contig_2,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,80,8,ct1,ct1_2",
+        "cell1,true,cell1_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,CASSA,TGTGCCAGCAGCGCC,80,8,ct2,ct2_1",
+        "cell1,true,cell1_contig_2,true,500,IGK,IGKV1,,IGKJ1,IGKC,true,true,CQQY,TGTCAGCAGTAT,400,15,ct2,ct2_2",
+    ]
+    store, receptors = _receptors(tmp_path, rows)
+    store.cells.insert("donor", np.asarray(["d2"] + ["d1"] * (N_CELLS - 1)))
+    types = store.artifacts.load_values(receptors).values
+    assert list(types[:2]) == ["TCR", "ambiguous"]
+    for options in (
+        {},
+        {"within": "donor"},
+        {"within": "donor", "within_receptor_type": False},
+    ):
+        loaded = store.repertoire.load_clonotypes(
+            store.repertoire.clonotypes(receptors, receptor_arms="VDJ", **options)
+        )
+        clonotype = loaded.cells["clonotype"]
+        assert clonotype["cell0"] != clonotype["cell1"], options
+    # Without either, the shared beta chain links them.
+    together = store.repertoire.load_clonotypes(
+        store.repertoire.clonotypes(
+            receptors, receptor_arms="VDJ", within_receptor_type=False
+        )
+    )
+    assert (
+        together.cells.loc["cell0", "clonotype"]
+        == (together.cells.loc["cell1", "clonotype"])
+    )
 
 
 def test_within_labels_are_an_array_that_opening_the_artifact_never_reads(
@@ -758,6 +878,33 @@ def test_renamed_within_labels_give_other_clonotypes(tmp_path) -> None:
 
 def test_within_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:
     store, receptors = _receptors(tmp_path)
-    store.cells.insert("clone_size", np.arange(N_CELLS).astype(str))
-    with pytest.raises(ValueError, match="'clone_size', which is also a column"):
-        store.repertoire.clonotypes(receptors, within="clone_size")
+    for column in ("clone_size", "VDJ_1_junction_aa", "VJ_2_j_call"):
+        store.cells.insert(column, np.arange(N_CELLS).astype(str))
+        with pytest.raises(ValueError, match=f"'{column}', which is also a column"):
+            store.repertoire.clonotypes(receptors, within=column)
+
+
+def test_regrouped_expansion_plot_keeps_receptor_types_apart(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    store.cells.insert(
+        "sample", np.asarray(["s1", "s2", "s1", "s2", "s1", "s1", "s2", "s1"])
+    )
+    store.cells.insert("tissue", np.asarray(["blood"] * N_CELLS))
+    expansion = store.clones.expansion(
+        store.repertoire.clonotypes(receptors), group_by="sample"
+    )
+    result = store.plots.clonal_expansion(expansion, group_by="tissue", show=False)
+    # The five T cells, in three clonotypes, and the two B cells, in one, are
+    # ranked apart within the tissue.
+    windows = result.tables["rank_windows"]
+    held = windows[windows["cells"] > 0]
+    assert held[["group", "window", "cells"]].values.tolist() == [
+        ["blood, BCR", "1 to 10", 2],
+        ["blood, TCR", "1 to 10", 5],
+    ]
+    totals = result.tables["categories"].groupby("group")["cells"].sum()
+    assert totals.to_dict() == {"blood, BCR": 2, "blood, TCR": 5}
+    result.close()
+    store.cells.insert("receptor_type", np.asarray(["x"] * N_CELLS))
+    with pytest.raises(ValueError, match="'receptor_type', whose labels the clones"):
+        store.plots.clonal_expansion(expansion, group_by="receptor_type", show=False)

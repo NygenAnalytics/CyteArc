@@ -66,14 +66,17 @@ def _load_clones(store: Any, clones: ArtifactRef) -> Any:
 
 
 def _kept_apart_groups(
-    loaded: Any, labels: np.ndarray | None, names: list[str]
+    cells: pd.DataFrame,
+    kept_apart: Sequence[str],
+    labels: np.ndarray | None,
+    names: list[str],
 ) -> tuple[np.ndarray, list[str]]:
     """Each cell's group by its plotted group and the labels its clones keep apart.
 
     The groups are the combinations of a cell's plotted group, when there is
-    a grouping, and its labels in each column of ``loaded.kept_apart``, such
-    as its receptor type, in the natural order of the labels; each is named
-    by its labels joined by commas.
+    a grouping, and its labels in each ``kept_apart`` column of ``cells``,
+    categoricals such as its receptor type, in the natural order of the
+    labels; each is named by its labels joined by commas.
 
     Returns:
         Each cell's group, a position in the names, -1 without one, and the
@@ -82,8 +85,8 @@ def _kept_apart_groups(
     coded: list[tuple[np.ndarray, list[str]]] = []
     if labels is not None:
         coded.append((np.asarray(labels, dtype=np.int64), list(names)))
-    for column in loaded.kept_apart:
-        values = loaded.cells[column]
+    for column in kept_apart:
+        values = cells[column]
         coded.append(
             (
                 np.asarray(values.cat.codes, dtype=np.int64),
@@ -160,7 +163,9 @@ def clone_abundance(
         cell_group = np.zeros(len(codes), dtype=np.int64)
         names = ["all cells"]
     else:
-        cell_group, names = _kept_apart_groups(loaded, group_labels, names)
+        cell_group, names = _kept_apart_groups(
+            loaded.cells, loaded.kept_apart, group_labels, names
+        )
         plotted = [] if group_name is None else [group_name]
         group_name = ", ".join([*plotted, *loaded.kept_apart])
     keep = (codes >= 0) & (cell_group >= 0)
@@ -366,7 +371,9 @@ def clonal_expansion(
     ``groups`` a cell-label artifact, such as a clustering. Each cell keeps
     the category measured within its expansion group, so grouping the cells
     by cell type shows which cell types hold the expanded cells of their
-    samples; the ranks are counted within the plotted groups. Cells without a
+    samples; the ranks are counted within the plotted groups. Labels that the
+    clones keep apart stay apart: the plotted groups of clonotypes are each
+    group's receptor types, named like ``"blood, TCR"``. Cells without a
     category or a group are left out.
 
     Tables: ``categories`` (``group``, ``category``, then ``cells`` or
@@ -378,16 +385,30 @@ def clonal_expansion(
     if not isinstance(normalize, bool):
         raise TypeError("normalize must be a boolean")
     loaded = _clones_method(store, "load_expansion")(expansion, splits=splits)
+    # The expansion's key columns lie between the group's name and the
+    # category; those of neither its group_by nor its label artifact hold the
+    # labels that its clones keep apart, such as the receptor type.
+    columns = list(loaded.categories.columns)
+    key_columns = columns[1 : columns.index("category")]
+    own = {*loaded.group_by, *([loaded.groups.kind] if loaded.groups else [])}
+    kept_apart = [column for column in key_columns if column not in own]
+    if group_by in kept_apart:
+        raise ValueError(
+            f"group_by names {group_by!r}, whose labels the clones keep apart "
+            "already; leave it out, or copy the cell metadata column under "
+            "another name"
+        )
     labels, names, group_name = cell_groups(
         store, expansion, group_by=group_by, groups=groups
     )
+    if labels is not None and kept_apart:
+        labels, names = _kept_apart_groups(loaded.cells, kept_apart, labels, names)
+        group_name = ", ".join([*([group_name] if group_name else []), *kept_apart])
     category_names = list(loaded.labels)
     window_names = list(rank_window_labels(splits))
     if labels is None:
-        # The expansion's own groups, which the loaded tables count; their
-        # key columns lie between the group's name and the category.
-        columns = list(loaded.categories.columns)
-        group_name = ", ".join(columns[1 : columns.index("category")]) or None
+        # The expansion's own groups, which the loaded tables count.
+        group_name = ", ".join(key_columns) or None
         order = sort_categories(pd.unique(loaded.categories["group"].to_numpy(object)))
         wide = (
             loaded.categories.pivot(index="group", columns="category", values=count)

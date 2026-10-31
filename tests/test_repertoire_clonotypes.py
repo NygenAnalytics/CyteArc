@@ -10,6 +10,7 @@ from cytearc.repertoire.clonotypes import (
     RECEPTOR_ARMS,
     assign_clonotypes,
     clonotype_labels,
+    shared_text,
 )
 
 # Sequences by name, so the tests read as receptors: a* are VJ junctions and
@@ -105,6 +106,21 @@ def test_cells_without_a_primary_sequence_join_only_their_like() -> None:
     assert _partition(_assign(cells, receptor_arms="any").codes) == [{0, 1, 2}]
 
 
+def test_cells_without_a_counted_arm_join_through_either_arm() -> None:
+    # No primary chain of these cells has the compared sequence, so no arm of
+    # any counts; under "all" they join through a chain of either arm, as
+    # cells with one counted arm do.
+    cells = _slots(
+        (None, "a1", None, None),
+        (None, "a1", None, "b2"),
+        (None, None, None, "b2"),
+        ("a1", None, None, None),
+    )
+    assert _partition(_assign(cells).codes) == [{0, 1, 2}, {3}]
+    # Each pair shares an arm whose chains are all equal, which "all" asks.
+    assert _partition(_assign(cells, dual_ir="all").codes) == [{0, 1, 2}, {3}]
+
+
 def test_one_arm_compares_that_arm_alone() -> None:
     cells = _slots(
         ("a1", None, "b1", None),
@@ -188,6 +204,18 @@ def test_arguments_are_checked(kwargs, message) -> None:
         assign_clonotypes(cells, **arguments)
     with pytest.raises(ValueError, match="four slots"):
         assign_clonotypes(np.zeros((2, 3)), groups=np.zeros(2))
+
+
+def test_shared_text_makes_one_string_for_each_distinct_value() -> None:
+    values = shared_text(np.asarray(["TCR", "BCR", "TCR", "TCR"]))
+    assert values.dtype == object
+    assert values.tolist() == ["TCR", "BCR", "TCR", "TCR"]
+    assert values[0] is values[2] and values[2] is values[3]
+    assert values[0] is not values[1]
+    # Objects pass through as they are, missing values included.
+    objects = np.asarray(["a", None, "a"], dtype=object)
+    assert shared_text(objects).tolist() == ["a", None, "a"]
+    assert shared_text(np.asarray([], dtype="<U1")).tolist() == []
 
 
 def test_labels_name_clonotypes_by_rank() -> None:

@@ -24,6 +24,7 @@ from ...metadata.selection import cell_selection_indices
 from ...repertoire.chains import (
     NO_RECEPTOR,
     RECEPTOR_TYPES,
+    SLOTS,
     index_chains,
     receptor_quality,
 )
@@ -37,6 +38,7 @@ from ...repertoire.clonotypes import (
     clonotype_frames,
     clonotype_labels,
     representative_cells,
+    shared_text,
 )
 from ...repertoire.contigs import FIELDS, contig_encoder
 from ...repertoire.receptors import (
@@ -125,19 +127,31 @@ _RECEPTOR_TYPE_CODING_BYTES = 100
 # stored code and its int64 copy of each contig's compared field.
 _CLONOTYPE_BYTES_PER_CELL = 1_000
 _CODE_BYTES = 8
-# The tables of loaded clonotypes hold, beside the cells' IDs as text, about
-# 300 bytes per cell at their peak: each cell's codes and sizes as read and in
-# the table, and the receptors' slots and types that the representatives are
-# taken from. With 12-character IDs, 518 to 582 bytes per cell were traced on
-# 30,000 and 100,000 cells, and 600 on 1,000,000 cells with 18-character IDs.
+# Loading clonotypes holds, beside the cells' IDs as text, up to 300 bytes per
+# cell: each cell's codes and sizes as read and in the table, and the
+# receptors' slots and types that the representatives are taken from.
 _CLONOTYPE_TABLE_BYTES_PER_CELL = 300
-# The packed text of a representative field is read whole and its needed
-# values decoded, so up to twice its bytes are held.
-_TEXT_COPIES = 2
+# Each clonotype holds its label and its row of the tables, 348 bytes while the
+# tables are built, as traced on 50,000 clonotypes of one cell each with two
+# and with four chains, and the codes of its four slots' contigs in each
+# representative field, 32 bytes as held and 96 while the field is decoded.
+_CLONOTYPE_TABLE_BYTES_PER_CLONOTYPE = 700
+# Each representative field's packed text and offsets are read whole, with the
+# bounds of every value, and each value that a representative holds becomes a
+# string: its header and pointers, and up to four bytes per character as held
+# and three more copies of its bytes while it is decoded.
+_FIELD_BYTES_PER_VALUE = 25
+_FIELD_BYTES_PER_DECODED_VALUE = 64
+_FIELD_BYTES_PER_PACKED_BYTE = 7
+# Values are decoded a batch of this many at a time, each holding about 160
+# bytes of Python objects while its batch is decoded.
+_DECODE_BATCH_VALUES = 2**16
+_DECODE_BYTES_PER_BATCH_VALUE = 160
 # The columns of the tables of clonotypes, which a within column may not share.
 _CLONOTYPE_COLUMNS = frozenset(
     {"clonotype", "clone_size", "n_cells", "fraction", "n_configurations"}
     | {"receptor_type"}
+    | {f"{slot}_{name}" for slot in SLOTS for name in REPRESENTATIVE_FIELDS}
 )
 
 
@@ -352,12 +366,15 @@ def _stored_text_at(group: zarr.Group, name: str, positions: np.ndarray) -> np.n
     values = np.full(len(positions), None, dtype=object)
     needed, inverse = np.unique(codes[codes >= 0], return_inverse=True)
     if len(needed):
-        # The packed bytes are read once; only the needed values become text.
-        text = take_text(
-            _read(group, f"contig_{name}_values"),
-            _read(group, f"contig_{name}_offsets"),
-            needed,
-        )
+        # The packed bytes are read once; only the needed values become text,
+        # a batch at a time, so the objects that decoding makes for each value
+        # are held for one batch.
+        data = _read(group, f"contig_{name}_values")
+        offsets = _read(group, f"contig_{name}_offsets")
+        text = np.empty(len(needed), dtype=object)
+        for start in range(0, len(needed), _DECODE_BATCH_VALUES):
+            batch = needed[start : start + _DECODE_BATCH_VALUES]
+            text[start : start + len(batch)] = take_text(data, offsets, batch)
         values[codes >= 0] = text[inverse.reshape(-1)]
     return values
 
@@ -382,10 +399,10 @@ def _sorted_codes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _labels_at(labels: np.ndarray, codes: np.ndarray) -> np.ndarray:
-    """Each code's label, None for -1; only the labels taken become strings."""
+    """Each code's label, None for -1, one string for each distinct label."""
     taken = np.full(len(codes), None, dtype=object)
     present = codes >= 0
-    taken[present] = np.asarray(labels[codes[present]], dtype=object)
+    taken[present] = shared_text(labels[codes[present]])
     return taken
 
 
@@ -828,8 +845,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         sequence among the chains that take part, has no clonotype.
 
         Clonotypes are numbered by size, so ``clonotype_1`` is the largest;
-        ties follow the clonotypes' sorted chains, so the numbers do not
-        depend on the order of the cells. The artifact's canonical ``values``
+        ties follow the receptor type in sorted order, then the ``within``
+        labels in natural order, then the sorted chains, so the numbers do
+        not depend on the order of the cells. The artifact's canonical ``values``
         hold each cell's clonotype label, empty for a cell without one, which
         groupings treat as missing; ``clone_size`` holds the cells of each
         cell's clonotype. The clone summaries of ``ds.clones``, such as
@@ -1040,9 +1058,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Raises:
             TypeError: If ``clonotypes`` is not an ArtifactRef.
             ValueError: If it is not a complete ``clonotypes`` artifact.
-            MemoryError: If the tables, 300 bytes per cell beside the cells'
-                IDs, the representatives' chains and the ``within`` labels that
-                they read as text, do not fit the memory budget.
+            MemoryError: If the tables, 300 bytes per cell and 700 per
+                clonotype beside the cells' IDs, the representatives' chains
+                and the ``within`` labels that they read as text, do not fit
+                the memory budget.
         """
         group = self._clonotype_group(clonotypes)
         n_cells = int(as_zarr_array(group["codes"], name="codes").shape[0])
@@ -1052,15 +1071,20 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         receptor_group = artifact_group(self.zw, receptors)
         fields = _stored_fields(receptor_group)
         within = tuple(str(column) for column in parameters.get("within") or ())
-        # Beside the tables: the cells' IDs as text, the packed text of each
-        # representative field, which is read whole, and the within groups'
-        # labels.
-        resident = _CLONOTYPE_TABLE_BYTES_PER_CELL * n_cells + text_read_bytes(
-            self.cells._get_array("ids"), n_cells
+        n_clonotypes = int(
+            as_zarr_array(group["clonotype_ids"], name="clonotype_ids").shape[0]
+        )
+        # Beside the tables of the cells and the clonotypes: the cells' IDs and
+        # the within groups' labels as text, and each representative field.
+        resident = (
+            _CLONOTYPE_TABLE_BYTES_PER_CELL * n_cells
+            + _CLONOTYPE_TABLE_BYTES_PER_CLONOTYPE * n_clonotypes
+            + text_read_bytes(self.cells._get_array("ids"), n_cells)
         )
         if within:
             stored = as_zarr_array(group["within_labels"], name="within_labels")
             resident += text_read_bytes(stored, int(stored.shape[0]))
+        decoded = 0
         for name in REPRESENTATIVE_FIELDS:
             if name in fields:
                 packed = as_zarr_array(
@@ -1069,7 +1093,16 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 offsets = as_zarr_array(
                     receptor_group[f"contig_{name}_offsets"], name=name
                 )
-                resident += _TEXT_COPIES * int(packed.nbytes) + int(offsets.nbytes)
+                n_values = int(offsets.shape[0]) - 1
+                # The representatives' four slots hold at most four values.
+                n_decoded = min(n_values, 4 * n_clonotypes)
+                decoded = max(decoded, n_decoded)
+                resident += (
+                    _FIELD_BYTES_PER_VALUE * n_values
+                    + _FIELD_BYTES_PER_DECODED_VALUE * n_decoded
+                    + _FIELD_BYTES_PER_PACKED_BYTE * int(packed.nbytes)
+                )
+        resident += _DECODE_BYTES_PER_BATCH_VALUE * min(decoded, _DECODE_BATCH_VALUES)
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Loading the clonotypes of {n_cells} cells holds about {resident} "
@@ -1096,10 +1129,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             self._artifact_cell_ids(clonotypes),
             codes=_read(group, "codes"),
             clone_size=_read(group, "clone_size"),
-            clonotype_ids=_read(group, "clonotype_ids").astype(str),
+            clonotype_ids=_read(group, "clonotype_ids"),
             clonotype_sizes=_read(group, "clonotype_sizes"),
             n_configurations=_read(group, "n_configurations"),
-            receptor_type=_read(receptor_group, "values").astype(str)[representatives],
+            receptor_type=_read(receptor_group, "values")[representatives],
             within={
                 column: _labels_at(within_labels[:, position], within_codes)
                 for position, column in enumerate(within)
