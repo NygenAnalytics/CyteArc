@@ -18,7 +18,8 @@ import pytest
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import import_truth_clones, write_truth_store
-from tests.clone_truth import clone_truth
+from tests.clone_truth import N_CELLS, clone_truth
+from tests.storage_helpers import insert_nullable_cell_column
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -42,6 +43,9 @@ def source(request, tmp_path_factory) -> SimpleNamespace:
     folder = tmp_path_factory.mktemp(request.param.replace(" ", "_"))
     store = write_truth_store(folder / "store.zarr", TRUTH)
     store.cells.insert("is_d2", TRUTH.samples == "d2")
+    insert_nullable_cell_column(
+        store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
+    )
     return SimpleNamespace(store=store, clones=SOURCES[request.param](store, folder))
 
 
@@ -125,3 +129,14 @@ def test_summaries_keep_to_a_cell_selection(source) -> None:
     np.testing.assert_array_equal(
         expansion.cells["group_clone_size"], TRUTH.cell_clone_sizes(cells=d2)[d2]
     )
+
+
+def test_summaries_refuse_a_grouping_that_leaves_out_every_clone(source) -> None:
+    store = source.store
+    for summary in (
+        store.clones.expansion,
+        store.clones.diversity,
+        store.clones.rarefaction,
+    ):
+        with pytest.raises(ValueError, match="No cell has both a clone and a group"):
+            summary(source.clones, group_by="unlabelled")

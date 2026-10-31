@@ -10,11 +10,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from cytearc.clones import ClonalExpansion
 from cytearc.clones.expansion import DEFAULT_RANK_SPLITS
+from cytearc.storage.artifacts import artifact_group
+from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
     copy_clone_store,
     every_cell,
@@ -314,8 +315,14 @@ def test_expansion_is_reused_and_selected_like_labels(copied) -> None:
     assert set(
         store.artifacts.load_values(first, cell_selection=expanded).cell_ids
     ) == set(TRUTH.cell_ids[np.isin(TRUTH.clones, [0, 1, 2])].tolist())
-    # Other labels in a group_by column give another result.
+    # Other labels in a group_by column give another result, also when they
+    # make the same groups, and the same labels again reuse it.
     by_sample = store.clones.expansion(clones, group_by="sample")
+    renamed = np.where(TRUTH.samples == "d2", "x2", "x4").astype(object)
+    store.cells.insert("sample", renamed, overwrite=True)
+    assert store.clones.expansion(clones, group_by="sample") != by_sample
+    store.cells.insert("sample", TRUTH.samples.astype(object), overwrite=True)
+    assert store.clones.expansion(clones, group_by="sample") == by_sample
     store.cells.insert("sample", TRUTH.samples[::-1].astype(object), overwrite=True)
     assert store.clones.expansion(clones, group_by="sample") != by_sample
 
@@ -376,11 +383,74 @@ def test_group_columns_may_not_share_a_name_with_the_result(copied) -> None:
         ({"breakpoints": (1.5,)}, TypeError, "whole numbers"),
         ({"frequency_breakpoints": (0.1, 0.5)}, ValueError, "must be 1"),
         ({"frequency_breakpoints": "0.5"}, TypeError, "sequence of numbers"),
+        ({"breakpoints": np.ones((2, 2), dtype=int)}, TypeError, "sequence of"),
+        ({"breakpoints": (1, 10**30)}, ValueError, "at most 9223372036854775807"),
+        ({"frequency_breakpoints": (10**400, 1)}, ValueError, "positive and finite"),
     ],
 )
 def test_expansion_arguments_are_checked(shared, kwargs, error, message) -> None:
     with pytest.raises(error, match=message):
         shared.store.clones.expansion(shared.clones, **kwargs)
+
+
+def test_bounds_are_checked_before_the_clones_are_read(shared) -> None:
+    unsaved = ArtifactRef("datastore", "clones", "0" * 64)
+    with pytest.raises(ValueError, match="strictly increasing"):
+        shared.store.clones.expansion(unsaved, breakpoints=(2, 1))
+    with pytest.raises(TypeError, match="invalidate_cache must be"):
+        shared.store.clones.expansion(unsaved, invalidate_cache=1)
+
+
+def test_bounds_and_splits_may_be_arrays(shared) -> None:
+    store, clones = shared.store, shared.clones
+    listed = store.clones.expansion(clones, breakpoints=(1, 2, 5))
+    assert store.clones.expansion(clones, breakpoints=np.array([1, 2, 5])) == listed
+    loaded = store.clones.load_expansion(listed, splits=np.array([1, 2]))
+    assert loaded.splits == (1, 2)
+    assert loaded.rank_windows["window"].drop_duplicates().tolist() == [
+        "1",
+        "2",
+        "after 2",
+    ]
+
+
+def test_frequency_bounds_that_print_alike_get_names_of_their_own(shared) -> None:
+    store, clones = shared.store, shared.clones
+    bounds = (0.1234561, 0.1234562, 0.1234563, 1.0)
+    loaded = store.clones.load_expansion(
+        store.clones.expansion(clones, frequency_breakpoints=bounds)
+    )
+    # Six digits print the three bounds alike, so all four get seven.
+    assert loaded.labels == (
+        "0 to 0.1234561",
+        "0.1234561 to 0.1234562",
+        "0.1234562 to 0.1234563",
+        "0.1234563 to 1",
+    )
+    # Every clone of the truth holds more than an eighth of the cells.
+    assert loaded.categories.groupby("category", sort=False)[
+        "cells"
+    ].sum().to_dict() == {
+        "0 to 0.1234561": 1 + 2 + 2 + 3,
+        "0.1234561 to 0.1234562": 0,
+        "0.1234562 to 0.1234563": 0,
+        "0.1234563 to 1": 4 + 5 + 6 + 9,
+    }
+
+
+def test_the_cells_table_orders_the_labels_of_key_columns_naturally(copied) -> None:
+    store = copied.store
+    sites = np.where(TRUTH.samples == "d2", "s2", "s10").astype(object)
+    store.cells.insert("site", sites)
+    loaded = store.clones.load_expansion(
+        store.clones.expansion(copied.clones, group_by="site")
+    )
+    assert loaded.cells["site"].cat.categories.tolist() == ["s2", "s10"]
+    assert loaded.categories["site"].drop_duplicates().tolist() == ["s2", "s10"]
+    assert loaded.cells["site"].astype(object).tolist() == [
+        site if clone >= 0 else np.nan
+        for site, clone in zip(sites, TRUTH.clones, strict=True)
+    ]
 
 
 def test_expansion_refuses_other_artifacts(shared) -> None:
@@ -410,42 +480,104 @@ def test_a_read_only_store_reuses_saved_expansion(copied) -> None:
         reader.clones.expansion(clones, breakpoints=(1,))
 
 
+# CoSpar's table labels the truth's eight clones 1 to 8, stored one character
+# wide; reading them holds each cell's stored int32 code and its int64 copy,
+# and each label's 4 stored bytes three times and 100 more.
+CLONES_READ = N_CELLS * (4 + 8) + 8 * (100 + 3 * 4)
+
+
 def test_expansion_refuses_more_cells_than_the_memory_budget(
     copied, monkeypatch
 ) -> None:
     store, clones = copied.store, copied.clones
+    assert artifact_group(store.zw, clones)["clone_ids"].dtype == np.dtype("<U1")
     saved = store.clones.expansion(clones)
-    # 48 cells take about 14,400 bytes to measure and 24,000 to load.
-    monkeypatch.setattr(store, "memoryBytes", 20_000)
-    with pytest.raises(MemoryError, match="Loading the clonal expansion of 48 cells"):
-        store.clones.load_expansion(saved)
-    monkeypatch.setattr(store, "memoryBytes", 10_000)
-    with pytest.raises(MemoryError, match="Measuring the clonal expansion of 48"):
+    # Measuring 48 cells in one group takes 48 * 300 bytes and 2,000 for the
+    # group.
+    monkeypatch.setattr(store, "memoryBytes", 16_399)
+    with pytest.raises(MemoryError, match="of 48 cells holds about 16400 bytes"):
         store.clones.expansion(clones, breakpoints=(1,))
     assert store.artifacts.list(kind="clonal_expansion", scope="datastore") == [saved]
+    monkeypatch.setattr(store, "memoryBytes", 16_400)
+    assert store.clones.expansion(clones, breakpoints=(1,)) != saved
+    # Loading takes 48 * 500 bytes for the tables, 2,000 for the group, and
+    # the clones read.
+    needed = N_CELLS * 500 + 2_000 + CLONES_READ
+    assert needed == 27_472
+    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    with pytest.raises(MemoryError, match=f"48 cells holds about {needed} bytes"):
+        store.clones.load_expansion(saved)
+    monkeypatch.setattr(store, "memoryBytes", needed)
+    assert store.clones.load_expansion(saved).categories["cells"].sum() == 32
 
 
-def test_expansion_of_cells_without_clones(copied) -> None:
+def test_reading_the_clones_is_checked_against_the_memory_budget(
+    copied, monkeypatch
+) -> None:
+    store, clones = copied.store, copied.clones
+    monkeypatch.setattr(store, "memoryBytes", CLONES_READ - 1)
+    with pytest.raises(MemoryError, match=f"48 cells holds about {CLONES_READ} bytes"):
+        store._read_clone_input(clones, with_ids=True)
+    monkeypatch.setattr(store, "memoryBytes", CLONES_READ)
+    source = store._read_clone_input(clones, with_ids=True)
+    assert source.clone_ids is not None
+    assert source.clone_ids.tolist() == [str(label) for label in range(1, 9)]
+    # Without labels, only the codes.
+    monkeypatch.setattr(store, "memoryBytes", N_CELLS * 12 - 1)
+    with pytest.raises(MemoryError, match="48 cells holds about 576 bytes"):
+        store._read_clone_input(clones)
+    monkeypatch.setattr(store, "memoryBytes", N_CELLS * 12)
+    assert store._read_clone_input(clones).clone_ids is None
+
+
+def test_expansion_of_some_cells_counts_every_clone_cell_it_reads(
+    copied, monkeypatch
+) -> None:
+    store, clones = copied.store, copied.clones
+    in_d2 = TRUTH.samples == "d2"
+    n_d2 = int(in_d2.sum())
+    store.cells.insert("is_d2", in_d2, overwrite=True)
+    d2 = store.snapshot_cell_selection("is_d2")
+    saved = store.clones.expansion(clones, cell_selection=d2)
+    # Matching the clones' 48 cells to the cells of d2 takes 56 bytes for each
+    # clone cell and 32 for each measured cell.
+    matched = N_CELLS * 56 + n_d2 * 32
+    monkeypatch.setattr(store, "memoryBytes", matched - 1)
+    with pytest.raises(
+        MemoryError, match=f"48 cells to {n_d2} measured cells holds about {matched}"
+    ):
+        store.clones.expansion(clones, cell_selection=d2, breakpoints=(1,))
+    # Loading their tables also reads and matches every clone cell.
+    needed = n_d2 * 500 + 2_000 + CLONES_READ + matched
+    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    with pytest.raises(MemoryError, match=f"{n_d2} cells holds about {needed} bytes"):
+        store.clones.load_expansion(saved)
+    monkeypatch.setattr(store, "memoryBytes", needed)
+    assert store.clones.load_expansion(saved).cells.shape[0] == n_d2
+
+
+def test_expansion_refuses_cells_without_a_clone_and_a_group(copied) -> None:
     store = copied.store
+    # Clones of no cell, a column without a label, and labels of the cells
+    # without a clone.
     store.cells.insert("no_clone", np.full(N_CELLS, "", dtype=object))
     empty = store.clones.from_column("no_clone", cell_selection=copied.cells)
-    loaded = store.clones.load_expansion(store.clones.expansion(empty))
-    assert loaded.cells["category"].isna().all()
-    assert loaded.cells["group_clone_size"].tolist() == [0] * N_CELLS
-    assert loaded.categories.empty and loaded.rank_windows.empty
-    assert loaded.categories.columns.tolist() == [
-        "group",
-        "category",
-        "cells",
-        "clones",
-        "fraction",
-    ]
-    by_sample = store.clones.load_expansion(
-        store.clones.expansion(empty, group_by="sample")
+    insert_nullable_cell_column(
+        store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
     )
-    assert by_sample.categories.empty
-    assert "sample" in by_sample.categories.columns
-    assert isinstance(by_sample.cells, pd.DataFrame)
+    store.cells.insert("without_clone", TRUTH.clones < 0)
+    others = store.snapshot_cluster_labels(
+        "sample", cell_selection=store.snapshot_cell_selection("without_clone")
+    )
+    for clones, options in (
+        (empty, {}),
+        (empty, {"group_by": "sample"}),
+        (copied.clones, {"group_by": "unlabelled"}),
+        (copied.clones, {"groups": others}),
+    ):
+        with pytest.raises(ValueError, match="No cell has both a clone and a group"):
+            store.clones.expansion(clones, **options)
+    assert store.artifacts.list(kind="clonal_expansion", scope="datastore") == []
 
 
 def test_labels_that_a_source_keeps_apart_follow_the_measured_cells(shared) -> None:

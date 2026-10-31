@@ -11,8 +11,8 @@ import pytest
 from cytearc.clones import diversity as dv
 from cytearc.clones.diversity import CloneSizes
 
-# Abundance vectors of iNEXT's examples, whose outputs below come from running
-# iNEXT 3.0.2 and vegan 2.7.6; the vectors are clone sizes here.
+# Two abundance vectors, used as clone sizes here, whose outputs below come
+# from running iNEXT 3.0.2 and vegan 2.7.6 on them.
 A = [10, 5, 5, 3, 2, 2, 1, 1, 1, 1, 1, 1]
 B = [50, 20, 4, 2, 2, 1, 1, 1, 1]
 
@@ -342,6 +342,22 @@ def test_default_sizes_follow_inext_knots() -> None:
             dv.default_sizes(10, **kwargs)
 
 
+def test_default_sizes_take_numpy_integers_up_to_the_largest_size() -> None:
+    assert dv.default_sizes(100, endpoint=np.int64(50), knots=np.int32(5)).tolist() == [
+        1,
+        13,
+        25,
+        37,
+        50,
+    ]
+    assert dv.checked_curve_arguments(None, np.int64(40)) == (None, 40)
+    # Sizes are floats while they are spaced, exact up to 2**53.
+    assert dv.LARGEST_SIZE == 2**53
+    assert dv.default_sizes(10, endpoint=2**53, knots=4)[-1] == 2**53
+    with pytest.raises(ValueError, match="up to 9007199254740992"):
+        dv.default_sizes(10, endpoint=2**53 + 1)
+
+
 def test_entropy_tail_is_stable_in_both_regimes() -> None:
     for n, a in ((33, 0.0204), (1_000, 0.1), (200_000, 1e-7), (5, 0.9)):
         j = np.arange(1, 400_000, dtype=np.float64)
@@ -384,6 +400,15 @@ def test_indices_of_a_few_clones() -> None:
     coverage = 1 - 2 / 7
     gamma = max(4 / coverage * 8 / (7 * 6) - 1, 0)
     assert got["ace"] == pytest.approx(4 / coverage + 2 / coverage * gamma)
+
+
+def test_d50_counts_a_clone_that_holds_exactly_half() -> None:
+    # The clone of 2 of 4 cells holds half of them, as do two clones of 3 of
+    # 12 cells.
+    assert dv.indices(_clones([2, 1, 1]))["d50"] == 1
+    assert dv.indices(_clones([3, 3, 2, 2, 1, 1]))["d50"] == 2
+    # Just under half needs one clone more.
+    assert dv.indices(_clones([3, 3, 2, 2, 2, 1]))["d50"] == 3
 
 
 def test_indices_of_one_clone_and_richness_estimators() -> None:

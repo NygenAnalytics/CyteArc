@@ -17,7 +17,7 @@ from tests.clone_helpers import (
     write_truth_store,
 )
 from tests.clone_truth import CELL_TYPES, N_CELLS, clone_truth
-from tests.storage_helpers import write_count_store
+from tests.storage_helpers import insert_nullable_cell_column, write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -362,11 +362,15 @@ def test_the_expansion_plot_checks_its_arguments(
         clonal_expansion(object(), truth_plot.by_sample, show=False)
 
 
-def test_the_expansion_plot_of_cells_without_clones(truth_plot) -> None:
+def test_the_expansion_plot_of_a_grouping_without_labels(truth_plot) -> None:
     store = truth_plot.store
-    store.cells.insert("no_clone", np.full(N_CELLS, "", dtype=object), overwrite=True)
-    empty = store.clones.from_column("no_clone", cell_selection=every_cell(store))
-    result = clonal_expansion(store, store.clones.expansion(empty), show=False)
+    if "unlabelled" not in store.cells.columns:
+        insert_nullable_cell_column(
+            store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
+        )
+    result = clonal_expansion(
+        store, truth_plot.by_sample, group_by="unlabelled", show=False
+    )
     assert result.tables["categories"].empty
     assert result.tables["rank_windows"].empty
     assert result.provenance.n_cells == 0
@@ -410,6 +414,23 @@ def test_the_rarefaction_plot_draws_one_panel_per_order(truth_plot) -> None:
     shown = clonal_rarefaction(store, truth_plot.clones, orders=(2,))
     assert shown.provenance.extras["orders"] == [2]
     assert shown.figure.number not in plt.get_fignums()
+
+
+def test_the_coverage_panel_draws_the_coverage(truth_plot) -> None:
+    result = clonal_rarefaction(
+        truth_plot.store, truth_plot.clones, group_by="sample", show=False
+    )
+    curves = result.tables["curves"]
+    lines = result.axes["coverage"].get_lines()
+    # Each sample draws its rarefied part, its extrapolated part and its
+    # observed point, of the first order.
+    for name, rarefied in zip(("d2", "d4"), lines[::3], strict=True):
+        rows = curves[(curves["group"] == name) & (curves["order"] == 0)]
+        rows = rows[rows["method"] != "extrapolation"]
+        np.testing.assert_allclose(rarefied.get_xdata(), rows["size"])
+        np.testing.assert_allclose(rarefied.get_ydata(), rows["coverage"])
+        assert rarefied.get_ydata().max() <= 1
+    plt.close(result.figure)
 
 
 def test_the_rarefaction_plot_of_complete_samples(truth_plot) -> None:

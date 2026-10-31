@@ -81,6 +81,12 @@ def test_category_names_describe_their_bounds_and_sort_naturally() -> None:
         ((0.5, float("nan")), False, ValueError, "positive and finite"),
         ((2, 2), True, ValueError, "strictly increasing"),
         ((0.5, 0.1, 1), False, ValueError, "strictly increasing"),
+        (np.ones((2, 2), dtype=int), True, TypeError, "sequence of numbers"),
+        (np.asarray(5), True, TypeError, "sequence of numbers"),
+        (np.asarray([True, False]), True, TypeError, "whole numbers"),
+        ((1, 2**63), True, ValueError, "at most 9223372036854775807"),
+        ((1, 10**400), True, ValueError, "at most 9223372036854775807"),
+        ((10**400,), False, ValueError, "positive and finite"),
     ],
 )
 def test_bounds_are_checked(values, whole, error, message) -> None:
@@ -95,6 +101,42 @@ def test_bounds_become_ints_or_floats() -> None:
     assert all(type(value) is float for value in bounds)
     with pytest.raises(ValueError, match="last of frequency_breakpoints must be 1"):
         frequency_labels((0.1, 0.5))
+    # One-dimensional arrays, and the largest int64.
+    whole = checked_bounds(np.asarray([1, 5], dtype=np.int32), "bounds", whole=True)
+    assert whole == (1, 5) and all(type(value) is int for value in whole)
+    largest = 2**63 - 1
+    assert checked_bounds((1, largest), "bounds", whole=True) == (1, largest)
+    assert checked_bounds(np.asarray([0.25, 1.0]), "bounds", whole=False) == (
+        0.25,
+        1.0,
+    )
+
+
+def test_frequency_names_print_each_bound_apart() -> None:
+    # Six significant digits print 0.1234561 and 0.1234562 alike, so every
+    # bound gets seven; 1e-05 and 1.00001e-05 need six.
+    assert frequency_labels((0.1234561, 0.1234562, 1)) == (
+        "0 to 0.1234561",
+        "0.1234561 to 0.1234562",
+        "0.1234562 to 1",
+    )
+    assert frequency_labels((1e-05, 1.00001e-05, 1)) == (
+        "0 to 1e-05",
+        "1e-05 to 1.00001e-05",
+        "1.00001e-05 to 1",
+    )
+    # The float just below 1, 1 - 2**-53, prints as 1 up to fifteen digits,
+    # and the float after 0.1 as 0.1 up to sixteen.
+    assert frequency_labels((0.5, np.nextafter(1.0, 0.0), 1)) == (
+        "0 to 0.5",
+        "0.5 to 0.9999999999999999",
+        "0.9999999999999999 to 1",
+    )
+    assert frequency_labels((0.1, np.nextafter(0.1, 1.0), 1)) == (
+        "0 to 0.10000000000000001",
+        "0.10000000000000001 to 0.10000000000000002",
+        "0.10000000000000002 to 1",
+    )
 
 
 def test_clone_sizes_count_cells_within_each_group() -> None:
@@ -296,6 +338,38 @@ def test_tables_count_cells_and_clones_per_group() -> None:
         "cells": [2, 2, 1, 2, 1, 0],
         "fraction": [0.4, 0.4, 0.2, 2 / 3, 1 / 3, 0.0],
     }
+
+
+def test_tables_order_the_labels_of_key_columns_naturally() -> None:
+    # The groups' keys in natural order: s2 before s10, within each batch.
+    keys = [
+        {"batch": "b2", "site": "s10"},
+        {"batch": "b10", "site": "s2"},
+        {"batch": "b10", "site": "s10"},
+    ]
+    clones = np.array([0, 0, 1, 2])
+    groups = np.array([0, 1, 2, -1])
+    sizes, frequencies = group_clone_sizes(clones, groups)
+    categories, labels = expansion_categories(sizes, frequencies, breakpoints=(1,))
+    cells, table, _ranks = expansion_tables(
+        np.asarray(["c0", "c1", "c2", "c3"]),
+        categories=categories,
+        labels=labels,
+        clones=clones,
+        clone_ids=np.asarray(["a", "b", "c"]),
+        groups=groups,
+        group_keys=keys,
+        key_columns=["batch", "site"],
+        sizes=sizes,
+        frequencies=frequencies,
+        splits=(1,),
+    )
+    assert cells["batch"].cat.categories.tolist() == ["b2", "b10"]
+    assert cells["site"].cat.categories.tolist() == ["s2", "s10"]
+    assert cells["batch"].astype(object).tolist()[:3] == ["b2", "b10", "b10"]
+    assert cells["site"].astype(object).tolist()[:3] == ["s10", "s2", "s10"]
+    assert pd.isna(cells.loc["c3", "site"])
+    assert table["site"].drop_duplicates().tolist() == ["s10", "s2"]
 
 
 def test_tables_without_clones_or_key_columns() -> None:

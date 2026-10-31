@@ -1,0 +1,171 @@
+"""Each clone summary runs within the smallest memory budget that it accepts.
+
+The budget climbs from one byte to each refusal's own estimate until the
+summary runs, and the peak that tracemalloc records while it runs must not
+exceed that budget. The test never repeats the budgets' formulas, so it
+checks that whatever a summary estimates bounds what it allocates, on inputs
+that stress each estimate: long and emoji labels, long clone labels, a few
+measured cells of many clone cells, a label artifact and a cell selection of
+more cells than the clones hold, a label for each of many cells, and many
+sizes.
+"""
+
+import re
+import tracemalloc
+from collections.abc import Callable
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+from cytearc.datastore.datastore import DataStore
+from tests.storage_helpers import write_count_store
+
+pytestmark = pytest.mark.slow
+
+N_CELLS = 10_000
+N_MEASURED = 500
+
+
+@pytest.fixture(scope="module")
+def data(tmp_path_factory) -> SimpleNamespace:
+    rng = np.random.default_rng(7)
+    path = tmp_path_factory.mktemp("clone_memory") / "store.zarr"
+    ids = np.asarray([f"cell{i:06d}-1" for i in range(N_CELLS)])
+    counts = rng.poisson(2.0, size=(N_CELLS, 4)).astype(np.uint16) + 1
+    write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=ids)
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+    draws = rng.integers(0, 8, size=N_CELLS)
+    store.cells.insert(
+        "donor", np.asarray([f"donor_with_a_long_name_{k:04d}" for k in draws])
+    )
+    store.cells.insert(
+        "condition", np.asarray([f"condition_named_at_length_{k:04d}" for k in draws])
+    )
+    store.cells.insert(
+        "emoji", np.asarray(["\U0001f600" * 17 + f"{k:03d}" for k in draws])
+    )
+    # A label of its own for each of the first 2,000 cells, and none for the
+    # others, makes groups that cost more than their cells.
+    own = np.asarray([f"g{i:06d}" if i < 2_000 else "" for i in range(N_CELLS)])
+    store.cells.insert("own", own)
+    store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
+    store.cells.insert("first", np.arange(N_CELLS) < N_MEASURED)
+    # Zipf clone sizes, about one cell in ten without a clone.
+    sizes = np.minimum(rng.zipf(1.8, size=N_CELLS), 300)
+    clone_of = np.repeat(np.arange(len(sizes)), sizes)[:N_CELLS]
+    rng.shuffle(clone_of)
+    labels = np.asarray([f"clone{c}" for c in clone_of], dtype=object)
+    labels[rng.random(N_CELLS) < 0.1] = ""
+    store.cells.insert("clone", labels)
+    store.cells.insert(
+        "long_clone", np.asarray([f"{'ACGT' * 40}_{i}" for i in range(N_CELLS)])
+    )
+    emoji = rng.integers(0x1F300, 0x1F5FF, size=(N_CELLS, 40))
+    store.cells.insert(
+        "emoji_clone",
+        np.asarray(["".join(map(chr, row)) + str(i) for i, row in enumerate(emoji)]),
+    )
+    every = store.snapshot_cell_selection("every_cell")
+    first = store.snapshot_cell_selection("first")
+    return SimpleNamespace(
+        store=store,
+        every=every,
+        first=first,
+        clones=store.clones.from_column("clone", cell_selection=every),
+        long=store.clones.from_column("long_clone", cell_selection=every),
+        emoji=store.clones.from_column("emoji_clone", cell_selection=every),
+        few=store.clones.from_column("clone", cell_selection=first),
+        labels=store.snapshot_cluster_labels("donor", cell_selection=every),
+    )
+
+
+def _expansion(**options: object) -> Callable[[SimpleNamespace], object]:
+    def run(data: SimpleNamespace) -> object:
+        return data.store.clones.expansion(
+            data.clones, invalidate_cache=True, **options
+        )
+
+    return run
+
+
+def _loaded(clones: str, **options: str) -> Callable[[SimpleNamespace], object]:
+    def run(data: SimpleNamespace) -> object:
+        selected = {name: getattr(data, value) for name, value in options.items()}
+        saved = data.store.clones.expansion(getattr(data, clones), **selected)
+        return data.store.clones.load_expansion(saved)
+
+    return run
+
+
+CASES: dict[str, Callable[[SimpleNamespace], object]] = {
+    "expansion of every cell": _expansion(),
+    "expansion by two columns of long labels": _expansion(
+        group_by=["donor", "condition"]
+    ),
+    "expansion by emoji labels": _expansion(group_by="emoji"),
+    "expansion by a label for each of many cells": _expansion(group_by="own"),
+    "expansion of a few of the clones' cells": lambda data: data.store.clones.expansion(
+        data.long, cell_selection=data.first, invalidate_cache=True
+    ),
+    "loaded expansion of 160-character clone labels": _loaded("long"),
+    "loaded expansion of emoji clone labels": _loaded("emoji"),
+    "loaded expansion of a few of the clones' cells": _loaded(
+        "long", cell_selection="first"
+    ),
+    "diversity by two columns of long labels": lambda data: data.store.clones.diversity(
+        data.clones, group_by=["donor", "condition"]
+    ),
+    "diversity by a label for each of many cells": lambda data: (
+        data.store.clones.diversity(data.clones, group_by="own")
+    ),
+    "diversity of a few cells by labels of every cell": lambda data: (
+        data.store.clones.diversity(data.few, groups=data.labels)
+    ),
+    "diversity of a few cells within a selection of every cell": lambda data: (
+        data.store.clones.diversity(data.few, cell_selection=data.every)
+    ),
+    "rarefaction at 5,000 sizes": lambda data: data.store.clones.rarefaction(
+        data.clones, orders=(0, 1), sizes=range(1, 5_001)
+    ),
+}
+
+
+def _smallest_budget(store: DataStore, run: Callable[[], object]) -> int:
+    """Raise the budget to each refusal's estimate until ``run`` runs."""
+    budget = 1
+    for _attempt in range(100):
+        store.memoryBytes = budget
+        try:
+            run()
+            return budget
+        except MemoryError as error:
+            found = re.search(r"about (\d+) bytes", str(error))
+            assert found is not None, str(error)
+            estimate = int(found.group(1))
+            # A refusal names a larger estimate than the budget it refused.
+            assert estimate > budget, str(error)
+            budget = estimate
+    raise AssertionError("the budget did not settle")
+
+
+@pytest.mark.parametrize("case", list(CASES))
+def test_the_traced_peak_fits_the_smallest_budget_accepted(data, case) -> None:
+    store, full = data.store, data.store.memoryBytes
+    run = CASES[case]
+    try:
+        # Compiled kernels and caches are warmed before anything is traced.
+        run(data)
+        budget = _smallest_budget(store, lambda: run(data))
+        store.memoryBytes = budget
+        tracemalloc.start()
+        try:
+            run(data)
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    finally:
+        store.memoryBytes = full
+    assert peak <= budget, (case, peak, budget)

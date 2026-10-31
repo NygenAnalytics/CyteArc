@@ -203,10 +203,73 @@ def test_diversity_refuses_other_artifacts_and_large_stores(
         store.clones.diversity(copied.cells)
     with pytest.raises(TypeError, match="clones must be an ArtifactRef"):
         store.clones.rarefaction("clones")
-    # Grouping 48 cells takes about 4,800 bytes.
-    monkeypatch.setattr(store, "memoryBytes", 4_000)
-    with pytest.raises(MemoryError, match="Grouping 48 cells by 0 columns"):
+    # Grouping 48 cells takes 4,800 bytes.
+    monkeypatch.setattr(store, "memoryBytes", 4_799)
+    with pytest.raises(MemoryError, match="by 0 columns holds about 4800 bytes"):
         store.clones.diversity(clones)
+    monkeypatch.setattr(store, "memoryBytes", 4_800)
+    assert store.clones.diversity(clones).indices["cells"].tolist() == [32]
+
+
+def test_each_group_counts_beside_its_cells(copied, monkeypatch) -> None:
+    store, clones = copied.store, copied.clones
+    # A label of its own for each of the 32 cells with a clone makes 32
+    # groups, whose clone sizes and rows take 2,000 bytes each.
+    has = TRUTH.clones >= 0
+    store.cells.insert("own", np.asarray([f"c{i:02d}" for i in range(N_CELLS)]))
+    store.cells.insert("has_clone", has)
+    own = store.snapshot_cluster_labels(
+        "own", cell_selection=store.snapshot_cell_selection("has_clone")
+    )
+    needed = 32 * 2_000
+    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    with pytest.raises(MemoryError, match=f"32 groups holds about {needed} bytes"):
+        store.clones.diversity(clones, groups=own)
+    with pytest.raises(MemoryError, match=f"32 groups holds about {needed} bytes"):
+        store.clones.rarefaction(clones, groups=own, orders=(0,), knots=2)
+    monkeypatch.setattr(store, "memoryBytes", needed)
+    result = store.clones.diversity(clones, groups=own)
+    assert result.indices["cells"].tolist() == [1] * 32
+
+
+def test_rarefaction_counts_the_sizes_it_reaches(copied, monkeypatch) -> None:
+    store, clones = copied.store, copied.clones
+    # 1,000 sizes for the one group: its 32 cells reach 32 whole sizes below
+    # them, each with its 7 distinct clone sizes at 40 bytes, and 1,000 rows
+    # of 100 bytes.
+    needed = 32 * 7 * 40 + 1_000 * 100
+    assert len(ALL.values) == 7 and needed == 108_960
+    sizes = np.arange(1, 1_001)
+    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    with pytest.raises(MemoryError, match=f"to 1000 sizes holds about {needed} bytes"):
+        store.clones.rarefaction(clones, orders=(0,), sizes=sizes)
+    monkeypatch.setattr(store, "memoryBytes", needed)
+    curves = store.clones.rarefaction(clones, orders=(0,), sizes=sizes).curves
+    assert curves["size"].tolist() == sizes.tolist()
+    # Knots are counted before any size is made, however many are asked for.
+    monkeypatch.undo()
+    with pytest.raises(MemoryError, match="to 1000000000000 sizes holds about"):
+        store.clones.rarefaction(clones, knots=10**12)
+
+
+def test_orders_sizes_endpoint_and_knots_may_be_numpy_values(shared) -> None:
+    store, clones = shared.store, shared.clones
+    listed = store.clones.rarefaction(clones, orders=[0, 2], sizes=[4, 2, 4])
+    arrays = store.clones.rarefaction(
+        clones, orders=np.array([0, 2]), sizes=np.array([4, 2, 4])
+    )
+    assert arrays.orders == (0, 2) and all(
+        type(order) is int for order in arrays.orders
+    )
+    assert arrays.curves.equals(listed.curves)
+    numbers = store.clones.rarefaction(
+        clones, orders=(0,), endpoint=np.int64(4), knots=np.int64(4)
+    )
+    assert numbers.curves.equals(
+        store.clones.rarefaction(clones, orders=(0,), endpoint=4, knots=4).curves
+    )
+    by_size = store.clones.diversity(clones, size=np.int64(10))
+    assert by_size.size == 10 and type(by_size.size) is int
 
 
 def test_rarefaction_follows_each_groups_default_sizes(shared) -> None:
@@ -263,6 +326,10 @@ def test_rarefaction_follows_each_groups_default_sizes(shared) -> None:
         ({"sizes": [2.5]}, ValueError, "sizes must hold positive integers"),
         ({"endpoint": 0}, ValueError, "endpoint must be"),
         ({"knots": 1}, ValueError, "knots must be"),
+        ({"orders": np.ones((1, 1), dtype=int)}, TypeError, "orders must be a"),
+        ({"sizes": np.ones((1, 1), dtype=int)}, TypeError, "sizes must be a"),
+        ({"sizes": [2**53 + 1]}, ValueError, "up to 9007199254740992"),
+        ({"endpoint": 2**53 + 1}, ValueError, "up to 9007199254740992"),
     ],
 )
 def test_rarefaction_arguments_are_checked(shared, kwargs, error, message) -> None:

@@ -14,6 +14,7 @@ scRepertoire's ``clonalProportion`` reports.
 These functions work on clone and group codes and never touch storage.
 """
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from itertools import pairwise
@@ -24,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from ..storage.refs import ArtifactRef
+from ..utils.arrays import sort_categories
 from .groups import group_names
 
 __all__ = [
@@ -51,28 +53,43 @@ DEFAULT_FREQUENCY_BREAKPOINTS = (0.0001, 0.001, 0.01, 0.1, 1.0)
 #: clones, 11 to 100, 101 to 1000, 1001 to 10000, 10001 to 30000, and 30001
 #: to 100000, and here also the rest.
 DEFAULT_RANK_SPLITS = (10, 100, 1_000, 10_000, 30_000, 100_000)
+# The largest whole bound, which int64 codes hold.
+_LARGEST_INT64 = int(np.iinfo(np.int64).max)
 
 
 def checked_bounds(values: Any, name: str, *, whole: bool) -> tuple[Any, ...]:
     """Return positive, strictly increasing bounds as ints or floats.
 
+    A sequence or a one-dimensional array of Python or NumPy numbers is
+    accepted. Whole bounds are at most ``2**63 - 1``, the largest int64.
+
     Raises:
         TypeError: If ``values`` is not a sequence of numbers, or of whole
             numbers when ``whole``.
-        ValueError: If it is empty, or not positive and strictly increasing.
+        ValueError: If it is empty, not positive and strictly increasing, or
+            beyond the range of its type.
     """
     kind = Integral if whole else Real
+    if isinstance(values, np.ndarray) and values.ndim == 1:
+        values = values.tolist()
     if isinstance(values, str | bytes) or not isinstance(values, Sequence):
         raise TypeError(f"{name} must be a sequence of numbers")
     if any(isinstance(value, bool) or not isinstance(value, kind) for value in values):
         raise TypeError(f"{name} must hold {'whole numbers' if whole else 'numbers'}")
-    bounds = tuple(int(value) if whole else float(value) for value in values)
+    try:
+        bounds = tuple(int(value) if whole else float(value) for value in values)
+    except OverflowError:
+        raise ValueError(f"{name} must be positive and finite") from None
     if not bounds:
         raise ValueError(f"{name} must hold at least one bound")
-    if not all(np.isfinite(bounds)) or bounds[0] <= 0:
+    # Whole numbers are finite, however large.
+    finite = whole or all(math.isfinite(bound) for bound in bounds)
+    if not finite or bounds[0] <= 0:
         raise ValueError(f"{name} must be positive and finite")
     if any(later <= earlier for earlier, later in pairwise(bounds)):
         raise ValueError(f"{name} must be strictly increasing")
+    if whole and bounds[-1] > _LARGEST_INT64:
+        raise ValueError(f"{name} must be at most {_LARGEST_INT64}")
     return bounds
 
 
@@ -117,9 +134,22 @@ def frequency_labels(frequency_breakpoints: Sequence[float]) -> tuple[str, ...]:
     if bounds[-1] != 1.0:
         raise ValueError("The last of frequency_breakpoints must be 1")
     lowers = (0.0, *bounds[:-1])
+    digits = _distinguishing_digits(bounds)
     return tuple(
-        f"{lower:g} to {upper:g}" for lower, upper in zip(lowers, bounds, strict=True)
+        f"{lower:.{digits}g} to {upper:.{digits}g}"
+        for lower, upper in zip(lowers, bounds, strict=True)
     )
+
+
+def _distinguishing_digits(bounds: tuple[float, ...]) -> int:
+    """The significant digits, at least 6, that print distinct bounds apart.
+
+    Six is the ``g`` format's default; 17 tell any two distinct floats apart.
+    """
+    for digits in range(6, 17):
+        if len({f"{bound:.{digits}g}" for bound in bounds}) == len(bounds):
+            return digits
+    return 17
 
 
 def rank_window_labels(splits: Sequence[int]) -> tuple[str, ...]:
@@ -367,12 +397,14 @@ def expansion_tables(
         "group": pd.Categorical.from_codes(groups, categories=pd.Index(group_labels)),
     }
     for column, column_keys in keys.items():
-        distinct, group_codes = np.unique(column_keys.astype(str), return_inverse=True)
+        # Each key column's labels in their natural order, as the groups are.
+        distinct = sort_categories(dict.fromkeys(column_keys.tolist()))
+        group_codes = pd.Index(distinct, dtype=object).get_indexer(column_keys)
         cell_columns[column] = pd.Categorical.from_codes(
-            np.where(groups >= 0, group_codes.reshape(-1)[np.maximum(groups, 0)], -1)
+            np.where(groups >= 0, group_codes[np.maximum(groups, 0)], -1)
             if n_groups
             else np.full(len(groups), -1),
-            categories=pd.Index(distinct.astype(object)),
+            categories=pd.Index(distinct, dtype=object),
         )
     cell_columns["group_clone_size"] = np.asarray(sizes, dtype=np.int64)
     cell_columns["group_clone_frequency"] = np.asarray(frequencies, dtype=np.float64)

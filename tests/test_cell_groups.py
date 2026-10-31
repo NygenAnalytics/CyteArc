@@ -6,10 +6,21 @@ import pytest
 from cytearc.datastore._operations.cell_groups import (
     GROUPING_BYTES_PER_CELL,
     GROUPING_BYTES_PER_COLUMN,
+    GROUPING_BYTES_PER_DISTINCT_LABEL,
+    GROUPING_BYTES_PER_GROUP,
+    GROUPING_BYTES_PER_LABEL_BYTE,
+    GROUPING_BYTES_PER_LABELLED_CELL,
+    GROUPING_BYTES_PER_SELECTED_CELL,
     cell_groups,
     group_columns,
 )
 from cytearc.datastore.datastore import DataStore
+from cytearc.metadata.artifacts import plan_cell_data_artifact
+from cytearc.metadata.rows import array_row_selection_parts
+from cytearc.storage.arrays import MISSING_MASK_PREFIX
+from cytearc.storage.artifact_writer import artifact_transaction
+from cytearc.storage.artifacts import artifact_group
+from cytearc.storage.refs import ArtifactRef
 from tests.storage_helpers import insert_nullable_cell_column, write_count_store
 
 N_CELLS = 8
@@ -180,10 +191,150 @@ def test_key_columns_are_checked(store) -> None:
         _group(store, kept_apart=(("kind", np.asarray(["T"])),))
 
 
+def _chunk(array) -> int:
+    """The bytes of one chunk that reading an array holds, by the store's model."""
+    return array_row_selection_parts(array)[0]
+
+
+def _assert_needs(store, needed: int, **options) -> None:
+    """Grouping runs within ``needed`` bytes and refuses one byte fewer."""
+    assert _group(store, memory_bytes=needed, **options).codes.shape == (N_CELLS,)
+    with pytest.raises(MemoryError, match=f"holds about {needed} bytes"):
+        _group(store, memory_bytes=needed - 1, **options)
+
+
 def test_grouping_is_checked_against_the_memory_budget(store) -> None:
-    # Eight cells by two columns take 8 * (100 + 2 * 70) bytes.
-    needed = N_CELLS * (GROUPING_BYTES_PER_CELL + 2 * GROUPING_BYTES_PER_COLUMN)
-    assert needed == 1_920
-    assert _group(store, group_by=["sample", "batch"], memory_bytes=needed).keys
-    with pytest.raises(MemoryError, match="Grouping 8 cells by 2 columns holds about"):
-        _group(store, group_by=["sample", "batch"], memory_bytes=needed - 1)
+    # Eight cells by two columns, whose labels are stored 3 and 1 characters
+    # wide in 4 bytes each: 8 * (100 + 2 * 70 + 3 * (12 + 4)) bytes, and the
+    # larger column's chunk while it is read.
+    per_cell = GROUPING_BYTES_PER_CELL + 2 * GROUPING_BYTES_PER_COLUMN
+    per_cell += GROUPING_BYTES_PER_LABEL_BYTE * (12 + 4)
+    assert N_CELLS * per_cell == 2_304
+    chunk = max(_chunk(store.cells._get_array(name)) for name in ("sample", "batch"))
+    # Each column holds two distinct labels, and they make four groups.
+    named = (2 + 2) * GROUPING_BYTES_PER_DISTINCT_LABEL + 4 * GROUPING_BYTES_PER_GROUP
+    _assert_needs(store, 2_304 + chunk + named, group_by=["sample", "batch"])
+
+
+def test_a_selection_and_a_label_artifact_count_all_their_cells(store) -> None:
+    # The four odd cells of a selection are read whatever the artifact holds.
+    batch = _chunk(store.cells._get_array("batch"))
+    per_cell = (
+        GROUPING_BYTES_PER_CELL
+        + GROUPING_BYTES_PER_COLUMN
+        + GROUPING_BYTES_PER_LABEL_BYTE * 4
+    )
+    selected = 4 * GROUPING_BYTES_PER_SELECTED_CELL
+    named = 2 * GROUPING_BYTES_PER_DISTINCT_LABEL + 2 * GROUPING_BYTES_PER_GROUP
+    _assert_needs(
+        store,
+        N_CELLS * per_cell + batch + selected + named,
+        group_by="batch",
+        cell_selection=store.snapshot_cell_selection("odd"),
+    )
+    # A label artifact of four cells, labelled one character wide.
+    labels = store.snapshot_cluster_labels(
+        "cluster", cell_selection=store.snapshot_cell_selection("first_four")
+    )
+    values = artifact_group(store.zw, labels)["values"]
+    assert values.dtype == np.dtype("<U1")
+    labelled = 4 * (
+        GROUPING_BYTES_PER_LABELLED_CELL + GROUPING_BYTES_PER_LABEL_BYTE * 4
+    )
+    per_cell = GROUPING_BYTES_PER_CELL + GROUPING_BYTES_PER_COLUMN
+    _assert_needs(
+        store,
+        N_CELLS * per_cell + labelled + _chunk(values) + named,
+        groups=labels,
+    )
+
+
+def test_distinct_labels_and_groups_count_beside_the_cells(store) -> None:
+    # A label for each cell names eight labels and makes eight groups, which
+    # cost more than the cells.
+    store.cells.insert(
+        "own", np.asarray([f"cell{i}" for i in range(N_CELLS)]), overwrite=True
+    )
+    own = store.cells._get_array("own")
+    per_cell = GROUPING_BYTES_PER_CELL + GROUPING_BYTES_PER_COLUMN
+    per_cell += GROUPING_BYTES_PER_LABEL_BYTE * own.dtype.itemsize
+    named = 8 * GROUPING_BYTES_PER_DISTINCT_LABEL + 8 * GROUPING_BYTES_PER_GROUP
+    assert named == 8_000
+    _assert_needs(store, N_CELLS * per_cell + _chunk(own) + named, group_by="own")
+
+
+def test_kept_apart_labels_follow_the_rows_that_join_groups(store) -> None:
+    rows = np.asarray([False, True, True, False, True, True, False, False])
+    kinds = np.asarray(["B", "T", "B", "B", "T", "T", "B", "T"], dtype=object)
+    grouped = _group(store, rows, group_by="batch", kept_apart=(("kind", kinds),))
+    # By hand: cell1 (a, T), cell2 (b, B), cell4 (a, T), cell5 (a, T).
+    assert grouped.keys == [
+        {"batch": "a", "kind": "T"},
+        {"batch": "b", "kind": "B"},
+    ]
+    assert grouped.codes.tolist() == [-1, 0, 1, -1, 0, 0, -1, -1]
+
+
+def _masked_labels(store, values: np.ndarray, missing: np.ndarray):
+    """Store cluster labels with a linked mask of the missing ones."""
+    planned = plan_cell_data_artifact(
+        store.zw,
+        scope="datastore",
+        kind="cluster_labels",
+        operation="test_cell_groups",
+        parameters={"case": "masked"},
+        inputs={},
+        execution_options={},
+        cell_selection=store.snapshot_cell_selection("every_cell"),
+        arrays={"values": (values.shape, None)},
+    )
+    mask_name = f"{MISSING_MASK_PREFIX}values"
+    with artifact_transaction(store.zw, planned) as group:
+        group.create_array("values", data=values)
+        group.create_array(mask_name, data=missing)
+        group["values"].attrs["missing_mask"] = mask_name
+    return planned.ref
+
+
+def test_an_unsaved_label_artifact_is_refused_before_anything_is_read(store) -> None:
+    unsaved = ArtifactRef("datastore", "cluster_labels", "0" * 64)
+    with pytest.raises(ValueError, match="unavailable or incomplete"):
+        _group(store, groups=unsaved)
+
+
+def test_a_label_artifact_leaves_its_missing_labels_ungrouped(store) -> None:
+    # The masked cells hold a placeholder label, "x", which names no group.
+    missing = np.asarray([False, False, True, False, False, True, False, False])
+    labels = _masked_labels(store, CLUSTERS.copy(), missing)
+    grouped = _group(store, groups=labels)
+    assert grouped.keys == [{"cluster_labels": "x"}, {"cluster_labels": "y"}]
+    assert grouped.codes.tolist() == [0, 1, -1, 1, 0, -1, 0, 1]
+
+
+def test_the_fingerprint_follows_each_cells_labels(store) -> None:
+    by_sample = _group(store, group_by="sample")
+    assert by_sample.fingerprint() == _group(store, group_by="sample").fingerprint()
+    # One cell in another sample.
+    moved = SAMPLES.copy()
+    moved[0] = "s10"
+    store.cells.insert("moved", moved.astype(object), overwrite=True)
+    assert _group(store, group_by="moved").fingerprint() != by_sample.fingerprint()
+    # The same groups under other labels keep their codes.
+    renamed = np.where(SAMPLES == "s2", "t2", "t10")
+    store.cells.insert("renamed", renamed.astype(object), overwrite=True)
+    other = _group(store, group_by="renamed")
+    assert other.codes.tolist() == by_sample.codes.tolist()
+    assert other.fingerprint() != by_sample.fingerprint()
+    # The same labels in a column of another name.
+    store.cells.insert("copied", SAMPLES.astype(object), overwrite=True)
+    copied = _group(store, group_by="copied")
+    assert [list(key.values()) for key in copied.keys] == [
+        list(key.values()) for key in by_sample.keys
+    ]
+    assert copied.fingerprint() != by_sample.fingerprint()
+    # The same labels of two columns in the other order, in one group.
+    first = np.arange(N_CELLS) == 0
+    forward = _group(store, first, group_by=["sample", "batch"])
+    backward = _group(store, first, group_by=["batch", "sample"])
+    assert forward.codes.tolist() == backward.codes.tolist()
+    assert forward.fingerprint() != backward.fingerprint()

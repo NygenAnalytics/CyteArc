@@ -1,4 +1,3 @@
-import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
@@ -21,11 +20,12 @@ from ...clones.assignments import (
 )
 from ...clones.diversity import (
     INDEX_COLUMNS,
+    LARGEST_SIZE,
     ORDERS,
     ClonalDiversity,
     CloneSizes,
     Rarefaction,
-    default_sizes,
+    checked_curve_arguments,
     diversity_tables,
     rarefaction_curves,
 )
@@ -62,6 +62,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
+from ...storage.selections import validate_cell_selection
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
@@ -112,13 +113,40 @@ _TABLE_BYTES_PER_CELL = 200
 _EXPORT_BYTES_PER_CELL = 200
 # The kinds of clone artifact that every clone summary reads.
 _CLONE_SOURCE_KINDS = ("clones",)
+# Reading a clone artifact holds, for each of its cells, the stored code and
+# this many bytes for its int64 copy.
+_CLONE_CODE_BYTES = 8
+# Reading each clone's label holds its stored text up to three times, decoded,
+# compressed and copied out of its chunk, and later as a Python string, with
+# this many bytes for the string's header and pointer.
+_CLONE_ID_BYTES = 100
+_CLONE_ID_COPIES = 3
+# Matching a clone artifact's cells to other measured cells holds, for each
+# clone cell, its code, its row and its place in a hash table, 45 bytes as
+# traced on 200,000 cells, and for each measured cell its row, position and
+# code, and its label in each column that the clones keep apart.
+_MATCH_BYTES_PER_CLONE_CELL = 56
+_MATCH_BYTES_PER_CELL = 32
+_MATCH_BYTES_PER_LABEL = 8
 # Measuring clonal expansion holds, at its peak, about 230 bytes per cell: the
 # clone and group codes, the clone sizes and frequencies, and the labels as
-# written, as traced on 1,000,000 cells in eight samples.
+# written, as traced on 1,000,000 cells in eight samples, and 281 bytes per
+# cell without a grouping, as traced on 200,000 cells.
 _EXPANSION_BYTES_PER_CELL = 300
 # The tables of loaded clonal expansion hold about 310 bytes per cell at their
-# peak, with the cell IDs and labels as text, as traced on the same cells.
+# peak, with the cell IDs and labels as text, as traced on the same cells,
+# besides the clone labels that they read.
 _EXPANSION_TABLE_BYTES_PER_CELL = 500
+# Each group of a summary holds its clone sizes and its rows of the result's
+# tables, 1,950 bytes for diversity as traced on 180,057 groups.
+_SUMMARY_BYTES_PER_GROUP = 2_000
+# Rarefying a group holds, for each pair of a whole sample size below its
+# cells and a distinct clone size, the chance that the sample misses such a
+# clone and three temporary arrays of the same shape.
+_RAREFACTION_BYTES_PER_ENTRY = 40
+# Each row of the rarefaction curves: its order, size, method, Hill number,
+# coverage and group.
+_CURVE_BYTES_PER_ROW = 100
 # The columns of each summary's tables besides the groups' labels, which a
 # key column of the groups may not share; "group" names each group, and plots
 # of expansion add a "group" column.
@@ -863,6 +891,36 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             return write_clone_table(path, cell_ids, clone_ids[codes[assigned]])
         return write_clone_matrix(path, cell_ids, codes[assigned], clone_ids)
 
+    def _clone_input_bytes(self, clones: ArtifactRef, *, with_ids: bool) -> int:
+        """The bytes that :meth:`_read_clone_input` holds for a clone artifact.
+
+        Only the arrays' metadata is read: each cell's code and, with
+        ``with_ids``, each clone's label, which costs as much as its stored
+        text is wide.
+
+        Raises:
+            TypeError: If ``clones`` is not an ArtifactRef.
+            ValueError: If it is not a kind of clone artifact that the
+                summaries read.
+        """
+        if not isinstance(clones, ArtifactRef):
+            raise TypeError("clones must be an ArtifactRef")
+        if clones.kind not in _CLONE_SOURCE_KINDS:
+            raise ValueError(
+                f"clones must be a {' or '.join(_CLONE_SOURCE_KINDS)} artifact, "
+                f"not {clones.kind!r}"
+            )
+        require_complete_artifact(self.zw, clones)
+        group = artifact_group(self.zw, clones)
+        codes = as_zarr_array(group["codes"], name="codes")
+        resident = int(codes.shape[0]) * (codes.dtype.itemsize + _CLONE_CODE_BYTES)
+        if with_ids:
+            ids = as_zarr_array(group["clone_ids"], name="clone_ids")
+            resident += int(ids.shape[0]) * (
+                _CLONE_ID_BYTES + _CLONE_ID_COPIES * ids.dtype.itemsize
+            )
+        return resident
+
     def _read_clone_input(
         self, clones: ArtifactRef, *, with_ids: bool = False
     ) -> _CloneInput:
@@ -875,27 +933,25 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef.
             ValueError: If it is not a complete clone artifact.
+            MemoryError: If the codes, and the labels when read, do not fit
+                the memory budget.
         """
-        if not isinstance(clones, ArtifactRef):
-            raise TypeError("clones must be an ArtifactRef")
-        if clones.kind not in _CLONE_SOURCE_KINDS:
-            raise ValueError(
-                f"clones must be a {' or '.join(_CLONE_SOURCE_KINDS)} artifact, "
-                f"not {clones.kind!r}"
-            )
-        require_complete_artifact(self.zw, clones)
+        resident = self._clone_input_bytes(clones, with_ids=with_ids)
         group = artifact_group(self.zw, clones)
+        if resident > self.memoryBytes:
+            n_cells = as_zarr_array(group["codes"], name="codes").shape[0]
+            raise MemoryError(
+                f"Reading the clones of {n_cells} cells holds about {resident} "
+                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
+                "Raise mem_budget."
+            )
         return _CloneInput(
             ref=clones,
             cell_selection=inspect_artifact(self.zw, clones).input_ref(
                 "cell_selection"
             ),
-            codes=_read(group, "codes").astype(np.int64),
-            clone_ids=(
-                _read(group, "clone_ids").astype(str).astype(object)
-                if with_ids
-                else None
-            ),
+            codes=_read(group, "codes").astype(np.int64, copy=False),
+            clone_ids=_read(group, "clone_ids").astype(object) if with_ids else None,
             kept_apart=(),
         )
 
@@ -911,6 +967,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Returns:
             The cells' selection, each cell's clone code, -1 for none, and
             the labels that the clones keep apart, aligned to the cells.
+
+        Raises:
+            MemoryError: If matching the clones' cells to other cells does
+                not fit the memory budget.
         """
         if cell_selection is None or cell_selection == source.cell_selection:
             return source.cell_selection, source.codes, source.kept_apart
@@ -920,6 +980,17 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise ValueError(
                 "cell_selection must be a cell_selection artifact, not "
                 f"{cell_selection.kind!r}"
+            )
+        n_measured = int(
+            validate_cell_selection(self.zw, cell_selection).selected_count
+        )
+        resident = _matched_bytes(len(source.codes), n_measured, len(source.kept_apart))
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Matching the clones of {len(source.codes)} cells to "
+                f"{n_measured} measured cells holds about {resident} bytes, more "
+                f"than the memory budget of {self.memoryBytes} bytes. Raise "
+                "mem_budget."
             )
         measured = self._clone_selection_indices(cell_selection)
         held = self._clone_selection_indices(source.cell_selection)
@@ -994,6 +1065,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cell_selection=cell_selection,
             reserved=reserved,
         )
+        resident = _SUMMARY_BYTES_PER_GROUP * len(keys)
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Summarizing the clones of {len(keys)} groups holds about "
+                f"{resident} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Group the cells by fewer labels, or "
+                "raise mem_budget."
+            )
         bounds = np.searchsorted(pair_groups, np.arange(len(keys) + 1))
         clone_sizes = [
             CloneSizes.from_sizes(pair_cells[bounds[index] : bounds[index + 1]])
@@ -1003,9 +1082,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise ValueError("No cell has both a clone and a group")
         return keys, clone_sizes
 
-    def _check_clone_table_budget(self, n_cells: int, per_cell: int, name: str) -> None:
-        """Refuse to load tables of ``n_cells`` cells beyond the memory budget."""
-        resident = per_cell * int(n_cells)
+    def _check_clone_table_budget(
+        self, n_cells: int, per_cell: int, name: str, *, held: int = 0
+    ) -> None:
+        """Refuse to load tables of ``n_cells`` cells beyond the memory budget.
+
+        ``held`` counts the bytes of the inputs that the tables are built from.
+        """
+        resident = per_cell * int(n_cells) + int(held)
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Loading the {name} of {n_cells} cells holds about {resident} "
@@ -1080,14 +1164,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a complete clone artifact, both
-                bounds are given, the bounds are invalid, a column of the
-                groups is missing or named twice, or two groups get one name.
+                bounds are given, the bounds are invalid, no measured cell has
+                both a clone and a group, a column of the groups is missing or
+                named twice, or two groups get one name.
             PermissionError: If the store is read-only and the result is not
                 saved yet.
-            MemoryError: If the measurement, about 300 bytes per cell, does
-                not fit the memory budget.
+            MemoryError: If reading the clones, grouping the cells, or the
+                measurement, about 300 bytes per cell, does not fit the memory
+                budget.
         """
-        source = self._read_clone_input(clones)
         if not isinstance(invalidate_cache, bool):
             raise TypeError("invalidate_cache must be a boolean")
         if breakpoints is not None and frequency_breakpoints is not None:
@@ -1106,7 +1191,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             )
             # Naming the bins checks that the last bound is 1.
             frequency_labels(frequencies)
-        measured, codes, kept_apart = self._measured_clone_cells(source, cell_selection)
+        # The clones' own codes are released once they follow the measured
+        # cells.
+        measured, codes, kept_apart = self._measured_clone_cells(
+            self._read_clone_input(clones), cell_selection
+        )
         grouped = cell_groups(
             self.zw,
             self.cells,
@@ -1119,20 +1208,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             kept_apart=kept_apart,
             reserved=_EXPANSION_COLUMNS,
         )
+        if not grouped.keys:
+            raise ValueError("No cell has both a clone and a group")
         columns = group_columns(group_by)
-        fingerprint = None
-        if columns:
-            # Each cell's group by its labels, empty without one, so other
-            # labels in the columns give another result.
-            rendered = np.asarray(
-                [json.dumps(key) for key in grouped.keys] + [""], dtype=object
-            )
-            fingerprint = fingerprint_strings(rendered[grouped.codes].astype(str))
         arguments = ClonalExpansionArguments(
             clones=clones,
             groups=groups,
             cell_selection=measured,
-            group_assignments_fingerprint=fingerprint,
+            # Each measured cell's group by its labels, so other labels in the
+            # columns give another result.
+            group_assignments_fingerprint=grouped.fingerprint() if columns else None,
             group_by=columns,
             breakpoints=counts,
             frequency_breakpoints=frequencies,
@@ -1161,7 +1246,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable(arguments.operation)
-        resident = _EXPANSION_BYTES_PER_CELL * n_cells
+        resident = _EXPANSION_BYTES_PER_CELL * n_cells + _SUMMARY_BYTES_PER_GROUP * len(
+            grouped.keys
+        )
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Measuring the clonal expansion of {n_cells} cells holds about "
@@ -1194,9 +1281,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "key_columns": list(grouped.key_columns),
             },
         )
+        n_counted = int(counted.sum())
+        n_ungrouped = int(np.count_nonzero(codes >= 0)) - n_counted
         logger.info(
-            f"Measured the clonal expansion of {int(counted.sum())} cells with a "
-            f"clone in {len(grouped.keys)} groups"
+            f"Measured the clonal expansion of {n_counted} cells with a clone in "
+            f"{len(grouped.keys)} groups"
+            + (
+                f"; {n_ungrouped} cells with a clone have no group"
+                if n_ungrouped
+                else ""
+            )
         )
         return planned.ref
 
@@ -1230,8 +1324,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``expansion`` is not a complete
                 ``clonal_expansion`` artifact, or ``splits`` are invalid.
-            MemoryError: If the tables, about 500 bytes per cell, do not fit
-                the memory budget.
+            MemoryError: If the tables, about 500 bytes per cell and 2,000
+                per group besides the clones and labels that they read, do not
+                fit the memory budget.
         """
         if not isinstance(expansion, ArtifactRef):
             raise TypeError("expansion must be an ArtifactRef")
@@ -1242,11 +1337,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         bounds = checked_bounds(splits, "splits", whole=True)
         require_complete_artifact(self.zw, expansion)
         group = artifact_group(self.zw, expansion)
-        self._check_clone_table_budget(
-            as_zarr_array(group["group_codes"], name="group_codes").shape[0],
-            _EXPANSION_TABLE_BYTES_PER_CELL,
-            "clonal expansion",
-        )
         status = inspect_artifact(self.zw, expansion)
         parameters = dict(status.parameters or {})
         clones = status.input_ref("clones")
@@ -1256,6 +1346,21 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             else status.input_ref("groups")
         )
         measured = status.input_ref("cell_selection")
+        n_cells = as_zarr_array(group["group_codes"], name="group_codes").shape[0]
+        n_groups = len(cast(list[Any], group.attrs["group_keys"]))
+        # Beside the tables of the cells: each group's rows, the clones' codes
+        # and labels, and the clones' cells matched to the measured cells when
+        # the expansion measured others.
+        held = _SUMMARY_BYTES_PER_GROUP * int(n_groups)
+        held += self._clone_input_bytes(clones, with_ids=True)
+        if measured != inspect_artifact(self.zw, clones).input_ref("cell_selection"):
+            clone_codes = as_zarr_array(
+                artifact_group(self.zw, clones)["codes"], name="codes"
+            )
+            held += _matched_bytes(int(clone_codes.shape[0]), n_cells, 0)
+        self._check_clone_table_budget(
+            n_cells, _EXPANSION_TABLE_BYTES_PER_CELL, "clonal expansion", held=held
+        )
         source = self._read_clone_input(clones, with_ids=True)
         _cells, codes, _kept = self._measured_clone_cells(source, measured)
         labels = tuple(str(name) for name in cast(list[str], group.attrs["labels"]))
@@ -1356,9 +1461,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a complete clone artifact, no
                 cell has a clone and a group, a column of the groups is
-                missing or named twice, ``size`` is not positive, or a group
-                cannot reach ``coverage``.
-            MemoryError: If grouping the cells does not fit the memory budget.
+                missing or named twice, or ``size`` is not positive.
+            MemoryError: If reading the clones or grouping the cells does not
+                fit the memory budget.
         """
         if size is not None:
             if isinstance(size, bool) or not isinstance(size, int | np.integer):
@@ -1443,29 +1548,37 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ValueError: If ``clones`` is not a complete clone artifact, an
                 order, size, endpoint or knots is invalid, or no cell has a
                 clone and a group.
-            MemoryError: If grouping the cells does not fit the memory budget.
+            MemoryError: If reading the clones, grouping the cells, or the
+                curves do not fit the memory budget.
         """
-        if isinstance(orders, str | bytes) or not isinstance(orders, Sequence):
+        listed_orders = _listed(orders)
+        if listed_orders is None:
             raise TypeError("orders must be a sequence of 0, 1 and 2")
-        chosen = tuple(orders)
         if (
-            not chosen
-            or any(isinstance(order, bool) or order not in ORDERS for order in chosen)
-            or len(set(chosen)) != len(chosen)
+            not listed_orders
+            or any(
+                isinstance(order, bool) or order not in ORDERS
+                for order in listed_orders
+            )
+            or len(set(listed_orders)) != len(listed_orders)
         ):
             raise ValueError("orders must hold distinct orders from 0, 1 and 2")
+        chosen = tuple(int(order) for order in listed_orders)
+        listed_sizes = None if sizes is None else _listed(sizes)
         if sizes is not None:
-            if isinstance(sizes, str | bytes) or not isinstance(sizes, Sequence):
+            if listed_sizes is None:
                 raise TypeError("sizes must be a sequence of positive integers")
-            if not sizes or any(
+            if not listed_sizes or any(
                 isinstance(value, bool)
                 or not isinstance(value, int | np.integer)
-                or value < 1
-                for value in sizes
+                or not 1 <= value <= LARGEST_SIZE
+                for value in listed_sizes
             ):
-                raise ValueError("sizes must hold positive integers")
+                raise ValueError(
+                    f"sizes must hold positive integers up to {LARGEST_SIZE}"
+                )
         # The defaults' arguments are checked once, before any group is read.
-        default_sizes(2, endpoint, knots)
+        endpoint, knots = checked_curve_arguments(endpoint, knots)
         keys, clone_sizes = self._grouped_clone_sizes(
             clones,
             group_by=group_by,
@@ -1473,12 +1586,29 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cell_selection=cell_selection,
             reserved=_RAREFACTION_COLUMNS,
         )
+        # Each group is rarefied in turn to at most this many sizes, and the
+        # curves hold a row per group, order and size.
+        n_sizes = knots if listed_sizes is None else len(listed_sizes)
+        largest = max(
+            min(n_sizes, group.n) * len(group.values) for group in clone_sizes
+        )
+        n_rows = len(clone_sizes) * len(chosen) * n_sizes
+        resident = (
+            _RAREFACTION_BYTES_PER_ENTRY * largest + _CURVE_BYTES_PER_ROW * n_rows
+        )
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Rarefying {len(clone_sizes)} groups to {n_sizes} sizes holds "
+                f"about {resident} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Pass fewer sizes or knots, or raise "
+                "mem_budget."
+            )
         return Rarefaction(
             curves=rarefaction_curves(
                 clone_sizes,
                 keys,
                 chosen,
-                sizes=sizes,
+                sizes=listed_sizes,
                 endpoint=endpoint,
                 knots=knots,
             ),
@@ -1488,6 +1618,25 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cell_selection=cell_selection,
             orders=chosen,
         )
+
+
+def _matched_bytes(n_clone_cells: int, n_cells: int, n_labels: int) -> int:
+    """Bytes that matching a clone artifact's cells to other measured cells holds.
+
+    ``n_labels`` counts the columns of labels that the clones keep apart.
+    """
+    return _MATCH_BYTES_PER_CLONE_CELL * n_clone_cells + n_cells * (
+        _MATCH_BYTES_PER_CELL + _MATCH_BYTES_PER_LABEL * n_labels
+    )
+
+
+def _listed(values: Any) -> list[Any] | None:
+    """The items of a sequence or a one-dimensional array, or None for anything else."""
+    if isinstance(values, np.ndarray):
+        return values.tolist() if values.ndim == 1 else None
+    if isinstance(values, str | bytes) or not isinstance(values, Sequence):
+        return None
+    return list(values)
 
 
 def _read(group: zarr.Group, name: str) -> np.ndarray:

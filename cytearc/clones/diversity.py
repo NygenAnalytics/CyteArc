@@ -36,6 +36,7 @@ from ..utils.arrays import sorted_unique
 from ..utils.numba import njit
 
 __all__ = [
+    "LARGEST_SIZE",
     "ORDERS",
     "RARE_THRESHOLD",
     "CloneSizes",
@@ -44,6 +45,7 @@ __all__ = [
     "ace",
     "chao1",
     "chao1_bias_corrected",
+    "checked_curve_arguments",
     "coverage",
     "default_sizes",
     "diversity_at",
@@ -61,6 +63,9 @@ __all__ = [
 #: Shannon entropy), and 2 counts the dominant ones (the inverse Simpson
 #: index).
 ORDERS = (0, 1, 2)
+#: The largest sample size of a curve, 2**53 cells: sizes are computed as
+#: floats, which hold every whole number up to it exactly.
+LARGEST_SIZE = 2**53
 #: Clones of at most this many cells are rare for ACE (Chao and Lee 1992).
 RARE_THRESHOLD = 10
 # Terms of the entropy estimator's series summed at once.
@@ -681,6 +686,26 @@ def hill_curve(
     return values.tolist(), [_METHODS[code] for code in samples.methods.tolist()]
 
 
+def checked_curve_arguments(endpoint: Any, knots: Any) -> tuple[int | None, int]:
+    """Return the ``endpoint`` and ``knots`` of the default curve sizes, checked.
+
+    Python and NumPy integers are accepted; the endpoint may be None.
+
+    Raises:
+        ValueError: If ``knots`` is not an integer of at least 2, or
+            ``endpoint`` is not a positive integer up to :data:`LARGEST_SIZE`.
+    """
+    if isinstance(knots, bool) or not isinstance(knots, int | np.integer) or knots < 2:
+        raise ValueError("knots must be an integer of at least 2")
+    if endpoint is not None and (
+        isinstance(endpoint, bool)
+        or not isinstance(endpoint, int | np.integer)
+        or not 1 <= endpoint <= LARGEST_SIZE
+    ):
+        raise ValueError(f"endpoint must be a positive integer up to {LARGEST_SIZE}")
+    return (None if endpoint is None else int(endpoint)), int(knots)
+
+
 def default_sizes(n: int, endpoint: int | None = None, knots: int = 40) -> np.ndarray:
     """The sizes of iNEXT's default curve: ``knots`` sizes from 1 to ``endpoint``.
 
@@ -689,12 +714,9 @@ def default_sizes(n: int, endpoint: int | None = None, knots: int = 40) -> np.nd
     then the sample itself, then about half extrapolate evenly from ``n + 1``
     to the endpoint; an endpoint at most ``n`` rarefies only.
     """
-    if isinstance(knots, bool) or not isinstance(knots, int) or knots < 2:
-        raise ValueError("knots must be an integer of at least 2")
+    endpoint, knots = checked_curve_arguments(endpoint, knots)
     if endpoint is None:
         endpoint = 2 * n
-    if isinstance(endpoint, bool) or not isinstance(endpoint, int) or endpoint < 1:
-        raise ValueError("endpoint must be a positive integer")
     if endpoint <= n:
         sizes = np.floor(np.linspace(1, endpoint, knots))
     else:
