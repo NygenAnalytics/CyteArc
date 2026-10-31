@@ -411,6 +411,11 @@ class CellBarcodeJoin:
         return len(self._unmatched)
 
     @property
+    def unmatched_bytes(self) -> int:
+        """The bytes of the hashes of the barcodes that matched no selected cell."""
+        return _UNMATCHED_BYTES_PER_BARCODE * len(self._unmatched)
+
+    @property
     def examples(self) -> list[str]:
         """Up to five barcodes that matched no selected cell, as the files hold them."""
         return list(self._examples)

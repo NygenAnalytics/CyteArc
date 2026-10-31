@@ -414,14 +414,27 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             reuse_validator=has_records,
         )
 
-    def _check_barcode_budget(self, held: int, counter: BarcodeCounter) -> None:
-        peak = held + counter.peak_bytes
+    def _check_barcode_budget(
+        self, counter: BarcodeCounter, *, cells: int, reading: int = 0
+    ) -> None:
+        """Refuse an import whose peak would pass the memory budget.
+
+        Args:
+            counter: The records held so far.
+            cells: The bytes held for the selected cells, such as their lookup.
+            reading: The bytes held to read a file: its names, a chunk, the
+                keys of its molecules and the barcodes that match no cell.
+        """
+        selected = cells + counter.peak_bytes
+        peak = selected + reading
         if peak > self.memoryBytes:
+            # A smaller selection helps only where the selected cells take most.
+            fewer = ", or pass a smaller cell_selection" if selected >= reading else ""
             raise MemoryError(
-                f"Importing barcodes holds about {peak} bytes at its peak, with "
-                f"{counter.n_rows} molecules and pairs, more than the memory budget "
-                f"of {self.memoryBytes} bytes. Raise mem_budget, or pass a smaller "
-                "cell_selection."
+                f"Importing barcodes holds about {peak} bytes at its peak, {selected} "
+                f"of them for the selected cells and their {counter.n_rows} molecules "
+                f"and pairs, more than the memory budget of {self.memoryBytes} bytes. "
+                f"Raise mem_budget{fewer}."
             )
 
     def _count_file(
@@ -441,10 +454,12 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         from ...readers.lineage_barcodes import iter_barcode_rows
 
         chunk_rows = layout.chunk_rows(self.memoryBytes // _CHUNK_SHARE)
-        held += layout.held_bytes + layout.chunk_bytes(chunk_rows)
+        reading = layout.held_bytes() + layout.chunk_bytes(chunk_rows)
         # A budget too small for the lookup, the file's names and one chunk
         # refuses before a row is read.
-        self._check_barcode_budget(held, counter)
+        self._check_barcode_budget(
+            counter, cells=held, reading=reading + join.unmatched_bytes
+        )
         if layout.library_column is None:
             # The file's library is listed even if it holds no row of a cell.
             counter.add_library(layout.library, molecules=layout.umi is not None)
@@ -473,7 +488,11 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 reads=None if rows.reads is None else rows.reads[keep],
                 rows_are_reads=layout.level == "reads",
             )
-            self._check_barcode_budget(held + _KEY_BYTES * n_keys, counter)
+            self._check_barcode_budget(
+                counter,
+                cells=held,
+                reading=reading + _KEY_BYTES * n_keys + join.unmatched_bytes,
+            )
         if keys is not None:
             repeated = repeated_keys(keys)
             if repeated:
@@ -540,7 +559,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 feature_ids[columns],
                 umi_counts=block[rows, columns].astype(np.int64),
             )
-            self._check_barcode_budget(held, counter)
+            self._check_barcode_budget(counter, cells=held)
             start += block.shape[0]
         return counter.finish(), {
             "n_file_rows": n_rows,

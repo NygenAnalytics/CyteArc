@@ -1182,11 +1182,184 @@ def test_a_file_whose_reading_cannot_fit_the_budget_is_refused_before_a_row(
     monkeypatch.setattr(reader, "iter_barcode_rows", recorded)
     # Names of more cells and barcodes than the budget holds.
     monkeypatch.setattr(
-        reader.BarcodeLayout,
-        "held_bytes",
-        property(lambda self: store.memoryBytes),
+        reader.BarcodeLayout, "held_bytes", lambda self: store.memoryBytes
     )
     with pytest.raises(MemoryError, match="Raise mem_budget"):
         store.clones.import_barcodes(path, cell_selection=every_cell(store))
     assert read == []
+    assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []
+
+
+def _refused_before_reading(store, path, monkeypatch, **options) -> list:
+    """Import ``path`` expecting a refusal; return the chunk sizes that were read."""
+    from cytearc.readers import lineage_barcodes as reader
+
+    read: list = []
+    iterate = reader.iter_barcode_rows
+
+    def recorded(layout, chunk_rows):
+        read.append(chunk_rows)
+        return iterate(layout, chunk_rows)
+
+    monkeypatch.setattr(reader, "iter_barcode_rows", recorded)
+    with pytest.raises(MemoryError, match="Raise mem_budget"):
+        store.clones.import_barcodes(path, cell_selection=every_cell(store), **options)
+    assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []
+    return read
+
+
+def test_a_dense_matrix_of_one_large_chunk_is_refused_before_it_is_read(
+    store, tmp_path, monkeypatch
+) -> None:
+    import h5py
+
+    from tests.clone_truth import _obs_frame
+
+    # One gzip chunk of 4,000 cells by 1,000 barcodes, 16 MB once inflated:
+    # the tile read and HDF5's buffer of the chunk each take that much.
+    path = tmp_path / "dense.h5ad"
+    with h5py.File(path, "w") as handle:
+        _obs_frame(handle, [f"C{index}" for index in range(4_000)])
+        var = handle.create_group("var")
+        var.attrs["_index"] = "_index"
+        var.create_dataset(
+            "_index",
+            data=np.asarray([f"B{index}" for index in range(1_000)], dtype=object),
+            dtype=h5py.string_dtype(),
+        )
+        values = np.zeros((4_000, 1_000), dtype=np.float32)
+        values[np.arange(4_000), np.arange(4_000) % 1_000] = 2
+        handle.create_dataset(
+            "X", data=values, chunks=(4_000, 1_000), compression="gzip"
+        )
+    monkeypatch.setattr(store, "memoryBytes", 24 * 2**20)
+    assert _refused_before_reading(store, path, monkeypatch) == []
+
+
+def test_the_keys_of_a_trex_table_count_against_the_budget(
+    store, tmp_path, monkeypatch
+) -> None:
+    from cytearc.datastore._operations import lineage_barcodes as operations
+
+    # 2,000 molecules of cells outside the store: no record is held, so only
+    # the keys that find repeated molecules fill the budget, here counted at
+    # 4,000 bytes each.
+    lines = ["#cell_id\tumi\tclone_id\tread_count"] + [
+        f"OUT{row % 50:04d}\tU{row:06d}\tTTTT\t3" for row in range(2_000)
+    ]
+    path = tmp_path / "molecules.txt"
+    path.write_text("\n".join(lines) + "\n")
+    monkeypatch.setattr(operations, "_KEY_BYTES", 4_000)
+    monkeypatch.setattr(store, "memoryBytes", 6 * 2**20)
+    with collect_warnings():
+        read = _refused_before_reading(store, path, monkeypatch)
+    assert len(read) == 1
+
+
+def test_a_molecule_info_file_of_many_barcodes_in_one_chunk_is_refused(
+    store, tmp_path, monkeypatch
+) -> None:
+    import h5py
+
+    path = write_molecule_info(BARCODES, tmp_path / "molecule_info.h5", sample="d4")
+    # 1,500,000 cell barcodes stored as one chunk of 24 MB, read at once.
+    with h5py.File(path, "a") as handle:
+        listed = handle["barcodes"][:]
+        filler = np.char.add(
+            b"F", np.char.zfill(np.arange(1_500_000).astype("S15"), 15)
+        ).astype(listed.dtype)
+        del handle["barcodes"]
+        barcodes = np.concatenate([listed, filler])
+        handle.create_dataset("barcodes", data=barcodes, chunks=(len(barcodes),))
+    monkeypatch.setattr(store, "memoryBytes", 24 * 2**20)
+    assert (
+        _refused_before_reading(store, path, monkeypatch, barcode_prefix="d4__") == []
+    )
+
+
+def test_a_library_column_of_many_long_labels_is_refused_before_it_is_read(
+    store, tmp_path, monkeypatch
+) -> None:
+    import h5py
+
+    path = write_quicat_h5ad(BARCODES, tmp_path / "barcodes_output.h5ad")
+    # A column that names each cell's library by 300 characters of its own.
+    with h5py.File(path, "a") as handle:
+        obs = handle["obs"]
+        n_cells = obs["_index"].shape[0]
+        del handle["obs"]
+        names = [f"C{index}" for index in range(20_000)]
+        obs = handle.create_group("obs")
+        obs.attrs["_index"] = "_index"
+        obs.create_dataset("_index", data=np.asarray(names, dtype=h5py.string_dtype()))
+        labels = obs.create_dataset(
+            "lane",
+            data=np.asarray(
+                [f"{index:0300d}" for index in range(20_000)], dtype=h5py.string_dtype()
+            ),
+        )
+        labels.attrs["encoding-type"] = "string-array"
+        labels.attrs["encoding-version"] = "0.2.0"
+        del handle["X"]
+        group = handle.create_group("X")
+        group.attrs["encoding-type"] = "csr_matrix"
+        group.attrs["encoding-version"] = "0.1.0"
+        n_barcodes = handle["var/_index"].shape[0]
+        group.attrs["shape"] = np.asarray([20_000, n_barcodes])
+        group.create_dataset("data", data=np.ones(20_000, dtype=np.float32))
+        group.create_dataset("indices", data=np.zeros(20_000, dtype=np.int32))
+        group.create_dataset("indptr", data=np.arange(20_001, dtype=np.int64))
+    assert n_cells < 20_000
+    monkeypatch.setattr(store, "memoryBytes", 8 * 2**20)
+    read = _refused_before_reading(
+        store, path, monkeypatch, format="h5ad", columns={"library": "lane"}
+    )
+    assert read == []
+
+
+def test_a_refusal_that_reading_causes_does_not_ask_for_fewer_cells(
+    store, tmp_path, monkeypatch
+) -> None:
+    from cytearc.readers import lineage_barcodes as reader
+
+    path = write_quicat_h5ad(BARCODES, tmp_path / "barcodes_output.h5ad")
+    monkeypatch.setattr(
+        reader.BarcodeLayout, "held_bytes", lambda self: store.memoryBytes
+    )
+    with pytest.raises(MemoryError) as refused:
+        store.clones.import_barcodes(path, cell_selection=every_cell(store))
+    # A smaller selection holds the file's names all the same.
+    assert "Raise mem_budget" in str(refused.value)
+    assert "cell_selection" not in str(refused.value)
+
+
+def test_the_join_s_unmatched_barcodes_count_beside_the_records(
+    store, tmp_path, monkeypatch
+) -> None:
+    from cytearc.clones import barcodes as barcodes_module
+    from cytearc.datastore._operations import cell_barcodes
+
+    counted = write_bartab_counts(BARCODES, tmp_path / "counts.tsv.gz", sample="d4")
+    rows = gzip.decompress(counted.read_bytes()).decode()
+    # 300 droplets outside the store, counted here at 4,000 bytes each.
+    droplets = "".join(f"LB{row}\tOUT{row:05d}\t2\n" for row in range(300))
+    path = tmp_path / "counts.tsv"
+    path.write_text(rows + droplets)
+    budget = 2 * 2**20
+    monkeypatch.setattr(store, "memoryBytes", budget)
+    monkeypatch.setattr(cell_barcodes, "_UNMATCHED_BYTES_PER_BARCODE", 4_000)
+    # The records take half the budget, the droplets' hashes more than the
+    # rest: each fits alone, but not both.
+    monkeypatch.setattr(
+        barcodes_module.BarcodeCounter,
+        "peak_bytes",
+        property(lambda self: budget // 2 if self.n_rows else 0),
+    )
+    with pytest.raises(MemoryError, match="Raise mem_budget"):
+        store.clones.import_barcodes(
+            path,
+            cell_selection=every_cell(store),
+            barcode_prefix="d4__",
+            barcode_suffix="-1",
+        )
     assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []

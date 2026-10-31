@@ -50,6 +50,7 @@ its formats follow its documentation and published files only.
 
 import os
 import re
+import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -178,8 +179,15 @@ _ENTRY_BYTES = 200
 # Bytes per molecule of a molecule_info.h5 read: its datasets, decoded UMI and
 # cell barcode.
 _MOLECULE_BYTES = 150
-# Bytes that each cell's and barcode's decoded name takes when a matrix is read.
-_NAME_BYTES = 100
+# Names and labels of an AnnData file are decoded this many at a time.
+_NAME_BLOCK = 65_536
+# Bytes of the reference that an object array holds to each decoded text.
+_REFERENCE_BYTES = 8
+# Bytes that a distinct library label takes in the table that codes labels,
+# beside its text.
+_LABEL_ENTRY_BYTES = 120
+# Bytes of the cache of chunks that h5py keeps for each dataset it reads.
+_CHUNK_CACHE_BYTES = 1 << 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,28 +264,31 @@ class BarcodeLayout:
         held = self._row_bytes() * int(chunk_rows)
         if self._matrix is not None and self._matrix.encoding == "dense":
             # A dense matrix is read a tile at a time, whose entries are
-            # parsed ``chunk_rows`` at a time.
+            # parsed ``chunk_rows`` at a time, while HDF5 inflates each of
+            # its chunks into a buffer of its own.
             height, width = self._matrix.tile_shape(chunk_rows)
-            held += height * width * self._matrix.itemsize
+            held += height * width * self._matrix.itemsize + self._matrix.buffer_bytes
         return held
 
-    @property
     def held_bytes(self) -> int:
-        """The bytes that reading holds beside its chunks, such as a matrix's names."""
+        """The bytes that reading holds beside its chunks, such as a matrix's names.
+
+        An AnnData file's names of cells and barcodes, and its column of
+        libraries, are read once to count them at the size they take
+        decoded.
+        """
         if self._molecules is not None:
             return self._molecules.barcode_block_bytes
         if self._matrix is None:
             return 0
         matrix = self._matrix
-        # The names of every cell and barcode, decoded once.
-        held = _NAME_BYTES * (matrix.n_cells + matrix.n_barcodes)
-        if self.library_column is not None:
-            held += 8 * matrix.n_cells
-        # A sparse matrix's pointers, and their differences as they are checked.
+        held = _decoded_bytes_of_names(self.path, self.library_column)
+        # A sparse matrix's pointers, their differences as they are checked,
+        # and HDF5's buffers for its entries and their positions.
         if matrix.encoding == "csr":
-            held += 16 * (matrix.n_cells + 1)
+            held += 16 * (matrix.n_cells + 1) + matrix.buffer_bytes
         elif matrix.encoding == "csc":
-            held += 16 * (matrix.n_barcodes + 1)
+            held += 16 * (matrix.n_barcodes + 1) + matrix.buffer_bytes
         return held
 
     def record(self) -> dict[str, Any]:
@@ -303,7 +314,8 @@ class _Matrix:
     """An AnnData file's matrix of counts: its layout, shape and value size.
 
     ``chunks`` is the shape of the HDF5 chunks of a dense matrix, or None
-    for one stored without chunks or a sparse one.
+    for one stored without chunks or a sparse one, and ``buffer_bytes`` the
+    bytes of the chunk that HDF5 inflates and caches for each dataset read.
     """
 
     encoding: str
@@ -311,6 +323,7 @@ class _Matrix:
     n_barcodes: int
     itemsize: int
     chunks: tuple[int, int] | None = None
+    buffer_bytes: int = 0
 
     def tile_shape(self, entries: int) -> tuple[int, int]:
         """The rows and columns of the tiles that a dense matrix is read in.
@@ -471,8 +484,10 @@ def _is_nucleotides(value: str) -> bool:
 
 def _headerless_format(path: str, found: str | None) -> str | None:
     """Recognise a table without a header by the fields of its first line."""
-    # The caller read the file's header, so it has a first line.
-    fields = first_lines(path, found, 1)[0].split("\t")
+    lines = first_lines(path, found, 1)
+    if not lines:
+        return None
+    fields = lines[0].split("\t")
     if (
         len(fields) == len(_PYCASHIER_COLUMNS)
         and fields[0].startswith("@")
@@ -553,12 +568,16 @@ def _preset_layout(format: str, text: TextLayout, library: str) -> BarcodeLayout
         )
     if format == "fatemap":
         require_columns(text, ["cellID", "UMI", "BC50StarcodeD8"])
+        # FateMap ends each row with its sample, so a row cut short lacks it.
         return preset(
             "molecules",
             cell=("cellID",),
             barcode=("BC50StarcodeD8",),
             umi="UMI",
-            required=("BC50StarcodeD8",),
+            required=(
+                "BC50StarcodeD8",
+                *(("SampleNum",) if "SampleNum" in names else ()),
+            ),
         )
     if format == "quicat":
         require_columns(text, ["cell", "barcode", "counts"])
@@ -713,10 +732,16 @@ def _matrix(handle: h5py.File, path: str) -> _Matrix:
         itemsize = int(node.dtype.itemsize)
         if node.chunks is not None and len(node.chunks) == 2:
             chunks = (int(node.chunks[0]), int(node.chunks[1]))
+        buffer_bytes = _buffer_bytes(node)
     else:
         encoding, shape = str(sparse_encoding(node)), sparse_shape(node) or ()
         data = node.get("data")
         itemsize = int(data.dtype.itemsize) if isinstance(data, h5py.Dataset) else 0
+        buffer_bytes = sum(
+            _buffer_bytes(node[name])
+            for name in ("data", "indices")
+            if isinstance(node.get(name), h5py.Dataset)
+        )
     if encoding not in ("dense", "csr", "csc") or len(shape) != 2 or not itemsize:
         raise ValueError(f"X of {path} is neither a dense nor a sparse matrix")
     if shape != (n_cells, n_barcodes):
@@ -730,7 +755,86 @@ def _matrix(handle: h5py.File, path: str) -> _Matrix:
         n_barcodes=n_barcodes,
         itemsize=itemsize,
         chunks=chunks,
+        buffer_bytes=buffer_bytes,
     )
+
+
+def _buffer_bytes(dataset: h5py.Dataset) -> int:
+    """The bytes of one inflated chunk of a dataset, and of h5py's cache of chunks."""
+    if dataset.chunks is None:
+        return _CHUNK_CACHE_BYTES
+    elements = int(np.prod(dataset.chunks, dtype=np.int64))
+    return elements * int(dataset.dtype.itemsize) + _CHUNK_CACHE_BYTES
+
+
+def _name_blocks(dataset: Any) -> Iterator[list[str]]:
+    """Decode a dataset of names, ``_NAME_BLOCK`` at a time."""
+    n_names = int(dataset.shape[0])
+    for start in range(0, n_names, _NAME_BLOCK):
+        values = np.asarray(dataset[start : min(start + _NAME_BLOCK, n_names)])
+        yield [as_text(value) for value in values.tolist()]
+
+
+def _library_blocks(
+    handle: h5py.File, obs: h5py.Group, column: str, n_cells: int, path: str
+) -> Iterator[list[str]]:
+    """Decode an ``obs`` column of libraries, ``_NAME_BLOCK`` cells at a time."""
+    for start in range(0, n_cells, _NAME_BLOCK):
+        labels, absent = read_table_column(
+            handle,
+            obs,
+            column,
+            ("__categories",),
+            start,
+            min(start + _NAME_BLOCK, n_cells),
+        )
+        if np.any(np.asarray(absent, dtype=bool)):
+            raise ValueError(
+                f"The obs column {column!r} of {path} lacks the library of some cells"
+            )
+        yield [as_text(value) for value in np.asarray(labels).tolist()]
+
+
+def _texts_bytes(texts: list[str]) -> int:
+    """The bytes that texts take in an object array, references included."""
+    return sum(map(sys.getsizeof, texts)) + _REFERENCE_BYTES * len(texts)
+
+
+def _decoded_bytes_of_names(path: str, library_column: str | None) -> int:
+    """Count the bytes of an AnnData file's names and libraries, decoded.
+
+    The names of cells and barcodes are held whole, the libraries as a code
+    per cell and a table of their distinct labels, and decoding a block
+    holds about as much again as the block takes.
+    """
+    held = 0
+    largest = 0
+    with h5py.File(path, "r") as handle:
+        obs, var = handle["obs"], handle["var"]
+        for table in (obs, var):
+            for names in _name_blocks(table[str(index_key(table))]):
+                size = _texts_bytes(names)
+                held += size
+                largest = max(largest, size)
+        if library_column is not None:
+            n_cells = int(obs[str(index_key(obs))].shape[0])
+            seen = np.empty(0, dtype=np.uint64)
+            held += 4 * n_cells
+            for labels in _library_blocks(handle, obs, library_column, n_cells, path):
+                largest = max(largest, _texts_bytes(labels))
+                hashes = np.asarray(
+                    pd.util.hash_array(np.asarray(labels, dtype=object)),
+                    dtype=np.uint64,
+                )
+                distinct, first = np.unique(hashes, return_index=True)
+                new = ~np.isin(distinct, seen)
+                held += sum(
+                    sys.getsizeof(labels[index]) + _LABEL_ENTRY_BYTES
+                    for index in first[new].tolist()
+                )
+                seen = np.union1d(seen, distinct[new])
+            held += 8 * len(seen)
+    return held + 2 * largest
 
 
 def barcode_layout(
@@ -813,24 +917,29 @@ def barcode_layout(
     if format in TABLE_FORMATS:
         text = text_layout(name, what="a barcode table")
         return _table_layout(format, text, file_library, roles)
+    # A first line of a tool's reads or molecules is no header, so tables
+    # without one are recognised before a header is read.
+    headerless = _headerless_format(name, found)
     if format is None:
+        if headerless is not None:
+            text = _headerless_layout(name, found, headerless)
+            return _preset_layout(headerless, text, file_library)
         text = text_layout(name, what="a barcode table")
         detected = _detected_text_format(text)
         if detected is None:
-            headerless = _headerless_format(name, found)
-            if headerless is None:
-                shown = ", ".join(repr(column) for column in text.names if column)
-                raise ValueError(
-                    f"{name} has the columns {shown}, which match no barcode table "
-                    "that CyteArc knows" + _hint(text)
-                )
-            text = _headerless_layout(name, found, headerless)
-            detected = headerless
+            shown = ", ".join(repr(column) for column in text.names if column)
+            raise ValueError(
+                f"{name} has the columns {shown}, which match no barcode table "
+                "that CyteArc knows" + _hint(text)
+            )
         return _preset_layout(detected, text, file_library)
     if format in ("pycashier", "fatemap"):
-        text = text_layout(name, what="a barcode table")
-        if _detected_text_format(text) != format:
+        if headerless == format:
             text = _headerless_layout(name, found, format)
+        else:
+            text = text_layout(name, what="a barcode table")
+            if _detected_text_format(text) != format:
+                text = _headerless_layout(name, found, format)
     else:
         text = text_layout(name, what="a barcode table")
     return _preset_layout(format, text, file_library)
@@ -1067,6 +1176,11 @@ def _iter_table_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[Barcode
     samples: set[str] = set()
     for first_line, chunk in text_chunks(text, chunk_rows):
         cells = _cell_texts(chunk, cell_positions, first_line, layout.path)
+        # A row cut short lacks the values that its tool writes in every row,
+        # which is checked before the rules that such a row would break.
+        for column in layout.required:
+            values = _distinct_text(chunk[index[column]].to_numpy(dtype=object))
+            _refuse_unfilled(layout, column, pd.isna(values), first_line)
         umis = None
         if layout.umi is not None:
             umis = _required_text(
@@ -1106,13 +1220,6 @@ def _iter_table_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[Barcode
                 if column is not None
             }
             lists = parse_text(chunk[barcode_positions[0]].to_numpy(dtype=object))
-            for column in layout.required:
-                values = (
-                    lists
-                    if column in layout.barcode
-                    else parse_text(chunk[index[column]].to_numpy(dtype=object))
-                )
-                _refuse_unfilled(layout, column, pd.isna(values), first_line)
             yield _exploded_rows(layout, first_line, cells, lists, raw, libraries)
             continue
         counts = {
@@ -1125,11 +1232,6 @@ def _iter_table_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[Barcode
             if column is not None
         }
         barcodes = _barcode_texts(chunk, barcode_positions)
-        for column in layout.required:
-            missing = (
-                pd.isna(barcodes) if column in layout.barcode else counts[column] < 0
-            )
-            _refuse_unfilled(layout, column, missing, first_line)
         if layout.format == "quicat":
             # QuiCAT writes a cell without barcodes with neither a barcode nor
             # a count, and a barcode always with its count.
@@ -1283,9 +1385,28 @@ def _whole_counts(values: np.ndarray, path: str) -> np.ndarray:
 
 
 def _decoded_names(dataset: Any) -> np.ndarray:
-    return np.asarray(
-        [as_text(value) for value in np.asarray(dataset).tolist()], dtype=object
-    )
+    """Decode a dataset of names into one array, a block at a time."""
+    names = np.empty(int(dataset.shape[0]), dtype=object)
+    start = 0
+    for block in _name_blocks(dataset):
+        names[start : start + len(block)] = block
+        start += len(block)
+    return names
+
+
+def _library_codes(
+    handle: h5py.File, obs: h5py.Group, column: str, n_cells: int, path: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Code each cell's library: a code per cell and the label of each code."""
+    codes = np.empty(n_cells, dtype=np.int32)
+    lookup: dict[str, int] = {}
+    start = 0
+    for labels in _library_blocks(handle, obs, column, n_cells, path):
+        codes[start : start + len(labels)] = [
+            lookup.setdefault(label, len(lookup)) for label in labels
+        ]
+        start += len(labels)
+    return codes, np.asarray(list(lookup), dtype=object)
 
 
 def _dense_entries(
@@ -1375,21 +1496,13 @@ def _iter_h5ad_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[BarcodeR
     entries = max(1, int(chunk_rows))
     with h5py.File(layout.path, "r") as handle:
         obs, var = handle["obs"], handle["var"]
-        cell_names = _decoded_names(obs[str(index_key(obs))][:])
-        barcode_names = _decoded_names(var[str(index_key(var))][:])
+        cell_names = _decoded_names(obs[str(index_key(obs))])
+        barcode_names = _decoded_names(var[str(index_key(var))])
         node = handle["X"]
-        libraries = None
+        library_codes = library_names = None
         if layout.library_column is not None:
-            labels, absent = read_table_column(
-                handle, obs, layout.library_column, ("__categories",)
-            )
-            if np.any(np.asarray(absent, dtype=bool)):
-                raise ValueError(
-                    f"The obs column {layout.library_column!r} of {layout.path} "
-                    "lacks the library of some cells"
-                )
-            libraries = np.asarray(
-                [as_text(value) for value in np.asarray(labels).tolist()], dtype=object
+            library_codes, library_names = _library_codes(
+                handle, obs, layout.library_column, len(cell_names), layout.path
             )
         found = (
             _dense_entries(node, matrix, entries)
@@ -1408,7 +1521,9 @@ def _iter_h5ad_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[BarcodeR
                 barcodes=barcode_names[columns],
                 umi_counts=counts if counts_role == "umis" else None,
                 reads=counts if counts_role == "reads" else None,
-                libraries=None if libraries is None else libraries[rows],
+                libraries=None
+                if library_codes is None or library_names is None
+                else library_names[library_codes[rows]],
             )
 
 

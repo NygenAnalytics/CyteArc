@@ -907,6 +907,12 @@ def test_quicats_wide_table_refuses_an_index_column(tmp_path) -> None:
             "sample,cell,barcode,counts\ns1,AAAC-1,TTT,4\ns1,CCCG-1,GGG,\n",
             "without counts on line 3",
         ),
+        # A FateMap molecule cut after its barcode, without its sample.
+        (
+            "cellID\tUMI\tOriginalBarcode\tBC50StarcodeD8\tSampleNum\n"
+            "AAAC\tGG\tTTTA\tTTTT\t1\nCCCG\tGC\tTTTA\tTTTT\n",
+            "without SampleNum on line 3",
+        ),
         # A BARtab annotation without its UMI list.
         (
             "barcode\tbc.umi.count\nAAAC\tLB1\t4\nCCCG\tLB2\n",
@@ -1047,19 +1053,21 @@ def test_molecule_info_reads_each_block_of_barcodes_once() -> None:
     reads = []
 
     class Listed:
-        shape = (10,)
+        shape = (11,)
         chunks = (4,)
 
         def __getitem__(self, selection):
             reads.append((selection.start, selection.stop))
-            return np.asarray([f"B{index}".encode() for index in range(10)])[selection]
+            return np.asarray([f"B{index}".encode() for index in range(11)])[selection]
 
     blocks = BarcodeBlocks(Listed(), block_rows=4)
     assert blocks.texts(np.asarray([0, 1, 1, 3])).tolist() == ["B0", "B1", "B1", "B3"]
     assert blocks.texts(np.asarray([2, 3])).tolist() == ["B2", "B3"]
-    assert blocks.texts(np.asarray([3, 4, 9])).tolist() == ["B3", "B4", "B9"]
+    # The last block holds three barcodes, so its offset is no multiple of
+    # its length.
+    assert blocks.texts(np.asarray([3, 4, 8, 10])).tolist() == ["B3", "B4", "B8", "B10"]
     # Each block of four barcodes is read once, however many chunks name it.
-    assert reads == [(0, 4), (4, 8), (8, 10)]
+    assert reads == [(0, 4), (4, 8), (8, 11)]
 
 
 def _matrix_h5ad(
@@ -1244,6 +1252,18 @@ def test_sparse_anndata_reads_a_barcode_of_many_cells_in_parts(
             "pointers that do not fit",
         ),
         ("indptr", lambda pointers: pointers + 1, "pointers that do not fit"),
+        # Only the first pointer is wrong: its entry would go to the last cell.
+        (
+            "indptr",
+            lambda pointers: np.concatenate([[1], pointers[1:]]),
+            "pointers that do not fit",
+        ),
+        # Only the last pointer is wrong: it names an entry that is not stored.
+        (
+            "indptr",
+            lambda pointers: np.concatenate([pointers[:-1], [pointers[-1] + 1]]),
+            "pointers that do not fit",
+        ),
         ("indices", lambda indices: indices + 6, "entries beyond its shape"),
         ("indices", lambda indices: indices - 7, "entries beyond its shape"),
     ],
@@ -1362,7 +1382,7 @@ def test_reading_holds_no_more_than_the_layout_estimates(tmp_path, kind) -> None
     )
     chunk_rows = layout.chunk_rows(400_000)
     assert _entries(_rows(layout, chunk_rows)) == _nonzero_entries(values)
-    assert _peak_while_reading(layout, chunk_rows) <= layout.held_bytes + (
+    assert _peak_while_reading(layout, chunk_rows) <= layout.held_bytes() + (
         layout.chunk_bytes(chunk_rows)
     )
 
@@ -1462,3 +1482,85 @@ def test_zeros_stored_in_a_sparse_matrix_name_no_barcode(tmp_path) -> None:
     chunks = _rows(barcode_layout(path), 3)
     assert _entries(chunks) == [("C1", "B1", 2), ("C2", "B2", 5)]
     assert len(chunks) == 1
+
+
+def _named_h5ad(path: Path, *, n_cells: int, name_length: int, libraries: str) -> Path:
+    """A CSR AnnData file of one count per cell, whose cell names are long.
+
+    ``libraries`` is ``"none"``, ``"categorical"`` or ``"strings"``: the
+    kind of ``obs`` column ``library`` that labels each cell's lane.
+    """
+    from tests.clone_truth import write_categorical
+
+    names = [f"C{index:0{name_length - 1}d}" for index in range(n_cells)]
+    lanes = [f"lane{index % 4}" for index in range(n_cells)]
+    with h5py.File(path, "w") as handle:
+        obs = handle.create_group("obs")
+        obs.attrs["_index"] = "_index"
+        obs.attrs["encoding-type"] = "dataframe"
+        obs.attrs["encoding-version"] = "0.2.0"
+        obs.attrs["column-order"] = np.asarray([], dtype=h5py.string_dtype())
+        obs.create_dataset("_index", data=np.asarray(names, dtype=h5py.string_dtype()))
+        if libraries == "categorical":
+            write_categorical(obs, "library", lanes)
+        elif libraries == "strings":
+            column = obs.create_dataset(
+                "library", data=np.asarray(lanes, dtype=h5py.string_dtype())
+            )
+            column.attrs["encoding-type"] = "string-array"
+            column.attrs["encoding-version"] = "0.2.0"
+        var = handle.create_group("var")
+        var.attrs["_index"] = "_index"
+        var.create_dataset(
+            "_index", data=np.asarray(["B0", "B1", "B2"], dtype=h5py.string_dtype())
+        )
+        group = handle.create_group("X")
+        group.attrs["encoding-type"] = "csr_matrix"
+        group.attrs["encoding-version"] = "0.1.0"
+        group.attrs["shape"] = np.asarray([n_cells, 3])
+        group.create_dataset("data", data=np.full(n_cells, 2.0, dtype=np.float32))
+        group.create_dataset("indices", data=(np.arange(n_cells) % 3).astype(np.int32))
+        group.create_dataset("indptr", data=np.arange(n_cells + 1, dtype=np.int64))
+    return path
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("name_length", "libraries"),
+    [(18, "none"), (34, "none"), (100, "none"), (34, "categorical"), (34, "strings")],
+)
+def test_the_names_of_many_cells_are_held_within_the_estimate(
+    tmp_path, monkeypatch, name_length, libraries
+) -> None:
+    from cytearc.readers import lineage_barcodes as reader
+
+    # Blocks of 2,048 names leave little room beside the names, so decoding
+    # them at once shows.
+    monkeypatch.setattr(reader, "_NAME_BLOCK", 2_048)
+    path = _named_h5ad(
+        tmp_path / "barcodes_output.h5ad",
+        n_cells=100_000,
+        name_length=name_length,
+        libraries=libraries,
+    )
+    columns = None if libraries == "none" else {"library": "library"}
+    layout = barcode_layout(path, format="h5ad", columns=columns)
+    chunk_rows = layout.chunk_rows(400_000)
+    # Decoded at once and counted at 100 bytes a name, 34 characters held
+    # about 166 bytes a cell at their peak.
+    assert _peak_while_reading(layout, chunk_rows) <= layout.held_bytes() + (
+        layout.chunk_bytes(chunk_rows)
+    )
+
+
+def test_a_fatemap_table_without_a_header_names_its_short_row(tmp_path) -> None:
+    # The first row of a table without a header is no header of 8 columns.
+    path = _file(
+        tmp_path,
+        "stepThreeStarcodeShavedReads.txt",
+        "AAAC\tGGTA\tTTTA\tTTTT\tTTT\tTT\tTA\t1\nCCCG\tGCTA\tTTTA\n",
+    )
+    layout = barcode_layout(path)
+    assert (layout.format, layout.level) == ("fatemap", "molecules")
+    with pytest.raises(ValueError, match="without BC50StarcodeD8 on line 2"):
+        _rows(layout, 10)
