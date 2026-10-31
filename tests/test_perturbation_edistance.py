@@ -150,7 +150,8 @@ def test_edistance_measures_each_target_against_the_controls(store, template) ->
     assert ref.assay == "RNA"
     loaded = store.perturbation.load_edistance(ref)
     assert isinstance(loaded, PerturbationEDistance)
-    assert (loaded.by, loaded.n_permutations, loaded.random_seed) == ("target", 200, 7)
+    assert (loaded.by, loaded.from_assay) == ("target", "RNA")
+    assert (loaded.n_permutations, loaded.random_seed) == (200, 7)
     assert "guide" not in loaded.table
     table = loaded.table.set_index("target")
     assert table.index.tolist() == ["GENE_A", "GENE_B", "GENE_C", "GENE_D"]
@@ -193,6 +194,32 @@ def test_edistance_measures_each_target_against_the_controls(store, template) ->
     untested = table.loc[["GENE_C", "GENE_D"], ["edistance", "p_value"]]
     assert untested.isna().all().all()
     assert table.loc[["GENE_C", "GENE_D"], "adjusted_p_value"].isna().all()
+
+
+def test_edistance_belongs_to_the_assay_of_its_coordinates(store, template) -> None:
+    # The same coordinates, owned by the guide assay rather than by the
+    # default assay.
+    cells = store.select_measured_cells("RNA")
+    selected = np.asarray(store.artifacts.load(cells)["values"][:], dtype=bool)
+    coordinates = store.reduction.import_coordinates(
+        COORDINATES[selected],
+        cell_selection=cells,
+        name="X_guides",
+        from_assay="CRISPR",
+    )
+
+    ref = store.perturbation.edistance(template.labels, coordinates, n_permutations=0)
+
+    assert ref.assay == "CRISPR"
+    loaded = store.perturbation.load_edistance(ref)
+    assert loaded.from_assay == "CRISPR"
+    default = store.perturbation.load_edistance(
+        store.perturbation.edistance(
+            template.labels, template.coordinates, n_permutations=0
+        )
+    )
+    assert default.from_assay == "RNA"
+    np.testing.assert_array_equal(loaded.table["edistance"], default.table["edistance"])
 
 
 def test_edistance_by_guide_takes_each_cell_with_one_guide(store, template) -> None:

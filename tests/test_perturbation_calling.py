@@ -1,9 +1,15 @@
+from fractions import Fraction
+
 import numpy as np
 import pytest
 
 from cytearc.perturbation import calling
 from cytearc.perturbation.calling import threshold_calls, top_guide_calls
-from cytearc.perturbation.guide_thresholds import call_settings
+from cytearc.perturbation.guide_thresholds import (
+    DEFAULT_FRACTION_THRESHOLD,
+    DEFAULT_MIN_UMI,
+    call_settings,
+)
 from cytearc.perturbation.guide_calls import GuideCountSummary, summarize_guide_counts
 from cytearc.perturbation.histograms import MAX_COUNT
 from tests.perturbation_helpers import screen_counts, use_python_kernels
@@ -124,7 +130,8 @@ def _summary() -> GuideCountSummary:
         (4, 0.79, [0, 1, 2]),
         (1, 0.0, [0, 1, 2, 4, 5]),  # every cell with guide UMIs
         (2, 0.9, [4]),  # 9 of 10 does not exceed 0.9
-        (10, 0.0, []),
+        (10, 0.0, [2]),  # 9 of 10: the cell's 10 guide UMIs reach the floor
+        (11, 0.0, []),
     ],
 )
 def test_top_guide_calls_compare_the_share_strictly(min_umi, fraction, cells) -> None:
@@ -143,6 +150,109 @@ def test_top_guide_calls_give_ties_to_the_first_guide() -> None:
     summary = summarize_guide_counts([counts], 1, 4)
     calls = top_guide_calls(summary, min_umi=np.int64(3), fraction_threshold=0.3)
     assert calls.codes.tolist() == [1]
+
+
+def _every_pair(largest: int) -> GuideCountSummary:
+    """One cell for each top-guide and total UMI count up to ``largest``.
+
+    The first cell holds no guide UMI; every other cell's top guide holds from
+    1 of its UMIs to all of them.
+    """
+    pairs = [(0, 0)] + [
+        (top, total) for total in range(1, largest + 1) for top in range(1, total + 1)
+    ]
+    top, total = np.asarray(pairs).T
+    return GuideCountSummary(
+        top_code=np.where(total > 0, np.arange(len(pairs)) % 7, -1).astype(np.int32),
+        top_umi=top.astype(np.uint32),
+        total_umi=total.astype(np.uint64),
+    )
+
+
+def _kept(summary: GuideCountSummary, fraction: Fraction, *, floor_of) -> np.ndarray:
+    """Return the cells past a floor whose top guide holds more than ``fraction``.
+
+    ``floor_of(top, total)`` says whether a cell reaches the floor, and the
+    share is compared exactly, as a ratio of integers.
+    """
+    return np.asarray(
+        [
+            floor_of(top, total) and Fraction(top, total) > fraction
+            for top, total in zip(
+                summary.top_umi.tolist(), summary.total_umi.tolist(), strict=True
+            )
+        ]
+    )
+
+
+def _book_rule(summary: GuideCountSummary, min_umi: int, fraction: Fraction):
+    """The cells that the SCEPTRE book's maximum rule finds with one guide.
+
+    The book flags a cell with fewer guide UMIs than its floor as holding no
+    guide, and a cell whose top guide holds at most its fraction of them as
+    holding several.
+    """
+    return _kept(summary, fraction, floor_of=lambda top, total: total >= min_umi)
+
+
+def _top_floor_rule(summary: GuideCountSummary, min_umi: int, fraction: Fraction):
+    """The cells that a floor on the top guide's UMIs keeps at the same share."""
+    return _kept(summary, fraction, floor_of=lambda top, total: top >= min_umi)
+
+
+@pytest.mark.parametrize("min_umi", [1, 2, 3, 4, 5, 6, 10])
+@pytest.mark.parametrize("fraction", ["0", "0.5", "0.75", "0.8", "0.9"])
+def test_top_guide_calls_bound_the_cells_guide_umis(min_umi, fraction) -> None:
+    summary = _every_pair(40)
+    exact = Fraction(fraction)
+
+    calls = top_guide_calls(summary, min_umi=min_umi, fraction_threshold=float(exact))
+
+    book = _book_rule(summary, min_umi, exact)
+    np.testing.assert_array_equal(calls.cells, np.flatnonzero(book))
+    np.testing.assert_array_equal(calls.codes, summary.top_code[book])
+    np.testing.assert_array_equal(calls.umis, summary.top_umi[book])
+    # A floor on the top guide's UMIs keeps some of these cells, and all of
+    # them exactly when the fraction is at least 1 - 1 / min_umi.
+    on_top = _top_floor_rule(summary, min_umi, exact)
+    assert not (on_top & ~book).any()
+    assert (on_top == book).all() == (exact >= 1 - Fraction(1, min_umi))
+
+
+def test_at_the_defaults_both_floors_call_the_same_cells() -> None:
+    # A top guide that holds more than 0.8 of at least 5 UMIs holds 5 itself.
+    summary = _every_pair(60)
+    min_umi = DEFAULT_MIN_UMI["top_guide"]
+    fraction = Fraction(str(DEFAULT_FRACTION_THRESHOLD))
+    assert (min_umi, fraction) == (5, Fraction(4, 5))
+
+    calls = top_guide_calls(
+        summary, min_umi=min_umi, fraction_threshold=DEFAULT_FRACTION_THRESHOLD
+    )
+
+    expected = _top_floor_rule(summary, min_umi, fraction)
+    np.testing.assert_array_equal(calls.cells, np.flatnonzero(expected))
+    np.testing.assert_array_equal(expected, _book_rule(summary, min_umi, fraction))
+
+
+def test_a_cell_with_4_of_6_guide_umis_is_called_at_half() -> None:
+    summary = GuideCountSummary(
+        top_code=np.asarray([2], dtype=np.int32),
+        top_umi=np.asarray([4], dtype=np.uint32),
+        total_umi=np.asarray([6], dtype=np.uint64),
+    )
+
+    half = top_guide_calls(summary, min_umi=5, fraction_threshold=0.5)
+
+    # The cell's 6 guide UMIs reach the floor of 5, though its top guide's 4
+    # do not.
+    assert (half.cells.tolist(), half.codes.tolist(), half.umis.tolist()) == (
+        [0],
+        [2],
+        [4],
+    )
+    default = top_guide_calls(summary, min_umi=5, fraction_threshold=0.8)
+    assert default.cells.tolist() == []
 
 
 @pytest.mark.parametrize(

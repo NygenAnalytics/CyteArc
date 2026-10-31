@@ -105,8 +105,9 @@ def call_settings(
 
     Args:
         method: One of :data:`METHODS`.
-        min_umi: The fewest UMIs of a called guide, or None for the method's
-            default.
+        min_umi: The UMI floor, or None for the method's default: the fewest
+            UMIs of a called guide for the fitted methods and ``"fixed"``, and
+            the fewest guide UMIs of a called cell for ``"top_guide"``.
         fraction_threshold: The share of a cell's guide UMIs that its top
             guide must exceed, for ``"top_guide"`` only, or None.
         sample_column: The name of the column whose samples are fitted

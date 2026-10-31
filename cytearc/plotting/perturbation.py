@@ -40,13 +40,14 @@ from ._style import (
 # Colours by role, which every screen figure shares. The highlight marks what
 # a figure is about: called cells, fitted fits, significant rows and pairs,
 # knocked-out cells, discovery pairs and positive controls; the muted grey
-# marks the rest. Cells without a call take a lighter grey, cells with several
-# called guides red, and the reference colour marks what a figure is read
+# marks the rest, cells without a call among them. Cells with several called
+# guides take red, and the reference colour marks what a figure is read
 # against: thresholds, the Benjamini-Hochberg cut, the fitted perturbed
-# component and the negative controls.
+# component and the negative controls. The mid grey keeps thin bars and lines
+# visible on white and still recedes on the dark theme.
 _HIGHLIGHT_COLOR = "#2b6cb0"
 _MUTED_COLOR = "#9e9e9e"
-_UNCALLED_COLOR = "#bdbdbd"
+_UNCALLED_COLOR = _MUTED_COLOR
 _SEVERAL_GUIDES_COLOR = "#d1495b"
 _REFERENCE_COLOR = "#d55e00"
 
@@ -92,9 +93,10 @@ _EFFICIENCY_PANEL = "efficiency"
 # A point's area, in points squared, grows linearly with the row's perturbed
 # cells from the first area to the second, which the row with the most takes.
 _POINT_AREAS = (16.0, 144.0)
-# A fold change of minus infinity is drawn at the left edge with this marker.
+# A fold change of minus infinity is drawn at the left edge with this marker,
+# and the legend says why.
 _MINUS_INFINITY_MARKER = "<"
-_NO_UMI_LABEL = "No UMI remains in the perturbed cells"
+_NO_COUNTS_LABEL = "No counts in the perturbed cells"
 
 _EDISTANCE_PANEL = "edistance"
 
@@ -117,16 +119,12 @@ _SCORE_COLUMNS = 4
 
 _VOLCANO_PANEL = "volcano"
 _CALIBRATION_PANELS = ("qq", "fold_changes", "controls")
-# A plot of association tests rasterizes the points of a panel that draws more
-# than this many.
-_ASSOCIATION_RASTERIZE_THRESHOLD = 100_000
 # A p-value below this, such as 0 when it underflows, is drawn at the top edge
 # of a -log10 axis.
 _SMALLEST_P_VALUE = 1e-300
 _TOP_EDGE_MARKER = "^"
 _TOP_EDGE_LABEL = "p-value below 1e-300"
 _BEYOND_AXIS_LABEL = "Beyond the axis"
-_NO_COUNTS_LABEL = "No counts in the perturbed cells"
 _CUT_LABEL = "Benjamini-Hochberg cut"
 # The label of a p-value axis names the side of a one-sided test.
 _SIDE_WORDS = {"left": " for a decrease", "right": " for an increase"}
@@ -1027,7 +1025,7 @@ def _row_legend(
     n_cells: np.ndarray,
     *,
     significant: np.ndarray | None,
-    no_umi: np.ndarray | None,
+    no_counts: np.ndarray | None,
     alpha: float,
     foreground: str,
 ) -> tuple[list[Any], list[str]]:
@@ -1035,8 +1033,8 @@ def _row_legend(
 
     Filled points give the colours of the rows, unless ``significant`` is None
     because no row has a p-value. Hollow markers give the marker of the rows
-    that ``no_umi`` marks, if any, and the point areas of the smallest, middle
-    and largest perturbed cell counts.
+    that ``no_counts`` marks, if any, and the point areas of the smallest,
+    middle and largest perturbed cell counts.
     """
     handles: list[Any] = []
     labels: list[str] = []
@@ -1048,9 +1046,9 @@ def _row_legend(
             if chosen.any():
                 handles.append(_legend_marker("o", color, foreground))
                 labels.append(label)
-    if no_umi is not None and no_umi.any():
+    if no_counts is not None and no_counts.any():
         handles.append(_legend_marker(_MINUS_INFINITY_MARKER, None, foreground))
-        labels.append(_NO_UMI_LABEL)
+        labels.append(_NO_COUNTS_LABEL)
     ordered = np.sort(n_cells)
     counts = np.unique(ordered[[0, len(ordered) // 2, -1]])
     for count, area in zip(
@@ -1088,9 +1086,9 @@ def efficiency(
     the line at 0 and an activation right of it. A point is blue when the row
     is significant at the false discovery rate ``alpha``, its adjusted p-value
     at most ``alpha``, and grey otherwise, and its area grows with the cells
-    that carry the perturbation. When no UMI of the gene remains
-    in those cells, the fold change is minus infinity: a triangle at the left
-    edge marks it, and the row's label says that no UMI remains.
+    that carry the perturbation. When those cells hold no counts of the gene,
+    the fold change is minus infinity: a triangle at the left edge marks it,
+    and the row's label ends in "(no counts)".
 
     When more than ``max_rows`` rows were tested, the plot keeps the
     ``max_rows`` rows with the smallest adjusted p-values, ties broken by name.
@@ -1131,10 +1129,10 @@ def efficiency(
     # A row is significant at the false discovery rate alpha, as a pair of
     # the association tests is.
     significant = drawn["adjusted_p_value"].to_numpy(dtype=np.float64) <= alpha
-    no_umi = np.isneginf(fold_changes)
+    no_counts = np.isneginf(fold_changes)
     labels = [
-        f"{name} (no UMI remains)" if missing else str(name)
-        for name, missing in zip(drawn[by].tolist(), no_umi.tolist(), strict=True)
+        f"{name} (no counts)" if missing else str(name)
+        for name, missing in zip(drawn[by].tolist(), no_counts.tolist(), strict=True)
     ]
     if figsize is None and target is None:
         figsize = _row_figsize(
@@ -1155,7 +1153,7 @@ def efficiency(
         handles, texts = _row_legend(
             n_cells,
             significant=significant,
-            no_umi=no_umi,
+            no_counts=no_counts,
             alpha=alpha,
             foreground=foreground,
         )
@@ -1296,7 +1294,7 @@ def edistance(
         handles, texts = _row_legend(
             n_cells,
             significant=significant if permuted else None,
-            no_umi=None,
+            no_counts=None,
             alpha=alpha,
             foreground=foreground,
         )
@@ -2069,7 +2067,7 @@ def association_volcano(
     name from the record's ``feature_name`` column, and ``label_top=0``
     labels none. A label that would overlap a label of a smaller p-value
     moves to the other side of its point, or above or below it with a thin
-    line to it. The points are rasterized when there are more than 100,000.
+    line to it. The points are rasterized when there are more than 50,000.
 
     ``targets`` keeps the pairs of those targets, and the plot raises
     ValueError naming any target without discovery pairs. The plot also
@@ -2138,7 +2136,7 @@ def association_volcano(
         no_counts, _MINUS_INFINITY_MARKER, np.where(at_top, _TOP_EDGE_MARKER, "o")
     )
     size, edge_size = _point_sizes(n_drawn)
-    rasterized = n_drawn > _ASSOCIATION_RASTERIZE_THRESHOLD
+    rasterized = n_drawn > DEFAULT_RASTERIZE_THRESHOLD
     n_significant = int(np.count_nonzero(significant))
     title = [
         "Association tests of the discovery pairs",
@@ -2379,7 +2377,7 @@ def _qq_panel(
     )
     ax.axline((0.0, 0.0), slope=1.0, color=foreground, linewidth=0.8, zorder=1.5)
     size, edge_size = _point_sizes(len(points))
-    rasterized = len(points) > _ASSOCIATION_RASTERIZE_THRESHOLD
+    rasterized = len(points) > DEFAULT_RASTERIZE_THRESHOLD
     # The discovery p-values are drawn over the negative controls.
     for name, color, order in (
         ("calibration", _REFERENCE_COLOR, 2.0),
@@ -2517,7 +2515,7 @@ def _controls_panel(
     )
     y = np.where(at_top, edge, heights)
     size, edge_size = _point_sizes(len(controls))
-    rasterized = len(controls) > _ASSOCIATION_RASTERIZE_THRESHOLD
+    rasterized = len(controls) > DEFAULT_RASTERIZE_THRESHOLD
     for name, color in (
         ("positive", _HIGHLIGHT_COLOR),
         ("calibration", _REFERENCE_COLOR),
@@ -2622,7 +2620,7 @@ def association_calibration(
 
     When the tests are one-sided, the labels of the p-value axes name the
     side tested. A panel rasterizes its points when it draws more than
-    100,000. The plot raises ValueError when no negative-control pair passed
+    50,000. The plot raises ValueError when no negative-control pair passed
     QC. The table ``"qq"`` holds the drawn p-values with ``set``,
     ``target``, ``feature``, ``p_value`` and ``expected``, the uniform
     quantile i / (n + 1); ``"band"`` holds the band's ``rank``, ``expected``,

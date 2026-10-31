@@ -392,11 +392,13 @@ class PerturbationEDistance:
             rows by guide), ``status``, ``n_cells``, ``n_control_cells``,
             ``edistance``, ``p_value`` and ``adjusted_p_value``.
         by: ``"target"`` or ``"guide"``.
+        from_assay: The assay of the coordinates.
         n_permutations: The permutations of each test.
         random_seed: The seed from which each row's permutations drew.
     """
 
     table: pd.DataFrame = field(repr=False)
     by: str
+    from_assay: str
     n_permutations: int
     random_seed: int

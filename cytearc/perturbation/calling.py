@@ -4,8 +4,8 @@ A threshold method calls a guide in a cell when the cell's UMIs of the guide
 reach the guide's threshold in the cell's sample, so a cell can have any
 number of calls, and its calls never depend on its other guides. The
 ``top_guide`` method calls at most one guide per cell: the cell's top guide,
-when its share of the cell's guide UMIs exceeds a set fraction and its UMIs
-reach a floor.
+when the cell's guide UMIs reach a floor and the top guide's share of them
+exceeds a set fraction.
 
 The kernels read count blocks that a caller streams and never touch storage.
 Their calls feed :func:`~cytearc.perturbation.guide_calls.guide_call_arrays`.
@@ -182,17 +182,26 @@ def top_guide_calls(
 ) -> CalledGuides:
     """Call each cell's top guide when it holds most of the cell's guide UMIs.
 
-    A cell's top guide is called when its UMIs reach ``min_umi`` and its share
-    of the cell's guide UMIs exceeds ``fraction_threshold``. The share must
-    exceed the fraction, as in crispat's ratio method and SCEPTRE's maximum
-    rule, so 4 of 5 UMIs is not called at 0.8. Among guides with equal UMIs,
-    the top guide is the one first in the assay. A cell gets at most one call,
-    and with ``fraction_threshold=0`` every cell whose top guide reaches
-    ``min_umi`` is called, as in pertpy's ``assign_to_max_guide``.
+    A cell's top guide is called when the cell's guide UMIs reach ``min_umi``
+    and the top guide's share of them exceeds ``fraction_threshold``. This is
+    the maximum rule of the SCEPTRE book's "Assign gRNAs" chapter, which flags
+    a cell with fewer guide UMIs than its floor, 5 by default, as holding no
+    guide, and a cell whose top guide holds at most its fraction, 0.8 by
+    default, as holding several. The share must exceed the fraction, as in
+    crispat's ratio method too, so 4 of 5 UMIs is not called at 0.8. Among
+    guides with equal UMIs, the top guide is the one first in the assay. A
+    cell gets at most one call, and with ``fraction_threshold=0`` every cell
+    whose guide UMIs reach ``min_umi`` is called.
+
+    A floor on the top guide's UMIs instead would call the same cells whenever
+    ``fraction_threshold`` is at least ``1 - 1 / min_umi``, as at the defaults
+    of 0.8 and 5: a top guide that holds more than 0.8 of at least 5 UMIs
+    holds 5 itself. Below that fraction the floors differ, and a cell with 4
+    of its 6 guide UMIs in its top guide is called at 0.5 with a floor of 5.
 
     Args:
         summary: Each cell's top guide and guide UMIs.
-        min_umi: The fewest UMIs of the top guide that are called, at least 1.
+        min_umi: The fewest guide UMIs of a called cell, at least 1.
         fraction_threshold: The share of the cell's guide UMIs that the top
             guide must exceed, at least 0 and below 1. Both settings are
             checked by
@@ -201,10 +210,10 @@ def top_guide_calls(
     Returns:
         The calls, ordered by cell.
     """
-    called = (
-        (summary.total_umi > 0)
-        & (summary.top_umi >= min_umi)
-        & (summary.top_fraction > fraction_threshold)
+    # The floor, at least 1, leaves out the cells without guide UMIs, which
+    # have no share.
+    called = (summary.total_umi >= min_umi) & (
+        summary.top_fraction > fraction_threshold
     )
     cells = np.flatnonzero(called).astype(np.int64)
     return CalledGuides(

@@ -844,6 +844,8 @@ class MixscapeResult:
             ``perturbed_weight``.
         de_genes: One row per target, split and DE gene, with ``target``,
             ``split`` and ``feature`` (the feature ID).
+        from_assay: The expression assay of the signature, whose features the
+            DE genes are.
         perturbation_type: The word that names knocked-out cells, ``"KO"`` by
             default.
         split_column: The cell metadata column of the splits, or None.
@@ -852,5 +854,6 @@ class MixscapeResult:
     cells: pd.DataFrame = field(repr=False)
     targets: pd.DataFrame = field(repr=False)
     de_genes: pd.DataFrame = field(repr=False)
+    from_assay: str
     perturbation_type: str
     split_column: str | None
