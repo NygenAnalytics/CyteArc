@@ -403,6 +403,13 @@ def test_each_cell_counts_its_edits_integrations_and_records(
     # The canonical value is each cell's edits.
     loaded = store.artifacts.load_values(ref)
     np.testing.assert_array_equal(loaded.values, expected_edits.to_numpy())
+    # select_cells compares its bounds strictly, so low=0 keeps the cells
+    # with an edit, as the clones page says.
+    assert 0 < (expected_edits > 0).sum() < len(truth.cell_ids)
+    selected = store.select_cells(ref, low=0)
+    np.testing.assert_array_equal(
+        store.artifacts.load(selected)["values"][:], expected_edits.to_numpy() > 0
+    )
 
 
 def test_a_saved_import_is_reused_and_warns_again(store, truth, recorders, tmp_path):
@@ -529,3 +536,36 @@ def test_a_read_only_store_reuses_saved_alleles_and_refuses_new_ones(
     )
     with pytest.raises(PermissionError):
         reader.clones.import_alleles(other, cell_selection=cells)
+
+
+def test_rows_without_an_integration_are_left_out_counted_and_warned(tmp_path):
+    from tests.clone_helpers import open_clone_store
+    from tests.storage_helpers import write_count_store
+
+    # PEtracer leaves intID empty where an intBC is not on its whitelist.
+    path = (
+        Path(__file__).parent
+        / "data"
+        / "recorders"
+        / "petracer_preedited_10x_invitro_alleles.csv"
+    )
+    raw = pd.read_csv(path, dtype=str, keep_default_na=False)
+    lacking = int((raw["intID"] == "").sum())
+    assert lacking > 0
+    cells = sorted(set(raw["cellBC"]))
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((len(cells), 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=cells,
+    )
+    store = open_clone_store(tmp_path / "store.zarr")
+    selection = store.snapshot_cell_selection()
+    message = f"{lacking} rows of the allele files name no integration"
+    with pytest.warns(UserWarning, match=message):
+        ref = store.clones.import_alleles(path, cell_selection=selection)
+    with pytest.warns(UserWarning, match=message):
+        assert store.clones.import_alleles(path, cell_selection=selection) == ref
+    records = store.clones.load_alleles(ref).records
+    assert len(records) == 3 * (len(raw) - lacking)
+    assert store.artifacts.load(ref).attrs["n_rows_without_integration"] == lacking

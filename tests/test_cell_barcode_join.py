@@ -34,6 +34,7 @@ from tests.barcode_join_helpers import (
     build_guide_store,
     build_join_store,
     import_case,
+    write_allele_file,
     write_barcode_file,
     write_clone_file,
     write_contig_file,
@@ -197,6 +198,15 @@ def _listed_cells(store, ref) -> set[str]:
     return set(cells.index[cells["listed"]])
 
 
+def _alleles(store, paths, **options):
+    return store.clones.import_alleles(paths, **options)
+
+
+def _cells_with_alleles(store, ref) -> set[str]:
+    cells = store.clones.load_alleles(ref).cells
+    return set(cells.index[cells["n_records"] > 0])
+
+
 IMPORTERS = {
     "import_guide_calls": Importer(
         name="import_guide_calls",
@@ -238,6 +248,14 @@ IMPORTERS = {
         run=_variant_counts,
         joined=_listed_cells,
         files=("the variant file", "the variant files"),
+    ),
+    "import_alleles": Importer(
+        name="import_alleles",
+        several_files=True,
+        write=write_allele_file,
+        run=_alleles,
+        joined=_cells_with_alleles,
+        files=("the allele file", "the allele files"),
     ),
 }
 MULTI_FILE = [name for name, importer in IMPORTERS.items() if importer.several_files]
