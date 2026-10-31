@@ -57,6 +57,14 @@ _FIT_TOLERANCE = 1e-12
 _LOGISTIC_ITERATIONS = 50
 # Counts up to this sum their digamma differences term by term.
 _FINITE_SUM_COUNTS = 8
+# A set whose cells the covariates determine, such as the cells of a sample
+# that holds no other cell of the fit, has a score variance of exactly 0. Its
+# computed variance is rounding, which grows with the cells summed by about
+# 2^-53 each: within 1e-12 of its weight sum over 4 million cells. A variance
+# up to this share of the weight sum therefore counts as 0, while a set that
+# the covariates do not determine keeps more: every cell but one keeps about
+# 1/n of its weight sum.
+_VARIANCE_TOLERANCE = 1e-8
 
 
 def count_array(values: np.ndarray) -> np.ndarray:
@@ -381,13 +389,16 @@ def score_statistic(
 
     ``weighted`` sums each cell's weight times its covariates, and ``factor``
     is the Cholesky factor of the information of the fit. A set without
-    spread, such as an empty set, has no statistic: NaN.
+    spread has no statistic: NaN. Such a set is empty, or the covariates
+    determine its cells, as they do the cells of a sample that holds no other
+    cell of the fit; its variance is 0, so any variance up to 1e-8 of the
+    weight sum, which rounding cannot reach, counts as none.
     """
     forward_substitution(factor, weighted, solved)
     variance = weight_sum
     for c in range(len(solved)):
         variance -= solved[c] * solved[c]
-    if variance > 0:
+    if variance > _VARIANCE_TOLERANCE * weight_sum:
         return score_sum / math.sqrt(variance)
     return np.nan
 
@@ -481,8 +492,11 @@ def set_test(
     ``factor`` of its information, a cell's score is (y - mu) / (1 + phi mu)
     and its weight mu / (1 + phi mu). The statistic standardizes the set's
     summed score, as :func:`score_statistic` does, and the fold change is
-    :func:`log2_fold_change` of the set. ``cells`` lists at least one cell,
-    and they add up in its order; ``solved`` is room for one covariate vector.
+    :func:`log2_fold_change` of the set. A set without a statistic, whose
+    cells the covariates determine, has no fold change either, since the fit
+    matches the set's counts by construction: all three are NaN. ``cells``
+    lists at least one cell, and they add up in its order; ``solved`` is
+    room for one covariate vector.
     """
     p = covariates.shape[1]
     sums = np.zeros(p + 1)
@@ -502,6 +516,8 @@ def set_test(
         for c in range(p):
             tangent[c] += mu[j] * covariates[j, c]
     statistic = score_statistic(sums[0], sums[1], sums[1:], factor, solved)
+    if np.isnan(statistic):
+        return statistic, np.nan, np.nan
     fold, error = log2_fold_change(
         count_sum, mean_sum, square_sum, tangent, factor, dispersion, solved
     )

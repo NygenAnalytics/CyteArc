@@ -488,26 +488,31 @@ def _mixscape(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _associations(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
-    arrays = _arrays(group, "sets", "pass_qc", "significant", "groups", "group_guides")
+    arrays = _arrays(
+        group, "sets", "pass_qc", "z", "significant", "groups", "group_guides"
+    )
     if arrays is None:
         return {}
-    sets, pass_qc, significant, pair_groups, group_guides = arrays
+    sets, pass_qc, z, significant, pair_groups, group_guides = arrays
     names = [str(name) for name in group.attrs["set_names"]]
     discovery, calibration, positive = (
         names.index(name) for name in ("discovery", "calibration", "positive")
     )
-    # Each set's pairs, those that pass QC, and those found significant, read
-    # in bounded blocks, since a trans run holds millions of pairs.
+    # Each set's pairs, those tested, which pass QC with a statistic, and
+    # those found significant, read in bounded blocks, since a trans run
+    # holds millions of pairs.
     pairs = np.zeros(len(names), dtype=np.int64)
-    passing = np.zeros(len(names), dtype=np.int64)
+    tested = np.zeros(len(names), dtype=np.int64)
     found = np.zeros(len(names), dtype=np.int64)
     false_groups: list[np.ndarray] = []
     for start, stop in _row_ranges(sets):
         codes = np.asarray(sets[start:stop]).astype(np.int64)
-        qc = np.asarray(pass_qc[start:stop]).astype(bool)
+        with_statistic = np.asarray(pass_qc[start:stop]).astype(bool) & ~np.isnan(
+            np.asarray(z[start:stop])
+        )
         hits = np.asarray(significant[start:stop]).astype(bool)
         pairs += np.bincount(codes, minlength=len(names))
-        passing += np.bincount(codes[qc], minlength=len(names))
+        tested += np.bincount(codes[with_statistic], minlength=len(names))
         found += np.bincount(codes[hits], minlength=len(names))
         false = hits & (codes == calibration)
         if false.any():
@@ -521,7 +526,7 @@ def _associations(group: Any, parameters: Mapping[str, Any]) -> dict[str, Any]:
     order = np.lexsort((labels, -counts))[:SUMMARY_ITEM_LIMIT]
     return {
         "discoveryPairs": int(pairs[discovery]),
-        "testedDiscoveryPairs": int(passing[discovery]),
+        "testedDiscoveryPairs": int(tested[discovery]),
         "discoveries": int(found[discovery]),
         "calibrationPairs": int(pairs[calibration]),
         "falseDiscoveries": int(group.attrs["n_false_discoveries"]),

@@ -116,14 +116,15 @@ MOIS = ("low", "high")
 CALIBRATION_GROUPS = 100
 #: Whether a calibration check ran, saved with the tests: it ran, it was
 #: turned off, or it could not run for too few control guides, for no
-#: discovery pair that passes QC by default, or for no calibration pair that
-#: passes QC.
+#: discovery pair that passes QC by default, for no calibration pair that
+#: passes QC, or for no calibration pair with a statistic.
 CALIBRATION_STATUSES = (
     "checked",
     "off",
     "few_control_guides",
     "no_passing_discovery",
     "no_passing_calibration",
+    "no_calibration_statistic",
 )
 
 # A start of a pair's fit with a coefficient beyond this size, on covariates
@@ -546,7 +547,8 @@ def _score_batch(
     adds one contiguous row. With rows in ``fold`` the fold change and its
     standard error are stored; with rows in ``statistics`` every statistic is
     stored, in the row that ``slots`` gives each pair, and otherwise
-    ``counts`` counts those at most and at least the observed one.
+    ``counts`` counts those at most and at least the observed one, and the
+    sets with a statistic.
     """
     p = design.shape[1]
     width = p + 1
@@ -597,11 +599,12 @@ def _score_batch(
                 )
             if store:
                 statistics[slots[pair], d] = value
-            else:
+            elif not np.isnan(value):
                 if value <= observed[k]:
                     counts[pair, 0] += 1
                 if value >= observed[k]:
                     counts[pair, 1] += 1
+                counts[pair, 2] += 1
 
 
 @njit(cache=True, nogil=True, parallel=True)
@@ -784,7 +787,7 @@ def _run_pairs(
     z = np.empty(n_pairs)
     fold = np.empty(n_pairs if with_fold else 0)
     se = np.empty(n_pairs if with_fold else 0)
-    counts = np.zeros((0 if store else n_pairs, 2), dtype=np.int64)
+    counts = np.zeros((0 if store else n_pairs, 3), dtype=np.int64)
     statistics = np.empty((n_pairs if store else 0, n_draws))
     counts_values = count_array(values)
     design_all = np.ascontiguousarray(covariates, dtype=np.float64)
@@ -913,9 +916,11 @@ def resampling_counts(
         draw_bytes: The memory that the groups' random sets may take at once.
 
     Returns:
-        Each pair's statistic, NaN for a gene without a fit; per pair, the
-        sets with a statistic at most and at least the observed one, pairs x
-        2; and each pair's log2 fold change and its standard error.
+        Each pair's statistic, NaN for a gene without a fit or a group whose
+        cells the covariates determine; per pair, the sets with a statistic
+        at most and at least the observed one, and all the sets with a
+        statistic, pairs x 3; and each pair's log2 fold change and its
+        standard error, NaN where the statistic is.
     """
     z, fold, se, counts, _ = _run_pairs(
         values,
@@ -947,7 +952,9 @@ def resampled_statistics(
 ) -> np.ndarray:
     """Return the statistic of every random set of each pair, pairs x sets.
 
-    The arguments are those of :func:`resampling_counts`. Each statistic is
+    A set without a statistic, such as one whose cells the covariates
+    determine, holds NaN. The arguments are those of
+    :func:`resampling_counts`. Each statistic is
     written straight to its pair's row, so the statistics, 8 bytes per pair
     and set, are held once.
     """
@@ -1000,7 +1007,9 @@ def association_settings(
         n_resamples: The random sets of the three rounds, a sequence of three
             integers.
         stage_threshold: The p-value at or below which a pair takes the
-            second round.
+            second round: 0, which keeps every first-round p-value, or at
+            least the smallest first-round p-value, 2 / (n_resamples[0] + 1)
+            with ``side="both"`` and 1 / (n_resamples[0] + 1) otherwise.
         min_nonzero: The fewest perturbed and control cells that express a
             tested gene.
         n_calibration_pairs: The calibration pairs, or None.
@@ -1020,8 +1029,10 @@ def association_settings(
 
     Raises:
         TypeError: If a setting has the wrong type.
-        ValueError: If a setting is unknown or out of range, or
-            ``resampling="conditional"`` goes with ``moi="low"``.
+        ValueError: If a setting is unknown or out of range,
+            ``resampling="conditional"`` goes with ``moi="low"``, or a
+            positive ``stage_threshold`` is below the smallest first-round
+            p-value, so that no pair could take the second round.
     """
     if isinstance(positive_controls, str) and positive_controls != "targets":
         raise ValueError(
@@ -1056,6 +1067,26 @@ def association_settings(
     threshold = float_argument(stage_threshold, "stage_threshold")
     if not 0 <= threshold <= 1:
         raise ValueError("stage_threshold must be from 0 to 1")
+    # The first round's smallest p-value, one set count over one more than
+    # the sets, doubled for both sides as resampling_p_values doubles it.
+    sides = 2.0 if side == "both" else 1.0
+    smallest = min(1.0, sides / (draws[0] + 1.0))
+    if 0 < threshold < smallest:
+        # The fewest sets n with sides / (n + 1) at most the threshold, the
+        # division's rounding corrected by one set either way.
+        needed = math.ceil(sides / threshold) - 1
+        if sides / (needed + 1.0) > threshold:
+            needed += 1
+        elif sides / needed <= threshold:
+            needed -= 1
+        sets = "set" if draws[0] == 1 else "sets"
+        raise ValueError(
+            f"With {draws[0]} first-round {sets} and side={side!r}, the smallest "
+            f"first-round p-value is {smallest:.3g}, above stage_threshold="
+            f"{threshold:g}, so no pair could take the second round; pass "
+            f"n_resamples[0] of at least {needed}, or stage_threshold=0 to keep "
+            "the first round's p-values"
+        )
     floor = integer_argument(min_nonzero, "min_nonzero", minimum=1)
     requested = (
         None
@@ -1137,7 +1168,11 @@ def pair_tests(
     beyond their 99th percentile, on the observed statistic's side, holds
     less than half of the statistics' own share there; then
     ``n_resamples[2]`` fresh sets give the p-value. With
-    ``approximation="none"``, the second round's sets give it.
+    ``approximation="none"``, the second round's sets give it. A pair of a
+    gene without a fit, or of a group whose cells the covariates determine
+    among the pair's cells, such as the cells of a sample without control
+    cells, has no statistic, fold change or p-value, and a random set
+    without a statistic counts in no p-value.
 
     Args:
         values: Counts, genes x cells, the control cells first.
@@ -1520,6 +1555,7 @@ def association_pairs(
 
 def calibration_status(
     n_calibration: int,
+    n_tested: int,
     n_calibration_pairs: int | None,
     n_control_guides: int,
     passing_discovery: int,
@@ -1529,10 +1565,12 @@ def calibration_status(
 
     At low MOI a group leaves one control guide for its comparison cells, so
     a check needs 2 control guides; at high MOI all other cells are a group's
-    comparison, and one is enough.
+    comparison, and one is enough. A check runs only on calibration pairs
+    with a statistic.
 
     Args:
         n_calibration: The calibration pairs drawn.
+        n_tested: Those of them with a statistic.
         n_calibration_pairs: The calibration pairs requested, or None.
         n_control_guides: The control guides that the groups draw from.
         passing_discovery: The discovery pairs that pass QC.
@@ -1541,8 +1579,10 @@ def calibration_status(
     Returns:
         One of :data:`CALIBRATION_STATUSES`.
     """
-    if n_calibration:
+    if n_tested:
         return "checked"
+    if n_calibration:
+        return "no_calibration_statistic"
     if n_calibration_pairs == 0:
         return "off"
     if n_control_guides < (1 if moi == "high" else 2):

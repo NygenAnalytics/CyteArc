@@ -1,4 +1,4 @@
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -12,6 +12,7 @@ from ...metadata.arguments import (
 from ...metadata.artifacts import write_cell_data_artifact
 from ...metadata.rows import (
     apply_missing_mask,
+    array_row_selection_parts,
     read_array_rows_chunkwise,
     read_metadata_missing_rows_chunkwise,
     read_metadata_rows_chunkwise,
@@ -31,6 +32,8 @@ from ...storage.artifact_writer import (
     PlannedArtifact,
 )
 from ...storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
+from ...storage.geometry import array_geometry
+from ...storage.partition import row_band
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
@@ -90,6 +93,32 @@ _ASSOCIATION_VALUES = (
 )
 
 
+def _chunk_rows(codes: zarr.Array) -> int:
+    """Return the rows of a stored chunk of a cells x slots array of codes."""
+    n_rows = int(codes.shape[0])
+    return min(row_band(array_geometry(codes), unit="chunk", fallback=n_rows), n_rows)
+
+
+def _code_blocks(codes: zarr.Array) -> Iterator[np.ndarray]:
+    """Yield the rows of a cells x slots array of codes, a stored chunk at a time.
+
+    Zarr decodes a whole chunk for any of its rows, so whole chunks are read.
+    """
+    step = max(_chunk_rows(codes), 1)
+    for start in range(0, int(codes.shape[0]), step):
+        yield np.asarray(codes[start : start + step])
+
+
+def _chunk_read_bytes(codes: zarr.Array) -> int:
+    """Return what reading one stored chunk of rows of an array of codes holds.
+
+    The read holds the chunk as stored and decoded, and the rows it returns.
+    """
+    stored, _ = array_row_selection_parts(codes)
+    row_bytes = int(np.prod(codes.shape[1:], dtype=np.int64)) * codes.dtype.itemsize
+    return stored + _chunk_rows(codes) * row_bytes
+
+
 def _association_warnings(
     unmatched: np.ndarray,
     n_rows: int,
@@ -108,9 +137,11 @@ def _association_warnings(
         assay: The expression assay.
         attributes: The attributes of the tests: ``calibration_status``,
             ``n_control_guides``, ``calibration_grade``,
-            ``n_false_discoveries`` and ``n_negative_control_pairs``.
+            ``n_false_discoveries``, ``n_negative_control_pairs``,
+            ``rows_without_statistic`` and
+            ``calibration_groups_without_statistic``.
         moi: ``"low"`` or ``"high"``, which choose the control guides of the
-            calibration groups.
+            calibration groups and the comparison cells.
     """
     messages = []
     if len(unmatched):
@@ -147,6 +178,10 @@ def _association_warnings(
             "No pair of a calibration group and a feature passes QC, so no "
             "calibration check was run"
         )
+    elif status == "no_calibration_statistic":
+        messages.append(
+            "No calibration pair has a statistic, so no calibration check was run"
+        )
     grade = attributes["calibration_grade"]
     if grade in ("moderate", "severe"):
         messages.append(
@@ -154,6 +189,35 @@ def _association_warnings(
             f"false discoveries among {attributes['n_negative_control_pairs']} "
             f"negative-control pairs, a {grade} miscalibration; check the "
             "covariates and the control guides before trusting the discoveries"
+        )
+    # Within a pair's cells, a sample or a binary covariate that holds exactly
+    # the treatment cells makes the variance of their score 0.
+    rows = [str(name) for name in attributes["rows_without_statistic"]]
+    if rows:
+        noun = f"{len(rows)} {by}" + ("s" if len(rows) > 1 else "")
+        holding = (
+            "samples, or of a binary covariate, that hold no control cell"
+            if moi == "low"
+            else "samples or of a binary covariate"
+        )
+        messages.append(
+            f"The pairs of {noun} pass QC but have no statistic, so they have no "
+            "p-value or fold change and are not significant: "
+            + ", ".join(repr(name) for name in rows)
+            + f". The covariates determine which of each pair's cells carry the "
+            f"{by}, as they do when its cells are exactly the cells of {holding}; "
+            f"test such a {by} without that sample column or covariate."
+        )
+    groups = [str(name) for name in attributes["calibration_groups_without_statistic"]]
+    if groups:
+        noun = f"{len(groups)} calibration group" + ("s" if len(groups) > 1 else "")
+        messages.append(
+            f"The pairs of {noun} pass QC but have no statistic, so they have no "
+            "p-value or fold change and are not counted as false discoveries: "
+            + ", ".join(repr(name) for name in groups)
+            + ". The covariates determine which of each pair's cells carry the "
+            "group's guides, as they do when those are exactly the pair's cells "
+            "of samples or of a binary covariate."
         )
     return messages
 
@@ -213,9 +277,14 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         sample label and covariate values that are not missing. A pair is
         tested when at least ``min_nonzero`` perturbed and ``min_nonzero``
         control cells express the gene, and p-values are adjusted by
-        Benjamini-Hochberg within each set of pairs. The fold change is log2
-        of the perturbed cells' counts over their means under the pair's fit,
-        the estimator of the SCEPTRE book.
+        Benjamini-Hochberg within each set of pairs. A pair that passes QC has
+        no statistic when the covariates determine which of its cells carry
+        the perturbation, as they do when a target's cells are exactly the
+        cells of samples, or of a binary covariate, that hold no control cell:
+        it gets no p-value or fold change, ``stage`` 0, and is not significant
+        or counted as tested, and a warning names its target. The p-values count only the random sets that have a
+        statistic. The fold change is log2 of the perturbed cells' counts over
+        their means under the pair's fit, the estimator of the SCEPTRE book.
 
         Three sets of pairs are tested:
 
@@ -236,9 +305,9 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
           (up to 6), moderate (up to 14) or severe. The grade is ``"none"``
           when no check runs: with ``n_calibration_pairs=0``; with fewer than
           2 control guides that are the one guide of a control cell; by
-          default, when no discovery pair passes QC; or when no pair of a
-          group and a feature passes QC. A warning says why in all but the
-          first case.
+          default, when no discovery pair passes QC; when no pair of a group
+          and a feature passes QC; or when no calibration pair has a
+          statistic. A warning says why in all but the first case.
         - Positive-control pairs: with ``positive_controls="targets"``, each
           target with its own gene, matched as
           :meth:`~cytearc.datastore.namespaces.PerturbationAccessor.efficiency`
@@ -272,7 +341,8 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         the group, are compared with all other labelled cells, so one control
         guide is enough; the grade is ``"none"`` when no labelled cell carries
         one. QC counts the expressing cells of each group against all other
-        cells.
+        cells, and a target whose cells are exactly the cells of samples, or
+        of a binary covariate, has no statistic.
 
         Args:
             labels: A ``perturbation_labels`` artifact.
@@ -299,7 +369,11 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             n_resamples: The random sets of the three rounds, a sequence of
                 three integers such as a tuple or a list.
             stage_threshold: The p-value at or below which a pair takes the
-                second round.
+                second round: 0, which keeps the first round's p-values, or
+                at least the smallest first-round p-value, 2 /
+                (``n_resamples[0]`` + 1) with ``side="both"`` and 1 /
+                (``n_resamples[0]`` + 1) otherwise, so 99 or 49 first-round
+                sets for the default of 0.02.
             approximation: ``"skew_normal"`` or ``"none"``.
             min_nonzero: The fewest perturbed and control cells that express a
                 tested gene.
@@ -320,8 +394,10 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             TypeError: If an argument has the wrong type.
             ValueError: If ``labels`` is not a ``perturbation_labels``
                 artifact, an assay, column, target or feature is unknown, a
-                number is out of range, ``resampling="conditional"`` goes
-                with ``moi="low"``, trans pairs have no ``features``, a table
+                number is out of range, a positive ``stage_threshold`` is
+                below the smallest first-round p-value,
+                ``resampling="conditional"`` goes with ``moi="low"``, trans
+                pairs have no ``features``, a table
                 of pairs is malformed, at low MOI no labelled cell carries
                 control guides only, or a tested cell has no sample label, a
                 covariate value that is missing or not finite, or at high MOI
@@ -557,6 +633,13 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                         "n_false_discoveries",
                         "n_negative_control_pairs",
                         "n_control_guides",
+                    )
+                ),
+                *(
+                    AttributeRequirement(name, expected_types=(list,))
+                    for name in (
+                        "rows_without_statistic",
+                        "calibration_groups_without_statistic",
                     )
                 ),
             ),
@@ -968,7 +1051,8 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         each band's counts again. ``test`` tests the chosen pairs on a band's
         counts, given the row of each pair's feature among them. Returns each
         pair's values by their names in the table, NaN for an untested pair,
-        and the round that gave its p-value, 0 for an untested pair.
+        and the round that gave its p-value, 0 for an untested pair or one
+        without a statistic.
         """
         n_pairs = len(pairs.sets)
         values = {name: np.full(n_pairs, np.nan) for name in _ASSOCIATION_VALUES}
@@ -994,7 +1078,8 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             for name in _ASSOCIATION_VALUES:
                 if name != "adjusted_p_value":
                     values[name][chosen] = getattr(result, name)
-            stage[chosen] = result.stage
+            # No round gives a p-value to a pair without a statistic.
+            stage[chosen] = np.where(np.isnan(result.z), 0, result.stage)
             del counts, result
         return values, stage
 
@@ -1046,6 +1131,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             GATHER_BYTES,
             ComplementGroups,
             cells_by_code,
+            code_counts,
             complement_tests,
             complement_thread_bytes,
             fit_detection_models,
@@ -1057,19 +1143,30 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         label_group = artifact_group(self.zw, labels)
         guide_names = read_array(calls, "guides").astype(str)
         target_is_control = read_array(label_group, "target_is_control").astype(bool)
-        guide_codes = read_array(calls, "guide_codes")
+        # Each labelled cell's called guides, and by target the targets of its
+        # guides, as stored: cells x the most of one cell, padded with -1. A
+        # few cells with many guides widen every row, so the codes are read a
+        # stored chunk of rows at a time, first to count each code's cells and,
+        # once the budget is checked, to place each group's cells.
+        guide_codes = as_zarr_array(calls["guide_codes"], name="guide_codes")
+        row_codes = (
+            as_zarr_array(label_group["target_codes"], name="target_codes")
+            if by == "target"
+            else guide_codes
+        )
         n_cells = len(cells)
         n_rows = len(rows.names)
         n_discovery = len(discovery[0])
+        guide_cells = code_counts(_code_blocks(guide_codes), len(guide_names))
         # The control guides that some labelled cell carries make up the
         # calibration groups, which hold the median target's guides, or every
         # control guide when there are fewer; one is enough, since a group is
         # compared with all other cells.
-        called = np.zeros(len(guide_names), dtype=bool)
-        called[guide_codes[guide_codes >= 0]] = True
         targets_of = rows.guide_targets
         control_guides = np.flatnonzero(
-            called & (targets_of >= 0) & target_is_control[np.maximum(targets_of, 0)]
+            (guide_cells > 0)
+            & (targets_of >= 0)
+            & target_is_control[np.maximum(targets_of, 0)]
         )
         n_control_guides = len(control_guides)
         group_size = min(
@@ -1087,50 +1184,23 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         )
         n_groups_nt = len(nt_groups)
         # Each tested row's cells: the cells whose target codes hold its
-        # target, or whose called guides hold its guide.
+        # target, or whose called guides hold its guide. Each calibration
+        # group's: those that carry any of its guides, at most the cells of
+        # its guides together.
         if by == "target":
-            row_codes = read_array(label_group, "target_codes")
-            lookup = np.full(len(rows.target_names), -1, dtype=np.int64)
-            lookup[rows.codes[used]] = np.arange(len(used))
+            row_code = rows.codes[used]
+            code_cells = code_counts(_code_blocks(row_codes), len(rows.target_names))
         else:
-            row_codes = guide_codes
-            lookup = np.full(len(guide_names), -1, dtype=np.int64)
-            lookup[pd.Index(guide_names).get_indexer(rows.names[used])] = np.arange(
-                len(used)
-            )
-        row_members, row_offsets = cells_by_code(
-            np.where(row_codes >= 0, lookup[np.maximum(row_codes, 0)], -1), len(used)
+            row_code = pd.Index(guide_names).get_indexer(rows.names[used])
+            code_cells = guide_cells
+        row_lookup = np.full(len(code_cells), -1, dtype=np.int64)
+        row_lookup[row_code] = np.arange(len(used))
+        row_sizes = code_cells[row_code]
+        guide_sizes = guide_cells[control_guides]
+        nt_most = np.asarray(
+            [guide_sizes[group].sum() for group in nt_groups], dtype=np.int64
         )
-        # Each calibration group's cells: those that carry any of its guides.
-        slot = np.full(len(guide_names), -1, dtype=np.int64)
-        slot[control_guides] = np.arange(n_control_guides)
-        guide_members, guide_offsets = cells_by_code(
-            np.where(guide_codes >= 0, slot[np.maximum(guide_codes, 0)], -1),
-            n_control_guides,
-        )
-        del row_codes, guide_codes
-        nt_members = [
-            np.unique(
-                np.concatenate(
-                    [
-                        guide_members[guide_offsets[g] : guide_offsets[g + 1]]
-                        for g in group
-                    ]
-                )
-            )
-            for group in nt_groups
-        ]
-        del guide_members
-        members = np.concatenate([row_members, *nt_members]).astype(np.int64)
-        offsets = np.concatenate(
-            [
-                row_offsets,
-                row_offsets[-1]
-                + np.cumsum([len(cells_of) for cells_of in nt_members], dtype=np.int64),
-            ]
-        ).astype(np.int64)
-        del row_members, nt_members
-        sizes = np.diff(offsets)
+        n_groups = len(used) + n_groups_nt
         codes = np.concatenate([used, n_rows + np.arange(n_groups_nt)]).astype(np.int64)
         guide_assay = self._get_assay(str(labels.assay))
         design = association_covariates(
@@ -1165,11 +1235,13 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             )
         )
         # Each labelled cell's positions, sample, totals and covariates as read
-        # and as fitted; every group's cells, with the cells' groups that the
-        # QC finds; every pair's arrays; and the QC counts.
+        # and as fitted; each guide's and target's cells; every group's cells,
+        # with the cells' groups that the QC finds; every pair's arrays; and
+        # the QC counts.
         threads = self.nthreads
         resident = n_cells * (144 + 8 * (n_covariates + len(covariate_names)))
-        resident += 32 * len(members)
+        resident += 8 * (len(guide_names) + len(rows.target_names))
+        resident += 32 * int(row_sizes.sum() + nt_most.sum())
         resident += _ASSOCIATION_PAIR_BYTES * n_pairs_most
         resident += 4 * len(used) * len(target_features)
         resident += 13 * n_groups_nt * len(checked) + 8 * len(checked)
@@ -1177,7 +1249,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         # from and its QC counts. A gene of a band of tests: its scores and
         # weights on every cell and its fit, beside its counts when they are
         # read again.
-        per_feature = 24 * n_cells + 16 * len(sizes)
+        per_feature = 24 * n_cells + 16 * n_groups
         per_gene = 16 * n_cells + 8 * n_covariates * (n_covariates + 2)
         # The least that the tests hold: each thread draws a group's
         # conditional sets in 24 bytes per cell and copies one of its genes,
@@ -1186,21 +1258,62 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         # than them; and the QC reads one feature and the tests one gene.
         one_copy = 16 * n_cells
         least_statistics = 8 * n_resamples[1]
-        needed = (
-            resident
-            + threads * complement_thread_bytes(n_cells, 0)
+        testing = (
+            threads * complement_thread_bytes(n_cells, 0)
             + 2 * least_statistics
             + per_feature
             + per_gene
         )
+        # Before the tests, placing the groups' cells reads one stored chunk
+        # of codes at a time, and the calibration groups hold the control
+        # guides' cells and merge the cells of one group's guides.
+        building = max(_chunk_read_bytes(guide_codes), _chunk_read_bytes(row_codes))
+        if n_groups_nt:
+            building += 8 * int(guide_sizes.sum()) + 32 * int(nt_most.max())
+        needed = resident + max(testing, building)
         _require_budget(
             needed,
             self.memoryBytes,
             f"Testing one gene over {n_cells} labelled cells holds about",
-            beside=" with the tests and their random sets",
+            beside=(
+                " with the tests, their random sets and the cells' guides, read "
+                "a stored chunk at a time"
+            ),
             remedy=f"Raise mem_budget to at least {needed} bytes.",
         )
         self._require_writable(operation)
+        row_members, row_offsets = cells_by_code(
+            _code_blocks(row_codes), row_lookup, row_sizes
+        )
+        nt_members: list[np.ndarray] = []
+        if n_groups_nt:
+            slot = np.full(len(guide_names), -1, dtype=np.int64)
+            slot[control_guides] = np.arange(n_control_guides)
+            guide_members, guide_offsets = cells_by_code(
+                _code_blocks(guide_codes), slot, guide_sizes
+            )
+            nt_members = [
+                np.unique(
+                    np.concatenate(
+                        [
+                            guide_members[guide_offsets[g] : guide_offsets[g + 1]]
+                            for g in group
+                        ]
+                    )
+                )
+                for group in nt_groups
+            ]
+            del guide_members
+        members = np.concatenate([row_members, *nt_members])
+        offsets = np.concatenate(
+            [
+                row_offsets,
+                row_offsets[-1]
+                + np.cumsum([len(cells_of) for cells_of in nt_members], dtype=np.int64),
+            ]
+        ).astype(np.int64)
+        del row_members, nt_members
+        sizes = np.diff(offsets)
         # Each thread's copy may take more genes, up to a quarter of the rest
         # among the threads, and the statistics a quarter of the rest; the
         # counts and the tests take what they leave.
@@ -1393,8 +1506,10 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
         """Adjust the tested pairs' p-values, grade the calibration and save the tests.
 
         The p-values are adjusted by Benjamini-Hochberg within each set of
-        pairs. The attributes also hold what the warnings name, so that saved
-        tests warn again as they did.
+        pairs; a pair without a p-value, such as one that passes QC without a
+        statistic, is not significant, nor a false discovery. The attributes
+        also hold what the warnings name, so that saved tests warn again as
+        they did.
         """
         from ...perturbation.associations import (
             ASSOCIATION_SETS,
@@ -1415,7 +1530,11 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             values_out["adjusted_p_value"][members] = adjusted
             significant[members] = found
         n_false = int(np.count_nonzero(significant & (sets == 1)))
-        grade = calibration_grade(n_false) if n_calibration else "none"
+        # A pair is tested when it has a statistic, not merely when it passes
+        # QC, and a calibration check runs on tested pairs only.
+        with_statistic = pass_qc & ~np.isnan(values_out["z"])
+        n_tested_calibration = int(np.count_nonzero(with_statistic & (sets == 1)))
+        grade = calibration_grade(n_false) if n_tested_calibration else "none"
         n_control_guides = len(tables.control_guides)
         attributes = {
             "set_names": list(ASSOCIATION_SETS),
@@ -1424,6 +1543,7 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             "calibration_group_size": tables.group_size,
             "calibration_status": calibration_status(
                 n_calibration,
+                n_tested_calibration,
                 requested,
                 n_control_guides,
                 pairs.passing_discovery,
@@ -1460,6 +1580,15 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
                 ),
             ]
         )
+        # The tested rows and calibration groups whose pairs pass QC without a
+        # statistic, by name, which the warning names again on reuse.
+        without = np.unique(pairs.groups[pass_qc & np.isnan(values_out["z"])])
+        attributes["rows_without_statistic"] = (
+            rows.names[used][without[without < len(used)]].astype(str).tolist()
+        )
+        attributes["calibration_groups_without_statistic"] = (
+            group_targets[without[without >= len(used)]].astype(str).tolist()
+        )
         qc = pairs.qc
         write_cell_data_artifact(
             self.zw,
@@ -1485,10 +1614,17 @@ class _PerturbationAssociationOperationsMixin(_PerturbationAssociationOperations
             unmatched, len(rows.names), by, assay, attributes, moi
         ):
             warn(message)
+        discovered = sets == 0
+        n_without = int(np.count_nonzero(discovered & pass_qc & ~with_statistic))
         logger.info(
-            f"Tested {int(np.count_nonzero(pass_qc[sets == 0]))} of "
-            f"{int(np.count_nonzero(sets == 0))} discovery pairs: "
-            f"{int(np.count_nonzero(significant[sets == 0]))} significant at "
+            f"Tested {int(np.count_nonzero(discovered & with_statistic))} of "
+            f"{int(np.count_nonzero(discovered))} discovery pairs"
+            + (
+                f", and {n_without} more passed QC without a statistic"
+                if n_without
+                else ""
+            )
+            + f": {int(np.count_nonzero(significant[discovered]))} significant at "
             f"{alpha}; calibration {grade} with {n_false} false discoveries in "
             f"{n_calibration} pairs"
         )

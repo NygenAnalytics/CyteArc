@@ -51,6 +51,7 @@ from cytearc.perturbation.p_values import (
 )
 from cytearc.perturbation.random_sets import resampling_keys
 from cytearc.storage.artifacts import ArtifactRef
+from cytearc.utils.logging import logger
 from tests.perturbation_helpers import (
     dense_pair,
     fixed_labels,
@@ -264,6 +265,46 @@ def test_association_settings_resolve_the_resampling_of_each_moi() -> None:
     ):
         with pytest.raises(ValueError, match=message):
             _settings(**changes)
+
+
+@pytest.mark.parametrize(
+    ("side", "short", "enough"), [("both", 98, 99), ("left", 48, 49), ("right", 48, 49)]
+)
+def test_settings_refuse_first_rounds_that_cannot_reach_the_stage_threshold(
+    side, short, enough
+) -> None:
+    # The smallest first-round p-value is 2 / (n + 1) for both sides and
+    # 1 / (n + 1) for one, which reaches 0.02 from 99 and 49 sets.
+    assert _settings(side=side, n_resamples=(enough, 4999, 24999))[0][0] == enough
+    for first in (short, 1):
+        smallest = min(1.0, (2.0 if side == "both" else 1.0) / (first + 1))
+        with pytest.raises(ValueError) as refusal:
+            _settings(side=side, n_resamples=(first, 4999, 24999))
+        message = str(refusal.value)
+        assert f"smallest first-round p-value is {smallest:.3g}" in message
+        assert f"n_resamples[0] of at least {enough}, or stage_threshold=0" in message
+    # A threshold of 0 keeps the first round's p-values, and a larger one
+    # needs fewer sets.
+    _settings(side=side, n_resamples=(short, 4999, 24999), stage_threshold=0)
+    _settings(side=side, n_resamples=(short, 4999, 24999), stage_threshold=0.05)
+
+
+def test_the_stage_threshold_rule_names_the_fewest_sets_that_reach_it() -> None:
+    # The last two thresholds sit where dividing 2 by them rounds to the
+    # other side of a whole number of sets.
+    for threshold in (0.3, 0.01, 1e-4, 0.0037, 2 / 7, 2 / 49, 0.0007202016564638098):
+        with pytest.raises(ValueError, match="at least") as refusal:
+            _settings(n_resamples=(1, 4999, 24999), stage_threshold=threshold)
+        found = re.search(r"at least (\d+)", str(refusal.value))
+        assert found is not None
+        needed = int(found.group(1))
+        # The first round's p-values reach the threshold from that many sets.
+        for n_draws, reaches in ((needed, True), (needed - 1, False)):
+            smallest = resampling_p_values(np.array([[0, n_draws, n_draws]]), "both")
+            assert (smallest[0] <= threshold) == reaches
+        _settings(n_resamples=(needed, 4999, 24999), stage_threshold=threshold)
+        with pytest.raises(ValueError):
+            _settings(n_resamples=(needed - 1, 4999, 24999), stage_threshold=threshold)
 
 
 def test_resampling_keys_differ_by_seed_group_and_stage() -> None:
@@ -523,7 +564,11 @@ def test_pairs_are_scored_by_the_fit_on_their_treatment_and_control_cells(
     np.testing.assert_array_equal(
         counted,
         np.column_stack(
-            [(statistics <= z[:, None]).sum(1), (statistics >= z[:, None]).sum(1)]
+            [
+                (statistics <= z[:, None]).sum(1),
+                (statistics >= z[:, None]).sum(1),
+                np.full(len(z), 40),
+            ]
         ),
     )
 
@@ -653,7 +698,9 @@ def test_pairs_of_genes_without_a_fit_have_no_statistic(
     )
 
     assert np.isfinite(z[0]) and np.isnan(z[1])
-    np.testing.assert_array_equal(counted[1], [0, 0])
+    # Every set of the gene with a fit has a statistic, and none of the other.
+    assert counted[0, 2] == 10
+    np.testing.assert_array_equal(counted[1], [0, 0, 0])
     assert np.isnan(fold[1]) and np.isnan(se[1])
 
 
@@ -692,19 +739,182 @@ def test_a_set_without_spread_has_no_statistic(monkeypatch, python_kernels) -> N
     assert np.isnan(value)
 
 
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_variance_that_rounding_could_leave_counts_as_none(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
+    solved = np.empty(1)
+    factor = np.array([[1.0]])
+
+    def statistic(share: float) -> float:
+        # The covariates explain all but ``share`` of a weight sum of 1.
+        weighted = np.array([math.sqrt(1.0 - share)])
+        return glm.score_statistic(1.0, 1.0, weighted, factor, solved)
+
+    # Up to 1e-8 of the weight sum is rounding's reach: no statistic.
+    for share in (1e-15, 1e-12, 1e-9, 0.9e-8):
+        assert np.isnan(statistic(share))
+    # Beyond it, the score over the root of the variance.
+    for share in (1.1e-8, 1e-6, 0.5):
+        np.testing.assert_allclose(statistic(share), 1 / math.sqrt(share), rtol=1e-6)
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_a_set_that_the_covariates_determine_has_no_estimate(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
+    rng = np.random.default_rng(6)
+    # The second covariate is the indicator of the first 10 of 50 cells.
+    design = np.column_stack([np.ones(50), (np.arange(50) < 10).astype(float)])
+    y = rng.poisson(5.0, 50).astype(np.float64)
+    coefficients = np.array([math.log(y.mean()), 0.0])
+    eta, mu, factor = np.empty(50), np.empty(50), np.empty((2, 2))
+    dispersion = glm.fit_negative_binomial(y, design, coefficients, eta, mu, factor)
+
+    def test(cells: np.ndarray) -> tuple[float, float, float]:
+        return glm.set_test(y, mu, design, dispersion, cells, factor, np.empty(2))
+
+    # The fit gives those cells their own counts, so their fold change of
+    # about 0 is no estimate, and neither is its standard error.
+    assert np.isnan(test(np.arange(10))).all()
+    assert np.isfinite(test(np.arange(11))).all()
+
+
+def test_a_target_of_exactly_the_cells_of_a_sample_without_controls_has_no_statistic() -> (
+    None
+):
+    rng = np.random.default_rng(0)
+    n_controls, size, n_genes = 300, 40, 10
+    n_cells = n_controls + 2 * size
+    library = rng.lognormal(np.log(3000), 0.4, n_cells)
+    detected = library**0.8 * rng.lognormal(0, 0.05, n_cells)
+    # The first target's cells are the second sample, which holds no control.
+    samples = np.zeros(n_cells, dtype=int)
+    samples[n_controls : n_controls + size] = 1
+    design = association_covariates(library, detected, samples)
+    mu = np.exp(-6.0 + np.log(library))
+    counts = rng.negative_binomial(3.0, 3.0 / (3.0 + mu), size=(n_genes, n_cells))
+    groups = _groups(
+        n_controls,
+        [
+            np.arange(n_controls, n_controls + size),
+            np.arange(n_controls + size, n_cells),
+        ],
+        [False, False],
+    )
+
+    result = pair_tests(
+        counts.astype(np.float64),
+        design,
+        groups,
+        np.repeat([0, 1], n_genes),
+        np.tile(np.arange(n_genes), 2),
+        n_resamples=(99, 199, 299),
+    )
+
+    # Rounding left about 1e-14 of the weight sum as the first target's
+    # variance, which gave statistics near 1e7 and p-values of 0; the fit
+    # matches its cells' counts, which gave fold changes of about 0.
+    for values in (
+        result.z,
+        result.p_value,
+        result.log2_fold_change,
+        result.se_log2_fold_change,
+    ):
+        assert np.isnan(values[:n_genes]).all()
+        assert np.isfinite(values[n_genes:]).all()
+    assert (np.abs(result.z[n_genes:]) < 5).all()
+
+
 # P-values ----------------------------------------------------------------------
 
 
 def test_resampling_p_values_count_the_observed_set_on_each_side() -> None:
-    counts = np.array([[0, 10], [10, 0], [4, 6]])
+    counts = np.array([[0, 10, 9], [10, 0, 9], [4, 6, 9]])
 
-    left = resampling_p_values(counts, 9, "left")
-    right = resampling_p_values(counts, 9, "right")
-    both = resampling_p_values(counts, 9, "both")
+    left = resampling_p_values(counts, "left")
+    right = resampling_p_values(counts, "right")
+    both = resampling_p_values(counts, "both")
 
     np.testing.assert_allclose(left, [0.1, 1.1, 0.5])
     np.testing.assert_allclose(right, [1.1, 0.1, 0.7])
     np.testing.assert_allclose(both, [0.2, 0.2, 1.0])
+
+
+def test_resampling_p_values_leave_out_the_sets_without_a_statistic() -> None:
+    rng = np.random.default_rng(3)
+    statistics = rng.normal(size=(4, 99))
+    # A third of the second row's sets and every set of the last row have no
+    # statistic; the third row's do.
+    statistics[1, ::3] = np.nan
+    statistics[3] = np.nan
+    z = np.array([-10.0, -10.0, 0.2, 1.0])
+
+    counted = p_values_module._counts_beyond(statistics, z)
+
+    for row in range(4):
+        valid = statistics[row][~np.isnan(statistics[row])]
+        np.testing.assert_array_equal(
+            counted[row], [(valid <= z[row]).sum(), (valid >= z[row]).sum(), len(valid)]
+        )
+    # Over the 66 sets with a statistic, none at most -10 gives 1 / 67, not
+    # the 1 / 100 that all 99 sets would give.
+    left = resampling_p_values(counted, "left")
+    assert left[1] == 1 / 67 and left[0] == 1 / 100
+    both = resampling_p_values(counted, "both")
+    assert both[1] == 2 / 67
+    # Without any set with a statistic, the observed one alone gives 1.
+    assert left[3] == 1.0 and both[3] == 1.0
+
+
+@pytest.mark.parametrize("approximation", ["skew_normal", "none"])
+def test_every_round_counts_only_the_sets_with_a_statistic(approximation) -> None:
+    rng = np.random.default_rng(5)
+    z = np.array([-6.0, -6.0, 0.0])
+    # The first round's 99 sets: all of the first pair's have a statistic, 49
+    # of the second's and 79 of the third's.
+    first = np.array([[0, 99, 99], [0, 49, 49], [50, 30, 79]])
+    second = rng.normal(size=(2, 999))
+    second[1, :333] = np.nan
+    asked = []
+
+    def second_statistics(chosen: np.ndarray, n_draws: int) -> np.ndarray:
+        assert n_draws == 999
+        return second[chosen]
+
+    def third_counts(chosen: np.ndarray, n_draws: int) -> np.ndarray:
+        assert n_draws == 1999
+        asked.append(chosen.tolist())
+        # 1,000 of the 1,999 sets have a statistic, none at most z.
+        return np.tile([0, 1000, 1000], (len(chosen), 1))
+
+    p_value, stage, location, *_ = p_values_module.staged_p_values(
+        z,
+        first,
+        second_statistics,
+        third_counts,
+        n_resamples=(99, 999, 1999),
+        stage_threshold=0.05,
+        approximation=approximation,
+        side="both",
+        statistics_bytes=1 << 20,
+    )
+
+    # The first round: 2 / 100 and 2 / 50 take the second round, while the
+    # third pair keeps 2 x 31 / 80.
+    assert stage[2] == 1 and p_value[2] == 2 * 31 / 80
+    if approximation == "none":
+        # The second round's 666 sets with a statistic, none at most -6.
+        assert stage.tolist() == [2, 2, 1] and asked == []
+        assert p_value[0] == 2 / 1000 and p_value[1] == 2 / 667
+    else:
+        # The fit takes only statistics without gaps, so the second pair
+        # takes the third round, whose sets with a statistic give 2 / 1001.
+        assert stage.tolist() == [2, 3, 1] and asked == [[1]]
+        assert np.isfinite(location[0]) and np.isnan(location[1])
+        assert p_value[1] == 2 / 1001
 
 
 def test_skew_normal_fits_recover_the_parameters_of_their_statistics() -> None:
@@ -794,7 +1004,11 @@ def test_fits_and_their_checks_do_not_depend_on_their_spans(
     np.testing.assert_array_equal(
         counted,
         np.column_stack(
-            [(statistics <= z[:, None]).sum(1), (statistics >= z[:, None]).sum(1)]
+            [
+                (statistics <= z[:, None]).sum(1),
+                (statistics >= z[:, None]).sum(1),
+                [101, 101, 101, 101 - 15, 101, 101, 101, 101],
+            ]
         ),
     )
     # The median and percentiles are those of a full sort, NaN last.
@@ -943,14 +1157,18 @@ def test_calibration_pairs_are_drawn_among_those_that_pass_qc() -> None:
 @pytest.mark.parametrize(
     ("arguments", "status"),
     [
-        ((3, None, 0, 0, "low"), "checked"),
-        ((0, 0, 5, 9, "low"), "off"),
-        ((0, None, 1, 9, "low"), "few_control_guides"),
-        ((0, None, 0, 9, "high"), "few_control_guides"),
-        ((0, None, 1, 0, "high"), "no_passing_discovery"),
-        ((0, None, 2, 0, "low"), "no_passing_discovery"),
-        ((0, 5, 2, 0, "low"), "no_passing_calibration"),
-        ((0, None, 2, 3, "low"), "no_passing_calibration"),
+        ((3, 3, None, 0, 0, "low"), "checked"),
+        ((3, 1, 5, 2, 0, "low"), "checked"),
+        # Pairs drawn, but none with a statistic: no check ran.
+        ((3, 0, None, 4, 9, "low"), "no_calibration_statistic"),
+        ((3, 0, 5, 4, 9, "high"), "no_calibration_statistic"),
+        ((0, 0, 0, 5, 9, "low"), "off"),
+        ((0, 0, None, 1, 9, "low"), "few_control_guides"),
+        ((0, 0, None, 0, 9, "high"), "few_control_guides"),
+        ((0, 0, None, 1, 0, "high"), "no_passing_discovery"),
+        ((0, 0, None, 2, 0, "low"), "no_passing_discovery"),
+        ((0, 0, 5, 2, 0, "low"), "no_passing_calibration"),
+        ((0, 0, None, 2, 3, "low"), "no_passing_calibration"),
     ],
 )
 def test_the_calibration_status_says_why_no_check_ran(arguments, status) -> None:
@@ -1812,6 +2030,159 @@ def test_associations_warn_about_miscalibration(tmp_path) -> None:
     assert _warned_associations(store, labels, **arguments) == (tests, messages)
 
 
+def _batch_screen(path: Path, batches: dict[int, str]) -> DataStore:
+    """A null screen whose cells' batches follow their guides.
+
+    Guides 0 and 1 target RNA0, guides 2 and 3 target RNA1, and guides 4 to
+    7 are non-targeting, each the one guide of 60 or 75 cells. ``batches``
+    gives the batch of some guides' cells, and the other cells are batch a.
+    No gene responds to any guide, and every cell holds ambient guide UMIs
+    below the floor of the calls.
+    """
+    rng = np.random.default_rng(11)
+    guide_of = np.r_[np.repeat(np.arange(4), 60), np.repeat(np.arange(4, 8), 75)]
+    n_cells = len(guide_of)
+    library = rng.lognormal(np.log(2000), 0.4, n_cells)
+    mu = np.exp(rng.normal(-5.0, 0.7, 20)[None, :] + np.log(library)[:, None])
+    rna = rng.negative_binomial(3.0, 3.0 / (3.0 + mu)).astype(np.uint16)
+    guides = rng.poisson(0.5, size=(n_cells, 8)).astype(np.uint16)
+    guides[np.arange(n_cells), guide_of] = 20
+    batch = np.asarray([batches.get(int(guide), "a") for guide in guide_of])
+    return write_screen(
+        path,
+        rna,
+        guides,
+        targets=GUIDE_TARGETS,
+        target_ids=GUIDE_GENE_IDS,
+        cell_columns={"batch": batch.astype(object)},
+        nthreads=2,
+    )
+
+
+@pytest.mark.parametrize(
+    ("moi", "determined"),
+    [
+        # At low MOI a calibration group is compared with the other control
+        # cells, of batch c or of batch a alone.
+        ("low", {"CRISPR4+CRISPR5", "CRISPR6+CRISPR7"}),
+        # At high MOI with all other cells, which batch a shares with RNA0.
+        ("high", {"CRISPR4+CRISPR5"}),
+    ],
+)
+def test_pairs_whose_cells_the_covariates_determine_have_no_statistic(
+    tmp_path, moi, determined
+) -> None:
+    # RNA1 was sequenced alone in batch b, and guides 4 and 5 make batch c.
+    store = _batch_screen(tmp_path / "store.zarr", {2: "b", 3: "b", 4: "c", 5: "c"})
+    labels = fixed_labels(store, ["NT"])
+    arguments = {
+        "features": store.features.snapshot(feature_indexes=np.arange(20)),
+        "sample_column": "batch",
+        "moi": moi,
+        "n_calibration_pairs": 1000,
+        **FAST,
+    }
+    logged: list[str] = []
+    sink = logger.add(lambda message: logged.append(message.record["message"]))
+    try:
+        tests, messages = _warned_associations(store, labels, **arguments)
+    finally:
+        logger.remove(sink)
+
+    # Within each pair of RNA1, batch b's indicator is RNA1's, so its null
+    # pairs had statistics of rounding noise, near 1e7, and p-values of 0,
+    # and fold changes of about 0, which the fit gives such cells by
+    # construction.
+    result = store.perturbation.load_associations(tests)
+    discovery = result.discovery
+    estimates = ["z", "p_value", "log2_fold_change", "se_log2_fold_change"]
+    rna1 = discovery[discovery["target"] == "RNA1"]
+    assert rna1["pass_qc"].all() and len(rna1) == 20
+    assert rna1[estimates].isna().all(axis=None)
+    assert (rna1["stage"] == 0).all() and not rna1["significant"].any()
+    rna0 = discovery[discovery["target"] == "RNA0"]
+    assert rna0[estimates].notna().all(axis=None) and (rna0["stage"] > 0).all()
+    positive = result.positive.set_index("target")
+    assert positive.loc["RNA1", estimates].isna().all()
+    assert positive.loc["RNA1", "stage"] == 0
+    # Only RNA0's pairs count as tested.
+    tested = [line for line in logged if line.startswith("Tested ")]
+    assert len(tested) == 1
+    assert tested[0].startswith(
+        "Tested 20 of 40 discovery pairs, and 20 more passed QC without a statistic: "
+    )
+    # The calibration groups that a batch determines give no false discovery.
+    calibration = result.calibration
+    without = calibration["control_guides"].isin(determined).to_numpy()
+    assert set(calibration.loc[without, "control_guides"]) == determined
+    assert calibration["pass_qc"].all() and (~without).any()
+    assert calibration.loc[without, estimates].isna().all(axis=None)
+    assert (calibration.loc[without, "stage"] == 0).all()
+    assert not calibration.loc[without, "significant"].any()
+    assert calibration.loc[~without, estimates].notna().all(axis=None)
+    assert result.n_false_discoveries == int(calibration["significant"].sum())
+    names = sorted(set(calibration.loc[without, "target"]))
+    named = [message for message in messages if "no statistic" in message]
+    holding = (
+        "samples, or of a binary covariate, that hold no control cell"
+        if moi == "low"
+        else "samples or of a binary covariate"
+    )
+    assert named == [
+        "The pairs of 1 target pass QC but have no statistic, so they have no "
+        "p-value or fold change and are not significant: 'RNA1'. The covariates "
+        "determine which of each pair's cells carry the target, as they do when "
+        f"its cells are exactly the cells of {holding}; test such a target "
+        "without that sample column or covariate.",
+        f"The pairs of {len(names)} calibration group"
+        + ("s" if len(names) > 1 else "")
+        + " pass QC but have no statistic, so they have no p-value or fold change "
+        "and are not counted as false discoveries: "
+        + ", ".join(repr(name) for name in names)
+        + ". The covariates determine which of each pair's cells carry the "
+        "group's guides, as they do when those are exactly the pair's cells of "
+        "samples or of a binary covariate.",
+    ]
+    # Saved tests warn again, alike.
+    again, repeated = _warned_associations(store, labels, **arguments)
+    assert again == tests
+    assert [message for message in repeated if "no statistic" in message] == named
+
+
+def test_a_calibration_check_without_a_statistic_does_not_run(tmp_path) -> None:
+    from cytearc.storage.artifacts import artifact_group
+
+    # Guides 4, 5 and 6 each make a batch, and guide 7 shares batch a with
+    # the targets, so among the control cells each guide's cells are a
+    # batch's: every calibration group of one guide is determined.
+    store = _batch_screen(tmp_path / "store.zarr", {4: "c4", 5: "c5", 6: "c6"})
+    labels = fixed_labels(store, ["NT"])
+    arguments = {
+        "features": store.features.snapshot(feature_indexes=np.arange(20)),
+        "sample_column": "batch",
+        "integration": "singleton",
+        "n_calibration_pairs": 1000,
+        **FAST,
+    }
+
+    tests, messages = _warned_associations(store, labels, **arguments)
+
+    # The check had pairs, but none with a statistic, so it graded nothing,
+    # where it was graded "excellent" from no tested pair.
+    result = store.perturbation.load_associations(tests)
+    assert len(result.calibration) == 80
+    assert result.calibration["z"].isna().all()
+    assert result.discovery["z"].notna().all()
+    assert (result.calibration_grade, result.n_false_discoveries) == ("none", 0)
+    status = artifact_group(store.zw, tests).attrs["calibration_status"]
+    assert status == "no_calibration_statistic"
+    assert "No calibration pair has a statistic, so no calibration check was run" in (
+        messages
+    )
+    # Saved tests warn again, alike.
+    assert _warned_associations(store, labels, **arguments) == (tests, messages)
+
+
 @pytest.mark.parametrize(
     ("arguments", "error", "message"),
     [
@@ -1839,6 +2210,11 @@ def test_associations_warn_about_miscalibration(tmp_path) -> None:
         ({"n_resamples": (499, 1, 24999)}, ValueError, "n_resamples\\[1\\]"),
         ({"n_resamples": (499, 4999, 0)}, ValueError, "n_resamples\\[2\\]"),
         ({"stage_threshold": 2.0}, ValueError, "stage_threshold must be"),
+        (
+            {"n_resamples": (50, 4999, 24999)},
+            ValueError,
+            "smallest first-round p-value is 0.0392, above stage_threshold=0.02",
+        ),
         ({"min_nonzero": 0}, ValueError, "min_nonzero"),
         ({"n_calibration_pairs": -1}, ValueError, "n_calibration_pairs"),
         ({"alpha": 1.0}, ValueError, "alpha must be"),

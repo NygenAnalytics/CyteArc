@@ -118,7 +118,8 @@ def _dense_null(
     """Each random set's statistic of one group and gene, by the score formula.
 
     The sets come from the group's key, as the tests draw them; the sums, the
-    information and the solve are NumPy's.
+    information and the solve are NumPy's. A set whose variance is at most
+    1e-8 of its weight sum, which rounding cannot reach, has none.
     """
     n = design.shape[0]
     out = np.empty(n, dtype=np.int64)
@@ -148,16 +149,17 @@ def _dense_null(
         )
         statistics[d] = (
             fits.scores[cells, column].sum() / np.sqrt(variance)
-            if variance > 1e-12
+            if variance > 1e-8 * weights[cells].sum()
             else np.nan
         )
     return statistics
 
 
 def _sided(statistics: np.ndarray, z: float, side: str) -> float:
-    n_draws = len(statistics)
-    left = (1 + (statistics <= z).sum()) / (n_draws + 1)
-    right = (1 + (statistics >= z).sum()) / (n_draws + 1)
+    """The p-value of ``z`` among the statistics that are not NaN."""
+    valid = statistics[~np.isnan(statistics)]
+    left = (1 + (valid <= z).sum()) / (len(valid) + 1)
+    right = (1 + (valid >= z).sum()) / (len(valid) + 1)
     return {"left": left, "right": right, "both": min(1.0, 2 * min(left, right))}[side]
 
 
@@ -322,6 +324,64 @@ def test_nonzero_counts_of_overlapping_groups_and_their_complements(
         np.testing.assert_array_equal(
             totals - in_groups[group], (values[:, outside] > 0).sum(1)
         )
+
+
+def _padded_codes(n_cells: int, width: int, n_codes: int, seed: int) -> np.ndarray:
+    """Each cell's distinct codes from 0, padded with -1, cells x slots, as stored."""
+    rng = np.random.default_rng(seed)
+    codes = np.full((n_cells, width), -1, dtype=np.int32)
+    for cell in range(n_cells):
+        held = np.sort(rng.choice(n_codes, rng.integers(0, width + 1), replace=False))
+        codes[cell, : len(held)] = held
+    return codes
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_groups_hold_the_cells_of_their_codes_whatever_the_blocks(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
+    codes = _padded_codes(50, 6, 9, seed=2)
+    # Three groups, of codes 2, 5 and 7, and codes of no group.
+    lookup = np.full(9, -1)
+    lookup[[7, 2, 5]] = [2, 0, 1]
+    carriers = [np.flatnonzero((codes == code).any(axis=1)) for code in range(9)]
+
+    for rows in (50, 7, 1):
+
+        def blocks(rows: int = rows):
+            return (codes[start : start + rows] for start in range(0, 50, rows))
+
+        counts = high_moi.code_counts(blocks(), 9)
+        members, offsets = high_moi.cells_by_code(blocks(), lookup, counts[[2, 5, 7]])
+
+        np.testing.assert_array_equal(counts, [len(cells) for cells in carriers])
+        for group, code in enumerate([2, 5, 7]):
+            cells = members[offsets[group] : offsets[group + 1]]
+            np.testing.assert_array_equal(cells, carriers[code])
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_groups_refuse_codes_and_sizes_that_disagree(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
+    codes = _padded_codes(20, 4, 6, seed=4)
+    lookup = np.arange(6)
+    sizes = high_moi.code_counts([codes], 6)
+    assert sizes[5] > 0
+
+    with pytest.raises(ValueError, match="codes must be below 5"):
+        high_moi.code_counts([codes], 5)
+    with pytest.raises(ValueError, match="codes must be below 5"):
+        high_moi.cells_by_code([codes], lookup[:5], sizes[:5])
+    with pytest.raises(ValueError, match="groups below the 5 sizes"):
+        high_moi.cells_by_code([codes], lookup, sizes[:5])
+    # A group with more cells than its size would run into the next group's.
+    with pytest.raises(ValueError, match="each group must hold its size"):
+        high_moi.cells_by_code([codes], lookup, sizes - (sizes > 0))
+    with pytest.raises(ValueError, match="Each group must hold its size"):
+        high_moi.cells_by_code([codes], lookup, sizes + 1)
 
 
 @pytest.mark.parametrize("python_kernels", [False, True])
@@ -542,6 +602,94 @@ def test_rounds_count_and_fit_the_statistics_of_their_random_sets(
             rtol=1e-9,
         )
     assert (fitted.stage == 2).all()
+
+
+def _two_sample_cells(
+    n_cells: int, n_sample: int, n_genes: int, seed: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Null counts and covariates of cells whose first ``n_sample`` are a second sample."""
+    rng = np.random.default_rng(seed)
+    library = rng.lognormal(np.log(3000), 0.4, n_cells)
+    detected = library**0.8 * rng.lognormal(0, 0.05, n_cells)
+    samples = (np.arange(n_cells) < n_sample).astype(int)
+    design = association_covariates(library, detected, samples)
+    mu = np.exp(-5.0 + np.log(library))
+    counts = rng.negative_binomial(3.0, 3.0 / (3.0 + mu), size=(n_genes, n_cells))
+    return counts.astype(np.float64), design
+
+
+@pytest.mark.parametrize("resampling", ["conditional", "permutation"])
+def test_a_group_of_exactly_one_samples_cells_has_no_statistic(resampling) -> None:
+    counts, design = _two_sample_cells(600, 60, 8, seed=0)
+    # The first group is the second sample; the second, other cells.
+    other = np.sort(np.random.default_rng(1).choice(np.arange(60, 600), 60, False))
+    groups = _groups([np.arange(60), other])
+    conditional = resampling == "conditional"
+
+    result = complement_tests(
+        counts,
+        design,
+        groups,
+        np.repeat([0, 1], 8),
+        np.tile(np.arange(8), 2),
+        resampling=resampling,
+        detection_models=fit_detection_models(design, groups) if conditional else None,
+        n_resamples=(99, 199, 299),
+    )
+
+    # The sample's indicator is the group's, so the treatment cells' score
+    # has no variance; rounding left about 1e-14 of the weight sum, which
+    # gave statistics near 1e7 and p-values of 0, and the fit matches the
+    # group's counts, which gave fold changes of about 0.
+    for values in (
+        result.z,
+        result.p_value,
+        result.log2_fold_change,
+        result.se_log2_fold_change,
+    ):
+        assert np.isnan(values[:8]).all() and np.isfinite(values[8:]).all()
+    assert (np.abs(result.z[8:]) < 5).all()
+
+
+@pytest.mark.parametrize("python_kernels", [False, True])
+def test_random_sets_without_a_statistic_count_in_no_p_value(
+    monkeypatch, python_kernels
+) -> None:
+    _python_kernels(monkeypatch, python_kernels)
+    n_cells, n_sample = (600, 30) if not python_kernels else (150, 10)
+    counts, design = _two_sample_cells(n_cells, n_sample, 2, seed=5)
+    # The group holds the second sample and two other cells. Its logistic
+    # fit takes the sample whole and about two other cells into each set, so
+    # about one set in seven is the sample alone, whose indicator is a
+    # covariate: those sets have no statistic.
+    members = np.r_[np.arange(n_sample), n_sample + 7, n_sample + 50]
+    groups = _groups([members])
+    models = fit_detection_models(design, groups)
+    fits = _gene_fits(counts, design)
+    draws = (99, 199, 299) if not python_kernels else (39, 59, 79)
+    settings = {"detection_models": models, "seed": 2, "n_resamples": draws}
+
+    def dense(row: int, stage: int, n_draws: int) -> np.ndarray:
+        key = resampling_keys(2, groups.codes, stage)[0]
+        return _dense_null(fits, design, members, key, row, n_draws, models[0])
+
+    pairs = (groups, [0, 0], [0, 1])
+    first = complement_tests(counts, design, *pairs, stage_threshold=0.0, **settings)
+    empirical = complement_tests(
+        counts, design, *pairs, stage_threshold=1.0, approximation="none", **settings
+    )
+    fitted = complement_tests(counts, design, *pairs, stage_threshold=1.0, **settings)
+
+    for row in range(2):
+        z = first.z[row]
+        statistics = dense(row, 1, draws[0])
+        assert 0 < np.isnan(statistics).sum() < len(statistics)
+        assert first.p_value[row] == _sided(statistics, z, "both")
+        assert empirical.p_value[row] == _sided(dense(row, 2, draws[1]), z, "both")
+        # The skew-normal fit takes no statistics with gaps, so the third
+        # round's sets with a statistic give the p-value.
+        assert fitted.stage[row] == 3 and np.isnan(fitted.skew_shape[row])
+        assert fitted.p_value[row] == _sided(dense(row, 3, draws[2]), z, "both")
 
 
 def _second_round_statistics(monkeypatch: pytest.MonkeyPatch) -> list[np.ndarray]:
@@ -1374,6 +1522,148 @@ def test_high_moi_refusals_name_the_budget_that_runs_the_tests(
     )
     for name in ("discovery", "calibration", "positive"):
         pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
+
+
+def _wide_screen_store(path):
+    """A screen of 2,000 cells: most carry about 5 guides, and 20 carry 120.
+
+    10 targets have 2 guides each, 4 guides are non-targeting, and 100 more
+    target genes outside the assay, which only the wide cells carry; every
+    cell holds ambient guide UMIs below the floor of the calls. No gene
+    responds to any guide.
+    """
+    rng = np.random.default_rng(3)
+    n_cells, n_targeting, n_control, n_other = 2000, 20, 4, 100
+    n_guides = n_targeting + n_control + n_other
+    targets = (
+        [f"RNA{g // 2}" for g in range(n_targeting)]
+        + ["NT"] * n_control
+        + [f"OTHER{g}" for g in range(n_other)]
+    )
+    gene_ids = [f"RNA{g // 2}" for g in range(n_targeting)]
+    guides = rng.poisson(0.3, size=(n_cells, n_guides)).astype(np.uint16)
+    for cell in range(n_cells):
+        pool = n_guides if cell < 20 else n_targeting + n_control
+        size = 120 if cell < 20 else 1 + rng.poisson(4)
+        guides[cell, rng.choice(pool, size=size, replace=False)] = 20
+    library = rng.lognormal(np.log(3000), 0.3, n_cells)
+    mu = np.exp(rng.normal(-5.0, 0.5, 10)[None, :] + np.log(library)[:, None])
+    rna = rng.negative_binomial(3.0, 3.0 / (3.0 + mu)).astype(np.uint16)
+    return write_screen(
+        path,
+        rna,
+        guides,
+        targets=targets,
+        target_ids=gene_ids + [""] * (n_control + n_other),
+        nthreads=2,
+    )
+
+
+def test_high_moi_stays_within_the_budget_it_names_with_a_few_wide_cells(
+    tmp_path, monkeypatch
+) -> None:
+    import tracemalloc
+
+    store = _wide_screen_store(tmp_path / "wide.zarr")
+    labels = _screen_labels(store)
+    genes = store.features.snapshot(feature_indexes=np.arange(10))
+    # Every guide of the wide cells widens the stored codes of every cell.
+    calls = store.perturbation.load_guide_calls(
+        store.perturbation.call_guides(
+            store.select_measured_cells("CRISPR"), method="fixed", min_umi=10
+        )
+    )
+    assert calls.cells["n_guides"].max() == 120
+    arguments = {"features": genes, "moi": "high", "invalidate_cache": True, **FAST}
+    # A first run compiles the kernels, whose compiler work is not the
+    # tests' data.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        store.perturbation.associations(labels, **arguments)
+    monkeypatch.setattr(store, "memoryBytes", 1000)
+    with pytest.raises(MemoryError) as refusal:
+        store.perturbation.associations(labels, **arguments)
+    needed = _needed_budget(refusal)
+    monkeypatch.setattr(store, "memoryBytes", needed)
+
+    def traced_peak() -> int:
+        tracemalloc.start()
+        try:
+            start = tracemalloc.get_traced_memory()[0]
+            tracemalloc.reset_peak()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                store.perturbation.associations(labels, **arguments)
+            return tracemalloc.get_traced_memory()[1] - start
+        finally:
+            tracemalloc.stop()
+
+    # tracemalloc counts every allocation in the process while the call runs,
+    # other threads' included, so a peak above the budget is traced again: a
+    # call that holds more than its budget does so in both runs.
+    peaks = [traced_peak()]
+    if peaks[0] > needed:
+        peaks.append(traced_peak())
+
+    # Reading the codes whole with 64-bit copies of their 120 slots per cell
+    # held about 4 times this budget before its check.
+    assert min(peaks) <= needed, f"Traced peaks of {peaks} bytes within {needed}"
+
+
+def test_codes_are_read_a_stored_chunk_at_a_time_within_their_plan(tmp_path) -> None:
+    import json
+    import subprocess
+    import sys
+    import textwrap
+
+    import zarr
+
+    from cytearc.datastore._operations import perturbation_associations as operations
+
+    rng = np.random.default_rng(0)
+    codes = rng.integers(-1, 1000, size=(50000, 40)).astype(np.int32)
+    array = zarr.open_group(str(tmp_path / "codes.zarr"), mode="w").create_array(
+        "codes", shape=codes.shape, chunks=(12000, 40), dtype="int32"
+    )
+    array[...] = codes
+    plan = operations._chunk_read_bytes(array)
+    # The reads are traced in a fresh process, after a first pass that sets up
+    # zarr's threads and codecs. tracemalloc counts every allocation of a
+    # process, and reads that an earlier test left running in zarr's threads
+    # can outlast a trace of a few milliseconds.
+    script = textwrap.dedent(
+        """
+        import json, sys, tracemalloc, zarr
+        from cytearc.datastore._operations import perturbation_associations as ops
+
+        array = zarr.open_array(sys.argv[1], mode="r")
+        for block in ops._code_blocks(array):
+            del block
+        tracemalloc.start()
+        start = tracemalloc.get_traced_memory()[0]
+        sizes = []
+        for block in ops._code_blocks(array):
+            sizes.append(len(block))
+            del block
+        peak = tracemalloc.get_traced_memory()[1] - start
+        print(json.dumps({"sizes": sizes, "peak": peak}))
+        """
+    )
+    traced = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "codes.zarr" / "codes")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    measured = json.loads(traced.stdout.strip().splitlines()[-1])
+    sizes, peak = measured["sizes"], measured["peak"]
+
+    assert sizes == [12000, 12000, 12000, 12000, 2000]
+    np.testing.assert_array_equal(
+        np.concatenate(list(operations._code_blocks(array))), codes
+    )
+    # Each read holds one chunk, as its plan says, not the whole array.
+    assert peak <= plan < codes.nbytes
 
 
 def test_high_moi_plans_only_the_calibration_pairs_a_check_can_draw(
