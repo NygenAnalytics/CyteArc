@@ -8,6 +8,9 @@ with UMIs decoded as Cell Ranger packs them.
 
 import gzip
 import json
+import sys
+from dataclasses import replace
+from itertools import islice
 from pathlib import Path
 
 import h5py
@@ -188,7 +191,7 @@ def test_a_named_format_without_its_header_needs_its_columns_in_order(tmp_path) 
             "the columns of several barcode tables: trex, pycashier",
         ),
         ("\n\n", "is empty; a barcode table needs a header line"),
-        ("barcode\tbc.umi.count\n", "R's row-name layout"),
+        ("barcode\tbc.umi.count\nLB1\t4\n", "R's row-name layout"),
         ("sample,cell,replicate\ns,A,r\n", "has no barcode columns"),
     ],
 )
@@ -684,9 +687,14 @@ def test_anndata_counts_skip_blocks_without_counts_and_refuse_odd_matrices(
         values[0] = 0
         del handle["X"]
         handle.create_dataset("X", data=values)
-    chunks = _rows(barcode_layout(path), 1)
+    # A matrix stored without chunks is read a row at a time when a chunk
+    # holds one row of entries; the first row holds none.
+    chunks = _rows(barcode_layout(path), values.shape[1])
     assert chunks[0].first_line == 2
     assert len(chunks) == len(values) - 1
+    assert [len(chunk.cells) for chunk in chunks] == np.count_nonzero(
+        values[1:], axis=1
+    ).tolist()
     with h5py.File(path, "a") as handle:
         del handle["X"]
         group = handle.create_group("X")
@@ -711,8 +719,613 @@ def test_molecule_info_skips_rows_of_other_libraries(tmp_path, monkeypatch) -> N
 
     path = write_molecule_info(BARCODES, tmp_path / "molecule_info.h5", sample="d4")
     library = molecule_info_library(path)
-    monkeypatch.setattr(cellranger, "_MIN_MOLECULE_ROWS", 1)
+    monkeypatch.setattr(cellranger, "MIN_MOLECULE_ROWS", 1)
     chunks = list(iter_molecule_info(library, chunk_rows=1))
     with h5py.File(path, "r") as handle:
         lineage = np.flatnonzero(handle["library_idx"][:] == 1)
     assert [chunk.first_row for chunk in chunks] == lineage.tolist()
+
+
+def test_quicats_wide_table_parses_each_chunk_in_one_pass(
+    tmp_path, monkeypatch
+) -> None:
+    from cytearc.readers import lineage_barcodes as reader
+
+    names = [f"B{index}" for index in range(300)]
+    rows = [
+        f"s1,C{row}_s1,"
+        + ",".join("2" if column == row else "0" for column in range(300))
+        for row in range(40)
+    ]
+    path = _file(
+        tmp_path,
+        "barcodes_output.csv",
+        "sample,cell," + ",".join(names) + "\n" + "\n".join(rows) + "\n",
+    )
+    calls = []
+    parse = reader.parse_integers
+
+    def counted(*arguments, **options):
+        calls.append(1)
+        return parse(*arguments, **options)
+
+    monkeypatch.setattr(reader, "parse_integers", counted)
+    chunks = _rows(barcode_layout(path), 10)
+    # Parsing one column at a time made a wide table's cost grow with the
+    # square of its barcodes.
+    assert len(calls) <= len(chunks) == 4
+    pairs = sorted(
+        (cell, barcode, int(count))
+        for chunk in chunks
+        for cell, barcode, count in zip(
+            chunk.cells, chunk.barcodes, chunk.umi_counts, strict=True
+        )
+    )
+    assert pairs == sorted((f"C{row}_s1", f"B{row}", 2) for row in range(40))
+
+
+def _python_calls(layout, chunk_rows: int) -> int:
+    calls = 0
+
+    def count(frame, event, argument) -> None:
+        nonlocal calls
+        calls += event == "call"
+
+    sys.setprofile(count)
+    try:
+        _rows(layout, chunk_rows)
+    finally:
+        sys.setprofile(None)
+    return calls
+
+
+def test_quicats_wide_table_does_python_work_per_row_not_per_barcode(
+    tmp_path,
+) -> None:
+    def wide(n_barcodes: int) -> Path:
+        rows = [
+            f"s1,C{row}_s1,"
+            + ",".join("3" if column == row else "0" for column in range(n_barcodes))
+            for row in range(30)
+        ]
+        header = "sample,cell," + ",".join(f"B{index}" for index in range(n_barcodes))
+        return _file(
+            tmp_path, f"wide_{n_barcodes}.csv", header + "\n" + "\n".join(rows) + "\n"
+        )
+
+    narrow, broad = (barcode_layout(wide(n_barcodes)) for n_barcodes in (300, 1_500))
+    # Parsing each column of each chunk made a merged table's cost grow with
+    # its rows times the square of its barcodes, since more barcodes also
+    # mean smaller chunks.
+    assert _python_calls(broad, 10) - _python_calls(narrow, 10) < 100
+    (chunk,) = _rows(broad, 30)
+    assert chunk.cells.tolist() == [f"C{row}_s1" for row in range(30)]
+    assert chunk.barcodes.tolist() == [f"B{row}" for row in range(30)]
+    assert chunk.umi_counts.tolist() == [3] * 30
+
+
+def test_quicats_wide_table_names_the_lines_of_blank_lines_and_quotes(
+    tmp_path,
+) -> None:
+    path = _file(
+        tmp_path,
+        "barcodes_output.csv",
+        'sample,cell,TTT,GGG\ns1,"A,1",0,4\n\n  \ns1, B ,"2",0\ns1,C,1.5,0\n',
+    )
+    # Counting rows instead of lines named line 4.
+    with pytest.raises(
+        ValueError, match=r"holds '1\.5' as the count of barcode 'TTT' on line 6;"
+    ):
+        _rows(barcode_layout(path), 10)
+    chunks = list(islice(iter_barcode_rows(barcode_layout(path), 1), 2))
+    assert [chunk.first_line for chunk in chunks] == [2, 5]
+    assert [chunk.cells.tolist() for chunk in chunks] == [["A,1"], ["B"]]
+    assert [chunk.barcodes.tolist() for chunk in chunks] == [["GGG"], ["TTT"]]
+    assert [chunk.umi_counts.tolist() for chunk in chunks] == [[4], [2]]
+
+
+@pytest.mark.parametrize(
+    ("row", "message"),
+    [
+        ("s1,B_s1,0", "holds 3 fields on line 3, where its header names 4 columns"),
+        ("s1,B_s1,0,1,5", "holds 5 fields on line 3, where its header names 4 columns"),
+        ("s1,,0,1", "rows without a cell barcode on lines 3"),
+        ("s1,B_s1,inf,1", "holds 'inf' as the count of barcode 'TTT' on line 3"),
+        ("s1,B_s1,1,nan", "holds 'nan' as the count of barcode 'GGG' on line 3"),
+    ],
+)
+def test_quicats_wide_table_refuses_rows_of_another_width_or_without_counts(
+    tmp_path, row, message
+) -> None:
+    path = _file(
+        tmp_path, "barcodes_output.csv", f"sample,cell,TTT,GGG\ns1,A_s1,0,4\n{row}\n"
+    )
+    with pytest.raises(ValueError, match=message):
+        _rows(barcode_layout(path), 10)
+
+
+def test_quicats_wide_table_reads_a_gzip_file_and_names_one_cut_short(
+    tmp_path,
+) -> None:
+    text = b"sample,cell,TTT,GGG\n" + b"".join(
+        b"s1,C%d_s1,%d,0\n" % (row, row % 3) for row in range(2_000)
+    )
+    path = tmp_path / "barcodes_output.csv"
+    path.write_bytes(gzip.compress(text))
+    chunks = _rows(barcode_layout(path), 500)
+    assert sum(len(chunk.cells) for chunk in chunks) == sum(
+        1 for row in range(2_000) if row % 3
+    )
+    path.write_bytes(gzip.compress(text)[:-40])
+    with pytest.raises(ValueError, match="barcodes_output.csv is cut short or corrupt"):
+        _rows(barcode_layout(path), 500)
+
+
+@pytest.mark.parametrize("entry", ["", "NA", "x", "1.5", "-1"])
+def test_quicats_wide_table_refuses_entries_that_are_not_counts(
+    tmp_path, entry
+) -> None:
+    path = _file(
+        tmp_path,
+        "barcodes_output.csv",
+        f"sample,cell,TTT,GGG\ns1,A_s1,0,4\ns1,B_s1,{entry},0\n",
+    )
+    with pytest.raises(ValueError, match="on line 3"):
+        _rows(barcode_layout(path), 10)
+
+
+def test_quicats_wide_table_refuses_an_index_column(tmp_path) -> None:
+    # A merged table saved again by pandas gains an unnamed index column.
+    path = _file(
+        tmp_path,
+        "barcodes_output.csv",
+        ",sample,cell,TTT\n0,s1,A_s1,3\n1,s1,B_s1,0\n",
+    )
+    with pytest.raises(ValueError, match="unnamed column"):
+        barcode_layout(path, format="quicat_wide")
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        # A pycashier read cut short before its barcode.
+        (
+            "info\tumi\tcell\tbarcode\n@r1\tGGAT\tAAAC\tTTTG\n@r2\tGGAT\tAAAC\n",
+            "without barcode on line 3",
+        ),
+        # A TREX molecule without its reads.
+        (
+            "#cell_id\tumi\tclone_id\tread_count\nAAAC\tGG\tTTT\t3\nAAAC\tGC\tTTT\n",
+            "without read_count on line 3",
+        ),
+        # A BARtab pair without its UMIs.
+        ("gene\tcell\tcount\nLB1\tAAAC\t4\nLB2\tAAAC\n", "without count on line 3"),
+        # A CellTag read without its tag.
+        (
+            "Cell.BC\tUMI\tCell.Tag\nAAAC-1\tGG\tTTTT\nAAAC-1\tGG\n",
+            "without Cell.Tag on line 3",
+        ),
+        # A QuiCAT pair with a barcode and no count.
+        (
+            "sample,cell,barcode,counts\ns1,AAAC-1,TTT,4\ns1,CCCG-1,GGG,\n",
+            "without counts on line 3",
+        ),
+        # A BARtab annotation without its UMI list.
+        (
+            "barcode\tbc.umi.count\nAAAC\tLB1\t4\nCCCG\tLB2\n",
+            "without bc.umi.count on line 3",
+        ),
+    ],
+)
+def test_tool_tables_refuse_rows_cut_short(tmp_path, text, message) -> None:
+    path = _file(tmp_path, "table.txt", text)
+    with pytest.raises(ValueError, match=message):
+        _rows(barcode_layout(path), 10)
+
+
+def test_quicats_cells_without_barcodes_hold_no_count(tmp_path) -> None:
+    path = _file(
+        tmp_path,
+        "sample_output.csv",
+        "sample,cell,barcode,counts\ns1,AAAC-1,TTT,4\ns1,CCCG-1,,\n",
+    )
+    (chunk,) = _rows(barcode_layout(path), 10)
+    assert chunk.barcodes.tolist() == ["TTT", None]
+    assert chunk.umi_counts.tolist() == [4, -1]
+
+
+def test_dense_anndata_reads_its_rows_within_the_chunk(tmp_path) -> None:
+    import tracemalloc
+
+    # 400 cells by 20,000 barcodes of float32 counts: 32 MB in memory.
+    n_cells, n_barcodes = 400, 20_000
+    path = tmp_path / "dense.h5ad"
+    with h5py.File(path, "w") as handle:
+        from tests.clone_truth import _obs_frame
+
+        _obs_frame(handle, [f"C{index}" for index in range(n_cells)])
+        var = handle.create_group("var")
+        var.attrs["_index"] = "_index"
+        var.create_dataset(
+            "_index",
+            data=np.asarray(
+                [f"B{index}" for index in range(n_barcodes)], dtype=h5py.string_dtype()
+            ),
+        )
+        values = handle.create_dataset(
+            "X",
+            shape=(n_cells, n_barcodes),
+            dtype=np.float32,
+            chunks=(10, n_barcodes),
+            compression="gzip",
+        )
+        for row in range(n_cells):
+            line = np.zeros(n_barcodes, dtype=np.float32)
+            line[row] = 3
+            values[row] = line
+    layout = barcode_layout(path)
+    entries = layout.chunk_rows(2 * 2**20)
+    tracemalloc.start()
+    chunks = _rows(layout, entries)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert sum(len(chunk.cells) for chunk in chunks) == n_cells
+    assert peak < 8 * 2**20
+
+
+def test_two_cell_columns_join_a_samples_number_to_its_barcodes(tmp_path) -> None:
+    # FateMap's table of two samples, read by both cell columns.
+    path = _file(
+        tmp_path,
+        "fm.txt",
+        "cellID\tUMI\tBC50StarcodeD8\tSampleNum\nAAAC\tGG\tTT\t1\nAAAC\tGC\tTT\t2\n",
+    )
+    layout = barcode_layout(
+        path,
+        format="molecules",
+        columns={
+            "cell": ["SampleNum", "cellID"],
+            "umi": "UMI",
+            "barcode": "BC50StarcodeD8",
+        },
+    )
+    (chunk,) = _rows(layout, 10)
+    assert chunk.cells.tolist() == ["1__AAAC", "2__AAAC"]
+
+
+def test_cell_barcodes_are_stripped_of_padding(tmp_path) -> None:
+    path = _file(
+        tmp_path, "pairs.csv", 'cell,barcode,n\n" AAAC-1 ",TT,3\nCCCG-1  ,GG,2\n'
+    )
+    layout = barcode_layout(
+        path,
+        format="pairs",
+        columns={"cell": "cell", "barcode": "barcode", "umis": "n"},
+    )
+    (chunk,) = _rows(layout, 10)
+    assert chunk.cells.tolist() == ["AAAC-1", "CCCG-1"]
+
+
+def test_molecule_info_names_cells_by_their_gem_well(tmp_path) -> None:
+    path = write_molecule_info(BARCODES, tmp_path / "molecule_info.h5", sample="d4")
+    with h5py.File(path, "a") as handle:
+        wells = handle["gem_group"][:]
+        wells[::2] = 2
+        handle["gem_group"][:] = wells
+    rows = list(iter_molecule_info(molecule_info_library(path)))
+    with h5py.File(path, "r") as handle:
+        lineage = handle["library_idx"][:] == 1
+        expected_wells = handle["gem_group"][:][lineage]
+    barcodes = np.concatenate([chunk.barcodes for chunk in rows])
+    assert [barcode.rsplit("-", 1)[1] for barcode in barcodes] == [
+        str(well) for well in expected_wells
+    ]
+    assert set(expected_wells.tolist()) == {1, 2}
+
+
+def test_trexs_early_clone_tables_point_to_import_clones(tmp_path) -> None:
+    path = _file(tmp_path, "clones.txt", "#clone_id,cell_id\n1,AAAC\n1,CCCG\n")
+    with pytest.raises(ValueError, match="import it with ds.clones.import_clones"):
+        barcode_layout(path)
+
+
+def test_a_bartab_annotation_without_cells_reads_no_pair(tmp_path) -> None:
+    path = _file(tmp_path, "annotation.tsv", "barcode\tbc.umi.count\n")
+    layout = barcode_layout(path)
+    assert layout.format == "bartab_annotation"
+    assert _rows(layout, 10) == []
+
+
+def test_corrupt_gzip_files_are_refused_naming_the_file(tmp_path) -> None:
+    whole = gzip.compress(b"gene\tcell\tcount\n" + b"LB1\tAAAC\t4\n" * 50_000)
+    path = tmp_path / "counts.tsv.gz"
+    path.write_bytes(whole[: len(whole) // 2])
+    with pytest.raises(ValueError, match="counts.tsv.gz is cut short or corrupt"):
+        _rows(barcode_layout(path), 1_000)
+
+
+def test_molecule_info_reads_each_block_of_barcodes_once() -> None:
+    from cytearc.readers.cellranger import BarcodeBlocks
+
+    reads = []
+
+    class Listed:
+        shape = (10,)
+        chunks = (4,)
+
+        def __getitem__(self, selection):
+            reads.append((selection.start, selection.stop))
+            return np.asarray([f"B{index}".encode() for index in range(10)])[selection]
+
+    blocks = BarcodeBlocks(Listed(), block_rows=4)
+    assert blocks.texts(np.asarray([0, 1, 1, 3])).tolist() == ["B0", "B1", "B1", "B3"]
+    assert blocks.texts(np.asarray([2, 3])).tolist() == ["B2", "B3"]
+    assert blocks.texts(np.asarray([3, 4, 9])).tolist() == ["B3", "B4", "B9"]
+    # Each block of four barcodes is read once, however many chunks name it.
+    assert reads == [(0, 4), (4, 8), (8, 10)]
+
+
+def _matrix_h5ad(
+    path: Path, values: np.ndarray, *, layout: str, chunks=None, compression=None
+) -> Path:
+    """An AnnData file of the cells by barcodes ``values``, dense or sparse."""
+    from tests.clone_truth import _obs_frame
+
+    n_cells, n_barcodes = values.shape
+    with h5py.File(path, "w") as handle:
+        _obs_frame(handle, [f"C{index}" for index in range(n_cells)])
+        var = handle.create_group("var")
+        var.attrs["_index"] = "_index"
+        var.create_dataset(
+            "_index",
+            data=np.asarray(
+                [f"B{index}" for index in range(n_barcodes)], dtype=h5py.string_dtype()
+            ),
+        )
+        if layout == "dense":
+            handle.create_dataset(
+                "X", data=values, chunks=chunks, compression=compression
+            )
+            return path
+        major = values if layout == "csr" else values.T
+        group = handle.create_group("X")
+        group.attrs["encoding-type"] = f"{layout}_matrix"
+        group.attrs["encoding-version"] = "0.1.0"
+        group.attrs["shape"] = np.asarray(values.shape)
+        group.create_dataset("data", data=major[major != 0])
+        group.create_dataset(
+            "indices",
+            data=np.concatenate([np.flatnonzero(line) for line in major]).astype(
+                np.int32
+            ),
+        )
+        group.create_dataset(
+            "indptr",
+            data=np.concatenate([[0], np.cumsum((major != 0).sum(axis=1))]).astype(
+                np.int64
+            ),
+        )
+    return path
+
+
+def _entries(chunks) -> list[tuple[str, str, int]]:
+    return sorted(
+        (cell, barcode, int(count))
+        for chunk in chunks
+        for cell, barcode, count in zip(
+            chunk.cells, chunk.barcodes, chunk.umi_counts, strict=True
+        )
+    )
+
+
+def _nonzero_entries(values: np.ndarray) -> list[tuple[str, str, int]]:
+    rows, columns = np.nonzero(values)
+    return sorted(
+        (f"C{row}", f"B{column}", int(values[row, column]))
+        for row, column in zip(rows.tolist(), columns.tolist(), strict=True)
+    )
+
+
+@pytest.mark.parametrize(
+    ("entries", "tile"),
+    [
+        # Fewer entries than a chunk holds: one chunk of 8 by 16 at a time.
+        (10, (8, 16)),
+        # 300 entries: two chunks side by side, 8 by 32, hold 256 of them.
+        (300, (8, 32)),
+        # 2,000 entries: all 70 columns, and 24 rows, three chunks of 8, hold
+        # 1,680 of them.
+        (2_000, (24, 70)),
+    ],
+)
+def test_dense_anndata_is_read_in_tiles_of_whole_chunks(
+    tmp_path, monkeypatch, entries, tile
+) -> None:
+    rng = np.random.default_rng(3)
+    values = (rng.random((50, 70)) < 0.2) * rng.integers(1, 9, (50, 70))
+    path = _matrix_h5ad(
+        tmp_path / "dense.h5ad",
+        values.astype(np.float32),
+        layout="dense",
+        chunks=(8, 16),
+        compression="gzip",
+    )
+    reads = []
+    read = h5py.Dataset.__getitem__
+
+    def recorded(self, selection):
+        if self.name == "/X":
+            reads.append(selection)
+        return read(self, selection)
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", recorded)
+    chunks = _rows(barcode_layout(path), entries)
+    assert _entries(chunks) == _nonzero_entries(values)
+    assert max(len(chunk.cells) for chunk in chunks) <= entries
+    height, width = tile
+    covered = np.zeros(values.shape, dtype=np.int64)
+    for rows, columns in reads:
+        # Each read starts on a chunk's edge and spans whole chunks, so that
+        # no chunk is decompressed twice.
+        assert rows.start % 8 == 0 and columns.start % 16 == 0
+        assert (
+            rows.stop - rows.start <= height and columns.stop - columns.start <= width
+        )
+        covered[rows, columns] += 1
+    assert (covered == 1).all()
+    assert len(reads) == -(-50 // height) * -(-70 // width)
+
+
+def test_a_dense_matrix_without_chunks_is_read_in_whole_rows_when_they_fit(
+    tmp_path,
+) -> None:
+    values = np.zeros((30, 6), dtype=np.int64)
+    values[np.arange(30), np.arange(30) % 6] = np.arange(1, 31)
+    path = _matrix_h5ad(tmp_path / "dense.h5ad", values, layout="dense")
+    # Four rows of six barcodes fit 25 entries; the last chunk holds two rows.
+    chunks = _rows(barcode_layout(path), 25)
+    assert [chunk.cells.tolist() for chunk in chunks] == [
+        [f"C{row}" for row in range(start, min(start + 4, 30))]
+        for start in range(0, 30, 4)
+    ]
+    assert _entries(chunks) == _nonzero_entries(values)
+    # A row of more barcodes than the entries is read in parts.
+    wide = np.ones((2, 9), dtype=np.int64)
+    path = _matrix_h5ad(tmp_path / "wide.h5ad", wide, layout="dense")
+    chunks = _rows(barcode_layout(path), 4)
+    assert [len(chunk.cells) for chunk in chunks] == [4, 4, 1, 4, 4, 1]
+
+
+@pytest.mark.parametrize("layout", ["csr", "csc"])
+def test_sparse_anndata_reads_a_barcode_of_many_cells_in_parts(
+    tmp_path, layout
+) -> None:
+    # One barcode in each of 50 cells beside barcodes of one cell each.
+    values = np.zeros((50, 6), dtype=np.int64)
+    values[:, 2] = np.arange(1, 51)
+    values[np.arange(0, 50, 7), 4] = 3
+    path = _matrix_h5ad(tmp_path / f"{layout}.h5ad", values, layout=layout)
+    chunks = _rows(barcode_layout(path), 7)
+    assert _entries(chunks) == _nonzero_entries(values)
+    # Reading a barcode's cells at once held all 50 of them.
+    assert max(len(chunk.cells) for chunk in chunks) == 7
+    assert sum(len(chunk.cells) for chunk in chunks) == np.count_nonzero(values)
+
+
+@pytest.mark.parametrize(
+    ("dataset", "change", "message"),
+    [
+        ("indptr", lambda pointers: pointers[:-1], "pointers that do not fit"),
+        (
+            "indptr",
+            lambda pointers: np.concatenate([[0, 3, 2], pointers[3:]]),
+            "pointers that do not fit",
+        ),
+        ("indptr", lambda pointers: pointers + 1, "pointers that do not fit"),
+        ("indices", lambda indices: indices + 6, "entries beyond its shape"),
+        ("indices", lambda indices: indices - 7, "entries beyond its shape"),
+    ],
+)
+def test_sparse_anndata_whose_pointers_or_entries_break_its_shape_is_refused(
+    tmp_path, dataset, change, message
+) -> None:
+    values = np.eye(6, dtype=np.int64)
+    path = _matrix_h5ad(tmp_path / "csr.h5ad", values, layout="csr")
+    with h5py.File(path, "a") as handle:
+        stored = handle[f"X/{dataset}"][:]
+        del handle[f"X/{dataset}"]
+        handle[f"X/{dataset}"] = change(stored)
+    with pytest.raises(ValueError, match=message):
+        _rows(barcode_layout(path), 10)
+
+
+def test_quicats_wide_table_is_parsed_once_per_chunk(tmp_path, monkeypatch) -> None:
+    rows = [f"s1,C{row}_s1," + ",".join(["0", "2", "0"]) for row in range(25)]
+    path = _file(
+        tmp_path, "barcodes_output.csv", "sample,cell,A,B,C\n" + "\n".join(rows) + "\n"
+    )
+    calls = []
+    parse = np.loadtxt
+
+    def counted(*arguments, **options):
+        calls.append(1)
+        return parse(*arguments, **options)
+
+    monkeypatch.setattr(np, "loadtxt", counted)
+    chunks = _rows(barcode_layout(path), 10)
+    assert len(calls) == len(chunks) == 3
+    assert [chunk.cells.tolist() for chunk in chunks][2] == [
+        f"C{row}_s1" for row in range(20, 25)
+    ]
+
+
+def test_required_columns_are_found_in_time_linear_in_the_header(tmp_path) -> None:
+    from cytearc.readers._delimited import TextLayout, require_columns
+
+    class Name(str):
+        comparisons = 0
+
+        def __eq__(self, other):
+            Name.comparisons += 1
+            return str.__eq__(self, other)
+
+        __hash__ = str.__hash__
+
+    names = tuple(Name(f"B{index}") for index in range(2_000))
+    text = TextLayout(
+        path="wide.csv", names=names, delimiter=",", compression=None, row_names=False
+    )
+    require_columns(text, list(names))
+    # Checking each name against the whole header compared 2,000 names about
+    # 2,000 times each.
+    assert Name.comparisons < 10 * len(names)
+    with pytest.raises(ValueError, match="names the column 'B1' more than once"):
+        require_columns(replace(text, names=(*names, Name("B1"))), ["B1", "B2"])
+    with pytest.raises(ValueError, match="has no column 'B9999'"):
+        require_columns(text, ["B9999"])
+
+
+def _peak_while_reading(layout, chunk_rows: int) -> int:
+    """The bytes held at the peak of reading a file chunk by chunk."""
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+        for _chunk in iter_barcode_rows(layout, chunk_rows):
+            pass
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return int(peak)
+
+
+@pytest.mark.parametrize("kind", ["wide", "dense", "csr", "csc", "many_barcodes"])
+def test_reading_holds_no_more_than_the_layout_estimates(tmp_path, kind) -> None:
+    rng = np.random.default_rng(5)
+    values = (rng.random((300, 400)) < 0.05) * rng.integers(1, 9, (300, 400))
+    if kind == "many_barcodes":
+        # One count per cell among 20,000 barcodes: their names outweigh
+        # the counts.
+        values = np.zeros((300, 20_000), dtype=np.int64)
+        values[np.arange(300), rng.choice(20_000, 300, replace=False)] = 2
+        kind = "csr"
+    if kind == "wide":
+        lines = ["sample,cell," + ",".join(f"B{index}" for index in range(400))] + [
+            f"s1,C{row}," + ",".join(map(str, values[row].tolist()))
+            for row in range(300)
+        ]
+        path = _file(tmp_path, "barcodes_output.csv", "\n".join(lines) + "\n")
+    else:
+        path = _matrix_h5ad(
+            tmp_path / f"{kind}.h5ad",
+            values.astype(np.float32),
+            layout=kind,
+            chunks=(16, 64) if kind == "dense" else None,
+            compression="gzip" if kind == "dense" else None,
+        )
+    layout = barcode_layout(path)
+    chunk_rows = layout.chunk_rows(400_000)
+    assert _entries(_rows(layout, chunk_rows)) == _nonzero_entries(values)
+    assert _peak_while_reading(layout, chunk_rows) <= layout.held_bytes + (
+        layout.chunk_bytes(chunk_rows)
+    )

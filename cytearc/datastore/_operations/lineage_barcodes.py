@@ -14,6 +14,8 @@ from ...clones.barcodes import (
     cell_summaries,
     library_summaries,
     lineage_barcode_frames,
+    pair_keys,
+    repeated_keys,
 )
 from ...metadata.arguments import LineageBarcodeImportArguments
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
@@ -65,11 +67,12 @@ _IMPORT_ATTRIBUTES = (
     "n_unmatched_barcodes",
     "unmatched_barcode_examples",
 )
-# Bytes that parsing holds for each field of a chunk's rows: the raw text, its
-# stripped copy and the parsed values.
-_PARSE_BYTES_PER_FIELD = 1_000
-# A chunk may take a twentieth of the budget, within 1 and 50,000 rows.
-_MAX_CHUNK_ROWS = 50_000
+# A chunk of a file may take a twentieth of the budget.
+_CHUNK_SHARE = 20
+# Bytes that the key of each row of a TREX molecule table takes at the peak
+# of finding a cell and UMI that it lists twice: the key, its sorted copy and
+# the comparison of neighbours.
+_KEY_BYTES = 40
 # Bytes that the per-cell arrays and the arrays written take per selected cell.
 _CELL_BYTES = 64
 # Bytes that a loaded record takes at the peak of building the tables: its
@@ -82,11 +85,6 @@ _TABLE_BYTES_PER_TEXT = 160
 # Waiting rows merge into the records once they hold about a thousandth of
 # the budget in rows, within 1,000 and 250,000 rows.
 _MERGE_BUDGET_SHARE = 1_000
-
-
-def _chunk_rows(memory_bytes: int, n_columns: int) -> int:
-    rows = int(memory_bytes) // (20 * _PARSE_BYTES_PER_FIELD * max(1, n_columns))
-    return int(min(_MAX_CHUNK_ROWS, max(1, rows)))
 
 
 def _files_text(n_files: int) -> str:
@@ -161,9 +159,13 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         ``n_file_barcodes``, ``n_unmatched_barcodes`` and
         ``unmatched_barcode_examples`` attributes beside ``n_file_rows`` and
         ``n_unmatched_rows``, and named in a warning, which a reused import
-        gives again. A file is identified by the SHA-256 of its bytes, so a
-        moved file reuses the saved barcodes, an edited one gives new ones,
-        and the order of the files does not matter.
+        gives again; the rows count each item of a list field and each
+        nonzero count of a merged table or a matrix. A file is identified by
+        the SHA-256 of its bytes and by its library, the file's name unless
+        ``library`` names it, so a file moved to another folder reuses the
+        saved barcodes, as does a renamed one whose library is named, an
+        edited one gives new ones, and the order of the files does not
+        matter.
 
         The artifact's canonical ``n_barcodes`` holds each cell's distinct
         barcodes, and ``n_umis``, ``n_reads`` and ``n_records`` its UMIs,
@@ -316,6 +318,12 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             what="barcode file",
         )
         n_listed = 1 if isinstance(paths, str | os.PathLike) else len(paths)
+        if library == "" or (
+            isinstance(library, Sequence)
+            and not isinstance(library, str)
+            and any(name == "" for name in library)
+        ):
+            raise ValueError("library must name a library, not be empty")
         # Libraries follow the order of the paths, as given.
         libraries = texts_per_file(library, n_listed, "library", "barcode file")
         layouts = [
@@ -347,13 +355,9 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         )
         counter = BarcodeCounter(merge_rows=self._merge_rows())
         n_empty = 0
-        molecule_tables: list[str] = []
         for file, layout in zip(files, layouts, strict=True):
             n_empty += self._count_file(counter, join, file, layout, held=held)
-            if layout.one_row_per_molecule:
-                molecule_tables.append(layout.library)
         counted = counter.finish()
-        _refuse_repeated_molecules(counted, molecule_tables)
         return counted, {
             "n_file_rows": join.n_rows,
             "n_unmatched_rows": join.n_unmatched_rows,
@@ -414,9 +418,9 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         peak = held + counter.peak_bytes
         if peak > self.memoryBytes:
             raise MemoryError(
-                f"Importing barcodes holds {counter.n_rows} molecules and pairs, "
-                f"about {peak} bytes at their peak, more than the memory budget of "
-                f"{self.memoryBytes} bytes. Raise mem_budget, or pass a smaller "
+                f"Importing barcodes holds about {peak} bytes at its peak, with "
+                f"{counter.n_rows} molecules and pairs, more than the memory budget "
+                f"of {self.memoryBytes} bytes. Raise mem_budget, or pass a smaller "
                 "cell_selection."
             )
 
@@ -429,16 +433,28 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         *,
         held: int,
     ) -> int:
-        """Count the barcodes of one file and return its rows without a barcode."""
+        """Count the barcodes of one file and return its rows without a barcode.
+
+        A file that lists each molecule once, as TREX's molecule tables do,
+        is refused if a cell and UMI repeat on its rows.
+        """
         from ...readers.lineage_barcodes import iter_barcode_rows
 
-        chunk_rows = _chunk_rows(self.memoryBytes, layout.n_columns)
-        chunk_bytes = _PARSE_BYTES_PER_FIELD * layout.n_columns * chunk_rows
+        chunk_rows = layout.chunk_rows(self.memoryBytes // _CHUNK_SHARE)
+        held += layout.held_bytes + layout.chunk_bytes(chunk_rows)
+        # A budget too small for the lookup, the file's names and one chunk
+        # refuses before a row is read.
+        self._check_barcode_budget(held, counter)
         if layout.library_column is None:
             # The file's library is listed even if it holds no row of a cell.
             counter.add_library(layout.library, molecules=layout.umi is not None)
+        keys: list[np.ndarray] | None = [] if layout.one_row_per_molecule else None
+        n_keys = 0
         n_empty = 0
         for rows in iter_barcode_rows(layout, chunk_rows):
+            if keys is not None:
+                keys.append(pair_keys(rows.cells, rows.umis))
+                n_keys += len(rows.cells)
             cells = join.cells(file, rows.cells)
             keep = _kept_rows(rows, cells, layout.level)
             n_empty += int(np.count_nonzero((cells >= 0) & ~keep))
@@ -457,7 +473,16 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                 reads=None if rows.reads is None else rows.reads[keep],
                 rows_are_reads=layout.level == "reads",
             )
-            self._check_barcode_budget(held + chunk_bytes, counter)
+            self._check_barcode_budget(held + _KEY_BYTES * n_keys, counter)
+        if keys is not None:
+            repeated = repeated_keys(keys)
+            if repeated:
+                raise ValueError(
+                    f"{os.fspath(file.path)} lists {repeated} cells and UMIs on "
+                    "several rows, as TREX's reads.txt lists each read; import "
+                    "molecules.txt or molecules_corrected.txt, which list each "
+                    "molecule once"
+                )
         return n_empty
 
     def _barcode_assay(self, from_assay: Any) -> Any:
@@ -644,36 +669,3 @@ def _stored_libraries(group: zarr.Group) -> list[dict[str, Any]]:
     ):
         raise ValueError("The lineage_barcodes artifact has no valid list of libraries")
     return [dict(entry) for entry in libraries]
-
-
-def _refuse_repeated_molecules(counted: CountedBarcodes, libraries: list[str]) -> None:
-    """Refuse molecule tables, such as TREX's, that list one cell and UMI twice.
-
-    TREX's ``reads.txt`` has the header of its early ``molecules.txt`` but
-    lists each read, so its cells repeat their UMIs.
-    """
-    if not libraries:
-        return
-    table = counted.table
-    positions = [
-        position
-        for position, name in enumerate(counted.libraries)
-        if name in set(libraries)
-    ]
-    held = np.isin(np.asarray(table.sources), positions)
-    if not held.any():
-        return
-    cells = np.asarray(table.cells)[held]
-    sources = np.asarray(table.sources)[held]
-    umis = np.asarray(table.text["umi"].codes)[held]
-    keys = np.stack([cells, sources, umis])
-    _unique, counts = np.unique(keys, axis=1, return_counts=True)
-    repeated = int(np.count_nonzero(counts > 1)) + int(
-        np.count_nonzero(counted.rows[held] > 1)
-    )
-    if repeated:
-        raise ValueError(
-            f"{repeated} cells and UMIs of a TREX molecule table appear on several "
-            "rows, as each read of TREX's reads.txt does; import molecules.txt or "
-            "molecules_corrected.txt, which list each molecule once"
-        )

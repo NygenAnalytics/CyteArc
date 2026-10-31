@@ -50,10 +50,10 @@ its formats follow its documentation and published files only.
 
 import os
 import re
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 import h5py
 import numpy as np
@@ -66,15 +66,18 @@ from ._delimited import (
     compression,
     first_lines,
     joined_columns,
+    line_chunks,
     line_list,
     require_columns,
     signature,
+    split_fields,
     text_chunks,
     text_layout,
 )
 from ._h5ad_columns import index_key, read_table_column, sparse_encoding, sparse_shape
 from ._text import as_text
 from .cellranger import (
+    MIN_MOLECULE_ROWS,
     MoleculeInfoLibrary,
     is_molecule_info,
     iter_molecule_info,
@@ -159,6 +162,22 @@ _CLONE_COLUMNS = frozenset(
     {"clone_nr", "clone#", "Clone_ID", "clone.id", "VBC", "lineageGrp", "clone_opt"}
 )
 _NUCLEOTIDES = re.compile(r"^[ACGTN]+$")
+# A chunk holds at most this many rows of a text table.
+_MAX_CHUNK_ROWS = 50_000
+# Bytes that a chunk holds per field of a text table while it parses it: the
+# raw text, its stripped copy and the parsed values.
+_TEXT_FIELD_BYTES = 1_000
+# Bytes per field of a wide table of counts: its text, its count as a float
+# and the masks that check the count.
+_COUNT_FIELD_BYTES = 120
+# Bytes per entry of an AnnData matrix read: its position, value, cell and
+# barcode.
+_ENTRY_BYTES = 200
+# Bytes per molecule of a molecule_info.h5 read: its datasets, decoded UMI and
+# cell barcode.
+_MOLECULE_BYTES = 150
+# Bytes that each cell's and barcode's decoded name takes when a matrix is read.
+_NAME_BYTES = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +204,8 @@ class BarcodeLayout:
             None.
         one_row_per_molecule: Whether the format lists each cell and UMI
             once, as TREX's molecule tables do.
+        required: The columns that the format fills in every row, so that an
+            empty value marks a row cut short.
     """
 
     format: str
@@ -199,13 +220,63 @@ class BarcodeLayout:
     library_column: str | None = None
     separator: str | None = None
     one_row_per_molecule: bool = False
+    required: tuple[str, ...] = ()
     _text: TextLayout | None = field(default=None, repr=False)
     _molecules: MoleculeInfoLibrary | None = field(default=None, repr=False)
+    _matrix: "_Matrix | None" = field(default=None, repr=False)
+
+    def _row_bytes(self) -> int:
+        if self._text is not None:
+            per_field = (
+                _COUNT_FIELD_BYTES
+                if self.format == "quicat_wide"
+                else _TEXT_FIELD_BYTES
+            )
+            return per_field * len(self._text.names)
+        return _ENTRY_BYTES if self._matrix is not None else _MOLECULE_BYTES
+
+    def chunk_rows(self, chunk_bytes: int) -> int:
+        """The rows of a chunk that holds at most about ``chunk_bytes``.
+
+        A chunk of a text table holds rows of the file, of a matrix nonzero
+        entries, and of Cell Ranger's molecule info molecules, at least
+        65,536 of them.
+        """
+        rows = max(1, int(chunk_bytes) // self._row_bytes())
+        if self._text is not None:
+            return min(_MAX_CHUNK_ROWS, rows)
+        if self._molecules is not None:
+            return max(MIN_MOLECULE_ROWS, rows)
+        return rows
+
+    def chunk_bytes(self, chunk_rows: int) -> int:
+        """The bytes that a chunk of ``chunk_rows`` holds at most, about."""
+        held = self._row_bytes() * int(chunk_rows)
+        if self._matrix is not None and self._matrix.encoding == "dense":
+            # A dense matrix is read a tile at a time, whose entries are
+            # parsed ``chunk_rows`` at a time.
+            height, width = self._matrix.tile_shape(chunk_rows)
+            held += height * width * self._matrix.itemsize
+        return held
 
     @property
-    def n_columns(self) -> int:
-        """The fields of each row that a chunk holds, which sizes chunks."""
-        return len(self._text.names) if self._text is not None else 6
+    def held_bytes(self) -> int:
+        """The bytes that reading holds beside its chunks, such as a matrix's names."""
+        if self._molecules is not None:
+            return self._molecules.barcode_block_bytes
+        if self._matrix is None:
+            return 0
+        matrix = self._matrix
+        # The names of every cell and barcode, decoded once.
+        held = _NAME_BYTES * (matrix.n_cells + matrix.n_barcodes)
+        if self.library_column is not None:
+            held += 8 * matrix.n_cells
+        # A sparse matrix's pointers, and their differences as they are checked.
+        if matrix.encoding == "csr":
+            held += 16 * (matrix.n_cells + 1)
+        elif matrix.encoding == "csc":
+            held += 16 * (matrix.n_barcodes + 1)
+        return held
 
     def record(self) -> dict[str, Any]:
         """Return the format, columns and library that identify how the file is read."""
@@ -223,6 +294,39 @@ class BarcodeLayout:
                 "separator": self.separator,
             },
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _Matrix:
+    """An AnnData file's matrix of counts: its layout, shape and value size.
+
+    ``chunks`` is the shape of the HDF5 chunks of a dense matrix, or None
+    for one stored without chunks or a sparse one.
+    """
+
+    encoding: str
+    n_cells: int
+    n_barcodes: int
+    itemsize: int
+    chunks: tuple[int, int] | None = None
+
+    def tile_shape(self, entries: int) -> tuple[int, int]:
+        """The rows and columns of the tiles that a dense matrix is read in.
+
+        A tile covers whole HDF5 chunks, so that each chunk is read and
+        decompressed once, and holds about ``entries`` values, or one chunk
+        if a chunk holds more; a matrix stored without chunks is read in
+        whole rows when a row fits.
+        """
+        entries = max(1, int(entries))
+        chunk_rows, chunk_columns = self.chunks or (1, 1)
+        chunk_rows = max(1, min(chunk_rows, self.n_cells))
+        chunk_columns = max(1, min(chunk_columns, self.n_barcodes))
+        width = entries // chunk_rows // chunk_columns * chunk_columns
+        width = max(1, min(self.n_barcodes, max(chunk_columns, width)))
+        height = entries // width // chunk_rows * chunk_rows
+        height = max(1, min(self.n_cells, max(chunk_rows, height)))
+        return height, width
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,7 +416,8 @@ def _role_columns(columns: Any) -> dict[str, Any]:
 
 
 def _hint(text: TextLayout) -> str:
-    if _CLONE_COLUMNS & set(text.names):
+    # TREX's clones.txt of 2022 starts with "#clone_id".
+    if _CLONE_COLUMNS & set(text.names) or text.names[:1] == ("clone_id",):
         return (
             "; it holds clone IDs, so import it with ds.clones.import_clones, which "
             "reads clone tables"
@@ -340,7 +445,9 @@ def _detected_text_format(text: TextLayout) -> str | None:
         matches.append("quicat_wide")
     if names == {"gene", "cell", "count"}:
         matches.append("bartab")
-    if text.row_names and text.names[1:] == ("barcode", "bc.umi.count"):
+    if text.names[text.row_names :] == ("barcode", "bc.umi.count") and (
+        text.row_names or _header_only(text)
+    ):
         matches.append("bartab_annotation")
     if len(matches) > 1:
         raise ValueError(
@@ -349,6 +456,11 @@ def _detected_text_format(text: TextLayout) -> str | None:
             + "; pass format= to choose one"
         )
     return matches[0] if matches else None
+
+
+def _header_only(text: TextLayout) -> bool:
+    """Whether a table holds its header and no row."""
+    return len(first_lines(text.path, text.compression, 2)) < 2
 
 
 def _is_nucleotides(value: str) -> bool:
@@ -417,10 +529,17 @@ def _preset_layout(format: str, text: TextLayout, library: str) -> BarcodeLayout
             umi=umi,
             reads=reads,
             one_row_per_molecule=umi is not None,
+            required=tuple(name for name in ("clone_id", reads) if name),
         )
     if format == "pycashier":
         require_columns(text, _PYCASHIER_COLUMNS)
-        return preset("reads", cell=("cell",), barcode=("barcode",), umi="umi")
+        return preset(
+            "reads",
+            cell=("cell",),
+            barcode=("barcode",),
+            umi="umi",
+            required=("barcode",),
+        )
     if format == "celltag":
         require_columns(text, ["Cell.BC", "Cell.Tag"])
         return preset(
@@ -428,6 +547,7 @@ def _preset_layout(format: str, text: TextLayout, library: str) -> BarcodeLayout
             cell=("Cell.BC",),
             barcode=("Cell.Tag",),
             umi="UMI" if "UMI" in names else None,
+            required=("Cell.Tag",),
         )
     if format == "fatemap":
         require_columns(text, ["cellID", "UMI", "BC50StarcodeD8"])
@@ -436,11 +556,18 @@ def _preset_layout(format: str, text: TextLayout, library: str) -> BarcodeLayout
             cell=("cellID",),
             barcode=("BC50StarcodeD8",),
             umi="UMI",
+            required=("BC50StarcodeD8",),
         )
     if format == "quicat":
         require_columns(text, ["cell", "barcode", "counts"])
+        # A cell without barcodes has a row without a barcode or a count.
         return preset("pairs", cell=("cell",), barcode=("barcode",), umis="counts")
     if format == "quicat_wide":
+        if text.row_names or "" in text.names:
+            raise ValueError(
+                f"{text.path} has an unnamed column, such as an index that pandas "
+                "wrote; QuiCAT's merged table has none, so remove it"
+            )
         require_columns(text, ["cell"])
         barcodes = [name for name in text.names if name not in _QUICAT_CELL_COLUMNS]
         if not barcodes:
@@ -449,18 +576,28 @@ def _preset_layout(format: str, text: TextLayout, library: str) -> BarcodeLayout
         return preset("pairs", cell=("cell",))
     if format == "bartab":
         require_columns(text, ["gene", "cell", "count"])
-        return preset("pairs", cell=("cell",), barcode=("gene",), umis="count")
-    if not text.row_names:
-        raise ValueError(
-            f"{text.path} is not in R's row-name layout, as BARtab writes its "
-            "barcode annotation: one header field fewer than each row"
+        return preset(
+            "pairs",
+            cell=("cell",),
+            barcode=("gene",),
+            umis="count",
+            required=("gene", "count"),
         )
+    if not text.row_names:
+        if not (text.names == ("barcode", "bc.umi.count") and _header_only(text)):
+            raise ValueError(
+                f"{text.path} is not in R's row-name layout, as BARtab writes its "
+                "barcode annotation: one header field fewer than each row"
+            )
+        # An annotation without cells holds its header alone.
+        text = replace(text, names=("", *text.names), row_names=True)
     require_columns(text, ["barcode", "bc.umi.count"])
     return preset(
         "pairs",
         barcode=("barcode",),
         umis="bc.umi.count",
         separator=";,",
+        required=("barcode", "bc.umi.count"),
     )
 
 
@@ -549,6 +686,7 @@ def _h5ad_layout(path: str, library: str, roles: dict[str, Any]) -> BarcodeLayou
             raise ValueError(f"{path} has no X matrix of barcode counts")
         if library_column is not None and library_column not in obs:
             raise ValueError(f"{path} has no obs column {library_column!r}")
+        matrix = _matrix(handle, path)
     return BarcodeLayout(
         format="h5ad",
         path=path,
@@ -557,6 +695,39 @@ def _h5ad_layout(path: str, library: str, roles: dict[str, Any]) -> BarcodeLayou
         umis="X" if not counts or counts[0] == "umis" else None,
         reads="X" if counts and counts[0] == "reads" else None,
         library_column=library_column,
+        _matrix=matrix,
+    )
+
+
+def _matrix(handle: h5py.File, path: str) -> _Matrix:
+    """Read the layout, shape and value size of an AnnData file's ``X``."""
+    obs, var = handle["obs"], handle["var"]
+    n_cells = int(obs[str(index_key(obs))].shape[0])
+    n_barcodes = int(var[str(index_key(var))].shape[0])
+    node = handle["X"]
+    chunks = None
+    if isinstance(node, h5py.Dataset):
+        encoding, shape = "dense", tuple(int(size) for size in node.shape)
+        itemsize = int(node.dtype.itemsize)
+        if node.chunks is not None and len(node.chunks) == 2:
+            chunks = (int(node.chunks[0]), int(node.chunks[1]))
+    else:
+        encoding, shape = str(sparse_encoding(node)), sparse_shape(node) or ()
+        data = node.get("data")
+        itemsize = int(data.dtype.itemsize) if isinstance(data, h5py.Dataset) else 0
+    if encoding not in ("dense", "csr", "csc") or len(shape) != 2 or not itemsize:
+        raise ValueError(f"X of {path} is neither a dense nor a sparse matrix")
+    if shape != (n_cells, n_barcodes):
+        raise ValueError(
+            f"X of {path} is {shape[0]} by {shape[1]}, but the file names "
+            f"{n_cells} cells and {n_barcodes} barcodes"
+        )
+    return _Matrix(
+        encoding=encoding,
+        n_cells=n_cells,
+        n_barcodes=n_barcodes,
+        itemsize=itemsize,
+        chunks=chunks,
     )
 
 
@@ -674,25 +845,38 @@ def _distinct_text(values: np.ndarray) -> np.ndarray:
     return parsed
 
 
-def _cell_texts(
-    chunk: pd.DataFrame, positions: Sequence[int], first_line: int, path: str
-) -> np.ndarray:
-    if len(positions) > 1:
-        cells = joined_columns(chunk, positions, COLUMN_SEPARATOR)
-    else:
-        # A missing-value token is a cell barcode as any other text is.
-        codes, distinct = pd.factorize(
-            chunk[positions[0] if positions else 0].to_numpy(dtype=object)
-        )
-        stripped = np.asarray([value.strip() for value in distinct], dtype=object)
-        cells = stripped[codes]
+def _stripped_cells(values: np.ndarray, lines: np.ndarray, path: str) -> np.ndarray:
+    """Strip cell barcodes once per distinct value, refusing rows without one.
+
+    A missing-value token is a cell barcode as any other text is.
+    """
+    codes, distinct = pd.factorize(np.asarray(values, dtype=object))
+    stripped = np.asarray([value.strip() for value in distinct], dtype=object)
+    cells: np.ndarray = stripped[codes]
+    _refuse_cellless(cells, lines, path)
+    return cells
+
+
+def _refuse_cellless(cells: np.ndarray, lines: np.ndarray, path: str) -> None:
     empty = np.flatnonzero(cells == "")
     if len(empty):
         raise ValueError(
             f"{path} has rows without a cell barcode on lines "
-            f"{line_list(empty, first_line)}"
+            f"{line_list(lines[empty], 0)}"
         )
-    return cells
+
+
+def _cell_texts(
+    chunk: pd.DataFrame, positions: Sequence[int], first_line: int, path: str
+) -> np.ndarray:
+    lines = first_line + np.arange(len(chunk))
+    if len(positions) > 1:
+        cells = joined_columns(chunk, positions, COLUMN_SEPARATOR)
+        _refuse_cellless(cells, lines, path)
+        return cells
+    return _stripped_cells(
+        chunk[positions[0] if positions else 0].to_numpy(dtype=object), lines, path
+    )
 
 
 def _barcode_texts(chunk: pd.DataFrame, positions: Sequence[int]) -> np.ndarray:
@@ -728,11 +912,15 @@ def _required_text(
     return values
 
 
-def _item_counts(
-    items: np.ndarray, origin: np.ndarray, name: str, first_line: int
-) -> np.ndarray:
-    """Parse the counts of list items, naming the file lines of bad ones."""
-    text = pd.Series(items, dtype=object).str.strip()
+def _parsed_counts(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Parse counts once per distinct value, as ``parse_integers`` parses them.
+
+    Returns:
+        Each value's count, -1 where missing; whether it is missing; and
+        whether it is no whole number of at least 0.
+    """
+    codes, distinct = pd.factorize(np.asarray(values, dtype=object))
+    text = pd.Series(distinct, dtype=object).str.strip()
     missing = (text.isna() | text.isin(MISSING_TEXT)).to_numpy(dtype=bool)
     numbers = pd.to_numeric(text.where(~missing), errors="coerce").to_numpy(
         dtype=np.float64
@@ -740,14 +928,23 @@ def _item_counts(
     bad = ~missing & (
         ~np.isfinite(numbers) | (numbers < 0) | (numbers != np.floor(numbers))
     )
+    counts = np.full(len(distinct), -1, dtype=np.int64)
+    whole = ~missing & ~bad
+    counts[whole] = numbers[whole].astype(np.int64)
+    return counts[codes], missing[codes], bad[codes]
+
+
+def _item_counts(
+    items: np.ndarray, origin: np.ndarray, name: str, first_line: int
+) -> np.ndarray:
+    """Parse the counts of list items, naming the file lines of bad ones."""
+    counts, _missing, bad = _parsed_counts(items)
     if bad.any():
-        rows = origin[bad]
         raise ValueError(
             f"{name} must be a whole number of at least 0, but holds "
-            f"{text[bad].iloc[0]!r} on " + file_lines(rows, first_line)
+            f"{str(items[np.flatnonzero(bad)[0]]).strip()!r} on "
+            + file_lines(origin[bad], first_line)
         )
-    counts = np.full(len(numbers), -1, dtype=np.int64)
-    counts[~missing] = numbers[~missing].astype(np.int64)
     return counts
 
 
@@ -835,6 +1032,20 @@ def _check_pycashier(
         )
 
 
+def _refuse_unfilled(
+    layout: BarcodeLayout, column: str, missing: np.ndarray, first_line: int
+) -> None:
+    """Refuse rows that lack a value that the format fills in every row."""
+    rows = np.flatnonzero(missing)
+    if len(rows):
+        raise ValueError(
+            f"{layout.path} has rows without {column} on "
+            + file_lines(rows, first_line)
+            + f", which format={layout.format!r} fills in every row; the file may "
+            "be cut short"
+        )
+
+
 def _iter_table_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[BarcodeRows]:
     text = layout._text
     assert text is not None
@@ -882,63 +1093,164 @@ def _iter_table_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[Barcode
                 for role, column in (("umis", layout.umis), ("reads", layout.reads))
                 if column is not None
             }
-            yield _exploded_rows(
-                layout,
-                first_line,
-                cells,
-                parse_text(chunk[barcode_positions[0]].to_numpy(dtype=object)),
-                raw,
-                libraries,
-            )
+            lists = parse_text(chunk[barcode_positions[0]].to_numpy(dtype=object))
+            for column in layout.required:
+                values = (
+                    lists
+                    if column in layout.barcode
+                    else parse_text(chunk[index[column]].to_numpy(dtype=object))
+                )
+                _refuse_unfilled(layout, column, pd.isna(values), first_line)
+            yield _exploded_rows(layout, first_line, cells, lists, raw, libraries)
             continue
         counts = {
-            role: parse_integers(
+            column: parse_integers(
                 chunk[index[column]].to_numpy(dtype=object),
                 name=column,
                 first_line=first_line,
             )
-            for role, column in (("umis", layout.umis), ("reads", layout.reads))
+            for column in (layout.umis, layout.reads)
             if column is not None
         }
+        barcodes = _barcode_texts(chunk, barcode_positions)
+        for column in layout.required:
+            missing = (
+                pd.isna(barcodes) if column in layout.barcode else counts[column] < 0
+            )
+            _refuse_unfilled(layout, column, missing, first_line)
+        if layout.format == "quicat":
+            # QuiCAT writes a cell without barcodes with neither a barcode nor
+            # a count, and a barcode always with its count.
+            _refuse_unfilled(
+                layout,
+                str(layout.umis),
+                ~pd.isna(barcodes) & (counts[str(layout.umis)] < 0),
+                first_line,
+            )
         yield BarcodeRows(
             first_line=first_line,
             cells=cells,
-            barcodes=_barcode_texts(chunk, barcode_positions),
+            barcodes=barcodes,
             umis=umis,
-            umi_counts=counts.get("umis"),
-            reads=counts.get("reads"),
+            umi_counts=None if layout.umis is None else counts[layout.umis],
+            reads=None if layout.reads is None else counts[layout.reads],
             libraries=libraries,
         )
 
 
-def _iter_wide_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[BarcodeRows]:
+def _text_as_zero(value: str) -> float:
+    """Read a field of text as 0, so that numpy parses a row's counts beside it."""
+    return 0.0
+
+
+def _kept_as_zero(kept: list[str]) -> Callable[[str], float]:
+    """Read a field of text as 0, keeping its text in ``kept``, row by row."""
+
+    def convert(value: str) -> float:
+        kept.append(value)
+        return 0.0
+
+    return convert
+
+
+def _refuse_wide_lines(
+    layout: BarcodeLayout,
+    lines: list[str],
+    numbers: np.ndarray,
+    positions: np.ndarray,
+    error: str,
+) -> NoReturn:
+    """Name the lines of a merged table whose fields are not a cell and counts."""
     text = layout._text
     assert text is not None
-    positions = [
-        position
-        for position, name in enumerate(text.names)
-        if name not in _QUICAT_CELL_COLUMNS
-    ]
-    names = np.asarray([text.names[position] for position in positions], dtype=object)
-    cell_position = text.names.index("cell")
-    for first_line, chunk in text_chunks(text, chunk_rows):
-        cells = _cell_texts(chunk, [cell_position], first_line, layout.path)
-        counts = np.column_stack(
-            [
-                parse_integers(
-                    chunk[position].to_numpy(dtype=object),
-                    name=text.names[position],
-                    first_line=first_line,
-                )
-                for position in positions
-            ]
+    rows = [split_fields(line.rstrip("\r\n"), text.delimiter) for line in lines]
+    widths = np.asarray([len(fields) for fields in rows], dtype=np.int64)
+    uneven = np.flatnonzero(widths != len(text.names))
+    if len(uneven):
+        raise ValueError(
+            f"{layout.path} holds {widths[uneven[0]]} fields on "
+            + file_lines(numbers[uneven], 0)
+            + f", where its header names {len(text.names)} columns"
         )
-        rows, columns = np.nonzero(counts > 0)
+    block = np.asarray(
+        [[fields[position] for position in positions] for fields in rows], dtype=object
+    )
+    _counts, missing, bad = _parsed_counts(block.reshape(-1))
+    wrong = np.flatnonzero(missing | bad)
+    if len(wrong):
+        row, column = divmod(int(wrong[0]), len(positions))
+        raise ValueError(
+            f"{layout.path} holds {str(block[row, column]).strip()!r} as the count "
+            f"of barcode {text.names[positions[column]]!r} on "
+            + file_lines(numbers[np.unique(wrong // len(positions))], 0)
+            + "; QuiCAT's merged table holds a whole number of at least 0 in "
+            "every field"
+        )
+    raise ValueError(f"{layout.path} is malformed: {error}")
+
+
+def _iter_wide_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[BarcodeRows]:
+    """Read a merged table's nonzero counts.
+
+    numpy parses each chunk in one pass in C, keeping each row's cell
+    barcode as it goes; pandas works column by column, which costs a merged
+    table of thousands of barcodes more than its parsing.
+    """
+    text = layout._text
+    assert text is not None
+    positions = np.asarray(
+        [
+            position
+            for position, name in enumerate(text.names)
+            if name not in _QUICAT_CELL_COLUMNS
+        ],
+        dtype=np.intp,
+    )
+    # The barcode of each column; the columns of each cell read as 0, so no
+    # count names them.
+    names = np.asarray(
+        [None if name in _QUICAT_CELL_COLUMNS else name for name in text.names],
+        dtype=object,
+    )
+    cell_position = text.names.index("cell")
+    options: dict[str, Any] = {
+        "delimiter": None if text.delimiter == " " else text.delimiter,
+        "comments": None,
+        "quotechar": '"',
+    }
+    for numbers, lines in line_chunks(text, chunk_rows):
+        cells: list[str] = []
+        converters: dict[int | str, Callable[[str], float]] = {
+            position: _text_as_zero
+            for position, name in enumerate(text.names)
+            if name in _QUICAT_CELL_COLUMNS
+        }
+        converters[cell_position] = _kept_as_zero(cells)
+        try:
+            # Every field is parsed, so a row of another width raises.
+            values = np.loadtxt(
+                lines, dtype=np.float64, ndmin=2, converters=converters, **options
+            )
+        except ValueError as error:
+            _refuse_wide_lines(layout, lines, numbers, positions, str(error))
+        if (
+            values.shape != (len(lines), len(text.names))
+            or len(cells) != len(lines)
+            or not np.all(np.isfinite(values))
+            or not np.all(values >= 0)
+            or not np.all(values == np.floor(values))
+        ):
+            _refuse_wide_lines(
+                layout, lines, numbers, positions, "its rows are not a cell and counts"
+            )
+        rows, columns = np.nonzero(values > 0)
         yield BarcodeRows(
-            first_line=first_line,
-            cells=cells[rows],
+            first_line=int(numbers[0]),
+            cells=_stripped_cells(
+                np.asarray(cells, dtype=object), numbers, layout.path
+            )[rows],
             barcodes=names[columns],
-            umi_counts=counts[rows, columns],
+            umi_counts=values[rows, columns].astype(np.int64),
         )
 
 
@@ -957,73 +1269,109 @@ def _decoded_names(dataset: Any) -> np.ndarray:
     )
 
 
+def _dense_entries(
+    node: h5py.Dataset, matrix: _Matrix, entries: int
+) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Yield the rows, columns and values of a dense matrix's nonzero entries.
+
+    The matrix is read in tiles of whole HDF5 chunks, and each tile's
+    entries are searched ``entries`` at a time, so no run yields more.
+    """
+    height, width = matrix.tile_shape(entries)
+    for top in range(0, matrix.n_cells, height):
+        for left in range(0, matrix.n_barcodes, width):
+            tile = np.asarray(
+                node[
+                    top : min(top + height, matrix.n_cells),
+                    left : min(left + width, matrix.n_barcodes),
+                ]
+            )
+            flat = tile.reshape(-1)
+            for begin in range(0, len(flat), entries):
+                found = np.flatnonzero(flat[begin : begin + entries]) + begin
+                rows, columns = np.divmod(found, tile.shape[1])
+                yield rows + top, columns + left, flat[found]
+
+
+def _sparse_entries(
+    node: h5py.Group, matrix: _Matrix, entries: int, path: str
+) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Yield the rows, columns and values of a sparse matrix's stored entries.
+
+    Stored entries are read ``entries`` at a time, whatever rows or columns
+    they belong to, so a barcode of many cells is read in parts.
+    """
+    pointers = np.asarray(node["indptr"][:], dtype=np.int64)
+    n_major, n_minor = (
+        (matrix.n_cells, matrix.n_barcodes)
+        if matrix.encoding == "csr"
+        else (matrix.n_barcodes, matrix.n_cells)
+    )
+    n_stored = int(pointers[-1]) if len(pointers) else 0
+    if (
+        len(pointers) != n_major + 1
+        or pointers[0] != 0
+        or np.any(np.diff(pointers) < 0)
+        or n_stored > min(node["indices"].shape[0], node["data"].shape[0])
+    ):
+        raise ValueError(f"X of {path} has pointers that do not fit its entries")
+    for first in range(0, n_stored, entries):
+        last = min(first + entries, n_stored)
+        minor = np.asarray(node["indices"][first:last], dtype=np.int64)
+        if len(minor) and (minor.min() < 0 or minor.max() >= n_minor):
+            raise ValueError(f"X of {path} holds entries beyond its shape")
+        majors = np.searchsorted(pointers, np.arange(first, last), side="right") - 1
+        rows, columns = (majors, minor) if matrix.encoding == "csr" else (minor, majors)
+        yield rows, columns, np.asarray(node["data"][first:last])
+
+
 def _iter_h5ad_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[BarcodeRows]:
+    """Yield the nonzero entries of an AnnData file's ``X``, ``chunk_rows`` at most.
+
+    A dense matrix is read in tiles of whole HDF5 chunks, and a sparse one
+    ``chunk_rows`` stored entries at a time. The names of the cells and
+    barcodes are decoded once.
+    """
+    matrix = layout._matrix
+    assert matrix is not None
     counts_role = "umis" if layout.umis is not None else "reads"
+    entries = max(1, int(chunk_rows))
     with h5py.File(layout.path, "r") as handle:
         obs, var = handle["obs"], handle["var"]
-        cell_names = obs[str(index_key(obs))]
+        cell_names = _decoded_names(obs[str(index_key(obs))][:])
         barcode_names = _decoded_names(var[str(index_key(var))][:])
-        n_cells, n_barcodes = int(cell_names.shape[0]), len(barcode_names)
         node = handle["X"]
-        if isinstance(node, h5py.Dataset):
-            encoding, shape = "dense", tuple(int(size) for size in node.shape)
-        else:
-            encoding, shape = str(sparse_encoding(node)), sparse_shape(node) or ()
-        if encoding not in ("dense", "csr", "csc") or len(shape) != 2:
-            raise ValueError(
-                f"X of {layout.path} is neither a dense nor a sparse matrix"
+        libraries = None
+        if layout.library_column is not None:
+            labels, absent = read_table_column(
+                handle, obs, layout.library_column, ("__categories",)
             )
-        if shape != (n_cells, n_barcodes):
-            raise ValueError(
-                f"X of {layout.path} is {shape[0]} by {shape[1]}, but the file names "
-                f"{n_cells} cells and {n_barcodes} barcodes"
-            )
-        major = n_barcodes if encoding == "csc" else n_cells
-        for start in range(0, major, chunk_rows):
-            stop = min(start + chunk_rows, major)
-            if encoding == "dense":
-                block = np.asarray(node[start:stop])
-                rows, columns = np.nonzero(block)
-                values = block[rows, columns]
-                rows = rows + start
-            else:
-                pointers = np.asarray(node["indptr"][start : stop + 1], dtype=np.int64)
-                first, last = int(pointers[0]), int(pointers[-1])
-                minor = np.asarray(node["indices"][first:last], dtype=np.int64)
-                values = np.asarray(node["data"][first:last])
-                majors = np.repeat(np.arange(start, stop), np.diff(pointers))
-                rows, columns = (
-                    (majors, minor) if encoding == "csr" else (minor, majors)
+            if np.any(np.asarray(absent, dtype=bool)):
+                raise ValueError(
+                    f"The obs column {layout.library_column!r} of {layout.path} "
+                    "lacks the library of some cells"
                 )
-                stored = values != 0
-                rows, columns, values = rows[stored], columns[stored], values[stored]
+            libraries = np.asarray(
+                [as_text(value) for value in np.asarray(labels).tolist()], dtype=object
+            )
+        found = (
+            _dense_entries(node, matrix, entries)
+            if matrix.encoding == "dense"
+            else _sparse_entries(node, matrix, entries, layout.path)
+        )
+        for rows, columns, values in found:
+            stored = values != 0
+            rows, columns, values = rows[stored], columns[stored], values[stored]
             counts = _whole_counts(values, layout.path)
             if not len(rows):
                 continue
-            low, high = int(rows.min()), int(rows.max())
-            cells = _decoded_names(cell_names[low : high + 1])[rows - low]
-            libraries = None
-            if layout.library_column is not None:
-                labels, missing = read_table_column(
-                    handle, obs, layout.library_column, ("__categories",), low, high + 1
-                )
-                texts = np.asarray(
-                    [as_text(value) for value in np.asarray(labels).tolist()],
-                    dtype=object,
-                )
-                if np.any(np.asarray(missing, dtype=bool)):
-                    raise ValueError(
-                        f"The obs column {layout.library_column!r} of {layout.path} "
-                        "lacks the library of some cells"
-                    )
-                libraries = texts[rows - low]
             yield BarcodeRows(
-                first_line=start + 1,
-                cells=cells,
+                first_line=int(rows.min()) + 1,
+                cells=cell_names[rows],
                 barcodes=barcode_names[columns],
                 umi_counts=counts if counts_role == "umis" else None,
                 reads=counts if counts_role == "reads" else None,
-                libraries=libraries,
+                libraries=None if libraries is None else libraries[rows],
             )
 
 

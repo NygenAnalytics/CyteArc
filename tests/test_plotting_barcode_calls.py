@@ -190,3 +190,22 @@ def test_barcode_calls_show_their_figure_by_default(imported) -> None:
     result = store.plots.barcode_calls(ref)
     plt.close(result.figure)
     assert result.tables["barcodes_per_cell"]["cells"].sum() == len(TRUTH.cell_ids)
+
+
+def test_pairs_counted_by_reads_are_no_molecules_of_the_reads_panel(tmp_path) -> None:
+    from tests.clone_truth import write_celltag_reads
+
+    store = write_truth_store(tmp_path / "store.zarr", TRUTH)
+    path = write_celltag_reads(
+        BARCODES, tmp_path / "atac.txt.gz", sample="d4", assay="ATAC"
+    )
+    ref = store.clones.import_barcodes(
+        path, cell_selection=every_cell(store), barcode_prefix="d4__"
+    )
+    result = store.plots.barcode_calls(ref, show=False)
+    try:
+        # ATAC's pairs count reads, but no molecule.
+        assert result.tables["reads_per_molecule"].empty
+        assert result.tables["umis_per_barcode"].empty
+    finally:
+        plt.close(result.figure)

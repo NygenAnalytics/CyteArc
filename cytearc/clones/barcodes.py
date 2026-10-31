@@ -27,9 +27,9 @@ without UMIs, into pairs. Rows that name one record, such as a molecule that
 two files of one library list, merge into one record that sums their reads,
 and a pair's UMIs too. A library holds molecules or pairs, never both, and a
 record's source is its library. ``BarcodeCounter`` collapses rows chunk by
-chunk and merges the chunks as they accumulate, so it holds about as many
-rows as there are records, however many reads the files list. These
-functions never touch storage.
+chunk and merges the chunks as they accumulate, so it holds at most about
+twice as many rows as there are records, however many reads the files list.
+These functions never touch storage.
 """
 
 from collections.abc import Mapping, Sequence
@@ -61,6 +61,8 @@ __all__ = [
     "cell_summaries",
     "library_summaries",
     "lineage_barcode_frames",
+    "pair_keys",
+    "repeated_keys",
 ]
 
 type BarcodeLevel = Literal["molecules", "pairs"]
@@ -76,8 +78,8 @@ LEVELS: tuple[BarcodeLevel, ...] = ("molecules", "pairs")
 # and its references.
 _TEXT_BYTES = 96
 # Bytes of the arrays that each held row takes: its cell, library, barcode
-# and UMI codes, UMIs, reads and rows.
-_ROW_BYTES = 44
+# and UMI codes, UMIs and reads.
+_ROW_BYTES = 36
 # Bytes that merging takes beside the held rows, for each row and each
 # distinct text value: the rows joined, their order and their sorted copy,
 # and the table that codes the text.
@@ -100,7 +102,6 @@ class _Rows:
     umi_values: np.ndarray
     umis: np.ndarray
     reads: np.ndarray
-    rows: np.ndarray
 
     def __len__(self) -> int:
         return len(self.cells)
@@ -148,7 +149,6 @@ def _collapsed(rows: _Rows) -> _Rows:
         umi_values=rows.umi_values,
         umis=np.asarray(umis, dtype=np.int64),
         reads=_known_sums(rows.reads[order], starts),
-        rows=np.add.reduceat(rows.rows[order], starts),
     )
 
 
@@ -194,7 +194,6 @@ def _merged(parts: Sequence[_Rows]) -> _Rows:
             umi_values=umi_values,
             umis=np.concatenate([part.umis for part in parts]),
             reads=np.concatenate([part.reads for part in parts]),
-            rows=np.concatenate([part.rows for part in parts]),
         )
     )
 
@@ -208,13 +207,11 @@ class CountedBarcodes:
             sources are their libraries.
         libraries: The name of each library, by its position, sorted.
         levels: Each library's level, ``"molecules"`` or ``"pairs"``.
-        rows: The file rows that each record merges.
     """
 
     table: RecordTable
     libraries: tuple[str, ...]
     levels: tuple[BarcodeLevel, ...]
-    rows: np.ndarray
 
 
 class BarcodeCounter:
@@ -222,7 +219,8 @@ class BarcodeCounter:
 
     Each chunk is collapsed on its own; once the rows that wait outnumber
     the records held, and ``merge_rows``, the waiting chunks merge into the
-    records, so the counter holds about as many rows as there are records.
+    records, so the counter holds at most about twice as many rows as there
+    are records.
 
     Args:
         merge_rows: The fewest waiting rows that merge into the records.
@@ -359,7 +357,6 @@ class BarcodeCounter:
                 umi_values=umi_values,
                 umis=unit_umis,
                 reads=row_reads,
-                rows=np.ones(n_rows, dtype=np.int64),
             )
         )
         self._waiting.append(part)
@@ -427,9 +424,7 @@ class BarcodeCounter:
             "molecules" if self._library_molecules[position] else "pairs"
             for position in library_order.tolist()
         )
-        return CountedBarcodes(
-            table=table, libraries=names, levels=levels, rows=held.rows[order]
-        )
+        return CountedBarcodes(table=table, libraries=names, levels=levels)
 
 
 def _empty_rows() -> _Rows:
@@ -444,7 +439,6 @@ def _empty_rows() -> _Rows:
         umi_values=np.empty(0, dtype=object),
         umis=empty,
         reads=empty,
-        rows=empty,
     )
 
 
@@ -747,3 +741,39 @@ def lineage_barcode_frames(
         }
     )
     return LineageBarcodes(cells=cells, records=records, libraries=library_table)
+
+
+# Two 64-bit hashes of each text, whose combination keys a pair of texts by
+# 128 bits, and the odd constant that mixes the first text into the key.
+_HASH_KEYS = ("lineage-barcode1", "lineage-barcode2")
+_MIX = np.uint64(0x9E3779B97F4A7C15)
+
+
+def pair_keys(first: Any, second: Any) -> np.ndarray:
+    """Key each pair of texts, such as a cell and a UMI, by 128 bits.
+
+    Two pairs share a key only if their texts are equal, but for a chance
+    of about one in 2**128.
+
+    Returns:
+        One row per pair and two uint64 columns.
+    """
+    first = np.asarray(first, dtype=object).reshape(-1)
+    second = np.asarray(second, dtype=object).reshape(-1)
+    columns = []
+    for key in _HASH_KEYS:
+        mixed = pd.util.hash_array(first, hash_key=key) * _MIX
+        columns.append(np.bitwise_xor(mixed, pd.util.hash_array(second, hash_key=key)))
+    return np.stack(columns, axis=1).astype(np.uint64, copy=False)
+
+
+def repeated_keys(keys: Sequence[np.ndarray]) -> int:
+    """Count the keys that repeat an earlier key.
+
+    The keys are joined and sorted in place, so finding the repeats holds a
+    copy of the keys and one byte per key beside them.
+    """
+    joined = np.concatenate([np.empty((0, 2), dtype=np.uint64), *keys])
+    pairs = joined.view([("high", np.uint64), ("low", np.uint64)]).reshape(-1)
+    pairs.sort()
+    return int(np.count_nonzero(pairs[1:] == pairs[:-1]))

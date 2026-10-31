@@ -1060,8 +1060,8 @@ _MOLECULE_LOOKUPS = ("barcodes", "features/id", "library_info", "library_idx")
 _GENE_EXPRESSION = "Gene Expression"
 # The bases of a 2-bit packed UMI: A=0, C=1, G=2, T=3.
 _UMI_BASES = np.frombuffer(b"ACGT", dtype=np.uint8)
-# Rows of the per-molecule datasets read at once, at least.
-_MIN_MOLECULE_ROWS = 1 << 16
+#: Rows of the per-molecule datasets read at once, at least.
+MIN_MOLECULE_ROWS = 1 << 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -1076,6 +1076,9 @@ class MoleculeInfoLibrary:
             of that type.
         umi_length: The length of the library's UMIs, from ``metrics_json``.
         n_molecules: The molecules of the file, of every library.
+        barcode_block_rows: The cell barcodes read at once: the rows of the
+            dataset's chunks, or 65,536 if more.
+        barcode_block_bytes: The bytes of such a block of cell barcodes.
     """
 
     path: str
@@ -1083,6 +1086,8 @@ class MoleculeInfoLibrary:
     library_indices: tuple[int, ...]
     umi_length: int
     n_molecules: int
+    barcode_block_rows: int
+    barcode_block_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1203,6 +1208,10 @@ def molecule_info_library(
         )
         umi_length = _umi_length(handle, library_type, name)
         n_molecules = int(handle["library_idx"].shape[0])
+        barcodes = handle["barcodes"]
+        chunk_rows = barcodes.chunks[0] if barcodes.chunks else 0
+        block_rows = max(int(chunk_rows), MIN_MOLECULE_ROWS)
+        block_bytes = block_rows * int(barcodes.dtype.itemsize)
         lengths = {int(handle[column].shape[0]) for column in _MOLECULE_COLUMNS}
         if lengths != {n_molecules}:
             raise ValueError(
@@ -1220,7 +1229,48 @@ def molecule_info_library(
         library_indices=indices,
         umi_length=umi_length,
         n_molecules=n_molecules,
+        barcode_block_rows=block_rows,
+        barcode_block_bytes=block_bytes,
     )
+
+
+class BarcodeBlocks:
+    """Cell barcodes of a ``molecule_info.h5``, read one block at a time.
+
+    Molecules are sorted by their barcode, so the chunks of molecules name
+    blocks of barcodes in order; the block read last is kept, and each block
+    is read once even when its dataset is stored as one compressed chunk.
+
+    Args:
+        barcodes: The ``barcodes`` dataset, or anything sliced like it.
+        block_rows: The barcodes of each block.
+    """
+
+    def __init__(self, barcodes: Any, *, block_rows: int) -> None:
+        self._barcodes = barcodes
+        self._rows = max(1, int(block_rows))
+        self._n = int(barcodes.shape[0])
+        self._block = -1
+        self._values: np.ndarray = np.empty(0, dtype=object)
+
+    def texts(self, indices: np.ndarray) -> np.ndarray:
+        """Return the barcodes at ``indices``, as text."""
+        positions = np.asarray(indices, dtype=np.int64)
+        texts = np.empty(len(positions), dtype=object)
+        blocks = positions // self._rows
+        for block in np.unique(blocks).tolist():
+            if block != self._block:
+                start = block * self._rows
+                self._values = np.asarray(
+                    self._barcodes[slice(start, min(start + self._rows, self._n))]
+                )
+                self._block = block
+            chosen = blocks == block
+            texts[chosen] = [
+                as_text(value)
+                for value in self._values[positions[chosen] - block * self._rows]
+            ]
+        return texts
 
 
 def decode_umis(packed: Any, length: int) -> np.ndarray:
@@ -1243,7 +1293,7 @@ def decode_umis(packed: Any, length: int) -> np.ndarray:
 
 
 def iter_molecule_info(
-    library: MoleculeInfoLibrary, *, chunk_rows: int = _MIN_MOLECULE_ROWS
+    library: MoleculeInfoLibrary, *, chunk_rows: int = MIN_MOLECULE_ROWS
 ) -> Iterator[MoleculeRows]:
     """Yield the molecules of one library of a ``molecule_info.h5`` in chunks.
 
@@ -1262,7 +1312,7 @@ def iter_molecule_info(
         ValueError: If a molecule names a barcode or feature that the file
             does not list.
     """
-    rows = max(_MIN_MOLECULE_ROWS, int(chunk_rows))
+    rows = max(MIN_MOLECULE_ROWS, int(chunk_rows))
     wanted = np.asarray(library.library_indices, dtype=np.int64)
     with h5py.File(library.path, "r") as handle:
         feature_ids = np.asarray(
@@ -1271,6 +1321,7 @@ def iter_molecule_info(
         )
         barcode_table = handle["barcodes"]
         n_barcodes = int(barcode_table.shape[0])
+        blocks = BarcodeBlocks(barcode_table, block_rows=library.barcode_block_rows)
         for start in range(0, library.n_molecules, rows):
             stop = min(start + rows, library.n_molecules)
             kept = np.flatnonzero(
@@ -1291,9 +1342,6 @@ def iter_molecule_info(
                     f"{library.path} lists molecules of barcodes or features that "
                     "it does not hold"
                 )
-            # Rows are sorted by barcode, so a chunk names a narrow range.
-            low, high = int(barcode_index.min()), int(barcode_index.max())
-            listed = barcode_table[low : high + 1]
             keys, positions = np.unique(
                 np.stack([barcode_index, columns["gem_group"].astype(np.int64)]),
                 axis=1,
@@ -1301,9 +1349,9 @@ def iter_molecule_info(
             )
             texts = np.asarray(
                 [
-                    f"{as_text(listed[barcode - low])}-{gem_group}"
+                    f"{barcode}-{gem_group}"
                     for barcode, gem_group in zip(
-                        keys[0].tolist(), keys[1].tolist(), strict=True
+                        blocks.texts(keys[0]).tolist(), keys[1].tolist(), strict=True
                     )
                 ],
                 dtype=object,

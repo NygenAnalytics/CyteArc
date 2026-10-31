@@ -462,7 +462,7 @@ def test_trexs_reads_table_is_refused_for_repeating_its_molecules(
     path = write_trex_molecules(
         BARCODES, tmp_path / "reads.txt", sample="d4", generation="reads"
     )
-    with pytest.raises(ValueError, match="as each read of TREX's reads.txt does"):
+    with pytest.raises(ValueError, match="as TREX's reads.txt lists each read"):
         shared.store.clones.import_barcodes(
             path,
             cell_selection=shared.cells,
@@ -791,7 +791,7 @@ def test_a_read_level_file_of_many_chunks_holds_its_molecules_not_its_reads(
     store, tmp_path, monkeypatch
 ) -> None:
     from cytearc.clones import barcodes as barcodes_module
-    from cytearc.datastore._operations import lineage_barcodes as operations
+    from cytearc.readers import lineage_barcodes as reader
 
     # One sample's molecules read 40 and 400 times: the second file is ten
     # times longer, and both hold the same molecules.
@@ -816,7 +816,7 @@ def test_a_read_level_file_of_many_chunks_holds_its_molecules_not_its_reads(
 
         monkeypatch.setattr(barcodes_module.BarcodeCounter, "add", add)
         # Chunks of 200 rows, merged once 1,000 rows wait.
-        monkeypatch.setattr(operations, "_MAX_CHUNK_ROWS", 200)
+        monkeypatch.setattr(reader, "_MAX_CHUNK_ROWS", 200)
         monkeypatch.setattr(store, "_merge_rows", lambda: 1_000)
         ref = store.clones.import_barcodes(
             path,
@@ -956,3 +956,237 @@ def test_load_refuses_an_artifact_whose_libraries_are_not_recorded(
     artifact_group(store.zw, ref).attrs["libraries"] = [{"library": "x"}]
     with pytest.raises(ValueError, match="no valid list of libraries"):
         store.clones.load_barcodes(ref)
+
+
+def test_a_trex_table_and_amplicon_reads_of_one_library_merge(shared, tmp_path) -> None:
+    # TREX lists each molecule once; pycashier's reads of the same library add
+    # one read per row to the same molecules.
+    trex = write_trex_molecules(BARCODES, tmp_path / "molecules.txt", sample="d4")
+    reads = write_pycashier(BARCODES, tmp_path / "amplicon.tsv", sample="d4")
+
+    ref = shared.store.clones.import_barcodes(
+        [trex, reads],
+        cell_selection=shared.cells,
+        barcode_prefix="d4__",
+        barcode_suffix="-1",
+        library="d4",
+    )
+
+    expected = _molecules()
+    expected = expected[expected["cell"].str.startswith("d4__")].reset_index(drop=True)
+    records = _records(shared.store.clones.load_barcodes(ref))
+    pd.testing.assert_frame_equal(
+        _sorted(records), _sorted(expected.assign(reads=2 * expected["reads"]))
+    )
+
+
+def test_two_trex_runs_of_one_library_merge_their_reads(shared, tmp_path) -> None:
+    first = write_trex_molecules(BARCODES, tmp_path / "run1.txt", sample="d2")
+    second = tmp_path / "run2.txt"
+    second.write_text(first.read_text() + "\n")
+
+    with collect_warnings():
+        ref = shared.store.clones.import_barcodes(
+            [first, second],
+            cell_selection=shared.cells,
+            barcode_prefix="d2__",
+            barcode_suffix="-1",
+            library="d2",
+        )
+
+    expected = _molecules()
+    expected = expected[expected["cell"].str.startswith("d2__")].reset_index(drop=True)
+    records = _records(shared.store.clones.load_barcodes(ref))
+    pd.testing.assert_frame_equal(
+        _sorted(records), _sorted(expected.assign(reads=2 * expected["reads"]))
+    )
+
+
+def test_a_trex_reads_table_beside_molecules_is_named_in_the_refusal(
+    shared, tmp_path
+) -> None:
+    molecules = write_trex_molecules(BARCODES, tmp_path / "molecules.txt", sample="d4")
+    reads = write_trex_molecules(
+        BARCODES, tmp_path / "reads.txt", sample="d4", generation="reads"
+    )
+    with pytest.raises(ValueError, match="reads.txt lists .* on several rows"):
+        shared.store.clones.import_barcodes(
+            [molecules, reads],
+            cell_selection=shared.cells,
+            barcode_prefix="d4__",
+            barcode_suffix="-1",
+            library=["d4", "other"],
+        )
+
+
+def test_barcodes_of_an_assay_join_cells_across_its_blocks(
+    tmp_path, monkeypatch
+) -> None:
+    from cytearc.matrix.chunked import ChunkedArray
+
+    rng = np.random.default_rng(8)
+    counts = rng.poisson(0.7, size=(N_CELLS, 4)).astype(np.uint16)
+    path = tmp_path / "store.zarr"
+    write_count_store(
+        str(path),
+        {"RNA": np.ones((N_CELLS, 3), dtype=np.uint16), "LINEAGE": counts},
+        "uint16",
+        cell_ids=TRUTH.cell_ids,
+    )
+    store = open_clone_store(path)
+    keep = np.arange(N_CELLS) % 3 != 0
+    store.cells.insert("kept", keep)
+    cells = store.snapshot_cell_selection("kept")
+    stream = ChunkedArray._stream_blocks
+
+    def in_blocks_of_five(self, **options):
+        for block in stream(self, **options):
+            for start in range(0, block.shape[0], 5):
+                yield block[start : start + 5]
+
+    monkeypatch.setattr(ChunkedArray, "_stream_blocks", in_blocks_of_five)
+    ref = store.clones.import_barcodes(cell_selection=cells, from_assay="LINEAGE")
+
+    kept = counts[keep]
+    rows, columns = np.nonzero(kept)
+    expected = sorted(
+        zip(
+            TRUTH.cell_ids[keep][rows],
+            [f"LINEAGE{column}" for column in columns],
+            kept[rows, columns].tolist(),
+            strict=True,
+        )
+    )
+    records = _records(store.clones.load_barcodes(ref))
+    assert (
+        sorted(zip(records["cell"], records["barcode"], records["umis"], strict=True))
+        == expected
+    )
+
+
+def test_rows_of_unselected_cells_are_unmatched_rather_than_empty(
+    shared, tmp_path
+) -> None:
+    path = tmp_path / "pairs.csv"
+    cell = TRUTH.cell_ids[0]
+    path.write_text(
+        f"cell,barcode,umis\n{cell},AAAA,3\noutside-1,NA,2\noutside-2,,1\n{cell},,4\n"
+    )
+    with collect_warnings():
+        ref = shared.store.clones.import_barcodes(
+            path,
+            cell_selection=shared.cells,
+            format="pairs",
+            columns={"cell": "cell", "barcode": "barcode", "umis": "umis"},
+        )
+    attributes = shared.store.artifacts.load(ref).attrs
+    assert (attributes["n_file_rows"], attributes["n_unmatched_rows"]) == (4, 2)
+    assert attributes["n_empty_rows"] == 1
+
+
+def test_pairs_counted_by_reads_alone_hold_no_barcode_at_zero(shared, tmp_path) -> None:
+    cell = TRUTH.cell_ids[0]
+    path = tmp_path / "pairs.csv"
+    path.write_text(f"cell,barcode,reads\n{cell},AAAA,5\n{cell},CCCC,0\n")
+    ref = shared.store.clones.import_barcodes(
+        path,
+        cell_selection=shared.cells,
+        format="pairs",
+        columns={"cell": "cell", "barcode": "barcode", "reads": "reads"},
+    )
+    records = _records(shared.store.clones.load_barcodes(ref))
+    assert records[["barcode", "umis", "reads"]].values.tolist() == [["AAAA", -1, 5]]
+    assert shared.store.artifacts.load(ref).attrs["n_empty_rows"] == 1
+
+
+def test_the_budget_check_counts_the_lookup_and_a_chunk_beside_the_records(
+    store, tmp_path, monkeypatch
+) -> None:
+    from cytearc.clones import barcodes as barcodes_module
+
+    path = write_bartab_counts(BARCODES, tmp_path / "counts.tsv", sample="d4")
+    budget = 4 * 2**20
+    monkeypatch.setattr(store, "memoryBytes", budget)
+    # The records alone fit the budget; with the lookup of the cells and a
+    # chunk of text beside them, they do not. Before the first row, the
+    # lookup and a chunk fit.
+    monkeypatch.setattr(
+        barcodes_module.BarcodeCounter,
+        "peak_bytes",
+        property(lambda self: budget - 64 if self.n_rows else 0),
+    )
+    with pytest.raises(MemoryError, match="Raise mem_budget"):
+        store.clones.import_barcodes(
+            path,
+            cell_selection=every_cell(store),
+            barcode_prefix="d4__",
+            barcode_suffix="-1",
+        )
+    assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []
+
+
+def test_a_small_budget_reads_a_file_in_several_chunks(
+    store, tmp_path, monkeypatch
+) -> None:
+    from cytearc.clones import barcodes as barcodes_module
+
+    path = write_pycashier(BARCODES, tmp_path / "reads.tsv", sample="d4")
+    n_reads = len(path.read_text().splitlines()) - 1
+    chunks = []
+    original = barcodes_module.BarcodeCounter.add
+
+    def add(self, cells, *args, **kwargs):
+        chunks.append(len(cells))
+        return original(self, cells, *args, **kwargs)
+
+    monkeypatch.setattr(barcodes_module.BarcodeCounter, "add", add)
+    monkeypatch.setattr(store, "memoryBytes", 2 * 2**20)
+    store.clones.import_barcodes(
+        path,
+        cell_selection=every_cell(store),
+        barcode_prefix="d4__",
+        barcode_suffix="-1",
+    )
+    assert n_reads > 500
+    assert len(chunks) > 10
+
+
+def test_an_empty_library_name_is_refused(shared, tmp_path) -> None:
+    path = write_bartab_counts(BARCODES, tmp_path / "counts.tsv", sample="d4")
+    with pytest.raises(ValueError, match="library must name a library"):
+        shared.store.clones.import_barcodes(
+            path, cell_selection=shared.cells, barcode_prefix="d4__", library=""
+        )
+    with pytest.raises(ValueError, match="library must name a library"):
+        shared.store.clones.import_barcodes(
+            [path, path],
+            cell_selection=shared.cells,
+            barcode_prefix=["d2__", "d4__"],
+            library=["a", ""],
+        )
+
+
+def test_a_file_whose_reading_cannot_fit_the_budget_is_refused_before_a_row(
+    store, tmp_path, monkeypatch
+) -> None:
+    from cytearc.readers import lineage_barcodes as reader
+
+    path = write_quicat_h5ad(BARCODES, tmp_path / "barcodes_output.h5ad")
+    read = []
+    iterate = reader.iter_barcode_rows
+
+    def recorded(layout, chunk_rows):
+        read.append(chunk_rows)
+        return iterate(layout, chunk_rows)
+
+    monkeypatch.setattr(reader, "iter_barcode_rows", recorded)
+    # Names of more cells and barcodes than the budget holds.
+    monkeypatch.setattr(
+        reader.BarcodeLayout,
+        "held_bytes",
+        property(lambda self: store.memoryBytes),
+    )
+    with pytest.raises(MemoryError, match="Raise mem_budget"):
+        store.clones.import_barcodes(path, cell_selection=every_cell(store))
+    assert read == []
+    assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []

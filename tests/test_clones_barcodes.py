@@ -16,6 +16,8 @@ from cytearc.clones.barcodes import (
     cell_summaries,
     library_summaries,
     lineage_barcode_frames,
+    pair_keys,
+    repeated_keys,
 )
 from cytearc.metadata.records import decode_text
 
@@ -96,7 +98,6 @@ def test_reads_collapse_into_molecules_whatever_the_chunks_and_merges(
     )
     assert observed["reads"].tolist() == expected["reads"].tolist()
     assert (observed["umis"] == 1).all()
-    assert counted.rows.tolist() == expected["reads"].tolist()
     assert counted.libraries == ("lib_a", "lib_b")
     assert counted.levels == ("molecules", "molecules")
     assert counted.table.kinds == FIELDS
@@ -170,7 +171,6 @@ def test_molecule_rows_sum_their_reads_and_pairs_their_umis() -> None:
         [2, "p", "C", None, -1, -1],
         [2, "p", "D", None, -1, -1],
     ]
-    assert counted.rows.tolist() == [2, 1, 2, 2, 2, 1]
     assert counted.levels == ("molecules", "pairs")
 
 
@@ -344,3 +344,41 @@ def test_long_and_unicode_barcodes_survive_merges() -> None:
     frame = _table_frame(counter.finish())
     assert frame["barcode"].tolist() == [long_barcode, "κύτταρο"]
     assert frame["reads"].tolist() == [3, 3]
+
+
+def test_pairs_of_texts_key_apart_and_repeats_count_once_per_copy() -> None:
+    keys = pair_keys(["AAAC", "AAAC", "CCCG", "GG"], ["TT", "TA", "TT", "AAAC"])
+    # Each pair keys apart, a pair and its swap included.
+    assert len({tuple(key) for key in keys.tolist()}) == 4
+    assert (pair_keys(["GG"], ["AAAC"]) != pair_keys(["AAAC"], ["GG"])).any()
+    again = pair_keys(["AAAC", "AAAC", "AAAC"], ["TT", "TT", "GC"])
+    assert again[0].tolist() == keys[0].tolist()
+    # The two copies of AAAC and TT repeat the first; AAAC and GC is new.
+    assert repeated_keys([keys, again]) == 2
+    assert repeated_keys([keys]) == 0
+    assert repeated_keys([]) == 0
+
+
+def test_finding_repeated_keys_holds_the_bytes_the_import_counts() -> None:
+    import tracemalloc
+
+    from cytearc.datastore._operations import lineage_barcodes as operations
+
+    n_keys = 200_000
+    cells = np.asarray(
+        [f"C{index % 5_000:05d}" for index in range(n_keys)], dtype=object
+    )
+    umis = np.asarray([f"U{index:08d}" for index in range(n_keys)], dtype=object)
+    tracemalloc.start()
+    try:
+        keys = [
+            pair_keys(cells[start : start + 20_000], umis[start : start + 20_000])
+            for start in range(0, n_keys, 20_000)
+        ]
+        tracemalloc.reset_peak()
+        assert repeated_keys(keys) == 0
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # The keys themselves and what finding their repeats adds.
+    assert peak <= operations._KEY_BYTES * n_keys

@@ -16,6 +16,7 @@ import csv
 import gzip
 import io
 import zlib
+from collections import Counter
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ __all__ = [
     "delimiter",
     "first_lines",
     "joined_columns",
+    "line_chunks",
     "line_list",
     "open_text",
     "parsed_chunks",
@@ -262,7 +264,9 @@ def require_columns(layout: TextLayout, names: Sequence[str]) -> None:
     Raises:
         ValueError: If a column is missing or named more than once.
     """
-    missing = [name for name in names if name not in layout.names]
+    # Counted once, since a merged table names a column per barcode.
+    counts = Counter(layout.names)
+    missing = [name for name in names if name not in counts]
     if missing:
         shown = ", ".join(repr(name) for name in layout.names if name)
         raise ValueError(
@@ -270,13 +274,45 @@ def require_columns(layout: TextLayout, names: Sequence[str]) -> None:
             + ", ".join(repr(name) for name in missing)
             + f"; its columns are {shown}"
         )
-    repeated = sorted({name for name in names if layout.names.count(name) > 1})
+    repeated = sorted({name for name in names if counts[name] > 1})
     if repeated:
         raise ValueError(
             f"{layout.path} names the column "
             + ", ".join(repr(name) for name in repeated)
             + " more than once, so which one to read is unclear"
         )
+
+
+def line_chunks(
+    text: TextLayout, chunk_rows: int
+) -> Iterator[tuple[np.ndarray, list[str]]]:
+    """Yield chunks of a table's lines that hold text, its header aside.
+
+    Each chunk comes with the file line of each of its lines, counting from
+    1, so that errors name the lines even when blank lines sit between rows.
+
+    Raises:
+        ValueError: If the file is not UTF-8 text, or a gzip file is cut
+            short or corrupt.
+    """
+    numbers: list[int] = []
+    lines: list[str] = []
+    with text_errors(text.path), open_text(text.path, text.compression) as handle:
+        number = 0
+        if text.header:
+            handle.readline()
+            number = 1
+        for line in handle:
+            number += 1
+            if not line.strip():
+                continue
+            numbers.append(number)
+            lines.append(line)
+            if len(lines) == chunk_rows:
+                yield np.asarray(numbers, dtype=np.int64), lines
+                numbers, lines = [], []
+    if lines:
+        yield np.asarray(numbers, dtype=np.int64), lines
 
 
 def count_rows(text: TextLayout) -> int:
