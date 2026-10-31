@@ -222,30 +222,7 @@ Operation mixins have no runtime inheritance from datastore facades, no `__init_
 `TYPE_CHECKING` imports of siblings are allowed.
 Reusable algorithms must be placed in their domain package before being exposed through a datastore method.
 
-`datastore.pipeline_accessor` exposes the pipeline recipes `rna`, `atac`, `adt`, `multimodal`,
-and `perturbation`. Each recipe method is thin: it passes its keywords to a resolver in
-`datastore._pipeline.recipes`, one module per recipe (`rna.py`, `atac.py`, `adt.py`,
-`multimodal.py`, and `perturbation.py`, with the steps that the single-modality recipes share in
-`common.py`). A resolver
-checks the call against the store without writing anything and returns a `RecipePlan`: the
-recorded recipe name, the assay, the label, the configuration that the run records, and every
-stage in order as a `PlannedStage`. It checks the keywords, the columns and cells, the stage
-combinations, and every setting value that a stage method's own validator or the store's shape can
-check before any data is read; the remaining values, and limits that depend on the data, are
-checked by each stage's method when the stage runs. A planned stage without an action is recorded
-as skipped, and its `on_skip` hook gives later stages the inputs that they would have read from it.
-`_pipeline/stages.py` builds the stages that several recipes share, from the input snapshot and
-filtering through highly variable genes, normalization, PCA, Harmony, the graph, the embeddings,
-Leiden, Paris, cluster selection, and membership strength to markers. The perturbation recipe
-runs the RNA recipe's stages from filtering to Harmony, so a run with an RNA run's cells and
-settings reuses that run's artifacts, and adds one stage per `DataStore.perturbation` method. The input snapshot freezes each group of cell
-columns that a stage reads apart, the QC columns of filtering in `cell_snapshot` and the others in
-`capture_snapshot`, `harmony_snapshot`, `doublet_sample_snapshot`, and `column_snapshot`, so that
-a column one stage reads never enters the provenance of another stage's result.
-`_pipeline/settings.py` checks each stage keyword against the keywords of the stage's method,
-with the method's own checks where its domain module holds them, as `perturbation/` does for every
-perturbation method, and `_pipeline/filtering.py` resolves and applies QC filtering. A new recipe adds a resolver module and
-reuses the rest.
+`datastore.pipeline_accessor` exposes the pipeline recipes `rna`, `atac`, `adt`, `multimodal`, and `perturbation`. Each recipe method is thin: it passes its keywords to a resolver in `datastore._pipeline.recipes`, one module per recipe (`rna.py`, `atac.py`, `adt.py`, `multimodal.py`, and `perturbation.py`, with the steps that the single-modality recipes share in `common.py`). A resolver checks the call against the store without writing anything and returns a `RecipePlan`: the recorded recipe name, the assay, the label, the configuration that the run records, and every stage in order as a `PlannedStage`. It checks the keywords, the columns and cells, the stage combinations, and every setting value that a stage method's own validator or the store's shape can check before any data is read; the remaining values, and limits that depend on the data, are checked by each stage's method when the stage runs. A planned stage without an action is recorded as skipped, and its `on_skip` hook gives later stages the inputs that they would have read from it. `_pipeline/stages.py` builds the stages that several recipes share, from the input snapshot and filtering through highly variable genes, normalization, PCA, Harmony, the graph, the embeddings, Leiden, Paris, cluster selection, and membership strength to markers. The perturbation recipe runs the RNA recipe's stages from filtering to Harmony, so a run with an RNA run's cells and settings reuses that run's artifacts, and adds one stage per `DataStore.perturbation` method. The input snapshot freezes each group of cell columns that a stage reads apart, the QC columns of filtering in `cell_snapshot` and the others in `capture_snapshot`, `harmony_snapshot`, `doublet_sample_snapshot`, and `column_snapshot`, so that a column one stage reads never enters the provenance of another stage's result. `_pipeline/settings.py` checks each stage keyword against the keywords of the stage's method, with the method's own checks where its domain module holds them, as `perturbation/` does for every perturbation method, and `_pipeline/filtering.py` resolves and applies QC filtering. A new recipe adds a resolver module and reuses the rest.
 
 One generic executor, `_pipeline/executor.py`, runs every plan. It creates the run record, passes
 a `RunState` that holds the refs of the stages that ran so far from stage to stage, and completes
@@ -325,9 +302,7 @@ CyteArc validates persisted data and public arguments against the following cont
 - `AssayState` and `IncompatibleAnalysisStateError` are removed. A store containing
   `{assay}/state` is rejected on open and must be rebuilt. CyteArc never reads, migrates, or uses that
   group to choose a current result.
-- The pipeline recipes `DataStore.pipeline.rna`, `atac`, `adt`, `multimodal`, and
-  `perturbation` accept only their documented keywords and return a durable `PipelineRun`. Removed options and prior return
-  values have no aliases or adapters.
+- The pipeline recipes `DataStore.pipeline.rna`, `atac`, `adt`, `multimodal`, and `perturbation` accept only their documented keywords and return a durable `PipelineRun`. Removed options and prior return values have no aliases or adapters.
 - Feature selection, graph construction, embeddings, clusterings, scores, markers, mapping, and
   trajectory operations exchange exact `ArtifactRef` values. Consumers do not parse encoded
   metadata names, resolve an implicit latest result, or accept a live result column in place of an
