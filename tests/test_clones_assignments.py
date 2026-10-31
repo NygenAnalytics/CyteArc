@@ -1,5 +1,8 @@
 """Clone labels, assignment and ranking, checked against hand-derived values."""
 
+import sys
+import tracemalloc
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -12,6 +15,7 @@ from cytearc.clones.assignments import (
     clone_label_texts,
     ranked_clones,
 )
+from cytearc.utils.arrays import sort_categories
 
 CELLS = np.asarray([f"c{index}" for index in range(6)])
 
@@ -95,6 +99,42 @@ def test_digit_labels_rank_as_integers_and_equal_values_by_text() -> None:
     assert ids.tolist() == ["1" * 30, "2" * 30]
 
 
+def test_numpy_booleans_read_as_their_text() -> None:
+    assert clone_label_texts(np.asarray([True, False])).tolist() == ["True", "False"]
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        # Floats hold integers of up to 15 digits exactly; these two round to
+        # one float, so natural order ranks them by text.
+        ["09007199254740993", "9007199254740992"],
+        # Digits outside ASCII, which int() and str.isdigit take differently.
+        ["²", "3", "⑤", "٣"],
+    ],
+)
+def test_digit_like_labels_rank_in_natural_order(labels) -> None:
+    _ranked, ids, _sizes = ranked_clones(np.arange(len(labels)), labels)
+    assert ids.tolist() == sort_categories(labels)
+
+
+def test_ranking_holds_each_label_as_its_own_text() -> None:
+    # One long label must not widen the other 29,999 to its length, which
+    # as fixed-width text would take 240 MB.
+    labels = [str(index) for index in range(30_000)]
+    labels[0] = "X" * 2_000
+    tracemalloc.start()
+    try:
+        _ranked, ids, _sizes = ranked_clones(np.arange(len(labels)), labels)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    # Numbers come first, then other text.
+    assert ids.tolist()[:2] == ["1", "2"]
+    assert ids.tolist()[-1] == "X" * 2_000
+    assert peak < 24_000_000
+
+
 def test_no_cell_in_a_clone_gives_no_clone() -> None:
     ranked, ids, sizes = ranked_clones(np.full(3, -1), ["a"])
     assert ranked.tolist() == [-1, -1, -1]
@@ -167,6 +207,36 @@ def test_probabilities_follow_the_cells_and_must_agree() -> None:
     later.add(np.asarray([3]), _labels("a"), probabilities=np.asarray([0.2]))
     with pytest.raises(ValueError, match="'c3' is listed with two probabilities"):
         later.add(np.asarray([3]), _labels("a"), probabilities=np.asarray([0.4]))
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [([0, 0], [np.nan, 0.5])],
+        [([0, 0], [0.5, np.nan])],
+        [([0], [np.nan]), ([0], [0.5])],
+        [([0], [0.5]), ([0], [np.nan])],
+    ],
+)
+def test_a_row_without_a_probability_gives_none_in_any_chunk(chunks) -> None:
+    # A row's NaN gives no probability, so the cell's other row decides it,
+    # in one chunk or across two, in either order.
+    assigner = CloneAssigner(CELLS, multiple="error")
+    for cells, probabilities in chunks:
+        assigner.add(
+            np.asarray(cells),
+            _labels(*["a"] * len(cells)),
+            probabilities=np.asarray(probabilities),
+        )
+    assert assigner.finish().probabilities.tolist()[0] == 0.5
+
+
+def test_the_assigner_counts_the_text_of_each_distinct_label_once() -> None:
+    assigner = CloneAssigner(CELLS, multiple="error")
+    long_label = "a" * 1_000
+    assigner.add(np.asarray([0, 1, 2]), _labels(long_label, long_label, "b"))
+    assigner.add(np.asarray([3]), _labels(long_label))
+    assert assigner.label_bytes == sys.getsizeof(long_label) + sys.getsizeof("b")
 
 
 def test_probabilities_of_dropped_cells_are_cleared() -> None:

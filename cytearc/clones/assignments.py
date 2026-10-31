@@ -10,6 +10,7 @@ every source saves clones alike: a ``clones`` artifact whose canonical
 by rank. These functions never touch storage.
 """
 
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -36,8 +37,9 @@ type MultiplePolicy = Literal["error", "drop"]
 MULTIPLE_POLICIES: tuple[str, ...] = ("error", "drop")
 # Cells given two clones named in the error.
 _CONFLICT_EXAMPLES = 5
-# Labels at most this long that hold only digits sort as integers at once.
-_INTEGER_DIGITS = 18
+# Labels of at most this many ASCII digits sort as integers at once; floats
+# hold them exactly, so ``sort_categories`` orders them alike.
+_INTEGER_DIGITS = 15
 
 
 def clone_label_texts(values: Any, missing: Any | None = None) -> np.ndarray:
@@ -59,7 +61,9 @@ def clone_label_texts(values: Any, missing: Any | None = None) -> np.ndarray:
         raise ValueError("clone labels must be one-dimensional")
     labels = np.full(len(array), None, dtype=object)
     kind = array.dtype.kind
-    if kind in "biu":
+    if kind == "b":
+        labels[:] = np.where(array, "True", "False").astype(object)
+    elif kind in "iu":
         labels[:] = array.astype(np.int64).astype(str).astype(object)
     elif kind == "f":
         present = np.isfinite(array)
@@ -114,20 +118,27 @@ def _label_text(value: Any) -> str | None:
 def _label_order(labels: list[str]) -> np.ndarray:
     """Rank labels in natural order: integers by value, then other text.
 
-    Labels of digits alone, such as TREX's clone numbers, sort as integers
-    without the per-label key of ``sort_categories``, which orders them the
-    same way.
+    Labels of at most 15 ASCII digits, such as TREX's clone numbers, sort as
+    integers without the per-label key of ``sort_categories``, which orders
+    them the same way. The labels stay Python strings, so a long label holds
+    only its own text.
     """
-    texts = np.asarray(labels, dtype=object)
-    if not len(texts):
+    if not labels:
         return np.empty(0, dtype=np.int64)
-    as_text = texts.astype(str)
-    if (
-        bool(np.all(np.strings.isdigit(as_text)))
-        and int(np.strings.str_len(as_text).max()) <= _INTEGER_DIGITS
+    if all(
+        len(label) <= _INTEGER_DIGITS and label.isascii() and label.isdigit()
+        for label in labels
     ):
+        values = np.fromiter(map(int, labels), dtype=np.int64, count=len(labels))
+        order = np.argsort(values, kind="stable")
+        ordered = values[order]
+        if not np.any(ordered[1:] == ordered[:-1]):
+            return order.astype(np.int64)
         # Equal values, such as "07" and "7", follow their text.
-        return np.lexsort((as_text, as_text.astype(np.int64))).astype(np.int64)
+        by_text = np.argsort(np.asarray(labels, dtype=object), kind="stable")
+        text_rank = np.empty(len(labels), dtype=np.int64)
+        text_rank[by_text] = np.arange(len(labels))
+        return np.lexsort((text_rank, values)).astype(np.int64)
     rank = {label: position for position, label in enumerate(sort_categories(labels))}
     return np.argsort(
         np.fromiter(
@@ -237,11 +248,17 @@ class CloneAssigner:
         self._labels: dict[str, int] = {}
         self._label_list: list[str] = []
         self._label_sources: list[int] = []
+        self._label_bytes = 0
 
     @property
     def n_labels(self) -> int:
         """The distinct clone labels given so far."""
         return len(self._label_list)
+
+    @property
+    def label_bytes(self) -> int:
+        """The bytes of the distinct labels given so far, as Python strings."""
+        return self._label_bytes
 
     def _label_codes(self, labels: np.ndarray, source: int) -> np.ndarray:
         """Return each label's code, numbering labels not seen before."""
@@ -254,6 +271,7 @@ class CloneAssigner:
                 self._labels[label] = code
                 self._label_list.append(label)
                 self._label_sources.append(source)
+                self._label_bytes += sys.getsizeof(label)
             elif self._label_sources[code] != source:
                 raise ValueError(
                     f"The clone label {label!r} comes from two sources, so two "
@@ -314,7 +332,7 @@ class CloneAssigner:
             values = np.asarray(probabilities, dtype=np.float64)
             if len(values) != len(cells):
                 raise ValueError("Clone rows need one probability each")
-            self._add_probabilities(values[keep][order], rows, starts, lengths, settled)
+            self._add_probabilities(values[keep][order], rows, starts, settled)
 
     def _record_several(
         self,
@@ -351,28 +369,27 @@ class CloneAssigner:
         values: np.ndarray,
         rows: np.ndarray,
         starts: np.ndarray,
-        lengths: np.ndarray,
         settled: np.ndarray,
     ) -> None:
+        """Keep each settled cell's probability from its rows, in cell order.
+
+        A row's NaN gives no probability, in this chunk as in later ones, so
+        only two different numbers for one cell conflict.
+        """
         if self._probabilities is None:
             self._probabilities = np.full(len(self._codes), np.nan)
-        given = values[starts]
-        # The rows of one cell must agree, NaN with NaN, unless the cell was
-        # given several clones and has none.
-        agree = (
-            (values == np.repeat(given, lengths))
-            | (np.isnan(values) & np.repeat(np.isnan(given), lengths))
-            | ~np.repeat(settled, lengths)
-        )
-        if not agree.all():
-            cell = rows[np.flatnonzero(~agree)[0]]
+        low = np.fmin.reduceat(values, starts)
+        high = np.fmax.reduceat(values, starts)
+        differ = settled & ~np.isnan(low) & (low != high)
+        if differ.any():
+            cell = rows[starts][np.flatnonzero(differ)[0]]
             raise ValueError(
                 f"Cell {str(self._cell_ids[cell])!r} is listed with two "
                 "probabilities of its clone"
             )
         cells = rows[starts][settled]
         stored = self._probabilities[cells]
-        new = given[settled]
+        new = low[settled]
         clash = ~np.isnan(stored) & ~np.isnan(new) & (stored != new)
         if clash.any():
             raise ValueError(
