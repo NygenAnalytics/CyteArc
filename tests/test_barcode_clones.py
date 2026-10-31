@@ -158,6 +158,11 @@ def test_the_trex_preset_gives_trexs_own_clones(tmp_path, run, doublets) -> None
     assert loaded_partition(store, clones) == expected
     loaded = store.clones.load_clones(clones)
     assert not loaded.cells["doublet"].any()
+    if run == "10x":
+        # TREX's log: 3,639 of its 3,800 molecules remain after the
+        # low-complexity filter.
+        counts = dict(store.artifacts.load(clones).attrs)["rule_counts"]
+        assert counts["molecules_of_low_complexity"] == 3_800 - 3_639
     # TREX's clones.txt lists the cells of cells_filtered.txt, one cloneID or
     # more each, and singletons are clones.
     assert int(loaded.cells["clone"].notna().sum()) == sum(map(len, expected))
