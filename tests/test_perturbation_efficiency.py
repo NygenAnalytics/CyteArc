@@ -5,6 +5,7 @@ template. A test that writes copies the template, and the tests of refused
 calls share one copy, which they check is left as it was.
 """
 
+import tracemalloc
 import warnings
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -15,15 +16,21 @@ from scipy.stats import false_discovery_control, mannwhitneyu
 
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationEfficiency
-from cytearc.perturbation.efficiency import efficiency_arrays, target_features
+from cytearc.perturbation.efficiency import (
+    efficiency_arrays,
+    efficiency_memory_bytes,
+    target_features,
+)
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
 from tests.perturbation_helpers import (
     copy_store,
     fixed_labels,
     open_store,
+    check_budget,
     write_screen,
     written,
 )
+from tests.storage_helpers import write_count_store
 
 # Guides, their targets and the feature IDs of the targets. RNA4 has no ID and
 # matches the RNA feature named RNA4; GENE_C's ID matches no feature; GENE_D
@@ -354,18 +361,247 @@ def test_efficiency_arrays_check_their_inputs() -> None:
         efficiency_arrays(counts, np.ones(3), np.zeros(2), np.ones(3, bool), [0])
     with pytest.raises(ValueError, match="no control cell"):
         efficiency_arrays(counts, np.ones(3), np.zeros(3), np.zeros(3, bool), [0])
-    # Equal values everywhere give a p-value of 1, and a cell without UMIs
-    # keeps an expression of 0.
+    # A UMI of a target gene in a cell whose library holds none cannot be
+    # scaled, and neither can compared cells that hold no UMI at all.
+    groups, control = np.asarray([0, -1, -1]), np.asarray([False, False, True])
+    with pytest.raises(ValueError, match="library size of 0"):
+        efficiency_arrays(counts, np.asarray([1.0, 0.0, 1.0]), groups, control, [0])
+    with pytest.raises(ValueError, match="No compared cell holds a UMI"):
+        efficiency_arrays(
+            np.zeros((3, 1)), np.asarray([0.0, 5.0, 0.0]), groups, control, [0]
+        )
+    # Equal values everywhere give a p-value of 1.
     arrays = efficiency_arrays(
-        counts,
+        np.asarray([[1.0], [0.0], [1.0]]),
         np.asarray([1.0, 0.0, 1.0]),
-        np.asarray([0, -1, -1]),
-        np.asarray([False, False, True]),
+        groups,
+        control,
         [0],
     )
     assert arrays.p_value.tolist() == [1.0]
     assert arrays.remaining_fraction.tolist() == [1.0]
     assert arrays.log2_fold_change.tolist() == [0.0]
+
+
+def test_the_median_library_size_leaves_out_cells_without_umis() -> None:
+    # Four of the seven compared cells hold no UMI. Over all of them the
+    # median library size is 0, which would scale every value to 0; over the
+    # three that hold UMIs it is 10, their own library size.
+    counts = np.asarray([[0], [0], [1], [5], [6], [0], [0]], dtype=float)
+    library = np.asarray([0, 0, 10, 10, 10, 0, 0], dtype=float)
+    groups = np.asarray([0, 0, 0, -1, -1, -1, -1])
+    arrays = efficiency_arrays(counts, library, groups, groups < 0, [0])
+    # Each cell with UMIs keeps its counts, scaled by 10 / 10.
+    perturbed, controls = np.asarray([0.0, 0.0, 1.0]), np.asarray([5.0, 6.0, 0.0, 0.0])
+    assert arrays.status.tolist() == [0]
+    assert arrays.mean_expression.tolist() == pytest.approx([1 / 3])
+    assert arrays.control_mean_expression.tolist() == pytest.approx([11 / 4])
+    assert arrays.remaining_fraction.tolist() == pytest.approx([(1 / 3) / (11 / 4)])
+    assert arrays.p_value[0] == pytest.approx(
+        mannwhitneyu(perturbed, controls, method="asymptotic").pvalue
+    )
+
+
+def test_a_row_without_control_umis_keeps_its_means_and_p_value() -> None:
+    # The control cells hold no UMI of gene 1, so its row has no fraction; its
+    # perturbed cells hold some, which the test still compares.
+    counts = np.asarray([[2, 3], [1, 4], [5, 0], [6, 0], [4, 0]], dtype=float)
+    groups = np.asarray([0, 0, -1, -1, -1])
+    arrays = efficiency_arrays(counts, counts.sum(axis=1), groups, groups < 0, [1])
+    assert arrays.status.tolist() == [3]
+    assert arrays.mean_umi.tolist() == [3.5]
+    assert arrays.control_mean_umi.tolist() == [0.0]
+    assert np.isnan(arrays.remaining_fraction[0])
+    assert 0 < arrays.p_value[0] < 1
+
+
+def test_the_p_value_is_the_normal_approximation_for_few_cells() -> None:
+    # Two cells against two, fully separated: U = 0 against a mean of 2 and a
+    # standard deviation of sqrt(2 * 2 * 5 / 12), so z = (2 - 0.5) / 1.291 and
+    # p = 0.2453, where the exact test gives 2 / 6 = 0.3333.
+    counts = np.asarray([[1.0], [2.0], [3.0], [4.0]])
+    groups = np.asarray([0, 0, -1, -1])
+    arrays = efficiency_arrays(counts, np.full(4, 10.0), groups, groups < 0, [0])
+    assert arrays.p_value[0] == pytest.approx(0.245278, abs=1e-6)
+    exact = mannwhitneyu([1.0, 2.0], [3.0, 4.0], method="exact").pvalue
+    assert exact == pytest.approx(1 / 3)
+
+
+@pytest.mark.parametrize(
+    ("n_cells", "n_features", "n_control", "n_rows"),
+    [
+        # Half the cells are controls and half carry one row, so one test
+        # pools every cell.
+        (20_000, 1, 10_000, 1),
+        # Many genes and rows of few cells each.
+        (10_000, 20, 1_000, 40),
+        # A handful of cells, where SciPy's own objects take the most.
+        (5, 1, 3, 1),
+    ],
+)
+def test_the_memory_estimate_bounds_the_comparisons_peak(
+    n_cells, n_features, n_control, n_rows
+) -> None:
+    rng = np.random.default_rng(n_cells)
+    groups = np.full(n_cells, -1)
+    groups[n_control:] = rng.integers(0, n_rows, n_cells - n_control)
+    counts = rng.poisson(2.0, size=(n_cells, n_features)).astype(float)
+    library = counts.sum(axis=1) + rng.poisson(1000.0, n_cells)
+    # A tenth of the cells hold no UMI.
+    counts[: n_cells // 10] = 0
+    library[: n_cells // 10] = 0
+    largest = int(np.bincount(groups[groups >= 0], minlength=n_rows).max())
+    columns = np.arange(n_rows) % n_features
+    # The first call creates what SciPy keeps for later tests.
+    efficiency_arrays(
+        counts[-5:], library[-5:], [0, 0, -1, -1, -1], [0, 0, 1, 1, 1], [0]
+    )
+    tracemalloc.start()
+    try:
+        # The estimate counts the arrays that the operation passes.
+        efficiency_arrays(
+            counts.copy(), library.copy(), groups.copy(), groups < 0, columns
+        )
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak <= efficiency_memory_bytes(n_cells, n_features, n_control, largest)
+
+
+@pytest.fixture(scope="module")
+def sparse_screen(tmp_path_factory) -> SimpleNamespace:
+    """44 cells with RNA and two sparse antibody assays, and their labels.
+
+    20 cells carry ADT0's guide, 20 the control guide and 4 none. 24 of the
+    40 compared cells hold no ADT UMI, so the median of every compared cell's
+    library size is 0: 8 of the control cells hold 6 UMIs of ADT0 and the
+    perturbed cells none, so the knockdown is complete. Only the 4 cells
+    without a guide hold HTO UMIs. A test that writes copies the store.
+    """
+    guides = np.zeros((44, 3), dtype=np.uint16)
+    guides[:20, 0] = 20
+    guides[20:40, 2] = 20
+    rna = np.random.default_rng(0).poisson(3.0, size=(44, 4)) + 1
+    adt = np.zeros((44, 3), dtype=np.int64)
+    adt[20:28, 0] = 6
+    adt[20:32, 1] = 4
+    adt[0:4, 1] = 4
+    hto = np.zeros((44, 3), dtype=np.int64)
+    hto[40:, 0] = 5
+    path = tmp_path_factory.mktemp("efficiency_sparse") / "store.zarr"
+    write_count_store(
+        str(path), {"RNA": rna, "CRISPR": guides, "ADT": adt, "HTO": hto}, "uint16"
+    )
+    store = open_store(path)
+    store._get_assay("CRISPR").feats.insert(
+        "target_gene_name", np.asarray(["ADT0", "ADT0", "Non-Targeting"], dtype=object)
+    )
+    return SimpleNamespace(path=path, labels=fixed_labels(store, ["Non-Targeting"]))
+
+
+def test_efficiency_scales_a_sparse_assay_to_the_cells_with_umis(
+    sparse_screen, tmp_path
+) -> None:
+    store = copy_store(sparse_screen.path, tmp_path)
+    ref = store.perturbation.efficiency(
+        sparse_screen.labels, from_assay="ADT", id_column=None
+    )
+    row = store.perturbation.load_efficiency(ref).table.iloc[0]
+    assert row["status"] == "tested"
+    assert row["control_mean_umi"] == pytest.approx(48 / 20)
+    assert row["mean_umi"] == 0.0
+    # The 16 compared cells with UMIs hold 4 or 10 UMIs, eight each: the
+    # median is 7, so a control cell's 6 UMIs of 10 scale to 4.2.
+    assert row["control_mean_expression"] == pytest.approx(8 * 4.2 / 20)
+    assert row["remaining_fraction"] == 0.0
+    assert row["log2_fold_change"] == -np.inf
+    expected = mannwhitneyu(
+        np.zeros(20), np.r_[np.full(8, 4.2), np.zeros(12)], method="asymptotic"
+    ).pvalue
+    assert row["p_value"] == pytest.approx(expected)
+    assert row["p_value"] < 0.05
+
+
+def test_efficiency_refuses_an_assay_without_umis_in_the_compared_cells(
+    sparse_screen,
+) -> None:
+    # No compared cell holds an HTO UMI, so no median library size scales
+    # their expression, whichever features match the targets.
+    store = open_store(sparse_screen.path)
+    saved = written(store)
+    with pytest.raises(
+        ValueError, match="None of the 40 compared cells.* holds a UMI of assay 'HTO'"
+    ):
+        store.perturbation.efficiency(
+            sparse_screen.labels, from_assay="HTO", id_column=None
+        )
+    assert written(store) == saved
+
+
+def test_the_warning_by_guide_names_each_guide_and_its_target(store, template) -> None:
+    labels = template.labels
+    measured, messages = _warned_efficiency(store, labels, by="guide")
+    # CRISPR5 targets GENE_C, whose feature ID the RNA assay lacks.
+    assert messages == [
+        "1 of 6 rows have no feature of assay 'RNA' for their target, for example "
+        "guide 'CRISPR5' (target 'GENE_C'). Check id_column, or the target names "
+        "against the feature names."
+    ]
+    assert _warned_efficiency(store, labels, by="guide") == (measured, messages)
+
+
+@pytest.fixture(scope="module")
+def budget_screens(tmp_path_factory) -> SimpleNamespace:
+    """Two screens, each with its labels, as templates.
+
+    In ``few``, 2 of 2,000 cells carry RNA0's guide and 3 the control guide;
+    the others carry none. In ``all``, each of 1,000 cells carries one of
+    RNA0's two guides or the control guide.
+    """
+    screens = {}
+    rng = np.random.default_rng(3)
+    for name, n_cells in (("few", 2_000), ("all", 1_000)):
+        guides = np.zeros((n_cells, 3), dtype=np.uint16)
+        if name == "few":
+            guides[0:2, 0] = 20
+            guides[2:5, 2] = 20
+        else:
+            guides[np.arange(n_cells), rng.integers(0, 3, n_cells)] = 20
+        rna = rng.poisson(2.0, size=(n_cells, 3)) + 1
+        path = tmp_path_factory.mktemp(f"efficiency_{name}") / "store.zarr"
+        store = write_screen(
+            path, rna, guides, targets=["RNA0", "RNA0", "Non-Targeting"]
+        )
+        screens[name] = SimpleNamespace(
+            path=path, labels=fixed_labels(store, ["Non-Targeting"])
+        )
+    return SimpleNamespace(**screens)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("screen", "by"), [("few", "target"), ("few", "guide"), ("all", "target")]
+)
+def test_efficiency_holds_no_more_than_the_budget_it_names(
+    budget_screens, tmp_path, screen, by
+) -> None:
+    labels = getattr(budget_screens, screen).labels
+    path = copy_store(getattr(budget_screens, screen).path, tmp_path).zarr_loc
+
+    def measure(store, invalidate_cache=True):
+        return store.perturbation.efficiency(
+            labels, by=by, id_column=None, invalidate_cache=invalidate_cache
+        )
+
+    # One refusal names the whole need, by guide too, and the call runs at
+    # that budget, holding no more than it.
+    _, refusals = check_budget(path, measure)
+    assert len(refusals) == 1
+    assert refusals[0].startswith("Comparing 1 target genes over")
+    # The first row, RNA0 or its first guide, is compared.
+    reused = open_store(path)
+    table = reused.perturbation.load_efficiency(measure(reused, False)).table
+    assert table["status"].iloc[0] == "tested"
 
 
 def test_target_features_prefer_one_id_then_one_name() -> None:

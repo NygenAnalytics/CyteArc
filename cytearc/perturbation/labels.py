@@ -33,7 +33,9 @@ __all__ = [
     "PerturbationLabelArrays",
     "PerturbationLabels",
     "guide_targets",
+    "label_memory_bytes",
     "label_settings",
+    "longest_label",
     "perturbation_label_arrays",
     "perturbation_label_frames",
 ]
@@ -94,8 +96,9 @@ def guide_targets(
 
     Raises:
         ValueError: If an override names a guide that is not in the assay or
-            gives an empty target, a target is a reserved label or, with
-            ``"combinations"``, holds ``"+"``, or a control matches no target.
+            gives an empty target, a target that is not a control is a
+            reserved label or, with ``"combinations"``, holds ``"+"``, or a
+            control matches no target.
     """
     ids = np.asarray(guide_ids, dtype=object).astype(str)
     names = np.full(len(ids), "", dtype=object)
@@ -120,18 +123,28 @@ def guide_targets(
                 )
             names[position] = str(target).strip()
     distinct = np.asarray(sorted({name for name in names if name}), dtype=object)
-    reserved = sorted(RESERVED_TARGETS.intersection(distinct.tolist()))
+    # A control target never becomes a label: a cell with control guides only
+    # is labelled "control" whatever their targets are called.
+    reserved = sorted(
+        RESERVED_TARGETS.intersection(distinct.tolist()).difference(controls)
+    )
     if reserved:
         raise ValueError(
             "Targets conflict with labels reserved for cells without one target: "
             + ", ".join(repr(name) for name in reserved)
+            + ". Give their guides other targets with targets, or name them in "
+            "controls if their guides are control guides"
         )
     if policy == "combinations":
-        joined = [name for name in distinct if _SEPARATOR in name]
+        # Control targets never join the genes of a combination either.
+        joined = [
+            name for name in distinct if _SEPARATOR in name and name not in controls
+        ]
         if joined:
             raise ValueError(
-                f"With policy='combinations', targets must not hold {_SEPARATOR!r}, "
-                f"which joins the genes of a combination, but {joined[0]!r} does"
+                f"With policy='combinations', targets that are not controls must "
+                f"not hold {_SEPARATOR!r}, which joins the genes of a combination, "
+                f"but {joined[0]!r} does"
             )
     missing = [control for control in controls if control not in set(distinct)]
     if missing:
@@ -209,6 +222,48 @@ def label_settings(
     return control_names
 
 
+def longest_label(targets: GuideTargets, width: int, *, policy: str) -> int:
+    """Return the most characters that a cell's label can hold.
+
+    Args:
+        targets: The target of every guide, from :func:`guide_targets`.
+        width: The most guides called in one cell.
+        policy: ``"single"`` or ``"combinations"``, which joins the genes of a
+            cell with several, at most ``width`` of the longest.
+    """
+    lengths = sorted(
+        (len(str(name)) for name in targets.names[~targets.is_control]), reverse=True
+    )
+    longest = max([len(NEGATIVE), len(MULTIPLE), len(CONTROL), *lengths[:1]])
+    if policy == "single":
+        return longest
+    joined = lengths[: max(1, width)]
+    return max(longest, sum(joined) + len(joined) - 1)
+
+
+def label_memory_bytes(
+    n_cells: int, width: int, *, label_length: int, joined: bool
+) -> int:
+    """Return the bytes that :func:`perturbation_label_arrays` holds beside the codes.
+
+    Args:
+        n_cells: The cells.
+        width: The most guides called in one cell, the width of the codes.
+        label_length: The most characters of a label, as
+            :func:`longest_label` gives it.
+        joined: Whether a cell with several genes gets a label of its own,
+            as ``policy="combinations"`` gives it.
+    """
+    # Each entry's target, control flag and call flag, and the flags that
+    # check the targets, take at most 8 bytes, and each cell's sorted targets
+    # are copied out at 4 bytes per entry while the entries are released. Each
+    # cell's label, control flag and number of targets, as counted and as
+    # stored, take 24 bytes, and a joined label is a string of its own of
+    # about 64 bytes and at most 4 bytes per character.
+    per_cell = 24 + (64 + 4 * label_length if joined else 0)
+    return n_cells * (9 * width + per_cell)
+
+
 @dataclass(frozen=True, slots=True)
 class PerturbationLabelArrays:
     """The per-cell arrays of a ``perturbation_labels`` artifact.
@@ -251,28 +306,42 @@ def perturbation_label_arrays(
         ValueError: If a called guide has no target.
     """
     codes = np.asarray(guide_codes)
+    guide_target = np.asarray(targets.guide_codes, dtype=np.int32)
+    guide_control = np.zeros(len(guide_target), dtype=bool)
+    targeted = guide_target >= 0
+    guide_control[targeted] = targets.is_control[guide_target[targeted]]
     called = codes >= 0
-    target_of = np.where(called, targets.guide_codes[np.where(called, codes, 0)], -1)
-    untargeted = np.unique(codes[called & (target_of < 0)])
+    # Each entry's target and whether it is a control target. An entry padded
+    # with -1 reads the last guide's, which the steps below set aside.
+    keyed = guide_target[codes]
+    control = guide_control[codes]
+    untargeted = np.unique(codes[called & (keyed < 0)])
     if len(untargeted):
         raise ValueError(
             f"{len(untargeted)} called guides have no target; pass targets or "
             "choose a target_column that names them"
         )
-    control = (target_of >= 0) & targets.is_control[np.maximum(target_of, 0)]
-    gene = np.where(control, -1, target_of).astype(np.int64)
-    # The distinct genes of each cell, in ascending order, padded at the end.
-    pad = np.iinfo(np.int64).max
-    keyed = np.sort(np.where(gene >= 0, gene, pad).astype(np.int64), axis=1)
+    control &= called
+    is_control = control.any(axis=1)
+    # The distinct genes of each cell, in ascending order, padded at the end:
+    # entries without a called gene guide take the pad, which sorts last. The
+    # entries are sorted in place, so that no copy of them is made.
+    pad = np.iinfo(np.int32).max
+    np.copyto(keyed, pad, where=control)
+    np.copyto(keyed, pad, where=~called)
+    del called, control
+    keyed.sort(axis=1)
     repeated = np.zeros(keyed.shape, dtype=bool)
-    repeated[:, 1:] = keyed[:, 1:] == keyed[:, :-1]
-    keyed = np.sort(np.where(repeated, pad, keyed), axis=1)
+    np.equal(keyed[:, 1:], keyed[:, :-1], out=repeated[:, 1:])
+    np.copyto(keyed, pad, where=repeated)
+    del repeated
+    keyed.sort(axis=1)
     n_targets = np.count_nonzero(keyed != pad, axis=1).astype(np.int32)
     width = max(1, int(n_targets.max(initial=0)))
-    target_codes = np.where(keyed[:, :width] == pad, -1, keyed[:, :width]).astype(
-        np.int32
-    )
-    is_control = control.any(axis=1) & (n_targets == 0)
+    target_codes = keyed[:, :width].copy()
+    del keyed
+    target_codes[target_codes == pad] = -1
+    is_control &= n_targets == 0
     values = np.full(len(codes), NEGATIVE, dtype=object)
     values[is_control] = CONTROL
     one = n_targets == 1

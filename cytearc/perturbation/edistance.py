@@ -193,7 +193,12 @@ def edistance_settings(
 
 
 def edistance_memory_bytes(
-    n_cells: int, n_dims: int, n_control: int, *, n_rows: int, nthreads: int = 1
+    group_sizes: np.ndarray,
+    n_control: int,
+    n_dims: int,
+    *,
+    n_permutations: int,
+    nthreads: int = 1,
 ) -> int:
     """Return the bytes that :func:`edistance_arrays` holds.
 
@@ -201,27 +206,39 @@ def edistance_memory_bytes(
     control flags that the caller passes.
 
     Args:
-        n_cells: The compared cells, perturbed and control.
-        n_dims: The dimensions of their coordinates.
-        n_control: The control cells among them.
-        n_rows: The rows, tested or not.
-        nthreads: The threads that test rows at once.
+        group_sizes: The perturbed cells of each row, tested or not.
+        n_control: The control cells.
+        n_dims: The dimensions of the cells' coordinates.
+        n_permutations: The permutations of each test.
+        nthreads: The threads that may test rows at once.
     """
+    sizes = np.asarray(group_sizes, dtype=np.int64)
+    n_cells = n_control + int(sizes.sum())
     # The coordinates as passed and as sorted take 16 bytes per cell and
     # dimension. The groups and flags as passed, the squared norms and the
     # positions that sort the cells by row take at most 41 bytes per cell,
     # which also leaves room for a flag per perturbed cell of the rows that
     # the threads test. Each row's bounds, results and adjustment take at
-    # most 128 bytes.
-    held = n_cells * (16 * n_dims + 41) + 128 * n_rows
-    # Each thread holds one block of uniform numbers, which holds at least
-    # one permutation of the smaller group, its kernel a flag per control
-    # cell, the position of each drawn cell and the sums of the two groups,
-    # and its own Python objects.
-    per_thread = (
-        max(_DRAW_BYTES, 8 * n_control) + 9 * n_control + 32 * n_dims + _THREAD_BYTES
-    )
-    return held + nthreads * per_thread
+    # most 128 bytes. Centring the coordinates, and in numpy before 2.3 also
+    # summing them, passes them through a buffer of at most np.getbufsize()
+    # numbers.
+    held = n_cells * (16 * n_dims + 41) + 128 * len(sizes) + 8 * np.getbufsize()
+    tested = sizes[sizes >= 2]
+    # A thread tests one row at a time, and no more threads run than rows
+    # are tested.
+    threads = min(nthreads, len(tested))
+    if not threads:
+        return held
+    # A row draws blocks of uniform numbers of at most _DRAW_BYTES, or of
+    # one permutation of the smaller group when that is larger, and never
+    # more than its permutations at once, which the largest group bounds.
+    drawn = min(int(tested.max()), n_control)
+    draws = min(8 * drawn * n_permutations, max(_DRAW_BYTES, 8 * drawn))
+    # Each thread holds one block of uniform numbers, its kernel a flag per
+    # control cell, the position of each drawn cell and the sums of the two
+    # groups, and its own Python objects.
+    per_thread = draws + 9 * n_control + 32 * n_dims + _THREAD_BYTES
+    return held + threads * per_thread
 
 
 @dataclass(frozen=True, slots=True)

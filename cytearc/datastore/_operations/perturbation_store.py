@@ -3,12 +3,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import zarr
 
 from ...metadata.artifacts import plan_cell_data_artifact
 from ...metadata.rows import (
     apply_missing_mask,
+    array_row_selection_parts,
     read_metadata_missing_rows_chunkwise,
     read_metadata_rows_chunkwise,
 )
@@ -22,6 +22,12 @@ from ...storage.artifacts import (
     artifact_group,
     fingerprint_strings,
     require_complete_artifact,
+)
+from ...storage.geometry import array_geometry
+from ...storage.partition import scan_band
+from ...storage.selections import (
+    iter_stored_selection_blocks,
+    validate_cell_selection,
 )
 from ...storage.types import as_zarr_array, read_array
 
@@ -50,6 +56,8 @@ class _LabelRows:
             a target.
         codes: Each row's target, as a position in ``target_names``.
         names: Each row's name: the target, or the guide.
+        guides: Each row's guide, as a position in the guide assay, for rows
+            by guide; empty for rows by target.
     """
 
     status: ArtifactStatus
@@ -57,6 +65,24 @@ class _LabelRows:
     guide_targets: np.ndarray
     codes: np.ndarray
     names: np.ndarray
+    guides: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class _ComparedCells:
+    """The cells that a per-perturbation table compares.
+
+    They are the cells that carry a row alone and the control cells.
+
+    Attributes:
+        cells: Their positions in the store, ascending.
+        groups: The row that each carries alone, -1 for a control cell.
+        control: Whether each is a control cell.
+    """
+
+    cells: np.ndarray
+    groups: np.ndarray
+    control: np.ndarray
 
 
 @dataclass(frozen=True, slots=True)
@@ -490,6 +516,7 @@ def _label_rows(
     is_control = read_array(group, "target_is_control").astype(bool)
     guide_targets = read_array(group, "guide_target_codes").astype(np.int64)
     if by == "target":
+        guides = np.empty(0, dtype=np.int64)
         codes = np.flatnonzero(~is_control)
         names = target_names[codes]
     else:
@@ -505,6 +532,93 @@ def _label_rows(
         guide_targets=guide_targets,
         codes=codes,
         names=names,
+        guides=guides,
+    )
+
+
+_NO_CONTROL_CELLS = (
+    "No labelled cell carries control guides only, and each perturbation is "
+    "compared with such cells; check the controls passed to perturbation.labels, "
+    "or in a screen whose cells carry several guides, test associations with "
+    "moi='high'"
+)
+# The cells of labels that are read at once to find the compared cells, at
+# least one chunk of codes, and the cells of a selection that are read at once
+# to place them.
+_LABEL_BLOCK_ROWS = 1 << 16
+_SELECTION_BLOCK_ROWS = 1 << 14
+# The bytes that finding the compared cells holds for each cell of a block of
+# labels, beside the chunks that its reads decode: the cells' flags, counts,
+# first codes and rows, and the positions, rows and flags of those compared.
+_LABEL_BLOCK_BYTES_PER_CELL = 64
+# The bytes that the compared cells hold for each of them while they are
+# found: their positions among the labels, rows and flags, gathered from the
+# blocks and joined, and their positions in the store.
+_COMPARED_BYTES_PER_CELL = 48
+
+
+@dataclass(frozen=True, slots=True)
+class _CellRowArrays:
+    """The stored arrays that give each labelled cell the row it carries alone.
+
+    A cell carries a target alone when its called guides target that gene and
+    no other, and a guide alone when it is the cell's one called guide: by
+    target, the labels' ``n_targets`` and ``target_codes``; by guide, the
+    calls' ``n_guides`` and ``guide_codes``. Only each cell's first code is
+    read.
+
+    Attributes:
+        is_control: Whether each cell carries control guides only.
+        counts: Each cell's number of targets, or of called guides.
+        codes: Each cell's targets, or called guides, as positions, padded
+            with -1.
+        row_of: The row of each target, or guide, -1 for none.
+    """
+
+    is_control: zarr.Array
+    counts: zarr.Array
+    codes: zarr.Array
+    row_of: np.ndarray
+
+    def rows(self, start: int, stop: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return the row that each cell from ``start`` to ``stop`` carries alone, or -1, and its control flag."""
+        control = np.asarray(self.is_control[start:stop], dtype=bool)
+        single = np.asarray(self.counts[start:stop]) == 1
+        first = np.asarray(self.codes[start:stop, 0])
+        return np.where(single, self.row_of[np.maximum(first, 0)], -1), control
+
+    def block_bytes(self, block_rows: int) -> int:
+        """Return the bytes that finding the compared cells of one block holds."""
+        decoded = max(
+            array_row_selection_parts(array)[0]
+            for array in (self.is_control, self.counts)
+        )
+        return (
+            block_rows * _LABEL_BLOCK_BYTES_PER_CELL
+            + array_row_selection_parts(self.codes)[0]
+            + decoded
+        )
+
+
+def _cell_row_arrays(
+    store: Any, labels: ArtifactRef, rows: _LabelRows, by: str
+) -> _CellRowArrays:
+    """Return the stored arrays from which each labelled cell's row is read."""
+    group = artifact_group(store.zw, labels)
+    if by == "target":
+        row_of = np.full(len(rows.target_names), -1, dtype=np.int64)
+        row_of[rows.codes] = np.arange(len(rows.codes))
+        source, counts, codes = group, "n_targets", "target_codes"
+    else:
+        row_of = np.full(len(rows.guide_targets), -1, dtype=np.int64)
+        row_of[rows.guides] = np.arange(len(rows.guides))
+        source = artifact_group(store.zw, rows.status.input_ref("guide_calls"))
+        counts, codes = "n_guides", "guide_codes"
+    return _CellRowArrays(
+        is_control=as_zarr_array(group["is_control"], name="is_control"),
+        counts=as_zarr_array(source[counts], name=counts),
+        codes=as_zarr_array(source[codes], name=codes),
+        row_of=row_of,
     )
 
 
@@ -519,24 +633,165 @@ def _label_groups(
     Raises:
         ValueError: If no labelled cell carries control guides only.
     """
-    group = artifact_group(store.zw, labels)
-
-    control = read_array(group, "is_control").astype(bool)
+    arrays = _cell_row_arrays(store, labels, rows, by)
+    control = np.asarray(arrays.is_control[:], dtype=bool)
     if not control.any():
-        raise ValueError(
-            "No labelled cell carries control guides only, and each "
-            "perturbation is compared with such cells; check the controls "
-            "passed to perturbation.labels, or in a screen whose cells carry "
-            "several guides, test associations with moi='high'"
-        )
-    if by == "target":
-        row_of = np.full(len(rows.target_names), -1, dtype=np.int64)
-        row_of[rows.codes] = np.arange(len(rows.codes))
-        single = read_array(group, "n_targets") == 1
-        # Only each cell's first target is read, not the other columns.
-        first = np.asarray(
-            as_zarr_array(group["target_codes"], name="target_codes")[:, 0]
-        )
-        return np.where(single, row_of[np.maximum(first, 0)], -1), control
-    guide_labels = _cell_values(store, labels, "guide_label").astype(str)
-    return pd.Index(rows.names).get_indexer(guide_labels).astype(np.int64), control
+        raise ValueError(_NO_CONTROL_CELLS)
+    groups, _ = arrays.rows(0, len(control))
+    return groups, control
+
+
+def _compared_cells(
+    store: Any, labels: ArtifactRef, rows: _LabelRows, by: str
+) -> tuple[_ComparedCells, int]:
+    """Return the cells that a per-perturbation table compares, and the bytes that finding them holds.
+
+    The labels are read a block of cells at a time, so that only the arrays of
+    the compared cells grow with the cells: a screen with many labelled cells
+    and few compared ones holds little. The bytes are the most that finding
+    the compared cells holds beside what the caller holds.
+
+    Raises:
+        ValueError: If no labelled cell carries control guides only.
+    """
+    arrays = _cell_row_arrays(store, labels, rows, by)
+    n_labelled = int(arrays.is_control.shape[0])
+    # The labels' cells are checked against the cell IDs before any array
+    # of the compared cells is held.
+    selection = rows.status.input_ref("cell_selection")
+    validate_cell_selection(store.zw, selection)
+    # Whole chunks of the codes, whose reads decode the most, up to a bound.
+    chunk_rows = max(1, int(arrays.codes.chunks[0]))
+    block_rows = max(chunk_rows, _LABEL_BLOCK_ROWS // chunk_rows * chunk_rows)
+    positions, groups, control = [], [], []
+    for start in range(0, n_labelled, block_rows):
+        row, flag = arrays.rows(start, min(start + block_rows, n_labelled))
+        kept = np.flatnonzero((row >= 0) | flag)
+        positions.append(kept + start)
+        groups.append(row[kept])
+        control.append(flag[kept])
+    if not any(flags.any() for flags in control):
+        raise ValueError(_NO_CONTROL_CELLS)
+    compared = np.concatenate(positions)
+    del positions
+    cells = _store_positions(store, selection, compared)
+    del compared
+    found = _ComparedCells(
+        cells=cells, groups=np.concatenate(groups), control=np.concatenate(control)
+    )
+    held = max(
+        _cell_selection_check_bytes(store),
+        len(cells) * _COMPARED_BYTES_PER_CELL
+        + max(
+            arrays.block_bytes(min(block_rows, n_labelled)),
+            _selection_block_bytes(store, selection),
+        ),
+    )
+    return found, held
+
+
+def _selection_blocks(store: Any, selection: ArtifactRef) -> Iterable[Any]:
+    """Yield a validated cell selection in blocks of cells."""
+    return iter_stored_selection_blocks(
+        store.zw,
+        selection,
+        kind="cell_selection",
+        scope="datastore",
+        assay=None,
+        table_path="cellData",
+        block_rows=_SELECTION_BLOCK_ROWS,
+    )
+
+
+def _selection_block_bytes(store: Any, selection: ArtifactRef) -> int:
+    """Return the bytes that one block of a cell selection holds as it is read.
+
+    A block holds its flags and the store positions of its cells, beside
+    those of the block before it, and the positions of the cells looked up in
+    it, at most 64 bytes for each of its cells, and the two chunks of flags
+    that its read may decode.
+    """
+    flags = as_zarr_array(artifact_group(store.zw, selection)["values"], name="values")
+    block_rows = min(_SELECTION_BLOCK_ROWS, int(flags.shape[0]))
+    return block_rows * 64 + 2 * array_row_selection_parts(flags)[0]
+
+
+def _store_positions(
+    store: Any, selection: ArtifactRef, compact: np.ndarray
+) -> np.ndarray:
+    """Return the store positions of a selection's cells at ascending ``compact`` positions.
+
+    The selection is read a block of cells at a time.
+    """
+    positions = np.empty(len(compact), dtype=np.int64)
+    for block in _selection_blocks(store, selection):
+        low, high = np.searchsorted(compact, (block.compact_start, block.compact_stop))
+        positions[low:high] = block.selected_indices[
+            compact[low:high] - block.compact_start
+        ]
+    return positions
+
+
+def _selected_rows(
+    store: Any, selection: ArtifactRef, cells: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return where each of ascending store positions sits among a selection's cells.
+
+    Also returns whether each is a cell of the selection; the position of one
+    that is not means nothing. The selection is read a block of cells at a
+    time.
+    """
+    found = np.zeros(len(cells), dtype=np.int64)
+    present = np.zeros(len(cells), dtype=bool)
+    for block in _selection_blocks(store, selection):
+        low, high = np.searchsorted(cells, (block.start, block.stop))
+        within, here = _positions_in(block.selected_indices, cells[low:high])
+        found[low:high] = block.compact_start + within
+        present[low:high] = here
+    return found, present
+
+
+def _cell_selection_check_bytes(store: Any, *, selected_ids: bool = False) -> int:
+    """Return the bytes that checking a cell selection against the cell IDs holds.
+
+    The check reads the selection's flags a band at a time. With
+    ``selected_ids``, as for imported coordinates, it also fingerprints the
+    selected cells' IDs a band at a time, which decodes whole chunks of IDs
+    and holds a band of IDs as read and as selected. The fingerprint of every
+    cell ID, which the first check in a process computes a chunk at a time,
+    is kept while the IDs are unchanged, so it is not counted.
+    """
+    ids = as_zarr_array(store.zw["cellData"]["ids"], name="ids")
+    n_cells = int(ids.shape[0])
+    held = 2 * n_cells
+    if selected_ids:
+        band = min(n_cells, scan_band(array_geometry(ids), fallback=n_cells))
+        itemsize = int(np.dtype(ids.dtype).itemsize)
+        held += array_row_selection_parts(ids)[0] + 2 * band * itemsize
+    return held
+
+
+def _column_read_bytes(metadata: Any, column: str | None) -> int:
+    """Return the bytes that reading a whole metadata column holds, 0 without one.
+
+    Zarr decodes whole chunks, also where a chunk reaches past the column's
+    end, so that reading a column shorter than its chunk holds the chunk as
+    stored and decoded, beside the column's values as read and as copied.
+    """
+    if column is None:
+        return 0
+    array = metadata._get_array(column)
+    return array_row_selection_parts(array)[0] + 2 * int(array.nbytes)
+
+
+def _read_chunkwise(array: zarr.Array) -> np.ndarray:
+    """Read a whole array one chunk of rows at a time.
+
+    Each read decodes one chunk of rows, so that reading holds the array and
+    one chunk beside it.
+    """
+    values = np.empty(array.shape, dtype=array.dtype)
+    step = max(1, int(array.chunks[0]))
+    for start in range(0, int(array.shape[0]), step):
+        values[start : start + step] = array[start : start + step]
+    return values
