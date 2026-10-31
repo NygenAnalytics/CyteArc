@@ -1364,15 +1364,40 @@ def write_quicat_wide(barcodes: BarcodeTruth, path: Path) -> Path:
 
 
 def write_quicat_h5ad(
-    barcodes: BarcodeTruth, path: Path, *, layout: str = "csr"
+    barcodes: BarcodeTruth,
+    path: Path,
+    *,
+    layout: str = "csr",
+    with_anndata: bool = False,
 ) -> Path:
-    """QuiCAT's ``barcodes_output.h5ad``: cells by barcodes, float UMI counts."""
+    """QuiCAT's ``barcodes_output.h5ad``: cells by barcodes, float UMI counts.
+
+    With ``with_anndata``, anndata itself writes the file; current releases
+    store each index as a nullable string array, a group of values and a
+    mask, where the file written here holds a dataset.
+    """
     merged, names = _merged_pairs(barcodes)
     cells = sorted(merged["cell"].unique())
     dense = np.zeros((len(cells), len(names)), dtype=np.float64)
     rows = pd.Index(cells).get_indexer(merged["cell"])
     columns = pd.Index(names).get_indexer(merged["barcode"])
     dense[rows, columns] = merged["umis"].to_numpy(dtype=np.float64)
+    if with_anndata:
+        import anndata
+        from scipy import sparse
+
+        samples = pd.Categorical([cell.rsplit("_", 1)[1] for cell in cells])
+        matrices = {
+            "dense": dense,
+            "csr": sparse.csr_matrix(dense),
+            "csc": sparse.csc_matrix(dense),
+        }
+        anndata.AnnData(
+            X=matrices[layout],
+            obs=pd.DataFrame({"sample": samples}, index=pd.Index(cells)),
+            var=pd.DataFrame(index=pd.Index(names)),
+        ).write_h5ad(path)
+        return path
     with h5py.File(path, "w") as handle:
         obs = _obs_frame(handle, cells)
         write_categorical(obs, "sample", [cell.rsplit("_", 1)[1] for cell in cells])

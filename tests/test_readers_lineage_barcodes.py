@@ -493,6 +493,53 @@ def test_missing_value_tokens_name_no_barcode_and_no_count(tmp_path) -> None:
             _rows(barcode_layout(molecules))
 
 
+def test_tool_formats_refuse_a_missing_value_where_the_tool_writes_one(
+    tmp_path,
+) -> None:
+    # TREX fills clone_id, and BARtab gene, in every row, so a token there is
+    # a row cut short.
+    trex = _file(
+        tmp_path,
+        "molecules.txt",
+        "#cell_id\tumi\tclone_id\nAAAC\tGG\tNA\nAAAG\tGT\tT\n",
+    )
+    with pytest.raises(ValueError, match="without clone_id on line 2.*cut short"):
+        _rows(barcode_layout(trex))
+    bartab = _file(
+        tmp_path, "x.counts.tsv", "gene\tcell\tcount\nN/A\tAAAC\t2\nLB\tAAAG\t3\n"
+    )
+    with pytest.raises(ValueError, match="without gene on line 2.*cut short"):
+        _rows(barcode_layout(bartab))
+    # Barcodes that head the columns of QuiCAT's merged table, and the names
+    # of an AnnData file, are read as written.
+    wide = _file(
+        tmp_path,
+        "barcodes_output.csv",
+        "sample,cell,NA,ACGT\ns1,AAAC,2,1\ns1,AAAG,0,3\n",
+    )
+    chunks = _rows(barcode_layout(wide), 100)
+    assert sorted(
+        (cell, barcode)
+        for chunk in chunks
+        for cell, barcode in zip(chunk.cells, chunk.barcodes, strict=True)
+    ) == [("AAAC", "ACGT"), ("AAAC", "NA"), ("AAAG", "ACGT")]
+    import anndata
+    import pandas as pd
+
+    named = tmp_path / "named.h5ad"
+    anndata.AnnData(
+        X=np.asarray([[2.0, 0.0], [0.0, 3.0]]),
+        obs=pd.DataFrame(index=["NA", "AAAG"]),
+        var=pd.DataFrame(index=["NA", "ACGT"]),
+    ).write_h5ad(named)
+    chunks = _rows(barcode_layout(named), 100)
+    assert sorted(
+        (cell, barcode)
+        for chunk in chunks
+        for cell, barcode in zip(chunk.cells, chunk.barcodes, strict=True)
+    ) == [("AAAG", "ACGT"), ("NA", "NA")]
+
+
 def test_bartab_annotations_split_both_list_separators(tmp_path) -> None:
     current = _file(
         tmp_path,
@@ -535,8 +582,59 @@ def test_gzip_compressed_tables_read_whatever_their_names(tmp_path) -> None:
     assert chunk.cells.tolist() == ["AAAC"]
 
 
-def _quicat_h5ad(tmp_path: Path, layout: str = "csr") -> Path:
-    return write_quicat_h5ad(BARCODES, tmp_path / f"{layout}.h5ad", layout=layout)
+def _quicat_h5ad(
+    tmp_path: Path, layout: str = "csr", *, with_anndata: bool = False
+) -> Path:
+    return write_quicat_h5ad(
+        BARCODES, tmp_path / f"{layout}.h5ad", layout=layout, with_anndata=with_anndata
+    )
+
+
+@pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
+def test_files_that_current_anndata_writes_give_the_same_pairs(
+    tmp_path, layout
+) -> None:
+    written = tmp_path / "written"
+    written.mkdir()
+    by_anndata = _quicat_h5ad(tmp_path, layout, with_anndata=True)
+    with h5py.File(by_anndata, "r") as handle:
+        # Each index is a nullable string array, a group of values and a mask.
+        assert isinstance(handle["obs/_index"], h5py.Group)
+        assert isinstance(handle["var/_index"], h5py.Group)
+    expected = _rows(barcode_layout(_quicat_h5ad(written, layout)), 7)
+    found = _rows(barcode_layout(by_anndata), 7)
+
+    def pairs(chunks) -> list:
+        return sorted(
+            (cell, barcode, int(count))
+            for chunk in chunks
+            for cell, barcode, count in zip(
+                chunk.cells, chunk.barcodes, chunk.umi_counts, strict=True
+            )
+        )
+
+    assert pairs(found) == pairs(expected) != []
+
+
+def test_a_missing_name_and_an_index_of_another_form_are_refused(tmp_path) -> None:
+    path = _quicat_h5ad(tmp_path, with_anndata=True)
+    with h5py.File(path, "r+") as handle:
+        mask = handle["var/_index/mask"]
+        flags = np.asarray(mask[:], dtype=bool)
+        flags[2] = True
+        mask[...] = flags
+    with pytest.raises(ValueError, match="name missing from the index .* row 3"):
+        _rows(barcode_layout(path), 7)
+    # An index that is neither a dataset of names nor a nullable string array.
+    folder = tmp_path / "odd"
+    folder.mkdir()
+    odd = _quicat_h5ad(folder)
+    with h5py.File(odd, "r+") as handle:
+        names = handle["obs/_index"][:]
+        del handle["obs/_index"]
+        handle["obs"].create_dataset("_index", data=np.stack([names, names], axis=1))
+    with pytest.raises(ValueError, match="stores its cell names in a form CyteArc"):
+        barcode_layout(odd)
 
 
 @pytest.mark.parametrize("layout", ["csr", "csc", "dense"])

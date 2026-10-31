@@ -75,7 +75,14 @@ from ._delimited import (
     text_chunks,
     text_layout,
 )
-from ._h5ad_columns import index_key, read_table_column, sparse_encoding, sparse_shape
+from ._h5ad_columns import (
+    column_length,
+    index_key,
+    read_column,
+    read_table_column,
+    sparse_encoding,
+    sparse_shape,
+)
 from ._text import as_text
 from .cellranger import (
     MIN_MOLECULE_ROWS,
@@ -720,11 +727,30 @@ def _h5ad_layout(path: str, library: str, roles: dict[str, Any]) -> BarcodeLayou
     )
 
 
+def _names(table: h5py.Group, path: str, what: str) -> Any:
+    """Return the node of an AnnData table's names, its index.
+
+    AnnData writes a text index as a dataset, or, in current releases, as a
+    nullable string array: a group of values and a mask.
+
+    Raises:
+        ValueError: If the index is neither.
+    """
+    node = table.get(str(index_key(table)))
+    if column_length(node) is None or (
+        isinstance(node, h5py.Dataset) and node.ndim != 1
+    ):
+        raise ValueError(
+            f"{path} stores its {what} names in a form CyteArc cannot read"
+        )
+    return node
+
+
 def _matrix(handle: h5py.File, path: str) -> _Matrix:
     """Read the layout, shape and value size of an AnnData file's ``X``."""
     obs, var = handle["obs"], handle["var"]
-    n_cells = int(obs[str(index_key(obs))].shape[0])
-    n_barcodes = int(var[str(index_key(var))].shape[0])
+    n_cells = int(column_length(_names(obs, path, "cell")) or 0)
+    n_barcodes = int(column_length(_names(var, path, "barcode")) or 0)
     node = handle["X"]
     chunks = None
     if isinstance(node, h5py.Dataset):
@@ -767,12 +793,22 @@ def _buffer_bytes(dataset: h5py.Dataset) -> int:
     return elements * int(dataset.dtype.itemsize) + _CHUNK_CACHE_BYTES
 
 
-def _name_blocks(dataset: Any) -> Iterator[list[str]]:
-    """Decode a dataset of names, ``_NAME_BLOCK`` at a time."""
-    n_names = int(dataset.shape[0])
+def _name_blocks(node: Any, path: str) -> Iterator[list[str]]:
+    """Decode an AnnData index of names, ``_NAME_BLOCK`` at a time.
+
+    Raises:
+        ValueError: If a name is missing.
+    """
+    n_names = int(column_length(node) or 0)
     for start in range(0, n_names, _NAME_BLOCK):
-        values = np.asarray(dataset[start : min(start + _NAME_BLOCK, n_names)])
-        yield [as_text(value) for value in values.tolist()]
+        values, missing = read_column(node, start, min(start + _NAME_BLOCK, n_names))
+        if np.any(missing):
+            row = start + int(np.flatnonzero(missing)[0]) + 1
+            raise ValueError(
+                f"{path} has a name missing from the index {node.name!r}, the first "
+                f"in row {row}"
+            )
+        yield [as_text(value) for value in np.asarray(values).tolist()]
 
 
 def _library_blocks(
@@ -812,12 +848,13 @@ def _decoded_bytes_of_names(path: str, library_column: str | None) -> int:
     with h5py.File(path, "r") as handle:
         obs, var = handle["obs"], handle["var"]
         for table in (obs, var):
-            for names in _name_blocks(table[str(index_key(table))]):
+            what = "cell" if table is obs else "barcode"
+            for names in _name_blocks(_names(table, path, what), path):
                 size = _texts_bytes(names)
                 held += size
                 largest = max(largest, size)
         if library_column is not None:
-            n_cells = int(obs[str(index_key(obs))].shape[0])
+            n_cells = int(column_length(_names(obs, path, "cell")) or 0)
             seen = np.empty(0, dtype=np.uint64)
             held += 4 * n_cells
             for labels in _library_blocks(handle, obs, library_column, n_cells, path):
@@ -1384,11 +1421,11 @@ def _whole_counts(values: np.ndarray, path: str) -> np.ndarray:
     return numbers.astype(np.int64)
 
 
-def _decoded_names(dataset: Any) -> np.ndarray:
-    """Decode a dataset of names into one array, a block at a time."""
-    names = np.empty(int(dataset.shape[0]), dtype=object)
+def _decoded_names(node: Any, path: str) -> np.ndarray:
+    """Decode an AnnData index of names into one array, a block at a time."""
+    names = np.empty(int(column_length(node) or 0), dtype=object)
     start = 0
-    for block in _name_blocks(dataset):
+    for block in _name_blocks(node, path):
         names[start : start + len(block)] = block
         start += len(block)
     return names
@@ -1496,8 +1533,8 @@ def _iter_h5ad_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[BarcodeR
     entries = max(1, int(chunk_rows))
     with h5py.File(layout.path, "r") as handle:
         obs, var = handle["obs"], handle["var"]
-        cell_names = _decoded_names(obs[str(index_key(obs))])
-        barcode_names = _decoded_names(var[str(index_key(var))])
+        cell_names = _decoded_names(_names(obs, layout.path, "cell"), layout.path)
+        barcode_names = _decoded_names(_names(var, layout.path, "barcode"), layout.path)
         node = handle["X"]
         library_codes = library_names = None
         if layout.library_column is not None:

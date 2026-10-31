@@ -311,8 +311,28 @@ def _wide_options(prefix_pattern: str) -> dict:
         lambda folder: write_quicat_h5ad(
             BARCODES, folder / "barcodes_output.h5ad", layout="dense"
         ),
+        lambda folder: write_quicat_h5ad(
+            BARCODES, folder / "barcodes_output.h5ad", with_anndata=True
+        ),
+        lambda folder: write_quicat_h5ad(
+            BARCODES, folder / "barcodes_output.h5ad", layout="csc", with_anndata=True
+        ),
+        lambda folder: write_quicat_h5ad(
+            BARCODES,
+            folder / "barcodes_output.h5ad",
+            layout="dense",
+            with_anndata=True,
+        ),
     ],
-    ids=["wide_csv", "h5ad_csr", "h5ad_csc", "h5ad_dense"],
+    ids=[
+        "wide_csv",
+        "h5ad_csr",
+        "h5ad_csc",
+        "h5ad_dense",
+        "anndata_csr",
+        "anndata_csc",
+        "anndata_dense",
+    ],
 )
 def test_quicats_merged_files_name_cells_with_their_sample(
     shared, tmp_path, write
