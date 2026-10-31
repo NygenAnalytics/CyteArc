@@ -372,3 +372,72 @@ def download_or_skip(url: str, path: Path) -> Path:
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         pytest.skip(f"{url} is unreachable: {error}")
     return path
+
+
+RCRS_CELLS = ("cell0", "cell1", "cell2")
+# The alternative base of each position that write_rcrs_mgatk writes, None for
+# C, or T where the reference reads C: masked positions, a NUMT position that
+# the NUMT does not change to C, and 1000, which no mask lists.
+RCRS_VARIANTS = {
+    310: "C",
+    16293: "C",
+    16218: "T",
+    2617: "G",
+    12684: "C",
+    1000: None,
+}
+
+
+def write_rcrs_mgatk(
+    folder: Path, alternative_reads: tuple[int, int, int] = (4, 4, 4)
+) -> Path:
+    """Write an mgatk folder on the rCRS reference of MiTo's fixture: each of
+    ``RCRS_CELLS`` reads 6 reference reads and its ``alternative_reads`` at
+    each variant of ``RCRS_VARIANTS``, as many on each strand."""
+    import gzip
+
+    folder.mkdir(parents=True)
+    data = Path(__file__).parent / "data" / "variants"
+    with gzip.open(data / "mito_mtscatac" / "pL1000.refAllele.txt.gz", "rt") as handle:
+        reference = {
+            int(position): base.upper()
+            for position, base in (line.split() for line in handle if line.strip())
+        }
+    (folder / "chrM_refAllele.txt").write_text(
+        "".join(f"{position}\t{base}\n" for position, base in reference.items())
+    )
+    rows: dict[str, list[str]] = {base: [] for base in "ACGT"}
+    for cell, reads in zip(RCRS_CELLS, alternative_reads, strict=True):
+        for position, alternative in RCRS_VARIANTS.items():
+            base = reference[position]
+            if alternative is None:
+                alternative = "C" if base != "C" else "T"
+            rows[base].append(f"{position},{cell},6,6")
+            if reads:
+                rows[alternative].append(f"{position},{cell},{reads},{reads}")
+    for base, lines in rows.items():
+        (folder / f"s.{base}.txt.gz").write_bytes(
+            gzip.compress("".join(f"{line}\n" for line in lines).encode())
+        )
+    (folder / "s.depthTable.txt").write_text(
+        "".join(f"{cell}\t1\n" for cell in RCRS_CELLS)
+    )
+    return folder
+
+
+def rcrs_store(path: Path) -> "DataStore":
+    """Write a store of ``RCRS_CELLS``, every cell in ``every_cell``."""
+    from cytearc.datastore.datastore import DataStore
+    from tests.storage_helpers import write_count_store
+
+    write_count_store(
+        str(path),
+        {"RNA": np.ones((len(RCRS_CELLS), 2), dtype=int)},
+        "uint16",
+        cell_ids=list(RCRS_CELLS),
+    )
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+    store.cells.insert("every_cell", np.ones(len(RCRS_CELLS), dtype=bool))
+    return store

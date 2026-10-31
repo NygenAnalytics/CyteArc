@@ -297,7 +297,9 @@ def mito_clone_truth(
             mito[row, position - 1, :, 1] = reads - forward
             if rng.random() < 0.25:
                 others = [b for b in range(len(BASES)) if BASES[b] != reference]
-                mito[row, position - 1, int(rng.choice(others)), int(rng.integers(2))] += 1
+                mito[
+                    row, position - 1, int(rng.choice(others)), int(rng.integers(2))
+                ] += 1
     quality = np.where(mito > 0, np.round(rng.uniform(20, 38, mito.shape), 1), 0.0)
     return VariantTruth(
         clones=clones,

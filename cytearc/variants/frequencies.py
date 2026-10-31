@@ -232,22 +232,19 @@ def _most_similar(
     similarity: np.ndarray, others: int, columns: np.ndarray
 ) -> np.ndarray:
     """Each row's ``others`` most similar positive columns, by decreasing
-    similarity and then by position, padded with -1."""
-    n_rows, n_columns = similarity.shape
+    similarity and then by position, padded with -1; ``others`` is below the
+    columns, since a cell is never its own neighbour."""
+    n_rows = similarity.shape[0]
     chosen = np.full((n_rows, others), -1, dtype=np.int64)
-    positive = similarity > 0
-    if others < n_columns:
-        # The value of each row's last neighbour; ties at it are taken from
-        # the lowest positions.
-        threshold = -np.partition(-similarity, others - 1, axis=1)[:, others - 1]
-        above = similarity > threshold[:, None]
-        tied = similarity == threshold[:, None]
-        needed = others - above.sum(axis=1)
-        tie_rank = np.cumsum(tied, axis=1)
-        selected = (above | (tied & (tie_rank <= needed[:, None]))) & positive
-        del above, tied, tie_rank
-    else:
-        selected = positive
+    # The value of each row's last neighbour; ties at it are taken from the
+    # lowest positions.
+    threshold = -np.partition(-similarity, others - 1, axis=1)[:, others - 1]
+    above = similarity > threshold[:, None]
+    tied = similarity == threshold[:, None]
+    needed = others - above.sum(axis=1)
+    tie_rank = np.cumsum(tied, axis=1)
+    selected = (above | (tied & (tie_rank <= needed[:, None]))) & (similarity > 0)
+    del above, tied, tie_rank
     rows, picked = np.nonzero(selected)
     del selected
     order = np.lexsort((columns[picked], -similarity[rows, picked], rows))

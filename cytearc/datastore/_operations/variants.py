@@ -471,18 +471,24 @@ def _variant_bands(
     """Yield bands of ``positions``' cells with their rows of long tables.
 
     ``tables`` names each long table, such as ``"depth"``, with the arrays
-    to read from it. A band is a run of consecutive positions whose rows in
-    every table together number at most ``max_rows``, or one cell. Each band
-    gives its positions and, per table, each row's cell position and the
-    arrays, so a band holds every row of its cells.
+    to read from it. A band covers consecutive cells whose rows in every
+    table together number at most ``max_rows``, or one cell, and gives the
+    positions among them and, per table, each of their rows' cell position
+    and the arrays, so a band holds every row of its chosen cells. Rows of
+    cells between chosen ones are read through and dropped while they number
+    fewer than ``max_rows``, so scattered cells take few reads.
     """
     if not len(positions):
         return
+    positions = np.asarray(positions, dtype=np.int64)
     offsets = {name: _read(group, f"{name}_offsets") for name in tables}
     combined = np.sum(list(offsets.values()), axis=0)
-    # Runs of consecutive cells read as one range.
-    breaks = np.flatnonzero(np.diff(positions) != 1) + 1
-    for run in np.split(np.asarray(positions, dtype=np.int64), breaks):
+    chosen = np.zeros(len(combined) - 1, dtype=bool)
+    chosen[positions] = True
+    # A gap whose rows reach max_rows is skipped; smaller ones are read.
+    gaps = combined[positions[1:]] - combined[positions[:-1] + 1]
+    breaks = np.flatnonzero(gaps >= max_rows) + 1
+    for run in np.split(positions, breaks):
         start_cell = int(run[0])
         last = int(run[-1])
         while start_cell <= last:
@@ -491,25 +497,31 @@ def _variant_bands(
                 np.searchsorted(combined, start + max_rows, side="right") - 1
             )
             stop_cell = min(last + 1, max(start_cell + 1, stop_cell))
+            cells = np.arange(start_cell, stop_cell, dtype=np.int64)
             band: dict[str, tuple[np.ndarray, dict[str, np.ndarray]]] = {}
             for table, names in tables.items():
                 table_offsets = offsets[table]
                 first = int(table_offsets[start_cell])
                 stop = int(table_offsets[stop_cell])
+                cells_of_rows = np.repeat(
+                    cells, np.diff(table_offsets[start_cell : stop_cell + 1])
+                )
+                kept = chosen[cells_of_rows]
                 band[table] = (
-                    np.repeat(
-                        np.arange(start_cell, stop_cell, dtype=np.int64),
-                        np.diff(table_offsets[start_cell : stop_cell + 1]),
-                    ),
+                    cells_of_rows[kept],
                     {
                         name: np.asarray(
                             as_zarr_array(group[name], name=name)[first:stop]
-                        )
+                        )[kept]
                         for name in names
                     },
                 )
-            yield np.arange(start_cell, stop_cell, dtype=np.int64), band
+            yield cells[chosen[cells]], band
             start_cell = stop_cell
+            # The next band starts at the next chosen cell.
+            following = np.searchsorted(run, start_cell)
+            if following < len(run):
+                start_cell = int(run[following])
 
 
 class _VariantOperationsMixin(_VariantOperationsBase):
@@ -1837,13 +1849,15 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         does, each cell's neighbourhood holds itself and the
         ``n_neighbors - 1`` cells most similar to it by the cosine similarity
         of the square roots of their allele frequencies of the informative
-        variants; a cell is joined to each neighbour with the Jaccard index
-        of their neighbourhoods, dropping joins below 1/15, as Seurat's
-        ``FindNeighbors`` weighs its shared-neighbour graph; and the Leiden
-        algorithm partitions the graph at ``resolution`` where Signac uses
-        Seurat's ``FindClusters``. Seurat also joins cells that only share
-        neighbours, which makes the graph quadratic in the cells that tie,
-        such as cells that show one informative variant each.
+        variants; two cells that share a neighbour are joined with the
+        Jaccard index of their neighbourhoods, dropping joins below 1/15, as
+        Seurat's ``FindNeighbors`` builds its shared-neighbour graph; and the
+        Leiden algorithm partitions the graph at ``resolution`` where Signac
+        uses Seurat's ``FindClusters``. Cells that tie, such as cells that
+        show one informative variant each, share the same few neighbours, so
+        Seurat's graph grows with the square of their number; a cell with
+        more than ``n_neighbors`` squared joins keeps those to its neighbours
+        and to the cells whose neighbourhoods hold it.
 
         A cell's frequency is undefined where it was not covered, so the
         similarity of two cells counts only the variants that both cover,
@@ -1991,13 +2005,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         ):
             depth_cells, depth = rows["depth"]
             count_cells, values = rows["count"]
-            first = int(band[0])
+            # A band's cells need not be consecutive.
             frequencies[row_of_position[band]] = band_frequencies(
                 n_rows=len(band),
-                depth_rows=depth_cells - first,
+                depth_rows=np.searchsorted(band, depth_cells),
                 depth_sites=depth["depth_sites"],
                 depth=depth["depth"],
-                count_rows=count_cells - first,
+                count_rows=np.searchsorted(band, count_cells),
                 count_alleles=values["count_alleles"],
                 counts=values["counts"],
                 alleles=alleles,

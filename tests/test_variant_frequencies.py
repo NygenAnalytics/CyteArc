@@ -316,6 +316,27 @@ def test_frequency_clones_leave_lone_cells_without_a_clone() -> None:
     assert called.n_edges == 1
 
 
+def test_frequency_clones_skip_a_group_whose_cells_join_no_other() -> None:
+    # Group 0 holds two cells that share variant 0; group 1 one cell that
+    # shows it, alone in its group.
+    frequencies = np.asarray([[0.5, 0.0], [0.6, 0.0], [0.7, 0.0]])
+    called = frequency_clones(
+        frequencies,
+        groups=np.asarray([0, 0, 1]),
+        n_neighbors=2,
+        resolution=1.0,
+        random_seed=1,
+        memory_bytes=1 << 30,
+    )
+    assert called.clusters.tolist() == [1, 1, 0]
+    assert [CLONE_STATUSES[code] for code in called.status] == [
+        "clustered",
+        "clustered",
+        "no_neighbor",
+    ]
+    assert called.n_edges == 1
+
+
 def test_frequency_clones_check_inputs_and_memory() -> None:
     with pytest.raises(ValueError, match=r"lie in \[0, 1\]"):
         frequency_clones(
@@ -355,6 +376,18 @@ def test_frequency_clones_check_inputs_and_memory() -> None:
             resolution=1.0,
             random_seed=1,
             memory_bytes=40_000,
+        )
+    # Enough for the similarities and the graph, but not for partitioning the
+    # two cells that join, which needs the Leiden backend's fixed 256 KiB.
+    with pytest.raises(
+        MemoryError, match="Partitioning the shared-neighbour graph of 2 cells"
+    ):
+        frequency_clones(
+            np.asarray([[0.5, 0.0], [0.6, 0.0], [0.0, 0.7]]),
+            n_neighbors=2,
+            resolution=1.0,
+            random_seed=1,
+            memory_bytes=10_000,
         )
 
 

@@ -4,7 +4,6 @@ The statistics are checked against mgatk's definitions computed densely from
 the synthetic truth's reads, which the code under test never sees.
 """
 
-import gzip
 import warnings
 from pathlib import Path
 
@@ -18,6 +17,8 @@ from tests.variant_helpers import (
     copy_variant_store,
     expected_mito_statistics,
     mito_variant_labels,
+    rcrs_store,
+    write_rcrs_mgatk,
     write_variant_store,
 )
 from tests.variant_truth import (
@@ -27,7 +28,6 @@ from tests.variant_truth import (
     write_mgatk,
 )
 
-DATA = Path(__file__).parent / "data" / "variants"
 TRUTH = mito_clone_truth()
 SMALL = variant_truth()
 STATISTICS = [
@@ -149,6 +149,61 @@ def test_cells_restrict_the_statistics_to_their_cells(store) -> None:
     )
 
 
+def test_scattered_cells_are_read_through_short_gaps_within_the_budget(
+    store, monkeypatch
+) -> None:
+    from cytearc.datastore._operations import variants as variant_operations
+
+    counts = _counts(store)
+    store.cells.insert("in_d2", TRUTH.clones.samples == "d2")
+    chosen = store.snapshot_cell_selection("in_d2")
+    rows = np.flatnonzero(TRUTH.clones.samples == "d2")
+    reads: list[int] = []
+    as_zarr_array = variant_operations.as_zarr_array
+
+    class Recorded:
+        """The stored depths, keeping the length of each read."""
+
+        def __init__(self, stored) -> None:
+            self.stored = stored
+            self.shape = stored.shape
+            self.dtype = stored.dtype
+
+        def __getitem__(self, selection) -> np.ndarray:
+            values = np.asarray(self.stored[selection])
+            reads.append(len(values))
+            return values
+
+    def recording(node, *, name=""):
+        stored = as_zarr_array(node, name=name)
+        return Recorded(stored) if name == "depth" else stored
+
+    monkeypatch.setattr(variant_operations, "as_zarr_array", recording)
+    # A budget of 1,500 rows per band, a few cells.
+    max_rows = 1500
+    store.memoryBytes = 240 * 60 * 4 + 16 * 60 + 200 * max_rows
+    store.variants.informative(counts, min_vmr=0.01)
+    every_read = len(reads)
+    reads.clear()
+    selection = store.variants.load_informative(
+        store.variants.informative(counts, cells=chosen, min_vmr=0.01)
+    )
+    expected = expected_mito_statistics(TRUTH, rows.tolist())
+    pd.testing.assert_frame_equal(
+        selection.variants.loc[expected.index, STATISTICS].astype(float),
+        expected[STATISTICS].astype(float),
+        check_exact=False,
+        check_index_type=False,
+        rtol=1e-9,
+    )
+    # The chosen cells form many runs, yet take no more reads than every
+    # cell, and each read stays within a band.
+    runs = 1 + int(np.count_nonzero(np.diff(rows) != 1))
+    assert every_read < runs
+    assert len(reads) <= every_read
+    assert max(reads) <= max_rows
+
+
 def test_cells_that_no_file_names_are_left_out(tmp_path) -> None:
     store = write_variant_store(tmp_path / "store.zarr", SMALL)
     # The files name every cell but the first five.
@@ -220,65 +275,9 @@ def test_tests_the_counts_cannot_make_fail_before_scoring(store, tmp_path) -> No
     assert selection.variants["strand_correlation"].isna().all()
 
 
-def _rcrs_folder(folder: Path) -> Path:
-    """An mgatk folder on the rCRS reference: three cells reading variants at
-    masked positions and at position 1000."""
-    folder.mkdir(parents=True)
-    with gzip.open(DATA / "mito_mtscatac" / "pL1000.refAllele.txt.gz", "rt") as handle:
-        reference = {
-            int(position): base.upper()
-            for position, base in (line.split() for line in handle if line.strip())
-        }
-    (folder / "chrM_refAllele.txt").write_text(
-        "".join(f"{position}\t{base}\n" for position, base in reference.items())
-    )
-    # Position: (reference reads, alternative base, alternative reads).
-    reads = {
-        310: (6, "C", 4),
-        16293: (6, "C", 4),
-        16218: (6, "T", 4),
-        2617: (6, "G", 4),
-        12684: (6, "C", 4),
-        1000: (6, "C" if reference[1000] != "C" else "T", 4),
-    }
-    rows: dict[str, list[str]] = {base: [] for base in "ACGT"}
-    for cell in ("cell0", "cell1", "cell2"):
-        for position, (
-            reference_reads,
-            alternative,
-            alternative_reads,
-        ) in reads.items():
-            ref = reference[position]
-            rows[ref].append(f"{position},{cell},{reference_reads},{reference_reads}")
-            rows[alternative].append(
-                f"{position},{cell},{alternative_reads},{alternative_reads}"
-            )
-    for base, lines in rows.items():
-        (folder / f"s.{base}.txt.gz").write_bytes(
-            gzip.compress(("\n".join(lines) + "\n").encode())
-        )
-    (folder / "s.depthTable.txt").write_text("cell0\t1\ncell1\t1\ncell2\t1\n")
-    return folder
-
-
 def test_masks_keep_listed_variants_from_being_informative(tmp_path) -> None:
-    from tests.storage_helpers import write_count_store
-    from cytearc.datastore.datastore import DataStore
-
-    write_count_store(
-        str(tmp_path / "store.zarr"),
-        {"RNA": np.ones((3, 2), dtype=int)},
-        "uint16",
-        cell_ids=["cell0", "cell1", "cell2"],
-    )
-    store = DataStore(
-        str(tmp_path / "store.zarr"),
-        default_assay="RNA",
-        min_features_per_cell=0,
-        nthreads=1,
-    )
-    store.cells.insert("every_cell", np.ones(3, dtype=bool))
-    counts = _import(store, _rcrs_folder(tmp_path / "final"))
+    store = rcrs_store(tmp_path / "store.zarr")
+    counts = _import(store, write_rcrs_mgatk(tmp_path / "final", (2, 4, 6)))
     selection = store.variants.load_informative(
         store.variants.informative(
             counts, min_vmr=0.0, mask=["numt", "artifact_prone", "rna_editing"]
@@ -330,6 +329,33 @@ def test_saved_statistics_are_reused_and_identified_by_their_thresholds(store) -
     assert reader.variants.informative(counts, preset="atac") in {first, again}
     with pytest.raises(PermissionError):
         reader.variants.informative(counts, preset="atac", min_vmr=0.2)
+
+
+def test_a_selection_that_lost_an_array_is_not_reused(store) -> None:
+    import zarr
+
+    from cytearc.storage.artifacts import artifact_path
+
+    counts = _counts(store)
+    first = store.variants.informative(counts, preset="atac")
+
+    def writable(ref) -> zarr.Group:
+        return zarr.open_group(store.zarr_loc, mode="r+")[artifact_path(ref)]
+
+    del writable(first)["vmr"]
+    second = store.variants.informative(counts, preset="atac")
+    assert second != first
+    # An array of another length is not reused either.
+    group = writable(second)
+    del group["mean"]
+    group.create_array("mean", data=np.zeros(3))
+    third = store.variants.informative(counts, preset="atac")
+    assert third not in (first, second)
+    loaded = store.variants.load_informative(third).variants
+    expected = expected_mito_statistics(TRUTH, list(range(TRUTH.n_cells)))
+    np.testing.assert_allclose(
+        loaded.loc[expected.index, "vmr"].astype(float), expected["vmr"], rtol=1e-9
+    )
 
 
 def test_scoring_checks_its_arguments_and_memory(store) -> None:

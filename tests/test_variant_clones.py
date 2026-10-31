@@ -179,6 +179,28 @@ def test_clones_do_not_depend_on_threads_or_budget(store, tmp_path) -> None:
     np.testing.assert_array_equal(first, second)
 
 
+def test_clones_of_scattered_cells_do_not_depend_on_the_budget(store) -> None:
+    counts, _selection = _inputs(store)
+    in_d2 = TRUTH.clones.samples == "d2"
+    store.cells.insert("in_d2", in_d2)
+    selection = store.variants.informative(
+        counts, cells=store.snapshot_cell_selection("in_d2"), preset="atac"
+    )
+    whole = _called(store, store.variants.clones(counts, variants=selection))
+    assert (whole[~in_d2] == "").all()
+    labelled = in_d2 & (TRUTH.clones.clones >= 0)
+    assert adjusted_rand_score(TRUTH.clones.clones[labelled], whole[labelled]) > 0.9
+    # Bands of 5,000 rows, a few cells each, with cells of d4 between the
+    # chosen ones; the rest of the budget holds the graph.
+    group = store.artifacts.load(counts)
+    rows = np.diff(group["depth_offsets"][:]) + np.diff(group["count_offsets"][:])
+    first, last = np.flatnonzero(in_d2)[[0, -1]]
+    assert rows[first : last + 1].sum() > 4 * 5_000
+    store.memoryBytes = 8 * int(in_d2.sum()) * 12 + 200 * 5_000
+    banded = store.variants.clones(counts, variants=selection, invalidate_cache=True)
+    np.testing.assert_array_equal(_called(store, banded), whole)
+
+
 def test_a_read_only_store_reuses_saved_clones_and_refuses_new_ones(store) -> None:
     counts, selection = _inputs(store)
     clones = store.variants.clones(counts, variants=selection)

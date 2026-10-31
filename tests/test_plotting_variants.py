@@ -316,3 +316,72 @@ def test_allele_frequencies_need_cells_with_a_clone(scored) -> None:
         allele_frequencies(store, selection, clones=empty, show=False)
     with pytest.raises(ValueError, match="max_cells"):
         allele_frequencies(store, selection, max_cells=0, show=False)
+
+
+def _rcrs_counts(store, folder, alternative_reads):
+    import warnings
+
+    from tests.clone_helpers import every_cell
+    from tests.variant_helpers import write_rcrs_mgatk
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        return store.variants.import_counts(
+            write_rcrs_mgatk(folder, alternative_reads),
+            cell_selection=every_cell(store),
+        )
+
+
+def test_variant_statistics_mark_masked_variants_apart(tmp_path) -> None:
+    from cytearc.plotting import variant_statistics
+    from tests.variant_helpers import rcrs_store
+
+    store = rcrs_store(tmp_path / "store.zarr")
+    counts = _rcrs_counts(store, tmp_path / "final", (2, 4, 6))
+    selection = store.variants.informative(counts, min_vmr=0.0, mask="artifact_prone")
+    result = variant_statistics(store, selection, show=True)
+    drawn = {
+        collection.get_label(): np.asarray(collection.get_offsets())
+        for collection in result.axes["variants"].collections
+    }
+    # 310 is the one artifact-prone position, and each cell reads as many
+    # alternative reads on each strand, a strand correlation of 1.
+    assert len(drawn["masked"]) == 1 and len(drawn["informative"]) == 5
+    assert len(drawn["other"]) == 0
+    assert drawn["masked"][0, 0] == pytest.approx(1.0)
+    table = result.tables["variants"]
+    assert table.loc[table["masked"], "variant"].tolist() == ["chrM:310T>C"]
+    plt.close(result.figure)
+
+
+def test_variant_statistics_need_a_variant_to_draw(tmp_path) -> None:
+    from cytearc.plotting import variant_statistics
+    from tests.variant_helpers import rcrs_store
+
+    store = rcrs_store(tmp_path / "store.zarr")
+    # Every read is a reference read, so no cell shows a variant.
+    counts = _rcrs_counts(store, tmp_path / "final", (0, 0, 0))
+    selection = store.variants.informative(counts, min_vmr=0.0)
+    assert store.variants.load_informative(selection).variants.empty
+    with pytest.raises(ValueError, match="No variant has a strand correlation"):
+        variant_statistics(store, selection, show=False)
+
+
+def test_allele_frequencies_show_and_need_a_store_with_clones(scored) -> None:
+    from types import SimpleNamespace
+
+    from cytearc.plotting import allele_frequencies
+
+    store, _truth, _counts, selection, clones = scored
+    result = allele_frequencies(
+        store, selection, clones=clones, max_cells=30, show=True
+    )
+    assert len(result.tables["cells"]) == 30
+    plt.close(result.figure)
+    with pytest.raises(TypeError, match="does not provide clones.load_clones"):
+        allele_frequencies(
+            SimpleNamespace(variants=store.variants),
+            selection,
+            clones=clones,
+            show=False,
+        )
