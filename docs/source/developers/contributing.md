@@ -74,6 +74,8 @@ After adding slow test files or changing how long existing ones take, refresh th
 
     NUMBA_CACHE_DIR=$(mktemp -d) uv run pytest --store-shard-durations
 
+The first run after a change to a module that uses `njit`, or after a new release tag, compiles every kernel that the suite uses again; commits that change no such module load the kernels that earlier runs compiled. A process that sees a module that uses `njit` change while it runs, as under IPython's autoreload, compiles its kernels without the cache until it restarts.
+
 For full CI parity, also run the visual regression step (or see `AGENTS.md`):
 
     MPLBACKEND=Agg CYTEARC_RUN_VISUAL_REGRESSION=1 \
