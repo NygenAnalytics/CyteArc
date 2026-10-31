@@ -687,14 +687,11 @@ def test_anndata_counts_skip_blocks_without_counts_and_refuse_odd_matrices(
         values[0] = 0
         del handle["X"]
         handle.create_dataset("X", data=values)
-    # A matrix stored without chunks is read a row at a time when a chunk
-    # holds one row of entries; the first row holds none.
+    # The first row holds no count, so the first chunk starts on the second.
     chunks = _rows(barcode_layout(path), values.shape[1])
     assert chunks[0].first_line == 2
-    assert len(chunks) == len(values) - 1
-    assert [len(chunk.cells) for chunk in chunks] == np.count_nonzero(
-        values[1:], axis=1
-    ).tolist()
+    assert max(len(chunk.cells) for chunk in chunks) <= values.shape[1]
+    assert sum(len(chunk.cells) for chunk in chunks) == np.count_nonzero(values)
     with h5py.File(path, "a") as handle:
         del handle["X"]
         group = handle.create_group("X")
@@ -1188,22 +1185,36 @@ def test_dense_anndata_is_read_in_tiles_of_whole_chunks(
 
 
 def test_a_dense_matrix_without_chunks_is_read_in_whole_rows_when_they_fit(
-    tmp_path,
+    tmp_path, monkeypatch
 ) -> None:
+    reads = []
+    read = h5py.Dataset.__getitem__
+
+    def recorded(self, selection):
+        if self.name == "/X":
+            reads.append(tuple((part.start, part.stop) for part in selection))
+        return read(self, selection)
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", recorded)
     values = np.zeros((30, 6), dtype=np.int64)
     values[np.arange(30), np.arange(30) % 6] = np.arange(1, 31)
     path = _matrix_h5ad(tmp_path / "dense.h5ad", values, layout="dense")
-    # Four rows of six barcodes fit 25 entries; the last chunk holds two rows.
+    # Four rows of six barcodes fit 25 entries; the last read holds two rows.
     chunks = _rows(barcode_layout(path), 25)
-    assert [chunk.cells.tolist() for chunk in chunks] == [
-        [f"C{row}" for row in range(start, min(start + 4, 30))]
-        for start in range(0, 30, 4)
-    ]
+    assert reads == [((start, min(start + 4, 30)), (0, 6)) for start in range(0, 30, 4)]
     assert _entries(chunks) == _nonzero_entries(values)
+    # Entries gather across reads: the six reads' 24 entries, then six more.
+    assert [len(chunk.cells) for chunk in chunks] == [24, 6]
     # A row of more barcodes than the entries is read in parts.
+    reads.clear()
     wide = np.ones((2, 9), dtype=np.int64)
     path = _matrix_h5ad(tmp_path / "wide.h5ad", wide, layout="dense")
     chunks = _rows(barcode_layout(path), 4)
+    assert reads == [
+        ((row, row + 1), columns)
+        for row in (0, 1)
+        for columns in ((0, 4), (4, 8), (8, 9))
+    ]
     assert [len(chunk.cells) for chunk in chunks] == [4, 4, 1, 4, 4, 1]
 
 
@@ -1424,3 +1435,30 @@ def test_a_merged_table_that_numpy_cannot_parse_is_refused_as_malformed(
     # Fields that are a cell and counts, which numpy refuses anyway.
     with pytest.raises(ValueError, match="is malformed: unbalanced quotes"):
         _rows(barcode_layout(path), 10)
+
+
+def test_a_sparse_dense_matrix_yields_its_entries_in_few_chunks(tmp_path) -> None:
+    values = np.zeros((50, 70), dtype=np.int64)
+    values[np.arange(50), (7 * np.arange(50)) % 70] = 3
+    path = _matrix_h5ad(tmp_path / "dense.h5ad", values, layout="dense", chunks=(8, 16))
+    chunks = _rows(barcode_layout(path), 10)
+    assert _entries(chunks) == _nonzero_entries(values)
+    assert max(len(chunk.cells) for chunk in chunks) <= 10
+    # A chunk per part of a tile held one or two entries each: 50 chunks.
+    assert len(chunks) <= 2 * 50 // 10
+
+
+def test_zeros_stored_in_a_sparse_matrix_name_no_barcode(tmp_path) -> None:
+    path = _matrix_h5ad(tmp_path / "csr.h5ad", np.eye(3, dtype=np.int64), layout="csr")
+    # The first three stored entries are zeros, so the first window holds none.
+    with h5py.File(path, "a") as handle:
+        for name, values in (
+            ("data", [0, 0, 0, 2, 5]),
+            ("indices", [0, 1, 2, 1, 2]),
+            ("indptr", [0, 3, 4, 5]),
+        ):
+            del handle[f"X/{name}"]
+            handle[f"X/{name}"] = np.asarray(values)
+    chunks = _rows(barcode_layout(path), 3)
+    assert _entries(chunks) == [("C1", "B1", 2), ("C2", "B2", 5)]
+    assert len(chunks) == 1

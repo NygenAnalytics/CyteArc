@@ -1294,9 +1294,12 @@ def _dense_entries(
     """Yield the rows, columns and values of a dense matrix's nonzero entries.
 
     The matrix is read in tiles of whole HDF5 chunks, and each tile's
-    entries are searched ``entries`` at a time, so no run yields more.
+    entries are searched ``entries`` at a time; the nonzero ones gather
+    across searches and tiles, and each run yields at most ``entries``.
     """
     height, width = matrix.tile_shape(entries)
+    gathered: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    n_gathered = 0
     for top in range(0, matrix.n_cells, height):
         for left in range(0, matrix.n_barcodes, width):
             tile = np.asarray(
@@ -1308,8 +1311,23 @@ def _dense_entries(
             flat = tile.reshape(-1)
             for begin in range(0, len(flat), entries):
                 found = np.flatnonzero(flat[begin : begin + entries]) + begin
+                if not len(found):
+                    continue
+                if n_gathered + len(found) > entries:
+                    yield _joined_entries(gathered)
+                    gathered, n_gathered = [], 0
                 rows, columns = np.divmod(found, tile.shape[1])
-                yield rows + top, columns + left, flat[found]
+                gathered.append((rows + top, columns + left, flat[found]))
+                n_gathered += len(found)
+    if gathered:
+        yield _joined_entries(gathered)
+
+
+def _joined_entries(
+    parts: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rows, columns, values = zip(*parts, strict=True)
+    return np.concatenate(rows), np.concatenate(columns), np.concatenate(values)
 
 
 def _sparse_entries(

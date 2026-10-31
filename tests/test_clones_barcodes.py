@@ -382,3 +382,44 @@ def test_finding_repeated_keys_holds_the_bytes_the_import_counts() -> None:
         tracemalloc.stop()
     # The keys themselves and what finding their repeats adds.
     assert peak <= operations._KEY_BYTES * n_keys
+
+
+def test_adding_many_small_chunks_costs_time_linear_in_the_chunks(monkeypatch) -> None:
+    from cytearc.clones import barcodes as barcodes_module
+
+    lengths = []
+    length = barcodes_module._Rows.__len__
+
+    def counted(self) -> int:
+        lengths.append(1)
+        return length(self)
+
+    monkeypatch.setattr(barcodes_module._Rows, "__len__", counted)
+    counter = BarcodeCounter(merge_rows=10**9)
+    n_chunks = 2_000
+    for chunk in range(n_chunks):
+        counter.add([chunk % 7], ["lib"], [f"B{chunk % 5}"], umi_counts=[1])
+        counter.peak_bytes
+    # Walking the waiting chunks on each call took about 6 million lengths.
+    assert len(lengths) < 20 * n_chunks
+    assert counter.n_rows == n_chunks
+
+
+def test_the_counters_totals_follow_the_rows_it_holds() -> None:
+    rng = np.random.default_rng(11)
+    counter = BarcodeCounter(merge_rows=40)
+    for _chunk in range(60):
+        size = int(rng.integers(1, 30))
+        counter.add(
+            rng.integers(0, 20, size),
+            ["lib"] * size,
+            [f"B{value}" for value in rng.integers(0, 15, size)],
+            umis=[f"U{value}" for value in rng.integers(0, 9, size)],
+            rows_are_reads=True,
+        )
+        parts = ([] if counter._held is None else [counter._held]) + counter._waiting
+        n_rows = sum(len(part) for part in parts)
+        n_text = sum(len(part.barcode_values) + len(part.umi_values) for part in parts)
+        assert counter.n_rows == n_rows
+        assert counter.nbytes == sum(part.nbytes for part in parts)
+        assert counter.peak_bytes == counter.nbytes + 110 * n_rows + 48 * n_text

@@ -235,6 +235,11 @@ class BarcodeCounter:
         self._merge_rows = int(merge_rows)
         self._held: _Rows | None = None
         self._waiting: list[_Rows] = []
+        # The rows, bytes and distinct texts of the waiting chunks, counted as
+        # they arrive, so that a chunk costs the same however many wait.
+        self._waiting_rows = 0
+        self._waiting_bytes = 0
+        self._waiting_texts = 0
         self._library_codes: dict[str, int] = {}
         self._library_names: list[str] = []
         # Whether each library's records are molecules, by library code.
@@ -245,19 +250,20 @@ class BarcodeCounter:
     def n_rows(self) -> int:
         """The rows held: records, and collapsed chunks that wait to merge."""
         held = 0 if self._held is None else len(self._held)
-        return held + sum(len(part) for part in self._waiting)
+        return held + self._waiting_rows
 
     @property
     def nbytes(self) -> int:
         """The bytes that the held rows and their distinct text take."""
         held = 0 if self._held is None else self._held.nbytes
-        return held + sum(part.nbytes for part in self._waiting)
+        return held + self._waiting_bytes
 
     @property
     def peak_bytes(self) -> int:
         """The bytes held at the peak of merging the rows held now."""
-        parts = ([] if self._held is None else [self._held]) + self._waiting
-        n_text = sum(len(part.barcode_values) + len(part.umi_values) for part in parts)
+        n_text = self._waiting_texts
+        if self._held is not None:
+            n_text += len(self._held.barcode_values) + len(self._held.umi_values)
         return self.nbytes + _MERGE_ROW_BYTES * self.n_rows + _MERGE_TEXT_BYTES * n_text
 
     def add_library(self, name: str, *, molecules: bool) -> None:
@@ -360,14 +366,17 @@ class BarcodeCounter:
             )
         )
         self._waiting.append(part)
+        self._waiting_rows += len(part)
+        self._waiting_bytes += part.nbytes
+        self._waiting_texts += len(part.barcode_values) + len(part.umi_values)
         held = 0 if self._held is None else len(self._held)
-        waiting = sum(len(rows) for rows in self._waiting)
-        if waiting >= max(held, self._merge_rows):
+        if self._waiting_rows >= max(held, self._merge_rows):
             self._merge()
 
     def _merge(self) -> None:
         parts = ([] if self._held is None else [self._held]) + self._waiting
         self._waiting = []
+        self._waiting_rows = self._waiting_bytes = self._waiting_texts = 0
         self._held = None
         if parts:
             self._held = _merged(parts)
