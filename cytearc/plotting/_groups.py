@@ -5,10 +5,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..metadata.selection import CellField, category_codes, resolve_grouping
+from ..metadata.selection import (
+    CellField,
+    category_codes,
+    cell_selection_indices,
+    resolve_grouping,
+)
 from ..storage.artifacts import inspect_artifact
 from ..storage.refs import ArtifactRef
-from ..storage.selections import read_stored_selection_indices
 from ..utils.arrays import sorted_unique
 
 __all__ = ["cell_groups"]
@@ -59,14 +63,7 @@ def cell_groups(
             raise TypeError("groups must be an ArtifactRef")
         resolved = resolve_grouping(store.zw, store.cells, groups)
         name = groups.kind
-    cell_index = read_stored_selection_indices(
-        store.zw,
-        selection,
-        kind="cell_selection",
-        scope="datastore",
-        assay=None,
-        table_path="cellData",
-    )
+    cell_index = cell_selection_indices(store.zw, selection)
     codes, names = category_codes(resolved.labels, resolved.missing_mask)
     at = pd.Index(np.asarray(resolved.cell_idx, dtype=np.int64)).get_indexer(
         np.asarray(cell_index, dtype=np.int64)

@@ -23,6 +23,7 @@ from ...metadata.rows import (
     read_metadata_missing_rows_chunkwise,
     read_metadata_rows_chunkwise,
 )
+from ...metadata.selection import cell_selection_indices
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
@@ -31,9 +32,9 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
-from ...storage.selections import read_stored_selection_indices
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
+from ...utils.arguments import bool_argument
 from ...utils.logging import logger
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
@@ -123,14 +124,7 @@ def _files_text(n_files: int) -> str:
 
 class _CloneOperationsMixin(_CloneOperationsBase):
     def _clone_selection_indices(self, cell_selection: ArtifactRef) -> np.ndarray:
-        cell_index = read_stored_selection_indices(
-            self.zw,
-            cell_selection,
-            kind="cell_selection",
-            scope="datastore",
-            assay=None,
-            table_path="cellData",
-        ).astype(np.int64, copy=False)
+        cell_index = cell_selection_indices(self.zw, cell_selection)
         if not len(cell_index):
             raise ValueError("cell_selection selects no cell")
         return cell_index
@@ -272,8 +266,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 f"{multiple!r}"
             )
         policy: MultiplePolicy = "drop" if multiple == "drop" else "error"
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
+        bool_argument(invalidate_cache, "invalidate_cache")
         if format is not None and not isinstance(format, str):
             raise TypeError("format must be a format name or None")
         files = barcode_files(
@@ -534,8 +527,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise ValueError(f"{column!r} is not a cell metadata column")
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
+        bool_argument(invalidate_cache, "invalidate_cache")
         cell_index = self._clone_selection_indices(cell_selection)
         n_cells = len(cell_index)
         resident = _TABLE_BYTES_PER_CELL * n_cells
@@ -594,14 +586,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
     def _clone_cell_ids(self, clones: ArtifactRef) -> np.ndarray:
         """The IDs of a clones artifact's cells, in the order of its arrays."""
         selection = inspect_artifact(self.zw, clones).input_ref("cell_selection")
-        cell_index = read_stored_selection_indices(
-            self.zw,
-            selection,
-            kind="cell_selection",
-            scope="datastore",
-            assay=None,
-            table_path="cellData",
-        )
+        cell_index = cell_selection_indices(self.zw, selection)
         return np.asarray(read_metadata_rows_chunkwise(self.cells, "ids", cell_index))
 
     @validation_scoped
