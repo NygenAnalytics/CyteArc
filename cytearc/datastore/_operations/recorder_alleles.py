@@ -66,6 +66,7 @@ _IMPORT_ATTRIBUTES = (
     "n_file_rows",
     "n_unmatched_rows",
     "n_beyond_length",
+    "n_rows_without_integration",
     "n_file_barcodes",
     "n_unmatched_barcodes",
     "unmatched_barcode_examples",
@@ -149,6 +150,27 @@ def _saved_count(group: zarr.Group, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"The lineage_alleles artifact records no count {name!r}")
     return value
+
+
+def _without_integration_warning(n_rows: int) -> str | None:
+    if not n_rows:
+        return None
+    return (
+        f"{n_rows} rows of the allele files name no integration, as PEtracer "
+        "leaves intID empty where an intBC is not on its whitelist; they are left "
+        "out."
+    )
+
+
+def _warn_import(attributes: Any, files_text: str) -> None:
+    """Warn about what an import counted, as it does again when it is reused."""
+    warn_unmatched_barcodes(attributes, files_text)
+    for message in (
+        _beyond_length_warning(int(attributes["n_beyond_length"])),
+        _without_integration_warning(int(attributes["n_rows_without_integration"])),
+    ):
+        if message is not None:
+            warn(message)
 
 
 def _beyond_length_warning(n_beyond: int) -> str | None:
@@ -306,18 +328,21 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         if planned.reused:
             # Saved alleles warn as they did when they were imported.
             saved = artifact_group(self.zw, planned.ref)
-            warn_unmatched_barcodes(saved.attrs, files_text)
-            message = _beyond_length_warning(_saved_count(saved, "n_beyond_length"))
-            if message is not None:
-                warn(message)
+            _warn_import(
+                {
+                    **saved.attrs,
+                    "n_beyond_length": _saved_count(saved, "n_beyond_length"),
+                    "n_rows_without_integration": _saved_count(
+                        saved, "n_rows_without_integration"
+                    ),
+                },
+                files_text,
+            )
             return planned.ref
         self._require_writable(arguments.operation)
         table, attributes = self._read_alleles(files, layouts, cell_index)
         self._write_alleles(planned, table, n_cells, attributes)
-        warn_unmatched_barcodes(attributes, files_text)
-        message = _beyond_length_warning(int(attributes["n_beyond_length"]))
-        if message is not None:
-            warn(message)
+        _warn_import(attributes, files_text)
         return planned.ref
 
     def _allele_layouts(
@@ -486,16 +511,15 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         )
         del cell_ids
         named: list[np.ndarray | None] = []
-        records = []
-        rows = []
-        n_beyond = merge_text = 0
+        counted: list[dict[str, int]] = []
+        merge_text = 0
         for position, (file, layout) in enumerate(zip(files, layouts, strict=True)):
             mask = (
                 np.zeros(n_cells, dtype=bool)
                 if layout.integration is not None
                 else None
             )
-            file_rows, file_records, file_beyond, merge_text = self._read_allele_file(
+            counts, merge_text = self._read_allele_file(
                 encoder,
                 join,
                 file,
@@ -506,9 +530,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 merge_text=merge_text,
             )
             named.append(mask)
-            rows.append(file_rows)
-            records.append(file_records)
-            n_beyond += file_beyond
+            counted.append(counts)
         _check_shared_cells(files, layouts, named)
         del named
         self._check_allele_budget(encoder, cells=held, merge_text=merge_text)
@@ -518,16 +540,17 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 {
                     **layout.source(),
                     "lengths": dict(sorted(layout.lengths.items())),
-                    "rows": int(file_rows),
-                    "records": int(file_records),
+                    "rows": counts["rows"],
+                    "records": counts["records"],
                 }
-                for layout, file_rows, file_records in zip(
-                    layouts, rows, records, strict=True
-                )
+                for layout, counts in zip(layouts, counted, strict=True)
             ],
             "n_file_rows": join.n_rows,
             "n_unmatched_rows": join.n_unmatched_rows,
-            "n_beyond_length": int(n_beyond),
+            "n_beyond_length": sum(counts["beyond"] for counts in counted),
+            "n_rows_without_integration": sum(
+                counts["without_integration"] for counts in counted
+            ),
             **join.attributes(),
         }
         return table, attributes
@@ -543,13 +566,14 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         mask: np.ndarray | None,
         held: int,
         merge_text: int,
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[dict[str, int], int]:
         """Read one file into the encoder.
 
         Returns:
-            The file's rows, its records, its edits beyond their
-            integration's length, and the bytes that merging takes for the
-            distinct text values of the chunks held, these included.
+            The file's ``rows``, its ``records``, its edits ``beyond`` their
+            integration's length and its rows ``without_integration``; and
+            the bytes that merging takes for the distinct text values of the
+            chunks held, these included.
         """
         from ...readers.recorder_alleles import classified_rows, iter_allele_rows
 
@@ -563,7 +587,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             reading=reading + join.unmatched_bytes,
             merge_text=merge_text,
         )
-        n_rows = n_records = n_beyond = 0
+        counts = {"rows": 0, "records": 0, "beyond": 0, "without_integration": 0}
         for rows in iter_allele_rows(layout, chunk_rows):
             classified = classified_rows(layout, rows)
             cells = join.cells(file, rows.barcodes)
@@ -572,16 +596,20 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             frame, record_cells = allele_chunk(rows, cells, classified)
             merge_text += _merge_text_bytes(frame)
             encoder.add(frame, record_cells, position)
-            n_rows += len(rows)
-            n_records += len(record_cells)
-            n_beyond += classified.n_beyond
+            counts["rows"] += len(rows)
+            counts["records"] += len(record_cells)
+            counts["beyond"] += classified.n_beyond
+            if rows.integrations is not None:
+                counts["without_integration"] += int(
+                    np.count_nonzero(pd.isna(rows.integrations))
+                )
             self._check_allele_budget(
                 encoder,
                 cells=held,
                 reading=reading + join.unmatched_bytes,
                 merge_text=merge_text,
             )
-        return n_rows, n_records, n_beyond, merge_text
+        return counts, merge_text
 
     def _write_alleles(
         self,

@@ -76,8 +76,10 @@ their last hyphen; a name without one is an integration of one site.
 """
 
 import csv
+import gzip
 import os
 import re
+import zlib
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -152,7 +154,13 @@ _CARLIN_EVENT = (
     r"(?:\d+_\d+del|\d+_\d+ins[ACGTN]+|\d+_\d+delins[ACGTN]+|\d+[ACGTN]>[ACGTN])"
 )
 _CARLIN_ALLELE = rf"{_CARLIN_EVENT}(?:,{_CARLIN_EVENT})*"
-_NUCLEOTIDES = r"[ACGTN]+"
+# PEtracer's and DNA Typewriter's insertions are bases, never N, so text such
+# as NA is no insertion.
+_INSERTION = r"[ACGT]+"
+# A state of a character matrix: text that other formats read as missing or
+# unedited, and a negative number that the matrix does not name missing, are
+# none.
+_MATRIX_STATE = r"(?!(?:None|none|nan|NaN|-\d+)$)\S(?:.*\S)?"
 _NUCLEOTIDE_NAME = re.compile(r"^[ACGTN]+$")
 # PEtracer's eight lineage marks at each site, the 5-mers that Koblan, Yost
 # et al. (Science 2025) insert, as Cassiopeia's PEtracer preset lists them.
@@ -418,13 +426,13 @@ def allele_file(path: str | os.PathLike[str]) -> str | os.PathLike[str]:
 
 def _line_bytes(path: str, found: str | None) -> int:
     """Twice the bytes of the longest of a text file's first lines."""
-    longest = 0
-    with open_text(path, found) as handle:
-        for number, line in enumerate(handle):
-            longest = max(longest, len(line.encode("utf-8")))
-            if number == _SAMPLED_LINES:
-                break
-    return 2 * longest
+    return 2 * max(
+        (
+            len(line.encode("utf-8"))
+            for line in first_lines(path, found, _SAMPLED_LINES)
+        ),
+        default=0,
+    )
 
 
 def _header(path: str) -> tuple[list[str], str, str | None]:
@@ -568,10 +576,38 @@ def _results_type(annotations: Path) -> str | None:
     return None
 
 
+def _lines(path: Path | str) -> Iterator[str]:
+    """Stream a text file's lines, plain or gzip-compressed, without line ends.
+
+    Raises:
+        ValueError: If the file is not UTF-8 text, or a gzip file is cut
+            short or corrupt.
+    """
+    text = os.fspath(path)
+    try:
+        with open_text(text, compression(text)) as handle:
+            for line in handle:
+                yield line.rstrip("\r\n")
+    except UnicodeDecodeError:
+        raise ValueError(f"{text} is not a text file that CyteArc can read") from None
+    except (EOFError, zlib.error, gzip.BadGzipFile) as error:
+        raise ValueError(f"{text} is malformed: {error}") from None
+
+
 def _text_lines(path: Path) -> list[str]:
-    """The lines of a small text file, without line ends, the last kept if unended."""
-    with open_text(os.fspath(path), compression(os.fspath(path))) as handle:
-        text = handle.read()
+    """The lines of a small text file, without line ends, the last kept if unended.
+
+    Raises:
+        ValueError: If the file is not UTF-8 text, or a gzip file is cut
+            short or corrupt.
+    """
+    try:
+        with open_text(os.fspath(path), compression(os.fspath(path))) as handle:
+            text = handle.read()
+    except UnicodeDecodeError:
+        raise ValueError(f"{path} is not a text file that CyteArc can read") from None
+    except (EOFError, zlib.error, gzip.BadGzipFile) as error:
+        raise ValueError(f"{path} is malformed: {error}") from None
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
@@ -592,15 +628,14 @@ def _carlin_layout(path: str, integration: str) -> AlleleLayout:
     lines = _text_lines(annotations)
     n_barcodes = 0
     shortest = longest = None
-    with open(colonies, encoding="utf-8") as handle:
-        for line in handle:
-            for barcode in line.rstrip("\r\n").split(","):
-                barcode = barcode.strip()
-                if barcode:
-                    n_barcodes += 1
-                    size = len(barcode.encode("utf-8"))
-                    shortest = size if shortest is None else min(shortest, size)
-                    longest = size if longest is None else max(longest, size)
+    for line in _lines(colonies):
+        for barcode in line.split(","):
+            barcode = barcode.strip()
+            if barcode:
+                n_barcodes += 1
+                size = len(barcode.encode("utf-8"))
+                shortest = size if shortest is None else min(shortest, size)
+                longest = size if longest is None else max(longest, size)
     if run is None and shortest is not None and shortest < _MIN_CARLIN_BARCODE:
         raise ValueError(
             f"{os.fspath(colonies)} lists tags of {shortest} bases, as CARLIN's bulk "
@@ -814,7 +849,7 @@ def _petracer_layout(path: str) -> AlleleLayout:
             unedited=frozenset({"None"}),
             unedited_at=MappingProxyType({"EMX1": frozenset({"CTTGGG"})}),
             marks_at=_PETRACER_MARKS,
-            pattern=_NUCLEOTIDES,
+            pattern=_INSERTION,
         ),
         n_columns=len(text.names),
         n_sites=len(_PETRACER_SITES),
@@ -865,9 +900,7 @@ def _matrix_layout(path: str, format: str) -> AlleleLayout:
             kind="independent",
             missing=frozenset({"-1", "-", "?", "NA"}),
             unedited=frozenset({"0", "*"}),
-            # Text that other formats read as missing or unedited, and
-            # negative numbers other than -1, are no state of a matrix.
-            pattern=r"(?!(?:None|none|nan|NaN|-\d+)$)\S(?:.*\S)?",
+            pattern=_MATRIX_STATE,
         )
         tool, pipeline = "character matrix", "character matrix"
     return AlleleLayout(
@@ -915,7 +948,7 @@ def _typewriter_layout(path: str, lengths: Mapping[str, int]) -> AlleleLayout:
         path=path,
         tool="DNA Typewriter",
         pipeline="DNA Typewriter 2022",
-        rules=SiteRules(kind="ordered", unedited=frozenset({""}), pattern=_NUCLEOTIDES),
+        rules=SiteRules(kind="ordered", unedited=frozenset({""}), pattern=_INSERTION),
         lengths=MappingProxyType(dict(lengths)),
         n_slots=len(slots),
         n_columns=len(names) + 1,
@@ -958,7 +991,7 @@ def _chains_layout(path: str, lengths: Mapping[str, int]) -> AlleleLayout:
         rules=SiteRules(
             kind="ordered",
             unedited=frozenset({""}),
-            pattern=_NUCLEOTIDES,
+            pattern=_INSERTION,
             absent=MISSING,
         ),
         lengths=MappingProxyType(dict(lengths)),
@@ -992,7 +1025,12 @@ def _treedata_layout(path: str) -> AlleleLayout:
         path=path,
         tool="TreeData",
         pipeline="TreeData",
-        rules=SiteRules(kind="independent", missing=missing, unedited=unedited),
+        rules=SiteRules(
+            kind="independent",
+            missing=missing,
+            unedited=unedited,
+            pattern=_MATRIX_STATE,
+        ),
         n_columns=len(columns),
         n_sites=len(columns),
         _table=table,
@@ -1253,6 +1291,17 @@ def _cells(values: Any, lines: np.ndarray, path: str) -> np.ndarray:
     return cells
 
 
+def _integration_names(values: Any, lines: np.ndarray, path: str) -> np.ndarray:
+    """Integration names, stripped; an empty one names no integration, None.
+
+    PEtracer leaves ``intID`` empty where an intBC is not on its whitelist.
+    """
+    del lines, path
+    names = _stripped(values)
+    names[np.asarray([not name for name in names.tolist()], dtype=bool)] = None
+    return names
+
+
 def _iter_carlin(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
     annotations = _text_lines(Path(layout._read["annotations"]))
     empty = [
@@ -1279,25 +1328,24 @@ def _iter_carlin(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
             tokens=np.asarray(tokens, dtype=object).reshape(-1, 1),
         )
 
-    with open(layout.path, encoding="utf-8") as handle:
-        for number, line in enumerate(handle, start=1):
-            n_lines = number
-            if number > len(annotations):
-                raise ValueError(
-                    f"{layout.path} has more lines than {layout._read['annotations']}, "
-                    "which names the allele of each line"
-                )
-            allele = annotations[number - 1].strip()
-            for barcode in line.rstrip("\r\n").split(","):
-                barcode = barcode.strip()
-                if not barcode:
-                    continue
-                barcodes.append(barcode)
-                numbers.append(number)
-                tokens.append(allele)
-                if len(barcodes) == chunk_rows:
-                    yield flush()
-                    barcodes, numbers, tokens = [], [], []
+    for number, line in enumerate(_lines(layout.path), start=1):
+        n_lines = number
+        if number > len(annotations):
+            raise ValueError(
+                f"{layout.path} has more lines than {layout._read['annotations']}, "
+                "which names the allele of each line"
+            )
+        allele = annotations[number - 1].strip()
+        for barcode in line.split(","):
+            barcode = barcode.strip()
+            if not barcode:
+                continue
+            barcodes.append(barcode)
+            numbers.append(number)
+            tokens.append(allele)
+            if len(barcodes) == chunk_rows:
+                yield flush()
+                barcodes, numbers, tokens = [], [], []
     if barcodes:
         yield flush()
     if n_lines != len(annotations):
@@ -1454,7 +1502,7 @@ def _iter_cassiopeia(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRo
             rows=lines,
             columns=tuple((None, site) for site in sites),
             tokens=tokens,
-            integrations=_cells(
+            integrations=_integration_names(
                 chunk[positions["intBC"]].to_numpy(dtype=object), lines, text.path
             ),
             umis=umis,
@@ -1524,7 +1572,7 @@ def _iter_parquet(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]
             rows=rows,
             columns=tuple((None, site) for site in sites),
             tokens=tokens,
-            integrations=_cells(
+            integrations=_integration_names(
                 np.asarray(chunk["intBC"].to_list(), dtype=object), rows, layout.path
             ),
             umis=counts("n_umis"),
@@ -1548,7 +1596,7 @@ def _iter_petracer(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows
             rows=lines,
             columns=tuple((None, site) for site in _PETRACER_SITES),
             tokens=tokens,
-            integrations=_cells(
+            integrations=_integration_names(
                 chunk[positions["intID"]].to_numpy(dtype=object), lines, text.path
             ),
             umis=None
@@ -1638,7 +1686,7 @@ def _iter_typewriter(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRo
             rows=np.asarray(numbers, dtype=np.int64),
             columns=tuple((None, str(slot)) for slot in range(1, n_slots + 1)),
             tokens=tokens,
-            integrations=_cells(
+            integrations=_integration_names(
                 np.asarray([row[1] for row in fields], dtype=object), numbers, text.path
             ),
             umis=umis,
@@ -1783,7 +1831,7 @@ def _iter_table(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
             columns = ((layout.integration, ""),)
         integrations = None
         if layout.integration is None:
-            integrations = _cells(
+            integrations = _integration_names(
                 chunk[positions[roles["integration"]]].to_numpy(dtype=object),
                 lines,
                 text.path,

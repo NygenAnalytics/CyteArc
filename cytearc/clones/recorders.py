@@ -308,8 +308,8 @@ class AlleleRows:
             each column of ``tokens``.
         tokens: The stripped token of each row and column, None where the
             file holds no field, rows by columns.
-        integrations: Each row's integration, or None when ``columns``
-            names them.
+        integrations: Each row's integration, None for a row that names
+            none, or None when ``columns`` names them.
         umis: Each row's UMIs, -1 where unknown, or None.
         reads: Each row's reads, -1 where unknown, or None.
     """
@@ -457,7 +457,8 @@ def allele_chunk(
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """Return the records of a chunk's rows of selected cells, for the encoder.
 
-    Each kept row gives one record per column, in column order.
+    Each kept row gives one record per column, in column order. A row that
+    names no integration, None, is left out.
 
     Args:
         rows: The chunk.
@@ -468,7 +469,10 @@ def allele_chunk(
         The records, with a column per field of ``FIELDS``, and each
         record's cell.
     """
-    keep = np.flatnonzero(np.asarray(cells) >= 0)
+    kept = np.asarray(cells) >= 0
+    if rows.integrations is not None:
+        kept &= ~np.asarray(pd.isna(rows.integrations), dtype=bool)
+    keep = np.flatnonzero(kept)
     n_columns = len(rows.columns)
     n_kept = len(keep)
     if rows.integrations is not None:
