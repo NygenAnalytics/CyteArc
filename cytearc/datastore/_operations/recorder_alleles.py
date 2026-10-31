@@ -734,11 +734,13 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         A character is one site of one integration, named
         ``{integration}-{site}``, or after its integration when the site has
         no name, as a DARLIN array's allele does. Its states are integers:
-        0 unedited, 1 to k its k distinct edits, the marks first, those
-        written as whole numbers by value and the others by their text, then
-        the unknown marks, and missing where a site is missing or not
-        applicable. A state names one allele of its
-        character, whatever cells are exported, and a table names each
+        0 unedited, missing where a site is missing or not applicable, and
+        its edits from 1: a mark written as a whole number, such as
+        PEtracer's marks ``1`` to ``8``, is its own state, and the
+        character's other marks, by their text, then its unknown marks, take
+        the states after the largest such number. So each state names one
+        allele of its character in every cell, a character matrix keeps its
+        states through an import and an export, and a table names each
         state's allele. Where a cell holds several allele rows of one
         integration, the row of most UMIs, then most reads, then most sites
         read is exported, as Cassiopeia keeps each integration's most

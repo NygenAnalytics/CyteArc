@@ -661,15 +661,17 @@ def lineage_allele_frames(
     return LineageAlleles(cells=cells, records=records, files=files)
 
 
-# Digits of a whole number that fits int64 whatever its digits.
+# Digits of a whole number that fits int64 whatever its digits, and the
+# largest state that the matrix's int32 codes hold.
 _MAX_NUMBER_DIGITS = 18
+_MAX_STATE = 2**31 - 2
 
 
-def _allele_ranks(values: np.ndarray) -> np.ndarray:
-    """The rank of each distinct allele: whole numbers by value, then text.
+def _allele_ranks(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The rank of each distinct allele, and its value as a state, or 0.
 
-    So PEtracer's marks ``"1"`` to ``"8"`` and ConvexML's integer states keep
-    their order, and an indel's text sorts by code point.
+    Whole numbers from 1 that an int32 state holds rank first, by value, and
+    are their own state; other text ranks after them by code point.
     """
     texts = np.asarray(values, dtype=object)
     numeric = np.asarray(
@@ -681,13 +683,15 @@ def _allele_ranks(values: np.ndarray) -> np.ndarray:
     )
     numbers = np.zeros(len(texts), dtype=np.int64)
     numbers[numeric] = [int(text) for text in texts[numeric].tolist()]
+    numeric &= (numbers >= 1) & (numbers <= _MAX_STATE)
+    numbers[~numeric] = 0
     text_order = np.argsort(texts, kind="stable")
     text_ranks = np.empty(len(texts), dtype=np.int64)
     text_ranks[text_order] = np.arange(len(texts), dtype=np.int64)
     order = np.lexsort((text_ranks, numbers, ~numeric))
     ranks = np.empty(len(texts), dtype=np.int64)
     ranks[order] = np.arange(len(texts), dtype=np.int64)
-    return ranks
+    return ranks, numbers
 
 
 # The order in which a cell's records at one site decide its state there, by
@@ -776,12 +780,13 @@ class CharacterMatrix:
     """Cells by characters of integer states, for tree builders.
 
     A character is one site of one integration. A state is 0 for an
-    unedited site, -1 for a missing one, and 1 to k for the k distinct
-    edits of the character: the marks first, those written as whole numbers
-    by value and the others by their text, then the unknown marks that
-    ``unknown="state"`` keeps, in the same order. So a state names one
-    allele of its character, whatever cells are exported, and PEtracer's
-    marks ``1`` to ``8`` keep their numbers where all eight occur.
+    unedited site and -1 for a missing one. A mark written as a whole number
+    from 1, such as PEtracer's marks ``1`` to ``8`` or the state of a
+    character matrix, is its own state; the character's other marks, by
+    their text, then the unknown marks that ``unknown="state"`` keeps, take
+    the states after the largest such number. So each state names one
+    allele of its character, in every cell, and a matrix's states survive an
+    export that reads it back.
 
     Attributes:
         cells: The position of each exported cell among the selected cells,
@@ -843,6 +848,28 @@ def _group_starts(*keys: np.ndarray) -> np.ndarray:
         for key in keys:
             starts[1:] |= key[1:] != key[:-1]
     return starts
+
+
+def _state_codes(characters: np.ndarray, numbers: np.ndarray) -> np.ndarray:
+    """The state of each distinct edit, sorted by character, kind and rank.
+
+    An edit whose number is above 0 keeps it; the others of its character
+    follow the largest such number, in order.
+    """
+    n_edits = len(characters)
+    codes = np.asarray(numbers, dtype=np.int64).copy()
+    if not n_edits:
+        return codes
+    starts = _group_starts(characters)
+    runs = np.cumsum(starts) - 1
+    largest = np.zeros(int(runs[-1]) + 1, dtype=np.int64)
+    np.maximum.at(largest, runs, codes)
+    unnumbered = codes == 0
+    # The position of each unnumbered edit among its character's.
+    counts = np.cumsum(unnumbered) - unnumbered
+    first_counts = counts[np.flatnonzero(starts)]
+    codes[unnumbered] = (largest[runs] + 1 + counts - first_counts[runs])[unnumbered]
+    return codes
 
 
 def character_matrix(
@@ -948,28 +975,26 @@ def character_matrix(
     record_characters = np.full(len(states), -1, dtype=np.int64)
     record_characters[exported] = character_of[integrations[exported], sites[exported]]
 
-    # Each character's edits: its marks, whole numbers by value and other text
-    # by code point, then the unknown marks that are kept.
+    # Each character's edits: a mark written as a whole number is its own
+    # state; the other marks, by their text, then the unknown marks that are
+    # kept, take the states after the largest such number.
     allele_names = table.text["allele"].categories
-    allele_ranks = _allele_ranks(allele_names)
+    allele_ranks, allele_numbers = _allele_ranks(allele_names)
     edits = exported & edited
+    edit_alleles = alleles[edits]
+    edit_kinds = (states[edits] == UNKNOWN_MARK).astype(np.int64)
     edit_keys = np.stack(
-        [
-            record_characters[edits],
-            (states[edits] == UNKNOWN_MARK).astype(np.int64),
-            allele_ranks[alleles[edits]] if len(allele_names) else alleles[edits],
-        ],
+        [record_characters[edits], edit_kinds, allele_ranks[edit_alleles]],
         axis=1,
     ).reshape(-1, 3)
-    distinct, inverse = np.unique(edit_keys, axis=0, return_inverse=True)
-    inverse = np.asarray(inverse, dtype=np.int64).reshape(-1)
-    character_starts = np.flatnonzero(_group_starts(distinct[:, 0]))
-    runs = np.cumsum(_group_starts(distinct[:, 0])) - 1
-    state_codes = (
-        np.arange(len(distinct), dtype=np.int64)
-        - (character_starts[runs] if len(distinct) else 0)
-        + 1
+    distinct, first_edit, inverse = np.unique(
+        edit_keys, axis=0, return_index=True, return_inverse=True
     )
+    inverse = np.asarray(inverse, dtype=np.int64).reshape(-1)
+    distinct_numbers = np.where(
+        distinct[:, 1] == 0, allele_numbers[edit_alleles[first_edit]], 0
+    )
+    state_codes = _state_codes(distinct[:, 0], distinct_numbers)
     record_codes = np.full(len(states), -1, dtype=np.int64)
     record_codes[exported & (states == UNEDITED)] = 0
     record_codes[edits] = state_codes[inverse]
@@ -1010,6 +1035,9 @@ def character_matrix(
             ),
         }
     )
+    # By character, then state.
+    order = np.lexsort((state_codes, distinct[:, 0])) if len(distinct) else []
+    state_table = state_table.iloc[order].reset_index(drop=True)
     return CharacterMatrix(
         cells=exported_cells,
         integrations=tuple(pair[0] for pair in ranked_names),
