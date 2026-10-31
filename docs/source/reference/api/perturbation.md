@@ -68,7 +68,7 @@ Two guides of one gene give that gene's label, and so does a gene's guide beside
 
 `controls` names the targets of the control guides, such as `["Non-Targeting"]` for 10x data. CyteArc never guesses the controls: each name must be the target of at least one guide, so a misspelt control raises `ValueError`.
 
-Each guide's target comes from `target_column` of the guide assay's features, `"target_gene_name"` by default, which 10x imports fill, beside `target_gene_id`, from Cell Ranger's feature reference. `targets` maps guide IDs to targets and replaces the column's target of the guides it names; with `target_column=None`, `targets` gives every target. A guide may lack a target as long as no cell calls it. `labels` raises `ValueError` for a target equal to `"control"`, `"Negative"` or `"Multiple"`, which label cells without one gene; with `policy="combinations"`, for a target that holds `"+"`; for a control that no guide has; and for a called guide without a target.
+Each guide's target comes from `target_column` of the guide assay's features, `"target_gene_name"` by default, which 10x imports fill, beside `target_gene_id`, from Cell Ranger's feature reference. `targets` maps guide IDs to targets and replaces the column's target of the guides it names; with `target_column=None`, `targets` gives every target. A guide may lack a target as long as no cell calls it. `labels` raises `ValueError` for a target that is not a control and equals `"control"`, `"Negative"` or `"Multiple"`, which label cells without one gene, while a control target may take these names, since a cell with control guides only is labelled `"control"` whatever their targets are called; with `policy="combinations"`, for a target that is not a control and holds `"+"`; for a control that no guide has; and for a called guide without a target.
 
 `policy` decides the label of a cell whose guides target several genes. `"single"`, the default, labels such a cell `"Multiple"`, which suits a screen that perturbs one gene per cell. `"combinations"` names the genes, which suits a screen designed to perturb pairs or sets of genes. Under either policy the artifact keeps each cell's full set of genes in `target_codes`, so a high-MOI analysis can follow each gene across all the cells whose guides target it, whatever their labels.
 
@@ -104,20 +104,20 @@ A perturbation explains a cell's response only if it changed its own target gene
 |---|---|
 | `n_cells`, `n_control_cells` | The cells that carry the perturbation alone, and the control cells |
 | `mean_umi`, `control_mean_umi` | The mean UMIs of the target gene in each group, as Cell Ranger reports them |
-| `mean_expression`, `control_mean_expression` | The mean in each group after scaling each cell's UMIs to the median library size of the compared cells, so that sequencing depth does not change the comparison |
+| `mean_expression`, `control_mean_expression` | The mean in each group after scaling each cell's UMIs to the median library size of the compared cells that hold a UMI, so that sequencing depth does not change the comparison |
 | `remaining_fraction` | `mean_expression` over `control_mean_expression`, the fraction of the control expression that remains: below 1 for a knockdown and above 1 for an activation |
 | `log2_fold_change` | The base-2 logarithm of `remaining_fraction`, minus infinity when the perturbed cells hold no UMI of the gene |
-| `p_value` | A two-sided Mann-Whitney test of the scaled expression, which asks whether the values of one group tend to rank above those of the other |
+| `p_value` | A two-sided Mann-Whitney test of the scaled expression, which asks whether the values of one group tend to rank above those of the other, by the normal approximation with the corrections for ties and continuity |
 | `adjusted_p_value` | The Benjamini-Hochberg adjustment of `p_value` across the rows that have one, which controls the false discovery rate |
 
-A cell's library size is its total UMIs in the expression assay, and the compared cells are the perturbed cells of every row together with the control cells.
+A cell's library size is its total UMIs in the expression assay, and the compared cells are the perturbed cells of every row together with the control cells. Cells without a UMI of the expression assay stay out of the median, which they would set to 0 in a sparse assay, such as an antibody panel, where most compared cells hold none; when no compared cell holds a UMI, `efficiency` raises `ValueError`. The approximation of the p-value is unreliable for groups of a few cells: two cells against two, fully separated, give 0.25 where the exact test gives 0.33.
 
 Each target is matched to a feature of `from_assay`, `"RNA"` by default. The guide assay's `id_column`, `"target_gene_id"` by default, which 10x imports fill from Cell Ranger's feature reference, gives the feature ID of each guide's target, and a target whose guides give one ID that the expression assay holds is matched to that feature. Any other target is matched to the one feature whose name equals the target; a name that several features share matches none. `id_column=None` matches by name only. `efficiency` reads only the matched genes of the compared cells, feature-major when that reads less.
 
 Each row ends with a status:
 
 - `"tested"`: the target gene was compared.
-- `"no_feature"`: the target matches no feature of `from_assay`. The row keeps its cells, and a warning names a few such rows.
+- `"no_feature"`: the target matches no feature of `from_assay`. The row keeps its cells, and a warning names a few such rows, by guide each guide with its target.
 - `"no_cells"`: no cell carries the perturbation alone.
 - `"no_control_expression"`: the control cells hold no UMI of the gene, so no fraction remains. The row keeps its means and its p-value, which can still show the activation of a gene that the control cells do not express.
 
@@ -156,7 +156,7 @@ A permutation test asks whether a perturbation's cells sit farther from the cont
 
 A row is `"tested"`, or `"too_few_cells"` when fewer than two of its cells have coordinates, so that no distance between two distinct perturbed cells exists; such a row has no E-distance and no p-value.
 
-The table belongs to the assay of the coordinates. It records the labels, the coordinates, `by`, `n_permutations` and `random_seed`, so measuring again with the same values returns the saved table, and `invalidate_cache=True` measures again. Labels without a `"control"` cell, and coordinates of fewer than two control cells, raise `ValueError`. Each E-distance follows from the sums and squared norms of each group's coordinates, so no matrix of pairwise distances is formed. The memory budget must hold about 16 bytes for each compared cell and dimension, and for each thread a block of permutation draws of up to 8 MiB, or one permutation of the control cells when that is larger.
+The table belongs to the assay of the coordinates. It records the labels, the coordinates, `by`, `n_permutations` and `random_seed`, so measuring again with the same values returns the saved table, and `invalidate_cache=True` measures again. Labels without a `"control"` cell, and coordinates of fewer than two control cells, raise `ValueError`. Each E-distance follows from the sums and squared norms of each group's coordinates, so no matrix of pairwise distances is formed. The memory budget must hold about 16 bytes for each compared cell and dimension and, for each thread that tests a row, a block of permutation draws: at most `n_permutations` permutations of the smaller group, up to 8 MiB or one permutation when that is larger. No more threads run than rows are tested.
 
 ```python
 pca = ds.reduction.pca(normalized, dims=30)  # a PCA of the cells' expression

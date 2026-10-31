@@ -9,10 +9,12 @@ expression in control cells:
 
 - the mean UMIs of the gene in each group, as Cell Ranger reports them;
 - the mean expression after scaling each cell to the median library size of
-  the compared cells, and the fraction of the control expression that
-  remains;
+  the compared cells that hold a UMI, and the fraction of the control
+  expression that remains;
 - a two-sided Mann-Whitney test on the scaled expression, with
-  Benjamini-Hochberg adjustment across the tested rows.
+  Benjamini-Hochberg adjustment across the tested rows. The p-value is the
+  normal approximation with the corrections for ties and for continuity,
+  which is unreliable for groups of a few cells.
 
 They read the counts that a caller passes and never touch storage.
 """
@@ -34,6 +36,7 @@ __all__ = [
     "EfficiencyArrays",
     "PerturbationEfficiency",
     "efficiency_arrays",
+    "efficiency_memory_bytes",
     "efficiency_settings",
     "id_column_setting",
     "rows_setting",
@@ -97,7 +100,8 @@ class EfficiencyArrays:
             ``control_mean_expression``.
         log2_fold_change: The base-2 logarithm of ``remaining_fraction``,
             minus infinity when no UMI remains.
-        p_value: The two-sided Mann-Whitney p-value.
+        p_value: The two-sided Mann-Whitney p-value, from the normal
+            approximation with the corrections for ties and continuity.
         adjusted_p_value: The Benjamini-Hochberg adjustment across the rows
             with a p-value.
     """
@@ -165,7 +169,13 @@ def target_features(
 
 
 def _two_sided_p(perturbed: np.ndarray, control: np.ndarray) -> float:
-    """Return the two-sided Mann-Whitney p-value, 1 when every value is equal."""
+    """Return the two-sided Mann-Whitney p-value, 1 when every value is equal.
+
+    The p-value is the normal approximation with the corrections for ties and
+    for continuity, whatever the groups' sizes, so it is unreliable for groups
+    of a few cells: two cells against two fully separated give 0.25, where the
+    exact test gives 0.33.
+    """
     values = np.concatenate([perturbed, control])
     if np.all(values == values[0]):
         return 1.0
@@ -180,6 +190,33 @@ def _two_sided_p(perturbed: np.ndarray, control: np.ndarray) -> float:
     )
 
 
+def efficiency_memory_bytes(
+    n_cells: int, n_features: int, n_control: int, largest: int
+) -> int:
+    """Return the bytes that :func:`efficiency_arrays` holds.
+
+    The count includes the float64 counts and library sizes, int64 groups and
+    boolean control flags that the caller passes.
+
+    Args:
+        n_cells: The compared cells, perturbed and control.
+        n_features: The target genes, the columns of the counts.
+        n_control: The control cells among them.
+        largest: The most cells that carry one row alone.
+    """
+    # The counts as passed and as scaled take 16 bytes per cell and gene. The
+    # library sizes, groups and flags as passed, the scale of each cell, the
+    # order of the cells by row as sorted, the positions of the control cells
+    # and the copies that the median library size sorts take at most 56 bytes
+    # per cell.
+    held = n_cells * (16 * n_features + 56)
+    # One row's comparison holds, for each of its cells and each control
+    # cell, the counts and scaled values of the gene, the values pooled for
+    # the test, and the ranks and sorted copies of SciPy's Mann-Whitney test,
+    # beside about 20 kB of Python objects however few the cells.
+    return held + 80 * (largest + n_control) + (1 << 16)
+
+
 def efficiency_arrays(
     counts: np.ndarray,
     library_sizes: np.ndarray,
@@ -188,6 +225,10 @@ def efficiency_arrays(
     row_columns: np.ndarray,
 ) -> EfficiencyArrays:
     """Compare each row's target gene between its cells and the control cells.
+
+    Each cell's counts are scaled to the median library size of the compared
+    cells that hold a UMI; cells without one would otherwise set the median to
+    0 when they are the majority, and scale every value to 0.
 
     Args:
         counts: The UMIs of the target genes, cells x genes.
@@ -202,7 +243,9 @@ def efficiency_arrays(
         p-values of every row.
 
     Raises:
-        ValueError: If the arrays do not align, or there is no control cell.
+        ValueError: If the arrays do not align, there is no control cell, no
+            compared cell holds a UMI, or a cell holds UMIs of a target gene
+            with a library size of 0.
     """
     counts = np.asarray(counts, dtype=np.float64)
     library = np.asarray(library_sizes, dtype=np.float64)
@@ -216,8 +259,19 @@ def efficiency_arrays(
         raise ValueError("groups and control must hold one entry per cell")
     if not control.any():
         raise ValueError("There is no control cell to compare with")
-    compared = (groups >= 0) | control
-    scale = float(np.median(library[compared]))
+    if np.any((library <= 0) & (counts > 0).any(axis=1)):
+        raise ValueError(
+            "A cell holds UMIs of a target gene but has a library size of 0; "
+            "library_sizes must hold each cell's total UMIs"
+        )
+    counted = ((groups >= 0) | control) & (library > 0)
+    if not counted.any():
+        raise ValueError(
+            "No compared cell holds a UMI, so there is no median library size "
+            "to scale their expression to"
+        )
+    scale = float(np.median(library[counted]))
+    del counted
     with np.errstate(divide="ignore", invalid="ignore"):
         per_cell = np.where(library > 0, scale / library, 0.0)
     expression = counts * per_cell[:, None]
@@ -256,7 +310,7 @@ def efficiency_arrays(
         out["mean_expression"][row] = perturbed.mean()
         out["control_mean_expression"][row] = reference.mean()
         out["p_value"][row] = _two_sided_p(perturbed, reference)
-        if out["control_mean_expression"][row] == 0:
+        if out["control_mean_umi"][row] == 0:
             status[row] = EFFICIENCY_NO_CONTROL_EXPRESSION
             continue
         fraction = out["mean_expression"][row] / out["control_mean_expression"][row]

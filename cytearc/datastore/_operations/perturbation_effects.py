@@ -11,7 +11,6 @@ from ...metadata.arguments import (
 )
 from ...metadata.artifacts import write_cell_data_artifact
 from ...metadata.rows import array_row_selection_parts
-from ...metadata.selection import cell_selection_indices
 from ...perturbation.edistance import (
     EDISTANCE_STATUSES,
     EDISTANCE_TESTED,
@@ -26,6 +25,7 @@ from ...perturbation.efficiency import (
     EFFICIENCY_TESTED,
     PerturbationEfficiency,
     efficiency_arrays,
+    efficiency_memory_bytes,
     efficiency_settings,
 )
 from ...storage.artifact_writer import ArrayRequirement, AttributeRequirement
@@ -37,15 +37,19 @@ from ...utils.logging import logger
 from ...utils.warnings import warn
 from .perturbation_store import (
     _COORDINATE_KINDS,
+    _cell_selection_check_bytes,
+    _column_read_bytes,
+    _compared_cells,
     _count_blocks,
-    _label_groups,
+    _count_stream_bytes,
     _label_rows,
     _matched_ids,
     _pairs_fingerprint,
-    _positions_in,
     _require_budget,
     _require_ref,
     _row_features,
+    _selected_rows,
+    _selection_block_bytes,
     _status_labels,
 )
 
@@ -88,25 +92,34 @@ def _float64_rows(data: zarr.Array, rows: np.ndarray) -> np.ndarray:
 
 
 def _unmatched_targets_warning(
-    names: np.ndarray, status: np.ndarray, assay: str
+    names: np.ndarray, targets: np.ndarray, status: np.ndarray, assay: str, by: str
 ) -> str | None:
     """Name the efficiency rows whose target matches no feature, or return None.
 
     A measured table warns with this message, and so does a saved table when
-    ``efficiency`` reuses it.
+    ``efficiency`` reuses it. By guide, each example names the guide and the
+    target that matches nothing.
 
     Args:
         names: Each row's name: its target, or its guide.
+        targets: Each row's target.
         status: Each row's status, as a position in ``EFFICIENCY_STATUSES``.
         assay: The expression assay.
+        by: ``"target"`` or ``"guide"``, which the rows are.
     """
-    unmatched = names[np.asarray(status) == EFFICIENCY_NO_FEATURE]
+    unmatched = np.flatnonzero(np.asarray(status) == EFFICIENCY_NO_FEATURE)
     if not len(unmatched):
         return None
+    examples = [
+        repr(str(names[row]))
+        if by == "target"
+        else f"guide {str(names[row])!r} (target {str(targets[row])!r})"
+        for row in unmatched[:5]
+    ]
     return (
         f"{len(unmatched)} of {len(names)} rows have no feature of assay "
         f"{assay!r} for their target, for example "
-        + ", ".join(repr(str(name)) for name in unmatched[:5])
+        + ", ".join(examples)
         + ". Check id_column, or the target names against the feature names."
     )
 
@@ -132,13 +145,16 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         it is the cell's one called guide. The comparison reports the mean
         UMIs of the gene in each group, as Cell Ranger's perturbation
         efficiency does, the mean expression after scaling each cell to the
-        median library size of the compared cells, the fraction of the control
-        expression that remains, its base-2 logarithm, and a two-sided
-        Mann-Whitney test on the scaled expression with Benjamini-Hochberg
-        adjustment. A knockdown leaves a fraction below 1 and an activation a
-        fraction above 1. A row whose control cells hold no UMI of the gene
-        has no fraction and the status ``"no_control_expression"``, but keeps
-        its p-value, which counts in the adjustment.
+        median library size of the compared cells that hold a UMI of
+        ``from_assay``, the fraction of the control expression that remains,
+        its base-2 logarithm, and a two-sided Mann-Whitney test on the scaled
+        expression with Benjamini-Hochberg adjustment. The test's p-value is
+        the normal approximation with the corrections for ties and for
+        continuity, which is unreliable for groups of a few cells. A knockdown
+        leaves a fraction below 1 and an activation a fraction above 1. A row
+        whose control cells hold no UMI of the gene has no fraction and the
+        status ``"no_control_expression"``, but keeps its p-value, which counts
+        in the adjustment.
 
         Each target is matched to a feature of ``from_assay`` by the feature
         ID that ``id_column`` of the guide assay gives its guides, which 10x
@@ -147,7 +163,8 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         feature whose name equals the target, when no other feature shares
         that name. Only the target genes are read, feature-major when that
         reads less. A target that matches no feature is kept with the status
-        ``"no_feature"`` and named in a warning, which a reused table repeats.
+        ``"no_feature"`` and named in a warning, beside its guide by guide,
+        which a reused table repeats.
 
         Args:
             labels: A ``perturbation_labels`` artifact from
@@ -168,12 +185,12 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``labels`` is not a ``perturbation_labels``
                 artifact, ``from_assay`` is not an assay, ``by`` is unknown,
-                ``id_column`` is not a feature column of the guide assay, or
-                no labelled cell carries control guides only.
+                ``id_column`` is not a feature column of the guide assay, no
+                labelled cell carries control guides only, or no compared cell
+                holds a UMI of ``from_assay``.
             PermissionError: If the store is read-only and the table is not
                 saved yet.
-            MemoryError: If the target genes of the compared cells do not fit
-                the memory budget.
+            MemoryError: If the comparison does not fit the memory budget.
         """
 
         _require_ref(labels, "labels", PerturbationLabelArguments.artifact_kind)
@@ -190,12 +207,20 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         row_features = _row_features(
             self, labels, rows, id_column, feature_ids, feature_names
         )
+        # The expression assay's feature IDs and names and the guide assay's
+        # feature IDs of the targets, each read in whole chunks and copied.
+        feature_bytes = (
+            _column_read_bytes(expression.feats, "ids")
+            + _column_read_bytes(expression.feats, "names")
+            + _column_read_bytes(self._get_assay(str(labels.assay)).feats, id_column)
+        )
         self._require_measured_cells(
             expression.name,
             status.input_ref("cell_selection"),
             operation=PerturbationEfficiencyArguments.operation,
         )
         row_feature_ids = _matched_ids(row_features, feature_ids)
+        del feature_ids, feature_names
         arguments = PerturbationEfficiencyArguments(
             labels=labels,
             dataset_fingerprint=self._ensure_dataset_fingerprint(expression.name),
@@ -234,49 +259,79 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             stored = artifact_group(self.zw, planned.ref)
             message = _unmatched_targets_warning(
                 read_array(stored, "names").astype(str),
+                read_array(stored, "targets").astype(str),
                 read_array(stored, "status"),
                 expression.name,
+                by,
             )
             if message is not None:
                 warn(message)
             return planned.ref
-        groups, control = _label_groups(self, labels, rows, by)
-        compared = np.flatnonzero((groups >= 0) | control)
-        cell_index = cell_selection_indices(
-            self.zw, status.input_ref("cell_selection")
-        )[compared]
+        compared, finding = _compared_cells(self, labels, rows, by)
+        n_compared = len(compared.cells)
         needed_features = np.unique(row_features[row_features >= 0])
-        resident = len(compared) * (16 * len(needed_features) + 40)
-        _require_budget(
-            resident,
-            self.memoryBytes,
-            f"Comparing {len(needed_features)} target genes over {len(compared)} "
-            "cells holds about",
+        n_features = len(needed_features)
+        sizes = np.bincount(compared.groups[compared.groups >= 0], minlength=n_rows)
+        n_control = int(np.count_nonzero(compared.control))
+        # The compared cells' positions, rows and flags and their library
+        # sizes are held from the read of the library sizes to the end.
+        held = 25 * n_compared
+        # The counts are streamed beside the blocks gathered so far, and
+        # joined into one array beside them.
+        gathered = held + 8 * n_features * n_compared
+        streaming = gathered
+        if n_features:
+            streaming += _count_stream_bytes(
+                expression,
+                needed_features,
+                compared.cells,
+                scratch_bytes_per_row=8 * n_features,
+            )
+        needed = max(
+            feature_bytes,
+            finding,
+            streaming,
+            held + 16 * n_features * n_compared,
+            8 * n_compared
+            + efficiency_memory_bytes(
+                n_compared, n_features, n_control, int(sizes.max(initial=0))
+            ),
         )
+        _require_budget(
+            needed,
+            self.memoryBytes,
+            f"Comparing {n_features} target genes over {n_compared} cells holds about",
+            remedy=f"Raise mem_budget to at least {needed} bytes.",
+        )
+        library = expression._cell_count_totals(compared.cells)
+        if not np.any(library > 0):
+            raise ValueError(
+                f"None of the {n_compared} compared cells, those that carry a "
+                "perturbation alone and the control cells, holds a UMI of assay "
+                f"{expression.name!r}, so their expression cannot be scaled to "
+                "a median library size; pass a from_assay that holds counts for "
+                "these cells"
+            )
         self._require_writable(arguments.operation)
-        if len(needed_features):
+        if n_features:
             _, blocks = _count_blocks(
                 self,
                 expression,
                 needed_features,
-                cell_index,
-                resident_bytes=resident,
-                scratch_bytes_per_row=8 * len(needed_features),
+                compared.cells,
+                resident_bytes=gathered,
+                scratch_bytes_per_row=8 * n_features,
             )
             counts = np.concatenate(
                 [np.asarray(block, dtype=np.float64) for block in blocks]
             )
         else:
-            counts = np.zeros((len(compared), 0))
+            counts = np.zeros((n_compared, 0))
         row_columns = np.where(
             row_features >= 0, np.searchsorted(needed_features, row_features), -1
         )
         arrays = efficiency_arrays(
-            counts,
-            expression._cell_count_totals(cell_index),
-            groups[compared],
-            control[compared],
-            row_columns,
+            counts, library, compared.groups, compared.control, row_columns
         )
         write_cell_data_artifact(
             self.zw,
@@ -297,13 +352,19 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             },
             attributes={"status_names": list(EFFICIENCY_STATUSES), "by": by},
         )
-        message = _unmatched_targets_warning(row_names, arrays.status, expression.name)
+        message = _unmatched_targets_warning(
+            row_names,
+            rows.target_names[rows.codes],
+            arrays.status,
+            expression.name,
+            by,
+        )
         if message is not None:
             warn(message)
         logger.info(
             "Measured the efficiency of "
             f"{int(np.count_nonzero(arrays.status == EFFICIENCY_TESTED))} "
-            f"of {n_rows} {by}s against {int(control.sum())} control cells"
+            f"of {n_rows} {by}s against {n_control} control cells"
         )
         return planned.ref
 
@@ -406,8 +467,7 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
                 cells have coordinates.
             PermissionError: If the store is read-only and the table is not
                 saved yet.
-            MemoryError: If the coordinates of the compared cells do not fit
-                the memory budget.
+            MemoryError: If the measurement does not fit the memory budget.
         """
         from ...graph.feature_projection import resolve_coordinate_inputs
 
@@ -452,26 +512,20 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         )
         if planned.reused:
             return planned.ref
-        groups, control = _label_groups(self, labels, rows, by)
-
-        labelled = cell_selection_indices(
-            self.zw, rows.status.input_ref("cell_selection")
-        )
-        located = cell_selection_indices(self.zw, inputs.cell_selection)
-        compared = np.flatnonzero((groups >= 0) | control)
-        positions, present = _positions_in(located, labelled[compared])
+        compared, finding = _compared_cells(self, labels, rows, by)
+        positions, present = _selected_rows(self, inputs.cell_selection, compared.cells)
+        n_compared = len(compared.cells)
         if not present.all():
             logger.info(
-                f"{int(np.count_nonzero(~present))} of {len(compared)} compared cells "
+                f"{int(np.count_nonzero(~present))} of {n_compared} compared cells "
                 "have no coordinates and are left out"
             )
-        kept = compared[present]
         # The measurement needs only the kept cells' coordinate rows, groups
-        # and flags, so the arrays of every labelled cell are released here.
+        # and flags, so the arrays of every compared cell are released here.
         coordinate_rows = positions[present]
-        kept_groups = groups[kept]
-        kept_control = control[kept]
-        del groups, control, labelled, located, compared, positions, present, kept
+        kept_groups = compared.groups[present]
+        kept_control = compared.control[present]
+        del compared, positions, present
         n_kept = len(kept_groups)
         n_control = int(np.count_nonzero(kept_control))
         if n_control < 2:
@@ -490,16 +544,28 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
             + read_fixed
             + read_per_row * min(n_kept, int(data.chunks[0]))
         )
-        resident = max(
-            edistance_memory_bytes(
-                n_kept, n_dims, n_control, n_rows=n_rows, nthreads=self.nthreads
-            ),
-            reading,
+        measuring = edistance_memory_bytes(
+            np.bincount(kept_groups[kept_groups >= 0], minlength=n_rows),
+            n_control,
+            n_dims,
+            n_permutations=permutations,
+            nthreads=self.nthreads,
         )
+        # Placing the compared cells among the cells with coordinates holds
+        # their positions, rows and flags, where each sits and whether it is
+        # there, and the kept cells' rows, groups and flags.
+        placing = 43 * n_compared + _selection_block_bytes(self, inputs.cell_selection)
+        # Imported coordinates are checked against the order of their cells'
+        # IDs before anything else is held.
+        checking = _cell_selection_check_bytes(
+            self, selected_ids=coordinates.kind == "imported_coordinates"
+        )
+        needed = max(checking, finding, placing, reading, measuring)
         _require_budget(
-            resident,
+            needed,
             self.memoryBytes,
             f"The E-distances of {n_kept} cells in {n_dims} dimensions hold about",
+            remedy=f"Raise mem_budget to at least {needed} bytes.",
         )
         self._require_writable(arguments.operation)
         values = _float64_rows(data, coordinate_rows)

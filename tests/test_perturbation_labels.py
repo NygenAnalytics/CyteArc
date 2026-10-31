@@ -8,6 +8,8 @@ copy, which they check is left as it was.
 from collections.abc import Iterator
 from types import SimpleNamespace
 
+import tracemalloc
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -15,7 +17,10 @@ import pytest
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import CONTROL, MULTIPLE, NEGATIVE, PerturbationLabels
 from cytearc.perturbation.labels import (
+    POLICIES,
     guide_targets,
+    label_memory_bytes,
+    longest_label,
     perturbation_label_arrays,
     perturbation_label_frames,
 )
@@ -25,6 +30,7 @@ from tests.perturbation_helpers import (
     copy_store,
     open_store,
     record_cell_reads,
+    check_budget,
     write_screen,
     written,
 )
@@ -389,3 +395,166 @@ def test_label_arrays_without_targets_keep_one_column() -> None:
     assert guides["target"].tolist() == [None, "Non-Targeting"]
     assert guides["is_control"].tolist() == [False, True]
     assert isinstance(cells, pd.DataFrame)
+
+
+def test_a_control_target_may_take_a_reserved_label(store, template) -> None:
+    # The control guides target "control" and "Negative": control targets
+    # never become labels, so a cell with control guides only is "control".
+    reserved = {"CRISPR3": "control", "CRISPR4": "Negative"}
+    labels = store.perturbation.labels(
+        template.calls, controls=["control", "Negative"], targets=reserved
+    )
+    loaded = store.perturbation.load_labels(labels)
+    assert loaded.cells["label"].tolist() == SINGLE
+    assert loaded.guides["target"].tolist()[3:] == ["control", "Negative"]
+    assert loaded.guides["is_control"].tolist() == [False] * 3 + [True] * 2
+    # A target that is not a control still may not take a reserved label.
+    with pytest.raises(
+        ValueError, match="'Negative'. Give their guides other targets with targets"
+    ):
+        store.perturbation.labels(
+            template.calls, controls=["control"], targets=reserved
+        )
+
+
+def test_a_control_target_may_hold_a_plus_under_combinations() -> None:
+    # The control target "Non+Targeting" never joins the genes of a
+    # combination: a cell with its guide only is "control", and a cell's
+    # genes are joined without it.
+    ids = np.asarray(["g0", "g1", "g2"])
+    column = np.asarray(["GENE_A", "GENE_B", "Non+Targeting"], dtype=object)
+    targets = guide_targets(
+        ids, column, None, ("Non+Targeting",), policy="combinations"
+    )
+    codes = np.asarray([[2, -1, -1], [0, 2, -1], [1, 2, 0]])
+    arrays = perturbation_label_arrays(codes, targets, policy="combinations")
+    assert arrays.values.tolist() == [CONTROL, "GENE_A", "GENE_A+GENE_B"]
+    # A target that is not a control still may not hold "+".
+    with pytest.raises(ValueError, match="targets that are not controls must not"):
+        guide_targets(ids, column, None, ("GENE_A",), policy="combinations")
+
+
+def _own_sets(codes: np.ndarray, targets, policy: str) -> list[tuple]:
+    """Each cell's label, control flag and sorted genes, from its own guides."""
+    names = list(targets.names)
+    found = []
+    for cell in codes:
+        called = [int(guide) for guide in cell if guide >= 0]
+        target_of = [int(targets.guide_codes[guide]) for guide in called]
+        controls = [code for code in target_of if targets.is_control[code]]
+        genes = sorted({code for code in target_of if not targets.is_control[code]})
+        if len(genes) == 1:
+            label = names[genes[0]]
+        elif genes:
+            joined = "+".join(names[gene] for gene in genes)
+            label = MULTIPLE if policy == "single" else joined
+        else:
+            label = CONTROL if controls else NEGATIVE
+        found.append((label, bool(controls) and not genes, genes))
+    return found
+
+
+def test_label_arrays_equal_each_cells_own_sets() -> None:
+    # Guides 0 to 7 target four genes in pairs, in an order that does not sort
+    # them; guides 8 and 9 are controls of two control targets.
+    column = np.asarray(
+        ["GENE_D", "GENE_D", "GENE_B", "GENE_B", "GENE_C", "GENE_C"]
+        + ["GENE_A", "GENE_A", "Non-Targeting", "Scrambled"],
+        dtype=object,
+    )
+    ids = np.asarray([f"g{index}" for index in range(len(column))])
+    rng = np.random.default_rng(12)
+    codes = np.full((600, 7), -1, dtype=np.int32)
+    for cell in range(len(codes)):
+        called = rng.choice(len(column), rng.integers(0, 8), replace=False)
+        codes[cell, : len(called)] = called
+    for policy in POLICIES:
+        targets = guide_targets(
+            ids, column, None, ("Non-Targeting", "Scrambled"), policy=policy
+        )
+        arrays = perturbation_label_arrays(codes, targets, policy=policy)
+        expected = _own_sets(codes, targets, policy)
+        assert arrays.values.tolist() == [label for label, _, _ in expected]
+        assert arrays.is_control.tolist() == [flag for _, flag, _ in expected]
+        assert arrays.n_targets.tolist() == [len(genes) for _, _, genes in expected]
+        assert arrays.target_codes.dtype == np.int32
+        assert arrays.target_codes.tolist() == [
+            genes + [-1] * (arrays.target_codes.shape[1] - len(genes))
+            for _, _, genes in expected
+        ]
+        assert arrays.target_codes.shape[1] == 4
+
+
+@pytest.mark.parametrize("policy", POLICIES)
+def test_the_memory_estimate_bounds_the_labels_peak(policy) -> None:
+    # 10,000 cells of up to 40 called guides of 30 genes and 4 controls, so
+    # that the entries take the most, and under "combinations" a cell's label
+    # joins up to 30 genes.
+    n_cells, width, n_guides = 10_000, 40, 64
+    rng = np.random.default_rng(13)
+    ids = np.asarray([f"g{index}" for index in range(n_guides)])
+    names = [f"GENE{index // 2}" for index in range(n_guides - 4)]
+    column = np.asarray(names + ["Non-Targeting"] * 4, dtype=object)
+    targets = guide_targets(ids, column, None, ("Non-Targeting",), policy=policy)
+    order = np.argsort(rng.random((n_cells, n_guides)), axis=1)
+    codes = order[:, :width].astype(np.int32)
+    codes[np.arange(width) >= rng.integers(0, width + 1, n_cells)[:, None]] = -1
+    # The first call creates what later calls reuse.
+    perturbation_label_arrays(codes[:10], targets, policy=policy)
+    tracemalloc.start()
+    try:
+        perturbation_label_arrays(codes, targets, policy=policy)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    estimate = label_memory_bytes(
+        n_cells,
+        width,
+        label_length=longest_label(targets, width, policy=policy),
+        joined=policy == "combinations",
+    )
+    assert peak <= estimate
+
+
+@pytest.fixture(scope="module")
+def wide_calls(tmp_path_factory) -> SimpleNamespace:
+    """4,000 cells of one guide each, and 20 cells of 40 guides of 30 genes."""
+    n_cells, n_guides = 4_000, 64
+    rng = np.random.default_rng(11)
+    guides = np.zeros((n_cells, n_guides), dtype=np.uint16)
+    guides[np.arange(n_cells), rng.integers(0, n_guides, n_cells)] = 20
+    for cell in range(0, n_cells, 200):
+        guides[cell, rng.choice(n_guides, 40, replace=False)] = 20
+    targets = [f"GENE{index // 2}" for index in range(n_guides - 4)]
+    path = tmp_path_factory.mktemp("wide_labels") / "store.zarr"
+    store = write_screen(
+        path,
+        rng.poisson(2.0, size=(n_cells, 3)) + 1,
+        guides,
+        targets=targets + ["Non-Targeting"] * 4,
+    )
+    return SimpleNamespace(path=path, calls=_calls(store))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("policy", POLICIES)
+def test_labelling_holds_no_more_than_the_budget_it_names(
+    wide_calls, tmp_path, policy
+) -> None:
+    path = copy_store(wide_calls.path, tmp_path).zarr_loc
+
+    def label(store, invalidate_cache=True):
+        return store.perturbation.labels(
+            wide_calls.calls,
+            controls=["Non-Targeting"],
+            policy=policy,
+            invalidate_cache=invalidate_cache,
+        )
+
+    # One refusal names the budget that runs, which holds the whole call.
+    _, refusals = check_budget(path, label)
+    assert len(refusals) == 1
+    assert refusals[0].startswith("Labelling 4000 cells holds about")
+    reused = open_store(path)
+    loaded = reused.perturbation.load_labels(label(reused, invalidate_cache=False))
+    assert loaded.cells["n_targets"].max() > 20

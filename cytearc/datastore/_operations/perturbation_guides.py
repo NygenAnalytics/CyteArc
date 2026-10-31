@@ -49,9 +49,12 @@ from ...perturbation.guide_thresholds import (
     guide_threshold_frames,
 )
 from ...perturbation.labels import (
+    GuideTargets,
     PerturbationLabels,
     guide_targets,
+    label_memory_bytes,
     label_settings,
+    longest_label,
     perturbation_label_arrays,
     perturbation_label_frames,
 )
@@ -91,8 +94,9 @@ from ...utils.numba import numba_threads
 from ...utils.warnings import warn
 from .perturbation_store import (
     _cell_samples,
-    _cell_values,
+    _column_read_bytes,
     _plan_cells,
+    _read_chunkwise,
     _require_budget,
     _require_cell_column,
     _require_ref,
@@ -478,6 +482,61 @@ def _unfitted_warning(
         + ". For example "
         + ", ".join(examples)
         + ". perturbation.load_guide_thresholds lists every status."
+    )
+
+
+def _labelling_bytes(
+    assay: Any,
+    target_column: str | None,
+    codes: zarr.Array,
+    call_labels: zarr.Array,
+    targets: GuideTargets,
+    guide_ids: np.ndarray,
+    *,
+    policy: str,
+) -> int:
+    """Return the most bytes that labelling the cells of guide calls holds.
+
+    Labelling reads the guide assay's target column, then the calls' guide
+    codes one chunk at a time, checks that each called guide has a target,
+    labels the cells, releases the codes, reads the calls' labels and writes
+    the labels' arrays one at a time.
+
+    Args:
+        assay: The guide assay.
+        target_column: Its feature column of targets, or None.
+        codes: The calls' ``guide_codes``.
+        call_labels: The calls' labels, their ``values``.
+        targets: The target of every guide.
+        guide_ids: The guide IDs.
+        policy: ``"single"`` or ``"combinations"``.
+    """
+    n_cells, width = (int(size) for size in codes.shape)
+    label_length = longest_label(targets, width, policy=policy)
+    # The labels, from the codes' entries to each cell's label and targets.
+    labelled = label_memory_bytes(
+        n_cells, width, label_length=label_length, joined=policy == "combinations"
+    )
+    # The int32 codes, beside the chunk that a read decodes or the flags that
+    # check the guides' targets.
+    held_codes = 4 * n_cells * width
+    reading = held_codes + max(array_row_selection_parts(codes)[0], 3 * n_cells * width)
+    # The calls' labels, each a guide ID, "Negative" or "Multiple", beside the
+    # chunk that their read decodes, or what saving the longest text array or
+    # a chunk of the target codes holds, as saving guide calls counts it.
+    guide_length = _label_width(guide_ids)
+    chunk = min(n_cells, _WRITE_CHUNK_CELLS)
+    n_genes = int(np.count_nonzero(~targets.is_control))
+    writing = max(
+        array_row_selection_parts(call_labels)[0],
+        _TEXT_BYTES_PER_CHARACTER * max(label_length, guide_length) * (n_cells + chunk),
+        4 * max(1, min(width, n_genes)) * chunk,
+    )
+    return max(
+        _column_read_bytes(assay.feats, target_column),
+        reading,
+        held_codes + labelled,
+        labelled + 4 * guide_length * n_cells + writing,
     )
 
 
@@ -1810,10 +1869,10 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 ``controls`` names no target or a blank one, neither
                 ``target_column`` nor ``targets`` is given, the target column
                 is not a feature column, ``targets`` names a guide that is not
-                in the assay or gives an empty target, a target is a reserved
-                label or, with ``"combinations"``, holds ``"+"``, a control
-                matches no target, a called guide has no target, or ``policy``
-                is unknown.
+                in the assay or gives an empty target, a target that is not a
+                control is a reserved label or, with ``"combinations"``, holds
+                ``"+"``, a control matches no target, a called guide has no
+                target, or ``policy`` is unknown.
             PermissionError: If the store is read-only and the labels are not
                 saved yet.
             MemoryError: If the labelling does not fit the memory budget.
@@ -1868,24 +1927,36 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
         )
         if planned.reused:
             return planned.ref
-        # The calls as int32, their targets and two sorted copies as int64, and
-        # each cell's two labels.
-        needed = n_cells * (28 * width + 160)
-        _require_budget(
-            needed, self.memoryBytes, f"Labelling {n_cells} cells holds about"
+        call_labels = as_zarr_array(group["values"], name="values")
+        needed = _labelling_bytes(
+            assay, target_column, codes, call_labels, resolved, guide_ids, policy=policy
         )
-        guide_codes = np.asarray(codes[:])
-        called = np.unique(guide_codes[guide_codes >= 0])
-        untargeted = called[resolved.guide_codes[called] < 0]
+        _require_budget(
+            needed,
+            self.memoryBytes,
+            f"Labelling {n_cells} cells holds about",
+            remedy=f"Raise mem_budget to at least {needed} bytes.",
+        )
+        guide_codes = _read_chunkwise(codes)
+        # Each called guide must have a target; a padded entry reads the last
+        # guide's flag, which the call flags drop.
+        called = guide_codes >= 0
+        lacking = (resolved.guide_codes < 0)[guide_codes]
+        lacking &= called
+        del called
+        untargeted = np.unique(guide_codes[lacking])
+        del lacking
         if len(untargeted):
             raise ValueError(
                 f"{len(untargeted)} called guides have no target, for example "
                 + ", ".join(repr(str(guide)) for guide in guide_ids[untargeted[:5]])
                 + "; pass targets or choose a target_column that names them"
             )
-        guide_label = _cell_values(self, calls)
         self._require_writable(arguments.operation)
         arrays = perturbation_label_arrays(guide_codes, resolved, policy=policy)
+        del guide_codes
+        # The labels of the calls, which hold one label per cell of the calls.
+        guide_label = _read_chunkwise(call_labels)
         write_cell_data_artifact(
             self.zw,
             planned,
