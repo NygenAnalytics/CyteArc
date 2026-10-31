@@ -203,8 +203,10 @@ def test_clones_of_equal_size_list_in_rank_order(plotted) -> None:
 
     result = clone_abundance(store, tied, show=False)
 
+    # Clones are labelled by their IDs, in the same order.
     assert result.tables["top"].to_dict("list") == {
         "clone": ["9", "10", "x"],
+        "label": ["9", "10", "x"],
         "cells": [2, 2, 1],
     }
     plt.close(result.figure)
@@ -676,10 +678,11 @@ def test_the_tracking_plot_places_groups_by_all_their_labels(truth_plot) -> None
 
 
 class _TrackOnly:
-    """A store whose clones namespace can follow clones and nothing else."""
+    """A store that can follow clones and label them, and nothing else."""
 
     def __init__(self, store: DataStore) -> None:
         self.clones = SimpleNamespace(track=store.clones.track)
+        self._clone_figure_labels = store._clone_figure_labels
 
 
 def test_the_tracking_plot_needs_only_the_tracked_clones(truth_plot) -> None:

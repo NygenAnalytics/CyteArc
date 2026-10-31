@@ -80,6 +80,7 @@ from ...metadata.rows import (
     text_width,
 )
 from ...metadata.selection import category_codes, cell_selection_indices
+from ...repertoire.clonotypes import clonotype_noun
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
@@ -1145,6 +1146,25 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             selection_chunk_bytes(self.zw, held),
             array_row_selection_parts(codes)[0],
         )
+
+    def _clone_figure_noun(self, clones: ArtifactRef) -> str:
+        """What figures call the clones of a clone artifact, in the plural.
+
+        Clones are ``"clones"``, and clonotypes ``"clonotypes"``, or
+        ``"clonotype clusters"`` when a distance metric linked their chains,
+        as their definition logs them.
+
+        Raises:
+            TypeError: If ``clones`` is not an ArtifactRef.
+            ValueError: If it is not a clone artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
+        """
+        self._clone_group(clones)
+        if clones.kind != ClonotypeArguments.artifact_kind:
+            return "clones"
+        parameters = inspect_artifact(self.zw, clones).parameters or {}
+        return clonotype_noun(str(parameters["metric"]))
 
     def _clone_figure_labels(
         self, clones: ArtifactRef, ids: Sequence[str]

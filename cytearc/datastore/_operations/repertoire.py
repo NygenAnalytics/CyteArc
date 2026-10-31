@@ -46,6 +46,7 @@ from ...repertoire.clonotypes import (
     assign_clonotypes,
     clonotype_frames,
     clonotype_labels,
+    clonotype_noun,
     representative_cells,
     shared_text,
 )
@@ -1262,7 +1263,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             arrays,
             attributes={"n_clonotypes": assignment.n_clonotypes},
         )
-        defined = "clonotypes" if metric == "identity" else "clonotype clusters"
+        defined = clonotype_noun(metric)
         logger.info(
             f"Defined {assignment.n_clonotypes} {defined} of {int(has.sum())} of "
             f"{n_cells} cells; the largest holds "

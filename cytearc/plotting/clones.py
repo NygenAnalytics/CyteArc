@@ -73,6 +73,14 @@ def _figure_labels(store: Any, clones: ArtifactRef, ids: np.ndarray) -> list[str
     return [str(label) for label in method(clones, ids.tolist())]
 
 
+def _figure_noun(store: Any, clones: ArtifactRef) -> str:
+    """What figures call the clones: clones, clonotypes or clonotype clusters."""
+    method = getattr(store, "_clone_figure_noun", None)
+    if not callable(method):
+        raise TypeError("store does not provide the figure labels of clones")
+    return str(method(clones))
+
+
 def _kept_apart_groups(
     cells: pd.DataFrame,
     kept_apart: Sequence[str],
@@ -147,7 +155,8 @@ def clone_abundance(
     each label also shows the clonotype's number, the rank in its ID, such as
     ``CAVA 1`` and ``CAVA 3``. For clonotypes the panel's title reads
     ``Largest 20 clonotypes``, so the word appears once rather than on every
-    label.
+    label, and for clonotype clusters, which a distance metric defines,
+    ``Largest 20 clonotype clusters``.
 
     ``group_by`` names a cell metadata column, such as the sample or time
     point, and ``groups`` a cell-label artifact, such as a clustering; with
@@ -232,6 +241,7 @@ def clone_abundance(
     )
     top_table.insert(0, "clone", ids)
     top_table.insert(1, "label", _figure_labels(store, clones, ids))
+    drawn = _figure_noun(store, clones)
     if not grouped:
         top_table = top_table.rename(columns={"all cells": "cells"})
     if figsize is None and target is None:
@@ -274,7 +284,6 @@ def clone_abundance(
             left += widths
         ax.set_yticks(positions, top_table["label"].tolist(), fontsize="small")
         ax.set_xlabel("Cells")
-        drawn = "clonotypes" if clones.kind == "clonotypes" else "clones"
         ax.set_title(f"Largest {len(top_table)} {drawn}")
         if show_legend and grouped:
             ax.legend(frameon=False, fontsize="small", loc="lower right")
@@ -827,15 +836,19 @@ def clone_tracking(
 
     ``clones`` is a clone artifact, such as ``clones`` or ``clonotypes``. The
     plot follows the clones that ``ds.clones.track`` chooses: the ``top`` with
-    the most cells in each group, or ``labels``. Each draws one line, labelled
-    with its clone ID, across the groups, such as time points or cell types, of
-    its share of each group's cells with a clone. Groups are placed by their
-    labels in the ``group_by`` columns and the ``groups`` artifact, joined by
-    commas; ``order`` lists those names from left to right, or values whose
-    text is the name, such as time points as integers, and by default the names
-    follow their natural order. Plots of at most 40 groups name them on the
-    axis, and the legend lists at most 80 clones, the largest first. By default
-    the figure grows with the groups up to the width of a page.
+    the most cells in each group, or ``labels``. Each draws one line across the
+    groups, such as time points or cell types, of its share of each group's
+    cells with a clone. A line is labelled with its clone's ID, or for a
+    clonotype with its representative's junction, such as ``CASSA``, and also
+    its number where two of the clonotypes followed share a junction, such as
+    ``CASSA 1`` and ``CASSA 3``, as ``clone_abundance`` labels the largest
+    clones. Groups are placed by their labels in the ``group_by`` columns and
+    the ``groups`` artifact, joined by commas; ``order`` lists those names from
+    left to right, or values whose text is the name, such as time points as
+    integers, and by default the names follow their natural order. Plots of at
+    most 40 groups name them on the axis, and the legend lists at most 80
+    clones, the largest first. By default the figure grows with the groups up
+    to the width of a page.
 
     Tables: ``cells`` (``clone``, ``group``, the key columns, ``cells`` and
     ``fraction``).
@@ -852,6 +865,15 @@ def clone_tracking(
         cell_selection=cell_selection,
         top=top,
         labels=labels,
+    )
+    # Every followed clone is labelled at once, so that the junctions which
+    # two followed clonotypes share are found among the lines of this figure.
+    line_labels = dict(
+        zip(
+            tracked.tracked,
+            _figure_labels(store, clones, np.asarray(tracked.tracked, dtype=object)),
+            strict=True,
+        )
     )
     cells = tracked.cells
     keys = [
@@ -903,7 +925,7 @@ def clone_tracking(
                 markersize=3.5,
                 linewidth=1.2,
                 color=colors[name],
-                label=name,
+                label=line_labels[name],
             )
         if len(positions) <= _NAMED_GROUPS:
             ax.set_xticks(x, positions, rotation=45, ha="right")
