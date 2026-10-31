@@ -51,19 +51,31 @@ def test_threshold_calls_and_summary_equal_a_direct_comparison(dtype) -> None:
     assert len(calls.cells) > 500
 
 
-def test_threshold_calls_take_a_second_pass_for_crowded_rows(monkeypatch) -> None:
+def test_threshold_calls_hold_each_blocks_calls_exactly(monkeypatch) -> None:
+    # Crowded rows call most guides; each block's calls are counted, then
+    # written into arrays of exactly that length.
     counts = screen_counts(300, 5, seed=22, ambient=4.0)
     samples = np.random.default_rng(23).integers(0, 2, size=300)
-    monkeypatch.setattr(calling, "_CALLS_PER_ROW", 0)
+    lengths: list[int] = []
+    call_block = calling._call_block
+
+    def recording(block, *arguments):
+        found = call_block(block, *arguments)
+        lengths.append(len(arguments[-1]))
+        return found
+
+    monkeypatch.setattr(calling, "_call_block", recording)
     calls, summary = threshold_calls([counts[:150], counts[150:]], samples, THRESHOLDS)
     _check(calls, summary, counts, samples)
+    rows, _, _ = _expected(counts, samples, THRESHOLDS)
+    in_blocks = [int(np.count_nonzero(rows < 150)), int(np.count_nonzero(rows >= 150))]
+    assert lengths == [0, in_blocks[0], 0, in_blocks[1]]
 
 
 def test_python_kernel_calls_like_the_compiled_one(monkeypatch) -> None:
     counts = screen_counts(200, 5, seed=24, ambient=2.0)
     samples = np.random.default_rng(25).integers(0, 2, size=200)
     use_python_kernels(monkeypatch, calling)
-    monkeypatch.setattr(calling, "_CALLS_PER_ROW", 0)
     calls, summary = threshold_calls([counts[:120], counts[120:]], samples, THRESHOLDS)
     _check(calls, summary, counts, samples)
     wide = np.full((1, 5), MAX_COUNT + 1, dtype=np.uint64)

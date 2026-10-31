@@ -5,6 +5,7 @@ template. A test that writes copies the template, and the tests of refused
 imports share one copy, which they check is left as it was.
 """
 
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,19 +13,22 @@ from types import SimpleNamespace
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+import zarr
 
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import MULTIPLE, NEGATIVE, GuideCalls
 from cytearc.storage.artifacts import ArtifactRef, artifact_group
 from cytearc.storage.selections import read_stored_selection_indices
-from cytearc.utils.logging import collect_warnings
+from cytearc.utils.logging import collect_warnings, logger
 from tests.perturbation_helpers import (
+    check_budget,
     copy_store,
     open_store,
     record_cell_reads,
     write_screen,
     written,
 )
+from tests.storage_helpers import write_count_store
 
 # Guides are named CRISPR0 to CRISPR3 and cells cell0 to cell7.
 GUIDE_COUNTS = np.asarray(
@@ -188,8 +192,12 @@ def test_import_saves_calls_and_count_summaries(store, template, tmp_path) -> No
     ]
     group = store.artifacts.load(ref)
     assert group.attrs["n_file_barcodes"] == 7
-    assert group.attrs["n_unmatched_barcodes"] == 2
-    assert group.attrs["unmatched_barcode_examples"] == ["cell6", "outside-1"]
+    # cell6 is a cell of the store outside the selection, and no cell is
+    # named outside-1.
+    assert group.attrs["n_unmatched_barcodes"] == 1
+    assert group.attrs["unmatched_barcode_examples"] == ["outside-1"]
+    assert group.attrs["n_unselected_barcodes"] == 1
+    assert group.attrs["unselected_barcode_examples"] == ["cell6"]
     assert "CRISPR_n_guides" not in store.cells.columns
 
 
@@ -267,11 +275,20 @@ def test_a_barcode_prefix_joins_barcodes_to_cell_ids(store, template, tmp_path) 
 
 def _logged_import(
     store: DataStore, path: Path, **arguments
-) -> tuple[ArtifactRef, list[str]]:
-    """Import guide calls, and return them with the warnings that CyteArc logs."""
-    with collect_warnings() as messages:
-        calls = store.perturbation.import_guide_calls(path, **arguments)
-    return calls, list(messages)
+) -> tuple[ArtifactRef, list[str], list[str]]:
+    """Import guide calls; return them, the warnings, and the notes on unselected cells."""
+    notes: list[str] = []
+    sink = logger.add(
+        lambda message: notes.append(message.record["message"]),
+        level="INFO",
+        filter=lambda record: "outside the selected cells" in record["message"],
+    )
+    try:
+        with collect_warnings() as messages:
+            calls = store.perturbation.import_guide_calls(path, **arguments)
+    finally:
+        logger.remove(sink)
+    return calls, list(messages), notes
 
 
 def test_a_reused_import_logs_the_warning_of_the_first(
@@ -280,19 +297,29 @@ def test_a_reused_import_logs_the_warning_of_the_first(
     selection = template.selection
     path = _call_file(tmp_path)
 
-    calls, messages = _logged_import(store, path, cell_selection=selection)
+    logged = _logged_import(store, path, cell_selection=selection)
 
-    # cell6 is outside the selection, and no cell is named outside-1.
-    assert messages == [
-        "2 of 7 barcodes of the call file match no selected cell, for example "
-        "'cell6', 'outside-1'. Check barcode_prefix and cell_selection."
-    ]
-    # The saved calls log it again, alike: for the same file under another
+    # No cell is named outside-1, which a wrong barcode_prefix could cause;
+    # cell6 is a cell outside the selection, which needs no warning.
+    assert logged[1:] == (
+        [
+            "1 of 7 barcodes of the call file match no cell of the store, for "
+            "example 'outside-1'. A cell matches a barcode when its ID is "
+            "barcode_prefix followed by the barcode, so check barcode_prefix when "
+            "the cell IDs carry a sample prefix."
+        ],
+        [
+            "1 of 7 barcodes of the call file are cells of the store outside the "
+            "selected cells, for example 'cell6'; the import labels the selected "
+            "cells only"
+        ],
+    )
+    # The saved calls log both again, alike: for the same file under another
     # name, and in a store opened read-only.
     moved = _call_file(tmp_path, name="moved.csv")
-    assert _logged_import(store, moved, cell_selection=selection) == (calls, messages)
+    assert _logged_import(store, moved, cell_selection=selection) == logged
     reader = _reader(store)
-    assert _logged_import(reader, path, cell_selection=selection) == (calls, messages)
+    assert _logged_import(reader, path, cell_selection=selection) == logged
     # Calls whose every barcode joins a selected cell log nothing, imported or
     # reused.
     joined = _call_file(
@@ -304,8 +331,158 @@ def test_a_reused_import_logs_the_warning_of_the_first(
     )
     arguments = {"cell_selection": selection, "barcode_prefix": "cell"}
     quiet = _logged_import(store, joined, **arguments)
-    assert quiet[1] == []
+    assert quiet[1:] == ([], [])
     assert _logged_import(store, joined, **arguments) == quiet
+
+
+def test_barcodes_of_unselected_cells_need_no_warning(
+    store, template, tmp_path
+) -> None:
+    # A selection that leaves out cell6, as QC filtering leaves out cells, and
+    # a file whose every barcode is a cell of the store.
+    path = _call_file(tmp_path, CALL_FILE.replace("outside-1,1,CRISPR0,4\n", ""))
+
+    calls, messages, notes = _logged_import(
+        store, path, cell_selection=template.selection
+    )
+
+    assert messages == []
+    assert notes == [
+        "1 of 6 barcodes of the call file are cells of the store outside the "
+        "selected cells, for example 'cell6'; the import labels the selected "
+        "cells only"
+    ]
+    attributes = store.artifacts.load(calls).attrs
+    assert attributes["n_unmatched_barcodes"] == 0
+    assert attributes["n_unselected_barcodes"] == 1
+
+
+def test_an_empty_barcode_prefix_is_no_prefix(store, template, tmp_path) -> None:
+    path = _call_file(tmp_path)
+
+    plain = store.perturbation.import_guide_calls(
+        path, cell_selection=template.selection
+    )
+    empty = store.perturbation.import_guide_calls(
+        path, cell_selection=template.selection, barcode_prefix=""
+    )
+
+    # The two imports are one, so later steps reuse each other's results.
+    assert empty == plain
+    assert store.artifacts.inspect(empty).parameters == {"barcode_prefix": None}
+
+
+def test_an_import_reaches_the_cells_of_one_sample_of_a_merged_store(
+    store, tmp_path
+) -> None:
+    # A store merged from two samples names each cell <sample>__<barcode>.
+    ids = np.asarray([f"{'s1' if cell < 4 else 's2'}__cell{cell}" for cell in range(8)])
+    zarr.open_group(str(Path(store.zarr_loc) / "cellData"), mode="r+").create_array(
+        "ids", data=ids, overwrite=True
+    )
+    merged = open_store(store.zarr_loc)
+    merged.cells.insert("every", np.ones(8, dtype=bool))
+    merged.cells.insert("first", np.arange(8) < 4)
+    every = merged.snapshot_cell_selection("every")
+    first = merged.snapshot_cell_selection("first")
+    path = _call_file(tmp_path)
+    remedy = "or call the guides from their counts with perturbation.call_guides"
+    saved = written(merged)
+
+    # Without a prefix, every cell of the other sample would be labelled
+    # Negative; with one, every selected cell outside its sample would be.
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "The call file holds the barcodes of one sample, but the cells of "
+            "cell_selection come from several samples of a merged store, such as "
+            "'s1' and 's2'; select only the cells of one sample and pass its "
+            f"barcode_prefix, such as 's1__', {remedy}"
+        ),
+    ):
+        merged.perturbation.import_guide_calls(path, cell_selection=every)
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "The call file's barcodes reach only the cells whose IDs start with "
+            "barcode_prefix 's1__', but 4 of the cells of cell_selection, such as "
+            f"'s2__cell4', do not; select only the cells of that sample, {remedy}"
+        ),
+    ):
+        merged.perturbation.import_guide_calls(
+            path, cell_selection=every, barcode_prefix="s1__"
+        )
+    assert written(merged) == saved
+
+    calls = merged.perturbation.import_guide_calls(
+        path, cell_selection=first, barcode_prefix="s1__"
+    )
+    cells = merged.perturbation.load_guide_calls(calls).cells
+    assert cells["call"].tolist() == ["CRISPR0", "CRISPR1", MULTIPLE, NEGATIVE]
+
+
+def _wide_screen(folder: Path) -> tuple[Path, Path]:
+    """A screen with long guide IDs where one cell carries every guide, and its call file.
+
+    4,000 cells and 80 guides whose IDs are 60 characters long; every cell
+    carries one guide with 30 UMIs beside ambient UMIs, and cell0 carries
+    every guide, so every cell's padded calls hold 80 slots. The call file
+    calls each guide with 30 UMIs or more and names one unknown barcode.
+    """
+    n_cells, n_guides = 4_000, 80
+    rng = np.random.default_rng(13)
+    guides = rng.poisson(0.2, size=(n_cells, n_guides)).astype(np.uint16)
+    guides[np.arange(n_cells), rng.integers(0, n_guides, n_cells)] += 30
+    guides[0] = 30
+    ids = [
+        f"GUIDE{guide:03d}_TARGETS_ENSG{guide:011d}_ACGTACGTACGTACGTACGTACGTAC"
+        for guide in range(n_guides)
+    ]
+    rna = rng.poisson(1.0, size=(n_cells, 3)) + 1
+    store_path = folder / "wide.zarr"
+    write_count_store(
+        str(store_path),
+        {"RNA": rna, "CRISPR": guides},
+        "uint16",
+        feature_ids={"CRISPR": ids},
+    )
+    lines = [
+        "cell_barcode,num_features,feature_call,num_umis",
+        "unknown-1,1,{},30".format(ids[0]),
+    ]
+    for cell in range(n_cells):
+        called = np.flatnonzero(guides[cell] >= 30)
+        lines.append(
+            f"cell{cell},{len(called)},"
+            + "|".join(ids[guide] for guide in called)
+            + ","
+            + "|".join(str(int(guides[cell, guide])) for guide in called)
+        )
+    call_path = folder / "wide.csv"
+    call_path.write_text("\n".join(lines) + "\n")
+    return store_path, call_path
+
+
+@pytest.mark.slow
+def test_an_import_runs_within_the_budget_that_its_refusal_names(tmp_path) -> None:
+    store_path, call_path = _wide_screen(tmp_path)
+    store = open_store(store_path)
+    store.cells.insert("every", np.ones(4_000, dtype=bool))
+    every = store.snapshot_cell_selection("every")
+
+    budget, refusals = check_budget(
+        store_path,
+        lambda opened: opened.perturbation.import_guide_calls(
+            call_path, cell_selection=every, invalidate_cache=True
+        ),
+    )
+
+    # One refusal, before the file is parsed, names the budget that runs:
+    # it holds the 80 padded slots of every cell and the labels' text, which
+    # the import left out before.
+    assert len(refusals) == 1
+    assert refusals[0].startswith("Importing the guide calls of 4000 cells holds about")
+    assert budget > 8 * 80 * 4_000 + 8 * 60 * 4_000
 
 
 def test_import_refuses_assays_and_guides_it_cannot_use(
@@ -340,6 +517,24 @@ def test_import_refuses_counts_that_are_not_unsigned_integers(tmp_path) -> None:
         store.perturbation.import_guide_calls(
             _call_file(tmp_path), cell_selection=_selection(store)
         )
+
+
+def test_import_refuses_counts_beyond_uint32_as_guide_calling_does(tmp_path) -> None:
+    # The top UMIs are saved as uint32, so a larger count would wrap.
+    counts = GUIDE_COUNTS.astype(np.uint64)
+    counts[0, 0] = 2**33 + 7
+    rna = np.random.default_rng(7).poisson(2.0, size=(len(counts), 10))
+    store = write_screen(tmp_path / "store.zarr", rna, counts, dtype="uint64")
+    selection = _selection(store)
+    saved = written(store)
+    message = "^Guide UMI counts must be at most 4294967295$"
+    with pytest.raises(ValueError, match=message):
+        store.perturbation.import_guide_calls(
+            _call_file(tmp_path), cell_selection=selection
+        )
+    with pytest.raises(ValueError, match=message):
+        store.perturbation.call_guides(selection, method="fixed", min_umi=5)
+    assert written(store) == saved
 
 
 @pytest.mark.parametrize(
@@ -460,18 +655,29 @@ def test_an_import_of_one_sample_reads_only_its_cell_ids(
     sample = store.snapshot_cell_selection("sample")
     reads = record_cell_reads(monkeypatch, store, {"ids"})
 
-    with pytest.warns(UserWarning, match="4 of 7 barcodes of the call file"):
+    with pytest.warns(UserWarning, match="1 of 7 barcodes of the call file match no"):
         ref = store.perturbation.import_guide_calls(
             _call_file(tmp_path), cell_selection=sample
         )
 
-    assert set(np.concatenate(reads["ids"]).tolist()) == {0, 1, 2, 3}
+    # The barcodes join the selected cells' IDs; those that join none are
+    # then looked up among every cell's ID, a block at a time.
+    first, *searched = reads["ids"]
+    assert set(first.tolist()) == {0, 1, 2, 3}
+    assert sorted(np.concatenate(searched).tolist()) == list(range(8))
     assert store.perturbation.load_guide_calls(ref).cells["call"].tolist() == [
         "CRISPR0",
         "CRISPR1",
         MULTIPLE,
         NEGATIVE,
     ]
+    # A file whose every barcode joins a selected cell reads their IDs only.
+    reads["ids"].clear()
+    store.perturbation.import_guide_calls(
+        _call_file(tmp_path, CALL_FILE.split("cell5")[0], "sample.csv"),
+        cell_selection=sample,
+    )
+    assert set(np.concatenate(reads["ids"]).tolist()) == {0, 1, 2, 3}
 
 
 def test_loading_calls_reads_the_cell_ids_once(
@@ -488,6 +694,7 @@ def test_loading_calls_reads_the_cell_ids_once(
     assert [rows.tolist() for rows in reads["ids"]] == [[0, 1, 2, 3, 4, 5, 7]]
 
 
+@pytest.mark.slow
 def test_loading_calls_checks_the_budget_of_every_array_at_once(
     store, template, tmp_path, monkeypatch
 ) -> None:

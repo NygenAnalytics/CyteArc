@@ -9,6 +9,7 @@ from cytearc.perturbation import histograms
 from cytearc.perturbation.histograms import (
     DENSE_COUNTS,
     MAX_COUNT,
+    HistogramMemoryError,
     checked_sample_codes,
     guide_count_histograms,
     histogram_bytes,
@@ -356,7 +357,63 @@ def test_histograms_refuse_memory_below_their_least_before_reading() -> None:
     assert found.zero_cells().tolist() == [[2, 2, 2], [2, 2, 2]]
 
 
-def test_the_calls_of_thresholds_count_each_cell_at_or_above_its_guides_threshold():
+def test_a_refusal_says_how_many_rows_remain_to_be_read() -> None:
+    n_cells, n_guides = 6_000, 100
+    counts = _carried_counts(n_cells, n_guides, 10, seed=5)
+    samples = np.zeros(n_cells, dtype=np.int64)
+    least = histogram_bytes(1, n_guides, n_cells, n_distinct=0)
+    with pytest.raises(HistogramMemoryError) as refused:
+        guide_count_histograms(
+            [counts], samples, n_samples=1, n_guides=n_guides, memory_bytes=least + 1
+        )
+    error = refused.value
+    # The buffer of larger counts filled within the block, so rows remain.
+    assert error.counts_remain
+    assert 0 < error.rows_read < error.n_rows == n_cells
+    assert f"{n_cells - error.rows_read} of {n_cells} rows of counts remain" in str(
+        error
+    )
+    assert error.needed > least + 1
+
+
+def test_a_refusal_after_every_row_names_memory_that_finishes() -> None:
+    n_cells, n_guides = 3_000, 100
+    counts = _carried_counts(n_cells, n_guides, 5, seed=9)
+    samples = np.zeros(n_cells, dtype=np.int64)
+    guide_count_histograms([counts[:2]], samples[:2], n_samples=1, n_guides=n_guides)
+    least = histogram_bytes(1, n_guides, n_cells, n_distinct=0)
+    full = histogram_bytes(
+        1, n_guides, n_cells, n_distinct=_distinct_counts(counts, samples)
+    )
+    finished = 0
+    for limit in np.linspace(least, full, 40).astype(int):
+        try:
+            guide_count_histograms(
+                [counts], samples, n_samples=1, n_guides=n_guides, memory_bytes=limit
+            )
+        except HistogramMemoryError as error:
+            if error.counts_remain:
+                continue
+            # With every row read, the last merge names what the assembly
+            # after it needs too, so the memory it names finishes the count.
+            found = guide_count_histograms(
+                [counts],
+                samples,
+                n_samples=1,
+                n_guides=n_guides,
+                memory_bytes=error.needed,
+            )
+            assert int(found.cells.sum()) == int(np.count_nonzero(counts))
+            finished += 1
+    assert finished
+
+
+@pytest.mark.parametrize("compiled", [True, False])
+def test_the_calls_of_thresholds_count_each_cell_at_or_above_its_guides_threshold(
+    monkeypatch, compiled
+):
+    if not compiled:
+        use_python_kernels(monkeypatch, histograms)
     counts = screen_counts(300, 6, seed=8)
     samples = np.arange(300) % 3
     found = guide_count_histograms([counts], samples, n_samples=3, n_guides=6)

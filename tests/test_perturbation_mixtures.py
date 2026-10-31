@@ -1,5 +1,7 @@
 import math
+import time
 
+import numba
 import numpy as np
 import pytest
 from scipy.optimize import minimize
@@ -358,6 +360,92 @@ def test_threshold_kernels_return_zero_when_no_count_is_called(compiled) -> None
             > 0.5
         )
         assert found == linear
+
+
+@numba.njit(cache=False)
+def _scanned_threshold(
+    rate: float, mean: float, std: float, weight: float, max_count: int
+) -> int:
+    """The first count, checked one by one, whose Gaussian density beats the Poisson's."""
+    log_sqrt_2pi = 0.5 * math.log(2.0 * math.pi)
+    for count in range(1, max_count + 1):
+        value = math.log2(count)
+        z = (value - mean) / std
+        normal = math.log(weight) - log_sqrt_2pi - math.log(std) - 0.5 * z * z
+        poisson = (
+            math.log1p(-weight)
+            + value * math.log(rate)
+            - rate
+            - math.lgamma(value + 1.0)
+        )
+        if normal > poisson:
+            return count
+    return 0
+
+
+def test_poisson_gaussian_threshold_equals_a_scan_of_every_count() -> None:
+    search = mixtures._poisson_gaussian_threshold
+    rng = np.random.default_rng(31)
+    crossings = 0
+    for _ in range(3_000):
+        rate = float(np.exp(rng.uniform(-3, 3)))
+        mean = float(rng.uniform(-2, 22))
+        std = float(np.exp(rng.uniform(np.log(2.1e-3), np.log(12))))
+        weight = float(np.exp(rng.uniform(np.log(3e-6), np.log(0.999))))
+        max_count = int(np.exp(rng.uniform(0, np.log(2e5))))
+        expected = _scanned_threshold(rate, mean, std, weight, max_count)
+        crossings += expected > 0
+        assert search(rate, mean, std, weight, max_count) == expected
+    # Both outcomes are common, so neither is passed by default.
+    assert 300 < crossings < 2_700
+    # Weights at the edge of a crossing, where the densities nearly tie at
+    # some count.
+    for _ in range(60):
+        rate = float(np.exp(rng.uniform(-2, 2)))
+        mean = float(rng.uniform(1, 14))
+        std = float(np.exp(rng.uniform(np.log(0.05), np.log(3))))
+        max_count = int(2 ** min(mean + 3 * std, 15))
+        low, high = 1e-12, 0.999
+        for _ in range(45):
+            middle = math.sqrt(low * high)
+            if _scanned_threshold(rate, mean, std, middle, max_count):
+                high = middle
+            else:
+                low = middle
+        for weight in (low, high):
+            expected = _scanned_threshold(rate, mean, std, weight, max_count)
+            assert search(rate, mean, std, weight, max_count) == expected
+    # A crossing far up the counts.
+    expected = _scanned_threshold(0.5, 20.0, 0.05, 0.5, 2_000_000)
+    assert expected > 500_000
+    assert search(0.5, 20.0, 0.05, 0.5, 2_000_000) == expected
+
+
+@pytest.mark.parametrize("compiled", [True, False])
+def test_poisson_gaussian_threshold_skips_counts_far_from_a_crossing(
+    compiled,
+) -> None:
+    search = mixtures._poisson_gaussian_threshold
+    if not compiled:
+        search = getattr(search, "py_func", search)
+    largest = 2**32 - 1
+    started = time.perf_counter()
+    # A Gaussian that never wins, and one that wins near a billion UMIs.
+    assert search(5.0, 6.0, 1.0, 0.01, largest) == 0
+    found = search(0.5, 30.0, 0.01, 0.5, largest)
+    # Checking every count up to the uint32 maximum takes minutes.
+    assert time.perf_counter() - started < 2.0
+    densities = [
+        poisson_gaussian_posterior(
+            np.asarray([count]),
+            poisson_rate=0.5,
+            gaussian_mean=30.0,
+            gaussian_std=0.01,
+            gaussian_weight=0.5,
+        )[0]
+        for count in (found - 1, found)
+    ]
+    assert densities[0] <= 0.5 < densities[1]
 
 
 def test_gaussian_em_gives_up_on_a_degenerate_fit() -> None:

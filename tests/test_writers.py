@@ -1974,10 +1974,18 @@ def test_to_h5ad_rejects_count_metadata_shape_mismatches_and_closes_output(
     group = zarr.group(store=MemoryStore())
     assay.rawData = ChunkedArray(group.create_array("counts", data=values), nthreads=1)
     path = tmp_path / "invalid.h5ad"
-    handles = h5py.h5f.get_obj_count()
+
+    def open_files() -> list[str]:
+        # The files that this test wrote; other tests' files may close or stay
+        # open in the same process while it runs.
+        names = (
+            item.name.decode() for item in h5py.h5f.get_obj_ids(types=h5py.h5f.OBJ_FILE)
+        )
+        return [name for name in names if name.startswith(str(tmp_path))]
+
     with pytest.raises(ValueError, match="The X matrix has .* the export declares"):
         to_h5ad(assay, str(path), nthreads=1)
-    assert h5py.h5f.get_obj_count() == handles
+    assert open_files() == []
     # The file is written under another name and moved into place only once
     # it is complete, so a failed export leaves nothing behind.
     assert list(tmp_path.glob("invalid.h5ad*")) == []

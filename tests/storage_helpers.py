@@ -1,6 +1,6 @@
 """Storage helpers for tests that build CyteArc stores directly."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -28,14 +28,17 @@ def write_count_store(
     zarr_loc: str,
     counts: Mapping[str, np.ndarray],
     dtype: DTypeLike,
+    *,
+    feature_ids: Mapping[str, Sequence[str]] | None = None,
 ) -> None:
     """Write a store whose count matrices have the storage dtype ``dtype``.
 
     ``counts`` maps assay names to cells-by-features matrices over the same
     cells. Each assay takes the preset type of its name, such as RNA, ADT,
     or ATAC, and RNA assays also get ``countsT``. Features are named
-    ``f"{assay}{index}"``. The values must be exactly representable in
-    ``dtype``, so the stored counts equal them.
+    ``f"{assay}{index}"``, or by ``feature_ids`` for the assays it names. The
+    values must be exactly representable in ``dtype``, so the stored counts
+    equal them.
     """
     from cytearc.storage.schema import create_cell_data, create_zarr_count_assay
     from cytearc.storage.stores import load_zarr
@@ -52,14 +55,19 @@ def write_count_store(
         stored = np.asarray(values).astype(storage_dtype)
         if not np.array_equal(stored, values):
             raise ValueError(f"{assay} counts do not fit {storage_dtype}")
-        feature_ids = np.array([f"{assay}{index}" for index in range(stored.shape[1])])
+        named = (feature_ids or {}).get(assay)
+        ids = np.array(
+            [f"{assay}{index}" for index in range(stored.shape[1])]
+            if named is None
+            else list(named)
+        )
         array = create_zarr_count_assay(
             root,
             assay,
             None,
             len(cell_ids),
-            feat_ids=feature_ids,
-            feat_names=feature_ids,
+            feat_ids=ids,
+            feat_names=ids,
             dtype=storage_dtype.name,
         )
         array[:] = stored

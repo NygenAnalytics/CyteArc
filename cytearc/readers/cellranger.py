@@ -1,4 +1,6 @@
+import gzip
 import os
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Generator, Iterator, Sequence
 from dataclasses import dataclass
@@ -593,6 +595,28 @@ class CrH5Reader(CrReader):
 _PROTOSPACER_COLUMNS = ("cell_barcode", "num_features", "feature_call", "num_umis")
 # Rows without a call, which Cell Ranger may write as an empty field or None.
 _NO_CALL = frozenset({"", "None"})
+# The first bytes of a gzip stream, whatever the file's name.
+_GZIP_MAGIC = b"\x1f\x8b"
+# The largest UMI count of a call, the uint32 maximum that guide calls store.
+_MAX_UMIS = int(np.iinfo(np.uint32).max)
+# The decompressed bytes that the size scan reads at a time, a small share of
+# what parsing the file holds.
+_SCAN_BYTES = 1 << 18
+# The bytes that read_protospacer_calls holds while it parses, by the size of
+# the file, measured with Python 3.13 and pandas 3.0 and rounded up: for
+# each row, its four fields as Python text, pandas' copies of them, and its
+# lists of calls and UMI counts; for each piece of a list, a feature ID or a
+# UMI count, its text, the flattened copies and its number; for each byte,
+# the text that the pieces copy; and pandas' fixed cost.
+_PARSE_BYTES_PER_ROW = 640
+_PARSE_BYTES_PER_PIECE = 160
+_PARSE_BYTES_PER_BYTE = 3
+_PARSE_FIXED_BYTES = 1 << 20
+# The bytes that the parsed calls hold: each barcode as Python text and its
+# pointer, and each call's row, UMIs, feature pointer and feature text.
+_PARSED_BYTES_PER_ROW = 64
+_PARSED_BYTES_PER_CALL = 96
+_PARSED_BYTES_PER_BYTE = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -612,11 +636,158 @@ class ProtospacerCalls:
     umis: np.ndarray
 
 
+@dataclass(frozen=True, slots=True)
+class ProtospacerCallsSize:
+    """The size of Cell Ranger's call file, read before the file is parsed.
+
+    The counts bound what the file holds, so that the memory of reading it
+    can be planned: a row of ``k`` calls separates its features and its UMI
+    counts with ``k - 1`` ``|`` characters each.
+
+    Attributes:
+        n_bytes: The bytes of the file's text, decompressed.
+        n_rows: The most rows of calls: the lines after the header.
+        n_pipes: The ``|`` characters of the file.
+        most_calls: The most calls of one row.
+    """
+
+    n_bytes: int
+    n_rows: int
+    n_pipes: int
+    most_calls: int
+
+    @property
+    def n_calls(self) -> int:
+        """The most calls of the file: one per row and one per two ``|``."""
+        return self.n_rows + self.n_pipes // 2
+
+    def parse_bytes(self) -> int:
+        """Return the most bytes that :func:`read_protospacer_calls` holds while it parses."""
+        pieces = 2 * self.n_rows + self.n_pipes
+        return (
+            _PARSE_FIXED_BYTES
+            + _PARSE_BYTES_PER_ROW * self.n_rows
+            + _PARSE_BYTES_PER_PIECE * pieces
+            + _PARSE_BYTES_PER_BYTE * self.n_bytes
+        )
+
+    def parsed_bytes(self) -> int:
+        """Return the most bytes that the :class:`ProtospacerCalls` read from the file hold."""
+        return (
+            _PARSED_BYTES_PER_ROW * self.n_rows
+            + _PARSED_BYTES_PER_CALL * self.n_calls
+            + _PARSED_BYTES_PER_BYTE * self.n_bytes
+        )
+
+
+def _open_call_file(path: str | os.PathLike[str]) -> Any:
+    """Open the call file for reading bytes, decompressed when it is gzip-compressed.
+
+    A gzip stream is recognised by its first bytes, whatever the file's name.
+    """
+    with open(path, "rb") as probe:
+        compressed = probe.read(len(_GZIP_MAGIC)) == _GZIP_MAGIC
+    return gzip.open(path, "rb") if compressed else open(path, "rb")
+
+
+def protospacer_calls_size(path: str | os.PathLike[str]) -> ProtospacerCallsSize:
+    """Count the rows, the ``|`` separators and the bytes of Cell Ranger's call file.
+
+    The file is read 256 KiB at a time, so the count holds little memory
+    whatever the file's size.
+
+    Args:
+        path: The call file, plain or gzip-compressed.
+
+    Returns:
+        The counts, which bound the rows and the calls of the file.
+    """
+    n_bytes = n_newlines = n_returns = n_pipes = most = carried = 0
+    with _open_call_file(path) as handle:
+        while chunk := handle.read(_SCAN_BYTES):
+            data = np.frombuffer(chunk, dtype=np.uint8)
+            n_bytes += len(data)
+            newlines = np.flatnonzero(data == ord("\n"))
+            pipes = np.flatnonzero(data == ord("|"))
+            n_returns += int(np.count_nonzero(data == ord("\r")))
+            n_newlines += len(newlines)
+            n_pipes += len(pipes)
+            # The separators of each line; the first line of the chunk goes on
+            # with the last line of the chunk before.
+            per_line = np.bincount(
+                np.searchsorted(newlines, pipes), minlength=len(newlines) + 1
+            )
+            per_line[0] += carried
+            most = max(most, int(per_line.max()))
+            carried = int(per_line[-1])
+    # pandas ends lines at a newline, a carriage return, or both; the last
+    # line may have no end.
+    n_lines = max(n_newlines, n_returns) + 1
+    return ProtospacerCallsSize(
+        n_bytes=n_bytes,
+        n_rows=max(n_lines - 1, 0),
+        n_pipes=n_pipes,
+        most_calls=most // 2 + 1,
+    )
+
+
 def _line_numbers(rows: np.ndarray) -> str:
     """Name the file lines of data rows, counting the header as line 1."""
     lines = [str(int(row) + 2) for row in rows[:5]]
     more = f" and {len(rows) - 5} more" if len(rows) > 5 else ""
     return ", ".join(lines) + more
+
+
+def _read_call_table(path: str | os.PathLike[str]) -> pd.DataFrame:
+    """Read the call file as text, one row per line after the header.
+
+    Blank lines are kept as rows, so that each row's position names its
+    line, and the header sets the number of fields of every line.
+
+    Raises:
+        ValueError: If a line holds more fields than the header.
+    """
+    with _open_call_file(path) as handle:
+        try:
+            # The header is read as the first row, so that pandas compares
+            # every line with it instead of taking a longer line's first
+            # field as an index.
+            table = pd.read_csv(
+                handle,
+                header=None,
+                dtype=str,
+                keep_default_na=False,
+                na_filter=False,
+                skip_blank_lines=False,
+                compression=None,
+            )
+        except pd.errors.ParserError as error:
+            fields = re.search(
+                r"Expected (\d+) fields in line (\d+), saw (\d+)", str(error)
+            )
+            if fields is None:
+                raise ValueError(
+                    f"The call file cannot be read as CSV: {error}"
+                ) from error
+            expected, line, found = fields.groups()
+            raise ValueError(
+                f"Line {line} of the call file holds {found} fields, but its header "
+                f"names {expected}"
+            ) from error
+    names = table.iloc[0].tolist()
+    frame = table.iloc[1:].reset_index(drop=True)
+    missing = [name for name in _PROTOSPACER_COLUMNS if name not in names]
+    if missing:
+        raise ValueError(
+            "The call file lacks the columns "
+            + ", ".join(repr(name) for name in missing)
+            + "; Cell Ranger writes "
+            + ", ".join(_PROTOSPACER_COLUMNS)
+        )
+    # The first column of each name, as pandas would read it.
+    return frame[[names.index(name) for name in _PROTOSPACER_COLUMNS]].set_axis(
+        list(_PROTOSPACER_COLUMNS), axis=1
+    )
 
 
 def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
@@ -627,7 +798,8 @@ def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
     a confident call: ``cell_barcode``, ``num_features``, and the
     ``|``-separated ``feature_call`` and ``num_umis`` of its called guides.
     Barcodes without a confident call are absent, and a row whose
-    ``num_features`` is 0 holds no call. A gzip-compressed file is read too.
+    ``num_features`` is 0 holds no call. A gzip-compressed file is read too,
+    whatever its name. Blank lines at the end of the file are left out.
 
     Args:
         path: The call file.
@@ -636,28 +808,38 @@ def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
         The barcode of each row and the feature ID and UMIs of each call.
 
     Raises:
-        ValueError: If a column is missing, a barcode is empty or repeated,
-            ``num_features`` is not a whole number or disagrees with the
-            number of called features or UMI counts, a UMI count is not a
-            whole number, a feature ID is empty, or a row calls one feature
-            twice.
+        ValueError: If a column is missing, a line holds more fields than the
+            header, a blank line comes before a row, a barcode is empty or
+            repeated, ``num_features`` is not a whole number or disagrees
+            with the number of called features or UMI counts, a UMI count is
+            not a whole number or exceeds the uint32 maximum, a feature ID is
+            empty, or a row calls one feature twice.
     """
-    frame = pd.read_csv(
-        path,
-        dtype=str,
-        keep_default_na=False,
-        na_filter=False,
-        compression="infer",
-    )
-    missing = [name for name in _PROTOSPACER_COLUMNS if name not in frame.columns]
-    if missing:
-        raise ValueError(
-            "The call file lacks the columns "
-            + ", ".join(repr(name) for name in missing)
-            + "; Cell Ranger writes "
-            + ", ".join(_PROTOSPACER_COLUMNS)
-        )
+    frame = _read_call_table(path)
     barcodes = frame["cell_barcode"].str.strip().to_numpy(dtype=object)
+    declared_text = frame["num_features"].str.strip()
+    feature_text = frame["feature_call"].str.strip()
+    umi_text = frame["num_umis"].str.strip()
+    blank = (
+        (barcodes == "")
+        & (declared_text == "").to_numpy()
+        & (feature_text == "").to_numpy()
+        & (umi_text == "").to_numpy()
+    )
+    # Blank lines after the last row hold nothing; a blank line before a row
+    # may be a row that lost its fields.
+    kept = len(blank) - int(np.argmin(blank[::-1])) if not blank.all() else 0
+    if np.any(blank[:kept]):
+        raise ValueError(
+            "The call file holds blank lines among its rows, on lines "
+            f"{_line_numbers(np.flatnonzero(blank[:kept]))}; Cell Ranger writes "
+            "one row per barcode"
+        )
+    if kept < len(blank):
+        barcodes = barcodes[:kept]
+        declared_text = declared_text.iloc[:kept]
+        feature_text = feature_text.iloc[:kept]
+        umi_text = umi_text.iloc[:kept]
     empty = np.flatnonzero(barcodes == "")
     if len(empty):
         raise ValueError(f"Empty cell barcodes on lines {_line_numbers(empty)}")
@@ -667,7 +849,7 @@ def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
             f"Cell barcodes repeat on lines {_line_numbers(repeated)}, for example "
             f"{barcodes[repeated[0]]!r}"
         )
-    declared = pd.to_numeric(frame["num_features"].str.strip(), errors="coerce")
+    declared = pd.to_numeric(declared_text, errors="coerce")
     declared_values = declared.to_numpy(dtype=np.float64)
     invalid = np.flatnonzero(
         ~np.isfinite(declared_values)
@@ -679,9 +861,9 @@ def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
             "num_features must be a whole number of at least 0 on lines "
             f"{_line_numbers(invalid)}"
         )
-    counts = declared_values.astype(np.int64)
-    feature_text = frame["feature_call"].str.strip()
-    umi_text = frame["num_umis"].str.strip()
+    # A row lists far fewer calls than this, so a larger number disagrees
+    # with its calls below without overflowing int64.
+    counts = np.minimum(declared_values, _MAX_UMIS).astype(np.int64)
     uncalled = counts == 0
     stray = np.flatnonzero(
         uncalled
@@ -725,6 +907,14 @@ def read_protospacer_calls(path: str | os.PathLike[str]) -> ProtospacerCalls:
         raise ValueError(
             "UMI counts must be whole numbers of at least 0 on lines "
             f"{_line_numbers(np.unique(bad_umis))}"
+        )
+    # A larger count would overflow int64 below, and guide calls store
+    # uint32 counts.
+    large_umis = rows[umi_values > _MAX_UMIS]
+    if len(large_umis):
+        raise ValueError(
+            f"UMI counts must be at most {_MAX_UMIS} on lines "
+            f"{_line_numbers(np.unique(large_umis))}"
         )
     blank = rows[features == ""]
     if len(blank):

@@ -1077,10 +1077,11 @@ def test_guide_calling_imports_cell_rangers_calls(runs, tmp_path) -> None:
     summary = _stages(run)["guide_calling"]["summary"]
     loaded = store.perturbation.load_guide_calls(run["guide_calls"])
     assert summary["cells"] == len(loaded.cells)
-    assert (summary["fileBarcodes"], summary["unmatchedBarcodes"]) == (
-        N_CELLS - 10 + 1,
-        1,
-    )
+    assert (
+        summary["fileBarcodes"],
+        summary["unmatchedBarcodes"],
+        summary["unselectedBarcodes"],
+    ) == (N_CELLS - 10 + 1, 1, 0)
     # The import reads the same calls as a fixed floor of 11 UMIs.
     fixed = store.perturbation.load_guide_calls(
         store.perturbation.call_guides(
@@ -1089,8 +1090,10 @@ def test_guide_calling_imports_cell_rangers_calls(runs, tmp_path) -> None:
     )
     pd.testing.assert_series_equal(loaded.cells["call"], fixed.cells["call"])
     warned = [
-        f"1 of {N_CELLS - 9} barcodes of the call file match no selected cell, "
-        "for example 'unknown-barcode'. Check barcode_prefix and cell_selection."
+        f"1 of {N_CELLS - 9} barcodes of the call file match no cell of the store, "
+        "for example 'unknown-barcode'. A cell matches a barcode when its ID is "
+        "barcode_prefix followed by the barcode, so check barcode_prefix when the "
+        "cell IDs carry a sample prefix."
     ]
     assert _stages(run)["guide_calling"]["warnings"] == warned
     # A run that reuses the calls records the import's warning again.
@@ -1100,6 +1103,32 @@ def test_guide_calling_imports_cell_rangers_calls(runs, tmp_path) -> None:
     assert again["guide_calls"] == run["guide_calls"]
     assert _reused(again)["guide_calls"]
     assert _stages(again)["guide_calling"]["warnings"] == warned
+
+
+def test_an_import_after_qc_filtering_warns_only_about_unknown_barcodes(
+    runs, tmp_path
+) -> None:
+    store = _copy(runs.location, tmp_path)
+    # Cell Ranger's file names only cells of the store.
+    path = _call_file(tmp_path / "protospacer_calls_per_cell.csv")
+    frame = pd.read_csv(path)
+    frame[frame["cell_barcode"] != "unknown-barcode"].to_csv(path, index=False)
+    settings = {"efficiency": False, "edistance": False, **HEAD}
+
+    # QC filtering removes some of the cells that the file calls.
+    run = store.pipeline.perturbation(
+        labels=LABELS, guide_calling={"path": path}, **settings
+    )
+
+    selection = store.artifacts.load(run["analysis_cell_selection"])
+    analysed = np.asarray(selection["values"][:], dtype=bool)
+    removed = int(np.count_nonzero((GUIDE_COUNTS > 10).any(axis=1) & ~analysed))
+    assert removed
+    summary = _stages(run)["guide_calling"]["summary"]
+    assert (summary["unmatchedBarcodes"], summary["unselectedBarcodes"]) == (0, removed)
+    # Barcodes of the cells that filtering removed are expected, so nothing
+    # advises checking barcode_prefix.
+    assert _stages(run)["guide_calling"]["warnings"] == []
 
 
 def test_one_call_file_reaches_the_cells_of_one_sample(screen, tmp_path) -> None:
@@ -1151,8 +1180,9 @@ def test_one_call_file_reaches_the_cells_of_one_sample(screen, tmp_path) -> None
             )
     assert written(store) == before
 
-    # One lane's cells with its prefix: the barcodes of the other lane's cells,
-    # and of the cells that QC filtering removed, match no analysis cell.
+    # One lane's cells with its prefix: the barcodes of the other lane's cells
+    # match no cell of the store, and those of the cells that QC filtering
+    # removed are cells outside the analysis cells.
     run = store.pipeline.perturbation(
         cells="lane1",
         labels=LABELS,
@@ -1166,9 +1196,14 @@ def test_one_call_file_reaches_the_cells_of_one_sample(screen, tmp_path) -> None
     removed = int(np.count_nonzero(called & (LANES == "L1") & ~analysed))
     assert removed
     summary = _stages(run)["guide_calling"]["summary"]
-    assert (summary["fileBarcodes"], summary["unmatchedBarcodes"]) == (
+    assert (
+        summary["fileBarcodes"],
+        summary["unmatchedBarcodes"],
+        summary["unselectedBarcodes"],
+    ) == (
         N_CELLS - 10 + 1,
-        1 + int(np.count_nonzero(called & (LANES == "L2"))) + removed,
+        1 + int(np.count_nonzero(called & (LANES == "L2"))),
+        removed,
     )
     # Every analysed cell that the file calls has its calls.
     cells = store.perturbation.load_guide_calls(run["guide_calls"]).cells
@@ -1319,22 +1354,31 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
         {"RNA": RNA, "CRISPR": GUIDE_COUNTS, "GUIDES": GUIDE_COUNTS},
         "uint16",
     )
-    for store, found in (
-        (_open(alone), "No assay of the store is"),
+    for store, expected in (
+        # Without a CRISPR assay, naming one cannot help; declaring its type can.
+        (
+            _open(alone),
+            "No assay of the store is declared 'CRISPR', and guide calls read one; "
+            "declare the guide assay's type when opening the store, such as "
+            "DataStore(..., assay_types={'RNA': 'CRISPR'})",
+        ),
+        # With two, the recipe asks for its own keyword, by the rule of the
+        # methods.
         (
             _open(pair, assay_types={"GUIDES": "CRISPR"}),
-            "2 assays of the store, 'CRISPR', 'GUIDES', are",
+            "2 assays of the store, 'CRISPR', 'GUIDES', are declared 'CRISPR', and "
+            "guide calls read one; name the guide assay with guide_assay=...",
         ),
     ):
-        # The recipe asks for its own keyword, by the rule of the methods.
-        with pytest.raises(
-            ValueError,
-            match=re.escape(
-                f"{found} declared 'CRISPR', and guide calls read one; name the "
-                "guide assay with guide_assay=..."
-            ),
-        ):
+        with pytest.raises(ValueError, match=re.escape(expected)):
             _resolve(store, **HEAD)
+    # A name that is no assay is refused as such.
+    with pytest.raises(
+        ValueError,
+        match="^guide_assay 'GUIDE' is not an assay of the store, whose assays are "
+        "'CRISPR', 'RNA'$",
+    ):
+        _resolve(readonly, guide_assay="GUIDE", **HEAD)
 
 
 @pytest.mark.parametrize(

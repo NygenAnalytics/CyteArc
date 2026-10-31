@@ -583,7 +583,7 @@ class DataStorePlotAccessor:
         self,
         thresholds: ArtifactRef,
         *,
-        guides: Sequence[str] | None = None,
+        guides: Iterable[str] | None = None,
         samples: Sequence[str] | None = None,
         max_panels: int = 12,
         target: Any | None = None,

@@ -28,6 +28,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from cytearc.utils.numba import njit
+
 __all__ = [
     "GUIDE_ASSAY_TYPE",
     "MULTIPLE",
@@ -56,6 +58,7 @@ RESERVED_LABELS = frozenset({NEGATIVE, MULTIPLE})
 # Called UMIs are stored as uint32, which holds any count of one guide in one
 # cell that a sequencing run produces.
 _UMI_DTYPE = np.dtype(np.uint32)
+_MAX_UMIS = int(np.iinfo(_UMI_DTYPE).max)
 
 
 def validated_guide_ids(guide_ids: Any) -> np.ndarray:
@@ -205,8 +208,9 @@ def summarize_guide_counts(
 
     Raises:
         TypeError: If a block holds counts that are not unsigned integers.
-        ValueError: If a block has the wrong width, or the blocks hold more or
-            fewer than ``n_cells`` rows.
+        ValueError: If a block has the wrong width, the blocks hold more or
+            fewer than ``n_cells`` rows, or a count exceeds the uint32 range,
+            as guide calling refuses it.
     """
     top_code = np.full(n_cells, -1, dtype=np.int32)
     top_umi = np.zeros(n_cells, dtype=_UMI_DTYPE)
@@ -215,6 +219,13 @@ def summarize_guide_counts(
         blocks, n_cells=n_cells, n_guides=n_guides
     ):
         stop = start + block.shape[0]
+        # Only wider counts can exceed the uint32 range of the top UMIs.
+        if (
+            block.dtype.itemsize > _UMI_DTYPE.itemsize
+            and block.size
+            and (block.max() > _MAX_UMIS)
+        ):
+            raise ValueError(f"Guide UMI counts must be at most {_MAX_UMIS}")
         if block.shape[0]:
             totals = block.sum(axis=1, dtype=np.uint64)
             # argmax returns the first maximum, the lowest guide position.
@@ -244,6 +255,56 @@ class GuideCallArrays:
     n_guides: np.ndarray
     guide_codes: np.ndarray
     guide_umis: np.ndarray
+
+
+@njit(cache=True, nogil=True)
+def _place_calls(
+    cells: np.ndarray,
+    codes: np.ndarray,
+    umis: np.ndarray,
+    guide_codes: np.ndarray,
+    guide_umis: np.ndarray,
+    seen: np.ndarray,
+    keys: np.ndarray,
+) -> bool:
+    """Write each cell's calls into its row, most UMIs first, then by guide position.
+
+    ``guide_codes`` and ``guide_umis`` are padded with -1 and 0 and as wide
+    as the most calls of a cell; ``seen`` holds -1 for each guide, and
+    ``keys`` has room for one row. Each row is ordered by one sort of keys
+    that pack the UMIs, reversed, above the guide position. Returns whether
+    a cell has a guide called twice, which leaves the rows incomplete.
+    """
+    n_cells = guide_codes.shape[0]
+    filled = np.zeros(n_cells, dtype=np.int32)
+    for call in range(cells.shape[0]):
+        cell = cells[call]
+        slot = filled[cell]
+        guide_codes[cell, slot] = codes[call]
+        guide_umis[cell, slot] = umis[call]
+        filled[cell] = slot + 1
+    most = np.uint64(_MAX_UMIS)
+    shift = np.uint64(32)
+    low = np.uint64(0xFFFFFFFF)
+    for cell in range(n_cells):
+        size = filled[cell]
+        for slot in range(size):
+            guide = guide_codes[cell, slot]
+            if seen[guide] == cell:
+                return True
+            seen[guide] = cell
+        if size < 2:
+            continue
+        row = keys[:size]
+        for slot in range(size):
+            row[slot] = (
+                (most - np.uint64(guide_umis[cell, slot])) << shift
+            ) | np.uint64(guide_codes[cell, slot])
+        row.sort()
+        for slot in range(size):
+            guide_codes[cell, slot] = np.int32(row[slot] & low)
+            guide_umis[cell, slot] = np.uint32(most - (row[slot] >> shift))
+    return False
 
 
 def guide_call_arrays(
@@ -302,30 +363,32 @@ def guide_call_arrays(
             raise ValueError(
                 f"UMI counts of calls must be at most {np.iinfo(_UMI_DTYPE).max}"
             )
+    # The checks keep every position in range and every count within uint32,
+    # so these copies, made only of other dtypes, are exact.
     cell_positions = cell_positions.astype(np.int64, copy=False)
     guide_positions = guide_positions.astype(np.int64, copy=False)
-    counts = counts.astype(np.int64)
-    pairs = cell_positions * n_guide_ids + guide_positions
-    if len(np.unique(pairs)) != n_calls:
-        raise ValueError("A guide is called more than once in one cell")
-    # Order by cell, then by UMIs, most first, then by guide position.
-    order = np.lexsort((guide_positions, -counts, cell_positions))
-    cell_positions = cell_positions[order]
-    guide_positions = guide_positions[order]
-    counts = counts[order]
+    counts = counts.astype(_UMI_DTYPE, copy=False)
     n_guides = np.bincount(cell_positions, minlength=n_cells).astype(np.int32)
     width = max(1, int(n_guides.max(initial=0)))
-    starts = np.zeros(n_cells + 1, dtype=np.int64)
-    np.cumsum(n_guides, out=starts[1:])
-    slots = np.arange(n_calls, dtype=np.int64) - starts[cell_positions]
     guide_codes = np.full((n_cells, width), -1, dtype=np.int32)
     guide_umis = np.zeros((n_cells, width), dtype=_UMI_DTYPE)
-    guide_codes[cell_positions, slots] = guide_positions
-    guide_umis[cell_positions, slots] = counts
-    values = np.full(n_cells, MULTIPLE, dtype=object)
-    values[n_guides == 0] = NEGATIVE
-    single = n_guides == 1
-    values[single] = np.asarray(guide_ids, dtype=object)[guide_codes[single, 0]]
+    repeated = _place_calls(
+        cell_positions,
+        guide_positions,
+        counts,
+        guide_codes,
+        guide_umis,
+        np.full(n_guide_ids, -1, dtype=np.int64),
+        np.empty(width, dtype=np.uint64),
+    )
+    if repeated:
+        raise ValueError("A guide is called more than once in one cell")
+    # Each cell's label refers to one of these texts, so that no cell holds
+    # a copy of its own.
+    labels = np.asarray([NEGATIVE, MULTIPLE, *guide_ids], dtype=object)
+    values = labels[
+        np.where(n_guides == 0, 0, np.where(n_guides == 1, guide_codes[:, 0] + 2, 1))
+    ]
     return GuideCallArrays(
         values=values,
         n_guides=n_guides,

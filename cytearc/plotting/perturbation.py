@@ -792,7 +792,7 @@ def guide_thresholds(
     store: Any,
     thresholds: ArtifactRef,
     *,
-    guides: Sequence[str] | None = None,
+    guides: Iterable[str] | None = None,
     samples: Sequence[str] | None = None,
     max_panels: int = 12,
     target: Any | None = None,
@@ -811,7 +811,8 @@ def guide_thresholds(
     <cytearc.datastore.namespaces.PerturbationAccessor.load_guide_thresholds>`
     reads them.
 
-    With ``guides``, each selected guide gets one panel per sample. Bars count
+    With ``guides``, any collection of guide IDs such as the ``guides`` index of
+    the loaded record, each selected guide gets one panel per sample. Bars count
     the cells at each UMI count of the guide, blue where the count is called
     and grey where it is not, on log scales; the UMI axis is a log scale of
     count + 1, so the cells without a UMI of the guide appear at 0. A line on
@@ -839,6 +840,12 @@ def guide_thresholds(
     and otherwise 1,000 counts spread evenly on the log scale.
     """
     max_panels = integer_argument(max_panels, "max_panels", minimum=1)
+    # The guides index of a loaded record, or an array, names guides as a
+    # list does, as load_guide_thresholds takes them.
+    if not isinstance(guides, str | bytes | Sequence | None) and isinstance(
+        guides, Iterable
+    ):
+        guides = list(guides)
     requested = _distinct_values(guides, "guides", "guide ID")
     kept = _distinct_values(samples, "samples", "sample label")
     loaded = _load(store, "load_guide_thresholds", thresholds, guides=requested)

@@ -1,8 +1,10 @@
 """Shared helpers for the tests of ``cytearc.perturbation``."""
 
+import re
 import shutil
+import tracemalloc
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -59,6 +61,74 @@ def write_screen(
     for name, values in (cell_columns or {}).items():
         store.cells.insert(name, values)
     return store
+
+
+def named_budget(error: BaseException) -> int:
+    """Return the budget that a refusal names, its last ``at least N bytes``."""
+    found = re.findall(r"at least (\d+) bytes", str(error))
+    assert found, f"The refusal names no budget: {error}"
+    return int(found[-1])
+
+
+def budget_that_runs(
+    path: str | Path, call: Callable[["DataStore"], Any], **options: Any
+) -> tuple[int, list[str]]:
+    """Follow the refusals of ``call`` from a budget of one byte to the budget that runs it.
+
+    Each refusal must name a budget above the one it refused, which the next
+    attempt opens the store with. Returns the budget that runs the call and
+    the messages of the refusals on the way.
+    """
+    budget, refusals = 1, []
+    while True:
+        try:
+            call(open_store(path, mem_budget=budget, **options))
+        except MemoryError as error:
+            named = named_budget(error)
+            assert named > budget, f"{error} names no larger budget"
+            refusals.append(str(error))
+            budget = named
+            continue
+        return budget, refusals
+
+
+def traced_peak(call: Callable[[], Any]) -> int:
+    """Return the most bytes that ``call()`` holds beside what was held before it."""
+    tracemalloc.start()
+    try:
+        start = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        call()
+        return tracemalloc.get_traced_memory()[1] - start
+    finally:
+        tracemalloc.stop()
+
+
+def check_budget(
+    path: str | Path, call: Callable[["DataStore"], Any], **options: Any
+) -> tuple[int, list[str]]:
+    """Check that ``call`` runs within the budget its refusals name.
+
+    The call must run within the smallest budget that every check accepts,
+    found by :func:`budget_that_runs`, and one byte less must be refused
+    naming that budget, with nothing written. ``call`` should compute again
+    rather than reuse. Returns the budget and the refusals on the way.
+    """
+    budget, refusals = budget_that_runs(path, call, **options)
+    store = open_store(path, mem_budget=budget, **options)
+    peak = traced_peak(lambda: call(store))
+    if peak > budget:
+        # tracemalloc counts every allocation in the process while the call
+        # runs, other threads' included, so a peak above the budget is traced
+        # again: a call that holds more than its budget does so in both runs.
+        peak = min(peak, traced_peak(lambda: call(store)))
+    assert peak <= budget, f"The call held {peak} bytes within a budget of {budget}"
+    saved = written(open_store(path))
+    with pytest.raises(MemoryError) as refused:
+        call(open_store(path, mem_budget=budget - 1, **options))
+    assert named_budget(refused.value) == budget
+    assert written(open_store(path)) == saved
+    return budget, refusals
 
 
 def fixed_labels(

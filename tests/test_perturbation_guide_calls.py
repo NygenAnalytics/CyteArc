@@ -1,10 +1,12 @@
 import gzip
+import tracemalloc
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc.perturbation import guide_calls
 from cytearc.perturbation.guide_calls import (
     MULTIPLE,
     NEGATIVE,
@@ -14,7 +16,9 @@ from cytearc.perturbation.guide_calls import (
     summarize_guide_counts,
     validated_guide_ids,
 )
-from cytearc.readers.cellranger import read_protospacer_calls
+from cytearc.readers import cellranger
+from tests.perturbation_helpers import use_python_kernels
+from cytearc.readers.cellranger import protospacer_calls_size, read_protospacer_calls
 
 GUIDES = np.asarray(["ACE2-1", "ACE2-2", "DPP4-1", "Non-Targeting-1"], dtype=object)
 
@@ -120,6 +124,106 @@ def test_call_arrays_order_calls_and_label_cells() -> None:
     assert arrays.guide_umis.tolist() == [[40, 40, 7], [0, 0, 0], [12, 0, 0]]
     assert arrays.guide_codes.dtype == np.int32
     assert arrays.guide_umis.dtype == np.uint32
+
+
+def _sorted_rows(cells, codes, umis, n_cells):
+    """Each cell's calls as (guide, UMIs), most UMIs first, then by guide."""
+    rows: list[list[tuple[int, int]]] = [[] for _ in range(n_cells)]
+    for cell, code, count in zip(cells, codes, umis, strict=True):
+        rows[int(cell)].append((int(code), int(count)))
+    return [sorted(row, key=lambda call: (-call[1], call[0])) for row in rows]
+
+
+@pytest.mark.parametrize("compiled", [True, False])
+def test_call_arrays_order_each_cells_calls_whatever_their_order(
+    monkeypatch, compiled
+) -> None:
+    if not compiled:
+        use_python_kernels(monkeypatch, guide_calls)
+    rng = np.random.default_rng(41)
+    guide_ids = np.asarray([f"g{index}" for index in range(30)], dtype=object)
+    for trial in range(200):
+        n_cells = int(rng.integers(1, 40))
+        held = rng.random((n_cells, len(guide_ids))) < rng.uniform(0, 0.5)
+        cells, codes = np.nonzero(held)
+        order = rng.permutation(len(cells))
+        # Few distinct counts make ties common; some calls hold the uint32
+        # maximum.
+        umis = rng.integers(0, [3, 50, 2**32][trial % 3], size=len(cells))
+        umis[rng.random(len(umis)) < 0.05] = 2**32 - 1
+        dtype = ["int64", "uint32", "float64"][trial % 3]
+        arrays = guide_call_arrays(
+            cells[order],
+            codes[order],
+            umis[order].astype(dtype),
+            n_cells=n_cells,
+            guide_ids=guide_ids,
+        )
+        expected = _sorted_rows(cells, codes, umis, n_cells)
+        width = max(1, max(len(row) for row in expected))
+        assert arrays.guide_codes.shape == (n_cells, width)
+        for cell, row in enumerate(expected):
+            assert arrays.guide_codes[cell].tolist() == [code for code, _ in row] + [
+                -1
+            ] * (width - len(row))
+            assert arrays.guide_umis[cell].tolist() == [umi for _, umi in row] + [0] * (
+                width - len(row)
+            )
+        assert arrays.n_guides.tolist() == [len(row) for row in expected]
+        assert arrays.values.tolist() == [
+            NEGATIVE if not row else guide_ids[row[0][0]] if len(row) == 1 else MULTIPLE
+            for row in expected
+        ]
+        # A guide called again in one cell, with any count, is refused.
+        if len(cells):
+            with pytest.raises(ValueError, match="more than once"):
+                guide_call_arrays(
+                    np.append(cells, cells[-1]),
+                    np.append(codes, codes[-1]),
+                    np.append(umis, 7),
+                    n_cells=n_cells,
+                    guide_ids=guide_ids,
+                )
+
+
+def test_call_arrays_hold_little_beside_their_padded_arrays() -> None:
+    n_cells, per_cell, n_guides = 20_000, 8, 40
+    rng = np.random.default_rng(42)
+    cells = np.repeat(np.arange(n_cells, dtype=np.int64), per_cell)
+    codes = (
+        np.argsort(rng.random((n_cells, n_guides)), axis=1)[:, :per_cell]
+        .reshape(-1)
+        .astype(np.int64)
+    )
+    umis = rng.integers(1, 4, len(cells)).astype(np.uint32)
+    guide_ids = np.asarray([f"g{index}" for index in range(n_guides)], dtype=object)
+    guide_call_arrays(cells[:2], codes[:2], umis[:2], n_cells=1, guide_ids=guide_ids)
+    tracemalloc.start()
+    try:
+        start = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        arrays = guide_call_arrays(
+            cells, codes, umis, n_cells=n_cells, guide_ids=guide_ids
+        )
+        peak = tracemalloc.get_traced_memory()[1] - start
+    finally:
+        tracemalloc.stop()
+    padded = arrays.guide_codes.nbytes + arrays.guide_umis.nbytes
+    # Beside the padded slots, a cell holds its count, its label as a
+    # reference and the masks that choose the label; a call holds nothing,
+    # where sorting every call held about 75 bytes per call.
+    assert peak - padded <= 32 * n_cells
+
+
+def test_count_summary_refuses_counts_beyond_uint32_as_calling_does() -> None:
+    counts = np.zeros((2, 4), dtype=np.uint64)
+    counts[1, 2] = 2**33 + 7
+    with pytest.raises(
+        ValueError, match="^Guide UMI counts must be at most 4294967295$"
+    ):
+        summarize_guide_counts([counts], 2, 4)
+    counts[1, 2] = 2**32 - 1
+    assert summarize_guide_counts([counts], 2, 4).top_umi.tolist() == [0, 2**32 - 1]
 
 
 def test_call_arrays_without_calls_keep_one_padded_column() -> None:
@@ -247,6 +351,116 @@ def test_malformed_call_files_are_refused(tmp_path, body, message) -> None:
     path = _write(tmp_path / "calls.csv", header + body)
     with pytest.raises(ValueError, match=message):
         read_protospacer_calls(path)
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        # Blank lines are rows, so the bad UMI count on line 5 is not
+        # reported on line 3.
+        ("A-1,1,g1,5\n\n\nC-1,1,g1,x\n", "blank lines among its rows, on lines 3, 4;"),
+        ("A-1,1,g1,5\n   \nC-1,1,g1,4\n", "blank lines among its rows, on lines 3;"),
+        # A longer row neither shifts the columns nor loses its last field.
+        (
+            "A-1,1,g1,5,extra\n",
+            "^Line 2 of the call file holds 5 fields, but its header names 4$",
+        ),
+        ("A-1,1,g1,5\nC-1,1,g1,5,extra\n", "^Line 3 of the call file holds 5 fields"),
+        ("A-1,1,g1,5,\n", "^Line 2 of the call file holds 5 fields"),
+        # A UMI count beyond uint32 is refused before it overflows.
+        (
+            "A-1,1,g1,99999999999999999999\n",
+            "UMI counts must be at most 4294967295 on lines 2$",
+        ),
+        ("A-1,1,g1,4294967296\n", "UMI counts must be at most 4294967295 on lines 2$"),
+        ('"A-1,1,g1,5\n', "^The call file cannot be read as CSV: "),
+    ],
+)
+def test_call_file_messages_name_the_line_and_the_problem(
+    tmp_path, body, message
+) -> None:
+    path = _write(
+        tmp_path / "calls.csv",
+        "cell_barcode,num_features,feature_call,num_umis\n" + body,
+    )
+    with pytest.raises(ValueError, match=message):
+        read_protospacer_calls(path)
+
+
+def test_call_file_reads_the_largest_counts_and_ends_without_blank_rows(
+    tmp_path,
+) -> None:
+    header = "cell_barcode,num_features,feature_call,num_umis\n"
+    path = _write(
+        tmp_path / "calls.csv",
+        header + "A-1,1,g1,4294967295\r\nC-1,2,g1|g2,3|4\r\n\r\n\r\n",
+    )
+    calls = read_protospacer_calls(path)
+    assert calls.barcodes.tolist() == ["A-1", "C-1"]
+    assert calls.umis.tolist() == [4294967295, 3, 4]
+    # A file of blank lines after its header has no rows.
+    assert (
+        len(
+            read_protospacer_calls(
+                _write(tmp_path / "blank.csv", header + "\n\n")
+            ).barcodes
+        )
+        == 0
+    )
+
+
+def test_a_num_features_beyond_any_row_disagrees_without_overflow(
+    tmp_path, recwarn
+) -> None:
+    path = _write(
+        tmp_path / "calls.csv",
+        "cell_barcode,num_features,feature_call,num_umis\nA-1,99999999999999999999,g1,5\n",
+    )
+    with pytest.raises(ValueError, match="disagrees with the number"):
+        read_protospacer_calls(path)
+    assert not [entry for entry in recwarn if "cast" in str(entry.message)]
+
+
+def test_a_gzip_call_file_is_read_whatever_its_name(tmp_path) -> None:
+    text = "cell_barcode,num_features,feature_call,num_umis\nA-1,2,g1|g2,5|3\n"
+    path = tmp_path / "calls.csv"
+    path.write_bytes(gzip.compress(text.encode()))
+    calls = read_protospacer_calls(path)
+    assert calls.features.tolist() == ["g1", "g2"]
+    assert protospacer_calls_size(path) == protospacer_calls_size(
+        _write(tmp_path / "plain.csv", text)
+    )
+
+
+@pytest.mark.parametrize("scan_bytes", [3, 1 << 20])
+def test_the_size_scan_bounds_the_rows_and_calls(
+    tmp_path, monkeypatch, scan_bytes
+) -> None:
+    # Small reads split lines and runs of separators across reads.
+    monkeypatch.setattr(cellranger, "_SCAN_BYTES", scan_bytes)
+    rows = [
+        "A-1,1,g1,5",
+        "B-1,3,g1|g2|g3,5|6|7",
+        "C-1,0,,",
+        "D-1,2,g10|g20,1|2",
+    ]
+    text = "cell_barcode,num_features,feature_call,num_umis\n" + "\n".join(rows)
+    for name, ending in (
+        ("plain.csv", ""),
+        ("ended.csv", "\n"),
+        ("windows.csv", "\r\n"),
+    ):
+        body = text.replace("\n", ending or "\n") if ending == "\r\n" else text + ending
+        path = _write(tmp_path / name, body)
+        size = protospacer_calls_size(path)
+        calls = read_protospacer_calls(path)
+        assert size.n_bytes == len(body.encode())
+        assert size.n_pipes == 2 * 2 + 2 * 1
+        # The rows and calls of the file, or one more row when the last
+        # line ends.
+        assert size.n_rows in (len(calls.barcodes), len(calls.barcodes) + 1)
+        assert size.n_calls >= len(calls.features)
+        assert size.most_calls == int(np.bincount(calls.rows).max())
 
 
 def test_call_file_frames_round_trip_through_pandas(tmp_path) -> None:
