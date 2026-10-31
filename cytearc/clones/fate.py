@@ -979,7 +979,8 @@ class CloneFateBias:
             ``q_value``, adjusted by Benjamini and Hochberg's method within
             the fate.
         fates: One row per fate: ``fate``, the key columns, and ``late_cells``,
-            with or without a clone.
+            those without a clone included unless the clones keep labels
+            apart.
         clones: The clone artifact, such as a ``clones`` artifact.
         early: The selection of the early cells.
         late: The selection of the late cells.

@@ -222,6 +222,8 @@ def test_coupling_needs_two_groups_with_a_clone(copied) -> None:
 
 # Clones that keep labels apart, as clonotypes keep receptor types apart,
 # label every cell of a clone alike: here clones 1 to 4 "A" and 5 to 8 "B".
+# The cells without a clone are labelled "A" too, as a source may label every
+# cell.
 LINEAGES = np.where(TRUTH.clones < 4, "A", "B").astype(object)
 
 
@@ -484,25 +486,29 @@ def test_fate_bias_tests_clones_within_the_labels_kept_apart(kept_apart) -> None
             clones, group_by="cell_type", early=kept_apart.early, late=kept_apart.late
         )
     )
-    # A late cell without a clone has no lineage, so no fate; the fates are
-    # the types and lineages of the late cells with a clone.
-    assert loaded.fates["fate"].tolist() == sorted(
-        {
-            f"{name}, {lineage}"
-            for name, lineage, clone in zip(
-                TRUTH.cell_types[LATE], LINEAGES[LATE], TRUTH.clones[LATE], strict=True
-            )
-            if clone >= 0
-        }
+    # The labels kept apart belong to the clones, so a late cell without a
+    # clone has no fate, whatever its source labels it; the fates hold the
+    # late cells with a clone, by type and lineage.
+    late_with_clone = LATE & (TRUTH.clones >= 0)
+    assert int(np.count_nonzero(LATE & (TRUTH.clones < 0))) > 0
+    expected = Counter(
+        f"{name}, {lineage}"
+        for name, lineage in zip(
+            TRUTH.cell_types[late_with_clone], LINEAGES[late_with_clone], strict=True
+        )
     )
+    assert dict(zip(loaded.fates["fate"], loaded.fates["late_cells"], strict=True)) == (
+        dict(expected)
+    )
+    assert loaded.fates["fate"].tolist() == sorted(expected)
     assert len(loaded.fates) == 5
     # Each clone is tested only in the fates of its lineage, among the late
-    # cells of that lineage, which all hold a clone.
+    # cells of that lineage with a clone.
     table = loaded.clone_fates
     for row in table.itertuples(index=False):
         lineage = "A" if int(row.clone) <= 4 else "B"
         assert row.fate.endswith(lineage)
-        in_lineage = LATE & (LINEAGES == lineage)
+        in_lineage = late_with_clone & (LINEAGES == lineage)
         n_late = int(in_lineage.sum())
         fate = row.fate.split(", ")[0]
         in_fate = int((in_lineage & (TRUTH.cell_types == fate)).sum())

@@ -2262,6 +2262,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             )
         del shared
         _late, late_codes, late_kept = self._measured_clone_cells(source, late)
+        # The labels that the clones keep apart belong to the clones, so a late
+        # cell without a clone has none, and no fate, whatever label its
+        # source gives it.
+        without_clone = late_codes < 0
+        cleared = []
+        for name, labels in late_kept:
+            kept_labels = np.array(labels, dtype=object)
+            kept_labels[without_clone] = None
+            cleared.append((name, kept_labels))
+        late_kept = tuple(cleared)
         grouped = cell_groups(
             self.zw,
             self.cells,
