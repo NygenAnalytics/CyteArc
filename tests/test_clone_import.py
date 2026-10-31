@@ -19,6 +19,7 @@ import pandas as pd
 import pytest
 
 from cytearc.clones import Clones
+from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
@@ -774,6 +775,34 @@ def test_load_and_export_refuse_other_artifacts(shared, tmp_path) -> None:
         shared.store.clones.export_clones(ref, tmp_path / "x.csv", format="h5ad")
     with pytest.raises(TypeError, match="path must be a path"):
         shared.store.clones.export_clones(ref, 3)
+
+
+def test_load_and_export_name_missing_and_incomplete_clones(
+    shared, store, tmp_path
+) -> None:
+    def readers(target):
+        return (
+            target.clones.load_clones,
+            lambda ref: target.clones.export_clones(ref, tmp_path / "out.csv"),
+        )
+
+    # Clones saved in one store are missing from another.
+    elsewhere = shared.store.clones.import_clones(
+        write_numbat(TRUTH, tmp_path / "clone_post_2.tsv"), cell_selection=shared.cells
+    )
+    for read in readers(store):
+        with pytest.raises(KeyError, match="Artifact does not exist"):
+            read(elsewhere)
+    # An import that stopped before it finished leaves an incomplete artifact.
+    saved = store.clones.import_clones(
+        write_numbat(TRUTH, tmp_path / "clone_post_3.tsv"),
+        cell_selection=every_cell(store),
+    )
+    artifact_group(store.zw, saved).attrs["complete"] = False
+    for read in readers(store):
+        with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+            read(saved)
+    assert not (tmp_path / "out.csv").exists()
 
 
 def test_load_refuses_tables_larger_than_the_budget(store, tmp_path) -> None:

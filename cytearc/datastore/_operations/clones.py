@@ -699,7 +699,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef.
-            ValueError: If it is not a complete ``clones`` artifact.
+            ValueError: If it is not a ``clones`` artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as an import that
+                stopped before it finished leaves it.
             MemoryError: If the tables, about 200 bytes per cell beside the
                 text of its ID and of the clone labels, do not fit the memory
                 budget.
@@ -762,10 +765,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a complete ``clones`` artifact,
-                ``format`` is unknown, a ``"table"`` would hold a clone label
-                that reads as no clone, such as ``"NA"``, or a ``"matrix"``
-                would list a label or cell ID that holds a line break.
+            ValueError: If ``clones`` is not a ``clones`` artifact, ``format``
+                is unknown, a ``"table"`` would hold a clone label that reads
+                as no clone, such as ``"NA"``, or a ``"matrix"`` would list a
+                label or cell ID that holds a line break.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as an import that
+                stopped before it finished leaves it.
             MemoryError: If the export, about 200 bytes per cell beside the
                 text of its ID and of the clone labels, does not fit the
                 memory budget.
