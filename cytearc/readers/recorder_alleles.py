@@ -882,8 +882,6 @@ def _matrix_columns(names: Sequence[str], path: str) -> tuple[tuple[str, str], .
 def _matrix_layout(path: str, format: str) -> AlleleLayout:
     text = text_layout(path, what="a character matrix")
     names = list(text.names[1:])
-    if len(set(names)) != len(names):
-        raise ValueError(f"{path} names a character twice")
     columns = _matrix_columns(names, path)
     if format == "petracer_characters":
         rules = SiteRules(
@@ -1237,10 +1235,10 @@ def allele_layout(
     if found == "typewriter":
         layout = _typewriter_layout(text, lengths)
         for name, length in lengths.items():
-            if length > (layout.n_slots or 0):
+            if not 1 <= length <= (layout.n_slots or 0):
                 raise ValueError(
                     f"The integration {name!r} has {length} slots, but the arrays of "
-                    f"{text} have {layout.n_slots}"
+                    f"{text} have from 1 to {layout.n_slots}"
                 )
         return layout
     if found == "typewriter_chains":
@@ -1373,11 +1371,8 @@ def _read_sums(
     molecules: TextLayout = layout._read["annotated"]
     positions = {name: position for position, name in enumerate(molecules.names)}
     parts: list[tuple[np.ndarray, np.ndarray]] = []
+    # text_layout checked the first row's width, which pandas keeps.
     for line, chunk in text_chunks(molecules, chunk_rows):
-        if chunk.shape[1] != len(molecules.names):
-            raise ValueError(
-                f"{molecules.path} has rows of another width than its header"
-            )
         keys = pair_keys(
             _stripped(chunk[positions["CR"]]), _stripped(chunk[positions["aligned_LR"]])
         )
@@ -1624,9 +1619,8 @@ def _iter_matrix(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
     text = layout._text
     assert text is not None
     columns = layout._read["columns"]
+    # text_layout checked the first row's width, which pandas keeps.
     for line, chunk in text_chunks(text, chunk_rows):
-        if chunk.shape[1] != len(text.names):
-            raise ValueError(f"{text.path} has rows of another width than its header")
         lines = np.arange(line, line + len(chunk), dtype=np.int64)
         tokens = np.stack(
             [_stripped(chunk[position]) for position in range(1, len(text.names))],
@@ -1749,9 +1743,8 @@ def _iter_chains(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
         for integration in integrations
         for slot in range(1, n_slots + 1)
     )
+    # text_layout checked the first row's width, which pandas keeps.
     for line, chunk in text_chunks(text, chunk_rows):
-        if chunk.shape[1] != len(text.names):
-            raise ValueError(f"{text.path} has rows of another width than its header")
         lines = np.arange(line, line + len(chunk), dtype=np.int64)
         tokens = np.concatenate(
             [
@@ -1799,9 +1792,8 @@ def _iter_table(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
     # The keys of each row's cell, integration and site, when rows hold one
     # site each, which find a site that the table lists twice.
     keys: list[np.ndarray] = []
+    # text_layout checked the first row's width, which pandas keeps.
     for line, chunk in text_chunks(text, chunk_rows):
-        if chunk.shape[1] != len(text.names):
-            raise ValueError(f"{text.path} has rows of another width than its header")
         lines = np.arange(line, line + len(chunk), dtype=np.int64)
         if "sites" in roles:
             tokens = np.stack(

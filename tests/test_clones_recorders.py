@@ -396,3 +396,21 @@ def test_priors_are_each_states_share_of_its_characters_edited_cells():
         "state": [1, 2, 1],
         "probability": [2 / 3, 1 / 3, 1.0],
     }
+
+
+def test_integer_keys_sort_as_their_columns_and_refuse_the_int64_range():
+    from cytearc.clones.recorders import _integer_keys
+
+    rng = np.random.default_rng(23)
+    first, second, third = (rng.integers(0, bound, 500) for bound in (7, 3, 1_000))
+    keys = _integer_keys((first, 7), (second, 3), (third, 1_000))
+    # The keys order the rows as the columns do, and the bounds recover them.
+    np.testing.assert_array_equal(
+        np.argsort(keys, kind="stable"), np.lexsort((third, second, first))
+    )
+    np.testing.assert_array_equal(keys // 3_000, first)
+    np.testing.assert_array_equal(keys // 1_000 % 3, second)
+    np.testing.assert_array_equal(keys % 1_000, third)
+    # 2**40 integrations by 2**23 cells would wrap past the int64 range.
+    with pytest.raises(ValueError, match="too many to number as one integer key"):
+        _integer_keys((np.zeros(1), 2**40), (np.zeros(1), 2**23))

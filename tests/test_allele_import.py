@@ -519,6 +519,46 @@ def test_import_arguments_are_checked(store, tmp_path, truth, recorders):
         )
     with pytest.raises(ValueError, match="needs columns"):
         store.clones.import_alleles(path, cell_selection=cells, format="table")
+    with pytest.raises(TypeError, match="paths must be a path or a sequence"):
+        store.clones.import_alleles([path, 3], cell_selection=cells)
+    with pytest.raises(TypeError, match="integrations must be an integration's name"):
+        store.clones.import_alleles(path, cell_selection=cells, integrations=5)
+    store.cells.insert(
+        "no_cell", np.zeros(len(truth.cell_ids), dtype=bool), overwrite=True
+    )
+    with pytest.raises(ValueError, match="cell_selection selects no cell"):
+        store.clones.import_alleles(
+            path, cell_selection=store.snapshot_cell_selection("no_cell")
+        )
+
+
+def test_artifacts_without_their_counts_or_files_are_refused(
+    store, truth, recorders, tmp_path
+):
+    """A saved import whose attributes were damaged is refused, never guessed."""
+    from cytearc.storage.artifacts import artifact_group
+
+    path = write_petracer_long(recorders, truth, tmp_path / "d2.csv", sample="d2")
+    cells = every_cell(store)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ref = store.clones.import_alleles(path, cell_selection=cells)
+    attributes = artifact_group(store.zw, ref).attrs
+    saved = attributes["n_beyond_length"]
+    attributes["n_beyond_length"] = True
+    try:
+        with pytest.raises(ValueError, match="records no count 'n_beyond_length'"):
+            store.clones.import_alleles(path, cell_selection=cells)
+    finally:
+        attributes["n_beyond_length"] = saved
+    files = attributes["files"]
+    attributes["files"] = "d2.csv"
+    try:
+        with pytest.raises(ValueError, match="has no valid list of files"):
+            store.clones.load_alleles(ref)
+    finally:
+        attributes["files"] = files
+    assert len(store.clones.load_alleles(ref).files) == 1
 
 
 def test_a_read_only_store_reuses_saved_alleles_and_refuses_new_ones(

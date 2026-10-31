@@ -119,3 +119,33 @@ def test_the_store_accessor_forwards_and_checks_its_arguments(imported) -> None:
         assert drawn.axes["site_states"] is ax and not drawn.legends
     finally:
         plt.close(figure)
+
+
+def test_alleles_without_records_draw_a_note_and_show_on_request(tmp_path):
+    from tests.clone_helpers import open_clone_store
+    from tests.storage_helpers import write_count_store
+
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((2, 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=["c1", "c2"],
+    )
+    store = open_clone_store(tmp_path / "store.zarr")
+    path = tmp_path / "alleles.csv"
+    # The table's only cell is none of the store's.
+    path.write_text(
+        "intID,cellBC,RNF2,HEK3,EMX1,UMI,readCount\nintID1,c9,ACAGT,None,None,3,30\n"
+    )
+    with pytest.warns(UserWarning, match="match no selected cell"):
+        ref = store.clones.import_alleles(
+            path, cell_selection=store.snapshot_cell_selection()
+        )
+    result = plotting.recorder_states(store, ref, show=True)
+    try:
+        ax = result.axes["site_states"]
+        assert [text.get_text() for text in ax.texts] == ["No allele records"]
+        assert result.tables["site_states"].empty
+        assert not ax.patches and not result.legends
+    finally:
+        plt.close(result.figure)

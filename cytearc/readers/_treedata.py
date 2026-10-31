@@ -407,10 +407,6 @@ def _write_frame(
     return frame
 
 
-def _no_column(position: int) -> np.ndarray:
-    raise IndexError(position)
-
-
 def _write_scalar(group: Any, name: str, value: Any) -> None:
     if isinstance(value, str):
         array = group.create_array(
@@ -479,8 +475,9 @@ def write_character_store(
         zarr_format=3,
         attributes=_encoded(("treedata", "0.1.0")),
     )
-    _write_frame(root, "obs", cells, (), _no_column)
-    _write_frame(root, "var", np.empty(0, dtype=object), (), _no_column)
+    # obs and var hold no columns beside their index.
+    for name, index in (("obs", cells), ("var", np.empty(0, dtype=object))):
+        _write_frame(root, name, index, (), lambda position: np.empty(0))
     for name in ("obsm", "varm", "obsp", "varp", "layers", "uns"):
         root.create_group(name, attributes=_encoded(_DICT))
     # One character's column at a time is copied as int64 and written.

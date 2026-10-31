@@ -437,3 +437,56 @@ def test_laml_text_refuses_a_state_that_its_table_does_not_list(tmp_path):
         "b,1,?",
         "c,?,?",
     ]
+
+
+def test_tables_of_one_site_per_row_export_as_their_wide_form(
+    store, truth, recorders, tmp_path
+):
+    """macsGESTALT's rows of one target each give the matrix of the same table, wide.
+
+    Each row is an allele row of its own as read, and the rows of one cell and
+    integration must export as one allele: kept apart, the export would keep
+    one target of each integration and leave the others missing.
+    """
+    from tests.clone_truth import write_gestalt_table
+
+    tokens = {"unedited": "NONE", "missing": "UNKNOWN"}
+    wide = store.clones.import_alleles(
+        write_gestalt_table(recorders, truth, tmp_path / "wide.tsv"),
+        cell_selection=every_cell(store),
+        columns={
+            "cell": "cell",
+            "integration": "integration",
+            "sites": ["target1", "target2", "target3"],
+            **tokens,
+        },
+    )
+    long = store.clones.import_alleles(
+        write_gestalt_table(recorders, truth, tmp_path / "long.tsv", long=True),
+        cell_selection=every_cell(store),
+        columns={
+            "cell": "cellID",
+            "integration": "intID",
+            "site": "target",
+            "allele": "target_edit",
+            "umis": "UMIs_crispr_intID_cell",
+            **tokens,
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        store.clones.export_characters(long, tmp_path / "long.csv", format="laml")
+    store.clones.export_characters(wide, tmp_path / "wide.csv", format="laml")
+    sites = {f"target{index + 1}": site for index, site in enumerate(PETRACER_SITES)}
+    expected = pd.read_csv(tmp_path / "wide.csv", dtype=str, keep_default_na=False)
+    expected.columns = [
+        name
+        if name == "cell"
+        else f"{name.rsplit('-', 1)[0]}-{sites[name.rsplit('-', 1)[1]]}"
+        for name in expected.columns
+    ]
+    found = pd.read_csv(tmp_path / "long.csv", dtype=str, keep_default_na=False)
+    pd.testing.assert_frame_equal(found, expected[found.columns.tolist()])
+    table = recorders.independent
+    read = table["read"] & (table["state"] != "missing")
+    assert int((found.drop(columns="cell") != "?").to_numpy().sum()) == int(read.sum())

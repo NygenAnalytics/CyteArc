@@ -694,6 +694,29 @@ def _allele_ranks(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return ranks, numbers
 
 
+def _integer_keys(*columns: tuple[np.ndarray, int]) -> np.ndarray:
+    """One int64 key per row of integer columns, each below its bound.
+
+    The keys sort as the rows do by their columns in turn, so one sort of the
+    keys orders the rows, and dividing by the bounds recovers each column.
+
+    Raises:
+        ValueError: If the bounds' product passes the int64 range.
+    """
+    total = 1
+    for _values, bound in columns:
+        total *= max(1, int(bound))
+    if total >= 2**63:
+        raise ValueError(
+            f"Columns of {' by '.join(str(bound) for _values, bound in columns)} "
+            "values are too many to number as one integer key"
+        )
+    keys = np.zeros(len(columns[0][0]), dtype=np.int64)
+    for values, bound in columns:
+        keys = keys * max(1, int(bound)) + np.asarray(values, dtype=np.int64)
+    return keys
+
+
 # The order in which a cell's records at one site decide its state there, by
 # state code: a mark first, then an unknown mark, unedited, missing and not
 # applicable.
@@ -718,20 +741,15 @@ def _site_state_counts(
     n_sites = max(1, len(site_names))
     n_pairs = max(1, len(integration_names)) * n_sites
     n_cells = int(cells.max()) + 1 if len(cells) else 1
-    if n_pairs * n_cells * n_states >= 2**63:
-        raise ValueError(
-            f"{n_pairs} integrations and sites of {n_cells} cells are too many to "
-            "count states over"
-        )
     n_reached = int(np.count_nonzero(np.bincount(cells, minlength=1)))
-    pairs = np.asarray(integrations, dtype=np.int64) * n_sites + np.asarray(
-        sites, dtype=np.int64
+    keys = sorted_unique(
+        _integer_keys(
+            (integrations, max(1, len(integration_names))),
+            (sites, n_sites),
+            (cells, n_cells),
+            (_STATE_PRIORITY[np.asarray(states, dtype=np.int64)], n_states),
+        )
     )
-    keys = (pairs * n_cells + cells) * n_states + _STATE_PRIORITY[
-        np.asarray(states, dtype=np.int64)
-    ]
-    del pairs
-    keys = sorted_unique(keys)
     # The first key of each cell at each site holds its lowest rank.
     groups = keys // n_states
     first = np.ones(len(keys), dtype=bool)
@@ -975,7 +993,12 @@ def character_matrix(
     integration_names = table.text["integration"].categories
     site_names = table.text["site"].categories
     n_sites = max(len(site_names), 1)
-    pairs = sorted_unique(integrations[exported] * n_sites + sites[exported])
+    pairs = sorted_unique(
+        _integer_keys(
+            (integrations[exported], max(len(integration_names), 1)),
+            (sites[exported], n_sites),
+        )
+    )
     pairs = np.stack([pairs // n_sites, pairs % n_sites], axis=1)
     named = [
         (str(integration_names[integration]), str(site_names[site]))
@@ -1002,14 +1025,11 @@ def character_matrix(
     # Each edit's character, kind and allele rank as one key, ordered as
     # those columns are, so that one stable sort finds the distinct edits.
     n_ranks = max(len(allele_names), 1)
-    if (len(ranked_names) + 1) * 2 * n_ranks >= 2**63:
-        raise ValueError(
-            f"{len(ranked_names)} characters of {n_ranks} alleles are too many to "
-            "number the states of"
-        )
-    edit_keys = (record_characters[edits] * 2 + edit_kinds) * n_ranks + allele_ranks[
-        edit_alleles
-    ]
+    edit_keys = _integer_keys(
+        (record_characters[edits], len(ranked_names)),
+        (edit_kinds, 2),
+        (allele_ranks[edit_alleles], n_ranks),
+    )
     edit_order = np.argsort(edit_keys, kind="stable")
     edit_starts = _group_starts(edit_keys[edit_order])
     distinct_keys = edit_keys[edit_order][edit_starts]
