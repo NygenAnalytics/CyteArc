@@ -279,6 +279,15 @@ The comparisons of pooled CRISPR screen methods in [Methods and limitations](htt
 | Perturbation profiles, and the calibration check at genome scale | The K562 essential screen of Replogle et al. (2022), Cell 185:2559-2575.e28, doi:10.1016/j.cell.2022.05.013, from "Replogle et al. 2022 processed Perturb-seq datasets", figshare+, doi:10.25452/figshare.plus.20029387.v1 | CC BY 4.0 |
 | Perturbation clusters | The published genome-wide K562 profiles of Replogle et al. (2022) from the same figshare+ record, and Table S3 of the paper; the names of the 1,973 perturbations that they clustered, from the authors' data browser, <https://gwps.wi.mit.edu> | CC BY 4.0; the data browser states no license |
 
+## Data that validated the clone import
+
+The clone sizes that `ds.clones.import_clones` saves were checked against counts taken with SciPy and pandas from these files. The repository holds none of them, and neither the tests nor the documentation download them.
+
+| Validation | Source | License or terms |
+| --- | --- | --- |
+| Clones of LARRY's in vitro clone matrix | `GSM4185642_stateFate_inVitro_clone_matrix.mtx.gz` and `GSM4185642_stateFate_inVitro_metadata.txt.gz` from GEO GSE140802, Weinreb et al. (2020), Science 367:eaaw3381, doi:10.1126/science.aaw3381 | GEO; no license stated |
+| Clones of CellTag-multi's clone table | `b4.rna&atac.r1&2_master_rev1_annotated.csv` of "Processed single-cell RNA and ATAC data for the CellTag-multi iEP reprogramming time course" by Samantha Annette Morris and Kunal Jindal (Zenodo, version 1.1.0, doi:10.5281/zenodo.23442375) | CC BY 4.0 |
+
 ## Optional packages that CyteArc does not install
 
 CyteArc contains no code from these GPL-licensed packages, and its default installation does not
