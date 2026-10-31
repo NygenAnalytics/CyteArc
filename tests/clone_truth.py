@@ -15,6 +15,7 @@ code under test never computes.
 """
 
 import gzip
+import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
@@ -2817,3 +2818,239 @@ def allele_calling_truth(
         rare={array: frozenset(alleles) for array, alleles in rare.items()},
         homoplasic=homoplasic if "homoplasy" in noise else None,
     )
+
+
+# The truth's phylogeny: a root at time 0 whose one child, the founder, at
+# time 0.5, splits into one clade per clone. Each clade's root is named by its
+# clone's label and starts at a time of 1 or later, so the cut at time 1, or
+# at depth 1 once the root and its one child merge, gives the truth's clones.
+# Every leaf ends at time 4, and every time is a multiple of 1/8, which
+# floating point holds exactly.
+FOUNDER_TIME = 0.5
+PHYLOGENY_CUT_TIME = 1.0
+PHYLOGENY_CUT_DEPTH = 1
+LEAF_TIME = 4.0
+_CLADE_STEP = 0.125
+_CHAIN_STEP = 0.25
+
+
+@dataclass(frozen=True, slots=True)
+class TruthTree:
+    """One tree of the truth's phylogeny, its nodes in preorder.
+
+    Attributes:
+        name: The tree's name, which its file takes.
+        names: Each node's name: leaves are cell IDs or barcodes outside the
+            store, and clade roots are clone labels.
+        parents: Each node's parent, -1 for the root.
+        times: Each node's time from the root.
+    """
+
+    name: str
+    names: tuple[str, ...]
+    parents: tuple[int, ...]
+    times: tuple[float, ...]
+
+    def children(self) -> list[list[int]]:
+        found: list[list[int]] = [[] for _ in self.names]
+        for node, parent in enumerate(self.parents):
+            if parent >= 0:
+                found[parent].append(node)
+        return found
+
+
+def _clone_members(truth: CloneTruth, clone: int) -> list[str]:
+    """A clone's cell IDs in cell order; clone 0 also holds the outside barcodes."""
+    members = [str(cell) for cell in truth.cell_ids[truth.clones == clone]]
+    if clone == 0:
+        members += [f"d2__{barcode}-1" for barcode in truth.outside]
+    return members
+
+
+def _add_clade(
+    nodes: list[tuple[str, int, float]], parent: int, clone: int, members: list[str]
+) -> None:
+    """Add a clone's clade: its root, then leaves and a chain of internal nodes.
+
+    A clade of one cell is a root with one child; of two, a root with two
+    leaves; larger clades are polytomies of two leaves and a chain that adds a
+    leaf at each step. The second clone's chain hangs below a node of one
+    child.
+    """
+    start = 1.0 + _CLADE_STEP * clone
+    root = len(nodes)
+    nodes.append((number_label(clone), parent, start))
+    for leaf in members[:2]:
+        nodes.append((leaf, root, LEAF_TIME))
+    rest = members[2:]
+    above, time = root, start + _CHAIN_STEP
+    if rest and clone == 1:
+        nodes.append((f"c{clone + 1}single", above, time))
+        above, time = len(nodes) - 1, time + _CHAIN_STEP
+    for step, leaf in enumerate(rest):
+        if step == len(rest) - 1:
+            nodes.append((leaf, above, LEAF_TIME))
+            break
+        nodes.append((f"c{clone + 1}n{step}", above, time))
+        above, time = len(nodes) - 1, time + _CHAIN_STEP
+        nodes.append((leaf, above, LEAF_TIME))
+
+
+def truth_phylogeny(truth: CloneTruth) -> TruthTree:
+    """The truth's phylogeny as one tree, with the founder below its root."""
+    nodes: list[tuple[str, int, float]] = [("root", -1, 0.0), ("founder", 0, 0.5)]
+    for clone in range(truth.n_clones):
+        _add_clade(nodes, 1, clone, _clone_members(truth, clone))
+    names, parents, times = zip(*nodes, strict=True)
+    return TruthTree("truth_tree", names, parents, times)
+
+
+def truth_forest(truth: CloneTruth) -> list[TruthTree]:
+    """The truth's phylogeny as one tree per clone, as PEtracer ships them."""
+    trees = []
+    for clone in range(truth.n_clones):
+        nodes: list[tuple[str, int, float]] = []
+        _add_clade(nodes, -1, clone, _clone_members(truth, clone))
+        names, parents, times = zip(*nodes, strict=True)
+        # Each tree's root starts at time 0 of its own.
+        trees.append(
+            TruthTree(
+                f"clone_{clone + 1}",
+                names,
+                parents,
+                tuple(time - times[0] for time in times),
+            )
+        )
+    return trees
+
+
+_NUMBER = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+
+
+def newick_label(name: str) -> str:
+    """A label as Newick writes it, quoted when it holds a mark or a space.
+
+    A name that reads as a number is quoted too, since an unquoted number on
+    an internal node is a support value, not a name.
+    """
+    if (
+        any(mark in name for mark in "()[]':;, \t\n")
+        or not name
+        or _NUMBER.fullmatch(name)
+    ):
+        return "'" + name.replace("'", "''") + "'"
+    return name
+
+
+def newick_text(tree: TruthTree, *, stem: float | None = None) -> str:
+    """A tree as one line of Newick, with branch lengths and node labels.
+
+    The text is built from the leaves up, without recursion. ``stem`` is a
+    length above the root.
+    """
+    children = tree.children()
+    texts: list[str] = [""] * len(tree.names)
+    for node in reversed(range(len(tree.names))):
+        label = newick_label(tree.names[node])
+        if children[node]:
+            label = (
+                "(" + ",".join(texts[child] for child in children[node]) + ")" + label
+            )
+        parent = tree.parents[node]
+        if parent >= 0:
+            label += f":{tree.times[node] - tree.times[parent]!r}"
+        elif stem is not None:
+            label += f":{stem!r}"
+        texts[node] = label
+    return texts[0] + ";"
+
+
+def write_newick(
+    trees: Sequence[TruthTree], path: Path, *, compress: bool = False
+) -> Path:
+    """Write trees to one Newick file, one line each."""
+    return _write(path, [newick_text(tree) for tree in trees], compress=compress)
+
+
+def _tree_graph(tree: TruthTree, *, lengths: bool) -> dict:
+    """A tree as TreeData's JSON holds it, nodes with times and edges.
+
+    With ``lengths`` the edges get a ``length`` of 1, which the node times
+    must win over; every node gets ``characters`` to drop.
+    """
+    edges: dict[str, dict[str, dict]] = {name: {} for name in tree.names}
+    for node, parent in enumerate(tree.parents):
+        if parent >= 0:
+            edges[tree.names[parent]][tree.names[node]] = (
+                {"length": 1.0} if lengths else {}
+            )
+    return {
+        "nodes": {
+            name: {"time": time, "characters": [0, 1, 2]}
+            for name, time in zip(tree.names, tree.times, strict=True)
+        },
+        "edges": edges,
+    }
+
+
+def write_h5td(
+    trees: Sequence[TruthTree], path: Path, *, lengths: bool = False
+) -> Path:
+    """A TreeData ``.h5td`` file: ``obst`` as one JSON string, keyed by tree."""
+    import json
+
+    leaves = [
+        name
+        for tree in trees
+        for name, children in zip(tree.names, tree.children(), strict=True)
+        if not children
+    ]
+    with h5py.File(path, "w") as handle:
+        handle.attrs["encoding-type"] = "treedata"
+        handle.attrs["encoding-version"] = "0.1.0"
+        _obs_frame(handle, leaves)
+        obst = handle.create_dataset(
+            "obst",
+            data=json.dumps(
+                {tree.name: _tree_graph(tree, lengths=lengths) for tree in trees}
+            ),
+            dtype=h5py.string_dtype(),
+        )
+        obst.attrs["encoding-type"] = "string"
+        obst.attrs["encoding-version"] = "0.2.0"
+    return path
+
+
+def write_tree_zarr(trees: Sequence[TruthTree], path: Path) -> Path:
+    """A TreeData ``.zarr`` store: one group per tree, attributes in columns.
+
+    Times are a column of numbers; lengths, given for every other edge, are
+    JSON text with ``""`` where absent, as treedata writes partial columns.
+    """
+    import zarr
+
+    root = zarr.open_group(path, mode="w", zarr_format=3)
+    root.attrs.update({"encoding-type": "treedata", "encoding-version": "0.1.0"})
+    obst = root.create_group("obst")
+    for tree in trees:
+        group = obst.create_group(tree.name)
+        group.create_array(
+            "nodes", data=np.asarray(tree.names, dtype=np.dtypes.StringDType())
+        )
+        pairs = [
+            (tree.names[parent], tree.names[node])
+            for node, parent in enumerate(tree.parents)
+            if parent >= 0
+        ]
+        group.create_array(
+            "edges",
+            data=np.asarray(pairs, dtype=np.dtypes.StringDType()).reshape(-1, 2),
+        )
+        nodes = group.create_group("node_attrs")
+        nodes.create_array("time", data=np.asarray(tree.times, dtype=np.float64))
+        edges = group.create_group("edge_attrs")
+        lengths = ["" if position % 2 else repr(1.0) for position in range(len(pairs))]
+        edges.create_array(
+            "length", data=np.asarray(lengths, dtype=np.dtypes.StringDType())
+        )
+    return path

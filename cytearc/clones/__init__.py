@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         CloneOverlap as CloneOverlap,
         CloneTracking as CloneTracking,
     )
+    from .phylogeny import CellPhylogeny as CellPhylogeny
     from .recorders import LineageAlleles as LineageAlleles
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "MULTIPLE_POLICIES",
     "ORDERS",
     "OVERLAP_INDICES",
+    "CellPhylogeny",
     "ClonalDiversity",
     "ClonalExpansion",
     "CloneCoupling",
@@ -54,6 +56,7 @@ __getattr__, __dir__ = _lazy_facade(
         "ClonalExpansion": ".expansion",
         "CloneCoupling": ".fate",
         "CloneFateBias": ".fate",
+        "CellPhylogeny": ".phylogeny",
         "CloneOverlap": ".overlap",
         "CloneTracking": ".overlap",
         "Clones": ".assignments",

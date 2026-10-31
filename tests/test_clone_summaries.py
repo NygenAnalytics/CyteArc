@@ -37,13 +37,16 @@ from tests.clone_helpers import (
 )
 from tests.clone_truth import (
     N_CELLS,
+    PHYLOGENY_CUT_TIME,
     CloneTruth,
     allele_calling_truth,
     calling_truth,
     clone_truth,
     number_label,
     receptor_truth,
+    truth_phylogeny,
     without_single_cell_clones,
+    write_newick,
 )
 from tests.storage_helpers import insert_nullable_cell_column
 from tests.variant_truth import (
@@ -135,6 +138,17 @@ def _allele_clones(store: DataStore, folder: Path) -> ArtifactRef:
     )
 
 
+def _phylogeny_clones(store: DataStore, folder: Path) -> ArtifactRef:
+    # The truth's phylogeny splits into one clade per clone, whose root carries
+    # the clone's label, so its cut at time 1 gives the truth's clones.
+    path = write_newick([truth_phylogeny(TRUTH)], folder / "truth_tree.nwk")
+    with pytest.warns(UserWarning, match="match no selected cell"):
+        phylogeny = store.clones.import_phylogeny(
+            path, cell_selection=every_cell(store), time_unit="days"
+        )
+    return store.clones.phylogeny_clones(phylogeny, time=PHYLOGENY_CUT_TIME)
+
+
 #: How each clone source saves the truth's clones, in the order the stack adds
 #: them.
 SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
@@ -145,6 +159,7 @@ SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
     "variant clones": _variant_clones,
     "genotype clones": _genotype_clones,
     "allele clones": _allele_clones,
+    "phylogeny clones": _phylogeny_clones,
 }
 #: The truth's clones as a source saves them, where it cannot save every one:
 #: variant clones join each cell to the cells that share its variants, so the

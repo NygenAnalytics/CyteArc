@@ -218,8 +218,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # then variants.genotypes, variants.load_genotypes and
     # variants.genotype_clones, then clones.import_alleles,
     # clones.load_alleles and clones.export_characters, then
-    # clones.allele_clones.
-    assert len(_NAMESPACE_METHODS) == 149
+    # clones.allele_clones, then clones.import_phylogeny,
+    # clones.load_phylogeny and clones.phylogeny_clones.
+    assert len(_NAMESPACE_METHODS) == 152
     assert {
         "import_receptors",
         "load_receptors",
@@ -266,6 +267,9 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
         "load_alleles",
         "export_characters",
         "allele_clones",
+        "import_phylogeny",
+        "load_phylogeny",
+        "phylogeny_clones",
     } == {name for namespace, _, name, _ in _NAMESPACE_METHODS if namespace == "clones"}
     assert {
         "import_guide_calls",
@@ -543,6 +547,7 @@ def test_datastore_private_mixin_order_is_stable():
     from cytearc.datastore._operations.perturbation_profiles import (
         _PerturbationProfileOperationsMixin,
     )
+    from cytearc.datastore._operations.phylogeny import _PhylogenyOperationsMixin
     from cytearc.datastore._operations.recorder_alleles import (
         _RecorderAlleleOperationsMixin,
     )
@@ -571,6 +576,7 @@ def test_datastore_private_mixin_order_is_stable():
         _PerturbationMixscapeOperationsMixin,
         _PerturbationAssociationOperationsMixin,
         _PerturbationProfileOperationsMixin,
+        _PhylogenyOperationsMixin,
         _CloneOperationsMixin,
         _LineageBarcodeOperationsMixin,
         _RecorderAlleleOperationsMixin,
@@ -578,7 +584,7 @@ def test_datastore_private_mixin_order_is_stable():
         _VariantOperationsMixin,
         MappingDatastore,
     )
-    assert DataStore.mro()[:20] == [
+    assert DataStore.mro()[:21] == [
         DataStore,
         _CellCallingOperationsMixin,
         _QualityControlOperationsMixin,
@@ -593,6 +599,7 @@ def test_datastore_private_mixin_order_is_stable():
         _PerturbationMixscapeOperationsMixin,
         _PerturbationAssociationOperationsMixin,
         _PerturbationProfileOperationsMixin,
+        _PhylogenyOperationsMixin,
         _CloneOperationsMixin,
         _LineageBarcodeOperationsMixin,
         _RecorderAlleleOperationsMixin,
@@ -655,6 +662,7 @@ def test_datastore_operation_mixins_have_unique_method_owners():
     from cytearc.datastore._operations.perturbation_profiles import (
         _PerturbationProfileOperationsMixin,
     )
+    from cytearc.datastore._operations.phylogeny import _PhylogenyOperationsMixin
     from cytearc.datastore._operations.presentation import _PresentationOperationsMixin
     from cytearc.datastore._operations.quality_control import (
         _QualityControlOperationsMixin,
@@ -691,6 +699,7 @@ def test_datastore_operation_mixins_have_unique_method_owners():
         _RecorderAlleleOperationsMixin,
         _RepertoireOperationsMixin,
         _VariantOperationsMixin,
+        _PhylogenyOperationsMixin,
     )
     owners: dict[str, list[str]] = {}
     for mixin in mixins:

@@ -764,6 +764,34 @@ class AlleleCloneArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class PhylogenyImportArguments(OperationArguments):
+    operation: ClassVar[str] = "import_phylogeny"
+    artifact_kind: ClassVar[str] = "cell_phylogeny"
+
+    cell_selection: ArtifactRef = artifact_input()
+    # Each tree file's format, the SHA-256 of its bytes, how its leaves name
+    # cells and the name its trees take, in canonical order; paths are not
+    # part of the identity.
+    sources: tuple[dict[str, Any], ...] = artifact_input()
+    time_unit: str | None = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class PhylogenyCloneArguments(OperationArguments):
+    operation: ClassVar[str] = "phylogeny_clones"
+    artifact_kind: ClassVar[str] = "clones"
+
+    phylogeny: ArtifactRef = artifact_input()
+    # The phylogeny's cells, which the clones label.
+    cell_selection: ArtifactRef = artifact_input()
+    # Exactly one of the two cuts is recorded; the other is None.
+    time: float | None = parameter()
+    depth: int | None = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class GuideThresholdArguments(OperationArguments):
     operation: ClassVar[str] = "fit_guide_thresholds"
     artifact_kind: ClassVar[str] = "guide_thresholds"

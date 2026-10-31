@@ -26,6 +26,8 @@ docs/**/cytearc_datasets/
 cytearc_datasets/
 *.zarr/
 **/*.zarr/
+# Zarr fixtures that tests read, such as TreeData stores.
+!tests/data/**/*.zarr/
 .coverage
 coverage.xml
 coverage.json

@@ -22,6 +22,7 @@ from ._operations.perturbation_effects import _PerturbationEffectOperationsMixin
 from ._operations.perturbation_guides import _PerturbationGuideOperationsMixin
 from ._operations.perturbation_mixscape import _PerturbationMixscapeOperationsMixin
 from ._operations.perturbation_profiles import _PerturbationProfileOperationsMixin
+from ._operations.phylogeny import _PhylogenyOperationsMixin
 from ._operations.presentation import _PresentationOperationsMixin
 from ._operations.quality_control import _QualityControlOperationsMixin
 from ._operations.regulons import _RegulonOperationsMixin
@@ -102,6 +103,9 @@ class ClonesAccessor(_Accessor):
     load_alleles = _bind(_RecorderAlleleOperationsMixin._clones_load_alleles)
     export_characters = _bind(_RecorderAlleleOperationsMixin._clones_export_characters)
     allele_clones = _bind(_RecorderAlleleOperationsMixin._clones_allele_clones)
+    import_phylogeny = _bind(_PhylogenyOperationsMixin._clones_import_phylogeny)
+    load_phylogeny = _bind(_PhylogenyOperationsMixin._clones_load_phylogeny)
+    phylogeny_clones = _bind(_PhylogenyOperationsMixin._clones_phylogeny_clones)
 
 
 class ClustersAccessor(_Accessor):
