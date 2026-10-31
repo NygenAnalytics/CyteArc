@@ -115,6 +115,9 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
     "loaded expansion of a few of the clones' cells": _loaded(
         "long", cell_selection="first"
     ),
+    "loaded expansion of a few cells of short clone labels": _loaded(
+        "clones", cell_selection="first"
+    ),
     "diversity by two columns of long labels": lambda data: data.store.clones.diversity(
         data.clones, group_by=["donor", "condition"]
     ),

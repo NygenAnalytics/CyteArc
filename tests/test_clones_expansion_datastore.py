@@ -19,6 +19,7 @@ from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
     copy_clone_store,
     every_cell,
+    ids_read_bytes,
     import_truth_clones,
     open_clone_store,
     write_truth_store,
@@ -500,10 +501,10 @@ def test_expansion_refuses_more_cells_than_the_memory_budget(
     assert store.artifacts.list(kind="clonal_expansion", scope="datastore") == [saved]
     monkeypatch.setattr(store, "memoryBytes", 16_400)
     assert store.clones.expansion(clones, breakpoints=(1,)) != saved
-    # Loading takes 48 * 500 bytes for the tables, 2,000 for the group, and
-    # the clones read.
-    needed = N_CELLS * 500 + 2_000 + CLONES_READ
-    assert needed == 27_472
+    # Loading takes 48 * 500 bytes for the tables, 2,000 for the group, the
+    # clones read and the cells' IDs read as text.
+    needed = N_CELLS * 500 + 2_000 + CLONES_READ + ids_read_bytes(store, N_CELLS)
+    assert needed - ids_read_bytes(store, N_CELLS) == 27_472
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
     with pytest.raises(MemoryError, match=f"48 cells holds about {needed} bytes"):
         store.clones.load_expansion(saved)
@@ -547,8 +548,9 @@ def test_expansion_of_some_cells_counts_every_clone_cell_it_reads(
         MemoryError, match=f"48 cells to {n_d2} measured cells holds about {matched}"
     ):
         store.clones.expansion(clones, cell_selection=d2, breakpoints=(1,))
-    # Loading their tables also reads and matches every clone cell.
-    needed = n_d2 * 500 + 2_000 + CLONES_READ + matched
+    # Loading their tables also reads and matches every clone cell, and reads
+    # the IDs of the cells of d2.
+    needed = n_d2 * 500 + 2_000 + CLONES_READ + matched + ids_read_bytes(store, n_d2)
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
     with pytest.raises(MemoryError, match=f"{n_d2} cells holds about {needed} bytes"):
         store.clones.load_expansion(saved)

@@ -902,6 +902,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             TypeError: If ``clones`` is not an ArtifactRef.
             ValueError: If it is not a kind of clone artifact that the
                 summaries read.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
         """
         if not isinstance(clones, ArtifactRef):
             raise TypeError("clones must be an ArtifactRef")
@@ -932,7 +934,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef.
-            ValueError: If it is not a complete clone artifact.
+            ValueError: If it is not a kind of clone artifact that the
+                summaries read.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
             MemoryError: If the codes, and the labels when read, do not fit
                 the memory budget.
         """
@@ -1163,18 +1168,20 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a complete clone artifact, both
-                bounds are given, the bounds are invalid, no measured cell has
-                both a clone and a group, a column of the groups is missing or
-                named twice, or two groups get one name.
+            ValueError: If ``clones`` is not a clone artifact, both bounds
+                are given, the bounds are invalid, no measured cell has both a
+                clone and a group, a column of the groups is missing or named
+                twice, or two groups get one name.
+            KeyError: If the store holds no such ``clones`` artifact.
+            RuntimeError: If the ``clones`` artifact is incomplete, as an
+                import that stopped before it finished leaves it.
             PermissionError: If the store is read-only and the result is not
                 saved yet.
             MemoryError: If reading the clones, grouping the cells, or the
                 measurement, about 300 bytes per cell, does not fit the memory
                 budget.
         """
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
+        bool_argument(invalidate_cache, "invalidate_cache")
         if breakpoints is not None and frequency_breakpoints is not None:
             raise ValueError("Pass breakpoints or frequency_breakpoints, not both")
         counts: tuple[int, ...] | None = None
@@ -1322,11 +1329,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``expansion`` is not a complete
-                ``clonal_expansion`` artifact, or ``splits`` are invalid.
+            ValueError: If ``expansion`` is not a ``clonal_expansion``
+                artifact, or ``splits`` are invalid.
+            KeyError: If the store holds no such artifact, or not the clones
+                that it measured.
+            RuntimeError: If the artifact or the clones that it measured are
+                incomplete.
             MemoryError: If the tables, about 500 bytes per cell and 2,000
-                per group besides the clones and labels that they read, do not
-                fit the memory budget.
+                per group besides the cells' IDs as text and the clones and
+                labels that they read, do not fit the memory budget.
         """
         if not isinstance(expansion, ArtifactRef):
             raise TypeError("expansion must be an ArtifactRef")
@@ -1348,10 +1359,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         measured = status.input_ref("cell_selection")
         n_cells = as_zarr_array(group["group_codes"], name="group_codes").shape[0]
         n_groups = len(cast(list[Any], group.attrs["group_keys"]))
-        # Beside the tables of the cells: each group's rows, the clones' codes
-        # and labels, and the clones' cells matched to the measured cells when
-        # the expansion measured others.
+        # Beside the tables of the cells: their IDs as text, each group's rows,
+        # the clones' codes and labels, and the clones' cells matched to the
+        # measured cells when the expansion measured others.
         held = _SUMMARY_BYTES_PER_GROUP * int(n_groups)
+        held += text_read_bytes(self.cells._get_array("ids"), int(n_cells))
         held += self._clone_input_bytes(clones, with_ids=True)
         if measured != inspect_artifact(self.zw, clones).input_ref("cell_selection"):
             clone_codes = as_zarr_array(
@@ -1459,9 +1471,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a complete clone artifact, no
-                cell has a clone and a group, a column of the groups is
-                missing or named twice, or ``size`` is not positive.
+            ValueError: If ``clones`` is not a clone artifact, no cell has a
+                clone and a group, a column of the groups is missing or named
+                twice, or ``size`` is not positive.
+            KeyError: If the store holds no such ``clones`` artifact.
+            RuntimeError: If the ``clones`` artifact is incomplete, as an
+                import that stopped before it finished leaves it.
             MemoryError: If reading the clones or grouping the cells does not
                 fit the memory budget.
         """
@@ -1545,9 +1560,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a complete clone artifact, an
-                order, size, endpoint or knots is invalid, or no cell has a
-                clone and a group.
+            ValueError: If ``clones`` is not a clone artifact, an order,
+                size, endpoint or knots is invalid, or no cell has a clone and
+                a group.
+            KeyError: If the store holds no such ``clones`` artifact.
+            RuntimeError: If the ``clones`` artifact is incomplete, as an
+                import that stopped before it finished leaves it.
             MemoryError: If reading the clones, grouping the cells, or the
                 curves do not fit the memory budget.
         """

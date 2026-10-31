@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 from cytearc.datastore.datastore import DataStore
+from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import import_truth_clones, write_truth_store
 from tests.clone_truth import N_CELLS, clone_truth
@@ -140,3 +141,39 @@ def test_summaries_refuse_a_grouping_that_leaves_out_every_clone(source) -> None
     ):
         with pytest.raises(ValueError, match="No cell has both a clone and a group"):
             summary(source.clones, group_by="unlabelled")
+
+
+def test_summaries_name_missing_and_incomplete_clones(source) -> None:
+    store = source.store
+    summaries = (
+        store.clones.expansion,
+        store.clones.diversity,
+        store.clones.rarefaction,
+    )
+    saved = store.clones.expansion(source.clones)
+    # Artifacts that the store does not hold raise KeyError.
+    for summary in summaries:
+        with pytest.raises(KeyError, match="Artifact does not exist"):
+            summary(_unsaved(source.clones))
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        store.clones.load_expansion(_unsaved(saved))
+    # An import that stopped before it finished leaves incomplete clones,
+    # which raise RuntimeError, also where a saved expansion reads them.
+    for ref, readers in (
+        (source.clones, (*summaries, lambda _ref: store.clones.load_expansion(saved))),
+        (saved, (store.clones.load_expansion,)),
+    ):
+        attributes = artifact_group(store.zw, ref).attrs
+        attributes["complete"] = False
+        try:
+            for read in readers:
+                with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+                    read(ref)
+        finally:
+            attributes["complete"] = True
+    assert store.clones.load_expansion(saved).cells.shape[0] == N_CELLS
+
+
+def _unsaved(ref: ArtifactRef) -> ArtifactRef:
+    """A reference of the same kind to an artifact that no store holds."""
+    return ArtifactRef(scope=ref.scope, kind=ref.kind, artifact_id="f" * 64)

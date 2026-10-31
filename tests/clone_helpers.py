@@ -63,6 +63,13 @@ def every_cell(store: "DataStore") -> "ArtifactRef":
     return store.snapshot_cell_selection("every_cell")
 
 
+def ids_read_bytes(store: "DataStore", n_cells: int) -> int:
+    """The bytes of reading the IDs of ``n_cells`` cells of ``store`` as text."""
+    from cytearc.metadata.rows import text_read_bytes
+
+    return text_read_bytes(store.cells._get_array("ids"), n_cells)
+
+
 def loaded_partition(store: "DataStore", clones: "ArtifactRef") -> set[frozenset[str]]:
     """The saved clones as sets of cell IDs, from the cells table of load_clones."""
     cells = store.clones.load_clones(clones).cells

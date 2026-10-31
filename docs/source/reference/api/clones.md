@@ -193,11 +193,11 @@ Every summary checks the memory budget before each step that reads or allocates,
 | Matching the clones to other cells, when `cell_selection` of `expansion` differs from the clones' cells | 56 per cell of the clones and 32 per measured cell |
 | Grouping | 100 per cell, 70 per cell for each key column, and three times the stored width of each `group_by` column's labels; 32 per cell of `cell_selection`, and 130 and three times the label width per cell of the `groups` artifact, whatever cells the clones hold; one chunk of the widest column of labels; 500 per distinct label and per group |
 | Measuring expansion | 300 per measured cell |
-| Loading expansion | 500 per cell |
+| Loading expansion | 500 per cell and the cells' IDs as text |
 | Rarefaction | 40 for each size below a group's cells and each of its distinct clone sizes, and 100 per row of the curves |
 | Each summary | 2,000 per group |
 
-A grouping with a label for each cell therefore needs far more memory than its cells. Peaks that tracemalloc recorded stayed within these budgets on long and emoji labels, long clone labels, a few measured cells of many clone cells, label artifacts and selections of more cells than the clones hold, and a label for each cell.
+A grouping with a label for each cell therefore needs far more memory than its cells. Reading cell IDs as text holds one chunk of the stored IDs, by default 100,000 of them, both decoded and as stored, and for each cell three times the stored width of an ID, 128 bytes of positions, and a string of 64 bytes and four per character. Peaks that tracemalloc recorded stayed within these budgets on long and emoji labels, long clone labels, a few measured cells of many clone cells, label artifacts and selections of more cells than the clones hold, and a label for each cell.
 
 ## Clones
 
