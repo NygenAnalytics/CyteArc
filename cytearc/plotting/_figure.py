@@ -563,7 +563,8 @@ def _shared_legend_parts(result: PlotResult) -> list[_SharedLegendPart] | None:
     Returns None when ``result`` reports no legend, or a legend that the
     shared legends cannot draw, such as a line legend or a categorical legend
     whose scale has no order or palette. Such a child keeps the legends that
-    it drew.
+    it drew. A categorical legend whose extras hold a true ``missing``, for
+    values drawn without a category, lists its scale's missing entry last.
     """
     if not result.legends:
         return None
@@ -586,6 +587,11 @@ def _shared_legend_parts(result: PlotResult) -> list[_SharedLegendPart] | None:
             order = tuple(categorical_scale.order or ())
             if not order or categorical_scale.palette is None:
                 return None
+            missing = (
+                (categorical_scale.missing_color, categorical_scale.missing_label)
+                if legend.extras.get("missing")
+                else None
+            )
             categorical_key = (
                 "categorical",
                 legend.label,
@@ -593,19 +599,9 @@ def _shared_legend_parts(result: PlotResult) -> list[_SharedLegendPart] | None:
                 tuple(
                     (str(value), categorical_scale.palette[value]) for value in order
                 ),
+                missing,
             )
-            handles = [
-                mpl.lines.Line2D(
-                    [],
-                    [],
-                    marker="o",
-                    linestyle="",
-                    markerfacecolor=categorical_scale.palette[value],
-                    markeredgecolor="none",
-                    markersize=5,
-                )
-                for value in order
-            ]
+            colors = [categorical_scale.palette[value] for value in order]
             labels = [
                 (
                     categorical_scale.labels.get(value, str(value))
@@ -613,6 +609,21 @@ def _shared_legend_parts(result: PlotResult) -> list[_SharedLegendPart] | None:
                     else str(value)
                 )
                 for value in order
+            ]
+            if missing is not None:
+                colors.append(missing[0])
+                labels.append(missing[1])
+            handles = [
+                mpl.lines.Line2D(
+                    [],
+                    [],
+                    marker="o",
+                    linestyle="",
+                    markerfacecolor=color,
+                    markeredgecolor="none",
+                    markersize=5,
+                )
+                for color in colors
             ]
             parts.append((categorical_key, (legend.label, handles, labels, None)))
         elif legend.kind == "colorbar" and continuous:

@@ -25,7 +25,11 @@ from cytearc.perturbation.profiles import (
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
 from tests.perturbation_helpers import (
     fixed_labels,
+    memory_screen,
+    needed_budget,
+    open_store,
     record_cell_reads,
+    smallest_budget,
     use_python_kernels,
     write_screen,
 )
@@ -751,7 +755,15 @@ def test_profiles_read_bands_of_features_that_fit_the_budget(
     whole = store.perturbation.load_profiles(
         store.perturbation.profiles(labels, features, sample_column="run")
     )
+
     bands: list[int] = []
+
+    def run(budgeted: DataStore) -> ArtifactRef:
+        bands.clear()
+        return budgeted.perturbation.profiles(
+            labels, features, sample_column="run", invalidate_cache=True
+        )
+
     read = normalization.feature_value_blocks
 
     def counting(assay, physical_indices, *args, **kwargs):
@@ -759,28 +771,21 @@ def test_profiles_read_bands_of_features_that_fit_the_budget(
         return read(assay, physical_indices, *args, **kwargs)
 
     monkeypatch.setattr(normalization, "feature_value_blocks", counting)
-    # The operation's accounting: 237 labelled cells, the 230 control and
-    # profiled cells, the profiles of 2 perturbations and the moments of 2
-    # samples in 30 features, and 7 features of a band.
-    held = 24 * N_CELLS + 32 * 230 + 4 * 2 * 30 + 16 * 2 * 30 + 16 * 30
-    per_feature = 8 * 2 + 24 * 2 + 16
-    monkeypatch.setattr(store, "memoryBytes", held + 7 * per_feature + 10)
+    with pytest.raises(MemoryError, match="2 targets in 30 features") as low:
+        run(open_store(shared.path, nthreads=2, mem_budget=1000))
+    needed = needed_budget(low.value)
+    banded = run(open_store(shared.path, nthreads=2, mem_budget=3 * needed // 2))
 
-    banded = store.perturbation.profiles(
-        labels, features, sample_column="run", invalidate_cache=True
-    )
-
-    # Each band reads the control cells, then the profiled cells.
-    assert bands == [7, 7, 7, 7, 7, 7, 7, 7, 2, 2]
-    monkeypatch.setattr(store, "memoryBytes", 1 << 30)
+    # Each band reads the control cells, then the profiled cells, and holds
+    # several features but not all of them.
+    assert bands[::2] == bands[1::2] and sum(bands[::2]) == 30
+    assert 1 < max(bands) < 30
     result = store.perturbation.load_profiles(banded)
     pd.testing.assert_frame_equal(result.values, whole.values)
     pd.testing.assert_frame_equal(result.control_sd, whole.control_sd)
-    monkeypatch.setattr(store, "memoryBytes", held + per_feature - 1)
-    with pytest.raises(MemoryError, match="2 targets in 30 features"):
-        store.perturbation.profiles(
-            labels, features, sample_column="run", invalidate_cache=True
-        )
+    with pytest.raises(MemoryError, match="2 targets in 30 features") as short:
+        run(open_store(shared.path, nthreads=2, mem_budget=needed - 1))
+    assert needed_budget(short.value) == needed
 
 
 @pytest.mark.parametrize(
@@ -876,9 +881,9 @@ def test_loading_profiles_refuses_other_artifacts_and_budgets(
         store.perturbation.load_profiles("profiles")
     with pytest.raises(ValueError, match="not 'perturbation_labels'"):
         store.perturbation.load_profiles(shared.labels)
-    monkeypatch.setattr(store, "memoryBytes", 100)
+    budgeted = open_store(shared.path, mem_budget=100)
     with pytest.raises(MemoryError, match="2 perturbations in 30 features hold 240"):
-        store.perturbation.load_profiles(profiles)
+        budgeted.perturbation.load_profiles(profiles)
 
 
 def test_loading_profiles_holds_their_values_once(shared, monkeypatch) -> None:
@@ -910,3 +915,36 @@ def test_loading_profiles_holds_their_values_once(shared, monkeypatch) -> None:
     # the memory check counts, rather than a copy of them.
     assert len(read) == 1
     assert np.shares_memory(result.values.to_numpy(), read[0])
+
+
+@pytest.mark.slow
+def test_profiles_run_within_the_budget_they_name(tmp_path) -> None:
+    screen = memory_screen(tmp_path / "store.zarr")
+    # Profiling 40 features keeps the least budget's bands of one feature few.
+    features = open_store(screen.path).features.snapshot(feature_indexes=np.arange(40))
+
+    def run(store: DataStore) -> ArtifactRef:
+        return store.perturbation.profiles(
+            screen.labels,
+            features,
+            sample_column="run",
+            min_cells=5,
+            id_column=None,
+            invalidate_cache=True,
+        )
+
+    whole = open_store(screen.path).perturbation.load_profiles(
+        run(open_store(screen.path, nthreads=2))
+    )
+    needed, profiles, peak = smallest_budget(screen.path, run)
+
+    # Each band of features streams its counts within the budget that the
+    # refusal names, which once failed in the stream planner.
+    assert peak <= needed
+    result = open_store(screen.path).perturbation.load_profiles(profiles)
+    pd.testing.assert_frame_equal(result.values, whole.values)
+    pd.testing.assert_frame_equal(result.control_mean, whole.control_mean)
+    pd.testing.assert_frame_equal(result.control_sd, whole.control_sd)
+    with pytest.raises(MemoryError) as short:
+        run(open_store(screen.path, nthreads=2, mem_budget=needed - 1))
+    assert needed_budget(short.value) == needed

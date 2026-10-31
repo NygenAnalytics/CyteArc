@@ -27,6 +27,7 @@ import pandas as pd
 from numba import prange
 from scipy.special import ndtr
 
+from cytearc.perturbation.guide_calls import MULTIPLE, NEGATIVE
 from cytearc.perturbation.labels import CONTROL
 from cytearc.utils.arguments import (
     bool_argument,
@@ -61,6 +62,9 @@ __all__ = [
 MIXSCAPE_STATUSES = ("fitted", "few_de_genes", "few_cells", "no_fit")
 #: The class of a cell of the signature that the labels do not cover.
 UNLABELLED = "unlabelled"
+# The classes that perturbation_type may not take, since other cells take
+# them: a target's escapers, and the cells without a single target.
+_OTHER_CLASSES = ("NP", CONTROL, NEGATIVE, MULTIPLE, UNLABELLED)
 #: The mixture classified the target's cells.
 MIXSCAPE_FITTED = 0
 #: Fewer DE genes than ``min_de_genes``: every cell is an escaper.
@@ -102,7 +106,8 @@ def mixscape_settings(
     Raises:
         TypeError: If a setting has the wrong type.
         ValueError: If a number is out of range, or ``perturbation_type`` is
-            empty or holds a space.
+            empty, holds a space, or is the class of other cells, such as
+            ``"NP"``.
     """
     de_floor = integer_argument(min_de_genes, "min_de_genes", minimum=1)
     cell_floor = integer_argument(min_cells, "min_cells", minimum=1)
@@ -123,6 +128,13 @@ def mixscape_settings(
         raise ValueError(
             "perturbation_type must be one word, such as 'KO', not "
             f"{perturbation_type!r}"
+        )
+    if perturbation_type in _OTHER_CLASSES:
+        named = [repr(name) for name in _OTHER_CLASSES]
+        raise ValueError(
+            f"perturbation_type {perturbation_type!r} is the class of other "
+            "cells, which would merge with the knocked-out cells; pass a word "
+            f"other than {', '.join(named[:-1])} and {named[-1]}, such as 'KO'"
         )
     optional_name_argument(split_column, "split_column")
     return de_floor, cell_floor, iterations, fold, fraction, cutoff
@@ -385,8 +397,9 @@ def band_de_genes(
     over every feature, is below ``p_value_cutoff``.
 
     Args:
-        values: The log-normalized values of the band's features over the
-            members, features x members.
+        values: The normalized values of the band's features over the
+            members, features x members, which are summed for the fold
+            changes and ranked as log1p for the tests.
         member_groups: Each member's group.
         by_group: The members in the order of their groups, group after
             group.

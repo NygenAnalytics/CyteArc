@@ -3195,6 +3195,12 @@ def perturbation_clusters(
         missing_label=_UNASSIGNED_LABEL,
     )
     named_axes = n_drawn <= _NAMED_PERTURBATIONS
+    # The cluster legend lists the unassigned perturbations when it draws any.
+    cluster_legend = LegendSpec(
+        kind="categorical",
+        label="Cluster",
+        extras={"missing": True} if n_unassigned else {},
+    )
     tables: dict[str, pd.DataFrame]
     legends: tuple[LegendSpec, ...]
     scales: tuple[Any, ...]
@@ -3254,13 +3260,19 @@ def perturbation_clusters(
                     }
                 ),
             }
+            # A figure without legends reports none, so that composing it
+            # draws none.
             legends = (
-                LegendSpec(
-                    kind="colorbar",
-                    label=scale_label,
-                    extras={"vmin": limits[0], "vmax": limits[1]},
-                ),
-                LegendSpec(kind="categorical", label="Cluster"),
+                (
+                    LegendSpec(
+                        kind="colorbar",
+                        label=scale_label,
+                        extras={"vmin": limits[0], "vmax": limits[1]},
+                    ),
+                    cluster_legend,
+                )
+                if show_legend
+                else ()
             )
             scales = (
                 ColorScale(
@@ -3293,7 +3305,7 @@ def perturbation_clusters(
             if labels:
                 _place_labels(figure, ax, labels, avoid=numbers)
             tables = {"perturbations": drawn, "clusters": cluster_table}
-            legends = (LegendSpec(kind="categorical", label="Cluster"),)
+            legends = (cluster_legend,) if show_legend else ()
             scales = (category_scale,)
             extras = {"rasterized": rasterized}
     plot_result = PlotResult(

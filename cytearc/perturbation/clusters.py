@@ -67,6 +67,9 @@ _START_SPAN = 10.0
 _START_NOISE = 1e-4
 # The rows of distances that one step of the neighbour search sorts at once.
 _SORT_ROWS = 256
+# The columns of the random matrices of scikit-learn's randomized PCA of the
+# starting layout: its 2 components and 10 more.
+_PCA_SKETCH_COLUMNS = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,7 +384,10 @@ def cluster_memory_bytes(n_perturbations: int, n_features: int) -> int:
     distances and its tree, measured at 2.2 copies on Python 3.13 and 2.6
     on 3.15 and budgeted at 3.2, the linkage holds the
     condensed distances and its copy, and the layout's PCA up to 5.3 copies
-    of the profiles, measured.
+    of the profiles, measured, with scikit-learn's randomized solver's
+    float64 matrices of features x 12, its 2 components and 10 more,
+    measured at 3.1 copies beside 2 copies of the profiles and budgeted at
+    4; they outweigh the profiles below 12 perturbations.
 
     Args:
         n_perturbations: The perturbations clustered.
@@ -392,10 +398,11 @@ def cluster_memory_bytes(n_perturbations: int, n_features: int) -> int:
     """
     pairs = 8 * n_perturbations * n_perturbations
     profiles = 8 * n_perturbations * n_features
+    sketches = 8 * _PCA_SKETCH_COLUMNS * n_features
     return max(
         2 * pairs + 2 * profiles,
         9 * pairs // 2 + profiles,
-        pairs + 7 * profiles,
+        pairs + 7 * profiles + 4 * sketches,
     )
 
 

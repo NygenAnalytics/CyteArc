@@ -30,8 +30,10 @@ from ...utils.numba import numba_threads
 from ...utils.warnings import warn
 from .perturbation_store import (
     _LabelRows,
+    _band_bytes,
     _cell_samples,
     _cell_values,
+    _count_bands,
     _count_blocks,
     _label_groups,
     _label_rows,
@@ -258,8 +260,8 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
                 control cell, or no perturbation has ``min_cells`` cells.
             PermissionError: If the store is read-only and the profiles are
                 not saved yet.
-            MemoryError: If the profiles and one feature's sums do not fit the
-                memory budget.
+            MemoryError: If the profiles and one feature's sums, beside the
+                read of its counts, do not fit the memory budget.
         """
         from ...perturbation.profiles import (
             CONTROL_SD_DDOF,
@@ -439,23 +441,43 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
             + 16 * n_features
         )
         # One feature of a band: its float64 sums over the perturbations,
-        # which are divided straight into the profiles counted above, its
-        # running moments in each sample, and a cell's value as read and as a
-        # C-ordered copy.
-        per_feature = 8 * n_kept + 24 * n_samples + 16
+        # which are divided straight into the profiles counted above, and its
+        # running moments in each sample. Its counts stream beside them, with
+        # a cell's value as read and as a C-ordered copy.
+        per_feature = 8 * n_kept + 24 * n_samples
+        controls = np.flatnonzero(is_control)
+        members = np.flatnonzero(groups[used] >= 0)
+        read_cells = (used_cells[controls], used_cells[members])
+        needed = _band_bytes(
+            expression,
+            feature_index[:1],
+            read_cells,
+            held_bytes=held,
+            per_feature=per_feature,
+            scratch_per_feature=16,
+        )
         _require_budget(
-            held + per_feature,
+            needed,
             self.memoryBytes,
             f"The profiles of {n_kept} {by}s in {n_features} features hold about",
-            beside=" with one feature's sums",
-            remedy="Raise mem_budget, or pass fewer features.",
+            beside=" with one feature's sums and the read of its counts",
+            remedy=f"Raise mem_budget to at least {needed} bytes, or pass fewer "
+            "features.",
         )
-        width = min(n_features, (self.memoryBytes - held) // per_feature)
+        bands = _count_bands(
+            expression,
+            feature_index,
+            read_cells,
+            budget=self.memoryBytes,
+            held_bytes=held,
+            per_feature=per_feature,
+            scratch_per_feature=16,
+            most=n_features,
+        )
+        del read_cells
         self._require_writable(arguments.operation)
         totals = expression._cell_count_totals(used_cells)
         target = depth_target(totals, is_control)
-        controls = np.flatnonzero(is_control)
-        members = np.flatnonzero(groups[used] >= 0)
         member_groups = groups[used][members]
         n_cells = sizes[kept].astype(np.int64)
         masked_columns = np.full(n_kept, -1, dtype=np.int64)
@@ -473,14 +495,13 @@ class _PerturbationProfileOperationsMixin(_PerturbationProfileOperationsBase):
                 expression,
                 band,
                 used_cells[positions],
-                resident_bytes=held + (per_feature - 16) * len(band),
+                resident_bytes=held + per_feature * len(band),
                 scratch_bytes_per_row=16 * len(band),
             )
             yield from blocks
 
         with numba_threads(self.nthreads):
-            for start in range(0, n_features, width):
-                stop = min(start + width, n_features)
+            for start, stop in bands:
                 band = feature_index[start:stop]
                 _, means[:, start:stop], sds[:, start:stop] = control_moments(
                     counts(band, controls),

@@ -11,11 +11,12 @@ from ...metadata.arguments import (
     PerturbationSignatureArguments,
 )
 from ...metadata.artifacts import write_cell_data_artifact
-from ...metadata.rows import read_metadata_rows_chunkwise
+from ...metadata.rows import array_row_selection_parts, read_metadata_rows_chunkwise
 from ...metadata.selection import cell_selection_indices
 from ...perturbation.mixscape import UNLABELLED, MixscapeResult, mixscape_settings
 from ...perturbation.signature import PerturbationSignature, signature_settings
 from ...storage.artifacts import ArtifactRef, artifact_group, require_complete_artifact
+from ...storage.geometry import array_geometry
 from ...storage.types import as_zarr_array, read_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
@@ -24,9 +25,12 @@ from ...utils.numba import numba_threads
 from .perturbation_store import (
     _BAND_BYTES,
     _COORDINATE_KINDS,
+    _band_bytes,
     _cell_samples,
     _cell_values,
+    _count_bands,
     _count_blocks,
+    _count_stream_bytes,
     _plan_cells,
     _positions_in,
     _require_budget,
@@ -42,6 +46,52 @@ if TYPE_CHECKING:
     )
 else:
     _PerturbationMixscapeOperationsBase = object
+
+# The most bytes of one stored band of signatures, the rows that a write
+# assembles and a read decodes whole, so that reading the signatures of some
+# cells or features holds little beside them.
+_SIGNATURE_BAND_BYTES = 1 << 23
+
+
+def _signature_read_bytes(stored: zarr.Array, n_columns: int) -> int:
+    """Return the bytes that reading one stored chunk of signature rows holds.
+
+    Zarr decodes the chunk's rows over every feature, and the signatures of
+    ``n_columns`` features of its rows are then copied out of them.
+    """
+    geometry = array_geometry(stored)
+    assert geometry is not None
+    rows = min(geometry.axisChunk(0), int(stored.shape[0]))
+    read: int = geometry.readBytes(
+        rows * int(stored.shape[1]) * geometry.itemsize, 1, decodes=1
+    )
+    return read + rows * int(n_columns) * geometry.itemsize
+
+
+def _read_signature_rows(
+    stored: zarr.Array,
+    rows: np.ndarray,
+    columns: np.ndarray,
+    out: np.ndarray,
+    out_columns: np.ndarray | slice,
+) -> None:
+    """Copy the stored signatures of ``rows`` in ``columns`` into ``out``.
+
+    ``rows`` are increasing stored rows, and row ``rows[i]`` goes to row ``i``
+    of ``out``, in its ``out_columns``. Each stored chunk of rows that holds
+    some of them is read whole, one at a time, and its columns are selected
+    in memory, so that Zarr decodes each chunk once; reading chosen rows and
+    columns at once decodes many times what it returns.
+    """
+    chunk_rows = int(stored.chunks[0])
+    chunks = rows // chunk_rows
+    starts = np.flatnonzero(np.r_[True, chunks[1:] != chunks[:-1]])
+    stops = np.r_[starts[1:], len(rows)]
+    for first, last in zip(starts.tolist(), stops.tolist(), strict=True):
+        offset = int(chunks[first]) * chunk_rows
+        band = np.asarray(stored[offset : offset + chunk_rows])
+        out[first:last, out_columns] = band[np.ix_(rows[first:last] - offset, columns)]
+        del band
 
 
 class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
@@ -128,23 +178,27 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 ``n_neighbors`` control cells with coordinates.
             PermissionError: If the store is read-only and the signature is
                 not saved yet.
-            MemoryError: If the control cells' values and each cell's
-                neighbors do not fit the memory budget.
+            MemoryError: If the neighbor search of one cell, or the control
+                cells' values and one block of counts beside the writer's band,
+                do not fit the memory budget.
         """
         from ...graph.feature_projection import resolve_coordinate_inputs
         from threadpoolctl import threadpool_limits
 
         from ...perturbation.signature import (
+            nearest_control_bytes,
             nearest_controls,
             normalize_counts,
             signature_rows,
         )
         from ...storage.arrays import create_numeric_array, create_zarr_dataset
         from ...storage.artifact_writer import artifact_transaction
+        from ...storage.budget import ResourceBudget
         from ...storage.feature_selection import read_feature_selection_indices
+        from ...storage.io_policy import StorageIoPolicy
         from ...storage.layout import row_sharded_array_spec
         from ...storage.profiles import resolve_storage_profile
-        from ...storage.sharding import write_dense_from_row_batches
+        from ...storage.sharding import plan_dense_write, write_dense_from_row_batches
 
         _require_ref(labels, "labels", PerturbationLabelArguments.artifact_kind)
         _require_ref(coordinates, "coordinates", *_COORDINATE_KINDS)
@@ -190,17 +244,23 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         control_counts = np.bincount(codes[is_control], minlength=len(sample_names))
         short = np.flatnonzero(control_counts < neighbors_k)
         if len(short):
-            where = (
-                "The cells"
-                if sample_column is None
-                else ", ".join(
-                    f"sample {sample_names[code]!r}" for code in short[:5].tolist()
+            if sample_column is None:
+                where = f"The cells have {int(control_counts[0])}"
+            else:
+                parts = [
+                    f"sample {sample_names[code]!r} has {int(control_counts[code])}"
+                    for code in short[:5].tolist()
+                ]
+                listed = (
+                    f"{', '.join(parts[:-1])} and {parts[-1]}"
+                    if len(parts) > 1
+                    else parts[0]
                 )
-            )
+                where = listed[0].upper() + listed[1:]
             raise ValueError(
-                f"{where} have {int(control_counts[short[0]])} control cells with "
-                f"coordinates, fewer than n_neighbors={neighbors_k}; lower "
-                "n_neighbors, or label more control cells"
+                f"{where} control cells with coordinates, fewer than "
+                f"n_neighbors={neighbors_k}; lower n_neighbors, or label more "
+                "control cells"
             )
         arguments = PerturbationSignatureArguments(
             labels=labels,
@@ -246,17 +306,69 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             )
         controls = np.flatnonzero(is_control)
         n_controls = len(controls)
-        # The control cells' scaled values, and each cell's coordinates,
-        # neighbors, total and sample.
-        resident = n_controls * n_features * 8 + n_cells * (
-            8 * resolved_dims + 16 * neighbors_k + 40
+        # Every step holds each cell's position, sample, control flag, total
+        # and neighbors, and the control cells' positions.
+        held = n_cells * (40 + 8 * neighbors_k) + 8 * n_controls
+        # The coordinates as read, float32 over all their dimensions, and as
+        # float64 over the first dims.
+        coordinate_bytes = 8 * resolved_dims * n_cells
+        reading = held + 4 * n_dims * n_cells + coordinate_bytes
+        # Within the largest sample, a copy of its cells' and its control
+        # cells' coordinates, and its cells' nearest controls as positions
+        # among the sample's controls and among every control.
+        n_largest = int(np.bincount(codes, minlength=len(sample_names)).max())
+        largest_pool = int(control_counts.max())
+        searching = (
+            held
+            + coordinate_bytes
+            + n_largest * (8 * resolved_dims + 16 * neighbors_k + 8)
+            + largest_pool * (8 * resolved_dims + 16)
+        )
+        # The control cells' scaled float64 values, from their read to the
+        # last block of signatures, while every cell's counts stream; a cell's
+        # counts as float64 and its float32 signatures take 16 bytes of a
+        # feature. The writer assembles and encodes a band of the float32
+        # signatures beside the stream.
+        scratch = 16 * n_features
+        holding = held + 8 * n_controls * n_features
+        spec = row_sharded_array_spec(
+            (n_cells, n_features),
+            np.float32,
+            profile=resolve_storage_profile(self.zw.store),
+            band_rows=max(1, min(n_cells, _SIGNATURE_BAND_BYTES // (4 * n_features))),
+        )
+        # One band as the writer holds it, planned without a limit on one
+        # worker.
+        writing = plan_dense_write(
+            spec, ResourceBudget(1 << 62, 1), 1, io=StorageIoPolicy(readWorkers=1)
+        ).reservedBytes
+        cell_stream = _count_stream_bytes(
+            assay, feature_index, cell_index, scratch_bytes_per_row=scratch
+        )
+        needed = max(
+            reading,
+            searching + nearest_control_bytes(largest_pool, neighbors_k, resolved_dims),
+            holding
+            + _count_stream_bytes(
+                assay,
+                feature_index,
+                cell_index[controls],
+                scratch_bytes_per_row=scratch,
+            ),
+            holding + writing + cell_stream,
+            # The neighbors written as int32 from int64 positions, a stored
+            # chunk of up to 100,000 rows encoded at a time.
+            holding
+            + 12 * neighbors_k * n_cells
+            + 8 * neighbors_k * min(n_cells, 100_000),
         )
         _require_budget(
-            resident,
+            needed,
             self.memoryBytes,
             f"The values of {n_controls} control cells in {n_features} features "
             f"and the neighbors of {n_cells} cells hold about",
-            remedy="Raise mem_budget, or pass fewer features.",
+            remedy=f"Raise mem_budget to at least {needed} bytes, or pass fewer "
+            "features.",
         )
         self._require_writable(arguments.operation)
         values = np.asarray(data[:, :resolved_dims], dtype=np.float64)
@@ -266,19 +378,23 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             for code in range(len(sample_names)):
                 members = np.flatnonzero(codes == code)
                 pool = members[is_control[members]]
-                nearest = nearest_controls(values[members], values[pool], neighbors_k)
+                nearest = nearest_controls(
+                    values[members],
+                    values[pool],
+                    neighbors_k,
+                    memory_bytes=self.memoryBytes - searching,
+                )
                 neighbors[members] = np.searchsorted(controls, pool)[nearest]
         del values
         totals = assay._cell_count_totals(cell_index)
         control_scaled = np.empty((n_controls, n_features))
-        scratch = 16 * n_features
         offset = 0
         _, control_blocks = _count_blocks(
             self,
             assay,
             feature_index,
             cell_index[controls],
-            resident_bytes=resident,
+            resident_bytes=holding,
             scratch_bytes_per_row=scratch,
         )
         for block in control_blocks:
@@ -287,28 +403,21 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 block, totals[controls[offset:stop]], factor
             )
             offset = stop
-        band_rows = max(1, min(n_cells, (1 << 27) // (4 * n_features)))
+        # The writer takes one band, or half of what the stream leaves when
+        # that is more, so that bands are written in parallel.
+        writer_bytes = max(writing, (self.memoryBytes - holding - cell_stream) // 2)
         with (
             numba_threads(self.nthreads),
             artifact_transaction(self.zw, planned) as group,
         ):
             group.attrs["sample_names"] = sample_names
-            output = create_numeric_array(
-                group,
-                "values",
-                row_sharded_array_spec(
-                    (n_cells, n_features),
-                    np.float32,
-                    profile=resolve_storage_profile(self.zw.store),
-                    band_rows=band_rows,
-                ),
-            )
-            block_rows, cell_blocks = _count_blocks(
+            output = create_numeric_array(group, "values", spec)
+            _, cell_blocks = _count_blocks(
                 self,
                 assay,
                 feature_index,
                 cell_index,
-                resident_bytes=resident,
+                resident_bytes=holding + writer_bytes,
                 scratch_bytes_per_row=scratch,
             )
 
@@ -332,9 +441,9 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 dtype=np.float32,
                 resources=self.resources,
                 io=self.storageIo,
-                # The writer holds one block of signatures while the next
-                # block of counts is read and computed.
-                producerReserveBytes=resident + block_rows * scratch,
+                # The producer holds what the stream may, and the writer the
+                # rest of the budget.
+                producerReserveBytes=self.memoryBytes - writer_bytes,
                 requireFinite=True,
                 operation=arguments.operation,
             )
@@ -381,7 +490,9 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``signature`` is not a ``perturbation_signature``
                 artifact, or ``features`` names a feature it lacks.
-            MemoryError: If the values read do not fit the memory budget.
+            MemoryError: If the values read, a stored chunk of signatures and
+                the IDs of the cells and their neighbors do not fit the memory
+                budget.
         """
         _require_ref(
             signature, "signature", PerturbationSignatureArguments.artifact_kind
@@ -412,19 +523,36 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                     "features of its feature selection"
                 )
         cell_index = cell_selection_indices(self.zw, status.input_ref("cell_selection"))
-        n_bytes = len(cell_index) * len(columns) * 4
+        n_cells = len(cell_index)
+        stored = as_zarr_array(group["values"], name="values")
+        n_neighbors = int(as_zarr_array(group["neighbors"], name="neighbors").shape[1])
+        ids = self.cells._get_array("ids")
+        id_chunk, _ = array_row_selection_parts(ids)
+        # Each cell's ID and each neighbor's: a numpy text of the stored width
+        # as read, then a Python string of its characters in its frame, which
+        # pandas builds through a working copy.
+        text = np.dtype(ids.dtype).itemsize
+        per_id = text + 2 * (64 + text // np.dtype(ids.dtype).alignment)
+        n_bytes = (
+            4 * n_cells * len(columns)
+            + _signature_read_bytes(stored, len(columns))
+            + id_chunk
+            + n_cells * ((n_neighbors + 2) * per_id + 4 * n_neighbors + 17)
+        )
         _require_budget(
             n_bytes,
             self.memoryBytes,
-            f"The signatures of {len(cell_index)} cells in {len(columns)} features "
-            "hold",
-            remedy="Pass fewer features, or raise mem_budget.",
+            f"The signatures of {n_cells} cells in {len(columns)} features hold about",
+            beside=" with the IDs of the cells and their neighbors and a stored "
+            "chunk of signatures read",
+            remedy=f"Pass fewer features, or raise mem_budget to at least {n_bytes} "
+            "bytes.",
         )
+        values = np.empty((n_cells, len(columns)), dtype=np.float32)
+        _read_signature_rows(stored, np.arange(n_cells), columns, values, slice(None))
         cell_ids = np.asarray(
             read_metadata_rows_chunkwise(self.cells, "ids", cell_index)
         ).astype(str)
-        stored = as_zarr_array(group["values"], name="values")
-        values = np.asarray(stored.oindex[:, columns])
         sample_names = _stored_samples(group, "sample_names")
         parameters = status.parameters or {}
         sample_columns = list(parameters["sample_columns"])
@@ -456,8 +584,8 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
 
     def _mixscape_labels(
         self, labels: ArtifactRef, cell_index: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return each cell's label, its single target's code, and the targets.
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+        """Return each cell's label, its single target's code, the targets, and the longest label.
 
         A cell outside the labels is ``"unlabelled"``; a cell without a single
         target that is not a control has the code -1.
@@ -478,7 +606,13 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         cell_labels[positions[present]] = values[present]
         cell_codes = np.full(len(cell_index), -1, dtype=np.int64)
         cell_codes[positions[present]] = codes[present]
-        return cell_labels, cell_codes, read_array(group, "targets").astype(str)
+        longest = max(len(UNLABELLED), values.dtype.itemsize // values.dtype.alignment)
+        return (
+            cell_labels,
+            cell_codes,
+            read_array(group, "targets").astype(str),
+            longest,
+        )
 
     @validation_scoped
     def _perturbation_mixscape(
@@ -560,8 +694,9 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``signature`` is not a ``perturbation_signature``
                 artifact, a number is out of range, ``perturbation_type`` is
-                empty or holds a space, or ``split_column`` is not a cell
-                metadata column or leaves a cell without a split.
+                empty, holds a space or is the class of other cells, such as
+                ``"NP"``, or ``split_column`` is not a cell metadata column or
+                leaves a cell without a split.
             PermissionError: If the store is read-only and the classes are not
                 saved yet.
             MemoryError: If one feature's values over the classified and
@@ -603,7 +738,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         scale_factor = float((source.parameters or {})["scale_factor"])
         cell_index = cell_selection_indices(self.zw, source.input_ref("cell_selection"))
         n_cells = len(cell_index)
-        cell_labels, target_codes, target_names = self._mixscape_labels(
+        cell_labels, target_codes, target_names, label_length = self._mixscape_labels(
             source.input_ref("labels"), cell_index
         )
         is_control = read_array(stored, "is_control").astype(bool)
@@ -691,23 +826,71 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
         n_controls = len(control_members)
         stored_neighbors = as_zarr_array(stored["neighbors"], name="neighbors")
         n_neighbors = int(stored_neighbors.shape[1])
-        # Each cell's class, scores, group and stored neighbors, and each
-        # member's total and neighbors among the members.
-        resident = (48 + 4 * n_neighbors) * n_cells + 8 * (n_neighbors + 2) * n_members
+        # Each cell's label as a Python string, its position, target, split,
+        # group and flags, and its stored neighbors as read; and each member's
+        # position, group, order, total and neighbors among the members.
+        resident = (128 + label_length + 4 * n_neighbors) * n_cells + 8 * (
+            n_neighbors + 4
+        ) * n_members
+        # The classes: each cell's class and global class as Python strings,
+        # with copies as fixed-width text that are written a chunk of up to
+        # 100,000 rows at a time, and its posterior, score and split.
+        class_length = max(
+            label_length,
+            target_names.dtype.itemsize // target_names.dtype.alignment
+            + 1
+            + max(len(perturbation_type), 2),
+        )
+        finishing = (
+            resident
+            + n_cells * (16 * class_length + 164)
+            + 8 * class_length * min(n_cells, 100_000)
+        )
         # One feature of the DE pass: every member's value, the control cells'
-        # sorted values and each group's sums, and as much again for the read.
-        per_feature = 2 * (8 * (n_members + n_controls) + 16 * n_groups)
+        # sorted values and each group's sums. Its counts stream beside them.
+        per_feature = 8 * (n_members + n_controls) + 16 * n_groups
+        member_cells = cell_index[members]
+        needed = max(
+            finishing,
+            _band_bytes(
+                assay,
+                np.arange(1),
+                (member_cells,),
+                held_bytes=resident,
+                per_feature=per_feature,
+                scratch_per_feature=8,
+            ),
+        )
         _require_budget(
-            resident + per_feature,
+            needed,
             self.memoryBytes,
             f"The values of one feature over {n_members} cells hold about",
-            beside=" with the cells' classes and neighbors",
+            beside=" with the cells' classes and neighbors and the read of its counts",
+            remedy=f"Raise mem_budget to at least {needed} bytes.",
         )
-        width = min(
-            n_features,
-            (self.memoryBytes - resident) // per_feature,
-            max(1, _BAND_BYTES // (8 * max(n_members, 1))),
+        # The DE genes, from one pass over bands of every feature: a row's
+        # genes are tested on its cells and the control cells of its split,
+        # whose sorted values serve every row of the split.
+        testable = [
+            row
+            for row in range(n_rows)
+            if sizes[n_splits + row] >= 3 and sizes[row_splits[row]] >= 3
+        ]
+        de_bands = (
+            _count_bands(
+                assay,
+                np.arange(n_features),
+                (member_cells,),
+                budget=self.memoryBytes,
+                held_bytes=resident,
+                per_feature=per_feature,
+                scratch_per_feature=8,
+                most=max(1, _BAND_BYTES // (8 * max(n_members, 1))),
+            )
+            if testable
+            else []
         )
+        del member_cells
         self._require_writable(arguments.operation)
         member_totals = assay._cell_count_totals(cell_index[members])
         position_of = np.full(n_cells, -1, dtype=np.int64)
@@ -745,70 +928,87 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                 offset += len(block)
             return out
 
-        # The DE genes, from one pass over bands of every feature: a row's
-        # genes are tested on its cells and the control cells of its split,
-        # whose sorted values serve every row of the split.
-        testable = [
-            row
-            for row in range(n_rows)
-            if sizes[n_splits + row] >= 3 and sizes[row_splits[row]] >= 3
-        ]
+        def band_genes(start: int, stop: int) -> dict[int, np.ndarray]:
+            """The DE genes of each row among the features of a band."""
+            band = np.arange(start, stop)
+            values = normalized(band, every_member, resident + per_feature * len(band))
+            found = band_de_genes(
+                values,
+                member_groups,
+                by_group,
+                bounds,
+                testable,
+                row_splits,
+                min_fraction=fraction,
+                logfc_threshold=fold,
+                p_value_cutoff=cutoff,
+                n_features=n_features,
+            )
+            return {row: band[genes] for row, genes in found.items()}
+
         de_parts: list[list[np.ndarray]] = [[] for _ in range(n_rows)]
         every_member = np.arange(n_members)
         with numba_threads(self.nthreads):
-            for start in range(0, n_features if testable else 0, width):
-                band = np.arange(start, min(start + width, n_features))
-                values = normalized(
-                    band, every_member, resident + per_feature * len(band)
-                )
-                found = band_de_genes(
-                    values,
-                    member_groups,
-                    by_group,
-                    bounds,
-                    testable,
-                    row_splits,
-                    min_fraction=fraction,
-                    logfc_threshold=fold,
-                    p_value_cutoff=cutoff,
-                    n_features=n_features,
-                )
-                for row, genes in found.items():
-                    de_parts[row].append(band[genes])
+            for start, stop in de_bands:
+                for row, genes in band_genes(start, stop).items():
+                    de_parts[row].append(genes)
         de_lists = [
             np.concatenate(parts) if parts else np.empty(0, dtype=np.int64)
             for parts in de_parts
         ]
+        # One DE gene outside the signature's features streams its counts over
+        # the cells of a batch, at most every member.
+        outside_stream = _count_stream_bytes(
+            assay, np.arange(1), cell_index[members], scratch_bytes_per_row=8
+        )
 
-        def batch_bytes(n_targets: int, n_genes: int, scratch: int) -> int:
-            """A batch's signatures, float32, one feature of normalized values
-            with its read, and its largest classification."""
+        def batch_held(n_targets: int, n_genes: int) -> int:
+            """A batch's float32 signatures, with its cells' positions and their
+            nearest controls among them."""
             n = n_targets + n_controls
-            return 4 * n * n_genes + 16 * n + scratch
+            return 4 * n * n_genes + 8 * (n_neighbors + 3) * n + 8 * n_members
 
-        # The rows with enough DE genes are classified in batches, each with one
-        # read of the stored signatures and one pass over the DE genes outside
-        # them, whose signatures come from each cell's stored neighbors.
+        def batch_bytes(
+            n_targets: int, n_genes: int, scratch: int, outside: bool
+        ) -> int:
+            """What a batch holds, with the most that one of its steps holds:
+            a stored chunk of signatures read, one DE gene outside the
+            signature's features with its values, signatures and counts, or
+            its largest classification."""
+            n = n_targets + n_controls
+            step = max(
+                _signature_read_bytes(signature_values, n_genes),
+                16 * n + outside_stream if outside else 0,
+                scratch,
+            )
+            return batch_held(n_targets, n_genes) + step
+
+        # The rows with enough DE genes are classified in batches, each with
+        # one read of the stored signatures and one pass over the DE genes
+        # outside them, whose signatures come from each cell's stored
+        # neighbors.
         batches: list[list[int]] = []
         batch: list[int] = []
         chosen = np.zeros(n_features, dtype=bool)
-        size = (0, 0, 0)
+        size = (0, 0, 0, False)
         for row in range(n_rows):
             genes = de_lists[row]
             if len(genes) < de_floor:
                 continue
             n_target = int(sizes[n_splits + row])
             scratch = 24 * (n_target + int(sizes[row_splits[row]])) * len(genes)
+            outside = bool(np.any(~in_signature[genes]))
             grown = (
                 size[0] + n_target,
                 size[1] + int(np.count_nonzero(~chosen[genes])),
                 max(size[2], scratch),
+                size[3] or outside,
             )
             if batch and resident + batch_bytes(*grown) > self.memoryBytes:
                 batches.append(batch)
                 batch = []
                 chosen[:] = False
-                grown = (n_target, len(genes), scratch)
+                grown = (n_target, len(genes), scratch, outside)
             _require_budget(
                 resident + batch_bytes(*grown),
                 self.memoryBytes,
@@ -826,63 +1026,85 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
             f"in {len(batches)} batches"
         )
         fits: list[MixscapeFit | None] = [None] * n_rows
+
+        def batch_signatures(
+            genes: np.ndarray, cells: np.ndarray, held: int
+        ) -> np.ndarray:
+            """The float32 signatures of members ``cells`` in ``genes``."""
+            inside = genes[in_signature[genes]]
+            outside = genes[~in_signature[genes]]
+            signatures = np.empty((len(cells), len(genes)), dtype=np.float32)
+            if len(inside):
+                _read_signature_rows(
+                    signature_values,
+                    members[cells],
+                    signature_column.get_indexer(inside),
+                    signatures,
+                    np.searchsorted(genes, inside),
+                )
+            if len(outside):
+                local = np.full(n_members, -1, dtype=np.int64)
+                local[cells] = np.arange(len(cells))
+                nearest = local[member_neighbors[cells]]
+                del local
+                computed = np.searchsorted(genes, outside)
+                # Each step holds its normalized values and signatures, 16
+                # bytes per cell of a gene, beside its counts' stream.
+                steps = _count_bands(
+                    assay,
+                    outside,
+                    (cell_index[members[cells]],),
+                    budget=self.memoryBytes,
+                    held_bytes=held,
+                    per_feature=16 * len(cells),
+                    scratch_per_feature=8,
+                    most=max(1, _BAND_BYTES // (8 * len(cells))),
+                )
+                for start, stop in steps:
+                    part = outside[start:stop]
+                    signatures[:, computed[start:stop]] = signature_of_values(
+                        normalized(part, cells, held + 16 * len(cells) * len(part)),
+                        np.arange(len(part)),
+                        np.arange(len(cells)),
+                        nearest,
+                    )
+            return signatures
+
+        def classify_batch(batch: list[int]) -> None:
+            """Classify the rows of a batch from one read of their signatures."""
+            genes = np.unique(np.concatenate([de_lists[row] for row in batch]))
+            cells = np.union1d(
+                np.concatenate([group_members(n_splits + row) for row in batch]),
+                control_members,
+            )
+            signatures = batch_signatures(
+                genes,
+                cells,
+                resident + batch_held(len(cells) - n_controls, len(genes)),
+            )
+            for row in batch:
+                targets = group_members(n_splits + row)
+                places = np.searchsorted(
+                    cells,
+                    np.concatenate([targets, group_members(int(row_splits[row]))]),
+                )
+                values = np.asarray(
+                    signatures[np.ix_(places, np.searchsorted(genes, de_lists[row]))],
+                    dtype=np.float64,
+                )
+                fits[row] = classify_target(
+                    values[: len(targets)],
+                    values[len(targets) :],
+                    n_de_genes=len(de_lists[row]),
+                    min_de_genes=de_floor,
+                    min_cells=cell_floor,
+                    max_iterations=iterations,
+                    scale=scale,
+                )
+
         with numba_threads(self.nthreads):
             for batch in batches:
-                genes = np.unique(np.concatenate([de_lists[row] for row in batch]))
-                inside = genes[in_signature[genes]]
-                outside = genes[~in_signature[genes]]
-                cells = np.union1d(
-                    np.concatenate([group_members(n_splits + row) for row in batch]),
-                    control_members,
-                )
-                held = resident + batch_bytes(len(cells) - n_controls, len(genes), 0)
-                signatures = np.empty((len(cells), len(genes)), dtype=np.float32)
-                if len(inside):
-                    signatures[:, np.searchsorted(genes, inside)] = (
-                        signature_values.oindex[
-                            members[cells], signature_column.get_indexer(inside)
-                        ]
-                    )
-                if len(outside):
-                    local = np.full(n_members, -1, dtype=np.int64)
-                    local[cells] = np.arange(len(cells))
-                    nearest = local[member_neighbors[cells]]
-                    step = min(
-                        1 + max(self.memoryBytes - held, 0) // (16 * len(cells)),
-                        max(1, _BAND_BYTES // (8 * len(cells))),
-                    )
-                    computed = np.searchsorted(genes, outside)
-                    for start in range(0, len(outside), step):
-                        part = outside[start : start + step]
-                        signatures[:, computed[start : start + len(part)]] = (
-                            signature_of_values(
-                                normalized(part, cells, held),
-                                np.arange(len(part)),
-                                np.arange(len(cells)),
-                                nearest,
-                            )
-                        )
-                for row in batch:
-                    targets = group_members(n_splits + row)
-                    places = np.searchsorted(
-                        cells,
-                        np.concatenate([targets, group_members(int(row_splits[row]))]),
-                    )
-                    values = np.asarray(
-                        signatures[
-                            np.ix_(places, np.searchsorted(genes, de_lists[row]))
-                        ],
-                        dtype=np.float64,
-                    )
-                    fits[row] = classify_target(
-                        values[: len(targets)],
-                        values[len(targets) :],
-                        n_de_genes=len(de_lists[row]),
-                        min_de_genes=de_floor,
-                        min_cells=cell_floor,
-                        max_iterations=iterations,
-                        scale=scale,
-                    )
+                classify_batch(batch)
 
         row_cells = [members[group_members(n_splits + row)] for row in range(n_rows)]
         # A row with fewer DE genes than min_de_genes was not classified: its
