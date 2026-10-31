@@ -149,15 +149,10 @@ def test_cells_restrict_the_statistics_to_their_cells(store) -> None:
     )
 
 
-def test_scattered_cells_are_read_through_short_gaps_within_the_budget(
-    store, monkeypatch
-) -> None:
+def _recorded_depth_reads(monkeypatch) -> list[int]:
+    """Record the rows of each read of the stored depths."""
     from cytearc.datastore._operations import variants as variant_operations
 
-    counts = _counts(store)
-    store.cells.insert("in_d2", TRUTH.clones.samples == "d2")
-    chosen = store.snapshot_cell_selection("in_d2")
-    rows = np.flatnonzero(TRUTH.clones.samples == "d2")
     reads: list[int] = []
     as_zarr_array = variant_operations.as_zarr_array
 
@@ -168,6 +163,7 @@ def test_scattered_cells_are_read_through_short_gaps_within_the_budget(
             self.stored = stored
             self.shape = stored.shape
             self.dtype = stored.dtype
+            self.chunks = stored.chunks
 
         def __getitem__(self, selection) -> np.ndarray:
             values = np.asarray(self.stored[selection])
@@ -179,6 +175,17 @@ def test_scattered_cells_are_read_through_short_gaps_within_the_budget(
         return Recorded(stored) if name == "depth" else stored
 
     monkeypatch.setattr(variant_operations, "as_zarr_array", recording)
+    return reads
+
+
+def test_scattered_cells_are_read_through_short_gaps_within_the_budget(
+    store, monkeypatch
+) -> None:
+    counts = _counts(store)
+    store.cells.insert("in_d2", TRUTH.clones.samples == "d2")
+    chosen = store.snapshot_cell_selection("in_d2")
+    rows = np.flatnonzero(TRUTH.clones.samples == "d2")
+    reads = _recorded_depth_reads(monkeypatch)
     # A budget of 1,500 rows per band, a few cells.
     max_rows = 1500
     store.memoryBytes = 240 * 60 * 4 + 16 * 60 + 200 * max_rows
@@ -202,6 +209,45 @@ def test_scattered_cells_are_read_through_short_gaps_within_the_budget(
     assert every_read < runs
     assert len(reads) <= every_read
     assert max(reads) <= max_rows
+
+
+def test_cells_a_chunk_apart_are_read_alone(store, monkeypatch, tmp_path) -> None:
+    from cytearc.datastore._operations import variants as variant_operations
+
+    # Chunks of 64 rows, fewer than the rows between every tenth cell.
+    monkeypatch.setattr(variant_operations, "_ROW_BAND", 64)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        counts = store.variants.import_counts(
+            write_mgatk(TRUTH, tmp_path / "final"),
+            cell_selection=every_cell(store),
+            invalidate_cache=True,
+        )
+    group = store.artifacts.load(counts)
+    assert group["depth"].chunks == (64,)
+    rows = np.arange(0, TRUTH.n_cells, 10)
+    combined = group["depth_offsets"][:] + group["count_offsets"][:]
+    assert np.all(combined[rows[1:]] - combined[rows[:-1] + 1] >= 64)
+    store.cells.insert("tenth", np.isin(np.arange(TRUTH.n_cells), rows))
+    reads = _recorded_depth_reads(monkeypatch)
+    selection = store.variants.load_informative(
+        store.variants.informative(
+            counts, cells=store.snapshot_cell_selection("tenth"), min_vmr=0.01
+        )
+    )
+    expected = expected_mito_statistics(TRUTH, rows.tolist())
+    pd.testing.assert_frame_equal(
+        selection.variants.loc[expected.index, STATISTICS].astype(float),
+        expected[STATISTICS].astype(float),
+        check_exact=False,
+        check_index_type=False,
+        rtol=1e-9,
+    )
+    # A large budget would read every cell in one band; each chosen cell is
+    # read alone instead, its own rows and no others.
+    depth_rows = np.diff(group["depth_offsets"][:])
+    assert len(reads) == len(rows)
+    assert sum(reads) == int(depth_rows[rows].sum())
 
 
 def test_cells_that_no_file_names_are_left_out(tmp_path) -> None:

@@ -476,7 +476,10 @@ def _variant_bands(
     positions among them and, per table, each of their rows' cell position
     and the arrays, so a band holds every row of its chosen cells. Rows of
     cells between chosen ones are read through and dropped while they number
-    fewer than ``max_rows``, so scattered cells take few reads.
+    fewer than ``max_rows`` and than a chunk of the arrays: reading a gap
+    decompresses its chunks, while skipping it reads at most one chunk
+    again, so scattered cells take few reads and distant ones are read
+    apart.
     """
     if not len(positions):
         return
@@ -485,9 +488,13 @@ def _variant_bands(
     combined = np.sum(list(offsets.values()), axis=0)
     chosen = np.zeros(len(combined) - 1, dtype=bool)
     chosen[positions] = True
-    # A gap whose rows reach max_rows is skipped; smaller ones are read.
+    chunk_rows = min(
+        int(as_zarr_array(group[name], name=name).chunks[0])
+        for names in tables.values()
+        for name in names
+    )
     gaps = combined[positions[1:]] - combined[positions[:-1] + 1]
-    breaks = np.flatnonzero(gaps >= max_rows) + 1
+    breaks = np.flatnonzero(gaps >= min(max_rows, chunk_rows)) + 1
     for run in np.split(positions, breaks):
         start_cell = int(run[0])
         last = int(run[-1])
@@ -498,6 +505,8 @@ def _variant_bands(
             )
             stop_cell = min(last + 1, max(start_cell + 1, stop_cell))
             cells = np.arange(start_cell, stop_cell, dtype=np.int64)
+            # A band of chosen cells only keeps its rows without a copy.
+            whole = bool(chosen[start_cell:stop_cell].all())
             band: dict[str, tuple[np.ndarray, dict[str, np.ndarray]]] = {}
             for table, names in tables.items():
                 table_offsets = offsets[table]
@@ -506,7 +515,7 @@ def _variant_bands(
                 cells_of_rows = np.repeat(
                     cells, np.diff(table_offsets[start_cell : stop_cell + 1])
                 )
-                kept = chosen[cells_of_rows]
+                kept = slice(None) if whole else chosen[cells_of_rows]
                 band[table] = (
                     cells_of_rows[kept],
                     {
@@ -516,7 +525,7 @@ def _variant_bands(
                         for name in names
                     },
                 )
-            yield cells[chosen[cells]], band
+            yield cells if whole else cells[chosen[cells]], band
             start_cell = stop_cell
             # The next band starts at the next chosen cell.
             following = np.searchsorted(run, start_cell)
