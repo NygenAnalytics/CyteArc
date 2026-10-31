@@ -3,9 +3,12 @@
 TREX's expected ``clones.txt`` (MIT) and six clones of CellTag-multi's iEP
 clone table (Zenodo 23442375, CC BY 4.0) are checked in under
 ``tests/data/clones/``. LARRY's cytokine clone matrix and metadata (GEO
-GSE140802, 1.9 MB) are downloaded; that test skips when GEO is unreachable.
+GSE140802, 1.9 MB) are downloaded; that test skips when GEO is unreachable or
+cannot serve a file whole.
 """
 
+import gzip
+import http.client
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -101,14 +104,49 @@ def test_a_pattern_joins_celltag_multi_cells_to_a_store_of_one_sample(tmp_path) 
     )
 
 
+# What a download raises when GEO is unreachable or cuts the file short:
+# IncompleteRead is an HTTPException, and a gzip stream that ends early raises
+# EOFError when it is read.
+_DOWNLOAD_ERRORS = (
+    urllib.error.URLError,
+    TimeoutError,
+    OSError,
+    http.client.HTTPException,
+    EOFError,
+)
+
+
+def _fetched(url: str) -> bytes:
+    """Return a gzip file's bytes from ``url``, refusing a file that arrives cut short."""
+    with urllib.request.urlopen(url, timeout=60) as response:
+        data = response.read()
+        length = response.headers.get("Content-Length")
+    if length is not None and len(data) != int(length):
+        raise http.client.IncompleteRead(data, int(length) - len(data))
+    gzip.decompress(data)
+    return data
+
+
 def _download(name: str, folder: Path) -> Path:
+    """Download one of LARRY's files, or skip when GEO cannot serve it whole.
+
+    A failed download is tried once more. The file is written only once it
+    is whole, under a name of its own and then renamed, so no run reads part
+    of it.
+    """
     path = folder / f"GSM4185644_stateFate_cytokinePerturbation_{name}"
-    try:
-        with urllib.request.urlopen(_LARRY.format(name), timeout=60) as response:
-            path.write_bytes(response.read())
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
-        pytest.skip(f"GEO is unreachable, so LARRY's files cannot be read: {error}")
-    return path
+    for attempt in range(2):
+        try:
+            data = _fetched(_LARRY.format(name))
+        except _DOWNLOAD_ERRORS as error:
+            if attempt:
+                pytest.skip(f"GEO could not serve LARRY's {name} whole: {error}")
+            continue
+        partial = path.with_name(f"{path.name}.partial")
+        partial.write_bytes(data)
+        partial.replace(path)
+        return path
+    raise AssertionError("unreachable: the second attempt returns or skips")
 
 
 @pytest.mark.integration
@@ -137,3 +175,71 @@ def test_larrys_cytokine_clones_match_counts_taken_from_the_raw_files(tmp_path) 
     rows = members.indices[members.indptr[:-1][in_clone]]
     labels = loaded.cells["clone"].astype(object).to_numpy()[in_clone]
     np.testing.assert_array_equal(labels.astype(str), rows.astype(str))
+
+
+class _Response:
+    """A response of GEO's server that serves ``data`` under ``length``."""
+
+    def __init__(self, data: bytes, length: int | None, error: Exception | None):
+        self._data, self._error = data, error
+        self.headers = {} if length is None else {"Content-Length": str(length)}
+
+    def __enter__(self) -> "_Response":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        if self._error is not None:
+            raise self._error
+        return self._data
+
+
+_WHOLE = gzip.compress(b"%%MatrixMarket matrix coordinate pattern general\n", mtime=0)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        # The server closes the connection before the length it announced.
+        _Response(b"", None, http.client.IncompleteRead(_WHOLE[:10], len(_WHOLE))),
+        # The body is shorter than the length it announced.
+        _Response(_WHOLE[:10], len(_WHOLE), None),
+        # Without a length, the gzip stream itself ends early.
+        _Response(_WHOLE[:-8], None, None),
+    ],
+)
+def test_a_download_cut_short_skips_after_one_retry_and_leaves_no_file(
+    tmp_path, monkeypatch, response
+) -> None:
+    calls: list[str] = []
+
+    def urlopen(url: str, timeout: float) -> _Response:
+        calls.append(url)
+        return response
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(pytest.skip.Exception, match="could not serve"):
+        _download("clone_matrix.mtx.gz", tmp_path)
+
+    assert len(calls) == 2
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_download_that_succeeds_on_its_retry_is_written_whole(
+    tmp_path, monkeypatch
+) -> None:
+    responses = iter(
+        [
+            _Response(b"", None, http.client.IncompleteRead(b"", len(_WHOLE))),
+            _Response(_WHOLE, len(_WHOLE), None),
+        ]
+    )
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout: next(responses))
+
+    path = _download("clone_matrix.mtx.gz", tmp_path)
+
+    assert path.read_bytes() == _WHOLE
+    assert list(tmp_path.iterdir()) == [path]
