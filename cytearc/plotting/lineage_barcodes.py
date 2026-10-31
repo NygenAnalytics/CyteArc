@@ -95,10 +95,10 @@ def barcode_calls(
     filters: the cells by their number of distinct barcodes, cells without a
     barcode included, with ``max_barcodes`` or more in the last bar; each
     library's pairs of a cell and a barcode by their UMIs; and each
-    library's molecules by their reads, on log scales. Barcodes of one or
-    two UMIs and molecules of one read are mostly errors and ambient
-    molecules. A library that counts no UMIs or no reads is left out of its
-    panel.
+    library's molecules by their reads, on log scales, so molecules of 0
+    reads appear in the table only. Barcodes of one or two UMIs and
+    molecules of one read are mostly errors and ambient molecules. A library
+    that counts no UMIs or no reads is left out of its panel.
 
     Tables: ``barcodes_per_cell`` (``barcodes``, ``cells``),
     ``umis_per_barcode`` (``library``, ``umis``, ``pairs``) and
