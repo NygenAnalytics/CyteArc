@@ -8,6 +8,7 @@ that check reuse, read-only stores or the memory budget copy the template.
 import gzip
 import math
 import re
+import tracemalloc
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from tests.clone_helpers import (
     every_cell,
     loaded_partition,
     open_clone_store,
+    write_cells_store,
     write_truth_store,
 )
 from tests.clone_truth import (
@@ -962,3 +964,117 @@ def test_a_column_without_labels_saves_no_clone(store) -> None:
     assert (loaded.cells["clone_size"] == 0).all()
     assert isinstance(ref, ArtifactRef)
     assert math.isclose(store.artifacts.load(ref).attrs["n_clones"], 0)
+
+
+def _traced(function: Callable[[], object]) -> tuple[object, int]:
+    """Run ``function`` and return its result, or its MemoryError, and its traced peak."""
+    tracemalloc.start()
+    try:
+        try:
+            result = function()
+        except MemoryError as error:
+            result = error
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    return result, peak
+
+
+# Cells of the long-label store, each in its own clone. One label is 5,000
+# characters long, and the store keeps text at the width of the longest, so
+# each cell's label takes 20,000 bytes there: 40 MB in all.
+_N_LONG = 2_000
+_BUDGET = 16_000_000
+
+
+def _long_label_store(tmp_path: Path) -> SimpleNamespace:
+    ids = [f"cell{index:05d}" for index in range(_N_LONG)]
+    store = write_cells_store(tmp_path / "store.zarr", ids)
+    labels = np.asarray([f"L{index}" for index in range(_N_LONG)], dtype=object)
+    labels[0] = "X" * 5_000
+    store.cells.insert("lineage", labels)
+    table = tmp_path / "clones.csv"
+    table.write_text(
+        "Cell_ID,Clone_ID\n"
+        + "".join(f"{cell},{label}\n" for cell, label in zip(ids, labels, strict=True))
+    )
+    return SimpleNamespace(store=store, cells=every_cell(store), table=table, ids=ids)
+
+
+@pytest.mark.parametrize("method", ["from_column", "import_clones"])
+def test_saving_long_labels_holds_the_budget_or_refuses(tmp_path, method) -> None:
+    long = _long_label_store(tmp_path)
+    save = {
+        "from_column": lambda: long.store.clones.from_column(
+            "lineage", cell_selection=long.cells
+        ),
+        "import_clones": lambda: long.store.clones.import_clones(
+            long.table, cell_selection=long.cells
+        ),
+    }[method]
+    long.store.memoryBytes = _BUDGET
+
+    result, peak = _traced(save)
+
+    if isinstance(result, MemoryError):
+        assert f"memory budget of {_BUDGET} bytes" in str(result)
+    else:
+        assert peak <= _BUDGET, peak
+    if method == "import_clones":
+        # A budget that holds the stored labels saves them. The cell table
+        # keeps the column in a chunk of 100,000 rows, so reading it would
+        # take 2 GB whatever the budget.
+        long.store.memoryBytes = 1_000_000_000
+        saved = save()
+        loaded = long.store.clones.load_clones(saved)
+        assert loaded.clones["n_cells"].tolist() == [1] * _N_LONG
+        assert loaded.clones["clone"].tolist()[-1] == "X" * 5_000
+
+
+@pytest.mark.parametrize("method", ["load_clones", "table", "matrix"])
+def test_reading_long_saved_labels_holds_the_budget_or_refuses(
+    tmp_path, method
+) -> None:
+    long = _long_label_store(tmp_path)
+    ref = long.store.clones.import_clones(long.table, cell_selection=long.cells)
+    folder = _folder(tmp_path, "export")
+    read = {
+        "load_clones": lambda: long.store.clones.load_clones(ref),
+        "table": lambda: long.store.clones.export_clones(ref, folder / "out.csv"),
+        "matrix": lambda: long.store.clones.export_clones(
+            ref, folder / "out.mtx", format="matrix"
+        ),
+    }[method]
+    long.store.memoryBytes = _BUDGET
+
+    result, peak = _traced(read)
+
+    if isinstance(result, MemoryError):
+        assert f"memory budget of {_BUDGET} bytes" in str(result)
+    else:
+        assert peak <= _BUDGET, peak
+
+
+def test_long_cell_ids_count_against_the_budget(tmp_path) -> None:
+    # IDs as long as GEO sample names make them; the lookup holds each one.
+    ids = [
+        f"GSM4185642_stateFate_inVitro__{index:08d}ACGTACGTA-1"
+        for index in range(20_000)
+    ]
+    store = write_cells_store(tmp_path / "store.zarr", ids)
+    table = tmp_path / "clones.csv"
+    table.write_text(
+        "Cell_ID,Clone_ID\n"
+        + "".join(f"{cell},{index % 8_000}\n" for index, cell in enumerate(ids))
+    )
+    budget = 6_000_000
+    store.memoryBytes = budget
+
+    result, peak = _traced(
+        lambda: store.clones.import_clones(table, cell_selection=every_cell(store))
+    )
+
+    if isinstance(result, MemoryError):
+        assert f"memory budget of {budget} bytes" in str(result)
+    else:
+        assert peak <= budget, peak

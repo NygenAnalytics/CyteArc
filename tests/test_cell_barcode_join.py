@@ -531,6 +531,14 @@ def test_the_join_refuses_repeated_cell_ids_and_budgets_too_small() -> None:
         )
 
 
+def test_the_join_counts_the_text_of_long_cell_ids() -> None:
+    # One ID of 10,000 characters holds more than the budget by itself.
+    with pytest.raises(MemoryError, match="memory budget of 5000 bytes"):
+        CellBarcodeJoin(np.asarray(["x" * 10_000]), memory_bytes=5_000)
+    join = CellBarcodeJoin(np.asarray(["x" * 10_000]), memory_bytes=20_000)
+    assert join.held_bytes >= 10_000
+
+
 def test_very_long_and_unicode_cell_ids_join_exactly() -> None:
     long_id = "s1__" + "ACGT" * 2500 + "-1"
     join = CellBarcodeJoin(np.asarray([long_id, "s1__κύτταρο-1"]), memory_bytes=10**6)

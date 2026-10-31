@@ -12,6 +12,7 @@ barcodes that match no selected cell, and the warning about them.
 import hashlib
 import os
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -37,8 +38,8 @@ __all__ = [
 #: The barcodes that match no selected cell named in an artifact's attributes
 #: and in the warning.
 UNMATCHED_EXAMPLES = 5
-#: Bytes that the join holds for each selected cell: its ID in the lookup with
-#: a hash slot, and whether a file named it.
+#: Bytes that the join holds for each selected cell beside the text of its ID:
+#: the ID's slot and hash in the lookup, and whether a file named it.
 LOOKUP_BYTES_PER_CELL = 100
 # Bytes held for each distinct barcode that matches no selected cell: its
 # 64-bit hash and the copy that merging new hashes makes.
@@ -230,15 +231,17 @@ class CellBarcodeJoin:
 
     The join holds a lookup of the selected cells' IDs, whether each cell was
     named, and the 64-bit hashes of the distinct barcodes that matched no
-    cell, which it checks against the memory budget as they grow. Barcodes
-    are counted by the cell ID they name, so a barcode that two files name
-    with different prefixes counts twice. A barcode that a file's pattern
-    does not match names no cell.
+    cell, which it checks against the memory budget as they grow. The IDs
+    count as the Python strings that the lookup holds, so long IDs cost more.
+    Barcodes are counted by the cell ID they name, so a barcode that two
+    files name with different prefixes counts twice. A barcode that a file's
+    pattern does not match names no cell.
 
     Args:
         cell_ids: The IDs of the selected cells, in selection order.
         memory_bytes: The memory budget.
-        held_bytes: Bytes that the caller holds beside the join.
+        held_bytes: Bytes that the caller holds beside the join and the
+            cells' IDs, which the join counts.
 
     Raises:
         MemoryError: If the lookup does not fit the memory budget.
@@ -248,9 +251,14 @@ class CellBarcodeJoin:
     def __init__(
         self, cell_ids: np.ndarray, *, memory_bytes: int, held_bytes: int = 0
     ) -> None:
-        n_cells = len(cell_ids)
+        ids = np.asarray(cell_ids, dtype=object)
+        n_cells = len(ids)
         self._memory_bytes = int(memory_bytes)
-        self._held_bytes = int(held_bytes) + LOOKUP_BYTES_PER_CELL * n_cells
+        self._held_bytes = (
+            int(held_bytes)
+            + LOOKUP_BYTES_PER_CELL * n_cells
+            + sum(map(sys.getsizeof, ids))
+        )
         if self._held_bytes > self._memory_bytes:
             raise MemoryError(
                 f"Joining file barcodes to {n_cells} selected cells holds about "
@@ -258,7 +266,7 @@ class CellBarcodeJoin:
                 f"{self._memory_bytes} bytes. Raise mem_budget, or pass a smaller "
                 "cell_selection."
             )
-        self._lookup = pd.Index(np.asarray(cell_ids, dtype=object))
+        self._lookup = pd.Index(ids)
         if not self._lookup.is_unique:
             raise ValueError(
                 "The selected cells' IDs repeat, so barcodes cannot name them"
@@ -268,6 +276,11 @@ class CellBarcodeJoin:
         self._examples: list[str] = []
         self.n_rows = 0
         self.n_unmatched_rows = 0
+
+    @property
+    def held_bytes(self) -> int:
+        """The bytes of the lookup and the caller's, before unmatched barcodes."""
+        return self._held_bytes
 
     @property
     def n_file_barcodes(self) -> int:

@@ -1,4 +1,5 @@
 import os
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -15,11 +16,12 @@ from ...clones.assignments import (
     clone_frames,
     MultiplePolicy,
     clone_label_texts,
-    ranked_clones,
 )
 from ...metadata.arguments import CloneColumnArguments, CloneImportArguments
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from ...metadata.rows import (
+    array_row_selection_parts,
+    metadata_column_fingerprint,
     read_metadata_missing_rows_chunkwise,
     read_metadata_rows_chunkwise,
 )
@@ -28,7 +30,6 @@ from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
-    fingerprint_strings,
     inspect_artifact,
     require_complete_artifact,
 )
@@ -57,8 +58,8 @@ _PROBABILITY = "clone_probability"
 # Bytes held for each selected cell while clones are gathered: its clone code,
 # whether it was given several clones, and its probability.
 _ASSIGNER_BYTES_PER_CELL = 24
-# Bytes held for each distinct clone label: its text and its entry in the
-# table of labels.
+# Bytes held for each distinct clone label beside its text: its entries in
+# the table of labels.
 _BYTES_PER_LABEL = 200
 # Bytes of one parsed row of a clone file at its peak, beside its fields: the
 # barcode, clone label and probability it yields, the cell ID it names and
@@ -66,16 +67,41 @@ _BYTES_PER_LABEL = 200
 _BYTES_PER_ROW = 400
 # Bytes of each field of a parsed row: its text and its slot in the chunk.
 _BYTES_PER_FIELD = 120
+# Bytes of each character of a row of a clone file: its fields as Python
+# strings, and the copies of the barcode that a prefix, suffix or pattern makes.
+_BYTES_PER_ROW_CHAR = 8
+# Bytes of a Python string beside its text, with its slot in an object array.
+_STRING_BYTES = 64
 # Bytes of each listed cell of a clone matrix: its selected cell.
 _BYTES_PER_LISTED_CELL = 8
 # The rows of a chunk lie in [_MIN_CHUNK_ROWS, _MAX_CHUNK_ROWS].
 _MIN_CHUNK_ROWS = 1_000
 _MAX_CHUNK_ROWS = 1_000_000
-# Bytes per cell of the tables of loaded clones: the cell ID, the clone code,
-# size and probability, and the pandas index.
+# Bytes per cell of the tables of loaded clones beside its ID: the clone
+# code, size and probability, and the pandas index.
 _TABLE_BYTES_PER_CELL = 200
-# Bytes per cell of an export: the cell ID, its label and its code.
+# Bytes per cell of an export beside its ID: its label and its code.
 _EXPORT_BYTES_PER_CELL = 200
+
+
+def _text_width(array: Any) -> int:
+    """The characters of each value of stored fixed-width text, 0 for other arrays."""
+    dtype = np.dtype(array.dtype)
+    if dtype.kind == "U":
+        return int(dtype.itemsize) // 4
+    if dtype.kind == "S":
+        return int(dtype.itemsize)
+    return 0
+
+
+def _text_read_bytes(array: Any, n_rows: int) -> int:
+    """Bytes of reading rows of a stored text array as Python strings.
+
+    The store keeps text at the width of its longest value and decodes whole
+    chunks, so one long value widens every row that is read.
+    """
+    fixed, per_row = array_row_selection_parts(array)
+    return int(fixed) + n_rows * (int(per_row) + _STRING_BYTES + 4 * _text_width(array))
 
 
 def _file_namespace(file: BarcodeFile) -> str:
@@ -142,14 +168,32 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         return int(min(room, _MAX_CHUNK_ROWS))
 
     def _check_clone_import_budget(
-        self, held: int, n_labels: int, chunk_bytes: int
+        self, held: int, n_labels: int, label_bytes: int, chunk_bytes: int
     ) -> None:
-        peak = held + _BYTES_PER_LABEL * n_labels + chunk_bytes
+        peak = held + _BYTES_PER_LABEL * n_labels + label_bytes + chunk_bytes
         if peak > self.memoryBytes:
             raise MemoryError(
-                f"Importing {n_labels} clone labels holds about {peak} bytes, more "
+                f"Gathering {n_labels} clone labels holds about {peak} bytes, more "
                 f"than the memory budget of {self.memoryBytes} bytes. Raise "
                 "mem_budget."
+            )
+
+    def _check_clone_write_budget(
+        self, held: int, clone_ids: np.ndarray, n_cells: int
+    ) -> None:
+        """Refuse clones whose labels would not fit the memory budget as stored.
+
+        The store saves text at the width of the longest value, so each cell's
+        label takes four bytes per character of the longest as it is written.
+        """
+        width = max((len(str(label)) for label in clone_ids.tolist()), default=0)
+        peak = held + n_cells * (8 + 4 * width)
+        if peak > self.memoryBytes:
+            raise MemoryError(
+                f"Saving the clones of {n_cells} cells holds about {peak} bytes, "
+                f"more than the memory budget of {self.memoryBytes} bytes, since the "
+                "store saves each cell's clone label at the width of the longest, "
+                f"{width} characters. Raise mem_budget."
             )
 
     @validation_scoped
@@ -318,12 +362,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 artifact_group(self.zw, planned.ref).attrs, files_text
             )
             return planned.ref
-        held = (LOOKUP_BYTES_PER_CELL + _ASSIGNER_BYTES_PER_CELL) * n_cells
-        # Rows are parsed in chunks sized by the widest file's fields.
-        row_bytes = _BYTES_PER_ROW + _BYTES_PER_FIELD * max(
-            layout.n_fields for layout in layouts
-        )
-        chunk_rows = self._clone_chunk_rows(held, row_bytes)
+        ids = self.cells._get_array("ids")
+        reading = (
+            LOOKUP_BYTES_PER_CELL + _ASSIGNER_BYTES_PER_CELL
+        ) * n_cells + _text_read_bytes(ids, n_cells)
+        if reading > self.memoryBytes:
+            raise MemoryError(
+                f"Reading the IDs of {n_cells} selected cells holds about {reading} "
+                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
+                "Raise mem_budget, or pass a smaller cell_selection."
+            )
         self._require_writable(arguments.operation)
         # Only the selected cells' IDs are read, a sample's in a merged store.
         cell_ids = np.asarray(
@@ -334,6 +382,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             memory_bytes=self.memoryBytes,
             held_bytes=_ASSIGNER_BYTES_PER_CELL * n_cells,
         )
+        held = join.held_bytes
+        # Rows are parsed in chunks sized by the widest file's fields and its
+        # longest sampled rows, whose barcodes are about as long as cell IDs.
+        row_bytes = (
+            _BYTES_PER_ROW
+            + _BYTES_PER_FIELD * max(layout.n_fields for layout in layouts)
+            + _BYTES_PER_ROW_CHAR
+            * max(_text_width(ids), *(layout.row_chars for layout in layouts))
+        )
+        chunk_rows = self._clone_chunk_rows(held, row_bytes)
         assigner = CloneAssigner(cell_ids, multiple=policy)
         for position, (file, layout, namespace) in enumerate(
             zip(files, layouts, namespaces, strict=True)
@@ -350,6 +408,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 chunk_bytes=chunk_rows * row_bytes,
             )
         assignment = assigner.finish()
+        self._check_clone_write_budget(
+            held + _BYTES_PER_LABEL * assigner.n_labels + assigner.label_bytes,
+            assignment.clone_ids,
+            n_cells,
+        )
         attributes = {
             **join.attributes(),
             "n_clones": len(assignment.clone_ids),
@@ -393,7 +456,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                     probabilities=rows.probabilities,
                     source=source,
                 )
-                self._check_clone_import_budget(held, assigner.n_labels, chunk_bytes)
+                self._check_clone_import_budget(
+                    held, assigner.n_labels, assigner.label_bytes, chunk_bytes
+                )
             return
         # A matrix lists its cells first; each entry names a listed cell.
         listed: list[np.ndarray] = []
@@ -404,6 +469,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             self._check_clone_import_budget(
                 held + _BYTES_PER_LISTED_CELL * n_listed,
                 assigner.n_labels,
+                assigner.label_bytes,
                 chunk_bytes,
             )
         cells = np.concatenate(listed) if listed else np.empty(0, dtype=np.int64)
@@ -412,6 +478,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         self._check_clone_import_budget(
             held + _BYTES_PER_LISTED_CELL * n_listed,
             assigner.n_labels + len(labels),
+            assigner.label_bytes + sum(map(sys.getsizeof, labels)),
             chunk_bytes,
         )
         for entries in matrix_entries(layout, chunk_rows):
@@ -501,8 +568,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         writes: a missing or blank label means no clone. Labels are text;
         integers read as their text, and floating-point whole numbers, which
         pandas writes for integer labels beside missing ones, as integers.
-        The artifact records the fingerprint of the labels, so editing the
-        column gives new clones.
+        The artifact records the fingerprint of the column, so editing it
+        gives new clones. The labels are read in blocks within the memory
+        budget.
 
         Args:
             column: A cell metadata column.
@@ -530,22 +598,25 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         bool_argument(invalidate_cache, "invalidate_cache")
         cell_index = self._clone_selection_indices(cell_selection)
         n_cells = len(cell_index)
-        resident = _TABLE_BYTES_PER_CELL * n_cells
-        if resident > self.memoryBytes:
+        array = self.cells._get_array(column)
+        fixed, per_row = array_row_selection_parts(array)
+        # Blocks of labels are read at their stored width, decoding whole
+        # chunks, and become Python strings beside each cell's code.
+        held = _ASSIGNER_BYTES_PER_CELL * n_cells + int(fixed)
+        row_bytes = int(per_row) + _STRING_BYTES + 4 * _text_width(array)
+        first_block = held + row_bytes * min(n_cells, _MIN_CHUNK_ROWS)
+        if first_block > self.memoryBytes:
             raise MemoryError(
                 f"Reading the clone labels of {n_cells} cells holds about "
-                f"{resident} bytes, more than the memory budget of "
+                f"{first_block} bytes, more than the memory budget of "
                 f"{self.memoryBytes} bytes. Raise mem_budget."
             )
-        labels = clone_label_texts(
-            np.asarray(read_metadata_rows_chunkwise(self.cells, column, cell_index)),
-            read_metadata_missing_rows_chunkwise(self.cells, column, cell_index),
+        block_rows = int(
+            min(n_cells, _MAX_CHUNK_ROWS, (self.memoryBytes - held) // row_bytes)
         )
-        present = pd.notna(labels)
-        texts = np.where(present, labels, "").astype(str)
         arguments = CloneColumnArguments(
             cell_selection=cell_selection,
-            labels_fingerprint=fingerprint_strings(texts),
+            labels_fingerprint=metadata_column_fingerprint(self.cells, column),
             column=column,
             invalidate_cache=invalidate_cache,
         )
@@ -559,18 +630,29 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable(arguments.operation)
-        codes = np.full(n_cells, -1, dtype=np.int64)
-        positions, distinct = _factorized(texts[present])
-        codes[present] = positions
-        ranked, clone_ids, clone_sizes = ranked_clones(codes, distinct)
-        assignment = CloneAssignment(
-            codes=ranked,
-            clone_ids=clone_ids,
-            clone_sizes=clone_sizes,
-            probabilities=None,
-            n_cells_in_several_clones=0,
+        # Each cell has one label, so no cell is given two clones.
+        assigner = CloneAssigner(cell_index, multiple="error")
+        for start in range(0, n_cells, block_rows):
+            rows = cell_index[start : start + block_rows]
+            assigner.add(
+                np.arange(start, start + len(rows)),
+                clone_label_texts(
+                    np.asarray(read_metadata_rows_chunkwise(self.cells, column, rows)),
+                    read_metadata_missing_rows_chunkwise(self.cells, column, rows),
+                ),
+            )
+            self._check_clone_import_budget(
+                held, assigner.n_labels, assigner.label_bytes, block_rows * row_bytes
+            )
+        assignment = assigner.finish()
+        self._check_clone_write_budget(
+            _ASSIGNER_BYTES_PER_CELL * n_cells
+            + _BYTES_PER_LABEL * assigner.n_labels
+            + assigner.label_bytes,
+            assignment.clone_ids,
+            n_cells,
         )
-        self._write_clones(planned, assignment, {"n_clones": len(clone_ids)})
+        self._write_clones(planned, assignment, {"n_clones": len(assignment.clone_ids)})
         self._log_clones(assignment, n_cells)
         return planned.ref
 
@@ -582,6 +664,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise ValueError(f"clones must be a clones artifact, not {clones.kind!r}")
         require_complete_artifact(self.zw, clones)
         return artifact_group(self.zw, clones)
+
+    def _clone_text_bytes(self, group: zarr.Group, n_cells: int) -> int:
+        """Bytes of reading saved clones' labels and their cells' IDs as text."""
+        clone_ids = as_zarr_array(group["clone_ids"], name="clone_ids")
+        return _text_read_bytes(clone_ids, int(clone_ids.shape[0])) + (
+            _text_read_bytes(self.cells._get_array("ids"), n_cells)
+        )
 
     def _clone_cell_ids(self, clones: ArtifactRef) -> np.ndarray:
         """The IDs of a clones artifact's cells, in the order of its arrays."""
@@ -604,12 +693,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef.
             ValueError: If it is not a complete ``clones`` artifact.
-            MemoryError: If the tables, about 200 bytes per cell, do not fit
-                the memory budget.
+            MemoryError: If the tables, about 200 bytes per cell beside the
+                text of its ID and of the clone labels, do not fit the memory
+                budget.
         """
         group = self._clone_group(clones)
         n_cells = int(as_zarr_array(group["codes"], name="codes").shape[0])
-        resident = _TABLE_BYTES_PER_CELL * n_cells
+        resident = (
+            self._clone_text_bytes(group, n_cells) + _TABLE_BYTES_PER_CELL * n_cells
+        )
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Loading the clones of {n_cells} cells holds about {resident} "
@@ -623,7 +715,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             self._clone_cell_ids(clones),
             codes=_read(group, "codes"),
             clone_size=_read(group, "clone_size"),
-            clone_ids=_read(group, "clone_ids").astype(str).astype(object),
+            clone_ids=_read(group, "clone_ids").astype(object),
             clone_sizes=_read(group, "clone_sizes"),
             extra=extra,
         )
@@ -667,8 +759,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 ``format`` is unknown, a ``"table"`` would hold a clone label
                 that reads as no clone, such as ``"NA"``, or a ``"matrix"``
                 would list a label or cell ID that holds a line break.
-            MemoryError: If the export, about 200 bytes per cell, does not
-                fit the memory budget.
+            MemoryError: If the export, about 200 bytes per cell beside the
+                text of its ID and of the clone labels, does not fit the
+                memory budget.
         """
         from ...readers.clone_tables import MISSING_TEXT
         from ...writers.clone_tables import write_clone_matrix, write_clone_table
@@ -681,14 +774,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             )
         group = self._clone_group(clones)
         codes = _read(group, "codes").astype(np.int64)
-        resident = _EXPORT_BYTES_PER_CELL * len(codes)
+        resident = self._clone_text_bytes(group, len(codes)) + (
+            _EXPORT_BYTES_PER_CELL * len(codes)
+        )
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Exporting the clones of {len(codes)} cells holds about {resident} "
                 f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
                 "Raise mem_budget."
             )
-        clone_ids = _read(group, "clone_ids").astype(str).astype(object)
+        clone_ids = _read(group, "clone_ids").astype(object)
         if format == "table":
             # A clone table reads these labels back as cells without a clone.
             lost = [label for label in clone_ids.tolist() if label in MISSING_TEXT]
@@ -708,9 +803,3 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
 def _read(group: zarr.Group, name: str) -> np.ndarray:
     return np.asarray(as_zarr_array(group[name], name=name)[:])
-
-
-def _factorized(texts: np.ndarray) -> tuple[np.ndarray, list[str]]:
-    """Code distinct texts by first appearance."""
-    positions, distinct = pd.factorize(np.asarray(texts, dtype=object))
-    return np.asarray(positions, dtype=np.int64), [str(text) for text in distinct]

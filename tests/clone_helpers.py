@@ -1,6 +1,7 @@
 """Stores and checks shared by the tests of clones."""
 
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -35,6 +36,18 @@ def write_truth_store(path: Path, truth: CloneTruth) -> "DataStore":
     store.cells.insert("time_point", truth.time_points)
     store.cells.insert("cell_type", truth.cell_types.astype(object))
     store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
+    return store
+
+
+def write_cells_store(path: Path, cell_ids: Sequence[str]) -> "DataStore":
+    """Write a store of these cells, each with one count of three features.
+
+    The ``every_cell`` column selects every cell.
+    """
+    counts = np.ones((len(cell_ids), 3), dtype=np.uint16)
+    write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=list(cell_ids))
+    store = open_clone_store(path)
+    store.cells.insert("every_cell", np.ones(len(cell_ids), dtype=bool))
     return store
 
 
