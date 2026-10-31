@@ -754,13 +754,18 @@ def normalization_is_cell_local(
     return True
 
 
-def _feature_values(
+def feature_values(
     assay: Any,
     physical_indices: np.ndarray,
     cell_idx: np.ndarray,
     normalization: "NormalizationSpec",
 ) -> Any:
-    """Return the lazy raw or normalized values of features over cells."""
+    """Return the lazy raw or normalized values of features over cells.
+
+    The result is the chunked array that :func:`feature_value_blocks`
+    streams, cells x features in the order of ``cell_idx`` and
+    ``physical_indices``; nothing is read until it is streamed.
+    """
     if normalization.source == "raw":
         return assay.rawData[:, physical_indices][cell_idx, :]
     # ``normed`` applies log1p under the normalizer's rule, so values that are
@@ -788,12 +793,17 @@ def streamed_block_rows(values: Any) -> int:
 
 
 def _value_blocks(
-    values: Any, nthreads: int, resident_bytes: int, scratch_bytes_per_row: int
+    values: Any,
+    nthreads: int,
+    resident_bytes: int,
+    scratch_bytes_per_row: int,
+    memory_bytes: int | None = None,
 ) -> Iterable[Any]:
     """Stream ``values`` in row blocks, or yield an in-memory matrix whole.
 
     The rows of the counts beneath ``values`` may come from their stored
-    transpose, ``countsT``, when that touches fewer chunk bytes.
+    transpose, ``countsT``, when that touches fewer chunk bytes. With
+    ``memory_bytes``, the blocks shrink to fit that budget.
     """
     if isinstance(values, np.ndarray):
         return (values,)
@@ -803,6 +813,7 @@ def _value_blocks(
         prefetch=None,
         row_mask=None,
         resident_bytes=resident_bytes,
+        memory_bytes=memory_bytes,
         scratch_bytes_per_row=scratch_bytes_per_row,
         allow_transposed=True,
     )
@@ -818,6 +829,7 @@ def feature_value_blocks(
     nthreads: int,
     resident_bytes: int,
     scratch_bytes_per_row: int,
+    memory_bytes: int | None = None,
 ) -> tuple[int, Iterable[np.ndarray]]:
     """Stream the raw or normalized values of features over cells in row blocks.
 
@@ -834,15 +846,20 @@ def feature_value_blocks(
         nthreads: Workers that the reads may use.
         resident_bytes: Bytes the caller holds while the blocks stream.
         scratch_bytes_per_row: Bytes per row the caller creates from a block.
+        memory_bytes: A memory budget that the blocks shrink to fit beside
+            ``resident_bytes``, for a caller whose results do not depend on
+            the blocks; ``stream_bytes`` of :func:`feature_values` gives the
+            bytes of whole blocks of the stored chunk rows. None keeps whole
+            blocks.
 
     Returns:
         The most rows of one block, and the blocks in cell order.
     """
-    values = _feature_values(
+    values = feature_values(
         assay, np.asarray(physical_indices), np.asarray(cell_idx), normalization
     )
     return streamed_block_rows(values), _value_blocks(
-        values, nthreads, resident_bytes, scratch_bytes_per_row
+        values, nthreads, resident_bytes, scratch_bytes_per_row, memory_bytes
     )
 
 

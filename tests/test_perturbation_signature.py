@@ -5,10 +5,12 @@ once, as a template. A test that writes copies the template, and the tests of
 refused calls share one copy, which they check is left as it was.
 """
 
+import tracemalloc
 from collections.abc import Iterator
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 
 import cytearc.perturbation.signature as signature_module
@@ -18,6 +20,7 @@ from cytearc.datastore._operations import (
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import PerturbationSignature
 from cytearc.perturbation.signature import (
+    nearest_control_bytes,
     nearest_controls,
     normalize_counts,
     normalize_counts_by_feature,
@@ -29,7 +32,10 @@ from cytearc.utils.logging import logger
 from tests.perturbation_helpers import (
     copy_store,
     fixed_labels,
+    memory_screen,
+    needed_budget,
     open_store,
+    smallest_budget,
     use_python_kernels,
     write_screen,
     written,
@@ -216,24 +222,13 @@ def test_loading_a_signature_holds_its_values_once(
         n_neighbors=4,
     )
     read: list[np.ndarray] = []
-    as_zarr_array = perturbation_operations.as_zarr_array
+    read_rows = perturbation_operations._read_signature_rows
 
-    class Recorded:
-        """The stored values, keeping each array that an orthogonal read returns."""
+    def recording(stored, rows, columns, out, out_columns) -> None:
+        read.append(out)
+        read_rows(stored, rows, columns, out, out_columns)
 
-        def __init__(self, stored) -> None:
-            self.oindex = self
-            self.stored = stored
-
-        def __getitem__(self, selection) -> np.ndarray:
-            read.append(np.asarray(self.stored.oindex[selection]))
-            return read[-1]
-
-    def recording(node, *, name=""):
-        stored = as_zarr_array(node, name=name)
-        return Recorded(stored) if name == "values" else stored
-
-    monkeypatch.setattr(perturbation_operations, "as_zarr_array", recording)
+    monkeypatch.setattr(perturbation_operations, "_read_signature_rows", recording)
 
     loaded = store.perturbation.load_signature(ref)
 
@@ -362,14 +357,51 @@ def test_signature_refuses_inputs_it_cannot_use(
         store.perturbation.signature(
             labels, coordinates, features=features, n_neighbors=17
         )
-    with pytest.raises(ValueError, match="sample 'run1', sample 'run2' have 8"):
+    with pytest.raises(
+        ValueError, match="Sample 'run1' has 8 and sample 'run2' has 8 control cells"
+    ):
         store.perturbation.signature(
             labels, coordinates, features=features, n_neighbors=9, sample_column="run"
         )
-    monkeypatch.setattr(store, "memoryBytes", 100)
+    budgeted = open_store(store.zarr_loc, mem_budget=100)
     with pytest.raises(MemoryError, match="16 control cells in 6 features"):
-        store.perturbation.signature(
+        budgeted.perturbation.signature(
             labels, coordinates, features=features, n_neighbors=5
+        )
+    assert written(store) == saved
+
+
+def test_a_short_sample_refusal_gives_each_sample_its_own_count(
+    shared_store, template
+) -> None:
+    store = shared_store
+    saved = written(store)
+    # Lane A holds 11 of the 16 control cells and lane B the other 5.
+    lanes = np.empty(N_CELLS, dtype=object)
+    lanes[CONTROLS[:11]] = "A"
+    lanes[CONTROLS[11:]] = "B"
+    lanes[CARRIED != 2] = np.where(np.arange(N_CELLS)[CARRIED != 2] % 2, "A", "B")
+    store.cells.insert("lane", lanes)
+
+    with pytest.raises(
+        ValueError,
+        match="^Sample 'A' has 11 and sample 'B' has 5 control cells with "
+        "coordinates, fewer than n_neighbors=12; lower n_neighbors",
+    ):
+        store.perturbation.signature(
+            template.labels,
+            template.coordinates,
+            features=template.features,
+            n_neighbors=12,
+            sample_column="lane",
+        )
+    with pytest.raises(ValueError, match="^Sample 'B' has 5 control cells with"):
+        store.perturbation.signature(
+            template.labels,
+            template.coordinates,
+            features=template.features,
+            n_neighbors=6,
+            sample_column="lane",
         )
     assert written(store) == saved
 
@@ -407,9 +439,9 @@ def test_loading_a_signature_refuses_what_it_cannot_read(
         store.perturbation.load_signature(ref, features="RNA0")
     with pytest.raises(ValueError, match="has no feature 'GENE_A'"):
         store.perturbation.load_signature(ref, features=["RNA0", "GENE_A"])
-    monkeypatch.setattr(store, "memoryBytes", 100)
+    budgeted = open_store(store.zarr_loc, mem_budget=100)
     with pytest.raises(MemoryError, match="48 cells in 6 features"):
-        store.perturbation.load_signature(ref)
+        budgeted.perturbation.load_signature(ref)
     assert written(store) == saved
 
 
@@ -420,33 +452,38 @@ def _brute_nearest(query: np.ndarray, controls: np.ndarray, k: int) -> np.ndarra
     )
 
 
-def test_nearest_controls_are_exact_with_ties_to_the_first(monkeypatch) -> None:
+def test_nearest_controls_are_exact_with_ties_to_the_first() -> None:
     rng = np.random.default_rng(3)
     query = rng.normal(size=(50, 3))
     controls = rng.normal(size=(40, 3))
     np.testing.assert_array_equal(
-        nearest_controls(query, controls, 5), _brute_nearest(query, controls, 5)
+        nearest_controls(query, controls, 5, memory_bytes=1 << 30),
+        _brute_nearest(query, controls, 5),
     )
     # Blocks of one query give the same neighbors.
-    monkeypatch.setattr(signature_module, "_DISTANCE_BYTES", 8)
     np.testing.assert_array_equal(
-        nearest_controls(query, controls, 5), _brute_nearest(query, controls, 5)
+        nearest_controls(query, controls, 5, memory_bytes=1),
+        _brute_nearest(query, controls, 5),
     )
     # Thirty controls at one point tie for every query, so the first ones win.
     tied = np.tile([[0.5, -1.0, 2.0]], (30, 1))
-    assert nearest_controls(query[:3], tied, 4).tolist() == [[0, 1, 2, 3]] * 3
+    assert (
+        nearest_controls(query[:3], tied, 4, memory_bytes=1 << 30).tolist()
+        == [[0, 1, 2, 3]] * 3
+    )
     # With few controls, every control is a candidate.
     few = controls[:6]
     np.testing.assert_array_equal(
-        nearest_controls(query, few, 6), _brute_nearest(query, few, 6)
+        nearest_controls(query, few, 6, memory_bytes=1 << 30),
+        _brute_nearest(query, few, 6),
     )
 
 
 def test_nearest_controls_check_their_inputs() -> None:
     with pytest.raises(ValueError, match="the same dimensions"):
-        nearest_controls(np.zeros((2, 3)), np.zeros((4, 2)), 1)
+        nearest_controls(np.zeros((2, 3)), np.zeros((4, 2)), 1, memory_bytes=1 << 20)
     with pytest.raises(ValueError, match="from 1 to the 4 controls, not 5"):
-        nearest_controls(np.zeros((2, 3)), np.zeros((4, 3)), 5)
+        nearest_controls(np.zeros((2, 3)), np.zeros((4, 3)), 5, memory_bytes=1 << 20)
 
 
 @pytest.mark.parametrize("python_kernels", [False, True])
@@ -526,3 +563,82 @@ def test_counts_normalized_by_feature_equal_normalized_counts(
     assert (out[:, [0, 1, 9]] == -1.0).all()
     with pytest.raises(ValueError, match="float64 features x cells out from start"):
         normalize_counts_by_feature(counts, totals, 1_000.0, out, 4)
+
+
+@pytest.mark.parametrize("n_queries", [1, 64])
+def test_nearest_controls_hold_what_their_budget_allows(n_queries) -> None:
+    rng = np.random.default_rng(7)
+    query, controls = rng.normal(size=(600, 10)), rng.normal(size=(800, 10))
+    budget = nearest_control_bytes(800, 20, 10, n_queries)
+
+    tracemalloc.start()
+    try:
+        start = tracemalloc.get_traced_memory()[0]
+        found = nearest_controls(query, controls, 20, memory_bytes=budget)
+        peak = tracemalloc.get_traced_memory()[1] - start
+    finally:
+        tracemalloc.stop()
+
+    # Beside the coordinates, the search holds its blocks and the result; a
+    # block once held 64 MiB of distances whatever the budget.
+    assert peak <= budget + found.nbytes
+    np.testing.assert_array_equal(found, _brute_nearest(query, controls, 20))
+
+
+@pytest.fixture(scope="module")
+def memory(tmp_path_factory) -> SimpleNamespace:
+    """A screen whose reads outweigh what every call reads besides, and its signature."""
+    screen = memory_screen(tmp_path_factory.mktemp("signature_memory") / "store.zarr")
+    store = open_store(screen.path, nthreads=2)
+    screen.signature = store.perturbation.signature(
+        screen.labels, screen.coordinates, features=screen.features, dims=10
+    )
+    screen.whole = store.perturbation.load_signature(screen.signature)
+    return screen
+
+
+@pytest.mark.slow
+def test_signature_runs_within_the_budget_it_names(memory) -> None:
+    def run(store: DataStore):
+        return store.perturbation.signature(
+            memory.labels,
+            memory.coordinates,
+            features=memory.features,
+            dims=10,
+            invalidate_cache=True,
+        )
+
+    needed, ref, peak = smallest_budget(memory.path, run)
+
+    # Finding the neighbors, reading the counts and writing the signatures
+    # stay within the budget that the refusal names, which once failed in
+    # the stream planner.
+    assert peak <= needed
+    loaded = open_store(memory.path).perturbation.load_signature(ref)
+    pd.testing.assert_frame_equal(loaded.values, memory.whole.values)
+    pd.testing.assert_frame_equal(loaded.neighbors, memory.whole.neighbors)
+    with pytest.raises(MemoryError) as short:
+        run(open_store(memory.path, nthreads=2, mem_budget=needed - 1))
+    assert needed_budget(short.value) == needed
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("features", [["RNA3"], None])
+def test_loading_signatures_stays_within_the_budget_it_names(memory, features) -> None:
+    def run(store: DataStore) -> PerturbationSignature:
+        return store.perturbation.load_signature(memory.signature, features=features)
+
+    needed, loaded, peak = smallest_budget(memory.path, run)
+
+    # Reading one feature decodes whole stored chunks of every feature, and
+    # the frames hold every cell's and neighbor's ID; the budget once
+    # counted 4 bytes per value read.
+    assert peak <= needed
+    expected = (
+        memory.whole.values if features is None else memory.whole.values[features]
+    )
+    pd.testing.assert_frame_equal(loaded.values, expected)
+    pd.testing.assert_frame_equal(loaded.neighbors, memory.whole.neighbors)
+    with pytest.raises(MemoryError) as short:
+        run(open_store(memory.path, nthreads=2, mem_budget=needed - 1))
+    assert needed_budget(short.value) == needed

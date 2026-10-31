@@ -37,6 +37,7 @@ from cytearc.utils.numba import njit
 
 __all__ = [
     "PerturbationSignature",
+    "nearest_control_bytes",
     "nearest_controls",
     "normalize_counts",
     "normalize_counts_by_feature",
@@ -45,8 +46,6 @@ __all__ = [
     "signature_settings",
 ]
 
-# The bytes of distances that one block of query cells holds.
-_DISTANCE_BYTES = 1 << 26
 # Candidates beyond the k nearest by the fast distances, which the exact
 # distances then rank.
 _EXTRA_CANDIDATES = 8
@@ -80,8 +79,46 @@ def signature_settings(
     return resolved_dims, neighbors_k, factor
 
 
+def _search_bytes(n_controls: int, n_neighbors: int, n_dims: int) -> tuple[int, int]:
+    """Return the bytes a nearest-control search holds whatever its block, and per query.
+
+    Whatever the block, the search holds the controls' squared norms, their
+    positions, and one query's exact distances to every control with its
+    differences and their order. Each query of a block holds its fast
+    distances to every control with two working copies, or their partition,
+    and its candidates' differences, a working copy of them, their exact
+    distances, their order and their ranking.
+    """
+    n_candidates = min(n_controls, n_neighbors + max(n_neighbors, _EXTRA_CANDIDATES))
+    fixed = 8 * n_controls * (n_dims + 5)
+    per_query = 8 * (3 * n_controls + n_candidates * (2 * n_dims + 3) + 4)
+    return fixed, per_query
+
+
+def nearest_control_bytes(
+    n_controls: int, n_neighbors: int, n_dims: int, n_queries: int = 1
+) -> int:
+    """Return the bytes that :func:`nearest_controls` holds for a block of queries.
+
+    These come beside the query and control coordinates and the result, which
+    its caller holds. A search given at least this many ``memory_bytes`` for
+    one query runs.
+
+    Args:
+        n_controls: The control cells searched.
+        n_neighbors: The controls returned for each query.
+        n_dims: The dimensions of the coordinates.
+        n_queries: The queries of a block.
+
+    Returns:
+        The bytes.
+    """
+    fixed, per_query = _search_bytes(n_controls, n_neighbors, n_dims)
+    return fixed + max(1, int(n_queries)) * per_query
+
+
 def nearest_controls(
-    query: np.ndarray, controls: np.ndarray, n_neighbors: int
+    query: np.ndarray, controls: np.ndarray, n_neighbors: int, *, memory_bytes: int
 ) -> np.ndarray:
     """Return the positions of each query's nearest controls, nearest first.
 
@@ -89,13 +126,18 @@ def nearest_controls(
     nearest candidates by those distances are ranked again by their exact
     squared distances, ties going to the lower position, and a query whose
     k-th distance comes within rounding of a control outside the candidates is
-    ranked exactly over every control, so the result is exact.
+    ranked exactly over every control, so the result is exact. The blocks
+    hold as many queries as fit ``memory_bytes``, and at least one, as
+    :func:`nearest_control_bytes` counts them; the result does not depend on
+    them.
 
     Args:
         query: The query cells' coordinates, cells x dimensions.
         controls: The control cells' coordinates, cells x dimensions.
         n_neighbors: The controls to return for each query, from 1 to the
             number of controls.
+        memory_bytes: The bytes that the search may hold beside the
+            coordinates and the result.
 
     Returns:
         The positions in ``controls`` of each query's ``n_neighbors`` nearest
@@ -121,38 +163,64 @@ def nearest_controls(
     largest_norm = float(pool_norms.max())
     # A bound on the rounding of the fast distances, with a wide margin.
     rounding = 4.0 * (n_dims + 2) * np.finfo(np.float64).eps
-    block = max(1, _DISTANCE_BYTES // (8 * max(n_controls, n_candidates * n_dims)))
+    fixed, per_query = _search_bytes(n_controls, n_neighbors, n_dims)
+    block = max(1, (int(memory_bytes) - fixed) // per_query)
     positions = np.empty((len(queries), n_neighbors), dtype=np.int64)
     every = np.arange(n_controls)
     for start in range(0, len(queries), block):
-        rows = queries[start : start + block]
-        norms = np.einsum("ij,ij->i", rows, rows)
-        fast = norms[:, None] + pool_norms[None, :] - 2.0 * (rows @ pool.T)
-        if n_candidates < n_controls:
-            # The n_candidates nearest come first, and the next one is the
-            # nearest control outside them.
-            parted = np.argpartition(fast, n_candidates, axis=1)
-            candidates = parted[:, :n_candidates]
-            outside = np.take_along_axis(
-                fast, parted[:, n_candidates : n_candidates + 1], 1
-            )[:, 0]
-        else:
-            candidates = np.broadcast_to(every, fast.shape)
-            outside = np.full(len(rows), np.inf)
-        difference = rows[:, None, :] - pool[candidates]
-        exact = np.einsum("ijk,ijk->ij", difference, difference)
-        order = np.lexsort((candidates, exact), axis=1)
-        ranked = np.take_along_axis(candidates, order, 1)[:, :n_neighbors]
-        kth = np.take_along_axis(exact, order[:, n_neighbors - 1 : n_neighbors], 1)[
-            :, 0
-        ]
-        slack = rounding * (norms + largest_norm)
-        for row in np.flatnonzero(outside - slack <= kth + slack):
-            gap = pool - rows[row]
-            distances = np.einsum("ij,ij->i", gap, gap)
-            ranked[row] = np.lexsort((every, distances))[:n_neighbors]
-        positions[start : start + len(rows)] = ranked
+        positions[start : start + block] = _nearest_in_block(
+            queries[start : start + block],
+            pool,
+            pool_norms,
+            every,
+            n_neighbors,
+            n_candidates,
+            largest_norm,
+            rounding,
+        )
     return positions
+
+
+def _nearest_in_block(
+    rows: np.ndarray,
+    pool: np.ndarray,
+    pool_norms: np.ndarray,
+    every: np.ndarray,
+    n_neighbors: int,
+    n_candidates: int,
+    largest_norm: float,
+    rounding: float,
+) -> np.ndarray:
+    """Return the nearest controls of one block of queries, as nearest_controls ranks them.
+
+    The block's distances and their working arrays are released when it
+    returns, before the next block computes its own.
+    """
+    n_controls = len(pool)
+    norms = np.einsum("ij,ij->i", rows, rows)
+    fast = norms[:, None] + pool_norms[None, :] - 2.0 * (rows @ pool.T)
+    if n_candidates < n_controls:
+        # The n_candidates nearest come first, and the next one is the
+        # nearest control outside them.
+        parted = np.argpartition(fast, n_candidates, axis=1)
+        candidates = parted[:, :n_candidates]
+        outside = np.take_along_axis(
+            fast, parted[:, n_candidates : n_candidates + 1], 1
+        )[:, 0]
+    else:
+        candidates = np.broadcast_to(every, fast.shape)
+        outside = np.full(len(rows), np.inf)
+    difference = rows[:, None, :] - pool[candidates]
+    exact = np.einsum("ijk,ijk->ij", difference, difference)
+    order = np.lexsort((candidates, exact), axis=1)
+    ranked: np.ndarray = np.take_along_axis(candidates, order, 1)[:, :n_neighbors]
+    kth = np.take_along_axis(exact, order[:, n_neighbors - 1 : n_neighbors], 1)[:, 0]
+    slack = rounding * (norms + largest_norm)
+    for row in np.flatnonzero(outside - slack <= kth + slack):
+        gap = pool - rows[row]
+        distances = np.einsum("ij,ij->i", gap, gap)
+        ranked[row] = np.lexsort((every, distances))[:n_neighbors]
+    return ranked
 
 
 def normalize_counts(
