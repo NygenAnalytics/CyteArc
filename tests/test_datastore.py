@@ -694,7 +694,12 @@ def test_new_reduction_rejects_underdetermined_inputs():
     two_features = dataset.features.snapshot(from_assay="RNA", feature_indexes=[0, 1])
     narrow = dataset.features.normalize(cells, two_features)
 
-    with pytest.raises(ValueError, match=r"at least dims \+ 1 selected features"):
+    # The message names the features that the normalized values select.
+    with pytest.raises(
+        ValueError,
+        match=r"^PCA requires at least dims \+ 1 selected features, 3 for dims=2, "
+        r"but 2 are selected$",
+    ):
         dataset.reduction.pca(narrow, dims=2, local_cache=False)
     # The public wrapper widens batch_size, so only direct callers reach this guard.
     with pytest.raises(ValueError, match=r"batch_size must be at least dims \+ 1"):

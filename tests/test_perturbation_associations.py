@@ -166,6 +166,12 @@ def test_covariates_hold_an_intercept_scaled_logs_samples_and_extra_columns() ->
             (np.array([4.0, 5.0]), np.array([2.0, 3.0]), None, [[1.0], [1.0]]),
             "column 0",
         ),
+        # One value repeated, whose standard deviation rounds above 0 for 10
+        # cells.
+        (
+            (np.arange(10.0) + 10, np.arange(10.0) + 5, None, np.full((10, 1), 0.3)),
+            "^The covariate 'column 0' is constant over the tested cells$",
+        ),
     ],
 )
 def test_covariates_refuse_cells_and_columns_they_cannot_use(
@@ -1737,6 +1743,22 @@ def test_associations_refuse_missing_covariates_of_tested_cells(
     ):
         store.perturbation.associations(
             labels, features=_every_gene(store), covariates=[column], **FAST
+        )
+
+
+def test_associations_refuse_a_covariate_of_one_value(shared) -> None:
+    store, labels = shared.store, shared.labels
+    # The tests read the 300 control cells and the 240 cells of the two
+    # targets, over which 1.1 repeated has a standard deviation above 0.
+    assert np.full(540, 1.1).std() > 0
+    store.cells.insert("constant", np.full(len(OPERATION_RUNS), 1.1), overwrite=True)
+
+    with pytest.raises(
+        ValueError,
+        match="^The covariate 'constant' is constant over the tested cells$",
+    ):
+        store.perturbation.associations(
+            labels, features=_every_gene(store), covariates=["constant"], **FAST
         )
 
 

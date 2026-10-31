@@ -1253,7 +1253,11 @@ class _GraphOperationsMixin(_GraphOperationsBase):
             if selected_pca_cells < effective_dims + 1:
                 raise ValueError("PCA requires at least dims + 1 selected cells")
             if n_features < effective_dims + 1:
-                raise ValueError("PCA requires at least dims + 1 selected features")
+                raise ValueError(
+                    "PCA requires at least dims + 1 selected features, "
+                    f"{effective_dims + 1} for dims={effective_dims}, but "
+                    f"{n_features} are selected"
+                )
             if effective_batch_size < effective_dims + 1:
                 raise ValueError("PCA batch_size must be at least dims + 1")
         elif method == "lsi":

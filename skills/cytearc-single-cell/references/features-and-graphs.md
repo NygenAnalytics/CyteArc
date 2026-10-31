@@ -23,20 +23,7 @@ chain of artifacts, then branch or subcluster it safely. Docs: <https://docs.nyg
 - Identity is operation + scientific parameters + exact inputs. An identical call returns the
   existing ref without recomputing; a changed `k` reuses normalization, PCA and the ANN index.
   Changing cells or features invalidates every downstream stage.
-- A recipe's `hvg`, `normalization`, `pca`, `ann_index`, `neighbors` and `connectivity` mappings
-  take the keywords of `features.hvgs`, `features.normalize`, `reduction.pca`, `graph.ann_index`,
-  `graph.neighbors` and `graph.connectivity`. Explicit calls with the same arguments return the
-  very refs in `run[...]`. PCA needs `dims` + 1 features, so a recipe refuses `pca` `dims` that
-  are not below `hvg` `top_n` before it writes anything. `pca={"dims": 0}` skips PCA and builds
-  the graph on the normalized HVG values, `run["normalized"]`, which needs `doublets=False` and no
-  Harmony (both need PCA).
-  `ds.graph.ann_index(normalized)` does the same outside the pipeline; WNN, mapping references
-  and doublet scoring reject such graphs, SNN integrates them. Memory and time then scale with
-  the HVG count, not the PCA dims: the ANN index holds about `4 * dims + 8 * ann_m + 130` bytes per
-  cell (8.3 GB at 1M cells and 2,000 HVGs with the default `ann_m=24`), the default embedding
-  initialization holds every cell's coordinates in memory (pass
-  `embedding_initialization={"batch_size": ...}` below the cell count for the streamed fit), and
-  cluster selection decodes most of the normalized matrix to read its 10,000-cell sample.
+- A recipe's `hvg`, `normalization`, `pca`, `ann_index`, `neighbors` and `connectivity` mappings take the keywords of `features.hvgs`, `features.normalize`, `reduction.pca`, `graph.ann_index`, `graph.neighbors` and `graph.connectivity`. Explicit calls with the same arguments return the very refs in `run[...]`. PCA needs `dims` + 1 features, so a recipe refuses `pca` `dims` that are not below the smaller of `hvg` `top_n` and the assay's features before it writes anything. `pca={"dims": 0}` skips PCA and builds the graph on the normalized HVG values, `run["normalized"]`, which needs `doublets=False` and no Harmony (both need PCA). `ds.graph.ann_index(normalized)` does the same outside the pipeline; WNN, mapping references and doublet scoring reject such graphs, SNN integrates them. Memory and time then scale with the HVG count, not the PCA dims: the ANN index holds about `4 * dims + 8 * ann_m + 130` bytes per cell (8.3 GB at 1M cells and 2,000 HVGs with the default `ann_m=24`), the default embedding initialization holds every cell's coordinates in memory (pass `embedding_initialization={"batch_size": ...}` below the cell count for the streamed fit), and cluster selection decodes most of the normalized matrix to read its 10,000-cell sample.
 - `graph.neighbors` searches `max(200, 2 * k)` candidates by default (the index's `ann_ef` floor and
   two per neighbour) and records the depth as its `ann_ef` only when it is not the index's own, so
   `k` up to 100 reuses earlier neighbors; pass `ann_ef=` for another depth. A query warns when

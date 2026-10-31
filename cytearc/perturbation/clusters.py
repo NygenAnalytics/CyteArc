@@ -113,8 +113,9 @@ def cluster_settings(
     Raises:
         TypeError: If a number is not an integer, or ``perturbations`` is
             neither a sequence of names nor None.
-        ValueError: If ``metric`` or ``selection`` is unknown, or a number is
-            out of range.
+        ValueError: If ``metric`` or ``selection`` is unknown, a number is out
+            of range, or ``perturbations`` names fewer than 3 distinct
+            perturbations or fewer than ``min_samples``.
     """
     if metric not in METRICS:
         raise ValueError(f"metric must be 'correlation' or 'euclidean', not {metric!r}")
@@ -124,6 +125,19 @@ def cluster_settings(
         raise ValueError(f"selection must be 'eom' or 'leaf', not {selection!r}")
     resolved_seed = integer_argument(seed, "seed", minimum=0, maximum=MAX_SEED)
     requested = None if perturbations is None else perturbation_names(perturbations)
+    if requested is not None:
+        # The clustering takes each named perturbation once.
+        n_named = len(set(requested))
+        if n_named < 3:
+            raise ValueError(
+                "Clustering needs at least 3 distinct perturbations, but "
+                f"perturbations names {n_named}"
+            )
+        if core_size > n_named:
+            raise ValueError(
+                f"min_samples={core_size} must be at most the {n_named} "
+                "perturbations clustered"
+            )
     return cluster_size, core_size, resolved_seed, requested
 
 

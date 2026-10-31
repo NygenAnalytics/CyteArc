@@ -196,13 +196,23 @@ def resolve_hvg(store: Any, hvg: object) -> dict[str, Any]:
     return settings
 
 
-def check_pca_features(dims: int, hvg: Mapping[str, Any]) -> None:
-    """Refuse PCA dimensions that the highly variable genes cannot give."""
+def check_pca_features(
+    dims: int, hvg: Mapping[str, Any], assay: str, n_features: int
+) -> None:
+    """Refuse PCA dimensions that the highly variable genes cannot give.
+
+    HVG selection keeps at most ``top_n`` genes and at most the ``n_features``
+    of the assay, and the message names the smaller bound.
+    """
     top_n = hvg.get("top_n", HVG_TOP_N_DEFAULT)
-    if dims >= top_n:
+    if top_n <= n_features:
+        limit, named = top_n, f"hvg top_n ({top_n})"
+    else:
+        limit, named = n_features, f"the {n_features} features of assay {assay!r}"
+    if dims >= limit:
         raise ValueError(
-            f"pca dims ({dims}) must be below hvg top_n ({top_n}): PCA "
-            "needs at least dims + 1 features"
+            f"pca dims ({dims}) must be below {named}: PCA needs at least "
+            "dims + 1 features"
         )
 
 
@@ -327,6 +337,26 @@ class RNAHeadSettings:
             harmony_stage(self.harmony_columns, self.harmony),
         )
 
+    def check_batch_labels(self, store: Any, source: CellSource) -> None:
+        """Refuse HVG and Harmony batch columns that leave an input cell unlabeled.
+
+        Batch-aware HVG selection takes empty or whitespace text as no batch,
+        and Harmony takes it as a label and refuses only missing values and
+        NaN. The stages read the batches of the analysis cells, which depend
+        on the data, so every input cell needs one.
+        """
+        batch = self.hvg.get("batch")
+        if batch is not None:
+            check_labeled_cells(
+                store,
+                source,
+                batch,
+                purpose="Batch-aware HVG selection",
+                blank_is_label=False,
+            )
+        for column in self.harmony_columns:
+            check_labeled_cells(store, source, column, purpose="Harmony")
+
     def to_config(self) -> dict[str, Any]:
         return {
             "hvg": self.hvg,
@@ -339,6 +369,7 @@ class RNAHeadSettings:
 def resolve_rna_head(
     store: Any,
     *,
+    assay: str,
     hvg: object,
     normalization: object,
     pca: object,
@@ -347,17 +378,19 @@ def resolve_rna_head(
 ) -> RNAHeadSettings:
     """Return the settings of the RNA stages from highly variable genes to Harmony.
 
-    ``min_dims`` is the fewest PCA dimensions: the RNA recipe takes 0, which
-    builds its graph on the normalized values, and the perturbation recipe
-    1, since its E-distances and signatures read the PCA.
+    ``assay`` is the RNA assay that the stages read. ``min_dims`` is the
+    fewest PCA dimensions: the RNA recipe takes 0, which builds its graph on
+    the normalized values, and the perturbation recipe 1, since its
+    E-distances and signatures read the PCA.
 
     Raises:
         TypeError: If a setting has the wrong type.
         KeyError: If the ``hvg`` batch or a Harmony batch column is not a cell
             column.
         ValueError: If PCA has fewer than ``min_dims`` dimensions, settings
-            besides ``dims=0``, or as many dimensions as the highly variable
-            genes, or another setting is out of range.
+            besides ``dims=0``, or at least as many dimensions as the highly
+            variable genes or the assay's features, or another setting is out
+            of range.
     """
     hvg_settings = resolve_hvg(store, hvg)
     _norm_enabled, normalization_settings = stage_settings(
@@ -369,7 +402,7 @@ def resolve_rna_head(
     )
     if dims == 0 and pca_settings:
         raise ValueError("PCA settings need dims above 0; dims=0 skips PCA")
-    check_pca_features(dims, hvg_settings)
+    check_pca_features(dims, hvg_settings, assay, int(store._get_assay(assay).feats.N))
     harmony_columns, harmony_settings = resolve_harmony(store, harmony)
     return RNAHeadSettings(
         hvg=hvg_settings,
