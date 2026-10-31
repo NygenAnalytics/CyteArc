@@ -37,3 +37,21 @@ def test_an_empty_matrix_lists_no_cell(tmp_path) -> None:
     assert written == 0
     assert (tmp_path / "m.mtx").read_text().splitlines()[2] == "0 0 0"
     assert (tmp_path / "cells.tsv").read_text() == '"cell"\n'
+
+
+@pytest.mark.parametrize(
+    ("cells", "labels", "what"),
+    [(["a\nb"], ["x"], "cell ID"), (["a"], ["x\ry"], "clone label")],
+)
+def test_a_clone_matrix_refuses_names_that_hold_line_breaks(
+    tmp_path, cells, labels, what
+) -> None:
+    # Each of the matrix's lists holds one name per line.
+    with pytest.raises(ValueError, match=f"The {what} .* holds a line break"):
+        write_clone_matrix(
+            tmp_path / "m.mtx",
+            np.asarray(cells, dtype=object),
+            np.asarray([0]),
+            np.asarray(labels, dtype=object),
+        )
+    assert list(tmp_path.iterdir()) == []

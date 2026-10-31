@@ -100,8 +100,9 @@ def write_clone_matrix(
         The number of cells written.
 
     Raises:
-        ValueError: If the cells and codes differ in length, or a code lies
-            outside the clones.
+        ValueError: If the cells and codes differ in length, a code lies
+            outside the clones, or a cell ID or clone label holds a line
+            break, which the lists cannot hold.
     """
     cells = np.asarray(cell_ids, dtype=object)
     positions = np.asarray(codes, dtype=np.int64)
@@ -110,6 +111,21 @@ def write_clone_matrix(
         raise ValueError("A clone matrix needs one clone per cell")
     if len(positions) and (positions.min() < 0 or positions.max() >= len(labels)):
         raise ValueError(f"Clone positions must lie in [0, {len(labels)})")
+    # The lists hold one name per line, as their readers count them.
+    for what, names in (("cell ID", cells), ("clone label", labels)):
+        broken = next(
+            (
+                str(name)
+                for name in names.tolist()
+                if "\n" in str(name) or "\r" in str(name)
+            ),
+            None,
+        )
+        if broken is not None:
+            raise ValueError(
+                f"The {what} {broken!r} holds a line break, which the matrix's "
+                "lists cannot hold; write the clones as a clone table instead"
+            )
     folder = Path(os.fspath(path)).parent
     with _open_output(path) as handle:
         handle.write("%%MatrixMarket matrix coordinate integer general\n")

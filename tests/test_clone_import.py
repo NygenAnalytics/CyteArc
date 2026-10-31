@@ -7,6 +7,7 @@ that check reuse, read-only stores or the memory budget copy the template.
 
 import gzip
 import math
+import re
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -840,6 +841,58 @@ def test_the_exported_matrix_lists_its_cells_and_clones_and_imports_back(
     )
     assert shared.store.clones.load_clones(again).cells.equals(
         shared.store.clones.load_clones(ref).cells
+    )
+
+
+def test_labels_that_a_clone_table_reads_as_no_clone_export_only_as_a_matrix(
+    store, tmp_path
+) -> None:
+    cells = every_cell(store)
+    named = {0: "NA", 1: "nan", 2: "NaN"}
+    labels = np.asarray(
+        [
+            named.get(int(clone), f"L{clone}") if clone >= 0 else ""
+            for clone in TRUTH.clones
+        ],
+        dtype=object,
+    )
+    store.cells.insert("lineage", labels)
+    ref = store.clones.from_column("lineage", cell_selection=cells)
+
+    # A clone table would read these labels back as cells without a clone.
+    with pytest.raises(ValueError, match="'NA', 'nan', 'NaN' read as no clone"):
+        store.clones.export_clones(ref, tmp_path / "clones.csv")
+    assert not (tmp_path / "clones.csv").exists()
+
+    folder = _folder(tmp_path, "matrix")
+    store.clones.export_clones(ref, folder / "clones.mtx", format="matrix")
+    again = store.clones.import_clones(folder / "clones.mtx", cell_selection=cells)
+    assert store.clones.load_clones(again).cells.equals(
+        store.clones.load_clones(ref).cells
+    )
+
+
+def test_labels_that_hold_line_breaks_export_only_as_a_table(store, tmp_path) -> None:
+    cells = every_cell(store)
+    rows = [
+        (cell, "two\nlines" if clone == 0 else f"c{clone}")
+        for cell, clone in zip(TRUTH.cell_ids, TRUTH.clones, strict=True)
+        if clone >= 0
+    ]
+    path = tmp_path / "clones.csv"
+    pd.DataFrame(rows, columns=["Cell_ID", "Clone_ID"]).to_csv(path, index=False)
+    ref = store.clones.import_clones(path, cell_selection=cells)
+
+    # The matrix's clone list holds one label per line.
+    folder = _folder(tmp_path, "matrix")
+    with pytest.raises(ValueError, match=re.escape("'two\\nlines' holds a line break")):
+        store.clones.export_clones(ref, folder / "clones.mtx", format="matrix")
+    assert list(folder.iterdir()) == []
+
+    store.clones.export_clones(ref, tmp_path / "out.csv")
+    again = store.clones.import_clones(tmp_path / "out.csv", cell_selection=cells)
+    assert store.clones.load_clones(again).cells.equals(
+        store.clones.load_clones(ref).cells
     )
 
 

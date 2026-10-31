@@ -663,11 +663,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a complete ``clones`` artifact, or
-                ``format`` is unknown.
+            ValueError: If ``clones`` is not a complete ``clones`` artifact,
+                ``format`` is unknown, a ``"table"`` would hold a clone label
+                that reads as no clone, such as ``"NA"``, or a ``"matrix"``
+                would list a label or cell ID that holds a line break.
             MemoryError: If the export, about 200 bytes per cell, does not
                 fit the memory budget.
         """
+        from ...readers.clone_tables import MISSING_TEXT
         from ...writers.clone_tables import write_clone_matrix, write_clone_table
 
         if not isinstance(path, str | os.PathLike):
@@ -686,6 +689,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "Raise mem_budget."
             )
         clone_ids = _read(group, "clone_ids").astype(str).astype(object)
+        if format == "table":
+            # A clone table reads these labels back as cells without a clone.
+            lost = [label for label in clone_ids.tolist() if label in MISSING_TEXT]
+            if lost:
+                raise ValueError(
+                    "The clone labels "
+                    + ", ".join(repr(label) for label in lost[:5])
+                    + " read as no clone in a clone table; export these clones "
+                    "with format='matrix', whose clone list keeps them"
+                )
         assigned = codes >= 0
         cell_ids = np.asarray(self._clone_cell_ids(clones), dtype=object)[assigned]
         if format == "table":

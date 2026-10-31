@@ -77,6 +77,7 @@ __all__ = [
     "CLONE_FORMATS",
     "CloneLayout",
     "CloneRows",
+    "MISSING_TEXT",
     "MatrixEntries",
     "clone_layout",
     "iter_clone_rows",
@@ -120,8 +121,9 @@ _H5AD_FORMATS = frozenset({"cospar_h5ad", "mito", "h5ad"})
 _COLUMN_ROLES = frozenset({"cell", "clone", "probability"})
 _HDF5_SIGNATURE = b"\x89HDF\r\n\x1a\n"
 _GZIP_SIGNATURE = b"\x1f\x8b"
-# Text that R and pandas write for a missing value.
-_MISSING_TEXT = frozenset({"", "NA", "NaN", "nan"})
+#: Text that R and pandas write for a missing value, which a table's clone
+#: column reads as no clone.
+MISSING_TEXT = frozenset({"", "NA", "NaN", "nan"})
 _MITO_UNASSIGNED = "unassigned"
 # Rows after the header that the layout samples for their fields and width.
 _SAMPLE_ROWS = 100
@@ -968,7 +970,7 @@ def _probabilities(
     table: "_TextLayout | None" = None,
 ) -> np.ndarray:
     text = values.str.strip()
-    missing = text.isin(_MISSING_TEXT).to_numpy()
+    missing = text.isin(MISSING_TEXT).to_numpy()
     numbers = pd.to_numeric(text.where(~missing, None), errors="coerce").to_numpy(
         dtype=np.float64
     )
@@ -986,7 +988,7 @@ def _probabilities(
 def _table_labels(values: pd.Series, format: str) -> np.ndarray:
     text = values.str.strip()
     labels = text.to_numpy(dtype=object)
-    missing = text.isin(_MISSING_TEXT).to_numpy()
+    missing = text.isin(MISSING_TEXT).to_numpy()
     if format == "cassiopeia":
         # Cassiopeia writes lineage group 0 for a cell without a clone, as an
         # integer or, beside missing groups, as a float, so 4.0 is group 4.
