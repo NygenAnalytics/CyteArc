@@ -12,19 +12,24 @@ frequencies as Signac's ``FindClonotypes`` does: each cell's neighbourhood
 is itself and the cells most similar to it by the cosine similarity of
 square-root allele frequencies; neighbourhoods give a shared-neighbour graph
 whose edges weigh the Jaccard index of two neighbourhoods, as Seurat's
-``FindNeighbors`` builds it, except that a cell with more than ``k**2``
-joins, which only cells that tie reach, keeps its neighbour edges; and the
-Leiden algorithm partitions the graph where Seurat uses SLM. The similarity of two cells counts only the variants
+``FindNeighbors`` builds it; and the Leiden algorithm partitions the graph
+where Seurat uses SLM. The similarity of two cells counts only the variants
 that both cover. Cells that cover no chosen variant, that show none, or
 that are similar to no other cell carry no evidence of a clone and get
-none. These functions never touch storage.
+none. Every cell is compared with every other cell of its group, so the
+time grows with the square of the cells. These functions never touch
+storage.
 """
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from .counts import SiteTable
+
+if TYPE_CHECKING:
+    from scipy.sparse import coo_matrix
 
 __all__ = [
     "CLONE_STATUSES",
@@ -54,12 +59,24 @@ _SIMILARITY_DECIMALS = 12
 # neighbours are chosen: the products, the similarities, and the masks and
 # ranks of the selection.
 _BLOCK_ARRAYS = 8
-# Bytes of a kept join of the shared-neighbour graph (its cells, weight and
-# pair key, and their copies while joins are merged), and of a candidate
+# Bytes per cell and variant held while a group's neighbourhoods are found:
+# the square-root frequencies, the covered values, their squares and the
+# coverage weights as float64, and the coverage mask, rounded up.
+_VALUE_BYTES = 40
+# Bytes per cell of the per-cell arrays: its group, status and clone.
+_CELL_BYTES = 24
+# Bytes per neighbourhood slot while the shared-neighbour graph is built:
+# the neighbourhoods, the matrix of who holds whom and its transpose, and
+# the arrays that build them and bound each cell's joins.
+_SLOT_BYTES = 64
+# Bytes of a kept join of the shared-neighbour graph (its cells and weight,
+# and their copies while the blocks' joins are merged), and of a candidate
 # join while a block is computed (the product's entries, their cells,
-# Jaccard indices, masks and ranks).
+# Jaccard indices, masks and order).
 _JOIN_BYTES = 64
 _CANDIDATE_BYTES = 96
+# Bytes per entry of the CSR graph that the Leiden algorithm reads.
+_CSR_ENTRY_BYTES = 12
 
 
 def band_frequencies(
@@ -125,8 +142,17 @@ def band_frequencies(
 
 def neighborhood_bytes_per_cell(n_cells: int, n_variants: int) -> int:
     """Bytes that :func:`cosine_neighborhoods` holds per row of a block, beside
-    its inputs: arrays the width of the cells, and copies of the variants."""
+    the arrays of every cell's values: arrays the width of the cells, and
+    copies of the block's variants."""
     return _BLOCK_ARRAYS * 8 * max(n_cells, 1) + 3 * 8 * max(n_variants, 1)
+
+
+def _value_range(values: np.ndarray) -> tuple[float, float]:
+    """The lowest and highest value that is not NaN, without a copy; (inf,
+    -inf) when every value is NaN."""
+    low = float(np.fmin.reduce(values, axis=None, initial=np.inf))
+    high = float(np.fmax.reduce(values, axis=None, initial=-np.inf))
+    return low, high
 
 
 def cosine_neighborhoods(
@@ -163,7 +189,8 @@ def cosine_neighborhoods(
     values = np.asarray(values, dtype=np.float64)
     if values.ndim != 2:
         raise ValueError("values must be a matrix of cells by variants")
-    if np.any(values[np.isfinite(values)] < 0) or np.any(np.isinf(values)):
+    low, high = _value_range(values)
+    if low < 0 or high == np.inf:
         raise ValueError("values must be finite and non-negative, or NaN")
     if n_neighbors < 1 or block_rows < 1:
         raise ValueError("n_neighbors and block_rows must be at least 1")
@@ -175,21 +202,20 @@ def cosine_neighborhoods(
         return neighborhoods
     covered = ~np.isnan(values)
     shown = np.where(covered, values, 0.0)
-    squares = shown * shown
     weights = covered.astype(np.float64)
-    shown_t = np.ascontiguousarray(shown.T)
-    squares_t = np.ascontiguousarray(squares.T)
-    weights_t = np.ascontiguousarray(weights.T)
+    del covered
+    squares = shown * shown
     columns = np.arange(n_cells, dtype=np.int64)
     for start in range(0, n_cells, block_rows):
         stop = min(start + block_rows, n_cells)
+        # Products with the transposed arrays read them in place.
         similarity = _block_similarity(
             shown[start:stop],
             squares[start:stop],
             weights[start:stop],
-            shown_t,
-            squares_t,
-            weights_t,
+            shown.T,
+            squares.T,
+            weights.T,
         )
         rows = np.arange(stop - start)
         # A cell is its own first neighbour, never one of the others.
@@ -291,13 +317,13 @@ def frequency_clones(
     similar cells by :func:`cosine_neighborhoods` of the square roots of its
     frequencies. Two cells that share a neighbour are joined with the Jaccard
     index of their neighbourhoods, the shared cells over the cells in either,
-    and joins below 1/15 are dropped, as in Seurat's ``FindNeighbors``. A cell
-    with more than ``n_neighbors**2`` joins, which only cells that tie reach,
-    keeps its joins along neighbour edges, so the graph stays linear in the
-    cells. The Leiden algorithm partitions each group's graph at
-    ``resolution``. A cell
-    without coverage of any variant, without an alternative allele at any
-    covered variant, or without a join, gets no clone.
+    and joins below 1/15 are dropped, as in Seurat's ``FindNeighbors``. Cells
+    that tie, such as cells that each show one variant, take the same few
+    cells as neighbours and join every other such cell, so the graph grows
+    with the square of their number. The Leiden algorithm partitions each
+    group's graph at ``resolution``. A cell without coverage of any variant,
+    without an alternative allele at any covered variant, or without a join,
+    gets no clone.
 
     Args:
         frequencies: Allele frequencies shaped (cells, variants), NaN where
@@ -322,13 +348,12 @@ def frequency_clones(
     from scipy.sparse import coo_matrix
 
     from ..clustering.leiden import leiden_membership, native_leiden_peak_bytes
-    from ..neighbors.graph import shared_neighbor_graph
 
     frequencies = np.asarray(frequencies, dtype=np.float64)
     if frequencies.ndim != 2:
         raise ValueError("frequencies must be a matrix of cells by variants")
-    present = frequencies[~np.isnan(frequencies)]
-    if np.any(present < 0) or np.any(present > 1):
+    low, high = _value_range(frequencies)
+    if low < 0 or high > 1:
         raise ValueError("Allele frequencies must lie in [0, 1], or be NaN")
     n_cells, n_variants = frequencies.shape
     group_codes = (
@@ -338,77 +363,124 @@ def frequency_clones(
     )
     if group_codes.shape != (n_cells,):
         raise ValueError("groups must hold one group per cell")
-    status = np.zeros(n_cells, dtype=np.int8)
-    covered = ~np.isnan(frequencies)
-    status[~covered.any(axis=1)] = CLONE_STATUSES.index("no_coverage")
-    shown = np.where(covered, frequencies, 0.0) > 0
-    status[covered.any(axis=1) & ~shown.any(axis=1)] = CLONE_STATUSES.index(
-        "no_alternative"
+    budget = (
+        f"the {memory_bytes} bytes that the memory budget leaves beside the "
+        "allele frequencies"
     )
+    cell_bytes = _CELL_BYTES * n_cells
+    # Each cell's status reads a mask of a byte per frequency, one at a time.
+    if cell_bytes + frequencies.size > memory_bytes:
+        raise MemoryError(
+            f"Checking the coverage of {n_cells} cells over {n_variants} variants "
+            f"needs about {cell_bytes + frequencies.size} bytes, more than {budget}. "
+            "Raise mem_budget."
+        )
+    status = np.zeros(n_cells, dtype=np.int8)
+    covered = ~np.isnan(frequencies).all(axis=1)
+    shown = (frequencies > 0).any(axis=1)
+    status[~covered] = CLONE_STATUSES.index("no_coverage")
+    status[covered & ~shown] = CLONE_STATUSES.index("no_alternative")
     status[group_codes < 0] = CLONE_STATUSES.index("no_group")
+    del covered, shown
     clusters = np.zeros(n_cells, dtype=np.int64)
     n_edges = 0
     for group in np.unique(group_codes[status == 0]).tolist():
         members = np.flatnonzero((group_codes == group) & (status == 0))
-        values = np.sqrt(frequencies[members])
-        per_row = neighborhood_bytes_per_cell(len(members), n_variants)
-        held = 4 * 8 * values.size
+        n_members = len(members)
+        per_row = neighborhood_bytes_per_cell(n_members, n_variants)
+        held = (
+            cell_bytes
+            + _VALUE_BYTES * n_members * n_variants
+            + 8 * n_neighbors * n_members
+        )
         block_rows = int((memory_bytes - held) // per_row)
         if block_rows < 1:
             raise MemoryError(
-                f"Comparing the allele frequencies of {len(members)} cells over "
+                f"Comparing the allele frequencies of {n_members} cells over "
                 f"{n_variants} variants needs about {held + per_row} bytes, more "
-                f"than the memory budget of {memory_bytes} bytes. Raise mem_budget, "
-                "or call clones within smaller groups."
+                f"than {budget}. Raise mem_budget, or call clones within smaller "
+                "groups."
             )
+        values = frequencies[members]
+        np.sqrt(values, out=values)
         neighborhoods = cosine_neighborhoods(
-            values, n_neighbors=n_neighbors, block_rows=min(block_rows, len(members))
+            values, n_neighbors=n_neighbors, block_rows=min(block_rows, n_members)
         )
-        # A cell with more than n_neighbors**2 joins, which only cells that
-        # tie reach, keeps its neighbour edges; candidate joins are computed in
-        # blocks that fit the budget left beside the kept joins.
-        max_joins = n_neighbors * n_neighbors
-        kept_bytes = _JOIN_BYTES * (max_joins + 2 * n_neighbors) * len(members)
-        room = memory_bytes - kept_bytes
-        if room < _CANDIDATE_BYTES * n_neighbors * n_neighbors:
-            raise MemoryError(
-                f"The shared-neighbour graph of {len(members)} cells takes about "
-                f"{kept_bytes} bytes, more than the memory budget of {memory_bytes} "
-                "bytes. Raise mem_budget, lower n_neighbors, or call clones within "
-                "smaller groups."
-            )
-        graph = shared_neighbor_graph(
-            neighborhoods,
-            max_joins=max_joins,
-            max_entries=room // _CANDIDATE_BYTES,
+        del values
+        graph = _shared_neighbor_graph(
+            neighborhoods, memory_bytes=memory_bytes - cell_bytes, budget=budget
         )
-        degree = np.bincount(graph.row, minlength=len(members)) + np.bincount(
-            graph.col, minlength=len(members)
+        del neighborhoods
+        degree = np.bincount(graph.row, minlength=n_members) + np.bincount(
+            graph.col, minlength=n_members
         )
         joined = degree > 0
         status[members[~joined]] = CLONE_STATUSES.index("no_neighbor")
         if not joined.any():
             continue
         kept = np.flatnonzero(joined)
-        renumber = np.full(len(members), -1, dtype=np.int64)
+        renumber = np.full(n_members, -1, dtype=np.int64)
         renumber[kept] = np.arange(len(kept))
         subgraph = coo_matrix(
             (graph.data, (renumber[graph.row], renumber[graph.col])),
             shape=(len(kept), len(kept)),
         ).tocsr()
+        del graph, renumber
         n_edges += int(subgraph.nnz)
-        leiden_bytes = native_leiden_peak_bytes(len(kept), 2 * int(subgraph.nnz))
+        leiden_bytes = (
+            cell_bytes
+            + native_leiden_peak_bytes(len(kept), 2 * int(subgraph.nnz))
+            + _CSR_ENTRY_BYTES * int(subgraph.nnz)
+            + 8 * (len(kept) + 1)
+        )
         if leiden_bytes > memory_bytes:
             raise MemoryError(
                 f"Partitioning the shared-neighbour graph of {len(kept)} cells needs "
-                f"about {leiden_bytes} bytes, more than the memory budget of "
-                f"{memory_bytes} bytes. Raise mem_budget."
+                f"about {leiden_bytes} bytes, more than {budget}. Raise mem_budget."
             )
         labels = leiden_membership(subgraph, resolution, random_seed, nthreads=nthreads)
         clusters[members[kept]] = np.asarray(labels, dtype=np.int64)
     return FrequencyClones(
         clusters=clusters, groups=group_codes, status=status, n_edges=n_edges
     )
+
+
+def _shared_neighbor_graph(
+    neighborhoods: np.ndarray, *, memory_bytes: int, budget: str
+) -> "coo_matrix":
+    """Seurat's shared-neighbour graph of a group's neighbourhoods, built in
+    blocks of candidate joins within ``memory_bytes``.
+
+    A quarter of the room beside the neighbourhoods holds a block of
+    candidate joins, at least the candidates of the cell with the most, and
+    the rest the kept joins; the graph does not depend on the split.
+    """
+    from ..neighbors.graph import shared_neighbor_bounds, shared_neighbor_graph
+
+    n_members = neighborhoods.shape[0]
+    fixed = _SLOT_BYTES * neighborhoods.size
+    largest = int(shared_neighbor_bounds(neighborhoods).max(initial=0))
+    room = memory_bytes - fixed
+    max_entries = max(largest, room // (4 * _CANDIDATE_BYTES), 1)
+    max_joins = (room - _CANDIDATE_BYTES * max_entries) // _JOIN_BYTES
+    if max_joins < 1:
+        raise MemoryError(
+            f"The shared-neighbour graph of {n_members} cells needs about "
+            f"{fixed + _CANDIDATE_BYTES * max_entries + _JOIN_BYTES} bytes before it "
+            f"holds a join, more than {budget}. Raise mem_budget, lower "
+            "n_neighbors, or call clones within smaller groups."
+        )
+    try:
+        return shared_neighbor_graph(
+            neighborhoods, max_joins=int(max_joins), max_entries=int(max_entries)
+        )
+    except MemoryError as error:
+        raise MemoryError(
+            f"The shared-neighbour graph of {n_members} cells does not fit {budget}: "
+            f"{error}. Cells that tie, such as cells that each show one informative "
+            "variant, take the same few neighbours and join every other such cell. "
+            "Raise mem_budget, or call clones within smaller groups."
+        ) from error
 
 
 def clone_status_counts(status: np.ndarray) -> dict[str, int]:

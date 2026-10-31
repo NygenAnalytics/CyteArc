@@ -1,6 +1,8 @@
 """Allele frequencies, masked cosine neighbourhoods, the shared-neighbour graph and
 the clones they give, against values derived by hand."""
 
+import tracemalloc
+
 import numpy as np
 import pytest
 from scipy.sparse import coo_matrix
@@ -182,38 +184,76 @@ def test_shared_neighbour_graph_weighs_the_jaccard_index_of_neighbourhoods() -> 
     pruned = shared_neighbor_graph(neighborhoods)
     assert np.all(pruned.data >= 1 / 15)
     assert len(pruned.data) == sum(value >= 1 / 15 for value in expected.values())
+    # The joins come sorted by row and then column.
+    keys = graph.row.astype(np.int64) * 30 + graph.col
+    assert np.all(np.diff(keys) > 0)
     # Blocks of cells change nothing.
     blocked = shared_neighbor_graph(neighborhoods, prune=0.0, max_entries=40)
-    assert sorted(zip(blocked.row, blocked.col, blocked.data, strict=True)) == sorted(
-        zip(graph.row, graph.col, graph.data, strict=True)
+    np.testing.assert_array_equal(blocked.row, graph.row)
+    np.testing.assert_array_equal(blocked.col, graph.col)
+    np.testing.assert_array_equal(blocked.data, graph.data)
+    # A graph of more joins than max_joins is refused; one of as many is not.
+    exact = shared_neighbor_graph(
+        neighborhoods, prune=0.0, max_joins=len(expected), max_entries=40
     )
-    # A cell with more joins than the limit keeps those along neighbour
-    # edges; a pair stays when either cell keeps it.
-    capped = shared_neighbor_graph(neighborhoods, prune=0.0, max_joins=3)
-    kept = {(int(r), int(c)) for r, c in zip(capped.row, capped.col, strict=True)}
-    sets = [set(row[row >= 0].tolist()) for row in neighborhoods]
-    joins = {cell: [pair for pair in expected if cell in pair] for cell in range(30)}
-    for (first, second), _value in expected.items():
-        along = second in sets[first] or first in sets[second]
-        either_within = len(joins[first]) <= 3 or len(joins[second]) <= 3
-        assert ((first, second) in kept) == (along or either_within)
+    assert len(exact.data) == len(expected)
+    with pytest.raises(MemoryError, match="holds more than the 99 joins"):
+        shared_neighbor_graph(neighborhoods, prune=0.0, max_joins=99, max_entries=40)
     with pytest.raises(MemoryError, match="may share neighbours with"):
         shared_neighbor_graph(neighborhoods, max_entries=3)
 
 
-def test_cells_that_tie_join_through_shared_neighbours_not_a_clique() -> None:
+def test_a_jaccard_index_of_one_fifteenth_is_kept_and_less_is_dropped() -> None:
+    # Cell 0's ten cells share one with cell 10's six: 1 / (10 + 6 - 1) is
+    # 1/15, which Seurat keeps. Cell 20's seven share one with cell 0: 1/16.
+    neighborhoods = np.full((26, 10), -1)
+    for cell in range(26):
+        neighborhoods[cell, 0] = cell
+    neighborhoods[0] = np.arange(10)
+    neighborhoods[10, :6] = [10, 1, 11, 12, 13, 14]
+    neighborhoods[20, :7] = [20, 2, 21, 22, 23, 24, 25]
+    graph = shared_neighbor_graph(neighborhoods)
+    weights = {
+        (int(row), int(column)): float(value)
+        for row, column, value in zip(graph.row, graph.col, graph.data, strict=True)
+    }
+    assert weights[(0, 10)] == 1 / 15
+    assert (0, 20) not in weights
+    assert (0, 20) in {
+        (int(row), int(column))
+        for row, column in zip(
+            *shared_neighbor_graph(neighborhoods, prune=1 / 16).nonzero(), strict=True
+        )
+    }
+
+
+def test_cells_that_tie_join_every_other_such_cell_as_seurat_joins_them() -> None:
     # 200 identical cells take the lowest positions as neighbours, so every
-    # pair shares them: Seurat's graph joins every pair, and the limit keeps
-    # each cell's joins to those few.
+    # pair shares them and Seurat's graph joins every pair: 9/11 between two
+    # cells beyond the first ten, which share nine of eleven cells.
     values = np.full((200, 3), 0.5)
     neighborhoods = cosine_neighborhoods(values, n_neighbors=10, block_rows=50)
-    assert len(shared_neighbor_graph(neighborhoods).data) == 200 * 199 // 2
-    capped = shared_neighbor_graph(neighborhoods, max_joins=100)
-    assert len(capped.data) <= 200 * 9
+    graph = shared_neighbor_graph(neighborhoods)
+    assert len(graph.data) == 200 * 199 // 2
+    beyond = (graph.row >= 10) & (graph.col >= 10)
+    np.testing.assert_allclose(graph.data[beyond], 9 / 11)
     called = frequency_clones(
         values**2, n_neighbors=10, resolution=1.0, random_seed=1, memory_bytes=1 << 30
     )
-    assert set(called.clusters.tolist()) == {1}
+    assert called.n_edges == 200 * 199 // 2
+    assert np.all(called.clusters > 0)
+    assert clone_status_counts(called.status)["clustered"] == 200
+    # A budget that holds the similarities but not the 19,900 joins fails
+    # before any clone is called, and says why.
+    with pytest.raises(MemoryError, match="Cells that tie") as raised:
+        frequency_clones(
+            values**2,
+            n_neighbors=10,
+            resolution=1.0,
+            random_seed=1,
+            memory_bytes=1_000_000,
+        )
+    assert "holds more than" in str(raised.value)
 
 
 def test_shared_neighbour_graph_refuses_malformed_neighbourhoods() -> None:
@@ -364,19 +404,25 @@ def test_frequency_clones_check_inputs_and_memory() -> None:
             memory_bytes=1,
         )
     frequencies, _truth = _two_clones(np.random.default_rng(2))
+    # Enough for the coverage masks but not for the similarities.
     with pytest.raises(MemoryError, match="Comparing the allele frequencies"):
         frequency_clones(
-            frequencies, n_neighbors=5, resolution=1.0, random_seed=1, memory_bytes=1000
+            frequencies, n_neighbors=5, resolution=1.0, random_seed=1, memory_bytes=5000
         )
-    # Enough for the similarities but not for the graph.
-    with pytest.raises(MemoryError, match="shared-neighbour graph"):
-        frequency_clones(
-            frequencies,
-            n_neighbors=5,
-            resolution=1.0,
-            random_seed=1,
-            memory_bytes=40_000,
-        )
+    # Enough for the similarities but not for the graph's fixed arrays, then
+    # not for its joins.
+    for budget, message in (
+        (12_000, "before it holds a join"),
+        (40_000, "graph of 40 cells does not fit"),
+    ):
+        with pytest.raises(MemoryError, match=message):
+            frequency_clones(
+                frequencies,
+                n_neighbors=5,
+                resolution=1.0,
+                random_seed=1,
+                memory_bytes=budget,
+            )
     # Enough for the similarities and the graph, but not for partitioning the
     # two cells that join, which needs the Leiden backend's fixed 256 KiB.
     with pytest.raises(
@@ -388,6 +434,85 @@ def test_frequency_clones_check_inputs_and_memory() -> None:
             resolution=1.0,
             random_seed=1,
             memory_bytes=10_000,
+        )
+
+
+def _peak_bytes(call) -> int:
+    """The traced bytes that ``call`` holds at its peak beyond what was held
+    before it."""
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        call()
+        return tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+
+
+def _smallest_accepted_budget(call, *, high: int) -> int:
+    """The smallest memory budget that ``call(budget)`` accepts, within 2%,
+    by bisection on its MemoryError."""
+    low = 1
+    while high - low > max(low // 50, 1024):
+        middle = (low + high) // 2
+        try:
+            call(middle)
+        except MemoryError:
+            low = middle
+        else:
+            high = middle
+    return high
+
+
+@pytest.mark.parametrize(
+    ("n_cells", "n_variants", "n_groups"),
+    [(600, 100, 1), (600, 100, 3), (1500, 8, 1)],
+)
+def test_frequency_clones_hold_no_more_than_the_smallest_budget_they_accept(
+    n_cells, n_variants, n_groups
+) -> None:
+    # Clones marked by variants of their own, sparse noise and uncovered
+    # entries; every frequency is held apart from the budget, as the input.
+    rng = np.random.default_rng(n_cells + n_variants)
+    clone = rng.integers(0, 8, size=n_cells)
+    owner = rng.integers(0, 8, size=n_variants)
+    frequencies = np.where(
+        clone[:, None] == owner[None, :],
+        rng.uniform(0.2, 0.9, size=(n_cells, n_variants)),
+        0.0,
+    )
+    noise = rng.random(frequencies.shape) < 0.02
+    frequencies[noise] = rng.uniform(0.01, 0.1, size=int(noise.sum()))
+    frequencies[rng.random(frequencies.shape) < 0.15] = np.nan
+    groups = np.arange(n_cells) % n_groups
+
+    def call(budget: int) -> None:
+        frequency_clones(
+            frequencies,
+            groups=groups,
+            n_neighbors=10,
+            resolution=1.0,
+            random_seed=1,
+            memory_bytes=budget,
+            nthreads=1,
+        )
+
+    budget = _smallest_accepted_budget(call, high=1 << 30)
+    assert _peak_bytes(lambda: call(budget)) <= budget
+
+
+def test_frequency_clones_refuse_a_budget_below_the_coverage_masks() -> None:
+    # The similarities of each group of two cells fit, but not the mask of
+    # all 500 cells' coverage, a byte per frequency.
+    frequencies = np.full((500, 400), 0.5)
+    with pytest.raises(MemoryError, match="Checking the coverage of 500 cells"):
+        frequency_clones(
+            frequencies,
+            groups=np.arange(500) // 2,
+            n_neighbors=2,
+            resolution=1.0,
+            random_seed=1,
+            memory_bytes=190_000,
         )
 
 

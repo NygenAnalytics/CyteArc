@@ -24,6 +24,9 @@ pytestmark = pytest.mark.benchmark
 
 N_POSITIONS = 2_000
 LADDER = Ladder(sizes=(250, 500, 1_000, 2_000), smoke=12)
+# Clones compare every cell with every other, whose cost overtakes the fixed
+# costs only past a thousand cells, so their fit starts there.
+CLONE_LADDER = Ladder(sizes=(1_000, 2_000, 4_000, 8_000), smoke=12)
 
 
 @lru_cache(maxsize=2)
@@ -274,4 +277,4 @@ def test_clones_call_from_allele_frequencies(bench) -> None:
         for label in np.unique(called.clusters[called.clusters > 0]).tolist():
             assert len(np.unique(clones[called.clusters == label])) == 1
 
-    bench("variants.clones", make, LADDER, check=check)
+    bench("variants.clones", make, CLONE_LADDER, check=check)

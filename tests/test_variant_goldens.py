@@ -241,11 +241,10 @@ def test_clones_agree_with_signac_find_clonotypes(tmp_path) -> None:
     assert adjusted_rand_score(signac.loc[assigned.index], assigned.astype(str)) > 0.75
     labelled = pd.Series(truth.clones.clones, index=truth.clones.cell_ids)
     labelled = labelled[labelled >= 0]
-    ours = adjusted_rand_score(
-        labelled.loc[labelled.index.intersection(assigned.index)],
-        assigned.loc[labelled.index.intersection(assigned.index)].astype(str),
-    )
-    theirs = adjusted_rand_score(labelled, signac.loc[labelled.index])
+    # Both over the labelled cells that CyteArc gives a clone.
+    common = labelled.index.intersection(assigned.index)
+    ours = adjusted_rand_score(labelled.loc[common], assigned.loc[common].astype(str))
+    theirs = adjusted_rand_score(labelled.loc[common], signac.loc[common])
     assert ours > 0.95 and ours > theirs
 
 
