@@ -1,11 +1,11 @@
 # Immune receptor repertoires
 
-Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, BD Rhapsody, TRUST4 and other AIRR producers), check each cell's chains, and label cells by receptor type, subtype and chain pairing. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, or any pipeline that writes AIRR Rearrangement files with cell IDs), check each cell's chains, and label cells by receptor type, subtype and chain pairing. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 
 - A store of the expression library's cells, and the V(D)J output of the same cells: `outs/filtered_contig_annotations.csv` from `cellranger vdj`, or `outs/per_sample_outs/<sample>/vdj_t/filtered_contig_annotations.csv` and `vdj_b/filtered_contig_annotations.csv` from `cellranger multi`.
-- An AIRR Rearrangement TSV with a `cell_id` column: Cell Ranger's `airr_rearrangement.tsv`, TRUST4's barcode AIRR file, BD Rhapsody's AIRR output, IgBLAST with Change-O, MiXCR, dandelion.
+- An AIRR Rearrangement TSV with a `cell_id` column, such as Cell Ranger's `airr_rearrangement.tsv`. Other pipelines' AIRR files read the same when they hold the required fields below; only Cell Ranger's are validated.
 
 ## Key concepts
 
@@ -14,7 +14,7 @@ Import the T cell and B cell receptor contigs of single-cell immune profiling (1
 - Required per file: a contig ID, `locus` or gene calls (an AIRR file without `locus` has it inferred from the calls that all name one locus), `junction_aa` and `productive`. AIRR files also need `cell_id`.
 - A cell ID is `barcode_prefix` + barcode + `barcode_suffix`, matched exactly; `barcode_pattern` (a regex with a named group `barcode`) keeps part of each barcode first. Each takes one value for every file or a list with one per file. Merged stores name cells `<sample>__<barcode>`. The rules are those of `clones.import_clones` and `perturbation.import_guide_calls`.
 - Contigs and barcodes outside the selection are counted (`n_file_contigs`, `n_unmatched_contigs`, `n_file_barcodes`, `n_unmatched_barcodes`, `unmatched_barcode_examples` attributes) and named in a warning, which a reused import gives again. Selected cells without contigs are kept as `"no IR"`.
-- Reuse follows each file's format, bytes, prefix, suffix and pattern, in any order; a moved file reuses, an edited file re-imports, `invalidate_cache=True` imports again. About 4x the encoded contigs at the peak, checked against `mem_budget` (about 1 GB per million cells with two contigs each).
+- Reuse follows each file's format, bytes, prefix, suffix and pattern, in any order; a moved file reuses, an edited file re-imports, `invalidate_cache=True` imports again. Up to 3x the encoded contigs plus about 400 bytes per selected cell at the peak, checked against `mem_budget` before anything is written. Encoded contigs take about 130 bytes each in Cell Ranger files without region sequences, 800 with them, 1,500 in AIRR files with sequences and alignments (about 1.2 GB per million cells with two contigs each of the first kind).
 - Chains (scirpy's receptor model): a contig counts when it has a locus of a receptor chain, a `junction_aa`, is productive (`productive_only=True`, default) and is not flagged `is_cell` or `high_confidence` False. Ranking within each arm: `umi_count`, `duplicate_count`, `consensus_count` (most first, missing as 0), then `junction` and `junction_aa` (later in sort order first), then contig ID. Arms: VJ (TRA, TRG, IGK, IGL) and VDJ (TRB, TRD, IGH). Up to two chains per arm fill `VJ_1`, `VJ_2`, `VDJ_1`, `VDJ_2`; more than two in an arm makes the cell `"multichain"`.
 - Labels, from the slots only:
   - `receptor_type` (canonical `values`): `"TCR"`, `"BCR"`, `"ambiguous"` (both kinds), `"multichain"`, `"no IR"`.
