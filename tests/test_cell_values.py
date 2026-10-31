@@ -616,6 +616,51 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
     assert scores.shape == (len(SELECTED), 1)
 
 
+def test_fate_bias_stores_the_declared_arrays(store) -> None:
+    # Early cells 0 and 1 are of clone a, 2 and 3 of b, 4 of c and 5 of none;
+    # the late cells 6 and 7, of fates x and y, are of clones a and b.
+    rows = np.arange(N_CELLS)
+    store.cells.insert(
+        "lineage", np.asarray(["a", "a", "b", "b", "c", "", "a", "b"], dtype=object)
+    )
+    store.cells.insert(
+        "outcome", np.asarray(["", "", "", "", "", "", "x", "y"], dtype=object)
+    )
+    store.cells.insert("every", np.ones(N_CELLS, dtype=bool))
+    store.cells.insert("last_two", rows >= 6)
+    clones = store.clones.from_column(
+        "lineage", cell_selection=store.snapshot_cell_selection("every")
+    )
+    bias = store.clones.fate_bias(
+        clones,
+        group_by="outcome",
+        early=store.snapshot_cell_selection("selected"),
+        late=store.snapshot_cell_selection("last_two"),
+    )
+    loaded = store.artifacts.load_values(bias)
+    np.testing.assert_array_equal(loaded.values, ["x", "x", "y", "y", "", ""])
+    assert loaded.categorical
+    assert loaded.cell_ids.tolist() == _cell_ids(SELECTED)
+    fractions = store.artifacts.load_values(bias, value="fractions").values
+    np.testing.assert_array_equal(
+        fractions, [[1, 0], [1, 0], [0, 1], [0, 1], [np.nan] * 2, [np.nan] * 2]
+    )
+    group = store.artifacts.load(bias)
+    per_cell = {
+        name
+        for name in group.array_keys()
+        if group[name].shape[0] == len(SELECTED)
+        and not name.startswith(MISSING_MASK_PREFIX)
+    }
+    # Two clones with late cells and two fates hold the other arrays.
+    assert per_cell == _declared("clone_fate_bias")
+    assert group["clone_fate_cells"].shape == (2, 2)
+    with_late = store.select_cells(bias, value="late_cells", low=1, keep_bounds=True)
+    assert store.artifacts.load_values(
+        bias, cell_selection=with_late
+    ).cell_ids.tolist() == _cell_ids(np.arange(4))
+
+
 def test_label_transfers_declare_every_per_cell_array() -> None:
     from cytearc.mapping.label_transfer import _transfer_array_requirements
 

@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from cytearc.datastore.datastore import DataStore
+from cytearc.utils.logging import logger
 from tests.storage_helpers import write_count_store
 
 pytestmark = pytest.mark.slow
@@ -60,6 +61,11 @@ def data(tmp_path_factory) -> SimpleNamespace:
         store.cells.insert(f"first_{n_first}", np.arange(N_CELLS) < n_first)
     store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
     store.cells.insert("first", np.arange(N_CELLS) < N_MEASURED)
+    # Late cells for fate bias, none of them among the first.
+    store.cells.insert("after_first", np.arange(N_CELLS) >= N_MEASURED)
+    store.cells.insert(
+        "next_300", (np.arange(N_CELLS) >= N_MEASURED) & (np.arange(N_CELLS) < 800)
+    )
     # Zipf clone sizes, about one cell in ten without a clone.
     sizes = np.minimum(rng.zipf(1.8, size=N_CELLS), 300)
     clone_of = np.repeat(np.arange(len(sizes)), sizes)[:N_CELLS]
@@ -85,16 +91,22 @@ def data(tmp_path_factory) -> SimpleNamespace:
         )
         for n_first in (220, 300, 800)
     }
+    next_300 = store.snapshot_cell_selection("next_300")
     return SimpleNamespace(
         store=store,
         every=every,
         first=first,
+        after_first=store.snapshot_cell_selection("after_first"),
+        next_300=next_300,
+        # A fate of its own for each of the 300 cells after the first.
+        own_next_300=store.snapshot_cluster_labels("own", cell_selection=next_300),
         clones=store.clones.from_column("clone", cell_selection=every),
         long=store.clones.from_column("long_clone", cell_selection=every),
         emoji=store.clones.from_column("emoji_clone", cell_selection=every),
         few=store.clones.from_column("clone", cell_selection=first),
         labels=store.snapshot_cluster_labels("donor", cell_selection=every),
         own_labels=own_labels,
+        own_labels_300=own_labels[300],
         named=sorted(set(labels.tolist()) - {""})[::3][:1_000],
     )
 
@@ -113,6 +125,63 @@ def _loaded(clones: str, **options: str) -> Callable[[SimpleNamespace], object]:
         selected = {name: getattr(data, value) for name, value in options.items()}
         saved = data.store.clones.expansion(getattr(data, clones), **selected)
         return data.store.clones.load_expansion(saved)
+
+    return run
+
+
+def _coupling(clones: str, **options: object) -> Callable[[SimpleNamespace], object]:
+    def run(data: SimpleNamespace) -> object:
+        chosen = {
+            name: getattr(data, value) if name == "groups" else value
+            for name, value in options.items()
+        }
+        return data.store.clones.coupling(getattr(data, clones), **chosen)
+
+    return run
+
+
+def _four_threads(run: Callable[[SimpleNamespace], object]) -> Callable:
+    def on_four(data: SimpleNamespace) -> object:
+        data.store.nthreads = 4
+        try:
+            return run(data)
+        finally:
+            data.store.nthreads = 1
+
+    return on_four
+
+
+def _fate_bias(
+    clones: str, late: str = "after_first", **options: object
+) -> Callable[[SimpleNamespace], object]:
+    def run(data: SimpleNamespace) -> object:
+        chosen = {
+            name: getattr(data, value) if name == "groups" else value
+            for name, value in options.items()
+        }
+        return data.store.clones.fate_bias(
+            getattr(data, clones),
+            early=data.first,
+            late=getattr(data, late),
+            invalidate_cache=True,
+            **chosen,
+        )
+
+    return run
+
+
+def _loaded_fate_bias(
+    clones: str, late: str = "after_first", **options: object
+) -> Callable[[SimpleNamespace], object]:
+    def run(data: SimpleNamespace) -> object:
+        chosen = {
+            name: getattr(data, value) if name == "groups" else value
+            for name, value in options.items()
+        }
+        saved = data.store.clones.fate_bias(
+            getattr(data, clones), early=data.first, late=getattr(data, late), **chosen
+        )
+        return data.store.clones.load_fate_bias(saved)
 
     return run
 
@@ -176,6 +245,36 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
     ),
     "track of a few cells by labels of every cell": lambda data: (
         data.store.clones.track(data.few, groups=data.labels)
+    ),
+    "coupling by two columns of long labels": _coupling(
+        "clones", group_by=["donor", "condition"]
+    ),
+    "coupling by a label for each of 300 cells": _coupling(
+        "clones", groups="own_labels_300", permutations=50
+    ),
+    "coupling on four threads by a label for each of 300 cells": _four_threads(
+        _coupling("clones", groups="own_labels_300", permutations=50)
+    ),
+    "coupling of one-cell clones by a label for each of 300 cells": _coupling(
+        "long", groups="own_labels_300", method="jaccard", permutations=50
+    ),
+    "coupling of a few cells by labels of every cell": _coupling(
+        "few", groups="labels", method="normalized_covariance"
+    ),
+    "fate bias by two columns of long labels": _fate_bias(
+        "clones", group_by=["donor", "condition"]
+    ),
+    "fate bias by a label for each of 300 late cells": _fate_bias(
+        "clones", late="next_300", groups="own_next_300"
+    ),
+    "fate bias of a few late cells of many clone cells": _fate_bias(
+        "long", late="next_300", group_by="emoji"
+    ),
+    "loaded fate bias of 160-character clone labels": _loaded_fate_bias(
+        "long", group_by="donor"
+    ),
+    "loaded fate bias of emoji clone labels by a label for each of 300 late cells": (
+        _loaded_fate_bias("emoji", late="next_300", groups="own_next_300")
     ),
 }
 
@@ -409,3 +508,41 @@ def test_grouping_by_columns_of_several_chunks_holds_its_budget(tmp_path) -> Non
         assert peak <= budget, (case, peak, budget)
         assert held_peak <= budget, (case, held_peak, budget)
         assert held_peak - peak > decoded[case] // 2, (case, peak, held_peak)
+
+
+def test_the_null_on_four_threads_stays_within_the_bytes_it_plans(data) -> None:
+    """With room for four workers, the coupling's plan bounds its traced peak.
+
+    The smallest budget accepted measures the null on one worker, so this
+    case gives the coupling room for four workers and 64 permutations at
+    once, and checks the peak against the bytes that its plan reports.
+    """
+    store, threads = data.store, data.store.nthreads
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="INFO"
+    )
+    store.nthreads = 4
+
+    def run() -> object:
+        return store.clones.coupling(
+            data.clones, groups=data.own_labels_300, permutations=200
+        )
+
+    try:
+        run()
+        messages.clear()
+        tracemalloc.start()
+        try:
+            run()
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    finally:
+        store.nthreads = threads
+        logger.remove(sink)
+    (line,) = [message for message in messages if "coupling of" in message]
+    assert "on 4 threads, 64 at once" in line, line
+    found = re.search(r"holding about (\d+) bytes", line)
+    assert found is not None, line
+    assert peak <= int(found.group(1)), (peak, line)

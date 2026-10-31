@@ -1,6 +1,7 @@
 """The clone plots, on clones whose sizes are counted by hand."""
 
 from collections import Counter
+from dataclasses import replace
 from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
@@ -14,9 +15,12 @@ from cytearc.plotting import (
     clonal_overlap,
     clonal_rarefaction,
     clone_abundance,
+    clone_coupling,
+    clone_fates,
     clone_tracking,
 )
 from cytearc.plotting._groups import cell_groups
+from cytearc.plotting._style import MAX_FIGURE_WIDTH_INCHES
 from tests.clone_helpers import (
     every_cell,
     import_truth_clones,
@@ -845,3 +849,267 @@ def test_the_tracking_plot_fits_many_clones_and_groups(many_groups) -> None:
     ticks = eighths.axes["tracking"].get_xticklabels()
     assert [tick.get_text() for tick in ticks] == names
     plt.close(eighths.figure)
+
+
+def test_the_coupling_plot_draws_z_scores_in_the_order_of_the_tree(truth_plot) -> None:
+    store, clones = truth_plot.store, truth_plot.clones
+    coupling = store.clones.coupling(clones, group_by="cell_type", permutations=200)
+    result = store.plots.clone_coupling(coupling, show=False)
+    matrix = result.tables["matrix"]
+    order = list(coupling.order)
+    assert matrix.index.tolist() == matrix.columns.tolist() == order
+    for row in coupling.pairs.itertuples(index=False):
+        assert matrix.loc[row.group_1, row.group_2] == row.z_score
+        assert matrix.loc[row.group_2, row.group_1] == row.z_score
+    assert np.isnan(np.diag(matrix)).all()
+    assert result.tables["pairs"] is coupling.pairs
+    ax = result.axes["matrix"]
+    assert ax.get_title() == "Cosine of clone shares, z-score"
+    assert [tick.get_text() for tick in ax.get_yticklabels()] == order
+    # Six cells off the diagonal print their z-scores, on a scale centred on 0.
+    assert len(ax.texts) == 6
+    low, high = ax.images[0].get_clim()
+    assert low == -high == -np.abs(coupling.pairs["z_score"]).max()
+    # z-scores take a scale centred on 0 even when all lie above it.
+    above = replace(
+        coupling,
+        pairs=coupling.pairs.assign(z_score=np.abs(coupling.pairs["z_score"]) + 1),
+    )
+    positive = clone_coupling(store, above, show=False)
+    low, high = positive.axes["matrix"].images[0].get_clim()
+    assert low == -high == -above.pairs["z_score"].max()
+    assert positive.axes["matrix"].images[0].cmap.name == "RdBu_r"
+    plt.close(positive.figure)
+    # The dendrogram above the matrix places its leaves under the columns.
+    dendrogram = result.axes["dendrogram"]
+    assert dendrogram.get_gid() == "top-dendrogram"
+    assert dendrogram.get_xlim() == ax.get_xlim()
+    assert result.legends[0].label == "z_score"
+    assert result.provenance.extras["method"] == "share_cosine"
+    assert result.provenance.extras["groups"] == order
+    assert result.provenance.n_cells == 32
+    plt.close(result.figure)
+    values = clone_coupling(store, coupling, value="coupling", show=False)
+    assert values.tables["matrix"].loc[order[0], order[1]] == pytest.approx(
+        coupling.pairs.set_index(["group_1", "group_2"]).loc[tuple(sorted(order[:2]))][
+            "coupling"
+        ]
+    )
+    # Cosines are not negative, so a sequential scale from their least.
+    assert values.axes["matrix"].images[0].cmap.name == "viridis"
+    assert values.axes["matrix"].get_title() == "Cosine of clone shares"
+    plt.close(values.figure)
+
+
+def test_the_coupling_plot_blanks_values_that_are_not_finite(truth_plot) -> None:
+    store, clones = truth_plot.store, truth_plot.clones
+    coupling = store.clones.coupling(
+        clones, group_by="cell_type", method="normalized_covariance", permutations=0
+    )
+    # Without permutations no z-score is defined, and nothing is printed.
+    result = clone_coupling(store, coupling, show=False)
+    assert np.isnan(result.tables["matrix"].to_numpy()).all()
+    assert len(result.axes["matrix"].texts) == 0
+    plt.close(result.figure)
+    # The truth's covariances are all above 0, which a sequential scale
+    # draws; covariances below 0 take a scale centred on 0.
+    assert coupling.pairs["coupling"].gt(0).all()
+    values = clone_coupling(store, coupling, value="coupling", show=False)
+    assert values.axes["matrix"].images[0].cmap.name == "viridis"
+    plt.close(values.figure)
+    below = replace(
+        coupling, pairs=coupling.pairs.assign(coupling=-coupling.pairs["coupling"])
+    )
+    negative = clone_coupling(store, below, value="coupling", show=False)
+    low, high = negative.axes["matrix"].images[0].get_clim()
+    assert low == -high == -coupling.pairs["coupling"].max()
+    plt.close(negative.figure)
+
+
+def test_the_coupling_plot_checks_its_arguments(truth_plot) -> None:
+    store, clones = truth_plot.store, truth_plot.clones
+    coupling = store.clones.coupling(clones, group_by="cell_type", permutations=0)
+    with pytest.raises(ValueError, match="value must be one of"):
+        clone_coupling(store, coupling, value="p_value", show=False)
+    with pytest.raises(TypeError, match="CloneCoupling"):
+        clone_coupling(store, coupling.pairs, show=False)
+    with pytest.raises(ValueError, match="does not follow its linkage"):
+        clone_coupling(store, replace(coupling, order=coupling.order[::-1]), show=False)
+
+
+def _late_cells(clone: int) -> dict[str, int]:
+    """A clone's d4 cells of each type, counted cell by cell."""
+    found: dict[str, int] = {}
+    for cell_type, own, sample in zip(
+        TRUTH.cell_types, TRUTH.clones, TRUTH.samples, strict=True
+    ):
+        if own == clone and sample == "d4":
+            found[str(cell_type)] = found.get(str(cell_type), 0) + 1
+    return found
+
+
+@pytest.fixture(scope="module")
+def fates_plot(truth_plot) -> SimpleNamespace:
+    store = truth_plot.store
+    store.cells.insert("is_d2", TRUTH.samples == "d2", overwrite=True)
+    store.cells.insert("is_d4", TRUTH.samples == "d4", overwrite=True)
+    bias = store.clones.fate_bias(
+        truth_plot.clones,
+        group_by="cell_type",
+        early=store.snapshot_cell_selection("is_d2"),
+        late=store.snapshot_cell_selection("is_d4"),
+    )
+    return SimpleNamespace(store=store, bias=bias, clones=truth_plot.clones)
+
+
+def test_the_fates_plot_groups_clones_by_their_dominant_fate(fates_plot) -> None:
+    result = fates_plot.store.plots.clone_fates(fates_plot.bias, show=False)
+    table = result.tables["clones"]
+    types = sorted(CELL_TYPES)
+    assert table.columns.tolist() == [
+        "clone",
+        "fate",
+        "early_cells",
+        "late_cells",
+        *types,
+    ]
+    tested = sorted({int(c) for c in TRUTH.clones[TRUTH.samples == "d4"] if c >= 0})
+
+    def dominant(clone: int) -> str | None:
+        found = _late_cells(clone)
+        top = max(found.values())
+        winners = [name for name in types if found.get(name, 0) == top]
+        return winners[0] if len(winners) == 1 else None
+
+    # By dominant fate in the order of the fates, ties last, then by late
+    # cells from the most and by clone.
+    def rank(clone: int) -> tuple:
+        fate = dominant(clone)
+        return (
+            types.index(fate) if fate else len(types),
+            -sum(_late_cells(clone).values()),
+            clone,
+        )
+
+    ordered = sorted(tested, key=rank)
+    assert table["clone"].tolist() == [str(clone + 1) for clone in ordered]
+    assert [
+        name if isinstance(name, str) else None for name in table["fate"].tolist()
+    ] == [dominant(clone) for clone in ordered]
+    for row, clone in zip(table.itertuples(index=False), ordered, strict=True):
+        found = _late_cells(clone)
+        assert [getattr(row, name) for name in types] == [
+            found.get(name, 0) for name in types
+        ]
+        assert row.late_cells == sum(found.values())
+        assert row.early_cells == int(
+            np.count_nonzero((TRUTH.clones == clone) & (TRUTH.samples == "d2"))
+        )
+    fates = result.axes["fates"]
+    assert [tick.get_text() for tick in fates.get_xticklabels()] == table[
+        "clone"
+    ].tolist()
+    # One bar per clone and fate, stacked to each clone's late cells.
+    heights = np.zeros(len(table))
+    for container in fates.containers:
+        heights += [bar.get_height() for bar in container]
+    np.testing.assert_array_equal(heights, table["late_cells"])
+    assert [bar.get_height() for bar in result.axes["early"].patches] == table[
+        "early_cells"
+    ].tolist()
+    assert result.axes["early"].get_xlim() == fates.get_xlim()
+    assert result.provenance.extras["clones"] == table["clone"].tolist()
+    plt.close(result.figure)
+
+
+def test_the_fates_plot_draws_the_top_clones_and_their_shares(fates_plot) -> None:
+    store, bias = fates_plot.store, fates_plot.bias
+    shares = clone_fates(store, bias, top=3, normalize=True, show=False)
+    table = shares.tables["clones"]
+    # The three clones with the most late cells: clones 3, 1 and 2 hold 4,
+    # 4 and 3, ties to the larger clone overall.
+    late = {
+        clone: sum(_late_cells(clone).values())
+        for clone in {int(c) for c in TRUTH.clones[TRUTH.samples == "d4"] if c >= 0}
+    }
+    chosen = sorted(late, key=lambda clone: (-late[clone], clone))[:3]
+    assert sorted(table["clone"].astype(int) - 1) == sorted(chosen)
+    heights = np.zeros(3)
+    for container in shares.axes["fates"].containers:
+        heights += [bar.get_height() for bar in container]
+    np.testing.assert_allclose(heights, 1.0)
+    assert shares.axes["fates"].get_ylabel() == "Share of late cells"
+    plt.close(shares.figure)
+    with pytest.raises(ValueError, match="top"):
+        clone_fates(store, bias, top=0, show=False)
+    with pytest.raises(TypeError, match="normalize must be a boolean"):
+        clone_fates(store, bias, normalize="yes", show=False)
+    with pytest.raises(TypeError, match="store does not provide clones.load_fate_bias"):
+        clone_fates(object(), bias, show=False)
+
+
+def test_the_coupling_plot_names_at_most_40_groups(many_groups) -> None:
+    store = many_groups.store
+    for n_first, named in ((40, True), (41, False)):
+        coupling = store.clones.coupling(
+            many_groups.clones,
+            group_by="cell",
+            cell_selection=store.snapshot_cell_selection(f"first_{n_first}"),
+            permutations=0,
+        )
+        # Each cell is a group of its own, and the two cells of a clone share
+        # all of it.
+        result = clone_coupling(store, coupling, value="coupling", show=False)
+        matrix = result.tables["matrix"]
+        assert matrix.loc["cell000", "cell001"] == pytest.approx(1.0)
+        assert matrix.loc["cell000", "cell002"] == 0.0
+        ax = result.axes["matrix"]
+        assert len(ax.get_xticklabels()) == (n_first if named else 0)
+        assert len(ax.texts) == 0
+        plt.close(result.figure)
+    # Shown by default: on Agg the owned figure is closed.
+    shown = clone_coupling(store, coupling, value="coupling")
+    assert shown.figure.number not in plt.get_fignums()
+    assert shown.figure.get_size_inches()[0] <= MAX_FIGURE_WIDTH_INCHES
+
+
+def test_the_fates_plot_names_at_most_40_clones(many_groups) -> None:
+    store = many_groups.store
+    # The even cell of each clone is early and the odd one late, in one of
+    # four fates.
+    store.cells.insert("even_cell", np.arange(N_MANY) % 2 == 0, overwrite=True)
+    store.cells.insert("odd_cell", np.arange(N_MANY) % 2 == 1, overwrite=True)
+    bias = store.clones.fate_bias(
+        many_groups.clones,
+        group_by="eighth",
+        early=store.snapshot_cell_selection("even_cell"),
+        late=store.snapshot_cell_selection("odd_cell"),
+    )
+    for top, named in ((40, True), (41, False)):
+        result = clone_fates(store, bias, top=top, show=False)
+        assert len(result.tables["clones"]) == top
+        ticks = result.axes["fates"].get_xticklabels()
+        assert len(ticks) == (top if named else 0)
+        plt.close(result.figure)
+    shown = clone_fates(store, bias, top=100)
+    assert shown.figure.number not in plt.get_fignums()
+    assert shown.figure.get_size_inches()[0] <= MAX_FIGURE_WIDTH_INCHES
+
+
+def test_the_fates_plot_draws_clones_without_a_dominant_fate_last(fates_plot) -> None:
+    store = fates_plot.store
+    # With the cells of d2 late, clone 3 (code 2) holds one monocyte and one
+    # undifferentiated cell there: a tie.
+    bias = store.clones.fate_bias(
+        fates_plot.clones,
+        group_by="cell_type",
+        early=store.snapshot_cell_selection("is_d4"),
+        late=store.snapshot_cell_selection("is_d2"),
+    )
+    result = clone_fates(store, bias, show=False)
+    table = result.tables["clones"]
+    tied = table["fate"].isna().to_numpy()
+    assert table.loc[tied, "clone"].tolist() == ["3"]
+    # Clones without a dominant fate come after every other clone.
+    assert tied[-1] and not tied[:-1].any()
+    plt.close(result.figure)

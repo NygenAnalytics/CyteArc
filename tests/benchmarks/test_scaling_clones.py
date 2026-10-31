@@ -1,8 +1,8 @@
-"""Benchmarks of the clone summaries: expansion, diversity, rarefaction and overlap.
+"""Benchmarks of the clone summaries: expansion, diversity, rarefaction, overlap and coupling.
 
 Clonal expansion counts each clone's cells within samples, diversity and
-rarefaction summarize each group's clone sizes, and overlap compares groups
-by the clones they share. Each benchmark runs one step on simulated clones
+rarefaction summarize each group's clone sizes, overlap compares groups by
+the clones they share, and coupling compares them against permuted labels. Each benchmark runs one step on simulated clones
 whose sizes follow a heavy-tailed draw, so a few clones hold many cells and
 most cells hold a clone of their own, with one cell in ten without a clone,
 and checks the result, so it doubles as a test at the smoke size. The
@@ -151,6 +151,50 @@ def test_overlap_pairs(bench) -> None:
         assert ((table["jaccard"] >= 0) & (table["jaccard"] <= 1)).all()
 
     bench("clones.overlap_pairs", make, LADDER, check=check)
+
+
+# Coupling measures 20 of the default 1,000 permutations, on one thread.
+COUPLING_PERMUTATIONS = 20
+COUPLING = Ladder(
+    sizes=(20_000, 40_000, 80_000, 160_000),
+    smoke=500,
+    work=1_000 / COUPLING_PERMUTATIONS,
+)
+
+
+def test_coupling(bench) -> None:
+    from cytearc.clones.fate import clone_coupling
+    from cytearc.clones.groups import pair_counts
+
+    n_groups = 16
+
+    def counts(n_cells: int):
+        codes = _clone_codes(n_cells)
+        has = codes >= 0
+        groups = np.random.default_rng([inputs.SEED, n_cells, n_groups]).integers(
+            0, n_groups, n_cells
+        )
+        return pair_counts(groups[has], codes[has])
+
+    def make(n_cells: int):
+        pair_groups, pair_codes, pair_cells = counts(n_cells)
+        return lambda: clone_coupling(
+            pair_groups,
+            pair_codes,
+            pair_cells,
+            n_groups,
+            permutations=COUPLING_PERMUTATIONS,
+        )
+
+    def check(n_cells: int, result) -> None:
+        pairs, tree = result
+        assert len(pairs) == n_groups * (n_groups - 1) // 2
+        assert tree.shape == (n_groups - 1, 4)
+        # Cells drawn into groups at random couple as the null does.
+        assert pairs["coupling"].between(0, 1).all()
+        assert np.isfinite(pairs["null_sd"]).all()
+
+    bench("clones.coupling", make, COUPLING, check=check)
 
 
 @lru_cache(maxsize=1)

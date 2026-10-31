@@ -136,6 +136,8 @@ _EXPECTED_PLOTTING_EXPORTS = (
     "clonal_overlap",
     "clonal_rarefaction",
     "clone_abundance",
+    "clone_coupling",
+    "clone_fates",
     "clone_tracking",
     "cluster_tree",
     "cluster_connectivity",

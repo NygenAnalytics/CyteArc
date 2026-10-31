@@ -298,6 +298,14 @@ _CONTRACTS = (
         model_only=_classified("resolved_input", "group_assignments_fingerprint"),
     ),
     OperationContract(
+        ClonesAccessor.fate_bias,
+        metadata_arguments.CloneFateBiasArguments,
+        # The early cells are the cells that the artifact labels, and each
+        # late cell's fate is recorded by its fingerprint.
+        aliases={"early": "cell_selection"},
+        model_only=_classified("resolved_input", "group_assignments_fingerprint"),
+    ),
+    OperationContract(
         PerturbationAccessor.import_guide_calls,
         metadata_arguments.GuideCallImportArguments,
         # The file is identified by the SHA-256 of its bytes, not its path.

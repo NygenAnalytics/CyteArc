@@ -122,3 +122,47 @@ def overlap_reference(x: Mapping[object, int], y: Mapping[object, int]) -> dict:
         "shared_fraction_1": sum(x[c] for c in shared) / n1,
         "shared_fraction_2": sum(y[c] for c in shared) / n2,
     }
+
+
+def coupling_reference(
+    table: Mapping[object, Mapping[object, int]],
+    first: object,
+    second: object,
+    method: str,
+) -> float:
+    """One pair's fate coupling, from each group's cells of each clone.
+
+    As CoSpar's definitions read: ``share_cosine`` divides each group's cells
+    of a clone by the group's cells and each clone's values by their sum over
+    every group of ``table``, and ``normalized_covariance`` counts every clone
+    that the table holds.
+    """
+    clones = sorted({clone for counts in table.values() for clone in counts}, key=str)
+    x = np.asarray([table[first].get(c, 0) for c in clones], dtype=float)
+    y = np.asarray([table[second].get(c, 0) for c in clones], dtype=float)
+    if method == "abundance_cosine":
+        return float(x @ y / sqrt((x @ x) * (y @ y)))
+    if method == "share_cosine":
+        frequency = {
+            group: np.asarray([counts.get(c, 0) for c in clones]) / sum(counts.values())
+            for group, counts in table.items()
+        }
+        total = sum(frequency.values())
+        p, q = frequency[first] / total, frequency[second] / total
+        return float(p @ q / sqrt((p @ p) * (q @ q)))
+    if method == "normalized_covariance":
+        return float(np.cov(x, y)[0, 1] / (x.mean() * y.mean()))
+    if method == "jaccard":
+        both = len(set(table[first]) & set(table[second]))
+        return both / len(set(table[first]) | set(table[second]))
+    raise ValueError(f"no reference for {method!r}")
+
+
+def benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
+    """Benjamini and Hochberg's adjusted p-values, step by step from the largest."""
+    p = np.asarray(p_values, dtype=float)
+    order = np.argsort(p)
+    ranked = p[order] * len(p) / np.arange(1, len(p) + 1)
+    adjusted = np.empty_like(p)
+    adjusted[order] = np.minimum(np.minimum.accumulate(ranked[::-1])[::-1], 1.0)
+    return adjusted

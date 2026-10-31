@@ -11,6 +11,7 @@ import zarr
 from zarr.storage import MemoryStore
 
 import cytearc.plotting as splt
+from cytearc.clones import CloneCoupling
 from cytearc.datastore.datastore import DataStore
 from cytearc.datastore.plot_accessor import DataStorePlotAccessor
 from cytearc.storage import ArtifactRef
@@ -23,6 +24,8 @@ _STORE_PLOT_METHODS = (
     "clonal_overlap",
     "clonal_rarefaction",
     "clone_abundance",
+    "clone_coupling",
+    "clone_fates",
     "clone_tracking",
     "cluster_connectivity",
     "cluster_tree",
@@ -144,6 +147,24 @@ _EXPANSION_REF = ArtifactRef(
     scope="datastore",
     kind="clonal_expansion",
     artifact_id="a" * 64,
+)
+_FATE_BIAS_REF = ArtifactRef(
+    scope="datastore",
+    kind="clone_fate_bias",
+    artifact_id="b" * 64,
+)
+_COUPLING = CloneCoupling(
+    group_sizes=None,  # type: ignore[arg-type]
+    pairs=None,  # type: ignore[arg-type]
+    order=(),
+    linkage=np.zeros((0, 4)),
+    method="share_cosine",
+    permutations=0,
+    seed=0,
+    clones=_CLONES_REF,
+    group_by=(),
+    groups=None,
+    cell_selection=None,
 )
 
 
@@ -379,6 +400,8 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             (_CLONES_REF,),
             {"group_by": "timepoint", "labels": ["3"], "order": ["d0", "d7"]},
         ),
+        ("clone_coupling", (_COUPLING,), {"value": "coupling", "theme": "paper"}),
+        ("clone_fates", (_FATE_BIAS_REF,), {"top": 12, "normalize": True}),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -433,6 +456,10 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("clones"))
     elif name == "clonal_expansion":
         expected_args.append(expected_kwargs.pop("expansion"))
+    elif name == "clone_coupling":
+        expected_args.append(expected_kwargs.pop("coupling"))
+    elif name == "clone_fates":
+        expected_args.append(expected_kwargs.pop("bias"))
 
     assert method(*args, **kwargs) is sentinel
     assert calls == [(tuple(expected_args), expected_kwargs)]

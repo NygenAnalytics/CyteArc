@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 
+from ..clones.fate import CloneCoupling
 from ..features.values import resolve_feature, resolve_feature_batch
 from ..mapping.reference import MappingReference
 from ..plotting._contracts import (
@@ -653,6 +654,35 @@ class DataStorePlotAccessor:
     ) -> PlotResult:
         """Plot the share of cells of chosen clones across groups of cells."""
         return self._forward(PlotResult, "clone_tracking", locals())
+
+    def clone_coupling(
+        self,
+        coupling: CloneCoupling,
+        *,
+        value: str = "z_score",
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the fate coupling of every pair of groups as a heatmap with its dendrogram."""
+        return self._forward(PlotResult, "clone_coupling", locals())
+
+    def clone_fates(
+        self,
+        bias: ArtifactRef,
+        *,
+        top: int = 40,
+        normalize: bool = False,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the fates of the clones of early cells, each clone's late cells by fate."""
+        return self._forward(PlotResult, "clone_fates", locals())
 
     def guide_calls(
         self,
