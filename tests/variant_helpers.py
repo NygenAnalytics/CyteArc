@@ -441,3 +441,49 @@ def rcrs_store(path: Path) -> "DataStore":
     )
     store.cells.insert("every_cell", np.ones(len(RCRS_CELLS), dtype=bool))
     return store
+
+
+def _widest_chunk_bytes(group, names: list[str]) -> int:
+    """The bytes of a chunk of the widest of these stored arrays."""
+    return max(
+        int(group[name].chunks[0]) * int(group[name].dtype.itemsize) for name in names
+    )
+
+
+def band_budget(store: "DataStore", counts, rows: int) -> int:
+    """The memory budget at which ``ds.variants.informative`` reads bands of
+    ``rows`` stored rows of ``counts``: its per-variant sums (240 bytes per
+    allele and 16 per site), the two chunks of the widest array that a band's
+    reads decompress beyond its rows, and 200 bytes per row."""
+    group = store.artifacts.load(counts)
+    fields = group.attrs["count_fields"]
+    names = ["depth_sites", "depth", "count_alleles", "counts"]
+    if "forward" in fields:
+        names += ["counts_forward", "counts_reverse"]
+    if "quality_forward" in fields:
+        names += ["counts_quality_forward", "counts_quality_reverse"]
+    n_alleles = int(group["allele_sites"].shape[0])
+    n_sites = int(group["site_positions"].shape[0])
+    return (
+        240 * n_alleles
+        + 16 * n_sites
+        + 2 * _widest_chunk_bytes(group, names)
+        + 200 * rows
+    )
+
+
+def clone_band_budget(
+    store: "DataStore", counts, rows: int, *, n_cells: int, n_variants: int
+) -> int:
+    """The memory budget at which ``ds.variants.clones`` reads bands of
+    ``rows`` stored rows of ``counts``: the frequencies of ``n_cells`` cells
+    at ``n_variants`` informative variants, the two chunks that a band's
+    reads decompress beyond its rows, and per row 200 bytes and 32 per
+    variant."""
+    group = store.artifacts.load(counts)
+    names = ["depth_sites", "depth", "count_alleles", "counts"]
+    return (
+        8 * n_cells * n_variants
+        + 2 * _widest_chunk_bytes(group, names)
+        + (200 + 32 * n_variants) * rows
+    )

@@ -136,6 +136,10 @@ _STATISTIC_BYTES_PER_ROW = 200
 _STATISTIC_BYTES_PER_VARIANT = 240
 # Bytes per cell and informative variant of the allele frequency matrix.
 _FREQUENCY_BYTES_PER_ENTRY = 8
+# Bytes per cell of a band and informative variant while the band's
+# frequencies are found: its depths at their sites, its counts, the depths
+# per variant and the frequencies, as float64.
+_BAND_FREQUENCY_BYTES = 32
 # The Leiden seed of variant clones, CyteArc's default.
 _CLONE_SEED = 4444
 # The smallest Jaccard index of two neighbourhoods that Seurat's shared
@@ -467,19 +471,21 @@ def _variant_bands(
     tables: Mapping[str, Sequence[str]],
     positions: np.ndarray,
     max_rows: int,
+    *,
+    max_cells: int | None = None,
 ) -> Iterator[tuple[np.ndarray, dict[str, tuple[np.ndarray, dict[str, np.ndarray]]]]]:
     """Yield bands of ``positions``' cells with their rows of long tables.
 
     ``tables`` names each long table, such as ``"depth"``, with the arrays
     to read from it. A band covers consecutive cells whose rows in every
-    table together number at most ``max_rows``, or one cell, and gives the
-    positions among them and, per table, each of their rows' cell position
-    and the arrays, so a band holds every row of its chosen cells. Rows of
-    cells between chosen ones are read through and dropped while they number
-    fewer than ``max_rows`` and than a chunk of the arrays: reading a gap
-    decompresses its chunks, while skipping it reads at most one chunk
-    again, so scattered cells take few reads and distant ones are read
-    apart.
+    table together number at most ``max_rows``, or one cell, and at most
+    ``max_cells`` cells, and gives the positions among them and, per table,
+    each of their rows' cell position and the arrays, so a band holds every
+    row of its chosen cells. Rows of cells between chosen ones are read
+    through and dropped while they number fewer than ``max_rows`` and than a
+    chunk of the arrays: reading a gap decompresses its chunks, while
+    skipping it reads at most one chunk again, so scattered cells take few
+    reads and distant ones are read apart.
     """
     if not len(positions):
         return
@@ -504,6 +510,8 @@ def _variant_bands(
                 np.searchsorted(combined, start + max_rows, side="right") - 1
             )
             stop_cell = min(last + 1, max(start_cell + 1, stop_cell))
+            if max_cells is not None:
+                stop_cell = min(stop_cell, start_cell + max_cells)
             cells = np.arange(start_cell, stop_cell, dtype=np.int64)
             # A band of chosen cells only keeps its rows without a copy.
             whole = bool(chosen[start_cell:stop_cell].all())
@@ -1672,7 +1680,17 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable(arguments.operation)
-        held = _STATISTIC_BYTES_PER_VARIANT * sites.n_alleles + 16 * sites.n_sites
+        count_arrays = ["count_alleles", "counts"]
+        if stranded:
+            count_arrays += ["counts_forward", "counts_reverse"]
+        if qualities:
+            count_arrays += ["counts_quality_forward", "counts_quality_reverse"]
+        tables = {"depth": ("depth_sites", "depth"), "count": tuple(count_arrays)}
+        held = (
+            _STATISTIC_BYTES_PER_VARIANT * sites.n_alleles
+            + 16 * sites.n_sites
+            + _band_chunk_bytes(group, tables)
+        )
         max_rows = (self.memoryBytes - held) // _STATISTIC_BYTES_PER_ROW
         if max_rows < 1:
             raise MemoryError(
@@ -1683,17 +1701,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         accumulator = VariantStatisticsAccumulator(
             sites, stranded=stranded, qualities=qualities
         )
-        count_arrays = ["count_alleles", "counts"]
-        if stranded:
-            count_arrays += ["counts_forward", "counts_reverse"]
-        if qualities:
-            count_arrays += ["counts_quality_forward", "counts_quality_reverse"]
-        for _band, rows in _variant_bands(
-            group,
-            {"depth": ("depth_sites", "depth"), "count": count_arrays},
-            positions,
-            int(max_rows),
-        ):
+        for _band, rows in _variant_bands(group, tables, positions, int(max_rows)):
             depth_cells, depth = rows["depth"]
             count_cells, values = rows["count"]
             accumulator.add(
@@ -1773,6 +1781,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "mean_coverage",
                 *HETEROPLASMY_LEVELS,
             }
+            # Counts with strands or qualities give their statistics too.
+            if group.attrs.get("stranded"):
+                required |= {"n_cells_conf_detected", "strand_correlation"}
+            if group.attrs.get("qualities"):
+                required.add("mean_quality")
             if not required <= names:
                 return False
             lengths = {as_zarr_array(group[name], name=name).shape for name in required}
@@ -1838,6 +1851,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             thresholds=dict(thresholds),
             masks=tuple(str(name) for name in cast(list[str], attributes["masks"])),
             n_cells=int(cast(int, attributes["n_cells"])),
+            stranded=bool(attributes["stranded"]),
+            qualities=bool(attributes["qualities"]),
         )
 
     @validation_scoped
@@ -1862,11 +1877,14 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         Jaccard index of their neighbourhoods, dropping joins below 1/15, as
         Seurat's ``FindNeighbors`` builds its shared-neighbour graph; and the
         Leiden algorithm partitions the graph at ``resolution`` where Signac
-        uses Seurat's ``FindClusters``. Cells that tie, such as cells that
-        show one informative variant each, share the same few neighbours, so
-        Seurat's graph grows with the square of their number; a cell with
-        more than ``n_neighbors`` squared joins keeps those to its neighbours
-        and to the cells whose neighbourhoods hold it.
+        uses Seurat's ``FindClusters``.
+
+        Every cell is compared with every other cell, so the time grows with
+        the square of the cells; ``within`` compares the cells of each group
+        apart. Cells that tie, such as cells that show one informative
+        variant each, take the same few neighbours and join every other such
+        cell, so the graph also grows with the square of their number, and a
+        graph that does not fit the memory budget raises ``MemoryError``.
 
         A cell's frequency is undefined where it was not covered, so the
         similarity of two cells counts only the variants that both cover,
@@ -1995,22 +2013,27 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         self._require_writable(arguments.operation)
         sites = _stored_sites(group)
         matrix_bytes = _FREQUENCY_BYTES_PER_ENTRY * len(positions) * len(alleles)
-        max_rows = (self.memoryBytes - matrix_bytes) // _STATISTIC_BYTES_PER_ROW
+        tables = {
+            "depth": ("depth_sites", "depth"),
+            "count": ("count_alleles", "counts"),
+        }
+        held = matrix_bytes + _band_chunk_bytes(group, tables)
+        # A band holds at most as many cells as rows, each with its dense
+        # depths, counts and frequencies at the informative variants.
+        per_row = _STATISTIC_BYTES_PER_ROW + _BAND_FREQUENCY_BYTES * len(alleles)
+        max_rows = (self.memoryBytes - held) // per_row
         if max_rows < 1:
             raise MemoryError(
                 f"The allele frequencies of {len(positions)} cells at "
-                f"{len(alleles)} variants take about {matrix_bytes} bytes, more than "
-                f"the memory budget of {self.memoryBytes} bytes. Raise mem_budget, "
-                "or select fewer informative variants."
+                f"{len(alleles)} variants take about {held + per_row} bytes, more "
+                f"than the memory budget of {self.memoryBytes} bytes. Raise "
+                "mem_budget, or select fewer informative variants."
             )
         frequencies = np.empty((len(positions), len(alleles)), dtype=np.float64)
         row_of_position = np.full(n_cells, -1, dtype=np.int64)
         row_of_position[positions] = np.arange(len(positions))
         for band, rows in _variant_bands(
-            group,
-            {"depth": ("depth_sites", "depth"), "count": ("count_alleles", "counts")},
-            positions,
-            int(max_rows),
+            group, tables, positions, int(max_rows), max_cells=int(max_rows)
         ):
             depth_cells, depth = rows["depth"]
             count_cells, values = rows["count"]

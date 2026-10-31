@@ -244,11 +244,15 @@ def variant_statistics(
     selection = _load_selection(store, variants)
     frame = selection.variants
     strand = frame["strand_correlation"].to_numpy(dtype=np.float64)
-    stranded = bool(np.isfinite(strand).any())
+    stranded = bool(selection.stranded)
     x_values = strand if stranded else frame["mean_coverage"].to_numpy(dtype=np.float64)
     shown = np.isfinite(x_values)
     if not shown.any():
-        raise ValueError("No variant has a strand correlation or a mean depth to plot")
+        raise ValueError(
+            "No variant has a strand correlation to plot"
+            if stranded
+            else "No variant has a mean depth to plot"
+        )
     vmr = frame["vmr"].to_numpy(dtype=np.float64)
     table = pd.DataFrame(
         {

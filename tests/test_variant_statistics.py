@@ -144,27 +144,53 @@ def test_counts_without_strands_give_no_strand_or_quality_statistics() -> None:
         VariantStatisticsAccumulator(_sites(), stranded=False, qualities=True)
 
 
+def _one_variant_rows(forward: np.ndarray, reverse: np.ndarray) -> dict:
+    """Rows of cells that each read only allele 1 at site 0, with these
+    strand counts."""
+    cells = np.arange(len(forward))
+    return {
+        "depth_cells": cells,
+        "depth_sites": np.zeros(len(cells), dtype=int),
+        "depth": forward + reverse,
+        "count_cells": cells,
+        "count_alleles": np.ones(len(cells), dtype=int),
+        "counts": forward + reverse,
+        "forward": forward,
+        "reverse": reverse,
+    }
+
+
 def test_large_strand_sums_correlate_without_overflow() -> None:
+    # 4,000 cells, half with about 1.9 million reads per strand and half with
+    # a few: every sum stays exact in float64, but the cells squared times a
+    # strand's variance, the correlation's variance terms, reach 1.4e19, past
+    # int64's 9.2e18, so they must be taken as Python integers.
     rng = np.random.default_rng(1)
-    forward = rng.integers(1, 3_000_000, size=500)
-    reverse = forward + rng.integers(0, 1_000_000, size=500)
-    sites = _sites()
-    accumulator = VariantStatisticsAccumulator(sites, stranded=True, qualities=False)
-    cells = np.arange(500)
-    accumulator.add(
-        depth_cells=cells,
-        depth_sites=np.zeros(500, dtype=int),
-        depth=forward + reverse,
-        count_cells=cells,
-        count_alleles=np.ones(500, dtype=int),
-        counts=forward + reverse,
-        forward=forward,
-        reverse=reverse,
+    forward = np.where(np.arange(4_000) % 2 == 0, 1_900_000, 1) + rng.integers(
+        0, 50_000, size=4_000
     )
-    correlation = accumulator.finish(500).strand_correlation
+    reverse = forward + rng.integers(0, 50_000, size=4_000)
+    variance_term = 4_000 * int((forward * forward).sum()) - int(forward.sum()) ** 2
+    assert variance_term > np.iinfo(np.int64).max
+    assert int((reverse * reverse).sum()) < 2**53
+    accumulator = VariantStatisticsAccumulator(_sites(), stranded=True, qualities=False)
+    accumulator.add(**_one_variant_rows(forward, reverse))
+    correlation = accumulator.finish(4_000).strand_correlation
     assert correlation is not None
     expected = np.corrcoef(forward.astype(float), reverse.astype(float))[0, 1]
     np.testing.assert_allclose(correlation[0], expected, rtol=1e-12)
+
+
+def test_counts_too_large_to_sum_exactly_are_refused() -> None:
+    accumulator = VariantStatisticsAccumulator(_sites(), stranded=True, qualities=False)
+    # A strand count whose square reaches 2**53 cannot be summed exactly.
+    big = np.asarray([94_906_266, 5])
+    with pytest.raises(ValueError, match="strand count exceeds 94906265"):
+        accumulator.add(**_one_variant_rows(big, np.asarray([1, 2])))
+    # Strand counts within the bound whose squares sum to 2**53 or more.
+    near = np.full(2, 94_906_265)
+    with pytest.raises(ValueError, match=r"sum to 2\*\*53 or more"):
+        accumulator.add(**_one_variant_rows(near, near))
 
 
 @pytest.mark.parametrize(

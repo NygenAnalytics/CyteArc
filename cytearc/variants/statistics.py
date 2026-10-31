@@ -61,6 +61,11 @@ HETEROPLASMY_LEVELS: Mapping[str, float] = {
 VMR_OFFSET = 1e-11
 # Reads of the allele on each strand that make a cell confidently detected.
 _CONFIDENT_READS = 2
+# Float64 holds every whole number below this exactly.
+_EXACT_FLOAT = 1 << 53
+# The largest strand count whose square stays below _EXACT_FLOAT, so that the
+# products of strand counts are exact.
+_MAX_STRAND_COUNT = 94_906_265
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,12 +138,21 @@ class VariantStatistics:
 
 
 def _exact_sums(positions: np.ndarray, values: np.ndarray, size: int) -> np.ndarray:
-    """Sum whole-number values per position exactly, as int64.
+    """Sum non-negative whole-number values per position exactly, as int64.
 
-    ``np.bincount`` sums in float64, which holds whole numbers exactly up to
-    2**53; a band's sums stay far below that.
+    ``np.bincount`` sums in float64, which holds whole numbers exactly below
+    2**53; a sum of non-negative values passes through no larger partial
+    sum, so a sum below 2**53 is exact.
+
+    Raises:
+        ValueError: If a sum reaches 2**53.
     """
     sums = np.bincount(positions, weights=values, minlength=size)
+    if sums.size and float(sums.max()) >= _EXACT_FLOAT:
+        raise ValueError(
+            "A band's counts sum to 2**53 or more, beyond what is summed exactly; "
+            "score fewer cells at once by lowering mem_budget"
+        )
     return np.rint(sums).astype(np.int64)
 
 
@@ -173,7 +187,6 @@ class VariantStatisticsAccumulator:
         self._stranded = stranded
         self._qualities = qualities
         self._site_depth = np.zeros(sites.n_sites, dtype=np.int64)
-        self._site_covered = np.zeros(sites.n_sites, dtype=np.int64)
         self._count = np.zeros(n_variants, dtype=np.int64)
         # The covered cells, mean and summed squared deviations of the allele
         # frequencies, merged band by band.
@@ -253,7 +266,6 @@ class VariantStatisticsAccumulator:
         n_sites = self._n_sites
         self._site_depth += _exact_sums(depth_sites, depth, n_sites)
         band_covered = np.bincount(depth_sites, minlength=n_sites).astype(np.int64)
-        self._site_covered += band_covered
         variants = self._variant_of_allele[count_alleles]
         kept = variants >= 0
         variants = variants[kept]
@@ -289,6 +301,11 @@ class VariantStatisticsAccumulator:
             assert forward is not None and reverse is not None
             f = np.asarray(forward, dtype=np.int64)[kept]
             r = np.asarray(reverse, dtype=np.int64)[kept]
+            if len(f) and max(int(f.max()), int(r.max())) > _MAX_STRAND_COUNT:
+                raise ValueError(
+                    f"A strand count exceeds {_MAX_STRAND_COUNT} reads, beyond what "
+                    "the strand correlation sums exactly"
+                )
             self._shown += np.bincount(variants, minlength=n_variants)
             for name, values in (
                 ("f", f),
@@ -451,11 +468,16 @@ def resolve_thresholds(
     keeps the preset's, or no test without a preset.
 
     Raises:
-        TypeError: If a threshold is not a real number.
+        TypeError: If the preset is not text or None, or a threshold is not a
+            real number.
         ValueError: If the preset or a threshold name is unknown, a
             threshold is not finite, ``min_cells`` is not a whole number at
             least 0, or no threshold results.
     """
+    if preset is not None and not isinstance(preset, str):
+        raise TypeError(
+            f"preset must be one of {', '.join(PRESETS)}, or None, not {preset!r}"
+        )
     if preset is not None and preset not in PRESETS:
         raise ValueError(
             f"preset must be one of {', '.join(PRESETS)}, or None, not {preset!r}"
@@ -573,6 +595,10 @@ class VariantSelection:
             test not made.
         masks: The masks whose variants are never informative.
         n_cells: The cells that the statistics cover.
+        stranded: Whether the counts give forward and reverse reads, and so
+            ``n_cells_conf_detected`` and ``strand_correlation``.
+        qualities: Whether the counts give base qualities, and so
+            ``mean_quality``.
     """
 
     variants: pd.DataFrame = field(repr=False)
@@ -582,6 +608,8 @@ class VariantSelection:
     thresholds: Mapping[str, float | None]
     masks: tuple[str, ...]
     n_cells: int
+    stranded: bool
+    qualities: bool
 
 
 # The columns of a selection's table after the variant's identity, in

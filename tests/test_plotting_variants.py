@@ -354,6 +354,26 @@ def test_variant_statistics_mark_masked_variants_apart(tmp_path) -> None:
     plt.close(result.figure)
 
 
+def test_variant_statistics_of_stranded_counts_never_draw_depth_instead(
+    scored,
+) -> None:
+    from cytearc.plotting import variant_statistics
+
+    store, truth, counts, _selection, _clones = scored
+    # Scored over one cell, no variant has a strand correlation, though the
+    # counts have strands and every variant a mean depth.
+    store.cells.insert("only_first_cell", np.arange(truth.n_cells) == 0)
+    selection = store.variants.informative(
+        counts, cells=store.snapshot_cell_selection("only_first_cell"), min_vmr=0.0
+    )
+    loaded = store.variants.load_informative(selection)
+    assert loaded.stranded and not loaded.variants.empty
+    assert loaded.variants["strand_correlation"].isna().all()
+    assert loaded.variants["mean_coverage"].notna().all()
+    with pytest.raises(ValueError, match="No variant has a strand correlation to plot"):
+        variant_statistics(store, selection, show=False)
+
+
 def test_variant_statistics_need_a_variant_to_draw(tmp_path) -> None:
     from cytearc.plotting import variant_statistics
     from tests.variant_helpers import rcrs_store

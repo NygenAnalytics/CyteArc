@@ -12,7 +12,11 @@ import pytest
 from sklearn.metrics import adjusted_rand_score
 
 from tests.clone_helpers import every_cell, open_clone_store
-from tests.variant_helpers import copy_variant_store, write_variant_store
+from tests.variant_helpers import (
+    clone_band_budget,
+    copy_variant_store,
+    write_variant_store,
+)
 from tests.variant_truth import mito_clone_truth, variant_truth, write_mgatk
 
 TRUTH = mito_clone_truth()
@@ -102,9 +106,12 @@ def test_cells_without_evidence_get_no_clone_and_are_counted(store) -> None:
         )
         if (str(site), str(allele)) in variants
     }
+    # Every cell that shows an informative variant shares it with a clone,
+    # so none lacks neighbours, and a cell without a clone shows none.
+    assert attributes["n_cells_without_neighbors"] == 0
     for cell, label in zip(TRUTH.clones.cell_ids, called, strict=True):
         if label == "":
-            assert str(cell) not in shown or attributes["n_cells_without_neighbors"]
+            assert str(cell) not in shown
     assert attributes["n_clones"] == len(set(called) - {""})
 
 
@@ -171,7 +178,10 @@ def test_clones_do_not_depend_on_threads_or_budget(store, tmp_path) -> None:
     counts, selection = _inputs(store)
     first = _called(store, store.variants.clones(counts, variants=selection))
     other = open_clone_store(Path(store.zarr_loc), nthreads=4)
-    other.memoryBytes = 3_000_000
+    # Bands of 2,000 rows, a few cells each.
+    other.memoryBytes = clone_band_budget(
+        other, counts, 2_000, n_cells=TRUTH.n_cells, n_variants=12
+    )
     second = _called(
         other,
         other.variants.clones(counts, variants=selection, invalidate_cache=True),
@@ -196,7 +206,9 @@ def test_clones_of_scattered_cells_do_not_depend_on_the_budget(store) -> None:
     rows = np.diff(group["depth_offsets"][:]) + np.diff(group["count_offsets"][:])
     first, last = np.flatnonzero(in_d2)[[0, -1]]
     assert rows[first : last + 1].sum() > 4 * 5_000
-    store.memoryBytes = 8 * int(in_d2.sum()) * 12 + 200 * 5_000
+    store.memoryBytes = clone_band_budget(
+        store, counts, 5_000, n_cells=int(in_d2.sum()), n_variants=12
+    )
     banded = store.variants.clones(counts, variants=selection, invalidate_cache=True)
     np.testing.assert_array_equal(_called(store, banded), whole)
 
