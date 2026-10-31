@@ -200,11 +200,79 @@ A `lineage_barcodes` artifact holds one record per molecule or pair, ordered by 
 
 `ds.plots.barcode_calls(barcodes)` draws three panels: the cells by their distinct barcodes, cells without a barcode included and `max_barcodes` or more (default 10) in the last bar; each library's pairs by their UMIs; and each library's molecules by their reads, on log scales, so molecules of 0 reads appear in the table only. Barcodes of one or two UMIs and molecules of one read are mostly sequencing errors and ambient molecules, which clone calling filters out. Its tables are `barcodes_per_cell` (`barcodes`, `cells`), `umis_per_barcode` (`library`, `umis`, `pairs`) and `reads_per_molecule` (`library`, `reads`, `molecules`).
 
+## Call clones from lineage barcodes
+
+Cells that carry the same lineage barcodes descend from one labelled cell, but the barcodes that extraction tools report also hold sequencing and PCR errors, ambient molecules from other cells and barcodes outside the library. {meth}`ds.clones.barcode_clones <cytearc.datastore.namespaces.ClonesAccessor.barcode_clones>` removes them by the published rules of the method that made the data, groups the cells by the barcodes that remain, and saves a `clones` artifact that every clone summary reads.
+
+```python
+barcodes = ds.clones.import_barcodes("trex_run/molecules.txt", cell_selection=cells, barcode_suffix="-1")
+clones = ds.clones.barcode_clones(barcodes, preset="trex")
+ds.clones.load_clones(clones).cells.head()  # clone, clone_size, n_barcodes, doublet
+ds.clones.diversity(clones, group_by="sample")
+```
+
+The rules run in this order:
+
+1. Molecule filter: a molecule with fewer than `min_reads` reads is dropped.
+2. Correction: within each group of `within` and each library, barcodes within `distance` of each other by `metric` are linked, `"hamming"` counting substitutions between barcodes of one length and `"levenshtein"` substitutions, insertions and deletions. Every pair within the distance is found exactly by the neighbour search that clonotype clusters use, whose keys mask runs of positions of long barcodes, so that 100,000 barcodes of 28 bases within 3 substitutions take about 0.1 s. Each connected component of linked barcodes merges into its most abundant barcode, by UMIs, or reads in a library that counts no UMIs, and a tie goes to the barcode that sorts last, as TREX picks its representatives. Molecules of one cell and UMI that correction gives one barcode become one molecule. Then the barcodes outside `allowlist` are dropped.
+3. Pair filters: within each library, a cell's barcode of fewer than `min_umis` UMIs is dropped, and so is one whose UMIs divided by `min_fraction` stay below the UMIs of the cell's top barcode, the rule of BARtab's `--umi_fraction_filter`.
+4. Cell filter: a cell with fewer or more barcodes than `barcodes_per_cell`, a pair of the fewest and the most, gets no clone.
+5. Grouping: `method="sets"` makes the cells of each identical barcode set a clone. `method="jaccard"` makes each identical set a node and links two nodes that share a barcode when the Jaccard index of their sets, the barcodes they share over the barcodes either holds, exceeds `similarity`, or reaches it with `inclusive=True`. `prune=True` removes TREX's bridges, the edges whose two ends share no neighbour while either end has another, and `doublets=True` TREX's doublets, the nodes of one cell whose neighbours fall apart into two or more groups without them, in TREX's order: pruning, doublets, pruning again, doublets again. The connected components are the clones, and a clone of fewer than `min_size` cells leaves its cells without one.
+
+Every rule runs within the groups of `within`, cell metadata columns whose labels keep clones apart, such as the mouse, so each group's clones are those it would get alone; every cell with a barcode needs a label. `similarity` may also be two numbers: the index that links cells whose barcodes come from the same libraries, and the index that links any others, as CellTag-multi links scRNA-seq and scATAC-seq cells.
+
+### Presets
+
+`preset` sets every rule to a method's published values, and an argument given replaces its preset's value; a count of 0 turns its filter off, so `preset="larry", min_reads=0` keeps every molecule. Without a preset, every filter is off and correction does not run, and `method` is required, with `similarity` and `inclusive` for `method="jaccard"` and a `metric` for a `distance`, since the tools differ in each. Whether the Jaccard test is strict is part of each method's rules: TREX and CellTagR link above the threshold, bartools and STICR at it or above. The artifact records the resolved rules as its parameters.
+
+| `preset` | Published rules of | Molecule, correction and pair rules | Grouping |
+|---|---|---|---|
+| `"larry"` | LARRY, Weinreb et al. ([2018](https://doi.org/10.1101/467886)) | `min_reads=10`, `distance=3` with `metric="hamming"`, `min_umis=3` | `method="sets"`, `min_size=1` |
+| `"trex"` | TREX's `run10x`, Ratz et al. ([2022](https://doi.org/10.1038/s41593-022-01011-x)) | TREX's rules below, with `distance=5` and `metric="hamming"` | `method="jaccard"`, `similarity=0.7`, `inclusive=False`, `prune=True`, `doublets=True`, `min_size=1` |
+| `"celltag"` | CellTagR and Biddy et al. ([2018](https://pmc.ncbi.nlm.nih.gov/articles/PMC6635140/)) | the library's `allowlist`, `min_umis=2`, `barcodes_per_cell=(2, 20)` | `method="jaccard"`, `similarity=0.7`, `inclusive=False`, `min_size=3` |
+| `"celltag_multi"` | CellTag-multi, Jindal et al. ([2024](https://doi.org/10.1038/s41587-023-01931-4)) | `min_reads=2`, `distance=2` with `metric="levenshtein"`, the library's `allowlist`, `min_umis=2`, `barcodes_per_cell=(2, 25)` | `method="jaccard"`, `similarity=(0.6, 0.5)`, `inclusive=False`, `min_size=2` |
+
+The CellTag presets keep the CellTags of the library's allowlist, which only the experiment holds, so they require `allowlist`, a sequence of barcodes such as `pd.read_csv("v1_whitelist.csv")["CellTag"]`; `allowlist=False` calls them without one. CellTag-multi's scATAC-seq tags count reads, so `min_umis=2` keeps the tags of two reads or more there, as the paper's "more than 1 read" does, while `min_reads=2` drops the one-read molecules of scRNA-seq. Its preset follows the paper's hematopoiesis data, whose scRNA-seq cells kept 2 to 25 CellTags; its scATAC-seq cells kept 1 to 25, and the reprogramming data kept 1 to 25 in both and linked cells above 0.6 within and across modalities, which `barcodes_per_cell=(1, 25)` and `similarity=0.6` give. CellTag-multi corrected its tags with Starcode and grouped cells by graph clustering in unlicensed code; CyteArc merges the connected components of near tags, as LARRY and TREX do, and takes the connected components of the graph. LARRY also dropped the pairs of cells in two sequencing libraries that share a cell barcode and a lineage barcode, and clones over-abundant in one library, which its methods do not state exactly enough to reproduce; its GEO in vitro set holds clones of two or more cells.
+
+### TREX's rules
+
+`preset="trex"` adds TREX's rules for its cloneIDs, in which `-` marks a base that no read covered and `0` a deletion, adapted from TREX's MIT-licensed `run10x`. They have no argument of their own, and the artifact records them as `trex_rules`:
+
+- A molecule whose cloneID has a Shannon entropy below 1 bit, such as `AAAAAAAAAAAAAAAAAAAAAAAAAAAAGA`, is dropped before correction.
+- Two cloneIDs are compared at the positions where both hold a base, and need 20 such positions, so a partial cloneID merges into the full one that it matches.
+- A cloneID needs 20 bases after correction.
+- A cell's cloneID of one UMI is dropped when another cell of its group holds the cloneID, and so is a cloneID whose only molecule has one read, which needs each molecule's reads: TREX writes `read_count` since September 2024.
+
+TREX compares two cloneIDs only when they share a substring of 7 bases, which can miss a pair with five mismatches spread along it; CyteArc compares every pair of one length exactly, which on TREX's expected outputs merges the same cloneIDs. TREX's `smartseq3` command applies neither the entropy filter nor doublet removal: on its expected output the entropy filter changes no clone, and `doublets=False` turns doublet removal off.
+
+### Counts each rule reads
+
+Each library counts its records in one unit. A molecule is one UMI, and a pair counts its UMIs where its library counts UMIs for every pair, or its reads in a library that counts no UMIs for any pair but reads for every one, such as CellTag-multi's scATAC-seq tags. A library that counts UMIs for some pairs and not for others, such as a table read through `columns` whose UMI field is `NA` on one row, has no unit, and neither has one that counts neither. A rule refuses with `ValueError` a count it cannot read rather than guess one: `min_reads` needs the reads of every molecule, correction and the pair filters a unit for each library whose pairs they rank or test, and TREX's rules molecules with their reads. `min_reads` tests molecules alone, so a library of pairs passes it whole, and it refuses barcodes that hold no molecule at all. Rules that read no count, such as `method="sets"` alone, call clones from every pair. The artifact's `library_units` attribute names each library's unit, `"umis"`, `"reads"` or None.
+
+### The clones artifact
+
+The clones are labelled by size, `clone_1` the largest, and clones of one size by their first cell. Beside the `values`, `codes` and `clone_size` of every `clones` artifact, the artifact holds `n_barcodes`, each cell's barcodes after the pair filters, and `doublet`, whether TREX's rule removed the cell. Its `rule_counts` attribute counts what each rule removed or changed: molecules below `min_reads` or of low complexity, barcodes and records corrected, records outside the allowlist, molecules of few bases, pairs, pairs of TREX's two rules and below `min_umis` or `min_fraction`, cells with barcodes and outside `barcodes_per_cell`, the nodes and edges of the graph, the edges pruned, the doublets, and the cells in clones below `min_size`. `load_clones` adds `n_barcodes` and `doublet` to its `cells` table, and its `source` is `"call_barcode_clones"`. The artifact is identified by the barcodes, the preset and the resolved rules, the fingerprint of the allowlist's distinct barcodes, whatever their order, and of each cell's `within` labels.
+
+### Memory while calling
+
+Calling checks the memory budget before each step that reads or allocates, and raises `MemoryError` before it reads what would not fit or writes anything. The steps hold about:
+
+| Step | Bytes |
+|---|---|
+| Reading the records | 48 per record, 8 more while one is converted, the stored barcodes with 8 per distinct barcode, 16 per cell, and 300 per allowlisted barcode, with 4 per character of a fixed-width array |
+| Writing the clones | 160 per cell, and 8 per character of the longest label, checked before reading as if every cell were a clone |
+| Every rule | 40 per cell, and 18 per record until the records collapse into pairs |
+| Looking up barcodes, for TREX's rules and the allowlist | 32 per record, 120 and 4 per character for each stored barcode decoded, and 1 per stored barcode |
+| Correction | 96 per molecule or pair kept, 64 per distinct barcode of a block with its text, and what the search holds, within what is left |
+| Collapsing records into pairs | 136 per molecule or pair kept |
+| Pair filters and sets | 48 per pair held, 80 per pair while TREX's rules or the pair filters run, and 16 per pair, beside the sets themselves, while the cells' sets are built |
+| Grouping | 180 per cell and 16 per item of a set to find identical sets; 64 per item and 40 per node for the Jaccard graph, beside 16 per edge; 80 per edge and 48 per node to prune or find doublets; 80 per node for the components; 40 per cell to number the clones |
+
 ## Read, export and plot clones
 
-A `clones` artifact labels each selected cell with its clone, an empty label for a cell without one, which groupings treat as missing. `codes` numbers the clones by size, largest first, then by label in natural order, -1 for none, and `clone_size` holds the cells of each cell's clone, 0 for none. A source that gives probabilities adds `clone_probability`, NaN where none is given; a cell's rows that give it no probability leave the one its other rows give. The store keeps each cell's label at the width of the longest label, so a very long label costs memory for every cell, and an import whose labels would not fit the memory budget raises `MemoryError` before it saves anything. `ds.select_cells(clones, include=["3"])` selects the cells of one clone, and plots colour cells by clone. [Read per-cell values](cell_aligned_kinds) lists the arrays.
+A `clones` artifact labels each selected cell with its clone, an empty label for a cell without one, which groupings treat as missing. `codes` numbers the clones by size, largest first, then by label in natural order, -1 for none, and `clone_size` holds the cells of each cell's clone, 0 for none. A source that gives probabilities adds `clone_probability`, NaN where none is given; a cell's rows that give it no probability leave the one its other rows give. Clones called from barcodes add `n_barcodes` and `doublet`. The store keeps each cell's label at the width of the longest label, so a very long label costs memory for every cell, and an import whose labels would not fit the memory budget raises `MemoryError` before it saves anything. `ds.select_cells(clones, include=["3"])` selects the cells of one clone, and plots colour cells by clone. [Read per-cell values](cell_aligned_kinds) lists the arrays.
 
-`load_clones` returns a {class}`~cytearc.clones.Clones` record. Its `cells` table holds one row per cell, indexed by cell ID: `clone`, a categorical of the clone labels in rank order, `clone_size` and, where saved, `clone_probability`. Its `clones` table holds one row per clone, largest first: `clone` and `n_cells`. Its `source` names the operation that saved the clones, `"import_clones"`, `"clones_from_column"` or, for clonotypes, `"define_clonotypes"`. Its `kept_apart` names the columns of `cells` whose labels the clones keep apart, which every summary measures apart: none for clones, and `("receptor_type",)` for clonotypes, whose `cells` table then holds each cell's receptor type as a categorical.
+`load_clones` returns a {class}`~cytearc.clones.Clones` record. Its `cells` table holds one row per cell, indexed by cell ID: `clone`, a categorical of the clone labels in rank order, `clone_size` and, where saved, `clone_probability`, or the `n_barcodes` and `doublet` of barcode clones. Its `clones` table holds one row per clone, largest first: `clone` and `n_cells`. Its `source` names the operation that saved the clones, `"import_clones"`, `"clones_from_column"`, `"call_barcode_clones"` or, for clonotypes, `"define_clonotypes"`. Its `kept_apart` names the columns of `cells` whose labels the clones keep apart, which every summary measures apart: none for clones, and `("receptor_type",)` for clonotypes, whose `cells` table then holds each cell's receptor type as a categorical.
 
 `export_clones(clones, path)` writes CoSpar's clone table, `Cell_ID,Clone_ID`, one row per cell with a clone, and `format="matrix"` writes a cells by clones Matrix Market file with `cells.tsv` and `clones.tsv` beside it, replacing files of those names. Both hold this store's cell IDs and the clone labels, and `import_clones` reads them back to the same clones; clone probabilities are not written. The table refuses labels that a clone table reads as no clone, such as `NA`, which the matrix keeps, and the matrix refuses labels and cell IDs that hold a line break, which the table keeps. A path ending in `.gz` is gzip-compressed. Each returns the number of cells written.
 

@@ -1,6 +1,6 @@
 import os
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
@@ -61,7 +61,8 @@ from .record_tables import (
 
 if TYPE_CHECKING:
     from ...readers.lineage_barcodes import BarcodeLayout, BarcodeRows
-    from .clones import _CloneOperationsMixin as _BarcodeOperationsBase
+    from ..mapping_datastore import MappingDatastore as _BarcodeOperationsBase
+    from .clones import _CloneOperationsMixin
 else:
     _BarcodeOperationsBase = object
 
@@ -98,19 +99,25 @@ _TABLE_BYTES_PER_TEXT = 160
 # Waiting rows merge into the records once they hold about a thousandth of
 # the budget in rows, within 1,000 and 250,000 rows.
 _MERGE_BUDGET_SHARE = 1_000
-# Bytes that calling clones holds for each record as read: its cell, library,
-# barcode, UMI, UMIs and reads as int64, and the stored copy of one while it
-# is converted; and for each distinct barcode, its offset.
-_CALL_RECORD_BYTES = 56
+# Calling clones reads, for each record, its cell, library, barcode, UMI, UMIs
+# and reads as int64, with the stored copy of one while it is converted; for
+# each distinct barcode, its offset beside its bytes; and for each cell, its
+# group and the canonical array read to find the cells with a barcode.
+_CALL_RECORD_BYTES = 48
+_CONVERTED_RECORD_BYTES = 8
 _CALL_TEXT_OFFSET_BYTES = 8
-# Bytes that calling holds for each selected cell beside the calls: its
-# canonical array, group and barcodes, and the clone label, code and size,
-# barcodes and doublet flag that are written; and for each clone, its label.
-_CALL_CELL_BYTES = 200
-_CALL_CLONE_BYTES = 200
+_CALL_CELL_BYTES = 16
+# Writing the clones holds, for each cell, its clone code, doublet flag and
+# barcodes from the calls, its label's pointer and its code and size as
+# written, and for each clone, its label as a Python string and its size;
+# each label is also written as fixed-width text of four bytes per character.
+_WRITE_CELL_BYTES = 40
+_WRITE_CLONE_BYTES = 120
 # Bytes of each allowlisted barcode while its distinct values are sorted and
-# fingerprinted: the copies of its Python string and its packed bytes.
-_ALLOWLIST_BYTES = 200
+# fingerprinted: the references to its Python string in the lists and the set
+# of distinct barcodes, its packed bytes, and the string itself when a
+# fixed-width array gave it, 294 for barcodes of 28 bases as traced.
+_ALLOWLIST_BYTES = 300
 # The columns of the table of loaded clones, which a within column may not
 # share.
 _CLONE_COLUMNS = frozenset({"clone", "clone_size", "n_barcodes", "doublet"})
@@ -802,7 +809,24 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             raise TypeError("invalidate_cache must be a boolean")
         listed = None
         if allowlist is not None and not isinstance(allowlist, bool | np.bool_):
-            # The allowlist's texts are checked before the rules resolve.
+            if isinstance(allowlist, str | bytes) or not hasattr(allowlist, "__len__"):
+                raise TypeError(
+                    "allowlist must be a sequence of barcodes, False or None"
+                )
+            # Its distinct barcodes are sorted and fingerprinted; the barcodes of
+            # a fixed-width array become Python strings first.
+            characters = (
+                len(allowlist) * (allowlist.dtype.itemsize // 4)
+                if isinstance(allowlist, np.ndarray) and allowlist.dtype.kind == "U"
+                else 0
+            )
+            needed = _ALLOWLIST_BYTES * len(allowlist) + characters
+            if needed > self.memoryBytes:
+                raise MemoryError(
+                    f"Reading an allowlist of {len(allowlist)} barcodes holds about "
+                    f"{needed} bytes, more than the memory budget of "
+                    f"{self.memoryBytes} bytes. Raise mem_budget."
+                )
             listed = allowlist_texts(allowlist)
         settings = barcode_call_settings(
             preset,
@@ -828,13 +852,6 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         allowlist_fingerprint = None
         if settings.allowlist:
             assert listed is not None
-            held = _ALLOWLIST_BYTES * len(listed)
-            if held > self.memoryBytes:
-                raise MemoryError(
-                    f"Reading an allowlist of {len(listed)} barcodes holds about "
-                    f"{held} bytes, more than the memory budget of "
-                    f"{self.memoryBytes} bytes. Raise mem_budget."
-                )
             allowed = listed
             builder = ValueFingerprintBuilder()
             data, offsets = pack_text(allowed)
@@ -881,7 +898,10 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             trex_rules=record["trex_rules"],
             invalidate_cache=invalidate_cache,
         )
-        planned = self._plan_clones(
+        # The DataStore holds the clone operations, which plan and write the
+        # clones artifact that every clone source saves.
+        clone_operations = cast("_CloneOperationsMixin", self)
+        planned = clone_operations._plan_clones(
             arguments,
             cell_selection,
             n_cells,
@@ -901,6 +921,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         barcode_values = as_zarr_array(
             group[f"{_RECORDS}_barcode_values"], name="record_barcode_values"
         )
+        # The records, as read, are held while the clones are called, which
+        # get what is left.
         held = (
             allowlist_bytes
             + _CALL_CELL_BYTES * n_cells
@@ -908,13 +930,21 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             + _CALL_TEXT_OFFSET_BYTES * int(barcode_offsets.shape[0])
             + int(barcode_values.shape[0])
         )
-        if held > self.memoryBytes:
-            raise MemoryError(
-                f"Calling clones from the {n_records} molecules and pairs of "
-                f"{n_cells} cells holds about {held} bytes as they are read, more "
-                f"than the memory budget of {self.memoryBytes} bytes. Raise "
-                "mem_budget."
-            )
+        # Writing them is checked first, as if every cell were a clone of its
+        # own, the most clones there can be.
+        width = len(f"clone_{n_cells}")
+        writing = n_cells * (_WRITE_CELL_BYTES + _WRITE_CLONE_BYTES + 8 * width)
+        for needed, what in (
+            (held + _CONVERTED_RECORD_BYTES * n_records, "as they are read"),
+            (writing, "as they are written"),
+        ):
+            if needed > self.memoryBytes:
+                raise MemoryError(
+                    f"Calling clones from the {n_records} molecules and pairs of "
+                    f"{n_cells} cells holds about {needed} bytes {what}, more than "
+                    f"the memory budget of {self.memoryBytes} bytes. Raise "
+                    "mem_budget."
+                )
         records = BarcodeRecords(
             cells=read_array(group, f"{_RECORDS}_cells").astype(np.int64),
             sources=read_array(group, f"{_RECORDS}_sources").astype(np.int64),
@@ -937,7 +967,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             allowlist=allowed,
             max_bytes=self.memoryBytes - held,
         )
-        del records
+        del records, allowed, listed
         calls = called.calls
         labels = clone_labels(calls.n_clones)
         assignment = CloneAssignment(
@@ -955,7 +985,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             "doublets": int(sum(calls.n_doublet_nodes)),
             "cells_in_small_clones": calls.n_small_cells,
         }
-        self._write_clones(
+        clone_operations._write_clones(
             planned,
             assignment,
             {

@@ -16,6 +16,7 @@ from cytearc.clones.barcode_clones import (
     clone_labels,
 )
 from cytearc.metadata.records import pack_text
+from tests.clone_helpers import smallest_budget, traced_peak
 
 A = "ACGTACGTACGTACGTACGTACGTACGT"
 # One substitution from A, and one more.
@@ -59,7 +60,7 @@ def _call(records, n_cells, groups=None, allowlist=None, **options):
         n_cells,
         groups=np.zeros(n_cells, dtype=np.int64) if groups is None else groups,
         settings=settings,
-        allowlist=None if allowlist is None else allowlist_texts(allowlist),
+        allowlist=None if allowlist in (None, False) else allowlist_texts(allowlist),
     )
 
 
@@ -175,6 +176,16 @@ def test_given_values_replace_a_presets_and_zero_turns_a_filter_off() -> None:
         ({"method": "jaccard", "similarity": 0.7}, ValueError, "needs inclusive"),
         ({"method": "sets", "distance": 2}, ValueError, "needs a metric"),
         ({"method": "sets", "metric": "hamming"}, ValueError, "give a distance"),
+        (
+            {"preset": "celltag", "allowlist": False, "metric": "hamming"},
+            ValueError,
+            "give a distance",
+        ),
+        (
+            {"preset": "larry", "distance": 0, "metric": "levenshtein"},
+            ValueError,
+            "give a distance",
+        ),
         (
             {"method": "sets", "distance": 2, "metric": "jaro"},
             ValueError,
@@ -567,3 +578,108 @@ def test_a_similarity_across_libraries_compares_cells_of_two_libraries() -> None
     assert _partition(across.calls.codes) == {frozenset({0, 1})}
     within = _call(records, 2, method="jaccard", similarity=0.6, inclusive=False)
     assert _partition(within.calls.codes) == {frozenset({0}), frozenset({1})}
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"preset": "larry"},
+        {"preset": "trex"},
+        {"preset": "celltag", "allowlist": False},
+        {"preset": "celltag_multi", "allowlist": False},
+        {"method": "sets", "min_fraction": 0.3},
+    ],
+)
+def test_records_of_no_barcode_call_no_clone(options) -> None:
+    # A molecule library without records of the selected cells passes the
+    # read filter, since it holds molecules.
+    records = _records([], (("lib", "molecules"),))
+    calls = _call(records, 3, **options)
+    assert calls.calls.n_clones == 0
+    assert calls.n_barcodes.tolist() == [0, 0, 0]
+    assert calls.counts["pairs"] == 0 and calls.counts["cells_with_barcodes"] == 0
+
+
+def _synthetic_records(
+    n_cells: int, *, molecules: bool, seed: int = 0
+) -> BarcodeRecords:
+    """Clones of up to nine cells with five barcodes each, errors and ambient barcodes."""
+    rng = np.random.default_rng(seed)
+    letters = np.frombuffer(b"ACGT", dtype=np.uint8)
+
+    def texts(count: int) -> list[str]:
+        drawn = letters[rng.integers(0, 4, size=(count, 28))]
+        return np.ascontiguousarray(drawn).view("S28").reshape(-1).astype(str).tolist()
+
+    clone_of = np.repeat(np.arange(n_cells), rng.integers(1, 10, size=n_cells))[
+        :n_cells
+    ]
+    clone_barcodes = np.asarray(texts(5 * (int(clone_of.max()) + 1)), dtype=object)
+    clone_barcodes = clone_barcodes.reshape(-1, 5)
+    rows = []
+    for cell in range(n_cells):
+        lost = int(rng.integers(0, 5)) if rng.random() < 0.3 else -1
+        for slot, barcode in enumerate(clone_barcodes[clone_of[cell]]):
+            if slot == lost:
+                continue
+            if molecules:
+                rows += [
+                    (
+                        cell,
+                        0,
+                        barcode,
+                        f"u{cell}_{slot}_{k}",
+                        1,
+                        int(rng.integers(10, 31)),
+                    )
+                    for k in range(3)
+                ]
+            else:
+                rows.append((cell, 0, barcode, None, int(rng.integers(3, 10)), -1))
+        if cell % 2 == 0:
+            source = clone_barcodes[clone_of[cell], 0]
+            error = source[:-1] + ("C" if source[-1] != "C" else "G")
+            rows.append(
+                (cell, 0, error, f"e{cell}", 1, 12)
+                if molecules
+                else (cell, 0, error, None, 1, -1)
+            )
+        if cell % 10 == 0:
+            ambient = clone_barcodes[int(rng.integers(0, len(clone_barcodes))), 1]
+            rows.append(
+                (cell, 0, ambient, f"a{cell}", 1, 1)
+                if molecules
+                else (cell, 0, ambient, None, 1, -1)
+            )
+    library = ("lib", "molecules" if molecules else "pairs")
+    return _records(rows, (library,))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("molecules", "options"),
+    [
+        (True, {"preset": "larry"}),
+        (True, {"preset": "trex"}),
+        (True, {"preset": "trex", "distance": 0}),
+        (False, {"preset": "celltag", "allowlist": False}),
+        (False, {"preset": "celltag_multi", "allowlist": False, "min_reads": 0}),
+        (False, {"method": "sets", "min_fraction": 0.3}),
+    ],
+)
+def test_calls_hold_no_more_than_the_smallest_budget_they_accept(
+    molecules, options
+) -> None:
+    records = _synthetic_records(4_000, molecules=molecules)
+    settings = barcode_call_settings(**options)
+    groups = np.zeros(4_000, dtype=np.int64)
+
+    def call(budget: int) -> object:
+        return barcode_clone_calls(
+            records, 4_000, groups=groups, settings=settings, max_bytes=budget
+        )
+
+    budget = smallest_budget(call, 1 << 30)
+    assert traced_peak(lambda: call(budget)) <= budget
+    with pytest.raises(MemoryError, match="(?i)raise"):
+        call(budget - 1)

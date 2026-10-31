@@ -24,7 +24,11 @@ block. Compiled loops compare every pair of one length, or of lengths within
 the distance, and stop at the first position where the distance is exceeded.
 Or, for distances up to 3, each text yields variant keys that any two texts
 within the distance share, and only the texts that share a key are compared.
-These functions work on text and never touch storage.
+Under substitutions a key masks as many runs of positions as the distance
+allows: one position each, or, for long texts such as lineage barcodes,
+fewer and longer runs, whose keys are far fewer, at the cost of texts that
+share one by chance, which are compared and left out. These functions work
+on text and never touch storage.
 """
 
 from dataclasses import dataclass
@@ -346,6 +350,12 @@ def _edit_pairs(
 # longer than the faster way for each length within 1 to 3 substitutions.
 _KEY_NS = 40.0
 _PAIR_NS = 3.5
+# A candidate pair of texts that share a key by chance costs its place in the
+# pairs of its run, its share of their sort and its comparison.
+_CANDIDATE_NS = 30.0
+# The segments of masked keys tried beyond the fewest that the limit allows,
+# besides one segment per position.
+_MAX_EXTRA_SEGMENTS = 12
 _EDIT_KEY_NS = 35.0
 _EDIT_PAIR_NS = 90.0
 _EDIT_CUTOFF_NS = 70.0
@@ -385,13 +395,17 @@ def _text_variants(
     table: np.ndarray,
     shifted: np.ndarray,
     hashes: np.ndarray,
+    bounds: np.ndarray,
 ) -> int:
     """Hash the variants of one text into ``hashes``; return how many.
 
     With ``deletions``, the variants drop 0 to ``limit`` positions, so two
-    texts within ``limit`` edits share one; otherwise they mask exactly
-    ``limit`` positions, so two texts of one length within ``limit``
-    substitutions share one. Up to three positions take part.
+    texts within ``limit`` edits share one. Otherwise they mask exactly
+    ``limit`` of the segments that ``bounds`` delimits, each one or more
+    positions in a row, so two texts of one length within ``limit``
+    substitutions share the variant that masks the segments of their
+    substitutions, or any segments where those are fewer. Up to three
+    positions or segments take part.
 
     A variant's hash is the exclusive or of the table's codes of its
     characters at their positions, a masked position taking the code in
@@ -410,23 +424,29 @@ def _text_variants(
         if limit == 0:
             hashes[0] = value
             return 1
+        # Masking a segment changes the hash by the codes of its characters
+        # and of its masked positions, held in the first row of ``shifted``.
+        n_segments = len(bounds) - 1
+        for segment in range(n_segments):
+            change = np.uint64(0)
+            for position in range(bounds[segment], bounds[segment + 1]):
+                change ^= table[position, text[position]] ^ table[position, _MASKED]
+            shifted[0, segment] = change
         n_hashes = 0
-        for first in range(length):
-            one = value ^ table[first, text[first]] ^ table[first, _MASKED]
+        for first in range(n_segments):
+            one = value ^ shifted[0, first]
             if limit == 1:
                 hashes[n_hashes] = one
                 n_hashes += 1
                 continue
-            for second in range(first + 1, length):
-                two = one ^ table[second, text[second]] ^ table[second, _MASKED]
+            for second in range(first + 1, n_segments):
+                two = one ^ shifted[0, second]
                 if limit == 2:
                     hashes[n_hashes] = two
                     n_hashes += 1
                     continue
-                for third in range(second + 1, length):
-                    hashes[n_hashes] = (
-                        two ^ table[third, text[third]] ^ table[third, _MASKED]
-                    )
+                for third in range(second + 1, n_segments):
+                    hashes[n_hashes] = two ^ shifted[0, third]
                     n_hashes += 1
         return n_hashes
     # shifted[shift, end]: the hash of the characters from position ``shift``
@@ -482,6 +502,7 @@ def _variant_keys(
     part: int,
     counts: np.ndarray,
     out: np.ndarray,
+    bounds: np.ndarray,
 ) -> int:
     """Hash each text's variants, counting each part's keys or writing one part's.
 
@@ -499,7 +520,7 @@ def _variant_keys(
     at = 0
     for row in range(codes.shape[0]):
         n_hashes = _text_variants(
-            codes[row], lengths[row], limit, deletions, table, shifted, hashes
+            codes[row], lengths[row], limit, deletions, table, shifted, hashes, bounds
         )
         if len(counts):
             for index in range(n_hashes):
@@ -594,11 +615,23 @@ def _check_pairs(
     return kept
 
 
-def _key_count(length: int, limit: int, deletions: bool) -> int:
-    """The keys that one text of ``length`` yields, at most."""
+def _key_count(
+    length: int, limit: int, deletions: bool, segments: int | None = None
+) -> int:
+    """The keys that one text of ``length`` yields, at most.
+
+    Under substitutions a text yields one key for each way of masking
+    ``limit`` of its ``segments``, one per position unless given.
+    """
     if deletions:
         return sum(comb(length, count) for count in range(min(limit, length) + 1))
-    return comb(length, limit) if limit <= length else 0
+    parts = length if segments is None else segments
+    return comb(parts, limit) if limit <= parts else 0
+
+
+def _segment_bounds(length: int, segments: int) -> np.ndarray:
+    """The bounds of ``segments`` runs of positions that split ``length`` evenly."""
+    return (np.arange(segments + 1, dtype=np.int64) * length) // segments
 
 
 def _keyed_pairs(
@@ -608,8 +641,13 @@ def _keyed_pairs(
     deletions: bool,
     table: np.ndarray,
     memory: _Memory,
+    segments: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Every pair within ``limit`` through shared variant keys, verified.
+
+    Under substitutions the texts share one length, split into ``segments``
+    runs of positions, or one per position for 0, of which each key masks
+    ``limit``.
 
     A key holds its hash with the row in the low bits, so one sort in place
     brings the rows of each hash together, ascending. Keys are split by their
@@ -623,8 +661,15 @@ def _keyed_pairs(
     n_rows = len(lengths)
     bits = max(int(n_rows - 1).bit_length(), 1)
     per_length = np.bincount(lengths)
+    if deletions:
+        parts = None
+        bounds = np.zeros(1, dtype=np.int64)
+    else:
+        length = len(per_length) - 1
+        parts = segments or length
+        bounds = _segment_bounds(length, parts)
     total = sum(
-        int(texts) * _key_count(length, limit, deletions)
+        int(texts) * _key_count(length, limit, deletions, parts)
         for length, texts in enumerate(per_length.tolist())
         if texts
     )
@@ -637,7 +682,7 @@ def _keyed_pairs(
     no_counts = np.empty(0, dtype=np.int64)
     entry = memory.held
     # The scratch space of one text's keys, held while the search runs.
-    scratch = _key_count(len(per_length) - 1, limit, deletions)
+    scratch = _key_count(len(per_length) - 1, limit, deletions, parts)
     memory.check(_KEY_BYTES * scratch, "the variant keys of one text")
     hashes = np.empty(scratch, dtype=np.uint64)
     memory.held += _KEY_BYTES * scratch
@@ -656,6 +701,7 @@ def _keyed_pairs(
             0,
             sizes,
             no_keys,
+            bounds,
         )
     held = memory.held
     found = []
@@ -676,6 +722,7 @@ def _keyed_pairs(
             part,
             no_counts,
             keys,
+            bounds,
         )
         keys = keys[:written]
         keys.sort()
@@ -803,12 +850,71 @@ def _unknown_table(unknown: str, coding: np.ndarray | None) -> np.ndarray:
     return table
 
 
-def _hamming_keyed(n_texts: int, length: int, limit: int) -> bool:
-    """Whether keys find the pairs of texts of one length sooner."""
-    if limit > 3:
-        return False
-    keys = n_texts * _key_count(length, limit, False)
-    return keys * _KEY_NS < n_texts * (n_texts - 1) / 2 * _PAIR_NS
+def _hamming_segments(codes: np.ndarray, limit: int, room: int) -> int:
+    """The segments whose masked keys find the pairs of texts of one length soonest.
+
+    A key masks ``limit`` of ``m`` segments of positions in a row, so a text
+    yields ``comb(m, limit)`` keys, and two texts share a key when they agree
+    on the segments it keeps, which two texts within ``limit`` substitutions
+    always do. One segment per position gives the most keys and the fewest
+    texts that share one by chance; fewer, longer segments give fewer keys
+    and more chance candidates, each compared. Each choice is timed by its
+    keys, hashed once for each pass, whose size follows ``room`` as the search
+    sizes it, and its candidate pairs, estimated from how often two texts
+    agree at each position by the frequencies of its characters; a choice
+    whose candidates of one pass would not fit ``room`` is left out.
+
+    Returns:
+        The segments of the fastest keyed search, or 0 when comparing every
+        pair is faster.
+    """
+    n_texts, length = codes.shape
+    pairs = n_texts * (n_texts - 1) / 2
+    best_time = pairs * _PAIR_NS
+    best = 0
+    if limit > 3 or length == 0 or n_texts < 2:
+        return best
+    # The fewest keys, of the fewest segments, without a chance candidate,
+    # cost more than comparing every pair of a few texts.
+    if n_texts * (limit + 1) * _KEY_NS >= best_time:
+        return best
+    # The chance that two texts agree at each position, from its characters,
+    # at least one in n_texts, and its logarithms summed along the positions.
+    agree = np.empty(length, dtype=np.float64)
+    for position in range(length):
+        counts = np.bincount(codes[:, position], minlength=256)
+        agree[position] = float(np.sum((counts / n_texts) ** 2))
+    summed = np.concatenate([[0.0], np.cumsum(np.log(agree))])
+    keys_per_pass = min(
+        _KEYS_PER_PASS, max(_MIN_KEYS_PER_PASS, room // (_KEY_SHARE * _KEY_BYTES))
+    )
+    # Splits into a few more segments than the limit keep the keys few, and
+    # one segment per position the chance candidates fewest; the splits
+    # between take more keys for fewer candidates than either.
+    choices = sorted(
+        {*range(limit + 1, min(length, limit + _MAX_EXTRA_SEGMENTS) + 1), length}
+    )
+    for segments in choices:
+        bounds = _segment_bounds(length, segments)
+        kept = segments - limit
+        # The chance that two texts agree on each segment, and on the kept
+        # segments of some key: the elementary symmetric sum of order kept.
+        agreements = np.exp(summed[bounds[1:]] - summed[bounds[:-1]]).tolist()
+        sums = [1.0] + [0.0] * kept
+        for value in agreements:
+            for order in range(kept, 0, -1):
+                sums[order] += sums[order - 1] * value
+        candidates = pairs * sums[kept]
+        keys = n_texts * comb(segments, limit)
+        # Passes split the keys, and the candidates with them, by hash.
+        passes = -(-keys // keys_per_pass)
+        if _CANDIDATE_BYTES * candidates / passes > room:
+            continue
+        time = keys * passes * _KEY_NS + candidates * _CANDIDATE_NS
+        if time < best_time:
+            best_time = time
+            best = segments
+    return best
 
 
 def _edits_keyed(sizes: np.ndarray, lengths: np.ndarray, limit: int) -> bool:
@@ -1046,9 +1152,9 @@ def neighbor_pairs(
                         codes, unknown_codes, limit, min_compared, found.most()
                     )
                 )
-            elif _hamming_keyed(len(members), length, limit):
+            elif segments := _hamming_segments(codes, limit, memory.room):
                 first, second = _keyed_pairs(
-                    codes, lengths[members], limit, False, table, memory
+                    codes, lengths[members], limit, False, table, memory, segments
                 )
             else:
                 first, second = found.looped(

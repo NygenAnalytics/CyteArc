@@ -516,22 +516,25 @@ def import_calling_truth(
     layout: str,
     *,
     cell_selection: "ArtifactRef | None" = None,
+    samples: Sequence[str] = SAMPLES,
 ) -> "ArtifactRef":
     """Import the calling truth's molecules as one tool writes them, one file per sample.
 
     ``"trex"`` writes TREX's ``molecules.txt`` of one library, ``"pycashier"``
     pycashier's reads, ``"celltag"`` the Biddy et al. workflow's reads of
     one library, and ``"celltag_multi"`` CellTag-multi's scRNA-seq reads of
-    d2 and its scATAC-seq reads, without UMIs, of d4, as two libraries.
+    d2 and its scATAC-seq reads, without UMIs, of d4, as two libraries. The
+    files are listed in the order of ``samples``.
     """
     barcodes = calling.barcodes
-    prefixes = [f"{sample}__" for sample in SAMPLES]
+    prefixes = [f"{sample}__" for sample in samples]
+    assays = {"d2": "RNA", "d4": "ATAC"}
     if layout == "trex":
         paths = [
             write_trex_molecules(
                 barcodes, folder / f"{sample}_molecules.txt", sample=sample
             )
-            for sample in SAMPLES
+            for sample in samples
         ]
         options: dict[str, object] = {"barcode_suffix": "-1", "library": "trex"}
     elif layout == "pycashier":
@@ -541,7 +544,7 @@ def import_calling_truth(
                 folder / f"{sample}.umi_cell_labeled.barcode.tsv",
                 sample=sample,
             )
-            for sample in SAMPLES
+            for sample in samples
         ]
         options = {"barcode_suffix": "-1", "library": "larry"}
     elif layout == "celltag":
@@ -552,17 +555,20 @@ def import_calling_truth(
                 sample=sample,
                 biddy=True,
             )
-            for sample in SAMPLES
+            for sample in samples
         ]
         options = {"library": "rna"}
     elif layout == "celltag_multi":
         paths = [
             write_celltag_reads(
-                barcodes, folder / f"{sample}_parse.txt.gz", sample=sample, assay=assay
+                barcodes,
+                folder / f"{sample}_parse.txt.gz",
+                sample=sample,
+                assay=assays[sample],
             )
-            for sample, assay in zip(SAMPLES, ("RNA", "ATAC"), strict=True)
+            for sample in samples
         ]
-        options = {"library": ["RNA", "ATAC"]}
+        options = {"library": [assays[sample] for sample in samples]}
     else:
         raise ValueError(f"layout must be one of {', '.join(CALLING_LAYOUTS)}")
     selection = every_cell(store) if cell_selection is None else cell_selection

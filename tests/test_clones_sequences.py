@@ -37,7 +37,11 @@ def _expected(texts, metric, cutoff, blocks=None) -> set[tuple[int, int]]:
 
 
 def _force(monkeypatch, path: str) -> None:
-    """Make the search use keys, or compare pairs, wherever it can."""
+    """Make the search use keys, or compare pairs, wherever it can.
+
+    Forced keys under substitutions mask single positions, the keys whose
+    costs the tests of the budget count.
+    """
     names = (
         ("_KEY_NS", "_EDIT_KEY_NS")
         if path == "keyed"
@@ -45,6 +49,12 @@ def _force(monkeypatch, path: str) -> None:
     )
     for name in names:
         monkeypatch.setattr(sequences, name, 0.0)
+    if path == "keyed":
+        monkeypatch.setattr(
+            sequences,
+            "_hamming_segments",
+            lambda codes, limit, room: max(codes.shape[1], 1) if limit <= 3 else 0,
+        )
 
 
 def _families(rng, alphabet: str, n_bases: int, high: int) -> list[str]:
@@ -757,3 +767,66 @@ def test_partial_pairs_found_count_against_the_budget() -> None:
         neighbor_pairs(texts, "hamming", 0, unknown="-", max_bytes=200_000)
     found = neighbor_pairs(texts, "hamming", 0, unknown="-", max_bytes=40 * needed)
     assert len(found[0]) == needed
+
+
+# Keys that mask segments of positions, for long texts.
+
+
+def _barcodes(rng, n_texts: int, length: int) -> list[str]:
+    """Random DNA barcodes with a variant one to three substitutions from each tenth."""
+    letters = np.asarray(list("ACGT"))
+    texts = ["".join(rng.choice(letters, size=length)) for _ in range(n_texts)]
+    for base in texts[: n_texts // 10]:
+        variant = list(base)
+        for position in rng.choice(length, size=int(rng.integers(1, 4)), replace=False):
+            variant[position] = "ACGT"[("ACGT".index(variant[position]) + 1) % 4]
+        texts.append("".join(variant))
+    return sorted(set(texts))
+
+
+@pytest.mark.parametrize("cutoff", [1, 2, 3])
+def test_segment_keys_find_every_pair_of_long_barcodes(cutoff, monkeypatch) -> None:
+    rng = np.random.default_rng(cutoff)
+    texts = _barcodes(rng, 2_000, 28)
+    chosen: list[int] = []
+    original = sequences._keyed_pairs
+
+    def spy(*args):
+        chosen.append(args[6])
+        return original(*args)
+
+    monkeypatch.setattr(sequences, "_keyed_pairs", spy)
+    found = _pairs(*neighbor_pairs(texts, "hamming", cutoff))
+    assert found == _expected(texts, "hamming", cutoff) and found
+    # Fewer, longer segments than positions take their keys.
+    assert len(chosen) == 1 and cutoff < chosen[0] < 28
+
+
+@pytest.mark.parametrize("segments", [4, 5, 9, 28])
+def test_every_split_into_segments_finds_the_same_pairs(segments, monkeypatch) -> None:
+    rng = np.random.default_rng(segments)
+    texts = _barcodes(rng, 600, 28)
+    monkeypatch.setattr(
+        sequences, "_hamming_segments", lambda codes, limit, room: segments
+    )
+    assert _pairs(*neighbor_pairs(texts, "hamming", 3)) == _expected(
+        texts, "hamming", 3
+    )
+
+
+def test_the_segments_cut_the_keys_of_long_barcodes() -> None:
+    rng = np.random.default_rng(31)
+    codes = rng.integers(0, 4, size=(100_000, 28)).astype(np.uint8)
+    segments = sequences._hamming_segments(codes, 3, 1 << 34)
+    # Five segments of five or six bases make ten keys per barcode, and two
+    # random barcodes rarely agree on the eleven bases a key keeps; masking
+    # positions would make 3,276.
+    assert 4 <= segments <= 8
+    assert sequences._key_count(28, 3, False, segments) < 100
+    # Texts that agree almost everywhere share keys by chance, so their
+    # segments stay short or they are compared pair by pair.
+    alike = np.zeros((2_000, 28), dtype=np.uint8)
+    alike[:, -1] = rng.integers(0, 4, size=2_000)
+    assert sequences._hamming_segments(alike, 1, 1 << 34) in (0, 28)
+    # Candidates that would not fit the room leave a choice out.
+    assert sequences._hamming_segments(codes, 3, 0) == 0

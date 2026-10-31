@@ -284,35 +284,66 @@ def test_a_read_only_store_reuses_saved_clones_and_refuses_new_ones(
         reader.clones.barcode_clones(barcodes, preset="larry", min_umis=4)
 
 
+@pytest.mark.parametrize("preset", ["trex", "celltag_multi"])
 def test_calls_follow_neither_file_order_nor_chunks_nor_threads(
-    template, tmp_path
+    tmp_path, monkeypatch, preset
 ) -> None:
-    noise, layout, _barcodes, _size = PRESET_CASES["trex"]
+    from cytearc.clones.barcodes import BarcodeCounter
+    from cytearc.readers import lineage_barcodes as reader
+
+    noise, layout, _barcodes, _size = PRESET_CASES[preset]
+    chunks = [0]
+    add = BarcodeCounter.add
+
+    def counted(self, *args, **kwargs):
+        chunks[0] += 1
+        return add(self, *args, **kwargs)
+
     calling = calling_truth(TRUTH, noise=noise)
+    allowlist = list(calling.allowlist) if preset == "celltag_multi" else None
     stored = []
-    for case, options in (
-        ("plain", {}),
-        ("small chunks", {"mem_budget": "96MB"}),
-        ("threads", {"nthreads": 4}),
-    ):
+    for case in ("plain", "files reversed", "chunks of 7 rows", "4 threads"):
         folder = tmp_path / case.replace(" ", "_")
         folder.mkdir()
-        store = write_truth_store(folder / "store.zarr", TRUTH)
-        if options:
-            store = open_clone_store(folder / "store.zarr", **options)
-        with collect_warnings():
-            barcodes = import_calling_truth(store, calling, folder, layout)
-        clones = store.clones.barcode_clones(barcodes, preset="trex")
+        write_truth_store(folder / "store.zarr", TRUTH)
+        store = open_clone_store(
+            folder / "store.zarr", nthreads=4 if case == "4 threads" else 1
+        )
+        with monkeypatch.context() as patched:
+            if case == "chunks of 7 rows":
+                # Each file is read 7 rows at a time, and every chunk merges.
+                patched.setattr(
+                    reader.BarcodeLayout, "chunk_rows", lambda self, chunk_bytes: 7
+                )
+                patched.setattr(store, "_merge_rows", lambda: 1)
+                patched.setattr(BarcodeCounter, "add", counted)
+            with collect_warnings():
+                barcodes = import_calling_truth(
+                    store,
+                    calling,
+                    folder,
+                    layout,
+                    samples=SAMPLES[::-1] if case == "files reversed" else SAMPLES,
+                )
+        clones = store.clones.barcode_clones(
+            barcodes, preset=preset, allowlist=allowlist
+        )
         group = store.artifacts.load(clones)
         stored.append(
             {
                 name: np.asarray(group[name][:])
-                for name in ("codes", "n_barcodes", "doublet", "clone_sizes")
+                for name in ("values", "codes", "n_barcodes", "doublet", "clone_sizes")
             }
         )
+        stored[-1]["rule_counts"] = dict(group.attrs)["rule_counts"]
+    # The files of about 400 reads or molecules came in chunks of 7 rows.
+    assert chunks[0] > 40
     for other in stored[1:]:
         for name, values in stored[0].items():
-            np.testing.assert_array_equal(other[name], values)
+            if name == "rule_counts":
+                assert other[name] == values
+            else:
+                np.testing.assert_array_equal(other[name], values)
 
 
 def test_barcode_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -> None:
@@ -445,3 +476,23 @@ def test_the_golden_holds_doublets_that_trex_removed() -> None:
         if not run["keep_doublets"]
     }
     assert removed[0.0] > 0 and removed[0.3] > 0
+
+
+def test_an_allowlist_too_large_for_the_budget_is_refused_before_it_is_copied(
+    store, tmp_path, monkeypatch
+) -> None:
+    calling, barcodes = _imported(store, tmp_path, "celltag")
+    # A fixed-width array's barcodes become Python strings, which count too.
+    allowlist = np.asarray(calling.allowlist)
+    needed = 300 * len(allowlist) + len(allowlist) * (allowlist.dtype.itemsize // 4)
+    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    with pytest.raises(MemoryError, match=f"allowlist of {len(allowlist)} barcodes"):
+        store.clones.barcode_clones(barcodes, preset="celltag", allowlist=allowlist)
+    monkeypatch.setattr(store, "memoryBytes", needed)
+    with pytest.raises(MemoryError, match="Raise mem_budget") as raised:
+        store.clones.barcode_clones(barcodes, preset="celltag", allowlist=allowlist)
+    assert "allowlist" not in str(raised.value)
+    with pytest.raises(TypeError, match="sequence of barcodes"):
+        store.clones.barcode_clones(
+            barcodes, preset="celltag", allowlist=iter(allowlist)
+        )
