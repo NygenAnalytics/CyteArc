@@ -145,6 +145,22 @@ _CLONE_SOURCE_KINDS = (
 )
 # The key column of each cell's receptor type, which clonotypes keep apart.
 _RECEPTOR_TYPE_COLUMN = "receptor_type"
+# The array of each kind's clone labels, and the key columns whose labels its
+# clones keep apart.
+_CLONE_ID_ARRAYS = {
+    CloneImportArguments.artifact_kind: "clone_ids",
+    ClonotypeArguments.artifact_kind: "clonotype_ids",
+}
+_KEPT_APART_COLUMNS: dict[str, tuple[str, ...]] = {
+    CloneImportArguments.artifact_kind: (),
+    ClonotypeArguments.artifact_kind: (_RECEPTOR_TYPE_COLUMN,),
+}
+# Reading the receptor types of clonotypes holds each cell's stored text and,
+# while it is coded, a Python string and a code for each cell, 92 bytes beside
+# the text as traced on 200,000 cells. Each cell then keeps a label in each
+# column that the clones keep apart, a pointer to one of a few shared labels.
+_RECEPTOR_TYPE_CODING_BYTES = 100
+_KEPT_LABEL_BYTES = 8
 # Reading a clone artifact holds, for each of its cells, the stored code and
 # this many bytes for its int64 copy.
 _CLONE_CODE_BYTES = 8
@@ -830,11 +846,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
     def _clone_text_bytes(self, clones: ArtifactRef, n_cells: int) -> int:
         """Bytes of reading saved clones' labels and their cells' IDs as text."""
-        name = (
-            "clonotype_ids"
-            if clones.kind == ClonotypeArguments.artifact_kind
-            else "clone_ids"
-        )
+        name = _CLONE_ID_ARRAYS[clones.kind]
         labels = as_zarr_array(artifact_group(self.zw, clones)[name], name=name)
         return text_read_bytes(labels, int(labels.shape[0])) + (
             text_read_bytes(self.cells._get_array("ids"), n_cells)
@@ -873,20 +885,20 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 are incomplete, as an import that stopped before it finished
                 leaves them.
             MemoryError: If the tables, about 250 bytes per cell beside the
-                text of its ID and of the clone labels, do not fit the memory
-                budget.
+                clones that they read and the text of the cells' IDs and of
+                the clone labels, do not fit the memory budget.
         """
         group = self._clone_group(clones)
         n_cells = int(as_zarr_array(group["codes"], name="codes").shape[0])
-        resident = (
-            self._clone_text_bytes(clones, n_cells) + _TABLE_BYTES_PER_CELL * n_cells
+        # The tables are built beside the codes and kept labels read, and the
+        # clone labels and the cells' IDs as text.
+        self._check_clone_table_budget(
+            n_cells,
+            _TABLE_BYTES_PER_CELL,
+            "clones",
+            held=self._clone_input_bytes(clones, with_ids=False)
+            + self._clone_text_bytes(clones, n_cells),
         )
-        if resident > self.memoryBytes:
-            raise MemoryError(
-                f"Loading the clones of {n_cells} cells holds about {resident} "
-                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
-                "Raise mem_budget."
-            )
         source = self._read_clone_input(clones, with_ids=True)
         assert source.clone_ids is not None
         extra = {}
@@ -956,8 +968,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 are incomplete, as an import that stopped before it finished
                 leaves them.
             MemoryError: If the export, about 200 bytes per cell beside the
-                text of its ID and of the clone labels, does not fit the
-                memory budget.
+                clones that it reads and the text of the cells' IDs and of the
+                clone labels, does not fit the memory budget.
         """
         from ...readers.clone_tables import MISSING_TEXT
         from ...writers.clone_tables import write_clone_matrix, write_clone_table
@@ -970,8 +982,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             )
         group = self._clone_group(clones)
         n_cells = int(as_zarr_array(group["codes"], name="codes").shape[0])
-        resident = self._clone_text_bytes(clones, n_cells) + (
+        # The file is written from the codes and kept labels read, and the
+        # clone labels and the cells' IDs as text.
+        resident = (
             _EXPORT_BYTES_PER_CELL * n_cells
+            + self._clone_input_bytes(clones, with_ids=False)
+            + self._clone_text_bytes(clones, n_cells)
         )
         if resident > self.memoryBytes:
             raise MemoryError(
@@ -1003,32 +1019,51 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Only the arrays' metadata is read: each cell's code and, with
         ``with_ids``, each clone's label, which costs as much as its stored
-        text is wide.
+        text is wide. Clonotypes also read each cell's receptor type as text,
+        code it, and keep a label for each cell.
 
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef.
             ValueError: If it is not a kind of clone artifact that the
                 summaries read.
-            KeyError: If the store holds no such artifact.
-            RuntimeError: If the artifact is incomplete.
+            KeyError: If the store holds no such artifact, or not the
+                receptors of the clonotypes.
+            RuntimeError: If the artifact or the receptors of the clonotypes
+                are incomplete.
         """
-        if not isinstance(clones, ArtifactRef):
-            raise TypeError("clones must be an ArtifactRef")
-        if clones.kind not in _CLONE_SOURCE_KINDS:
-            raise ValueError(
-                f"clones must be a {' or '.join(_CLONE_SOURCE_KINDS)} artifact, "
-                f"not {clones.kind!r}"
-            )
-        require_complete_artifact(self.zw, clones)
-        group = artifact_group(self.zw, clones)
+        group = self._clone_group(clones)
         codes = as_zarr_array(group["codes"], name="codes")
-        resident = int(codes.shape[0]) * (codes.dtype.itemsize + _CLONE_CODE_BYTES)
+        n_cells = int(codes.shape[0])
+        resident = n_cells * (codes.dtype.itemsize + _CLONE_CODE_BYTES)
         if with_ids:
-            ids = as_zarr_array(group["clone_ids"], name="clone_ids")
+            name = _CLONE_ID_ARRAYS[clones.kind]
+            ids = as_zarr_array(group[name], name=name)
             resident += int(ids.shape[0]) * (
                 _CLONE_ID_BYTES + _CLONE_ID_COPIES * ids.dtype.itemsize
             )
-        return resident
+        if clones.kind == ClonotypeArguments.artifact_kind:
+            receptor_type = self._receptor_types(clones)
+            resident += int(receptor_type.shape[0]) * (
+                receptor_type.dtype.itemsize + _RECEPTOR_TYPE_CODING_BYTES
+            )
+        return resident + n_cells * _KEPT_LABEL_BYTES * len(
+            _KEPT_APART_COLUMNS[clones.kind]
+        )
+
+    def _receptor_types(self, clonotypes: ArtifactRef) -> zarr.Array:
+        """The stored receptor type of each cell of saved clonotypes.
+
+        Clonotypes label the cells of their receptors, in the same order, and
+        the receptors' canonical values are the receptor types.
+
+        Raises:
+            ValueError: If the receptors are not complete.
+        """
+        receptors = inspect_artifact(self.zw, clonotypes).input_ref("receptors")
+        require_complete_artifact(self.zw, receptors)
+        return as_zarr_array(
+            artifact_group(self.zw, receptors)["values"], name="values"
+        )
 
     def _read_clone_input(
         self, clones: ArtifactRef, *, with_ids: bool = False
@@ -1060,24 +1095,19 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
                 "Raise mem_budget."
             )
-        status = inspect_artifact(self.zw, clones)
-        ids = "clone_ids"
         kept_apart: tuple[tuple[str, np.ndarray], ...] = ()
         if clones.kind == ClonotypeArguments.artifact_kind:
-            ids = "clonotype_ids"
-            # Clonotypes label the cells of their receptors, in the same order.
-            receptors = status.input_ref("receptors")
-            require_complete_artifact(self.zw, receptors)
-            receptor_type = _read(artifact_group(self.zw, receptors), "values")
             # Each of the few receptor types becomes one shared label, so the
             # summaries code the cells' labels without a string per cell.
-            codes, names = category_codes(receptor_type)
-            del receptor_type
+            codes, names = category_codes(np.asarray(self._receptor_types(clones)[:]))
             labels = np.asarray([*names, None], dtype=object)[codes]
             kept_apart = ((_RECEPTOR_TYPE_COLUMN, labels),)
+        ids = _CLONE_ID_ARRAYS[clones.kind]
         return _CloneInput(
             ref=clones,
-            cell_selection=status.input_ref("cell_selection"),
+            cell_selection=inspect_artifact(self.zw, clones).input_ref(
+                "cell_selection"
+            ),
             codes=_read(group, "codes").astype(np.int64, copy=False),
             clone_ids=_read(group, ids).astype(object) if with_ids else None,
             kept_apart=kept_apart,
@@ -1408,9 +1438,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable(arguments.operation)
-        resident = _EXPANSION_BYTES_PER_CELL * n_cells + _SUMMARY_BYTES_PER_GROUP * len(
-            grouped.keys
-        )
+        # The labels that the clones keep apart stay beside the measurement.
+        resident = (
+            _EXPANSION_BYTES_PER_CELL + _KEPT_LABEL_BYTES * len(kept_apart)
+        ) * n_cells + _SUMMARY_BYTES_PER_GROUP * len(grouped.keys)
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Measuring the clonal expansion of {n_cells} cells holds about "
@@ -1522,7 +1553,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         held += self._clone_input_bytes(clones, with_ids=True)
         clone_cells = inspect_artifact(self.zw, clones).input_ref("cell_selection")
         if measured != clone_cells:
-            held += self._matching_bytes(clones, clone_cells, measured, n_cells, 0)
+            held += self._matching_bytes(
+                clones,
+                clone_cells,
+                measured,
+                n_cells,
+                len(_KEPT_APART_COLUMNS[clones.kind]),
+            )
         self._check_clone_table_budget(
             n_cells, _EXPANSION_TABLE_BYTES_PER_CELL, "clonal expansion", held=held
         )

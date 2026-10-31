@@ -189,11 +189,12 @@ Every summary checks the memory budget before each step that reads or allocates,
 
 | Step | Bytes |
 |---|---|
-| Reading the clones | 12 per cell of the clones, and for `track` and the tables of `load_expansion` 100 and three times the stored width of each clone's label |
-| Matching the clones to other cells, when `cell_selection` of `expansion` differs from the clones' cells | 56 per cell of the clones and 32 per measured cell, and the read before, below |
+| Reading the clones | 12 per cell of the clones, and for `track` and the tables of `load_expansion` 100 and three times the stored width of each clone's label; for clonotypes also the stored width of each cell's receptor type and 108 more |
+| Matching the clones to other cells, when `cell_selection` of `expansion` differs from the clones' cells | 56 per cell of the clones and 32 per measured cell, 8 per measured cell for each column of labels that the clones keep apart, and the read before, below |
 | Grouping | 100 per cell, 70 per cell for each key column, and three times the stored width of each `group_by` column's labels; 32 per cell of `cell_selection`, with the read before, and 130 and three times the label width per cell of the `groups` artifact, whatever cells the clones hold; one chunk of the widest column of labels, and that chunk again with the read before when it reads several columns and labels or a column of several chunks; 500 per distinct label and per group |
-| Measuring expansion | 300 per measured cell |
+| Measuring expansion | 300 per measured cell, and 8 for each column of labels that the clones keep apart |
 | Loading expansion | 500 per cell and the cells' IDs as text |
+| `load_clones` and `export_clones` | 250 and 200 per cell, the clones read without their labels, and the clone labels and the cells' IDs as text |
 | Rarefaction | 40 for each size below a group's cells and each of its distinct clone sizes, and 100 per row of the curves |
 | Comparing groups | 250 per pair of groups and 24 per entry of the groups-by-groups matrices, 40 per clone of each group, and the clones read |
 | Following clones | 100 per row of the table and 16 more per row for each key column, a byte per chosen clone and group, 40 per clone of each group, and the clones and labels read |

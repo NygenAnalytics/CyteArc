@@ -254,6 +254,47 @@ AIRR_ROWS = [
 ]
 
 
+# One codon for each residue, so distinct junction residues have distinct
+# nucleotides.
+_CODONS = dict(
+    zip(
+        "ACDEFGHIKLMNPQRSTVWY",
+        "GCT TGT GAT GAA TTT GGT CAT ATT AAA CTG ATG AAT CCG CAG CGT AGC ACC GTG "
+        "TGG TAT".split(),
+        strict=True,
+    )
+)
+
+
+def write_clone_contigs(
+    folder: Path, name: str, cell_ids: Sequence[str], clone_of: np.ndarray
+) -> Path:
+    """Write Cell Ranger contig annotations in which each clone has its receptor.
+
+    Every fifth clone is a B cell clone with a heavy and a kappa chain, and the
+    others are T cell clones with an alpha and a beta chain. Each cell carries
+    both chains of its clone, and a cell of clone -1 has no contig. A clone's
+    junctions spell its number in residues, so clonotypes of identical chains
+    are the clones.
+    """
+    residues = "ACDEFGHIKLMNPQRSTVWY"
+    rows = []
+    for cell, clone in zip(cell_ids, np.asarray(clone_of).tolist(), strict=True):
+        if clone < 0:
+            continue
+        digits = "".join(residues[clone // 20**power % 20] for power in range(5))
+        loci = ("IGH", "IGK") if clone % 5 == 4 else ("TRA", "TRB")
+        for index, locus in enumerate(loci, start=1):
+            junction_aa = f"C{digits}{'FW'[index - 1]}"
+            junction = "".join(_CODONS[residue] for residue in junction_aa)
+            rows.append(
+                f"{cell},true,{cell}_contig_{index},true,500,{locus},{locus}V1,,"
+                f"{locus}J1,{locus}C,true,true,{junction_aa},{junction},100,5,"
+                f"ct{clone},ct{clone}_{index}"
+            )
+    return write_lines(folder, name, CELLRANGER_HEADER, rows)
+
+
 def receptor_store(folder: Path, **options: object) -> "DataStore":
     """Open the store of cells cell0 to cell7 in ``folder``, writing it once."""
     from cytearc.datastore.datastore import DataStore

@@ -1,7 +1,7 @@
 import os
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -19,14 +19,8 @@ from ...metadata.records import (
     decode_text,
     take_text,
 )
-from ...metadata.rows import (
-    apply_missing_mask,
-    read_metadata_missing_rows,
-    read_metadata_rows,
-    read_metadata_rows_chunkwise,
-    text_read_bytes,
-)
-from ...metadata.selection import cell_selection_indices, sample_codes
+from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
+from ...metadata.selection import cell_selection_indices
 from ...repertoire.chains import (
     NO_RECEPTOR,
     RECEPTOR_TYPES,
@@ -68,7 +62,7 @@ from .cell_barcodes import (
     barcode_files,
     warn_unmatched_barcodes,
 )
-from .cell_groups import group_columns
+from .cell_groups import cell_groups, group_columns
 
 if TYPE_CHECKING:
     from ..mapping_datastore import MappingDatastore as _RepertoireOperationsBase
@@ -120,14 +114,26 @@ _CELL_TABLE_BYTES_PER_CELL = 700
 # The bytes of each chunk of a contig array. Packed text and per-contig codes
 # are read and written whole, which chunks of megabytes make fast.
 _CONTIG_CHUNK_BYTES = 2 * 2**20
+# Reading the receptor types holds each cell's stored text and, while it is
+# coded, a Python string and a code for each cell, 92 bytes beside the text as
+# traced on 200,000 cells.
+_RECEPTOR_TYPE_CODING_BYTES = 100
 # Defining clonotypes holds the chains of every slot, their distinct
 # configurations and keys, and the labels: 340 bytes per cell at the peak, as
 # traced on 1,000,000 simulated cells of about two chains each. Cells with more
-# chains give more keys, so the check reserves 1,000 bytes per cell.
+# chains give more keys, so the check reserves 1,000 bytes per cell, beside the
+# stored code and its int64 copy of each contig's compared field.
 _CLONOTYPE_BYTES_PER_CELL = 1_000
-# The tables of loaded clonotypes hold about 600 bytes per cell at their peak,
-# with the cell IDs as text, as traced on the same cells.
-_CLONOTYPE_TABLE_BYTES_PER_CELL = 1_000
+_CODE_BYTES = 8
+# The tables of loaded clonotypes hold, beside the cells' IDs as text, about
+# 300 bytes per cell at their peak: each cell's codes and sizes as read and in
+# the table, and the receptors' slots and types that the representatives are
+# taken from. With 12-character IDs, 518 to 582 bytes per cell were traced on
+# 30,000 and 100,000 cells, and 600 on 1,000,000 cells with 18-character IDs.
+_CLONOTYPE_TABLE_BYTES_PER_CELL = 300
+# The packed text of a representative field is read whole and its needed
+# values decoded, so up to twice its bytes are held.
+_TEXT_COPIES = 2
 # The columns of the tables of clonotypes, which a within column may not share.
 _CLONOTYPE_COLUMNS = frozenset(
     {"clonotype", "clone_size", "n_cells", "fraction", "n_configurations"}
@@ -375,14 +381,11 @@ def _sorted_codes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(distinct), np.asarray(codes, dtype=np.int64)
 
 
-def _labels_of(
-    keys: list[dict[str, str]], column: str, codes: np.ndarray
-) -> np.ndarray:
-    """Each code's label in a column of the keys, None for -1."""
-    labels = np.asarray([key.get(column) for key in keys], dtype=object)
+def _labels_at(labels: np.ndarray, codes: np.ndarray) -> np.ndarray:
+    """Each code's label, None for -1; only the labels taken become strings."""
     taken = np.full(len(codes), None, dtype=object)
     present = codes >= 0
-    taken[present] = labels[codes[present]]
+    taken[present] = np.asarray(labels[codes[present]], dtype=object)
     return taken
 
 
@@ -734,33 +737,56 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         group = artifact_group(self.zw, receptors)
         return group, _stored_fields(group)
 
-    def _within_samples(
+    def _within_groups(
         self,
         cell_selection: ArtifactRef,
         columns: tuple[str, ...],
-        rows: np.ndarray,
-        *,
-        reason: str,
+        with_receptor: np.ndarray,
     ) -> tuple[np.ndarray, list[dict[str, str]], str | None]:
-        """Group the selected cells at ``rows`` by their labels in ``columns``.
+        """Group the cells with a receptor by their labels in the within columns.
 
-        Returns each of those cells' sample code, each sample's labels, and the
-        fingerprint of the cells' samples, as ``sample_codes`` does; without
-        columns, one sample without labels and no fingerprint.
+        The groups are those of :func:`cell_groups`, in the natural order of
+        their labels, and are identified by its fingerprint of each cell's
+        group.
+
+        Returns:
+            Each cell's group, 0 for a cell without a receptor; each group's
+            labels by column; and the fingerprint of the cells' groups.
+            Without columns, every cell is in one group without labels, and
+            the fingerprint is None.
+
+        Raises:
+            ValueError: If a column is not a cell metadata column, or a cell
+                with a receptor has no label in one.
+            MemoryError: If grouping the cells does not fit the memory budget.
         """
-        n_rows = int(np.count_nonzero(rows))
+        n_cells = len(with_receptor)
         if not columns:
-            return sample_codes(columns, [], n_rows, reason=reason)
-        cell_index = cell_selection_indices(self.zw, cell_selection)[rows]
-        labels = [
-            apply_missing_mask(
-                np.asarray(read_metadata_rows(self.cells, column, cell_index)),
-                read_metadata_missing_rows(self.cells, column, cell_index),
-                labels=True,
+            return np.zeros(n_cells, dtype=np.int64), [{}], None
+        for column in columns:
+            if column not in self.cells.columns:
+                raise ValueError(
+                    f"within names {column!r}, which is not a cell metadata column"
+                )
+        grouped = cell_groups(
+            self.zw,
+            self.cells,
+            cell_selection,
+            with_receptor,
+            group_by=columns,
+            groups=None,
+            cell_selection=None,
+            memory_bytes=self.memoryBytes,
+            reserved=_CLONOTYPE_COLUMNS,
+        )
+        unlabelled = int(np.count_nonzero(with_receptor & (grouped.codes < 0)))
+        if unlabelled:
+            raise ValueError(
+                f"The within columns have no label for {unlabelled} cells with a "
+                "receptor. Every cell with a receptor needs a label in the within "
+                "columns."
             )
-            for column in columns
-        ]
-        return sample_codes(columns, labels, n_rows, reason=reason)
+        return np.maximum(grouped.codes, 0), grouped.keys, grouped.fingerprint()
 
     def _artifact_cell_ids(self, artifact: ArtifactRef) -> np.ndarray:
         """The IDs of a cell-aligned artifact's cells, in the order of its arrays."""
@@ -832,12 +858,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If an option is unknown, the receptors store no
-                junction of the compared kind, or a ``within`` column has no
-                label for a cell with a receptor.
+                junction of the compared kind, or a ``within`` column is not a
+                cell metadata column or has no label for a cell with a
+                receptor.
             PermissionError: If the store is read-only and the clonotypes are
                 not saved yet.
-            MemoryError: If the 1,000 bytes per cell that the definition
-                reserves do not fit the memory budget.
+            MemoryError: If reading the receptor types, grouping the cells
+                by their ``within`` labels, or the definition, 1,000 bytes per
+                cell and 12 per contig, does not fit the memory budget.
         """
         group, fields = self._receptor_group(receptors)
         if sequence not in SEQUENCES:
@@ -867,24 +895,27 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 raise ValueError(f"The receptors store no {gene} to match")
         status = inspect_artifact(self.zw, receptors)
         cell_selection = status.input_ref("cell_selection")
-        receptor_type = _read(group, "values").astype(str)
-        n_cells = len(receptor_type)
+        stored_types = as_zarr_array(group["values"], name="values")
+        n_cells = int(stored_types.shape[0])
+        held = n_cells * (stored_types.dtype.itemsize + _RECEPTOR_TYPE_CODING_BYTES)
+        if held > self.memoryBytes:
+            raise MemoryError(
+                f"Reading the receptor types of {n_cells} cells holds about {held} "
+                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
+                "Raise mem_budget."
+            )
+        receptor_type = np.asarray(stored_types[:])
         with_receptor = receptor_type != NO_RECEPTOR
         if within_receptor_type:
             _types, type_codes = _sorted_codes(receptor_type)
         else:
             type_codes = np.zeros(n_cells, dtype=np.int64)
-        within_codes = np.zeros(n_cells, dtype=np.int64)
-        codes, within_labels, fingerprint = self._within_samples(
-            cell_selection,
-            columns,
-            with_receptor,
-            reason="Every cell with a receptor needs a label in the within columns.",
+        del receptor_type
+        within_codes, within_labels, fingerprint = self._within_groups(
+            cell_selection, columns, with_receptor
         )
-        within_codes[with_receptor] = codes
-        n_within = max(1, int(within_codes.max()) + 1)
         groups = np.where(
-            with_receptor, type_codes.astype(np.int64) * n_within + within_codes, -1
+            with_receptor, type_codes * max(1, len(within_labels)) + within_codes, -1
         )
         arguments = ClonotypeArguments(
             receptors=receptors,
@@ -919,7 +950,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable(arguments.operation)
-        resident = _CLONOTYPE_BYTES_PER_CELL * n_cells
+        # Each compared field's code of every contig is read, one field at a
+        # time.
+        contig_codes = as_zarr_array(group[f"contig_{field_name}"], name=field_name)
+        resident = _CLONOTYPE_BYTES_PER_CELL * n_cells + int(contig_codes.shape[0]) * (
+            contig_codes.dtype.itemsize + _CODE_BYTES
+        )
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Defining the clonotypes of {n_cells} cells holds about {resident} "
@@ -947,23 +983,28 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             if columns
             else np.full(assignment.n_clonotypes, -1, dtype=np.int64)
         )
+        arrays = {
+            "values": values,
+            "codes": assignment.codes.astype(np.int32),
+            "clone_size": sizes,
+            "clonotype_ids": labels,
+            "clonotype_sizes": assignment.sizes,
+            "representatives": representatives,
+            "n_configurations": n_configurations,
+            "clonotype_within": clonotype_within,
+        }
+        if columns:
+            # Each within group's label in each column, row by row, as an
+            # array, so opening the artifact reads none of them.
+            arrays["within_labels"] = np.asarray(
+                [key[column] for key in within_labels for column in columns],
+                dtype=object,
+            )
         write_cell_data_artifact(
             self.zw,
             planned,
-            {
-                "values": values,
-                "codes": assignment.codes.astype(np.int32),
-                "clone_size": sizes,
-                "clonotype_ids": labels,
-                "clonotype_sizes": assignment.sizes,
-                "representatives": representatives,
-                "n_configurations": n_configurations,
-                "clonotype_within": clonotype_within,
-            },
-            attributes={
-                "n_clonotypes": assignment.n_clonotypes,
-                "within_labels": within_labels,
-            },
+            arrays,
+            attributes={"n_clonotypes": assignment.n_clonotypes},
         )
         logger.info(
             f"Defined {assignment.n_clonotypes} clonotypes of {int(has.sum())} of "
@@ -999,23 +1040,42 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Raises:
             TypeError: If ``clonotypes`` is not an ArtifactRef.
             ValueError: If it is not a complete ``clonotypes`` artifact.
-            MemoryError: If the 1,000 bytes per cell that the tables reserve
-                do not fit the memory budget.
+            MemoryError: If the tables, 300 bytes per cell beside the cells'
+                IDs, the representatives' chains and the ``within`` labels that
+                they read as text, do not fit the memory budget.
         """
         group = self._clonotype_group(clonotypes)
         n_cells = int(as_zarr_array(group["codes"], name="codes").shape[0])
-        resident = _CLONOTYPE_TABLE_BYTES_PER_CELL * n_cells
+        status = inspect_artifact(self.zw, clonotypes)
+        parameters = dict(status.parameters or {})
+        receptors = status.input_ref("receptors")
+        receptor_group = artifact_group(self.zw, receptors)
+        fields = _stored_fields(receptor_group)
+        within = tuple(str(column) for column in parameters.get("within") or ())
+        # Beside the tables: the cells' IDs as text, the packed text of each
+        # representative field, which is read whole, and the within groups'
+        # labels.
+        resident = _CLONOTYPE_TABLE_BYTES_PER_CELL * n_cells + text_read_bytes(
+            self.cells._get_array("ids"), n_cells
+        )
+        if within:
+            stored = as_zarr_array(group["within_labels"], name="within_labels")
+            resident += text_read_bytes(stored, int(stored.shape[0]))
+        for name in REPRESENTATIVE_FIELDS:
+            if name in fields:
+                packed = as_zarr_array(
+                    receptor_group[f"contig_{name}_values"], name=name
+                )
+                offsets = as_zarr_array(
+                    receptor_group[f"contig_{name}_offsets"], name=name
+                )
+                resident += _TEXT_COPIES * int(packed.nbytes) + int(offsets.nbytes)
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Loading the clonotypes of {n_cells} cells holds about {resident} "
                 f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
                 "Raise mem_budget."
             )
-        status = inspect_artifact(self.zw, clonotypes)
-        parameters = dict(status.parameters or {})
-        receptors = status.input_ref("receptors")
-        receptor_group = artifact_group(self.zw, receptors)
-        fields = _stored_fields(receptor_group)
         representatives = _read(group, "representatives").astype(np.int64)
         slots = _read(receptor_group, "chain_slots")[representatives]
         # Only the representatives' contigs are decoded.
@@ -1026,11 +1086,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             for name in REPRESENTATIVE_FIELDS
             if name in fields
         }
-        within = tuple(str(column) for column in parameters.get("within") or ())
-        within_labels = cast(
-            list[dict[str, str]], group.attrs.get("within_labels") or [{}]
-        )
         within_codes = _read(group, "clonotype_within").astype(np.int64)
+        within_labels = (
+            _read(group, "within_labels").reshape(-1, len(within))
+            if within
+            else np.empty((0, 0), dtype=object)
+        )
         cells, table = clonotype_frames(
             self._artifact_cell_ids(clonotypes),
             codes=_read(group, "codes"),
@@ -1040,8 +1101,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             n_configurations=_read(group, "n_configurations"),
             receptor_type=_read(receptor_group, "values").astype(str)[representatives],
             within={
-                column: _labels_of(within_labels, column, within_codes)
-                for column in within
+                column: _labels_at(within_labels[:, position], within_codes)
+                for position, column in enumerate(within)
             },
             slots=local.reshape(slots.shape),
             chains=chains,

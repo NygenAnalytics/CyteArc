@@ -17,10 +17,13 @@ import pandas as pd
 import pytest
 
 from cytearc import plotting
+from cytearc.metadata.rows import text_read_bytes
 from cytearc.repertoire import Clonotypes
+from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import (
     CELLRANGER_HEADER,
     N_RECEPTOR_CELLS,
+    ids_read_bytes,
     loaded_partition,
     receptor_store,
     write_lines,
@@ -291,7 +294,7 @@ def test_nucleotide_clonotypes_need_nucleotide_junctions(tmp_path) -> None:
         ({"within": 3}, TypeError, "within must be"),
         ({"within": ["donor", "donor"]}, ValueError, "within names a column twice"),
         ({"within": ["donor", 3]}, TypeError, "within must be"),
-        ({"within": ["absent"]}, KeyError, "absent"),
+        ({"within": ["absent"]}, ValueError, "'absent', which is not a cell metadata"),
     ],
 )
 def test_clonotype_arguments_are_checked(tmp_path, kwargs, error, message) -> None:
@@ -530,27 +533,227 @@ def test_group_by_may_not_name_the_receptor_type_again(tmp_path) -> None:
         store.clones.diversity(receptors)
 
 
-def test_clonotypes_refuse_more_cells_than_the_memory_budget(
+# Reading the eight cells' clonotypes holds each cell's stored int32 code and
+# its int64 copy, its receptor type, stored in 20 bytes as "no IR" is five
+# characters, and 100 more while the types are coded, and an 8-byte label; and
+# with their labels, each of the four clonotypes' 44 stored bytes, eleven
+# characters, three times and 100 more.
+CLONOTYPES_READ = 8 * (4 + 8) + 8 * (20 + 100) + 8 * 8
+CLONOTYPE_LABELS_READ = 4 * (100 + 3 * 44)
+
+
+def _assert_stored_widths(store, receptors, ref) -> None:
+    receptor_group = artifact_group(store.zw, receptors)
+    assert receptor_group["values"].dtype == np.dtype("<U5")
+    assert receptor_group["contig_junction"].dtype == np.int32
+    assert receptor_group["contig_junction"].shape == (14,)
+    group = artifact_group(store.zw, ref)
+    assert group["codes"].dtype == np.int32
+    assert group["clonotype_ids"].dtype == np.dtype("<U11")
+
+
+def test_defining_clonotypes_is_checked_against_the_memory_budget(
     tmp_path, monkeypatch
 ) -> None:
     store, receptors = _receptors(tmp_path)
-    monkeypatch.setattr(store, "memoryBytes", 1_000)
-    with pytest.raises(MemoryError, match="Raise mem_budget"):
+    # Reading the receptor types takes each cell's 20 stored bytes and 100
+    # more while they are coded.
+    monkeypatch.setattr(store, "memoryBytes", 8 * 120 - 1)
+    with pytest.raises(MemoryError, match="types of 8 cells holds about 960 bytes"):
+        store.repertoire.clonotypes(receptors)
+    # Defining takes 1,000 bytes per cell, and each contig's stored junction
+    # code and its int64 copy.
+    needed = 8 * 1_000 + 14 * (4 + 8)
+    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    with pytest.raises(MemoryError, match=f"of 8 cells holds about {needed} bytes"):
         store.repertoire.clonotypes(receptors)
     assert store.artifacts.list(kind="clonotypes", scope="datastore") == []
+    monkeypatch.setattr(store, "memoryBytes", needed)
+    ref = store.repertoire.clonotypes(receptors)
+    assert store.artifacts.list(kind="clonotypes", scope="datastore") == [ref]
+    _assert_stored_widths(store, receptors, ref)
+
+
+def test_grouping_by_within_columns_is_checked_against_the_memory_budget(
+    tmp_path, monkeypatch
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    store.cells.insert("donor", np.asarray(["d1", "d2"] * 4))
+    # The definition alone fits, but grouping the cells by donor reads a chunk
+    # of 100,000 rows of the column, which does not.
+    monkeypatch.setattr(store, "memoryBytes", 8 * 1_000 + 14 * 12)
+    assert store.repertoire.clonotypes(receptors)
+    with pytest.raises(MemoryError, match="Grouping 8 cells by 1 columns holds"):
+        store.repertoire.clonotypes(receptors, within="donor")
+    assert len(store.artifacts.list(kind="clonotypes", scope="datastore")) == 1
+
+
+def test_reading_clonotypes_as_clones_counts_their_receptor_types(
+    tmp_path, monkeypatch
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    ref = store.repertoire.clonotypes(receptors)
+    _assert_stored_widths(store, receptors, ref)
+    for with_ids, needed in (
+        (False, CLONOTYPES_READ),
+        (True, CLONOTYPES_READ + CLONOTYPE_LABELS_READ),
+    ):
+        monkeypatch.setattr(store, "memoryBytes", needed - 1)
+        with pytest.raises(MemoryError, match=f"8 cells holds about {needed} bytes"):
+            store._read_clone_input(ref, with_ids=with_ids)
+        monkeypatch.setattr(store, "memoryBytes", needed)
+        source = store._read_clone_input(ref, with_ids=with_ids)
+    assert source.clone_ids is not None
+    assert source.clone_ids.tolist() == [f"clonotype_{rank}" for rank in range(1, 5)]
+    ((name, labels),) = source.kept_apart
+    assert name == "receptor_type"
+    assert labels.tolist() == ["TCR"] * 5 + ["BCR"] * 2 + ["no IR"]
+
+
+def test_clonotypes_load_and_export_as_clones_within_the_memory_budget(
+    tmp_path, monkeypatch
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    ref = store.repertoire.clonotypes(receptors)
+    # Beside 250 bytes per cell for the tables, or 200 for the file, both read
+    # the clonotypes with their labels and the cells' IDs as text.
+    read = CLONOTYPES_READ + CLONOTYPE_LABELS_READ + ids_read_bytes(store, 8)
+    for verb, per_cell, run in (
+        ("Loading", 250, lambda: store.clones.load_clones(ref)),
+        ("Exporting", 200, lambda: store.clones.export_clones(ref, tmp_path / "x.csv")),
+    ):
+        needed = 8 * per_cell + read
+        monkeypatch.setattr(store, "memoryBytes", needed - 1)
+        with pytest.raises(MemoryError, match=f"{verb} the clones of 8 cells holds"):
+            run()
+        with pytest.raises(MemoryError, match=f"about {needed} bytes"):
+            run()
+        monkeypatch.setattr(store, "memoryBytes", needed)
+        run()
+
+
+def test_expansion_of_clonotypes_counts_each_cells_receptor_type(
+    tmp_path, monkeypatch
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    ref = store.repertoire.clonotypes(receptors)
+    # Measuring takes 300 bytes per cell and 8 for its receptor type, and
+    # 2,000 for each group, the T cells and the B cells.
+    needed = 8 * (300 + 8) + 2 * 2_000
+    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    with pytest.raises(MemoryError, match=f"of 8 cells holds about {needed} bytes"):
+        store.clones.expansion(ref)
+    monkeypatch.setattr(store, "memoryBytes", needed)
+    assert store.clones.expansion(ref).kind == "clonal_expansion"
+
+
+def test_loaded_expansion_of_other_cells_matches_their_receptor_types(
+    tmp_path, monkeypatch
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    ref = store.repertoire.clonotypes(receptors)
+    store.cells.insert("first_half", np.arange(N_CELLS) < 4)
+    saved = store.clones.expansion(
+        ref, cell_selection=store.snapshot_cell_selection("first_half")
+    )
+    # The four measured cells are T cells of one group: 500 bytes each and
+    # 2,000 for the group, their IDs as text, the clonotypes with their
+    # labels, and the clonotypes' eight cells matched to the measured ones,
+    # 56 bytes each, and 32 for each measured cell and 8 for its receptor type.
+    needed = (
+        4 * 500
+        + 2_000
+        + ids_read_bytes(store, 4)
+        + CLONOTYPES_READ
+        + CLONOTYPE_LABELS_READ
+        + 8 * 56
+        + 4 * (32 + 8)
+    )
+    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    with pytest.raises(MemoryError, match=f"of 4 cells holds about {needed} bytes"):
+        store.clones.load_expansion(saved)
+    monkeypatch.setattr(store, "memoryBytes", needed)
+    assert store.clones.load_expansion(saved).cells.shape[0] == 4
 
 
 def test_loaded_clonotypes_are_checked_against_the_memory_budget(
     tmp_path, monkeypatch
 ) -> None:
     store, receptors = _receptors(tmp_path)
-    ref = store.repertoire.clonotypes(receptors)
-    # The tables of eight cells take about 8,000 bytes.
-    monkeypatch.setattr(store, "memoryBytes", 7_999)
-    with pytest.raises(MemoryError, match="Loading the clonotypes of 8 cells"):
-        store.repertoire.load_clonotypes(ref)
-    monkeypatch.setattr(store, "memoryBytes", 8_000)
-    assert len(store.repertoire.load_clonotypes(ref).clonotypes) == 4
+    store.cells.insert("donor", np.asarray(["d1", "d2"] * 4))
+    receptor_group = artifact_group(store.zw, receptors)
+    # Each representative field's packed text is read whole, and its needed
+    # values decoded: twice its bytes, and its int64 offsets.
+    text = sum(
+        2 * receptor_group[f"contig_{name}_values"].nbytes
+        + receptor_group[f"contig_{name}_offsets"].nbytes
+        for name in ("junction_aa", "junction", "v_call", "j_call")
+    )
+    assert text == 2 * (21 + 75 + 30 + 25) + 8 * (6 + 7 + 7 + 6)
+    for within in ((), ("donor",)):
+        ref = store.repertoire.clonotypes(receptors, within=list(within))
+        # The tables take 300 bytes per cell, beside the cells' IDs as text,
+        # the representatives' text, and the within groups' labels.
+        needed = 8 * 300 + ids_read_bytes(store, 8) + text
+        if within:
+            labels = artifact_group(store.zw, ref)["within_labels"]
+            assert labels.dtype == np.dtype("<U2") and labels.shape == (2,)
+            needed += text_read_bytes(labels, 2)
+        monkeypatch.setattr(store, "memoryBytes", needed - 1)
+        with pytest.raises(
+            MemoryError, match=f"clonotypes of 8 cells holds about {needed} bytes"
+        ):
+            store.repertoire.load_clonotypes(ref)
+        monkeypatch.setattr(store, "memoryBytes", needed)
+        assert len(store.repertoire.load_clonotypes(ref).clonotypes) >= 4
+        monkeypatch.undo()
+
+
+def test_within_labels_are_an_array_that_opening_the_artifact_never_reads(
+    tmp_path,
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    store.cells.insert(
+        "donor", np.asarray(["d1", "d2", "d1", "d1", "d1", "d1", "d1", "d1"])
+    )
+    store.cells.insert("site", np.asarray(["s10", "s2"] * 4))
+    ref = store.repertoire.clonotypes(receptors, within=["donor", "site"])
+    group = artifact_group(store.zw, ref)
+    assert "within_labels" not in group.attrs
+    # The cells with a receptor make three groups, in the natural order of
+    # their labels, each stored as its donor and its site.
+    assert group["within_labels"][:].tolist() == ["d1", "s2", "d1", "s10", "d2", "s2"]
+    loaded = store.repertoire.load_clonotypes(ref)
+    first = loaded.cells.loc["cell0", "clonotype"]
+    assert _members(loaded)[first] == ["cell0", "cell4"]
+    row = loaded.clonotypes.set_index("clonotype").loc[first]
+    assert row[["donor", "site"]].tolist() == ["d1", "s10"]
+    cell1 = loaded.clonotypes.set_index("clonotype").loc[
+        loaded.cells.loc["cell1", "clonotype"]
+    ]
+    assert cell1[["donor", "site"]].tolist() == ["d2", "s2"]
+    # Clonotypes without within columns store no labels.
+    assert "within_labels" not in artifact_group(
+        store.zw, store.repertoire.clonotypes(receptors)
+    )
+
+
+def test_renamed_within_labels_give_other_clonotypes(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    donors = np.asarray(["d1", "d2", "d1", "d1", "d1", "d1", "d1", "d1"])
+    store.cells.insert("donor", donors)
+    first = store.repertoire.clonotypes(receptors, within="donor")
+    # The same groups under other names give other clonotypes, and the same
+    # labels again reuse the saved ones.
+    store.cells.insert("donor", np.where(donors == "d1", "x1", "x2"), overwrite=True)
+    renamed = store.repertoire.clonotypes(receptors, within="donor")
+    assert renamed != first
+    assert set(store.repertoire.load_clonotypes(renamed).clonotypes["donor"]) == {
+        "x1",
+        "x2",
+    }
+    store.cells.insert("donor", donors.copy(), overwrite=True)
+    assert store.repertoire.clonotypes(receptors, within="donor") == first
 
 
 def test_within_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:

@@ -18,6 +18,7 @@ from cytearc.metadata.rows import READ_OBJECT_BYTES, array_row_selection_parts
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
+    ids_read_bytes,
     copy_clone_store,
     every_cell,
     ids_read_bytes,
