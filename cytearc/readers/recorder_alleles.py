@@ -216,15 +216,26 @@ _TABLE_ROLES = (
 _TOKEN_ROLES = ("unedited", "missing", "not_applicable", "unknown")
 # A chunk holds at most this many rows of a file.
 _MAX_CHUNK_ROWS = 50_000
-# Bytes that a chunk holds per field of a text row while it parses it: the
-# raw text, its stripped copy and the parsed values.
-_TEXT_FIELD_BYTES = 1_000
-# Bytes that each record of a chunk takes in flight: its token, state and
-# allele, the record table built from them and its encoding.
-_RECORD_BYTES = 400
-# Bytes per key of the reads that step4_annotated.tsv sums, and per row
-# of it while they are summed.
-_READS_KEY_BYTES = 40
+# Bytes that a chunk holds per field of a row beside the field's text: the
+# references and headers of its raw text, its stripped copy and its token.
+_FIELD_BYTES = 100
+# Fields that the csv module and polars read hold a list entry or an Arrow
+# value beside.
+_LIST_FIELD_BYTES = 150
+_PARQUET_FIELD_BYTES = 300
+# Each byte of a row's text is held as raw text, stripped text and a token,
+# and a row may be twice as long as the longest of the first lines.
+_TEXT_COPIES = 4
+_SAMPLED_LINES = 1_000
+# Bytes that each record of a chunk takes in flight: its state and allele,
+# the columns of the records built from them, and their cells.
+_RECORD_BYTES = 100
+# A CARLIN pair's row is a cell barcode, held in lists, then as text, its
+# line number, its key and its record.
+_CARLIN_ROW_BYTES = 400
+# Bytes per molecule row of step4_annotated.tsv while its reads are summed:
+# its key, its reads, and their sorted copies.
+_READS_KEY_BYTES = 80
 # Bytes that a CARLIN annotation line and a barcode's key take while held.
 _ANNOTATION_BYTES = 120
 _BARCODE_KEY_BYTES = 24
@@ -253,6 +264,10 @@ class AlleleLayout:
         columns: The columns read, by role, as the identity records them.
         n_columns: The fields of each row that reading parses.
         n_sites: The sites that each row gives, its records.
+        field_bytes: The bytes that each field of a row holds beside its
+            text while it is read.
+        line_bytes: The bytes of a row's text that a chunk is sized for:
+            twice the longest of the file's first lines.
     """
 
     format: str
@@ -268,6 +283,8 @@ class AlleleLayout:
     columns: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     n_columns: int = 1
     n_sites: int = 1
+    field_bytes: int = _FIELD_BYTES
+    line_bytes: int = 0
     _text: TextLayout | None = field(default=None, repr=False)
     _table: CharacterTable | None = field(default=None, repr=False)
     _read: Mapping[str, Any] = field(
@@ -275,7 +292,11 @@ class AlleleLayout:
     )
 
     def _row_bytes(self) -> int:
-        return _TEXT_FIELD_BYTES * self.n_columns + _RECORD_BYTES * self.n_sites
+        return (
+            self.field_bytes * self.n_columns
+            + _TEXT_COPIES * self.line_bytes
+            + _RECORD_BYTES * self.n_sites
+        )
 
     def chunk_rows(self, chunk_bytes: int) -> int:
         """The rows of a chunk that holds at most about ``chunk_bytes``."""
@@ -393,6 +414,17 @@ def allele_file(path: str | os.PathLike[str]) -> str | os.PathLike[str]:
                 "must sit beside the other file"
             )
     return os.fspath(pair[1])
+
+
+def _line_bytes(path: str, found: str | None) -> int:
+    """Twice the bytes of the longest of a text file's first lines."""
+    longest = 0
+    with open_text(path, found) as handle:
+        for number, line in enumerate(handle):
+            longest = max(longest, len(line.encode("utf-8")))
+            if number == _SAMPLED_LINES:
+                break
+    return 2 * longest
 
 
 def _header(path: str) -> tuple[list[str], str, str | None]:
@@ -559,18 +591,16 @@ def _carlin_layout(path: str, integration: str) -> AlleleLayout:
         )
     lines = _text_lines(annotations)
     n_barcodes = 0
-    shortest = None
+    shortest = longest = None
     with open(colonies, encoding="utf-8") as handle:
         for line in handle:
             for barcode in line.rstrip("\r\n").split(","):
                 barcode = barcode.strip()
                 if barcode:
                     n_barcodes += 1
-                    shortest = (
-                        len(barcode)
-                        if shortest is None
-                        else min(shortest, len(barcode))
-                    )
+                    size = len(barcode.encode("utf-8"))
+                    shortest = size if shortest is None else min(shortest, size)
+                    longest = size if longest is None else max(longest, size)
     if run is None and shortest is not None and shortest < _MIN_CARLIN_BARCODE:
         raise ValueError(
             f"{os.fspath(colonies)} lists tags of {shortest} bases, as CARLIN's bulk "
@@ -593,6 +623,8 @@ def _carlin_layout(path: str, integration: str) -> AlleleLayout:
         companions=(("annotations", os.fspath(annotations)),),
         n_columns=1,
         n_sites=1,
+        field_bytes=_CARLIN_ROW_BYTES,
+        line_bytes=2 * (longest or 0),
         _read=MappingProxyType(
             {
                 "annotations": os.fspath(annotations),
@@ -621,6 +653,7 @@ def _count_text_rows(text: TextLayout) -> int:
 def _darlin_layout(path: str, integration: str) -> AlleleLayout:
     text = text_layout(path, what="a darlin table")
     require_columns(text, ("n_UMIs", "CR", "mutation"))
+    line_bytes = _line_bytes(path, text.compression)
     annotated = _annotated_path(Path(path))
     read: dict[str, Any] = {"annotated": None, "reads_from": None}
     companions: tuple[tuple[str, str], ...] = ()
@@ -638,6 +671,8 @@ def _darlin_layout(path: str, integration: str) -> AlleleLayout:
             "n_annotated": _count_text_rows(molecules),
         }
         companions = (("molecules", os.fspath(annotated)),)
+        # The molecules are read in chunks of the same rows.
+        line_bytes = max(line_bytes, _line_bytes(molecules.path, molecules.compression))
     return AlleleLayout(
         format="darlin",
         path=path,
@@ -650,6 +685,7 @@ def _darlin_layout(path: str, integration: str) -> AlleleLayout:
         companions=companions,
         n_columns=len(text.names),
         n_sites=1,
+        line_bytes=line_bytes,
         _text=text,
         _read=MappingProxyType(read),
     )
@@ -675,6 +711,7 @@ def _cassiopeia_layout(path: str) -> AlleleLayout:
         columns=MappingProxyType({"sites": sites}),
         n_columns=len(text.names),
         n_sites=len(sites),
+        line_bytes=_line_bytes(path, text.compression),
         _text=text,
         _read=MappingProxyType({"sites": tuple(sites)}),
     )
@@ -750,6 +787,7 @@ def _parquet_layout(path: str) -> AlleleLayout:
         columns=MappingProxyType({"sites": sites}),
         n_columns=len(sites) + 5,
         n_sites=len(sites),
+        field_bytes=_PARQUET_FIELD_BYTES,
         _read=MappingProxyType(
             {
                 "sites": tuple(sites),
@@ -780,6 +818,7 @@ def _petracer_layout(path: str) -> AlleleLayout:
         ),
         n_columns=len(text.names),
         n_sites=len(_PETRACER_SITES),
+        line_bytes=_line_bytes(path, text.compression),
         _text=text,
     )
 
@@ -839,6 +878,7 @@ def _matrix_layout(path: str, format: str) -> AlleleLayout:
         rules=rules,
         n_columns=len(text.names),
         n_sites=len(columns),
+        line_bytes=_line_bytes(path, text.compression),
         _text=text,
         _read=MappingProxyType({"columns": columns}),
     )
@@ -880,6 +920,8 @@ def _typewriter_layout(path: str, lengths: Mapping[str, int]) -> AlleleLayout:
         n_slots=len(slots),
         n_columns=len(names) + 1,
         n_sites=len(slots),
+        field_bytes=_LIST_FIELD_BYTES,
+        line_bytes=_line_bytes(path, found),
         _text=text,
         _read=MappingProxyType({"has_umis": bool(extra)}),
     )
@@ -923,6 +965,7 @@ def _chains_layout(path: str, lengths: Mapping[str, int]) -> AlleleLayout:
         n_slots=_TYPEWRITER_CHAIN_SLOTS,
         n_columns=len(names),
         n_sites=len(integrations) * _TYPEWRITER_CHAIN_SLOTS,
+        line_bytes=_line_bytes(path, text.compression),
         _text=text,
         _read=MappingProxyType({"integrations": tuple(integrations)}),
     )
@@ -1089,6 +1132,7 @@ def _table_layout(
         n_columns=len(text.names),
         # A split allele's sites are counted as GESTALT's ten until it is read.
         n_sites=len(sites) if sites else (n_slots or 10),
+        line_bytes=_line_bytes(path, text.compression),
         _text=text,
         _read=MappingProxyType({"sites": tuple(sites)}),
     )

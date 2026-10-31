@@ -1780,3 +1780,812 @@ def calling_truth(
         allowlist=tuple(sorted({b for c in clone_barcodes for b in c} | set(crowded))),
         noise=tuple(noise),
     )
+
+
+# Lineage recorders -----------------------------------------------------------
+
+#: PEtracer's eight lineage marks at each site, the 5-mers that Koblan, Yost
+#: et al. (Science 2025) insert, written out here so that the reader's own
+#: table is checked against them.
+PETRACER_MARKS = {
+    "RNF2": ("ACAGT", "ACTTA", "TTCCT", "TATAT", "GTTCA", "TGCCA", "TCCAA", "ACTCC"),
+    "HEK3": ("GATAG", "AATCG", "GCAAG", "GCGCC", "CTTTG", "ATCAA", "CTCTC", "ATTTA"),
+    "EMX1": ("GGACA", "ACAAT", "CCCTA", "AGTAC", "CCGAT", "CCTTT", "ATCAA", "ATTCG"),
+}
+PETRACER_SITES = ("RNF2", "HEK3", "EMX1")
+PETRACER_INTEGRATIONS = ("intID101", "intID205", "intID318", "intID4")
+# An insertion outside the eight marks, as PEtracer's kinetics pegRNA writes.
+PETRACER_OTHER = "GTCAG"
+#: DNA Typewriter's tapes of 2022 and their slots: three contracted ones, as
+#: in the published HEK293T line.
+TYPEWRITER_TAPES = {"ATTTGGTT": 5, "TGCGATTT": 5, "TGGACGAC": 4, "TTCACGTA": 2}
+TYPEWRITER_SYMBOLS = ("CCGGGA", "TATGGA", "CATGGA", "GCCGGA", "ATAGGA", "GATGGA")
+#: DNA Typewriter's tapes of 2026: six slots, one contracted to four.
+CHAIN_TAPES = {"CGGGGAATTGTA": 6, "TCCGGAAGACCC": 6, "GTGTAAATCGGC": 4}
+CHAIN_SYMBOLS = ("AAG", "GCC", "CAC", "CCC", "GATG", "ACT")
+DARLIN_ARRAYS = ("CA", "TA", "RA")
+# CARLIN events, as Custom_CARLIN writes them, of which alleles are built.
+_DARLIN_EVENTS = (
+    "23_268del",
+    "22_23insTA",
+    "50_130del",
+    "103A>T",
+    "185_238del",
+    "23_265delinsG",
+    "77_83del",
+    "212_267del",
+    "9_35del",
+    "158_161del",
+)
+
+
+def recorder_counts(cell: int, integration: int) -> tuple[int, int]:
+    """The UMIs and reads that every writer gives a cell's integration."""
+    umis = 2 + (cell + 3 * integration) % 9
+    return umis, 10 * umis + cell % 5
+
+
+@dataclass(frozen=True, slots=True)
+class RecorderTruth:
+    """The edits of the truth's cells on three kinds of recorder, drawn along clones.
+
+    Attributes:
+        independent: PEtracer-like sites, one row per cell, integration and
+            site: ``cell`` (its position among the truth's cells),
+            ``integration``, ``site``, ``read`` (whether the integration was
+            read), ``state`` (``"unedited"``, ``"mark"``, ``"unknown_mark"``
+            or ``"missing"``) and ``mark`` (``1`` to ``8``, 0 for none).
+        second: A second, weaker allele of the first integration of some
+            cells, in the columns of ``independent``.
+        tapes: DNA Typewriter's tapes of 2022, one row per cell and tape:
+            ``cell``, ``integration``, ``edits`` (its edited slots, -1 when
+            the tape was not read) and ``symbols``, the symbols of its slots
+            in order.
+        chains: DNA Typewriter's tapes of 2026, in the columns of ``tapes``.
+        arrays: DARLIN's arrays, one row per cell and array: ``cell``,
+            ``integration``, ``read`` and ``allele`` (``[]`` unedited, ``X``
+            an unknown allele).
+    """
+
+    independent: pd.DataFrame
+    second: pd.DataFrame
+    tapes: pd.DataFrame
+    chains: pd.DataFrame
+    arrays: pd.DataFrame
+
+
+def recorder_truth(truth: CloneTruth, seed: int = 0) -> RecorderTruth:
+    """Draw the truth's recorder edits: a clone's cells share its founder's edits.
+
+    A clone's founder edits each site with a chance of one half, each of its
+    cells adds edits of its own to unedited sites with a chance of one
+    fifth, and a cell without a clone draws every site as a founder does.
+    Every seventh cell's private edit at its first PEtracer site, where it
+    has one, is an insertion outside the eight marks. Tapes extend their
+    founder's chain by up to two symbols per cell. Each integration of a cell
+    is not read with a chance of one tenth, and each PEtracer site of a read
+    integration with a chance of one in twenty.
+    """
+    rng = np.random.default_rng([seed, 19])
+    n_clones = truth.n_clones
+    founders_marks = rng.integers(1, 9, size=(n_clones, 4, 3))
+    founders_edited = rng.random((n_clones, 4, 3)) < 0.5
+    founder_chains = {
+        name: [
+            list(rng.choice(TYPEWRITER_SYMBOLS, size=int(rng.integers(0, length))))
+            for _clone in range(n_clones)
+        ]
+        for name, length in TYPEWRITER_TAPES.items()
+    }
+    founder_symbols = {
+        name: [
+            list(rng.choice(CHAIN_SYMBOLS, size=int(rng.integers(0, length))))
+            for _clone in range(n_clones)
+        ]
+        for name, length in CHAIN_TAPES.items()
+    }
+    founder_events = [
+        [
+            sorted(rng.choice(len(_DARLIN_EVENTS), size=2, replace=False).tolist())
+            for _array in DARLIN_ARRAYS
+        ]
+        for _clone in range(n_clones)
+    ]
+    independent, second, tapes, chains, arrays = [], [], [], [], []
+    for cell in range(N_CELLS):
+        clone = int(truth.clones[cell])
+        for k, integration in enumerate(PETRACER_INTEGRATIONS):
+            read = bool(rng.random() >= 0.1)
+            for s, site in enumerate(PETRACER_SITES):
+                if clone >= 0 and founders_edited[clone, k, s]:
+                    state, mark = "mark", int(founders_marks[clone, k, s])
+                elif rng.random() < (0.2 if clone >= 0 else 0.5):
+                    state, mark = "mark", int(rng.integers(1, 9))
+                    if cell % 7 == 0 and k == 0 and s == 0:
+                        state, mark = "unknown_mark", 0
+                else:
+                    state, mark = "unedited", 0
+                if read and rng.random() < 0.05:
+                    state, mark = "missing", 0
+                independent.append(
+                    {
+                        "cell": cell,
+                        "integration": integration,
+                        "site": site,
+                        "read": read,
+                        "state": state,
+                        "mark": mark,
+                    }
+                )
+            if k == 0 and read and cell % 5 == 0:
+                for s, site in enumerate(PETRACER_SITES):
+                    second.append(
+                        {
+                            "cell": cell,
+                            "integration": integration,
+                            "site": site,
+                            "read": True,
+                            "state": "mark",
+                            "mark": 1 + (cell + s) % 8,
+                        }
+                    )
+        for name, length in TYPEWRITER_TAPES.items():
+            chain = list(founder_chains[name][clone]) if clone >= 0 else []
+            chain += list(rng.choice(TYPEWRITER_SYMBOLS, size=int(rng.integers(0, 3))))
+            chain = chain[:length]
+            read = bool(rng.random() >= 0.1)
+            tapes.append(
+                {
+                    "cell": cell,
+                    "integration": name,
+                    "edits": len(chain) if read else -1,
+                    "symbols": tuple(str(symbol) for symbol in chain),
+                }
+            )
+        for name, length in CHAIN_TAPES.items():
+            chain = list(founder_symbols[name][clone]) if clone >= 0 else []
+            chain += list(rng.choice(CHAIN_SYMBOLS, size=int(rng.integers(0, 3))))
+            chain = chain[:length]
+            read = bool(rng.random() >= 0.1)
+            chains.append(
+                {
+                    "cell": cell,
+                    "integration": name,
+                    "edits": len(chain) if read else -1,
+                    "symbols": tuple(str(symbol) for symbol in chain),
+                }
+            )
+        for a, array in enumerate(DARLIN_ARRAYS):
+            events = set(founder_events[clone][a]) if clone >= 0 else set()
+            if rng.random() < 0.3:
+                events.add(int(rng.integers(0, len(_DARLIN_EVENTS))))
+            allele = (
+                ",".join(_DARLIN_EVENTS[event] for event in sorted(events))
+                if events
+                else "[]"
+            )
+            if cell % 11 == 3 and a == 0:
+                allele = "X"
+            arrays.append(
+                {
+                    "cell": cell,
+                    "integration": array,
+                    "read": bool(rng.random() >= 0.15),
+                    "allele": allele,
+                }
+            )
+    return RecorderTruth(
+        independent=pd.DataFrame(independent),
+        second=pd.DataFrame(second),
+        tapes=pd.DataFrame(tapes),
+        chains=pd.DataFrame(chains),
+        arrays=pd.DataFrame(arrays),
+    )
+
+
+def _records(rows: list[dict[str, object]]) -> pd.DataFrame:
+    """Expected records, in the columns an import's records are compared in."""
+    columns = ["cell", "integration", "site", "state", "allele", "umis", "reads"]
+    frame = pd.DataFrame(rows, columns=columns)
+    return frame.sort_values(columns[:5], na_position="first").reset_index(drop=True)
+
+
+def _site_token(state: str, mark: int, site: str, cell: int) -> str:
+    """A PEtracer site as its 2025 tables write it."""
+    if state == "mark":
+        return PETRACER_MARKS[site][mark - 1]
+    if state == "unknown_mark":
+        return PETRACER_OTHER
+    if state == "missing":
+        return ""
+    # An unedited EMX1 reads CTTGGG in every other cell.
+    return "CTTGGG" if site == "EMX1" and cell % 2 else "None"
+
+
+def write_petracer_long(
+    recorders: RecorderTruth, truth: CloneTruth, path: Path, *, sample: str
+) -> Path:
+    """PEtracer's long table of 2025 for one sample's cells, as GEO holds it.
+
+    ``intID``, ``cellBC`` (the 10x barcode with ``-1``), the three sites,
+    ``UMI`` and ``readCount``, then figshare's extra columns; the weaker
+    second alleles follow their cell's rows with fewer UMIs, and a droplet
+    outside the store has a row of its own.
+    """
+    lines = ["intID,cellBC,RNF2,HEK3,EMX1,UMI,readCount,sample,reads_per_umi"]
+    for table, weaker in ((recorders.independent, False), (recorders.second, True)):
+        for (cell, integration), sites in table.groupby(
+            ["cell", "integration"], sort=True
+        ):
+            if truth.samples[cell] != sample or not bool(sites["read"].iloc[0]):
+                continue
+            umis, reads = recorder_counts(
+                int(cell), PETRACER_INTEGRATIONS.index(integration)
+            )
+            if weaker:
+                umis, reads = 1, 3
+            tokens = [
+                _site_token(row.state, int(row.mark), row.site, int(cell))
+                for row in sites.itertuples()
+            ]
+            lines.append(
+                f"{integration},{truth.barcodes[cell]}-1,{','.join(tokens)},{umis},"
+                f"{reads},{sample},{reads / umis}"
+            )
+    if sample == SAMPLES[0]:
+        lines.append(f"intID101,{truth.outside[0]}-1,None,None,None,4,40,{sample},10.0")
+    return _write(path, lines)
+
+
+def expected_petracer_long(
+    recorders: RecorderTruth, truth: CloneTruth, *, sample: str
+) -> pd.DataFrame:
+    """The records that importing ``write_petracer_long`` gives."""
+    rows: list[dict[str, object]] = []
+    for table, weaker in ((recorders.independent, False), (recorders.second, True)):
+        for row in table.itertuples():
+            if truth.samples[row.cell] != sample or not row.read:
+                continue
+            umis, reads = recorder_counts(
+                row.cell, PETRACER_INTEGRATIONS.index(row.integration)
+            )
+            if weaker:
+                umis, reads = 1, 3
+            allele = (
+                PETRACER_MARKS[row.site][row.mark - 1]
+                if row.state == "mark"
+                else PETRACER_OTHER
+                if row.state == "unknown_mark"
+                else None
+            )
+            rows.append(
+                {
+                    "cell": truth.cell_ids[row.cell],
+                    "integration": row.integration,
+                    "site": row.site,
+                    "state": row.state,
+                    "allele": allele,
+                    "umis": umis,
+                    "reads": reads,
+                }
+            )
+    return _records(rows)
+
+
+def write_petracer_characters(
+    recorders: RecorderTruth, truth: CloneTruth, path: Path, *, layout: str = "geo"
+) -> Path:
+    """PEtracer's character matrix of 2026, of every cell, gzip-compressed.
+
+    ``layout="geo"`` names the cell column ``cell_barcode``, as GEO's files
+    do; ``"zenodo"`` leaves it unnamed, as the Zenodo matrix does, and the
+    cells of the second sample, another embryo, lack the last integration,
+    so its fields are empty. ``*`` is unedited, ``-`` missing, ``1`` to
+    ``8`` a mark and ``!`` another insertion. Cell IDs are the store's.
+    """
+    columns = [
+        f"{integration}-{site}"
+        for integration in PETRACER_INTEGRATIONS
+        for site in sorted(PETRACER_SITES)
+    ]
+    header = ("" if layout == "zenodo" else "cell_barcode") + "," + ",".join(columns)
+    states = recorders.independent.set_index(["cell", "integration", "site"])
+    lines = [header]
+    for cell in range(N_CELLS):
+        fields = [str(truth.cell_ids[cell])]
+        for integration in PETRACER_INTEGRATIONS:
+            for site in sorted(PETRACER_SITES):
+                row = states.loc[(cell, integration, site)]
+                if (
+                    layout == "zenodo"
+                    and integration == PETRACER_INTEGRATIONS[-1]
+                    and truth.samples[cell] == SAMPLES[1]
+                ):
+                    fields.append("")
+                elif not row["read"] or row["state"] == "missing":
+                    fields.append("-")
+                elif row["state"] == "mark":
+                    fields.append(str(row["mark"]))
+                elif row["state"] == "unknown_mark":
+                    fields.append("!")
+                else:
+                    fields.append("*")
+        lines.append(",".join(fields))
+    return _write(path, lines, compress=True)
+
+
+def expected_petracer_characters(
+    recorders: RecorderTruth, truth: CloneTruth, *, layout: str = "geo"
+) -> pd.DataFrame:
+    """The records that importing ``write_petracer_characters`` gives."""
+    rows: list[dict[str, object]] = []
+    for row in recorders.independent.itertuples():
+        state = row.state if row.read else "missing"
+        allele = (
+            str(row.mark)
+            if state == "mark"
+            else "!"
+            if state == "unknown_mark"
+            else None
+        )
+        if (
+            layout == "zenodo"
+            and row.integration == PETRACER_INTEGRATIONS[-1]
+            and truth.samples[row.cell] == SAMPLES[1]
+        ):
+            state, allele = "not_applicable", None
+        rows.append(
+            {
+                "cell": truth.cell_ids[row.cell],
+                "integration": row.integration,
+                "site": row.site,
+                "state": state,
+                "allele": allele,
+                "umis": -1,
+                "reads": -1,
+            }
+        )
+    return _records(rows)
+
+
+# Cells whose 2022 rows carry a quirk of the published table: a sixth, empty
+# slot field; a blank first slot before an edit; and an insertion beyond the
+# fourth slot of the contracted TGGACGAC tape.
+_RAGGED_CELL, _GAP_CELL, _BEYOND_CELL = 1, 2, 4
+
+
+def _tape_slots(edits: int, symbols: Sequence[str], n_slots: int) -> list[str]:
+    return [symbols[slot] if slot < edits else "" for slot in range(n_slots)]
+
+
+def write_typewriter(
+    recorders: RecorderTruth, truth: CloneTruth, path: Path, *, sample: str
+) -> Path:
+    """DNA Typewriter's table of 2022 for one sample's cells.
+
+    ``Cell`` (the 10x barcode with ``-1``), ``TargetBC``, ``Site1`` to
+    ``Site5`` and ``nUMI``; a slot holds its 6-base insertion and is blank
+    when unedited, so the slots beyond a contracted tape are blank too.
+    """
+    lines = ["Cell,TargetBC,Site1,Site2,Site3,Site4,Site5,nUMI"]
+    for row in recorders.tapes.itertuples():
+        if truth.samples[row.cell] != sample or row.edits < 0:
+            continue
+        slots = _tape_slots(row.edits, row.symbols, 5)
+        if row.cell == _GAP_CELL and row.integration == "ATTTGGTT":
+            slots = ["", "TATGGA", "", "", ""]
+        if row.cell == _BEYOND_CELL and row.integration == "TGGACGAC":
+            slots = _tape_slots(4, ("CCGGGA",) * 4, 5)[:4] + ["GATGGA"]
+        umis, _reads = recorder_counts(
+            row.cell, list(TYPEWRITER_TAPES).index(row.integration)
+        )
+        fields = [f"{truth.barcodes[row.cell]}-1", row.integration, *slots]
+        if row.cell == _RAGGED_CELL:
+            fields.append("")
+        lines.append(",".join([*fields, str(umis)]))
+    return _write(path, lines)
+
+
+def expected_typewriter(
+    recorders: RecorderTruth, truth: CloneTruth, *, sample: str
+) -> pd.DataFrame:
+    """The records that importing ``write_typewriter`` with the tapes' slots gives."""
+    rows: list[dict[str, object]] = []
+    for row in recorders.tapes.itertuples():
+        if truth.samples[row.cell] != sample or row.edits < 0:
+            continue
+        length = TYPEWRITER_TAPES[row.integration]
+        edits, symbols = row.edits, row.symbols
+        states = ["mark" if slot < edits else "unedited" for slot in range(5)]
+        alleles = [symbols[slot] if slot < edits else None for slot in range(5)]
+        if row.cell == _GAP_CELL and row.integration == "ATTTGGTT":
+            states = ["missing", "mark", "unedited", "unedited", "unedited"]
+            alleles = [None, "TATGGA", None, None, None]
+        if row.cell == _BEYOND_CELL and row.integration == "TGGACGAC":
+            states = ["mark"] * 4 + ["unedited"]
+            alleles = ["CCGGGA"] * 4 + [None]
+        umis, _reads = recorder_counts(
+            row.cell, list(TYPEWRITER_TAPES).index(row.integration)
+        )
+        for slot in range(5):
+            beyond = slot >= length
+            rows.append(
+                {
+                    "cell": truth.cell_ids[row.cell],
+                    "integration": row.integration,
+                    "site": str(slot + 1),
+                    "state": "not_applicable" if beyond else states[slot],
+                    "allele": None if beyond else alleles[slot],
+                    "umis": umis,
+                    "reads": -1,
+                }
+            )
+    return _records(rows)
+
+
+def write_typewriter_chains(
+    recorders: RecorderTruth, truth: CloneTruth, path: Path, *, form: str = "chain"
+) -> Path:
+    """DNA Typewriter's per-cell table of 2026, of every cell, gzip-compressed.
+
+    ``form="chain"`` writes each tape as its symbols joined by ``-``, ``-``
+    for none and nothing for no call, beside ``n_loci``, ``n_doublet_loci``
+    and ``mean_dominance``; ``"slots"`` writes six slots joined by ``|``,
+    ``U`` unedited and ``NA`` for no call, and adds ``pass_qc``. Cell IDs
+    are the store's.
+    """
+    names = list(CHAIN_TAPES)
+    header = [
+        "cell" if form == "chain" else "cell_id",
+        *names,
+        "n_loci",
+        "n_doublet_loci",
+        "mean_dominance",
+    ]
+    if form == "slots":
+        header.append("pass_qc")
+    chains = recorders.chains.set_index(["cell", "integration"])
+    lines = ["\t".join(header)]
+    for cell in range(N_CELLS):
+        fields = [str(truth.cell_ids[cell])]
+        loci = 0
+        for name in names:
+            row = chains.loc[(cell, name)]
+            edits, symbols = int(row["edits"]), tuple(row["symbols"])
+            if edits < 0:
+                fields.append("" if form == "chain" else "NA")
+                continue
+            loci += 1
+            if form == "chain":
+                fields.append("-".join(symbols[:edits]) if edits else "-")
+            else:
+                fields.append("|".join([*symbols[:edits], *["U"] * (6 - edits)]))
+        fields += [str(loci), "0", "1.000"]
+        if form == "slots":
+            fields.append("1" if loci >= 2 else "0")
+        lines.append("\t".join(fields))
+    return _write(path, lines, compress=True)
+
+
+def expected_typewriter_chains(
+    recorders: RecorderTruth, truth: CloneTruth
+) -> pd.DataFrame:
+    """The records that importing ``write_typewriter_chains`` with the tapes' slots gives."""
+    rows: list[dict[str, object]] = []
+    for row in recorders.chains.itertuples():
+        length = CHAIN_TAPES[row.integration]
+        for slot in range(6):
+            if slot >= length:
+                state, allele = "not_applicable", None
+            elif row.edits < 0:
+                state, allele = "missing", None
+            elif slot < row.edits:
+                state, allele = "mark", row.symbols[slot]
+            else:
+                state, allele = "unedited", None
+            rows.append(
+                {
+                    "cell": truth.cell_ids[row.cell],
+                    "integration": row.integration,
+                    "site": str(slot + 1),
+                    "state": state,
+                    "allele": allele,
+                    "umis": -1,
+                    "reads": -1,
+                }
+            )
+    return _records(rows)
+
+
+def write_carlin_pair(
+    recorders: RecorderTruth,
+    truth: CloneTruth,
+    folder: Path,
+    *,
+    sample: str,
+    array: str,
+) -> Path:
+    """CARLIN's AlleleAnnotations.txt and AlleleColonies.txt of one sample and array.
+
+    One line per distinct allele, most cells first, each cell barcode bare
+    and listed once; the first allele's line also lists the droplets
+    outside the store, and neither file ends with a newline.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    table = recorders.arrays
+    chosen = table[(table["integration"] == array) & table["read"]]
+    chosen = chosen[[truth.samples[cell] == sample for cell in chosen["cell"]]]
+    groups = chosen.groupby("allele", sort=True)["cell"].apply(list)
+    order = sorted(groups.index, key=lambda allele: (-len(groups[allele]), allele))
+    annotations, colonies = [], []
+    for position, allele in enumerate(order):
+        barcodes = [str(truth.barcodes[cell]) for cell in groups[allele]]
+        if position == 0 and sample == SAMPLES[0]:
+            barcodes += [str(barcode) for barcode in truth.outside]
+        annotations.append(allele)
+        colonies.append(",".join(barcodes))
+    _write(folder / "AlleleAnnotations.txt", annotations, final_newline=False)
+    return _write(folder / "AlleleColonies.txt", colonies, final_newline=False)
+
+
+def expected_darlin(
+    recorders: RecorderTruth,
+    truth: CloneTruth,
+    *,
+    samples: Sequence[str],
+    arrays: Sequence[str],
+) -> pd.DataFrame:
+    """The records that importing ``write_carlin_pair`` of samples and arrays gives."""
+    rows: list[dict[str, object]] = []
+    for row in recorders.arrays.itertuples():
+        if (
+            not row.read
+            or row.integration not in arrays
+            or truth.samples[row.cell] not in samples
+        ):
+            continue
+        state = (
+            "unedited"
+            if row.allele == "[]"
+            else "unknown_mark"
+            if row.allele == "X"
+            else "mark"
+        )
+        rows.append(
+            {
+                "cell": truth.cell_ids[row.cell],
+                "integration": row.integration,
+                "site": "",
+                "state": state,
+                "allele": None if state == "unedited" else row.allele,
+                "umis": -1,
+                "reads": -1,
+            }
+        )
+    return _records(rows)
+
+
+def write_darlin_step4(
+    recorders: RecorderTruth,
+    truth: CloneTruth,
+    folder: Path,
+    *,
+    sample: str,
+    array: str,
+) -> Path:
+    """The ``darlin`` CLI's step4_final.tsv and step4_annotated.tsv of one sample and array.
+
+    Columns as its documentation names them. Every third cell has a second
+    lineage barcode whose allele is unedited, written ``[]``, or empty, as
+    darlin-core wrote it before 1.1.0, in every other such cell. Each row of
+    the final table has ``n_UMIs`` molecules in the annotated table, each
+    with reads of its own.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    table = recorders.arrays
+    chosen = table[(table["integration"] == array) & table["read"]]
+    final = ["n_UMIs\tCR\tmutation\taligned_LR\taligned_ref"]
+    molecules = ["CR\tLR\tUR\treads\tmutations\taligned_LR\taligned_ref"]
+    for row in chosen.itertuples():
+        if truth.samples[row.cell] != sample:
+            continue
+        alleles = [row.allele]
+        if row.cell % 3 == 0:
+            alleles.append("[]" if row.cell % 2 else "")
+        for k, allele in enumerate(alleles):
+            barcode = str(truth.barcodes[row.cell])
+            lineage = f"LB{row.cell:03d}{k}{array}"
+            aligned = f"ACGT-{lineage}-AC"
+            umis, reads = recorder_counts(row.cell, DARLIN_ARRAYS.index(array) + k)
+            final.append(f"{umis}\t{barcode}\t{allele}\t{aligned}\tACGTACGTAC")
+            for umi in range(umis):
+                molecules.append(
+                    f"{barcode}\t{lineage}\tUMI{umi:04d}\t{1 + (umi + row.cell) % 4}\t{allele}\t{aligned}\tACGTACGTAC"
+                )
+    _write(folder / "step4_annotated.tsv", molecules)
+    return _write(folder / "step4_final.tsv", final)
+
+
+def expected_darlin_step4(
+    recorders: RecorderTruth, truth: CloneTruth, *, sample: str, array: str
+) -> pd.DataFrame:
+    """The records that importing ``write_darlin_step4`` gives, reads summed."""
+    rows: list[dict[str, object]] = []
+    for row in recorders.arrays.itertuples():
+        if (
+            row.integration != array
+            or not row.read
+            or truth.samples[row.cell] != sample
+        ):
+            continue
+        alleles = [row.allele]
+        if row.cell % 3 == 0:
+            alleles.append("[]" if row.cell % 2 else "")
+        for k, allele in enumerate(alleles):
+            umis, _reads = recorder_counts(row.cell, DARLIN_ARRAYS.index(array) + k)
+            reads = sum(1 + (umi + row.cell) % 4 for umi in range(umis))
+            state = (
+                "unedited"
+                if allele in ("[]", "")
+                else "unknown_mark"
+                if allele == "X"
+                else "mark"
+            )
+            rows.append(
+                {
+                    "cell": truth.cell_ids[row.cell],
+                    "integration": array,
+                    "site": "",
+                    "state": state,
+                    "allele": None if state == "unedited" else allele,
+                    "umis": umis,
+                    "reads": reads,
+                }
+            )
+    return _records(rows)
+
+
+def _cassiopeia_token(state: str, mark: int, site_index: int) -> str:
+    """A cut site as Cassiopeia writes it, with 5 bases around the event."""
+    context = ("CGCCG", "ATTCG", "GATAT")[site_index]
+    if state in ("mark", "unknown_mark"):
+        size = mark if state == "mark" else 11
+        return f"{context}[{100 + 30 * site_index + size}:{size}D]AATGG"
+    if state == "missing":
+        return "NC" if site_index % 2 else ""
+    return f"{context}[None]CGGAG"
+
+
+def write_cassiopeia_table(
+    recorders: RecorderTruth, truth: CloneTruth, path: Path, *, sample: str
+) -> Path:
+    """Cassiopeia's allele table of one sample, in KP-Tracer's published layout.
+
+    ``cellBC`` is ``<sample>.<barcode>-1``; an integration's sites are
+    ``r1`` to ``r3``, uncut where they hold ``[None]``, missing where empty
+    or ``NC``; ``allele`` joins them; a second, weaker allele of some cells
+    follows. The PEtracer-like truth gives the edits.
+    """
+    header = "cellBC\tintBC\tr1\tr2\tr3\tallele\tsampleID\tUMI\treadCount\tTumor"
+    lines = [header]
+    for table, weaker in ((recorders.independent, False), (recorders.second, True)):
+        for (cell, integration), sites in table.groupby(
+            ["cell", "integration"], sort=True
+        ):
+            if truth.samples[cell] != sample or not bool(sites["read"].iloc[0]):
+                continue
+            tokens = [
+                _cassiopeia_token(row.state, int(row.mark), index)
+                for index, row in enumerate(sites.itertuples())
+            ]
+            umis, reads = recorder_counts(
+                int(cell), PETRACER_INTEGRATIONS.index(integration)
+            )
+            if weaker:
+                umis, reads = 1, 3
+            lines.append(
+                f"{sample}.{truth.barcodes[cell]}-1\t{integration}\t"
+                + "\t".join(tokens)
+                + f"\t{''.join(tokens)}\t{sample}\t{umis}\t{reads}\tT1"
+            )
+    return _write(path, lines)
+
+
+def expected_cassiopeia_table(
+    recorders: RecorderTruth, truth: CloneTruth, *, sample: str
+) -> pd.DataFrame:
+    """The records that importing ``write_cassiopeia_table`` gives."""
+    rows: list[dict[str, object]] = []
+    for table, weaker in ((recorders.independent, False), (recorders.second, True)):
+        for row in table.itertuples():
+            if truth.samples[row.cell] != sample or not row.read:
+                continue
+            index = PETRACER_SITES.index(row.site)
+            token = _cassiopeia_token(row.state, row.mark, index)
+            state = "mark" if row.state in ("mark", "unknown_mark") else row.state
+            umis, reads = recorder_counts(
+                row.cell, PETRACER_INTEGRATIONS.index(row.integration)
+            )
+            if weaker:
+                umis, reads = 1, 3
+            rows.append(
+                {
+                    "cell": truth.cell_ids[row.cell],
+                    "integration": row.integration,
+                    "site": f"r{index + 1}",
+                    "state": state,
+                    "allele": token if state == "mark" else None,
+                    "umis": umis,
+                    "reads": reads,
+                }
+            )
+    return _records(rows)
+
+
+def write_gestalt_table(
+    recorders: RecorderTruth, truth: CloneTruth, path: Path, *, long: bool = False
+) -> Path:
+    """A GESTALT-family table of every cell: ``NONE`` unedited, ``UNKNOWN`` missing.
+
+    Wide, one row per cell and integration with a column per target; or,
+    with ``long``, one row per target, as macsGESTALT writes it, with its
+    UMIs. Edits read ``<k>D+<site>``. Cell IDs are the store's.
+    """
+
+    def token(row) -> str:
+        if not row.read or row.state == "missing":
+            return "UNKNOWN"
+        if row.state == "unedited":
+            return "NONE"
+        return f"{row.mark if row.state == 'mark' else 99}D+{row.site}"
+
+    if long:
+        lines = ["intID\tcellID\ttarget\ttarget_edit\tUMIs_crispr_intID_cell"]
+        for row in recorders.independent.itertuples():
+            umis, _reads = recorder_counts(
+                row.cell, PETRACER_INTEGRATIONS.index(row.integration)
+            )
+            lines.append(
+                f"{row.integration}\t{truth.cell_ids[row.cell]}\t{row.site}\t{token(row)}\t{umis}"
+            )
+        return _write(path, lines)
+    lines = ["cell\tintegration\ttarget1\ttarget2\ttarget3"]
+    for (cell, integration), sites in recorders.independent.groupby(
+        ["cell", "integration"], sort=True
+    ):
+        lines.append(
+            f"{truth.cell_ids[cell]}\t{integration}\t"
+            + "\t".join(token(row) for row in sites.itertuples())
+        )
+    return _write(path, lines)
+
+
+def expected_gestalt_table(
+    recorders: RecorderTruth, truth: CloneTruth, *, long: bool = False
+) -> pd.DataFrame:
+    """The records that importing ``write_gestalt_table`` through columns gives."""
+    rows: list[dict[str, object]] = []
+    for row in recorders.independent.itertuples():
+        state = "missing" if not row.read or row.state == "missing" else row.state
+        if state == "unknown_mark":
+            state = "mark"
+        allele = None
+        if state == "mark":
+            allele = f"{row.mark if row.state == 'mark' else 99}D+{row.site}"
+        umis = recorder_counts(row.cell, PETRACER_INTEGRATIONS.index(row.integration))[
+            0
+        ]
+        rows.append(
+            {
+                "cell": truth.cell_ids[row.cell],
+                "integration": row.integration,
+                "site": row.site
+                if long
+                else f"target{PETRACER_SITES.index(row.site) + 1}",
+                "state": state,
+                "allele": allele,
+                "umis": umis if long else -1,
+                "reads": -1,
+            }
+        )
+    return _records(rows)

@@ -515,12 +515,14 @@ def cell_summaries(table: RecordTable, n_cells: int) -> dict[str, np.ndarray]:
     edited = (states == MARK) | (states == UNKNOWN_MARK)
     read = np.isin(states, _READ_STATES)
     integrations = np.asarray(table.text["integration"].codes, dtype=np.int64)
-    pairs = np.unique(
-        np.stack([cells[read], integrations[read]], axis=1).reshape(-1, 2), axis=0
-    )
+    # Each cell and integration read is one key, counted once.
+    n_integrations = max(1, len(table.text["integration"].offsets) - 1)
+    keys = np.unique(cells[read] * n_integrations + integrations[read])
     return {
         "n_edits": np.bincount(cells[edited], minlength=n_cells).astype(np.int64),
-        "n_integrations": np.bincount(pairs[:, 0], minlength=n_cells).astype(np.int64),
+        "n_integrations": np.bincount(keys // n_integrations, minlength=n_cells).astype(
+            np.int64
+        ),
         "n_records": np.bincount(cells, minlength=n_cells).astype(np.int64),
     }
 
@@ -655,11 +657,33 @@ def lineage_allele_frames(
     return LineageAlleles(cells=cells, records=records, files=files)
 
 
-def _natural_ranks(values: np.ndarray) -> np.ndarray:
-    """The rank of each distinct text in natural order, as :func:`sort_categories` orders it."""
-    texts = [str(value) for value in np.asarray(values, dtype=object).tolist()]
-    rank_of = {text: rank for rank, text in enumerate(sort_categories(texts))}
-    return np.asarray([rank_of[text] for text in texts], dtype=np.int64)
+# Digits of a whole number that fits int64 whatever its digits.
+_MAX_NUMBER_DIGITS = 18
+
+
+def _allele_ranks(values: np.ndarray) -> np.ndarray:
+    """The rank of each distinct allele: whole numbers by value, then text.
+
+    So PEtracer's marks ``"1"`` to ``"8"`` and ConvexML's integer states keep
+    their order, and an indel's text sorts by code point.
+    """
+    texts = np.asarray(values, dtype=object)
+    numeric = np.asarray(
+        [
+            text.isdigit() and text.isascii() and len(text) <= _MAX_NUMBER_DIGITS
+            for text in texts.tolist()
+        ],
+        dtype=bool,
+    )
+    numbers = np.zeros(len(texts), dtype=np.int64)
+    numbers[numeric] = [int(text) for text in texts[numeric].tolist()]
+    text_order = np.argsort(texts, kind="stable")
+    text_ranks = np.empty(len(texts), dtype=np.int64)
+    text_ranks[text_order] = np.arange(len(texts), dtype=np.int64)
+    order = np.lexsort((text_ranks, numbers, ~numeric))
+    ranks = np.empty(len(texts), dtype=np.int64)
+    ranks[order] = np.arange(len(texts), dtype=np.int64)
+    return ranks
 
 
 # The order in which a cell's records at one site decide its state there, by
@@ -749,9 +773,11 @@ class CharacterMatrix:
 
     A character is one site of one integration. A state is 0 for an
     unedited site, -1 for a missing one, and 1 to k for the k distinct
-    edits of the character, the marks first in natural order of their text,
-    then the unknown marks that ``unknown="state"`` keeps; so a state names
-    one allele of its character, whatever the cells exported.
+    edits of the character: the marks first, those written as whole numbers
+    by value and the others by their text, then the unknown marks that
+    ``unknown="state"`` keeps, in the same order. So a state names one
+    allele of its character, whatever cells are exported, and PEtracer's
+    marks ``1`` to ``8`` keep their numbers where all eight occur.
 
     Attributes:
         cells: The position of each exported cell among the selected cells,
@@ -816,7 +842,11 @@ def _group_starts(*keys: np.ndarray) -> np.ndarray:
 
 
 def character_matrix(
-    table: RecordTable, *, unknown: str = "state", max_bytes: int | None = None
+    table: RecordTable,
+    *,
+    unknown: str = "state",
+    memory_bytes: int | None = None,
+    held_bytes: int = 0,
 ) -> CharacterMatrix:
     """Turn allele records into a cells by characters matrix of integer states.
 
@@ -833,13 +863,14 @@ def character_matrix(
         unknown: ``"state"`` gives each distinct unknown mark of a character
             a state of its own, after the marks; ``"missing"`` writes unknown
             marks as missing.
-        max_bytes: The most bytes that the matrix's codes may take, 4 per
-            cell and character, or None for no limit.
+        memory_bytes: The memory budget, or None for no limit.
+        held_bytes: The bytes that the caller holds beside the matrix's
+            codes, 4 per cell and character.
 
     Raises:
         ValueError: If ``unknown`` is not one of ``UNKNOWN_POLICIES``.
-        MemoryError: If the codes would take more than ``max_bytes``, before
-            they are allocated.
+        MemoryError: If the codes and ``held_bytes`` would pass
+            ``memory_bytes``, before the codes are allocated.
     """
     if unknown not in UNKNOWN_POLICIES:
         raise ValueError(
@@ -913,10 +944,10 @@ def character_matrix(
     record_characters = np.full(len(states), -1, dtype=np.int64)
     record_characters[exported] = character_of[integrations[exported], sites[exported]]
 
-    # Each character's edits: its marks in natural order of their text, then
-    # the unknown marks that are kept.
+    # Each character's edits: its marks, whole numbers by value and other text
+    # by code point, then the unknown marks that are kept.
     allele_names = table.text["allele"].categories
-    allele_ranks = _natural_ranks(allele_names)
+    allele_ranks = _allele_ranks(allele_names)
     edits = exported & edited
     edit_keys = np.stack(
         [
@@ -944,12 +975,12 @@ def character_matrix(
     # character.
     with_state = np.flatnonzero(record_codes >= 0)
     exported_cells = np.unique(cells[with_state])
-    n_bytes = 4 * len(exported_cells) * len(ranked_names)
-    if max_bytes is not None and n_bytes > max_bytes:
+    held = int(held_bytes) + 4 * len(exported_cells) * len(ranked_names)
+    if memory_bytes is not None and held > memory_bytes:
         raise MemoryError(
-            f"The character matrix of {len(exported_cells)} cells by "
-            f"{len(ranked_names)} characters takes {n_bytes} bytes, more than the "
-            f"{max_bytes} bytes that the memory budget leaves it. Raise mem_budget."
+            f"Exporting the character matrix of {len(exported_cells)} cells by "
+            f"{len(ranked_names)} characters holds about {held} bytes, more than "
+            f"the memory budget of {memory_bytes} bytes. Raise mem_budget."
         )
     codes = np.full((len(exported_cells), len(ranked_names)), -1, dtype=np.int32)
     codes[

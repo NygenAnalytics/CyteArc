@@ -17,8 +17,8 @@ from ..clones.recorders import CharacterMatrix
 from ..readers._treedata import write_character_store
 
 __all__ = [
-    "laml_block_cells",
     "laml_paths",
+    "laml_row_bytes",
     "write_cassiopeia_characters",
     "write_laml_characters",
 ]
@@ -71,20 +71,9 @@ def laml_paths(path: str | os.PathLike[str]) -> tuple[Path, Path, Path]:
     )
 
 
-def laml_block_cells(free_bytes: int, n_characters: int) -> int:
-    """The cells of LAML's text to write at once within ``free_bytes``.
-
-    Raises:
-        MemoryError: If not even one cell fits.
-    """
-    cells = int(free_bytes) // (_LAML_BYTES_PER_STATE * max(1, int(n_characters)))
-    if cells < 1:
-        raise MemoryError(
-            f"Writing LAML's text of {n_characters} characters needs about "
-            f"{_LAML_BYTES_PER_STATE * n_characters} bytes per cell, more than the "
-            f"{free_bytes} bytes that the memory budget leaves. Raise mem_budget."
-        )
-    return min(cells, _LAML_MAX_BLOCK)
+def laml_row_bytes(n_characters: int) -> int:
+    """The bytes that one cell's row of LAML's text holds as it is written."""
+    return _LAML_BYTES_PER_STATE * (max(1, int(n_characters)) + 1)
 
 
 def _refuse_laml_names(names: list[str], what: str) -> None:

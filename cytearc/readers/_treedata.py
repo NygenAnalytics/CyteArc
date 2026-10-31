@@ -18,7 +18,7 @@ no trees.
 """
 
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,8 +48,16 @@ _ARRAY = ("array", "0.2.0")
 _STRING_ARRAY = ("string-array", "0.2.0")
 _NUMERIC_SCALAR = ("numeric-scalar", "0.2.0")
 _STRING = ("string", "0.2.0")
-# Rows of each chunk of a written array.
+# Rows of each chunk of a written array of numbers, and of text, which Zarr
+# encodes at about 160 bytes per value; arrays are written a chunk at a time.
 _CHUNK_ROWS = 65_536
+_TEXT_CHUNK_ROWS = 16_384
+#: The bytes that writing a store holds beside the values it is given: a
+#: chunk of text as Zarr encodes it, and a character's column copied as int64
+#: with its encoded chunk.
+WRITE_BYTES = 160 * _TEXT_CHUNK_ROWS + 16 * _CHUNK_ROWS
+#: Bytes per cell of a character's column as it is written.
+WRITE_BYTES_PER_CELL = 8
 
 
 def is_zarr_store(path: str | os.PathLike[str]) -> bool:
@@ -354,31 +362,48 @@ def _set_encoding(node: Any, encoding: tuple[str, str]) -> None:
 
 
 def _write_array(group: Any, name: str, values: np.ndarray) -> None:
+    """Write a one-dimensional array of text or numbers, a chunk at a time."""
     values = np.asarray(values)
-    chunks = (max(1, min(_CHUNK_ROWS, len(values))),)
-    if values.dtype.kind in "OUS":
+    text = values.dtype.kind in "OUS"
+    rows = _TEXT_CHUNK_ROWS if text else _CHUNK_ROWS
+    chunks = (max(1, min(rows, len(values))),)
+    if text:
         array = group.create_array(name, shape=values.shape, dtype=str, chunks=chunks)
-        array[:] = np.asarray(values, dtype=object).astype(str)
         _set_encoding(array, _STRING_ARRAY)
-        return
-    array = group.create_array(
-        name, shape=values.shape, dtype=values.dtype, chunks=chunks
-    )
-    array[:] = values
-    _set_encoding(array, _ARRAY)
+    else:
+        array = group.create_array(
+            name, shape=values.shape, dtype=values.dtype, chunks=chunks
+        )
+        _set_encoding(array, _ARRAY)
+    for start in range(0, len(values), chunks[0]):
+        block = values[start : start + chunks[0]]
+        array[start : start + len(block)] = (
+            np.asarray([str(value) for value in block.tolist()], dtype=object)
+            if text
+            else block
+        )
 
 
 def _write_frame(
-    group: Any, name: str, index: np.ndarray, columns: dict[str, np.ndarray]
+    group: Any,
+    name: str,
+    index: np.ndarray,
+    names: Sequence[str],
+    column: Callable[[int], np.ndarray],
 ) -> Any:
+    """Write a dataframe whose ``column(position)`` gives each column in turn."""
     frame = group.create_group(name)
     _set_encoding(frame, _DATAFRAME)
     frame.attrs["_index"] = "_index"
-    frame.attrs["column-order"] = list(columns)
+    frame.attrs["column-order"] = list(names)
     _write_array(frame, "_index", np.asarray(index, dtype=object))
-    for column, values in columns.items():
-        _write_array(frame, column, values)
+    for position, column_name in enumerate(names):
+        _write_array(frame, column_name, column(position))
     return frame
+
+
+def _no_column(position: int) -> np.ndarray:
+    raise IndexError(position)
 
 
 def _write_scalar(group: Any, name: str, value: Any) -> None:
@@ -443,32 +468,33 @@ def write_character_store(
         raise ValueError("Each character must be named once")
     root = zarr.open_group(target, mode="w-", zarr_format=3)
     _set_encoding(root, ("treedata", "0.1.0"))
-    obs = _write_frame(root, "obs", cells, {})
-    del obs
-    _write_frame(root, "var", np.empty(0, dtype=object), {})
+    _write_frame(root, "obs", cells, (), _no_column)
+    _write_frame(root, "var", np.empty(0, dtype=object), (), _no_column)
     for name in ("obsm", "varm", "obsp", "varp", "layers", "uns"):
         _set_encoding(root.create_group(name), _DICT)
+    # One character's column at a time is copied as int64 and written.
     _write_frame(
         root["obsm"],
         "characters",
         cells,
-        {
-            character: np.ascontiguousarray(matrix[:, position], dtype=np.int64)
-            for position, character in enumerate(characters)
-        },
+        list(characters),
+        lambda position: np.ascontiguousarray(matrix[:, position], dtype=np.int64),
     )
     uns = root["uns"]
     _write_scalar(uns, "missing_state", np.int64(missing_state))
     _write_scalar(uns, "unmodified_state", np.int64(unmodified_state))
+    state_columns = {
+        "character": states["character"].to_numpy(dtype=object),
+        "state": states["state"].to_numpy(dtype=np.int64),
+        "allele": states["allele"].to_numpy(dtype=object),
+    }
+    names = list(state_columns)
     _write_frame(
         uns,
         "character_states",
         np.arange(len(states)).astype(str).astype(object),
-        {
-            "character": states["character"].to_numpy(dtype=object),
-            "state": states["state"].to_numpy(dtype=np.int64),
-            "allele": states["allele"].to_numpy(dtype=object),
-        },
+        names,
+        lambda position: state_columns[names[position]],
     )
     _write_scalar(root, "allow_overlap", np.bool_(False))
     _write_scalar(root, "alignment", "leaves")
