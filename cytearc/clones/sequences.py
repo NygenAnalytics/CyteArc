@@ -188,6 +188,51 @@ def _hamming_pairs(
 
 
 @njit(cache=True)
+def _known_hamming_pairs(
+    codes: np.ndarray, unknown: np.ndarray, limit: int, min_compared: int, most: int
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Every pair of rows within ``limit`` substitutions where both hold a base.
+
+    A position where either row holds a character that ``unknown`` flags is
+    not compared, and a pair needs ``min_compared`` compared positions. The
+    comparison of a pair stops once it has more than ``limit`` substitutions,
+    or too few positions left to reach ``min_compared``. Returns False, with
+    no pairs, once more than ``most`` pairs are found.
+    """
+    rows, length = codes.shape
+    start = min(max(rows, 16), most)
+    firsts = np.empty(start, dtype=np.int64)
+    seconds = np.empty(start, dtype=np.int64)
+    at = 0
+    for first in range(rows):
+        for second in range(first + 1, rows):
+            mismatches = 0
+            compared = 0
+            for position in range(length):
+                left = codes[first, position]
+                right = codes[second, position]
+                if unknown[left] or unknown[right]:
+                    if compared + length - position - 1 < min_compared:
+                        break
+                    continue
+                compared += 1
+                if left != right:
+                    mismatches += 1
+                    if mismatches > limit:
+                        break
+            if mismatches <= limit and compared >= min_compared:
+                if at == len(firsts):
+                    if at == most:
+                        return firsts[:0].copy(), seconds[:0].copy(), False
+                    firsts = _grown(firsts, most)
+                    seconds = _grown(seconds, most)
+                firsts[at] = first
+                seconds[at] = second
+                at += 1
+    return firsts[:at].copy(), seconds[:at].copy(), True
+
+
+@njit(cache=True)
 def _within_edits(
     left: np.ndarray,
     left_length: int,
@@ -694,14 +739,17 @@ def _blocks(blocks: Any, n_texts: int) -> np.ndarray:
     return array.astype(np.int64)
 
 
-def _encoded(texts: list[str], memory: _Memory) -> tuple[np.ndarray, np.ndarray]:
+def _encoded(
+    texts: list[str], memory: _Memory
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Encode texts as a padded matrix of character codes and their lengths.
 
     A character below 256, such as an ASCII letter, is coded by its code
     point. Texts with other characters code each distinct character by its
-    rank instead, which allows 256 of them. The memory the encoding needs is
-    checked before it is allocated, and the matrix and the per-text arrays of
-    the search are held.
+    rank instead, which allows 256 of them, and the sorted code points of
+    those characters are returned, None for texts coded by code point. The
+    memory the encoding needs is checked before it is allocated, and the
+    matrix and the per-text arrays of the search are held.
     """
     lengths = np.fromiter(map(len, texts), dtype=np.int64, count=len(texts))
     width = max(int(lengths.max()) if len(texts) else 0, 1)
@@ -717,6 +765,7 @@ def _encoded(texts: list[str], memory: _Memory) -> tuple[np.ndarray, np.ndarray]
     # Joined, the texts take a byte per character, and their codes another.
     memory.check(held + 2 * characters, what)
     joined = "".join(texts)
+    coding = None
     try:
         points = np.frombuffer(joined.encode("latin-1"), dtype=np.uint8)
     except UnicodeEncodeError:
@@ -731,11 +780,27 @@ def _encoded(texts: list[str], memory: _Memory) -> tuple[np.ndarray, np.ndarray]
         if len(distinct) > 256:
             raise ValueError("texts can hold at most 256 distinct characters") from None
         points = ranks.astype(np.uint8)
+        coding = distinct
     del joined
     matrix = np.zeros((len(texts), width), dtype=np.uint8)
     matrix[np.arange(width) < lengths[:, None]] = points
     memory.held += held
-    return matrix, lengths
+    return matrix, lengths, coding
+
+
+def _unknown_table(unknown: str, coding: np.ndarray | None) -> np.ndarray:
+    """Flag the codes of the characters that hold no base, by code."""
+    table = np.zeros(256, dtype=np.bool_)
+    for character in unknown:
+        point = ord(character)
+        if coding is None:
+            if point < 256:
+                table[point] = True
+            continue
+        rank = int(np.searchsorted(coding, point))
+        if rank < len(coding) and int(coding[rank]) == point:
+            table[rank] = True
+    return table
 
 
 def _hamming_keyed(n_texts: int, length: int, limit: int) -> bool:
@@ -809,6 +874,8 @@ def neighbor_pairs(
     blocks: Any = None,
     *,
     max_bytes: int | None = None,
+    unknown: str = "",
+    min_compared: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Find every pair of texts within ``cutoff`` of each other.
 
@@ -816,6 +883,13 @@ def neighbor_pairs(
     ``metric`` is at most ``cutoff``; equal texts at two positions form a
     pair at distance 0. Only texts of one block are compared when ``blocks``
     is given.
+
+    Under ``hamming``, ``unknown`` names characters that hold no base, such
+    as the ``-`` of a base that no read covered and the ``0`` of a deletion
+    in TREX's cloneIDs: a position where either text holds one is not
+    compared, so it is never a substitution, and two texts form a pair only
+    when at least ``min_compared`` positions are compared, as TREX links
+    partial cloneIDs. Such texts are always compared pair by pair.
 
     Args:
         texts: The texts, a sequence of str, such as the distinct junctions
@@ -837,6 +911,9 @@ def neighbor_pairs(
             cutoff; and 32 bytes for each pair it finds, counted once for
             each pass of keys that finds it, with 384 for the arrays of each
             length or block that has pairs. None sets no limit.
+        unknown: Characters that hold no base, under ``hamming`` only.
+        min_compared: The fewest positions that two texts must compare,
+            under ``hamming`` only.
 
     Returns:
         The positions of the pairs as int64, the first below the second,
@@ -846,9 +923,11 @@ def neighbor_pairs(
         TypeError: If ``texts`` is not a one-dimensional sequence of str,
             ``blocks`` not one of integer codes, or the cutoff or
             ``max_bytes`` not an integer.
-        ValueError: If the metric is unknown, the cutoff or ``max_bytes`` is
-            negative, ``blocks`` does not hold one block per text, or the
-            texts hold more than 256 distinct characters.
+        ValueError: If the metric is unknown, the cutoff, ``max_bytes`` or
+            ``min_compared`` is negative, ``blocks`` does not hold one block
+            per text, the texts hold more than 256 distinct characters, or
+            ``unknown`` or ``min_compared`` is given with a metric other than
+            ``hamming``.
         MemoryError: If the search would hold more than ``max_bytes``: the
             encoded texts, the keys or candidate pairs of one pass, or the
             pairs within the cutoff need more.
@@ -861,11 +940,21 @@ def neighbor_pairs(
         if max_bytes is None
         else integer_argument(max_bytes, "max_bytes", minimum=0)
     )
+    if not isinstance(unknown, str):
+        raise TypeError("unknown must be text, the characters that hold no base")
+    min_compared = integer_argument(min_compared, "min_compared", minimum=0)
+    if (unknown or min_compared) and metric != "hamming":
+        raise ValueError(
+            "unknown and min_compared apply to metric='hamming' only, which "
+            "compares texts position by position"
+        )
     values = _texts(texts)
     n_texts = len(values)
     block_codes = _blocks(blocks, n_texts)
     memory = _Memory(limit_bytes)
-    matrix, lengths = _encoded(values, memory)
+    matrix, lengths, coding = _encoded(values, memory)
+    partial = bool(unknown) or min_compared > 0
+    unknown_codes = _unknown_table(unknown, coding)
     empty = np.empty(0, dtype=np.int64)
     if n_texts < 2:
         return empty, empty.copy()
@@ -951,7 +1040,13 @@ def neighbor_pairs(
             )
             limit = min(limit, length)
             codes = matrix[members, :length]
-            if _hamming_keyed(len(members), length, limit):
+            if partial:
+                first, second = found.looped(
+                    _known_hamming_pairs(
+                        codes, unknown_codes, limit, min_compared, found.most()
+                    )
+                )
+            elif _hamming_keyed(len(members), length, limit):
                 first, second = _keyed_pairs(
                     codes, lengths[members], limit, False, table, memory
                 )

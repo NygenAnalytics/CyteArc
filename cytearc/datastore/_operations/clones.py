@@ -62,6 +62,7 @@ from ...clones.overlap import (
     tracking_reach,
 )
 from ...metadata.arguments import (
+    BarcodeCloneArguments,
     ClonalExpansionArguments,
     CloneColumnArguments,
     CloneFateBiasArguments,
@@ -113,6 +114,10 @@ else:
 #: The values of ``export_clones``'s ``format``.
 EXPORT_FORMATS = ("table", "matrix")
 _PROBABILITY = "clone_probability"
+# The per-cell arrays that a clone source may add, with the dtype that the
+# table of loaded cells holds: each cell's probability of its clone, its
+# barcodes and whether calling removed it as a doublet.
+_SOURCE_ARRAYS = {_PROBABILITY: np.float64, "n_barcodes": np.int64, "doublet": bool}
 # Bytes held for each selected cell while clones are gathered: its clone code,
 # whether it was given several clones, and its probability.
 _ASSIGNER_BYTES_PER_CELL = 24
@@ -670,13 +675,20 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
     def _plan_clones(
         self,
-        arguments: CloneImportArguments | CloneColumnArguments,
+        arguments: CloneImportArguments | CloneColumnArguments | BarcodeCloneArguments,
         cell_selection: ArtifactRef,
         n_cells: int,
         *,
         with_probability: bool,
         required_attributes: tuple[str, ...],
+        source_arrays: Mapping[str, str] | None = None,
     ) -> PlannedArtifact:
+        """Plan a ``clones`` artifact of ``n_cells`` cells.
+
+        ``source_arrays`` names further per-cell arrays that the source
+        saves, with their dtype kinds, such as barcode clones' ``n_barcodes``
+        and ``doublet``.
+        """
         record = arguments.to_record()
         arrays: dict[str, tuple[tuple[int | None, ...], str | None]] = {
             "values": ((n_cells,), None),
@@ -685,6 +697,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         }
         if with_probability:
             arrays[_PROBABILITY] = ((n_cells,), "f")
+        for name, kind in (source_arrays or {}).items():
+            arrays[name] = ((n_cells,), kind)
 
         def has_clones(_ref: ArtifactRef, group: zarr.Group) -> bool:
             ids = group.get("clone_ids")
@@ -715,6 +729,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         planned: PlannedArtifact,
         assignment: CloneAssignment,
         attributes: Mapping[str, Any],
+        source_arrays: Mapping[str, np.ndarray] | None = None,
     ) -> None:
         arrays: dict[str, np.ndarray] = {
             "values": assignment.values,
@@ -725,6 +740,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         }
         if assignment.probabilities is not None:
             arrays[_PROBABILITY] = assignment.probabilities.astype(np.float64)
+        for name, values in (source_arrays or {}).items():
+            if name not in _SOURCE_ARRAYS or name in arrays:
+                raise ValueError(f"{name!r} is not a source array of clones")
+            arrays[name] = values
         write_cell_data_artifact(self.zw, planned, arrays, attributes=dict(attributes))
 
     def _log_clones(self, assignment: CloneAssignment, n_cells: int) -> None:
@@ -907,9 +926,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         )
         source = self._read_clone_input(clones, with_ids=True)
         assert source.clone_ids is not None
-        extra = {}
-        if _PROBABILITY in group:
-            extra[_PROBABILITY] = _read(group, _PROBABILITY).astype(np.float64)
+        extra = {
+            name: _read(group, name).astype(dtype)
+            for name, dtype in _SOURCE_ARRAYS.items()
+            if name in group
+        }
         # Every saved clone holds a cell, so the codes give the clone sizes.
         assigned = source.codes >= 0
         clone_sizes = np.bincount(

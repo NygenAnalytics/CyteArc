@@ -664,3 +664,96 @@ def test_the_budget_and_the_texts_are_checked() -> None:
     # An array of fixed-width text is text, read as Python strings.
     array = np.asarray(["CASSF", "CASSY", "CAF"])
     assert _pairs(*neighbor_pairs(array, "hamming", 1)) == {(0, 1)}
+
+
+# Texts with characters that hold no base, as TREX's partial cloneIDs.
+
+
+def _known_within(first: str, second: str, cutoff: int, min_compared: int) -> bool:
+    """TREX's test of two cloneIDs: mismatches where both hold a base."""
+    if len(first) != len(second):
+        return False
+    compared = mismatches = 0
+    for left, right in zip(first, second, strict=True):
+        if left in "-0" or right in "-0":
+            continue
+        compared += 1
+        mismatches += left != right
+    return compared >= min_compared and mismatches <= cutoff
+
+
+@pytest.mark.parametrize("cutoff", [0, 1, 3, 5])
+@pytest.mark.parametrize("min_compared", [0, 4, 8])
+def test_unknown_bases_are_not_compared_and_pairs_need_compared_positions(
+    cutoff, min_compared
+) -> None:
+    rng = np.random.default_rng([cutoff, min_compared])
+    letters = list("ACGT-0")
+    texts = []
+    for _ in range(120):
+        base = "".join(rng.choice(letters[:4], size=10))
+        texts.append(base)
+        # A partial copy, as reads that cover only part of a cloneID give.
+        cut = int(rng.integers(0, 10))
+        texts.append(base[:cut] + "-" * (10 - cut))
+        texts.append("".join(rng.choice(letters, size=10)))
+    texts.append("".join(rng.choice(letters, size=9)))
+    blocks = rng.integers(0, 3, size=len(texts))
+    found = _pairs(
+        *neighbor_pairs(
+            texts, "hamming", cutoff, blocks, unknown="-0", min_compared=min_compared
+        )
+    )
+    expected = {
+        (i, j)
+        for i, j in itertools.combinations(range(len(texts)), 2)
+        if blocks[i] == blocks[j]
+        and _known_within(texts[i], texts[j], cutoff, min_compared)
+    }
+    assert found == expected and expected
+
+
+def test_unknown_characters_beyond_latin_one_are_coded_by_their_rank() -> None:
+    texts = ["αβ-γ", "αβδγ", "αεδγ", "----"]
+    found = _pairs(*neighbor_pairs(texts, "hamming", 0, unknown="-", min_compared=3))
+    # The first matches the second where both hold a letter; the third
+    # differs from both, and the last compares no position.
+    assert found == {(0, 1)}
+    found = _pairs(*neighbor_pairs(texts, "hamming", 1, unknown="-", min_compared=3))
+    assert found == {(0, 1), (0, 2), (1, 2)}
+    # A character that no text holds changes nothing.
+    assert _pairs(
+        *neighbor_pairs(texts, "hamming", 0, unknown="-ω", min_compared=3)
+    ) == {(0, 1)}
+
+
+def test_without_unknown_characters_the_search_is_unchanged() -> None:
+    rng = np.random.default_rng(4)
+    texts = ["".join(rng.choice(list("ACGT"), size=12)) for _ in range(300)]
+    texts += [text[:5] + "A" + text[6:] for text in texts[:100]]
+    for cutoff in (0, 1, 2):
+        plain = _pairs(*neighbor_pairs(texts, "hamming", cutoff))
+        known = _pairs(*neighbor_pairs(texts, "hamming", cutoff, unknown="-0"))
+        assert plain == known == _expected(texts, "hamming", cutoff)
+
+
+def test_unknown_characters_apply_to_hamming_only() -> None:
+    for metric in ("levenshtein", "normalized_hamming"):
+        with pytest.raises(ValueError, match="'hamming' only"):
+            neighbor_pairs(["AC", "AG"], metric, 1, unknown="-")
+        with pytest.raises(ValueError, match="'hamming' only"):
+            neighbor_pairs(["AC", "AG"], metric, 1, min_compared=1)
+    with pytest.raises(TypeError, match="unknown must be text"):
+        neighbor_pairs(["AC", "AG"], "hamming", 1, unknown=["-"])
+    with pytest.raises(ValueError, match="min_compared must be at least 0"):
+        neighbor_pairs(["AC", "AG"], "hamming", 1, min_compared=-1)
+
+
+def test_partial_pairs_found_count_against_the_budget() -> None:
+    # Every pair of 400 texts with nothing known but a shared base matches.
+    texts = ["A" + "-" * 9] * 400
+    needed = len(texts) * (len(texts) - 1) // 2
+    with pytest.raises(MemoryError, match="the pairs found"):
+        neighbor_pairs(texts, "hamming", 0, unknown="-", max_bytes=200_000)
+    found = neighbor_pairs(texts, "hamming", 0, unknown="-", max_bytes=40 * needed)
+    assert len(found[0]) == needed

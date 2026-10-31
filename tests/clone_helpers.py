@@ -16,10 +16,14 @@ import pytest
 from tests.clone_truth import (
     N_CELLS,
     SAMPLES,
+    CallingTruth,
     CloneTruth,
     ReceptorTruth,
     write_cellranger_contigs,
+    write_celltag_reads,
     write_cospar,
+    write_pycashier,
+    write_trex_molecules,
 )
 from tests.storage_helpers import write_count_store
 
@@ -499,3 +503,69 @@ def count_units(
         ascending=[*([True] * len(keys)), False, *([True] * len(values))],
         kind="stable",
     ).reset_index(drop=True)
+
+
+#: The file layout in which each barcode-calling preset reads the truth.
+CALLING_LAYOUTS = ("trex", "pycashier", "celltag", "celltag_multi")
+
+
+def import_calling_truth(
+    store: "DataStore",
+    calling: CallingTruth,
+    folder: Path,
+    layout: str,
+    *,
+    cell_selection: "ArtifactRef | None" = None,
+) -> "ArtifactRef":
+    """Import the calling truth's molecules as one tool writes them, one file per sample.
+
+    ``"trex"`` writes TREX's ``molecules.txt`` of one library, ``"pycashier"``
+    pycashier's reads, ``"celltag"`` the Biddy et al. workflow's reads of
+    one library, and ``"celltag_multi"`` CellTag-multi's scRNA-seq reads of
+    d2 and its scATAC-seq reads, without UMIs, of d4, as two libraries.
+    """
+    barcodes = calling.barcodes
+    prefixes = [f"{sample}__" for sample in SAMPLES]
+    if layout == "trex":
+        paths = [
+            write_trex_molecules(
+                barcodes, folder / f"{sample}_molecules.txt", sample=sample
+            )
+            for sample in SAMPLES
+        ]
+        options: dict[str, object] = {"barcode_suffix": "-1", "library": "trex"}
+    elif layout == "pycashier":
+        paths = [
+            write_pycashier(
+                barcodes,
+                folder / f"{sample}.umi_cell_labeled.barcode.tsv",
+                sample=sample,
+            )
+            for sample in SAMPLES
+        ]
+        options = {"barcode_suffix": "-1", "library": "larry"}
+    elif layout == "celltag":
+        paths = [
+            write_celltag_reads(
+                barcodes,
+                folder / f"{sample}.celltag.parsed.tsv.gz",
+                sample=sample,
+                biddy=True,
+            )
+            for sample in SAMPLES
+        ]
+        options = {"library": "rna"}
+    elif layout == "celltag_multi":
+        paths = [
+            write_celltag_reads(
+                barcodes, folder / f"{sample}_parse.txt.gz", sample=sample, assay=assay
+            )
+            for sample, assay in zip(SAMPLES, ("RNA", "ATAC"), strict=True)
+        ]
+        options = {"library": ["RNA", "ATAC"]}
+    else:
+        raise ValueError(f"layout must be one of {', '.join(CALLING_LAYOUTS)}")
+    selection = every_cell(store) if cell_selection is None else cell_selection
+    return store.clones.import_barcodes(
+        paths, cell_selection=selection, barcode_prefix=prefixes, **options
+    )

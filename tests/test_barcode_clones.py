@@ -1,0 +1,447 @@
+"""Clones called from imported lineage barcodes recover the truth and TREX's own clones.
+
+Each preset reads the calling truth in the layout of its tool, with the noise
+that its published rules remove, and must give back the truth's clones that
+those rules call. TREX's expected outputs for 10x and Smart-seq3 (MIT) are
+checked in: ``preset="trex"`` on their ``molecules.txt`` must give the clones
+of their ``clones.txt``.
+"""
+
+import gzip
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from cytearc.datastore.datastore import DataStore
+from cytearc.utils.logging import collect_warnings
+from tests.clone_helpers import (
+    copy_clone_store,
+    every_cell,
+    import_calling_truth,
+    loaded_partition,
+    open_clone_store,
+    smallest_budget,
+    traced_peak,
+    write_truth_store,
+)
+from tests.clone_truth import (
+    N_CELLS,
+    SAMPLES,
+    calling_truth,
+    clone_truth,
+)
+from tests.storage_helpers import write_count_store
+
+TRUTH = clone_truth()
+DATA = Path(__file__).parent / "data" / "barcodes"
+# The noise each preset's rules remove, its layout, and the truth's clones
+# that its rules call: those of enough barcodes and cells.
+PRESET_CASES = {
+    "larry": (("amplified", "ambient", "indel", "partial"), "pycashier", 1, 1),
+    "trex": (("amplified", "ambient", "dropout", "partial"), "trex", 1, 1),
+    "celltag": (
+        (
+            "amplified",
+            "ambient",
+            "dropout",
+            "indel",
+            "partial",
+            "contaminant",
+            "crowded",
+        ),
+        "celltag",
+        2,
+        3,
+    ),
+    "celltag_multi": (
+        ("amplified", "ambient", "dropout", "indel", "contaminant", "crowded"),
+        "celltag_multi",
+        2,
+        2,
+    ),
+}
+
+
+@pytest.fixture(scope="module")
+def template(tmp_path_factory) -> Path:
+    path = tmp_path_factory.mktemp("barcode_clones") / "store.zarr"
+    write_truth_store(path, TRUTH)
+    return path
+
+
+@pytest.fixture
+def store(template, tmp_path) -> DataStore:
+    return copy_clone_store(template, tmp_path)
+
+
+def _imported(store: DataStore, folder: Path, preset: str, **options):
+    noise, layout, _barcodes, _size = PRESET_CASES[preset]
+    calling = calling_truth(TRUTH, noise=noise, **options)
+    with collect_warnings():
+        barcodes = import_calling_truth(store, calling, folder, layout)
+    return calling, barcodes
+
+
+@pytest.mark.parametrize("preset", list(PRESET_CASES))
+def test_each_preset_recovers_the_truth_under_the_noise_its_rules_remove(
+    store, tmp_path, preset
+) -> None:
+    calling, barcodes = _imported(store, tmp_path, preset)
+    _noise, _layout, min_barcodes, min_size = PRESET_CASES[preset]
+    allowlist = list(calling.allowlist) if preset.startswith("celltag") else None
+    clones = store.clones.barcode_clones(barcodes, preset=preset, allowlist=allowlist)
+    expected = calling.expected_partition(
+        TRUTH, min_barcodes=min_barcodes, min_size=min_size
+    )
+    assert loaded_partition(store, clones) == expected
+    # The noise is there to remove: the same barcodes without the rules call
+    # other clones.
+    loose = store.clones.barcode_clones(barcodes, method="sets")
+    assert loaded_partition(store, loose) != expected
+
+
+def test_celltag_rules_need_their_allowlist_and_cell_filter(store, tmp_path) -> None:
+    calling, barcodes = _imported(store, tmp_path, "celltag")
+    allowlist = list(calling.allowlist)
+    expected = calling.expected_partition(TRUTH, min_barcodes=2, min_size=3)
+    ids = TRUTH.cell_ids
+    contaminated = set(
+        ids[calling.barcodes.molecules.query("kind == 'contaminant'")["cell"].unique()]
+    )
+    crowded = set(
+        ids[calling.barcodes.molecules.query("kind == 'crowded'")["cell"].unique()]
+    )
+    # Without the allowlist, the three cells of the contaminant form a clone.
+    without = store.clones.barcode_clones(barcodes, preset="celltag", allowlist=False)
+    assert loaded_partition(store, without) == expected | {frozenset(contaminated)}
+    # Without the cell filter, so do the three crowded cells, and clone 1,
+    # whose cells carry one CellTag.
+    unfiltered = store.clones.barcode_clones(
+        barcodes, preset="celltag", allowlist=allowlist, barcodes_per_cell=(1, None)
+    )
+    ones = calling.expected_partition(TRUTH, min_barcodes=1, min_size=3)
+    assert loaded_partition(store, unfiltered) == ones | {frozenset(crowded)}
+    with pytest.raises(ValueError, match="allowlist=False"):
+        store.clones.barcode_clones(barcodes, preset="celltag")
+
+
+def _trex_store(folder: Path, molecules: Path) -> DataStore:
+    with gzip.open(molecules, "rt") as handle:
+        cells = sorted(
+            {line.split("\t")[0] for line in handle if not line.startswith("#")}
+        )
+    counts = np.ones((len(cells), 2), dtype=np.uint16)
+    write_count_store(
+        str(folder / "trex.zarr"), {"RNA": counts}, "uint16", cell_ids=cells
+    )
+    store = open_clone_store(folder / "trex.zarr")
+    store.cells.insert("every_cell", np.ones(len(cells), dtype=bool))
+    return store
+
+
+def _trex_partition(path: Path) -> set[frozenset[str]]:
+    table = pd.read_csv(path, sep="\t", dtype=str)
+    return {frozenset(rows["cell_id"]) for _, rows in table.groupby("clone_nr")}
+
+
+@pytest.mark.parametrize("run", ["10x", "smartseq3"])
+@pytest.mark.parametrize("doublets", [None, False])
+def test_the_trex_preset_gives_trexs_own_clones(tmp_path, run, doublets) -> None:
+    molecules = DATA / f"trex_{run}_molecules.txt.gz"
+    store = _trex_store(tmp_path, molecules)
+    barcodes = store.clones.import_barcodes(molecules, cell_selection=every_cell(store))
+    clones = store.clones.barcode_clones(barcodes, preset="trex", doublets=doublets)
+    expected = _trex_partition(DATA / f"trex_{run}_clones.txt.gz")
+    assert loaded_partition(store, clones) == expected
+    loaded = store.clones.load_clones(clones)
+    assert not loaded.cells["doublet"].any()
+    # TREX's clones.txt lists the cells of cells_filtered.txt, one cloneID or
+    # more each, and singletons are clones.
+    assert int(loaded.cells["clone"].notna().sum()) == sum(map(len, expected))
+    assert (loaded.cells.loc[loaded.cells["clone"].notna(), "n_barcodes"] > 0).all()
+
+
+def test_the_artifact_holds_barcodes_doublets_and_what_each_rule_removed(
+    store, tmp_path
+) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "trex")
+    clones = store.clones.barcode_clones(barcodes, preset="trex")
+    group = store.artifacts.load(clones)
+    attributes = dict(group.attrs)
+    assert attributes["library_units"] == [{"library": "trex", "unit": "umis"}]
+    counts = attributes["rule_counts"]
+    for name in (
+        "barcodes_corrected",
+        "pairs_of_one_umi_shared",
+        "molecules_of_low_complexity",
+        "nodes",
+        "edges",
+        "doublets",
+    ):
+        assert name in counts
+    # Every clonal cell carries an error; the ambient molecules are shared.
+    assert counts["barcodes_corrected"] > 0 and counts["pairs_of_one_umi_shared"] > 0
+    loaded = store.clones.load_clones(clones)
+    assert loaded.source == "call_barcode_clones"
+    assert list(loaded.cells.columns) == [
+        "clone",
+        "clone_size",
+        "n_barcodes",
+        "doublet",
+    ]
+    barcode_counts = store.clones.load_barcodes(barcodes).cells["n_barcodes"]
+    # The rules leave each cell at most the barcodes it was read with.
+    assert (loaded.cells["n_barcodes"] <= barcode_counts).all()
+    record = store.artifacts.inspect(clones)
+    assert record.parameters["preset"] == "trex"
+    assert record.parameters["similarity"] == 0.7
+    assert record.parameters["trex_rules"] is True
+    assert record.operation == "call_barcode_clones"
+
+
+def test_clones_within_groups_are_those_of_each_group_alone(store, tmp_path) -> None:
+    calling, barcodes = _imported(store, tmp_path, "larry")
+    within = store.clones.barcode_clones(barcodes, preset="larry", within="sample")
+    expected = {
+        frozenset(cell for cell in clone if cell.startswith(f"{sample}__"))
+        for clone in calling.expected_partition(TRUTH)
+        for sample in SAMPLES
+    } - {frozenset()}
+    assert loaded_partition(store, within) == expected
+    for sample in SAMPLES:
+        store.cells.insert(f"is_{sample}", TRUTH.samples == sample)
+        # The other sample's cells are not selected, so their barcodes match
+        # no cell.
+        with pytest.warns(UserWarning, match="match no selected cell"):
+            alone = import_calling_truth(
+                store,
+                calling,
+                tmp_path,
+                "pycashier",
+                cell_selection=store.snapshot_cell_selection(f"is_{sample}"),
+            )
+        clones = store.clones.barcode_clones(alone, preset="larry")
+        assert loaded_partition(store, clones) == {
+            clone for clone in expected if next(iter(clone)).startswith(sample)
+        }
+
+
+def test_within_needs_a_label_for_every_cell_with_a_barcode(store, tmp_path) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "larry")
+    labels = TRUTH.samples.astype(object).copy()
+    with_barcodes = (
+        store.clones.load_barcodes(barcodes).cells["n_barcodes"].to_numpy() > 0
+    )
+    labels[np.flatnonzero(with_barcodes)[0]] = None
+    store.cells.insert("partly", labels)
+    with pytest.raises(ValueError, match="no label for 1 cells with a barcode"):
+        store.clones.barcode_clones(barcodes, preset="larry", within="partly")
+    with pytest.raises(ValueError, match="not a cell metadata column"):
+        store.clones.barcode_clones(barcodes, preset="larry", within="mouse")
+    with pytest.raises(ValueError, match="also a column of the result"):
+        store.clones.barcode_clones(barcodes, preset="larry", within="doublet")
+
+
+def test_saved_clones_are_reused_by_their_resolved_rules(store, tmp_path) -> None:
+    calling, barcodes = _imported(store, tmp_path, "celltag")
+    allowlist = list(calling.allowlist)
+    clones = store.clones.barcode_clones(
+        barcodes, preset="celltag", allowlist=allowlist
+    )
+    # The same rules and an allowlist of the same barcodes, in any order.
+    again = store.clones.barcode_clones(
+        barcodes, preset="celltag", allowlist=allowlist[::-1] + allowlist[:3]
+    )
+    assert again == clones
+    other = store.clones.barcode_clones(
+        barcodes, preset="celltag", allowlist=allowlist[1:]
+    )
+    assert other != clones
+    assert store.clones.barcode_clones(
+        barcodes, preset="celltag", allowlist=allowlist, min_size=2
+    ) not in (clones, other)
+    recomputed = store.clones.barcode_clones(
+        barcodes, preset="celltag", allowlist=allowlist, invalidate_cache=True
+    )
+    assert recomputed.kind == "clones"
+    np.testing.assert_array_equal(
+        store.artifacts.load_values(recomputed).values,
+        store.artifacts.load_values(clones).values,
+    )
+
+
+def test_a_read_only_store_reuses_saved_clones_and_refuses_new_ones(
+    store, tmp_path
+) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "larry")
+    clones = store.clones.barcode_clones(barcodes, preset="larry")
+    reader = open_clone_store(Path(store.zarr_loc), zarr_mode="r")
+    assert reader.clones.barcode_clones(barcodes, preset="larry") == clones
+    with pytest.raises(PermissionError, match="call_barcode_clones"):
+        reader.clones.barcode_clones(barcodes, preset="larry", min_umis=4)
+
+
+def test_calls_follow_neither_file_order_nor_chunks_nor_threads(
+    template, tmp_path
+) -> None:
+    noise, layout, _barcodes, _size = PRESET_CASES["trex"]
+    calling = calling_truth(TRUTH, noise=noise)
+    stored = []
+    for case, options in (
+        ("plain", {}),
+        ("small chunks", {"mem_budget": "96MB"}),
+        ("threads", {"nthreads": 4}),
+    ):
+        folder = tmp_path / case.replace(" ", "_")
+        folder.mkdir()
+        store = write_truth_store(folder / "store.zarr", TRUTH)
+        if options:
+            store = open_clone_store(folder / "store.zarr", **options)
+        with collect_warnings():
+            barcodes = import_calling_truth(store, calling, folder, layout)
+        clones = store.clones.barcode_clones(barcodes, preset="trex")
+        group = store.artifacts.load(clones)
+        stored.append(
+            {
+                name: np.asarray(group[name][:])
+                for name in ("codes", "n_barcodes", "doublet", "clone_sizes")
+            }
+        )
+    for other in stored[1:]:
+        for name, values in stored[0].items():
+            np.testing.assert_array_equal(other[name], values)
+
+
+def test_barcode_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "larry")
+    clones = store.clones.barcode_clones(barcodes, preset="larry")
+    with pytest.raises(ValueError, match="lineage_barcodes artifact"):
+        store.clones.barcode_clones(clones, preset="larry")
+    with pytest.raises(TypeError, match="ArtifactRef"):
+        store.clones.barcode_clones("barcodes", preset="larry")
+    with pytest.raises(TypeError, match="invalidate_cache"):
+        store.clones.barcode_clones(barcodes, preset="larry", invalidate_cache=1)
+    with pytest.raises(ValueError, match="needs a preset or a method"):
+        store.clones.barcode_clones(barcodes)
+    with pytest.raises(TypeError, match="as text"):
+        store.clones.barcode_clones(barcodes, method="sets", allowlist=[1, 2])
+
+
+def test_counts_that_a_table_leaves_unknown_are_refused_by_the_rules_that_read_them(
+    store, tmp_path
+) -> None:
+    # A pairs table whose UMIs one row leaves out: its library has no unit.
+    rows = ["cell\tbarcode\tumis"] + [
+        f"{TRUTH.cell_ids[cell]}\tBC{cell % 4}\t{'NA' if cell == 5 else 3}"
+        for cell in range(N_CELLS)
+    ]
+    path = tmp_path / "pairs.tsv"
+    path.write_text("\n".join(rows) + "\n")
+    barcodes = store.clones.import_barcodes(
+        path,
+        cell_selection=every_cell(store),
+        format="pairs",
+        columns={"cell": "cell", "barcode": "barcode", "umis": "umis"},
+    )
+    loaded = store.clones.load_barcodes(barcodes)
+    assert loaded.cells["n_umis"].iloc[5] == -1
+    with pytest.raises(ValueError, match="counts UMIs for 47 of its 48 pairs"):
+        store.clones.barcode_clones(barcodes, method="sets", min_umis=2)
+    with pytest.raises(ValueError, match="Barcode correction counts each barcode"):
+        store.clones.barcode_clones(
+            barcodes, method="sets", distance=1, metric="hamming"
+        )
+    # Rules that read no count call clones from every pair.
+    clones = store.clones.barcode_clones(barcodes, method="sets")
+    assert len(loaded_partition(store, clones)) == 4
+    assert dict(store.artifacts.load(clones).attrs)["library_units"] == [
+        {"library": "pairs", "unit": None}
+    ]
+
+
+def test_calling_refuses_a_budget_too_small_before_writing(
+    store, tmp_path, monkeypatch
+) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "trex")
+    before = len(store.artifacts.list(kind="clones", scope="datastore"))
+    monkeypatch.setattr(store, "memoryBytes", 50_000)
+    with pytest.raises(MemoryError, match="Raise mem_budget"):
+        store.clones.barcode_clones(barcodes, preset="trex")
+    assert len(store.artifacts.list(kind="clones", scope="datastore")) == before
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("preset", ["trex", "celltag_multi"])
+def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(
+    template, tmp_path, monkeypatch, preset
+) -> None:
+    store = copy_clone_store(template, tmp_path)
+    calling, barcodes = _imported(store, tmp_path, preset)
+    allowlist = list(calling.allowlist) if preset == "celltag_multi" else None
+
+    def call(budget: int) -> object:
+        monkeypatch.setattr(store, "memoryBytes", budget)
+        return store.clones.barcode_clones(
+            barcodes, preset=preset, allowlist=allowlist, invalidate_cache=True
+        )
+
+    budget = smallest_budget(call, 1 << 30)
+    assert traced_peak(lambda: call(budget)) <= budget
+
+
+# TREX 0.4.dev412 (commit c1ade47) ran its own run10x steps on a synthetic
+# molecule table with doublets, clones that share cloneIDs, dropout, errors,
+# partial and low-complexity cloneIDs and ambient molecules, at several
+# Jaccard thresholds, with and without doublet removal; the script stays in
+# the stack's work folder.
+GOLDEN = json.loads((Path(__file__).parent / "trex_0_4_dev412_golden.json").read_text())
+
+
+@pytest.fixture(scope="module")
+def golden_barcodes(tmp_path_factory):
+    folder = tmp_path_factory.mktemp("trex_golden")
+    molecules = DATA / "trex_doublets_molecules.txt.gz"
+    store = _trex_store(folder, molecules)
+    return store, store.clones.import_barcodes(
+        molecules, cell_selection=every_cell(store)
+    )
+
+
+@pytest.mark.parametrize(
+    "run",
+    GOLDEN["runs"],
+    ids=[
+        f"{run['jaccard_threshold']}-keep{run['keep_doublets']}"
+        for run in GOLDEN["runs"]
+    ],
+)
+def test_the_trex_preset_matches_trexs_clones_and_doublets(
+    golden_barcodes, run
+) -> None:
+    store, barcodes = golden_barcodes
+    clones = store.clones.barcode_clones(
+        barcodes,
+        preset="trex",
+        similarity=run["jaccard_threshold"],
+        doublets=not run["keep_doublets"],
+    )
+    assert loaded_partition(store, clones) == {
+        frozenset(members) for members in run["clones"]
+    }
+    cells = store.clones.load_clones(clones).cells
+    assert sorted(cells.index[cells["doublet"]]) == run["doublets"]
+    counts = dict(store.artifacts.load(clones).attrs)["rule_counts"]
+    assert counts["doublets"] == sum(run["counts"].get("doublets", [0]))
+    assert counts["edges_pruned"] == sum(run["counts"]["bridges"])
+
+
+def test_the_golden_holds_doublets_that_trex_removed() -> None:
+    removed = {
+        run["jaccard_threshold"]: len(run["doublets"])
+        for run in GOLDEN["runs"]
+        if not run["keep_doublets"]
+    }
+    assert removed[0.0] > 0 and removed[0.3] > 0

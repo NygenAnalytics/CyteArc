@@ -622,6 +622,10 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
         )
     )
     barcodes = store.clones.import_barcodes(counts, cell_selection=cells)
+    # Each cell's barcode set differs from the others', so each cell with a
+    # barcode is a clone of one, numbered in the order of the cells.
+    barcode_clones = store.clones.barcode_clones(barcodes, method="sets")
+    stored: dict[str, set[str]] = {}
 
     for ref, expected in (
         (clusters, np.array(list("aabbcc"))),
@@ -648,6 +652,10 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
             ),
         ),
         (barcodes, np.array([2, 1, 0, 3, 0, 1])),
+        (
+            barcode_clones,
+            np.array(["clone_1", "clone_2", "", "clone_3", "", "clone_4"]),
+        ),
     ):
         loaded = store.artifacts.load_values(ref)
         np.testing.assert_array_equal(loaded.values, expected)
@@ -670,7 +678,14 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
         }
         # An enrichment also stores the cell row of each score row, which
         # CellValues.cell_idx gives.
-        assert per_cell - {"cell_index"} == _declared(ref.kind)
+        assert per_cell - {"cell_index"} <= _declared(ref.kind)
+        stored.setdefault(ref.kind, set()).update(per_cell - {"cell_index"})
+    # Each kind's producers store every array it declares between them:
+    # Numbat's clones their posteriors, barcode clones each cell's barcodes
+    # and doublet flag.
+    assert {kind: stored[kind] for kind in stored} == {
+        kind: _declared(kind) for kind in stored
+    }
     assert scores.shape == (len(SELECTED), 1)
 
 

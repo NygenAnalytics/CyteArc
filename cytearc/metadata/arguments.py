@@ -579,6 +579,40 @@ class LineageBarcodeImportArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class BarcodeCloneArguments(OperationArguments):
+    operation: ClassVar[str] = "call_barcode_clones"
+    artifact_kind: ClassVar[str] = "clones"
+
+    barcodes: ArtifactRef = artifact_input()
+    # The fingerprint of each barcoded cell's labels in the within columns, or
+    # None without columns.
+    within_fingerprint: str | None = artifact_input()
+    # The fingerprint of the allowlist's sorted distinct barcodes, or None
+    # without one.
+    allowlist_fingerprint: str | None = artifact_input()
+    # The resolved rules: the preset's values, replaced by those given.
+    preset: str | None = parameter()
+    min_reads: int = parameter()
+    distance: int = parameter()
+    metric: str | None = parameter()
+    min_umis: int = parameter()
+    min_fraction: float = parameter()
+    barcodes_per_cell: tuple[int, int | None] | None = parameter()
+    method: str = parameter()
+    # One similarity, or the similarity within a library and across libraries.
+    similarity: float | tuple[float, float] | None = parameter()
+    inclusive: bool | None = parameter()
+    prune: bool = parameter()
+    doublets: bool = parameter()
+    min_size: int = parameter()
+    within: tuple[str, ...] = parameter()
+    # TREX's rules for its partial cloneIDs and its pair filters, which
+    # preset="trex" applies.
+    trex_rules: bool = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class GuideThresholdArguments(OperationArguments):
     operation: ClassVar[str] = "fit_guide_thresholds"
     artifact_kind: ClassVar[str] = "guide_thresholds"

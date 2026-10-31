@@ -1561,3 +1561,205 @@ def write_molecule_info(
             "metrics_json", data=json.dumps(metrics), dtype=h5py.string_dtype()
         )
     return path
+
+
+# The barcodes of each clone of the truth for barcode calling, by rank: clone
+# 1 carries one barcode, so a method that needs two per cell leaves it out.
+CALLING_BARCODES = (4, 1, 5, 2, 4, 3, 4, 2)
+# The noise that each preset's rules must remove from the calling truth.
+CALLING_NOISE = (
+    "amplified",
+    "ambient",
+    "dropout",
+    "indel",
+    "partial",
+    "contaminant",
+    "crowded",
+)
+# Barcodes that the crowded cells carry, more than any CellTag preset allows.
+N_CROWDED_BARCODES = 30
+N_CROWDED_CELLS = 3
+
+
+@dataclass(frozen=True, slots=True)
+class CallingTruth:
+    """Lineage barcode molecules of the truth's clones, with noise to remove.
+
+    Attributes:
+        barcodes: The molecules, in the layout of ``barcode_truth``, so that
+            its writers emit them in each tool's format.
+        allowlist: The barcodes of the library: the clones' and the crowded
+            cells', and neither their errors nor the contaminant.
+        noise: The kinds of noise that the molecules hold.
+    """
+
+    barcodes: BarcodeTruth
+    allowlist: tuple[str, ...]
+    noise: tuple[str, ...]
+
+    def expected_partition(
+        self, truth: CloneTruth, *, min_barcodes: int = 1, min_size: int = 1
+    ) -> set[frozenset[str]]:
+        """The truth's clones that a preset calls, as sets of cell IDs.
+
+        A clone is called when it carries at least ``min_barcodes`` barcodes
+        and holds at least ``min_size`` cells; its cells are those of the
+        truth, whatever noise they carry.
+        """
+        ids = truth.cell_ids
+        called = set()
+        for clone, members in enumerate(self.barcodes.clone_barcodes):
+            cells = np.flatnonzero(truth.clones == clone)
+            if len(members) >= min_barcodes and len(cells) >= min_size:
+                called.add(frozenset(str(ids[cell]) for cell in cells))
+        return called
+
+
+def _variant(rng: np.random.Generator, barcode: str, kind: str) -> str:
+    """A sequencing or PCR error of a barcode: a substitution, or an indel."""
+    position = int(rng.integers(1, len(barcode) - 1))
+    if kind == "substitution":
+        base = "ACGT"[("ACGT".index(barcode[position]) + 1) % 4]
+        return barcode[:position] + base + barcode[position + 1 :]
+    # A deletion and a base added at the end keep the length, two edits away.
+    base = "ACGT"[("ACGT".index(barcode[-1]) + 2) % 4]
+    return barcode[:position] + barcode[position + 1 :] + base
+
+
+def calling_truth(
+    truth: CloneTruth,
+    *,
+    noise: Sequence[str] = ("amplified", "ambient"),
+    barcode_length: int = 28,
+    seed: int = 0,
+) -> CallingTruth:
+    """Give the truth's clones barcodes and each cell its molecules, with noise.
+
+    Clone ``k`` carries ``CALLING_BARCODES[k]`` barcodes. Each cell of a
+    clone holds four to seven UMIs of each, read 12 to 30 times, which pass
+    every preset's thresholds. Every cell of a clone also holds a one-read
+    molecule of a barcode one substitution from one of its own, and the
+    kinds of ``noise`` add:
+
+    - ``"amplified"``: a molecule of 12 reads one substitution away, a PCR
+      error that read filters keep, in every other cell of a clone;
+    - ``"ambient"``: a one-read molecule of clone 0's barcode in every other
+      cell without a clone and in every third cell of another clone;
+    - ``"dropout"``: every third cell of a clone of four or more barcodes
+      lacks the clone's last barcode;
+    - ``"indel"``: a molecule of 3 reads two edits from one of its barcodes,
+      in every other cell of a clone;
+    - ``"partial"``: a molecule of 4 reads whose barcode's last six bases are
+      ``-``, as TREX writes bases that no read covered, in every other cell
+      of a clone;
+    - ``"contaminant"``: three cells without a clone hold five UMIs of each
+      of two barcodes outside the allowlist;
+    - ``"crowded"``: three cells without a clone hold five UMIs of each of
+      the same 30 allowlisted barcodes.
+    """
+    unknown = sorted(set(noise) - set(CALLING_NOISE))
+    if unknown:
+        raise ValueError(f"unknown noise {unknown}")
+    rng = np.random.default_rng([seed, 23])
+    seen: set[str] = set()
+
+    def drawn() -> str:
+        while True:
+            barcode = _sequence(rng, barcode_length)
+            if barcode not in seen:
+                seen.add(barcode)
+                return barcode
+
+    clone_barcodes = tuple(
+        tuple(drawn() for _ in range(count))
+        for count in CALLING_BARCODES[: truth.n_clones]
+    )
+    crowded = tuple(drawn() for _ in range(N_CROWDED_BARCODES))
+    contaminants = (drawn(), drawn())
+    rows: list[dict[str, object]] = []
+    used: dict[str, set[str]] = {}
+
+    def add(
+        cell: int, barcode: str, reads: int, kind: str, sequenced: str = ""
+    ) -> None:
+        cell_barcode = str(truth.barcodes[cell])
+        taken = used.setdefault(cell_barcode, set())
+        while True:
+            umi = _sequence(rng, UMI_LENGTH)
+            if umi not in taken:
+                taken.add(umi)
+                break
+        rows.append(
+            {
+                "cell": cell,
+                "sample": str(truth.samples[cell]),
+                "cell_barcode": cell_barcode,
+                "umi": umi,
+                "barcode": sequenced or barcode,
+                "true_barcode": barcode,
+                "reads": reads,
+                "kind": kind,
+            }
+        )
+
+    unclonal = np.flatnonzero(truth.clones < 0).tolist()
+    for cell in range(N_CELLS):
+        clone = int(truth.clones[cell])
+        if clone < 0:
+            continue
+        members = clone_barcodes[clone]
+        rank = int(np.count_nonzero(np.flatnonzero(truth.clones == clone) < cell))
+        carried = members
+        if "dropout" in noise and len(members) >= 4 and rank % 3 == 1:
+            carried = members[:-1]
+        for barcode in carried:
+            for _ in range(int(rng.integers(4, 8))):
+                add(cell, barcode, int(rng.integers(12, 31)), "signal")
+        source = carried[int(rng.integers(0, len(carried)))]
+        # Each error of a cell is a barcode of its own, of one UMI.
+        variants: set[str] = set()
+
+        def variant(kind: str) -> str:
+            while True:
+                drawn_variant = _variant(rng, source, kind)
+                if drawn_variant not in variants:
+                    variants.add(drawn_variant)
+                    return drawn_variant
+
+        add(cell, source, 1, "error", variant("substitution"))
+        if "amplified" in noise and rank % 2 == 0:
+            add(cell, source, 12, "amplified", variant("substitution"))
+        if "indel" in noise and rank % 2 == 1:
+            add(cell, source, 3, "indel", variant("indel"))
+        if "partial" in noise and rank % 2 == 1:
+            add(cell, source, 4, "partial", source[:-6] + "-" * 6)
+        if "ambient" in noise and clone != 0 and rank % 3 == 2:
+            add(cell, clone_barcodes[0][0], 1, "ambient")
+    for position, cell in enumerate(unclonal):
+        if "ambient" in noise and position % 2 == 0:
+            add(cell, clone_barcodes[0][0], 1, "ambient")
+    chosen = unclonal[1::2]
+    if "contaminant" in noise:
+        for cell in chosen[:N_CROWDED_CELLS]:
+            for contaminant in contaminants:
+                for _ in range(5):
+                    add(cell, contaminant, 20, "contaminant")
+    if "crowded" in noise:
+        for cell in chosen[N_CROWDED_CELLS : 2 * N_CROWDED_CELLS]:
+            for barcode in crowded:
+                for _ in range(5):
+                    add(cell, barcode, 20, "crowded")
+    molecules = pd.DataFrame(rows)
+    labelled = set(molecules["cell"])
+    quiet = [cell for cell in range(N_CELLS) if cell not in labelled]
+    return CallingTruth(
+        barcodes=BarcodeTruth(
+            clone_barcodes=clone_barcodes,
+            molecules=molecules,
+            unlabelled=pd.DataFrame(
+                {"sample": truth.samples[quiet], "cell_barcode": truth.barcodes[quiet]}
+            ),
+        ),
+        allowlist=tuple(sorted({b for c in clone_barcodes for b in c} | set(crowded))),
+        noise=tuple(noise),
+    )

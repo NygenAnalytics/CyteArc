@@ -94,6 +94,7 @@ class ClonesAccessor(_Accessor):
     load_fate_bias = _bind(_CloneOperationsMixin._clones_load_fate_bias)
     import_barcodes = _bind(_LineageBarcodeOperationsMixin._clones_import_barcodes)
     load_barcodes = _bind(_LineageBarcodeOperationsMixin._clones_load_barcodes)
+    barcode_clones = _bind(_LineageBarcodeOperationsMixin._clones_barcode_clones)
 
 
 class ClustersAccessor(_Accessor):

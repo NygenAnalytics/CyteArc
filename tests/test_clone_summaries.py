@@ -22,14 +22,22 @@ from scipy.stats import fisher_exact
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.storage.refs import ArtifactRef
+from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
     coupling_reference,
+    import_calling_truth,
     import_truth_clones,
     import_truth_receptors,
     overlap_reference,
     write_truth_store,
 )
-from tests.clone_truth import N_CELLS, clone_truth, number_label, receptor_truth
+from tests.clone_truth import (
+    N_CELLS,
+    calling_truth,
+    clone_truth,
+    number_label,
+    receptor_truth,
+)
 from tests.storage_helpers import insert_nullable_cell_column
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
@@ -63,12 +71,23 @@ def _clonotype_clusters(store: DataStore, folder: Path) -> ArtifactRef:
     )
 
 
+def _barcode_clones(store: DataStore, folder: Path) -> ArtifactRef:
+    # TREX's rules remove the errors, ambient molecules and partial cloneIDs
+    # of the truth's barcodes and join the cells that lost one, keeping the
+    # truth's clones, its singleton among them.
+    calling = calling_truth(TRUTH, noise=("amplified", "ambient", "dropout", "partial"))
+    with collect_warnings():
+        barcodes = import_calling_truth(store, calling, folder, "trex")
+    return store.clones.barcode_clones(barcodes, preset="trex")
+
+
 #: How each clone source saves the truth's clones, in the order the stack adds
 #: them.
 SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
     "imported clones": _imported_clones,
     "clonotypes": _clonotypes,
     "clonotype clusters": _clonotype_clusters,
+    "barcode clones": _barcode_clones,
 }
 #: The labels that a source's clones keep apart, by key column, for each of the
 #: truth's cells: every summary measures the cells of each label apart, so T
