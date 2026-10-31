@@ -26,10 +26,10 @@ ds.plots.variant_depth(counts, group_by="sample")
 |---|---|---|---|---|
 | `"mgatk"` | an [mgatk](https://github.com/caleblareau/mgatk) folder from 0.4.7 on: `<name>.A.txt.gz` to `<name>.T.txt.gz`, `<contig>_refAllele.txt` and `<name>.depthTable.txt` | every position of the reference but `N`, with the four bases | reads | every base |
 | `"maegatk"` | a [maegatk](https://github.com/caleblareau/maegatk) folder of the same files, always with six columns | as mgatk | molecules (UMI consensus reads) | every base |
-| `"cellsnp_lite"` | a [cellsnp-lite](https://github.com/single-cell-genetics/cellsnp-lite) folder: `cellSNP.base.vcf`, `cellSNP.samples.tsv` and `cellSNP.tag.AD.mtx`, `.DP.mtx` and `.OTH.mtx` | each record, with its reference, its alternative and `"other"`, the other bases | declared | DP plus OTH |
+| `"cellsnp_lite"` | a [cellsnp-lite](https://github.com/single-cell-genetics/cellsnp-lite) folder: `cellSNP.base.vcf`, `cellSNP.samples.tsv`, `cellSNP.tag.AD.mtx` and `.DP.mtx`, and `.OTH.mtx` where written | each record, with its reference, its alternative and, with OTH, `"other"`, the other bases | declared | DP plus OTH, or DP, the reference and alternative, without OTH |
 | `"mquad"` | an [MQuad](https://github.com/single-cell-genetics/MQuad) folder: `passed_ad.mtx`, `passed_dp.mtx`, `passed_variant_names.txt` and `BIC_params.csv`, with the `cellSNP.samples.tsv` of the cellsnp-lite run it read | each passed variant, with its reference and alternative | declared | reference and alternative |
-| `"vartrix"` | a folder of [VarTrix](https://github.com/10XGenomics/vartrix)'s coverage mode: the input VCF, the barcode list and the two matrices, the reference one with `ref` in its name | each record with one alternative, with both alleles | declared | reference and alternative |
-| `"mito"` | [MiTo](https://github.com/andrecossa5/MiTo)'s allele frequency matrix, an `.h5ad` file with `AD` and `DP` layers | each position, with its reference and alternatives | molecules | every base, the largest DP of the position's variants |
+| `"vartrix"` | a folder of [VarTrix](https://github.com/10XGenomics/vartrix)'s coverage mode: the input VCF, the barcode list and the two matrices, the reference one with `ref` in its name | each record with one alternative, with both alleles; one record per position | declared | reference and alternative |
+| `"mito"` | [MiTo](https://github.com/andrecossa5/MiTo)'s allele frequency matrix, an `.h5ad` file with `AD` and `DP` layers | each position, with its reference and alternatives | molecules where `uns` says so, otherwise declared | every base, the largest DP of the position's variants |
 | `"giftwrap"` | [giftwrap](https://github.com/clareaulab/giftwrap)'s `counts.N.h5` or `counts.N.filtered.h5`, or a folder of GEO's `probe_reads.tsv.gz`, `barcodes.tsv.gz` and `manifest.tsv` of one sample | each probe, with the gapfills that cells show or the manifest names | UMIs | every gapfill |
 | `"ironthrone"` | IronThrone-GoT's `<prefix>.summTable.txt` | the target, with `WT`, `MUT` and `ambiguous` | UMIs | every call |
 | `"got"` | a per-cell GoT table of one target, as deposited on GEO: `BC` with `num.WT.call` and `num.MUT.call`, `WT.calls` and `MUT.calls`, or `wtUMIs` and `mutUMIs`, and a `Genotype` call | the target, with `WT` and `MUT` | UMIs | `WT` and `MUT` |
@@ -52,7 +52,7 @@ Cell Ranger ARC writes the gene expression barcode into the ATAC BAM's `CB` tag,
 
 ### Several libraries
 
-Several paths of one format import together, such as one mgatk folder per Cell Ranger ATAC library, each with its own prefix. Their shared sites are one site, so they must lie on the same reference: a contig with another length or sequence raises `ValueError`, as do a named and an unnamed contig, files that give one allele two roles, and, outside GIFT's open set of gapfills, files that give a site different alleles. A cell that two files count at one site raises `ValueError`. A call that a source repeats for one cell and allele, as GoT-Multi-ML's refined table does for a few cells, is kept once and counted in the `n_repeated_calls` attribute, while two different calls raise `ValueError`. A source is identified by the SHA-256 of its file, or of each file of a folder, so moved files reuse the saved counts and the order of the paths does not matter.
+Several paths of one format import together, such as one mgatk folder per Cell Ranger ATAC library, each with its own prefix. Their shared sites are one site, so they must lie on the same reference: a contig with another length or sequence raises `ValueError`, as do one sequence under two contig names, such as mgatk references renamed `lib1_chrM_refAllele.txt` and `lib2_chrM_refAllele.txt`, a named and an unnamed contig, files that give one allele two roles, and, outside GIFT's open set of gapfills, files that give a site different alleles. The paths must also count in one unit, define depth alike and give their counts the same fields, so four-column and six-column mgatk folders, or cellsnp-lite folders with and without OTH, import apart; a table of calls alone, such as GoT-Multi's refined table, gives no counts. A cell that two files count at one site raises `ValueError`. A call that a source repeats for one cell and allele, as GoT-Multi-ML's refined table does for a few cells, is kept once and counted in the `n_repeated_calls` attribute, while two different calls raise `ValueError`. A source is identified by the SHA-256 of its file, or of each file of a folder, so moved files reuse the saved counts and the order of the paths does not matter.
 
 ```python
 counts = ds.variants.import_counts(
@@ -64,9 +64,11 @@ counts = ds.variants.import_counts(
 
 ### Units and depth
 
-The unit of the counts is the format's own, except for cellsnp-lite, MQuad and VarTrix, which count UMIs or reads depending on how they ran: their import needs `count_unit="umis"` or `count_unit="reads"`. Tools define depth two ways, which the artifact's `depth_definition` records: every read or UMI at the site (`"all"`), or those of the reference and alternative only (`"reference_and_alternative"`). cellsnp-lite's reference count is DP less AD, and its depth DP plus OTH.
+The unit of the counts is the format's own, except for cellsnp-lite, MQuad and VarTrix, which count UMIs or reads depending on how they ran: their import needs `count_unit="umis"` or `count_unit="reads"`. A MiTo matrix counts molecules when its `uns` says so: `uns['molecules']`, which MiTo 2 records when it turns mtscATAC reads into molecules, or a `pp_method` of maegatk or ReDeeM. Other MiTo matrices, such as mgatk reads that MiTo 1 assembled, need `count_unit`. Tools define depth two ways, which the artifact's `depth_definition` records: every read or UMI at the site (`"all"`), or those of the reference and alternative only (`"reference_and_alternative"`). cellsnp-lite's reference count is DP less AD, and its depth DP plus OTH.
 
 Depth 0 means the cell was not covered at the site, so an allele frequency there is undefined rather than 0. Signac's `AlleleFreq` turns such cells into frequency 0; CyteArc stores no depth for them, so a reader can tell "not covered" from "covered, without the allele", which VarTrix's explicit zeros mark.
+
+The import sorts each file's rows by cell, whatever their order, and rows that outgrow the memory budget go to sorted runs in the system's temporary folder (`TMPDIR` on Linux and macOS), about 4 bytes per count row of mgatk's files, removed when the import ends. mgatk's four base files parse on up to four threads when the budget is 1 GiB or more.
 
 ## Read counts
 
@@ -80,11 +82,11 @@ table = loaded.counts.merge(loaded.depth, on=["cell", "site"])
 table["frequency"] = table["count"] / table["depth"]
 ```
 
-`sites` takes site labels, or positions on an artifact of one contig, and `cells` a cell selection within the counts' cells or a list of cell IDs; `cells=[]` reads only the sites with their sums. The tables are checked against the memory budget, at about 120 bytes per row.
+`sites` takes site labels, or positions on an artifact of one contig, and `cells` a cell selection within the counts' cells or cell IDs, as a list, a NumPy array or a pandas index; `cells=[]` reads only the sites with their sums. The tables are checked against the memory budget, at about 120 bytes per row, with the two stored chunks that a read's first and last rows decompress whole.
 
 ## The variant_counts artifact
 
-The artifact holds a row per selected cell in its canonical `mean_depth`, the cell's depth summed over the sites and divided by their number, NaN for a cell that no file names, `covered_sites` and `listed`, so `ds.select_cells(counts, low=10)` keeps cells with a mean depth above 10, the cells whose variants mgatk scores. {ref}`Read per-cell values <cell_aligned_kinds>` lists them, and {doc}`artifacts` describes the sites, alleles and long tables, which are sorted by cell in row bands.
+The artifact holds a row per selected cell in its canonical `mean_depth`, the cell's depth summed over the sites and divided by their number, NaN for a cell that no file names, `covered_sites` and `listed`, so `ds.select_cells(counts, low=10)` keeps cells with a mean depth above 10. mgatk scores the cells whose mean depth exceeds 10 too, but averages over every position of its reference, the `N` at 3107 of rCRS included, so a cell within a few thousandths of 10 can fall on the other side. {ref}`Read per-cell values <cell_aligned_kinds>` lists them, and {doc}`artifacts` describes the sites, alleles and long tables, which are sorted by cell in row bands.
 
 ## Plot depth
 
