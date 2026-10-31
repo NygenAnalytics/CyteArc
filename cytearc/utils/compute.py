@@ -1,4 +1,5 @@
 import itertools
+import sys
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -14,6 +15,29 @@ _thread_limit_lock = threading.Lock()
 _thread_limit_tokens = itertools.count()
 _active_thread_limits: dict[int, int | None] = {}
 _original_thread_limits: Any | None = None
+_thread_pool_controller: Any | None = None
+_thread_pool_modules = -1
+
+
+def _shared_thread_pool_controller() -> Any:
+    """Return the process's threadpoolctl controller, built again after any import.
+
+    Building a controller scans the loaded shared libraries and wraps each
+    native thread pool in ctypes objects that form reference cycles, about
+    14 KB for each controller, which only the cycle collector frees. The
+    libraries that a limit reaches, BLAS and OpenMP runtimes, are loaded by
+    importing extension modules, and threadpoolctl gives no signal of a new
+    library, so a controller built since ``sys.modules`` last changed size
+    still knows every one of them. Callers hold ``_thread_limit_lock``.
+    """
+    from threadpoolctl import ThreadpoolController
+
+    global _thread_pool_controller, _thread_pool_modules
+    if _thread_pool_controller is None or len(sys.modules) != _thread_pool_modules:
+        _thread_pool_controller = ThreadpoolController()
+        # Building the first controller imports modules of its own.
+        _thread_pool_modules = len(sys.modules)
+    return _thread_pool_controller
 
 
 def enter_thread_limit(limits: int | None) -> int:
@@ -25,11 +49,9 @@ def enter_thread_limit(limits: int | None) -> int:
     applies while scopes overlap, and the last scope to end restores the
     recorded limits. ``None`` changes nothing but still takes part.
     """
-    from threadpoolctl import ThreadpoolController
-
     global _original_thread_limits
     with _thread_limit_lock:
-        controller = ThreadpoolController()
+        controller = _shared_thread_pool_controller()
         if not _active_thread_limits:
             _original_thread_limits = controller.limit(limits=None)
         token = next(_thread_limit_tokens)
@@ -41,8 +63,6 @@ def enter_thread_limit(limits: int | None) -> int:
 
 def exit_thread_limit(token: int) -> None:
     """End a limit started by ``enter_thread_limit``."""
-    from threadpoolctl import ThreadpoolController
-
     global _original_thread_limits
     with _thread_limit_lock:
         del _active_thread_limits[token]
@@ -53,7 +73,7 @@ def exit_thread_limit(token: int) -> None:
         if not _active_thread_limits:
             _original_thread_limits = None
         if requested:
-            ThreadpoolController().limit(limits=requested[-1])
+            _shared_thread_pool_controller().limit(limits=requested[-1])
         else:
             original.restore_original_limits()
 
