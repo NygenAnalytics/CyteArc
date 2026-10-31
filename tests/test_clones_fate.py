@@ -417,6 +417,13 @@ def test_the_tree_joins_the_most_coupled_groups_first() -> None:
     np.testing.assert_allclose(tree[:, 2], [0.0, 0.1, 0.8], atol=1e-15)
     assert {tuple(sorted(tree[0, :2].astype(int)))} == {(0, 1)}
     assert {tuple(sorted(tree[1, :2].astype(int)))} == {(2, 3)}
+    # Average linkage: groups 0 and 1 join first, and group 2 joins them at
+    # the mean of its distances to both, (0.9 - 0.5 + 0.9 - 0.1) / 2 = 0.6,
+    # where complete linkage would join at 0.8 and single linkage at 0.4.
+    three = coupling_linkage(
+        np.array([0, 0, 1]), np.array([1, 2, 2]), np.array([0.9, 0.5, 0.1]), 3
+    )
+    np.testing.assert_allclose(three[:, 2], [0.0, 0.6], atol=1e-15)
     # A pair of two strata, not compared, joins after every compared pair.
     split = coupling_linkage(
         np.array([0, 2]), np.array([1, 3]), np.array([0.2, -1.0]), 4
@@ -518,6 +525,18 @@ def test_fate_bias_follows_each_early_cell_to_its_clones_late_cells() -> None:
     np.testing.assert_allclose(
         result.q_values, [[0.1, 1], [1, 0.5], [1, 0.5]], rtol=1e-12
     )
+
+
+def test_an_early_cell_of_a_clone_between_tested_clones_has_no_bias() -> None:
+    # Clones 0 and 2 have late cells and clone 1 none: an early cell of clone
+    # 1 falls between them among the tested clones and has no bias.
+    fates, clones = np.array([0, 1, 1]), np.array([0, 2, 2])
+    result = fate_bias(np.array([1, 2]), *_pairs(fates, clones), np.array([1, 2]))
+    assert result.clones.tolist() == [0, 2]
+    assert np.isnan(result.fractions[0]).all()
+    assert result.fractions[1].tolist() == [0.0, 1.0]
+    assert (result.late_cells.tolist(), result.dominant.tolist()) == ([0, 2], [-1, 1])
+    assert result.clone_early_cells.tolist() == [0, 1]
 
 
 def test_fate_bias_p_values_are_one_sided_fisher_tests() -> None:

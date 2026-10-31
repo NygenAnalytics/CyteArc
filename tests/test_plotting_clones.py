@@ -904,12 +904,19 @@ def test_the_coupling_plot_draws_z_scores_in_the_order_of_the_tree(truth_plot) -
 def test_the_coupling_plot_blanks_values_that_are_not_finite(truth_plot) -> None:
     store, clones = truth_plot.store, truth_plot.clones
     coupling = store.clones.coupling(
-        clones, group_by="cell_type", method="normalized_covariance", permutations=0
+        clones, group_by="cell_type", method="normalized_covariance", permutations=50
     )
-    # Without permutations no z-score is defined, and nothing is printed.
-    result = clone_coupling(store, coupling, show=False)
-    assert np.isnan(result.tables["matrix"].to_numpy()).all()
-    assert len(result.axes["matrix"].texts) == 0
+    # Without permutations there are no z-scores to draw.
+    with pytest.raises(ValueError, match="without permutations, so it has no"):
+        clone_coupling(store, replace(coupling, permutations=0), show=False)
+    # A null without spread gives a z-score of NaN, or an infinite one, which
+    # stay blank; the finite one is printed on both sides.
+    blank = replace(
+        coupling, pairs=coupling.pairs.assign(z_score=[np.nan, np.inf, 1.5])
+    )
+    result = clone_coupling(store, blank, show=False)
+    assert [text.get_text() for text in result.axes["matrix"].texts] == ["1.5"] * 2
+    assert np.isinf(result.tables["matrix"].to_numpy()).sum() == 2
     plt.close(result.figure)
     # The truth's covariances are all above 0, which a sequential scale
     # draws; covariances below 0 take a scale centred on 0.
@@ -934,7 +941,12 @@ def test_the_coupling_plot_checks_its_arguments(truth_plot) -> None:
     with pytest.raises(TypeError, match="CloneCoupling"):
         clone_coupling(store, coupling.pairs, show=False)
     with pytest.raises(ValueError, match="does not follow its linkage"):
-        clone_coupling(store, replace(coupling, order=coupling.order[::-1]), show=False)
+        clone_coupling(
+            store,
+            replace(coupling, order=coupling.order[::-1]),
+            value="coupling",
+            show=False,
+        )
 
 
 def _late_cells(clone: int) -> dict[str, int]:
@@ -1034,6 +1046,12 @@ def test_the_fates_plot_draws_the_top_clones_and_their_shares(fates_plot) -> Non
     }
     chosen = sorted(late, key=lambda clone: (-late[clone], clone))[:3]
     assert sorted(table["clone"].astype(int) - 1) == sorted(chosen)
+    # Four clones hold one late cell each; the fifth clone drawn is the one
+    # of them that is larger overall, the lowest code.
+    assert sorted(late.values(), reverse=True) == [6, 4, 3, 2, 1, 1, 1, 1]
+    five = clone_fates(store, bias, top=5, show=False)
+    assert sorted(five.tables["clones"]["clone"].astype(int) - 1) == [0, 1, 2, 3, 4]
+    plt.close(five.figure)
     heights = np.zeros(3)
     for container in shares.axes["fates"].containers:
         heights += [bar.get_height() for bar in container]

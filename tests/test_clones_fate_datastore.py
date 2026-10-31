@@ -175,6 +175,8 @@ def test_coupling_keeps_to_a_cell_selection_and_takes_label_artifacts(shared) ->
         ({"permutations": True}, TypeError, "permutations must be"),
         ({"permutations": 2.5}, TypeError, "permutations must be"),
         ({"seed": -1}, ValueError, "seed must be a non-negative"),
+        # A seed of 2**64 would draw the permutations of seed 0.
+        ({"seed": 2**64}, ValueError, r"below 2\*\*64"),
         ({"seed": "0"}, TypeError, "seed must be a non-negative"),
         ({"group_by": "missing"}, ValueError, "not a cell metadata column"),
     ],
@@ -184,6 +186,26 @@ def test_coupling_arguments_are_checked(shared, kwargs, error, message) -> None:
         shared.store.clones.coupling(
             shared.clones, **{"group_by": "cell_type", **kwargs}
         )
+
+
+def test_coupling_runs_on_no_more_threads_than_numba_has(copied, monkeypatch) -> None:
+    import numba
+
+    from cytearc.utils.logging import logger
+
+    store, clones = copied.store, copied.clones
+    monkeypatch.setattr(store, "nthreads", 10_000)
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="INFO"
+    )
+    try:
+        store.clones.coupling(clones, group_by="cell_type", permutations=500)
+    finally:
+        logger.remove(sink)
+    (line,) = [message for message in messages if "coupling of" in message]
+    threads = min(500, int(numba.config.NUMBA_NUM_THREADS))
+    assert f"on {threads} threads" in line, line
 
 
 def test_coupling_needs_two_groups_with_a_clone(copied) -> None:
@@ -388,6 +410,19 @@ def test_fate_bias_is_reused_and_selected_like_labels(copied) -> None:
     assert store.clones.fate_bias(clones, **options) == first
 
 
+def test_saved_fate_bias_with_damaged_clone_arrays_is_measured_again(copied) -> None:
+    store, clones = copied.store, copied.clones
+    options = {"group_by": "cell_type", "early": copied.early, "late": copied.late}
+    saved = store.clones.fate_bias(clones, **options)
+    group = artifact_group(store.zw, saved)
+    # One column of p-values instead of one per fate.
+    p_values = np.asarray(group["clone_p_values"][:])
+    group.create_array("clone_p_values", data=p_values[:, :1], overwrite=True)
+    rebuilt = store.clones.fate_bias(clones, **options)
+    assert rebuilt != saved
+    assert artifact_group(store.zw, rebuilt)["clone_p_values"].shape == p_values.shape
+
+
 def test_a_read_only_store_reuses_saved_fate_bias(copied) -> None:
     store, clones = copied.store, copied.clones
     options = {"group_by": "cell_type", "early": copied.early, "late": copied.late}
@@ -415,6 +450,12 @@ def test_fate_bias_arguments_are_checked(copied) -> None:
     everyone = every_cell(store)
     with pytest.raises(ValueError, match=f"share {int(LATE.sum())} cells"):
         store.clones.fate_bias(clones, group_by="cell_type", early=everyone, late=late)
+    store.cells.insert("no_cell", np.zeros(N_CELLS, dtype=bool))
+    none = store.snapshot_cell_selection("no_cell")
+    with pytest.raises(ValueError, match="^early selects no cell$"):
+        store.clones.fate_bias(clones, group_by="cell_type", early=none, late=late)
+    with pytest.raises(ValueError, match="^late selects no cell$"):
+        store.clones.fate_bias(clones, group_by="cell_type", early=early, late=none)
     with pytest.raises(ValueError, match="No cell has both a clone and a group"):
         store.clones.fate_bias(clones, group_by="unlabelled", early=early, late=late)
     with pytest.raises(ValueError, match="at least two fates"):
@@ -536,7 +577,7 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
     with pytest.raises(MemoryError, match=f"late cells holds about {checked} bytes"):
         store.clones.fate_bias(clones, group_by="cell_type", early=early, late=late)
     # A fate of its own for each late cell, named by three characters, makes
-    # the measurement the largest step: per early cell 64 bytes, 16 per
+    # the measurement the largest step: per early cell 64 bytes, 24 per
     # fraction, 40 to write and 4 per character of a fate's name; per clone
     # with late cells and fate 80 bytes; 1,000 per fate; and 24 per count of
     # a clone in a fate, here one per late cell with a clone.
@@ -544,13 +585,13 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
     tested = len({int(c) for c in TRUTH.clones[LATE] if c >= 0})
     with_clone = int(np.count_nonzero(TRUTH.clones[LATE] >= 0))
     measured = (
-        n_early * (64 + 16 * n_late + 40 + 4 * 3)
+        n_early * (64 + 24 * n_late + 40 + 4 * 3)
         + 80 * tested * n_late
         + 1_000 * n_late
         + 24 * with_clone
         + CODES_READ
     )
-    assert (tested, with_clone, measured) == (8, 19, 56_820)
+    assert (tested, with_clone, measured) == (8, 19, 61_356)
     options = {"groups": fates, "early": early, "late": late}
     monkeypatch.setattr(store, "memoryBytes", measured - 1)
     with pytest.raises(
@@ -560,17 +601,17 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
     assert store.artifacts.list(kind="clone_fate_bias", scope="datastore") == []
     monkeypatch.setattr(store, "memoryBytes", measured)
     saved = store.clones.fate_bias(clones, **options)
-    # Loading: per early cell 200 bytes and 16 per fraction, per row of clone
+    # Loading: per early cell 200 bytes and 24 per fraction, per row of clone
     # and fate 160 bytes and 16 per key column, 2,000 per fate, and the
     # clones read with their labels, eight of one stored character.
     loaded = (
-        n_early * (200 + 16 * n_late)
+        n_early * (200 + 24 * n_late)
         + tested * n_late * (160 + 16)
         + 2_000 * n_late
         + CODES_READ
         + 8 * (100 + 3 * 4)
     )
-    assert loaded == 106_760
+    assert loaded == 111_296
     monkeypatch.setattr(store, "memoryBytes", loaded - 1)
     with pytest.raises(
         MemoryError, match=f"fate bias of {n_early} cells holds about {loaded}"

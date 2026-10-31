@@ -81,6 +81,20 @@ def data(tmp_path_factory) -> SimpleNamespace:
         "emoji_clone",
         np.asarray(["".join(map(chr, row)) + str(i) for i, row in enumerate(emoji)]),
     )
+    # Clones of 100 early and 100 late cells: the first half of the cells is
+    # early and the second late, and the late cells fall in 200 fates, so
+    # each early cell's fractions are the largest arrays of its fate bias.
+    half = N_CELLS // 2
+    store.cells.insert("first_half", np.arange(N_CELLS) < half)
+    store.cells.insert("second_half", np.arange(N_CELLS) >= half)
+    store.cells.insert(
+        "paired_clone",
+        np.asarray([f"p{(i % half) // 100}" for i in range(N_CELLS)], dtype=object),
+    )
+    store.cells.insert(
+        "state",
+        np.asarray([f"f{k:03d}" for k in rng.integers(0, 200, size=N_CELLS)]),
+    )
     every = store.snapshot_cell_selection("every_cell")
     first = store.snapshot_cell_selection("first")
     # Label artifacts of a label for each of the first cells: their small
@@ -108,6 +122,9 @@ def data(tmp_path_factory) -> SimpleNamespace:
         own_labels=own_labels,
         own_labels_300=own_labels[300],
         named=sorted(set(labels.tolist()) - {""})[::3][:1_000],
+        first_half=store.snapshot_cell_selection("first_half"),
+        second_half=store.snapshot_cell_selection("second_half"),
+        paired=store.clones.from_column("paired_clone", cell_selection=every),
     )
 
 
@@ -275,6 +292,25 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
     ),
     "loaded fate bias of emoji clone labels by a label for each of 300 late cells": (
         _loaded_fate_bias("emoji", late="next_300", groups="own_next_300")
+    ),
+    "fate bias of 200 fates of clones of 100 early and 100 late cells": lambda data: (
+        data.store.clones.fate_bias(
+            data.paired,
+            group_by="state",
+            early=data.first_half,
+            late=data.second_half,
+            invalidate_cache=True,
+        )
+    ),
+    "loaded fate bias of 200 fates of clones of 100 early and 100 late cells": (
+        lambda data: data.store.clones.load_fate_bias(
+            data.store.clones.fate_bias(
+                data.paired,
+                group_by="state",
+                early=data.first_half,
+                late=data.second_half,
+            )
+        )
     ),
 }
 

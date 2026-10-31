@@ -2,13 +2,14 @@
 
 Clonal expansion counts each clone's cells within samples, diversity and
 rarefaction summarize each group's clone sizes, overlap compares groups by
-the clones they share, and coupling compares them against permuted labels. Each benchmark runs one step on simulated clones
-whose sizes follow a heavy-tailed draw, so a few clones hold many cells and
-most cells hold a clone of their own, with one cell in ten without a clone,
-and checks the result, so it doubles as a test at the smoke size. The
-summaries of groups, such as samples by clusters, are measured over the
-number of groups as well, on simulated groups of about 150 cells: diversity,
-rarefaction and the clones that groups share and follow.
+the clones they share, and coupling compares them against permuted labels.
+Each benchmark runs one step on simulated clones whose sizes follow a
+heavy-tailed draw, so a few clones hold many cells and most cells hold a
+clone of their own, with one cell in ten without a clone, and checks the
+result, so it doubles as a test at the smoke size. The summaries of groups,
+such as samples by clusters, are measured over the number of groups as
+well, on simulated groups of about 150 cells: diversity, rarefaction and the
+clones that groups share and follow.
 """
 
 from functools import lru_cache

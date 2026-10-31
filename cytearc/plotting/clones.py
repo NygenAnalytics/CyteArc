@@ -889,7 +889,8 @@ def clone_coupling(
     ``"coupling"``, the method's value. The groups follow the result's
     average-linkage order, whose dendrogram is drawn above the matrix. The
     diagonal is left blank, and so are pairs that were not compared and
-    z-scores that are not finite. Matrices of at most 12 groups print their
+    z-scores that are not finite; a coupling measured without permutations
+    has no z-scores and is refused. Matrices of at most 12 groups print their
     values, and of at most 40 name their groups on the axes. By default the
     figure grows with the groups up to the width of a page.
 
@@ -899,6 +900,11 @@ def clone_coupling(
         raise TypeError("coupling must be the CloneCoupling of ds.clones.coupling")
     if value not in _COUPLING_VALUES:
         raise ValueError(f"value must be one of {', '.join(_COUPLING_VALUES)}")
+    if value == "z_score" and not coupling.permutations:
+        raise ValueError(
+            "The coupling was measured without permutations, so it has no "
+            "z-scores; plot value='coupling', or measure it with permutations"
+        )
     names = list(coupling.order)
     positions = pd.Index(names)
     first = positions.get_indexer(coupling.pairs["group_1"])

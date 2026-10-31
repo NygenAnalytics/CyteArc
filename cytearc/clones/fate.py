@@ -87,10 +87,10 @@ _BATCH_BYTES_PER_VALUE = 8
 # per worker, since more save little time.
 _BATCH_BYTES = 64 * 1024**2
 # Bytes that measuring fate bias holds for each early cell, besides its
-# fractions, for each of its fractions, for each fate of each clone with late
-# cells, and for each fate.
+# fractions, for each of its fractions, the value and its copy as it is
+# written, for each fate of each clone with late cells, and for each fate.
 _BIAS_BYTES_PER_EARLY_CELL = 64
-_BIAS_BYTES_PER_FRACTION = 16
+_BIAS_BYTES_PER_FRACTION = 24
 _BIAS_BYTES_PER_CLONE_FATE = 80
 _BIAS_BYTES_PER_FATE = 1_000
 
@@ -824,8 +824,12 @@ def fate_bias(
     found = (early_clones >= 0) & (at < n_tested)
     found[found] = clones[at[found]] == early_clones[found]
     positions = at[found]
-    fractions = np.full((len(early_clones), n_fates), np.nan)
-    fractions[found] = clone_cells[positions] / clone_late[positions, None]
+    # Each clone's fractions once, and a row of NaN for the early cells
+    # without late clone-mates, gathered into one array of the early cells.
+    shares = np.full((n_tested + 1, n_fates), np.nan)
+    np.divide(clone_cells, clone_late[:, None], out=shares[:n_tested])
+    fractions = shares[np.where(found, at, n_tested)]
+    del shares
     late_cells = np.zeros(len(early_clones), dtype=np.int64)
     late_cells[found] = clone_late[positions]
     dominant = np.full(len(early_clones), -1, dtype=np.int64)

@@ -220,12 +220,12 @@ _BYTES_PER_FATE_PAIR = 24
 _BIAS_WRITE_BYTES_PER_CELL = 40
 _BIAS_WRITE_BYTES_PER_CHARACTER = 4
 # The tables of loaded fate bias hold, for each early cell, its ID, clone,
-# fate and late cells and the pandas index, for each of its fractions a
-# value, and for each row of the table of clones and fates its labels,
-# counts and tests: 92 to 113 bytes at their peak as traced on 1 to 3 million
-# rows with one to three key columns.
+# fate and late cells and the pandas index, for each of its fractions the
+# value read and its column in the table, and for each row of the table of
+# clones and fates its labels, counts and tests: 92 to 113 bytes at their
+# peak as traced on 1 to 3 million rows with one to three key columns.
 _BIAS_TABLE_BYTES_PER_CELL = 200
-_BIAS_TABLE_BYTES_PER_FRACTION = 16
+_BIAS_TABLE_BYTES_PER_FRACTION = 24
 _BIAS_TABLE_BYTES_PER_ROW = 160
 _BIAS_TABLE_BYTES_PER_KEY_COLUMN = 16
 
@@ -2028,7 +2028,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 ``"normalized_covariance"`` or ``"jaccard"``.
             permutations: The permutations of the null, 0 for none, or at
                 least 2 to estimate its spread.
-            seed: The seed of the permutations, a non-negative integer.
+            seed: The seed of the permutations, a non-negative integer below
+                2**64.
 
         Returns:
             The groups' cells and clones, each pair's coupling with its null
@@ -2038,7 +2039,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a complete clone artifact,
                 ``method`` is unknown, ``permutations`` is 1 or negative,
-                ``seed`` is negative, no cell has both a clone and a group,
+                ``seed`` is negative or 2**64 or more, no cell has both a
+                clone and a group,
                 fewer than two groups hold a cell with a clone, no two groups
                 share the labels that the clones keep apart, a column of the
                 groups is missing or named twice, a key column names a column
@@ -2063,8 +2065,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             )
         if isinstance(seed, bool) or not isinstance(seed, int | np.integer):
             raise TypeError("seed must be a non-negative integer")
-        if seed < 0:
-            raise ValueError("seed must be a non-negative integer")
+        if not 0 <= seed < 2**64:
+            raise ValueError("seed must be a non-negative integer below 2**64")
         source = self._read_clone_input(clones)
         keys, pair_groups, pair_codes, pair_cells = self._clone_pair_counts(
             source,
@@ -2092,13 +2094,18 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             + _SUMMARY_BYTES_PER_GROUP * len(keys)
             + self._clone_input_bytes(clones, with_ids=False)
         )
+        import numba
+
         workers, batch, needed = coupling_plan(
             len(keys),
             n_pairs,
             int(pair_cells.sum()),
             len(pair_cells),
             permutations=int(permutations),
-            nthreads=self.nthreads,
+            # More workers than Numba's threads would only hold scratch.
+            nthreads=min(
+                self.nthreads, int(getattr(numba.config, "NUMBA_NUM_THREADS"))
+            ),
             available=self.memoryBytes - held,
         )
         resident = held + needed
@@ -2175,8 +2182,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         one-sided Fisher test per fate: the chance of at least that many of
         the clone's late cells in the fate if they were drawn at random from
         all late cells with a fate, those without a clone included, as
-        CoSpar's ``clonal_fate_bias`` tests a clone, with the Benjamini and
-        Hochberg adjustment over the clones within each fate.
+        CoSpar's ``clonal_fate_bias`` tests a clone among the late cells,
+        with the Benjamini and Hochberg adjustment over the clones within
+        each fate. When the clones keep labels apart, such as receptor types,
+        each fate holds one such label, which a late cell without a clone
+        lacks, so it has no fate.
 
         The artifact's canonical ``values`` hold each early cell's dominant
         fate, empty for none, so ``ds.select_cells(bias, include=["Neutrophil"])``
@@ -2202,8 +2212,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a complete clone artifact,
-                ``early`` or ``late`` is not a cell selection, a cell is both
-                early and late, no late cell has both a clone and a fate,
+                ``early`` or ``late`` is not a cell selection or selects no
+                cell, a cell is both early and late, no late cell has both a clone and a fate,
                 fewer than two fates hold a late cell, a column of the fates
                 is missing or named twice, a key column names a column of the
                 result, two fates get one name, or a fate is named
@@ -2226,6 +2236,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         held = self._clone_input_bytes(clones, with_ids=False)
         n_early = int(validate_cell_selection(self.zw, early).selected_count)
         n_late = int(validate_cell_selection(self.zw, late).selected_count)
+        for name, count in (("early", n_early), ("late", n_late)):
+            if count == 0:
+                raise ValueError(f"{name} selects no cell")
         resident = held + _SELECTION_BYTES_PER_CELL * (n_early + n_late)
         if resident > self.memoryBytes:
             raise MemoryError(
@@ -2406,7 +2419,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         Raises:
             TypeError: If ``bias`` is not an ArtifactRef.
             ValueError: If it is not a complete ``clone_fate_bias`` artifact.
-            MemoryError: If the tables, about 200 bytes per early cell, 16 per
+            MemoryError: If the tables, about 200 bytes per early cell, 24 per
                 fraction and 160 per row of clone and fate, beside the clone
                 labels that they read, do not fit the memory budget.
         """
