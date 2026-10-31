@@ -122,7 +122,7 @@ def test_identical_sets_of_a_group_share_a_node_numbered_by_its_first_cell() -> 
     # cell 4, {7} at cell 6; the empty set joins no node.
     assert nodes.cell_nodes.tolist() == [0, 1, -1, 1, 2, 0, 3]
     assert nodes.first_cells.tolist() == [0, 1, 4, 6]
-    assert nodes.n_cells.tolist() == [2, 2, 1, 1]
+    assert nodes.cell_counts.tolist() == [2, 2, 1, 1]
     assert nodes.groups.tolist() == [0, 0, 1, 0]
     assert nodes.sets.items.tolist() == [4, 1, 2, 1, 2, 7]
 
@@ -138,7 +138,7 @@ def test_colliding_hashes_never_merge_different_sets(monkeypatch) -> None:
     monkeypatch.setattr(calling, "_set_hashes", colliding)
     collided = identical_sets(_sets(rows))
     assert collided.cell_nodes.tolist() == honest.cell_nodes.tolist() == [0, 1, 0, 2, 1]
-    assert collided.n_cells.tolist() == [2, 2, 1]
+    assert collided.cell_counts.tolist() == [2, 2, 1]
 
 
 def test_hashes_tell_apart_sets_of_one_size_and_shared_items() -> None:
@@ -146,7 +146,7 @@ def test_hashes_tell_apart_sets_of_one_size_and_shared_items() -> None:
     rows = [list(row) for row in itertools.combinations(range(8), 3)]
     nodes = identical_sets(_sets(rows + rows[::-1]))
     assert nodes.n_nodes == len(rows)
-    assert nodes.n_cells.tolist() == [2] * len(rows)
+    assert nodes.cell_counts.tolist() == [2] * len(rows)
 
 
 def test_identical_sets_refuse_groups_that_do_not_align() -> None:
@@ -189,6 +189,11 @@ def test_sets_that_share_no_item_or_another_group_never_link() -> None:
     # node; with cell 3 in its group instead, the two link.
     assert _jaccard(rows, 0.0, False, groups=np.asarray([0, 0, 1, 0])) == []
     assert _jaccard(rows, 0.0, False, groups=np.asarray([0, 0, 1, 1])) == [(2, 3)]
+    # Item 5 ends one group's items and starts the next one's: the two
+    # groups' item 5 are two items.
+    assert _jaccard([[5], [5, 6]], 0.0, False, groups=np.asarray([0, 1])) == []
+    calls = set_clones(_sets([[5], [5, 6]]), groups=np.asarray([0, 1]), method="shared")
+    assert calls.n_clones == 2
 
 
 def test_a_similarity_of_one_links_nothing_since_equal_sets_share_a_node() -> None:
@@ -352,6 +357,155 @@ def test_only_eligible_nodes_are_tested_for_cutting() -> None:
         local_cut_vertices(4, edges, np.ones(3, dtype=bool))
 
 
+# Unknown items, such as the sites that no read covered.
+
+
+def _unknown_sets(rows, unknown) -> tuple[CellSets, CellSets]:
+    return _sets(rows), _sets(unknown)
+
+
+def test_cells_with_equal_items_and_other_unknown_items_are_other_nodes() -> None:
+    sets, unknown = _unknown_sets(
+        [[1, 2], [1, 2], [1, 2], [], [1, 2]], [[], [3], [3], [1], []]
+    )
+    nodes = identical_sets(sets, unknown=unknown)
+    # A cell that holds no item joins no node, whatever it holds unknown.
+    assert nodes.cell_nodes.tolist() == [0, 1, 1, -1, 0]
+    assert nodes.cell_counts.tolist() == [2, 2]
+    assert nodes.sets.items.tolist() == [1, 2, 1, 2]
+    assert nodes.unknown is not None
+    assert nodes.unknown.indptr.tolist() == [0, 0, 1]
+    assert nodes.unknown.items.tolist() == [3]
+    # Without unknown items, the four cells are one node.
+    assert identical_sets(sets).cell_nodes.tolist() == [0, 0, 0, -1, 0]
+
+
+def test_unknown_items_need_one_set_per_cell_apart_from_its_items() -> None:
+    sets = _sets([[1, 2], [3]])
+    with pytest.raises(ValueError, match="one set per cell"):
+        identical_sets(sets, unknown=_sets([[4]]))
+    with pytest.raises(ValueError, match="both hold an item and hold it unknown"):
+        identical_sets(sets, unknown=_sets([[2], []]))
+    with pytest.raises(ValueError, match="stay below"):
+        identical_sets(_sets([[2**62]]), unknown=_sets([[]]))
+
+
+def test_the_index_compares_the_items_that_both_nodes_know() -> None:
+    # B lacks a read of item 3, which A holds: on items 1 and 2, which both
+    # know, they agree. C holds 1 and 4 and lacks a read of 2.
+    sets, unknown = _unknown_sets([[1, 2, 3], [1, 2], [1, 4]], [[], [3], [2]])
+    nodes = identical_sets(sets, unknown=unknown)
+
+    def linked(similarity: float, inclusive: bool) -> list:
+        return _pairs(jaccard_edges(nodes, similarity, inclusive=inclusive))
+
+    # A-B: 2 shared of 2 known, 1; A-C: 1 of 3 (1, 3 and 4), 1/3; B-C: 1 of
+    # 2 (1 and 4), 0.5.
+    assert linked(1.0, True) == [(0, 1)]
+    assert linked(0.5, True) == [(0, 1), (1, 2)]
+    assert linked(0.5, False) == [(0, 1)]
+    assert linked(1 / 3, True) == [(0, 1), (0, 2), (1, 2)]
+    assert linked(1 / 3, False) == [(0, 1), (1, 2)]
+    # Without the unknown items, A-B is 2/3, A-C 1/4 and B-C 1/3.
+    assert _jaccard([[1, 2, 3], [1, 2], [1, 4]], 0.5, True) == [(0, 1)]
+
+
+def test_the_graph_with_unknown_items_matches_python_sets() -> None:
+    rng = np.random.default_rng(16)
+    rows, unknown_rows = [], []
+    for _ in range(400):
+        sites = rng.permutation(14)
+        n_held = int(rng.integers(1, 5))
+        n_unknown = int(rng.integers(0, 6))
+        rows.append(sorted(sites[:n_held].tolist()))
+        unknown_rows.append(sorted(sites[n_held : n_held + n_unknown].tolist()))
+    groups = rng.integers(0, 2, size=len(rows))
+    sets, unknown = _unknown_sets(rows, unknown_rows)
+    nodes = identical_sets(sets, groups=groups, unknown=unknown)
+    # The nodes are the distinct pairs of items and unknown items of a group.
+    keys = [
+        (int(groups[cell]), frozenset(rows[cell]), frozenset(unknown_rows[cell]))
+        for cell in range(len(rows))
+    ]
+    assert _partition(nodes.cell_nodes) == {
+        frozenset(cell for cell in range(len(rows)) if keys[cell] == key)
+        for key in set(keys)
+    }
+    first = nodes.first_cells.tolist()
+    for similarity, inclusive in ((0.0, False), (0.5, True), (0.5, False), (1.0, True)):
+        found = set(_pairs(jaccard_edges(nodes, similarity, inclusive=inclusive)))
+        expected = set()
+        for a, b in itertools.combinations(range(nodes.n_nodes), 2):
+            group_a, held_a, lost_a = keys[first[a]]
+            group_b, held_b, lost_b = keys[first[b]]
+            shared = len(held_a & held_b)
+            if group_a != group_b or not shared:
+                continue
+            index = shared / len((held_a | held_b) - (lost_a | lost_b))
+            if index >= similarity if inclusive else index > similarity:
+                expected.add((a, b))
+        assert found == expected and expected
+
+
+def test_a_cell_that_agrees_with_two_clones_where_it_knows_is_a_doublet() -> None:
+    # Clone X carries mutations 0 and 1 and clone Y 0 and 2, two cells each;
+    # a cell with mutation 0 and sites 1 and 2 uncovered agrees with both.
+    rows = [[0, 1], [0, 1], [0, 2], [0, 2], [0]]
+    unknown_rows = [[], [], [], [], [1, 2]]
+    sets, unknown = _unknown_sets(rows, unknown_rows)
+    options = {"method": "jaccard", "similarity": 1.0, "inclusive": True}
+    calls = set_clones(sets, unknown=unknown, doublets=True, **options)
+    assert _partition(calls.codes) == {frozenset({0, 1}), frozenset({2, 3})}
+    assert calls.doublets.tolist() == [False, False, False, False, True]
+    joined = set_clones(sets, unknown=unknown, **options)
+    assert _partition(joined.codes) == {frozenset(range(5))}
+    # As identical sets, the uncovered cell is a clone of its own.
+    alone = set_clones(sets, unknown=unknown, method="sets")
+    assert _partition(alone.codes) == {
+        frozenset({0, 1}),
+        frozenset({2, 3}),
+        frozenset({4}),
+    }
+
+
+# Links through any shared item.
+
+
+def test_nodes_that_share_any_item_are_one_clone_as_networkx_finds_them() -> None:
+    rng = np.random.default_rng(20)
+    rows = [
+        sorted(rng.choice(400, size=int(rng.integers(1, 4)), replace=False).tolist())
+        for _ in range(300)
+    ]
+    groups = rng.integers(0, 2, size=len(rows))
+    calls = set_clones(_sets(rows), groups=groups, method="shared")
+    graph = nx.Graph()
+    graph.add_nodes_from(range(len(rows)))
+    graph.add_edges_from(
+        (a, b)
+        for a, b in itertools.combinations(range(len(rows)), 2)
+        if groups[a] == groups[b] and set(rows[a]) & set(rows[b])
+    )
+    expected = {frozenset(part) for part in nx.connected_components(graph)}
+    assert _partition(calls.codes) == expected
+    assert any(len(part) > 2 for part in expected)
+    jaccard = set_clones(
+        _sets(rows), groups=groups, method="jaccard", similarity=0.0, inclusive=False
+    )
+    np.testing.assert_array_equal(calls.codes, jaccard.codes)
+    assert calls.n_edges == 0
+
+
+def test_links_through_shared_items_refuse_what_they_cannot_use() -> None:
+    sets = _sets([[1], [1, 2]])
+    with pytest.raises(ValueError, match="share any item, so similarity"):
+        set_clones(sets, method="shared", similarity=0.5)
+    with pytest.raises(ValueError, match="so prune"):
+        set_clones(sets, method="shared", prune=True)
+    with pytest.raises(ValueError, match="so unknown would change nothing"):
+        set_clones(sets, method="shared", unknown=_sets([[], []]))
+
+
 # Connected components.
 
 
@@ -465,6 +619,36 @@ def test_a_cut_vertex_of_several_cells_is_kept() -> None:
     )
     assert not calls.doublets.any()
     assert _partition(calls.codes) == {frozenset(range(4))}
+
+
+def test_the_second_round_prunes_what_the_first_round_of_doublets_left() -> None:
+    # A, B and C (two cells) form a triangle with C-D; X links C and D to Y
+    # and Z. Nothing is pruned at first; X is the one doublet, its
+    # neighbours {C, D} and {Y, Z} falling apart; then C-D has no common
+    # neighbour, and goes.
+    a, b, c, d, x, y, z = range(7)
+    pairs = [(a, b), (a, c), (b, c), (c, d), (x, c), (x, d), (x, y), (x, z), (y, z)]
+    rows = _graph_sets(7, pairs)
+    cells = [a, b, c, c, d, x, y, z]
+    calls = set_clones(
+        _sets([rows[node] for node in cells]),
+        method="jaccard",
+        similarity=0.0,
+        inclusive=False,
+        prune=True,
+        doublets=True,
+    )
+    assert _partition(calls.codes) == {
+        frozenset({0, 1, 2, 3}),
+        frozenset({4}),
+        frozenset({6, 7}),
+    }
+    assert np.flatnonzero(calls.doublets).tolist() == [5]
+    assert calls.n_pruned == 1 and calls.n_doublet_nodes == (1, 0)
+    single = [node != c for node in range(7)]
+    expected, removed = _reference_trex(7, pairs, single, prune=True, doublets=True)
+    assert expected == {frozenset({a, b, c}), frozenset({d}), frozenset({y, z})}
+    assert removed == {x}
 
 
 def test_pruning_isolates_a_doublet_whose_ends_share_no_neighbour() -> None:
@@ -674,6 +858,66 @@ def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(options) -> N
 
     def call(budget: int) -> object:
         return set_clones(sets, groups=groups, max_bytes=budget, **options)
+
+    budget = smallest_budget(call, 1 << 30)
+    assert traced_peak(lambda: call(budget)) <= budget
+
+
+def test_components_of_many_edges_hold_no_more_than_the_budget_they_accept() -> None:
+    # Every pair of 1,000 nodes, 499,500 edges: the components hold memory
+    # for the nodes alone.
+    first, second = np.triu_indices(1_000, 1)
+    edges = Edges(first=first.astype(np.int64), second=second.astype(np.int64))
+
+    def call(budget: int) -> object:
+        return connected_components(1_000, edges, max_bytes=budget)
+
+    budget = smallest_budget(call, 1 << 30)
+    assert budget < 200_000
+    assert traced_peak(lambda: call(budget)) <= budget
+
+
+def test_unknown_items_and_shared_links_hold_no_more_than_their_budget() -> None:
+    sets = _random_sets(20_000)
+    rng = np.random.default_rng(4)
+    # Each cell holds up to 4 items unknown, beyond the codes of its items.
+    sizes = rng.integers(0, 5, size=20_000)
+    cells = np.repeat(np.arange(20_000), sizes)
+    unknown = cell_sets(cells, 10_000 + rng.integers(0, 8, size=len(cells)), 20_000)
+    groups = np.arange(20_000) % 4
+    for options in (
+        {"method": "sets", "unknown": unknown},
+        {"method": "jaccard", "similarity": 0.3, "inclusive": True, "unknown": unknown},
+        {"method": "shared"},
+    ):
+
+        def call(budget: int) -> object:
+            return set_clones(sets, groups=groups, max_bytes=budget, **options)
+
+        budget = smallest_budget(call, 1 << 30)
+        assert traced_peak(lambda: call(budget)) <= budget
+
+
+def test_sets_of_narrower_integers_count_their_int64_copies() -> None:
+    sets = _sets([[1, 2], [1, 2], [3]] * 1_000)
+    narrow = CellSets(
+        indptr=sets.indptr.astype(np.int32), items=sets.items.astype(np.int32)
+    )
+    # Two nodes of three items in all.
+    enough = (
+        calling._IDENTITY_CELL_BYTES * sets.n_cells
+        + calling._NODE_ITEM_BYTES * 3
+        + calling._FIXED_BYTES
+    )
+    assert identical_sets(sets, max_bytes=enough).n_nodes == 2
+    with pytest.raises(MemoryError, match="the sets' hashes"):
+        identical_sets(narrow, max_bytes=enough)
+    copies = 8 * (len(narrow.items) + narrow.n_cells + 1)
+    nodes = identical_sets(narrow, max_bytes=enough + copies)
+    assert nodes.cell_nodes.tolist() == identical_sets(sets).cell_nodes.tolist()
+
+    def call(budget: int) -> object:
+        return identical_sets(narrow, max_bytes=budget)
 
     budget = smallest_budget(call, 1 << 30)
     assert traced_peak(lambda: call(budget)) <= budget

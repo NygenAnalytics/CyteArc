@@ -3,16 +3,21 @@
 Cells that share heritable marks share an ancestor: expressed lineage
 barcodes, the mutant calls of genotyped sites, rare recorder alleles. Each
 cell's marks are a set of integer item codes, and clones are called from the
-sets in steps that every source shares:
+sets in steps that every source shares. A cell may also hold items unknown,
+such as the sites that no read covered, which neither hold nor lack the
+mark:
 
-- identical sets: cells whose sets are equal, within one group such as a
-  mouse, form one node, so a node holds one cell or many;
+- identical sets: cells whose sets are equal, and whose unknown items are,
+  within one group such as a mouse, form one node, so a node holds one cell
+  or many;
 - a Jaccard graph: two nodes of a group whose sets share an item are linked
   when the Jaccard index of their sets, the items they share over the items
-  either holds, exceeds a similarity, or reaches it when ``inclusive``; the
-  intersections come from the sparse product of the nodes-by-items matrix
-  with its transpose, row by row, so nodes that share no item are never
-  compared;
+  either holds that both know, exceeds a similarity, or reaches it when
+  ``inclusive``; the intersections come from the sparse product of the
+  nodes-by-items matrix with its transpose, row by row, so nodes that share
+  no item are never compared;
+- or links through any item that two nodes share, which joins the nodes of
+  each item without listing every pair of them;
 - pruning, as TREX does: edges whose two ends share no neighbour are removed
   when either end has another neighbour;
 - doublets, as TREX finds them: nodes of one cell whose neighbours fall apart
@@ -52,11 +57,11 @@ __all__ = [
     "set_clones",
 ]
 
-type CallingMethod = Literal["sets", "jaccard"]
+type CallingMethod = Literal["sets", "jaccard", "shared"]
 
-#: The ways of grouping sets into clones: identical sets alone, or a Jaccard
-#: graph over them.
-CALLING_METHODS: tuple[str, ...] = ("sets", "jaccard")
+#: The ways of grouping sets into clones: identical sets alone, a Jaccard
+#: graph over them, or links through any item two sets share.
+CALLING_METHODS: tuple[str, ...] = ("sets", "jaccard", "shared")
 # Bytes of each item of a set while sets are built from pairs: the cell and
 # item of the pair, their order and the copies sorted.
 _PAIR_BYTES = 48
@@ -74,8 +79,11 @@ _NODE_BYTES = 41
 _HELD_ITEM_BYTES = 8
 # Bytes of each item of a node while the Jaccard graph is built: the group of
 # its entry, its code within the group, the transposed lists and their order;
-# and of each node, its intersections, the nodes it touched and its size.
+# of each unknown item, the same without a place in the lists, and the marks
+# of the codes; and of each node, its intersections, the nodes it touched and
+# its size.
 _GRAPH_ITEM_BYTES = 64
+_GRAPH_UNKNOWN_BYTES = 72
 _GRAPH_NODE_BYTES = 40
 # Bytes of each edge kept: its two ends; and while the graph is pruned or its
 # cut vertices found, each edge twice in the lists of neighbours with their
@@ -91,6 +99,9 @@ _CLONE_CELL_BYTES = 40
 # Bytes that each step holds whatever its size: the buffers of NumPy's sorts
 # and the objects of its arrays.
 _FIXED_BYTES = 1 << 16
+# Item codes with unknown items stay below this, so that their doubled codes
+# fit 64 bits.
+_MAX_UNKNOWN_CODE = 1 << 61
 
 
 def _check(needed: int, max_bytes: int | None, what: str) -> None:
@@ -210,16 +221,19 @@ class SetNodes:
     Attributes:
         cell_nodes: Each cell's node, -1 for a cell without an item.
         first_cells: Each node's first cell; nodes are numbered in its order.
-        n_cells: The cells of each node.
+        cell_counts: The cells of each node.
         groups: Each node's group.
         sets: Each node's set.
+        unknown: Each node's unknown items, or None when the cells had none
+            given.
     """
 
     cell_nodes: np.ndarray
     first_cells: np.ndarray
-    n_cells: np.ndarray
+    cell_counts: np.ndarray
     groups: np.ndarray
     sets: CellSets
+    unknown: CellSets | None = None
 
     @property
     def n_nodes(self) -> int:
@@ -279,10 +293,59 @@ def _verified_runs(
     return verified
 
 
+def _unknown_sets(sets: CellSets, unknown: CellSets, limit: int | None) -> CellSets:
+    """Each cell's items and unknown items as one set, of even and odd codes.
+
+    An item ``i`` that the cell holds is coded ``2 * i`` and one unknown
+    ``2 * i + 1``, so two cells hold equal sets of these codes exactly when
+    their items and their unknown items are equal.
+    """
+    n_cells = sets.n_cells
+    if unknown.n_cells != n_cells:
+        raise ValueError("unknown must hold one set per cell of sets")
+    n_held = len(sets.items)
+    n_unknown = len(unknown.items)
+    for name, codes in (("item", sets.items), ("unknown item", unknown.items)):
+        if len(codes) and int(np.max(codes)) >= _MAX_UNKNOWN_CODE:
+            raise ValueError(
+                f"{name} codes must stay below {_MAX_UNKNOWN_CODE} with unknown items"
+            )
+    _check(
+        _PAIR_BYTES * (n_held + n_unknown) + 8 * (n_cells + 1) + _FIXED_BYTES,
+        limit,
+        "the cells' items and unknown items",
+    )
+    cells = np.concatenate(
+        [
+            np.repeat(np.arange(n_cells, dtype=np.int64), sets.sizes),
+            np.repeat(np.arange(n_cells, dtype=np.int64), unknown.sizes),
+        ]
+    )
+    codes = np.concatenate(
+        [
+            np.asarray(sets.items, dtype=np.int64) * 2,
+            np.asarray(unknown.items, dtype=np.int64) * 2 + 1,
+        ]
+    )
+    order = np.lexsort((codes, cells))
+    cells = cells[order]
+    codes = codes[order]
+    del order
+    if len(codes) > 1 and np.any(
+        (cells[1:] == cells[:-1]) & (codes[1:] >> 1 == codes[:-1] >> 1)
+    ):
+        raise ValueError("a cell cannot both hold an item and hold it unknown")
+    indptr = np.asarray(sets.indptr, dtype=np.int64) + np.asarray(
+        unknown.indptr, dtype=np.int64
+    )
+    return CellSets(indptr=indptr, items=codes)
+
+
 def identical_sets(
     sets: CellSets,
     groups: np.ndarray | None = None,
     *,
+    unknown: CellSets | None = None,
     max_bytes: int | None = None,
 ) -> SetNodes:
     """Group the cells of each group whose sets are equal into nodes.
@@ -290,28 +353,49 @@ def identical_sets(
     Each set is hashed twice in 64 bits, the cells are sorted by group, size
     and hashes, and every cell of a run of equal keys is compared item by
     item with the run's first, so two sets share a node only when they are
-    equal; colliding hashes are split apart. A cell without an item joins no
-    node.
+    equal; colliding hashes are split apart. With ``unknown``, two cells
+    share a node only when their unknown items are equal too. A cell without
+    an item joins no node, whatever it holds unknown.
 
     Args:
         sets: Each cell's items.
         groups: Each cell's group as an integer code, such as its mouse; sets
             of two groups never share a node. None puts every cell in one.
+        unknown: Each cell's unknown items, such as the sites that no read
+            covered, none of them among its items; None for none.
         max_bytes: The most bytes the grouping may hold, or None.
 
     Raises:
-        ValueError: If ``groups`` does not hold one integer code per cell.
+        ValueError: If ``groups`` does not hold one integer code per cell, or
+            ``unknown`` one set per cell without the cell's items.
         MemoryError: If the grouping does not fit ``max_bytes``.
     """
     limit = _max_bytes(max_bytes)
     n_cells = sets.n_cells
     group_codes = _group_codes(groups, n_cells)
-    sizes = sets.sizes
-    _check(_IDENTITY_CELL_BYTES * n_cells + _FIXED_BYTES, limit, "the sets' hashes")
-    indptr = np.asarray(sets.indptr, dtype=np.int64)
-    items = np.asarray(sets.items, dtype=np.int64)
+    held_sizes = sets.sizes
+    # Sets of other integer types are copied as int64, and the joined sets of
+    # items and unknown items are held while the nodes are found.
+    copied = 0
+    if (
+        np.asarray(sets.indptr).dtype != np.int64
+        or np.asarray(sets.items).dtype != np.int64
+    ):
+        copied = 8 * (len(sets.items) + n_cells + 1)
+    keyed = sets
+    if unknown is not None:
+        keyed = _unknown_sets(sets, unknown, limit)
+        copied = 8 * (len(keyed.items) + n_cells + 1)
+    sizes = keyed.sizes
+    _check(
+        _IDENTITY_CELL_BYTES * n_cells + copied + _FIXED_BYTES,
+        limit,
+        "the sets' hashes",
+    )
+    indptr = np.asarray(keyed.indptr, dtype=np.int64)
+    items = np.asarray(keyed.items, dtype=np.int64)
     first_hash, second_hash = _set_hashes(indptr, items)
-    present = np.flatnonzero(sizes > 0)
+    present = np.flatnonzero(held_sizes > 0)
     order = present[
         np.lexsort(
             (
@@ -347,26 +431,39 @@ def identical_sets(
     cell_nodes[order] = rank[inverse]
     first_cells = firsts[by_first]
     n_nodes = len(first_cells)
-    node_sizes = sizes[first_cells]
     _check(
         _IDENTITY_CELL_BYTES * n_cells
-        + _NODE_ITEM_BYTES * int(node_sizes.sum())
+        + copied
+        + _NODE_ITEM_BYTES * int(sizes[first_cells].sum())
         + _FIXED_BYTES,
         limit,
         "the nodes' sets",
     )
-    node_indptr = np.zeros(n_nodes + 1, dtype=np.int64)
-    np.cumsum(node_sizes, out=node_indptr[1:])
-    node_items = _gathered_rows(indptr, items, first_cells, node_indptr)
+    del indptr, items, keyed
+    node_sets = _node_rows(sets, first_cells)
+    node_unknown = None if unknown is None else _node_rows(unknown, first_cells)
     return SetNodes(
         cell_nodes=cell_nodes,
         first_cells=first_cells,
-        n_cells=np.bincount(cell_nodes[cell_nodes >= 0], minlength=n_nodes).astype(
+        cell_counts=np.bincount(cell_nodes[cell_nodes >= 0], minlength=n_nodes).astype(
             np.int64
         ),
         groups=group_codes[first_cells],
-        sets=CellSets(indptr=node_indptr, items=node_items),
+        sets=node_sets,
+        unknown=node_unknown,
     )
+
+
+def _node_rows(sets: CellSets, first_cells: np.ndarray) -> CellSets:
+    """The rows of each node's first cell, as int64."""
+    indptr = np.asarray(sets.indptr, dtype=np.int64)
+    sizes = indptr[first_cells + 1] - indptr[first_cells]
+    node_indptr = np.zeros(len(first_cells) + 1, dtype=np.int64)
+    np.cumsum(sizes, out=node_indptr[1:])
+    items = _gathered_rows(
+        indptr, np.asarray(sets.items, dtype=np.int64), first_cells, node_indptr
+    )
+    return CellSets(indptr=node_indptr, items=items)
 
 
 def _split_collisions(
@@ -446,6 +543,8 @@ def _jaccard_pairs(
     item_indptr: np.ndarray,
     item_nodes: np.ndarray,
     sizes: np.ndarray,
+    unknown_indptr: np.ndarray,
+    unknown_items: np.ndarray,
     within: float,
     across: float,
     modalities: np.ndarray,
@@ -459,11 +558,18 @@ def _jaccard_pairs(
     Each node's intersections with the higher nodes that share an item are
     accumulated through the items' lists of nodes, the row of the product
     of the nodes-by-items matrix with its transpose; with ``fill`` the pairs
-    are written in order of their two ends.
+    are written in order of their two ends. With unknown items, the items
+    that one node of a pair holds and the other holds unknown are left out
+    of the items either holds.
     """
     n_nodes = len(node_indptr) - 1
+    n_items = len(item_indptr) - 1
     shared = np.zeros(n_nodes, dtype=np.int64)
     touched = np.empty(n_nodes, dtype=np.int64)
+    with_unknown = len(unknown_items) > 0
+    # The node that last marked each item as held, and as unknown.
+    held_by = np.full(n_items if with_unknown else 0, -1, dtype=np.int64)
+    unknown_to = np.full(n_items if with_unknown else 0, -1, dtype=np.int64)
     count = 0
     for node in range(n_nodes):
         n_touched = 0
@@ -479,11 +585,25 @@ def _jaccard_pairs(
                 shared[other] += 1
         if fill and n_touched > 1:
             touched[:n_touched] = np.sort(touched[:n_touched])
+        if with_unknown:
+            for at in range(node_indptr[node], node_indptr[node + 1]):
+                held_by[node_items[at]] = node
+            for at in range(unknown_indptr[node], unknown_indptr[node + 1]):
+                unknown_to[unknown_items[at]] = node
         for at in range(n_touched):
             other = touched[at]
             common = shared[other]
             shared[other] = 0
-            index = common / (sizes[node] + sizes[other] - common)
+            # The items of either that the other holds unknown.
+            uncovered = 0
+            if with_unknown:
+                for position in range(node_indptr[other], node_indptr[other + 1]):
+                    if unknown_to[node_items[position]] == node:
+                        uncovered += 1
+                for position in range(unknown_indptr[other], unknown_indptr[other + 1]):
+                    if held_by[unknown_items[position]] == node:
+                        uncovered += 1
+            index = common / (sizes[node] + sizes[other] - common - uncovered)
             same = modalities[node] >= 0 and modalities[node] == modalities[other]
             limit = within if same else across
             linked = index >= limit if inclusive else index > limit
@@ -522,7 +642,10 @@ def jaccard_edges(
     share by the items either holds, exceeds ``similarity``, or reaches it
     with ``inclusive``. Nodes that share no item are never linked, so a
     similarity of 0 links every pair that shares an item, and of 1 none,
-    since equal sets share a node already.
+    since equal sets share a node already. With the nodes' unknown items,
+    an item that one node holds and the other holds unknown counts in
+    neither, so the index compares the items both know, and a similarity
+    of 1 with ``inclusive`` links the nodes that agree wherever both know.
 
     Args:
         nodes: The nodes of :func:`identical_sets`.
@@ -565,31 +688,23 @@ def jaccard_edges(
             raise ValueError("modalities must hold one integer code per node")
         node_modalities = node_modalities.astype(np.int64)
     indptr = np.asarray(nodes.sets.indptr, dtype=np.int64)
-    items = np.asarray(nodes.sets.items, dtype=np.int64)
-    n_items = len(items)
-    _check(
-        _GRAPH_ITEM_BYTES * n_items + _GRAPH_NODE_BYTES * n_nodes + _FIXED_BYTES,
-        limit,
-        "the lists of each item's nodes",
+    n_items = len(nodes.sets.items)
+    unknown_indptr = np.zeros(n_nodes + 1, dtype=np.int64)
+    n_unknown = 0
+    if nodes.unknown is not None:
+        unknown_indptr = np.asarray(nodes.unknown.indptr, dtype=np.int64)
+        n_unknown = len(nodes.unknown.items)
+    graph_bytes = (
+        _GRAPH_ITEM_BYTES * n_items
+        + _GRAPH_UNKNOWN_BYTES * n_unknown
+        + _GRAPH_NODE_BYTES * n_nodes
+        + _FIXED_BYTES
     )
-    # Items are coded within each group, so that nodes of two groups never
-    # meet through an item they both hold.
-    entry_nodes = np.repeat(np.arange(n_nodes, dtype=np.int64), np.diff(indptr))
-    entry_groups = nodes.groups[entry_nodes]
-    by_item = np.lexsort((entry_nodes, items, entry_groups))
-    new = np.ones(n_items, dtype=bool)
-    if n_items > 1:
-        new[1:] = (items[by_item][1:] != items[by_item][:-1]) | (
-            entry_groups[by_item][1:] != entry_groups[by_item][:-1]
-        )
-    del entry_groups
-    local = np.empty(n_items, dtype=np.int64)
-    local[by_item] = np.cumsum(new) - 1
-    n_local = int(np.count_nonzero(new))
-    item_nodes = entry_nodes[by_item]
-    del entry_nodes, by_item, new
-    item_indptr = np.zeros(n_local + 1, dtype=np.int64)
-    np.cumsum(np.bincount(local, minlength=n_local), out=item_indptr[1:])
+    _check(graph_bytes, limit, "the lists of each item's nodes")
+    item_indptr, item_nodes, codes = _items_by_group(nodes, n_unknown)
+    local = codes[:n_items]
+    unknown_local = codes[n_items:]
+    del codes
     sizes = np.diff(indptr)
     empty = np.empty(0, dtype=np.int64)
     arguments = (
@@ -598,6 +713,8 @@ def jaccard_edges(
         item_indptr,
         item_nodes,
         sizes,
+        unknown_indptr,
+        unknown_local,
         within,
         other,
         node_modalities,
@@ -605,10 +722,7 @@ def jaccard_edges(
     )
     n_edges = _jaccard_pairs(*arguments, empty, empty, False)
     _check(
-        _GRAPH_ITEM_BYTES * n_items
-        + _GRAPH_NODE_BYTES * n_nodes
-        + _EDGE_BYTES * n_edges
-        + _FIXED_BYTES,
+        graph_bytes + _EDGE_BYTES * n_edges,
         limit,
         f"the {n_edges} edges of the graph",
     )
@@ -616,6 +730,81 @@ def jaccard_edges(
     second = np.empty(n_edges, dtype=np.int64)
     _jaccard_pairs(*arguments, first, second, True)
     return Edges(first=first, second=second)
+
+
+def _items_by_group(
+    nodes: SetNodes, n_unknown: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Each item's nodes, with the items coded within each group.
+
+    Items are coded within each group, so that nodes of two groups never
+    meet through an item they both hold; the nodes' unknown items take the
+    codes of their groups' items, or codes of their own.
+
+    Returns:
+        The pointers and nodes of each code's list of the nodes that hold
+        it, ascending, and the code of each node's item in turn, followed by
+        those of its unknown items.
+    """
+    n_nodes = nodes.n_nodes
+    indptr = np.asarray(nodes.sets.indptr, dtype=np.int64)
+    n_items = len(nodes.sets.items)
+    entry_nodes = np.repeat(np.arange(n_nodes, dtype=np.int64), np.diff(indptr))
+    items = np.asarray(nodes.sets.items, dtype=np.int64)
+    if n_unknown:
+        assert nodes.unknown is not None
+        unknown_indptr = np.asarray(nodes.unknown.indptr, dtype=np.int64)
+        entry_nodes = np.concatenate(
+            [
+                entry_nodes,
+                np.repeat(np.arange(n_nodes, dtype=np.int64), np.diff(unknown_indptr)),
+            ]
+        )
+        items = np.concatenate([items, np.asarray(nodes.unknown.items, dtype=np.int64)])
+    n_entries = len(items)
+    entry_groups = nodes.groups[entry_nodes]
+    by_item = np.lexsort((entry_nodes, items, entry_groups))
+    new = np.ones(n_entries, dtype=bool)
+    if n_entries > 1:
+        new[1:] = (items[by_item][1:] != items[by_item][:-1]) | (
+            entry_groups[by_item][1:] != entry_groups[by_item][:-1]
+        )
+    del entry_groups, items
+    codes = np.empty(n_entries, dtype=np.int64)
+    codes[by_item] = np.cumsum(new) - 1
+    n_codes = int(np.count_nonzero(new))
+    del new
+    # Only the items held, not those unknown, list their nodes.
+    held = by_item[by_item < n_items] if n_unknown else by_item
+    item_nodes = entry_nodes[held]
+    del entry_nodes, by_item, held
+    item_indptr = np.zeros(n_codes + 1, dtype=np.int64)
+    np.cumsum(np.bincount(codes[:n_items], minlength=n_codes), out=item_indptr[1:])
+    return item_indptr, item_nodes, codes
+
+
+def _shared_item_edges(nodes: SetNodes, *, max_bytes: int | None) -> Edges:
+    """Edges that join the nodes of each item of a group into one component.
+
+    Each node of an item's list is linked to the next, so the components are
+    those of the graph that links every two nodes sharing an item, without
+    the pairs of that graph.
+    """
+    n_items = len(nodes.sets.items)
+    _check(
+        _GRAPH_ITEM_BYTES * n_items
+        + _GRAPH_NODE_BYTES * nodes.n_nodes
+        + _EDGE_BYTES * n_items
+        + _FIXED_BYTES,
+        max_bytes,
+        "the lists of each item's nodes",
+    )
+    item_indptr, item_nodes, _codes = _items_by_group(nodes, 0)
+    del _codes
+    following = np.ones(len(item_nodes), dtype=bool)
+    following[item_indptr[:-1][np.diff(item_indptr) > 0]] = False
+    later = np.flatnonzero(following)
+    return Edges(first=item_nodes[later - 1], second=item_nodes[later])
 
 
 def _neighbours(n_nodes: int, edges: Edges) -> tuple[np.ndarray, np.ndarray]:
@@ -781,6 +970,15 @@ def _roots(n_nodes: int, first: np.ndarray, second: np.ndarray) -> np.ndarray:
     return parent
 
 
+@njit(cache=True)
+def _touches_removed(kept: np.ndarray, first: np.ndarray, second: np.ndarray) -> bool:
+    """Whether an edge touches a node that is not kept."""
+    for edge in range(len(first)):
+        if not kept[first[edge]] or not kept[second[edge]]:
+            return True
+    return False
+
+
 def connected_components(
     n_nodes: int,
     edges: Edges,
@@ -810,10 +1008,10 @@ def connected_components(
     kept = np.ones(n_nodes, dtype=bool) if present is None else np.asarray(present)
     if kept.shape != (n_nodes,):
         raise ValueError("present must hold one flag per node")
-    kept = kept.astype(bool)
-    if len(edges) and not (kept[edges.first].all() and kept[edges.second].all()):
-        raise ValueError("An edge touches a node that was removed")
     _check(_COMPONENT_NODE_BYTES * n_nodes + _FIXED_BYTES, limit, "the components")
+    kept = kept.astype(bool)
+    if _touches_removed(kept, edges.first, edges.second):
+        raise ValueError("An edge touches a node that was removed")
     roots = _roots(n_nodes, edges.first, edges.second)
     components = np.full(n_nodes, -1, dtype=np.int64)
     _distinct, numbered = unique_inverse(roots[kept])
@@ -855,6 +1053,7 @@ class SetClones:
 def set_clones(
     sets: CellSets,
     *,
+    unknown: CellSets | None = None,
     groups: np.ndarray | None = None,
     method: str = "sets",
     similarity: float | None = None,
@@ -873,14 +1072,18 @@ def set_clones(
     TREX does, ``prune`` removes the edges of :func:`pruned_edges` and
     ``doublets`` the single-cell nodes of :func:`local_cut_vertices` with
     their cells, in TREX's order: pruning, doublets, pruning again and
-    doublets again. The connected components of what remains are the
-    clones, and a clone of fewer than ``min_size`` cells leaves its cells
-    without one.
+    doublets again. ``method="shared"`` links the nodes that share any item,
+    as DARLIN links cells that share a rare allele, joining the nodes of
+    each item without listing every pair of them. The connected components
+    of what remains are the clones, and a clone of fewer than ``min_size``
+    cells leaves its cells without one.
 
     Args:
         sets: Each cell's items; a cell without one gets no clone.
+        unknown: Each cell's unknown items, such as the sites that no read
+            covered, for ``"sets"`` and ``"jaccard"``; None for none.
         groups: Each cell's group, within which clones are called, or None.
-        method: ``"sets"`` or ``"jaccard"``.
+        method: ``"sets"``, ``"jaccard"`` or ``"shared"``.
         similarity: For ``"jaccard"``, the index that links two nodes.
         inclusive: For ``"jaccard"``, whether an index equal to the
             similarity links.
@@ -910,7 +1113,7 @@ def set_clones(
         raise TypeError("min_size must be an integer")
     if min_size < 1:
         raise ValueError("min_size must be at least 1")
-    if method == "sets":
+    if method != "jaccard":
         given = [
             name
             for name, value in (
@@ -921,15 +1124,22 @@ def set_clones(
             )
             if value is not None
         ] + [name for name, flag in (("prune", prune), ("doublets", doublets)) if flag]
+        if method == "shared" and unknown is not None:
+            given.append("unknown")
         if given:
+            rule = (
+                "groups identical sets alone"
+                if method == "sets"
+                else "links the sets that share any item"
+            )
             raise ValueError(
-                f"method='sets' groups identical sets alone, so {', '.join(given)} "
-                "would change nothing; use method='jaccard'"
+                f"method={method!r} {rule}, so {', '.join(given)} would change "
+                "nothing; use method='jaccard'"
             )
     elif similarity is None or inclusive is None:
         raise ValueError("method='jaccard' needs a similarity and inclusive")
     n_cells = sets.n_cells
-    nodes = identical_sets(sets, groups, max_bytes=limit)
+    nodes = identical_sets(sets, groups, unknown=unknown, max_bytes=limit)
     n_nodes = nodes.n_nodes
     # The nodes are held until the clones are numbered: each cell's node, and
     # each node's first cell, size, group, set and presence.
@@ -937,11 +1147,17 @@ def set_clones(
         _HELD_CELL_BYTES * n_cells
         + _NODE_BYTES * n_nodes
         + _HELD_ITEM_BYTES * len(nodes.sets.items)
+        + (0 if nodes.unknown is None else _HELD_ITEM_BYTES * len(nodes.unknown.items))
     )
     present = np.ones(n_nodes, dtype=bool)
     edges = Edges(np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64))
     n_edges = n_pruned = 0
     removed_rounds: list[int] = []
+    if method == "shared":
+        edges = _shared_item_edges(
+            nodes, max_bytes=None if limit is None else limit - held
+        )
+        held += _EDGE_BYTES * len(edges)
     if method == "jaccard":
         assert similarity is not None and inclusive is not None
         node_modalities = None
@@ -966,7 +1182,7 @@ def set_clones(
                 n_pruned += removed
             if doublets:
                 cut = local_cut_vertices(
-                    n_nodes, edges, present & (nodes.n_cells == 1), max_bytes=room
+                    n_nodes, edges, present & (nodes.cell_counts == 1), max_bytes=room
                 )
                 removed_rounds.append(len(cut))
                 present[cut] = False
