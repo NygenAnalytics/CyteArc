@@ -1,14 +1,14 @@
 ---
 myst:
   html_meta:
-    description: CyteArc clones API for lineage tracing, with clones imported from CoSpar, TREX, CellTag-multi, CellTagR, STICR, Cassiopeia, Numbat, MiTo and LARRY's clone matrices or from a cell metadata column, lineage barcode reads, molecules and counts imported from TREX, pycashier, CellTag-multi, FateMap, QuiCAT, BARtab and Cell Ranger, joined to cells by barcode prefix, suffix or pattern, saved as a clones artifact, read as tables of cells and clones, exported as CoSpar's clone table or a Matrix Market file, drawn as clone sizes, measured within groups of cells, immune receptor clonotypes among them, as clonal expansion, diversity indices and Hill numbers with rarefaction and extrapolation, compared between groups by the clones they share, with chosen clones followed across groups, and measured as fate coupling between groups against shuffled labels and as the fate bias of early cells, with CoSpar's definitions.
+    description: CyteArc clones API for lineage tracing, with clones imported from CoSpar, TREX, CellTag-multi, CellTagR, STICR, Cassiopeia, Numbat, MiTo and LARRY's clone matrices or from a cell metadata column, lineage barcode reads, molecules and counts imported from TREX, pycashier, CellTag-multi, FateMap, QuiCAT, BARtab and Cell Ranger, lineage recorder alleles imported from CARLIN, DARLIN, Cassiopeia, PEtracer, DNA Typewriter and TreeData files and exported as character matrices for Cassiopeia and LAML, joined to cells by barcode prefix, suffix or pattern, saved as a clones artifact, read as tables of cells and clones, exported as CoSpar's clone table or a Matrix Market file, drawn as clone sizes, measured within groups of cells, immune receptor clonotypes among them, as clonal expansion, diversity indices and Hill numbers with rarefaction and extrapolation, compared between groups by the clones they share, with chosen clones followed across groups, and measured as fate coupling between groups against shuffled labels and as the fate bias of early cells, with CoSpar's definitions.
 ---
 
 # Clones API reference
 
 A clone is the set of cells that descend from one ancestor cell. Lineage tracing methods mark the ancestor with a heritable barcode, such as LARRY's, CellTag's or TREX's expressed barcodes, and other methods infer clones from the cells' own mutations, such as copy-number changes or mitochondrial variants. Each tool writes which clone each cell belongs to in its own format. `ds.clones` reads those files, joins their cells to a store's cells, and saves the clones as a `clones` artifact that CyteArc's clone analyses read whatever defined the clones. The T cell and B cell clonotypes of {meth}`ds.repertoire.clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.clonotypes>` are clones too: every function on this page reads a `clonotypes` artifact as it reads `clones`, and measures each receptor type apart, as the {doc}`repertoire` describes.
 
-{meth}`ds.clones.import_clones <cytearc.datastore.namespaces.ClonesAccessor.import_clones>` imports the clones of one file or several, and {meth}`ds.clones.from_column <cytearc.datastore.namespaces.ClonesAccessor.from_column>` takes them from a cell metadata column. {meth}`ds.clones.load_clones <cytearc.datastore.namespaces.ClonesAccessor.load_clones>` reads the artifact as a {class}`~cytearc.clones.Clones` record, {meth}`ds.clones.export_clones <cytearc.datastore.namespaces.ClonesAccessor.export_clones>` writes it as a file that other tools read, and {meth}`ds.plots.clone_abundance <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clone_abundance>` draws how many clones have each size. {meth}`ds.clones.expansion <cytearc.datastore.namespaces.ClonesAccessor.expansion>` places each cell in an expansion category by its clone's size within its sample or other group, {meth}`ds.clones.diversity <cytearc.datastore.namespaces.ClonesAccessor.diversity>` and {meth}`ds.clones.rarefaction <cytearc.datastore.namespaces.ClonesAccessor.rarefaction>` measure how many clones each group holds and how evenly its cells spread over them, {meth}`ds.clones.overlap <cytearc.datastore.namespaces.ClonesAccessor.overlap>` and {meth}`ds.clones.track <cytearc.datastore.namespaces.ClonesAccessor.track>` compare groups by the clones they share and follow chosen clones across them, {meth}`ds.clones.coupling <cytearc.datastore.namespaces.ClonesAccessor.coupling>` measures how strongly groups share clones against shuffled labels, and {meth}`ds.clones.fate_bias <cytearc.datastore.namespaces.ClonesAccessor.fate_bias>` follows each early cell's clone to its later cells and tests which fates each clone took. {meth}`ds.clones.import_barcodes <cytearc.datastore.namespaces.ClonesAccessor.import_barcodes>` reads the lineage barcodes of each cell, from which clones are called.
+{meth}`ds.clones.import_clones <cytearc.datastore.namespaces.ClonesAccessor.import_clones>` imports the clones of one file or several, and {meth}`ds.clones.from_column <cytearc.datastore.namespaces.ClonesAccessor.from_column>` takes them from a cell metadata column. {meth}`ds.clones.load_clones <cytearc.datastore.namespaces.ClonesAccessor.load_clones>` reads the artifact as a {class}`~cytearc.clones.Clones` record, {meth}`ds.clones.export_clones <cytearc.datastore.namespaces.ClonesAccessor.export_clones>` writes it as a file that other tools read, and {meth}`ds.plots.clone_abundance <cytearc.datastore.plot_accessor.DataStorePlotAccessor.clone_abundance>` draws how many clones have each size. {meth}`ds.clones.expansion <cytearc.datastore.namespaces.ClonesAccessor.expansion>` places each cell in an expansion category by its clone's size within its sample or other group, {meth}`ds.clones.diversity <cytearc.datastore.namespaces.ClonesAccessor.diversity>` and {meth}`ds.clones.rarefaction <cytearc.datastore.namespaces.ClonesAccessor.rarefaction>` measure how many clones each group holds and how evenly its cells spread over them, {meth}`ds.clones.overlap <cytearc.datastore.namespaces.ClonesAccessor.overlap>` and {meth}`ds.clones.track <cytearc.datastore.namespaces.ClonesAccessor.track>` compare groups by the clones they share and follow chosen clones across them, {meth}`ds.clones.coupling <cytearc.datastore.namespaces.ClonesAccessor.coupling>` measures how strongly groups share clones against shuffled labels, and {meth}`ds.clones.fate_bias <cytearc.datastore.namespaces.ClonesAccessor.fate_bias>` follows each early cell's clone to its later cells and tests which fates each clone took. {meth}`ds.clones.import_barcodes <cytearc.datastore.namespaces.ClonesAccessor.import_barcodes>` reads the lineage barcodes of each cell, from which clones are called, and {meth}`ds.clones.import_alleles <cytearc.datastore.namespaces.ClonesAccessor.import_alleles>` reads the alleles of lineage recorders, whose edits tree builders read from the matrices that {meth}`ds.clones.export_characters <cytearc.datastore.namespaces.ClonesAccessor.export_characters>` writes.
 
 ```python
 cells = ds.snapshot_cell_selection("I")
@@ -312,6 +312,121 @@ Calling checks the memory budget before each step that reads or allocates, and r
 
 On one thread, for 1,000,000 cells that fall in 200,000 clones of five barcodes of 28 bases, LARRY's preset calls clones from 14.7 million molecules, with a PCR error in every fourth cell, in 14 s, and accepts a budget of 2,976 MiB, at which tracemalloc records a peak of 2,325 MiB. CellTag's preset calls them from 4.8 million pairs in 4.9 s within 1,296 MiB. TREX's preset takes 18 minutes on the same molecules with three in ten cloneIDs cut at one end, nearly all of it correcting the cut cloneIDs, whose 20 to 27 bases within 5 mismatches meet many candidates by chance; its graph, pruning and doublets take 30 s.
 
+## Import lineage recorder alleles
+
+Lineage recorders such as DARLIN, PEtracer and DNA Typewriter write heritable edits into target arrays in the genome, so cells that share an edit descend from the cell in which it arose. Their pipelines write each cell's alleles, the edits that each copy of an array carries, in tables of their own. {meth}`ds.clones.import_alleles <cytearc.datastore.namespaces.ClonesAccessor.import_alleles>` reads them, joins each row to a selected cell by its cell barcode and saves a `lineage_alleles` artifact. {meth}`ds.clones.load_alleles <cytearc.datastore.namespaces.ClonesAccessor.load_alleles>` reads it as a {class}`~cytearc.clones.LineageAlleles` record, {meth}`ds.plots.recorder_states <cytearc.datastore.plot_accessor.DataStorePlotAccessor.recorder_states>` draws each site's share of cells in each state, and {meth}`ds.clones.export_characters <cytearc.datastore.namespaces.ClonesAccessor.export_characters>` writes the character matrix from which [Cassiopeia](https://doi.org/10.1186/s13059-020-02000-8) and [LAML](https://doi.org/10.1101/2024.03.05.583638) build trees. CyteArc builds no trees itself.
+
+```python
+# The character matrix of one PEtracer embryo, whose cell IDs the store shares.
+alleles = ds.clones.import_alleles("E7.5-R1_characters.csv.gz", cell_selection=cells)
+ds.plots.recorder_states(alleles)
+ds.clones.export_characters(alleles, "characters.zarr")  # for Cassiopeia
+ds.clones.export_characters(alleles, "characters.csv", format="laml")
+```
+
+### Sites and states
+
+An integration is one copy of a target array, named as its tool names it: a DARLIN array (`CA`, `TA` or `RA`), a Cassiopeia `intBC`, a PEtracer `intID` or a DNA Typewriter `TargetBC`. An integration's sites are of one of three kinds.
+
+| Kind | Sites | Recorders |
+|---|---|---|
+| independent | Sites edited independently, each with a fixed lookup of marks | [PEtracer](https://doi.org/10.1126/science.adx3800)'s `RNF2`, `HEK3` and `EMX1`, each written with one of eight 5-base insertions; the columns of a character matrix |
+| ordered | Slots edited one after the other, so slot k is edited only after slots 1 to k-1 | [DNA Typewriter](https://doi.org/10.1038/s41586-022-04922-8)'s tapes |
+| indel | The edits of a CRISPR target array, as text | [DARLIN](https://doi.org/10.1016/j.cell.2023.09.019) and [CARLIN](https://doi.org/10.1016/j.cell.2020.04.048) alleles over a whole array, whose one site has no name; Cassiopeia's cut sites `r1` to `rN`; GESTALT-family targets |
+
+Each site of a cell is in one of five states: unedited; a mark, an edit that the recorder names; an unknown mark, an edit that a lookup does not name or that the tool could not resolve, such as PEtracer's `!` or CARLIN's `X`; missing, a site that was not read; and not applicable, a slot beyond a contracted tape or an integration that the cell's embryo lacks. Each format writes the states with tokens of its own, which the table of formats lists. Ordered slots follow the prefix rule: a slot before an edited slot was edited, so one that reads as unedited there is missing, and a slot at or beyond its integration's length is not applicable, whatever the file holds there. A warning counts such slots that hold an insertion, and the `n_beyond_length` attribute keeps the count.
+
+### Formats
+
+`import_alleles` recognises each file's format from its contents unless `format` names it. A character matrix of another tool needs `format="characters"`, and any other table `format="table"` with `columns`.
+
+| `format` | File | Integration | Tokens |
+|---|---|---|---|
+| `"carlin"` | [CARLIN](https://gitlab.com/hormozlab/carlin)'s `AlleleAnnotations.txt` and `AlleleColonies.txt`, as CARLIN and Custom_CARLIN write them for every published DARLIN dataset; either file, or the folder that holds them, names the pair | named by `integrations` | `[]` unedited; `X` and `?` an unknown allele; other text an allele in CARLIN's notation, such as `23_268del,55_248del` |
+| `"darlin"` | The `darlin` CLI's `step4_final.tsv`, with the reads of each row summed over its molecules in `step4_annotated.tsv` beside it | named by `integrations` | `[]` unedited, and empty text, as darlin-core wrote it before 1.1.0 |
+| `"cassiopeia"` | Cassiopeia's allele tables before 3.0: `cellBC`, `intBC`, `r1` to `rN`, `UMI` and `readCount` | `intBC` | text that holds `None`, such as `GCCGA[None]AAAAT`, uncut; empty, `NaN`, `nan`, `NA`, `NC` and `Missing` missing |
+| `"cassiopeia_parquet"` | Cassiopeia 3.0's `<name>.alleles.parquet`, the rows whose `pass` is true | `intBC` | `None` and text that holds `[None]` uncut; a null missing |
+| `"petracer"` | PEtracer's long tables of 2025: `intID`, `cellBC`, `RNF2`, `HEK3`, `EMX1`, `UMI` and `readCount` | `intID` | a site's 5-base insertion, one of its eight marks or, otherwise, an unknown mark; `None`, and `CTTGGG` at `EMX1`, unedited; empty missing |
+| `"petracer_characters"` | PEtracer's character matrices of [2026](https://doi.org/10.1016/j.cell.2026.09.050): a cell column, then `intID<N>-<site>` columns | the column name before its last hyphen | `*` unedited, `-` missing, `1` to `8` a mark, `!` another insertion, empty not applicable |
+| `"typewriter"` | DNA Typewriter's table of 2022: `Cell`, `TargetBC`, `Site1` to `Site5` and `nUMI` | `TargetBC` | a slot's 6-base insertion; blank unedited |
+| `"typewriter_chains"` | DNA Typewriter's per-cell tables of [2026](https://doi.org/10.1126/science.ael0508): `cell` or `cell_id`, one column per 12-base integration barcode, and quality columns, which are not read | the column | the symbols written, joined by `-`, with the slots after them unedited, `-` no edit and empty no call; or six slots joined by `\|`, `U` unedited and `NA` no call |
+| `"treedata"` | A TreeData `.h5td` file or `.zarr` store's `obsm['characters']` | the column name before its last hyphen | the states that `uns['missing_state']` and `uns['unmodified_state']` name, or Cassiopeia's: `-1`, `-` and `NA` missing, `0` and `*` unedited |
+| `"characters"` | A delimited character matrix, as Cassiopeia's `to_csv`, LAML and ConvexML write it | the column name before its last hyphen, or the whole name | `0` and `*` unedited, `-1`, `-`, `?` and `NA` missing, other text a state |
+| `"table"` | Any table, read by the columns that `columns` names | a column, or named by `integrations` | the tokens that `columns` names; text that pandas reads as missing is missing |
+
+Text is read as written, so Cassiopeia's `None` stays an uncut site where pandas would read it as missing. A token that a format does not write is refused with the lines that hold it: `NA` in PEtracer's 2025 tables, whose sites hold a 5-base insertion, `None` or nothing, and `None`, `nan` and negative numbers other than `-1` in a character matrix, where other tools write other states. A row of a tool's table without its counts is refused as a row cut short, as is a gzip file cut short. CARLIN's files must have equal lines and list each barcode once, and a bulk run, which lists UMIs instead of cells, is refused: by the run type that `Results.txt` beside the pair records, or, without it, by tags shorter than 14 bases. Several alleles of one cell and integration are kept, as the `darlin` CLI, Cassiopeia and PEtracer write them; only the CARLIN pair lists one per cell. No output of the `darlin` CLI is public, so its reader follows the CLI's documented columns and checks that each row's UMIs are the molecules that `step4_annotated.tsv` lists for its cell and lineage barcode. DNA Typewriter's 2026 code is licensed under the GPL, so its tables are read from their documentation and published files only. Reading Cassiopeia's parquet tables needs polars.
+
+### Integrations
+
+A CARLIN pair and a `darlin` table hold one array without naming it, so `integrations` names it: one for every file, or one per file. It is never inferred, from folder names or otherwise. Files of different arrays with the same `barcode_prefix`, `barcode_suffix` and `barcode_pattern` hold the arrays of one library, such as DARLIN's three, and each must share a cell with another, so a file of another library's barcodes is refused. For DNA Typewriter's tapes, `integrations` maps each integration shorter than the recorder's arrays to its number of slots, as the HEK293T line of 2022 has three tapes of four slots and one of two.
+
+```python
+# DARLIN's three arrays of one skull library, each a CARLIN pair.
+alleles = ds.clones.import_alleles(
+    ["LL837-skull-CA_S2", "LL837-skull-TA_S7", "LL837-skull-RA_S12"],
+    cell_selection=cells,
+    integrations=["CA", "TA", "RA"],
+    barcode_suffix="-1",
+)
+tapes = ds.clones.import_alleles(
+    "41586_2022_4922_MOESM5_ESM.csv",
+    cell_selection=cells,
+    integrations={"TGGACGAC": 4, "TTTCGTGA": 4, "TGGTTTTG": 4, "TTCACGTA": 2},
+)
+```
+
+Rows that name no integration, as PEtracer leaves `intID` empty where an intBC is not on its whitelist, are left out, counted in the `n_rows_without_integration` attribute and named in a warning, which a reused import gives again.
+
+### Tables of other tools
+
+`format="table"` reads any table by the columns that `columns` maps to roles: `"cell"`; `"integration"`, unless `integrations` names the file's one; the sites, as `"sites"`, a column per site, or as `"allele"`, with `"site"` when each row holds one site, with `"separator"` when one field joins the sites, which are then numbered from 1, or alone for one site of no name; `"umis"` and `"reads"`; `"kind"`, `"indel"` by default, `"independent"` or `"ordered"`, with `"slots"` for the slots of ordered sites; and the tokens `"unedited"`, `"missing"`, `"not_applicable"` and `"unknown"`, each a text or a list of texts. Text that pandas reads as missing, such as `NA`, `NaN`, `None` or an empty field, is missing unless a role names it, and a count that holds it is unknown. When each row holds one site, the rows of one cell and integration form one allele, and a site listed twice for one cell and integration is refused. MosaicLineage's `UMI_count` counts the cells of an allele, not its UMIs, so it is no `"umis"` column.
+
+```python
+# scGESTALT joins its ten targets with "-": NONE is unedited and UNKNOWN missing.
+alleles = ds.clones.import_alleles(
+    "GestMaster.txt.gz",
+    cell_selection=cells,
+    format="table",
+    columns={
+        "cell": "CellBarcode",
+        "allele": "HMID",
+        "separator": "-",
+        "unedited": "NONE",
+        "missing": "UNKNOWN",
+    },
+    integrations="HMID",
+)
+```
+
+### Join, reuse and memory
+
+Cell barcodes join cells as the other importers join them: a cell's ID is its file's `barcode_prefix`, the cell barcode and `barcode_suffix`, and `barcode_pattern` keeps the part that its `barcode` group matches. Barcodes that match no selected cell, such as the droplets that CARLIN calls against the whole 10x list, are counted in the artifact's `n_file_barcodes`, `n_unmatched_barcodes` and `unmatched_barcode_examples` attributes and named in a warning, which a reused import gives again. A file is identified by the SHA-256 of its bytes, of the files read beside it, such as a CARLIN pair's annotations and a `darlin` table's molecules, and of every file of a `.zarr` store, so the order of the files does not matter.
+
+A file is read in chunks of about a twentieth of the memory budget, sized from the longest of the file's first lines. The import checks its peak against the budget before it reads a file and after each chunk: the selected cells' lookup and IDs; one chunk; a CARLIN pair's annotation lines and the keys that find a barcode listed twice; a `darlin` table's sums of reads per cell and lineage barcode; the records held; at the merge of the records into one table, twice their encoded bytes and, for each distinct integration, site and allele of a chunk, 150 bytes and twice its bytes; at the write, twice their encoded bytes, since the memory that the merged chunks held stays resident for reuse, and 40 bytes per record; and 8 MiB of buffers whatever the size. It refuses with `MemoryError` before it writes. Loading counts 120 bytes per record and 160 per distinct text and cell, and the export 260 per record, 150 per distinct allele beside twice its bytes, 1,000 per character and, once the matrix's size is known, 4 bytes per cell and character; LAML's text is written as many cells at a time as a twentieth of the budget holds, at 40 bytes per state.
+
+On one thread, PEtracer's character matrix of 100,000 cells by 300 sites, 30 million records, imports in 23 s and holds 4,285 MiB above its start against a check of 4,203 MiB; about 50 MiB of it is code and caches loaded on first use, as a 400-cell import holds 49 MiB above its start, and tracemalloc traces its peak at 2,787 MiB. DNA Typewriter's chains of 400,000 cells on 11 tapes, 26.4 million slots, import in 25 s and 3,555 MiB, against a check of 3,852 MiB; Cassiopeia's allele table of 1 million rows, 3 million records, in 6.8 s and 453 MiB, against 496 MiB; and a CARLIN pair of 200,000 cells in 1.2 s. Under a budget of 1 GiB, the PEtracer import refuses after 6 s, before it writes anything. `load_alleles` reads its 30 million records in 2.5 s and `site_states()` counts them in 1.9 s; exporting them takes 17 s for Cassiopeia and 16 s for LAML, and Cassiopeia's table of 1,200 characters exports in 17 s to Cassiopeia and 6.9 s to LAML. The peaks that tracemalloc records stay within the smallest budget that each step accepts, on a wide character matrix of 1,000 cells by 300 characters, 30,000 CARLIN alleles of about 150 characters each, and a long table of 20,000 cells among 300 integrations, whose matrix is mostly missing.
+
+### Read and plot recorder alleles
+
+A `lineage_alleles` artifact holds one record per cell, integration, site and allele row, ordered by cell, file and the row's line, with each distinct integration, site and allele stored once. A record's `allele` is the edit of a mark or an unknown mark as the file writes it, and missing for the other states, whose tokens are notation; its `umis` and `reads` are its allele row's, -1 where the file counts none, and its `row` is the row's line in a text file, counting from 1, or its position in another file. The canonical `n_edits` holds each cell's sites with a mark or an unknown mark, over its allele rows, so `ds.select_cells(alleles, low=0)` keeps the cells with an edit; `n_integrations` and `n_records` hold its integrations with a site read and its records. The `files` attribute records each file's format, tool and the pipeline whose notation its alleles follow, which an allele bank must share: CARLIN's MATLAB notation and darlin-core's place some events one base apart.
+
+`load_alleles` returns a {class}`~cytearc.clones.LineageAlleles` record. Its `cells` table holds one row per selected cell, indexed by cell ID, with the per-cell counts. Its `records` table holds one row per record: `cell`, `file`, `integration`, `site`, `state` and `allele` as categoricals, `umis` and `reads` as nullable integers, and `row`. Its `files` table names each file's `format`, `tool`, `pipeline`, `kind`, its one `integration` where it holds one, and its `rows` and `records`. `site_states()` counts the cells in each state at each site.
+
+`ds.plots.recorder_states(alleles)` draws one bar per site, named `{integration}-{site}`, stacked by the share of the site's cells that hold a mark, an unknown mark, an unedited site or no read. A site's cells are the cells with a record, of which those whose integration lacks the site are left out; a cell with several alleles at a site counts once, in the first of these states, and a cell without a record there is missing. With more than `max_sites` (default 60) sites, the sites read in the most cells are drawn and the table keeps every site. Its table is `site_states` (`integration`, `site`, `state`, `cells`, `share`).
+
+### Export character matrices
+
+`export_characters(alleles, path)` writes a character matrix: one row per cell and one column per site of an integration, named `{integration}-{site}`, or after its integration when the site has no name, as a DARLIN array's allele does. A state is 0 for an unedited site and missing where a site is missing or not applicable. A mark written as a whole number from 1, such as PEtracer's marks `1` to `8` or a character matrix's state, is its own state, and a character's other marks, by their text, then its unknown marks take the states after the largest such number, so each state names one allele of its character in every cell, and a character matrix keeps its states through an import and an export. `unknown="missing"` writes unknown marks as missing. Where a cell holds several allele rows of one integration, the row of most UMIs, then most reads, then most sites read is exported, as Cassiopeia keeps each integration's most abundant allele, and a warning counts such cells and integrations. Ordered slots export one character per slot, so the prefix rule is left to the tree builder's model. Cells that read no character and characters that no cell reads are left out, so 1,032 of the 1,342 cells of PEtracer's E7.5-R1 matrix are written. It returns the number of cells written.
+
+`format="cassiopeia"`, the default, creates a TreeData `.zarr` store, which must not exist: `obsm['characters']` with one int64 column per character, `uns['missing_state']` -1, `uns['unmodified_state']` 0, and `uns['character_states']`, the `character`, `state` and `allele` of each edited state, beside an empty `var` and no trees. `format="laml"` writes LAML's CSV, a header `cell,<characters>` and one row per cell with `?` for missing, and beside it `<stem>_priors.csv`, headerless rows of a character's position from 0, a state and its probability, each edited state's share of the cells with an edit at its character, and `<stem>_states.csv`, the `character`, `state`, `allele`, `kind` and `cells` of each edited state; it replaces files of those names, and refuses cell and character names that hold a comma, semicolon, colon, bracket, quote or space, which LAML's CSV and the Newick trees it writes cannot hold. Cell IDs are this store's.
+
+```python
+ds.clones.export_characters(alleles, "characters.zarr")
+ds.clones.export_characters(alleles, "characters.csv", format="laml", unknown="missing")
+```
+
+Cassiopeia 3.0.0, built from its repository at commit 2867d2d, and treedata 0.4.0 read the stores exported from PEtracer's E7.5-R1 characters (1,032 cells by 99 characters), ConvexML's matrix (400 by 39), DARLIN's skull library (90 cells on three arrays), the DNA Typewriter subset of 2022 (90 cells by 79 characters) and the Cassiopeia subset of 3432_NT_T1 (30 by 30), with every character an int64 column, `missing_state` -1 and `unmodified_state` 0, and their neighbor-joining and UPGMA solvers return trees whose leaves are the exported cells. LAML 1.0.5, with its Scipy solver, reads the CSV and priors of the three smaller matrices and of 100 cells of the two larger ones, and returns trees whose leaves are the exported cells, from its own starting tree and from Cassiopeia's neighbor-joining tree. LAML asks for a MOSEK licence before it starts, as its documentation says, whichever solver it is given.
+
 ## Read, export and plot clones
 
 A `clones` artifact labels each selected cell with its clone, an empty label for a cell without one, which groupings treat as missing. `codes` numbers the clones by size, largest first, then by label in natural order, -1 for none, and `clone_size` holds the cells of each cell's clone, 0 for none. A source that gives probabilities adds `clone_probability`, NaN where none is given; a cell's rows that give it no probability leave the one its other rows give. Clones called from barcodes add `n_barcodes` and `doublet`. The store keeps each cell's label at the width of the longest label, so a very long label costs memory for every cell, and an import whose labels would not fit the memory budget raises `MemoryError` before it saves anything. `ds.select_cells(clones, include=["3"])` selects the cells of one clone, and plots colour cells by clone. [Read per-cell values](cell_aligned_kinds) lists the arrays.
@@ -518,6 +633,13 @@ On the synthetic experiment above, every early cell's fractions equal CoSpar 0.5
 ```{eval-rst}
 .. autoclass:: cytearc.clones.LineageBarcodes
     :members: pairs
+```
+
+## Recorder alleles
+
+```{eval-rst}
+.. autoclass:: cytearc.clones.LineageAlleles
+    :members: site_states
 ```
 
 ## Clonal expansion

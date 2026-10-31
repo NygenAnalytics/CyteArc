@@ -233,6 +233,20 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - License: MIT
 - Used in: `cytearc/variants/genotypes.py` (the genotype model of `get_p`, `get_cell_genotypes` and `assign_genotypes` in `1_figure_CL_proof_of_concept/code/utils_00.py` at commit `35564bc`: each gapfill's probability of a probe's two alleles, normalized over them; each UMI's score of a genotype, the larger of its swap probability and its probability under the genotype, of which the heterozygote takes the larger half; a cell's likelihood as the product of its UMIs' scores; the posterior under a uniform prior; and a call when the largest posterior exceeds `min_p` and enough UMIs have a swap probability below 0.1), reimplemented on arrays as sums of logarithms.
 
+### Cassiopeia
+
+- Source: <https://github.com/YosefLab/Cassiopeia>
+- Copyright (c) 2019, Matthew G Jones
+- License: MIT
+- Used in: `cytearc/readers/recorder_alleles.py` (the eight lineage marks of each PEtracer site, as `presets_petracer.yaml` of branch 3.0.0 at commit 2867d2d74181937b75d79d76afe8839662762044 lists them, with `CTTGGG` read as an unedited `EMX1` site; the tokens of Cassiopeia's allele tables, where text holding `None` is an uncut site; the `pass` column and the `sites` attribute of its 3.0 parquet tables; and the default states of a character matrix, `-1`, `-` and `NA` missing and `0` and `*` unedited), `cytearc/clones/recorders.py` (characters named `{integration}-{site}`, and an integration's most abundant allele kept, as `alleles_to_characters` and `filter_alleles` keep it) and `cytearc/readers/_treedata.py` (the `obsm['characters']`, `uns['missing_state']`, `uns['unmodified_state']` and `uns['character_states']` that Cassiopeia 3.0's solvers read). Written from Cassiopeia's documentation and code; no code was copied.
+
+### treedata
+
+- Source: <https://github.com/YosefLab/treedata>
+- Copyright (c) 2024, William Colgan
+- License: BSD-3-Clause
+- Used in: `cytearc/readers/_treedata.py` (the on-disk layout of `docs/fileformat.md` and of what treedata writes: a TreeData file is an AnnData file whose root's `encoding-type` is `treedata` and which holds `label`, `allow_overlap`, `alignment`, `obst` and `vart` beside AnnData's elements, with one group per tree in a `.zarr` store). Written from that layout; no code was copied.
+
 ## Data in this repository
 
 - **JASPAR** (<https://jaspar.elixir.no>), CC BY 4.0: the motif matrices MA0004.1 (Arnt) and
@@ -294,6 +308,14 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
   in the file's layout.
 - **Single-cell_BPDCN** (<https://github.com/petervangalen/Single-cell_BPDCN>), MIT, Copyright (c) 2022 Peter van Galen: `tests/data/variants/got/` holds the XV-seq tables `04_XV-seq/Pt1Dx/TET2.2847/Patient1_TET2.2847_summTable.txt` and `04_XV-seq/Pt5Dx/ZRSR2.500/Patient5_ZRSR2.500_summTable.txt` at commit 5c5f361aafcc6fa6a7d6f8b33556bb0bfd76a03b, unchanged, and in `Pt1Dx_CellBarcode_Allowlist_in_TET2.2847.txt` and `Pt5Dx_CellBarcode_Allowlist_in_ZRSR2.500.txt` the barcodes of `05_Stats/5.1_CB-AllowLists/Pt1Dx_CellBarcode_Allowlist.txt` and `Pt5Dx_CellBarcode_Allowlist.txt` at the same commit that each table names, in the allowlist's order. `tests/test_variant_genotype_studies.py` compares the calls with `04_XV-seq/4.2_Genotyping_stats.txt`.
 - **GIFT goldens**: `tests/giftwrap_0_6_2_golden.json` holds what giftwrap 0.6.2 (MIT) read from its 60-cell sample and from the BC8 plex of GEO GSM9714721 (GSE319999; Blattman et al. (2026), bioRxiv, doi:10.64898/2026.04.11.717967), each probe's UMI and read totals and a digest of the sample's entries, and the calls and posteriors that the GIFT reproducibility code (MIT, credited above) made from them. GEO states no license, and the NCBI places no restrictions on the use of its data.
+- **CARLIN**, CC BY 4.0: `tests/data/recorders/carlin_fo864_lf/` holds `AlleleAnnotations.txt`, `AlleleColonies.txt` and `Results.txt` of `Analyzed/EB/FO864/SC/LF/Amplicon/`, unchanged, and `tests/data/recorders/carlin_bulk_24h/` the first five lines of `AlleleAnnotations.txt` and of `AlleleColonies.txt` of `Analyzed/ChronicInduction/NegDox/Trial1/24h/`, the latter cut to the first 20 UMIs of each line, from `Analyzed.zip` of the Zenodo record <https://zenodo.org/records/4817818>. Bowling et al. (2020), Cell 181:1410-1422, doi:10.1016/j.cell.2020.04.048.
+- **DARLIN**, CC BY 4.0: `tests/data/recorders/darlin_ll837_skull_CA/`, `_TA/` and `_RA/` hold the alleles of 60 cells read on all three arrays and of 10 more read on each array alone, the lines of `AlleleAnnotations.txt` and `AlleleColonies.txt` that name them, and each array's `Results.txt` unchanged, from `DARLIN_public/DATA/20220815_LL837_10X_3A/<array>/DARLIN/results_cutoff_override_3/LL837-skull-<array>_S<n>/` of `DARLIN_public.zip` (Zenodo, doi:10.5281/zenodo.11929508). Li et al. (2023), Cell 186:5183-5199, doi:10.1016/j.cell.2023.09.019.
+- **darlin-core** (<https://github.com/JarningGau/darlin-core>), MIT, Copyright (c) 2024 LiliLab: `tests/data/recorders/darlin_core_CA_benchmark.tsv` is `tests/data/CA_benchmark.tsv` at commit a07eaf16b1a916b6d6be936237438b32a51e0a20, unchanged. The license text is at the end of this file.
+- **Cassiopeia** (<https://github.com/YosefLab/Cassiopeia>), MIT, Copyright (c) 2019, Matthew G Jones: `tests/data/recorders/cassiopeia_3432_NT_T1_alleletable.txt` holds every row of 30 cells of `notebooks/data/3432_NT_T1_alleletable.txt` at commit 1ee5959eb9d3f8d4d26e2af5678234493bf54d6d, with its header. The license text is at the end of this file.
+- **PEtracer**, MIT: `tests/data/recorders/petracer_E7.5-R1_characters.csv.gz` is `GSM9925880_E7.5-R1_characters.csv.gz` of GEO GSE342226, renamed and otherwise unchanged: the character matrix of embryo E7.5-R1. Colgan et al. (2026), Cell 189:7154-7176, doi:10.1016/j.cell.2026.09.050. The same data are released under the MIT License as the Mouse Embryonic Lineage Atlas by William Colgan and Luke Koblan (Zenodo, doi:10.5281/zenodo.19892784); the license text is at the end of this file.
+- **PEtracer**, CC BY 4.0: `tests/data/recorders/petracer_barcoded_tracing_alleles.csv`, `petracer_B16F10_kinetics_alleles.csv` and `petracer_preedited_10x_invitro_alleles.csv` hold whole rows of `barcoded_tracing_alleles.csv`, `B16F10_kinetics_alleles.csv` and `preedited_10x_invitro_alleles.csv` of "PEtracer Data" by William Colgan, Luke Koblan, Kathryn Yost, Pu Zheng and others (figshare, doi:10.6084/m9.figshare.28473866): rows with insertions outside the eight lineage marks, the rows of cells with two alleles of one integration, and rows chosen at random, with each table's header. Koblan et al. (2025), Science 390, doi:10.1126/science.adx3800.
+- **DNA Typewriter**, CC BY 4.0: `tests/data/recorders/typewriter_2022_hek293t.csv` holds every row of 50 cells of Supplementary Data `41586_2022_4922_MOESM5_ESM.csv`, every row of six slot fields, and rows that edit a contracted tape beyond its length or leave a slot blank before an edit, with its header. Choi et al. (2022), Nature 608:98-107, doi:10.1038/s41586-022-04922-8.
+- **ConvexML** (<https://github.com/songlab-cal/ConvexML>), BSD-3-Clause, Copyright (c) 2025, Song Lab @ Cal: `tests/data/recorders/convexml_tree_0_character_matrix.csv` is `tests/public_api_tests/data/tree_0_character_matrix.csv` at commit e93f6aee113044c29c1f123023f11fe9e6753bde, unchanged. The license text is at the end of this file.
 - **Color palettes** in `cytearc/plotting/_style.py`: the 10- and 20-color sets are Tableau 10 and
   20 as distributed with matplotlib (the 10-color set with Scanpy's colorblind substitutions), the
   28-color set is from Zeileis, Hornik, and Murrell (2009), Computational Statistics & Data
@@ -347,6 +369,8 @@ states no license, and the NCBI places no restrictions on the use of its data.
 `tests/test_readers_variants.py`, `tests/test_variant_genotype_goldens.py` and `tests/test_variant_genotype_studies.py` download these for tests marked `integration`, which skip when the host is unreachable: `chrM_refAllele.txt` and `pL1000_mgatk.variant_stats.tsv.gz` of Figshare doi:10.6084/m9.figshare.31323481 (CC BY 4.0); GIFT's per-UMI tables of the BC8 plex of GEO GSM9714721 (GSE319999); the GoT tables `GSM3309839_ET02.CALR.txt.gz` of GEO GSE117825 (Nam et al. (2019), Nature 571:355-360, doi:10.1038/s41586-019-1367-0) and `GSM6198713_MDS01.SF3B1.tsv.gz` and `GSM6198716_MDS04.SF3B1.tsv.gz` of GEO GSE204845 (Cell Stem Cell (2023) 30:1262-1281.e8, doi:10.1016/j.stem.2023.07.012); and GoT-Multi-ML's example outputs `example_run/got_multi_ml_run/ironthrone_out_pp.csv` and `ml_denoise/got_multi_out_refined.csv` at commit c4a6721d64c0710e6fc2fa3356f9ad4f55e796e8 of <https://github.com/AnnaNamLab/GoT-Multi-ML>, which carries no license, so they are read and never checked in. GEO states no license, and the NCBI places no restrictions on the use of its data.
 
 `tests/test_tapestri_files.py` downloads these for tests marked `integration`, which skip when the host is unreachable: Mission Bio's Tapestri example `4-cell-lines-AML-multiomics.dna+protein.h5` of Zenodo doi:10.5281/zenodo.20818440 (CC BY-SA 4.0), and the DAb-seq genotypes `GSM9567643.hdf5` of GEO GSE324062. Both are read and never checked in; GEO states no license, and the NCBI places no restrictions on the use of its data. Mission Bio's mosaic is licensed under the GPL-3.0 and its Tapestri Pipeline is proprietary, so the Tapestri reader follows Mission Bio's documentation and these files, and none of their code was read. The DAb-seq reader follows the layout that the DAb-seq pipeline (<https://github.com/AbateLab/DAb-seq>, Apache-2.0) writes, checked in its source; none of its code is copied.
+
+`tests/test_allele_downloads.py` downloads `sc_tape/example_data/e3v8_subsample.cell_consensus.tsv.gz` of <https://github.com/shendurelab/dtt-mouse> at commit a491be02509d5ae862181a076f9e9006600dc096, a 1-in-40 subsample of the single-cell tape table of Yu et al. (2026), Science, doi:10.1126/science.ael0508, for a test marked `integration`. The repository is licensed under the GPL-3.0, so the file is never checked in, and CyteArc reads DNA Typewriter's tables from their documentation and this file; none of its code was read.
 
 The Seurat import tutorial also uses `seurat_v4_1_3_pbmc_mye.rds` and embeds a 581-byte
 compressed synthetic RDS with three cells and two genes. The synthetic object was authored
@@ -1426,4 +1450,148 @@ SOFTWARE.
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+```
+
+### Cassiopeia (MIT License)
+
+```text
+MIT License
+
+Copyright (c) 2019, Matthew G Jones
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### darlin-core (MIT License)
+
+```text
+MIT License
+
+Copyright (c) 2024 LiliLab
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. ```
+
+### PEtracer data (MIT License)
+
+```text
+MIT License
+
+Copyright (c) 2026 William Colgan and Luke Koblan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### ConvexML (BSD 3-Clause License)
+
+```text
+BSD 3-Clause License
+
+Copyright (c) 2025, Song Lab @ Cal
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### treedata (BSD 3-Clause License)
+
+```text
+BSD 3-Clause License
+
+Copyright (c) 2024, William Colgan
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```

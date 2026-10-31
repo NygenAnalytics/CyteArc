@@ -573,7 +573,13 @@ class LineageAlleles:
     files: pd.DataFrame = field(repr=False)
 
     def site_states(self) -> pd.DataFrame:
-        """Count the cells in each state at each site, as :func:`site_state_counts` does.
+        """Count the cells in each state at each site.
+
+        The cells counted are those with a record, the cells that the
+        recorder reached. A cell counts once per site, in the first of these
+        states that one of its records there holds: mark, unknown mark,
+        unedited, missing, not applicable; a cell without a record at the
+        site is missing there.
 
         Returns:
             ``integration``, ``site``, ``state`` and ``cells``, one row per
