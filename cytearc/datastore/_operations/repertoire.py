@@ -18,6 +18,7 @@ from ...metadata.records import (
     decode_ragged,
     decode_text,
     take_text,
+    unpack_text,
 )
 from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
 from ...metadata.selection import cell_selection_indices
@@ -58,7 +59,7 @@ from ...storage.artifacts import (
 )
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import bool_argument
+from ...utils.arguments import bool_argument, integer_argument
 from ...utils.logging import logger
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
@@ -858,7 +859,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         rules for arms, dual chains, genes and groups. The resulting
         clonotype clusters group T cells that likely share their epitope, or
         B cells of one clone despite somatic mutations. ``cutoff`` has no
-        default for these metrics, since it decides the clusters.
+        default for these metrics, since it decides the clusters, and a
+        cutoff of 0 links identical junctions alone, as in scirpy.
 
         Clonotypes are numbered by size, so ``clonotype_1`` is the largest;
         ties follow the receptor type in sorted order, then the ``within``
@@ -909,8 +911,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 by their ``within`` labels, or the definition, 1,000 bytes per
                 cell and 12 per contig and with a distance metric the 512 MiB
                 of the search, does not fit the memory budget, or the pairs of
-                chains within the cutoff, about 80 bytes each, do not fit what
-                is left.
+                chains within the cutoff and the links between the chains or
+                arms that match, 32 bytes each, do not fit what is left.
         """
         group, fields = self._receptor_group(receptors)
         if sequence not in SEQUENCES:
@@ -930,7 +932,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if metric not in METRICS:
             raise ValueError(f"metric must be one of {', '.join(METRICS)}")
         if metric == "identity":
-            if cutoff not in (None, 0) or isinstance(cutoff, bool):
+            # Only the 0 that the artifact records stands for no cutoff.
+            if cutoff is not None and (
+                isinstance(cutoff, bool | np.bool_)
+                or not isinstance(cutoff, int | np.integer)
+                or cutoff != 0
+            ):
                 raise ValueError("metric='identity' takes no cutoff")
             limit = 0
         else:
@@ -939,13 +946,12 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                     f"metric={metric!r} needs a cutoff, such as 1 or 2 "
                     "substitutions or edits, or 15 percent"
                 )
-            if isinstance(cutoff, bool) or not isinstance(cutoff, int | np.integer):
-                raise TypeError("cutoff must be a non-negative integer")
-            if cutoff < 0 or (metric == "normalized_hamming" and cutoff > 100):
+            limit = integer_argument(cutoff, "cutoff", minimum=0)
+            if metric == "normalized_hamming" and limit > 100:
                 raise ValueError(
-                    "cutoff must be a non-negative integer, at most 100 percent"
+                    "A normalized_hamming cutoff is a percentage of the length, "
+                    "at most 100"
                 )
-            limit = int(cutoff)
         field_name = "junction" if sequence == "nt" else "junction_aa"
         if field_name not in fields:
             raise ValueError(
@@ -1109,6 +1115,82 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             )
         require_complete_artifact(self.zw, clonotypes)
         return artifact_group(self.zw, clonotypes)
+
+    def _representative_junctions(
+        self, clonotypes: ArtifactRef, codes: np.ndarray
+    ) -> np.ndarray:
+        """The junction amino acids that name some clonotypes in figures.
+
+        A clonotype is named by its representative cell's ``VDJ_1`` chain, or
+        its ``VJ_1`` chain without one; clonotypes defined by
+        ``receptor_arms="VJ"`` by the ``VJ_1`` chain first, which their
+        cells share. Of the receptors, only the representatives' slots and
+        junction codes and the bytes of the junctions they name are read.
+
+        Args:
+            clonotypes: A complete ``clonotypes`` artifact.
+            codes: The positions of some of its clonotypes, such as 0 for
+                ``clonotype_1``.
+
+        Returns:
+            Each clonotype's junction, None where the chain that names it
+            has no junction amino-acid sequence, as an object array.
+        """
+        group = self._clonotype_group(clonotypes)
+        status = inspect_artifact(self.zw, clonotypes)
+        receptor_group = artifact_group(self.zw, status.input_ref("receptors"))
+        naming = ("VJ_1", "VDJ_1")
+        if (status.parameters or {}).get("receptor_arms") != "VJ":
+            naming = ("VDJ_1", "VJ_1")
+        cells = np.asarray(
+            as_zarr_array(
+                group["representatives"], name="representatives"
+            ).get_coordinate_selection(np.asarray(codes, dtype=np.int64)),
+            dtype=np.int64,
+        )
+        slots = np.asarray(
+            as_zarr_array(
+                receptor_group["chain_slots"], name="chain_slots"
+            ).get_orthogonal_selection(
+                (
+                    cells,
+                    np.asarray([SLOTS.index(slot) for slot in naming], dtype=np.int64),
+                )
+            ),
+            dtype=np.int64,
+        ).reshape(len(cells), 2)
+        contigs = np.where(slots[:, 0] >= 0, slots[:, 0], slots[:, 1])
+        junction_codes = np.full(len(contigs), -1, dtype=np.int64)
+        if (contigs >= 0).any():
+            junction_codes[contigs >= 0] = as_zarr_array(
+                receptor_group["contig_junction_aa"], name="contig_junction_aa"
+            ).get_coordinate_selection(contigs[contigs >= 0])
+        junctions = np.full(len(contigs), None, dtype=object)
+        named = junction_codes >= 0
+        if not named.any():
+            return junctions
+        # Only the bytes of the junctions needed are read and decoded.
+        needed, inverse = np.unique(junction_codes[named], return_inverse=True)
+        bounds = np.asarray(
+            as_zarr_array(
+                receptor_group["contig_junction_aa_offsets"],
+                name="contig_junction_aa_offsets",
+            ).get_coordinate_selection(np.concatenate([needed, needed + 1])),
+            dtype=np.int64,
+        )
+        starts, ends = bounds[: len(needed)], bounds[len(needed) :]
+        offsets = np.zeros(len(needed) + 1, dtype=np.int64)
+        np.cumsum(ends - starts, out=offsets[1:])
+        positions = np.repeat(starts - offsets[:-1], ends - starts) + np.arange(
+            offsets[-1], dtype=np.int64
+        )
+        data = as_zarr_array(
+            receptor_group["contig_junction_aa_values"],
+            name="contig_junction_aa_values",
+        ).get_coordinate_selection(positions)
+        text = unpack_text(np.asarray(data, dtype=np.uint8), offsets)
+        junctions[named] = text[inverse.reshape(-1)]
+        return junctions
 
     @validation_scoped
     def _repertoire_load_clonotypes(self, clonotypes: ArtifactRef) -> Clonotypes:

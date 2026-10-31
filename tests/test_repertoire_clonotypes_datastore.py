@@ -467,6 +467,30 @@ def test_figure_labels_name_clonotypes_by_their_representatives_junction(
     ]
 
 
+def test_clonotypes_of_one_arm_are_named_by_the_chains_they_share(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    ids = ["clonotype_1", "clonotype_2", "clonotype_3"]
+    # By alpha and light chains: cell0, cell1 and cell4 share CAVA, the B
+    # cells CQQY, and cell2 has CAVA from other nucleotides; their beta and
+    # heavy chains would name them CASSA and CARW.
+    by_alpha = store.repertoire.clonotypes(receptors, receptor_arms="VJ")
+    assert _members(store.repertoire.load_clonotypes(by_alpha))["clonotype_1"] == [
+        "cell0",
+        "cell1",
+        "cell4",
+    ]
+    assert store._clone_figure_labels(by_alpha, ids).tolist() == [
+        "clonotype_1 (CAVA)",
+        "clonotype_2 (CQQY)",
+        "clonotype_3 (CAVA)",
+    ]
+    by_beta = store.repertoire.clonotypes(receptors, receptor_arms="VDJ")
+    assert store._clone_figure_labels(by_beta, ids[:2]).tolist() == [
+        "clonotype_1 (CASSA)",
+        "clonotype_2 (CARW)",
+    ]
+
+
 def test_figure_labels_read_the_clonotype_ids_within_the_budget(
     tmp_path, monkeypatch
 ) -> None:
@@ -1098,13 +1122,16 @@ def test_clonotype_clusters_get_what_the_budget_leaves_for_their_pairs(
     store, receptors = _receptors(tmp_path)
     # Within three substitutions, cell0's alpha junction pairs with cell2's
     # (3 substitutions) and with cell4's second one (2): two pairs of chains
-    # of about 80 bytes each beyond the 1,000 bytes per cell and the search.
+    # of 32 bytes each beyond the 1,000 bytes per cell and the search. The T
+    # cells with both arms hold these chains in one group, so linking them
+    # adds two links of 32 bytes each.
     reserved = 1_000 * N_CELLS + 512 * 2**20
-    monkeypatch.setattr(store, "memoryBytes", reserved + 2 * 80 - 1)
-    with pytest.raises(MemoryError, match="The 2 pairs of chains within the cutoff"):
-        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    for budget, held in ((2 * 32 - 1, "the 2 pairs"), (4 * 32 - 1, "the 2 links")):
+        monkeypatch.setattr(store, "memoryBytes", reserved + budget)
+        with pytest.raises(MemoryError, match=f"bytes for {held}"):
+            store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
     assert store.artifacts.list(kind="clonotypes", scope="datastore") == []
-    monkeypatch.setattr(store, "memoryBytes", reserved + 2 * 80)
+    monkeypatch.setattr(store, "memoryBytes", reserved + 4 * 32)
     assert store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
 
 
@@ -1151,10 +1178,17 @@ def test_clonotype_clusters_link_similar_junctions(tmp_path) -> None:
         ({"metric": "tcrdist"}, ValueError, "metric must be one of"),
         ({"metric": "identity", "cutoff": 1}, ValueError, "takes no cutoff"),
         ({"metric": "identity", "cutoff": False}, ValueError, "takes no cutoff"),
+        ({"metric": "identity", "cutoff": 0.0}, ValueError, "takes no cutoff"),
+        (
+            {"metric": "identity", "cutoff": np.asarray([0])},
+            ValueError,
+            "takes no cutoff",
+        ),
         ({"metric": "hamming"}, ValueError, "needs a cutoff"),
-        ({"metric": "hamming", "cutoff": 1.5}, TypeError, "cutoff must be"),
-        ({"metric": "levenshtein", "cutoff": True}, TypeError, "cutoff must be"),
-        ({"metric": "hamming", "cutoff": -1}, ValueError, "non-negative"),
+        ({"metric": "hamming", "cutoff": 1.5}, TypeError, "cutoff must be an integer"),
+        ({"metric": "hamming", "cutoff": 1.0}, TypeError, "cutoff must be an integer"),
+        ({"metric": "levenshtein", "cutoff": True}, TypeError, "must be an integer"),
+        ({"metric": "hamming", "cutoff": -1}, ValueError, "cutoff must be at least 0"),
         ({"metric": "normalized_hamming", "cutoff": 101}, ValueError, "at most 100"),
     ],
 )
@@ -1164,6 +1198,23 @@ def test_clonotype_cluster_options_are_checked(
     store, receptors = _receptors(tmp_path)
     with pytest.raises(error, match=message):
         store.repertoire.clonotypes(receptors, **kwargs)
+
+
+def test_the_bounds_of_the_cutoff_are_accepted(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    # Identity records a cutoff of 0, so a cutoff of 0 is the same request.
+    identity = store.repertoire.clonotypes(receptors)
+    assert store.repertoire.clonotypes(receptors, cutoff=0) == identity
+    assert store.repertoire.clonotypes(receptors, cutoff=np.int64(0)) == identity
+    # Within 100 percent, every chain is near every chain of its length: the
+    # alpha chains of cell0, cell2 and cell4 join their T cells, and the B
+    # cells stay apart in their own receptor type.
+    whole = store.repertoire.load_clonotypes(
+        store.repertoire.clonotypes(receptors, metric="normalized_hamming", cutoff=100)
+    )
+    assert whole.cutoff == 100
+    assert _members(whole)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
+    assert _members(whole)["clonotype_2"] == ["cell5", "cell6"]
 
 
 def test_clusters_keep_whole_the_b_cell_clones_that_mutations_split(tmp_path) -> None:

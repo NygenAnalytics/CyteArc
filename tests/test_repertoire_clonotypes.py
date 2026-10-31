@@ -352,13 +352,80 @@ def test_representatives_are_first_cells_of_the_most_frequent_configuration() ->
 def test_cluster_pairs_are_checked_against_the_memory_left() -> None:
     from cytearc.repertoire.clonotypes import assign_clonotype_clusters
 
-    # Three cells whose beta chains differ by one residue: two pairs of
-    # chains within the cutoff.
+    # Three cells whose beta chains differ by one residue from the first
+    # cell's: two pairs of chains within the cutoff, 32 bytes each, and in
+    # their one group two links between chains, 32 bytes each.
     sequences = np.asarray([[-1, -1, 0, -1], [-1, -1, 1, -1], [-1, -1, 2, -1]])
     texts = ["CASSF", "CASTF", "CAGSF"]
     groups = np.zeros(3, dtype=np.int64)
     options = dict(groups=groups, metric="hamming", cutoff=1, receptor_arms="VDJ")
-    linked = assign_clonotype_clusters(sequences, texts, max_bytes=160, **options)
+    linked = assign_clonotype_clusters(sequences, texts, max_bytes=128, **options)
     assert linked.codes.tolist() == [0, 0, 0]
-    with pytest.raises(MemoryError, match="2 pairs of chains within the cutoff"):
-        assign_clonotype_clusters(sequences, texts, max_bytes=159, **options)
+    with pytest.raises(MemoryError, match="for the 2 links between near chains"):
+        assign_clonotype_clusters(sequences, texts, max_bytes=127, **options)
+    with pytest.raises(MemoryError, match="for the 2 pairs of chains within"):
+        assign_clonotype_clusters(sequences, texts, max_bytes=63, **options)
+
+
+def test_the_links_of_one_arm_are_released_before_the_next_arm_links() -> None:
+    from cytearc.repertoire.clonotypes import assign_clonotype_clusters
+
+    # Under receptor_arms="any", two cells whose alpha chains differ by one
+    # residue, and whose beta chains do: two pairs of chains, 64 bytes, and
+    # one link in each arm, 32 bytes, released before the other arm links.
+    sequences = np.asarray([[0, -1, 2, -1], [1, -1, 3, -1]])
+    texts = ["CAVSF", "CAVTF", "GGGGG", "GGGGW"]
+    options = dict(
+        groups=np.zeros(2, dtype=np.int64),
+        metric="hamming",
+        cutoff=1,
+        receptor_arms="any",
+    )
+    linked = assign_clonotype_clusters(sequences, texts, max_bytes=96, **options)
+    assert linked.codes.tolist() == [0, 0]
+    with pytest.raises(MemoryError, match="for the 1 links between near chains"):
+        assign_clonotype_clusters(sequences, texts, max_bytes=95, **options)
+
+
+def test_links_count_once_for_each_group_that_holds_both_chains() -> None:
+    from cytearc.repertoire.clonotypes import assign_clonotype_clusters
+
+    # The same three beta chains in each of three groups, and the first
+    # chain alone in a fourth: two pairs of chains, 64 bytes, and two links
+    # in each group that holds both chains of a pair, 192 bytes.
+    sequences = np.full((10, 4), -1, dtype=np.int64)
+    sequences[:, 2] = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0]
+    groups = np.asarray([0, 0, 0, 1, 1, 1, 2, 2, 2, 3])
+    options = dict(groups=groups, metric="hamming", cutoff=1, receptor_arms="VDJ")
+    texts = ["CASSF", "CASTF", "CAGSF"]
+    linked = assign_clonotype_clusters(sequences, texts, max_bytes=256, **options)
+    assert linked.n_clonotypes == 4
+    assert len(set(linked.codes[[0, 1, 2]].tolist())) == 1
+    with pytest.raises(MemoryError, match="for the 6 links between near chains"):
+        assign_clonotype_clusters(sequences, texts, max_bytes=255, **options)
+
+
+def test_matching_arms_are_checked_as_they_are_found() -> None:
+    from cytearc.repertoire.clonotypes import assign_clonotype_clusters
+
+    # Under dual_ir="all", the alpha arms CAVSF and CAGSF, and CAVTF and
+    # CAGTF, match one by one, crossed. Four pairs of the chains are one
+    # substitution apart, 128 bytes, with four links between them, 128 more;
+    # each arm then finds its match through its first chain, 64 bytes.
+    sequences = np.asarray([[0, 2, -1, -1], [3, 1, -1, -1]])
+    texts = ["CAVSF", "CAGTF", "CAGSF", "CAVTF"]
+    options = dict(
+        groups=np.zeros(2, dtype=np.int64),
+        metric="hamming",
+        cutoff=1,
+        receptor_arms="VJ",
+        dual_ir="all",
+    )
+    linked = assign_clonotype_clusters(sequences, texts, max_bytes=320, **options)
+    assert linked.codes.tolist() == [0, 0]
+    with pytest.raises(MemoryError, match="2 more arms whose chains match one by"):
+        assign_clonotype_clusters(sequences, texts, max_bytes=319, **options)
+    with pytest.raises(MemoryError, match="for the 4 links between near chains"):
+        assign_clonotype_clusters(sequences, texts, max_bytes=255, **options)
+    with pytest.raises(MemoryError, match="for the 4 pairs of chains within"):
+        assign_clonotype_clusters(sequences, texts, max_bytes=127, **options)

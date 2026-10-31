@@ -68,7 +68,6 @@ from ...metadata.arguments import (
     ClonotypeArguments,
 )
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
-from ...metadata.records import unpack_text
 from ...metadata.rows import (
     array_row_selection_parts,
     metadata_column_fingerprint,
@@ -80,7 +79,6 @@ from ...metadata.rows import (
     text_width,
 )
 from ...metadata.selection import category_codes, cell_selection_indices
-from ...repertoire.chains import SLOTS
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
@@ -106,7 +104,7 @@ from .cell_groups import cell_groups, group_columns, selection_chunk_bytes
 
 if TYPE_CHECKING:
     from ...readers.clone_tables import CloneLayout
-    from ..mapping_datastore import MappingDatastore as _CloneOperationsBase
+    from .repertoire import _RepertoireOperationsMixin as _CloneOperationsBase
 else:
     _CloneOperationsBase = object
 
@@ -1151,11 +1149,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         A clone is labelled by its ID. A clonotype is labelled by its ID and
         the junction amino acids of its representative cell's ``VDJ_1``
         chain, or of its ``VJ_1`` chain without a VDJ chain, such as
-        ``clonotype_1 (CASSLGQAYEQYF)``: immunologists read clonotypes by
-        their junctions, and the ID tells apart clonotypes whose junctions
-        repeat. The clonotypes' IDs are read to find those given; of the
-        receptors, only the representatives' slots and junction codes and the
-        bytes of the junctions they name are read.
+        ``clonotype_1 (CASSLGQAYEQYF)``; clonotypes defined by
+        ``receptor_arms="VJ"`` by the ``VJ_1`` chain first. Immunologists
+        read clonotypes by their junctions, and the ID tells apart clonotypes
+        whose junctions repeat. The clonotypes' IDs are read to find those
+        given, and the repertoire operations read the junctions.
 
         Args:
             clones: A clone artifact: ``clones`` or ``clonotypes``.
@@ -1199,61 +1197,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if (codes < 0).any():
             unknown = names[codes < 0].tolist()
             raise ValueError(f"No clonotype is labelled {unknown[:5]}")
-        receptors = inspect_artifact(self.zw, clones).input_ref("receptors")
-        receptor_group = artifact_group(self.zw, receptors)
-        representatives = as_zarr_array(
-            group["representatives"], name="representatives"
-        )
-        cells = np.asarray(
-            representatives.get_coordinate_selection(codes), dtype=np.int64
-        )
-        slots = np.asarray(
-            as_zarr_array(
-                receptor_group["chain_slots"], name="chain_slots"
-            ).get_orthogonal_selection(
-                (
-                    cells,
-                    np.asarray(
-                        [SLOTS.index("VDJ_1"), SLOTS.index("VJ_1")], dtype=np.int64
-                    ),
-                )
-            ),
-            dtype=np.int64,
-        ).reshape(len(cells), 2)
-        contigs = np.where(slots[:, 0] >= 0, slots[:, 0], slots[:, 1])
-        junction_codes = np.full(len(contigs), -1, dtype=np.int64)
-        if (contigs >= 0).any():
-            junction_codes[contigs >= 0] = as_zarr_array(
-                receptor_group["contig_junction_aa"], name="contig_junction_aa"
-            ).get_coordinate_selection(contigs[contigs >= 0])
-        if (junction_codes < 0).any():
-            unnamed = names[junction_codes < 0].tolist()
+        junctions = self._representative_junctions(clones, codes)
+        unnamed = np.asarray([junction is None for junction in junctions.tolist()])
+        if unnamed.any():
             raise ValueError(
-                f"The representative cells of the clonotypes {unnamed[:5]} have no "
-                "junction amino-acid sequence in their VDJ_1 or VJ_1 chain"
+                f"The representative cells of the clonotypes "
+                f"{names[unnamed].tolist()[:5]} have no junction amino-acid "
+                "sequence in the VDJ_1 or VJ_1 chain that names them"
             )
-        # Only the bytes of the junctions needed are read and decoded.
-        needed, inverse = np.unique(junction_codes, return_inverse=True)
-        bounds = np.asarray(
-            as_zarr_array(
-                receptor_group["contig_junction_aa_offsets"],
-                name="contig_junction_aa_offsets",
-            ).get_coordinate_selection(np.concatenate([needed, needed + 1])),
-            dtype=np.int64,
-        )
-        starts, ends = bounds[: len(needed)], bounds[len(needed) :]
-        offsets = np.zeros(len(needed) + 1, dtype=np.int64)
-        np.cumsum(ends - starts, out=offsets[1:])
-        positions = np.repeat(starts - offsets[:-1], ends - starts) + np.arange(
-            offsets[-1], dtype=np.int64
-        )
-        data = as_zarr_array(
-            receptor_group["contig_junction_aa_values"],
-            name="contig_junction_aa_values",
-        ).get_coordinate_selection(positions)
-        junctions = unpack_text(np.asarray(data, dtype=np.uint8), offsets)[
-            inverse.reshape(-1)
-        ]
         return np.asarray(
             [
                 f"{name} ({junction})"

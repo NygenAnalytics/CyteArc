@@ -141,7 +141,9 @@ def clone_abundance(
     the tail. The second panel draws the ``top`` clones with the most cells,
     labelled with their IDs; a clonotype's label adds the junction amino
     acids of its representative cell's ``VDJ_1`` chain, or of its ``VJ_1``
-    chain without a VDJ chain, such as ``clonotype_1 (CASSLGQAYEQYF)``.
+    chain without a VDJ chain, such as ``clonotype_1 (CASSLGQAYEQYF)``, and
+    those of clonotypes defined by ``receptor_arms="VJ"`` by the ``VJ_1``
+    chain first, which their cells share.
 
     ``group_by`` names a cell metadata column, such as the sample or time
     point, and ``groups`` a cell-label artifact, such as a clustering; with

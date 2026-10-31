@@ -49,7 +49,7 @@ from scipy.sparse.csgraph import connected_components
 
 from ..clones.sequences import DISTANCE_METRICS, neighbor_pairs
 from ..storage.refs import ArtifactRef
-from ..utils.arrays import sorted_unique, unique_inverse, unique_rows
+from ..utils.arrays import unique_inverse, unique_rows
 from ..utils.numba import njit
 from .chains import SLOTS
 
@@ -387,7 +387,10 @@ def assign_clonotype_clusters(
     rules that one arm satisfies, as components through the chains of each
     group; with both arms required, each configuration meets its candidates
     through the arm whose chains reach the fewest configurations, in chunks
-    of ``_PAIRS_PER_CHUNK`` pairs that are checked in the other arm.
+    of ``_PAIRS_PER_CHUNK`` pairs that are checked in the other arm. Links
+    join two near chains of a group, or under ``dual_ir="all"`` two arms of
+    a group whose chains match one by one; each is counted against
+    ``max_bytes`` before it is allocated.
 
     Args:
         sequences: Each cell's sequence code in its four slots, -1 for none.
@@ -399,10 +402,11 @@ def assign_clonotype_clusters(
         j_genes: Each slot's J gene code, alike.
         receptor_arms: The arms that must agree.
         dual_ir: The chains of an arm that must agree.
-        max_bytes: The memory that the pairs of chains within the cutoff may
-            take, about 80 bytes each, beyond the ``CLUSTER_SEARCH_BYTES``
-            that the search for them and the chunks of candidate cells hold;
-            None for no limit.
+        max_bytes: The memory that linking the cells may hold beyond the
+            ``CLUSTER_SEARCH_BYTES`` that the search for near chains and the
+            chunks of candidate cells hold: 32 bytes for each pair of chains
+            within the cutoff, and 32 for each link while it is held. None
+            for no limit.
 
     Returns:
         The clonotype cluster of each cell, ranked as clonotypes are.
@@ -411,7 +415,7 @@ def assign_clonotype_clusters(
         ValueError: If an option is unknown or the arrays do not align.
         MemoryError: If the search for the pairs of chains within the cutoff
             would hold more than ``CLUSTER_SEARCH_BYTES`` and ``max_bytes``
-            together, or the pairs need more than ``max_bytes``.
+            together, or the pairs and links need more than ``max_bytes``.
     """
     if metric not in DISTANCE_METRICS:
         raise ValueError(f"metric must be one of {', '.join(DISTANCE_METRICS)}")
@@ -422,6 +426,24 @@ def assign_clonotype_clusters(
     config_groups, arm_elements, taking = found.groups, found.arms, found.taking
     n_configurations = len(found.rows)
     element_rows = found.element_rows
+    held = 0
+
+    def reserve(needed: int, what: str) -> None:
+        """Count ``needed`` more bytes held; MemoryError beyond ``max_bytes``."""
+        nonlocal held
+        if max_bytes is not None and held + needed > max_bytes:
+            raise MemoryError(
+                f"Linking the cells of clonotype clusters needs about {held + needed} "
+                f"bytes for {what}, more than the {max_bytes} bytes left in the "
+                "memory budget. Require the same V and J genes, lower the cutoff, "
+                "or raise mem_budget."
+            )
+        held += needed
+
+    def release(freed: int) -> None:
+        """Count ``freed`` bytes as no longer held."""
+        nonlocal held
+        held -= freed
 
     # Elements within the cutoff, with matching genes when asked: their
     # sequences are compared within blocks of equal gene calls.
@@ -434,22 +456,19 @@ def assign_clonotype_clusters(
         blocks=blocks,
         max_bytes=None if max_bytes is None else CLUSTER_SEARCH_BYTES + max_bytes,
     )
-    needed = _NEAR_PAIR_BYTES * len(low)
-    if max_bytes is not None and needed > max_bytes:
-        raise MemoryError(
-            f"The {len(low)} pairs of chains within the cutoff need about {needed} "
-            f"bytes, more than the {max_bytes} bytes left in the memory budget. "
-            "Require the same V and J genes, lower the cutoff, or raise mem_budget."
-        )
-    near_codes = sorted_unique(
-        np.concatenate(
-            [
-                low * n_elements + high,
-                high * n_elements + low,
-                np.arange(n_elements) * (n_elements + 1),
-            ]
-        )
+    n_pairs = len(low)
+    reserve(
+        _NEAR_PAIR_BYTES * n_pairs, f"the {n_pairs} pairs of chains within the cutoff"
     )
+    # Each pair in both directions and each element with itself, codes that
+    # are distinct, so a sort in place orders them for searching.
+    near_codes = np.empty(2 * n_pairs + n_elements, dtype=np.int64)
+    np.multiply(low, n_elements, out=near_codes[:n_pairs])
+    near_codes[:n_pairs] += high
+    np.multiply(high, n_elements, out=near_codes[n_pairs : 2 * n_pairs])
+    near_codes[n_pairs : 2 * n_pairs] += low
+    np.multiply(np.arange(n_elements), n_elements + 1, out=near_codes[2 * n_pairs :])
+    near_codes.sort()
 
     def is_near(first: np.ndarray, second: np.ndarray) -> np.ndarray:
         """Whether element pairs are within the cutoff; -1 is never near."""
@@ -504,29 +523,28 @@ def assign_clonotype_clusters(
         return ids, nodes
 
     def element_links(nodes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Pairs of nodes of one group whose distinct elements are near."""
-        if not len(low) or not len(nodes):
-            return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
-        table = pd.DataFrame(
-            {
-                "group": nodes[:, 0],
-                "element": nodes[:, 1],
-                "node": np.arange(len(nodes)),
-            }
-        )
-        firsts = pd.DataFrame({"element": low, "partner": high}).merge(
-            table, on="element"
-        )
-        joined = firsts.merge(
-            table,
-            left_on=["partner", "group"],
-            right_on=["element", "group"],
-            suffixes=("", "_partner"),
-        )
-        return (
-            joined["node"].to_numpy(dtype=np.int64),
-            joined["node_partner"].to_numpy(dtype=np.int64),
-        )
+        """Pairs of nodes of one group whose distinct elements are near.
+
+        The links are counted before they are allocated, and each holds
+        ``_LINK_BYTES`` until the caller releases it.
+        """
+        empty = np.empty(0, dtype=np.int64)
+        if not n_pairs or not len(nodes):
+            return empty, empty.copy()
+        # The nodes of each element, in order of their groups.
+        by_element = np.lexsort((nodes[:, 0], nodes[:, 1]))
+        node_groups = np.ascontiguousarray(nodes[by_element, 0], dtype=np.int64)
+        element_starts = np.searchsorted(
+            nodes[by_element, 1], np.arange(n_elements + 1)
+        ).astype(np.int64)
+        arguments = (low, high, element_starts, node_groups, by_element)
+        n_links = _node_links(*arguments, empty, empty)
+        reserve(_LINK_BYTES * n_links, f"the {n_links} links between near chains")
+        firsts = np.empty(n_links, dtype=np.int64)
+        seconds = np.empty(n_links, dtype=np.int64)
+        if n_links:
+            _node_links(*arguments, firsts, seconds)
+        return firsts, seconds
 
     def signature_nodes(rows: np.ndarray, arm: int) -> tuple[np.ndarray, np.ndarray]:
         """Each row's arm as a node, its group and sorted elements, -1 without one."""
@@ -544,7 +562,9 @@ def assign_clonotype_clusters(
 
         A match pairs every chain, so each arm meets its matches through its
         rarest chain alone: arms that share a common chain cost no pairs when
-        their other chains differ.
+        their other chains differ. The links between chains are released once
+        the matches are found, and each match holds ``_LINK_BYTES`` from when
+        it is found until the caller releases it.
         """
         elements = nodes[:, 1:]
         present = elements >= 0
@@ -563,7 +583,8 @@ def assign_clonotype_clusters(
         reach = _reach(len(parts), firsts, seconds, part_ids[present])
         cost = np.where(present, reach[np.maximum(part_ids, 0)], np.iinfo(np.int64).max)
         rarest = part_ids[np.arange(len(nodes)), np.argmin(cost, axis=1)]
-        found = [np.empty((0, 2), dtype=np.int64)]
+        kept_firsts = [np.empty(0, dtype=np.int64)]
+        kept_seconds = [np.empty(0, dtype=np.int64)]
         for first, second in _candidate_pairs(
             len(parts),
             firsts,
@@ -574,44 +595,57 @@ def assign_clonotype_clusters(
             owners[present],
         ):
             keep = full_match(elements[first], elements[second])
-            found.append(np.column_stack([first[keep], second[keep]]))
-        links = np.concatenate(found)
-        return links[:, 0], links[:, 1]
+            n_kept = int(np.count_nonzero(keep))
+            reserve(
+                _LINK_BYTES * n_kept,
+                f"{n_kept} more arms whose chains match one by one",
+            )
+            kept_firsts.append(first[keep])
+            kept_seconds.append(second[keep])
+        matched = np.concatenate(kept_firsts), np.concatenate(kept_seconds)
+        release(_LINK_BYTES * len(firsts))
+        return matched
 
-    def arm_structure(
-        rows: np.ndarray, arm: int
-    ) -> tuple[np.ndarray, int, np.ndarray, np.ndarray]:
-        """Each row's nodes of an arm, the number of nodes and the nodes' links."""
+    def arm_nodes(rows: np.ndarray, arm: int) -> tuple[np.ndarray, np.ndarray]:
+        """Each row's nodes of an arm, -1 without one, a column per slot; and each node."""
         if dual_ir == "all":
             ids, nodes = signature_nodes(rows, arm)
-            firsts, seconds = signature_links(nodes)
-            return ids[:, None], len(nodes), firsts, seconds
-        ids, nodes = element_nodes(rows, arm)
-        firsts, seconds = element_links(nodes)
-        return ids, len(nodes), firsts, seconds
+            return ids[:, None], nodes
+        return element_nodes(rows, arm)
+
+    def arm_links(nodes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """The pairs of an arm's nodes that match, each held until it is released."""
+        return signature_links(nodes) if dual_ir == "all" else element_links(nodes)
 
     def either_components(rows: np.ndarray, arms: list[int]) -> np.ndarray:
         """Components of rows linked when one of the arms matches.
 
-        Rows connect through the nodes of their arms and the links between
-        nodes, so rows that share a chain need no pair of their own. Every
+        Rows join the nodes of their arms and linked nodes join, one arm at a
+        time, so rows that share a chain need no pair of their own. Every
         node is a row's, so a path through nodes passes through rows that
         are linked in turn.
         """
-        heads, tails = [], []
+        structures = [arm_nodes(rows, arm) for arm in arms]
+        n_items = len(rows) + sum(len(nodes) for _ids, nodes in structures)
+        parent = np.arange(n_items, dtype=np.int64)
         offset = len(rows)
-        for arm in arms:
-            ids, n_nodes, firsts, seconds = arm_structure(rows, arm)
+        for ids, nodes in structures:
             has = ids >= 0
-            heads.extend([np.nonzero(has)[0], offset + firsts])
-            tails.extend([offset + ids[has], offset + seconds])
-            offset += n_nodes
-        head, tail = np.concatenate(heads), np.concatenate(tails)
-        graph = coo_matrix(
-            (np.ones(len(head), dtype=np.int8), (head, tail)), shape=(offset, offset)
-        )
-        _count, labels = connected_components(graph, directed=False)
-        return unique_inverse(labels[: len(rows)])[1]
+            slot_rows = np.nonzero(has)[0]
+            _union(
+                parent,
+                slot_rows,
+                offset + ids[has],
+                np.ones(len(slot_rows), dtype=bool),
+            )
+            firsts, seconds = arm_links(nodes)
+            firsts += offset
+            seconds += offset
+            _union(parent, firsts, seconds, np.ones(len(firsts), dtype=bool))
+            release(_LINK_BYTES * len(firsts))
+            del firsts, seconds
+            offset += len(nodes)
+        return unique_inverse(_roots(parent)[: len(rows)])[1]
 
     def both_components(rows: np.ndarray) -> np.ndarray:
         """Components of rows linked when both of their arms match.
@@ -625,7 +659,9 @@ def assign_clonotype_clusters(
         structures = {}
         costs = []
         for arm in (_VJ, _VDJ):
-            ids, n_nodes, firsts, seconds = arm_structure(rows, arm)
+            ids, nodes = arm_nodes(rows, arm)
+            firsts, seconds = arm_links(nodes)
+            n_nodes = len(nodes)
             has = ids >= 0
             node_of, row_of = ids[has], np.nonzero(has)[0]
             reach = _reach(n_nodes, firsts, seconds, node_of)
@@ -651,6 +687,8 @@ def assign_clonotype_clusters(
                 _union(
                     parent, first, second, arm_matches(other, rows[first], rows[second])
                 )
+        for _n_nodes, firsts, _seconds, _node_of, _row_of in structures.values():
+            release(_LINK_BYTES * len(firsts))
         return unique_inverse(_roots(parent))[1]
 
     if receptor_arms == "all":
@@ -685,12 +723,88 @@ _NONE = np.iinfo(np.int64).max
 #: candidate pairs of cells.
 CLUSTER_SEARCH_BYTES = 512 * 2**20
 # The bytes that each pair of chains within the cutoff holds while the cells
-# are linked: its codes, both directions, and the links between chains, as
-# measured on 1.2 to 2.9 million pairs of B cell junctions.
-_NEAR_PAIR_BYTES = 80
+# are linked: its two codes, and its codes in both directions among those
+# that tell whether two chains are near.
+_NEAR_PAIR_BYTES = 32
+# The bytes that each link holds while the cells are linked: its two nodes,
+# and its two places among the nodes' neighbours while candidate cells are
+# drawn through it. A link joins two nodes of one group: near chains, or
+# under dual_ir="all", arms whose chains match one by one, which are then
+# collected and joined.
+_LINK_BYTES = 32
 # Candidate pairs checked at once: two arrays of this many int64 values and
 # the checks' temporaries, about 150 MB together.
 _PAIRS_PER_CHUNK = 1 << 21
+
+
+@njit(cache=True)
+def _node_links(
+    low: np.ndarray,
+    high: np.ndarray,
+    element_starts: np.ndarray,
+    node_groups: np.ndarray,
+    node_ids: np.ndarray,
+    firsts: np.ndarray,
+    seconds: np.ndarray,
+) -> int:
+    """Count the pairs of nodes of one group whose elements are near, or write them.
+
+    The nodes of element ``e`` are ``node_ids[element_starts[e]:element_starts[e
+    + 1]]``, in ascending order of their groups ``node_groups``, so the nodes
+    of a near pair of elements that share a group are found by walking both
+    in step. With empty outputs the links are only counted.
+    """
+    write = len(firsts) > 0
+    at = 0
+    for pair in range(len(low)):
+        left = element_starts[low[pair]]
+        left_end = element_starts[low[pair] + 1]
+        right = element_starts[high[pair]]
+        right_end = element_starts[high[pair] + 1]
+        while left < left_end and right < right_end:
+            if node_groups[left] < node_groups[right]:
+                left += 1
+            elif node_groups[right] < node_groups[left]:
+                right += 1
+            else:
+                if write:
+                    firsts[at] = node_ids[left]
+                    seconds[at] = node_ids[right]
+                at += 1
+                left += 1
+                right += 1
+    return at
+
+
+@njit(cache=True)
+def _neighbor_lists(
+    n_nodes: int, firsts: np.ndarray, seconds: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Each node's neighbours, itself and the nodes it links to, grouped by node.
+
+    Returns where each node's neighbours start, and the neighbours.
+    """
+    starts = np.zeros(n_nodes + 1, dtype=np.int64)
+    for node in range(n_nodes):
+        starts[node + 1] = 1
+    for at in range(len(firsts)):
+        starts[firsts[at] + 1] += 1
+        starts[seconds[at] + 1] += 1
+    for node in range(n_nodes):
+        starts[node + 1] += starts[node]
+    neighbors = np.empty(starts[n_nodes], dtype=np.int64)
+    filled = starts[:n_nodes].copy()
+    for node in range(n_nodes):
+        neighbors[filled[node]] = node
+        filled[node] += 1
+    for at in range(len(firsts)):
+        first = firsts[at]
+        second = seconds[at]
+        neighbors[filled[first]] = second
+        filled[first] += 1
+        neighbors[filled[second]] = first
+        filled[second] += 1
+    return starts, neighbors
 
 
 def _candidate_pairs(
@@ -707,12 +821,7 @@ def _candidate_pairs(
     A node's neighbours are the node itself and the nodes it links to. An
     anchor never pairs with itself, and a pair can come more than once.
     """
-    heads = np.concatenate([link_firsts, link_seconds, np.arange(n_nodes)])
-    tails = np.concatenate([link_seconds, link_firsts, np.arange(n_nodes)])
-    order = np.lexsort((tails, heads))
-    heads = heads[order]
-    neighbors = np.ascontiguousarray(tails[order], dtype=np.int64)
-    starts = np.searchsorted(heads, np.arange(n_nodes + 1)).astype(np.int64)
+    starts, neighbors = _neighbor_lists(n_nodes, link_firsts, link_seconds)
 
     def grouped(nodes: np.ndarray, items: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         table = unique_rows(np.column_stack([nodes, items]))[0]
