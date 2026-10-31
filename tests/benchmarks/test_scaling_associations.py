@@ -105,7 +105,9 @@ def test_band_gather(bench) -> None:
         no_statistics = np.empty((0, N_SETS))
 
         def call():
-            counts = np.zeros((N_BAND, 2), dtype=np.int64)
+            # Sets at or below and at or above each observed statistic, and the
+            # sets that have a statistic.
+            counts = np.zeros((N_BAND, 3), dtype=np.int64)
             _score_sets(
                 0,
                 1,
@@ -137,7 +139,7 @@ def test_band_gather(bench) -> None:
         sampler = _sampler(covariates, MODEL, True)
         out = np.empty(n_cells, dtype=np.int64)
         information = np.einsum("ik,ic,id->kcd", weights, covariates, covariates)
-        expected = np.zeros((N_BAND, 2), dtype=np.int64)
+        expected = np.zeros((N_BAND, 3), dtype=np.int64)
         for set_key in _keys():
             cells = out[: draw_bernoulli_set(set_key, *sampler, out)]
             weighted = np.einsum("ik,ic->kc", weights[cells], covariates[cells])
@@ -146,6 +148,7 @@ def test_band_gather(bench) -> None:
             statistics = scores[cells].sum(0) / np.sqrt(variance)
             expected[:, 0] += statistics <= observed
             expected[:, 1] += statistics >= observed
+            expected[:, 2] += np.isfinite(statistics)
         np.testing.assert_array_equal(counts, expected)
 
     bench("perturbation.band_gather", make, LADDER, check=check)

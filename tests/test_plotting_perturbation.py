@@ -3172,12 +3172,16 @@ def test_the_association_volcano_refuses_settings_it_cannot_use(
 @pytest.mark.parametrize(
     ("rows", "targets", "message"),
     [
-        ([("MYC", "NPM1", NAN, NAN, NAN)], None, "None of the discovery pairs passed"),
-        ([], None, "None of the discovery pairs passed QC"),
+        (
+            [("MYC", "NPM1", NAN, NAN, NAN)],
+            None,
+            "None of the discovery pairs has a p-value",
+        ),
+        ([], None, "None of the discovery pairs has a p-value to plot"),
         (
             [*DISCOVERY_ROWS, ("CD8", "GZMB", NAN, NAN, NAN)],
             ["CD8"],
-            "None of the discovery pairs of these targets passed QC",
+            "None of the discovery pairs of these targets has a p-value",
         ),
     ],
 )
@@ -3501,7 +3505,7 @@ def test_association_calibration_spreads_a_large_band_on_the_log_scale() -> None
     ("positive", "message"),
     [
         ([], "No positive controls"),
-        ([("CD4", "CD4", NAN, NAN, NAN)], "No positive control passed QC"),
+        ([("CD4", "CD4", NAN, NAN, NAN)], "No positive control has a statistic"),
     ],
 )
 def test_association_calibration_says_when_no_positive_control_was_tested(

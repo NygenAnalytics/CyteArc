@@ -266,7 +266,9 @@ def _association_summary(tests: PerturbationAssociations) -> dict[str, Any]:
     false = tests.calibration.loc[tests.calibration["significant"], "control_guides"]
     return {
         "discoveryPairs": len(tests.discovery),
-        "testedDiscoveryPairs": int(tests.discovery["pass_qc"].sum()),
+        "testedDiscoveryPairs": int(
+            (tests.discovery["pass_qc"] & tests.discovery["z"].notna()).sum()
+        ),
         "discoveries": int(tests.discovery["significant"].sum()),
         "calibrationPairs": len(tests.calibration),
         "falseDiscoveries": tests.n_false_discoveries,
@@ -1495,6 +1497,11 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
             r"n_resamples\[1\] must be at least 2",
         ),
         (
+            {"associations": {"n_resamples": [48, 499, 999], "side": "left"}},
+            ValueError,
+            r"n_resamples\[0\] of at least 49, or stage_threshold=0",
+        ),
+        (
             {"associations": {"covariates": ["depth", "missing"]}},
             ValueError,
             "^covariate 'missing' not found in cell metadata$",
@@ -2051,14 +2058,17 @@ def test_summaries_read_statuses_only_as_their_methods_name_them() -> None:
 
 
 def test_false_discoveries_are_counted_by_their_control_guides() -> None:
-    # Two discovery pairs and five calibration pairs of three control groups,
-    # three of them false discoveries, two in one group.
+    # Three discovery pairs and five calibration pairs of three control
+    # groups, three of them false discoveries, two in one group. Of the
+    # discovery pairs, one fails QC and one passes QC without a statistic, so
+    # only the first is tested.
     group = _group(
         {
-            "sets": [0, 0, 1, 1, 1, 1, 1, 2],
-            "pass_qc": [True, False, True, True, True, True, True, True],
-            "significant": [True, False, True, True, False, True, False, True],
-            "groups": [0, 0, 1, 1, 2, 3, 3, 0],
+            "sets": [0, 0, 0, 1, 1, 1, 1, 1, 2],
+            "pass_qc": [True, False, True, True, True, True, True, True, True],
+            "z": [3.5, np.nan, np.nan, 3.1, 2.9, 0.2, 3.3, -0.4, 4.0],
+            "significant": [True, False, False, True, True, False, True, False, True],
+            "groups": [0, 0, 0, 1, 1, 2, 3, 3, 0],
             "group_guides": np.asarray(["", "nt1+nt2", "nt3", "nt4"]),
         },
         set_names=["discovery", "calibration", "positive"],
@@ -2070,7 +2080,7 @@ def test_false_discoveries_are_counted_by_their_control_guides() -> None:
     summary = summaries._associations(group, {"alpha": 0.1})
 
     assert summary == {
-        "discoveryPairs": 2,
+        "discoveryPairs": 3,
         "testedDiscoveryPairs": 1,
         "discoveries": 1,
         "calibrationPairs": 5,

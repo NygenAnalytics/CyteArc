@@ -2104,8 +2104,8 @@ def association_volcano(
     if tested.empty:
         scope = "" if requested is None else " of these targets"
         raise ValueError(
-            f"None of the discovery pairs{scope} passed QC, so there are no "
-            "p-values to plot"
+            f"None of the discovery pairs{scope} has a p-value to plot: pairs that "
+            "fail QC, or whose treatment cells the covariates determine, get none"
         )
     n_untested = len(discovery) - len(tested)
     drawn = tested.sort_values(
@@ -2543,7 +2543,7 @@ def _controls_panel(
             0.5,
             "No positive controls"
             if n_positive_pairs == 0
-            else "No positive control passed QC",
+            else "No positive control has a statistic",
             transform=ax.get_xaxis_transform(),
             ha="center",
             va="center",

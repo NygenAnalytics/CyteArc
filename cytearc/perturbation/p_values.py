@@ -69,7 +69,7 @@ class PairResults:
         skew_scale: The scale of that fit.
         skew_shape: The shape of that fit.
         log2_fold_change: log2 of the treatment cells' counts over their
-            means under the pair's fit.
+            means under the pair's fit, NaN without a statistic.
         se_log2_fold_change: The standard error of ``log2_fold_change``.
     """
 
@@ -83,24 +83,29 @@ class PairResults:
     se_log2_fold_change: np.ndarray
 
 
-def resampling_p_values(counts: np.ndarray, n_draws: int, side: str) -> np.ndarray:
+def resampling_p_values(counts: np.ndarray, side: str) -> np.ndarray:
     """Return the p-values that the random sets give.
 
-    With ``n_draws`` sets, the left p-value is (1 + sets at most the observed
-    statistic) / (n_draws + 1) and the right one counts sets at least the
-    observed statistic; ``"both"`` doubles the smaller, up to 1.
+    Only the sets with a statistic count. With B of them, the left p-value is
+    (1 + sets at most the observed statistic) / (1 + B) and the right one
+    counts sets at least the observed statistic; ``"both"`` doubles the
+    smaller, up to 1. A set without a statistic, such as one whose cells the
+    covariates determine, says nothing about the observed statistic, so it
+    counts on neither side, nor in B.
 
     Args:
-        counts: Per pair, the sets at most and at least the observed
-            statistic, from :func:`resampling_counts`.
-        n_draws: The number of sets.
+        counts: Per pair, the sets with a statistic at most and at least the
+            observed one, and all the sets with a statistic, pairs x 3, as
+            :func:`~cytearc.perturbation.associations.resampling_counts`
+            counts them.
         side: ``"both"``, ``"left"`` or ``"right"``.
 
     Returns:
         Each pair's p-value.
     """
-    left = (1.0 + counts[:, 0]) / (n_draws + 1.0)
-    right = (1.0 + counts[:, 1]) / (n_draws + 1.0)
+    valid = 1.0 + counts[:, 2]
+    left = (1.0 + counts[:, 0]) / valid
+    right = (1.0 + counts[:, 1]) / valid
     return _sided(left, right, side)
 
 
@@ -194,15 +199,17 @@ def _order_statistics(values: np.ndarray, ranks: list[int]) -> np.ndarray:
 
 
 def _counts_beyond(statistics: np.ndarray, observed: np.ndarray) -> np.ndarray:
-    """Return each row's statistics at most and at least its observed one, rows x 2.
+    """Return each row's statistics at most and at least its observed one, rows x 3.
 
-    The rows are compared a span at a time.
+    The third column counts the row's statistics that are not NaN. The rows
+    are compared a span at a time.
     """
-    counts = np.empty((len(observed), 2), dtype=np.int64)
+    counts = np.empty((len(observed), 3), dtype=np.int64)
     for rows, block in _row_spans(statistics):
         point = observed[rows, None]
         counts[rows, 0] = (block <= point).sum(axis=1)
         counts[rows, 1] = (block >= point).sum(axis=1)
+        counts[rows, 2] = block.shape[1] - np.isnan(block).sum(axis=1)
     return counts
 
 
@@ -371,6 +378,9 @@ def staged_p_values(
     percentile, on the observed statistic's side, holds less than half of the
     statistics' own share there; then ``n_resamples[2]`` fresh sets give the
     p-value. With ``approximation="none"``, the second round's sets give it.
+    Every round's p-value counts only the sets with a statistic, as
+    :func:`resampling_p_values` does. The fit takes only rows whose sets all
+    have a statistic, so a pair with a set without one takes the third round.
     The second round takes its pairs in batches whose statistics fit
     ``statistics_bytes``. Both tests of this package, against control cells
     and against all other cells, take their p-values this way.
@@ -378,12 +388,12 @@ def staged_p_values(
     Args:
         z: Each pair's statistic, NaN for a pair without one.
         counts: Per pair, the first round's sets with a statistic at most and
-            at least ``z``, pairs x 2.
+            at least ``z``, and all its sets with a statistic, pairs x 3.
         second_statistics: Returns the statistics of the second round's sets
-            of the pairs it is given, pairs x sets, from their positions and
-            the number of sets.
+            of the pairs it is given, pairs x sets, NaN for a set without
+            one, from their positions and the number of sets.
         third_counts: Returns the third round's counts of the pairs it is
-            given, pairs x 2, likewise.
+            given, pairs x 3, likewise.
         n_resamples: The random sets of the three rounds.
         stage_threshold: The p-value at or below which a pair takes the
             second round.
@@ -397,8 +407,8 @@ def staged_p_values(
         and the location, scale and shape of the skew-normal fit that gave
         it, NaN where random sets gave it.
     """
-    first_draws, second_draws, third_draws = n_resamples
-    p_value = resampling_p_values(counts, first_draws, side)
+    _, second_draws, third_draws = n_resamples
+    p_value = resampling_p_values(counts, side)
     p_value[np.isnan(z)] = np.nan
     n_pairs = len(z)
     stage = np.ones(n_pairs, dtype=np.int8)
@@ -412,7 +422,7 @@ def staged_p_values(
         chosen = second[begin : begin + batch]
         statistics = second_statistics(chosen, second_draws)
         empirical = _counts_beyond(statistics, z[chosen])
-        p_value[chosen] = resampling_p_values(empirical, second_draws, side)
+        p_value[chosen] = resampling_p_values(empirical, side)
         stage[chosen] = 2
         if approximation == "skew_normal":
             fit_location, fit_scale, fit_shape = fit_skew_normals(statistics)
@@ -435,7 +445,7 @@ def staged_p_values(
         poor = np.concatenate(third)
         if len(poor):
             counted = third_counts(poor, third_draws)
-            p_value[poor] = resampling_p_values(counted, third_draws, side)
+            p_value[poor] = resampling_p_values(counted, side)
             stage[poor] = 3
     return p_value, stage, location, scale, shape
 

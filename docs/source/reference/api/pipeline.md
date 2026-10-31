@@ -930,7 +930,7 @@ cannot be computed is logged as a warning and left out. For example:
 | `edistance` | `by`, `rows`, `statuses`, `significant` (tested rows with an adjusted p-value of at most 0.05), `atFloor` (tested rows at the smallest p-value of their permutations, 1 / (`n_permutations` + 1)), and `nPermutations` |
 | `signature` | `cells`, `features`, `controls`, `samples` (the samples of `sample_column`, which the loader's `cells["sample"]` names, 0 without one), `neighbors` |
 | `mixscape` | `rows` (targets by split), `statuses`, `cells`, `knockedOut`, `fewDeGenes` (the targets with too few DE genes in some split, at most 50), `perturbationType` |
-| `associations` | `discoveryPairs`, `testedDiscoveryPairs` (those that pass QC), `discoveries`, `calibrationPairs`, `falseDiscoveries`, `calibrationGrade`, `calibrationStatus`, `falseDiscoveriesByControlGuides` (the false discoveries of each group of control guides, most first, at most 50), `positivePairs`, `positiveDetected`, `alpha` |
+| `associations` | `discoveryPairs`, `testedDiscoveryPairs` (those that pass QC with a statistic), `discoveries`, `calibrationPairs`, `falseDiscoveries`, `calibrationGrade`, `calibrationStatus`, `falseDiscoveriesByControlGuides` (the false discoveries of each group of control guides, most first, at most 50), `positivePairs`, `positiveDetected`, `alpha` |
 | `profiles` | `perturbations`, `features`, `leftOut`, `zeroSdFeatures` (features without spread over some sample's control cells), `samples` (the rows of the loader's `samples`, 1 without a `sample_column`) |
 | `perturbation_clusters` | `perturbations`, `clusters`, `unassigned`, `largestCluster` |
 
