@@ -29,7 +29,7 @@ ds.plots.clone_abundance(clones, group_by="sample")
 | `"celltag_multi"` | [CellTag-multi](https://github.com/morris-lab/CellTag-multi-2023)'s clone tables, such as the iEP table on [Zenodo](https://zenodo.org/records/23442375) | `cell.bc`, and `clone_id` or `clone.id`; an unnamed index column and annotation columns are skipped |
 | `"celltagr"` | [CellTagR](https://github.com/morris-lab/CellTagR)'s clone composition | `cell.barcode`, `clone.id` |
 | `"sticr"` | STICR's cell metadata on the [UCSC Cell Browser](https://cells.ucsc.edu/?ds=human-cortical-lineage) | `cell_Id`, `VBC` |
-| `"cassiopeia"` | [Cassiopeia](https://github.com/YosefLab/Cassiopeia)'s allele table, one row per cell and target site | `cellBC`, `lineageGrp`; group 0 means no clone |
+| `"cassiopeia"` | [Cassiopeia](https://github.com/YosefLab/Cassiopeia)'s allele table, one row per cell and target site | `cellBC`, `lineageGrp`; group 0 means no clone, and a group written as `4.0` is group `4` |
 | `"numbat"` | [Numbat](https://github.com/kharchenkolab/numbat)'s `clone_post_{i}.tsv` | `cell`, `clone_opt`, and `p_opt` as each cell's `clone_probability` |
 | `"table"` | any delimited table | the columns that `columns` names |
 | `"matrix"` | a Matrix Market clone matrix with its cell list beside it, such as LARRY's on [GEO GSE140802](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE140802) | the cell list's columns that `columns["cell"]` names |
@@ -37,9 +37,9 @@ ds.plots.clone_abundance(clones, group_by="sample")
 | `"mito"` | an AnnData file with [MiTo](https://github.com/andrecossa5/MiTo)'s `obs['MiTo_clone']` | `"unassigned"` means no clone |
 | `"h5ad"` | an AnnData file | the `obs` column that `columns["clone"]` names |
 
-`columns` maps `"cell"`, `"clone"` and `"probability"` to column names. `"cell"` may list several columns, whose values joined by `"__"` form the barcode, as a merged store joins a sample and a barcode. A table whose header holds one field fewer than its rows, as R's `write.table` writes it, takes each cell from its row names, so a wide table with one clone column per labelling round, such as the `celltag_data.txt` of the Biddy et al. workflow, needs only `columns={"clone": "CellTagD13"}` to read one round. Clone labels are text as the file writes them; an empty field, `NA` or `NaN` means no clone.
+`columns` maps `"cell"`, `"clone"` and `"probability"` to column names. `"cell"` may list several columns, whose values joined by `"__"` form the barcode, as a merged store joins a sample and a barcode. A table whose header holds one field fewer than its rows, as R's `write.table` writes it, takes each cell from its row names, as does one whose first column has an empty name, as R's `write.csv` writes row names, so a wide table with one clone column per labelling round, such as the `celltag_data.txt` of the Biddy et al. workflow, needs only `columns={"clone": "CellTagD13"}` to read one round. Clone labels are text as the file writes them; an empty field, `NA`, `NaN` or `nan` means no clone.
 
-Tables may be plain or gzip-compressed, whatever their names, separated by tabs, commas or spaces, quoted as R quotes them, and without a final newline. A header that starts with `#`, as TREX writes, is a header. A row with more fields than the table's first row raises `ValueError`.
+Tables may be plain or gzip-compressed, whatever their names, separated by tabs, commas or spaces, quoted as R quotes them, and without a final newline. A header that starts with `#`, as TREX writes, is a header, blank lines hold no rows, and a delimiter after the last field of every row ends no column. A row with more fields than the table's first row raises `ValueError`, and errors name the lines of the file.
 
 A clone matrix holds a nonzero entry where a cell belongs to a clone. Its cell list is a file beside it: `<name>metadata.txt.gz` beside `<name>clone_matrix.mtx.gz`, as GEO ships LARRY's, or `cells.tsv`, with `clones.tsv` naming the clones, as `export_clones` writes. The axis whose length equals the cell list's rows holds the cells, so LARRY's in vitro matrix, cells by clones, and its in vivo and cytokine matrices, clones by cells, read alike; a matrix that fits both ways holds its cells in rows. Clones that no list names, and the columns of CoSpar's `X_clone`, are labelled by their position from 0, as SciPy and AnnData number them.
 
@@ -90,7 +90,7 @@ A cell listed in two different clones, in one file or in two, raises `ValueError
 
 ## Clones from a cell metadata column
 
-`from_column` saves the clones that a cell metadata column assigns, such as a column imported with an AnnData file. A missing or blank label means no clone. Integer labels read as their text, and floating-point whole numbers, which pandas writes for integer labels beside missing ones, read as integers; other floating-point labels raise `TypeError`. The artifact records the fingerprint of the labels, so editing the column gives new clones.
+`from_column` saves the clones that a cell metadata column assigns, such as a column imported with an AnnData file. A missing or blank label means no clone. Integer labels read as their text, and floating-point whole numbers, which pandas writes for integer labels beside missing ones, read as integers; other floating-point labels raise `TypeError`. The artifact records a fingerprint of the column, so editing it gives new clones.
 
 ```python
 clones = ds.clones.from_column("clone_id", cell_selection=cells)
@@ -98,11 +98,11 @@ clones = ds.clones.from_column("clone_id", cell_selection=cells)
 
 ## Read, export and plot clones
 
-A `clones` artifact labels each selected cell with its clone, an empty label for a cell without one, which groupings treat as missing. `codes` numbers the clones by size, largest first, then by label in natural order, -1 for none, and `clone_size` holds the cells of each cell's clone, 0 for none. A source that gives probabilities adds `clone_probability`, NaN where none is given. `ds.select_cells(clones, include=["3"])` selects the cells of one clone, and plots colour cells by clone. [Read per-cell values](cell_aligned_kinds) lists the arrays.
+A `clones` artifact labels each selected cell with its clone, an empty label for a cell without one, which groupings treat as missing. `codes` numbers the clones by size, largest first, then by label in natural order, -1 for none, and `clone_size` holds the cells of each cell's clone, 0 for none. A source that gives probabilities adds `clone_probability`, NaN where none is given; a cell's rows that give it no probability leave the one its other rows give. The store keeps each cell's label at the width of the longest label, so a very long label costs memory for every cell, and an import whose labels would not fit the memory budget raises `MemoryError` before it saves anything. `ds.select_cells(clones, include=["3"])` selects the cells of one clone, and plots colour cells by clone. [Read per-cell values](cell_aligned_kinds) lists the arrays.
 
 `load_clones` returns a {class}`~cytearc.clones.Clones` record. Its `cells` table holds one row per cell, indexed by cell ID: `clone`, a categorical of the clone labels in rank order, `clone_size` and, where saved, `clone_probability`. Its `clones` table holds one row per clone, largest first: `clone` and `n_cells`. Its `source` names the operation that saved the clones, `"import_clones"` or `"clones_from_column"`.
 
-`export_clones(clones, path)` writes CoSpar's clone table, `Cell_ID,Clone_ID`, one row per cell with a clone, and `format="matrix"` writes a cells by clones Matrix Market file with `cells.tsv` and `clones.tsv` beside it, replacing files of those names. Both hold this store's cell IDs and the clone labels, and `import_clones` reads them back to the same clones; clone probabilities are not written. A path ending in `.gz` is gzip-compressed. Each returns the number of cells written.
+`export_clones(clones, path)` writes CoSpar's clone table, `Cell_ID,Clone_ID`, one row per cell with a clone, and `format="matrix"` writes a cells by clones Matrix Market file with `cells.tsv` and `clones.tsv` beside it, replacing files of those names. Both hold this store's cell IDs and the clone labels, and `import_clones` reads them back to the same clones; clone probabilities are not written. The table refuses labels that a clone table reads as no clone, such as `NA`, which the matrix keeps, and the matrix refuses labels and cell IDs that hold a line break, which the table keeps. A path ending in `.gz` is gzip-compressed. Each returns the number of cells written.
 
 ```python
 ds.clones.export_clones(clones, "clones.csv")  # for CoSpar
