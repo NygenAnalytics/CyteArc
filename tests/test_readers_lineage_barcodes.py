@@ -397,6 +397,102 @@ def test_list_fields_split_with_their_counts_and_keep_cells_without_any(
         )
 
 
+# The text that pandas reads as missing by default, and "none": each means no
+# value in a barcode table, as in every record table of metadata/records.py.
+_MISSING_TOKENS = (
+    "",
+    "#N/A",
+    "#N/A N/A",
+    "#NA",
+    "-1.#IND",
+    "-1.#QNAN",
+    "-NaN",
+    "-nan",
+    "1.#IND",
+    "1.#QNAN",
+    "<NA>",
+    "N/A",
+    "NA",
+    "NULL",
+    "NaN",
+    "None",
+    "n/a",
+    "nan",
+    "none",
+    "null",
+)
+
+
+def test_missing_value_tokens_name_no_barcode_and_no_count(tmp_path) -> None:
+    n_tokens = len(_MISSING_TOKENS)
+    rows = [f"A{at}\t{token}\t5\t9" for at, token in enumerate(_MISSING_TOKENS)]
+    rows += [
+        f"B{at}\tbc{at}\t{token}\t{token}" for at, token in enumerate(_MISSING_TOKENS)
+    ]
+    # Text that pandas reads as a value stays a barcode, and a cell barcode
+    # that spells a token is a cell barcode like any other.
+    rows += ["C0\tNAN\t1\t1", "C1\tna\t1\t1", "NA\tNULLS\t2\t2"]
+    path = _file(
+        tmp_path, "pairs.tsv", "cell\tbarcode\tumis\treads\n" + "\n".join(rows) + "\n"
+    )
+    layout = barcode_layout(
+        path,
+        format="pairs",
+        columns={
+            "cell": "cell",
+            "barcode": "barcode",
+            "umis": "umis",
+            "reads": "reads",
+        },
+    )
+    (chunk,) = _rows(layout, 1_000)
+    assert chunk.cells.tolist() == (
+        [f"A{at}" for at in range(n_tokens)]
+        + [f"B{at}" for at in range(n_tokens)]
+        + ["C0", "C1", "NA"]
+    )
+    assert chunk.barcodes.tolist() == (
+        [None] * n_tokens
+        + [f"bc{at}" for at in range(n_tokens)]
+        + ["NAN", "na", "NULLS"]
+    )
+    assert chunk.umi_counts.tolist() == [5] * n_tokens + [-1] * n_tokens + [1, 1, 2]
+    assert chunk.reads.tolist() == [9] * n_tokens + [-1] * n_tokens + [1, 1, 2]
+    # In lists, a token is an item without a barcode or without a count.
+    listed = _file(
+        tmp_path,
+        "lists.tsv",
+        "cell\tbarcodes\tumis\n"
+        + "".join(
+            f"A{at}\tx|{token}\t{token}|4\n" for at, token in enumerate(_MISSING_TOKENS)
+        ),
+    )
+    (chunk,) = _rows(
+        barcode_layout(
+            listed,
+            format="pairs",
+            columns={
+                "cell": "cell",
+                "barcode": "barcodes",
+                "umis": "umis",
+                "separator": "|",
+            },
+        ),
+        1_000,
+    )
+    assert chunk.barcodes.tolist() == ["x", None] * n_tokens
+    assert chunk.umi_counts.tolist() == [-1, 4] * n_tokens
+    # A molecule needs its UMI, so a token in its place is refused.
+    for token in _MISSING_TOKENS:
+        molecules = _file(
+            tmp_path,
+            "molecules.tsv",
+            f"#cell_id\tumi\tclone_id\nA\tGG\tT\nB\t{token}\tT\n",
+        )
+        with pytest.raises(ValueError, match=r"without a UMI \(umi\) on line 3"):
+            _rows(barcode_layout(molecules))
+
+
 def test_bartab_annotations_split_both_list_separators(tmp_path) -> None:
     current = _file(
         tmp_path,

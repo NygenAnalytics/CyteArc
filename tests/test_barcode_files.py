@@ -6,10 +6,12 @@ format, corrected, and as TREX wrote them in 2022, are checked in under
 ``tests/data/barcodes/``. No licensed per-read CellTag file exists, so its
 rows are written here in CellTag-multi's layout. BARtab's counts and
 annotation of GEO GSM9076301 (301 and 194 KB) are downloaded; that test skips
-when GEO is unreachable. Every expectation is counted with pandas from the
-raw files.
+when GEO is unreachable or cuts a file short. Every expectation is counted
+with pandas from the raw files.
 """
 
+import gzip
+import http.client
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -240,14 +242,69 @@ def test_celltag_multi_reads_collapse_into_molecules_and_atac_into_pairs(
     assert loaded.cells["n_barcodes"].tolist() == [2, 2]
 
 
+# What a download raises when GEO is unreachable or cuts the file short:
+# IncompleteRead is an HTTPException, and a gzip stream that ends early raises
+# EOFError when it is decompressed.
+_DOWNLOAD_ERRORS = (
+    urllib.error.URLError,
+    TimeoutError,
+    OSError,
+    http.client.HTTPException,
+    EOFError,
+)
+
+
 def _download(name: str, folder: Path) -> Path:
+    """Download one of BARtab's files, or skip when GEO cannot serve it whole."""
     path = folder / f"GSM9076301{name}"
     try:
         with urllib.request.urlopen(_BARTAB.format(name), timeout=60) as response:
-            path.write_bytes(response.read())
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
-        pytest.skip(f"GEO is unreachable, so BARtab's files cannot be read: {error}")
+            data = response.read()
+        gzip.decompress(data)
+    except _DOWNLOAD_ERRORS as error:
+        pytest.skip(f"GEO could not serve BARtab's {name} whole: {error}")
+    path.write_bytes(data)
     return path
+
+
+class _Response:
+    """A response of urlopen whose body is ``data``, or whose read raises."""
+
+    def __init__(self, data: bytes, error: Exception | None = None) -> None:
+        self._data, self._error = data, error
+
+    def __enter__(self) -> "_Response":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        if self._error is not None:
+            raise self._error
+        return self._data
+
+
+def test_a_download_cut_short_skips_and_a_whole_one_is_written(
+    tmp_path, monkeypatch
+) -> None:
+    whole = gzip.compress(b"gene\tcell\tcount\nLB\tA\t1\n")
+    for response in (
+        # The server closes the connection before the length it announced.
+        _Response(b"", http.client.IncompleteRead(whole[:10], len(whole))),
+        # Without a length, the gzip stream itself ends early.
+        _Response(whole[:-6]),
+    ):
+        monkeypatch.setattr(
+            urllib.request, "urlopen", lambda url, timeout, served=response: served
+        )
+        with pytest.raises(pytest.skip.Exception, match="could not serve"):
+            _download(".counts.tsv.gz", tmp_path)
+        assert not (tmp_path / "GSM9076301.counts.tsv.gz").exists()
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda url, timeout: _Response(whole)
+    )
+    assert _download(".counts.tsv.gz", tmp_path).read_bytes() == whole
 
 
 @pytest.mark.integration
