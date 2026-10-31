@@ -234,6 +234,33 @@ def test_clones_within_groups_are_those_of_each_group_alone(store, tmp_path) -> 
         }
 
 
+def test_other_labels_of_one_within_column_call_other_clones(store, tmp_path) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "larry")
+    store.cells.insert("batch", TRUTH.samples.astype(object))
+    by_sample = store.clones.barcode_clones(barcodes, preset="larry", within="batch")
+    # The column keeps its name and puts every cell in one batch: the labels
+    # identify the clones, so they are called again, as without groups.
+    store.cells.insert("batch", np.full(N_CELLS, "all", dtype=object), overwrite=True)
+    together = store.clones.barcode_clones(barcodes, preset="larry", within="batch")
+    assert together != by_sample
+    alone = store.clones.barcode_clones(barcodes, preset="larry")
+    assert loaded_partition(store, together) == loaded_partition(store, alone)
+    assert loaded_partition(store, together) != loaded_partition(store, by_sample)
+
+
+def test_numpys_false_calls_a_celltag_preset_without_its_allowlist(
+    store, tmp_path
+) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "celltag")
+    without = store.clones.barcode_clones(barcodes, preset="celltag", allowlist=False)
+    assert (
+        store.clones.barcode_clones(barcodes, preset="celltag", allowlist=np.False_)
+        == without
+    )
+    with pytest.raises(TypeError, match="sequence of barcodes"):
+        store.clones.barcode_clones(barcodes, preset="celltag", allowlist=np.True_)
+
+
 def test_within_needs_a_label_for_every_cell_with_a_barcode(store, tmp_path) -> None:
     _calling, barcodes = _imported(store, tmp_path, "larry")
     labels = TRUTH.samples.astype(object).copy()
@@ -307,6 +334,8 @@ def test_calls_follow_neither_file_order_nor_chunks_nor_threads(
     calling = calling_truth(TRUTH, noise=noise)
     allowlist = list(calling.allowlist) if preset == "celltag_multi" else None
     stored = []
+    # No step of the calling runs on threads; the case of 4 keeps a later one
+    # from changing the calls.
     for case in ("plain", "files reversed", "chunks of 7 rows", "4 threads"):
         folder = tmp_path / case.replace(" ", "_")
         folder.mkdir()

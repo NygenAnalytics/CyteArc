@@ -166,6 +166,8 @@ def test_given_values_replace_a_presets_and_zero_turns_a_filter_off() -> None:
         False,
     )
     assert barcode_call_settings("celltag", allowlist=False).allowlist is False
+    # NumPy's False is False.
+    assert barcode_call_settings("celltag", allowlist=np.False_).allowlist is False
 
 
 @pytest.mark.parametrize(
@@ -233,6 +235,11 @@ def test_given_values_replace_a_presets_and_zero_turns_a_filter_off() -> None:
         ),
         ({"method": "sets", "min_size": 0}, ValueError, "at least 1"),
         ({"method": "sets", "allowlist": True}, TypeError, "sequence of barcodes"),
+        (
+            {"method": "sets", "allowlist": np.True_},
+            TypeError,
+            "sequence of barcodes",
+        ),
         ({"method": "sets", "allowlist": "ACGT"}, TypeError, "sequence of barcodes"),
         ({"method": "sets", "prune": 1}, ValueError, "change nothing"),
     ],
@@ -383,6 +390,24 @@ def test_molecules_that_correction_gives_one_barcode_and_umi_are_one() -> None:
     assert calls.n_barcodes.tolist() == [0, 1]
     calls = _call(_records(rows), 2, method="sets", distance=1, metric="hamming")
     assert calls.n_barcodes.tolist() == [1, 1]
+
+
+def test_molecules_rank_by_their_umis_whatever_their_reads() -> None:
+    # A has three molecules of one read; A1 one molecule of 100 reads. In a
+    # library of molecules, each molecule is one UMI, so A is the more
+    # abundant, and only an allowlist of A keeps the merged barcodes.
+    rows = _molecules(0, A, 3, reads=1) + _molecules(1, A1, 1, reads=100)
+    for allowed, kept in (([A], [1, 1]), ([A1], [0, 0])):
+        calls = _call(
+            _records(rows),
+            2,
+            method="sets",
+            distance=1,
+            metric="hamming",
+            allowlist=allowed,
+        )
+        assert calls.n_barcodes.tolist() == kept
+    assert calls.units == ("umis",)
 
 
 def test_pairs_of_a_library_without_umis_rank_by_reads() -> None:
@@ -548,13 +573,38 @@ def test_trex_drops_one_umi_cloneids_that_another_cell_holds_or_one_read_support
     assert calls.counts["pairs_of_one_read"] == 1
 
 
+def test_trex_tests_a_one_umi_cloneid_against_the_cells_of_its_group_and_library() -> (
+    None
+):
+    # Cell 1's one UMI of T is shared with cell 0 only when both are in one
+    # group and one library.
+    rows = _molecules(0, T, 3, reads=3) + [(1, 0, T, "u1", 1, 5)]
+    shared = _call(_records(rows), 2, preset="trex", distance=0)
+    assert shared.n_barcodes.tolist() == [1, 0]
+    apart = _call(
+        _records(rows), 2, groups=np.asarray([0, 1]), preset="trex", distance=0
+    )
+    assert apart.n_barcodes.tolist() == [1, 1]
+    assert apart.counts["pairs_of_one_umi_shared"] == 0
+    other_library = _molecules(0, T, 3, reads=3) + [(1, 1, T, "u1", 1, 5)]
+    libraries = (("a", "molecules"), ("b", "molecules"))
+    calls = _call(_records(other_library, libraries), 2, preset="trex", distance=0)
+    assert calls.n_barcodes.tolist() == [1, 1]
+
+
 def test_trex_rules_need_molecules_and_their_reads() -> None:
     pairs = [(0, 0, T, None, 3, 9)]
     with pytest.raises(ValueError, match="applies TREX's rules to molecules"):
         _call(_records(pairs, (("p", "pairs"),)), 1, preset="trex")
-    rows = _molecules(0, T, 2, reads=-1)
-    with pytest.raises(ValueError, match="read_count since September 2024"):
-        _call(_records(rows), 1, preset="trex")
+    # Two of the three molecules of the library count no reads; the route
+    # from an earlier run's reads.txt is named.
+    rows = _molecules(0, T, 2, reads=-1) + _molecules(1, T, 1, reads=4)
+    with pytest.raises(
+        ValueError, match=r"2 of the 3 molecules of library 'lib' count no reads"
+    ) as refused:
+        _call(_records(rows), 2, preset="trex")
+    assert "format='reads'" in str(refused.value)
+    assert "'barcode': 'clone_id'" in str(refused.value)
 
 
 def test_the_settings_and_the_allowlist_go_together() -> None:

@@ -60,7 +60,7 @@ import pandas as pd
 from ..metadata.records import take_text
 from ..utils.arguments import integer_argument
 from ..utils.arrays import sorted_unique
-from .calling import CALLING_METHODS, SetClones, cell_sets, set_clones
+from .calling import SetClones, cell_sets, set_clones
 from .sequences import neighbor_pairs
 
 __all__ = [
@@ -85,9 +85,10 @@ _REQUIRED = "required"
 #: libraries. ``"required"`` marks a value that only the user can give.
 PRESETS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
     {
-        # Weinreb et al. 2020: triples of at least 10 reads, barcodes within
-        # Hamming distance 3 collapsed by connected components, pairs of at
-        # least 3 UMIs, and clones of cells with identical barcode sets.
+        # Weinreb et al. 2018 (bioRxiv v2): triples of at least 10 reads,
+        # barcodes within Hamming distance 3 collapsed by connected
+        # components, pairs of at least 3 UMIs, and clones of cells with
+        # identical barcode sets.
         "larry": MappingProxyType(
             {
                 "min_reads": 10,
@@ -154,7 +155,9 @@ PRESETS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
 _TREX_UNKNOWN = "-0"
 _TREX_MIN_BASES = 20
 _TREX_MIN_ENTROPY = 1.0
-# The arguments that only a method="jaccard" call uses.
+# The ways of grouping barcode sets, and the arguments that only a
+# method="jaccard" call uses.
+_METHODS = ("sets", "jaccard")
 _JACCARD_ONLY = ("similarity", "inclusive", "prune", "doublets")
 # Calling holds, beside its inputs, for each cell its group, barcodes, flag
 # and modality, and its set's pointer; and for each record, until the records
@@ -405,8 +408,8 @@ def barcode_call_settings(
             "'trex', 'celltag' or 'celltag_multi', or method='sets' or 'jaccard' "
             "with the thresholds you choose"
         )
-    if chosen not in CALLING_METHODS:
-        raise ValueError(f"method must be one of {', '.join(CALLING_METHODS)}")
+    if chosen not in _METHODS:
+        raise ValueError(f"method must be one of {', '.join(_METHODS)}")
     if chosen == "sets":
         # A preset's graph settings fall away under sets; given ones refuse.
         stray = sorted(name for name in _JACCARD_ONLY if name in given)
@@ -451,6 +454,8 @@ def barcode_call_settings(
             "base, which needs metric='hamming'"
         )
     listed = values.get("allowlist")
+    if isinstance(listed, np.bool_):
+        listed = bool(listed)
     if isinstance(listed, str) and listed == _REQUIRED and "allowlist" not in given:
         raise ValueError(
             f"preset={preset!r} keeps the CellTags of the library's allowlist, as "
@@ -713,8 +718,16 @@ def _corrected(
         min_compared=_TREX_MIN_BASES if settings.trex else 0,
     )
     del texts
-    room.held -= entries
-    components = connected_components(n_entries, Edges(first=first, second=second))
+    # The texts are freed; the entries and the pairs found are held while the
+    # components are found, which get what is left.
+    text_bytes = _TEXT_BYTES * len(distinct) + 4 * int(lengths.sum())
+    pair_bytes = 16 * len(first)
+    room.held += pair_bytes - text_bytes
+    components = connected_components(
+        n_entries, Edges(first=first, second=second), max_bytes=room.left()
+    )
+    del first, second
+    room.held -= entries - text_bytes + pair_bytes
     # The last entry of each component, ordered by abundance and then code,
     # is its representative: the most abundant barcode, sorting last on ties.
     by_rank = np.lexsort((entry_codes, abundance, components))
@@ -786,6 +799,21 @@ def barcode_clone_calls(
                     "preset='trex' applies TREX's rules to molecules, and library "
                     f"{detail['library']!r} holds pairs of a cell and a barcode"
                 )
+        missing = reads < 0
+        if np.any(missing):
+            source = int(sources[np.argmax(missing)])
+            of_library = sources == source
+            raise ValueError(
+                "preset='trex' drops a barcode whose only molecule has one read, "
+                f"and {int(np.count_nonzero(missing & of_library))} of the "
+                f"{int(np.count_nonzero(of_library))} molecules of library "
+                f"{details[source]['library']!r} count no reads. TREX writes "
+                "read_count to molecules.txt since September 2024; the reads.txt "
+                "of an earlier run gives each molecule's reads, imported with "
+                "format='reads' and columns={'cell': 'cell_id', 'umi': 'umi', "
+                "'barcode': 'clone_id'}"
+            )
+        del missing
         room.check(
             _LOOKUP_RECORD_BYTES * n_records
             + _texts_bytes(records, n_stored)
@@ -901,14 +929,6 @@ def barcode_clone_calls(
     room.check(0, f"the {n_pairs} barcodes of the cells")
     keep_pair = np.ones(n_pairs, dtype=bool)
     if settings.trex:
-        if np.any(pairs["reads"] < 0):
-            detail = details[int(pairs["sources"][np.argmax(pairs["reads"] < 0)])]
-            raise ValueError(
-                "preset='trex' drops a barcode whose only molecule has one read, "
-                f"and library {detail['library']!r} counts no reads for some "
-                "molecules; TREX's molecule tables hold read_count since "
-                "September 2024"
-            )
         room.check(_FILTER_PAIR_BYTES * n_pairs, "TREX's filters of the barcodes")
         pair_blocks = (
             group_codes[pairs["cells"]] * max(n_libraries, 1) + pairs["sources"]
