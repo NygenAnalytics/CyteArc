@@ -331,10 +331,12 @@ def _guide_calls(group: Any) -> dict[str, Any]:
         "multiple": int(calls[2]),
         "calledGuides": int(np.count_nonzero(called)),
     }
-    # Imported calls count the barcodes of Cell Ranger's file.
+    # Imported calls count the barcodes of Cell Ranger's file: those that
+    # match no cell of the store, and those of cells outside the run's cells.
     for key, name in (
         ("fileBarcodes", "n_file_barcodes"),
         ("unmatchedBarcodes", "n_unmatched_barcodes"),
+        ("unselectedBarcodes", "n_unselected_barcodes"),
     ):
         if name in group.attrs:
             summary[key] = int(group.attrs[name])

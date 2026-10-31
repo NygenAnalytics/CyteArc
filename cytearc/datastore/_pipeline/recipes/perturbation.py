@@ -17,13 +17,13 @@ from typing import Any
 import numpy as np
 
 from ....assay import RNAassay
-from ....merge.row_plan import MERGED_ID_SEPARATOR
 from ....metadata.rows import read_metadata_rows_chunkwise
 from ....perturbation.associations import covariate_columns
 from ....perturbation.guide_calls import validated_guide_ids
 from ....perturbation.labels import guide_targets, label_settings
 from ....storage.artifacts import ArtifactRef, inspect_artifact
 from ....storage.types import as_zarr_group
+from ..._operations.perturbation_guides import _require_call_file_cells
 from ..._operations.perturbation_store import _require_cell_column
 from ..executor import PlannedStage, RecipePlan, RunState
 from ..fields import (
@@ -403,39 +403,17 @@ def _check_call_file_cells(
     by the barcode. A cell that no barcode can reach would be labelled
     ``"Negative"`` and left out of every later stage.
     """
-    # Only the input cells' IDs are read.
+    # Only the input cells' IDs are read; the import checks its cells alike.
     rows = np.flatnonzero(input_cell_mask(store, source))
     ids = np.asarray(read_metadata_rows_chunkwise(store.cells, "ids", rows)).astype(str)
-    remedy = (
-        "or call the guides from their counts with guide_calling settings without path"
+    _require_call_file_cells(
+        ids,
+        barcode_prefix,
+        cells="the run's cells",
+        restrict="restrict cells to",
+        remedy="or call the guides from their counts with guide_calling settings "
+        "without path",
     )
-    if barcode_prefix:
-        outside = ~np.strings.startswith(ids, barcode_prefix)
-        count = int(np.count_nonzero(outside))
-        if count:
-            verb = "does" if count == 1 else "do"
-            raise ValueError(
-                "The call file's barcodes reach only the cells whose IDs start "
-                f"with barcode_prefix {barcode_prefix!r}, but {count} of the "
-                f"run's cells, such as {str(ids[np.argmax(outside)])!r}, {verb} "
-                f"not; restrict cells to the cells of that sample, {remedy}"
-            )
-        return
-    # A merged store names each cell <sample>__<barcode>.
-    position = np.strings.find(ids, MERGED_ID_SEPARATOR)
-    merged = np.flatnonzero(position >= 0)
-    if not len(merged):
-        return
-    first = str(ids[merged[0]])[: int(position[merged[0]])]
-    other = merged[~np.strings.startswith(ids[merged], first + MERGED_ID_SEPARATOR)]
-    if len(other):
-        second = str(ids[other[0]])[: int(position[other[0]])]
-        raise ValueError(
-            "The call file holds the barcodes of one sample, but the run's cells "
-            f"come from several samples of a merged store, such as {first!r} and "
-            f"{second!r}; restrict cells to the cells of one sample and pass its "
-            f"barcode_prefix, such as {first + MERGED_ID_SEPARATOR!r}, {remedy}"
-        )
 
 
 def resolve_perturbation(

@@ -7,7 +7,6 @@ write their own stores.
 """
 
 import re
-import tracemalloc
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,7 +21,7 @@ from cytearc.datastore._operations import perturbation_guides as operations
 from cytearc.datastore.datastore import DataStore
 from cytearc.perturbation import MULTIPLE, NEGATIVE, GuideThresholds
 from cytearc.perturbation.guide_thresholds import call_thresholds
-from cytearc.perturbation.histograms import guide_count_histograms, histogram_bytes
+from cytearc.perturbation.histograms import guide_count_histograms
 from cytearc.perturbation.mixtures import (
     FIT_STATUSES,
     fit_gaussian,
@@ -31,6 +30,7 @@ from cytearc.perturbation.mixtures import (
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.utils.logging import logger
 from tests.perturbation_helpers import (
+    check_budget,
     copy_store,
     open_store,
     record_cell_reads,
@@ -399,33 +399,115 @@ def test_the_guide_assay_is_the_stores_only_crispr_assay_whatever_its_name(
 
 
 @pytest.mark.parametrize(
-    ("guide_assays", "found"),
+    ("guide_assays", "expected"),
     [
-        ({}, "No assay of the store is"),
+        (
+            {},
+            "No assay of the store is declared 'CRISPR', and guide calls read one; "
+            "declare the guide assay's type when opening the store, such as "
+            "DataStore(..., assay_types={'RNA': 'CRISPR'}). The store's assays "
+            "are 'RNA', declared 'RNA'",
+        ),
         (
             {"CRISPR": "CRISPR", "GUIDES": "CRISPR"},
-            "2 assays of the store, 'CRISPR', 'GUIDES', are",
+            "2 assays of the store, 'CRISPR', 'GUIDES', are declared 'CRISPR', and "
+            "guide calls read one; name the guide assay with from_assay=...",
         ),
     ],
 )
 def test_a_store_without_one_crispr_assay_needs_from_assay(
-    tmp_path, guide_assays, found
+    tmp_path, guide_assays, expected
 ) -> None:
     store = _guide_store(tmp_path, guide_assays)
     cells = store.select_measured_cells("RNA")
     path = tmp_path / "calls.csv"
     path.write_text("cell_barcode,num_features,feature_call,num_umis\n")
-    message = re.escape(
-        f"{found} declared 'CRISPR', and guide calls read one; name the guide "
-        "assay with from_assay=..."
-    )
+    message = re.escape(expected)
     saved = written(store)
 
     with pytest.raises(ValueError, match=f"^{message}$"):
         store.perturbation.call_guides(cells)
     with pytest.raises(ValueError, match=f"^{message}$"):
         store.perturbation.import_guide_calls(path, cell_selection=cells)
+    # Naming an assay of another type names the assays declared CRISPR.
+    with pytest.raises(TypeError, match="'RNA' is declared as 'RNA'; ") as refused:
+        store.perturbation.call_guides(cells, from_assay="RNA")
+    if guide_assays:
+        declared = ", ".join(repr(name) for name in guide_assays)
+        assert str(refused.value).endswith(
+            f"the store's assays declared 'CRISPR' are {declared}"
+        )
     assert written(store) == saved
+
+
+def test_guide_assay_messages_name_the_remedy_that_works(tmp_path) -> None:
+    # A guide assay whose name is not a preset opens as a generic Assay.
+    path = tmp_path / "guides.zarr"
+    rna = np.random.default_rng(7).poisson(2.0, size=(len(COUNTS), 10))
+    write_count_store(str(path), {"RNA": rna, "Guides": COUNTS}, "uint16")
+    store = open_store(path)
+    cells = store.select_measured_cells("Guides")
+    saved = written(store)
+    declare = (
+        "declare the guide assay's type when opening the store, such as "
+        "DataStore(..., assay_types={'Guides': 'CRISPR'})"
+    )
+    with pytest.raises(ValueError, match=re.escape(declare + ". The store's assays")):
+        store.perturbation.call_guides(cells, method="fixed", min_umi=10)
+    with pytest.raises(
+        TypeError,
+        match=re.escape(f"'Guides' is declared as 'Assay'; {declare}") + "$",
+    ):
+        store.perturbation.call_guides(
+            cells, method="fixed", min_umi=10, from_assay="Guides"
+        )
+    # A misspelt name is not an assay, whatever its type.
+    with pytest.raises(
+        ValueError,
+        match="^from_assay 'GUIDES' is not an assay of the store, whose assays are "
+        "'Guides', 'RNA'$",
+    ):
+        store.perturbation.call_guides(
+            cells, method="fixed", min_umi=10, from_assay="GUIDES"
+        )
+    assert written(store) == saved
+    # The declaration that the messages name works.
+    declared = open_store(path, assay_types={"Guides": "CRISPR"})
+    calls = declared.perturbation.call_guides(
+        declared.select_measured_cells("Guides"), method="fixed", min_umi=10
+    )
+    assert calls.assay == "Guides"
+    # Once an assay is declared CRISPR, naming another names it instead.
+    with pytest.raises(
+        TypeError,
+        match="'RNA' is declared as 'RNA'; the store's assay declared 'CRISPR' is "
+        "'Guides'$",
+    ):
+        declared.perturbation.call_guides(
+            cells, method="fixed", min_umi=10, from_assay="RNA"
+        )
+
+
+def test_loading_thresholds_takes_any_collection_of_guide_ids(store, template) -> None:
+    ref = store.perturbation.call_guides(template.cells, sample_column="lane")
+    loaded = store.perturbation.load_guide_thresholds(ref)
+    expected = loaded.table[loaded.table["guide"].isin(["CRISPR0", "CRISPR1"])]
+    # The guides index of a loaded record, a NumPy array and a generator all
+    # read the guides that a list reads.
+    for guides in (
+        loaded.guides[:2],
+        loaded.guides[:2].to_numpy(),
+        (guide for guide in ["CRISPR0", "CRISPR1"]),
+        ["CRISPR0", "CRISPR1"],
+    ):
+        table = store.perturbation.load_guide_thresholds(ref, guides=guides).table
+        pd.testing.assert_frame_equal(
+            table.reset_index(drop=True), expected.reset_index(drop=True)
+        )
+    with pytest.raises(TypeError, match="guides must be a sequence"):
+        store.perturbation.load_guide_thresholds(ref, guides=7)
+    with pytest.raises(TypeError, match="guides must be a sequence"):
+        store.perturbation.load_guide_thresholds(ref, guides=b"CRISPR0")
 
 
 def test_a_read_only_store_checks_the_budget_before_writing(
@@ -528,90 +610,133 @@ def test_call_guides_refuses_a_selection_of_no_cell(store) -> None:
     assert written(store) == saved
 
 
-def test_call_guides_checks_the_memory_budget(store, template, monkeypatch) -> None:
-    cells = template.cells
-    saved = written(store)
-    # Enough for 16 bytes per cell of the fit, too little for the least that
-    # the histograms of 3 lanes and 7 guides hold, and for the calls.
-    least = 16 * 600 + histogram_bytes(3, 7, 600, n_distinct=0)
-    monkeypatch.setattr(store, "memoryBytes", 20_000)
-    with pytest.raises(
-        MemoryError,
-        match=f"Fitting guide thresholds for 600 cells in 3 samples and 7 "
-        f"guides holds at least {least} bytes",
-    ):
-        store.perturbation.call_guides(cells, sample_column="lane")
-    with pytest.raises(MemoryError, match="Calling guides makes"):
-        store.perturbation.call_guides(cells, method="fixed", min_umi=2)
-    assert written(store) == saved
-    # Within 100,000 bytes, the counts stream beside the histograms, which
-    # may hold half of the memory, but 160 bytes for each of the 600 cells
-    # and 48 for each call do not fit. The fits, which count the calls, are
-    # saved; the calls are not.
-    monkeypatch.setattr(store, "memoryBytes", 100_000)
-    with pytest.raises(MemoryError, match="Calling guides makes"):
-        store.perturbation.call_guides(cells, method="gaussian")
-    assert store.artifacts.list(kind="guide_thresholds", from_assay="CRISPR")
-    assert not store.artifacts.list(kind="guide_calls", from_assay="CRISPR")
-    # Saved fits are read again only within the budget.
-    monkeypatch.undo()
-    store.perturbation.call_guides(cells, method="gaussian")
-    monkeypatch.setattr(store, "memoryBytes", 100)
-    with pytest.raises(MemoryError, match="Reading the saved guide fits"):
-        store.perturbation.call_guides(cells, method="gaussian", min_umi=9)
+def _wide_screen(folder: Path) -> Path:
+    """A two-lane screen with long guide IDs, where one cell carries every guide.
 
-
-def test_fits_of_a_high_moi_screen_stay_within_the_memory_budget(
-    tmp_path, monkeypatch
-) -> None:
-    # 10,000 cells carry 30 of 60 guides each, at counts that most cells
-    # hold alone, so that the histograms hold about 200,000 distinct counts,
-    # 20 per cell.
-    n_cells, n_guides = 10_000, 60
-    rng = np.random.default_rng(5)
-    counts = rng.poisson(0.2, size=(n_cells, n_guides)).astype(np.uint16)
-    cells = np.arange(n_cells)
-    for carried in range(30):
-        guides = (cells * 30 + carried) % n_guides
-        counts[cells, guides] = 33 + rng.integers(0, 20_000, n_cells)
-    rna = rng.poisson(1.0, size=(n_cells, 2)) + 1
-    store = write_screen(tmp_path / "store.zarr", rna, counts, nthreads=2)
-    selected = store.select_measured_cells("CRISPR")
-    # A first call on a few cells loads the kernels.
-    store.cells.insert("few", cells < 50)
-    store.perturbation.call_guides(store.snapshot_cell_selection("few"))
-    fit = operations._PerturbationGuideOperationsMixin._fit_guide_thresholds
-    peaks: list[int] = []
-
-    def measured_fit(self, *args, **kwargs):
-        tracemalloc.reset_peak()
-        try:
-            return fit(self, *args, **kwargs)
-        finally:
-            peaks.append(tracemalloc.get_traced_memory()[1])
-
-    monkeypatch.setattr(
-        operations._PerturbationGuideOperationsMixin,
-        "_fit_guide_thresholds",
-        measured_fit,
+    4,000 cells and 80 guides whose IDs are 60 characters long. Every cell
+    holds ambient UMIs and carries one guide with about 2**6 UMIs, and cell0
+    holds 30 UMIs of every guide, so a floor of 1 UMI calls about 17 guides
+    in a cell and 80 in cell0.
+    """
+    n_cells, n_guides = 4_000, 80
+    rng = np.random.default_rng(17)
+    counts = rng.poisson(0.2, size=(n_cells, n_guides))
+    carried = rng.integers(0, n_guides, n_cells)
+    counts[np.arange(n_cells), carried] += (
+        np.round(2.0 ** rng.normal(6.0, 0.7, n_cells)).astype(np.int64) + 8
     )
-    saved = written(store)
-    tracemalloc.start()
-    try:
-        # Within 12 MB the histograms may hold about 6 MB, need more, and
-        # say so before they take it.
-        monkeypatch.setattr(store, "memoryBytes", 12_000_000)
-        with pytest.raises(MemoryError, match="The guide count histograms need about"):
-            store.perturbation.call_guides(selected)
-        assert written(store) == saved
-        # Within 20 MB the counts stream beside the histograms, and both
-        # passes run.
-        monkeypatch.setattr(store, "memoryBytes", 20_000_000)
-        store.perturbation.call_guides(selected)
-    finally:
-        tracemalloc.stop()
-    assert peaks[0] <= 12_000_000
-    assert peaks[1] <= 20_000_000
+    counts[0] = 30
+    ids = [
+        f"GUIDE{guide:03d}_TARGETS_ENSG{guide:011d}_ACGTACGTACGTACGTACGTACGTAC"
+        for guide in range(n_guides)
+    ]
+    path = folder / "wide.zarr"
+    write_count_store(
+        str(path),
+        {"RNA": rng.poisson(1.0, size=(n_cells, 3)) + 1, "CRISPR": counts},
+        "uint16",
+        feature_ids={"CRISPR": ids},
+    )
+    store = open_store(path)
+    store.cells.insert(
+        "lane", np.where(np.arange(n_cells) % 2, "A", "B").astype(object)
+    )
+    store.cells.insert("every", np.ones(n_cells, dtype=bool))
+    store.snapshot_cell_selection("every")
+    return path
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"method": "fixed", "min_umi": 1},
+        {"method": "top_guide"},
+        {"method": "poisson_gaussian"},
+        {"method": "gaussian", "sample_column": "lane"},
+    ],
+    ids=["fixed", "top_guide", "poisson_gaussian", "gaussian"],
+)
+def test_call_guides_runs_within_the_budget_that_its_refusals_name(
+    tmp_path, options
+) -> None:
+    path = _wide_screen(tmp_path)
+    cells = open_store(path).snapshot_cell_selection("every")
+
+    budget, refusals = check_budget(
+        path,
+        lambda store: store.perturbation.call_guides(
+            cells, invalidate_cache=True, **options
+        ),
+    )
+
+    # The first refusal comes before any count is read and names a budget
+    # that runs, or for the fitted methods one that gets the fits past the
+    # stream; the calls may then need more, which a second refusal names.
+    assert 1 <= len(refusals) <= (2 if options["method"].endswith("gaussian") else 1)
+    first = (
+        "Fitting guide" if options["method"].endswith("gaussian") else "Calling guides"
+    )
+    assert refusals[0].startswith(first)
+    if options["method"] != "top_guide":
+        # The padded calls of cell0, 80 slots for each of the 4,000 cells, and
+        # the 60 characters of the labels count.
+        assert budget > 8 * 80 * 4_000
+
+
+def _distinct_screen(folder: Path) -> Path:
+    """A screen whose cells carry 20 of 200 guides at counts that few cells share.
+
+    The histograms of 3,000 cells then hold about 60,000 distinct counts,
+    20 per cell, which only reading the counts tells.
+    """
+    n_cells, n_guides, per_cell = 3_000, 200, 20
+    rng = np.random.default_rng(23)
+    counts = rng.poisson(0.2, size=(n_cells, n_guides))
+    for cell in range(n_cells):
+        chosen = rng.choice(n_guides, size=per_cell, replace=False)
+        counts[cell, chosen] += 33 + rng.integers(0, 100_000, per_cell)
+    path = folder / "distinct.zarr"
+    write_count_store(
+        str(path),
+        {"RNA": rng.poisson(1.0, size=(n_cells, 2)) + 1, "CRISPR": counts},
+        "uint32",
+    )
+    store = open_store(path)
+    store.cells.insert("every", np.ones(n_cells, dtype=bool))
+    store.snapshot_cell_selection("every")
+    return path
+
+
+@pytest.mark.slow
+def test_histogram_refusals_name_a_budget_past_where_they_stopped(tmp_path) -> None:
+    path = _distinct_screen(tmp_path)
+    cells = open_store(path).snapshot_cell_selection("every")
+
+    budget, refusals = check_budget(
+        path,
+        lambda store: store.perturbation.call_guides(cells, invalidate_cache=True),
+    )
+
+    # Within the least that the fits hold, the histograms stop while counts
+    # remain, and estimate what every row needs from the rows read.
+    stopped = [refusal for refusal in refusals if "histograms" in refusal]
+    assert stopped
+    first = stopped[0]
+    assert re.search(
+        r"; \d+ of 3000 rows of counts remain to be read, and at the ", first
+    )
+    distinct = [
+        int(re.search(r"for (\d+) distinct counts", refusal).group(1))
+        for refusal in stopped
+    ]
+    # Each refusal names a budget that gets past the point where the one before
+    # stopped, so the next stops later, with more distinct counts, or not at
+    # all, and a few refusals reach the budget that runs.
+    assert distinct == sorted(set(distinct))
+    assert len(refusals) <= 5
+    # The budget holds the counts beside histograms of every count.
+    assert budget > 16 * 60_000
 
 
 def test_gaussian_warns_when_most_calls_carry_several_guides(tmp_path) -> None:

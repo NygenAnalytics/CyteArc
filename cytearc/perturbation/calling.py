@@ -22,10 +22,6 @@ from cytearc.utils.numba import njit
 
 __all__ = ["CalledGuides", "threshold_calls", "top_guide_calls"]
 
-# Each block reserves room for this many calls per row before a second pass is
-# needed; most screens call one or two guides per cell.
-_CALLS_PER_ROW = 2
-
 
 @dataclass(frozen=True, slots=True)
 class CalledGuides:
@@ -141,7 +137,9 @@ def threshold_calls(
         blocks, n_cells=n_cells, n_guides=n_guides
     ):
         stop = start + block.shape[0]
-        room = _CALLS_PER_ROW * block.shape[0] + 64
+        # A first pass without room counts the block's calls, and a second
+        # writes them, so the calls hold no unused room.
+        room = 0
         while True:
             call_rows = np.empty(room, dtype=np.int64)
             call_codes = np.empty(room, dtype=np.int64)
@@ -162,9 +160,13 @@ def threshold_calls(
             room = n_calls
         if n_calls < 0:
             raise ValueError(f"Guide UMI counts must be at most {MAX_COUNT}")
-        cells.append(call_rows[:n_calls] + start)
-        guides.append(call_codes[:n_calls])
-        umis.append(call_umis[:n_calls])
+        call_rows += start
+        cells.append(call_rows)
+        guides.append(call_codes)
+        umis.append(call_umis)
+        # Each block is released before the next is read and before the
+        # calls are joined.
+        del block
     calls = CalledGuides(
         cells=np.concatenate(cells),
         codes=np.concatenate(guides),

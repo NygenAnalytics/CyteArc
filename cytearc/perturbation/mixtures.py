@@ -438,21 +438,63 @@ def _fit_poisson_gaussian_groups(
 
 
 @njit(cache=True, nogil=True)
+def _log_odds_slope(
+    low: float, high: float, log_rate: float, mean: float, std: float
+) -> float:
+    """Bound the slope of the Gaussian's log-odds over x = log2(count) in [low, high].
+
+    The log-odds is the Gaussian's log density minus the Poisson's, and its
+    slope is ``(mean - x) / std**2 - log(rate) + digamma(x + 1)``. The bound
+    takes each term at its extreme in the interval, with
+    ``log(y) - 1 / y < digamma(y) < log(y)`` for y > 0.
+    """
+    precision = 1.0 / (std * std)
+    upper = (mean - low) * precision - log_rate + math.log(high + 1.0)
+    lower = (
+        (mean - high) * precision - log_rate + math.log(low + 1.0) - 1.0 / (low + 1.0)
+    )
+    return max(abs(upper), abs(lower), 1e-300)
+
+
+@njit(cache=True, nogil=True)
 def _poisson_gaussian_threshold(
     rate: float, mean: float, std: float, weight: float, max_count: int
 ) -> int:
-    """Return the smallest count up to ``max_count`` with Gaussian posterior above one half, or 0."""
+    """Return the smallest count up to ``max_count`` with Gaussian posterior above one half, or 0.
+
+    A count is called when the Gaussian's log density at x = log2(count)
+    exceeds the Poisson's. Where the Poisson's exceeds it by a margin, the
+    bound of :func:`_log_odds_slope` shows that it still does at every larger
+    count up to some x, so those counts are skipped; near a crossing the
+    counts are checked one by one. Every checked count is compared exactly as
+    a check of each count in turn compares it, and a skipped count is one
+    where the Poisson's density exceeds the Gaussian's by far more than the
+    rounding of either, so the result equals that check. The search takes
+    about one step per unit of x away from a crossing, instead of one per
+    count.
+    """
     log_rate = math.log(rate)
     log_std = math.log(std)
     log_weight = math.log(weight)
     log_rest = math.log1p(-weight)
-    for count in range(1, max_count + 1):
+    count = 1
+    while count <= max_count:
         value = math.log2(count)
         z = (value - mean) / std
         normal = log_weight - _LOG_SQRT_2PI - log_std - 0.5 * z * z
         poisson = log_rest + value * log_rate - rate - math.lgamma(value + 1.0)
         if normal > poisson:
             return count
+        # The skip stays within one unit of x, where the slope bound holds.
+        # The allowance for rounding, at this count and at the skipped ones,
+        # is far above the rounding of either density and of x.
+        slope = _log_odds_slope(value, value + 1.0, log_rate, mean, std)
+        rounding = 1e-9 * (1.0 + abs(normal) + abs(poisson) + slope)
+        step = min(1.0, (poisson - normal - 2.0 * rounding) / slope)
+        # Every count up to 2 ** (value + step) is skipped; the factor keeps
+        # the rounding of the power within the step.
+        skipped = math.floor(2.0 ** (value + 0.999 * step)) if step > 0.0 else count
+        count = max(count + 1, int(skipped))
     return 0
 
 

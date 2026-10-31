@@ -196,6 +196,30 @@ def _status_labels(
     return labels
 
 
+def _stream_bytes(counts: Any, scratch_bytes_per_row: int = 0) -> tuple[int, int]:
+    """Return what a budgeted row stream of ``counts`` holds: its least, and with full blocks.
+
+    ``ChunkedArray._stream_blocks`` with a memory budget holds the matrix's
+    own arrays, the decode of one stored chunk, and the rows of each block
+    with ``scratch_bytes_per_row`` for each, beside the caller's resident
+    bytes. It shrinks its blocks to fit, down to one row, and refuses a
+    budget without room for that row; this follows its arithmetic.
+
+    Args:
+        counts: A chunked matrix of counts, such as ``assay.rawData[cells, :]``.
+        scratch_bytes_per_row: The bytes that the caller makes of each row of
+            a block.
+
+    Returns:
+        The bytes of a stream of one-row blocks, and of a stream of full
+        blocks, each beside the caller's resident bytes.
+    """
+    rows = min(counts._block_size, max(1, counts.shape[0]))
+    per_row = max(1, counts._block_owned_bytes() // rows + scratch_bytes_per_row)
+    fixed = counts._resident_bytes() + counts._max_decode_bytes()
+    return fixed + per_row, fixed + rows * per_row
+
+
 def _count_blocks(
     store: Any,
     assay: Any,

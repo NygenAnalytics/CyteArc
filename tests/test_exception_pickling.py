@@ -36,6 +36,7 @@ from cytearc.readers._seurat.errors import (
 from cytearc.readers.seurat import SeuratImportError
 from cytearc.storage.errors import ArtifactResolutionError
 from cytearc.storage.finite_values import NonFiniteArtifactError
+from cytearc.perturbation.histograms import HistogramMemoryError
 from cytearc.storage.sharding import CountLayoutMemoryError
 from cytearc.utils.shutdown import ShutdownRequest, ShutdownRequested
 
@@ -73,6 +74,9 @@ SAMPLES: dict[type[BaseException], Callable[[], BaseException]] = {
     ),
     NonFiniteArtifactError: lambda: NonFiniteArtifactError("run_pca", "data", 7),
     CountLayoutMemoryError: lambda: CountLayoutMemoryError("countsT needs 8 GB"),
+    HistogramMemoryError: lambda: HistogramMemoryError(
+        4096, 1024, 128, rows_read=10, n_rows=20
+    ),
     ShutdownRequested: lambda: ShutdownRequested(
         ShutdownRequest(
             requested_at_ns=1,

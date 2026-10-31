@@ -641,6 +641,17 @@ def test_showing_the_threshold_plot_releases_its_figure() -> None:
     assert result.tables["thresholds"]["guide"].tolist() == ["g1"]
 
 
+def test_the_threshold_plot_takes_the_guides_index_of_a_record() -> None:
+    store = _threshold_store("poisson_gaussian", ONE_SAMPLE, min_umi=None)
+
+    for guides in (pd.Index(["g2", "g1"], name="guide"), np.asarray(["g2", "g1"])):
+        result = guide_thresholds(store, THRESHOLDS, guides=guides, show=False)
+        try:
+            assert result.tables["thresholds"]["guide"].tolist() == ["g2", "g1"]
+        finally:
+            result.close()
+
+
 @pytest.mark.parametrize(
     ("case", "arguments", "error", "message"),
     [

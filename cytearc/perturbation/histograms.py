@@ -17,6 +17,7 @@ counts that the histograms hold, which only the counts tell.
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -28,6 +29,7 @@ __all__ = [
     "DENSE_COUNTS",
     "MAX_COUNT",
     "GuideCountHistograms",
+    "HistogramMemoryError",
     "checked_sample_codes",
     "guide_count_histograms",
     "histogram_bytes",
@@ -101,12 +103,11 @@ class GuideCountHistograms:
 
         ``thresholds`` holds the smallest called count of each guide in each
         sample, samples x guides, 0 where a guide calls nothing; each cell
-        whose count of a guide reaches it is one call.
+        whose count of a guide reaches it is one call. The count makes no
+        array as long as the histograms.
         """
-        entries = np.repeat(np.arange(len(self.offsets) - 1), np.diff(self.offsets))
-        limits = np.asarray(thresholds, dtype=np.int64).reshape(-1)[entries]
-        called = (limits > 0) & (self.counts >= limits)
-        return int(self.cells[called].sum())
+        limits = np.asarray(thresholds, dtype=np.int64).reshape(-1)
+        return int(_called_cells(self.offsets, self.counts, self.cells, limits))
 
     def distinct_counts(self) -> np.ndarray:
         """Return the number of distinct nonzero counts of each guide, samples x guides."""
@@ -119,6 +120,27 @@ class GuideCountHistograms:
         largest = np.zeros(len(stops), dtype=np.int64)
         largest[filled] = self.counts[stops[filled] - 1]
         return largest.reshape(self.n_samples, self.n_guides)
+
+
+@njit(cache=True, nogil=True)
+def _called_cells(
+    offsets: np.ndarray, counts: np.ndarray, cells: np.ndarray, limits: np.ndarray
+) -> int:
+    """Return the cells whose count of each histogram reaches its limit, 0 for none.
+
+    Each histogram lists its counts in ascending order, so the counts that
+    reach the limit are the histogram's last ones.
+    """
+    total = 0
+    for entry in range(limits.shape[0]):
+        limit = limits[entry]
+        if limit <= 0:
+            continue
+        stop = offsets[entry + 1]
+        first = offsets[entry] + np.searchsorted(counts[offsets[entry] : stop], limit)
+        for index in range(first, stop):
+            total += cells[index]
+    return total
 
 
 def histogram_bytes(
@@ -288,14 +310,109 @@ def _assemble(
     offsets[dense.shape[0]] = position
 
 
-def _require_memory(needed: int, memory_bytes: int | None, n_distinct: int) -> None:
-    """Raise MemoryError when the histograms need more than ``memory_bytes``."""
-    if memory_bytes is not None and needed > memory_bytes:
-        raise MemoryError(
+class HistogramMemoryError(MemoryError):
+    """The guide count histograms need more memory than they may hold.
+
+    Attributes:
+        needed: The bytes that the histograms need at the point where they
+            stopped, within their memory limit.
+        memory_bytes: The bytes that the histograms may hold.
+        n_distinct: The distinct counts that they held then.
+        rows_read: The rows of counts read when they stopped.
+        n_rows: The rows of counts, one per cell.
+    """
+
+    def __init__(
+        self,
+        needed: int,
+        memory_bytes: int,
+        n_distinct: int,
+        *,
+        rows_read: int,
+        n_rows: int,
+    ) -> None:
+        self.needed = needed
+        self.memory_bytes = memory_bytes
+        self.n_distinct = n_distinct
+        self.rows_read = rows_read
+        self.n_rows = n_rows
+        remain = (
+            f", and {n_rows - rows_read} of {n_rows} rows of counts remain to be "
+            "read, so they may need more"
+            if self.counts_remain
+            else ""
+        )
+        super().__init__(
             f"The guide count histograms need about {needed} bytes for "
             f"{n_distinct} distinct counts, more than the {memory_bytes} bytes "
-            "they may hold. Raise mem_budget."
+            f"they may hold{remain}"
         )
+
+    @property
+    def counts_remain(self) -> bool:
+        """Whether counts remained to be read, so that the histograms may need more."""
+        return self.rows_read < self.n_rows
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...], dict[str, Any]]:
+        return (
+            _restore_histogram_memory_error,
+            (
+                type(self),
+                self.needed,
+                self.memory_bytes,
+                self.n_distinct,
+                self.rows_read,
+                self.n_rows,
+            ),
+            self.__dict__,
+        )
+
+
+def _restore_histogram_memory_error(
+    error_type: type[HistogramMemoryError],
+    needed: int,
+    memory_bytes: int,
+    n_distinct: int,
+    rows_read: int,
+    n_rows: int,
+) -> HistogramMemoryError:
+    """Rebuild a pickled HistogramMemoryError, whose row counts are keywords."""
+    return error_type(
+        needed, memory_bytes, n_distinct, rows_read=rows_read, n_rows=n_rows
+    )
+
+
+def _require_memory(
+    needed: int,
+    memory_bytes: int | None,
+    n_distinct: int,
+    *,
+    rows_read: int,
+    n_rows: int,
+) -> None:
+    """Raise HistogramMemoryError when the histograms need more than ``memory_bytes``."""
+    if memory_bytes is not None and needed > memory_bytes:
+        raise HistogramMemoryError(
+            needed, memory_bytes, n_distinct, rows_read=rows_read, n_rows=n_rows
+        )
+
+
+def _assembly_bytes(held: int, dense: np.ndarray, n_larger: int) -> int:
+    """Return what assembling the histograms holds.
+
+    ``held`` covers what the caller holds and the dense array; beside it,
+    the ``n_larger`` merged larger counts and their cells, the offsets, the
+    cells of each sample, and the counts and cells of the histograms.
+    """
+    n_samples, n_guides = int(dense.shape[0]), int(dense.shape[1])
+    total = int(np.count_nonzero(dense)) + n_larger
+    return (
+        held
+        + 16 * n_larger
+        + 8 * (n_samples * n_guides + 1)
+        + 16 * n_samples
+        + 16 * total
+    )
 
 
 def _larger_counts(
@@ -317,24 +434,25 @@ def _larger_counts(
     keys = np.zeros(0, dtype=np.uint64)
     cells = np.zeros(0, dtype=np.int64)
 
-    def merged(n_keys: int) -> tuple[np.ndarray, np.ndarray]:
+    n_rows = len(codes)
+
+    def merged(n_keys: int, rows_read: int) -> tuple[np.ndarray, np.ndarray]:
         run = buffer[:n_keys]
         run.sort()
         size = int(_merged_size(keys, run))
-        _require_memory(
-            held + buffer.nbytes + keys.nbytes + cells.nbytes + 16 * size,
-            memory_bytes,
-            size,
-        )
+        needed = held + buffer.nbytes + keys.nbytes + cells.nbytes + 16 * size
+        if rows_read == n_rows:
+            # The last merge also checks the assembly that follows, so that
+            # one refusal names what both need.
+            needed = max(needed, _assembly_bytes(held, dense, size))
+        _require_memory(needed, memory_bytes, size, rows_read=rows_read, n_rows=n_rows)
         merged_keys = np.empty(size, dtype=np.uint64)
         merged_cells = np.empty(size, dtype=np.int64)
         _merge_run(keys, cells, run, merged_keys, merged_cells)
         return merged_keys, merged_cells
 
     n_keys = 0
-    for start, block in checked_count_blocks(
-        blocks, n_cells=len(codes), n_guides=n_guides
-    ):
+    for start, block in checked_count_blocks(blocks, n_cells=n_rows, n_guides=n_guides):
         block_codes = codes[start : start + block.shape[0]]
         row = 0
         while row < block.shape[0]:
@@ -345,11 +463,11 @@ def _larger_counts(
                 raise ValueError(f"Guide UMI counts must be at most {MAX_COUNT}")
             if row < block.shape[0]:
                 # The next row might not fit, so the buffer's keys join the
-                # merged ones.
-                keys, cells = merged(n_keys)
+                # merged ones; the rows from the next on remain to be read.
+                keys, cells = merged(n_keys, start + row)
                 n_keys = 0
     if n_keys:
-        keys, cells = merged(n_keys)
+        keys, cells = merged(n_keys, n_rows)
     return keys, cells
 
 
@@ -411,8 +529,9 @@ def guide_count_histograms(
             range, a block has the wrong width, the blocks hold more or fewer
             rows than there are cells, a count exceeds the uint32 range, or
             ``memory_bytes`` is negative.
-        MemoryError: If the histograms need more than ``memory_bytes``. The
-            message names the bytes that they need.
+        HistogramMemoryError: If the histograms need more than
+            ``memory_bytes``, a MemoryError that holds the bytes they need at
+            that point and the rows of counts read by then.
     """
     if n_samples < 1 or n_guides < 1:
         raise ValueError("Histograms need at least one sample and one guide")
@@ -430,6 +549,8 @@ def guide_count_histograms(
         copied + histogram_bytes(n_samples, n_guides, len(codes), n_distinct=0),
         memory_bytes,
         0,
+        rows_read=0,
+        n_rows=len(codes),
     )
     held = copied + _CALL_BYTES
     dense = np.zeros((n_samples, n_guides, DENSE_COUNTS), dtype=np.uint32)
@@ -440,15 +561,11 @@ def guide_count_histograms(
     flat = dense.reshape(n_entries, DENSE_COUNTS)
     total = int(np.count_nonzero(flat)) + len(keys)
     _require_memory(
-        held
-        + dense.nbytes
-        + keys.nbytes
-        + key_cells.nbytes
-        + 8 * (n_entries + 1)
-        + 16 * n_samples
-        + 16 * total,
+        _assembly_bytes(held + dense.nbytes, dense, len(keys)),
         memory_bytes,
         total,
+        rows_read=len(codes),
+        n_rows=len(codes),
     )
     offsets = np.empty(n_entries + 1, dtype=np.int64)
     counts = np.empty(total, dtype=np.int64)
