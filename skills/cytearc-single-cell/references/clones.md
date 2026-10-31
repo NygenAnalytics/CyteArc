@@ -132,7 +132,7 @@ clones = ds.clones.barcode_clones(barcodes, preset="celltag_multi", allowlist=al
 ## Checks
 
 - Compare `n_unmatched_barcodes` with what the file should hold outside the selection before suspecting the prefix, suffix or pattern. pycashier, BARtab from BAM input and Cell Ranger's molecule info list droplets that are not cells, so their unmatched barcodes are expected.
-- After calling barcode clones, read `rule_counts`: a rule that removed most molecules or barcodes, such as LARRY's `min_reads=10` on a shallow library, needs a lower threshold, given alone with the preset. LARRY's identical sets split clones whose cells lost a barcode; a Jaccard preset keeps them.
+- After calling barcode clones, read `rule_counts`: a rule that removed most molecules or barcodes, such as LARRY's `min_reads=10` on a shallow library, needs a lower threshold, given alone with the preset. LARRY's identical sets, and TREX's pruning of the edges between cells that lost different barcodes, split clones whose cells lost a barcode; the CellTag presets keep them together.
 - After a barcode import, check `loaded.libraries`: each library's `level` and whether it counts UMIs and reads decide which filters clone calling can apply. Most cells should hold a few barcodes in `plots.barcode_calls`; one-read molecules and one-UMI barcodes are mostly errors and ambient reads.
 - Check `table.clones["n_cells"]` against the study's reported clone count and sizes; LARRY's in vitro and cytokine sets hold only clones of two or more cells, while TREX keeps singletons.
 - With several files, check that `table.clones["clone"]` carries each file's namespace, and that clones expected to span samples were called jointly in one run; clones of separate runs never merge.
