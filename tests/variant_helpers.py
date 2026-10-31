@@ -360,20 +360,6 @@ def mito_variant_labels(truth: VariantTruth) -> set[str]:
     }
 
 
-def download_or_skip(url: str, path: Path) -> Path:
-    """Download a file for a test marked integration, skipping the test when
-    the host is unreachable."""
-    import urllib.error
-    import urllib.request
-
-    try:
-        with urllib.request.urlopen(url, timeout=120) as response:
-            path.write_bytes(response.read())
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
-        pytest.skip(f"{url} is unreachable: {error}")
-    return path
-
-
 RCRS_CELLS = ("cell0", "cell1", "cell2")
 # The alternative base of each position that write_rcrs_mgatk writes, None for
 # C, or T where the reference reads C: masked positions, a NUMT position that
