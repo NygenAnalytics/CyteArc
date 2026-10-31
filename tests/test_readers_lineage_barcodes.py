@@ -1066,14 +1066,25 @@ def test_molecule_info_reads_each_block_of_barcodes_once() -> None:
 
 
 def _matrix_h5ad(
-    path: Path, values: np.ndarray, *, layout: str, chunks=None, compression=None
+    path: Path,
+    values: np.ndarray,
+    *,
+    layout: str,
+    chunks=None,
+    compression=None,
+    libraries=None,
 ) -> Path:
-    """An AnnData file of the cells by barcodes ``values``, dense or sparse."""
-    from tests.clone_truth import _obs_frame
+    """An AnnData file of the cells by barcodes ``values``, dense or sparse.
+
+    ``libraries`` labels each cell in the ``obs`` column ``library``.
+    """
+    from tests.clone_truth import _obs_frame, write_categorical
 
     n_cells, n_barcodes = values.shape
     with h5py.File(path, "w") as handle:
-        _obs_frame(handle, [f"C{index}" for index in range(n_cells)])
+        obs = _obs_frame(handle, [f"C{index}" for index in range(n_cells)])
+        if libraries is not None:
+            write_categorical(obs, "library", list(libraries))
         var = handle.create_group("var")
         var.attrs["_index"] = "_index"
         var.create_dataset(
@@ -1299,15 +1310,26 @@ def _peak_while_reading(layout, chunk_rows: int) -> int:
     return int(peak)
 
 
-@pytest.mark.parametrize("kind", ["wide", "dense", "csr", "csc", "many_barcodes"])
+@pytest.mark.parametrize(
+    "kind", ["wide", "dense", "csr", "csc", "many_barcodes", "libraries"]
+)
 def test_reading_holds_no_more_than_the_layout_estimates(tmp_path, kind) -> None:
     rng = np.random.default_rng(5)
     values = (rng.random((300, 400)) < 0.05) * rng.integers(1, 9, (300, 400))
+    columns = None
+    libraries = None
     if kind == "many_barcodes":
         # One count per cell among 20,000 barcodes: their names outweigh
         # the counts.
         values = np.zeros((300, 20_000), dtype=np.int64)
         values[np.arange(300), rng.choice(20_000, 300, replace=False)] = 2
+        kind = "csr"
+    if kind == "libraries":
+        # Each cell's library, read from an obs column for every cell.
+        values = np.zeros((20_000, 3), dtype=np.int64)
+        values[::50, 1] = 4
+        libraries = [f"lane{index % 4}" for index in range(20_000)]
+        columns = {"library": "library"}
         kind = "csr"
     if kind == "wide":
         lines = ["sample,cell," + ",".join(f"B{index}" for index in range(400))] + [
@@ -1322,10 +1344,83 @@ def test_reading_holds_no_more_than_the_layout_estimates(tmp_path, kind) -> None
             layout=kind,
             chunks=(16, 64) if kind == "dense" else None,
             compression="gzip" if kind == "dense" else None,
+            libraries=libraries,
         )
-    layout = barcode_layout(path)
+    layout = barcode_layout(
+        path, format=None if columns is None else "h5ad", columns=columns
+    )
     chunk_rows = layout.chunk_rows(400_000)
     assert _entries(_rows(layout, chunk_rows)) == _nonzero_entries(values)
     assert _peak_while_reading(layout, chunk_rows) <= layout.held_bytes + (
         layout.chunk_bytes(chunk_rows)
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "text", "message"),
+    [
+        (
+            "annotation.tsv",
+            "barcode\tbc.umi.count\nAAAC\tLB1;LB2\t4;99999999999999999999\n",
+            "umis holds a number too large for int64, "
+            "'99999999999999999999', on line 2",
+        ),
+        (
+            "barcodes_output.csv",
+            "sample,cell,A,B\ns1,C1,0,9223372036854775808\n",
+            "holds '9223372036854775808' as the count of barcode 'B' on line 2",
+        ),
+    ],
+)
+def test_counts_beyond_int64_are_refused_naming_their_line(
+    tmp_path, name, text, message
+) -> None:
+    # Cast to int64, they became -9223372036854775808.
+    path = _file(tmp_path, name, text)
+    with pytest.raises(ValueError, match=message):
+        _rows(barcode_layout(path), 10)
+
+
+@pytest.mark.parametrize("layout", ["dense", "csr"])
+def test_anndata_counts_beyond_int64_are_refused(tmp_path, layout) -> None:
+    values = np.asarray([[0.0, 2.0**63], [1.0, 0.0]])
+    path = _matrix_h5ad(tmp_path / f"{layout}.h5ad", values, layout=layout)
+    with pytest.raises(ValueError, match="whole numbers of at least 0 and below"):
+        _rows(barcode_layout(path), 10)
+    # The largest float64 below 2**63 is read exactly.
+    values[0, 1] = np.nextafter(2.0**63, 0)
+    path = _matrix_h5ad(tmp_path / f"{layout}_largest.h5ad", values, layout=layout)
+    assert _entries(_rows(barcode_layout(path), 10)) == [
+        ("C0", "B1", 2**63 - 1024),
+        ("C1", "B0", 1),
+    ]
+
+
+def test_text_that_cannot_be_read_is_refused_naming_the_file(tmp_path) -> None:
+    # A gzip header followed by bytes that do not inflate.
+    corrupt = tmp_path / "counts.tsv.gz"
+    corrupt.write_bytes(gzip.compress(b"gene\tcell\tcount\n")[:10] + b"\xff" * 64)
+    with pytest.raises(ValueError, match="counts.tsv.gz is malformed"):
+        barcode_layout(corrupt)
+    # A merged table whose line beyond the header's block of text is not UTF-8.
+    path = tmp_path / "barcodes_output.csv"
+    rows = b"".join(b"s1,C%d,2\n" % row for row in range(5_000))
+    path.write_bytes(b"sample,cell,A\n" + rows + b"s1,C\xff2,1\n")
+    with pytest.raises(ValueError, match="is not a text file that CyteArc can read"):
+        _rows(barcode_layout(path), 10)
+
+
+def test_a_merged_table_that_numpy_cannot_parse_is_refused_as_malformed(
+    tmp_path, monkeypatch
+) -> None:
+    path = _file(tmp_path, "barcodes_output.csv", "sample,cell,A,B\ns1,C1,0,2\n")
+    parse = np.loadtxt
+
+    def refused(*arguments, **options):
+        parse(*arguments, **options)
+        raise ValueError("unbalanced quotes")
+
+    monkeypatch.setattr(np, "loadtxt", refused)
+    # Fields that are a cell and counts, which numpy refuses anyway.
+    with pytest.raises(ValueError, match="is malformed: unbalanced quotes"):
+        _rows(barcode_layout(path), 10)

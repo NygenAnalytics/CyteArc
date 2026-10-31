@@ -162,6 +162,8 @@ _CLONE_COLUMNS = frozenset(
     {"clone_nr", "clone#", "Clone_ID", "clone.id", "VBC", "lineageGrp", "clone_opt"}
 )
 _NUCLEOTIDES = re.compile(r"^[ACGTN]+$")
+# Counts are stored as int64, so each must be below 2**63.
+_COUNT_LIMIT = 2.0**63
 # A chunk holds at most this many rows of a text table.
 _MAX_CHUNK_ROWS = 50_000
 # Bytes that a chunk holds per field of a text table while it parses it: the
@@ -912,12 +914,15 @@ def _required_text(
     return values
 
 
-def _parsed_counts(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _parsed_counts(
+    values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Parse counts once per distinct value, as ``parse_integers`` parses them.
 
     Returns:
-        Each value's count, -1 where missing; whether it is missing; and
-        whether it is no whole number of at least 0.
+        Each value's count, -1 where missing; whether it is missing; whether
+        it is no whole number of at least 0; and whether it is one too large
+        for int64.
     """
     codes, distinct = pd.factorize(np.asarray(values, dtype=object))
     text = pd.Series(distinct, dtype=object).str.strip()
@@ -928,22 +933,29 @@ def _parsed_counts(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarr
     bad = ~missing & (
         ~np.isfinite(numbers) | (numbers < 0) | (numbers != np.floor(numbers))
     )
+    huge = ~missing & ~bad & (numbers >= _COUNT_LIMIT)
     counts = np.full(len(distinct), -1, dtype=np.int64)
-    whole = ~missing & ~bad
+    whole = ~missing & ~bad & ~huge
     counts[whole] = numbers[whole].astype(np.int64)
-    return counts[codes], missing[codes], bad[codes]
+    return counts[codes], missing[codes], bad[codes], huge[codes]
 
 
 def _item_counts(
     items: np.ndarray, origin: np.ndarray, name: str, first_line: int
 ) -> np.ndarray:
     """Parse the counts of list items, naming the file lines of bad ones."""
-    counts, _missing, bad = _parsed_counts(items)
+    counts, _missing, bad, huge = _parsed_counts(items)
     if bad.any():
         raise ValueError(
             f"{name} must be a whole number of at least 0, but holds "
             f"{str(items[np.flatnonzero(bad)[0]]).strip()!r} on "
             + file_lines(origin[bad], first_line)
+        )
+    if huge.any():
+        raise ValueError(
+            f"{name} holds a number too large for int64, "
+            f"{str(items[np.flatnonzero(huge)[0]]).strip()!r}, on "
+            + file_lines(origin[huge], first_line)
         )
     return counts
 
@@ -1175,16 +1187,16 @@ def _refuse_wide_lines(
     block = np.asarray(
         [[fields[position] for position in positions] for fields in rows], dtype=object
     )
-    _counts, missing, bad = _parsed_counts(block.reshape(-1))
-    wrong = np.flatnonzero(missing | bad)
+    _counts, missing, bad, huge = _parsed_counts(block.reshape(-1))
+    wrong = np.flatnonzero(missing | bad | huge)
     if len(wrong):
         row, column = divmod(int(wrong[0]), len(positions))
         raise ValueError(
             f"{layout.path} holds {str(block[row, column]).strip()!r} as the count "
             f"of barcode {text.names[positions[column]]!r} on "
             + file_lines(numbers[np.unique(wrong // len(positions))], 0)
-            + "; QuiCAT's merged table holds a whole number of at least 0 in "
-            "every field"
+            + "; every field of QuiCAT's merged table holds a count of UMIs, a "
+            "whole number of at least 0 and below 2**63"
         )
     raise ValueError(f"{layout.path} is malformed: {error}")
 
@@ -1238,6 +1250,7 @@ def _iter_wide_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[BarcodeR
             or len(cells) != len(lines)
             or not np.all(np.isfinite(values))
             or not np.all(values >= 0)
+            or not np.all(values < _COUNT_LIMIT)
             or not np.all(values == np.floor(values))
         ):
             _refuse_wide_lines(
@@ -1256,9 +1269,15 @@ def _iter_wide_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[BarcodeR
 
 def _whole_counts(values: np.ndarray, path: str) -> np.ndarray:
     numbers = np.asarray(values, dtype=np.float64)
-    if np.any(~np.isfinite(numbers) | (numbers < 0) | (numbers != np.floor(numbers))):
+    if np.any(
+        ~np.isfinite(numbers)
+        | (numbers < 0)
+        | (numbers >= _COUNT_LIMIT)
+        | (numbers != np.floor(numbers))
+    ):
         raise ValueError(
-            f"The counts in X of {path} must be whole numbers of at least 0"
+            f"The counts in X of {path} must be whole numbers of at least 0 and "
+            "below 2**63"
         )
     return numbers.astype(np.int64)
 
