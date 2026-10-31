@@ -23,6 +23,7 @@ from tests.clone_helpers import (
     copy_clone_store,
     coupling_reference,
     every_cell,
+    ids_read_bytes,
     import_truth_clones,
     open_clone_store,
     write_truth_store,
@@ -602,8 +603,9 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
     monkeypatch.setattr(store, "memoryBytes", measured)
     saved = store.clones.fate_bias(clones, **options)
     # Loading: per early cell 200 bytes and 24 per fraction, per row of clone
-    # and fate 160 bytes and 16 per key column, 2,000 per fate, and the
-    # clones read with their labels, eight of one stored character.
+    # and fate 160 bytes and 16 per key column, 2,000 per fate, the clones
+    # read with their labels, eight of one stored character, and the early
+    # cells' IDs read as text.
     loaded = (
         n_early * (200 + 24 * n_late)
         + tested * n_late * (160 + 16)
@@ -612,6 +614,7 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
         + 8 * (100 + 3 * 4)
     )
     assert loaded == 111_296
+    loaded += ids_read_bytes(store, n_early)
     monkeypatch.setattr(store, "memoryBytes", loaded - 1)
     with pytest.raises(
         MemoryError, match=f"fate bias of {n_early} cells holds about {loaded}"

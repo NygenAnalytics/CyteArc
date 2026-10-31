@@ -250,25 +250,46 @@ def test_summaries_refuse_a_grouping_that_leaves_out_every_clone(source) -> None
 
 def test_summaries_name_missing_and_incomplete_clones(source) -> None:
     store = source.store
+    early = store.snapshot_cell_selection("is_d2")
+    late = store.snapshot_cell_selection("is_d4")
+
+    def fate_bias(clones):
+        return store.clones.fate_bias(
+            clones, group_by="cell_type", early=early, late=late
+        )
+
     summaries = (
         store.clones.expansion,
         store.clones.diversity,
         store.clones.rarefaction,
         lambda clones: store.clones.overlap(clones, group_by="sample"),
         store.clones.track,
+        lambda clones: store.clones.coupling(
+            clones, group_by="cell_type", permutations=0
+        ),
+        fate_bias,
     )
-    saved = store.clones.expansion(source.clones)
+    # Each saved result, with the loader that reads it.
+    saved = {
+        store.clones.expansion(source.clones): store.clones.load_expansion,
+        fate_bias(source.clones): store.clones.load_fate_bias,
+    }
     # Artifacts that the store does not hold raise KeyError.
     for summary in summaries:
         with pytest.raises(KeyError, match="Artifact does not exist"):
             summary(_unsaved(source.clones))
-    with pytest.raises(KeyError, match="Artifact does not exist"):
-        store.clones.load_expansion(_unsaved(saved))
+    for result, load in saved.items():
+        with pytest.raises(KeyError, match="Artifact does not exist"):
+            load(_unsaved(result))
     # An import that stopped before it finished leaves incomplete clones,
-    # which raise RuntimeError, also where a saved expansion reads them.
+    # which raise RuntimeError, also where a saved result reads them.
+    loads_of_saved = tuple(
+        lambda _ref, result=result, load=load: load(result)
+        for result, load in saved.items()
+    )
     for ref, readers in (
-        (source.clones, (*summaries, lambda _ref: store.clones.load_expansion(saved))),
-        (saved, (store.clones.load_expansion,)),
+        (source.clones, (*summaries, *loads_of_saved)),
+        *((result, (load,)) for result, load in saved.items()),
     ):
         attributes = artifact_group(store.zw, ref).attrs
         attributes["complete"] = False
@@ -278,7 +299,8 @@ def test_summaries_name_missing_and_incomplete_clones(source) -> None:
                     read(ref)
         finally:
             attributes["complete"] = True
-    assert store.clones.load_expansion(saved).cells.shape[0] == N_CELLS
+    for result, load in saved.items():
+        assert len(load(result).cells) > 0
 
 
 def _unsaved(ref: ArtifactRef) -> ArtifactRef:

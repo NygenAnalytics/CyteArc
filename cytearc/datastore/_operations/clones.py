@@ -2037,15 +2037,17 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a complete clone artifact,
-                ``method`` is unknown, ``permutations`` is 1 or negative,
-                ``seed`` is negative or 2**64 or more, no cell has both a
-                clone and a group,
-                fewer than two groups hold a cell with a clone, no two groups
-                share the labels that the clones keep apart, a column of the
-                groups is missing or named twice, a key column names a column
-                of the result, two groups get one name, or
+            ValueError: If ``clones`` is not a clone artifact, ``method`` is
+                unknown, ``permutations`` is 1 or negative, ``seed`` is
+                negative or 2**64 or more, no cell has both a clone and a
+                group, fewer than two groups hold a cell with a clone, no two
+                groups share the labels that the clones keep apart, a column
+                of the groups is missing or named twice, a key column names a
+                column of the result, two groups get one name, or
                 ``"normalized_covariance"`` meets fewer than two clones.
+            KeyError: If the store holds no such ``clones`` artifact.
+            RuntimeError: If the ``clones`` artifact is incomplete, as an
+                import that stopped before it finished leaves it.
             MemoryError: If reading the clones, grouping the cells, or the
                 coupling and one worker of its null do not fit the memory
                 budget.
@@ -2211,20 +2213,22 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a complete clone artifact,
-                ``early`` or ``late`` is not a cell selection or selects no
-                cell, a cell is both early and late, no late cell has both a clone and a fate,
+            ValueError: If ``clones`` is not a clone artifact, ``early`` or
+                ``late`` is not a cell selection or selects no cell, a cell is
+                both early and late, no late cell has both a clone and a fate,
                 fewer than two fates hold a late cell, a column of the fates
                 is missing or named twice, a key column names a column of the
                 result, two fates get one name, or a fate is named
                 ``"clone"``, ``"late_cells"`` or ``"fate"``.
+            KeyError: If the store holds no such ``clones`` artifact.
+            RuntimeError: If the ``clones`` artifact is incomplete, as an
+                import that stopped before it finished leaves it.
             PermissionError: If the store is read-only and the result is not
                 saved yet.
             MemoryError: If reading the clones, grouping the late cells, or
                 the measurement does not fit the memory budget.
         """
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
+        bool_argument(invalidate_cache, "invalidate_cache")
         for name, selection in (("early", early), ("late", late)):
             if not isinstance(selection, ArtifactRef):
                 raise TypeError(f"{name} must be an ArtifactRef")
@@ -2418,10 +2422,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If ``bias`` is not an ArtifactRef.
-            ValueError: If it is not a complete ``clone_fate_bias`` artifact.
+            ValueError: If it is not a ``clone_fate_bias`` artifact.
+            KeyError: If the store holds no such artifact, or not the clones
+                that it measured.
+            RuntimeError: If the artifact or the clones that it measured are
+                incomplete.
             MemoryError: If the tables, about 200 bytes per early cell, 24 per
-                fraction and 160 per row of clone and fate, beside the clone
-                labels that they read, do not fit the memory budget.
+                fraction and 160 per row of clone and fate, beside the early
+                cells' IDs as text and the clone labels that they read, do not
+                fit the memory budget.
         """
         if not isinstance(bias, ArtifactRef):
             raise TypeError("bias must be an ArtifactRef")
@@ -2459,6 +2468,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 + _BIAS_TABLE_BYTES_PER_KEY_COLUMN * len(key_columns)
             )
             + _SUMMARY_BYTES_PER_GROUP * n_fates
+            # The early cells' IDs, read as text for the index of their table.
+            + text_read_bytes(self.cells._get_array("ids"), n_early)
             + self._clone_input_bytes(clones, with_ids=True)
         )
         self._check_clone_table_budget(n_early, 0, "fate bias", held=resident)

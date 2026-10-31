@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from cytearc.datastore.datastore import DataStore
+from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import logger
 from tests.storage_helpers import write_count_store
 
@@ -203,6 +204,32 @@ def _loaded_fate_bias(
     return run
 
 
+def _saved_fate_bias(
+    clones: str, **options: str
+) -> Callable[[SimpleNamespace], object]:
+    """Load the fate bias that the first run saves, so later runs only load it.
+
+    The first run, which warms the caches at the full budget, measures the
+    fate bias of the first cells; the smallest budget accepted and the traced
+    peak are then those of loading alone.
+    """
+    saved: list[ArtifactRef] = []
+
+    def run(data: SimpleNamespace) -> object:
+        if not saved:
+            saved.append(
+                data.store.clones.fate_bias(
+                    getattr(data, clones),
+                    early=data.first,
+                    late=data.after_first,
+                    **options,
+                )
+            )
+        return data.store.clones.load_fate_bias(saved[0])
+
+    return run
+
+
 CASES: dict[str, Callable[[SimpleNamespace], object]] = {
     "expansion of every cell": _expansion(),
     "expansion by two columns of long labels": _expansion(
@@ -289,6 +316,9 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
     ),
     "loaded fate bias of 160-character clone labels": _loaded_fate_bias(
         "long", group_by="donor"
+    ),
+    "loaded fate bias of a few early cells of short clone labels": _saved_fate_bias(
+        "clones", group_by="donor"
     ),
     "loaded fate bias of emoji clone labels by a label for each of 300 late cells": (
         _loaded_fate_bias("emoji", late="next_300", groups="own_next_300")
