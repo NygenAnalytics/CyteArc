@@ -12,7 +12,7 @@ import pandas as pd
 from scipy.sparse import coo_matrix
 
 from ..utils.progress import iter_progress
-from ._contigs import compression, header_fields, parse_contig_columns
+from ._contigs import header_fields, parse_contig_columns, read_options
 from ._assay_names import (
     AUTO_ASSAY_NAMES,
     auto_name_feat_table,
@@ -1006,7 +1006,8 @@ def iter_vdj_contigs(
     ``fwr1_aa`` and ``fwr1``. ``is_cell``, ``high_confidence``,
     ``full_length``, ``raw_clonotype_id``, ``raw_consensus_id`` and
     ``exact_subclonotype_id`` keep their names, and other columns are not
-    kept. A plain or gzip-compressed file is read.
+    kept. A plain or gzip-compressed file is read, and blank lines hold no
+    contig.
 
     Args:
         path: ``filtered_contig_annotations.csv`` or
@@ -1014,7 +1015,7 @@ def iter_vdj_contigs(
         chunk_rows: The most rows to parse at once.
 
     Yields:
-        The file line of each chunk's first row and the chunk's parsed fields:
+        The file line where each chunk starts and the chunk's parsed fields:
         ``cell_id`` and each AIRR field that the file holds, text as Python
         strings with None where missing, flags as int8 and counts as int64.
 
@@ -1039,12 +1040,9 @@ def iter_vdj_contigs(
     line = 2
     reader = pd.read_csv(
         path,
-        dtype=str,
-        keep_default_na=False,
-        na_filter=False,
-        compression=compression(path),
         usecols=lambda name: str(name).strip() in _VDJ_COLUMNS,
         chunksize=max(1, int(chunk_rows)),
+        **read_options(path),
     )
     with reader:
         for chunk in reader:

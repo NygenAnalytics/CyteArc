@@ -84,9 +84,33 @@ NUMBER: FieldKind = "number"
 _KINDS = (TEXT, RAGGED, INTEGER, FLAG, NUMBER)
 
 #: Text that stands for a missing value in the files of single-cell tools:
-#: AIRR files write nothing, and Cell Ranger and other tools write ``None`` or
-#: ``NA``.
-MISSING_TEXT = frozenset({"", "None", "none", "NA", "NaN", "nan", "null", "NULL"})
+#: AIRR files write nothing, Cell Ranger writes ``None``, R writes ``NA`` and
+#: spreadsheets ``#N/A``. These are the tokens that pandas reads as missing by
+#: default, and ``none``.
+MISSING_TEXT = frozenset(
+    {
+        "",
+        "#N/A",
+        "#N/A N/A",
+        "#NA",
+        "-1.#IND",
+        "-1.#QNAN",
+        "-NaN",
+        "-nan",
+        "1.#IND",
+        "1.#QNAN",
+        "<NA>",
+        "N/A",
+        "NA",
+        "NULL",
+        "NaN",
+        "None",
+        "n/a",
+        "nan",
+        "none",
+        "null",
+    }
+)
 
 _TRUE = frozenset({"T", "TRUE", "True", "true", "1"})
 _FALSE = frozenset({"F", "FALSE", "False", "false", "0"})
@@ -104,6 +128,24 @@ def _checked_fields(fields: Mapping[str, FieldKind]) -> Mapping[str, FieldKind]:
             + ", ".join(map(repr, _KINDS))
         )
     return MappingProxyType(dict(fields))
+
+
+def _require_text(values: np.ndarray, what: str) -> None:
+    """Refuse an object array that holds values other than text and NAs.
+
+    Raises:
+        TypeError: If a value is neither text nor missing, naming ``what``.
+    """
+    if pd.api.types.infer_dtype(values, skipna=True) in ("string", "empty"):
+        return
+    for value in values.tolist():
+        if isinstance(value, str):
+            continue
+        # pandas tells a missing scalar by a boolean, and returns an array
+        # for a value such as a list.
+        missing = pd.isna(value)
+        if not (isinstance(missing, bool | np.bool_) and missing):
+            raise TypeError(f"{what} must be text or missing, but holds {value!r}")
 
 
 def file_lines(rows: np.ndarray, first_line: int) -> str:
@@ -366,15 +408,23 @@ def encode_text(values: Any) -> EncodedText:
 
     Returns:
         The codes and the sorted distinct values.
+
+    Raises:
+        TypeError: If a value is neither text nor missing.
     """
     text = np.asarray(values, dtype=object).reshape(-1)
-    present = ~np.asarray(pd.isna(text), dtype=bool)
+    _require_text(text, "encode_text")
+    local, distinct = pd.factorize(text, use_na_sentinel=True)
+    # Object text sorts by code point, as fixed-width text would, without a
+    # copy padded to the longest value.
+    distinct = np.asarray(distinct, dtype=object)
+    ranks = np.argsort(distinct, kind="stable")
+    final = np.empty(len(distinct), dtype=np.int32)
+    final[ranks] = np.arange(len(distinct), dtype=np.int32)
     codes = np.full(len(text), -1, dtype=np.int32)
-    if not present.any():
-        return EncodedText.from_categories(codes, [])
-    categories, inverse = np.unique(text[present].astype(str), return_inverse=True)
-    codes[present] = inverse.astype(np.int32)
-    return EncodedText.from_categories(codes, categories)
+    present = local >= 0
+    codes[present] = final[local[present]]
+    return EncodedText.from_categories(codes, distinct[ranks])
 
 
 def decode_text(codes: np.ndarray, categories: np.ndarray) -> np.ndarray:
@@ -494,18 +544,28 @@ def take_text(
 
 @dataclass(frozen=True, slots=True)
 class RecordTable:
-    """Encoded records, ordered by cell, then by source, then by file row.
+    """Encoded records, ordered by cell.
+
+    :class:`RecordEncoder` orders the records of each cell by source, then by
+    file row; a table built otherwise keeps its own order within each cell.
 
     Attributes:
         cells: The position of each record's cell among the selected cells, in
             ascending order, as int64.
-        sources: The position of each record's source file, as int32.
-        kinds: The kind of each field that at least one source provides, in
-            the order of the encoder's fields.
+        sources: The position of each record's source, such as its file, as
+            int32.
+        kinds: The kind of each field that the table holds, in storage order.
         text: The codes and distinct values of each text field.
         ragged: The bytes and offsets of each ragged field.
         values: The int64, int8 or float64 values of each integer, flag and
             number field.
+
+    Raises:
+        ValueError: If a kind is unknown, the fields of ``text``, ``ragged``
+            and ``values`` are not those that ``kinds`` names for each, an
+            array does not hold one value per record (one offset more for
+            ragged fields), a text code names no value, or the cells are not
+            positions of at least 0 in ascending order.
     """
 
     cells: np.ndarray
@@ -514,6 +574,52 @@ class RecordTable:
     text: Mapping[str, EncodedText] = field(repr=False)
     ragged: Mapping[str, tuple[np.ndarray, np.ndarray]] = field(repr=False)
     values: Mapping[str, np.ndarray] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        kinds = _checked_fields(self.kinds)
+        cells = np.asarray(self.cells)
+        n_records = len(cells)
+        if cells.ndim != 1 or np.asarray(self.sources).shape != (n_records,):
+            raise ValueError("A record table needs one cell and one source per record")
+        if n_records and (cells[0] < 0 or bool((cells[1:] < cells[:-1]).any())):
+            raise ValueError(
+                "A record table's cells must be positions of at least 0, in "
+                "ascending order"
+            )
+        expected = {
+            "text": {name for name, kind in kinds.items() if kind == TEXT},
+            "ragged": {name for name, kind in kinds.items() if kind == RAGGED},
+            "values": {
+                name for name, kind in kinds.items() if kind not in (TEXT, RAGGED)
+            },
+        }
+        held = {"text": self.text, "ragged": self.ragged, "values": self.values}
+        for part, names in expected.items():
+            if set(held[part]) != names:
+                raise ValueError(
+                    f"A record table's {part} must hold the fields "
+                    + (", ".join(map(repr, sorted(names))) or "none")
+                    + " that kinds names for it, not "
+                    + (", ".join(map(repr, sorted(map(str, held[part])))) or "none")
+                )
+        for name, encoded in self.text.items():
+            codes = np.asarray(encoded.codes)
+            n_values = len(encoded.offsets) - 1
+            if codes.shape != (n_records,) or (
+                n_records and (codes.min() < -1 or codes.max() >= n_values)
+            ):
+                raise ValueError(
+                    f"Text field {name!r} needs one code per record: -1, or the "
+                    f"position of one of its {n_values} values"
+                )
+        for name, (_data, offsets) in self.ragged.items():
+            if np.asarray(offsets).shape != (n_records + 1,):
+                raise ValueError(
+                    f"Ragged field {name!r} needs one offset per record, and one more"
+                )
+        for name, column in self.values.items():
+            if np.asarray(column).shape != (n_records,):
+                raise ValueError(f"Field {name!r} needs one value per record")
 
     @property
     def fields(self) -> tuple[str, ...]:
@@ -644,21 +750,32 @@ class RecordEncoder:
     def add(self, chunk: pd.DataFrame, cells: np.ndarray, source: int) -> None:
         """Add a chunk of parsed records of one source.
 
+        A chunk that is refused leaves the encoder as it was.
+
         Args:
-            chunk: Parsed records, one row per record.
-            cells: The position of each row's cell among the selected cells.
-            source: The position of the chunk's source file.
+            chunk: Parsed records, one row per record: text as strings with
+                None or another NA where missing, integers of at least -1,
+                flags of -1, 0 or 1, and real numbers with NaN where missing.
+            cells: The position of each row's cell among the selected cells,
+                as integers of at least 0.
+            source: The position of the chunk's source file, at least 0.
 
         Raises:
-            ValueError: If ``cells`` does not hold one cell per row.
+            TypeError: If ``cells``, ``source`` or a field holds values of
+                another kind.
+            ValueError: If ``cells`` does not hold one cell per row, or a
+                cell, the source, an integer, a flag or a number is out of
+                range.
             RuntimeError: If the encoder has finished.
         """
         if self._finished:
             raise RuntimeError("The encoder has finished; start a new one")
         n_rows = len(chunk)
-        cell_positions = np.asarray(cells, dtype=np.int64).reshape(-1)
-        if len(cell_positions) != n_rows:
-            raise ValueError("A chunk needs one cell per record")
+        cell_positions = _checked_positions(cells, n_rows)
+        if isinstance(source, bool) or not isinstance(source, int | np.integer):
+            raise TypeError(f"source must be the position of a file, not {source!r}")
+        if source < 0:
+            raise ValueError(f"source must be a position of at least 0, not {source}")
         encoded = _Chunk(
             cells=cell_positions,
             source=int(source),
@@ -667,31 +784,38 @@ class RecordEncoder:
             values={},
             id_hashes=None,
         )
+        fields = []
+        missing_ids = 0
         for name in map(str, chunk.columns):
             kind = self._kinds.get(name)
             if kind is None:
                 continue
-            self._fields.add(name)
+            fields.append(name)
             if kind == TEXT:
                 codes, distinct = pd.factorize(
                     chunk[name].to_numpy(dtype=object), use_na_sentinel=True
                 )
+                _require_text(np.asarray(distinct, dtype=object), f"Field {name!r}")
                 data, offsets = pack_text(distinct)
                 encoded.text[name] = (np.asarray(codes, dtype=np.int32), data, offsets)
             elif kind == RAGGED:
                 values = chunk[name].to_numpy(dtype=object)
+                _require_text(values, f"Field {name!r}")
                 encoded.ragged[name] = encode_ragged(values)
                 if name == self._id_field:
-                    missing = np.asarray(pd.isna(values), dtype=bool)
-                    self._missing_ids += int(missing.sum())
+                    missing_ids += int(np.count_nonzero(pd.isna(values)))
+                    # Hashing the strings themselves needs no copy padded to
+                    # the longest ID.
                     encoded.id_hashes = np.asarray(
-                        pd.util.hash_array(values.astype(str)), dtype=np.uint64
+                        pd.util.hash_array(values, categorize=False), dtype=np.uint64
                     )
             else:
-                encoded.values[name] = _typed_values(kind, chunk[name], n_rows)
+                encoded.values[name] = _checked_values(kind, chunk[name], name)
         if self._id_field is not None and encoded.id_hashes is None:
             # A chunk without the ID field holds no record with an ID.
-            self._missing_ids += n_rows
+            missing_ids += n_rows
+        self._fields.update(fields)
+        self._missing_ids += missing_ids
         self._nbytes += (
             cell_positions.nbytes
             + sum(array.nbytes for parts in encoded.text.values() for array in parts)
@@ -798,7 +922,7 @@ class RecordEncoder:
                 ]
                 ragged[name] = take_ragged(*_concatenate_ragged(ragged_pieces), order)
             else:
-                placed = _typed_values(kind, None, len(order))
+                placed = _missing_values(kind, len(order))
                 for position, chunk in enumerate(chunks):
                     if name in chunk.values:
                         rows = destination[bounds[position] : bounds[position + 1]]
@@ -870,19 +994,76 @@ def _merge_text(
     return EncodedText(codes=codes[order], data=data, offsets=offsets)
 
 
-def _typed_values(kind: str, column: Any, n_rows: int) -> np.ndarray:
-    """Return a chunk's integers, flags or numbers, missing where absent."""
+def _checked_positions(cells: Any, n_rows: int) -> np.ndarray:
+    """Return a chunk's cells as int64, refusing values that are not positions."""
+    positions = np.asarray(cells).reshape(-1)
+    if positions.size and positions.dtype.kind not in "iu":
+        raise TypeError(
+            "cells must be the positions of selected cells, as integers, not "
+            f"{positions.dtype}"
+        )
+    if len(positions) != n_rows:
+        raise ValueError("A chunk needs one cell per record")
+    if positions.size and positions.min() < 0:
+        raise ValueError(
+            f"cells must be positions of at least 0, but hold {positions.min()}"
+        )
+    return positions.astype(np.int64, copy=False)
+
+
+def _checked_values(kind: str, column: Any, name: str) -> np.ndarray:
+    """Return a chunk's integers, flags or numbers, refusing other values.
+
+    Raises:
+        TypeError: If the values have a dtype of another kind.
+        ValueError: If an integer is below -1, a flag is not -1, 0 or 1, or a
+            number is infinite.
+    """
+    values = np.asarray(column)
+    if kind == NUMBER:
+        if values.size and values.dtype.kind not in "iuf":
+            raise TypeError(
+                f"Field {name!r} holds numbers, so its values must be real "
+                f"numbers, not {values.dtype}"
+            )
+        numbers = values.astype(np.float64)
+        if np.isinf(numbers).any():
+            raise ValueError(
+                f"Field {name!r} holds numbers, which must be finite, with NaN "
+                "for a missing value"
+            )
+        return numbers
+    accepted = "iu" if kind == INTEGER else "iub"
+    if values.size and values.dtype.kind not in accepted:
+        noun = "integers" if kind == INTEGER else "flags"
+        raise TypeError(
+            f"Field {name!r} holds {noun}, so its values must be integers, not "
+            f"{values.dtype}"
+        )
     if kind == INTEGER:
-        if column is None:
-            return np.full(n_rows, -1, dtype=np.int64)
-        return np.asarray(column, dtype=np.int64)
+        if values.size and (
+            values.min() < -1 or (values.dtype.kind == "u" and values.max() >= 2**63)
+        ):
+            raise ValueError(
+                f"Field {name!r} holds whole numbers of at least 0, with -1 for "
+                f"a missing value, but holds {values.min()} or a value beyond int64"
+            )
+        return values.astype(np.int64)
+    if values.size and (values.min() < -1 or values.max() > 1):
+        raise ValueError(
+            f"Field {name!r} holds flags, which are 1 for true, 0 for false and "
+            f"-1 for a missing value, but holds {values.min()} or {values.max()}"
+        )
+    return values.astype(np.int8)
+
+
+def _missing_values(kind: str, n_rows: int) -> np.ndarray:
+    """Return ``n_rows`` missing integers, flags or numbers."""
+    if kind == INTEGER:
+        return np.full(n_rows, -1, dtype=np.int64)
     if kind == FLAG:
-        if column is None:
-            return np.full(n_rows, -1, dtype=np.int8)
-        return np.asarray(column, dtype=np.int8)
-    if column is None:
-        return np.full(n_rows, np.nan, dtype=np.float64)
-    return np.asarray(column, dtype=np.float64)
+        return np.full(n_rows, -1, dtype=np.int8)
+    return np.full(n_rows, np.nan, dtype=np.float64)
 
 
 def _concatenate_ragged(

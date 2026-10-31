@@ -19,6 +19,7 @@ from cytearc.metadata.records import (
     TEXT,
     EncodedText,
     RecordEncoder,
+    RecordTable,
     chunk_rows_for,
     decode_ragged,
     decode_text,
@@ -398,3 +399,167 @@ def test_encoded_text_keeps_categories_in_the_order_given() -> None:
         None,
         "zeta",
     ]
+
+
+def test_text_parsing_reads_pandas_missing_tokens_as_missing() -> None:
+    # The tokens that pandas reads as missing by default, which scirpy's
+    # reader of Cell Ranger files sees as missing, and text that is not one.
+    tokens = ["N/A", "n/a", "#N/A", "<NA>", "#NA", "-nan", "NULL", "none"]
+    assert parse_text([*tokens, "NAN", "na", "N/A2"]).tolist() == [None] * 8 + [
+        "NAN",
+        "na",
+        "N/A2",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rows", "cells", "source", "error", "message"),
+    [
+        ({"reads": [1.0, np.nan]}, [0, 1], 0, TypeError, "'reads' holds integers"),
+        ({"reads": [3, -7]}, [0, 1], 0, ValueError, "at least 0, with -1"),
+        ({"kept": [2, 0]}, [0, 1], 0, ValueError, "'kept' holds flags"),
+        ({"kept": [-3, 1]}, [0, 1], 0, ValueError, "'kept' holds flags"),
+        ({"kept": [0.5, 1.0]}, [0, 1], 0, TypeError, "'kept' holds flags"),
+        ({"quality": ["high", "low"]}, [0, 1], 0, TypeError, "real numbers"),
+        ({"quality": [np.inf, 0.5]}, [0, 1], 0, ValueError, "must be finite"),
+        ({"barcode": ["AC", 5]}, [0, 1], 0, TypeError, "'barcode' must be text"),
+        ({"molecule": ["m1", 3]}, [0, 1], 0, TypeError, "'molecule' must be text"),
+        ({"molecule": ["m1", ["m2"]]}, [0, 1], 0, TypeError, "holds \\['m2'\\]"),
+        ({"barcode": ["AC", "GT"]}, [0, -5], 0, ValueError, "at least 0, but hold -5"),
+        ({"barcode": ["AC", "GT"]}, [0.0, 1.0], 0, TypeError, "as integers"),
+        ({"barcode": ["AC", "GT"]}, [0, 1], -1, ValueError, "at least 0, not -1"),
+        ({"barcode": ["AC", "GT"]}, [0, 1], True, TypeError, "position of a file"),
+    ],
+)
+def test_an_encoder_refuses_values_of_the_wrong_kind_and_stays_unchanged(
+    rows, cells, source, error, message
+) -> None:
+    encoder = RecordEncoder(MOLECULE_FIELDS, id_field="molecule")
+    encoder.add(_molecules({"molecule": ["m0"], "barcode": ["TT"]}), [0], source=0)
+    before = (encoder.n_records, encoder.nbytes, encoder.missing_ids)
+    # Each bad chunk also holds valid fields, which a refusal must not keep.
+    frame = _molecules({"library": ["lib_a", "lib_a"], **rows})
+    with pytest.raises(error, match=message):
+        encoder.add(frame, np.asarray(cells), source=source)
+    assert (encoder.n_records, encoder.nbytes, encoder.missing_ids) == before
+    assert encoder.finish().fields == ("molecule", "barcode")
+
+
+def test_an_encoder_takes_integers_of_any_width_and_boolean_flags() -> None:
+    encoder = RecordEncoder(MOLECULE_FIELDS)
+    encoder.add(
+        pd.DataFrame(
+            {
+                "reads": np.asarray([7, -1], dtype=np.int32),
+                "kept": np.asarray([True, False]),
+                "quality": np.asarray([3, 4], dtype=np.int16),
+            }
+        ),
+        np.asarray([1, 0], dtype=np.uint8),
+        source=np.int64(2),
+    )
+    table = encoder.finish()
+    assert table.column("reads").tolist() == [-1, 7]
+    assert table.column("kept").tolist() == [0, 1]
+    assert table.column("quality").tolist() == [4.0, 3.0]
+    assert table.sources.tolist() == [2, 2]
+
+
+def _hand_built_table(**changes: object) -> RecordTable:
+    """Records built without an encoder, ordered by cell, barcode and UMI."""
+    barcode = encode_text(["AAAA", "AAAA", "CCCC"])
+    parts: dict[str, object] = {
+        "cells": np.asarray([0, 2, 2], dtype=np.int64),
+        "sources": np.asarray([1, 0, 0], dtype=np.int32),
+        "kinds": {"barcode": TEXT, "umi": RAGGED, "umis": INTEGER},
+        "text": {"barcode": barcode},
+        "ragged": {"umi": encode_ragged(["u1", None, "u3"])},
+        "values": {"umis": np.asarray([3, 1, -1], dtype=np.int64)},
+    }
+    parts.update(changes)
+    return RecordTable(**parts)  # type: ignore[arg-type]
+
+
+def test_a_table_built_by_hand_in_its_own_order_is_accepted() -> None:
+    table = _hand_built_table()
+    assert table.fields == ("barcode", "umi", "umis")
+    assert table.column("barcode").tolist() == ["AAAA", "AAAA", "CCCC"]
+    assert table.column("umi").tolist() == ["u1", None, "u3"]
+    empty = RecordTable(
+        cells=np.empty(0, np.int64),
+        sources=np.empty(0, np.int32),
+        kinds={},
+        text={},
+        ragged={},
+        values={},
+    )
+    assert empty.n_records == 0
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"cells": np.asarray([2, 0, 2])}, "ascending order"),
+        ({"cells": np.asarray([-1, 0, 2])}, "ascending order"),
+        ({"sources": np.asarray([0, 0])}, "one cell and one source per record"),
+        ({"cells": np.zeros((3, 1), np.int64)}, "one cell and one source"),
+        ({"kinds": {"barcode": TEXT, "umi": RAGGED, "umis": "count"}}, "kind 'count'"),
+        (
+            {"kinds": {"barcode": TEXT, "umis": INTEGER}},
+            "ragged must hold the fields none",
+        ),
+        ({"values": {}}, "values must hold the fields 'umis'"),
+        ({"text": {"barcode": encode_text(["AAAA"])}}, "one code per record"),
+        (
+            {"text": {"barcode": EncodedText.from_categories([0, 1, 2], ["A", "C"])}},
+            "one of its 2 values",
+        ),
+        ({"ragged": {"umi": encode_ragged(["u1"])}}, "one offset per record"),
+        ({"values": {"umis": np.asarray([3, 1])}}, "'umis' needs one value per record"),
+    ],
+)
+def test_a_table_refuses_arrays_that_do_not_fit_its_records(changes, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        _hand_built_table(**changes)
+
+
+def test_ids_and_text_are_encoded_without_a_copy_padded_to_the_longest_value() -> None:
+    import tracemalloc
+
+    # A copy padded to the one long value would take 2,000 rows of 10,000
+    # characters, 80 MB; the values themselves take about 10 MB.
+    values = [f"m{row}" for row in range(1_999)] + ["x" * 10_000]
+    frame = pd.DataFrame({"molecule": pd.Series(values, dtype=object)})
+    tracemalloc.start()
+    try:
+        RecordEncoder(MOLECULE_FIELDS, id_field="molecule").add(
+            frame, np.arange(len(values)), source=0
+        )
+        encode_text(values)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 20 * 2**20
+
+
+def test_an_encoder_counts_the_bytes_of_every_array_it_holds() -> None:
+    encoder = RecordEncoder(MOLECULE_FIELDS, id_field="molecule")
+    encoder.add(
+        _molecules(
+            {
+                "barcode": ["AAAA", "AAAA", "CC", None],
+                "molecule": ["m1", "m22", None, "m4"],
+                "reads": [1, 2, 3, 4],
+            }
+        ),
+        np.arange(4),
+        source=0,
+    )
+    # Derived by hand: four cells as int64; four barcode codes as int32 with
+    # the distinct values AAAA and CC packed in 6 bytes and 3 int64 offsets;
+    # the IDs' 7 bytes with 5 int64 offsets and 4 uint64 hashes; four reads.
+    cells = 4 * 8
+    barcode = 4 * 4 + 6 + 3 * 8
+    molecule = 7 + 5 * 8 + 4 * 8
+    reads = 4 * 8
+    assert encoder.nbytes == cells + barcode + molecule + reads == 189

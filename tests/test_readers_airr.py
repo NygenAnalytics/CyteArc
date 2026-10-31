@@ -113,6 +113,130 @@ def test_airr_files_without_a_locus_have_it_inferred(tmp_path) -> None:
     assert chunk["locus"].tolist() == ["TRB", "TRA"]
 
 
+def test_a_constant_gene_call_alone_names_the_locus(tmp_path) -> None:
+    header = "cell_id\tsequence_id\tv_call\tc_call\tjunction_aa\tproductive"
+    rows = ["c1\ts1\t\tIGHM\tCAR\tT", "c1\ts2\tIGKV1\tIGHG1\tCQQ\tT"]
+    path = _write(tmp_path / "rearrangements.tsv", [header, *rows])
+    ((_line, chunk),) = iter_airr_rearrangements(path)
+    # The second contig's calls name two loci, so it has none.
+    assert chunk["locus"].tolist() == ["IGH", None]
+    only_constant = _write(
+        tmp_path / "constant.tsv",
+        [
+            "cell_id\tsequence_id\tc_call\tjunction_aa\tproductive",
+            "c1\ts1\tIGHM\tCAR\tT",
+        ],
+    )
+    ((_line, chunk),) = iter_airr_rearrangements(only_constant)
+    assert chunk["locus"].tolist() == ["IGH"]
+
+
+@pytest.mark.parametrize("compress", [False, True])
+def test_a_byte_order_mark_is_not_part_of_the_header(tmp_path, compress) -> None:
+    airr = _write(tmp_path / "bom.tsv", ["\ufeff" + AIRR_HEADER, *AIRR_ROWS], compress)
+    cellranger = _write(
+        tmp_path / "bom.csv", ["\ufeff" + CELLRANGER_HEADER, *CELLRANGER_ROWS], compress
+    )
+    assert contig_file_format(airr) == "airr"
+    assert contig_file_format(cellranger) == "cellranger"
+    assert airr_columns(airr)[0] == "cell_id"
+    assert vdj_contig_columns(cellranger)[0] == "barcode"
+    ((_line, airr_chunk),) = iter_airr_rearrangements(airr)
+    ((_line, cellranger_chunk),) = iter_vdj_contigs(cellranger)
+    assert airr_chunk["cell_id"].tolist() == ["c1", "c1", "c2"]
+    assert cellranger_chunk["cell_id"].tolist() == ["AAAC-1", "AAAC-1", "AAAG-1"]
+
+
+def test_a_separator_ending_every_row_leaves_the_columns_in_place(tmp_path) -> None:
+    airr = _write(
+        tmp_path / "trailing.tsv", [AIRR_HEADER, *(row + "\t" for row in AIRR_ROWS)]
+    )
+    ((_line, chunk),) = iter_airr_rearrangements(airr)
+    assert chunk["cell_id"].tolist() == ["c1", "c1", "c2"]
+    assert chunk["productive"].tolist() == [1, 0, 1]
+    cellranger = _write(
+        tmp_path / "trailing.csv",
+        [CELLRANGER_HEADER, *(row + "," for row in CELLRANGER_ROWS)],
+    )
+    ((_line, chunk),) = iter_vdj_contigs(cellranger)
+    assert chunk["sequence_id"].tolist() == [
+        "AAAC-1_contig_1",
+        "AAAC-1_contig_2",
+        "AAAG-1_contig_1",
+    ]
+
+
+@pytest.mark.parametrize("chunk_rows", [1, 2, 50_000])
+def test_blank_lines_hold_no_contig_and_keep_the_line_numbers(
+    tmp_path, chunk_rows
+) -> None:
+    airr = _write(
+        tmp_path / "blank.tsv",
+        [AIRR_HEADER, AIRR_ROWS[0], "", AIRR_ROWS[1], "", "", AIRR_ROWS[2], ""],
+    )
+    chunks = list(iter_airr_rearrangements(airr, chunk_rows=chunk_rows))
+    assert [value for _line, chunk in chunks for value in chunk["sequence_id"]] == [
+        "c1_1",
+        "c1_2",
+        "c2_1",
+    ]
+    # A row of empty fields, as spreadsheets end a table, is a blank line too.
+    cellranger = _write(
+        tmp_path / "blank.csv",
+        [CELLRANGER_HEADER, CELLRANGER_ROWS[0], "", CELLRANGER_ROWS[1], ",," * 15],
+    )
+    chunks = list(iter_vdj_contigs(cellranger, chunk_rows=chunk_rows))
+    assert [value for _line, chunk in chunks for value in chunk["sequence_id"]] == [
+        "AAAC-1_contig_1",
+        "AAAC-1_contig_2",
+    ]
+    # Line 5 holds the bad flag: the header, a row, a blank line, a row.
+    bad = AIRR_ROWS[1].replace("\tF\t", "\tmaybe\t")
+    with pytest.raises(ValueError, match="holds 'maybe' on line 5$"):
+        list(
+            iter_airr_rearrangements(
+                _write(
+                    tmp_path / "bad.tsv",
+                    [AIRR_HEADER, AIRR_ROWS[0], "", AIRR_ROWS[2], bad],
+                ),
+                chunk_rows=chunk_rows,
+            )
+        )
+    bad = CELLRANGER_ROWS[0].replace("true,true,QQV", "true,maybe,QQV")
+    with pytest.raises(ValueError, match="holds 'maybe' on line 5$"):
+        list(
+            iter_vdj_contigs(
+                _write(
+                    tmp_path / "bad.csv",
+                    [
+                        CELLRANGER_HEADER,
+                        CELLRANGER_ROWS[1],
+                        "",
+                        CELLRANGER_ROWS[2],
+                        bad,
+                    ],
+                ),
+                chunk_rows=chunk_rows,
+            )
+        )
+    # A row without a cell ID beside other values is not blank.
+    with pytest.raises(ValueError, match="cell_id is missing on line 4"):
+        list(
+            iter_airr_rearrangements(
+                _write(
+                    tmp_path / "no_cell.tsv",
+                    [
+                        AIRR_HEADER,
+                        AIRR_ROWS[0],
+                        "",
+                        "\t" + AIRR_ROWS[1].split("\t", 1)[1],
+                    ],
+                ),
+                chunk_rows=chunk_rows,
+            )
+        )
+
+
 def test_header_names_are_stripped(tmp_path) -> None:
     header = " cell_id \t sequence_id\tlocus \tjunction_aa\tproductive"
     path = _write(tmp_path / "rearrangements.tsv", [header, "c1\ts1\tTRB\tCASS\tT"])
@@ -211,7 +335,15 @@ def test_cellranger_columns_take_their_airr_names(tmp_path) -> None:
     assert chunk["is_cell"].tolist() == [1, 1, 0]
     assert chunk["umi_count"].tolist() == [11, 9, 1]
     assert chunk["consensus_count"].tolist() == [2699, 3202, 12]
-    assert chunk["cdr1_aa"].tolist() == ["TSG", None, None]
+    # Each region's amino acids and nucleotides, as Cell Ranger names them.
+    regions = {
+        "fwr1_aa": "QQV", "fwr1": "CAGCAG", "cdr1_aa": "TSG", "cdr1": "ACCAGT",
+        "fwr2_aa": "LYW", "fwr2": "CTGTAC", "cdr2_aa": "IYS", "cdr2": "ATCTAC",
+        "fwr3_aa": "LSQ", "fwr3": "CTGAGC", "fwr4_aa": "FGK", "fwr4": "TTCGGC",
+    }  # fmt: skip
+    assert {name: chunk[name].tolist() for name in regions} == {
+        name: [value, None, None] for name, value in regions.items()
+    }
     assert chunk["locus"].tolist() == ["TRA", "TRB", "Multi"]
     assert chunk["exact_subclonotype_id"].tolist() == ["1", "1", None]
 

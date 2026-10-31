@@ -142,7 +142,7 @@ def test_hash_collisions_are_not_reported_as_repeats(monkeypatch) -> None:
     monkeypatch.setattr(
         records_module.pd.util,
         "hash_array",
-        lambda values: np.zeros(len(values), dtype=np.uint64),
+        lambda values, **options: np.zeros(len(values), dtype=np.uint64),
     )
     encoder = contig_encoder()
     encoder.add(_chunk({"sequence_id": ["a", "b", "c", "b"]}), np.arange(4), source=0)

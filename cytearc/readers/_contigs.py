@@ -10,7 +10,13 @@ from ..metadata.records import file_lines, parse_columns, parse_text
 from ..repertoire.chains import infer_loci
 from ..repertoire.contigs import FIELDS
 
-__all__ = ["compression", "first_line", "header_fields", "parse_contig_columns"]
+__all__ = [
+    "compression",
+    "first_line",
+    "header_fields",
+    "parse_contig_columns",
+    "read_options",
+]
 
 _GENE_CALLS = ("v_call", "d_call", "j_call", "c_call")
 
@@ -26,10 +32,32 @@ def compression(path: str | os.PathLike[str]) -> str | None:
 
 
 def first_line(path: str | os.PathLike[str]) -> str:
-    """Return the first line of a plain or gzip-compressed text file."""
+    """Return the first line of a plain or gzip-compressed text file.
+
+    A UTF-8 byte order mark, which spreadsheet programs write, is not part of
+    the line.
+    """
     opener = gzip.open if compression(path) == "gzip" else open
-    with opener(path, "rt", encoding="utf-8", errors="replace") as text:
+    with opener(path, "rt", encoding="utf-8-sig", errors="replace") as text:
         return text.readline().rstrip("\r\n")
+
+
+def read_options(path: str | os.PathLike[str]) -> dict[str, object]:
+    """Return the options of ``pandas.read_csv`` that every contig reader shares.
+
+    Every value is read as text, empty where a field is empty, and the first
+    column is never taken as an index, so a separator at the end of every
+    row leaves the columns in place. Blank lines are read as rows, so that
+    the rows of a chunk follow the file's lines.
+    """
+    return {
+        "dtype": str,
+        "keep_default_na": False,
+        "na_filter": False,
+        "index_col": False,
+        "skip_blank_lines": False,
+        "compression": compression(path),
+    }
 
 
 def header_fields(path: str | os.PathLike[str], separator: str) -> tuple[str, ...]:
@@ -52,9 +80,12 @@ def parse_contig_columns(
 ) -> pd.DataFrame:
     """Parse the AIRR fields of a chunk of contig rows.
 
+    A row whose every field is empty, as a blank line reads, holds no contig
+    and is left out.
+
     Args:
-        frame: Raw text of one chunk, with AIRR field names, including
-            ``cell_id``.
+        frame: Raw text of one chunk, one row per file line, with AIRR field
+            names, including ``cell_id``.
         first_line: The file line of the chunk's first row, named in errors.
         infer_locus: Infer ``locus`` from the gene calls; for a file without a
             ``locus`` field.
@@ -68,9 +99,18 @@ def parse_contig_columns(
         ValueError: If a cell ID is missing, or a field holds a value of the
             wrong kind.
     """
+    raw_ids = frame["cell_id"].to_numpy(dtype=object)
+    # Only a row without a cell ID can be blank, so the other fields of most
+    # chunks are never compared.
+    blank = np.zeros(len(frame), dtype=bool)
+    candidates = np.flatnonzero(raw_ids == "")
+    if len(candidates):
+        blank[candidates] = (frame.iloc[candidates] == "").to_numpy().all(axis=1)
     parsed: dict[str, np.ndarray] = {}
-    cell_ids = parse_text(frame["cell_id"].to_numpy(dtype=object))
-    missing = np.flatnonzero([value is None for value in cell_ids])
+    cell_ids = parse_text(raw_ids)
+    missing = np.flatnonzero(
+        np.fromiter((value is None for value in cell_ids), bool, len(cell_ids)) & ~blank
+    )
     if len(missing):
         raise ValueError(f"cell_id is missing on {file_lines(missing, first_line)}")
     parsed["cell_id"] = cell_ids
@@ -81,9 +121,12 @@ def parse_contig_columns(
         )
     # Object columns keep None for missing text whatever string dtype pandas
     # would infer.
-    return pd.DataFrame(
+    chunk = pd.DataFrame(
         {
             name: pd.Series(values, dtype=object) if values.dtype == object else values
             for name, values in parsed.items()
         }
     )
+    if blank.any():
+        chunk = chunk.loc[~blank].reset_index(drop=True)
+    return chunk

@@ -4,9 +4,9 @@ The AIRR Community's Rearrangement schema (Vander Heiden et al. 2018) holds one
 row per rearrangement, here one contig of a cell's receptor chain, in a
 tab-separated file with a header of field names. True and false are written
 ``T`` and ``F`` and a missing value is empty. A single-cell file joins each row
-to its cell through ``cell_id``. Cell Ranger (``airr_rearrangement.tsv``),
-TRUST4, BD Rhapsody, IgBLAST with Change-O, MiXCR and dandelion write such
-files.
+to its cell through ``cell_id``. Cell Ranger writes such a file,
+``airr_rearrangement.tsv``, and other pipelines that follow the schema read the
+same when they hold the fields that an import needs.
 """
 
 import os
@@ -15,7 +15,7 @@ from collections.abc import Iterator
 import pandas as pd
 
 from ..repertoire.contigs import FIELDS, REQUIRED_FIELDS
-from ._contigs import compression, first_line, header_fields, parse_contig_columns
+from ._contigs import first_line, header_fields, parse_contig_columns, read_options
 
 __all__ = [
     "AIRR_FORMAT",
@@ -78,15 +78,16 @@ def iter_airr_rearrangements(
     """Parse an AIRR Rearrangement file in chunks of rows.
 
     A plain or gzip-compressed file is read. Fields outside ``FIELDS`` are not
-    kept. A file without ``locus`` has each contig's locus inferred from its
-    gene calls (:func:`cytearc.repertoire.chains.infer_loci`).
+    kept, and blank lines hold no rearrangement. A file without ``locus`` has
+    each contig's locus inferred from its gene calls
+    (:func:`cytearc.repertoire.chains.infer_loci`).
 
     Args:
         path: The AIRR Rearrangement file.
         chunk_rows: The most rows to parse at once.
 
     Yields:
-        The file line of each chunk's first row and the chunk's parsed fields:
+        The file line where each chunk starts and the chunk's parsed fields:
         ``cell_id`` and each field of ``FIELDS`` that the file holds, text as
         Python strings with None where missing, flags as int8, counts and
         positions as int64 and numbers as float64.
@@ -126,12 +127,9 @@ def iter_airr_rearrangements(
     reader = pd.read_csv(
         path,
         sep="\t",
-        dtype=str,
-        keep_default_na=False,
-        na_filter=False,
-        compression=compression(path),
         usecols=lambda name: str(name).strip() in kept,
         chunksize=max(1, int(chunk_rows)),
+        **read_options(path),
     )
     with reader:
         for chunk in reader:

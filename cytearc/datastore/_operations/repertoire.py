@@ -72,12 +72,24 @@ _IMPORT_ATTRIBUTES = (
     "unmatched_barcode_examples",
 )
 # At its peak, while it orders the contigs, ranks the chains and writes the
-# artifact, an import holds about four times the bytes of its encoded contigs,
-# as measured on 200,000 and 1,000,000 cells.
-_PEAK_PER_ENCODED_BYTE = 4
+# artifact, an import holds up to three times the bytes of its encoded
+# contigs beside what it holds for each selected cell, as measured on
+# Cell Ranger files with and without region sequences and on AIRR files with
+# sequences and alignments.
+_PEAK_PER_ENCODED_BYTE = 3
+# Bytes that an import holds for each selected cell beside the join's lookup
+# of cell IDs: the selection, the IDs while they are read, each cell's chain
+# slots, counts and labels, and the fixed-width text of the labels it writes.
+# With the lookup, up to 290 bytes per cell were resident at the peak on
+# 200,000 and 1,000,000 cells, and tracemalloc traces about 320.
+_IMPORT_BYTES_PER_CELL = 300
 # Bytes that a decoded contig field takes in a table, per contig, besides the
 # text of ragged fields.
 _TABLE_BYTES_PER_FIELD = 64
+# Bytes per cell of the table of cells without its slot fields: the cell IDs,
+# the labels and chain counts as read and as table columns, and the slots.
+# Up to 560 bytes per cell were resident at the peak, on 1,000,000 cells.
+_CELL_TABLE_BYTES_PER_CELL = 700
 # The bytes of each chunk of a contig array. Packed text and per-contig codes
 # are read and written whole, which chunks of megabytes make fast.
 _CONTIG_CHUNK_BYTES = 2 * 2**20
@@ -298,9 +310,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Profiling, assembles each cell's T or B cell receptor transcripts into
         contigs. The import reads Cell Ranger's contig annotations,
         ``filtered_contig_annotations.csv`` or ``all_contig_annotations.csv``,
-        or AIRR Rearrangement files, which Cell Ranger
-        (``airr_rearrangement.tsv``), TRUST4, BD Rhapsody, IgBLAST with
-        Change-O, MiXCR and dandelion write; each file's format is read from
+        or AIRR Rearrangement files with a ``cell_id`` field, such as Cell
+        Ranger's ``airr_rearrangement.tsv``; each file's format is read from
         its header unless ``format`` names it. It joins each contig to a
         selected cell by barcode, keeps every contig of the selected cells,
         and saves them as an ``immune_receptors`` artifact. Pass the TCR and
@@ -371,9 +382,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             FileNotFoundError: If a file does not exist.
             PermissionError: If the store is read-only and the receptors are
                 not saved yet.
-            MemoryError: If the import would not fit the memory budget: it
-                holds about four times the bytes of its encoded contigs at its
-                peak.
+            MemoryError: If the import would not fit the memory budget: at
+                its peak it holds about three times the bytes of its encoded
+                contigs and 400 bytes per selected cell.
         """
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
@@ -448,16 +459,27 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             )
             return planned.ref
         self._require_writable(arguments.operation)
+        # What the import holds for the selected cells is checked before
+        # their IDs are read.
+        held = (LOOKUP_BYTES_PER_CELL + _IMPORT_BYTES_PER_CELL) * n_cells
+        if held > self.memoryBytes:
+            raise MemoryError(
+                f"Importing contigs for {n_cells} selected cells holds about "
+                f"{held} bytes before the first contig is read, more than the "
+                f"memory budget of {self.memoryBytes} bytes. Raise mem_budget, or "
+                "pass a smaller cell_selection."
+            )
         # Only the selected cells' IDs are read, a sample's in a merged store.
         cell_ids = np.asarray(
             read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
         )
-        join = CellBarcodeJoin(cell_ids, memory_bytes=self.memoryBytes)
-        table = _encode_contigs(
-            sources,
-            join,
+        join = CellBarcodeJoin(
+            cell_ids,
             memory_bytes=self.memoryBytes,
-            held_bytes=LOOKUP_BYTES_PER_CELL * n_cells,
+            held_bytes=_IMPORT_BYTES_PER_CELL * n_cells,
+        )
+        table = _encode_contigs(
+            sources, join, memory_bytes=self.memoryBytes, held_bytes=held
         )
         # Files without a contig row give no locus field and no contig.
         locus = (
@@ -557,7 +579,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         resident = (
             _TABLE_BYTES_PER_FIELD * n_contigs * (len(chosen) + 3)
             + 2 * sequence_bytes
-            + _TABLE_BYTES_PER_FIELD * n_cells * (slot_columns + len(_CELL_ARRAYS))
+            + (_CELL_TABLE_BYTES_PER_CELL + _TABLE_BYTES_PER_FIELD * slot_columns)
+            * n_cells
         )
         if resident > self.memoryBytes:
             raise MemoryError(

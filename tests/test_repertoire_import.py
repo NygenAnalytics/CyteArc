@@ -151,6 +151,25 @@ def test_import_classifies_each_cells_chains(tmp_path) -> None:
     assert by_id.loc["cell2_contig_2", "chain"] == np.False_  # non-productive
     assert by_id.loc["cell3_contig_3", "chain"] == np.True_  # a chain in no slot
     assert by_id.loc["cell3_contig_3", "slot"] == ""
+    # The slots of the contigs whose IDs are unique, derived from the rows:
+    # cell1's alpha and cell3's beta chains rank by UMIs, and cell2's
+    # non-productive and cell5's flagged contigs fill no slot.
+    expected_slots = {
+        "cell1_contig_1": "VJ_1",
+        "cell1_contig_2": "VJ_2",
+        "cell1_contig_3": "VDJ_1",
+        "cell2_contig_1": "VDJ_1",
+        "cell2_contig_2": "",
+        "cell3_contig_1": "VDJ_1",
+        "cell3_contig_2": "VDJ_2",
+        "cell4_contig_1": "VDJ_1",
+        "cell4_contig_2": "VJ_1",
+        "cell5_contig_1": "",
+        "cell6_contig_1": "VDJ_1",
+        "cell6_contig_2": "VJ_1",
+    }
+    unique = by_id.loc[~by_id.index.duplicated(keep=False), "slot"].to_dict()
+    assert {name: unique[name] for name in expected_slots} == expected_slots
     assert by_id.loc["cell5_contig_1", "is_cell"] == np.False_
     assert by_id.loc["cell6_contig_1", "sequence_alignment"] == "ACGT-ACGT"
     assert pd.isna(by_id.loc["cell6_contig_2", "sequence_alignment"])
@@ -458,10 +477,184 @@ def test_import_refuses_contigs_larger_than_the_memory_budget(
     with pytest.raises(MemoryError, match="Raise mem_budget"):
         store.repertoire.import_receptors(tcr_file(tmp_path), cell_selection=cells)
     assert store.artifacts.list(kind="immune_receptors", scope="datastore") == []
-    # A budget below the lookup of the selected cells' IDs fails before reading.
+    # A budget below what the selected cells take fails before reading.
     monkeypatch.setattr(store, "memoryBytes", 500)
-    with pytest.raises(MemoryError, match="Joining file barcodes to 8 selected cells"):
+    with pytest.raises(MemoryError, match="Importing contigs for 8 selected cells"):
         store.repertoire.import_receptors(tcr_file(tmp_path), cell_selection=cells)
+
+
+def test_the_memory_check_is_three_times_the_encoded_contigs_and_400_bytes_per_cell(
+    tmp_path, monkeypatch
+) -> None:
+    from cytearc.datastore._operations import repertoire as operations
+    from cytearc.metadata import records
+
+    store = receptor_store(tmp_path)
+    cells = store.snapshot_cell_selection()
+    path = tcr_file(tmp_path)
+    encoded: list[int] = []
+    add = records.RecordEncoder.add
+
+    def recording_add(self, *arguments, **options):
+        add(self, *arguments, **options)
+        encoded.append(self.nbytes)
+
+    monkeypatch.setattr(records.RecordEncoder, "add", recording_add)
+    saved = store.repertoire.import_receptors(path, cell_selection=cells)
+    # The peak that the import documents: three times its encoded contigs and
+    # 400 bytes per selected cell.
+    estimate = 3 * max(encoded) + 400 * N_CELLS
+    monkeypatch.setattr(store, "memoryBytes", estimate - 1)
+    with pytest.raises(MemoryError, match=f"holds about {estimate} bytes at its peak"):
+        store.repertoire.import_receptors(
+            path, cell_selection=cells, invalidate_cache=True
+        )
+    assert store.artifacts.list(kind="immune_receptors", scope="datastore") == [saved]
+    monkeypatch.setattr(store, "memoryBytes", estimate)
+    assert (
+        store.repertoire.import_receptors(
+            path, cell_selection=cells, invalidate_cache=True
+        )
+        != saved
+    )
+
+    # Below the cells' share, the import refuses before it reads a cell ID.
+    def unread(*_arguments, **_options):
+        raise AssertionError("the cell IDs were read")
+
+    monkeypatch.setattr(operations, "read_metadata_rows_chunkwise", unread)
+    monkeypatch.setattr(store, "memoryBytes", 400 * N_CELLS - 1)
+    with pytest.raises(MemoryError, match="holds about 3200 bytes before the first"):
+        store.repertoire.import_receptors(
+            path, cell_selection=cells, invalidate_cache=True
+        )
+
+
+def _refused_estimate(run, store, monkeypatch, budget: int) -> int:
+    """Return the bytes that a run names when it refuses ``budget``."""
+    import re
+
+    with monkeypatch.context() as patched:
+        patched.setattr(store, "memoryBytes", budget)
+        with pytest.raises(MemoryError) as refused:
+            run()
+    found = re.search(r"holds? about (\d+) bytes", str(refused.value))
+    assert found is not None, str(refused.value)
+    return int(found.group(1))
+
+
+@pytest.mark.slow
+def test_the_memory_checks_cover_what_a_sparse_import_and_load_allocate(
+    tmp_path, monkeypatch
+) -> None:
+    import tracemalloc
+
+    from cytearc.datastore.datastore import DataStore
+    from tests.storage_helpers import write_count_store
+
+    # One cell in 50 has a contig, as when a store of every cell of a sample
+    # meets the contigs of its B cells, so what the import holds for each
+    # selected cell outweighs its contigs.
+    n_cells = 50_000
+    write_count_store(
+        str(tmp_path / "sparse.zarr"),
+        {"RNA": np.ones((n_cells, 1), dtype=np.uint16)},
+        "uint16",
+    )
+    store = DataStore(
+        str(tmp_path / "sparse.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        nthreads=1,
+    )
+    rows = [
+        f"cell{cell},true,cell{cell}_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,"
+        f"true,true,CASS{cell % 50}F,TGTGCC{cell % 50},40,3,ct{cell},ct{cell}_1"
+        for cell in range(0, n_cells, 50)
+    ]
+    path = write_lines(tmp_path, "sparse.csv", CELLRANGER_HEADER, rows)
+    cells = store.snapshot_cell_selection()
+    # Warm the process, so one-off costs such as lazy imports are paid.
+    small = receptor_store(tmp_path)
+    small.repertoire.import_receptors(
+        tcr_file(tmp_path), cell_selection=small.snapshot_cell_selection()
+    )
+
+    def run_import():
+        return store.repertoire.import_receptors(path, cell_selection=cells)
+
+    # The share of the cells passes the first check, so the second names the
+    # whole estimate.
+    held = _refused_estimate(run_import, store, monkeypatch, 1)
+    estimate = _refused_estimate(run_import, store, monkeypatch, held)
+    tracemalloc.start()
+    try:
+        ref = run_import()
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert estimate > held
+    assert peak <= estimate, (peak, estimate)
+
+    def run_load():
+        return store.repertoire.load_receptors(ref, fields=[])
+
+    load_estimate = _refused_estimate(run_load, store, monkeypatch, 1)
+    run_load()
+    tracemalloc.start()
+    try:
+        run_load()
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak <= load_estimate, (peak, load_estimate)
+
+
+def test_zero_counts_load_as_zero_and_missing_counts_as_missing(tmp_path) -> None:
+    store = receptor_store(tmp_path)
+    rows = [
+        # cell0's alpha chain has no UMI and no read; its beta chain's counts
+        # are missing.
+        TCR_ROWS[0].replace(",100,5,", ",0,0,"),
+        TCR_ROWS[1].replace(",200,8,", ",,,"),
+    ]
+    ref = store.repertoire.import_receptors(
+        tcr_file(tmp_path, rows, "zero.csv"),
+        cell_selection=store.snapshot_cell_selection(),
+    )
+    loaded = store.repertoire.load_receptors(ref)
+    chains = loaded.chains.set_index("sequence_id")
+    assert chains.loc["cell0_contig_1", "umi_count"] == 0
+    assert chains.loc["cell0_contig_1", "consensus_count"] == 0
+    assert pd.isna(chains.loc["cell0_contig_2", "umi_count"])
+    assert pd.isna(chains.loc["cell0_contig_2", "consensus_count"])
+    assert loaded.cells.loc["cell0", "VJ_1_umi_count"] == 0
+    assert pd.isna(loaded.cells.loc["cell0", "VDJ_1_umi_count"])
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        pytest.param(lambda stored: [*stored, "sequence"], id="field-without-array"),
+        pytest.param(lambda stored: "junction_aa", id="fields-not-a-list"),
+    ],
+)
+def test_a_saved_import_with_incomplete_contigs_is_imported_again(
+    tmp_path, fields
+) -> None:
+    from cytearc.storage.artifacts import artifact_group
+
+    store = receptor_store(tmp_path)
+    cells = store.snapshot_cell_selection()
+    path = tcr_file(tmp_path)
+    saved = store.repertoire.import_receptors(path, cell_selection=cells)
+    attributes = artifact_group(store.zw, saved).attrs
+    attributes["fields"] = fields(list(attributes["fields"]))
+    again = store.repertoire.import_receptors(path, cell_selection=cells)
+    assert again != saved
+    assert store.repertoire.load_receptors(again).cells["receptor_type"].tolist()[
+        :4
+    ] == ["TCR", "TCR", "TCR", "multichain"]
 
 
 def test_contig_arrays_are_chunked_by_bytes(tmp_path, monkeypatch) -> None:
