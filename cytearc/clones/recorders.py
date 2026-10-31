@@ -566,6 +566,23 @@ class LineageAlleles:
     records: pd.DataFrame = field(repr=False)
     files: pd.DataFrame = field(repr=False)
 
+    def site_states(self) -> pd.DataFrame:
+        """Count the cells in each state at each site, as :func:`site_state_counts` does.
+
+        Returns:
+            ``integration``, ``site``, ``state`` and ``cells``, one row per
+            integration, site and state.
+        """
+        records = self.records
+        return _site_state_counts(
+            records["cell"].cat.codes.to_numpy(),
+            records["integration"].cat.codes.to_numpy(),
+            records["site"].cat.codes.to_numpy(),
+            records["state"].cat.codes.to_numpy(),
+            np.asarray(records["integration"].cat.categories, dtype=object),
+            np.asarray(records["site"].cat.categories, dtype=object),
+        )
+
 
 def lineage_allele_frames(
     cell_ids: Any,
@@ -651,51 +668,79 @@ def _natural_ranks(values: np.ndarray) -> np.ndarray:
 _STATE_PRIORITY = np.asarray([2, 0, 1, 3, 4], dtype=np.int64)
 
 
-def site_state_counts(table: RecordTable) -> pd.DataFrame:
-    """Count the cells in each state at each site, over every allele row.
-
-    A cell counts once per site, in the first of these states that one of
-    its records at the site holds: mark, unknown mark, unedited, missing,
-    not applicable.
-
-    Returns:
-        One row per integration, site and state with cells: ``integration``,
-        ``site``, ``state`` and ``cells``, by integration and site in
-        natural order, then state in ``STATES`` order.
-    """
-    cells = np.asarray(table.cells, dtype=np.int64)
-    integrations = np.asarray(table.text["integration"].codes, dtype=np.int64)
-    sites = np.asarray(table.text["site"].codes, dtype=np.int64)
-    ranks = _STATE_PRIORITY[np.asarray(table.values["state"], dtype=np.int64)]
+def _site_state_counts(
+    cells: np.ndarray,
+    integrations: np.ndarray,
+    sites: np.ndarray,
+    states: np.ndarray,
+    integration_names: np.ndarray,
+    site_names: np.ndarray,
+) -> pd.DataFrame:
+    """Count the cells in each state at each site from the codes of records."""
+    cells = np.asarray(cells, dtype=np.int64)
+    integrations = np.asarray(integrations, dtype=np.int64)
+    sites = np.asarray(sites, dtype=np.int64)
+    ranks = _STATE_PRIORITY[np.asarray(states, dtype=np.int64)]
+    n_reached = len(np.unique(cells))
     order = np.lexsort((ranks, cells, sites, integrations))
-    starts = _group_starts(cells[order], sites[order], integrations[order])
-    # The first record of each cell and site has its lowest rank.
+    starts = _group_starts(integrations[order], sites[order], cells[order])
+    # The first record of each cell at each site has its lowest rank.
     first = order[starts]
     keys = np.stack([integrations[first], sites[first], ranks[first]], axis=1)
     distinct, counts = np.unique(keys.reshape(-1, 3), axis=0, return_counts=True)
-    state_of_rank = np.argsort(_STATE_PRIORITY)
-    integration_names = table.text["integration"].categories
-    site_names = table.text["site"].categories
-    counted = pd.DataFrame(
+    counted: dict[tuple[int, int], np.ndarray] = {}
+    for (integration, site, rank), count in zip(
+        distinct.tolist(), counts.tolist(), strict=True
+    ):
+        found = counted.setdefault(
+            (integration, site), np.zeros(len(STATES), dtype=np.int64)
+        )
+        found[int(np.argsort(_STATE_PRIORITY)[rank])] = count
+    named = {
+        (str(integration_names[integration]), str(site_names[site])): found
+        for (integration, site), found in counted.items()
+    }
+    rows: list[tuple[str, str, str, int]] = []
+    for integration, site in sort_categories(named):
+        found = named[(integration, site)]
+        # A cell that the recorder reached without a record at the site was
+        # not read there.
+        found[MISSING] += n_reached - int(found.sum())
+        rows.extend(
+            (integration, site, STATES[state], int(found[state]))
+            for state in range(len(STATES))
+        )
+    return pd.DataFrame(
         {
-            "integration": pd.Series(integration_names[distinct[:, 0]], dtype=object),
-            "site": pd.Series(site_names[distinct[:, 1]], dtype=object),
-            "state": pd.Series(
-                np.asarray(STATES, dtype=object)[state_of_rank[distinct[:, 2]]],
-                dtype=object,
-            ),
-            "cells": pd.Series(counts, dtype=np.int64),
+            "integration": pd.Series([row[0] for row in rows], dtype=object),
+            "site": pd.Series([row[1] for row in rows], dtype=object),
+            "state": pd.Series([row[2] for row in rows], dtype=object),
+            "cells": pd.Series([row[3] for row in rows], dtype=np.int64),
         }
     )
-    pairs = list(zip(counted["integration"], counted["site"], strict=True))
-    rank_of = {pair: rank for rank, pair in enumerate(sort_categories(set(pairs)))}
-    order = np.lexsort(
-        (
-            state_of_rank[distinct[:, 2]],
-            np.asarray([rank_of[pair] for pair in pairs], dtype=np.int64),
-        )
+
+
+def site_state_counts(table: RecordTable) -> pd.DataFrame:
+    """Count the cells in each state at each site.
+
+    The cells counted are those with a record, the cells that the recorder
+    reached. A cell counts once per site, in the first of these states that
+    one of its records there holds: mark, unknown mark, unedited, missing,
+    not applicable; a cell without a record at the site is missing there.
+
+    Returns:
+        One row per integration, site and state: ``integration``, ``site``,
+        ``state`` and ``cells``, by integration and site in natural order,
+        then state in ``STATES`` order.
+    """
+    return _site_state_counts(
+        table.cells,
+        table.text["integration"].codes,
+        table.text["site"].codes,
+        table.values["state"],
+        table.text["integration"].categories,
+        table.text["site"].categories,
     )
-    return counted.iloc[order].reset_index(drop=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -770,7 +815,9 @@ def _group_starts(*keys: np.ndarray) -> np.ndarray:
     return starts
 
 
-def character_matrix(table: RecordTable, *, unknown: str = "state") -> CharacterMatrix:
+def character_matrix(
+    table: RecordTable, *, unknown: str = "state", max_bytes: int | None = None
+) -> CharacterMatrix:
     """Turn allele records into a cells by characters matrix of integer states.
 
     Where the files give a cell several allele rows of one integration, the
@@ -786,9 +833,13 @@ def character_matrix(table: RecordTable, *, unknown: str = "state") -> Character
         unknown: ``"state"`` gives each distinct unknown mark of a character
             a state of its own, after the marks; ``"missing"`` writes unknown
             marks as missing.
+        max_bytes: The most bytes that the matrix's codes may take, 4 per
+            cell and character, or None for no limit.
 
     Raises:
         ValueError: If ``unknown`` is not one of ``UNKNOWN_POLICIES``.
+        MemoryError: If the codes would take more than ``max_bytes``, before
+            they are allocated.
     """
     if unknown not in UNKNOWN_POLICIES:
         raise ValueError(
@@ -893,6 +944,13 @@ def character_matrix(table: RecordTable, *, unknown: str = "state") -> Character
     # character.
     with_state = np.flatnonzero(record_codes >= 0)
     exported_cells = np.unique(cells[with_state])
+    n_bytes = 4 * len(exported_cells) * len(ranked_names)
+    if max_bytes is not None and n_bytes > max_bytes:
+        raise MemoryError(
+            f"The character matrix of {len(exported_cells)} cells by "
+            f"{len(ranked_names)} characters takes {n_bytes} bytes, more than the "
+            f"{max_bytes} bytes that the memory budget leaves it. Raise mem_budget."
+        )
     codes = np.full((len(exported_cells), len(ranked_names)), -1, dtype=np.int32)
     codes[
         np.searchsorted(exported_cells, cells[with_state]),

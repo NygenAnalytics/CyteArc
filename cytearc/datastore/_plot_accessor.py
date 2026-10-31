@@ -833,6 +833,20 @@ class DataStorePlotAccessor:
         """Plot the cells' genotype calls by group and on a two-dimensional layout."""
         return self._forward(PlotResult, "genotypes", locals())
 
+    def recorder_states(
+        self,
+        alleles: ArtifactRef,
+        *,
+        max_sites: int = 60,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the share of cells that each recorder site reads as each state."""
+        return self._forward(PlotResult, "recorder_states", locals())
+
     def guide_calls(
         self,
         calls: ArtifactRef,

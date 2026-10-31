@@ -650,6 +650,17 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
     # The four mutant cells carry one combination of calls, one clone.
     genotype_clones = store.variants.genotype_clones(variant_genotypes)
     stored: dict[str, set[str]] = {}
+    # PEtracer's characters: two marks and an unedited site of cell0, an
+    # unknown mark of cell1, nothing read of cell3 and three marks of cell5.
+    characters = tmp_path / "characters.csv"
+    characters.write_text(
+        "cell_barcode,intID1-EMX1,intID1-HEK3,intID1-RNF2\n"
+        "cell0,1,2,*\n"
+        "cell1,!,*,*\n"
+        "cell3,-,-,-\n"
+        "cell5,4,5,6\n"
+    )
+    alleles = store.clones.import_alleles(characters, cell_selection=cells)
 
     for ref, expected in (
         (clusters, np.array(list("aabbcc"))),
@@ -683,6 +694,7 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
         (variant_counts, np.array([4.0, 2.0, 4.0, 1.0, 5.0, np.nan])),
         (variant_genotypes, np.array([1, 1, 1, 0, 1, 0])),
         (genotype_clones, np.array(["clone_1"] * 3 + [""] + ["clone_1", ""])),
+        (alleles, np.array([2, 1, 0, 0, 0, 3])),
     ):
         loaded = store.artifacts.load_values(ref)
         np.testing.assert_array_equal(loaded.values, expected)
@@ -702,6 +714,9 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
             # Lineage barcodes' record_ arrays hold one row per molecule or
             # pair, or per distinct barcode or UMI.
             and not (ref.kind == "lineage_barcodes" and name.startswith("record_"))
+            # Lineage alleles' record_ arrays hold one row per site of an
+            # allele row, or per distinct integration, site or allele.
+            and not (ref.kind == "lineage_alleles" and name.startswith("record_"))
         }
         # An enrichment also stores the cell row of each score row, which
         # CellValues.cell_idx gives.

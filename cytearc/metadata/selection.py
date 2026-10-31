@@ -235,6 +235,13 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
                 "reference_distance_percentile": False,
             },
         ),
+        # The record_ arrays hold one row per site of an allele row, or per
+        # distinct integration, site or allele, which are not cell-aligned.
+        "lineage_alleles": CellValueSpec(
+            "n_edits",
+            False,
+            {"n_integrations": False, "n_records": False},
+        ),
         # The record_ arrays hold one row per molecule or barcode pair, or per
         # distinct barcode or UMI, which are not cell-aligned.
         "lineage_barcodes": CellValueSpec(

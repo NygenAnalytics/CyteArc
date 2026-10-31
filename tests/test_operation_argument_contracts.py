@@ -420,6 +420,25 @@ _CONTRACTS = (
         },
     ),
     OperationContract(
+        ClonesAccessor.import_alleles,
+        metadata_arguments.RecorderAlleleImportArguments,
+        # Each file is identified by its format, its one integration or the
+        # slots of its shorter integrations, the columns it reads, the SHA-256
+        # of its bytes and of the files read beside it, and how its barcodes
+        # name cells, in canonical order; paths are not recorded.
+        signature_only=_classified(
+            "transformed",
+            "paths",
+            "format",
+            "integrations",
+            "barcode_prefix",
+            "barcode_suffix",
+            "barcode_pattern",
+            "columns",
+        ),
+        model_only=_classified("resolved_input", "sources"),
+    ),
+    OperationContract(
         PerturbationAccessor.import_guide_calls,
         metadata_arguments.GuideCallImportArguments,
         # The file is identified by the SHA-256 of its bytes, not its path.

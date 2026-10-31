@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         CloneOverlap as CloneOverlap,
         CloneTracking as CloneTracking,
     )
+    from .recorders import LineageAlleles as LineageAlleles
 
 __all__ = [
     "COUPLING_METHODS",
@@ -37,6 +38,7 @@ __all__ = [
     "CloneOverlap",
     "CloneTracking",
     "Clones",
+    "LineageAlleles",
     "LineageBarcodes",
     "Rarefaction",
 ]
@@ -55,6 +57,7 @@ __getattr__, __dir__ = _lazy_facade(
         "CloneOverlap": ".overlap",
         "CloneTracking": ".overlap",
         "Clones": ".assignments",
+        "LineageAlleles": ".recorders",
         "LineageBarcodes": ".barcodes",
         "Rarefaction": ".diversity",
     },

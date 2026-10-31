@@ -46,6 +46,7 @@ ARTIFACT_KINDS = frozenset(
         "imported_coordinates",
         "label_transfer",
         "lineage_aggregation",
+        "lineage_alleles",
         "lineage_barcodes",
         "lineage_curves",
         "lineage_drivers",

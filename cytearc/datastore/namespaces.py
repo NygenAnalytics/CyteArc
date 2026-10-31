@@ -12,6 +12,7 @@ from ._operations.features import _FeatureOperationsMixin
 from ._operations.graph import _GraphOperationsMixin
 from ._operations.integration_metrics import _IntegrationMetricsOperationsMixin
 from ._operations.lineage_barcodes import _LineageBarcodeOperationsMixin
+from ._operations.recorder_alleles import _RecorderAlleleOperationsMixin
 from ._operations.mapping import _MappingOperationsMixin
 from ._operations.mapping_reference import _MappingReferenceOperationsMixin
 from ._operations.perturbation_associations import (
@@ -97,6 +98,9 @@ class ClonesAccessor(_Accessor):
     import_barcodes = _bind(_LineageBarcodeOperationsMixin._clones_import_barcodes)
     load_barcodes = _bind(_LineageBarcodeOperationsMixin._clones_load_barcodes)
     barcode_clones = _bind(_LineageBarcodeOperationsMixin._clones_barcode_clones)
+    import_alleles = _bind(_RecorderAlleleOperationsMixin._clones_import_alleles)
+    load_alleles = _bind(_RecorderAlleleOperationsMixin._clones_load_alleles)
+    export_characters = _bind(_RecorderAlleleOperationsMixin._clones_export_characters)
 
 
 class ClustersAccessor(_Accessor):
