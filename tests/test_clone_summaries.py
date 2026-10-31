@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.stats import fisher_exact
 
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
@@ -355,6 +356,28 @@ def test_fate_bias_follows_early_cells_to_their_clones_late_cells(source) -> Non
     assert set(loaded.clone_fates["clone"].astype(str)) == {
         labels[key] for key in clone_fates
     }
+    # Each clone is tested in each fate of its labels kept apart, against the
+    # late cells with a fate of those labels.
+    kept = _kept_labels(source, TRUTH.cell_types)
+    fate_cells = Counter(fates[cell] for cell in with_fate)
+    expected: dict[tuple[str, str], tuple[int, float]] = {}
+    for key, found in clone_fates.items():
+        n_late = sum(found.values())
+        own = [name for name in names if kept[name] == key[1:]]
+        population = sum(fate_cells[name] for name in own)
+        for name in own:
+            x, in_fate = found[name], fate_cells[name]
+            table = [[x, n_late - x], [in_fate - x, population - in_fate - n_late + x]]
+            p_value = fisher_exact(table, alternative="greater").pvalue
+            expected[(labels[key], name)] = (x, p_value)
+    tests = {
+        (str(row.clone), str(row.fate)): (row.cells, row.p_value)
+        for row in loaded.clone_fates.itertuples(index=False)
+    }
+    assert tests.keys() == expected.keys()
+    for name, (cells, p_value) in tests.items():
+        assert cells == expected[name][0], name
+        assert p_value == pytest.approx(expected[name][1], rel=1e-9), name
 
 
 def test_summaries_report_each_label_their_clones_keep_apart(source) -> None:
@@ -380,6 +403,35 @@ def test_summaries_report_each_label_their_clones_keep_apart(source) -> None:
     assert sorted(set(map(tuple, expansion.categories[columns].values.tolist()))) == (
         expected
     )
+    overlap = store.clones.overlap(source.clones, group_by="sample")
+    assert sorted(map(tuple, overlap.group_sizes[columns].values.tolist())) == expected
+    tracked = store.clones.track(source.clones, group_by="sample").cells
+    assert set(map(tuple, tracked[columns].values.tolist())) <= set(expected)
+    coupling = store.clones.coupling(source.clones, group_by="sample", permutations=0)
+    assert sorted(map(tuple, coupling.group_sizes[columns].values.tolist())) == (
+        expected
+    )
+    # The fates of the late cells by cell type, with the labels of their
+    # clones when the clones keep labels apart.
+    late = TRUTH.samples == "d4"
+    with_fate = late & (clonal | (not source.kept_apart))
+    by_type = [TRUTH.cell_types, *source.kept_apart.values()]
+    fates = sorted(
+        {
+            tuple(str(values[cell]) for values in by_type)
+            for cell in np.flatnonzero(with_fate)
+        }
+    )
+    bias = store.clones.load_fate_bias(
+        store.clones.fate_bias(
+            source.clones,
+            group_by="cell_type",
+            early=store.snapshot_cell_selection("is_d2"),
+            late=store.snapshot_cell_selection("is_d4"),
+        )
+    )
+    fate_columns = ["cell_type", *source.kept_apart]
+    assert sorted(map(tuple, bias.fates[fate_columns].values.tolist())) == fates
     if source.kept_apart:
         # T cells and B cells of one sample are measured apart.
         types = {key[:2] for key in expected}

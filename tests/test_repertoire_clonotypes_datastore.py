@@ -503,6 +503,61 @@ def test_summaries_keep_receptor_types_apart_within_one_clonotype(tmp_path) -> N
         ["BCR", 2, 1],
         ["TCR", 5, 1],
     ]
+    # By alternate cells, a and b: its T cells are cell0, cell2 and cell4 in a
+    # and cell1 and cell3 in b, its B cells cell6 in a and cell5 in b, and
+    # cell7, in b, is ambiguous. Overlap and coupling count its cells of each
+    # type as one clone of that type's groups.
+    store.cells.insert("tp", np.asarray(["a", "b"] * (N_CELLS // 2)))
+    overlap = store.clones.overlap(together, group_by="tp")
+    assert overlap.pairs[["group_1", "group_2", "shared"]].values.tolist() == [
+        ["a, BCR", "b, BCR", 1],
+        ["a, TCR", "b, TCR", 1],
+    ]
+    coupling = store.clones.coupling(
+        together, group_by="tp", method="abundance_cosine", permutations=0
+    )
+    assert coupling.group_sizes[["group", "cells", "clones"]].values.tolist() == [
+        ["a, BCR", 1, 1],
+        ["a, TCR", 3, 1],
+        ["b, ambiguous", 1, 1],
+        ["b, BCR", 1, 1],
+        ["b, TCR", 2, 1],
+    ]
+    # Each pair shares its one clone, so the clone sizes are parallel.
+    assert coupling.pairs[["group_1", "group_2", "coupling"]].values.tolist() == [
+        ["a, BCR", "b, BCR", 1.0],
+        ["a, TCR", "b, TCR", 1.0],
+    ]
+    # Fate bias tests a clonotype in the fates of one receptor type, so it
+    # refuses one whose early and late cells span types, and tests it among
+    # the cells of one type.
+    store.cells.insert("early", np.arange(N_CELLS) % 2 == 0)
+    store.cells.insert("late", np.arange(N_CELLS) % 2 == 1)
+    store.cells.insert("outcome", np.asarray(["x", "x", "y", "y"] * (N_CELLS // 4)))
+    with pytest.raises(ValueError, match="two labels in 'receptor_type'"):
+        store.clones.fate_bias(
+            together,
+            group_by="outcome",
+            early=store.snapshot_cell_selection("early"),
+            late=store.snapshot_cell_selection("late"),
+        )
+    t_cells = np.arange(N_CELLS) < 5
+    store.cells.insert("early_t", t_cells & (np.arange(N_CELLS) % 2 == 0))
+    store.cells.insert("late_t", t_cells & (np.arange(N_CELLS) % 2 == 1))
+    bias = store.clones.load_fate_bias(
+        store.clones.fate_bias(
+            together,
+            group_by="outcome",
+            early=store.snapshot_cell_selection("early_t"),
+            late=store.snapshot_cell_selection("late_t"),
+        )
+    )
+    # The late T cells, cell1 and cell3, lie in fates x and y.
+    assert bias.fates[["fate", "late_cells"]].values.tolist() == [
+        ["x, TCR", 1],
+        ["y, TCR", 1],
+    ]
+    assert bias.cells[["x, TCR", "y, TCR"]].values.tolist() == [[0.5, 0.5]] * 3
 
 
 def test_summaries_of_clonotypes_follow_a_cell_selection(tmp_path) -> None:
