@@ -195,6 +195,8 @@ def test_summaries_name_missing_and_incomplete_clones(source) -> None:
         store.clones.expansion,
         store.clones.diversity,
         store.clones.rarefaction,
+        lambda clones: store.clones.overlap(clones, group_by="sample"),
+        store.clones.track,
     )
     saved = store.clones.expansion(source.clones)
     # Artifacts that the store does not hold raise KeyError.

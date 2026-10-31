@@ -1736,12 +1736,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a complete clone artifact, no
-                cell has both a clone and a group, fewer than two groups hold
-                a cell with a clone, no two groups share the labels that the
-                clones keep apart, a column of the groups is missing or named
-                twice, a key column names a column of the result, or two
-                groups get one name.
+            ValueError: If ``clones`` is not a clone artifact, no cell has
+                both a clone and a group, fewer than two groups hold a cell
+                with a clone, no two groups share the labels that the clones
+                keep apart, a column of the groups is missing or named twice,
+                a key column names a column of the result, or two groups get
+                one name.
+            KeyError: If the store holds no such ``clones`` artifact.
+            RuntimeError: If the ``clones`` artifact is incomplete, as an
+                import that stopped before it finished leaves it.
             MemoryError: If reading the clones, grouping the cells, or the
                 pairs of groups do not fit the memory budget.
         """
@@ -1834,11 +1837,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a complete clone artifact, ``top``
-                is not positive, ``labels`` is empty or a label names no
-                clone, no cell has both a clone and a group, a column of the
-                groups is missing or named twice, a key column names a column
-                of the result, or two groups get one name.
+            ValueError: If ``clones`` is not a clone artifact, ``top`` is not
+                positive, ``labels`` is empty or a label names no clone, no
+                cell has both a clone and a group, a column of the groups is
+                missing or named twice, a key column names a column of the
+                result, or two groups get one name.
+            KeyError: If the store holds no such ``clones`` artifact.
+            RuntimeError: If the ``clones`` artifact is incomplete, as an
+                import that stopped before it finished leaves it.
             MemoryError: If reading the clones, grouping the cells, or the
                 table of the chosen clones' groups does not fit the memory
                 budget.
