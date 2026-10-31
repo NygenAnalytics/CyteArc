@@ -30,12 +30,11 @@ from cytearc.perturbation.signature import (
 from cytearc.storage.artifacts import inspect_artifact
 from cytearc.utils.logging import logger
 from tests.perturbation_helpers import (
+    check_budget,
     copy_store,
     fixed_labels,
     memory_screen,
-    needed_budget,
     open_store,
-    smallest_budget,
     use_python_kernels,
     write_screen,
     written,
@@ -608,18 +607,13 @@ def test_signature_runs_within_the_budget_it_names(memory) -> None:
             invalidate_cache=True,
         )
 
-    needed, ref, peak = smallest_budget(memory.path, run)
-
     # Finding the neighbors, reading the counts and writing the signatures
     # stay within the budget that the refusal names, which once failed in
     # the stream planner.
-    assert peak <= needed
+    _, _, ref = check_budget(memory.path, run, check_writes=False, nthreads=2)
     loaded = open_store(memory.path).perturbation.load_signature(ref)
     pd.testing.assert_frame_equal(loaded.values, memory.whole.values)
     pd.testing.assert_frame_equal(loaded.neighbors, memory.whole.neighbors)
-    with pytest.raises(MemoryError) as short:
-        run(open_store(memory.path, nthreads=2, mem_budget=needed - 1))
-    assert needed_budget(short.value) == needed
 
 
 @pytest.mark.slow
@@ -628,17 +622,12 @@ def test_loading_signatures_stays_within_the_budget_it_names(memory, features) -
     def run(store: DataStore) -> PerturbationSignature:
         return store.perturbation.load_signature(memory.signature, features=features)
 
-    needed, loaded, peak = smallest_budget(memory.path, run)
-
     # Reading one feature decodes whole stored chunks of every feature, and
     # the frames hold every cell's and neighbor's ID; the budget once
     # counted 4 bytes per value read.
-    assert peak <= needed
+    _, _, loaded = check_budget(memory.path, run, check_writes=False, nthreads=2)
     expected = (
         memory.whole.values if features is None else memory.whole.values[features]
     )
     pd.testing.assert_frame_equal(loaded.values, expected)
     pd.testing.assert_frame_equal(loaded.neighbors, memory.whole.neighbors)
-    with pytest.raises(MemoryError) as short:
-        run(open_store(memory.path, nthreads=2, mem_budget=needed - 1))
-    assert needed_budget(short.value) == needed

@@ -1,4 +1,3 @@
-import re
 import warnings
 
 import numba
@@ -28,8 +27,10 @@ from cytearc.perturbation.random_sets import N_BUCKETS, resampling_keys
 from tests.perturbation_helpers import (
     dense_pair,
     fixed_labels,
+    named_budget,
     open_store,
     size_root,
+    traced_peak,
     use_python_kernels,
     write_screen,
 )
@@ -1475,16 +1476,6 @@ def test_high_moi_checks_the_budget_before_the_store_must_be_writable(
         reader.perturbation.associations(labels, **arguments)
 
 
-def _needed_budget(refusal: pytest.ExceptionInfo[MemoryError]) -> int:
-    """The memory budget that a refusal asks for."""
-    found = re.search(r"holds? about (\d+) bytes", str(refusal.value))
-    assert found is not None, str(refusal.value)
-    assert str(refusal.value).endswith(
-        f"Raise mem_budget to at least {found.group(1)} bytes."
-    )
-    return int(found.group(1))
-
-
 def test_high_moi_refusals_name_the_budget_that_runs_the_tests(screen) -> None:
     store, labels, genes = screen
     arguments = {"features": genes, "moi": "high", "invalidate_cache": True, **FAST}
@@ -1499,7 +1490,7 @@ def test_high_moi_refusals_name_the_budget_that_runs_the_tests(screen) -> None:
     # alone.
     with pytest.raises(MemoryError, match="one gene over 400 labelled cells") as low:
         run(open_store(store.zarr_loc, nthreads=2, mem_budget=1000))
-    needed = _needed_budget(low)
+    needed = named_budget(low.value)
 
     # A budget one byte short asks for the same budget, which runs the tests
     # with the results of the default budget; it once left out the read of a
@@ -1509,7 +1500,7 @@ def test_high_moi_refusals_name_the_budget_that_runs_the_tests(screen) -> None:
     # below checks the traced peak.
     with pytest.raises(MemoryError) as short:
         run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed - 1))
-    assert _needed_budget(short) == needed
+    assert named_budget(short.value) == needed
     tight = store.perturbation.load_associations(
         run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed))
     )
@@ -1555,8 +1546,6 @@ def _wide_screen_store(path):
 def test_high_moi_stays_within_the_budget_it_names_with_a_few_wide_cells(
     tmp_path,
 ) -> None:
-    import tracemalloc
-
     store = _wide_screen_store(tmp_path / "wide.zarr")
     labels = _screen_labels(store)
     genes = store.features.snapshot(feature_indexes=np.arange(10))
@@ -1577,31 +1566,19 @@ def test_high_moi_stays_within_the_budget_it_names_with_a_few_wide_cells(
         open_store(
             store.zarr_loc, nthreads=2, mem_budget=1000
         ).perturbation.associations(labels, **arguments)
-    needed = _needed_budget(refusal)
+    needed = named_budget(refusal.value)
     budgeted = open_store(store.zarr_loc, nthreads=2, mem_budget=needed)
 
-    def traced_peak() -> int:
-        tracemalloc.start()
-        try:
-            start = tracemalloc.get_traced_memory()[0]
-            tracemalloc.reset_peak()
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                budgeted.perturbation.associations(labels, **arguments)
-            return tracemalloc.get_traced_memory()[1] - start
-        finally:
-            tracemalloc.stop()
+    def run():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return budgeted.perturbation.associations(labels, **arguments)
 
-    # tracemalloc counts every allocation in the process while the call runs,
-    # other threads' included, so a peak above the budget is traced again: a
-    # call that holds more than its budget does so in both runs.
-    peaks = [traced_peak()]
-    if peaks[0] > needed:
-        peaks.append(traced_peak())
+    _, peak = traced_peak(run, needed)
 
     # Reading the codes whole with 64-bit copies of their 120 slots per cell
     # held about 4 times this budget before its check.
-    assert min(peaks) <= needed, f"Traced peaks of {peaks} bytes within {needed}"
+    assert peak <= needed, f"The call held {peak} bytes within a budget of {needed}"
 
 
 def test_codes_are_read_a_stored_chunk_at_a_time(tmp_path) -> None:

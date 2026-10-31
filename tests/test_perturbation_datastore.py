@@ -470,7 +470,7 @@ def test_an_import_runs_within_the_budget_that_its_refusal_names(tmp_path) -> No
     store.cells.insert("every", np.ones(4_000, dtype=bool))
     every = store.snapshot_cell_selection("every")
 
-    budget, refusals = check_budget(
+    budget, refusals, _ = check_budget(
         store_path,
         lambda opened: opened.perturbation.import_guide_calls(
             call_path, cell_selection=every, invalidate_cache=True

@@ -1352,10 +1352,11 @@ def test_the_call_file_is_read_before_the_run_within_the_memory_budget(
     plan = _resolve(store, guide_calling={"path": path}, **HEAD)
     assert plan.config["stages"]["guide_calling"] == {"path": str(path)}
     # The budget bounds what the check holds beside the cells' IDs.
-    peak = traced_peak(
+    _, peak = traced_peak(
         lambda: _check_call_file(
             store, store._get_assay("CRISPR"), str(path), ids, None
-        )
+        ),
+        needed,
     )
     assert peak <= needed
 

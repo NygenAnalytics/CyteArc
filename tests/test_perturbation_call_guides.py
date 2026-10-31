@@ -663,7 +663,7 @@ def test_call_guides_runs_within_the_budget_that_its_refusals_name(
     path = _wide_screen(tmp_path)
     cells = open_store(path).snapshot_cell_selection("every")
 
-    budget, refusals = check_budget(
+    budget, refusals, _ = check_budget(
         path,
         lambda store: store.perturbation.call_guides(
             cells, invalidate_cache=True, **options
@@ -713,7 +713,7 @@ def test_histogram_refusals_name_a_budget_past_where_they_stopped(tmp_path) -> N
     path = _distinct_screen(tmp_path)
     cells = open_store(path).snapshot_cell_selection("every")
 
-    budget, refusals = check_budget(
+    budget, refusals, _ = check_budget(
         path,
         lambda store: store.perturbation.call_guides(cells, invalidate_cache=True),
     )

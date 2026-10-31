@@ -37,11 +37,11 @@ from cytearc.perturbation.signature import normalize_counts
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.utils.logging import logger
 from tests.perturbation_helpers import (
+    check_budget,
     copy_store,
     memory_screen,
-    needed_budget,
+    named_budget,
     open_store,
-    smallest_budget,
     use_python_kernels,
     write_screen,
     written,
@@ -273,7 +273,7 @@ def test_mixscape_refuses_inputs_and_budgets_it_cannot_use(
     # The budget that this names fits the DE tests, but not GENE_A's
     # classification.
     budgeted = open_store(
-        store.zarr_loc, nthreads=2, mem_budget=needed_budget(low.value)
+        store.zarr_loc, nthreads=2, mem_budget=named_budget(low.value)
     )
     with pytest.raises(
         MemoryError, match="90 cells of GENE_A and of the 150 control cells in its 12"
@@ -299,11 +299,11 @@ def test_mixscape_classifies_in_batches_that_fit_the_budget(store, template) -> 
     with pytest.raises(MemoryError) as low:
         run(1_000)
     with pytest.raises(MemoryError, match="cells of GENE_A") as batch:
-        run(needed_budget(low.value))
+        run(named_budget(low.value))
     messages: list[str] = []
     sink = logger.add(lambda message: messages.append(message.record["message"]))
     try:
-        classes = run(needed_budget(batch.value))
+        classes = run(named_budget(batch.value))
     finally:
         logger.remove(sink)
     assert "Classifying 2 targets and splits in 2 batches" in messages
@@ -648,7 +648,9 @@ def test_mixscape_runs_within_the_budget_it_names(memory, monkeypatch) -> None:
     def run(store: DataStore):
         bands.clear()
         messages.clear()
-        return store.perturbation.mixscape(memory.signature, invalidate_cache=True)
+        classes = store.perturbation.mixscape(memory.signature, invalidate_cache=True)
+        # Copies, as the check's refusal of one byte less clears the lists.
+        return classes, list(bands), list(messages)
 
     band_de_genes = mixscape_module.band_de_genes
 
@@ -659,7 +661,9 @@ def test_mixscape_runs_within_the_budget_it_names(memory, monkeypatch) -> None:
     monkeypatch.setattr(mixscape_module, "band_de_genes", counting)
     sink = logger.add(lambda message: messages.append(message.record["message"]))
     try:
-        needed, classes, peak = smallest_budget(memory.path, run)
+        _, _, (classes, band_sizes, logged) = check_budget(
+            memory.path, run, check_writes=False, nthreads=2
+        )
     finally:
         logger.remove(sink)
 
@@ -667,13 +671,9 @@ def test_mixscape_runs_within_the_budget_it_names(memory, monkeypatch) -> None:
     # classified in several batches, within the budget that the refusal
     # names; the bands once never fitted a limited budget, and a batch's
     # read of the signatures took 17 times what it returned.
-    assert len(bands) > 1 and sum(bands) == 400
-    assert "Classifying 16 targets and splits in 16 batches" in messages
-    assert peak <= needed
+    assert len(band_sizes) > 1 and sum(band_sizes) == 400
+    assert "Classifying 16 targets and splits in 16 batches" in logged
     result = open_store(memory.path).perturbation.load_mixscape(classes)
     pd.testing.assert_frame_equal(result.cells, memory.whole.cells)
     pd.testing.assert_frame_equal(result.targets, memory.whole.targets)
     pd.testing.assert_frame_equal(result.de_genes, memory.whole.de_genes)
-    with pytest.raises(MemoryError) as short:
-        run(open_store(memory.path, nthreads=2, mem_budget=needed - 1))
-    assert needed_budget(short.value) == needed

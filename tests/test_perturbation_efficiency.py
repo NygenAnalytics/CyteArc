@@ -23,10 +23,10 @@ from cytearc.perturbation.efficiency import (
 )
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
 from tests.perturbation_helpers import (
+    check_budget,
     copy_store,
     fixed_labels,
     open_store,
-    check_budget,
     write_screen,
     written,
 )
@@ -588,19 +588,18 @@ def test_efficiency_holds_no_more_than_the_budget_it_names(
     labels = getattr(budget_screens, screen).labels
     path = copy_store(getattr(budget_screens, screen).path, tmp_path).zarr_loc
 
-    def measure(store, invalidate_cache=True):
+    def measure(store):
         return store.perturbation.efficiency(
-            labels, by=by, id_column=None, invalidate_cache=invalidate_cache
+            labels, by=by, id_column=None, invalidate_cache=True
         )
 
     # One refusal names the whole need, by guide too, and the call runs at
     # that budget, holding no more than it.
-    _, refusals = check_budget(path, measure)
+    _, refusals, ref = check_budget(path, measure)
     assert len(refusals) == 1
     assert refusals[0].startswith("Comparing 1 target genes over")
     # The first row, RNA0 or its first guide, is compared.
-    reused = open_store(path)
-    table = reused.perturbation.load_efficiency(measure(reused, False)).table
+    table = open_store(path).perturbation.load_efficiency(ref).table
     assert table["status"].iloc[0] == "tested"
 
 

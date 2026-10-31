@@ -27,10 +27,10 @@ from cytearc.perturbation.labels import (
 from cytearc.storage.artifacts import inspect_artifact
 from cytearc.storage.selections import read_stored_selection_indices
 from tests.perturbation_helpers import (
+    check_budget,
     copy_store,
     open_store,
     record_cell_reads,
-    check_budget,
     write_screen,
     written,
 )
@@ -543,18 +543,17 @@ def test_labelling_holds_no_more_than_the_budget_it_names(
 ) -> None:
     path = copy_store(wide_calls.path, tmp_path).zarr_loc
 
-    def label(store, invalidate_cache=True):
+    def label(store):
         return store.perturbation.labels(
             wide_calls.calls,
             controls=["Non-Targeting"],
             policy=policy,
-            invalidate_cache=invalidate_cache,
+            invalidate_cache=True,
         )
 
     # One refusal names the budget that runs, which holds the whole call.
-    _, refusals = check_budget(path, label)
+    _, refusals, ref = check_budget(path, label)
     assert len(refusals) == 1
     assert refusals[0].startswith("Labelling 4000 cells holds about")
-    reused = open_store(path)
-    loaded = reused.perturbation.load_labels(label(reused, invalidate_cache=False))
+    loaded = open_store(path).perturbation.load_labels(ref)
     assert loaded.cells["n_targets"].max() > 20
