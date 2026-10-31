@@ -683,3 +683,21 @@ def test_calls_hold_no_more_than_the_smallest_budget_they_accept(
     assert traced_peak(lambda: call(budget)) <= budget
     with pytest.raises(MemoryError, match="(?i)raise"):
         call(budget - 1)
+
+
+def test_a_similarity_across_libraries_tells_apart_at_most_62_libraries() -> None:
+    libraries = tuple((f"lib{index}", "molecules") for index in range(63))
+    rows = [(index, index, A, f"u{index}", 1, 20) for index in range(63)]
+    with pytest.raises(ValueError, match="at most 62 libraries"):
+        _call(
+            _records(rows, libraries),
+            63,
+            method="jaccard",
+            similarity=(0.6, 0.5),
+            inclusive=False,
+        )
+    # One similarity compares any number of libraries.
+    calls = _call(
+        _records(rows, libraries), 63, method="jaccard", similarity=0.6, inclusive=False
+    )
+    assert calls.calls.n_clones == 1

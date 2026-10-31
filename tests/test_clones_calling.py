@@ -84,6 +84,9 @@ def test_sets_merge_repeated_pairs_and_order_each_cells_items() -> None:
         ([0, 2, 1], [1, 2], "rise from 0"),
         ([0, 1], [-1], "at least 0"),
         ([0, 1], [0.5], "integer codes"),
+        ([[0, 1]], [1], "n_cells \\+ 1 integer offsets"),
+        ([0.0, 1.0], [1], "n_cells \\+ 1 integer offsets"),
+        ([], [], "n_cells \\+ 1 integer offsets"),
     ],
 )
 def test_sets_refuse_pointers_and_items_they_cannot_hold(
@@ -597,6 +600,23 @@ def test_set_clones_refuses_options_of_the_other_method() -> None:
         set_clones(sets, method="jaccard", similarity=0.5, inclusive=True, prune=1)
     with pytest.raises(ValueError, match="needs each cell's modality"):
         set_clones(sets, method="jaccard", similarity=0.5, inclusive=True, across=0.4)
+
+
+def test_modalities_must_be_one_code_of_at_least_zero_per_cell() -> None:
+    sets = _sets([[1], [1, 2]])
+    options = {
+        "method": "jaccard",
+        "similarity": 0.5,
+        "inclusive": False,
+        "across": 0.4,
+    }
+    for modalities, message in (
+        (np.asarray([0]), "one integer code per cell"),
+        (np.asarray([0.0, 1.0]), "one integer code per cell"),
+        (np.asarray([0, -1]), "at least 0"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            set_clones(sets, modalities=modalities, **options)
 
 
 def test_modalities_of_cells_give_their_nodes_one_modality_or_several() -> None:

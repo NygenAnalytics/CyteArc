@@ -254,12 +254,10 @@ def _set_hashes(indptr: np.ndarray, items: np.ndarray) -> tuple[np.ndarray, np.n
 
 @njit(cache=True)
 def _equal_sets(indptr: np.ndarray, items: np.ndarray, first: int, second: int) -> bool:
+    """Whether two sets of one size hold the same items, as runs of equal keys do."""
     start = indptr[first]
     other = indptr[second]
-    length = indptr[first + 1] - start
-    if indptr[second + 1] - other != length:
-        return False
-    for at in range(length):
+    for at in range(indptr[first + 1] - start):
         if items[start + at] != items[other + at]:
             return False
     return True
