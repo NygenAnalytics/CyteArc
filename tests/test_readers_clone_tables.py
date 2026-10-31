@@ -190,6 +190,13 @@ def test_errors_name_the_file_line_of_a_row_after_blank_lines(
     path = _write(tmp_path / "clones.csv", "Cell_ID,Clone_ID\nA,1\n\n\nB,2\n,3\n")
     with pytest.raises(ValueError, match="without a cell barcode on lines 6$"):
         _rows(path, chunk_rows=chunk_rows)
+    # R's space-separated layout, where a row's name may be quoted empty text.
+    spaced = _write(
+        tmp_path / "celltag_data.txt",
+        '"CellTagD0" "CellTagD3"\n"AAA-1" 16 NA\n\n"" NA 2\n',
+    )
+    with pytest.raises(ValueError, match="without a cell barcode on lines 4$"):
+        _rows(spaced, chunk_rows=chunk_rows, columns={"clone": "CellTagD3"})
     # A quoted field that holds a line break spans two lines of the file.
     quoted = _write(
         tmp_path / "clone_post_2.tsv",

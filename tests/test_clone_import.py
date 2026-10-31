@@ -1036,9 +1036,10 @@ def _traced(function: Callable[[], object]) -> tuple[object, int]:
     return result, peak
 
 
-# Cells of the long-label store, each in its own clone. One label is 5,000
-# characters long, and the store keeps text at the width of the longest, so
-# each cell's label takes 20,000 bytes there: 40 MB in all.
+# Cells of the long-label store, each in its own clone. The last label is
+# 5,000 characters long, past the rows that a table's layout samples, and the
+# store keeps text at the width of the longest, so each cell's label takes
+# 20,000 bytes there: 40 MB in all.
 _N_LONG = 2_000
 _BUDGET = 16_000_000
 
@@ -1047,7 +1048,7 @@ def _long_label_store(tmp_path: Path) -> SimpleNamespace:
     ids = [f"cell{index:05d}" for index in range(_N_LONG)]
     store = write_cells_store(tmp_path / "store.zarr", ids)
     labels = np.asarray([f"L{index}" for index in range(_N_LONG)], dtype=object)
-    labels[0] = "X" * 5_000
+    labels[-1] = "X" * 5_000
     store.cells.insert("lineage", labels)
     table = tmp_path / "clones.csv"
     table.write_text(
@@ -1085,6 +1086,19 @@ def test_saving_long_labels_holds_the_budget_or_refuses(tmp_path, method) -> Non
         loaded = long.store.clones.load_clones(saved)
         assert loaded.clones["n_cells"].tolist() == [1] * _N_LONG
         assert loaded.clones["clone"].tolist()[-1] == "X" * 5_000
+
+
+def test_a_table_whose_first_rows_are_long_needs_room_for_a_chunk(tmp_path) -> None:
+    # The layout samples the first rows, so the long label sizes every row
+    # of a chunk, and 1,000 of them do not fit the budget.
+    long = _long_label_store(tmp_path)
+    header, *rows = long.table.read_text().splitlines()
+    first = tmp_path / "long_first.csv"
+    first.write_text("\n".join([header, rows[-1], *rows[:-1]]) + "\n")
+    long.store.memoryBytes = _BUDGET
+
+    with pytest.raises(MemoryError, match="leaves too little of the memory budget"):
+        long.store.clones.import_clones(first, cell_selection=long.cells)
 
 
 @pytest.mark.parametrize("method", ["load_clones", "table", "matrix"])

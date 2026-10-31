@@ -85,13 +85,12 @@ _EXPORT_BYTES_PER_CELL = 200
 
 
 def _text_width(array: Any) -> int:
-    """The characters of each value of stored fixed-width text, 0 for other arrays."""
+    """The characters of each value of stored text, 0 for arrays of other values.
+
+    The store writes text as fixed-width unicode, four bytes per character.
+    """
     dtype = np.dtype(array.dtype)
-    if dtype.kind == "U":
-        return int(dtype.itemsize) // 4
-    if dtype.kind == "S":
-        return int(dtype.itemsize)
-    return 0
+    return int(dtype.itemsize) // 4 if dtype.kind == "U" else 0
 
 
 def _text_read_bytes(array: Any, n_rows: int) -> int:

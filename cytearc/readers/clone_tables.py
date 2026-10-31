@@ -52,6 +52,7 @@ import os
 import re
 import zlib
 from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -298,23 +299,42 @@ def _open_text(path: str, compression: str | None) -> io.TextIOBase:
     return open(path, encoding="utf-8", newline="")
 
 
-def _first_lines(path: str, compression: str | None, n_lines: int) -> list[str]:
-    lines: list[str] = []
+def _corrupt_error(path: str, error: BaseException) -> ValueError:
+    return ValueError(f"{path} is cut short or corrupt: {error}")
+
+
+@contextmanager
+def _text_errors(path: str) -> Iterator[None]:
+    """Name the file in the errors of reading it as UTF-8 text, plain or gzip."""
     try:
-        with _open_text(path, compression) as handle:
-            for line in handle:
-                lines.append(line.rstrip("\r\n"))
-                if len(lines) == n_lines:
-                    break
+        yield
     except UnicodeDecodeError:
         raise ValueError(f"{path} is not a text file that CyteArc can read") from None
     except _CORRUPT as error:
         raise _corrupt_error(path, error) from None
+
+
+@contextmanager
+def _parse_errors(path: str) -> Iterator[None]:
+    """Name the file in the errors of parsing it with pandas, a header alone aside."""
+    try:
+        yield
+    except pd.errors.EmptyDataError:
+        raise
+    except _CORRUPT as error:
+        raise _corrupt_error(path, error) from None
+    except (pd.errors.ParserError, ValueError) as error:
+        raise ValueError(f"{path} is malformed: {error}") from None
+
+
+def _first_lines(path: str, compression: str | None, n_lines: int) -> list[str]:
+    lines: list[str] = []
+    with _text_errors(path), _open_text(path, compression) as handle:
+        for line in handle:
+            lines.append(line.rstrip("\r\n"))
+            if len(lines) == n_lines:
+                break
     return lines
-
-
-def _corrupt_error(path: str, error: BaseException) -> ValueError:
-    return ValueError(f"{path} is cut short or corrupt: {error}")
 
 
 def _header_and_rows(path: str, compression: str | None) -> tuple[str, list[str]]:
@@ -325,26 +345,21 @@ def _header_and_rows(path: str, compression: str | None) -> tuple[str, list[str]
     header: str | None = None
     rows: list[str] = []
     record = ""
-    try:
-        with _open_text(path, compression) as handle:
-            for line in handle:
-                text = line.rstrip("\r\n")
-                if header is None:
-                    header = text
-                    continue
-                # A row whose quotes are open goes on to the next line.
-                record = f"{record}\n{text}" if record else text
-                if record.count('"') % 2 or not record.strip():
-                    record = "" if not record.strip() else record
-                    continue
-                rows.append(record)
-                record = ""
-                if len(rows) == _SAMPLE_ROWS:
-                    break
-    except UnicodeDecodeError:
-        raise ValueError(f"{path} is not a text file that CyteArc can read") from None
-    except _CORRUPT as error:
-        raise _corrupt_error(path, error) from None
+    with _text_errors(path), _open_text(path, compression) as handle:
+        for line in handle:
+            text = line.rstrip("\r\n")
+            if header is None:
+                header = text
+                continue
+            # A row whose quotes are open goes on to the next line.
+            record = f"{record}\n{text}" if record else text
+            if record.count('"') % 2 or not record.strip():
+                record = "" if not record.strip() else record
+                continue
+            rows.append(record)
+            record = ""
+            if len(rows) == _SAMPLE_ROWS:
+                break
     return header or "", rows
 
 
@@ -548,14 +563,7 @@ def _table_layout(
 
 
 def _matrix_header(path: str, compression: str | None) -> _MatrixHeader:
-    try:
-        return _read_matrix_header(path, compression)
-    except _CORRUPT as error:
-        raise _corrupt_error(path, error) from None
-
-
-def _read_matrix_header(path: str, compression: str | None) -> _MatrixHeader:
-    with _open_text(path, compression) as handle:
+    with _text_errors(path), _open_text(path, compression) as handle:
         banner = handle.readline().strip().split()
         if len(banner) < 5 or banner[0].lower() != "%%matrixmarket":
             raise ValueError(f"{path} is not a Matrix Market file")
@@ -639,18 +647,11 @@ def _beside(path: str) -> tuple[str, str | None]:
 def _count_rows(text: _TextLayout) -> int:
     """Count a table's lines that hold text, its header aside."""
     count = 0
-    try:
-        with _open_text(text.path, text.compression) as handle:
-            handle.readline()
-            for line in handle:
-                if line.strip():
-                    count += 1
-    except UnicodeDecodeError:
-        raise ValueError(
-            f"{text.path} is not a text file that CyteArc can read"
-        ) from None
-    except _CORRUPT as error:
-        raise _corrupt_error(text.path, error) from None
+    with _text_errors(text.path), _open_text(text.path, text.compression) as handle:
+        handle.readline()
+        for line in handle:
+            if line.strip():
+                count += 1
     return count
 
 
@@ -942,24 +943,17 @@ def _text_chunks(
 def _parsed_chunks(path: str, **options: Any) -> Iterator[pd.DataFrame]:
     """Yield the chunks that pandas parses, naming the file in its errors."""
     try:
-        reader = pd.read_csv(path, **options)
+        with _parse_errors(path):
+            reader = pd.read_csv(path, **options)
     except pd.errors.EmptyDataError:
         # A header without rows holds no rows.
         return
-    except _CORRUPT as error:
-        raise _corrupt_error(path, error) from None
-    except (pd.errors.ParserError, ValueError) as error:
-        raise ValueError(f"{path} is malformed: {error}") from None
     with reader:
         while True:
-            try:
-                chunk = next(reader)
-            except StopIteration:
+            with _parse_errors(path):
+                chunk = next(reader, None)
+            if chunk is None:
                 return
-            except _CORRUPT as error:
-                raise _corrupt_error(path, error) from None
-            except (pd.errors.ParserError, ValueError) as error:
-                raise ValueError(f"{path} is malformed: {error}") from None
             yield chunk
 
 
