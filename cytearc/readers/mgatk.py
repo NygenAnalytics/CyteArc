@@ -20,12 +20,17 @@ consensus reads, which are molecules.
 
 The reference is uppercased, since mgatk's references keep soft-masked
 lowercase bases, and positions of ``N``, such as 3107 of rCRS, are not
-sites. The contig is named after the reference file, ``chrM`` for
-``chrM_refAllele.txt``, and is unnamed for nf-MiTo's ``refAllele.txt``.
+sites. mgatk names the reference file after the contig, ``chrM`` for
+``chrM_refAllele.txt``, and a deposit that prefixes the base files
+prefixes it alike, as in ``pL1000.chrM_refAllele.txt`` beside
+``pL1000.A.txt.gz``. The contig is the file's name without that prefix,
+kept whole otherwise, so ``NC_012920.1_refAllele.txt`` names
+``NC_012920.1``; nf-MiTo's ``refAllele.txt`` names no contig.
 """
 
 import hashlib
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -54,19 +59,61 @@ _SIX = (
 )
 
 
+# An accession's version, such as the ".1" of NC_012920.1.
+_VERSION = re.compile(r"\.\d+$")
+
+
 def _base_pattern(base: str) -> str:
     return rf"(.*\.)?{base}\.txt(\.gz)?"
 
 
-def _contig_name(path: str) -> str:
+def _base_prefix(folder: str, base_files: list[tuple[str, str]]) -> str:
+    """The prefix that the base files' names carry: ``pL1000.`` for
+    ``pL1000.A.txt.gz``, or empty for ``A.txt.gz``.
+
+    Raises:
+        ValueError: If the four files carry different prefixes.
+    """
+    prefixes = {
+        re.sub(rf"{base}\.txt(\.gz)?$", "", os.path.basename(path))
+        for base, path in base_files
+    }
+    if len(prefixes) > 1:
+        raise ValueError(
+            f"The base files of {folder} carry different prefixes, "
+            f"{', '.join(repr(prefix) for prefix in sorted(prefixes))}; they must "
+            "come from one run"
+        )
+    return prefixes.pop()
+
+
+def _contig_name(path: str, prefix: str) -> str:
+    """The contig that a reference file names, without the base files' prefix.
+
+    Raises:
+        ValueError: If what remains holds a dot that is not an accession's
+            version, which may be a sample prefix that the base files do not
+            carry or part of the contig's name.
+    """
     name = os.path.basename(path)
     if name.endswith(".gz"):
         name = name[: -len(".gz")]
     stem = name[: -len("refAllele.txt")]
-    # mgatk names the file <contig>_refAllele.txt; deposits add "<sample>.".
+    if prefix and stem.startswith(prefix):
+        stem = stem[len(prefix) :]
+    # mgatk writes <contig>_refAllele.txt, and nf-MiTo refAllele.txt.
     if not stem.endswith("_"):
         return ""
-    return stem[:-1].rsplit(".", 1)[-1]
+    contig = stem[:-1]
+    if "." in _VERSION.sub("", contig):
+        carried = f"carry {prefix!r}" if prefix else "carry no prefix"
+        raise ValueError(
+            f"{name} may name the contig {contig!r} or a contig after a sample "
+            f"prefix, since the base files {carried} and the dot in {contig!r} is "
+            "not an accession's version, as in NC_012920.1; rename it "
+            "<contig>_refAllele.txt"
+        )
+    return contig
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,12 +126,14 @@ class _Reference:
         return len(self.bases)
 
 
-def _read_reference(path: str) -> _Reference:
-    """Read a ``refAllele`` file: 1-based positions in order and their bases.
+def _read_reference(path: str, prefix: str) -> _Reference:
+    """Read a ``refAllele`` file: 1-based positions in order and their bases,
+    on the contig that its name gives without the base files' ``prefix``.
 
     Raises:
         ValueError: If a row is not a position and a base, positions do not
-            run from 1 without gaps, or a base is not A, C, G, T or N.
+            run from 1 without gaps, a base is not A, C, G, T or N, or the
+            name leaves the contig unclear.
     """
     table = pd.read_csv(
         path,
@@ -115,7 +164,7 @@ def _read_reference(path: str) -> _Reference:
     sequence = "".join(bases.tolist())
     return _Reference(
         contig=Contig(
-            name=_contig_name(path),
+            name=_contig_name(path, prefix),
             length=len(bases),
             sequence_sha256=hashlib.sha256(sequence.encode()).hexdigest(),
         ),
@@ -361,7 +410,8 @@ def mgatk_source(
     Raises:
         FileNotFoundError: If a base file or the reference is missing.
         ValueError: If a file is malformed, the base files hold different
-            columns, six-column files come without a format, or
+            columns or carry different prefixes, the reference's name leaves
+            its contig unclear, six-column files come without a format, or
             ``swap_strands`` is given with maegatk.
     """
     folder = os.fspath(path)
@@ -371,6 +421,7 @@ def mgatk_source(
     ]
     reference = find_file(folder, _REFERENCE, "reference file (<contig>_refAllele.txt)")
     depth_table = find_file(folder, _DEPTH_TABLE, "depth table", required=False)
+    prefix = _base_prefix(folder, [(base, str(file)) for base, file in base_files])
     columns = {_columns(str(file)) for _base, file in base_files}
     if len(columns) > 1:
         raise ValueError(
@@ -416,7 +467,7 @@ def mgatk_source(
         reference_from_depth=False,
         open_alleles=False,
         notes={"columns": len(layout), "strands_swapped": swap},
-        _reference=_read_reference(str(reference)),
+        _reference=_read_reference(str(reference), prefix),
         _columns=layout,
         _swap=swap,
         _threads=threads,

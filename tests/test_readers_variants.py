@@ -481,25 +481,86 @@ def test_mgatk_rows_are_checked_as_they_are_read(tmp_path) -> None:
     assert batches[0].kind == "cells"
 
 
-@pytest.mark.parametrize(
-    ("name", "contig"),
-    [
-        ("chrM_refAllele.txt", "chrM"),
-        ("TF1_filtered.chrM_refAllele.txt.gz", "chrM"),
-        ("hg19_chrM_refAllele.txt", "hg19_chrM"),
-        ("CRC_v12-mtMask_mgatk.MT_refAllele.txt", "MT"),
-        ("refAllele.txt", ""),
-        ("pL1000.refAllele.txt", ""),
-    ],
-)
-def test_the_contig_is_named_after_the_reference_file(tmp_path, name, contig) -> None:
-    folder = _copy(DATA / "signac_test_mgatk", tmp_path / "a")
+def _renamed_mgatk(folder: Path, prefix: str, reference: str) -> Path:
+    """Signac's mgatk files with the base files and depth table under
+    ``prefix`` and the reference named ``reference``."""
+    for path in sorted(folder.iterdir()):
+        if path.name.startswith("test."):
+            path.rename(folder / (prefix + path.name[len("test.") :]))
     text = gzip.decompress((folder / "chrM_refAllele.txt.gz").read_bytes())
     (folder / "chrM_refAllele.txt.gz").unlink()
-    target = folder / name
-    target.write_bytes(gzip.compress(text) if name.endswith(".gz") else text)
+    target = folder / reference
+    target.write_bytes(gzip.compress(text) if reference.endswith(".gz") else text)
+    return folder
+
+
+@pytest.mark.parametrize(
+    ("prefix", "name", "contig"),
+    [
+        # mgatk's own folder: the reference carries no prefix.
+        ("test.", "chrM_refAllele.txt", "chrM"),
+        ("test.", "hg19_chrM_refAllele.txt", "hg19_chrM"),
+        # Deposits prefix every file alike.
+        ("TF1_filtered.", "TF1_filtered.chrM_refAllele.txt.gz", "chrM"),
+        ("CRC_v12-mtMask_mgatk.", "CRC_v12-mtMask_mgatk.MT_refAllele.txt", "MT"),
+        ("lib.v2.", "lib.v2.chrM_refAllele.txt", "chrM"),
+        # A contig whose name holds an accession's version keeps it whole.
+        ("test.", "NC_012920.1_refAllele.txt", "NC_012920.1"),
+        ("sample.", "sample.NC_012920.1_refAllele.txt", "NC_012920.1"),
+        ("", "NC_012920.1_refAllele.txt", "NC_012920.1"),
+        # nf-MiTo's reference names no contig.
+        ("", "refAllele.txt", ""),
+        ("pL1000.", "pL1000.refAllele.txt", ""),
+    ],
+)
+def test_the_contig_is_named_after_the_reference_file_without_its_prefix(
+    tmp_path, prefix, name, contig
+) -> None:
+    folder = _renamed_mgatk(
+        _copy(DATA / "signac_test_mgatk", tmp_path / "a"), prefix, name
+    )
     source = mgatk_source(folder, format=None, swap_strands=False)
     assert source.sites().contigs[0].name == contig
+
+
+@pytest.mark.parametrize(
+    ("prefix", "name", "carried"),
+    [
+        # A prefix the base files do not carry, or one beside theirs.
+        ("lib1.", "lib2.chrM_refAllele.txt", "'lib1.'"),
+        ("", "pL1000.chrM_refAllele.txt", "no prefix"),
+        ("lib1.", "lib1.lib2.chrM_refAllele.txt", "'lib1.'"),
+    ],
+)
+def test_a_reference_whose_name_leaves_its_contig_unclear_is_refused(
+    tmp_path, prefix, name, carried
+) -> None:
+    folder = _renamed_mgatk(
+        _copy(DATA / "signac_test_mgatk", tmp_path / "a"), prefix, name
+    )
+    with pytest.raises(
+        ValueError, match=f"{name.split('_')[0]}.* the base files carry {carried}"
+    ):
+        mgatk_source(folder, format=None, swap_strands=False)
+
+
+def test_base_files_with_different_prefixes_are_refused(tmp_path) -> None:
+    folder = _copy(DATA / "signac_test_mgatk", tmp_path / "a")
+    (folder / "test.G.txt.gz").rename(folder / "other.G.txt.gz")
+    with pytest.raises(
+        ValueError, match="carry different prefixes, 'other.', 'test.'; they must come"
+    ):
+        mgatk_source(folder, format=None, swap_strands=False)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "contig"),
+    [("signac_test_mgatk", "chrM"), ("mito_mtscatac", ""), ("mito_maester", "chrM")],
+)
+def test_the_fixture_folders_name_their_contigs(fixture, contig) -> None:
+    format = "maegatk" if fixture == "mito_maester" else None
+    source = mgatk_source(DATA / fixture, format=format, swap_strands=False)
+    assert [entry.name for entry in source.sites().contigs] == [contig]
 
 
 def test_cellsnp_and_mquad_readers_refuse_inconsistent_folders(tmp_path) -> None:
