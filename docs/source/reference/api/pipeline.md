@@ -221,11 +221,11 @@ screen = ds.pipeline.perturbation(
     mixscape=True,
     associations={"sample_column": "lane"},
     clusters=True,
-    label="screen",
+    label="screen_all_stages",
 )
 ```
 
-The run's `assay` is the RNA assay. Its cell view holds each cell's `guide_call`, the call of the run's `guide_calls`: the ID of its one called guide, `"Negative"` without a guide, or `"Multiple"` with several. It holds `perturbation_label`, the label of the run's `perturbation_labels`, and `is_control`, which is True for a cell with control guides only, labelled `"control"`. A cell with several guides of one gene, or with a gene's guides beside control guides, is called `"Multiple"` but labelled by the gene; [Label cells by perturbation](perturbation.md#label-cells-by-perturbation) lists every case. With Mixscape, the view also holds `mixscape_class` and `mixscape_posterior`. The guide calls and labels belong to the guide assay, and the view reads them by the run's cells ([Frozen fields](#frozen-fields)). `ds.perturbation.load_guide_calls(screen["guide_calls"])` and `ds.perturbation.load_labels(screen["perturbation_labels"])` read their other columns, such as each cell's guides and genes:
+The run's `assay` is the RNA assay. Its cell view holds each cell's `guide_call`, the call of the run's `guide_calls`: the ID of its one called guide, `"Negative"` without a guide, or `"Multiple"` with several. It holds `perturbation_label`, the label of the run's `perturbation_labels`, and `is_control`, which is True for a cell with control guides only, labelled `"control"`. A cell with several guides of one gene, or with a gene's guides beside control guides, is called `"Multiple"` but labelled by the gene; [Label cells by perturbation](perturbation.html#label-cells-by-perturbation) lists every case. With Mixscape, the view also holds `mixscape_class` and `mixscape_posterior`. The guide calls and labels belong to the guide assay, and the view reads them by the run's cells ([Frozen fields](#frozen-fields)). `ds.perturbation.load_guide_calls(screen["guide_calls"])` and `ds.perturbation.load_labels(screen["perturbation_labels"])` read their other columns, such as each cell's guides and genes:
 
 ```python
 screen.cells.to_pandas_dataframe(["ids", "guide_call", "perturbation_label"])
@@ -684,8 +684,7 @@ input_cell_selection, analysis_cell_selection, feature_universe, integrated_grap
 embedding_initialization, umap, leiden_1.0, clusters, markers_RNA, markers_ADT
 ```
 
-Its `input_cell_selection` and `analysis_cell_selection` are both the selection that its runs
-share, and its `feature_universe` is the first run's. A default `perturbation` run has:
+Its `input_cell_selection` and `analysis_cell_selection` are both the selection that its runs share, and its `feature_universe` is the first run's. A default `perturbation` run has:
 
 ```text
 input_cell_selection, analysis_cell_selection, feature_universe, guide_thresholds, guide_calls,
@@ -694,10 +693,7 @@ perturbation_labels, efficiency, highly_variable_features, normalized, pca, edis
 
 Its optional stages add `harmony` after `pca`, and `signature`, `mixscape`, `associations`, `profiles`, and `perturbation_clusters`, in that order, after `edistance`. Calls that fit no thresholds, with `method="fixed"` or `"top_guide"` or imported from Cell Ranger, have no `guide_thresholds`.
 
-`run.recipe` names the recipe, `"rna"`, `"atac"`, `"adt"`, `"multimodal"`, or `"perturbation"`,
-and `run.assay` the analyzed assay, the RNA assay of a perturbation run, or the first run's assay
-for a multimodal run. Normal mapping operations such as `run["pca"]`, `list(run)`, and
-`run.items()` are available only on a successfully completed run.
+`run.recipe` names the recipe, `"rna"`, `"atac"`, `"adt"`, `"multimodal"`, or `"perturbation"`, and `run.assay` the analyzed assay, the RNA assay of a perturbation run, or the first run's assay for a multimodal run. Normal mapping operations such as `run["pca"]`, `list(run)`, and `run.items()` are available only on a successfully completed run.
 
 ### Run snapshots
 
