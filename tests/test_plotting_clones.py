@@ -134,3 +134,41 @@ def test_cell_groups_align_labels_to_the_artifacts_cells(plotted) -> None:
     assert cell_groups(store, clones, group_by=None, groups=None) == (None, [], None)
     codes, names, name = cell_groups(store, clones, group_by="group", groups=None)
     assert (codes.tolist(), names, name) == ([0, 0, 1, 0, 1, -1], ["x", "y"], "group")
+
+
+def test_cell_groups_align_labels_to_clones_of_later_cells(plotted) -> None:
+    store, _clones = plotted
+    store.cells.insert("first_five", np.arange(6) < 5, overwrite=True)
+    store.cells.insert("middle_three", np.isin(np.arange(6), [2, 3, 4]), overwrite=True)
+    labels = store.snapshot_cluster_labels(
+        "group", cell_selection=store.snapshot_cell_selection("first_five")
+    )
+    middle = store.clones.from_column(
+        "lineage", cell_selection=store.snapshot_cell_selection("middle_three")
+    )
+    # The clones' cells, c2 to c4, lie in y, x and y; the labels' first
+    # cells, c0 and c1, lie in x.
+    codes, names, _name = cell_groups(store, middle, group_by=None, groups=labels)
+    assert (codes.tolist(), names) == ([1, 0, 1], ["x", "y"])
+
+
+def test_clones_of_equal_size_list_in_rank_order(plotted) -> None:
+    store, _clones = plotted
+    # 9 and 10 hold two cells each and rank by number, 9 first, where their
+    # text would put 10 first.
+    store.cells.insert(
+        "tied",
+        np.asarray(["10", "10", "9", "9", "x", ""], dtype=object),
+        overwrite=True,
+    )
+    tied = store.clones.from_column(
+        "tied", cell_selection=store.snapshot_cell_selection("every_cell")
+    )
+
+    result = clone_abundance(store, tied, show=False)
+
+    assert result.tables["top"].to_dict("list") == {
+        "clone": ["9", "10", "x"],
+        "cells": [2, 2, 1],
+    }
+    plt.close(result.figure)

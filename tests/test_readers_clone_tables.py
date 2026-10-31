@@ -444,6 +444,11 @@ def test_the_matrix_axis_whose_length_matches_the_cell_list_holds_the_cells(
             "%%MatrixMarket matrix coordinate integer general\n3 2 1\n1 0 1\n",
             "entries outside its 3 by 2 shape",
         ),
+        # Matrix Market counts from 1, so a row of 0 would wrap to the last cell.
+        (
+            "%%MatrixMarket matrix coordinate integer general\n3 2 1\n0 1 1\n",
+            "entries outside its 3 by 2 shape",
+        ),
         (
             "%%MatrixMarket matrix coordinate integer general\n3 2 1\n1.5 1 1\n",
             "entries outside its 3 by 2 shape",

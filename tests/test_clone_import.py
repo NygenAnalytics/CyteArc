@@ -904,6 +904,27 @@ def test_labels_that_hold_line_breaks_export_only_as_a_table(store, tmp_path) ->
     )
 
 
+def test_editing_a_matrix_cell_list_imports_new_clones(store, tmp_path) -> None:
+    # The matrix names its cells by row in cells.tsv, so the identity of its
+    # import holds the bytes of that list too.
+    cells = every_cell(store)
+    ref = store.clones.import_clones(
+        write_trex(TRUTH, tmp_path / "clones.txt"), cell_selection=cells
+    )
+    folder = _folder(tmp_path, "matrix")
+    store.clones.export_clones(ref, folder / "clones.mtx", format="matrix")
+    matrix = store.clones.import_clones(folder / "clones.mtx", cell_selection=cells)
+    listed = (folder / "cells.tsv").read_text().splitlines()
+    first, last = listed[1], listed[-1]
+    listed[1], listed[-1] = last, first
+    (folder / "cells.tsv").write_text("\n".join(listed) + "\n")
+
+    edited = store.clones.import_clones(folder / "clones.mtx", cell_selection=cells)
+
+    assert edited != matrix
+    assert loaded_partition(store, edited) != loaded_partition(store, matrix)
+
+
 def test_clones_come_from_a_cell_metadata_column(store) -> None:
     cells = every_cell(store)
     labels = np.where(

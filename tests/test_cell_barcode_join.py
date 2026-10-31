@@ -242,6 +242,46 @@ def test_a_pattern_keeps_the_barcode_group_and_others_match_no_cell(
 
 
 @pytest.mark.parametrize("name", sorted(IMPORTERS))
+def test_a_pattern_finds_the_barcode_anywhere_in_a_barcode(
+    joined, tmp_path, name
+) -> None:
+    # The pattern is searched for, as re.search does, rather than matched
+    # from the first character.
+    store, cells = joined
+    importer = IMPORTERS[name]
+    path = importer.write(tmp_path / "file.txt", ["x_AAAC-1", "lane9_GGGT-1"])
+
+    with collect_warnings() as messages:
+        ref = importer.run(
+            store,
+            [path],
+            cell_selection=cells,
+            barcode_prefix="s2__",
+            barcode_suffix="-1",
+            barcode_pattern=r"_(?P<barcode>[ACGT]{4})-1$",
+        )
+
+    assert importer.joined(store, ref) == {"s2__AAAC-1", "s2__GGGT-1"}
+    assert list(messages) == []
+
+
+def test_guide_calls_record_an_empty_prefix_as_given(joined, tmp_path) -> None:
+    # Before the shared join, guide calls recorded the prefix as given, so
+    # calls imported with barcode_prefix="" keep that identity.
+    store, cells = joined
+    path = write_guide_call_file(tmp_path / "calls.csv", ["s2__GGGT-1"])
+
+    empty = store.perturbation.import_guide_calls(
+        path, cell_selection=cells, barcode_prefix=""
+    )
+    none = store.perturbation.import_guide_calls(path, cell_selection=cells)
+
+    assert store.artifacts.inspect(empty).parameters == {"barcode_prefix": ""}
+    assert store.artifacts.inspect(none).parameters == {"barcode_prefix": None}
+    assert empty != none
+
+
+@pytest.mark.parametrize("name", sorted(IMPORTERS))
 def test_unmatched_barcodes_are_counted_and_warned_again_on_reuse(
     joined, tmp_path, name
 ) -> None:
