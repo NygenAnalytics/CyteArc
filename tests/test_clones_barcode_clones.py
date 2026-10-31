@@ -441,6 +441,12 @@ def test_pairs_of_fewer_umis_than_min_umis_are_dropped() -> None:
     pairs = [(0, 0, A, None, -1, 2), (0, 0, B, None, -1, 1)]
     calls = _call(_records(pairs, (("atac", "pairs"),)), 1, method="sets", min_umis=2)
     assert calls.n_barcodes.tolist() == [1]
+    # A library that counts both is read in UMIs: A's one UMI of ten reads
+    # goes, and B's three UMIs of three reads stay.
+    both = [(0, 0, A, None, 1, 10), (1, 0, B, None, 3, 3)]
+    calls = _call(_records(both, (("bartab", "pairs"),)), 2, method="sets", min_umis=2)
+    assert calls.units == ("umis",)
+    assert calls.n_barcodes.tolist() == [0, 1]
 
 
 def test_min_fraction_keeps_pairs_at_bartabs_share_of_the_top_barcode() -> None:
@@ -450,6 +456,11 @@ def test_min_fraction_keeps_pairs_at_bartabs_share_of_the_top_barcode() -> None:
     calls = _call(_records(rows), 1, method="sets", min_fraction=0.3)
     assert calls.n_barcodes.tolist() == [2]
     assert calls.counts["pairs_below_min_fraction"] == 1
+    # BARtab divides by the fraction: 17 / 0.34 is 49.99999999999999, below
+    # a top of 50, so the barcode goes, though 0.34 * 50 is exactly 17.
+    rows = _molecules(0, A, 50) + _molecules(0, B, 17)
+    calls = _call(_records(rows), 1, method="sets", min_fraction=0.34)
+    assert calls.n_barcodes.tolist() == [1]
     # Each library's top barcode is its own.
     two = _molecules(0, A, 10) + _molecules(0, B, 2, library=1)
     calls = _call(
