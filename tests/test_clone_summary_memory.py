@@ -162,8 +162,8 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
     "overlap of a few cells by labels of every cell": lambda data: (
         data.store.clones.overlap(data.few, groups=data.labels)
     ),
-    "track by 13 key columns": lambda data: data.store.clones.track(
-        data.clones,
+    "track of a few cells by 13 key columns": lambda data: data.store.clones.track(
+        data.few,
         group_by=[f"own_{copy}" for copy in range(12)],
         groups=data.own_labels[800],
         top=1,
