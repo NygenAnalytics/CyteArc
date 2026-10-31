@@ -356,9 +356,13 @@ def character_table(path: str | os.PathLike[str]) -> CharacterTable:
         )
 
 
-def _set_encoding(node: Any, encoding: tuple[str, str]) -> None:
-    node.attrs["encoding-type"] = encoding[0]
-    node.attrs["encoding-version"] = encoding[1]
+def _encoded(encoding: tuple[str, str], **attributes: Any) -> dict[str, Any]:
+    """The attributes of a node of this encoding, set as it is created.
+
+    Setting attributes one by one rewrites the node's metadata each time,
+    which costs as much again as creating it.
+    """
+    return {"encoding-type": encoding[0], "encoding-version": encoding[1], **attributes}
 
 
 def _write_array(group: Any, name: str, values: np.ndarray) -> None:
@@ -367,14 +371,13 @@ def _write_array(group: Any, name: str, values: np.ndarray) -> None:
     text = values.dtype.kind in "OUS"
     rows = _TEXT_CHUNK_ROWS if text else _CHUNK_ROWS
     chunks = (max(1, min(rows, len(values))),)
-    if text:
-        array = group.create_array(name, shape=values.shape, dtype=str, chunks=chunks)
-        _set_encoding(array, _STRING_ARRAY)
-    else:
-        array = group.create_array(
-            name, shape=values.shape, dtype=values.dtype, chunks=chunks
-        )
-        _set_encoding(array, _ARRAY)
+    array = group.create_array(
+        name,
+        shape=values.shape,
+        dtype=str if text else values.dtype,
+        chunks=chunks,
+        attributes=_encoded(_STRING_ARRAY if text else _ARRAY),
+    )
     for start in range(0, len(values), chunks[0]):
         block = values[start : start + chunks[0]]
         array[start : start + len(block)] = (
@@ -392,10 +395,12 @@ def _write_frame(
     column: Callable[[int], np.ndarray],
 ) -> Any:
     """Write a dataframe whose ``column(position)`` gives each column in turn."""
-    frame = group.create_group(name)
-    _set_encoding(frame, _DATAFRAME)
-    frame.attrs["_index"] = "_index"
-    frame.attrs["column-order"] = list(names)
+    frame = group.create_group(
+        name,
+        attributes=_encoded(
+            _DATAFRAME, _index="_index", **{"column-order": list(names)}
+        ),
+    )
     _write_array(frame, "_index", np.asarray(index, dtype=object))
     for position, column_name in enumerate(names):
         _write_array(frame, column_name, column(position))
@@ -408,14 +413,16 @@ def _no_column(position: int) -> np.ndarray:
 
 def _write_scalar(group: Any, name: str, value: Any) -> None:
     if isinstance(value, str):
-        array = group.create_array(name, shape=(), dtype=str)
+        array = group.create_array(
+            name, shape=(), dtype=str, attributes=_encoded(_STRING)
+        )
         array[()] = value
-        _set_encoding(array, _STRING)
         return
     stored = np.asarray(value)
-    array = group.create_array(name, shape=(), dtype=stored.dtype)
+    array = group.create_array(
+        name, shape=(), dtype=stored.dtype, attributes=_encoded(_NUMERIC_SCALAR)
+    )
     array[()] = stored
-    _set_encoding(array, _NUMERIC_SCALAR)
 
 
 def write_character_store(
@@ -466,12 +473,16 @@ def write_character_store(
         )
     if len(set(characters)) != len(characters):
         raise ValueError("Each character must be named once")
-    root = zarr.open_group(target, mode="w-", zarr_format=3)
-    _set_encoding(root, ("treedata", "0.1.0"))
+    root = zarr.open_group(
+        target,
+        mode="w-",
+        zarr_format=3,
+        attributes=_encoded(("treedata", "0.1.0")),
+    )
     _write_frame(root, "obs", cells, (), _no_column)
     _write_frame(root, "var", np.empty(0, dtype=object), (), _no_column)
     for name in ("obsm", "varm", "obsp", "varp", "layers", "uns"):
-        _set_encoding(root.create_group(name), _DICT)
+        root.create_group(name, attributes=_encoded(_DICT))
     # One character's column at a time is copied as int64 and written.
     _write_frame(
         root["obsm"],

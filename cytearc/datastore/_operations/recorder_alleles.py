@@ -87,7 +87,10 @@ _MERGE_FACTOR = 2
 _MERGE_BYTES_PER_TEXT = 150
 # Bytes that writing takes per record beside the table: the int32 copies of
 # its cells and files, the int8 copy of its states, and the keys that count
-# each cell's integrations.
+# each cell's integrations. The chunks that the merge freed stay resident
+# beside them, since the allocator keeps them for reuse: at 30 million
+# records the resident peak of writing was twice the table's bytes and about
+# 40 bytes per record.
 _WRITE_BYTES_PER_RECORD = 40
 # Bytes that an import, a load and an export hold whatever their size: a
 # block of a file as it is hashed, pandas' parser buffers, and a Zarr chunk of
@@ -470,9 +473,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 values of the chunks held.
         """
         held = encoder.nbytes
-        merging = max(
-            _MERGE_FACTOR * held + merge_text,
-            held + _WRITE_BYTES_PER_RECORD * encoder.n_records,
+        merging = _MERGE_FACTOR * held + max(
+            merge_text, _WRITE_BYTES_PER_RECORD * encoder.n_records
         )
         peak = cells + _FIXED_BYTES + max(held + reading, merging)
         if peak > self.memoryBytes:
@@ -864,8 +866,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         else:
             from ...writers.characters import laml_row_bytes, write_laml_characters
 
-            # LAML's text is written as many cells at a time as the budget
-            # leaves room for, at least one.
+            # LAML's text is written as many cells at a time as a twentieth of
+            # the budget holds, or as the rest of it leaves room for, at least
+            # one.
             row_bytes = laml_row_bytes(len(matrix.characters))
             held = resident + int(matrix.codes.nbytes)
             if held + row_bytes > self.memoryBytes:
@@ -878,7 +881,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 target,
                 cell_ids,
                 matrix,
-                block_cells=(self.memoryBytes - held) // row_bytes,
+                block_cells=max(
+                    1, min(self.memoryBytes // 20, self.memoryBytes - held) // row_bytes
+                ),
             )
         logger.info(
             f"Exported {len(matrix.cells)} cells by {len(matrix.characters)} "

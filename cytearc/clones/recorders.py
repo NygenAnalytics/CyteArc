@@ -55,7 +55,7 @@ import numpy as np
 import pandas as pd
 
 from ..metadata.records import INTEGER, TEXT, FieldKind, RecordTable
-from ..utils.arrays import sort_categories
+from ..utils.arrays import sort_categories, sorted_unique
 
 __all__ = [
     "FIELDS",
@@ -521,7 +521,7 @@ def cell_summaries(table: RecordTable, n_cells: int) -> dict[str, np.ndarray]:
     integrations = np.asarray(table.text["integration"].codes, dtype=np.int64)
     # Each cell and integration read is one key, counted once.
     n_integrations = max(1, len(table.text["integration"].offsets) - 1)
-    keys = np.unique(cells[read] * n_integrations + integrations[read])
+    keys = sorted_unique(cells[read] * n_integrations + integrations[read])
     return {
         "n_edits": np.bincount(cells[edited], minlength=n_cells).astype(np.int64),
         "n_integrations": np.bincount(keys // n_integrations, minlength=n_cells).astype(
@@ -708,29 +708,46 @@ def _site_state_counts(
     integration_names: np.ndarray,
     site_names: np.ndarray,
 ) -> pd.DataFrame:
-    """Count the cells in each state at each site from the codes of records."""
+    """Count the cells in each state at each site from the codes of records.
+
+    Each record's site, cell and rank form one integer key, so one sort of
+    the keys finds each cell's lowest rank at each site.
+    """
     cells = np.asarray(cells, dtype=np.int64)
-    integrations = np.asarray(integrations, dtype=np.int64)
-    sites = np.asarray(sites, dtype=np.int64)
-    ranks = _STATE_PRIORITY[np.asarray(states, dtype=np.int64)]
-    n_reached = len(np.unique(cells))
-    order = np.lexsort((ranks, cells, sites, integrations))
-    starts = _group_starts(integrations[order], sites[order], cells[order])
-    # The first record of each cell at each site has its lowest rank.
-    first = order[starts]
-    keys = np.stack([integrations[first], sites[first], ranks[first]], axis=1)
-    distinct, counts = np.unique(keys.reshape(-1, 3), axis=0, return_counts=True)
-    counted: dict[tuple[int, int], np.ndarray] = {}
-    for (integration, site, rank), count in zip(
-        distinct.tolist(), counts.tolist(), strict=True
-    ):
-        found = counted.setdefault(
-            (integration, site), np.zeros(len(STATES), dtype=np.int64)
+    n_states = len(STATES)
+    n_sites = max(1, len(site_names))
+    n_pairs = max(1, len(integration_names)) * n_sites
+    n_cells = int(cells.max()) + 1 if len(cells) else 1
+    if n_pairs * n_cells * n_states >= 2**63:
+        raise ValueError(
+            f"{n_pairs} integrations and sites of {n_cells} cells are too many to "
+            "count states over"
         )
-        found[int(np.argsort(_STATE_PRIORITY)[rank])] = count
+    n_reached = int(np.count_nonzero(np.bincount(cells, minlength=1)))
+    pairs = np.asarray(integrations, dtype=np.int64) * n_sites + np.asarray(
+        sites, dtype=np.int64
+    )
+    keys = (pairs * n_cells + cells) * n_states + _STATE_PRIORITY[
+        np.asarray(states, dtype=np.int64)
+    ]
+    del pairs
+    keys = sorted_unique(keys)
+    # The first key of each cell at each site holds its lowest rank.
+    groups = keys // n_states
+    first = np.ones(len(keys), dtype=bool)
+    first[1:] = groups[1:] != groups[:-1]
+    chosen = keys[first]
+    del keys, groups, first
+    counts = np.bincount(
+        (chosen // n_states // n_cells) * n_states + chosen % n_states,
+        minlength=n_pairs * n_states,
+    ).reshape(n_pairs, n_states)
     named = {
-        (str(integration_names[integration]), str(site_names[site])): found
-        for (integration, site), found in counted.items()
+        (
+            str(integration_names[pair // n_sites]),
+            str(site_names[pair % n_sites]),
+        ): counts[pair][_STATE_PRIORITY].copy()
+        for pair in np.flatnonzero(counts.sum(axis=1)).tolist()
     }
     rows: list[tuple[str, str, str, int]] = []
     for integration, site in sort_categories(named):
@@ -957,10 +974,9 @@ def character_matrix(
     # The characters that an exported record reads, in natural order.
     integration_names = table.text["integration"].categories
     site_names = table.text["site"].categories
-    pairs = np.unique(
-        np.stack([integrations[exported], sites[exported]], axis=1).reshape(-1, 2),
-        axis=0,
-    )
+    n_sites = max(len(site_names), 1)
+    pairs = sorted_unique(integrations[exported] * n_sites + sites[exported])
+    pairs = np.stack([pairs // n_sites, pairs % n_sites], axis=1)
     named = [
         (str(integration_names[integration]), str(site_names[site]))
         for integration, site in pairs.tolist()
@@ -983,14 +999,32 @@ def character_matrix(
     edits = exported & edited
     edit_alleles = alleles[edits]
     edit_kinds = (states[edits] == UNKNOWN_MARK).astype(np.int64)
-    edit_keys = np.stack(
-        [record_characters[edits], edit_kinds, allele_ranks[edit_alleles]],
+    # Each edit's character, kind and allele rank as one key, ordered as
+    # those columns are, so that one stable sort finds the distinct edits.
+    n_ranks = max(len(allele_names), 1)
+    if (len(ranked_names) + 1) * 2 * n_ranks >= 2**63:
+        raise ValueError(
+            f"{len(ranked_names)} characters of {n_ranks} alleles are too many to "
+            "number the states of"
+        )
+    edit_keys = (record_characters[edits] * 2 + edit_kinds) * n_ranks + allele_ranks[
+        edit_alleles
+    ]
+    edit_order = np.argsort(edit_keys, kind="stable")
+    edit_starts = _group_starts(edit_keys[edit_order])
+    distinct_keys = edit_keys[edit_order][edit_starts]
+    distinct = np.stack(
+        [
+            distinct_keys // (2 * n_ranks),
+            distinct_keys // n_ranks % 2,
+            distinct_keys % n_ranks,
+        ],
         axis=1,
     ).reshape(-1, 3)
-    distinct, first_edit, inverse = np.unique(
-        edit_keys, axis=0, return_index=True, return_inverse=True
-    )
-    inverse = np.asarray(inverse, dtype=np.int64).reshape(-1)
+    first_edit = edit_order[edit_starts]
+    inverse = np.empty(len(edit_keys), dtype=np.int64)
+    inverse[edit_order] = np.cumsum(edit_starts) - 1
+    del edit_keys, edit_order, edit_starts, distinct_keys
     distinct_numbers = np.where(
         distinct[:, 1] == 0, allele_numbers[edit_alleles[first_edit]], 0
     )
@@ -1003,7 +1037,7 @@ def character_matrix(
     # kept allele row names a site once, so a cell has one record per
     # character.
     with_state = np.flatnonzero(record_codes >= 0)
-    exported_cells = np.unique(cells[with_state])
+    exported_cells = sorted_unique(cells[with_state])
     held = int(held_bytes) + 4 * len(exported_cells) * len(ranked_names)
     if memory_bytes is not None and held > memory_bytes:
         raise MemoryError(
@@ -1036,8 +1070,8 @@ def character_matrix(
         }
     )
     # By character, then state.
-    order = np.lexsort((state_codes, distinct[:, 0])) if len(distinct) else []
-    state_table = state_table.iloc[order].reset_index(drop=True)
+    table_order = np.lexsort((state_codes, distinct[:, 0]))
+    state_table = state_table.iloc[table_order].reset_index(drop=True)
     return CharacterMatrix(
         cells=exported_cells,
         integrations=tuple(pair[0] for pair in ranked_names),
@@ -1045,5 +1079,5 @@ def character_matrix(
         codes=codes,
         states=state_table,
         n_resolved=n_resolved,
-        n_without_states=int(len(np.unique(cells[kept])) - len(exported_cells)),
+        n_without_states=int(len(sorted_unique(cells[kept])) - len(exported_cells)),
     )

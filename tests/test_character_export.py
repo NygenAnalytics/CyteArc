@@ -358,3 +358,82 @@ def test_an_export_beyond_the_budget_writes_nothing(store, truth, recorders, tmp
     with pytest.raises(MemoryError, match="Raise mem_budget"):
         store.clones.export_characters(alleles, tmp_path / "out.csv", format="laml")
     assert not (tmp_path / "out.zarr").exists() and not (tmp_path / "out.csv").exists()
+
+
+def _matrix_of(codes: np.ndarray, largest: int):
+    """A character matrix whose every character lists the states 1 to ``largest``."""
+    from cytearc.clones.recorders import CharacterMatrix
+
+    names = [f"intID{k // 3}-s{k % 3}" for k in range(codes.shape[1])]
+    states = pd.DataFrame(
+        [
+            (name, state, f"allele{state}", "mark", 1)
+            for name in names
+            for state in range(1, largest + 1)
+        ],
+        columns=["character", "state", "allele", "kind", "cells"],
+    )
+    return CharacterMatrix(
+        cells=np.arange(codes.shape[0]),
+        integrations=tuple(name.split("-")[0] for name in names),
+        sites=tuple(name.split("-")[1] for name in names),
+        codes=codes,
+        states=states,
+        n_resolved=0,
+        n_without_states=0,
+    )
+
+
+def test_laml_text_holds_what_its_rows_count(tmp_path):
+    """A block of LAML's text holds at most laml_row_bytes per cell, traced.
+
+    States of two digits each become a string of their own when every value
+    is converted, which held about 85 bytes per state beside the 64 counted.
+    """
+    import tracemalloc
+
+    from cytearc.writers.characters import laml_row_bytes, write_laml_characters
+
+    rng = np.random.default_rng(5)
+    n_cells, n_characters = 2_000, 300
+    codes = rng.integers(-1, 41, size=(n_cells, n_characters)).astype(np.int32)
+    matrix = _matrix_of(codes, 40)
+    cells = np.asarray([f"cell{index:05d}" for index in range(n_cells)], dtype=object)
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        write_laml_characters(
+            tmp_path / "matrix.csv", cells, matrix, block_cells=n_cells
+        )
+        peak = tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+    assert peak <= n_cells * laml_row_bytes(n_characters), peak
+    written = pd.read_csv(
+        tmp_path / "matrix.csv", dtype=str, keep_default_na=False, index_col=0
+    )
+    expected = np.where(codes < 0, "?", codes.astype(str))
+    np.testing.assert_array_equal(written.to_numpy(), expected)
+    assert written.index.tolist() == cells.tolist()
+
+
+def test_laml_text_refuses_a_state_that_its_table_does_not_list(tmp_path):
+    from cytearc.writers.characters import write_laml_characters
+
+    codes = np.asarray([[0, 1], [7, -1]], dtype=np.int32)
+    cells = np.asarray(["a", "b"], dtype=object)
+    with pytest.raises(ValueError, match="a state that its state table does not list"):
+        write_laml_characters(tmp_path / "matrix.csv", cells, _matrix_of(codes, 2))
+    # Blocks of one cell write the same text as one block of every cell.
+    codes = np.asarray([[0, 2], [1, -1], [-1, -1]], dtype=np.int32)
+    cells = np.asarray(["a", "b", "c"], dtype=object)
+    for block_cells, name in ((1, "one.csv"), (3, "all.csv")):
+        write_laml_characters(
+            tmp_path / name, cells, _matrix_of(codes, 2), block_cells=block_cells
+        )
+    assert (tmp_path / "one.csv").read_text() == (tmp_path / "all.csv").read_text()
+    assert (tmp_path / "one.csv").read_text().splitlines()[1:] == [
+        "a,0,2",
+        "b,1,?",
+        "c,?,?",
+    ]

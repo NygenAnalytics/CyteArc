@@ -27,8 +27,10 @@ __all__ = [
 # cell's or a character's name.
 _LAML_FORBIDDEN = frozenset(",;:()[]'\"\t\r\n ")
 # Bytes that each state of a block of LAML's text takes as it is written:
-# its code as a Python string and the reference to it.
-_LAML_BYTES_PER_STATE = 64
+# its position among the states, the check of that position, a reference
+# to the state's text, which each state shares, and the reference in the
+# block's rows as lists, 24 in all as traced, beside the row's joined text.
+_LAML_BYTES_PER_STATE = 40
 # At most this many cells of LAML's text are written at once.
 _LAML_MAX_BLOCK = 50_000
 
@@ -117,18 +119,34 @@ def write_laml_characters(
     _refuse_laml_names(characters, "character")
     target, priors_path, states_path = laml_paths(path)
     codes = np.asarray(matrix.codes)
-    step = max(1, int(block_cells))
+    # Each state's text is made once and shared by every cell that holds it:
+    # missing, unedited and each edited state of the state table.
+    values = np.unique(
+        np.concatenate(
+            [[-1, 0], np.asarray(matrix.states["state"], dtype=np.int64)]
+        ).astype(np.int64)
+    )
+    texts = np.asarray(
+        ["?" if value < 0 else str(value) for value in values.tolist()], dtype=object
+    )
+    step = max(1, min(_LAML_MAX_BLOCK, int(block_cells)))
     with open(target, "w", encoding="utf-8", newline="") as handle:
         handle.write(",".join(["cell", *characters]) + "\n")
         for start in range(0, len(cells), step):
-            block = codes[start : start + step].astype(str).astype(object)
-            block[codes[start : start + step] < 0] = "?"
+            block = codes[start : start + step]
+            positions = np.minimum(np.searchsorted(values, block), len(values) - 1)
+            if not np.array_equal(values[positions], block):
+                raise ValueError(
+                    "The character matrix holds a state that its state table "
+                    "does not list"
+                )
+            rows = texts[positions].tolist()
+            del positions
             handle.writelines(
                 ",".join([cell, *row]) + "\n"
-                for cell, row in zip(
-                    cells[start : start + step], block.tolist(), strict=True
-                )
+                for cell, row in zip(cells[start : start + step], rows, strict=True)
             )
+            del rows
     priors = matrix.priors()
     with open(priors_path, "w", encoding="utf-8", newline="") as handle:
         handle.writelines(
