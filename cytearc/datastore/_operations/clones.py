@@ -741,8 +741,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if assignment.probabilities is not None:
             arrays[_PROBABILITY] = assignment.probabilities.astype(np.float64)
         for name, values in (source_arrays or {}).items():
-            if name not in _SOURCE_ARRAYS or name in arrays:
-                raise ValueError(f"{name!r} is not a source array of clones")
+            # The callers in this package name only the arrays of a source.
+            assert name in _SOURCE_ARRAYS and name not in arrays, name
             arrays[name] = values
         write_cell_data_artifact(self.zw, planned, arrays, attributes=dict(attributes))
 
