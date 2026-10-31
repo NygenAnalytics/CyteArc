@@ -1,6 +1,7 @@
 """Pairs of texts within a distance, checked against every pair compared directly."""
 
 import itertools
+import warnings
 
 import numpy as np
 import pytest
@@ -40,7 +41,8 @@ def _force(monkeypatch, path: str) -> None:
     """Make the search use keys, or compare pairs, wherever it can.
 
     Forced keys under substitutions mask single positions, the keys whose
-    costs the tests of the budget count.
+    costs the tests of the budget count, up to 3 substitutions; beyond them,
+    they keep one of one more segment than the substitutions.
     """
     names = (
         ("_KEY_NS", "_EDIT_KEY_NS")
@@ -53,7 +55,11 @@ def _force(monkeypatch, path: str) -> None:
         monkeypatch.setattr(
             sequences,
             "_hamming_segments",
-            lambda codes, limit, room: max(codes.shape[1], 1) if limit <= 3 else 0,
+            lambda codes, limit, room, split=0: (
+                max(codes.shape[1], 1)
+                if limit <= 3
+                else (limit + 1 if limit < codes.shape[1] else 0)
+            ),
         )
 
 
@@ -772,13 +778,14 @@ def test_partial_pairs_found_count_against_the_budget() -> None:
 # Keys that mask segments of positions, for long texts.
 
 
-def _barcodes(rng, n_texts: int, length: int) -> list[str]:
-    """Random DNA barcodes with a variant one to three substitutions from each tenth."""
+def _barcodes(rng, n_texts: int, length: int, most: int = 3) -> list[str]:
+    """Random DNA barcodes with a variant 1 to ``most`` substitutions from each tenth."""
     letters = np.asarray(list("ACGT"))
     texts = ["".join(rng.choice(letters, size=length)) for _ in range(n_texts)]
     for base in texts[: n_texts // 10]:
         variant = list(base)
-        for position in rng.choice(length, size=int(rng.integers(1, 4)), replace=False):
+        changed = int(rng.integers(1, most + 1))
+        for position in rng.choice(length, size=changed, replace=False):
             variant[position] = "ACGT"[("ACGT".index(variant[position]) + 1) % 4]
         texts.append("".join(variant))
     return sorted(set(texts))
@@ -802,16 +809,23 @@ def test_segment_keys_find_every_pair_of_long_barcodes(cutoff, monkeypatch) -> N
     assert len(chosen) == 1 and cutoff < chosen[0] < 28
 
 
-@pytest.mark.parametrize("segments", [4, 5, 9, 28])
-def test_every_split_into_segments_finds_the_same_pairs(segments, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("cutoff", "segments"),
+    # Keys that mask 3 of 9 or 28 segments, keep 1 or 2 of 4 or 5, or keep 1
+    # to 3 of 6 to 8 under 5 substitutions.
+    [(3, 4), (3, 5), (3, 9), (3, 28), (5, 6), (5, 7), (5, 8)],
+)
+def test_every_split_into_segments_finds_the_same_pairs(
+    cutoff, segments, monkeypatch
+) -> None:
     rng = np.random.default_rng(segments)
-    texts = _barcodes(rng, 600, 28)
+    texts = _barcodes(rng, 600, 28, most=cutoff + 1)
     monkeypatch.setattr(
-        sequences, "_hamming_segments", lambda codes, limit, room: segments
+        sequences, "_hamming_segments", lambda codes, limit, room, split=0: segments
     )
-    assert _pairs(*neighbor_pairs(texts, "hamming", 3)) == _expected(
-        texts, "hamming", 3
-    )
+    expected = _expected(texts, "hamming", cutoff)
+    assert _pairs(*neighbor_pairs(texts, "hamming", cutoff)) == expected
+    assert len(expected) >= 30
 
 
 def test_the_segments_cut_the_keys_of_long_barcodes() -> None:
@@ -830,3 +844,206 @@ def test_the_segments_cut_the_keys_of_long_barcodes() -> None:
     assert sequences._hamming_segments(alike, 1, 1 << 34) in (0, 28)
     # Candidates that would not fit the room leave a choice out.
     assert sequences._hamming_segments(codes, 3, 0) == 0
+    # Within 5 substitutions, keys keep 1 to 3 of 6 to 8 segments: at most 56
+    # keys a barcode, where masking positions would make 98,280.
+    segments = sequences._hamming_segments(codes, 5, 1 << 34)
+    assert 6 <= segments <= 8
+    assert sequences._key_count(28, 5, False, segments) <= 56
+
+
+def test_keys_find_every_pair_within_four_or_five_substitutions(monkeypatch) -> None:
+    rng = np.random.default_rng(45)
+    texts = _barcodes(rng, 3_000, 30, most=6)
+    codes = np.asarray([list(map(ord, text)) for text in texts], dtype=np.uint8)
+    differ = (codes[:, None, :] != codes[None, :, :]).sum(axis=2)
+    chosen: list[int] = []
+    original = sequences._keyed_pairs
+
+    def spy(*args):
+        chosen.append(args[6])
+        return original(*args)
+
+    monkeypatch.setattr(sequences, "_keyed_pairs", spy)
+    for cutoff in (4, 5):
+        chosen.clear()
+        first, second = np.nonzero(np.triu(differ <= cutoff, 1))
+        expected = set(zip(first.tolist(), second.tolist(), strict=True))
+        assert _pairs(*neighbor_pairs(texts, "hamming", cutoff)) == expected
+        assert len(expected) > 100
+        # Keys of a few more segments than the cutoff found them.
+        assert len(chosen) == 1 and cutoff < chosen[0] <= cutoff + 3
+
+
+def test_texts_across_a_split_that_never_agree_at_a_position_choose_keys() -> None:
+    rng = np.random.default_rng(8)
+    codes = rng.integers(0, 4, size=(4_000, 24)).astype(np.uint8)
+    # The rows below the split hold 0 at the first position, the rest never.
+    codes[:2_000, 0] = 0
+    codes[2_000:, 0] = rng.integers(1, 4, size=2_000)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        across = sequences._hamming_segments(codes, 2, 1 << 34, split=2_000)
+        within = sequences._hamming_segments(codes, 2, 1 << 34)
+    assert across > 2 and within > 2
+
+
+# TREX's partial cloneIDs, grouped by the positions where they hold no base.
+
+
+def _cloneids(rng, n_bases: int, length: int = 30) -> list[str]:
+    """CloneIDs with variants of up to 6 substitutions, some cut or with a deletion.
+
+    A cut variant lost up to 13 bases at one end, as a read that covers part
+    of the barcode gives, marked ``-``; a deletion marks 3 bases ``0``.
+    """
+    letters = np.asarray(list("ACGT"))
+    texts = []
+    for _ in range(n_bases):
+        base = list(rng.choice(letters, size=length))
+        texts.append("".join(base))
+        for _ in range(int(rng.integers(0, 5))):
+            variant = list(base)
+            changed = int(rng.integers(0, 7))
+            for position in rng.choice(length, size=changed, replace=False):
+                variant[position] = str(rng.choice(letters))
+            kind = int(rng.integers(0, 4))
+            cut = int(rng.integers(1, 14))
+            if kind == 1:
+                variant[:cut] = "-" * cut
+            elif kind == 2:
+                variant[-cut:] = "-" * cut
+            elif kind == 3:
+                at = int(rng.integers(0, length - 3))
+                variant[at : at + 3] = "000"
+            texts.append("".join(variant))
+    return texts
+
+
+@pytest.mark.parametrize("path", ["chosen", "keyed", "pairwise"])
+@pytest.mark.parametrize(
+    ("cutoff", "min_compared"), [(5, 20), (3, 20), (5, 0), (0, 25), (4, 10)]
+)
+def test_partial_cloneids_find_every_pair_by_their_unknown_positions(
+    monkeypatch, path, cutoff, min_compared
+) -> None:
+    if path != "chosen":
+        _force(monkeypatch, path)
+    rng = np.random.default_rng([cutoff, min_compared])
+    texts = _cloneids(rng, 60)
+    blocks = rng.integers(0, 2, size=len(texts))
+    found = _pairs(
+        *neighbor_pairs(
+            texts, "hamming", cutoff, blocks, unknown="-0", min_compared=min_compared
+        )
+    )
+    expected = {
+        (i, j)
+        for i, j in itertools.combinations(range(len(texts)), 2)
+        if blocks[i] == blocks[j]
+        and _known_within(texts[i], texts[j], cutoff, min_compared)
+    }
+    assert found == expected
+    # Pairs of a cut or deleted cloneID with a full one, and of two cut ones
+    # where a pair compares few enough positions.
+    partial = {i for i, text in enumerate(texts) if "-" in text or "0" in text}
+    assert any((i in partial) != (j in partial) for i, j in expected)
+    if min_compared <= 20:
+        assert any(i in partial and j in partial for i, j in expected)
+
+
+@pytest.mark.parametrize("path", ["keyed", "pairwise"])
+def test_two_partial_texts_compare_the_positions_both_hold(monkeypatch, path) -> None:
+    _force(monkeypatch, path)
+    texts = ["AAAAAAAAAA", "AAAAA-----", "-----CCCCC", "AAAAACCCCC"]
+    # The cut texts match the full texts on their halves; they share no
+    # position, so they pair only when a pair needs none.
+    assert _pairs(
+        *neighbor_pairs(texts, "hamming", 0, unknown="-", min_compared=5)
+    ) == {(0, 1), (1, 3), (2, 3)}
+    assert _pairs(*neighbor_pairs(texts, "hamming", 0, unknown="-")) == {
+        (0, 1),
+        (1, 2),
+        (1, 3),
+        (2, 3),
+    }
+    # Five substitutions on the second half link the first full text with
+    # the last and with the text that holds that half only.
+    assert _pairs(
+        *neighbor_pairs(texts, "hamming", 5, unknown="-", min_compared=5)
+    ) == {(0, 1), (0, 2), (0, 3), (1, 3), (2, 3)}
+
+
+def test_partial_cloneids_search_their_groups_by_keys(monkeypatch) -> None:
+    # 20,000 cloneIDs, three in ten cut at one end, as TREX's reads give:
+    # each group of a cut, and the full cloneIDs, find their pairs through
+    # keys, and only small groups compare every pair.
+    rng = np.random.default_rng(20)
+    codes = rng.integers(0, 4, size=(20_000, 30))
+    cut = rng.random(20_000) < 0.3
+    lost = rng.integers(1, 11, size=20_000)
+    texts = []
+    for row, values in enumerate(codes.tolist()):
+        text = "".join("ACGT"[value] for value in values)
+        if cut[row]:
+            text = "-" * lost[row] + text[lost[row] :]
+        texts.append(text)
+    looped: list[int] = []
+    keyed: list[int] = []
+    original_loops = sequences._hamming_pairs
+    original_keys = sequences._keyed_pairs
+
+    def loops(words, limit, most, split):
+        looped.append(len(words))
+        return original_loops(words, limit, most, split)
+
+    def keys(*args):
+        keyed.append(len(args[0]))
+        return original_keys(*args)
+
+    monkeypatch.setattr(sequences, "_hamming_pairs", loops)
+    monkeypatch.setattr(sequences, "_keyed_pairs", keys)
+    neighbor_pairs(texts, "hamming", 5, unknown="-", min_compared=20)
+    assert max(keyed) > 14_000
+    assert not looped or max(looped) < 2_000
+
+
+@pytest.mark.parametrize("path", ["keyed", "pairwise"])
+@pytest.mark.parametrize("near", [True, False])
+def test_partial_texts_hold_no_more_than_the_smallest_budget_they_accept(
+    monkeypatch, path, near
+) -> None:
+    # Copies of cut and full texts that all pair, whose pairs take the most;
+    # or distinct random cloneIDs cut in many ways, which pair with nothing,
+    # so that their positions and groups take the most.
+    _force(monkeypatch, path)
+    if near:
+        texts = (
+            ["A" * 20 + "-" * 10] * 120 + ["A" * 30] * 120 + ["-" * 10 + "A" * 20] * 120
+        )
+    else:
+        rng = np.random.default_rng(9)
+        texts = _cloneids(rng, 1_500)
+
+    def search(budget: int | None) -> tuple[np.ndarray, np.ndarray]:
+        return neighbor_pairs(
+            texts, "hamming", 0, unknown="-0", min_compared=10, max_bytes=budget
+        )
+
+    if near:
+        assert len(search(None)[0]) == 360 * 359 // 2
+    budget = smallest_budget(search, 1 << 24)
+    assert traced_peak(lambda: search(budget)) <= budget
+
+
+def test_the_positions_of_partial_texts_count_against_the_budget() -> None:
+    # 600 cut texts that pair with nothing hold their positions, 64 bytes
+    # each, while their groups are searched.
+    rng = np.random.default_rng(10)
+    texts = ["".join(rng.choice(list("ACGT"), size=20)) + "-" * 10 for _ in range(600)]
+    held = _encoding_bytes(texts) + _group_bytes(texts)
+    with pytest.raises(MemoryError, match="where the texts hold no base"):
+        neighbor_pairs(texts, "hamming", 0, unknown="-", max_bytes=held + 64 * 600 - 1)
+    found = neighbor_pairs(
+        texts, "hamming", 0, unknown="-", max_bytes=held + 64 * 600 + 2**20
+    )
+    assert len(found[0]) == 0
