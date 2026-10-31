@@ -39,7 +39,10 @@ Formats:
 Text may be plain or gzip-compressed, separated by tabs, commas or spaces,
 with R's double quotes and without a final newline. A header that starts
 with ``#``, as TREX writes, is a header. A header with one field fewer than
-its rows is R's row-name layout, whose first field is the row name.
+its rows is R's row-name layout, whose first field is the row name, unless
+the rows' last field is empty, which a delimiter at the end of each row
+leaves; R's ``write.csv`` writes the row names under an empty first name
+instead. Blank lines hold no rows.
 """
 
 import csv
@@ -47,6 +50,7 @@ import gzip
 import io
 import os
 import re
+import zlib
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -119,6 +123,10 @@ _GZIP_SIGNATURE = b"\x1f\x8b"
 # Text that R and pandas write for a missing value.
 _MISSING_TEXT = frozenset({"", "NA", "NaN", "nan"})
 _MITO_UNASSIGNED = "unassigned"
+# Rows after the header that the layout samples for their fields and width.
+_SAMPLE_ROWS = 100
+# What reading a gzip file that is cut short or corrupt raises.
+_CORRUPT = (EOFError, zlib.error, gzip.BadGzipFile)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +192,12 @@ class CloneLayout:
         return len(text.names) if text is not None else 3
 
     @property
+    def row_chars(self) -> int:
+        """The characters of the longest row the layout sampled, 0 for none."""
+        text = self._text if self._text is not None else self._cells_text
+        return text.row_chars if text is not None else 0
+
+    @property
     def related_paths(self) -> tuple[str, ...]:
         """The files read beside ``path``: a matrix's cell and clone lists."""
         return tuple(path for path in (self.cells_path, self.clones_path) if path)
@@ -200,13 +214,21 @@ class CloneLayout:
 
 @dataclass(frozen=True, slots=True)
 class _TextLayout:
-    """A delimited text file's header, delimiter and compression."""
+    """A delimited text file's header, delimiter and compression.
+
+    Attributes:
+        trailing_delimiter: Whether each row ends in a delimiter that the
+            header lacks, which leaves an empty last field.
+        row_chars: The characters of the longest of the first rows.
+    """
 
     path: str
     names: tuple[str, ...]
     delimiter: str
     compression: str | None
     row_names: bool
+    trailing_delimiter: bool = False
+    row_chars: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,7 +253,9 @@ class CloneRows:
     """A chunk of rows of a clone table, in file order.
 
     Attributes:
-        first_line: The file line of the first row, counting from 1.
+        first_line: The line of the first row, counting rows: the header is
+            line 1 of a table and blank lines hold no row, and an AnnData
+            file's first cell is line 1.
         barcodes: Each row's cell barcode, as text.
         clones: Each row's clone label, None for none.
         probabilities: Each row's clone probability, NaN for none, or None
@@ -282,7 +306,44 @@ def _first_lines(path: str, compression: str | None, n_lines: int) -> list[str]:
                     break
     except UnicodeDecodeError:
         raise ValueError(f"{path} is not a text file that CyteArc can read") from None
+    except _CORRUPT as error:
+        raise _corrupt_error(path, error) from None
     return lines
+
+
+def _corrupt_error(path: str, error: BaseException) -> ValueError:
+    return ValueError(f"{path} is cut short or corrupt: {error}")
+
+
+def _header_and_rows(path: str, compression: str | None) -> tuple[str, list[str]]:
+    """Return a table's first line and up to ``_SAMPLE_ROWS`` rows after it.
+
+    Blank lines after the first are skipped.
+    """
+    header: str | None = None
+    rows: list[str] = []
+    record = ""
+    try:
+        with _open_text(path, compression) as handle:
+            for line in handle:
+                text = line.rstrip("\r\n")
+                if header is None:
+                    header = text
+                    continue
+                # A row whose quotes are open goes on to the next line.
+                record = f"{record}\n{text}" if record else text
+                if record.count('"') % 2 or not record.strip():
+                    record = "" if not record.strip() else record
+                    continue
+                rows.append(record)
+                record = ""
+                if len(rows) == _SAMPLE_ROWS:
+                    break
+    except UnicodeDecodeError:
+        raise ValueError(f"{path} is not a text file that CyteArc can read") from None
+    except _CORRUPT as error:
+        raise _corrupt_error(path, error) from None
+    return header or "", rows
 
 
 def _delimiter(lines: list[str]) -> str:
@@ -314,31 +375,38 @@ def _fields(line: str, delimiter: str) -> list[str]:
 
 def _text_layout(path: str) -> _TextLayout:
     compression = _compression(path)
-    lines = _first_lines(path, compression, 2)
-    if not lines or not lines[0].strip():
+    first, rows = _header_and_rows(path, compression)
+    if not first.strip():
         raise ValueError(f"{path} is empty; a clone table needs a header line")
-    delimiter = _delimiter(lines)
-    header = [name.strip() for name in _fields(lines[0].lstrip("﻿"), delimiter)]
+    delimiter = _delimiter([first, *rows[:1]])
+    header = [name.strip() for name in _fields(first.lstrip("﻿"), delimiter)]
     # TREX starts its headers with "#", which marks no comment.
     if header and header[0].startswith("#"):
         header[0] = header[0][1:]
-    row_names = False
-    if len(lines) > 1:
-        n_fields = len(_fields(lines[1], delimiter))
-        if n_fields == len(header) + 1:
+    row_names = trailing_delimiter = False
+    if rows:
+        fields = _fields(rows[0], delimiter)
+        if len(fields) == len(header) + 1 and not fields[-1].strip():
+            trailing_delimiter = True
+        elif len(fields) == len(header) + 1:
             row_names = True
             header = ["", *header]
-        elif n_fields != len(header):
+        elif len(fields) != len(header):
             raise ValueError(
                 f"The header of {path} names {len(header)} columns, but its first "
-                f"row holds {n_fields} fields"
+                f"row holds {len(fields)} fields"
             )
+        elif header[0] == "":
+            # R's write.csv writes its row names under an empty name.
+            row_names = True
     return _TextLayout(
         path=path,
         names=tuple(header),
         delimiter=delimiter,
         compression=compression,
         row_names=row_names,
+        trailing_delimiter=trailing_delimiter,
+        row_chars=max((len(row) for row in rows), default=0),
     )
 
 
@@ -478,6 +546,13 @@ def _table_layout(
 
 
 def _matrix_header(path: str, compression: str | None) -> _MatrixHeader:
+    try:
+        return _read_matrix_header(path, compression)
+    except _CORRUPT as error:
+        raise _corrupt_error(path, error) from None
+
+
+def _read_matrix_header(path: str, compression: str | None) -> _MatrixHeader:
     with _open_text(path, compression) as handle:
         banner = handle.readline().strip().split()
         if len(banner) < 5 or banner[0].lower() != "%%matrixmarket":
@@ -560,12 +635,20 @@ def _beside(path: str) -> tuple[str, str | None]:
 
 
 def _count_rows(text: _TextLayout) -> int:
+    """Count a table's lines that hold text, its header aside."""
     count = 0
-    with _open_text(text.path, text.compression) as handle:
-        handle.readline()
-        for line in handle:
-            if line.strip():
-                count += 1
+    try:
+        with _open_text(text.path, text.compression) as handle:
+            handle.readline()
+            for line in handle:
+                if line.strip():
+                    count += 1
+    except UnicodeDecodeError:
+        raise ValueError(
+            f"{text.path} is not a text file that CyteArc can read"
+        ) from None
+    except _CORRUPT as error:
+        raise _corrupt_error(text.path, error) from None
     return count
 
 
@@ -757,10 +840,59 @@ def _joined_barcodes(frame: pd.DataFrame, positions: Sequence[int]) -> np.ndarra
     return np.asarray(joined.to_numpy(dtype=object))
 
 
-def _line_list(rows: np.ndarray, first_line: int) -> str:
-    lines = [str(int(row) + first_line) for row in rows[:5]]
+def _line_list(
+    rows: np.ndarray, first_line: int, text: "_TextLayout | None" = None
+) -> str:
+    """Name up to five lines of rows of a chunk that starts at ``first_line``.
+
+    ``first_line`` counts rows, as ``_text_chunks`` yields it; with ``text``,
+    the rows' lines in the file are found by reading it again, past blank
+    lines and quoted fields that hold line breaks.
+    """
+    lines = [int(row) + first_line for row in rows[:5]]
+    if text is not None:
+        lines = _file_lines(text, lines)
     more = f" and {len(rows) - 5} more" if len(rows) > 5 else ""
-    return ", ".join(lines) + more
+    return ", ".join(str(line) for line in lines) + more
+
+
+def _blank_record(fields: list[str], delimiter: str) -> bool:
+    """Whether a record is a line that pandas skips as blank.
+
+    A line of whitespace alone is blank, but a tab-separated line of tabs
+    holds empty fields.
+    """
+    if not all(not field.strip() for field in fields):
+        return False
+    return delimiter == " " or len(fields) <= 1
+
+
+def _file_lines(text: _TextLayout, row_lines: list[int]) -> list[int]:
+    """Return the file lines of rows that ``_text_chunks`` numbers from line 2.
+
+    Only errors need them, so the file is read again from its start.
+    """
+    wanted = {line - 2 for line in row_lines}
+    found: dict[int, int] = {}
+    with _open_text(text.path, text.compression) as handle:
+        handle.readline()
+        if text.delimiter == " ":
+            reader = csv.reader(handle, delimiter=" ", skipinitialspace=True)
+        else:
+            reader = csv.reader(handle, delimiter=text.delimiter)
+        row, consumed = -1, 0
+        for fields in reader:
+            start = consumed + 2
+            consumed = reader.line_num
+            if _blank_record(fields, text.delimiter):
+                continue
+            row += 1
+            if row in wanted:
+                found[row] = start
+                if len(found) == len(wanted):
+                    break
+    # A row the second reading misses keeps the line that counts rows.
+    return [found.get(line - 2, line) for line in row_lines]
 
 
 def _text_chunks(
@@ -769,6 +901,10 @@ def _text_chunks(
     """Yield chunks of a table's rows as text, with each chunk's first line.
 
     Every field is read, so a row with more fields than the first raises.
+    Blank lines hold no rows. The lines count rows, the first after the
+    header being line 2, so a row's line is its chunk's first line plus its
+    position; ``_line_list`` with ``text`` finds the line in the file, past
+    blank lines and quoted fields that hold line breaks.
     """
     separator = r"\s+" if text.delimiter == " " else text.delimiter
     chunks = _parsed_chunks(
@@ -787,6 +923,16 @@ def _text_chunks(
     )
     line = 2
     for chunk in chunks:
+        if text.trailing_delimiter:
+            last = chunk.columns[-1]
+            filled = np.flatnonzero(chunk[last].to_numpy(dtype=object) != "")
+            if len(filled):
+                raise ValueError(
+                    f"{text.path} ends its rows in a delimiter, but holds a value "
+                    f"after its last column on line "
+                    f"{_line_list(filled[:1], line, text)}"
+                )
+            chunk = chunk.drop(columns=last)
         yield line, chunk
         line += len(chunk)
 
@@ -798,6 +944,8 @@ def _parsed_chunks(path: str, **options: Any) -> Iterator[pd.DataFrame]:
     except pd.errors.EmptyDataError:
         # A header without rows holds no rows.
         return
+    except _CORRUPT as error:
+        raise _corrupt_error(path, error) from None
     except (pd.errors.ParserError, ValueError) as error:
         raise ValueError(f"{path} is malformed: {error}") from None
     with reader:
@@ -806,12 +954,19 @@ def _parsed_chunks(path: str, **options: Any) -> Iterator[pd.DataFrame]:
                 chunk = next(reader)
             except StopIteration:
                 return
+            except _CORRUPT as error:
+                raise _corrupt_error(path, error) from None
             except (pd.errors.ParserError, ValueError) as error:
                 raise ValueError(f"{path} is malformed: {error}") from None
             yield chunk
 
 
-def _probabilities(values: pd.Series, first_line: int, path: str) -> np.ndarray:
+def _probabilities(
+    values: pd.Series,
+    first_line: int,
+    path: str,
+    table: "_TextLayout | None" = None,
+) -> np.ndarray:
     text = values.str.strip()
     missing = text.isin(_MISSING_TEXT).to_numpy()
     numbers = pd.to_numeric(text.where(~missing, None), errors="coerce").to_numpy(
@@ -823,7 +978,7 @@ def _probabilities(values: pd.Series, first_line: int, path: str) -> np.ndarray:
     if len(invalid):
         raise ValueError(
             f"Clone probabilities of {path} must be numbers from 0 to 1, or NA, on "
-            f"lines {_line_list(invalid, first_line)}"
+            f"lines {_line_list(invalid, first_line, table)}"
         )
     return np.asarray(numbers, dtype=np.float64)
 
@@ -834,9 +989,13 @@ def _table_labels(values: pd.Series, format: str) -> np.ndarray:
     missing = text.isin(_MISSING_TEXT).to_numpy()
     if format == "cassiopeia":
         # Cassiopeia writes lineage group 0 for a cell without a clone, as an
-        # integer or, beside missing groups, as a float.
-        numbers = pd.to_numeric(text.where(~missing, None), errors="coerce")
-        missing = missing | (numbers == 0).to_numpy()
+        # integer or, beside missing groups, as a float, so 4.0 is group 4.
+        numbers = pd.to_numeric(text.where(~missing, None), errors="coerce").to_numpy(
+            dtype=np.float64
+        )
+        missing = missing | (numbers == 0)
+        whole = ~missing & np.isfinite(numbers) & (numbers == np.floor(numbers))
+        labels[whole] = [str(int(number)) for number in numbers[whole].tolist()]
     labels[missing] = None
     return np.asarray(labels)
 
@@ -856,12 +1015,12 @@ def _iter_table_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows
         if len(empty):
             raise ValueError(
                 f"{layout.path} has rows without a cell barcode on lines "
-                f"{_line_list(empty, first_line)}"
+                f"{_line_list(empty, first_line, text)}"
             )
         probabilities = None
         if probability_position is not None:
             probabilities = _probabilities(
-                chunk[probability_position], first_line, layout.path
+                chunk[probability_position], first_line, layout.path, text
             )
         yield CloneRows(
             first_line=first_line,
@@ -997,7 +1156,7 @@ def matrix_cells(layout: CloneLayout, chunk_rows: int) -> Iterator[np.ndarray]:
         if len(empty):
             raise ValueError(
                 f"The cell list {text.path} has cells without a barcode on lines "
-                f"{_line_list(empty, first_line)}"
+                f"{_line_list(empty, first_line, text)}"
             )
         yield barcodes
 
@@ -1062,8 +1221,10 @@ def _x_clone_entries(layout: CloneLayout, chunk_rows: int) -> Iterator[MatrixEnt
             )
         node = handle["obsm"]["X_clone"]
         if isinstance(node, h5py.Dataset):
-            for start in range(0, n_rows, chunk_rows):
-                block = np.asarray(node[start : start + chunk_rows])
+            # A block holds as many values as a chunk of three-field rows.
+            block_rows = max(1, (3 * chunk_rows) // max(n_columns, 1))
+            for start in range(0, n_rows, block_rows):
+                block = np.asarray(node[start : start + block_rows])
                 rows, columns = np.nonzero(block)
                 yield MatrixEntries(cells=rows + start, clones=columns)
             return

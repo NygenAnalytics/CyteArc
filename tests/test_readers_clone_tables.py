@@ -90,10 +90,10 @@ def test_the_formats_are_the_documented_ones() -> None:
             [None, "GW_1"],
         ),
         (
-            "cellBC\tlineageGrp\nAAA\t0\nCCC\t4.0\nGGG\t0.0\nTTT\tNA\n",
+            "cellBC\tlineageGrp\nAAA\t0\nCCC\t4.0\nGGG\t0.0\nTTT\tNA\nCGA\t4\n",
             "cassiopeia",
-            ["AAA", "CCC", "GGG", "TTT"],
-            [None, "4.0", None, None],
+            ["AAA", "CCC", "GGG", "TTT", "CGA"],
+            [None, "4", None, None, "4"],
         ),
         (
             "﻿Cell_ID,Clone_ID\nAAA,NaN\nCCC,nan\nGGG,\n",
@@ -138,6 +138,87 @@ def test_r_row_names_hold_the_cells_of_a_wide_table(tmp_path) -> None:
         [None, "2", "2"],
     )
     assert _rows(path, columns={"clone": "CellTagD0"})[1] == ["16", None, "16"]
+
+
+def test_r_write_csv_row_names_hold_the_cells(tmp_path) -> None:
+    # R's write.csv writes its row names under an empty first name.
+    path = _write(tmp_path / "clones.csv", '"","clone"\n"AAA-1","3"\n"CCC-1",NA\n')
+
+    layout = clone_layout(path, columns={"clone": "clone"})
+
+    assert layout.cell == ()
+    assert _rows(path, columns={"clone": "clone"})[:2] == (
+        ["AAA-1", "CCC-1"],
+        ["3", None],
+    )
+
+
+@pytest.mark.parametrize("delimiter", [",", "\t"])
+def test_a_delimiter_after_every_rows_last_field_ends_no_column(
+    tmp_path, delimiter
+) -> None:
+    # One field more than the header, the last one empty, is a delimiter at
+    # the end of each row rather than R's row-name layout.
+    path = _write(
+        tmp_path / "clones.txt",
+        f"clone_nr{delimiter}cell_id\n1{delimiter}AAA{delimiter}\n"
+        f"2{delimiter}CCC{delimiter}\n",
+    )
+
+    assert clone_layout(path).cell == ("cell_id",)
+    assert _rows(path)[:2] == (["AAA", "CCC"], ["1", "2"])
+
+
+def test_a_value_after_the_last_column_of_a_row_is_refused(tmp_path) -> None:
+    path = _write(tmp_path / "clones.csv", "Cell_ID,Clone_ID\nAAA,1,\n\nCCC,2,x\n")
+    with pytest.raises(ValueError, match="value after its last column on line 4"):
+        _rows(path, chunk_rows=10)
+
+
+def test_blank_lines_hold_no_rows(tmp_path) -> None:
+    path = _write(tmp_path / "clones.csv", "Cell_ID,Clone_ID\n\nAAA,1\n\n\nCCC,2\n\n")
+    assert clone_layout(path).cell == ("Cell_ID",)
+    assert _rows(path)[:2] == (["AAA", "CCC"], ["1", "2"])
+    header_only = _write(tmp_path / "header.csv", "Cell_ID,Clone_ID\n\n")
+    assert _rows(header_only) == ([], [], [])
+
+
+@pytest.mark.parametrize("chunk_rows", [1, 2, 10])
+def test_errors_name_the_file_line_of_a_row_after_blank_lines(
+    tmp_path, chunk_rows
+) -> None:
+    path = _write(tmp_path / "clones.csv", "Cell_ID,Clone_ID\nA,1\n\n\nB,2\n,3\n")
+    with pytest.raises(ValueError, match="without a cell barcode on lines 6$"):
+        _rows(path, chunk_rows=chunk_rows)
+    # A quoted field that holds a line break spans two lines of the file.
+    quoted = _write(
+        tmp_path / "clone_post_2.tsv",
+        'cell\tclone_opt\tp_opt\nA\t"1\n2"\t0.5\n\nB\t1\t3\n',
+    )
+    with pytest.raises(ValueError, match="or NA, on lines 5$"):
+        _rows(quoted, chunk_rows=chunk_rows)
+
+
+def test_a_gzip_file_cut_short_is_refused_by_name(tmp_path) -> None:
+    rows = "".join(f"C{index},{index}\n" for index in range(5_000))
+    data = gzip.compress(("Cell_ID,Clone_ID\n" + rows).encode(), mtime=0)
+    table = tmp_path / "clones.csv.gz"
+    table.write_bytes(data[: len(data) // 2])
+    with pytest.raises(ValueError, match="clones.csv.gz is cut short or corrupt"):
+        _rows(table, chunk_rows=100)
+    # The rows of a matrix's cell list are counted before they are read.
+    folder = tmp_path / "matrix"
+    folder.mkdir()
+    cells = gzip.compress(
+        ("cell\n" + "".join(f"C{index}\n" for index in range(5_000))).encode(), mtime=0
+    )
+    (folder / "cells.tsv.gz").write_bytes(cells[: len(cells) // 2])
+    _write(
+        folder / "m.mtx",
+        "%%MatrixMarket matrix coordinate pattern general\n5000 1 0\n",
+    )
+    with pytest.raises(ValueError, match="cells.tsv.gz is cut short or corrupt"):
+        clone_layout(folder / "m.mtx")
 
 
 def test_columns_join_several_cell_columns_and_read_probabilities(tmp_path) -> None:
@@ -498,6 +579,35 @@ def test_cospars_clone_matrix_reads_in_any_storage(tmp_path, layout) -> None:
     assert matrix_clone_ids(read).tolist() == [
         str(clone) for clone in range(TRUTH.n_clones)
     ]
+
+
+def test_a_dense_clone_matrix_is_read_in_blocks_of_bounded_size(tmp_path) -> None:
+    import tracemalloc
+
+    n_cells, n_clones = 2_000, 2_000
+    path = tmp_path / "dense.h5ad"
+    with h5py.File(path, "w") as handle:
+        obs = handle.create_group("obs")
+        obs.attrs["_index"] = "_index"
+        obs.create_dataset(
+            "_index",
+            data=np.asarray([f"C{index}" for index in range(n_cells)], dtype="S"),
+        )
+        dense = np.zeros((n_cells, n_clones), dtype=np.float32)
+        dense[np.arange(n_cells), np.arange(n_cells) % n_clones] = 1
+        handle.create_group("obsm").create_dataset("X_clone", data=dense)
+    layout = clone_layout(path)
+
+    tracemalloc.start()
+    try:
+        n_entries = sum(len(entries.cells) for entries in matrix_entries(layout, 1_000))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert n_entries == n_cells
+    # A block of 1,000 rows would hold 8 MB of matrix values.
+    assert peak < 2_000_000
 
 
 def test_mito_clones_leave_unassigned_cells_without_a_clone(tmp_path) -> None:
