@@ -78,6 +78,7 @@ def test_without_groups_the_plot_counts_every_cell(plotted) -> None:
         "a",
         "b",
     ]
+    assert result.axes["top"].get_title() == "Largest 2 clones"
     plt.close(result.figure)
 
 

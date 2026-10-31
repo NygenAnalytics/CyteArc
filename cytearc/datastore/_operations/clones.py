@@ -1,5 +1,6 @@
 import os
 import sys
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -1148,20 +1149,22 @@ class _CloneOperationsMixin(_CloneOperationsBase):
     def _clone_figure_labels(
         self, clones: ArtifactRef, ids: Sequence[str]
     ) -> np.ndarray:
-        """The labels that figures give some clones of a clone artifact.
+        """The labels that one figure gives some clones of a clone artifact.
 
-        A clone is labelled by its ID. A clonotype is labelled by its ID and
-        the junction amino acids of its representative cell's ``VDJ_1``
-        chain, or of its ``VJ_1`` chain without a VDJ chain, such as
-        ``clonotype_1 (CASSLGQAYEQYF)``; clonotypes defined by
-        ``receptor_arms="VJ"`` by the ``VJ_1`` chain first. Immunologists
-        read clonotypes by their junctions, and the ID tells apart clonotypes
-        whose junctions repeat. The clonotypes' IDs are read to find those
-        given, and the repertoire operations read the junctions.
+        A clone is labelled by its ID. A clonotype is labelled by the junction
+        amino acids of its representative cell's ``VDJ_1`` chain, or of its
+        ``VJ_1`` chain without a VDJ chain, such as ``CASSLGQAYEQYF``, since
+        immunologists read clonotypes by their junctions; clonotypes defined
+        by ``receptor_arms="VJ"`` by the ``VJ_1`` chain first. Where two of
+        the clonotypes given share a junction, the label of each also shows
+        its number, the rank in its ID, such as ``CAVA 1`` and ``CAVA 3`` for
+        ``clonotype_1`` and ``clonotype_3``. The clonotypes' IDs are read to
+        find those given, and the repertoire operations read the junctions.
 
         Args:
             clones: A clone artifact: ``clones`` or ``clonotypes``.
-            ids: The IDs of the clones to label, such as ``clonotype_1``.
+            ids: The IDs of the clones that one figure shows, such as
+                ``clonotype_1``; an ID given twice is one clonotype.
 
         Returns:
             The label of each clone, in the order of ``ids``, as an object
@@ -1214,11 +1217,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 f"{names[unnamed].tolist()[:5]} have no junction amino-acid "
                 "sequence in the VDJ_1 or VJ_1 chain that names them"
             )
+        # A junction that two of the clonotypes share names each with its
+        # number too.
+        distinct = np.unique(codes, return_index=True)[1]
+        counted = Counter(junctions[distinct].tolist())
         return np.asarray(
             [
-                f"{name} ({junction})"
-                for name, junction in zip(
-                    names.tolist(), junctions.tolist(), strict=True
+                f"{junction} {code + 1}" if counted[junction] > 1 else junction
+                for junction, code in zip(
+                    junctions.tolist(), codes.tolist(), strict=True
                 )
             ],
             dtype=object,

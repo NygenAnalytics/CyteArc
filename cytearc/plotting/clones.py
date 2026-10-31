@@ -66,7 +66,7 @@ def _load_clones(store: Any, clones: ArtifactRef) -> Any:
 
 
 def _figure_labels(store: Any, clones: ArtifactRef, ids: np.ndarray) -> list[str]:
-    """The labels of some clones in figures: their IDs, with junctions for clonotypes."""
+    """The labels that one figure gives some clones: IDs, or junctions for clonotypes."""
     method = getattr(store, "_clone_figure_labels", None)
     if not callable(method):
         raise TypeError("store does not provide the figure labels of clones")
@@ -139,11 +139,15 @@ def clone_abundance(
     panel counts clones by their number of cells on log scales: in most
     experiments many clones hold one or a few cells, and expanded clones form
     the tail. The second panel draws the ``top`` clones with the most cells,
-    labelled with their IDs; a clonotype's label adds the junction amino
-    acids of its representative cell's ``VDJ_1`` chain, or of its ``VJ_1``
-    chain without a VDJ chain, such as ``clonotype_1 (CASSLGQAYEQYF)``, and
-    those of clonotypes defined by ``receptor_arms="VJ"`` by the ``VJ_1``
-    chain first, which their cells share.
+    labelled with their IDs. Clonotypes are labelled instead by the junction
+    amino acids of their representative cell's ``VDJ_1`` chain, or of its
+    ``VJ_1`` chain without a VDJ chain, such as ``CASSLGQAYEQYF``, and those
+    defined by ``receptor_arms="VJ"`` by the ``VJ_1`` chain first, which
+    their cells share. Where two of the clonotypes drawn share a junction,
+    each label also shows the clonotype's number, the rank in its ID, such as
+    ``CAVA 1`` and ``CAVA 3``. For clonotypes the panel's title reads
+    ``Largest 20 clonotypes``, so the word appears once rather than on every
+    label.
 
     ``group_by`` names a cell metadata column, such as the sample or time
     point, and ``groups`` a cell-label artifact, such as a clustering; with
@@ -270,7 +274,8 @@ def clone_abundance(
             left += widths
         ax.set_yticks(positions, top_table["label"].tolist(), fontsize="small")
         ax.set_xlabel("Cells")
-        ax.set_title(f"Largest {len(top_table)} clones")
+        drawn = "clonotypes" if clones.kind == "clonotypes" else "clones"
+        ax.set_title(f"Largest {len(top_table)} {drawn}")
         if show_legend and grouped:
             ax.legend(frameon=False, fontsize="small", loc="lower right")
         apply_figure_chrome(figure, theme)

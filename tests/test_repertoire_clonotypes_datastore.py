@@ -364,18 +364,17 @@ def test_clone_abundance_counts_the_clonotypes_of_each_receptor_type(
         top = result.tables["top"]
         assert top.to_dict("list") == {
             "clone": ["clonotype_1", "clonotype_2", "clonotype_3"],
-            # Each clonotype is named by its representative's junction:
-            # clonotype_1 and clonotype_3 share their beta chain.
-            "label": [
-                "clonotype_1 (CASSA)",
-                "clonotype_2 (CARW)",
-                "clonotype_3 (CASSA)",
-            ],
+            # Each clonotype is named by its representative's junction, and
+            # clonotype_1 and clonotype_3, which share their beta chain, by
+            # their numbers too.
+            "label": ["CASSA 1", "CARW", "CASSA 3"],
             "BCR": [0, 2, 0],
             "TCR": [3, 0, 1],
         }
         ticks = [tick.get_text() for tick in result.axes["top"].get_yticklabels()]
         assert ticks == top["label"].tolist()
+        # The title names clonotypes once, so their labels need not.
+        assert result.axes["top"].get_title() == "Largest 3 clonotypes"
         assert result.legends[0].label == "receptor_type"
         assert len(result.axes["sizes"].get_lines()) == 2
         assert result.provenance.n_cells == 7
@@ -420,6 +419,9 @@ def test_clone_abundance_splits_clonotypes_by_group_and_receptor_type(
     # Shown by default: on Agg the owned figure is closed.
     shown = plotting.clone_abundance(store, ref, top=2)
     assert shown.tables["top"]["clone"].tolist() == ["clonotype_1", "clonotype_2"]
+    # clonotype_3 is not drawn, so clonotype_1 shares its junction with no
+    # clonotype of the figure.
+    assert shown.tables["top"]["label"].tolist() == ["CASSA", "CARW"]
     with pytest.raises(TypeError, match="does not provide clones.load_clones"):
         plotting.clone_abundance(object(), ref, show=False)
 
@@ -435,8 +437,17 @@ def test_clonotypes_without_a_beta_chain_are_named_by_their_alpha_chain(
     result = plotting.clone_abundance(store, ref, show=False)
     try:
         labels = dict(zip(result.tables["top"]["clone"], result.tables["top"]["label"]))
-        orphan = store.repertoire.load_clonotypes(ref).cells.loc["cell7", "clonotype"]
-        assert labels[orphan] == f"{orphan} (CAVZ)"
+        clonotype_of = store.repertoire.load_clonotypes(ref).cells["clonotype"]
+        alone = {cell: str(clonotype_of[cell]) for cell in ("cell2", "cell3", "cell7")}
+        # cell7's alpha chain alone names its clonotype; cell2 and cell3 carry
+        # the beta chain CASSA of clonotype_1, so the three show their numbers.
+        assert labels == {
+            "clonotype_1": "CASSA 1",
+            "clonotype_2": "CARW",
+            alone["cell2"]: f"CASSA {alone['cell2'].removeprefix('clonotype_')}",
+            alone["cell3"]: f"CASSA {alone['cell3'].removeprefix('clonotype_')}",
+            alone["cell7"]: "CAVZ",
+        }
     finally:
         result.close()
 
@@ -447,15 +458,16 @@ def test_figure_labels_name_clonotypes_by_their_representatives_junction(
     store, receptors = _receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     # In any order and repeated; clonotype_4 is cell2's, of alpha CAVA and
-    # beta CASSA.
+    # beta CASSA. An ID given twice is one clonotype, so CASSA names one.
     labels = store._clone_figure_labels(
         ref, ["clonotype_4", "clonotype_2", "clonotype_4"]
     )
-    assert labels.tolist() == [
-        "clonotype_4 (CASSA)",
-        "clonotype_2 (CARW)",
-        "clonotype_4 (CASSA)",
-    ]
+    assert labels.tolist() == ["CASSA", "CARW", "CASSA"]
+    # clonotype_1, clonotype_3 (cell3's beta chain alone) and clonotype_4 all
+    # carry CASSA, so each shows its number, wherever it is listed.
+    assert store._clone_figure_labels(
+        ref, ["clonotype_4", "clonotype_2", "clonotype_1", "clonotype_3"]
+    ).tolist() == ["CASSA 4", "CARW", "CASSA 1", "CASSA 3"]
     assert store._clone_figure_labels(ref, []).tolist() == []
     with pytest.raises(ValueError, match=r"No clonotype is labelled \['clonotype_9'\]"):
         store._clone_figure_labels(ref, ["clonotype_1", "clonotype_9"])
@@ -465,9 +477,20 @@ def test_figure_labels_name_clonotypes_by_their_representatives_junction(
     imported = store.clones.import_clones(
         path, cell_selection=store.snapshot_cell_selection()
     )
-    assert store._clone_figure_labels(imported, ["clonotype_2"]).tolist() == [
-        "clonotype_2"
-    ]
+    assert store._clone_figure_labels(
+        imported, ["clonotype_2", "clonotype_1", "clonotype_3"]
+    ).tolist() == ["clonotype_2", "clonotype_1", "clonotype_3"]
+    assert store._clone_figure_labels(imported, []).tolist() == []
+    shown = plotting.clone_abundance(store, imported, top=3, show=False)
+    try:
+        assert shown.tables["top"]["label"].tolist() == [
+            "clonotype_1",
+            "clonotype_2",
+            "clonotype_3",
+        ]
+        assert shown.axes["top"].get_title() == "Largest 3 clones"
+    finally:
+        shown.close()
 
 
 def test_clonotypes_of_one_arm_are_named_by_the_chains_they_share(tmp_path) -> None:
@@ -483,14 +506,14 @@ def test_clonotypes_of_one_arm_are_named_by_the_chains_they_share(tmp_path) -> N
         "cell4",
     ]
     assert store._clone_figure_labels(by_alpha, ids).tolist() == [
-        "clonotype_1 (CAVA)",
-        "clonotype_2 (CQQY)",
-        "clonotype_3 (CAVA)",
+        "CAVA 1",
+        "CQQY",
+        "CAVA 3",
     ]
     by_beta = store.repertoire.clonotypes(receptors, receptor_arms="VDJ")
     assert store._clone_figure_labels(by_beta, ids[:2]).tolist() == [
-        "clonotype_1 (CASSA)",
-        "clonotype_2 (CARW)",
+        "CASSA",
+        "CARW",
     ]
 
 
@@ -521,7 +544,7 @@ def test_figure_labels_read_the_clonotype_ids_within_the_budget(
             refusals.append(int(found.group(1)))
             assert refusals[-1] > budget
             budget = refusals[-1]
-    assert refusals and labels.tolist() == ["clonotype_1 (CASSA)"]
+    assert refusals and labels.tolist() == ["CASSA"]
 
 
 def test_a_representative_without_a_junction_is_refused(tmp_path) -> None:
