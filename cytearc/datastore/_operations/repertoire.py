@@ -157,12 +157,15 @@ _FIELD_BYTES_PER_PACKED_BYTE = 7
 # bytes of Python objects while its batch is decoded.
 _DECODE_BATCH_VALUES = 2**16
 _DECODE_BYTES_PER_BATCH_VALUE = 160
-# Each junction that names a clonotype in a figure, while it is decoded: its
-# bounds as read and as Python integers, its object and its string's header;
-# and each of its bytes as read, joined and decoded, and up to four bytes per
-# character in its string.
+# Each junction that is decoded, such as one that names a clonotype in a
+# figure or one that clusters compare, while it is decoded: its bounds as read
+# and as Python integers, its object and its string's header; and each of its
+# bytes as read, joined and decoded, and up to four bytes per character in its
+# string. Once decoded, each keeps its bounds, its object and its string.
 _JUNCTION_BYTES_PER_VALUE = 200
 _JUNCTION_BYTES_PER_BYTE = 7
+_KEPT_JUNCTION_BYTES_PER_VALUE = 100
+_KEPT_JUNCTION_BYTES_PER_BYTE = 4
 # The columns of the tables of clonotypes, which a within column may not share.
 _CLONOTYPE_COLUMNS = frozenset(
     {"clonotype", "clone_size", "n_cells", "fraction", "n_configurations"}
@@ -402,6 +405,95 @@ def _slot_codes(group: zarr.Group, name: str, slots: np.ndarray) -> np.ndarray:
     filled = slots >= 0
     taken[filled] = codes[slots[filled]]
     return taken
+
+
+@dataclass(slots=True)
+class _Reads:
+    """What a sequence of reads holds, checked against the budget before each read.
+
+    Attributes:
+        limit: The memory budget.
+        held: The bytes held so far, by the caller and by earlier reads.
+        what: What the reads are for, named in errors.
+        remedy: What to do when a read does not fit, named in errors.
+    """
+
+    limit: int
+    held: int
+    what: str
+    remedy: str
+
+    def reserve(self, needed: int) -> None:
+        """Raise MemoryError if ``needed`` more bytes would exceed the budget."""
+        if self.held + needed > self.limit:
+            raise MemoryError(
+                f"{self.what} holds about {self.held + needed} bytes, more than the "
+                f"memory budget of {self.limit} bytes. {self.remedy}"
+            )
+
+    def rows(self, source: zarr.Group, name: str, wanted: np.ndarray) -> np.ndarray:
+        """Read distinct rows of an array a chunk at a time, keeping them held."""
+        array = as_zarr_array(source[name], name=name)
+        fixed, per_row = array_row_selection_parts(array)
+        self.reserve(fixed + len(wanted) * per_row)
+        values = np.asarray(read_array_rows_chunkwise(array, wanted))
+        self.held += int(values.nbytes)
+        return values
+
+
+def _decoded_values(
+    reads: _Reads, group: zarr.Group, name: str, codes: np.ndarray
+) -> np.ndarray:
+    """Decode the stored values of some codes of a contig text field.
+
+    The bounds of the values are read a chunk at a time, or whole where that
+    holds less, and their bytes a chunk at a time, so values that no code
+    names are never decoded. Each read, and the decoding, is checked first,
+    and the decoded values stay counted in ``reads``.
+
+    Args:
+        reads: What the caller holds, and the budget.
+        group: An ``immune_receptors`` artifact's group.
+        name: The text field, such as ``junction_aa``.
+        codes: Distinct codes of the field in ascending order.
+
+    Returns:
+        The value of each code, as an object array of text.
+    """
+    offsets = as_zarr_array(group[f"contig_{name}_offsets"], name=name)
+    values = as_zarr_array(group[f"contig_{name}_values"], name=name)
+    bound_rows = np.union1d(codes, codes + 1)
+    fixed, per_row = array_row_selection_parts(offsets)
+    serial = fixed + len(bound_rows) * per_row
+    whole = 2 * int(offsets.nbytes) + fixed
+    if whole < serial:
+        # Most values are named: reading the bounds whole holds less.
+        reads.reserve(whole)
+        stored = np.asarray(offsets[:], dtype=np.int64)
+        starts, ends = stored[codes], stored[codes + 1]
+        del stored
+        reads.held += int(starts.nbytes + ends.nbytes)
+    else:
+        bounds = reads.rows(group, f"contig_{name}_offsets", bound_rows)
+        starts = bounds[np.searchsorted(bound_rows, codes)].astype(np.int64)
+        ends = bounds[np.searchsorted(bound_rows, codes + 1)].astype(np.int64)
+    n_bytes = int((ends - starts).sum())
+    geometry = array_geometry(values)
+    chunk = 0 if geometry is None else geometry.nominalChunkBytes()
+    reads.reserve(
+        array_row_selection_parts(values)[0]
+        + chunk
+        + _JUNCTION_BYTES_PER_VALUE * len(codes)
+        + _JUNCTION_BYTES_PER_BYTE * n_bytes
+    )
+    lengths = np.zeros(len(codes) + 1, dtype=np.int64)
+    np.cumsum(ends - starts, out=lengths[1:])
+    text = unpack_text(_byte_ranges(values, starts, ends), lengths)
+    reads.held += (
+        _KEPT_JUNCTION_BYTES_PER_VALUE * len(codes)
+        + _KEPT_JUNCTION_BYTES_PER_BYTE * n_bytes
+    )
+    return text
 
 
 def _byte_ranges(array: Any, starts: np.ndarray, ends: np.ndarray) -> np.ndarray:
@@ -954,9 +1046,11 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             MemoryError: If reading the receptor types, grouping the cells
                 by their ``within`` labels, or the definition, 1,000 bytes per
                 cell and 12 per contig and with a distance metric the 512 MiB
-                of the search, does not fit the memory budget, or the pairs of
-                chains within the cutoff and the links between the chains or
-                arms that match, 32 bytes each, do not fit what is left.
+                of the search, does not fit the memory budget; or, with a
+                distance metric, the junctions that the cells' chains hold,
+                decoded for the search, or the pairs of chains within the
+                cutoff and the links between the chains or arms that match, 32
+                bytes each, do not fit what is left.
         """
         group, fields = self._receptor_group(receptors)
         if sequence not in SEQUENCES:
@@ -1095,9 +1189,35 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 dual_ir=dual_ir,
             )
         else:
+            # Only the junctions that the slots compare are decoded, so the
+            # contigs that no slot holds, such as non-productive ones, cost
+            # nothing, and the slots are coded by their position among them.
+            # The decoded junctions are held while the search and the
+            # linking run, which get what the budget leaves beside them.
+            present = compared >= 0
+            compared_codes, local = np.unique(compared[present], return_inverse=True)
+            compared[present] = local.reshape(-1)
+            reads = _Reads(
+                limit=self.memoryBytes,
+                held=resident - CLUSTER_SEARCH_BYTES,
+                what=(
+                    f"Decoding the {len(compared_codes)} junctions that the clonotype "
+                    f"clusters of {n_cells} cells compare"
+                ),
+                remedy="Raise mem_budget.",
+            )
+            texts = _decoded_values(reads, group, field_name, compared_codes)
+            held = reads.held + CLUSTER_SEARCH_BYTES
+            if held > self.memoryBytes:
+                raise MemoryError(
+                    f"Defining the clonotype clusters of {n_cells} cells holds about "
+                    f"{held} bytes with the {len(compared_codes)} junctions they "
+                    f"compare, more than the memory budget of {self.memoryBytes} "
+                    "bytes. Raise mem_budget."
+                )
             assignment = assign_clonotype_clusters(
                 compared,
-                _stored_text(group, field_name).categories,
+                texts,
                 groups=groups,
                 metric=metric,
                 cutoff=limit,
@@ -1105,7 +1225,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 j_genes=j_genes,
                 receptor_arms=receptor_arms,
                 dual_ir=dual_ir,
-                max_bytes=self.memoryBytes - resident,
+                max_bytes=self.memoryBytes - held,
             )
         labels = clonotype_labels(assignment.n_clonotypes)
         has = assignment.codes >= 0
@@ -1170,8 +1290,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         its ``VJ_1`` chain without one; clonotypes defined by
         ``receptor_arms="VJ"`` by the ``VJ_1`` chain first, which their
         cells share. Of the receptors, only the representatives' slots and
-        junction codes and the bytes of the junctions they name are read,
-        each array a physical chunk at a time. Before each read, what it
+        junction codes, the bounds of the junctions they name, a chunk at a
+        time or whole where that holds less, and those junctions' bytes are
+        read, each array a physical chunk at a time. Before each read, what it
         holds is checked against the memory budget beside ``held_bytes`` and
         what earlier reads keep: one decoded chunk and its compressed bytes,
         with three copies and the index arrays of each row it reads, and for
@@ -1197,32 +1318,16 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         naming = ("VJ_1", "VDJ_1")
         if (status.parameters or {}).get("receptor_arms") != "VJ":
             naming = ("VDJ_1", "VJ_1")
-        held = int(held_bytes)
-
-        def reserve(needed: int) -> None:
-            """Raise MemoryError if ``needed`` more bytes exceed the budget."""
-            if held + needed > self.memoryBytes:
-                raise MemoryError(
-                    f"Labelling clonotypes by their junctions holds about "
-                    f"{held + needed} bytes, more than the memory budget of "
-                    f"{self.memoryBytes} bytes. Raise mem_budget, or label fewer "
-                    "clonotypes."
-                )
-
-        def rows(source: zarr.Group, name: str, wanted: np.ndarray) -> np.ndarray:
-            """Read distinct rows of an array a chunk at a time, once counted."""
-            nonlocal held
-            array = as_zarr_array(source[name], name=name)
-            fixed, per_row = array_row_selection_parts(array)
-            reserve(fixed + len(wanted) * per_row)
-            values = np.asarray(read_array_rows_chunkwise(array, wanted))
-            held += int(values.nbytes)
-            return values
-
+        reads = _Reads(
+            limit=self.memoryBytes,
+            held=int(held_bytes),
+            what="Labelling clonotypes by their junctions",
+            remedy="Raise mem_budget, or label fewer clonotypes.",
+        )
         wanted, back = np.unique(np.asarray(codes, dtype=np.int64), return_inverse=True)
-        cells = rows(group, "representatives", wanted).astype(np.int64)
+        cells = reads.rows(group, "representatives", wanted).astype(np.int64)
         distinct_cells, cell_back = np.unique(cells, return_inverse=True)
-        stored_slots = rows(receptor_group, "chain_slots", distinct_cells)
+        stored_slots = reads.rows(receptor_group, "chain_slots", distinct_cells)
         slots = np.asarray(
             stored_slots[:, [SLOTS.index(slot) for slot in naming]], dtype=np.int64
         )[cell_back.reshape(-1)]
@@ -1233,7 +1338,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             distinct_contigs, contig_back = np.unique(
                 contigs[present], return_inverse=True
             )
-            junction_codes[present] = rows(
+            junction_codes[present] = reads.rows(
                 receptor_group, "contig_junction_aa", distinct_contigs
             ).astype(np.int64)[contig_back.reshape(-1)]
         junctions = np.full(len(wanted), None, dtype=object)
@@ -1241,27 +1346,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if named.any():
             # Only the bytes of the junctions needed are read and decoded.
             needed, inverse = np.unique(junction_codes[named], return_inverse=True)
-            bound_rows = np.union1d(needed, needed + 1)
-            bounds = rows(receptor_group, "contig_junction_aa_offsets", bound_rows)
-            starts = bounds[np.searchsorted(bound_rows, needed)].astype(np.int64)
-            ends = bounds[np.searchsorted(bound_rows, needed + 1)].astype(np.int64)
-            values = as_zarr_array(
-                receptor_group["contig_junction_aa_values"],
-                name="contig_junction_aa_values",
-            )
-            n_bytes = int((ends - starts).sum())
-            geometry = array_geometry(values)
-            fixed = array_row_selection_parts(values)[0]
-            chunk = 0 if geometry is None else geometry.nominalChunkBytes()
-            reserve(
-                fixed
-                + chunk
-                + _JUNCTION_BYTES_PER_VALUE * len(needed)
-                + _JUNCTION_BYTES_PER_BYTE * n_bytes
-            )
-            offsets = np.zeros(len(needed) + 1, dtype=np.int64)
-            np.cumsum(ends - starts, out=offsets[1:])
-            text = unpack_text(_byte_ranges(values, starts, ends), offsets)
+            text = _decoded_values(reads, receptor_group, "junction_aa", needed)
             junctions[np.flatnonzero(named)] = text[inverse.reshape(-1)]
         return junctions[back.reshape(-1)]
 

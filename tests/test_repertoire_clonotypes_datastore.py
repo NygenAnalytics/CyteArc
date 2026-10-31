@@ -1177,10 +1177,19 @@ def test_clonotype_clusters_get_what_the_budget_leaves_for_their_pairs(
     # Within three substitutions, cell0's alpha junction pairs with cell2's
     # (3 substitutions) and with cell4's second one (2): two pairs of chains
     # of 32 bytes each beyond the 1,000 bytes per cell, the stored junction
-    # code of each of the 14 contigs with its int64 copy, and the search. The
-    # T cells with both arms hold these chains in one group, so linking them
-    # adds two links of 32 bytes each.
-    reserved = 1_000 * N_CELLS + 14 * (4 + 8) + 512 * 2**20
+    # code of each of the 14 contigs with its int64 copy, the search, and the
+    # 6 distinct junctions that the chains hold, 75 bases in all, decoded for
+    # the search: 100 bytes and 4 per base each, and their bounds, 16 bytes
+    # each. The T cells with both arms hold these chains in one group, so
+    # linking them adds two links of 32 bytes each.
+    junctions = 6 * (100 + 16) + 4 * 75
+    reserved = 1_000 * N_CELLS + 14 * (4 + 8) + 512 * 2**20 + junctions
+    # The definition's check fits, but not the decoded junctions beside it.
+    monkeypatch.setattr(store, "memoryBytes", reserved - 1)
+    with pytest.raises(
+        MemoryError, match=f"holds about {reserved} bytes with the 6 junctions"
+    ):
+        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
     for budget, held in ((2 * 32 - 1, "the 2 pairs"), (4 * 32 - 1, "the 2 links")):
         monkeypatch.setattr(store, "memoryBytes", reserved + budget)
         with pytest.raises(MemoryError, match=f"bytes for {held}"):
@@ -1225,6 +1234,50 @@ def test_clonotype_clusters_link_similar_junctions(tmp_path) -> None:
         )
     )
     assert _members(residues)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
+
+
+def test_clusters_ignore_the_junctions_of_contigs_that_are_not_chains(
+    tmp_path,
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    clusters = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    expected = _members(store.repertoire.load_clonotypes(clusters))
+    # Non-productive alpha contigs of cell3 and of cell7, which has no chain,
+    # one substitution from cell0's alpha chain: the import keeps them, but no
+    # slot holds them, so they link no cells.
+    rows = CLONAL_ROWS + [
+        "cell3,true,cell3_contig_9,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,false,CAVA,TGTGCTGTGGCA,5,1,ct3,ct3_9",
+        "cell7,true,cell7_contig_9,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,false,CAVA,TGTGCTGTGGCC,5,1,ct7,ct7_9",
+    ]
+    other = tmp_path / "other"
+    other.mkdir()
+    shutil.copytree(tmp_path / "store.zarr", other / "store.zarr")
+    store, receptors = _receptors(other, rows)
+    assert len(store.repertoire.load_receptors(receptors).chains) == 16
+    near = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    assert _members(store.repertoire.load_clonotypes(near)) == expected
+
+
+def test_decoded_values_read_only_the_codes_given(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    group = artifact_group(store.zw, receptors)
+    every = repertoire_operations._stored_text(group, "junction").categories
+    # One code reads its bounds a chunk at a time, and every code reads them
+    # whole, which holds less.
+    for codes in (np.asarray([1]), np.asarray([0, 2]), np.arange(len(every))):
+        reads = repertoire_operations._Reads(
+            limit=1 << 30, held=7, what="Reading junctions", remedy="Raise it."
+        )
+        decoded = repertoire_operations._decoded_values(reads, group, "junction", codes)
+        assert decoded.tolist() == every[codes].tolist()
+        # The decoded junctions stay counted: 100 bytes each and four per byte.
+        kept = sum(100 + 4 * len(value.encode()) for value in every[codes].tolist())
+        assert reads.held >= 7 + kept
+    reads = repertoire_operations._Reads(
+        limit=64, held=0, what="Reading junctions", remedy="Raise it."
+    )
+    with pytest.raises(MemoryError, match=r"Reading junctions holds about \d+ bytes"):
+        repertoire_operations._decoded_values(reads, group, "junction", np.asarray([1]))
 
 
 def test_the_log_names_clonotype_clusters_as_such(tmp_path) -> None:

@@ -27,7 +27,13 @@ import cytearc.repertoire.clonotypes as clonotypes_module
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import logger
-from tests.clone_helpers import smallest_budget, traced_peak, write_clone_contigs
+from tests.clone_helpers import (
+    CELLRANGER_HEADER,
+    smallest_budget,
+    traced_peak,
+    write_clone_contigs,
+    write_lines,
+)
 from tests.storage_helpers import write_count_store
 
 pytestmark = pytest.mark.slow
@@ -39,6 +45,10 @@ N_LONG_IDS = 2_000
 # their clonotypes than for their cells; with more cells than one chunk of
 # cell IDs holds, the IDs' chunk does not hide their cost.
 N_SINGLETONS = 50_000
+# Cells with contigs beside their chains, whose junctions no slot holds.
+N_EXTRA_CELLS = 10_000
+# Clonotypes of one cell each, named by long junctions of wide characters.
+N_LABELLED = 5_000
 
 
 @pytest.fixture(scope="module")
@@ -832,22 +842,21 @@ def test_loaded_clonotypes_of_one_cell_each_fit_the_smallest_budget(
     assert peak <= budget, (peak, budget)
 
 
-@pytest.mark.parametrize("case", list(CLUSTER_CASES))
-def test_clonotype_clusters_fit_the_smallest_budget_accepted(
-    data, monkeypatch, case
-) -> None:
-    # The search's fixed reservation would hide what clusters hold for their
-    # cells, contigs, junctions and links, so it shrinks to 1 MiB, with the
-    # chunks of candidate pairs of cells that it covers.
+def _cluster_peak(
+    store: DataStore, receptors: object, options: dict[str, object], monkeypatch
+) -> tuple[int, int]:
+    """The traced peak of clusters at the smallest budget they accept, and it.
+
+    The search's fixed reservation would hide what clusters hold for their
+    cells, contigs, junctions and links, so it shrinks to 1 MiB, with the
+    chunks of candidate pairs of cells that it covers.
+    """
     for module in (repertoire_operations, clonotypes_module):
         monkeypatch.setattr(module, "CLUSTER_SEARCH_BYTES", 1 << 20)
     monkeypatch.setattr(clonotypes_module, "_PAIRS_PER_CHUNK", 1 << 12)
-    store = data.store
 
     def run() -> object:
-        return store.repertoire.clonotypes(
-            data.receptors, invalidate_cache=True, **CLUSTER_CASES[case]
-        )
+        return store.repertoire.clonotypes(receptors, invalidate_cache=True, **options)
 
     def attempt(budget: int) -> object:
         store.memoryBytes = budget
@@ -864,4 +873,115 @@ def test_clonotype_clusters_fit_the_smallest_budget_accepted(
         peak = traced_peak(run)
     finally:
         store.memoryBytes = full
+    return peak, budget
+
+
+@pytest.mark.parametrize("case", list(CLUSTER_CASES))
+def test_clonotype_clusters_fit_the_smallest_budget_accepted(
+    data, monkeypatch, case
+) -> None:
+    peak, budget = _cluster_peak(
+        data.store, data.receptors, CLUSTER_CASES[case], monkeypatch
+    )
     assert peak <= budget, (case, peak, budget)
+
+
+@pytest.fixture(scope="module")
+def extra_contigs(tmp_path_factory) -> SimpleNamespace:
+    """Cells of an alpha and a beta chain and eight contigs that are not chains.
+
+    Every contig has a junction of 45 bases of its own; the import keeps the
+    non-productive contigs, which no slot holds, as Cell Ranger's unfiltered
+    annotations list them.
+    """
+    rng = np.random.default_rng(13)
+    path = tmp_path_factory.mktemp("extra_contigs") / "store.zarr"
+    ids = [f"cell{i:06d}-1" for i in range(N_EXTRA_CELLS)]
+    counts = np.ones((N_EXTRA_CELLS, 2), dtype=np.uint16)
+    write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=np.asarray(ids))
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+    residues = np.asarray(list("ACDEFGHIKLMNPQRSTVWY"))
+    bases = np.asarray(list("ACGT"))
+    rows = []
+    for cell, name in enumerate(ids):
+        for contig in range(10):
+            locus = ("TRA", "TRB")[contig % 2]
+            residue_text = "".join(rng.choice(residues, size=15))
+            base_text = "".join(rng.choice(bases, size=45))
+            productive = "true" if contig < 2 else "false"
+            rows.append(
+                f"{name},true,{name}_contig_{contig + 1},true,500,{locus},"
+                f"{locus}V1,,{locus}J1,{locus}C,true,{productive},{residue_text},"
+                f"{base_text},100,{9 if contig < 2 else 2},ct{cell},ct{cell}_{contig + 1}"
+            )
+    contigs = write_lines(path.parent, "contigs.csv", CELLRANGER_HEADER, rows)
+    receptors = store.repertoire.import_receptors(
+        contigs, cell_selection=store.snapshot_cell_selection()
+    )
+    return SimpleNamespace(store=store, receptors=receptors)
+
+
+def test_clusters_of_cells_with_contigs_beside_their_chains_fit_the_budget(
+    extra_contigs, monkeypatch
+) -> None:
+    # Four in five junctions belong to contigs that no slot holds.
+    peak, budget = _cluster_peak(
+        extra_contigs.store,
+        extra_contigs.receptors,
+        {"sequence": "nt", "metric": "hamming", "cutoff": 1},
+        monkeypatch,
+    )
+    assert peak <= budget, (peak, budget)
+
+
+@pytest.fixture(scope="module")
+def wide_junctions(tmp_path_factory) -> SimpleNamespace:
+    """Clonotypes named by beta chains of 300 characters beyond the BMP.
+
+    Each cell is a clonotype of its own chains, so every label decodes a
+    junction of its own, whose bytes set the labels' smallest budget. Each
+    character takes four bytes as stored and four in a Python string.
+    """
+    rng = np.random.default_rng(17)
+    path = tmp_path_factory.mktemp("wide_junctions") / "store.zarr"
+    ids = [f"cell{i:06d}-1" for i in range(N_LABELLED)]
+    counts = np.ones((N_LABELLED, 2), dtype=np.uint16)
+    write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=np.asarray(ids))
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+    wide = np.asarray([chr(0x1F600 + k) for k in range(20)])
+    residues = np.asarray(list("ACDEFGHIKLMNPQRSTVWY"))
+    rows = []
+    for cell, name in enumerate(ids):
+        alpha = "C" + "".join(rng.choice(residues, size=12)) + "F"
+        beta = "C" + "".join(rng.choice(wide, size=300)) + "F"
+        chains = (("TRA", alpha), ("TRB", beta))
+        for contig, (locus, junction) in enumerate(chains):
+            rows.append(
+                f"{name},true,{name}_contig_{contig + 1},true,500,{locus},"
+                f"{locus}V1,,{locus}J1,{locus}C,true,true,{junction},,100,9,"
+                f"ct{cell},ct{cell}_{contig + 1}"
+            )
+    contigs = write_lines(path.parent, "contigs.csv", CELLRANGER_HEADER, rows)
+    receptors = store.repertoire.import_receptors(
+        contigs, cell_selection=store.snapshot_cell_selection()
+    )
+    clonotypes = store.repertoire.clonotypes(receptors, sequence="aa")
+    return SimpleNamespace(store=store, clonotypes=clonotypes)
+
+
+def test_labels_of_long_wide_junctions_fit_the_smallest_budget(
+    wide_junctions,
+) -> None:
+    store, clonotypes = wide_junctions.store, wide_junctions.clonotypes
+    ids = [f"clonotype_{rank}" for rank in range(1, N_LABELLED + 1)]
+    labels = store._clone_figure_labels(clonotypes, ids).tolist()
+    assert len(set(labels)) == N_LABELLED
+    assert {len(label) for label in labels} == {302}
+    peak, budget = _traced_at_smallest_budget(
+        store, lambda: store._clone_figure_labels(clonotypes, ids)
+    )
+    assert peak <= budget, (peak, budget)
