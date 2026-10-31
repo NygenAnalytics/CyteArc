@@ -26,6 +26,7 @@ from tests.clone_helpers import (
     bcr_file,
     copy_clone_store,
     every_cell,
+    ids_read_bytes,
     receptor_store,
     tcr_file,
     write_lines,
@@ -483,7 +484,7 @@ def test_import_refuses_contigs_larger_than_the_memory_budget(
         store.repertoire.import_receptors(tcr_file(tmp_path), cell_selection=cells)
 
 
-def test_the_memory_check_is_three_times_the_encoded_contigs_and_400_bytes_per_cell(
+def test_the_memory_checks_count_the_contigs_the_cells_and_what_the_join_holds(
     tmp_path, monkeypatch
 ) -> None:
     from cytearc.datastore._operations import repertoire as operations
@@ -491,7 +492,19 @@ def test_the_memory_check_is_three_times_the_encoded_contigs_and_400_bytes_per_c
 
     store = receptor_store(tmp_path)
     cells = store.snapshot_cell_selection()
-    path = tcr_file(tmp_path)
+    # 1,250 contigs for each cell, with long junctions of their own, outweigh
+    # the read of the cells' IDs, which decodes a stored chunk of 100,000 of them; 10,000
+    # rows are parsed as one chunk at any budget, so the encoded bytes do not
+    # depend on the budget.
+    rows = [
+        f"cell{cell},true,cell{cell}_contig_{k},true,500,TRB,TRBV1,,TRBJ1,TRBC1,"
+        f"true,true,CASSLGQ{cell}{k:05d}YEQYFGPGTRLTVL,{'TGTGCCAGC' * 10}{cell}{k:05d},"
+        "40,3,"
+        f"ct{cell},ct{cell}_{k}"
+        for cell in range(N_RECEPTOR_CELLS)
+        for k in range(1_250)
+    ]
+    path = write_lines(tmp_path, "many.csv", CELLRANGER_HEADER, rows)
     encoded: list[int] = []
     add = records.RecordEncoder.add
 
@@ -501,9 +514,13 @@ def test_the_memory_check_is_three_times_the_encoded_contigs_and_400_bytes_per_c
 
     monkeypatch.setattr(records.RecordEncoder, "add", recording_add)
     saved = store.repertoire.import_receptors(path, cell_selection=cells)
-    # The peak that the import documents: three times its encoded contigs and
-    # 400 bytes per selected cell.
-    estimate = 3 * max(encoded) + 400 * N_CELLS
+    # At its peak the import holds three times its encoded contigs, 300 bytes
+    # per selected cell, and what the join holds: 100 bytes per cell for its
+    # lookup and each cell's ID as a Python string, 46 bytes for the five
+    # characters of cell0 to cell7.
+    estimate = 3 * max(encoded) + (300 + 100 + 46) * N_RECEPTOR_CELLS
+    reading = 400 * N_RECEPTOR_CELLS + ids_read_bytes(store, N_RECEPTOR_CELLS)
+    assert estimate > reading
     monkeypatch.setattr(store, "memoryBytes", estimate - 1)
     with pytest.raises(MemoryError, match=f"holds about {estimate} bytes at its peak"):
         store.repertoire.import_receptors(
@@ -518,13 +535,16 @@ def test_the_memory_check_is_three_times_the_encoded_contigs_and_400_bytes_per_c
         != saved
     )
 
-    # Below the cells' share, the import refuses before it reads a cell ID.
+    # Below the cells' share and the read of their IDs as text, the import
+    # refuses before it reads a cell ID.
     def unread(*_arguments, **_options):
         raise AssertionError("the cell IDs were read")
 
     monkeypatch.setattr(operations, "read_metadata_rows_chunkwise", unread)
-    monkeypatch.setattr(store, "memoryBytes", 400 * N_CELLS - 1)
-    with pytest.raises(MemoryError, match="holds about 3200 bytes before the first"):
+    monkeypatch.setattr(store, "memoryBytes", reading - 1)
+    with pytest.raises(
+        MemoryError, match=f"holds about {reading} bytes before the first"
+    ):
         store.repertoire.import_receptors(
             path, cell_selection=cells, invalidate_cache=True
         )
@@ -538,14 +558,35 @@ def _refused_estimate(run, store, monkeypatch, budget: int) -> int:
         patched.setattr(store, "memoryBytes", budget)
         with pytest.raises(MemoryError) as refused:
             run()
-    found = re.search(r"holds? about (\d+) bytes", str(refused.value))
+    found = re.search(r"(?:holds?|needs) about (\d+) bytes", str(refused.value))
     assert found is not None, str(refused.value)
     return int(found.group(1))
 
 
+def _smallest_budget(run, store, monkeypatch) -> int:
+    """Return the smallest budget that ``run`` accepts.
+
+    The budget starts at one byte and rises to each refusal's own estimate.
+    """
+    budget = 1
+    for _attempt in range(20):
+        with monkeypatch.context() as patched:
+            patched.setattr(store, "memoryBytes", budget)
+            try:
+                run()
+                return budget
+            except MemoryError:
+                pass
+        needed = _refused_estimate(run, store, monkeypatch, budget)
+        assert needed > budget, (needed, budget)
+        budget = needed
+    raise AssertionError("the budget did not settle")
+
+
 @pytest.mark.slow
+@pytest.mark.parametrize("long_ids", [False, True], ids=["ids", "80-character-ids"])
 def test_the_memory_checks_cover_what_a_sparse_import_and_load_allocate(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, long_ids
 ) -> None:
     import tracemalloc
 
@@ -554,12 +595,17 @@ def test_the_memory_checks_cover_what_a_sparse_import_and_load_allocate(
 
     # One cell in 50 has a contig, as when a store of every cell of a sample
     # meets the contigs of its B cells, so what the import holds for each
-    # selected cell outweighs its contigs.
+    # selected cell outweighs its contigs; long IDs widen every ID read.
     n_cells = 50_000
+    ids = [
+        f"{'sample_with_a_long_name_' * 3}{cell:08d}-1" if long_ids else f"cell{cell}"
+        for cell in range(n_cells)
+    ]
     write_count_store(
         str(tmp_path / "sparse.zarr"),
         {"RNA": np.ones((n_cells, 1), dtype=np.uint16)},
         "uint16",
+        cell_ids=ids,
     )
     store = DataStore(
         str(tmp_path / "sparse.zarr"),
@@ -568,7 +614,7 @@ def test_the_memory_checks_cover_what_a_sparse_import_and_load_allocate(
         nthreads=1,
     )
     rows = [
-        f"cell{cell},true,cell{cell}_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,"
+        f"{ids[cell]},true,{ids[cell]}_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,"
         f"true,true,CASS{cell % 50}F,TGTGCC{cell % 50},40,3,ct{cell},ct{cell}_1"
         for cell in range(0, n_cells, 50)
     ]
@@ -581,33 +627,33 @@ def test_the_memory_checks_cover_what_a_sparse_import_and_load_allocate(
     )
 
     def run_import():
-        return store.repertoire.import_receptors(path, cell_selection=cells)
+        return store.repertoire.import_receptors(
+            path, cell_selection=cells, invalidate_cache=True
+        )
 
-    # The share of the cells passes the first check, so the second names the
-    # whole estimate.
-    held = _refused_estimate(run_import, store, monkeypatch, 1)
-    estimate = _refused_estimate(run_import, store, monkeypatch, held)
-    tracemalloc.start()
-    try:
-        ref = run_import()
-        _current, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    assert estimate > held
-    assert peak <= estimate, (peak, estimate)
+    def traced(run, budget):
+        with monkeypatch.context() as patched:
+            patched.setattr(store, "memoryBytes", budget)
+            tracemalloc.start()
+            try:
+                result = run()
+                _current, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        return result, peak
+
+    # Each import runs at the smallest budget it accepts.
+    budget = _smallest_budget(run_import, store, monkeypatch)
+    ref, peak = traced(run_import, budget)
+    assert peak <= budget, (peak, budget)
 
     def run_load():
         return store.repertoire.load_receptors(ref, fields=[])
 
-    load_estimate = _refused_estimate(run_load, store, monkeypatch, 1)
     run_load()
-    tracemalloc.start()
-    try:
-        run_load()
-        _current, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    assert peak <= load_estimate, (peak, load_estimate)
+    budget = _smallest_budget(run_load, store, monkeypatch)
+    _loaded, peak = traced(run_load, budget)
+    assert peak <= budget, (peak, budget)
 
 
 def test_zero_counts_load_as_zero_and_missing_counts_as_missing(tmp_path) -> None:

@@ -18,7 +18,8 @@ from ...metadata.records import (
     decode_ragged,
     decode_text,
 )
-from ...metadata.rows import read_metadata_rows_chunkwise
+from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
+from ...metadata.selection import cell_selection_indices
 from ...repertoire.chains import RECEPTOR_TYPES, index_chains, receptor_quality
 from ...repertoire.contigs import FIELDS, contig_encoder
 from ...repertoire.receptors import (
@@ -33,9 +34,9 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
-from ...storage.selections import read_stored_selection_indices
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
+from ...utils.arguments import bool_argument
 from ...utils.logging import logger
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
@@ -78,10 +79,12 @@ _IMPORT_ATTRIBUTES = (
 # sequences and alignments.
 _PEAK_PER_ENCODED_BYTE = 3
 # Bytes that an import holds for each selected cell beside the join's lookup
-# of cell IDs: the selection, the IDs while they are read, each cell's chain
-# slots, counts and labels, and the fixed-width text of the labels it writes.
-# With the lookup, up to 290 bytes per cell were resident at the peak on
-# 200,000 and 1,000,000 cells, and tracemalloc traces about 320.
+# of cell IDs and their text, which the join counts, and the read of the IDs,
+# which text_read_bytes counts: the selection, each cell's chain slots,
+# counts and labels, and the fixed-width text of the labels it writes.
+# With the lookup and the IDs of 12 characters, up to 290 bytes per cell were
+# resident at the peak on 200,000 and 1,000,000 cells, and tracemalloc traces
+# about 320.
 _IMPORT_BYTES_PER_CELL = 300
 # Bytes that a decoded contig field takes in a table, per contig, besides the
 # text of ragged fields.
@@ -384,14 +387,13 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 not saved yet.
             MemoryError: If the import would not fit the memory budget: at
                 its peak it holds about three times the bytes of its encoded
-                contigs and 400 bytes per selected cell.
+                contigs, 400 bytes per selected cell and each cell's ID as
+                text, and reading the IDs decodes a stored chunk of them.
         """
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
-        if not isinstance(productive_only, bool):
-            raise TypeError("productive_only must be a boolean")
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
+        bool_argument(productive_only, "productive_only")
+        bool_argument(invalidate_cache, "invalidate_cache")
         sources = _contig_sources(
             paths,
             barcode_prefix=barcode_prefix,
@@ -399,14 +401,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             barcode_pattern=barcode_pattern,
             format=format,
         )
-        cell_index = read_stored_selection_indices(
-            self.zw,
-            cell_selection,
-            kind="cell_selection",
-            scope="datastore",
-            assay=None,
-            table_path="cellData",
-        ).astype(np.int64, copy=False)
+        cell_index = cell_selection_indices(self.zw, cell_selection)
         n_cells = len(cell_index)
         if not n_cells:
             raise ValueError("cell_selection selects no cell")
@@ -459,13 +454,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             )
             return planned.ref
         self._require_writable(arguments.operation)
-        # What the import holds for the selected cells is checked before
-        # their IDs are read.
-        held = (LOOKUP_BYTES_PER_CELL + _IMPORT_BYTES_PER_CELL) * n_cells
-        if held > self.memoryBytes:
+        # What the import holds for the selected cells, and the read of their
+        # IDs as text, are checked before the IDs are read.
+        reading = (
+            LOOKUP_BYTES_PER_CELL + _IMPORT_BYTES_PER_CELL
+        ) * n_cells + text_read_bytes(self.cells._get_array("ids"), n_cells)
+        if reading > self.memoryBytes:
             raise MemoryError(
                 f"Importing contigs for {n_cells} selected cells holds about "
-                f"{held} bytes before the first contig is read, more than the "
+                f"{reading} bytes before the first contig is read, more than the "
                 f"memory budget of {self.memoryBytes} bytes. Raise mem_budget, or "
                 "pass a smaller cell_selection."
             )
@@ -478,8 +475,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             memory_bytes=self.memoryBytes,
             held_bytes=_IMPORT_BYTES_PER_CELL * n_cells,
         )
+        # Beside the encoded contigs, the import holds what the join counts:
+        # its lookup, the cells' IDs as text and the bytes held for each cell.
         table = _encode_contigs(
-            sources, join, memory_bytes=self.memoryBytes, held_bytes=held
+            sources, join, memory_bytes=self.memoryBytes, held_bytes=join.held_bytes
         )
         # Files without a contig row give no locus field and no contig.
         locus = (
