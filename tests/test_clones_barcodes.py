@@ -359,16 +359,24 @@ def test_pairs_of_texts_key_apart_and_repeats_count_once_per_copy() -> None:
     assert repeated_keys([]) == 0
 
 
-def test_finding_repeated_keys_holds_the_bytes_the_import_counts() -> None:
+@pytest.mark.parametrize("repeated", [0, 100_000])
+def test_finding_repeated_keys_holds_the_bytes_the_import_counts(repeated) -> None:
     import tracemalloc
 
     from cytearc.datastore._operations import lineage_barcodes as operations
 
+    # 200,000 rows of distinct molecules, or of 100,000 molecules each listed
+    # twice, as TREX's reads.txt lists reads.
     n_keys = 200_000
     cells = np.asarray(
         [f"C{index % 5_000:05d}" for index in range(n_keys)], dtype=object
     )
-    umis = np.asarray([f"U{index:08d}" for index in range(n_keys)], dtype=object)
+    umis = np.asarray(
+        [f"U{index % (n_keys - repeated):08d}" for index in range(n_keys)],
+        dtype=object,
+    )
+    if repeated:
+        cells = np.concatenate([cells[:repeated], cells[:repeated]])
     tracemalloc.start()
     try:
         keys = [
@@ -376,7 +384,7 @@ def test_finding_repeated_keys_holds_the_bytes_the_import_counts() -> None:
             for start in range(0, n_keys, 20_000)
         ]
         tracemalloc.reset_peak()
-        assert repeated_keys(keys) == 0
+        assert repeated_keys(keys) == repeated
         _current, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -423,3 +431,46 @@ def test_the_counters_totals_follow_the_rows_it_holds() -> None:
         assert counter.n_rows == n_rows
         assert counter.nbytes == sum(part.nbytes for part in parts)
         assert counter.peak_bytes == counter.nbytes + 110 * n_rows + 48 * n_text
+
+
+def test_pair_keys_hash_each_distinct_text_once_per_half(monkeypatch) -> None:
+    hashed = []
+    hash_array = pd.util.hash_array
+
+    def recorded(values, *arguments, **options):
+        hashed.append(len(values))
+        return hash_array(values, *arguments, **options)
+
+    monkeypatch.setattr(pd.util, "hash_array", recorded)
+    cells = [f"C{row % 10}" for row in range(1_000)]
+    umis = [f"U{row}" for row in range(1_000)]
+    keys = pair_keys(cells, umis)
+    # Ten cells and a thousand UMIs, hashed by each of the two halves.
+    assert sorted(hashed) == [10, 10, 1_000, 1_000]
+    assert len({tuple(key) for key in keys.tolist()}) == 1_000
+
+
+def test_repeated_keys_compare_whole_keys_that_share_a_half() -> None:
+    def keys(*rows):
+        return np.asarray(rows, dtype=np.uint64).reshape(-1, 2)
+
+    assert repeated_keys([keys([5, 1], [5, 2])]) == 0
+    assert repeated_keys([keys([5, 1], [7, 1])]) == 0
+    assert repeated_keys([keys([5, 1], [5, 2]), keys([5, 1], [9, 9])]) == 1
+    assert repeated_keys([keys([5, 2], [5, 1], [5, 2], [5, 2])]) == 2
+
+
+@pytest.mark.slow
+def test_keys_listed_twice_in_many_parts_are_counted_at_once() -> None:
+    import time
+
+    # TREX's reads.txt repeats its molecules: here 500,000 keys, each twice,
+    # in 200 parts. Testing each part against the shared halves with np.isin
+    # took over a minute.
+    rng = np.random.default_rng(4)
+    once = rng.integers(0, 2**63, size=(500_000, 2), dtype=np.int64).astype(np.uint64)
+    twice = np.concatenate([once, once])
+    parts = [twice[start : start + 5_000] for start in range(0, len(twice), 5_000)]
+    began = time.perf_counter()
+    assert repeated_keys(parts) == 500_000
+    assert time.perf_counter() - began < 30

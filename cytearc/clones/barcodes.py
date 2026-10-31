@@ -762,27 +762,72 @@ def pair_keys(first: Any, second: Any) -> np.ndarray:
     """Key each pair of texts, such as a cell and a UMI, by 128 bits.
 
     Two pairs share a key only if their texts are equal, but for a chance
-    of about one in 2**128.
+    of about one in 2**128. Each distinct text is hashed once per half.
 
     Returns:
         One row per pair and two uint64 columns.
+
+    Raises:
+        ValueError: If the two sequences differ in length.
     """
-    first = np.asarray(first, dtype=object).reshape(-1)
-    second = np.asarray(second, dtype=object).reshape(-1)
+    first_codes, first_values = pd.factorize(
+        np.asarray(first, dtype=object).reshape(-1), use_na_sentinel=False
+    )
+    second_codes, second_values = pd.factorize(
+        np.asarray(second, dtype=object).reshape(-1), use_na_sentinel=False
+    )
+    if len(first_codes) != len(second_codes):
+        raise ValueError("Each pair needs two texts")
     columns = []
     for key in _HASH_KEYS:
-        mixed = pd.util.hash_array(first, hash_key=key) * _MIX
-        columns.append(np.bitwise_xor(mixed, pd.util.hash_array(second, hash_key=key)))
+        mixed = (
+            pd.util.hash_array(
+                np.asarray(first_values, dtype=object), hash_key=key, categorize=False
+            )[first_codes]
+            * _MIX
+        )
+        hashed = pd.util.hash_array(
+            np.asarray(second_values, dtype=object), hash_key=key, categorize=False
+        )
+        columns.append(np.bitwise_xor(mixed, hashed[second_codes]))
     return np.stack(columns, axis=1).astype(np.uint64, copy=False)
+
+
+def _sorted_members(values: np.ndarray, members: np.ndarray) -> np.ndarray:
+    """Whether each value is one of ``members``, which are sorted and distinct."""
+    positions = np.searchsorted(members, values)
+    found = np.minimum(positions, len(members) - 1)
+    return np.asarray((positions < len(members)) & (members[found] == values))
 
 
 def repeated_keys(keys: Sequence[np.ndarray]) -> int:
     """Count the keys that repeat an earlier key.
 
-    The keys are joined and sorted in place, so finding the repeats holds a
-    copy of the keys and one byte per key beside them.
+    The first halves of the keys are sorted to find those that keys share,
+    and only the keys whose first half is shared are compared whole, so
+    finding the repeats holds the first halves, and the keys that share
+    one, beside the keys.
     """
-    joined = np.concatenate([np.empty((0, 2), dtype=np.uint64), *keys])
-    pairs = joined.view([("high", np.uint64), ("low", np.uint64)]).reshape(-1)
+    parts = [np.asarray(part, dtype=np.uint64).reshape(-1, 2) for part in keys]
+    halves = np.concatenate(
+        [np.empty(0, dtype=np.uint64), *(part[:, 0] for part in parts)]
+    )
+    halves.sort()
+    shared = np.unique(halves[1:][halves[1:] == halves[:-1]])
+    del halves
+    if not len(shared):
+        return 0
+    # The keys that share a first half fill one array, part by part.
+    chosen = [_sorted_members(part[:, 0], shared) for part in parts]
+    del shared
+    n_sharing = sum(int(np.count_nonzero(mask)) for mask in chosen)
+    sharing = np.empty((n_sharing, 2), dtype=np.uint64)
+    start = 0
+    for part, mask in zip(parts, chosen, strict=True):
+        selected = part[mask]
+        sharing[start : start + len(selected)] = selected
+        start += len(selected)
+    del chosen
+    pairs = sharing.view([("high", np.uint64), ("low", np.uint64)]).reshape(-1)
     pairs.sort()
     return int(np.count_nonzero(pairs[1:] == pairs[:-1]))
