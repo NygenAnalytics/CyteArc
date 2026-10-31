@@ -2,13 +2,14 @@ import hashlib
 import importlib
 import inspect
 import os
+import re
 import threading
 import weakref
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from functools import cache, wraps
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, overload
+from typing import IO, TYPE_CHECKING, Any, NamedTuple, overload
 
 from .logging import logger
 
@@ -63,9 +64,9 @@ def njit(*args: Any, **options: Any) -> Any:
     checks a cached kernel only against the file that defines it, although
     the machine code also holds the kernels it calls and the constants it
     reads from other files. With ``cache=True``, the kernel gets the cache of
-    :func:`enable_dispatcher_cache`, whose entries also hold CyteArc's version
-    and a digest of every CyteArc module that uses ``njit``, so a change to
-    any of those modules compiles the kernel again.
+    :func:`enable_dispatcher_cache`, whose entries also hold the release part
+    of CyteArc's version and a digest of every CyteArc module that uses
+    ``njit``, so a change to any of those modules compiles the kernel again.
 
     Kernels compile at their first call, so ``njit`` takes no signature. With
     ``NUMBA_DISABLE_JIT`` set, it returns the Python function.
@@ -121,13 +122,17 @@ def enable_dispatcher_cache(*dispatchers: object) -> None:
     function, although the machine code also holds the kernels it calls and
     the constants it reads from other files. These caches also stamp each
     entry with a digest of every Python file of the package that defines the
-    function, so a change to any of those files compiles it again.
+    function, so a change to any of those files compiles it again. A process
+    that sees one of those files change after it digested them neither loads
+    nor saves the package's entries from then on, because the modules that it
+    imported before and after the change may hold different sources.
 
     Caching never fails a computation. A dispatcher for which Numba finds no
     writable cache directory, as when ``NUMBA_CACHE_DIR`` is unset and neither
     the package's directory nor the user's cache directory is writable, stays
     uncached, and a cache entry that cannot be read or written is compiled
-    instead. Both are logged at debug level.
+    instead. An index file that cannot be read counts as empty, so the next
+    save rewrites it. Each of these is logged at debug level.
 
     Args:
         dispatchers: The objects to cache, typically Numba dispatchers.
@@ -173,18 +178,34 @@ def _kernel_cache_class() -> type[Any]:
     """
     from numba.core.caching import FunctionCache, IndexDataCacheFile
 
+    class KernelCacheFile(IndexDataCacheFile):
+        # Numba reads the index before it saves an entry and raises when the
+        # index cannot be read, so such an index would never be rewritten and
+        # every later process would compile the kernel.
+        def _load_index(self) -> dict[Any, Any]:
+            try:
+                overloads: dict[Any, Any] = super()._load_index()
+            except Exception as error:
+                logger.debug(
+                    f"Numba cache index {self._index_path} cannot be read, so "
+                    f"it counts as empty and the next save rewrites it: {error}"
+                )
+                return {}
+            return overloads
+
     class KernelCache(FunctionCache):
         def __init__(self, dispatcher: Any) -> None:
             self._label = _function_name(dispatcher.py_func)
             self._target_options = repr(sorted(dispatcher.targetoptions.items()))
             super().__init__(dispatcher.py_func)
+            self._token = _build_token(dispatcher.py_func)
             # Numba rewrites an index from the copy that it read, without a
             # lock, and names a new data file after the first number free in
             # that copy. Processes that save different options to one index at
             # once can leave one key pointing at the other options' machine
             # code, so each set of options keeps its own index and data files.
             digest = hashlib.sha256(self._target_options.encode()).hexdigest()[:16]
-            self._cache_file = IndexDataCacheFile(
+            self._cache_file = KernelCacheFile(
                 cache_path=self._cache_path,
                 filename_base=f"{self._impl.filename_base}-{digest}",
                 # Numba loads an entry only while the index holds this stamp,
@@ -192,7 +213,7 @@ def _kernel_cache_class() -> type[Any]:
                 # kernel, so the stamp adds the build token.
                 source_stamp=(
                     self._impl.locator.get_source_stamp(),
-                    *_build_token(dispatcher.py_func),
+                    *self._token.values,
                 ),
             )
 
@@ -204,6 +225,13 @@ def _kernel_cache_class() -> type[Any]:
         # cross, so loads share the cache directory's lock and saves hold it.
         def load_overload(self, sig: Any, target_context: Any) -> Any:
             try:
+                if not self._token.stats_match():
+                    logger.debug(
+                        f"Compiling {self._label} without its Numba cache, "
+                        "because its package's source files changed after "
+                        "this process read them"
+                    )
+                    return None
                 with cache_directory_lock(self._cache_path, shared=True):
                     return super().load_overload(sig, target_context)
             except Exception as error:
@@ -215,6 +243,13 @@ def _kernel_cache_class() -> type[Any]:
 
         def save_overload(self, sig: Any, data: Any) -> None:
             try:
+                if not self._token.sources_match():
+                    logger.debug(
+                        f"Numba does not cache {self._label}, because its "
+                        "package's source files changed after this process "
+                        "read them"
+                    )
+                    return
                 with cache_directory_lock(self._cache_path):
                     super().save_overload(sig, data)
             except Exception as error:
@@ -226,57 +261,144 @@ def _kernel_cache_class() -> type[Any]:
     return KernelCache
 
 
-def _build_token(function: Callable[..., Any]) -> tuple[str, ...]:
-    """Return the build token of a kernel compiled from ``function``: values
-    that change whenever the source that its machine code holds may change.
+class _SourceFile(NamedTuple):
+    """A source file as it was read."""
 
-    For CyteArc's kernels, these are CyteArc's version and a digest of every
-    CyteArc module that uses ``njit``. For another package's kernels, which
-    nobody edits, the token is a digest of every Python file of the package.
+    path: str
+    # The file's modification time in nanoseconds and its size, taken before
+    # its source was read.
+    stat: tuple[int, int]
+    source: bytes
+
+
+class _BuildToken:
+    """The values that stamp the cache entries of a package's kernels: values
+    that change whenever the source that their machine code holds may change.
+
+    The values hold a digest of the package's source files as this process
+    first read them. Once one of those files changes, the modules that the
+    process imported before and after the change may hold different sources,
+    so the machine code that it compiles may match neither that digest nor
+    the files on disk. The token then stays stale for the rest of the process,
+    and the kernels that it stamps neither load nor save cache entries.
+    """
+
+    def __init__(self, version: tuple[str, ...], files: dict[str, _SourceFile]) -> None:
+        self._digest = _source_digest(
+            {name: file.source for name, file in files.items()}
+        )
+        # The path and stat of each file, by its name in the digest.
+        self._files = {name: (file.path, file.stat) for name, file in files.items()}
+        self._stale = False
+        self.values = (*version, self._digest)
+
+    def stats_match(self) -> bool:
+        """Return whether the token still matches its source files, judged by
+        the modification time and size of each file that it digests.
+
+        From the first check that finds a change on, every check returns False.
+        """
+        if not self._stale:
+            self._stale = any(
+                _file_stat(path) != stat for path, stat in self._files.values()
+            )
+        return not self._stale
+
+    def sources_match(self) -> bool:
+        """Return whether the token still matches its source files, judged by
+        their stats and by digesting them again, which also finds an edit
+        that keeps a file's modification time and size."""
+        if self.stats_match():
+            sources = {
+                name: Path(path).read_bytes() for name, (path, _) in self._files.items()
+            }
+            self._stale = _source_digest(sources) != self._digest
+        return not self._stale
+
+
+def _build_token(function: Callable[..., Any]) -> _BuildToken:
+    """Return the build token of a kernel compiled from ``function``.
+
+    For CyteArc's kernels, its values are the release part of CyteArc's
+    version and a digest of every CyteArc module that uses ``njit``. For
+    another package's kernels, which nobody edits, its value is a digest of
+    every Python file of the package.
     """
     path = Path(inspect.getfile(function)).resolve()
     if path.is_relative_to(_CYTEARC_DIR):
         return _cytearc_build_token()
-    return (_package_digest(_outermost_package(path)),)
+    return _package_build_token(_outermost_package(path))
 
 
 @cache
-def _cytearc_build_token() -> tuple[str, str]:
-    """Return CyteArc's version and a digest of its modules that use ``njit``.
+def _cytearc_build_token() -> _BuildToken:
+    """Return the build token of CyteArc's kernels: the release part of
+    CyteArc's version and a digest of its modules that use ``njit``.
 
     Every file that a kernel's machine code depends on uses ``njit``, as
-    ``tests/test_numba_dispatcher_cache.py`` checks, so editing any other
-    module compiles no kernel again. The version also covers a release whose
-    kernel modules are unchanged; an editable install keeps the version that
-    it was installed with while its sources change.
+    ``tests/test_numba_dispatcher_cache.py`` checks, so the digest changes
+    whenever that machine code may change. The token keeps only the release
+    part of the version, such as ``1.3.1`` of ``1.3.1.dev35+g1eadbb736``,
+    because the development version changes with every commit. A new release
+    compiles every kernel again, also when its kernel modules are unchanged,
+    and a commit or an edit that changes no module that uses ``njit``
+    compiles none again. A version without a release part, such as
+    ``unavailable``, stays whole.
     """
     from .. import __version__
 
-    return __version__, _source_digest(_kernel_module_sources(_CYTEARC_DIR))
-
-
-def _kernel_module_sources(directory: Path) -> dict[str, bytes]:
-    """Return the source of each module under ``directory`` that uses
-    ``njit``, by its path relative to ``directory``."""
-    sources = {}
-    for path in directory.rglob("*.py"):
-        source = path.read_bytes()
-        if b"njit" in source:
-            sources[path.relative_to(directory).as_posix()] = source
-    return sources
+    release = re.match(r"\d+(?:\.\d+)*", __version__)
+    version = __version__ if release is None else release.group()
+    return _BuildToken((version,), _kernel_module_sources(_CYTEARC_DIR))
 
 
 @cache
-def _package_digest(location: Path) -> str:
-    """Return a digest of every Python file of the package directory
-    ``location``, or of ``location`` itself, a module outside any package."""
+def _package_build_token(location: Path) -> _BuildToken:
+    """Return the build token of the kernels of the package directory
+    ``location``, or of ``location`` itself, a module outside any package:
+    a digest of every Python file of the package."""
+    return _BuildToken((), _package_sources(location))
+
+
+def _kernel_module_sources(directory: Path) -> dict[str, _SourceFile]:
+    """Read each module under ``directory`` that uses ``njit``."""
+    return _read_sources(directory, directory.rglob("*.py"), holding=b"njit")
+
+
+def _package_sources(location: Path) -> dict[str, _SourceFile]:
+    """Read every Python file of the package directory ``location``, or
+    ``location`` itself, a module outside any package."""
     if location.is_dir():
-        directory, files = location, list(location.rglob("*.py"))
-    else:
-        directory, files = location.parent, [location]
-    return _source_digest(
-        {path.relative_to(directory).as_posix(): path.read_bytes() for path in files}
-    )
+        return _read_sources(location, location.rglob("*.py"))
+    return _read_sources(location.parent, [location])
+
+
+def _read_sources(
+    directory: Path, paths: Iterable[Path], *, holding: bytes = b""
+) -> dict[str, _SourceFile]:
+    """Read each file of ``paths`` whose source holds ``holding``, by its path
+    relative to ``directory``."""
+    files = {}
+    for path in paths:
+        # The stat comes first, so a write between it and the read leaves a
+        # stat that no longer matches the file.
+        status = os.stat(path)
+        source = path.read_bytes()
+        if holding in source:
+            files[path.relative_to(directory).as_posix()] = _SourceFile(
+                os.fspath(path), (status.st_mtime_ns, status.st_size), source
+            )
+    return files
+
+
+def _file_stat(path: str) -> tuple[int, int] | None:
+    """Return the modification time in nanoseconds and the size of the file
+    at ``path``, or None where it cannot be found."""
+    try:
+        status = os.stat(path)
+    except OSError:
+        return None
+    return status.st_mtime_ns, status.st_size
 
 
 def _outermost_package(path: Path) -> Path:

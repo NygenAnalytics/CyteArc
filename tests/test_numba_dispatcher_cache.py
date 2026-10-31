@@ -9,6 +9,7 @@ import inspect
 import json
 import math
 import os
+import pickle
 import shutil
 import subprocess
 import sys
@@ -35,12 +36,14 @@ from cytearc.utils.arrays import rolling_window
 from cytearc.utils.logging import logger
 from cytearc.utils.numba import (
     _build_token,
+    _BuildToken,
     _caching_import_time_kernels,
     _cytearc_build_token,
     _has_cache_entry,
     _kernel_cache_class,
     _kernel_module_sources,
-    _package_digest,
+    _package_build_token,
+    _package_sources,
     _source_digest,
     cache_directory_lock,
     enable_dispatcher_cache,
@@ -257,6 +260,52 @@ def test_a_corrupt_cache_entry_is_compiled_again(cache_dir: Path) -> None:
 
     assert (compiled(later), loaded(later)) == (1, 0)
     assert any("cache entry cannot be read" in message for message in messages)
+
+
+def _make_unreadable(index: Path) -> None:
+    index.chmod(0)
+    if os.access(index, os.R_OK):
+        pytest.skip("the file stays readable, as it does for root")
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        lambda index: index.write_bytes(b""),
+        lambda index: index.write_bytes(b"\x80\x05truncated"),
+        # Numba's version, which Numba reads first, then a payload that is
+        # not a stamp and its entries.
+        lambda index: index.write_bytes(
+            pickle.dumps(numba.__version__) + pickle.dumps(5)
+        ),
+        _make_unreadable,
+    ],
+    ids=["empty", "truncated", "foreign_payload", "no_read_permission"],
+)
+def test_an_unreadable_cache_index_is_rewritten_by_the_next_save(
+    cache_dir: Path, corrupt: Callable[[Path], None]
+) -> None:
+    # Numba reads the index before it saves an entry, so an index that raises
+    # there would make every later process compile the kernel again.
+    kernel = njit(cache=True)(is_nan)
+    assert kernel(math.nan)
+    (index,) = cache_dir.rglob("*.nbi")
+    corrupt(index)
+    after = njit(cache=True)(is_nan)
+
+    with debug_messages() as messages:
+        assert after(math.nan)
+    later = njit(cache=True)(is_nan)
+    assert later(math.nan)
+
+    # The first dispatcher after the damage, as in the next process, compiles
+    # and rewrites the index, and the one after it loads what that one saved.
+    assert (compiled(after), loaded(after)) == (1, 0)
+    assert (compiled(later), loaded(later)) == (0, 1)
+    assert any(
+        message.startswith(f"Numba cache index {index} cannot be read, so it counts ")
+        for message in messages
+    )
 
 
 # A package whose decorators fix the signatures of two kernels, which then
@@ -803,12 +852,16 @@ print(json.dumps({
 """
 
 
-def _write_callee(package: Path, style: str, *, increment: int, scale: int) -> None:
+def _callee_source(style: str, *, increment: int, scale: int) -> str:
     imports, decorator = _KERNEL_STYLES[style]
+    return _CALLEE_SOURCE.format(
+        imports=imports, decorator=decorator, increment=increment, scale=scale
+    )
+
+
+def _write_callee(package: Path, style: str, *, increment: int, scale: int) -> None:
     (package / "callee.py").write_text(
-        _CALLEE_SOURCE.format(
-            imports=imports, decorator=decorator, increment=increment, scale=scale
-        )
+        _callee_source(style, increment=increment, scale=scale)
     )
 
 
@@ -937,6 +990,110 @@ def test_a_caller_compiles_again_when_its_callees_file_changes(
         assert Path(report["cachePath"]).is_relative_to(cache_root)
 
 
+# Runs the steps on its command line in a process that imports the two-file
+# package from a copy of CyteArc, and reports what run(1) returned at each
+# "run" step and how many signatures the caller's last dispatcher compiled and
+# loaded.
+_EDITING_PROCESS = """
+import importlib
+import json
+import sys
+from pathlib import Path
+
+package, callee_path, original, edited, *steps = sys.argv[1:]
+values = []
+for step in steps:
+    if step == "import_kernels":
+        # A CyteArc kernel module computes the build token as it imports.
+        importlib.import_module("cytearc.utils.strided")
+    elif step == "import":
+        caller = importlib.import_module(package + ".caller")
+    elif step in ("edit", "revert"):
+        Path(callee_path).write_text(edited if step == "edit" else original)
+    elif step == "reload":
+        importlib.reload(sys.modules[package + ".callee"])
+        caller = importlib.reload(caller)
+    elif step == "run":
+        values.append(int(caller.run(1)))
+    else:
+        raise ValueError(step)
+print(json.dumps({
+    "values": values,
+    "compiled": sum(caller.run.stats.cache_misses.values()),
+    "loaded": sum(caller.run.stats.cache_hits.values()),
+}))
+"""
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("session", "session_result", "later_result"),
+    [
+        # A kernel module computes the token before the callee's file
+        # changes, and the caller first imports after the change.
+        (
+            ["import_kernels", "edit", "import", "run", "revert"],
+            ([300], 1, 0),
+            ([20], 1, 0),
+        ),
+        # The callee's file changes and both modules reload before the
+        # caller's first call.
+        (["import", "edit", "reload", "run", "revert"], ([300], 1, 0), ([20], 1, 0)),
+        # The caller compiles and saves before the change and the reload.
+        (["import", "run", "edit", "reload", "run"], ([20, 300], 1, 0), ([300], 1, 0)),
+    ],
+    ids=["import_after_a_change", "reload_then_revert", "reload"],
+)
+def test_a_process_that_sees_a_kernel_module_change_neither_loads_nor_saves(
+    tmp_path: Path,
+    session: list[str],
+    session_result: tuple[list[int], int, int],
+    later_result: tuple[list[int], int, int],
+) -> None:
+    # The token holds a digest of the sources as the process first read them.
+    # Saved under it, machine code compiled from a changed callee would load
+    # in a later process once the change is reverted; loaded under it after a
+    # reload, the old machine code would run in place of the changed callee.
+    root = tmp_path / "copy"
+    package = _cytearc_copy(root) / _TWO_FILE_PACKAGE
+    _write_two_file_package(package, "cytearc")
+    callee = package / "callee.py"
+    original = callee.read_text()
+    edited = _callee_source("cytearc", increment=2, scale=100)
+    env = _probe_environment(
+        PYTHONPATH=str(root), NUMBA_CACHE_DIR=str(tmp_path / "cache")
+    )
+    # Coverage cannot map the copy's sources onto this checkout's.
+    for name in ("COVERAGE_PROCESS_CONFIG", "COVERAGE_PROCESS_START"):
+        env.pop(name, None)
+
+    def run(steps: list[str]) -> tuple[list[int], int, int]:
+        process = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _EDITING_PROCESS,
+                f"cytearc.{_TWO_FILE_PACKAGE}",
+                str(callee),
+                original,
+                edited,
+                *steps,
+            ],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert process.returncode == 0, process.stderr
+        report = json.loads(process.stdout.splitlines()[-1])
+        return report["values"], report["compiled"], report["loaded"]
+
+    assert run(session) == session_result
+    # A new process computes the callee as the session left its file.
+    assert run(["import", "run"]) == later_result
+
+
 @pytest.mark.slow
 def test_numbas_own_cache_keeps_the_old_callee(tmp_path: Path) -> None:
     # Numba checks a cached kernel only against the file that defines it. If
@@ -988,7 +1145,8 @@ def test_a_third_party_caller_compiles_again_when_its_callees_file_changes(
 
 
 def _kernel_digest(directory: Path) -> str:
-    return _source_digest(_kernel_module_sources(directory))
+    files = _kernel_module_sources(directory)
+    return _source_digest({name: file.source for name, file in files.items()})
 
 
 def _append(path: Path, text: str) -> None:
@@ -1032,8 +1190,53 @@ def test_one_tree_at_two_paths_has_one_build_token(tmp_path: Path) -> None:
     assert _kernel_digest(first) == _kernel_digest(CYTEARC_DIR)
 
 
-def test_the_build_token_holds_cytearcs_version() -> None:
-    assert _cytearc_build_token() == (cytearc.__version__, _kernel_digest(CYTEARC_DIR))
+def _cytearc_token_values(
+    monkeypatch: pytest.MonkeyPatch, version: str
+) -> tuple[str, ...]:
+    """Return the values of the build token that CyteArc's kernels get in a
+    process whose CyteArc version is ``version``."""
+    monkeypatch.setattr(cytearc, "__version__", version)
+    _cytearc_build_token.cache_clear()
+    try:
+        return _cytearc_build_token().values
+    finally:
+        # The next token, computed after monkeypatch restores the version, is
+        # the process's own again.
+        _cytearc_build_token.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("version", "release"),
+    [
+        ("1.3.1.dev35+g1eadbb736", "1.3.1"),
+        # setuptools-scm marks a tree with uncommitted changes by a date.
+        ("1.3.1.dev35+g1eadbb736.d20261031", "1.3.1"),
+        ("1.3.1", "1.3.1"),
+        ("1.10.0rc1", "1.10.0"),
+        # CyteArc's version where neither its metadata nor _version.py exists.
+        ("unavailable", "unavailable"),
+    ],
+)
+def test_the_build_token_holds_the_release_part_of_cytearcs_version(
+    monkeypatch: pytest.MonkeyPatch, version: str, release: str
+) -> None:
+    assert _cytearc_token_values(monkeypatch, version) == (
+        release,
+        _kernel_digest(CYTEARC_DIR),
+    )
+
+
+def test_commits_share_the_build_token_and_releases_do_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each commit gets its own development version, which compiled every
+    # kernel again in the first process of each commit.
+    assert _cytearc_token_values(
+        monkeypatch, "1.3.1.dev32+g7835e8fb2"
+    ) == _cytearc_token_values(monkeypatch, "1.3.1.dev33+gc80bf25d7")
+    assert _cytearc_token_values(monkeypatch, "1.3.1") != _cytearc_token_values(
+        monkeypatch, "1.3.2"
+    )
 
 
 def test_the_source_digest_keeps_file_boundaries_and_ignores_order() -> None:
@@ -1072,8 +1275,8 @@ def test_a_third_party_kernels_token_covers_every_file_of_its_package(
 
     def tokens() -> tuple[tuple[str, ...], tuple[str, ...]]:
         # Each process digests a package once.
-        _package_digest.cache_clear()
-        return _build_token(in_package), _build_token(alone)
+        _package_build_token.cache_clear()
+        return _build_token(in_package).values, _build_token(alone).values
 
     first = tokens()
     (tmp_path / "unrelated.py").write_text("SCALE = 100\n")
@@ -1086,6 +1289,115 @@ def test_a_third_party_kernels_token_covers_every_file_of_its_package(
     assert second[1] == first[1]
     _append(tmp_path / "alone.py", "\n# A comment.\n")
     assert tokens()[1] != second[1]
+
+
+def _write_package(root: Path) -> Path:
+    """Write a package that holds a module of constants, and return its
+    directory."""
+    package = root / "package"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "settings.py").write_text("SCALE = 10\n")
+    return package
+
+
+def _keep_stat(path: Path, write: Callable[[], None]) -> None:
+    """Run ``write`` on ``path`` and give the file back its modification time,
+    as copies that keep timestamps do."""
+    before = path.stat()
+    write()
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+
+def test_a_build_token_stays_stale_once_a_file_it_digests_changes(
+    tmp_path: Path,
+) -> None:
+    package = _write_package(tmp_path)
+    settings = package / "settings.py"
+    token = _BuildToken((), _package_sources(package))
+    assert token.stats_match() and token.sources_match()
+
+    _keep_stat(settings, lambda: settings.write_text("SCALE = 100\n"))
+
+    assert not token.stats_match()
+    # With the source and the stat back as they were, modules that the
+    # process imported meanwhile may still hold the change.
+    _keep_stat(settings, lambda: settings.write_text("SCALE = 10\n"))
+    assert os.stat(settings).st_size == len("SCALE = 10\n")
+    assert not token.stats_match()
+    assert not token.sources_match()
+    # A new process gets a token that matches, with the same values.
+    fresh = _BuildToken((), _package_sources(package))
+    assert fresh.stats_match() and fresh.sources_match()
+    assert fresh.values == token.values
+
+
+def test_a_build_token_digests_its_files_again_before_a_save(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    settings = package / "settings.py"
+    token = _BuildToken((), _package_sources(package))
+
+    # An edit that keeps the file's size and modification time.
+    _keep_stat(settings, lambda: settings.write_text("SCALE = 20\n"))
+
+    assert token.stats_match()
+    assert not token.sources_match()
+    assert not token.stats_match()
+
+
+def test_a_build_token_is_stale_once_a_file_it_digests_moves(tmp_path: Path) -> None:
+    package = _write_package(tmp_path)
+    token = _BuildToken((), _package_sources(package))
+
+    (package / "settings.py").rename(package / "constants.py")
+
+    assert not token.stats_match()
+
+
+def test_a_token_stays_current_while_a_module_without_njit_changes(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "kernels.py").write_text(
+        "from cytearc.utils.numba import njit\n\n\n"
+        "@njit(cache=True)\ndef increment(value):\n    return value + 1\n"
+    )
+    (tmp_path / "settings.py").write_text("SCALE = 10\n")
+    token = _BuildToken(("1.3.1",), _kernel_module_sources(tmp_path))
+
+    (tmp_path / "settings.py").write_text("SCALE = 100\n")
+
+    assert token.stats_match() and token.sources_match()
+    _append(tmp_path / "kernels.py", "\n# A comment.\n")
+    assert not token.stats_match()
+
+
+def test_a_kernel_neither_loads_nor_saves_once_its_packages_files_change(
+    cache_dir: Path, tmp_path: Path
+) -> None:
+    package = _write_package(tmp_path)
+    function = _function_in_file(package / "kernels.py")
+    first = njit(cache=True)(function)
+    assert first(1) == 2
+    assert (compiled(first), loaded(first)) == (1, 0)
+    (index,) = cache_dir.rglob("*.nbi")
+    saved = index.read_bytes()
+
+    (package / "settings.py").write_text("SCALE = 100\n")
+    later = njit(cache=True)(function)
+    with debug_messages() as messages:
+        assert later(1) == 2
+        assert later(1.5) == 2.5
+
+    # The entry saved for integers stays unread, and neither signature is
+    # saved.
+    assert (compiled(later), loaded(later)) == (2, 0)
+    assert index.read_bytes() == saved
+    assert len(list(cache_dir.rglob("*.nbc"))) == 1
+    reason = "because its package's source files changed after this process read them"
+    assert [message.rstrip() for message in messages] == 2 * [
+        f"Compiling kernels.increment without its Numba cache, {reason}",
+        f"Numba does not cache kernels.increment, {reason}",
+    ]
 
 
 @pytest.mark.parametrize("location", ["in_tree", "cache_dir", "user_cache"])
@@ -1224,7 +1536,7 @@ def test_every_cytearc_kernel_has_the_build_scoped_cache() -> None:
         assert isinstance(kernel, Dispatcher), name
         assert type(kernel._cache) is _kernel_cache_class(), name
         stamp = kernel._cache._cache_file._source_stamp
-        assert len(stamp) == 3 and stamp[1:] == token, name
+        assert len(stamp) == 3 and stamp[1:] == token.values, name
 
 
 def _code_objects(code: types.CodeType) -> Iterator[types.CodeType]:
