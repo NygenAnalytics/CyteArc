@@ -138,6 +138,10 @@ _MAX_CHUNK_ROWS = 1_000_000
 _TABLE_BYTES_PER_CELL = 250
 # Bytes per cell of an export beside its ID: its label and its code.
 _EXPORT_BYTES_PER_CELL = 200
+# Bytes of each clone that a figure labels: its ID as given and as text, its
+# code, and its label, a string of up to four bytes per character, beside the
+# junction that the repertoire operations read.
+_FIGURE_LABEL_BYTES = 400
 # The kinds of clone artifact that every clone summary reads.
 _CLONE_SOURCE_KINDS = (
     CloneImportArguments.artifact_kind,
@@ -1165,10 +1169,14 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef.
-            ValueError: If it is not a complete clone artifact, an ID names no
+            ValueError: If it is not a clone artifact, an ID names no
                 clonotype, or a representative has no junction to show.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
             MemoryError: If reading the clonotypes' IDs, three times their
-                size as read, does not fit the memory budget.
+                size as read, and 400 bytes for each clone given, or reading
+                their representatives' junctions, a chunk of each array at a
+                time, does not fit the memory budget.
         """
         group = self._clone_group(clones)
         names = np.asarray([str(name) for name in ids], dtype=object)
@@ -1179,8 +1187,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         # The IDs as read, the buffer they are decoded from and their
         # compressed bytes, each at most their size, and a comparison of them
         # with an ID given: 56 MiB traced for 410,365 IDs of up to 16
-        # characters, 26 MB as read.
-        resident = 3 * int(stored_ids.nbytes) + 2 * n_clonotypes
+        # characters, 26 MB as read. Each clone given is held throughout.
+        held = _FIGURE_LABEL_BYTES * len(names)
+        resident = held + 3 * int(stored_ids.nbytes) + 2 * n_clonotypes
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Labelling clonotypes reads the IDs of {n_clonotypes} clonotypes, "
@@ -1197,7 +1206,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if (codes < 0).any():
             unknown = names[codes < 0].tolist()
             raise ValueError(f"No clonotype is labelled {unknown[:5]}")
-        junctions = self._representative_junctions(clones, codes)
+        junctions = self._representative_junctions(clones, codes, held_bytes=held)
         unnamed = np.asarray([junction is None for junction in junctions.tolist()])
         if unnamed.any():
             raise ValueError(

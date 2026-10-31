@@ -5,6 +5,7 @@ each receptor type apart, so their expected values here are counted by hand
 within the T cells and the B cells.
 """
 
+import re
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,8 @@ from cytearc.metadata.rows import (
 )
 from cytearc.repertoire import SLOTS, Clonotypes
 from cytearc.storage.artifacts import artifact_group
+from cytearc.storage.refs import ArtifactRef
+from cytearc.utils.logging import logger
 from tests.clone_helpers import (
     CELLRANGER_HEADER,
     N_RECEPTOR_CELLS,
@@ -497,15 +500,28 @@ def test_figure_labels_read_the_clonotype_ids_within_the_budget(
     store, receptors = _receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     # Four IDs of 11 characters, read as fixed-width text of 4 bytes per
-    # character: 176 bytes, three times with the buffers of the read, and 2
-    # bytes each for a comparison.
-    monkeypatch.setattr(store, "memoryBytes", 3 * 176 + 2 * 4 - 1)
+    # character: 176 bytes, three times with the buffers of the read, 2 bytes
+    # each for a comparison, and 400 bytes for the clonotype labelled.
+    ids_bytes = 400 + 3 * 176 + 2 * 4
+    monkeypatch.setattr(store, "memoryBytes", ids_bytes - 1)
     with pytest.raises(MemoryError, match="Labelling clonotypes reads the IDs of 4"):
         store._clone_figure_labels(ref, ["clonotype_1"])
-    monkeypatch.setattr(store, "memoryBytes", 3 * 176 + 2 * 4)
-    assert store._clone_figure_labels(ref, ["clonotype_1"]).tolist() == [
-        "clonotype_1 (CASSA)"
-    ]
+    # Reading the junction that names it then decodes a chunk of each array
+    # of the receptors that it reads, which the IDs' budget does not hold.
+    budget = ids_bytes
+    refusals = []
+    for _attempt in range(10):
+        monkeypatch.setattr(store, "memoryBytes", budget)
+        try:
+            labels = store._clone_figure_labels(ref, ["clonotype_1"])
+            break
+        except MemoryError as error:
+            found = re.search(r"by their junctions holds about (\d+) bytes", str(error))
+            assert found is not None, str(error)
+            refusals.append(int(found.group(1)))
+            assert refusals[-1] > budget
+            budget = refusals[-1]
+    assert refusals and labels.tolist() == ["clonotype_1 (CASSA)"]
 
 
 def test_a_representative_without_a_junction_is_refused(tmp_path) -> None:
@@ -517,6 +533,21 @@ def test_a_representative_without_a_junction_is_refused(tmp_path) -> None:
     representatives = artifact_group(store.zw, ref)["representatives"]
     representatives[0] = 7
     with pytest.raises(ValueError, match="no junction amino-acid sequence"):
+        store._clone_figure_labels(ref, ["clonotype_1"])
+
+
+def test_figure_labels_name_missing_and_incomplete_clonotypes(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    ref = store.repertoire.clonotypes(receptors)
+    missing = ArtifactRef(
+        scope="datastore", kind="clonotypes", artifact_id="0" * 64, assay=None
+    )
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        store._clone_figure_labels(missing, ["clonotype_1"])
+    # A definition that stopped before it finished leaves an incomplete
+    # artifact.
+    artifact_group(store.zw, ref).attrs["complete"] = False
+    with pytest.raises(RuntimeError, match="Artifact is incomplete"):
         store._clone_figure_labels(ref, ["clonotype_1"])
 
 
@@ -1122,10 +1153,11 @@ def test_clonotype_clusters_get_what_the_budget_leaves_for_their_pairs(
     store, receptors = _receptors(tmp_path)
     # Within three substitutions, cell0's alpha junction pairs with cell2's
     # (3 substitutions) and with cell4's second one (2): two pairs of chains
-    # of 32 bytes each beyond the 1,000 bytes per cell and the search. The T
-    # cells with both arms hold these chains in one group, so linking them
+    # of 32 bytes each beyond the 1,000 bytes per cell, the stored junction
+    # code of each of the 14 contigs with its int64 copy, and the search. The
+    # T cells with both arms hold these chains in one group, so linking them
     # adds two links of 32 bytes each.
-    reserved = 1_000 * N_CELLS + 512 * 2**20
+    reserved = 1_000 * N_CELLS + 14 * (4 + 8) + 512 * 2**20
     for budget, held in ((2 * 32 - 1, "the 2 pairs"), (4 * 32 - 1, "the 2 links")):
         monkeypatch.setattr(store, "memoryBytes", reserved + budget)
         with pytest.raises(MemoryError, match=f"bytes for {held}"):
@@ -1170,6 +1202,26 @@ def test_clonotype_clusters_link_similar_junctions(tmp_path) -> None:
         )
     )
     assert _members(residues)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
+
+
+def test_the_log_names_clonotype_clusters_as_such(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="INFO"
+    )
+    try:
+        store.repertoire.clonotypes(receptors)
+        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    finally:
+        logger.remove(sink)
+    # Of the seven cells with a receptor, cell0, cell1 and cell4 share their
+    # chains, as do the B cells, and cell2 and cell3 stand alone; within
+    # three substitutions cell2's alpha chain joins it to cell0.
+    assert [message for message in messages if message.startswith("Defined")] == [
+        "Defined 4 clonotypes of 7 of 8 cells; the largest holds 3 cells",
+        "Defined 3 clonotype clusters of 7 of 8 cells; the largest holds 4 cells",
+    ]
 
 
 @pytest.mark.parametrize(

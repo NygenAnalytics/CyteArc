@@ -195,6 +195,7 @@ Every summary checks the memory budget before each step that reads or allocates,
 | Measuring expansion | 300 per measured cell, and 8 for each column of labels that the clones keep apart |
 | Loading expansion | 500 per cell and the cells' IDs as text |
 | `load_clones` and `export_clones` | 250 and 200 per cell, the clones read without their labels, and the clone labels and the cells' IDs as text |
+| The labels of the largest clonotypes in `clone_abundance` | Three times the stored width of each clonotype's ID, 2 per clonotype and 400 per clonotype drawn; then, a chunk of each receptor array at a time, the representatives' slots, junction codes and bounds, and 200 per junction and 7 per byte of its text |
 | Rarefaction | 40 for each size below a group's cells and each of its distinct clone sizes, and 100 per row of the curves |
 | Comparing groups | 250 per pair of groups and 24 per entry of the groups-by-groups matrices, 40 per clone of each group, and the clones read |
 | Following clones | 100 per row of the table and 16 more per row for each key column, a byte per chosen clone and group, 40 per clone of each group, and the clones and labels read |

@@ -20,7 +20,12 @@ from ...metadata.records import (
     take_text,
     unpack_text,
 )
-from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
+from ...metadata.rows import (
+    array_row_selection_parts,
+    read_array_rows_chunkwise,
+    read_metadata_rows_chunkwise,
+    text_read_bytes,
+)
 from ...metadata.selection import cell_selection_indices
 from ...repertoire.chains import (
     NO_RECEPTOR,
@@ -57,6 +62,7 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
+from ...storage.geometry import array_geometry
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument, integer_argument
@@ -151,6 +157,12 @@ _FIELD_BYTES_PER_PACKED_BYTE = 7
 # bytes of Python objects while its batch is decoded.
 _DECODE_BATCH_VALUES = 2**16
 _DECODE_BYTES_PER_BATCH_VALUE = 160
+# Each junction that names a clonotype in a figure, while it is decoded: its
+# bounds as read and as Python integers, its object and its string's header;
+# and each of its bytes as read, joined and decoded, and up to four bytes per
+# character in its string.
+_JUNCTION_BYTES_PER_VALUE = 200
+_JUNCTION_BYTES_PER_BYTE = 7
 # The columns of the tables of clonotypes, which a within column may not share.
 _CLONOTYPE_COLUMNS = frozenset(
     {"clonotype", "clone_size", "n_cells", "fraction", "n_configurations"}
@@ -390,6 +402,38 @@ def _slot_codes(group: zarr.Group, name: str, slots: np.ndarray) -> np.ndarray:
     filled = slots >= 0
     taken[filled] = codes[slots[filled]]
     return taken
+
+
+def _byte_ranges(array: Any, starts: np.ndarray, ends: np.ndarray) -> np.ndarray:
+    """The bytes of ascending, disjoint ranges of a one-dimensional array, joined.
+
+    Each physical chunk that a range touches is read once, as a slice, so the
+    read holds one chunk and its slice beside the bytes it returns.
+    """
+    length = int(array.shape[0])
+    geometry = array_geometry(array)
+    step = max(1, length) if geometry is None else geometry.axisChunk(0)
+    joined = np.empty(int((ends - starts).sum()), dtype=np.uint8)
+    block = np.empty(0, dtype=np.uint8)
+    block_start = -1
+    at = 0
+    for start, end in zip(starts.tolist(), ends.tolist(), strict=True):
+        position = start
+        while position < end:
+            chunk_start = position // step * step
+            if chunk_start != block_start:
+                del block
+                block = np.asarray(
+                    array[chunk_start : min(chunk_start + step, length)],
+                    dtype=np.uint8,
+                )
+                block_start = chunk_start
+            taken = min(end, chunk_start + step) - position
+            offset = position - chunk_start
+            joined[at : at + taken] = block[offset : offset + taken]
+            at += taken
+            position += taken
+    return joined
 
 
 def _sorted_codes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -1098,8 +1142,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             arrays,
             attributes={"n_clonotypes": assignment.n_clonotypes},
         )
+        defined = "clonotypes" if metric == "identity" else "clonotype clusters"
         logger.info(
-            f"Defined {assignment.n_clonotypes} clonotypes of {int(has.sum())} of "
+            f"Defined {assignment.n_clonotypes} {defined} of {int(has.sum())} of "
             f"{n_cells} cells; the largest holds "
             f"{int(assignment.sizes[0]) if assignment.n_clonotypes else 0} cells"
         )
@@ -1117,7 +1162,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         return artifact_group(self.zw, clonotypes)
 
     def _representative_junctions(
-        self, clonotypes: ArtifactRef, codes: np.ndarray
+        self, clonotypes: ArtifactRef, codes: np.ndarray, *, held_bytes: int = 0
     ) -> np.ndarray:
         """The junction amino acids that name some clonotypes in figures.
 
@@ -1125,16 +1170,26 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         its ``VJ_1`` chain without one; clonotypes defined by
         ``receptor_arms="VJ"`` by the ``VJ_1`` chain first, which their
         cells share. Of the receptors, only the representatives' slots and
-        junction codes and the bytes of the junctions they name are read.
+        junction codes and the bytes of the junctions they name are read,
+        each array a physical chunk at a time. Before each read, what it
+        holds is checked against the memory budget beside ``held_bytes`` and
+        what earlier reads keep: one decoded chunk and its compressed bytes,
+        with three copies and the index arrays of each row it reads, and for
+        the junctions' bytes the chunk's slice, the bytes and each junction
+        while it is decoded.
 
         Args:
             clonotypes: A complete ``clonotypes`` artifact.
             codes: The positions of some of its clonotypes, such as 0 for
                 ``clonotype_1``.
+            held_bytes: What the caller holds beside the reads.
 
         Returns:
             Each clonotype's junction, None where the chain that names it
             has no junction amino-acid sequence, as an object array.
+
+        Raises:
+            MemoryError: If a read does not fit the memory budget.
         """
         group = self._clonotype_group(clonotypes)
         status = inspect_artifact(self.zw, clonotypes)
@@ -1142,55 +1197,73 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         naming = ("VJ_1", "VDJ_1")
         if (status.parameters or {}).get("receptor_arms") != "VJ":
             naming = ("VDJ_1", "VJ_1")
-        cells = np.asarray(
-            as_zarr_array(
-                group["representatives"], name="representatives"
-            ).get_coordinate_selection(np.asarray(codes, dtype=np.int64)),
-            dtype=np.int64,
-        )
-        slots = np.asarray(
-            as_zarr_array(
-                receptor_group["chain_slots"], name="chain_slots"
-            ).get_orthogonal_selection(
-                (
-                    cells,
-                    np.asarray([SLOTS.index(slot) for slot in naming], dtype=np.int64),
+        held = int(held_bytes)
+
+        def reserve(needed: int) -> None:
+            """Raise MemoryError if ``needed`` more bytes exceed the budget."""
+            if held + needed > self.memoryBytes:
+                raise MemoryError(
+                    f"Labelling clonotypes by their junctions holds about "
+                    f"{held + needed} bytes, more than the memory budget of "
+                    f"{self.memoryBytes} bytes. Raise mem_budget, or label fewer "
+                    "clonotypes."
                 )
-            ),
-            dtype=np.int64,
-        ).reshape(len(cells), 2)
+
+        def rows(source: zarr.Group, name: str, wanted: np.ndarray) -> np.ndarray:
+            """Read distinct rows of an array a chunk at a time, once counted."""
+            nonlocal held
+            array = as_zarr_array(source[name], name=name)
+            fixed, per_row = array_row_selection_parts(array)
+            reserve(fixed + len(wanted) * per_row)
+            values = np.asarray(read_array_rows_chunkwise(array, wanted))
+            held += int(values.nbytes)
+            return values
+
+        wanted, back = np.unique(np.asarray(codes, dtype=np.int64), return_inverse=True)
+        cells = rows(group, "representatives", wanted).astype(np.int64)
+        distinct_cells, cell_back = np.unique(cells, return_inverse=True)
+        stored_slots = rows(receptor_group, "chain_slots", distinct_cells)
+        slots = np.asarray(
+            stored_slots[:, [SLOTS.index(slot) for slot in naming]], dtype=np.int64
+        )[cell_back.reshape(-1)]
         contigs = np.where(slots[:, 0] >= 0, slots[:, 0], slots[:, 1])
         junction_codes = np.full(len(contigs), -1, dtype=np.int64)
-        if (contigs >= 0).any():
-            junction_codes[contigs >= 0] = as_zarr_array(
-                receptor_group["contig_junction_aa"], name="contig_junction_aa"
-            ).get_coordinate_selection(contigs[contigs >= 0])
-        junctions = np.full(len(contigs), None, dtype=object)
+        present = contigs >= 0
+        if present.any():
+            distinct_contigs, contig_back = np.unique(
+                contigs[present], return_inverse=True
+            )
+            junction_codes[present] = rows(
+                receptor_group, "contig_junction_aa", distinct_contigs
+            ).astype(np.int64)[contig_back.reshape(-1)]
+        junctions = np.full(len(wanted), None, dtype=object)
         named = junction_codes >= 0
-        if not named.any():
-            return junctions
-        # Only the bytes of the junctions needed are read and decoded.
-        needed, inverse = np.unique(junction_codes[named], return_inverse=True)
-        bounds = np.asarray(
-            as_zarr_array(
-                receptor_group["contig_junction_aa_offsets"],
-                name="contig_junction_aa_offsets",
-            ).get_coordinate_selection(np.concatenate([needed, needed + 1])),
-            dtype=np.int64,
-        )
-        starts, ends = bounds[: len(needed)], bounds[len(needed) :]
-        offsets = np.zeros(len(needed) + 1, dtype=np.int64)
-        np.cumsum(ends - starts, out=offsets[1:])
-        positions = np.repeat(starts - offsets[:-1], ends - starts) + np.arange(
-            offsets[-1], dtype=np.int64
-        )
-        data = as_zarr_array(
-            receptor_group["contig_junction_aa_values"],
-            name="contig_junction_aa_values",
-        ).get_coordinate_selection(positions)
-        text = unpack_text(np.asarray(data, dtype=np.uint8), offsets)
-        junctions[named] = text[inverse.reshape(-1)]
-        return junctions
+        if named.any():
+            # Only the bytes of the junctions needed are read and decoded.
+            needed, inverse = np.unique(junction_codes[named], return_inverse=True)
+            bound_rows = np.union1d(needed, needed + 1)
+            bounds = rows(receptor_group, "contig_junction_aa_offsets", bound_rows)
+            starts = bounds[np.searchsorted(bound_rows, needed)].astype(np.int64)
+            ends = bounds[np.searchsorted(bound_rows, needed + 1)].astype(np.int64)
+            values = as_zarr_array(
+                receptor_group["contig_junction_aa_values"],
+                name="contig_junction_aa_values",
+            )
+            n_bytes = int((ends - starts).sum())
+            geometry = array_geometry(values)
+            fixed = array_row_selection_parts(values)[0]
+            chunk = 0 if geometry is None else geometry.nominalChunkBytes()
+            reserve(
+                fixed
+                + chunk
+                + _JUNCTION_BYTES_PER_VALUE * len(needed)
+                + _JUNCTION_BYTES_PER_BYTE * n_bytes
+            )
+            offsets = np.zeros(len(needed) + 1, dtype=np.int64)
+            np.cumsum(ends - starts, out=offsets[1:])
+            text = unpack_text(_byte_ranges(values, starts, ends), offsets)
+            junctions[np.flatnonzero(named)] = text[inverse.reshape(-1)]
+        return junctions[back.reshape(-1)]
 
     @validation_scoped
     def _repertoire_load_clonotypes(self, clonotypes: ArtifactRef) -> Clonotypes:

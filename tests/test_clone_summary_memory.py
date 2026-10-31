@@ -10,7 +10,8 @@ more cells than the clones hold, a label for each of many cells, many sizes,
 many pairs of groups, one-cell clones, 13 key columns, and clone labels
 held beside many rows. Clonotypes, whose receptor types every summary keeps
 apart, are measured alike, as are the steps that define and load them, also
-within those labels and for cells with long IDs.
+within those labels and for cells with long IDs, the labels that figures give
+them, and clonotype clusters, whose smallest budget is found by bisection.
 """
 
 import re
@@ -21,11 +22,12 @@ import numba
 import numpy as np
 import pytest
 
+import cytearc.datastore._operations.repertoire as repertoire_operations
+import cytearc.repertoire.clonotypes as clonotypes_module
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import logger
-from tests.clone_helpers import write_clone_contigs
-from tests.perturbation_helpers import traced_peak
+from tests.clone_helpers import smallest_budget, traced_peak, write_clone_contigs
 from tests.storage_helpers import write_count_store
 
 pytestmark = pytest.mark.slow
@@ -125,6 +127,7 @@ def data(tmp_path_factory) -> SimpleNamespace:
         path.parent, "contigs.csv", ids, np.where(labels == "", -1, clone_of)
     )
     receptors = store.repertoire.import_receptors(contigs, cell_selection=every)
+    clonotypes = store.repertoire.clonotypes(receptors)
     return SimpleNamespace(
         store=store,
         folder=path.parent,
@@ -135,7 +138,10 @@ def data(tmp_path_factory) -> SimpleNamespace:
         # A fate of its own for each of the 300 cells after the first.
         own_next_300=store.snapshot_cluster_labels("own", cell_selection=next_300),
         receptors=receptors,
-        clonotypes=store.repertoire.clonotypes(receptors),
+        clonotypes=clonotypes,
+        clonotype_ids=store.repertoire.load_clonotypes(clonotypes)
+        .clonotypes["clonotype"]
+        .tolist(),
         own_clonotypes=store.repertoire.clonotypes(
             receptors, within="label_of_each_cell"
         ),
@@ -443,6 +449,36 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
             )
         )
     ),
+    "figure labels of the 20 largest clonotypes": lambda data: (
+        data.store._clone_figure_labels(data.clonotypes, data.clonotype_ids[:20])
+    ),
+    "figure labels of every clonotype": lambda data: data.store._clone_figure_labels(
+        data.clonotypes, data.clonotype_ids
+    ),
+}
+
+# Clonotype clusters by residues, unless a case compares nucleotides.
+CLUSTER_CASES: dict[str, dict[str, object]] = {
+    "within one substitution": {"sequence": "aa", "metric": "hamming", "cutoff": 1},
+    "within one edit": {"sequence": "aa", "metric": "levenshtein", "cutoff": 1},
+    "of nucleotides within 15 percent and a V gene": {
+        "metric": "normalized_hamming",
+        "cutoff": 15,
+        "same_v_gene": True,
+    },
+    "of either arm with every chain": {
+        "sequence": "aa",
+        "metric": "hamming",
+        "cutoff": 1,
+        "receptor_arms": "any",
+        "dual_ir": "all",
+    },
+    "within a label of each cell": {
+        "sequence": "aa",
+        "metric": "hamming",
+        "cutoff": 1,
+        "within": "label_of_each_cell",
+    },
 }
 
 
@@ -794,3 +830,38 @@ def test_loaded_clonotypes_of_one_cell_each_fit_the_smallest_budget(
         store, lambda: store.repertoire.load_clonotypes(clonotypes)
     )
     assert peak <= budget, (peak, budget)
+
+
+@pytest.mark.parametrize("case", list(CLUSTER_CASES))
+def test_clonotype_clusters_fit_the_smallest_budget_accepted(
+    data, monkeypatch, case
+) -> None:
+    # The search's fixed reservation would hide what clusters hold for their
+    # cells, contigs, junctions and links, so it shrinks to 1 MiB, with the
+    # chunks of candidate pairs of cells that it covers.
+    for module in (repertoire_operations, clonotypes_module):
+        monkeypatch.setattr(module, "CLUSTER_SEARCH_BYTES", 1 << 20)
+    monkeypatch.setattr(clonotypes_module, "_PAIRS_PER_CHUNK", 1 << 12)
+    store = data.store
+
+    def run() -> object:
+        return store.repertoire.clonotypes(
+            data.receptors, invalidate_cache=True, **CLUSTER_CASES[case]
+        )
+
+    def attempt(budget: int) -> object:
+        store.memoryBytes = budget
+        return run()
+
+    full = store.memoryBytes
+    try:
+        # Compiled kernels and caches are warmed before anything is traced.
+        run()
+        # Refusals of the search and of linking name what they hold beside
+        # the definition, so the smallest budget is found by bisection.
+        budget = smallest_budget(attempt, 1 << 28)
+        store.memoryBytes = budget
+        peak = traced_peak(run)
+    finally:
+        store.memoryBytes = full
+    assert peak <= budget, (case, peak, budget)
