@@ -192,7 +192,7 @@ def _report_barcodes(attributes: Mapping[str, Any]) -> None:
         logger.info(message)
 
 
-def _import_bytes(
+def _import_step_bytes(
     size: Any,
     *,
     n_cells: int,
@@ -200,15 +200,16 @@ def _import_bytes(
     id_array: Any,
     prefix_length: int,
     stream_least: int,
-    reading: int,
-) -> int:
-    """Return the most bytes that importing Cell Ranger's calls holds.
+) -> dict[str, int]:
+    """Return the bytes that each step of importing Cell Ranger's calls holds.
 
-    The import reads the selected cells' IDs, parses the call file, matches
-    its barcodes to the cells and searches the store's other cells for the
-    barcodes that match none, pads the calls, streams the counts to summarise
-    each cell's guides, and saves the calls; this returns the most that any of
-    these steps holds with what the earlier ones keep.
+    The import reads the selected cells' IDs and parses the call file
+    (``"parsing"``), matches its barcodes to the cells (``"matching"``),
+    searches the store's other cells for the barcodes that match none
+    (``"searching"``), pads the calls (``"padding"``), streams the counts to
+    summarise each cell's guides (``"streaming"``), and saves the calls
+    (``"saving"``). Each step's bytes include what the earlier steps keep,
+    but not the cells' positions and the fixed bytes that every step holds.
 
     Args:
         size: The :class:`~cytearc.readers.cellranger.ProtospacerCallsSize`
@@ -218,8 +219,6 @@ def _import_bytes(
         id_array: The store's array of cell IDs.
         prefix_length: The characters of the barcode prefix.
         stream_least: What the count stream holds with one-row blocks.
-        reading: What the reads before the plan hold, from
-            ``_guide_read_bytes``.
     """
     n_rows = size.n_rows
     n_calls = size.n_calls
@@ -260,13 +259,68 @@ def _import_bytes(
     )
     streaming = _STREAMED_BYTES_PER_CELL * n_cells + 8 * width * n_cells + stream_least
     saving = _call_bytes(n_cells, 0, width, _label_width(guide_ids))
+    return {
+        "parsing": parsing,
+        "matching": matching,
+        "searching": searching,
+        "padding": padding,
+        "streaming": streaming,
+        "saving": saving,
+    }
+
+
+def _import_bytes(
+    size: Any,
+    *,
+    n_cells: int,
+    guide_ids: np.ndarray,
+    id_array: Any,
+    prefix_length: int,
+    stream_least: int,
+    reading: int,
+) -> int:
+    """Return the most bytes that importing Cell Ranger's calls holds.
+
+    These are the most that one step of :func:`_import_step_bytes` holds
+    beside the cells' positions and the fixed bytes, or ``reading``, what the
+    reads before the plan hold, from ``_guide_read_bytes``, if more. The other
+    arguments are those of :func:`_import_step_bytes`.
+    """
+    steps = _import_step_bytes(
+        size,
+        n_cells=n_cells,
+        guide_ids=guide_ids,
+        id_array=id_array,
+        prefix_length=prefix_length,
+        stream_least=stream_least,
+    )
+    return int(max(reading, _CALL_FIXED_BYTES + 8 * n_cells + max(steps.values())))
+
+
+def _call_file_check_bytes(
+    size: Any,
+    *,
+    n_cells: int,
+    guide_ids: np.ndarray,
+    id_array: Any,
+    prefix_length: int,
+) -> int:
+    """Return the most bytes that reading the call file and matching its barcodes hold.
+
+    These are the import's first two steps, which the perturbation recipe
+    runs to check the file against its cells before its run. The arguments
+    are those of :func:`_import_step_bytes`.
+    """
+    steps = _import_step_bytes(
+        size,
+        n_cells=n_cells,
+        guide_ids=guide_ids,
+        id_array=id_array,
+        prefix_length=prefix_length,
+        stream_least=0,
+    )
     return int(
-        max(
-            reading,
-            _CALL_FIXED_BYTES
-            + 8 * n_cells
-            + max(parsing, matching, searching, padding, streaming, saving),
-        )
+        _CALL_FIXED_BYTES + 8 * n_cells + max(steps["parsing"], steps["matching"])
     )
 
 
@@ -382,6 +436,52 @@ def _require_call_file_cells(
             f"{second!r}; {restrict} the cells of one sample and pass its "
             f"barcode_prefix, such as {first + MERGED_ID_SEPARATOR!r}, {remedy}"
         )
+
+
+def _barcode_ids(barcodes: np.ndarray, barcode_prefix: str | None) -> np.ndarray:
+    """Return the ID of the cell that each barcode of a call file names.
+
+    A cell's ID is ``barcode_prefix`` followed by the barcode; None, or an
+    empty text, adds nothing.
+    """
+    if not barcode_prefix:
+        return barcodes
+    return np.asarray([barcode_prefix + barcode for barcode in barcodes], dtype=object)
+
+
+def _called_guide_positions(
+    features: np.ndarray, guide_ids: np.ndarray, assay: Any
+) -> np.ndarray:
+    """Return the position of each called guide among the guide assay's guides.
+
+    Args:
+        features: The feature ID of each call of a call file.
+        guide_ids: The guide IDs of the assay.
+        assay: The guide assay, whose names the message compares with the
+            calls.
+
+    Raises:
+        ValueError: If a called guide is not a feature of the assay; the
+            message says so when the calls name the guides by name.
+    """
+    positions: np.ndarray = pd.Index(guide_ids).get_indexer(features)
+    unknown = np.flatnonzero(positions < 0)
+    if len(unknown):
+        names = set(np.asarray(assay.feats.fetch_all("names")).astype(str))
+        examples = pd.unique(features[unknown])[:5].tolist()
+        hint = (
+            "; they match guide names, so the file names guides by name "
+            "while the assay's IDs differ"
+            if all(example in names for example in examples)
+            else ""
+        )
+        raise ValueError(
+            f"{len(pd.unique(features[unknown]))} called guides are not features "
+            f"of assay {assay.name!r}, for example "
+            + ", ".join(repr(example) for example in examples)
+            + hint
+        )
+    return positions
 
 
 # Fits named in the warning about guides that call nothing.
@@ -945,32 +1045,9 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             remedy="or call the guides from their counts with perturbation.call_guides",
         )
         file_calls = read_protospacer_calls(path)
-        guide_positions = pd.Index(guide_ids).get_indexer(file_calls.features)
-        unknown = np.flatnonzero(guide_positions < 0)
-        if len(unknown):
-            names = set(np.asarray(assay.feats.fetch_all("names")).astype(str))
-            examples = pd.unique(file_calls.features[unknown])[:5].tolist()
-            hint = (
-                "; they match guide names, so the file names guides by name "
-                "while the assay's IDs differ"
-                if all(example in names for example in examples)
-                else ""
-            )
-            raise ValueError(
-                f"{len(pd.unique(file_calls.features[unknown]))} called guides are "
-                f"not features of assay {assay.name!r}, for example "
-                + ", ".join(repr(example) for example in examples)
-                + hint
-            )
+        guide_positions = _called_guide_positions(file_calls.features, guide_ids, assay)
         self._require_writable(arguments.operation)
-        file_ids = (
-            file_calls.barcodes
-            if barcode_prefix is None
-            else np.asarray(
-                [barcode_prefix + barcode for barcode in file_calls.barcodes],
-                dtype=object,
-            )
-        )
+        file_ids = _barcode_ids(file_calls.barcodes, barcode_prefix)
         row_cells = pd.Index(cell_ids).get_indexer(file_ids)
         del cell_ids
         unmatched = np.flatnonzero(row_cells < 0)

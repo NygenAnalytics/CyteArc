@@ -31,17 +31,23 @@ from cytearc import (
 from cytearc.datastore._pipeline import summaries
 from cytearc.datastore._pipeline.executor import RecipePlan
 from cytearc.datastore._pipeline.recipes.common import require_labeled_cells
+from cytearc.datastore._operations.perturbation_guides import _call_file_check_bytes
 from cytearc.datastore._pipeline.recipes.perturbation import (
+    _check_call_file,
     _check_call_file_cells,
+    _check_cluster_perturbations,
     resolve_perturbation,
 )
+from cytearc.datastore._pipeline.recipes.rna import resolve_rna
 from cytearc.datastore._pipeline.settings import LABELS_NEED_CONTROLS, stage_settings
 from cytearc.datastore._pipeline.stages import CellSource
 from cytearc.datastore.pipeline_accessor import PipelineAccessor
 from cytearc.metadata.membership import UnmeasuredCellsError, membership_attributes
 from cytearc.perturbation import PerturbationAssociations
+from cytearc.perturbation.labels import guide_targets
+from cytearc.readers.cellranger import protospacer_calls_size
 from cytearc.storage.artifacts import artifact_group
-from tests.perturbation_helpers import record_cell_reads, written
+from tests.perturbation_helpers import record_cell_reads, traced_peak, written
 from tests.storage_helpers import insert_nullable_cell_column, write_count_store
 
 N_GENES = 120
@@ -281,21 +287,36 @@ def _association_summary(tests: PerturbationAssociations) -> dict[str, Any]:
     }
 
 
+def _recipe_defaults(recipe: str) -> dict[str, Any]:
+    """Return the keywords that ``ds.pipeline.<recipe>`` resolves, at their defaults.
+
+    The callback and the cancellation token belong to the run, and the
+    perturbation recipe's ``labels`` has no default.
+    """
+    return {
+        name: parameter.default
+        for name, parameter in inspect.signature(
+            getattr(PipelineAccessor, recipe)
+        ).parameters.items()
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        and name not in {"callback", "cancel", "labels"}
+    }
+
+
 def _resolve(store: DataStore, **keywords: Any) -> RecipePlan:
     """Resolve a call as ``ds.pipeline.perturbation`` does, writing nothing.
 
     Every omitted keyword takes the public method's default, and ``labels``
     those of the screen.
     """
-    defaults = {
-        name: parameter.default
-        for name, parameter in inspect.signature(
-            PipelineAccessor.perturbation
-        ).parameters.items()
-        if parameter.kind is inspect.Parameter.KEYWORD_ONLY
-        and name not in {"callback", "cancel", "labels"}
-    }
-    return resolve_perturbation(store, **{**defaults, "labels": LABELS, **keywords})
+    return resolve_perturbation(
+        store, **{**_recipe_defaults("perturbation"), "labels": LABELS, **keywords}
+    )
+
+
+def _resolve_rna(store: DataStore, **keywords: Any) -> RecipePlan:
+    """Resolve a call as ``ds.pipeline.rna`` does, writing nothing."""
+    return resolve_rna(store, **{**_recipe_defaults("rna"), **keywords})
 
 
 def _call_file(path: Path, prefix: str = "") -> Path:
@@ -1230,6 +1251,138 @@ def test_the_call_file_check_reads_the_ids_of_the_runs_cells_only(
         assert set(read.tolist()) == set(np.flatnonzero(LANES == "L1").tolist())
 
 
+def test_a_call_file_that_cannot_label_the_runs_cells_is_refused(
+    screen, rejection_store, tmp_path
+) -> None:
+    store = rejection_store
+    # A store of one sample of a merged store names each cell s1__<barcode>.
+    location = tmp_path / "one_sample.zarr"
+    shutil.copytree(screen, location)
+    ids = np.asarray([f"s1__cell{cell}" for cell in range(N_CELLS)])
+    zarr.open_group(str(location / "cellData"), mode="r+").create_array(
+        "ids", data=ids, overwrite=True
+    )
+    one_sample = _open(location)
+    plain = _call_file(tmp_path / "plain.csv")
+    # Barcodes that carry a sample prefix that the cell IDs lack.
+    prefixed = _call_file(tmp_path / "prefixed.csv", prefix="L1__")
+    # A call of a guide that the guide assay lacks, and a file without UMIs.
+    frame = pd.read_csv(plain, dtype=str)
+    frame.loc[1, "feature_call"] = "CRISPR99"
+    frame.to_csv(unknown := tmp_path / "unknown.csv", index=False)
+    frame.drop(columns="num_umis").to_csv(
+        lacking := tmp_path / "lacking.csv", index=False
+    )
+    # Cell Ranger writes the header alone when it calls no cell.
+    (empty := tmp_path / "empty.csv").write_text(
+        "cell_barcode,num_features,feature_call,num_umis\n"
+    )
+    remedy = (
+        "or call the guides from their counts with guide_calling settings without path"
+    )
+    unreached = (
+        "No barcode of the call file names one of the run's cells, so the import "
+        "would label them all 'Negative': a cell matches a barcode when its ID is "
+        "barcode_prefix followed by the barcode, which gives IDs such as {!r}, "
+        "but the run's cells have IDs such as {!r}; check barcode_prefix and that "
+        f"the file holds the calls of these cells, {remedy}"
+    )
+    saved = {store: written(store), one_sample: written(one_sample)}
+
+    # Each would fail a stage after the earlier stages had written: a file
+    # that names none of the run's cells at efficiency, which finds no control
+    # cell, and the others at guide calling.
+    for target, path, message in (
+        (store, prefixed, unreached.format("L1__unknown-barcode", "cell0")),
+        (one_sample, plain, unreached.format("unknown-barcode", "s1__cell0")),
+        (
+            store,
+            unknown,
+            "1 called guides are not features of assay 'CRISPR', for example "
+            "'CRISPR99'",
+        ),
+        (store, lacking, "The call file lacks the columns 'num_umis'"),
+        (
+            store,
+            empty,
+            "The call file holds no barcode, so the import would label all of the "
+            f"run's cells 'Negative'; pass the call file of these cells, {remedy}",
+        ),
+    ):
+        with pytest.raises(ValueError, match="^" + re.escape(message)):
+            target.pipeline.perturbation(
+                labels=LABELS, guide_calling={"path": path}, **HEAD
+            )
+    assert {target: written(target) for target in saved} == saved
+
+    # With the prefix of the store's cells, the file reaches them.
+    plan = _resolve(one_sample, guide_calling={"path": plain, "barcode_prefix": "s1__"})
+    assert plan.config["stages"]["guide_calling"]["barcode_prefix"] == "s1__"
+
+
+def test_the_call_file_is_read_before_the_run_within_the_memory_budget(
+    screen, tmp_path
+) -> None:
+    location = tmp_path / "screen.zarr"
+    shutil.copytree(screen, location)
+    path = _call_file(tmp_path / "calls.csv")
+    guide = _open(location)._get_assay("CRISPR")
+    ids = np.asarray([f"cell{cell}" for cell in range(N_CELLS)])
+    needed = _call_file_check_bytes(
+        protospacer_calls_size(path),
+        n_cells=N_CELLS,
+        guide_ids=np.asarray(guide.feats.fetch_all("ids")).astype(str),
+        id_array=_open(location).cells._get_array("ids"),
+        prefix_length=0,
+    )
+    small = _open(location, mem_budget=needed - 1)
+    before = written(small)
+
+    # The read holds the parsed file beside the IDs of the run's cells.
+    with pytest.raises(
+        MemoryError,
+        match=f"^Checking the call file against the run's {N_CELLS} cells holds about "
+        f"{needed} bytes, more than the memory budget of {needed - 1} bytes. Raise "
+        f"mem_budget to at least {needed} bytes.$",
+    ):
+        small.pipeline.perturbation(labels=LABELS, guide_calling={"path": path}, **HEAD)
+
+    assert written(small) == before
+    store = _open(location, mem_budget=needed)
+    plan = _resolve(store, guide_calling={"path": path}, **HEAD)
+    assert plan.config["stages"]["guide_calling"] == {"path": str(path)}
+    # The budget bounds what the check holds beside the cells' IDs.
+    peak = traced_peak(
+        lambda: _check_call_file(
+            store, store._get_assay("CRISPR"), str(path), ids, None
+        )
+    )
+    assert peak <= needed
+
+
+def test_a_screen_without_targets_besides_controls_has_none_to_cluster() -> None:
+    ids = np.asarray(["CRISPR0", "CRISPR1"])
+    targets = guide_targets(
+        ids, np.asarray(["NT", "NT"], dtype=object), None, ("NT",), policy="single"
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="^"
+        + re.escape(
+            "perturbations names perturbations without a profile: 'GENE_A'; by "
+            "target, the profiles hold the targets that are not controls, of "
+            "which the guide assay has none"
+        )
+        + "$",
+    ):
+        _check_cluster_perturbations(
+            {"perturbations": ["GENE_A"]}, "target", ids, targets
+        )
+    # Without named perturbations every profile is clustered.
+    _check_cluster_perturbations({}, "target", ids, targets)
+
+
 # Failures and cancellation ----------------------------------------------------
 
 
@@ -1632,6 +1785,19 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
             "such cells; switch them off for a high-MOI screen with "
             "edistance=False, mixscape=False, clusters=False",
         ),
+        # One stage takes a verb and a pronoun of one.
+        (
+            {"associations": {"moi": "high"}, "efficiency": False},
+            ValueError,
+            "^"
+            + re.escape(
+                "associations={'moi': 'high'} tests a screen whose cells carry "
+                "several guides, where hardly any cell carries control guides only, "
+                "but edistance compares each perturbation with such cells; switch "
+                "it off for a high-MOI screen with edistance=False"
+            )
+            + "$",
+        ),
         # One cell of the screen holds no guide UMI.
         (
             {"associations": {"moi": "high"}, "efficiency": False, "edistance": False},
@@ -1651,6 +1817,49 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
             {"clusters": {"perturbations": "GENE_A", "metric": "cosine"}},
             ValueError,
             "metric must be",
+        ),
+        # The clustering refuses fewer than 3 perturbations, counted once each,
+        # and a min_samples above them, after every other stage.
+        (
+            {"clusters": {"perturbations": ["GENE_A", "GENE_B", "GENE_A"]}},
+            ValueError,
+            "^Clustering needs at least 3 distinct perturbations, but perturbations "
+            "names 2$",
+        ),
+        (
+            {
+                "clusters": {
+                    "perturbations": ["GENE_A", "GENE_B", "GENE_C"],
+                    "min_samples": 4,
+                }
+            },
+            ValueError,
+            "^min_samples=4 must be at most the 3 perturbations clustered$",
+        ),
+        # By target, the profiles hold the targets that are not controls, and
+        # by guide the guides with a target.
+        (
+            {"clusters": {"perturbations": ["GENE_TYPO", "GENE_A", "NT"]}},
+            ValueError,
+            "^"
+            + re.escape(
+                "perturbations names perturbations without a profile: 'GENE_TYPO', "
+                "'NT'; by target, the profiles hold the targets that are not "
+                "controls, such as 'GENE_A', 'GENE_B', 'GENE_C'"
+            )
+            + "$",
+        ),
+        (
+            {
+                "clusters": {"perturbations": ["CRISPR0", "GENE_A", "GENE_B"]},
+                "profiles": {"by": "guide"},
+            },
+            ValueError,
+            re.escape(
+                "perturbations names perturbations without a profile: 'GENE_A', "
+                "'GENE_B'; by guide, the profiles hold the guides with a target, "
+                "such as 'CRISPR0', 'CRISPR1', 'CRISPR2'"
+            ),
         ),
         (
             {"profiles": {"min_cells": 5}},
@@ -1700,6 +1909,34 @@ def test_the_guide_assay_is_the_only_crispr_assay_or_the_named_one(
         ({"guide_assay": 3}, TypeError, "guide_assay must be a non-empty string"),
         ({"cells": "missing"}, KeyError, "Cell selection column 'missing'"),
         ({"harmony": {"batch_columns": ["missing"]}}, KeyError, "Harmony columns"),
+        # Every input cell needs an HVG batch and a label in each Harmony batch
+        # column, which the stages would otherwise refuse after the earlier
+        # stages. Blank text is no batch of HVG selection, but Harmony takes it
+        # as a label and refuses only missing values and NaN.
+        (
+            {"hvg": {"top_n": 50, "batch": "lane_gaps"}},
+            ValueError,
+            "^Batch-aware HVG selection needs a 'lane_gaps' label for every cell, "
+            "but 44 of the run's cells have none$",
+        ),
+        (
+            {"hvg": {"top_n": 50, "batch": "lane_blank"}},
+            ValueError,
+            "^Batch-aware HVG selection needs a 'lane_blank' label for every cell, "
+            "but 44 of the run's cells have none$",
+        ),
+        (
+            {"harmony": {"batch_columns": ["lane", "lane_gaps"]}},
+            ValueError,
+            "^Harmony needs a 'lane_gaps' label for every cell, but 44 of the run's "
+            "cells have none$",
+        ),
+        (
+            {"harmony": {"batch_columns": ["depth_inf"]}},
+            ValueError,
+            "^Harmony needs a 'depth_inf' label for every cell, but 22 of the run's "
+            "cells have none$",
+        ),
         *(
             (
                 {"snapshot_columns": [field]},
@@ -1722,6 +1959,70 @@ def test_a_call_is_refused_before_anything_is_written(
         store.pipeline.perturbation(**call)
 
     assert written(store) == before
+
+
+def test_clusters_take_the_perturbations_that_can_have_a_profile(readonly) -> None:
+    # By target, the targets that are not controls; by guide, every guide with
+    # a target, the control guides included.
+    by_target = {"perturbations": ["GENE_C", "GENE_A", "GENE_B"], "min_samples": 3}
+    by_guide = {"perturbations": ["CRISPR0", "CRISPR6", "CRISPR9"]}
+
+    target = _resolve(readonly, clusters=by_target, **HEAD)
+    guide = _resolve(readonly, clusters=by_guide, profiles={"by": "guide"}, **HEAD)
+
+    assert target.config["stages"]["clusters"] == by_target
+    assert guide.config["stages"]["clusters"] == by_guide
+    # Targets read from the gene IDs leave the non-targeting guides without
+    # one, and a guide without a target has no profile.
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "without a profile: 'CRISPR6', 'CRISPR9'; by guide, the profiles hold "
+            "the guides with a target, such as 'CRISPR0', 'CRISPR1', 'CRISPR2'"
+        ),
+    ):
+        _resolve(
+            readonly,
+            labels={"controls": ["RNA3"], "target_column": "target_gene_id"},
+            clusters=by_guide,
+            profiles={"by": "guide"},
+            **HEAD,
+        )
+
+
+def test_pca_dims_must_be_below_the_genes_that_hvg_selection_can_keep(
+    tmp_path,
+) -> None:
+    # A panel of 20 genes, of which HVG selection keeps at most 20 whatever
+    # its top_n of 1,000.
+    store = _write(tmp_path / "panel.zarr", rna=RNA[:, :20])
+    before = written(store)
+
+    # The PCA stage would refuse the recipes' default 21 dimensions, and 20,
+    # after the earlier stages had written.
+    for dims, call in (
+        (21, lambda: store.pipeline.perturbation(labels=LABELS)),
+        (21, lambda: store.pipeline.rna()),
+        (20, lambda: store.pipeline.rna(pca={"dims": 20})),
+    ):
+        with pytest.raises(
+            ValueError,
+            match="^"
+            + re.escape(
+                f"pca dims ({dims}) must be below the 20 features of assay 'RNA': "
+                "PCA needs at least dims + 1 features"
+            )
+            + "$",
+        ):
+            call()
+
+    assert written(store) == before
+    # 19 dimensions leave PCA the one feature more that it needs, and a top_n
+    # below the genes still bounds the dimensions.
+    assert _resolve(store, pca={"dims": 19}).config["stages"]["pca"] == {"dims": 19}
+    assert _resolve_rna(store, pca={"dims": 19}).config["stages"]["pca"] == {"dims": 19}
+    with pytest.raises(ValueError, match=r"^pca dims \(10\) must be below hvg top_n"):
+        _resolve(store, hvg={"top_n": 10}, pca={"dims": 10})
 
 
 def test_label_settings_need_controls_wherever_they_are_checked() -> None:
@@ -1765,6 +2066,26 @@ def test_cells_that_the_guide_assay_did_not_measure_are_refused(
     assert written(store) == before
 
 
+@pytest.mark.parametrize("recipe", ["perturbation", "rna"])
+def test_cells_that_select_no_cell_are_refused(screen, tmp_path, recipe) -> None:
+    store = _copy(screen, tmp_path)
+    store.cells.insert("nobody", np.zeros(N_CELLS, dtype=bool))
+    nobody = store.snapshot_cell_selection("nobody")
+    keywords = {"labels": LABELS} if recipe == "perturbation" else {}
+    before = written(store)
+
+    # A stage, such as filtering, would refuse the run after its input
+    # snapshot had written.
+    for cells, message in (
+        ("nobody", "^Cell selection column 'nobody' selects no cell$"),
+        (nobody, "^cells selects no cell$"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            getattr(store.pipeline, recipe)(cells=cells, **keywords, **HEAD)
+
+    assert written(store) == before
+
+
 def test_a_path_object_names_the_call_file(readonly, tmp_path) -> None:
     path = _call_file(tmp_path / "calls.csv")
     plan = _resolve(readonly, guide_calling={"path": path, "barcode_prefix": None})
@@ -1784,6 +2105,9 @@ def test_only_the_runs_cells_need_labels_and_covariates(readonly) -> None:
         readonly,
         cells="filled",
         guide_calling={"sample_column": "lane_blank"},
+        hvg={"top_n": 50, "batch": "lane_blank"},
+        pca={"dims": 5},
+        harmony={"batch_columns": ["lane_gaps"]},
         signature={"dims": 5, "sample_column": "lane_gaps"},
         mixscape={"split_column": "lane_blank"},
         associations={
@@ -1792,7 +2116,6 @@ def test_only_the_runs_cells_need_labels_and_covariates(readonly) -> None:
         },
         clusters=True,
         profiles={"sample_column": "lane_blank"},
-        **HEAD,
     )
 
     assert plan.config["cells"] == {"column": "filled"}
@@ -1800,6 +2123,43 @@ def test_only_the_runs_cells_need_labels_and_covariates(readonly) -> None:
         "sample_column": "lane_gaps",
         "covariates": ["depth_gaps", "depth_inf"],
     }
+    assert plan.config["stages"]["hvg"] == {"top_n": 50, "batch": "lane_blank"}
+    assert plan.config["stages"]["harmony"] == {"batch_columns": ["lane_gaps"]}
+
+
+def test_the_rna_recipe_checks_the_batch_labels_alike(rejection_store) -> None:
+    # pipeline.rna resolves the HVG and Harmony settings as the perturbation
+    # recipe does, so it refuses the same batch columns before writing.
+    store = rejection_store
+    before = written(store)
+
+    for keywords, purpose, column in (
+        (
+            {"hvg": {"top_n": 50, "batch": "lane_blank"}, "pca": {"dims": 5}},
+            "Batch-aware HVG selection",
+            "lane_blank",
+        ),
+        ({"harmony": {"batch_columns": ["lane_gaps"]}, **HEAD}, "Harmony", "lane_gaps"),
+    ):
+        with pytest.raises(
+            ValueError,
+            match=f"^{purpose} needs a '{column}' label for every cell, but 44 of "
+            "the run's cells have none$",
+        ):
+            store.pipeline.rna(cell_cycle=False, doublets=False, **keywords)
+
+    assert written(store) == before
+
+
+def test_harmony_takes_blank_text_as_a_batch_label(readonly) -> None:
+    # Harmony refuses missing values only, so the blank text of every cell
+    # outside FILLED is a batch of its own, in both recipes.
+    harmony = {"batch_columns": ["lane", "lane_blank"]}
+    plan = _resolve(readonly, harmony=harmony, **HEAD)
+    rna = _resolve_rna(readonly, harmony=harmony, **HEAD)
+
+    assert plan.config["stages"]["harmony"] == harmony
+    assert rna.config["stages"]["harmony"] == harmony
 
 
 def test_a_run_with_association_tests_refuses_cells_without_counts(tmp_path) -> None:
@@ -1829,6 +2189,42 @@ def test_a_run_with_association_tests_refuses_cells_without_counts(tmp_path) -> 
     # A run without the tests takes the cell.
     plan = _resolve(store, cells="every", **QUICK)
     assert plan.config["stages"]["associations"] is False
+
+
+def test_a_covariate_of_one_value_over_the_runs_cells_is_refused(
+    screen, tmp_path
+) -> None:
+    store = _copy(screen, tmp_path)
+    # One value over every cell, and one value over the cells of FILLED only:
+    # NumPy gives 0.3 repeated a standard deviation just above 0, so the check
+    # compares the values themselves.
+    store.cells.insert("ones", np.ones(N_CELLS))
+    store.cells.insert("one_value_where_filled", np.where(FILLED, 0.3, 1.0))
+    assert np.full(int(FILLED.sum()), 0.3).std() > 0
+    before = written(store)
+
+    # The tests refuse a covariate that is constant over the cells they test,
+    # after every earlier stage has written.
+    for cells, column in (("I", "ones"), ("filled", "one_value_where_filled")):
+        with pytest.raises(
+            ValueError,
+            match=f"^The covariate '{column}' is constant over the run's cells$",
+        ):
+            store.pipeline.perturbation(
+                cells=cells,
+                labels=LABELS,
+                associations={"covariates": [column]},
+                **HEAD,
+            )
+
+    assert written(store) == before
+    # Over every cell the second covariate takes two values.
+    plan = _resolve(
+        store, associations={"covariates": ["one_value_where_filled"]}, **HEAD
+    )
+    assert plan.config["stages"]["associations"] == {
+        "covariates": ["one_value_where_filled"]
+    }
 
 
 def test_the_recipe_passes_the_moi_to_the_association_tests(tmp_path) -> None:

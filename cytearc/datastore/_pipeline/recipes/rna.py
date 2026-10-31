@@ -370,6 +370,7 @@ def resolve_rna(
     )
     head = resolve_rna_head(
         store,
+        assay=assay_name,
         hvg=hvg,
         normalization=normalization,
         pca=pca,
@@ -439,6 +440,7 @@ def resolve_rna(
         # The stage checks its frozen labels again, since the live column can
         # change before the snapshot.
         check_labeled_cells(store, source, capture_column, purpose=_CAPTURE_PURPOSE)
+    head.check_batch_labels(store, source)
     cell_columns, extra_snapshots = cell_snapshots(
         filtering_config,
         harmony_columns=head.harmony_columns,

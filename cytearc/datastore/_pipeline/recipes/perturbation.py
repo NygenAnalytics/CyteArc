@@ -15,16 +15,23 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from ....assay import RNAassay
 from ....metadata.rows import read_metadata_rows_chunkwise
 from ....perturbation.associations import covariate_columns
 from ....perturbation.guide_calls import validated_guide_ids
-from ....perturbation.labels import guide_targets, label_settings
+from ....perturbation.labels import GuideTargets, guide_targets, label_settings
+from ....readers.cellranger import protospacer_calls_size, read_protospacer_calls
 from ....storage.artifacts import ArtifactRef, inspect_artifact
 from ....storage.types import as_zarr_group
-from ..._operations.perturbation_guides import _require_call_file_cells
-from ..._operations.perturbation_store import _require_cell_column
+from ..._operations.perturbation_guides import (
+    _barcode_ids,
+    _call_file_check_bytes,
+    _called_guide_positions,
+    _require_call_file_cells,
+)
+from ..._operations.perturbation_store import _require_budget, _require_cell_column
 from ..executor import PlannedStage, RecipePlan, RunState
 from ..fields import (
     PERTURBATION_CELL_FIELDS,
@@ -96,6 +103,10 @@ PROFILE_CELLS = {"labelled": "perturbation_labels", "knocked_out": "mixscape"}
 # efficiency, the E-distances, Mixscape with its signature, and the clusters
 # with the profiles, which z-score each cell against those cells.
 CONTROL_CELL_STAGES = ("efficiency", "edistance", "mixscape", "clusters")
+# The other way out of a call file that cannot label the run's cells.
+CALL_FROM_COUNTS = (
+    "or call the guides from their counts with guide_calling settings without path"
+)
 
 
 def _resolve_guide_assay(store: Any, name: object) -> tuple[str, Any]:
@@ -134,8 +145,13 @@ def _resolve_guide_calling(store: Any, value: object) -> dict[str, Any]:
     return settings
 
 
-def _resolve_labels(store: Any, guide: Any, value: object) -> dict[str, Any]:
-    """Return the label settings after checking every guide's target."""
+def _resolve_labels(
+    store: Any, guide: Any, value: object
+) -> tuple[dict[str, Any], np.ndarray, GuideTargets]:
+    """Return the label settings, the guide IDs, and each guide's target.
+
+    Every guide's target is checked as labelling resolves it.
+    """
     # The settings check refuses a mapping without controls; None takes the
     # method's defaults unchecked, and controls have no default.
     if value is None:
@@ -148,14 +164,15 @@ def _resolve_labels(store: Any, guide: Any, value: object) -> dict[str, Any]:
     controls = label_settings(settings["controls"], target_column, targets, policy)
     # The targets that the guide assay gives, as labelling resolves them; a
     # called guide without a target needs the calls, so its stage refuses it.
-    guide_targets(
-        validated_guide_ids(guide.feats.fetch_all("ids")),
+    guide_ids = validated_guide_ids(guide.feats.fetch_all("ids"))
+    resolved = guide_targets(
+        guide_ids,
         store._guide_feature_column(guide, target_column, "target_column"),
         targets,
         controls,
         policy=policy,
     )
-    return settings
+    return settings, guide_ids, resolved
 
 
 def _require_id_column(
@@ -189,6 +206,39 @@ def _resolve_associations(
         if np.dtype(store.cells.get_dtype(column)).kind not in "biuf":
             raise ValueError(f"covariate '{column}' must be numeric")
     return True, settings
+
+
+def _check_cluster_perturbations(
+    settings: Mapping[str, Any], by: str, guide_ids: np.ndarray, targets: GuideTargets
+) -> None:
+    """Refuse perturbations to cluster that can have no profile.
+
+    By target the profiles hold the targets that are not controls, and with
+    ``by="guide"`` every guide with a target, the control guides included.
+    Whether a perturbation has the profiles' ``min_cells`` cells depends on
+    the data, so the clustering stage checks it.
+    """
+    requested = settings.get("perturbations")
+    if requested is None:
+        return
+    if by == "target":
+        rows = targets.names[~targets.is_control].astype(str)
+        held = "the targets that are not controls"
+    else:
+        rows = guide_ids[targets.guide_codes >= 0].astype(str)
+        held = "the guides with a target"
+    unknown = sorted(set(requested) - set(rows.tolist()))
+    if unknown:
+        examples = (
+            "such as " + ", ".join(repr(name) for name in rows[:3].tolist())
+            if len(rows)
+            else "of which the guide assay has none"
+        )
+        raise ValueError(
+            "perturbations names perturbations without a profile: "
+            + ", ".join(repr(name) for name in unknown[:5])
+            + f"; by {by}, the profiles hold {held}, {examples}"
+        )
 
 
 def _profile_labels(settings: Mapping[str, Any], mixscape: bool) -> str:
@@ -297,10 +347,12 @@ def _check_labeled_inputs(
 
 
 def _check_covariates(store: Any, source: CellSource, columns: Sequence[str]) -> None:
-    """Refuse covariates without a finite value for every input cell.
+    """Refuse covariates without a finite value for every input cell, or of one value.
 
     The association tests refuse a missing or non-finite covariate value of a
-    cell that they test, and every input cell can be one.
+    cell that they test, and every input cell can be one. They refuse a
+    covariate that is constant over the tested cells too, which a covariate of
+    one value over the input cells is.
     """
     if not columns:
         return
@@ -308,7 +360,8 @@ def _check_covariates(store: Any, source: CellSource, columns: Sequence[str]) ->
     cell_data = as_zarr_group(store.zw["cellData"], name="cellData")
     for column in columns:
         values, missing = snapshot_column_values(cell_data, column)
-        unset = ~np.isfinite(values.astype(np.float64, copy=False))
+        numbers = values.astype(np.float64, copy=False)
+        unset = ~np.isfinite(numbers)
         if missing is not None:
             unset |= missing
         count = int(np.count_nonzero(unset & active))
@@ -317,6 +370,13 @@ def _check_covariates(store: Any, source: CellSource, columns: Sequence[str]) ->
             raise ValueError(
                 f"Covariate {column!r} needs a finite value for every cell, but "
                 f"{count} of the run's cells {verb} a missing or non-finite value"
+            )
+        # The values themselves, since the standard deviation of one value
+        # repeated can round above 0.
+        held = numbers[active]
+        if len(held) and held.min() == held.max():
+            raise ValueError(
+                f"The covariate {column!r} is constant over the run's cells"
             )
 
 
@@ -335,12 +395,14 @@ def _check_high_moi_stages(
     running = [stage for stage in CONTROL_CELL_STAGES if enabled[stage]]
     if running:
         names = running[-1]
+        verb, pronoun = "compares", "it"
         if len(running) > 1:
             names = ", ".join(running[:-1]) + " and " + names
+            verb, pronoun = "compare", "them"
         raise ValueError(
             "associations={'moi': 'high'} tests a screen whose cells carry several "
             f"guides, where hardly any cell carries control guides only, but {names} "
-            "compare each perturbation with such cells; switch them off for a "
+            f"{verb} each perturbation with such cells; switch {pronoun} off for a "
             "high-MOI screen with " + ", ".join(f"{stage}=False" for stage in running)
         )
 
@@ -395,13 +457,16 @@ def _check_association_counts(
 
 def _check_call_file_cells(
     store: Any, source: CellSource, barcode_prefix: str | None
-) -> None:
+) -> np.ndarray:
     """Refuse input cells that the barcodes of one call file cannot reach.
 
     Cell Ranger writes a call file for each sample, and the import matches
     each of its barcodes to the cell whose ID is ``barcode_prefix`` followed
     by the barcode. A cell that no barcode can reach would be labelled
     ``"Negative"`` and left out of every later stage.
+
+    Returns:
+        The input cells' IDs, as text.
     """
     # Only the input cells' IDs are read; the import checks its cells alike.
     rows = np.flatnonzero(input_cell_mask(store, source))
@@ -411,9 +476,65 @@ def _check_call_file_cells(
         barcode_prefix,
         cells="the run's cells",
         restrict="restrict cells to",
-        remedy="or call the guides from their counts with guide_calling settings "
-        "without path",
+        remedy=CALL_FROM_COUNTS,
     )
+    return ids
+
+
+def _check_call_file(
+    store: Any,
+    guide: Any,
+    path: str,
+    cell_ids: np.ndarray,
+    barcode_prefix: str | None,
+) -> None:
+    """Refuse a call file that the import would refuse, or that labels no input cell.
+
+    The file is read as the import reads it, once its read fits the memory
+    budget, so a malformed file, a missing column, or a called guide that the
+    guide assay lacks fails before anything is written. A file none of whose
+    barcodes names one of the input cells, whose IDs are ``cell_ids``, would
+    label every cell ``"Negative"``, and the stages after the labels would find
+    no control cell.
+
+    Raises:
+        MemoryError: If reading the file beside the cells' IDs does not fit
+            the memory budget.
+        ValueError: If the import would refuse the file, or it labels no
+            input cell.
+    """
+    guide_ids = validated_guide_ids(guide.feats.fetch_all("ids"))
+    needed = _call_file_check_bytes(
+        protospacer_calls_size(path),
+        n_cells=len(cell_ids),
+        guide_ids=guide_ids,
+        id_array=store.cells._get_array("ids"),
+        prefix_length=len(barcode_prefix or ""),
+    )
+    _require_budget(
+        needed,
+        store.memoryBytes,
+        f"Checking the call file against the run's {len(cell_ids)} cells holds about",
+        remedy=f"Raise mem_budget to at least {needed} bytes.",
+    )
+    calls = read_protospacer_calls(path)
+    _called_guide_positions(calls.features, guide_ids, guide)
+    if not len(calls.barcodes):
+        raise ValueError(
+            "The call file holds no barcode, so the import would label all of the "
+            "run's cells 'Negative'; pass the call file of these cells, "
+            + CALL_FROM_COUNTS
+        )
+    file_ids = _barcode_ids(calls.barcodes, barcode_prefix)
+    if not np.any(pd.Index(cell_ids).get_indexer(file_ids) >= 0):
+        raise ValueError(
+            "No barcode of the call file names one of the run's cells, so the "
+            "import would label them all 'Negative': a cell matches a barcode "
+            "when its ID is barcode_prefix followed by the barcode, which gives "
+            f"IDs such as {str(file_ids[0])!r}, but the run's cells have IDs such "
+            f"as {str(cell_ids[0])!r}; check barcode_prefix and that the file "
+            "holds the calls of these cells, " + CALL_FROM_COUNTS
+        )
 
 
 def resolve_perturbation(
@@ -446,7 +567,7 @@ def resolve_perturbation(
     guide_name, guide = _resolve_guide_assay(store, guide_assay)
     resolved_label = resolve_label(label)
     calling_settings = _resolve_guide_calling(store, guide_calling)
-    label_settings_ = _resolve_labels(store, guide, labels)
+    label_settings_, guide_ids, targets = _resolve_labels(store, guide, labels)
     efficiency_enabled, efficiency_settings = stage_settings(
         "efficiency", efficiency, optional=True
     )
@@ -455,6 +576,7 @@ def resolve_perturbation(
     # E-distances and signatures read the PCA, so the recipe always runs it.
     head = resolve_rna_head(
         store,
+        assay=assay_name,
         hvg=hvg,
         normalization=normalization,
         pca=pca,
@@ -493,6 +615,12 @@ def resolve_perturbation(
         _cell_column(store, profile_settings, "profiles", "sample_column")
         if method_setting("profiles", profile_settings, "mask_targets"):
             _require_id_column(store, guide, profile_settings, "profiles")
+        _check_cluster_perturbations(
+            cluster_settings,
+            method_setting("profiles", profile_settings, "by"),
+            guide_ids,
+            targets,
+        )
     profile_labels = _profile_labels(profile_settings, mixscape_enabled)
     _check_high_moi_stages(
         association_settings,
@@ -528,9 +656,12 @@ def resolve_perturbation(
         default_attrs=default_filter_columns(store, assay_name, FILTER_SUFFIXES),
         operation=OPERATION,
     )
-    # One call file reaches the cells of one sample.
+    # One call file reaches the cells of one sample, and the file is read
+    # before the run, as the import reads it.
     if "path" in calling_settings:
-        _check_call_file_cells(store, source, calling_settings.get("barcode_prefix"))
+        prefix = calling_settings.get("barcode_prefix")
+        cell_ids = _check_call_file_cells(store, source, prefix)
+        _check_call_file(store, guide, calling_settings["path"], cell_ids, prefix)
     # The stages that read these columns read some of the input cells, which
     # of them depends on the data, so every input cell needs a label and a
     # finite covariate value.
@@ -551,6 +682,7 @@ def resolve_perturbation(
             ),
         },
     )
+    head.check_batch_labels(store, source)
     _check_covariates(
         store, source, covariate_columns(association_settings.get("covariates"))
     )

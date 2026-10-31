@@ -192,8 +192,24 @@ def test_cluster_settings_return_the_perturbations_to_cluster() -> None:
     assert cluster_settings(*settings, None) == (4, 2, 7, None)
     # Any iterable of names, in the order given; whether each has a profile
     # is checked against the profiles.
-    names = (name for name in ("T01", "T00"))
-    assert cluster_settings(*settings, names)[-1] == ["T01", "T00"]
+    names = (name for name in ("T01", "T00", "T02"))
+    assert cluster_settings(*settings, names)[-1] == ["T01", "T00", "T02"]
+    # A name given twice counts once, and the pipeline recipe refuses these
+    # before the stages before the clusters run.
+    with pytest.raises(
+        ValueError,
+        match="^Clustering needs at least 3 distinct perturbations, but "
+        "perturbations names 2$",
+    ):
+        cluster_settings(*settings, ["T00", "T01", "T00"])
+    with pytest.raises(ValueError, match="^Clustering needs at least 3 distinct"):
+        cluster_settings(*settings, [])
+    assert cluster_settings("correlation", 4, 3, "eom", 0, ["T00", "T01", "T02"])
+    with pytest.raises(
+        ValueError,
+        match="^min_samples=4 must be at most the 3 perturbations clustered$",
+    ):
+        cluster_settings("correlation", 4, 4, "eom", 0, ["T00", "T01", "T02", "T01"])
     for perturbations in ("T00", b"T00", 3, ["T00", 1]):
         with pytest.raises(
             TypeError,
@@ -428,7 +444,16 @@ def test_clusters_are_reused_read_only_and_refused_when_new(shared) -> None:
             ValueError,
             "without a profile: 'NT', 'T99'",
         ),
-        ({"perturbations": ["T00", "T01"]}, ValueError, "not 2 and 40"),
+        (
+            {"perturbations": ["T00", "T01"]},
+            ValueError,
+            "needs at least 3 distinct perturbations, but perturbations names 2",
+        ),
+        (
+            {"perturbations": ["T00", "T01", "T02"], "min_samples": 4},
+            ValueError,
+            "min_samples=4 must be at most the 3 perturbations clustered",
+        ),
     ],
 )
 def test_cluster_refuses_arguments_it_cannot_use(
@@ -436,6 +461,23 @@ def test_cluster_refuses_arguments_it_cannot_use(
 ) -> None:
     with pytest.raises(error, match=message):
         shared.store.perturbation.cluster(shared.profiles, **arguments)
+
+
+def test_cluster_refuses_profiles_of_fewer_than_2_features(shared) -> None:
+    store = shared.store
+    one_feature = store.perturbation.profiles(
+        fixed_labels(store, ["NT"]),
+        store.features.snapshot(feature_indexes=[0]),
+        min_cells=10,
+        id_column=None,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="^Clustering needs at least 3 perturbations and 2 features, not 12 "
+        "and 1$",
+    ):
+        store.perturbation.cluster(one_feature)
 
 
 def test_cluster_refuses_inputs_and_budgets_it_cannot_use(shared) -> None:

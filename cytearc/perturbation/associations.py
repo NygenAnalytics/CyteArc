@@ -366,7 +366,9 @@ def association_covariates(
     for column, name, scaled in columns:
         if scaled:
             spread = column.std()
-            if not spread > 0:
+            # The values themselves too, since the standard deviation of one
+            # value repeated can round above 0.
+            if not spread > 0 or column.min() == column.max():
                 raise ValueError(
                     f"The covariate {name!r} is constant over the tested cells"
                 )

@@ -463,9 +463,14 @@ class _Cells:
     def get_dtype(self, column: str) -> np.dtype[Any]:
         return np.dtype(bool if column == "I" else np.int64)
 
+    def fetch_all(self, column: str) -> np.ndarray:
+        # The recipe refuses a cell column that selects no cell.
+        return np.ones(4, dtype=bool)
+
 
 class _FakeRNA:
-    pass
+    # The recipe checks PCA dimensions against the assay's features too.
+    feats = SimpleNamespace(N=100)
 
 
 class _RecipeStore:

@@ -39,21 +39,8 @@ refs, and record the analysis for handoff. Docs:
   ATAC `prevalent_peaks` and `lsi`; ADT `panel`; multimodal `integration`) takes `None` for its
   defaults or a mapping; a bool raises `TypeError`. `harmony` is `None` (off) or a mapping with
   `batch_columns`. `membership_strength` and `markers` are plain bools.
-- A setting means what the same keyword means on the stage's method (`hvg` takes the keywords of
-  `features.hvgs`, `neighbors` those of `graph.neighbors`), and an omitted setting takes that
-  method's default. Before anything is written, a recipe refuses an unknown key (`ValueError`
-  listing the allowed ones) and values that a later stage would refuse, including: `cell_calling`
-  and `hashing` values (such as `fdr` or `positive_quantile`); a per-capture column that leaves an
-  input cell unlabelled; `pca` `dims` not below the `hvg` `top_n` (RNA) or the panel size (ADT);
-  an ATAC `prevalent_peaks` `top_n` not below the assay's peak count, or below LSI `dims` plus
-  `skip_first`; and SNN source runs of different `k`. A value that only the method itself
-  rejects, such as `ann_metric`, Leiden `backend`, a doublet setting or
-  `paris={"min_cluster_size": -5}`, fails its stage.
-- `cells` is a boolean cell column (default `"I"`), a datastore cell-selection ref, or a completed
-  run, whose `analysis_cell_selection` is reused as the same ref. `filtering=None` (the default)
-  filters the cells of a column (RNA, ATAC), and an `rna` run with `cell_calling` or `hashing`
-  filters the cells those stages keep, whatever its `cells`. Otherwise a given selection's or
-  run's cells stay as they are, and an ADT run filters only when asked.
+- A setting means what the same keyword means on the stage's method (`hvg` takes the keywords of `features.hvgs`, `neighbors` those of `graph.neighbors`), and an omitted setting takes that method's default. Before anything is written, a recipe refuses an unknown key (`ValueError` listing the allowed ones) and values that a later stage would refuse, including: `cell_calling` and `hashing` values (such as `fdr` or `positive_quantile`); a per-capture column, an `hvg` `batch` (blank text counts as missing there), or a Harmony batch column that leaves an input cell unlabelled; `pca` `dims` not below the smaller of the `hvg` `top_n` and the assay's features (RNA) or the panel size (ADT); an ATAC `prevalent_peaks` `top_n` not below the assay's peak count, or below LSI `dims` plus `skip_first`; and SNN source runs of different `k`. A value that only the method itself rejects, such as `ann_metric`, Leiden `backend`, a doublet setting or `paris={"min_cluster_size": -5}`, fails its stage.
+- `cells` is a boolean cell column (default `"I"`), a datastore cell-selection ref, or a completed run, whose `analysis_cell_selection` is reused as the same ref; `cells` that select no cell are refused before anything is written. `filtering=None` (the default) filters the cells of a column (RNA, ATAC), and an `rna` run with `cell_calling` or `hashing` filters the cells those stages keep, whatever its `cells`. Otherwise a given selection's or run's cells stay as they are, and an ADT run filters only when asked.
 - A recipe writes artifacts plus a run record only. It never edits live `I` or adds metadata
   columns, and needs `zarr_mode="r+"` (the default); a read-only store raises `PermissionError`,
   though `open`, reports and plots still work.
@@ -428,7 +415,7 @@ cytearc.ArtifactRef.from_dict(saved["refs"]["fineClusters"]) == fine_clusters  #
 | `cell_calling`, `hashing` (rna) | `False` | Raw droplets (EmptyDrops; `{"sample_column": ...}` calls each capture apart and needs a capture label for every input cell) or HTO-hashed cells (one demultiplexing fit over all captures); see quality-control.md. |
 | `cell_cycle` (rna) | `True` | `False` to save time (the slowest stage on remote counts) or when feature names are not symbols; `{"s_genes": [...], "g2m_genes": [...]}` for other lists. |
 | `hvg` (rna) | `None`: `top_n` 1000, `DEFAULT_HVG_BLACKLIST` | A representation choice is under test (`{"top_n": 2000}`); species blacklist (`{"blacklist": ...}`); `flavor`, `batch` (features-and-graphs.md). |
-| `pca` (rna, adt) | `None`: `dims` 21; ADT one fewer than the panel, at most 21 | A representation choice is under test. `dims` must be below the `hvg` `top_n` (RNA) or the panel size (ADT). RNA `{"dims": 0}` skips PCA: the graph uses `run["normalized"]` (no `pca` output) and needs `doublets=False` and no Harmony. Its memory and time then scale with the HVG count: the ANN index holds about `4 * top_n + 8 * ann_m + 130` bytes per cell (4.3 GB at 1M cells and 1,000 HVGs with the default `ann_m=24`) and raises `MemoryError` over `mem_budget`; on large data pass `embedding_initialization={"batch_size": ...}` below the cell count for the streamed k-means fit. |
+| `pca` (rna, adt) | `None`: `dims` 21; ADT one fewer than the panel, at most 21 | A representation choice is under test. `dims` must be below the smaller of the `hvg` `top_n` and the assay's features (RNA), or the panel size (ADT). RNA `{"dims": 0}` skips PCA: the graph uses `run["normalized"]` (no `pca` output) and needs `doublets=False` and no Harmony. Its memory and time then scale with the HVG count: the ANN index holds about `4 * top_n + 8 * ann_m + 130` bytes per cell (4.3 GB at 1M cells and 1,000 HVGs with the default `ann_m=24`) and raises `MemoryError` over `mem_budget`; on large data pass `embedding_initialization={"batch_size": ...}` below the cell count for the streamed k-means fit. |
 | `prevalent_peaks`, `lsi` (atac) | `None`: `top_n` `min(10000, peaks - 1)`; `dims` 11, `skip_first=True` | More peaks or LSI components for large or deep data. `top_n` must stay below the assay's peak count and at least LSI `dims` plus `skip_first` (a bool); the run records the resolved `top_n`. |
 | `panel` (adt) | `None`: `exclude=DEFAULT_PANEL_EXCLUDE` | Controls named otherwise (`{"exclude": "(?i)control"}`); `{"exclude": None}` keeps every antibody. The run records the excluded names. |
 | `harmony` | `None` (off) | Real technical batch columns: `{"batch_columns": ["batch"]}`; see integration-and-comparisons.md. |

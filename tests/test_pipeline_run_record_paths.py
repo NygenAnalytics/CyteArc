@@ -62,6 +62,8 @@ _FAST_RUN: dict[str, Any] = {
     "paris": False,
     "doublets": False,
     "markers": False,
+    # PCA needs dims + 1 of the small store's 8 genes.
+    "pca": {"dims": 3},
 }
 # Every graph stage runs on the small graph store, and nothing after them.
 _GRAPH_STAGES: dict[str, Any] = {

@@ -10,6 +10,7 @@ from ...metadata.membership import require_measured_cells
 from ...storage.artifacts import ArtifactRef, artifact_group
 from ...storage.pipeline_runs import load_pipeline_run_record
 from ...storage.selections import (
+    read_stored_selection_mask,
     resolve_stored_selection_artifact,
     snapshot_run_metadata,
     validate_stored_selection_integrity,
@@ -66,7 +67,9 @@ def resolve_cells(
     """Validate the ``cells`` keyword and refuse cells an assay did not measure.
 
     A run reads each of ``assays`` over these cells, so it refuses cells that
-    one did not measure before any stage runs; it never narrows them.
+    one did not measure before any stage runs; it never narrows them. A run
+    without a cell is refused too, since its stages would refuse it after the
+    input snapshot.
     """
     if isinstance(cells, str):
         if not cells:
@@ -75,6 +78,8 @@ def resolve_cells(
             raise KeyError(f"Cell selection column {cells!r} was not found")
         if np.dtype(store.cells.get_dtype(cells)) != np.dtype(bool):
             raise TypeError("cells must name a boolean metadata column")
+        if not np.asarray(store.cells.fetch_all(cells), dtype=bool).any():
+            raise ValueError(f"Cell selection column {cells!r} selects no cell")
         for assay in assays:
             require_measured_cells(
                 store.cells,
@@ -117,6 +122,15 @@ def resolve_cells(
         assay=None,
         table_path="cellData",
     )
+    if not read_stored_selection_mask(
+        store.zw,
+        selection,
+        kind="cell_selection",
+        scope="datastore",
+        assay=None,
+        table_path="cellData",
+    ).any():
+        raise ValueError("cells selects no cell")
     for assay in assays:
         store._require_measured_cells(
             assay,
