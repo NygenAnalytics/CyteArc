@@ -53,12 +53,13 @@ from cytearc.perturbation.random_sets import resampling_keys
 from cytearc.storage.artifacts import ArtifactRef
 from cytearc.utils.logging import logger
 from tests.perturbation_helpers import (
+    check_budget,
     dense_pair,
     fixed_labels,
+    named_budget,
     open_store,
     record_cell_reads,
     size_root,
-    smallest_budget,
     use_python_kernels,
     write_screen,
 )
@@ -1821,16 +1822,6 @@ def test_associations_refuse_a_budget_without_room_for_one_feature(shared) -> No
         )
 
 
-def _needed_budget(refusal: pytest.ExceptionInfo[MemoryError]) -> int:
-    """The memory budget that a refusal asks for."""
-    found = re.search(r"holds? about (\d+) bytes", str(refusal.value))
-    assert found is not None, str(refusal.value)
-    assert str(refusal.value).endswith(
-        f"Raise mem_budget to at least {found.group(1)} bytes."
-    )
-    return int(found.group(1))
-
-
 def test_association_refusals_name_the_budget_that_runs_the_tests(shared) -> None:
     store, labels = shared.store, shared.labels
     features = _every_gene(store)
@@ -1845,14 +1836,14 @@ def test_association_refusals_name_the_budget_that_runs_the_tests(shared) -> Non
     # The tests hold far more than this budget, the pairs' arrays alone.
     with pytest.raises(MemoryError, match="one feature over 540 tested cells") as low:
         run(open_store(store.zarr_loc, nthreads=2, mem_budget=1000))
-    needed = _needed_budget(low)
+    needed = named_budget(low.value)
 
     # A budget one byte short asks for the same budget, which runs the tests
     # with the results of the default budget; the wide count chunk below
     # checks the traced peak.
     with pytest.raises(MemoryError) as short:
         run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed - 1))
-    assert _needed_budget(short) == needed
+    assert named_budget(short.value) == needed
     tight = store.perturbation.load_associations(
         run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed))
     )
@@ -1884,17 +1875,12 @@ def test_association_refusals_count_the_read_of_a_wide_count_chunk(tmp_path) -> 
     def run(budgeted: DataStore) -> ArtifactRef:
         return budgeted.perturbation.associations(labels, **arguments)
 
-    needed, tests, peak = smallest_budget(store.zarr_loc, run)
-
     # The named budget runs the tests within it; it once left out the read,
     # which then failed in the stream planner.
-    assert peak <= needed
+    _, _, tests = check_budget(store.zarr_loc, run, check_writes=False, nthreads=2)
     tight = store.perturbation.load_associations(tests)
     for name in ("discovery", "positive"):
         pd.testing.assert_frame_equal(getattr(tight, name), getattr(default, name))
-    with pytest.raises(MemoryError) as short:
-        run(open_store(store.zarr_loc, nthreads=2, mem_budget=needed - 1))
-    assert _needed_budget(short) == needed
 
 
 def test_loading_associations_checks_the_memory_budget(shared, monkeypatch) -> None:

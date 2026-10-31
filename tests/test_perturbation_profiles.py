@@ -24,12 +24,12 @@ from cytearc.perturbation.profiles import (
 )
 from cytearc.storage.artifacts import ArtifactRef, inspect_artifact
 from tests.perturbation_helpers import (
+    check_budget,
     fixed_labels,
     memory_screen,
-    needed_budget,
+    named_budget,
     open_store,
     record_cell_reads,
-    smallest_budget,
     use_python_kernels,
     write_screen,
 )
@@ -773,7 +773,7 @@ def test_profiles_read_bands_of_features_that_fit_the_budget(
     monkeypatch.setattr(normalization, "feature_value_blocks", counting)
     with pytest.raises(MemoryError, match="2 targets in 30 features") as low:
         run(open_store(shared.path, nthreads=2, mem_budget=1000))
-    needed = needed_budget(low.value)
+    needed = named_budget(low.value)
     banded = run(open_store(shared.path, nthreads=2, mem_budget=3 * needed // 2))
 
     # Each band reads the control cells, then the profiled cells, and holds
@@ -785,7 +785,7 @@ def test_profiles_read_bands_of_features_that_fit_the_budget(
     pd.testing.assert_frame_equal(result.control_sd, whole.control_sd)
     with pytest.raises(MemoryError, match="2 targets in 30 features") as short:
         run(open_store(shared.path, nthreads=2, mem_budget=needed - 1))
-    assert needed_budget(short.value) == needed
+    assert named_budget(short.value) == needed
 
 
 @pytest.mark.parametrize(
@@ -936,15 +936,10 @@ def test_profiles_run_within_the_budget_they_name(tmp_path) -> None:
     whole = open_store(screen.path).perturbation.load_profiles(
         run(open_store(screen.path, nthreads=2))
     )
-    needed, profiles, peak = smallest_budget(screen.path, run)
-
     # Each band of features streams its counts within the budget that the
     # refusal names, which once failed in the stream planner.
-    assert peak <= needed
+    _, _, profiles = check_budget(screen.path, run, check_writes=False, nthreads=2)
     result = open_store(screen.path).perturbation.load_profiles(profiles)
     pd.testing.assert_frame_equal(result.values, whole.values)
     pd.testing.assert_frame_equal(result.control_mean, whole.control_mean)
     pd.testing.assert_frame_equal(result.control_sd, whole.control_sd)
-    with pytest.raises(MemoryError) as short:
-        run(open_store(screen.path, nthreads=2, mem_budget=needed - 1))
-    assert needed_budget(short.value) == needed

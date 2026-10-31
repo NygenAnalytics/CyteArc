@@ -28,10 +28,10 @@ from cytearc.perturbation.edistance import (
 from cytearc.storage.artifacts import inspect_artifact
 from cytearc.utils.logging import logger
 from tests.perturbation_helpers import (
+    check_budget,
     copy_store,
     fixed_labels,
     open_store,
-    check_budget,
     use_python_kernels,
     write_screen,
     written,
@@ -675,7 +675,7 @@ def test_the_memory_check_bounds_what_the_operation_holds(
     use_python_kernels(monkeypatch, edistance_module)
     # The whole call, from the labels and the check of the coordinates to the
     # table, holds no more than the budget that its one refusal names.
-    _, refusals = check_budget(
+    _, refusals, _ = check_budget(
         path,
         lambda store: store.perturbation.edistance(
             labels, coordinates, n_permutations=1, invalidate_cache=True
@@ -719,20 +719,15 @@ def test_one_refusal_names_a_budget_that_runs_for_few_compared_cells(
     labels = fixed_labels(store, ["Non-Targeting"])
     use_python_kernels(monkeypatch, edistance_module)
 
-    def measure(store, invalidate_cache=True):
+    def measure(store):
         return store.perturbation.edistance(
-            labels,
-            coordinates,
-            by=by,
-            n_permutations=9,
-            invalidate_cache=invalidate_cache,
+            labels, coordinates, by=by, n_permutations=9, invalidate_cache=True
         )
 
-    _, refusals = check_budget(path, measure)
+    _, refusals, ref = check_budget(path, measure)
     assert len(refusals) == 1
     assert refusals[0].startswith("The E-distances of 5 cells in 2 dimensions")
-    reused = open_store(path)
-    table = reused.perturbation.load_edistance(measure(reused, False)).table
+    table = open_store(path).perturbation.load_edistance(ref).table
     assert table["n_cells"].iloc[0] == 2
     assert table["n_control_cells"].iloc[0] == 3
 

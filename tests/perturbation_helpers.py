@@ -5,6 +5,7 @@ import shutil
 import tracemalloc
 import warnings
 from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -63,72 +64,112 @@ def write_screen(
     return store
 
 
-def named_budget(error: BaseException) -> int:
-    """Return the budget that a refusal names, its last ``at least N bytes``."""
-    found = re.findall(r"at least (\d+) bytes", str(error))
-    assert found, f"The refusal names no budget: {error}"
-    return int(found[-1])
+def named_budget(refusal: BaseException) -> int:
+    """Return the memory budget that a refusal names in its closing ``raise mem_budget to at least N bytes``.
+
+    A refusal that says the call holds about M bytes must name M. A refusal
+    that closes with ``Raise mem_budget.`` names no budget, as Mixscape's
+    refusal of a classification batch does, and asks for the M bytes the call
+    holds.
+    """
+    message = str(refusal)
+    held = re.search(r"holds? about (\d+) bytes", message)
+    if message.endswith(" Raise mem_budget."):
+        assert held is not None, f"The refusal names no budget: {message}"
+        return int(held.group(1))
+    named = re.search(
+        r"[Rr]aise mem_budget to at least (\d+) bytes(?:, or [^.]*)?\.$", message
+    )
+    assert named is not None, f"The refusal does not end naming a budget: {message}"
+    assert held is None or held.group(1) == named.group(1), (
+        f"The refusal names a budget other than what it holds: {message}"
+    )
+    return int(named.group(1))
+
+
+def traced_peak(call: Callable[[], Any], budget: int) -> tuple[Any, int]:
+    """Return the result of ``call()`` and the most bytes it held beside what was held before it.
+
+    tracemalloc counts every allocation in the process while the call runs,
+    other threads' included, so a peak above ``budget`` is traced again on a
+    second run, and the smaller peak is returned: a call that holds more than
+    its budget does so in both runs.
+    """
+
+    def trace() -> tuple[Any, int]:
+        tracemalloc.start()
+        try:
+            start = tracemalloc.get_traced_memory()[0]
+            result = call()
+            return result, tracemalloc.get_traced_memory()[1] - start
+        finally:
+            tracemalloc.stop()
+
+    result, peak = trace()
+    if peak > budget:
+        result, again = trace()
+        peak = min(peak, again)
+    return result, peak
 
 
 def budget_that_runs(
     path: str | Path, call: Callable[["DataStore"], Any], **options: Any
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[str], Any, int]:
     """Follow the refusals of ``call`` from a budget of one byte to the budget that runs it.
 
-    Each refusal must name a budget above the one it refused, which the next
-    attempt opens the store with. Returns the budget that runs the call and
-    the messages of the refusals on the way.
+    ``call`` runs an operation on the store at ``path``, opened with each
+    budget and ``options``. Each refusal must name a budget above the one it
+    refused, which the next attempt opens the store with, and a check that a
+    later step makes may refuse that budget and name more. Each attempt is
+    traced as :func:`traced_peak` traces it, and ten refusals fail the search.
+
+    Returns:
+        The budget that runs the call, the messages of the refusals on the
+        way, and the result and traced peak of the call at that budget.
     """
     budget, refusals = 1, []
-    while True:
+    while len(refusals) < 10:
+        store = open_store(path, mem_budget=budget, **options)
         try:
-            call(open_store(path, mem_budget=budget, **options))
-        except MemoryError as error:
-            named = named_budget(error)
-            assert named > budget, f"{error} names no larger budget"
-            refusals.append(str(error))
+            result, peak = traced_peak(partial(call, store), budget)
+        except MemoryError as refusal:
+            named = named_budget(refusal)
+            assert named > budget, f"{refusal} names no budget above {budget}"
+            refusals.append(str(refusal))
             budget = named
-            continue
-        return budget, refusals
-
-
-def traced_peak(call: Callable[[], Any]) -> int:
-    """Return the most bytes that ``call()`` holds beside what was held before it."""
-    tracemalloc.start()
-    try:
-        start = tracemalloc.get_traced_memory()[0]
-        tracemalloc.reset_peak()
-        call()
-        return tracemalloc.get_traced_memory()[1] - start
-    finally:
-        tracemalloc.stop()
+        else:
+            return budget, refusals, result, peak
+    raise AssertionError(f"Ten refusals named no budget that runs: {refusals}")
 
 
 def check_budget(
-    path: str | Path, call: Callable[["DataStore"], Any], **options: Any
-) -> tuple[int, list[str]]:
-    """Check that ``call`` runs within the budget its refusals name.
+    path: str | Path,
+    call: Callable[["DataStore"], Any],
+    *,
+    check_writes: bool = True,
+    **options: Any,
+) -> tuple[int, list[str], Any]:
+    """Check that ``call`` runs within the budget that its refusals name.
 
-    The call must run within the smallest budget that every check accepts,
-    found by :func:`budget_that_runs`, and one byte less must be refused
-    naming that budget, with nothing written. ``call`` should compute again
-    rather than reuse. Returns the budget and the refusals on the way.
+    :func:`budget_that_runs` finds that budget and traces the call at it. The
+    traced peak must be within the budget, and one byte less must be refused
+    naming the same budget. With ``check_writes``, the refused call must leave
+    what the store holds unchanged. ``call`` should compute again rather than
+    reuse.
+
+    Returns:
+        The budget, the messages of the refusals on the way, and the result
+        of the call at that budget.
     """
-    budget, refusals = budget_that_runs(path, call, **options)
-    store = open_store(path, mem_budget=budget, **options)
-    peak = traced_peak(lambda: call(store))
-    if peak > budget:
-        # tracemalloc counts every allocation in the process while the call
-        # runs, other threads' included, so a peak above the budget is traced
-        # again: a call that holds more than its budget does so in both runs.
-        peak = min(peak, traced_peak(lambda: call(store)))
+    budget, refusals, result, peak = budget_that_runs(path, call, **options)
     assert peak <= budget, f"The call held {peak} bytes within a budget of {budget}"
-    saved = written(open_store(path))
+    saved = written(open_store(path)) if check_writes else None
     with pytest.raises(MemoryError) as refused:
         call(open_store(path, mem_budget=budget - 1, **options))
     assert named_budget(refused.value) == budget
-    assert written(open_store(path)) == saved
-    return budget, refusals
+    if check_writes:
+        assert written(open_store(path)) == saved
+    return budget, refusals, result
 
 
 def fixed_labels(
@@ -312,65 +353,6 @@ def dense_pair(
         np.log2(ratio) if ratio > 0 else -np.inf,
         np.sqrt(spread) / np.log(2),
     )
-
-
-def needed_budget(refusal: BaseException) -> int:
-    """Return the memory budget that a refusal names, its first number of bytes."""
-    found = re.search(r"(\d+) bytes", str(refusal))
-    assert found is not None, str(refusal)
-    return int(found.group(1))
-
-
-def smallest_budget(
-    path: str | Path, run: Callable[["DataStore"], Any]
-) -> tuple[int, Any, int]:
-    """Return the smallest memory budget that every check of ``run`` accepts.
-
-    ``run`` calls an operation on the store at ``path``, opened with a real
-    memory budget. From 1,000 bytes, each refusal names a budget, and a check
-    that a later step makes may refuse that one and name more, until a budget
-    runs; every named budget exceeds the one it refuses. Each call is traced,
-    as :func:`traced_run` traces it. tracemalloc counts every allocation in
-    the process while the call runs, other threads' included, so a peak above
-    the budget is traced again on a second run: a call that holds more than
-    its budget does so in both runs.
-
-    Returns:
-        The budget, and the result and the smaller traced peak of the runs.
-    """
-    budget = 1000
-    for _ in range(10):
-        try:
-            result, peak = traced_run(path, run, budget)
-        except MemoryError as refusal:
-            named = needed_budget(refusal)
-            assert named > budget, str(refusal)
-            budget = named
-        else:
-            if peak > budget:
-                result, again = traced_run(path, run, budget)
-                peak = min(peak, again)
-            return budget, result, peak
-    raise AssertionError("Ten refusals did not name a budget that runs")
-
-
-def traced_run(
-    path: str | Path, run: Callable[["DataStore"], Any], budget: int
-) -> tuple[Any, int]:
-    """Run ``run`` on the store opened with ``budget``; return its result and traced peak.
-
-    The peak counts what the call allocates above what was held when it
-    started, as tracemalloc traces it.
-    """
-    store = open_store(path, nthreads=2, mem_budget=budget)
-    tracemalloc.start()
-    try:
-        start = tracemalloc.get_traced_memory()[0]
-        result = run(store)
-        peak = tracemalloc.get_traced_memory()[1] - start
-    finally:
-        tracemalloc.stop()
-    return result, peak
 
 
 def memory_screen(path: Path) -> SimpleNamespace:
