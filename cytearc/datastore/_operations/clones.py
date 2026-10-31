@@ -20,10 +20,12 @@ from ...clones.assignments import (
 from ...metadata.arguments import CloneColumnArguments, CloneImportArguments
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from ...metadata.rows import (
-    array_row_selection_parts,
     metadata_column_fingerprint,
     read_metadata_missing_rows_chunkwise,
     read_metadata_rows_chunkwise,
+    text_read_bytes,
+    text_row_selection_parts,
+    text_width,
 )
 from ...metadata.selection import cell_selection_indices
 from ...storage.artifact_writer import PlannedArtifact
@@ -70,8 +72,6 @@ _BYTES_PER_FIELD = 120
 # Bytes of each character of a row of a clone file: its fields as Python
 # strings, and the copies of the barcode that a prefix, suffix or pattern makes.
 _BYTES_PER_ROW_CHAR = 8
-# Bytes of a Python string beside its text, with its slot in an object array.
-_STRING_BYTES = 64
 # Bytes of each listed cell of a clone matrix: its selected cell.
 _BYTES_PER_LISTED_CELL = 8
 # The rows of a chunk lie in [_MIN_CHUNK_ROWS, _MAX_CHUNK_ROWS].
@@ -82,25 +82,6 @@ _MAX_CHUNK_ROWS = 1_000_000
 _TABLE_BYTES_PER_CELL = 200
 # Bytes per cell of an export beside its ID: its label and its code.
 _EXPORT_BYTES_PER_CELL = 200
-
-
-def _text_width(array: Any) -> int:
-    """The characters of each value of stored text, 0 for arrays of other values.
-
-    The store writes text as fixed-width unicode, four bytes per character.
-    """
-    dtype = np.dtype(array.dtype)
-    return int(dtype.itemsize) // 4 if dtype.kind == "U" else 0
-
-
-def _text_read_bytes(array: Any, n_rows: int) -> int:
-    """Bytes of reading rows of a stored text array as Python strings.
-
-    The store keeps text at the width of its longest value and decodes whole
-    chunks, so one long value widens every row that is read.
-    """
-    fixed, per_row = array_row_selection_parts(array)
-    return int(fixed) + n_rows * (int(per_row) + _STRING_BYTES + 4 * _text_width(array))
 
 
 def _file_namespace(file: BarcodeFile) -> str:
@@ -371,7 +352,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         ids = self.cells._get_array("ids")
         reading = (
             LOOKUP_BYTES_PER_CELL + _ASSIGNER_BYTES_PER_CELL
-        ) * n_cells + _text_read_bytes(ids, n_cells)
+        ) * n_cells + text_read_bytes(ids, n_cells)
         if reading > self.memoryBytes:
             raise MemoryError(
                 f"Reading the IDs of {n_cells} selected cells holds about {reading} "
@@ -395,7 +376,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             _BYTES_PER_ROW
             + _BYTES_PER_FIELD * max(layout.n_fields for layout in layouts)
             + _BYTES_PER_ROW_CHAR
-            * max(_text_width(ids), *(layout.row_chars for layout in layouts))
+            * max(text_width(ids), *(layout.row_chars for layout in layouts))
         )
         chunk_rows = self._clone_chunk_rows(held, row_bytes)
         assigner = CloneAssigner(cell_ids, multiple=policy)
@@ -604,12 +585,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         bool_argument(invalidate_cache, "invalidate_cache")
         cell_index = self._clone_selection_indices(cell_selection)
         n_cells = len(cell_index)
-        array = self.cells._get_array(column)
-        fixed, per_row = array_row_selection_parts(array)
         # Blocks of labels are read at their stored width, decoding whole
         # chunks, and become Python strings beside each cell's code.
-        held = _ASSIGNER_BYTES_PER_CELL * n_cells + int(fixed)
-        row_bytes = int(per_row) + _STRING_BYTES + 4 * _text_width(array)
+        fixed, row_bytes = text_row_selection_parts(self.cells._get_array(column))
+        held = _ASSIGNER_BYTES_PER_CELL * n_cells + fixed
         first_block = held + row_bytes * min(n_cells, _MIN_CHUNK_ROWS)
         if first_block > self.memoryBytes:
             raise MemoryError(
@@ -674,8 +653,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
     def _clone_text_bytes(self, group: zarr.Group, n_cells: int) -> int:
         """Bytes of reading saved clones' labels and their cells' IDs as text."""
         clone_ids = as_zarr_array(group["clone_ids"], name="clone_ids")
-        return _text_read_bytes(clone_ids, int(clone_ids.shape[0])) + (
-            _text_read_bytes(self.cells._get_array("ids"), n_cells)
+        return text_read_bytes(clone_ids, int(clone_ids.shape[0])) + (
+            text_read_bytes(self.cells._get_array("ids"), n_cells)
         )
 
     def _clone_cell_ids(self, clones: ArtifactRef) -> np.ndarray:
