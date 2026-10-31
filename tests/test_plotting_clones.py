@@ -685,6 +685,15 @@ def test_the_tracking_plot_checks_its_arguments(truth_plot) -> None:
         clone_tracking(store, clones, group_by="sample", order=["d2"], show=False)
     with pytest.raises(TypeError, match="order must be a sequence"):
         clone_tracking(store, clones, group_by="sample", order="d2", show=False)
+    # The order is checked before the clones are followed.
+    with pytest.raises(TypeError, match="order must be a sequence"):
+        clone_tracking(object(), clones, order=np.asarray([["d2"]]), show=False)
+    ordered = clone_tracking(
+        store, clones, group_by="sample", order=np.asarray(["d4", "d2"]), show=False
+    )
+    ax = ordered.axes["tracking"]
+    assert [tick.get_text() for tick in ax.get_xticklabels()] == ["d4", "d2"]
+    plt.close(ordered.figure)
     with pytest.raises(ValueError, match="top must be a positive integer"):
         clone_tracking(store, clones, group_by="sample", top=0, show=False)
     with pytest.raises(TypeError, match="store does not provide clones.track"):

@@ -182,6 +182,8 @@ def test_summaries_refuse_a_grouping_that_leaves_out_every_clone(source) -> None
         store.clones.expansion,
         store.clones.diversity,
         store.clones.rarefaction,
+        store.clones.overlap,
+        store.clones.track,
     ):
         with pytest.raises(ValueError, match="No cell has both a clone and a group"):
             summary(source.clones, group_by="unlabelled")

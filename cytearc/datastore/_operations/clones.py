@@ -1734,11 +1734,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a complete clone artifact, fewer
-                than two groups hold a cell with a clone, a column of the
-                groups is missing or named twice, or two groups get one name.
-            MemoryError: If grouping the cells, or the pairs of groups, do
-                not fit the memory budget.
+            ValueError: If ``clones`` is not a complete clone artifact, no
+                cell has both a clone and a group, fewer than two groups hold
+                a cell with a clone, a column of the groups is missing or
+                named twice, or two groups get one name.
+            MemoryError: If reading the clones, grouping the cells, or the
+                pairs of groups do not fit the memory budget.
         """
         source = self._read_clone_input(clones)
         keys, pair_groups, pair_codes, pair_cells = self._clone_pair_counts(
@@ -1748,6 +1749,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cell_selection=cell_selection,
             reserved=_OVERLAP_COLUMNS,
         )
+        if len(pair_cells) == 0:
+            raise ValueError("No cell has both a clone and a group")
         if len(keys) < 2:
             raise ValueError("Overlap needs at least two groups of cells with a clone")
         strata = _kept_apart_strata(source, keys)
@@ -1756,6 +1759,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             _OVERLAP_BYTES_PER_PAIR * n_pairs
             + _OVERLAP_BYTES_PER_PRODUCT * largest**2
             + _OVERLAP_BYTES_PER_COUNT * len(pair_cells)
+            + _SUMMARY_BYTES_PER_GROUP * len(keys)
         )
         if resident > self.memoryBytes:
             raise MemoryError(
@@ -1809,7 +1813,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cell_selection: Only these cells, or None for every cell of the
                 clones.
             top: The clones with the most cells to take from each group.
-            labels: Clone labels to follow instead, or None.
+            labels: Clone labels to follow instead, as a sequence or a
+                one-dimensional array, or None.
 
         Returns:
             One row per chosen clone and group, and the chosen clones' labels.
@@ -1820,22 +1825,21 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 is not positive, ``labels`` is empty or a label names no
                 clone, no cell has both a clone and a group, a column of the
                 groups is missing or named twice, or two groups get one name.
-            MemoryError: If grouping the cells, or the table of the chosen
-                clones' groups, does not fit the memory budget.
+            MemoryError: If reading the clones, grouping the cells, or the
+                table of the chosen clones' groups does not fit the memory
+                budget.
         """
         if isinstance(top, bool) or not isinstance(top, int | np.integer):
             raise TypeError("top must be a positive integer")
         if top < 1:
             raise ValueError("top must be a positive integer")
         if labels is not None:
-            if (
-                isinstance(labels, str | bytes)
-                or not isinstance(labels, Sequence)
-                or not all(isinstance(label, str) for label in labels)
-            ):
+            listed = _listed(labels)
+            if listed is None or not all(isinstance(label, str) for label in listed):
                 raise TypeError("labels must be a sequence of clone labels or None")
-            if not labels:
+            if not listed:
                 raise ValueError("labels must name at least one clone, or be None")
+            labels = listed
         source = self._read_clone_input(clones, with_ids=True)
         keys, pair_groups, pair_codes, pair_cells = self._clone_pair_counts(
             source,
@@ -1871,7 +1875,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             _fallback_strata(source, keys, strata, chosen),
         )
         n_rows = int((reach * np.bincount(strata, minlength=reach.shape[1])).sum())
-        resident = _TRACK_BYTES_PER_ROW * n_rows + reach.shape[0] * len(keys)
+        resident = (
+            _TRACK_BYTES_PER_ROW * n_rows
+            + reach.shape[0] * len(keys)
+            + _SUMMARY_BYTES_PER_GROUP * len(keys)
+        )
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Following {len(chosen)} clones through {len(keys)} groups "

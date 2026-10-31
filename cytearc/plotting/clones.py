@@ -717,6 +717,11 @@ def clone_tracking(
     Tables: ``cells`` (``clone``, ``group``, the key columns, ``cells`` and
     ``fraction``).
     """
+    if order is not None:
+        if isinstance(order, np.ndarray) and order.ndim == 1:
+            order = order.tolist()
+        if isinstance(order, str | bytes) or not isinstance(order, Sequence):
+            raise TypeError("order must be a sequence of group names")
     tracked = _clones_method(store, "track")(
         clones,
         group_by=group_by,
@@ -742,8 +747,6 @@ def clone_tracking(
     if order is None:
         positions = list(present)
     else:
-        if isinstance(order, str) or not isinstance(order, Sequence):
-            raise TypeError("order must be a sequence of group names")
         positions = list(order)
         if sorted(map(str, positions)) != sorted(map(str, present)):
             raise ValueError(f"order must list the groups {present}")

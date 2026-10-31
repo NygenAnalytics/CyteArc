@@ -15,6 +15,8 @@ import numpy as np
 import pytest
 
 from cytearc.clones import OVERLAP_INDICES, CloneOverlap, CloneTracking
+from cytearc.metadata.rows import array_row_selection_parts
+from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import (
     copy_clone_store,
     every_cell,
@@ -222,10 +224,10 @@ def test_cells_without_a_label_are_left_out(copied) -> None:
     insert_nullable_cell_column(
         store, "batch", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
     )
-    with pytest.raises(ValueError, match="at least two groups"):
-        store.clones.overlap(clones, group_by="batch")
-    with pytest.raises(ValueError, match="No cell has both a clone and a group"):
-        store.clones.track(clones, group_by="batch")
+    # No cell has a label, so no group holds a clone.
+    for method in (store.clones.overlap, store.clones.track):
+        with pytest.raises(ValueError, match="No cell has both a clone and a group"):
+            method(clones, group_by="batch")
 
 
 def _expected_rows(by_group: dict, chosen: list[int]) -> list[list]:
@@ -325,6 +327,8 @@ def test_track_follows_labelled_clones_through_every_group(shared) -> None:
         ({"top": True}, TypeError, "top must be a positive integer"),
         ({"labels": "1"}, TypeError, "labels must be a sequence"),
         ({"labels": [1]}, TypeError, "labels must be a sequence"),
+        ({"labels": np.asarray([["1"]])}, TypeError, "labels must be a sequence"),
+        ({"labels": np.asarray([1])}, TypeError, "labels must be a sequence"),
         ({"labels": []}, ValueError, "labels must name at least one clone"),
         ({"labels": ["9"]}, ValueError, "No clone is labelled"),
     ],
@@ -334,27 +338,61 @@ def test_track_arguments_are_checked(shared, kwargs, error, message) -> None:
         shared.store.clones.track(shared.clones, group_by="sample", **kwargs)
 
 
+def test_track_takes_labels_as_an_array(shared) -> None:
+    store, clones = shared.store, shared.clones
+    listed = store.clones.track(clones, group_by="sample", labels=["8", "3"])
+    array = store.clones.track(clones, group_by="sample", labels=np.asarray(["8", "3"]))
+    assert array.tracked == listed.tracked == ("3", "8")
+    assert array.cells.values.tolist() == listed.cells.values.tolist()
+    with pytest.raises(ValueError, match="labels must name at least one clone"):
+        store.clones.track(clones, labels=np.asarray([], dtype=str))
+
+
 def test_overlap_and_track_refuse_tables_beyond_the_budget(copied, monkeypatch) -> None:
     store, clones = copied.store, copied.clones
-    # Grouping 48 cells by one column takes 48 * 170 = 8,160 bytes. Each of
-    # the 32 cells with a clone is then a group of one clone: their 496 pairs
-    # take 250 * 496 + 24 * 32**2 + 40 * 32 = 149,856 bytes, and the 8 clones
-    # that are each group's largest, followed through 32 groups, take
-    # 150 * 256 + 8 * 32 = 38,656 bytes.
-    monkeypatch.setattr(store, "memoryBytes", 149_855)
-    with pytest.raises(MemoryError, match="gives 496 pairs.*Compare fewer groups"):
-        store.clones.overlap(clones, group_by="cell")
-    monkeypatch.setattr(store, "memoryBytes", 149_856)
-    assert len(store.clones.overlap(clones, group_by="cell").pairs) == 496
-    monkeypatch.setattr(store, "memoryBytes", 38_655)
-    with pytest.raises(MemoryError, match="gives 256 rows.*with a smaller top"):
-        store.clones.track(clones, group_by="cell", top=1)
-    monkeypatch.setattr(store, "memoryBytes", 38_656)
-    assert len(store.clones.track(clones, group_by="cell", top=1).cells) == 256
-    # Grouping is checked first: 8,159 bytes do not fit it.
-    monkeypatch.setattr(store, "memoryBytes", 8_159)
-    with pytest.raises(MemoryError, match="Grouping 48 cells by 1 columns"):
-        store.clones.overlap(clones, group_by="cell")
+    # A label of its own for each of the 32 cells with a clone, as a label
+    # artifact of those cells, whose labels are stored 3 characters wide.
+    store.cells.insert("has_clone", TRUTH.clones >= 0)
+    own = store.snapshot_cluster_labels(
+        "cell", cell_selection=store.snapshot_cell_selection("has_clone")
+    )
+    values = artifact_group(store.zw, own)["values"]
+    assert values.dtype == np.dtype("<U3")
+    # Grouping the clones' 48 cells takes 48 * (100 + 70) bytes, 32 * (130 +
+    # 3 * 12) for the labelled cells and one chunk of their labels, then 500
+    # for each of the 32 distinct labels and 500 for each of the 32 groups.
+    grouping = 48 * 170 + 32 * 166 + array_row_selection_parts(values)[0]
+    grouping += 32 * 500 + 32 * 500
+    assert grouping == 47_267
+    # Each group holds one clone: their 496 pairs take 250 * 496 + 24 * 32**2
+    # + 40 * 32 bytes and 2,000 for each group.
+    pairs = 250 * 496 + 24 * 32**2 + 40 * 32 + 32 * 2_000
+    assert pairs == 213_856
+    monkeypatch.setattr(store, "memoryBytes", pairs - 1)
+    with pytest.raises(
+        MemoryError, match=f"gives 496 pairs, which hold about {pairs} bytes"
+    ):
+        store.clones.overlap(clones, groups=own)
+    monkeypatch.setattr(store, "memoryBytes", pairs)
+    assert len(store.clones.overlap(clones, groups=own).pairs) == 496
+    # The 8 clones that are each group's largest, followed through the 32
+    # groups, take 150 * 256 + 8 * 32 bytes and 2,000 for each group.
+    rows = 150 * 256 + 8 * 32 + 32 * 2_000
+    assert rows == 102_656
+    monkeypatch.setattr(store, "memoryBytes", rows - 1)
+    with pytest.raises(
+        MemoryError, match=f"gives 256 rows, which hold about {rows} bytes.*smaller"
+    ):
+        store.clones.track(clones, groups=own, top=1)
+    monkeypatch.setattr(store, "memoryBytes", rows)
+    assert len(store.clones.track(clones, groups=own, top=1).cells) == 256
+    # Grouping is checked first.
+    monkeypatch.setattr(store, "memoryBytes", grouping - 1)
+    for method in (store.clones.overlap, store.clones.track):
+        with pytest.raises(
+            MemoryError, match=f"Grouping 48 cells by 1 columns holds about {grouping}"
+        ):
+            method(clones, groups=own)
 
 
 # Clones that keep labels apart, as clonotypes keep receptor types apart,
