@@ -50,28 +50,53 @@ def group_clone_matrix(
     pair_clones: np.ndarray,
     pair_cells: np.ndarray,
     n_groups: int,
+    n_clones: int | None = None,
 ) -> sparse.csr_matrix:
     """The cells of each clone in each group, one row per group and one column per clone.
 
     Args:
-        pair_groups: The group of each distinct pair of group and clone, as
-            :func:`~cytearc.clones.groups.pair_counts` counts them.
+        pair_groups: The group of each pair of group and clone, such as the
+            distinct pairs that :func:`~cytearc.clones.groups.pair_counts`
+            counts; a pair given twice counts the cells of both.
         pair_clones: The clone code of each pair.
-        pair_cells: The cells of the clone in the group.
+        pair_cells: The cells of the clone in the group, or any non-negative
+            weight; a pair of 0 holds nothing.
         n_groups: The number of groups, the matrix's rows.
+        n_clones: The number of clones, the matrix's columns, or None for one
+            column per clone code up to the largest.
 
     Returns:
-        A float64 matrix of ``n_groups`` rows and one column per clone code up
-        to the largest, whose entries are whole numbers of cells.
+        A float64 matrix of ``n_groups`` rows and ``n_clones`` columns, which
+        stores only the clones that each group holds.
+
+    Raises:
+        TypeError: If ``n_clones`` is not an integer or None.
+        ValueError: If the three arrays are not one-dimensional and of one
+            length, a group or clone code is out of range, a count is
+            negative or not finite, or ``n_clones`` is below a clone code.
     """
-    n_clones = int(np.max(pair_clones)) + 1 if len(pair_clones) else 0
-    return sparse.csr_matrix(
-        (
-            np.asarray(pair_cells, dtype=np.float64),
-            (np.asarray(pair_groups), np.asarray(pair_clones)),
-        ),
-        shape=(n_groups, n_clones),
+    cells = np.asarray(pair_cells, dtype=np.float64)
+    groups, clones = np.asarray(pair_groups), np.asarray(pair_clones)
+    if cells.ndim != 1 or groups.shape != cells.shape or clones.shape != cells.shape:
+        raise ValueError(
+            "pair_groups, pair_clones and pair_cells must be one-dimensional "
+            "arrays of one length"
+        )
+    if not np.isfinite(cells).all() or (cells < 0).any():
+        raise ValueError("pair_cells must hold non-negative, finite counts")
+    needed = int(np.max(clones)) + 1 if len(clones) else 0
+    if n_clones is None:
+        n_clones = needed
+    elif isinstance(n_clones, bool) or not isinstance(n_clones, int | np.integer):
+        raise TypeError("n_clones must be an integer or None")
+    elif n_clones < needed:
+        raise ValueError(f"n_clones is {n_clones}, below the clone code {needed - 1}")
+    # Repeated pairs are summed, and pairs of no cells are dropped.
+    matrix = sparse.csr_matrix(
+        (cells, (groups, clones)), shape=(int(n_groups), int(n_clones))
     )
+    matrix.eliminate_zeros()
+    return matrix
 
 
 def _ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
@@ -108,9 +133,11 @@ def overlap_pairs(
     """Compare every pair of groups by the clones they share.
 
     Args:
-        pair_groups: The group of each distinct pair of group and clone.
+        pair_groups: The group of each pair of group and clone, as for
+            :func:`group_clone_matrix`: a pair given twice counts the cells of
+            both, and a pair of 0 cells counts no clone.
         pair_clones: The clone code of each pair.
-        pair_cells: The cells of the clone in the group, each above 0.
+        pair_cells: The cells of the clone in the group.
         n_groups: The number of groups.
         strata: Each group's stratum, such as its labels in the columns that
             the clones keep apart; only groups of one stratum are compared.
@@ -130,16 +157,22 @@ def overlap_pairs(
         ``morisita_horn`` is ``2 sum(x y) / ((sum(x^2) / X^2 + sum(y^2) / Y^2)
         X Y)`` and ``abundance_cosine`` ``sum(x y) / sqrt(sum(x^2) sum(y^2))``,
         with ``x`` and ``y`` the clone sizes and ``X`` and ``Y`` the cells.
+
+    Raises:
+        ValueError: If the pairs are invalid, as :func:`group_clone_matrix`
+            checks them.
     """
-    pair_groups = np.asarray(pair_groups, dtype=np.int64)
-    pair_cells = np.asarray(pair_cells, dtype=np.float64)
     cells = group_clone_matrix(pair_groups, pair_clones, pair_cells, n_groups)
     presence = cells.copy()
     presence.data[:] = 1.0
-    # Every product is a sum of whole numbers, exact in floating point.
-    richness = np.bincount(pair_groups, minlength=n_groups).astype(np.float64)
-    totals = np.bincount(pair_groups, weights=pair_cells, minlength=n_groups)
-    squares = np.bincount(pair_groups, weights=pair_cells**2, minlength=n_groups)
+    # Each group's clones, cells and squared clone sizes, from the matrix's
+    # entries, which sum repeated pairs and leave out pairs of no cells. Every
+    # product is a sum of whole numbers, exact in floating point.
+    entry_groups = np.repeat(np.arange(n_groups), np.diff(cells.indptr))
+    richness = np.bincount(entry_groups, minlength=n_groups).astype(np.float64)
+    totals = np.bincount(entry_groups, weights=cells.data, minlength=n_groups)
+    squares = np.bincount(entry_groups, weights=cells.data**2, minlength=n_groups)
+    del entry_groups
     # Only groups of one stratum are compared, so the products are computed
     # for each stratum's groups, a block of those of all groups.
     blocks: list[dict[str, np.ndarray]] = []

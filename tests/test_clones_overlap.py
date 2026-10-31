@@ -3,6 +3,7 @@
 from collections import Counter
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from cytearc.clones.overlap import (
@@ -190,6 +191,61 @@ def test_group_clone_matrix_holds_each_clones_cells_in_each_group() -> None:
         3,
     )
     assert empty.shape == (3, 0) and empty.nnz == 0
+
+
+def test_the_matrix_sums_repeated_pairs_and_stores_only_held_clones() -> None:
+    # Group 0 holds clone 1 twice, 2 and 3 cells, and clone 2 with no cell.
+    matrix = group_clone_matrix(
+        np.array([0, 0, 0, 1]), np.array([1, 1, 2, 0]), np.array([2, 3, 0, 4]), 2
+    )
+    assert matrix.toarray().tolist() == [[0, 5, 0], [4, 0, 0]]
+    assert matrix.nnz == 2
+    # Columns for every clone of an artifact, beyond the largest code held.
+    wide = group_clone_matrix(np.array([1]), np.array([2]), np.array([7]), 2, 6)
+    assert wide.shape == (2, 6) and wide[1, 2] == 7.0 and wide.nnz == 1
+
+
+@pytest.mark.parametrize(
+    ("arguments", "error", "message"),
+    [
+        (([0], [0], [-1], 1), ValueError, "non-negative, finite counts"),
+        (([0], [0], [np.nan], 1), ValueError, "non-negative, finite counts"),
+        (([0], [0], [np.inf], 1), ValueError, "non-negative, finite counts"),
+        (([0, 1], [0], [1], 2), ValueError, "one-dimensional arrays of one length"),
+        (([[0]], [[0]], [[1]], 1), ValueError, "one-dimensional arrays of one"),
+        (([1], [0], [1], 1), ValueError, "exceeds matrix dimension"),
+        (([0], [-1], [1], 1), ValueError, "negative axis 1 index"),
+        (([0], [3], [1], 1, 3), ValueError, "n_clones is 3, below the clone code 3"),
+        (([0], [0], [1], 1, 1.5), TypeError, "n_clones must be an integer"),
+        (([0], [0], [1], 1, True), TypeError, "n_clones must be an integer"),
+    ],
+)
+def test_the_matrix_refuses_invalid_pairs(arguments, error, message) -> None:
+    arrays = [np.asarray(values) for values in arguments[:3]]
+    with pytest.raises(error, match=message):
+        group_clone_matrix(*arrays, *arguments[3:])
+
+
+def test_pairs_given_per_cell_or_of_no_cells_count_as_distinct_pairs() -> None:
+    rng = np.random.default_rng(11)
+    groups = rng.integers(0, 4, size=200)
+    clones = np.minimum(rng.zipf(1.6, size=200), 30) - 1
+    groups[:4] = np.arange(4)
+    distinct = overlap_pairs(*_pairs(groups, clones), 4)
+    # One pair of one cell per cell, in the cells' order, and pairs of no
+    # cells for clones that no group holds.
+    per_cell = overlap_pairs(groups, clones, np.ones(200, dtype=np.int64), 4)
+    pd.testing.assert_frame_equal(per_cell, distinct, check_exact=True)
+    padded = overlap_pairs(
+        np.concatenate([groups, [0, 1, 2]]),
+        np.concatenate([clones, [40, 41, 42]]),
+        np.concatenate([np.ones(200, dtype=np.int64), [0, 0, 0]]),
+        4,
+    )
+    pd.testing.assert_frame_equal(padded, distinct, check_exact=True)
+    for row in distinct.itertuples(index=False):
+        expected = _reference(groups.tolist(), clones.tolist(), row.first, row.second)
+        assert row.jaccard == pytest.approx(expected["jaccard"], rel=1e-12)
 
 
 def _tracked_rows(groups, clones, cells, chosen, strata, fallback):
