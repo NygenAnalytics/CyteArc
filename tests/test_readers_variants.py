@@ -33,7 +33,7 @@ from cytearc.readers.mito_afm import mito_afm_source
 from cytearc.readers.vartrix import vartrix_source
 from tests.perturbation_helpers import open_store
 from tests.storage_helpers import write_count_store
-from tests.variant_helpers import assert_tables
+from tests.variant_helpers import assert_tables, download_or_skip
 
 DATA = Path(__file__).parent / "data" / "variants"
 
@@ -1036,21 +1036,91 @@ _GOT_MULTI = (
 )
 
 
-def _download(url: str, path: Path) -> Path:
-    import urllib.error
-    import urllib.request
-
-    try:
-        with urllib.request.urlopen(url, timeout=120) as response:
-            path.write_bytes(response.read())
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
-        pytest.skip(f"{url} is unreachable: {error}")
-    return path
+_download = download_or_skip
 
 
 def _geo(sample: str, name: str, folder: Path) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     return _download(_GEO.format(sample[:-3], sample, name), folder / name)
+
+
+class _Response:
+    """A host's answer that serves ``data`` and states ``length``."""
+
+    def __init__(self, data: bytes, length: int | None = None) -> None:
+        self._data = data
+        self.headers = {} if length is None else {"Content-Length": str(length)}
+
+    def __enter__(self) -> "_Response":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._data
+
+
+def _status(code: int) -> Exception:
+    import urllib.error
+
+    return urllib.error.HTTPError("https://host/file", code, "status", {}, None)  # type: ignore[arg-type]
+
+
+_WHOLE = gzip.compress(b"BC\twtUMIs\tmutUMIs\n", mtime=0)
+
+
+@pytest.mark.parametrize(
+    ("name", "answers", "outcome"),
+    [
+        ("table.tsv.gz", [_Response(_WHOLE, len(_WHOLE))], "written"),
+        ("table.tsv.gz", [_status(503), _Response(_WHOLE)], "written"),
+        ("table.tsv.gz", [_status(503), _status(429)], "skipped"),
+        # A body shorter than its stated length, and a gzip stream that ends
+        # early without one.
+        ("table.tsv", [_Response(b"BC\t", 20), _Response(b"BC\t", 20)], "skipped"),
+        ("table.tsv.gz", [_Response(_WHOLE[:10]), _Response(_WHOLE[:10])], "skipped"),
+        (
+            "table.tsv.gz",
+            [ConnectionResetError("reset"), TimeoutError("slow")],
+            "skipped",
+        ),
+        ("table.tsv.gz", [_status(404)], "failed"),
+        ("table.tsv.gz", [_status(410)], "failed"),
+    ],
+)
+def test_downloads_skip_only_when_the_host_cannot_serve_a_file_whole(
+    monkeypatch, tmp_path, name, answers, outcome
+) -> None:
+    import urllib.error
+    import urllib.request
+
+    pending = list(answers)
+
+    def urlopen(url: str, timeout: float) -> _Response:
+        answer = pending.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    url = f"https://host/{name}"
+    path = tmp_path / name
+    if outcome == "written":
+        assert download_or_skip(url, path) == path
+        assert path.read_bytes() == _WHOLE
+    elif outcome == "skipped":
+        with pytest.raises(
+            pytest.skip.Exception, match="could not be downloaded whole"
+        ):
+            download_or_skip(url, path)
+        assert not path.exists()
+    else:
+        # A file that moved fails the test rather than skipping it for good.
+        with pytest.raises(urllib.error.HTTPError):
+            download_or_skip(url, path)
+    assert not pending
+    assert list(tmp_path.iterdir()) == ([path] if outcome == "written" else [])
 
 
 @pytest.mark.integration

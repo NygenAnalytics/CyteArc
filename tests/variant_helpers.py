@@ -2,15 +2,20 @@
 
 The expected tables come from the truth's arrays alone, so a test that
 compares an import with them checks the importer against values it never
-computed.
+computed. ``download_or_skip`` fetches the files of tests marked
+integration.
 """
 
+import gzip
+import http.client
 import shutil
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
 import pandas as pd
+import pytest
 
 from tests.clone_helpers import open_clone_store, write_truth_store
 from tests.variant_truth import (
@@ -19,13 +24,11 @@ from tests.variant_truth import (
     PROBES,
     REFERENCE,
     SITE_POSITIONS,
-    TARGETS,
     VariantTruth,
 )
 
 if TYPE_CHECKING:
     from cytearc.datastore.datastore import DataStore
-    from cytearc.variants import VariantCounts
 
 
 def write_variant_store(path: Path, truth: VariantTruth) -> "DataStore":
@@ -232,16 +235,58 @@ def mito_reference_digest() -> str:
     return hashlib.sha256(REFERENCE.encode()).hexdigest()
 
 
-def loaded_counts(store: "DataStore", ref) -> "VariantCounts":
-    return store.variants.load_counts(ref)
+# What a download raises when its host is unreachable, slow or cuts the file
+# short: IncompleteRead is an HTTPException rather than an OSError, and a gzip
+# stream that ends early raises EOFError.
+_UNREACHABLE = (
+    urllib.error.URLError,
+    TimeoutError,
+    OSError,
+    http.client.HTTPException,
+    EOFError,
+)
+# HTTP statuses of a host that refuses or fails for the moment, as GEO does
+# under load; any other error status, such as 404 for a file that moved,
+# fails the test.
+_TRANSIENT_STATUSES = frozenset({403, 408, 429, 500, 502, 503, 504})
 
 
-def every_got_target() -> tuple[str, ...]:
-    return TARGETS
+def _fetched(url: str) -> bytes:
+    """The bytes at ``url``, refusing a body shorter than its stated length
+    and a gzip file that ends early."""
+    with urllib.request.urlopen(url, timeout=120) as response:
+        data = response.read()
+        length = response.headers.get("Content-Length")
+    if length is not None and len(data) != int(length):
+        raise http.client.IncompleteRead(data, int(length) - len(data))
+    if url.endswith(".gz"):
+        gzip.decompress(data)
+    return data
 
 
-def listed_rows(truth: VariantTruth, *, covered_only: bool) -> np.ndarray:
-    """The truth's cells that a one-target GoT table lists."""
-    if covered_only:
-        return np.flatnonzero(truth.got[: truth.n_cells, 0, 0] >= 0)
-    return np.arange(truth.n_cells)
+def download_or_skip(url: str, path: Path) -> Path:
+    """Download a file for a test marked integration, or skip the test when
+    its host cannot serve the file whole.
+
+    A failed download is tried once more, and the file is written only once
+    whole, under a name of its own and then renamed. A status that names a
+    missing file, such as 404, fails the test, since skipping would hide a
+    file that moved.
+    """
+    failure: Exception | None = None
+    for _attempt in range(2):
+        try:
+            data = _fetched(url)
+        except urllib.error.HTTPError as error:
+            if error.code not in _TRANSIENT_STATUSES:
+                raise
+            failure = error
+            continue
+        except _UNREACHABLE as error:
+            failure = error
+            continue
+        partial = path.with_name(f"{path.name}.partial")
+        partial.write_bytes(data)
+        partial.replace(path)
+        return path
+    pytest.skip(f"{url} could not be downloaded whole: {failure}")

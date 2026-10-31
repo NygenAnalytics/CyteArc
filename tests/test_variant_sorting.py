@@ -172,6 +172,27 @@ def test_sort_rows_keeps_equal_keys_in_order() -> None:
     assert sort_rows(rows[:1], ("cell", "key"))["count"].tolist() == [1]
 
 
+def test_sort_rows_keeps_cells_apart_whatever_their_keys() -> None:
+    # mgatk's alleles reach 4 * 16,568 - 1 = 66,271 on rCRS, beyond 16 bits,
+    # so the cell must sit above every key in the combined sort key.
+    rows = np.zeros(6, dtype=COUNTS)
+    rows["cell"] = [1, 0, 2, 1, 0, 2]
+    rows["key"] = [10, 66_271, 3, 66_000, 3, 2**31 - 1]
+    rows["count"] = np.arange(6)
+    ordered = sort_rows(rows, ("cell", "key"))
+    assert list(
+        zip(ordered["cell"].tolist(), ordered["key"].tolist(), strict=True)
+    ) == [
+        (0, 3),
+        (0, 66_271),
+        (1, 10),
+        (1, 66_000),
+        (2, 3),
+        (2, 2**31 - 1),
+    ]
+    np.testing.assert_array_equal(ordered, _sorted(rows))
+
+
 def test_bands_can_be_read_again() -> None:
     rows = _random_rows(50, 5, seed=4)
     with CellRowSorter(
