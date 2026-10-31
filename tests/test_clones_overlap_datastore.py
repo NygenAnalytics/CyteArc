@@ -348,16 +348,28 @@ def test_track_takes_labels_as_an_array(shared) -> None:
         store.clones.track(clones, labels=np.asarray([], dtype=str))
 
 
-def test_overlap_and_track_refuse_tables_beyond_the_budget(copied, monkeypatch) -> None:
-    store, clones = copied.store, copied.clones
-    # A label of its own for each of the 32 cells with a clone, as a label
-    # artifact of those cells, whose labels are stored 3 characters wide.
+def _own_labels(store):
+    """A label artifact of a label of its own for each of the 32 cells with a clone."""
     store.cells.insert("has_clone", TRUTH.clones >= 0)
     own = store.snapshot_cluster_labels(
         "cell", cell_selection=store.snapshot_cell_selection("has_clone")
     )
+    # Its labels are stored 3 characters wide.
+    assert artifact_group(store.zw, own)["values"].dtype == np.dtype("<U3")
+    return own
+
+
+# Reading the clones holds each of the 48 cells' stored int32 code and its
+# int64 copy, and tracking also reads the eight clones' labels, stored one
+# character wide: 4 bytes three times and 100 more each.
+READ = 48 * (4 + 8)
+READ_WITH_LABELS = READ + 8 * (100 + 3 * 4)
+
+
+def test_overlap_and_track_refuse_tables_beyond_the_budget(copied, monkeypatch) -> None:
+    store, clones = copied.store, copied.clones
+    own = _own_labels(store)
     values = artifact_group(store.zw, own)["values"]
-    assert values.dtype == np.dtype("<U3")
     # Grouping the clones' 48 cells takes 48 * (100 + 70) bytes, 32 * (130 +
     # 3 * 12) for the labelled cells and one chunk of their labels, then 500
     # for each of the 32 distinct labels and 500 for each of the 32 groups.
@@ -365,23 +377,26 @@ def test_overlap_and_track_refuse_tables_beyond_the_budget(copied, monkeypatch) 
     grouping += 32 * 500 + 32 * 500
     assert grouping == 47_267
     # Each group holds one clone: their 496 pairs take 250 * 496 + 24 * 32**2
-    # + 40 * 32 bytes and 2,000 for each group.
-    pairs = 250 * 496 + 24 * 32**2 + 40 * 32 + 32 * 2_000
-    assert pairs == 213_856
+    # bytes, the 32 counts of a clone in a group 40 each, the groups 2,000
+    # each, and the clones read are held beside them.
+    pairs = 250 * 496 + 24 * 32**2 + 40 * 32 + 32 * 2_000 + READ
+    assert pairs == 214_432
     monkeypatch.setattr(store, "memoryBytes", pairs - 1)
     with pytest.raises(
-        MemoryError, match=f"gives 496 pairs, which hold about {pairs} bytes"
+        MemoryError, match=f"gives 496 pairs and holds about {pairs} bytes"
     ):
         store.clones.overlap(clones, groups=own)
     monkeypatch.setattr(store, "memoryBytes", pairs)
     assert len(store.clones.overlap(clones, groups=own).pairs) == 496
     # The 8 clones that are each group's largest, followed through the 32
-    # groups, take 150 * 256 + 8 * 32 bytes and 2,000 for each group.
-    rows = 150 * 256 + 8 * 32 + 32 * 2_000
-    assert rows == 102_656
+    # groups, give 256 rows of 100 bytes and 16 for their one key column, a
+    # byte for each clone and group, and the counts, groups and clones read
+    # as for overlap, with the clones' labels.
+    rows = 256 * (100 + 16) + 8 * 32 + 40 * 32 + 32 * 2_000 + READ_WITH_LABELS
+    assert rows == 96_704
     monkeypatch.setattr(store, "memoryBytes", rows - 1)
     with pytest.raises(
-        MemoryError, match=f"gives 256 rows, which hold about {rows} bytes.*smaller"
+        MemoryError, match=f"gives 256 rows and holds about {rows} bytes.*smaller"
     ):
         store.clones.track(clones, groups=own, top=1)
     monkeypatch.setattr(store, "memoryBytes", rows)
@@ -495,9 +510,61 @@ def test_track_follows_clones_through_the_groups_of_their_labels(kept_apart) -> 
         "cells",
         "fraction",
     ]
+    # The empty table keeps the types of a full one.
+    full = store.clones.track(clones, group_by="sample", labels=["8"])
+    assert none.cells.dtypes.tolist() == full.cells.dtypes.tolist()
+    assert none.cells["cells"].dtype == np.int64
+    assert none.cells["fraction"].dtype == np.float64
     # The plot places a sample's groups of both lineages at one position.
     plot = store.plots.clone_tracking(clones, group_by="sample", top=1, show=False)
     ax = plot.axes["tracking"]
     assert [tick.get_text() for tick in ax.get_xticklabels()] == ["d2", "d4"]
     assert all(len(line.get_xdata()) == 2 for line in ax.get_lines())
     plot.close()
+
+
+def test_the_budget_counts_only_the_pairs_and_rows_of_one_lineage(
+    kept_apart, monkeypatch
+) -> None:
+    store, clones = kept_apart.store, kept_apart.clones
+    own = _own_labels(store)
+    # The 24 cells of clones 1 to 4 are groups of lineage A and the 8 cells
+    # of clones 5 to 8 groups of B: 276 + 28 pairs, the largest stratum of 24
+    # groups, beside the counts, groups and clones read.
+    pairs = 250 * (276 + 28) + 24 * 24**2 + 40 * 32 + 32 * 2_000 + READ
+    assert pairs == 155_680
+    monkeypatch.setattr(store, "memoryBytes", pairs - 1)
+    with pytest.raises(
+        MemoryError, match=f"gives 304 pairs and holds about {pairs} bytes"
+    ):
+        store.clones.overlap(clones, groups=own)
+    monkeypatch.setattr(store, "memoryBytes", pairs)
+    assert len(store.clones.overlap(clones, groups=own).pairs) == 304
+    # Clones 1 to 4 are followed through the 24 groups of A and clones 5 to
+    # 8 through the 8 of B, in rows with two key columns.
+    rows = (4 * 24 + 4 * 8) * (100 + 2 * 16) + 8 * 32 + 40 * 32 + 32 * 2_000
+    rows += READ_WITH_LABELS
+    assert rows == 83_904
+    monkeypatch.setattr(store, "memoryBytes", rows - 1)
+    with pytest.raises(
+        MemoryError, match=f"gives 128 rows and holds about {rows} bytes"
+    ):
+        store.clones.track(clones, groups=own, top=1)
+    monkeypatch.setattr(store, "memoryBytes", rows)
+    assert len(store.clones.track(clones, groups=own, top=1).cells) == 128
+
+
+def test_overlap_needs_two_groups_of_one_lineage(kept_apart) -> None:
+    store, clones = kept_apart.store, kept_apart.clones
+    # Lineage A holds clones 1 to 4, of 3 cells of d2 and 6 of d4, and
+    # lineage B clones 5 to 8; among the cells of lineage A in d2 and of B in
+    # d4, each lineage is one group, and no pair can be compared.
+    chosen = ((TRUTH.samples == "d2") & (LINEAGES == "A")) | (
+        (TRUTH.samples == "d4") & (LINEAGES == "B")
+    )
+    store.cells.insert("one_lineage_each", chosen)
+    selection = store.snapshot_cell_selection("one_lineage_each")
+    with pytest.raises(
+        ValueError, match=r"No two groups share their labels in \['lineage'\]"
+    ):
+        store.clones.overlap(clones, group_by="sample", cell_selection=selection)

@@ -177,18 +177,20 @@ _RAREFACTION_COLUMNS = frozenset(
 _OVERLAP_COLUMNS = frozenset({"group", "cells", "clones"})
 _TRACK_COLUMNS = frozenset({"group", "clone", "cells", "fraction"})
 # Comparing groups holds, at its peak, about 220 bytes per pair of groups of
-# one stratum, the pairs' indices and their table, 16 bytes per product of
-# two groups of the largest stratum, and 40 bytes per count of a clone in a
-# group, as measured on 1,000 and 2,000 groups; 2,000 groups of a million
-# cells, 2 million pairs, traced 374 MiB beyond grouping the cells.
+# one stratum, the pairs' indices and their table, and 16 bytes per product of
+# two groups of the largest stratum, as measured on 1,000 and 2,000 groups;
+# 2,000 groups of a million cells, 2 million pairs, traced 374 MiB beyond
+# grouping the cells.
 _OVERLAP_BYTES_PER_PAIR = 250
 _OVERLAP_BYTES_PER_PRODUCT = 24
-_OVERLAP_BYTES_PER_COUNT = 40
-# Following clones holds about 110 bytes per row of the table with three key
-# columns, as measured on 1.3 million rows, and a byte per chosen clone and
-# group; 546,000 rows with two key columns traced 32 MiB beyond grouping a
-# million cells.
-_TRACK_BYTES_PER_ROW = 150
+# Each count of a clone's cells in a group holds its group, clone code and
+# cells, and its entries in the matrices that compare or follow the groups.
+_BYTES_PER_CLONE_COUNT = 40
+# Following clones holds, for each row of the table, about 82 bytes and 8
+# more for each key column, as traced on 3 million rows with 1 to 12 key
+# columns, and a byte per chosen clone and group.
+_TRACK_BYTES_PER_ROW = 100
+_TRACK_BYTES_PER_KEY_COLUMN = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -1736,8 +1738,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``clones`` is not a complete clone artifact, no
                 cell has both a clone and a group, fewer than two groups hold
-                a cell with a clone, a column of the groups is missing or
-                named twice, or two groups get one name.
+                a cell with a clone, no two groups share the labels that the
+                clones keep apart, a column of the groups is missing or named
+                twice, a key column names a column of the result, or two
+                groups get one name.
             MemoryError: If reading the clones, grouping the cells, or the
                 pairs of groups do not fit the memory budget.
         """
@@ -1755,15 +1759,24 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             raise ValueError("Overlap needs at least two groups of cells with a clone")
         strata = _kept_apart_strata(source, keys)
         n_pairs, largest = overlap_extent(len(keys), strata)
+        if n_pairs == 0:
+            raise ValueError(
+                f"No two groups share their labels in {_kept_apart(source)}, "
+                "which the clones keep apart, so no pair of groups can be "
+                "compared"
+            )
+        # The pairs, and beside them the clones read, their counts in each
+        # group and each group's rows.
         resident = (
             _OVERLAP_BYTES_PER_PAIR * n_pairs
             + _OVERLAP_BYTES_PER_PRODUCT * largest**2
-            + _OVERLAP_BYTES_PER_COUNT * len(pair_cells)
+            + _BYTES_PER_CLONE_COUNT * len(pair_cells)
             + _SUMMARY_BYTES_PER_GROUP * len(keys)
+            + self._clone_input_bytes(clones, with_ids=False)
         )
         if resident > self.memoryBytes:
             raise MemoryError(
-                f"Comparing {len(keys)} groups gives {n_pairs} pairs, which hold "
+                f"Comparing {len(keys)} groups gives {n_pairs} pairs and holds "
                 f"about {resident} bytes, more than the memory budget of "
                 f"{self.memoryBytes} bytes. Compare fewer groups, with fewer "
                 "group_by columns or a cell_selection, or raise mem_budget."
@@ -1824,7 +1837,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ValueError: If ``clones`` is not a complete clone artifact, ``top``
                 is not positive, ``labels`` is empty or a label names no
                 clone, no cell has both a clone and a group, a column of the
-                groups is missing or named twice, or two groups get one name.
+                groups is missing or named twice, a key column names a column
+                of the result, or two groups get one name.
             MemoryError: If reading the clones, grouping the cells, or the
                 table of the chosen clones' groups does not fit the memory
                 budget.
@@ -1875,15 +1889,22 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             _fallback_strata(source, keys, strata, chosen),
         )
         n_rows = int((reach * np.bincount(strata, minlength=reach.shape[1])).sum())
+        # The rows, each with its clone, group, labels, cells and fraction,
+        # and beside them the clones read, their counts in each group and
+        # each group's rows.
+        n_key_columns = len(keys.columns) - 1
         resident = (
-            _TRACK_BYTES_PER_ROW * n_rows
+            n_rows
+            * (_TRACK_BYTES_PER_ROW + _TRACK_BYTES_PER_KEY_COLUMN * n_key_columns)
             + reach.shape[0] * len(keys)
+            + _BYTES_PER_CLONE_COUNT * len(pair_cells)
             + _SUMMARY_BYTES_PER_GROUP * len(keys)
+            + self._clone_input_bytes(clones, with_ids=True)
         )
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Following {len(chosen)} clones through {len(keys)} groups "
-                f"gives {n_rows} rows, which hold about {resident} bytes, more "
+                f"gives {n_rows} rows and holds about {resident} bytes, more "
                 f"than the memory budget of {self.memoryBytes} bytes. Follow "
                 "fewer clones, with a smaller top or labels, or fewer groups, "
                 "or raise mem_budget."
@@ -1892,14 +1913,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             pair_groups, pair_codes, pair_cells, chosen, strata, reach
         )
         tracked = np.asarray(identifiers[chosen].tolist(), dtype=object)
-        if len(rows):
-            sizes = _group_sizes(keys, pair_groups, pair_cells)
-            table = keys.take(rows).reset_index(drop=True)
-            table.insert(0, "clone", tracked[followed])
-            table["cells"] = counts
-            table["fraction"] = counts / sizes["cells"].to_numpy()[rows]
-        else:
-            table = pd.DataFrame(columns=["clone", *keys.columns, "cells", "fraction"])
+        # Without rows, the table keeps its columns and their types; clone
+        # labels are text, as the groups' labels are.
+        sizes = _group_sizes(keys, pair_groups, pair_cells)
+        table = keys.take(rows).reset_index(drop=True)
+        table.insert(0, "clone", pd.array(tracked[followed], dtype="str"))
+        table["cells"] = counts
+        table["fraction"] = counts / sizes["cells"].to_numpy()[rows]
         return CloneTracking(
             cells=table,
             clones=clones,

@@ -6,8 +6,9 @@ exceed that budget. The test never repeats the budgets' formulas, so it
 checks that whatever a summary estimates bounds what it allocates, on inputs
 that stress each estimate: long and emoji labels, long clone labels, a few
 measured cells of many clone cells, a label artifact and a cell selection of
-more cells than the clones hold, a label for each of many cells, and many
-sizes.
+more cells than the clones hold, a label for each of many cells, many sizes,
+many pairs of groups, one-cell clones, 13 key columns, and clone labels
+held beside many rows.
 """
 
 import re
@@ -51,6 +52,12 @@ def data(tmp_path_factory) -> SimpleNamespace:
     # others, makes groups that cost more than their cells.
     own = np.asarray([f"g{i:06d}" if i < 2_000 else "" for i in range(N_CELLS)])
     store.cells.insert("own", own)
+    # Twelve copies of those labels give as many key columns and no more
+    # groups.
+    for copy in range(12):
+        store.cells.insert(f"own_{copy}", own)
+    for n_first in (220, 300, 800):
+        store.cells.insert(f"first_{n_first}", np.arange(N_CELLS) < n_first)
     store.cells.insert("every_cell", np.ones(N_CELLS, dtype=bool))
     store.cells.insert("first", np.arange(N_CELLS) < N_MEASURED)
     # Zipf clone sizes, about one cell in ten without a clone.
@@ -70,6 +77,14 @@ def data(tmp_path_factory) -> SimpleNamespace:
     )
     every = store.snapshot_cell_selection("every_cell")
     first = store.snapshot_cell_selection("first")
+    # Label artifacts of a label for each of the first cells: their small
+    # chunks leave the pairs or rows of many groups the largest estimate.
+    own_labels = {
+        n_first: store.snapshot_cluster_labels(
+            "own", cell_selection=store.snapshot_cell_selection(f"first_{n_first}")
+        )
+        for n_first in (220, 300, 800)
+    }
     return SimpleNamespace(
         store=store,
         every=every,
@@ -79,6 +94,8 @@ def data(tmp_path_factory) -> SimpleNamespace:
         emoji=store.clones.from_column("emoji_clone", cell_selection=every),
         few=store.clones.from_column("clone", cell_selection=first),
         labels=store.snapshot_cluster_labels("donor", cell_selection=every),
+        own_labels=own_labels,
+        named=sorted(set(labels.tolist()) - {""})[::3][:1_000],
     )
 
 
@@ -132,6 +149,33 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
     ),
     "rarefaction at 5,000 sizes": lambda data: data.store.clones.rarefaction(
         data.clones, orders=(0, 1), sizes=range(1, 5_001)
+    ),
+    "overlap by two columns of long labels": lambda data: data.store.clones.overlap(
+        data.clones, group_by=["donor", "condition"]
+    ),
+    "overlap by a label for each of 300 cells": lambda data: data.store.clones.overlap(
+        data.clones, groups=data.own_labels[300]
+    ),
+    "overlap of one-cell clones by a label for each of 300 cells": lambda data: (
+        data.store.clones.overlap(data.long, groups=data.own_labels[300])
+    ),
+    "overlap of a few cells by labels of every cell": lambda data: (
+        data.store.clones.overlap(data.few, groups=data.labels)
+    ),
+    "track by 13 key columns": lambda data: data.store.clones.track(
+        data.clones,
+        group_by=[f"own_{copy}" for copy in range(12)],
+        groups=data.own_labels[800],
+        top=1,
+    ),
+    "track of emoji clone labels by a label for each of 220 cells": lambda data: (
+        data.store.clones.track(data.emoji, groups=data.own_labels[220], top=1)
+    ),
+    "track of 1,000 named clones": lambda data: data.store.clones.track(
+        data.clones, labels=data.named
+    ),
+    "track of a few cells by labels of every cell": lambda data: (
+        data.store.clones.track(data.few, groups=data.labels)
     ),
 }
 
