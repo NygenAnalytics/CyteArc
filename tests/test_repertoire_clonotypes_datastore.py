@@ -620,8 +620,12 @@ def test_clonotypes_load_and_export_as_clones_within_the_memory_budget(
     store, receptors = _receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     # Beside 250 bytes per cell for the tables, or 200 for the file, both read
-    # the clonotypes with their labels and the cells' IDs as text.
-    read = CLONOTYPES_READ + CLONOTYPE_LABELS_READ + ids_read_bytes(store, 8)
+    # the clonotypes and count their labels and the cells' IDs as text, the
+    # four labels once each, as their stored chunk is read.
+    labels = artifact_group(store.zw, ref)["clonotype_ids"]
+    assert labels.shape == (4,)
+    read = CLONOTYPES_READ + text_read_bytes(labels, 4) + ids_read_bytes(store, 8)
+    assert text_read_bytes(labels, 4) > CLONOTYPE_LABELS_READ
     for verb, per_cell, run in (
         ("Loading", 250, lambda: store.clones.load_clones(ref)),
         ("Exporting", 200, lambda: store.clones.export_clones(ref, tmp_path / "x.csv")),

@@ -397,6 +397,21 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
     "clonotypes within a label of each cell loaded as clones": lambda data: (
         data.store.clones.load_clones(data.own_clonotypes)
     ),
+    "overlap of clonotypes by two columns of long labels": lambda data: (
+        data.store.clones.overlap(data.clonotypes, group_by=["donor", "condition"])
+    ),
+    "track of clonotypes by a label for each of 300 cells": lambda data: (
+        data.store.clones.track(data.clonotypes, groups=data.own_labels[300], top=1)
+    ),
+    "coupling of clonotypes by two columns of long labels": _coupling(
+        "clonotypes", group_by=["donor", "condition"], permutations=50
+    ),
+    "fate bias of clonotypes by long labels": _fate_bias(
+        "clonotypes", group_by="donor"
+    ),
+    "loaded fate bias of the clonotypes of a few early cells": _saved_fate_bias(
+        "clonotypes", group_by="donor"
+    ),
     "clonotypes exported as a clone matrix": lambda data: (
         data.store.clones.export_clones(
             data.clonotypes, data.folder / "clonotypes.mtx", format="matrix"

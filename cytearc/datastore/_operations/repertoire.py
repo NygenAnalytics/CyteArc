@@ -875,10 +875,13 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If an option is unknown, the receptors store no
+            ValueError: If ``receptors`` is not an ``immune_receptors``
+                artifact, an option is unknown, the receptors store no
                 junction of the compared kind, or a ``within`` column is not a
                 cell metadata column or has no label for a cell with a
                 receptor.
+            KeyError: If the store holds no such receptors.
+            RuntimeError: If the receptors are incomplete.
             PermissionError: If the store is read-only and the clonotypes are
                 not saved yet.
             MemoryError: If reading the receptor types, grouping the cells
@@ -898,8 +901,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             ("within_receptor_type", within_receptor_type),
             ("invalidate_cache", invalidate_cache),
         ):
-            if not isinstance(flag, bool):
-                raise TypeError(f"{name} must be a boolean")
+            bool_argument(flag, name)
         columns = group_columns(within, "within", _CLONOTYPE_COLUMNS)
         field_name = "junction" if sequence == "nt" else "junction_aa"
         if field_name not in fields:
@@ -1057,7 +1059,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
 
         Raises:
             TypeError: If ``clonotypes`` is not an ArtifactRef.
-            ValueError: If it is not a complete ``clonotypes`` artifact.
+            ValueError: If it is not a ``clonotypes`` artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
             MemoryError: If the tables, 300 bytes per cell and 700 per
                 clonotype beside the cells' IDs, the representatives' chains
                 and the ``within`` labels that they read as text, do not fit

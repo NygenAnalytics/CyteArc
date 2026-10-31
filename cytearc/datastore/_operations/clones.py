@@ -1057,7 +1057,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         the receptors' canonical values are the receptor types.
 
         Raises:
-            ValueError: If the receptors are not complete.
+            KeyError: If the store holds no such receptors.
+            RuntimeError: If the receptors are incomplete.
         """
         receptors = inspect_artifact(self.zw, clonotypes).input_ref("receptors")
         require_complete_artifact(self.zw, receptors)
@@ -1081,8 +1082,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             TypeError: If ``clones`` is not an ArtifactRef.
             ValueError: If it is not a kind of clone artifact that the
                 summaries read.
-            KeyError: If the store holds no such artifact.
-            RuntimeError: If the artifact is incomplete.
+            KeyError: If the store holds no such artifact, or not the
+                receptors of the clonotypes.
+            RuntimeError: If the artifact or the receptors of the clonotypes
+                are incomplete.
             MemoryError: If the codes, and the labels when read, do not fit
                 the memory budget.
         """
@@ -1844,7 +1847,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         cell metadata columns, such as the sample or the tissue, and of the
         ``groups`` label artifact, such as a clustering, among the cells of
         ``cell_selection``. Cells without a clone or a label are left out.
-        Nothing is saved.
+        Clonotypes are grouped within each receptor type, which joins the
+        groups' key columns as ``receptor_type``, and only groups of one
+        receptor type are compared. Nothing is saved.
 
         Each pair of groups gets presence indices, which count clones, and
         abundance indices, which weigh them by their cells, as scRepertoire's
@@ -1859,7 +1864,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         both groups.
 
         Args:
-            clones: A ``clones`` artifact.
+            clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups.
             groups: A cell-label artifact whose labels define the groups.
             cell_selection: Only these cells, or None for every cell of the
@@ -1953,11 +1958,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         of cells in every group, zeros included, so a clone that expands
         between time points or spreads between cell types shows it. The
         groups are those of
-        :meth:`~cytearc.datastore.namespaces.ClonesAccessor.overlap`. Nothing
-        is saved.
+        :meth:`~cytearc.datastore.namespaces.ClonesAccessor.overlap`, and a
+        clonotype is followed through the groups of its own receptor type.
+        Nothing is saved.
 
         Args:
-            clones: A ``clones`` artifact.
+            clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups.
             groups: A cell-label artifact whose labels define the groups.
             cell_selection: Only these cells, or None for every cell of the
@@ -2092,7 +2098,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         labels of the ``group_by`` cell metadata columns, such as the cell
         type, and of the ``groups`` label artifact, among the cells of
         ``cell_selection``, such as the cells of one time point. Cells
-        without a clone or a label are left out. Nothing is saved.
+        without a clone or a label are left out. Clonotypes are grouped within
+        each receptor type, which joins the groups' key columns as
+        ``receptor_type``: only groups of one receptor type are coupled, and
+        the null shuffles labels within each receptor type. Nothing is saved.
 
         ``method`` names how a pair's coupling is measured from each clone's
         cells in each group, as CoSpar's ``fate_coupling`` measures it:
@@ -2116,7 +2125,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         linkage on the coupling, the most coupled together.
 
         Args:
-            clones: A ``clones`` artifact.
+            clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups.
             groups: A cell-label artifact whose labels define the groups.
             cell_selection: Only these cells, or None for every cell of the
@@ -2285,7 +2294,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         with the Benjamini and Hochberg adjustment over the clones within
         each fate. When the clones keep labels apart, such as receptor types,
         each fate holds one such label, which a late cell without a clone
-        lacks, so it has no fate.
+        lacks, so it has no fate. The fates of clonotypes therefore name a
+        receptor type each, such as ``"Neutrophil, TCR"``, and each clonotype
+        is tested among the late cells of its receptor type that have a
+        clonotype.
 
         The artifact's canonical ``values`` hold each early cell's dominant
         fate, empty for none, so ``ds.select_cells(bias, include=["Neutrophil"])``
@@ -2295,7 +2307,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         its other per-cell arrays.
 
         Args:
-            clones: A ``clones`` artifact.
+            clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the fates.
             groups: A cell-label artifact whose labels define the fates.
             early: The early cells, a cell selection.

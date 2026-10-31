@@ -686,17 +686,17 @@ def clonal_overlap(
 ) -> PlotResult:
     """Plot an overlap index between every pair of groups as a heatmap.
 
-    ``clones`` is a ``clones`` artifact. ``index`` is one of ``"shared"``,
-    ``"jaccard"``, ``"sorensen"``, ``"overlap"``, ``"cosine"``,
-    ``"morisita_horn"`` (the default) and ``"abundance_cosine"``, as
-    ``ds.clones.overlap`` computes them for its groups: the ``group_by``
-    cell metadata columns and a ``groups`` label artifact, among the cells of
-    ``cell_selection``. The diagonal is left blank so that the colours span
-    the pairs, and so are pairs that were not compared; the ``matrix`` table
-    holds each group's clones on its diagonal for ``"shared"`` and 1
-    otherwise. Matrices of at most 12 groups print their values, and of at
-    most 40 name their groups on the axes. By default the figure grows with
-    the groups up to the width of a page.
+    ``clones`` is a clone artifact, such as ``clones`` or ``clonotypes``.
+    ``index`` is one of ``"shared"``, ``"jaccard"``, ``"sorensen"``,
+    ``"overlap"``, ``"cosine"``, ``"morisita_horn"`` (the default) and
+    ``"abundance_cosine"``, as ``ds.clones.overlap`` computes them for its
+    groups: the ``group_by`` cell metadata columns and a ``groups`` label
+    artifact, among the cells of ``cell_selection``. The diagonal is left blank
+    so that the colours span the pairs, and so are pairs that were not
+    compared; the ``matrix`` table holds each group's clones on its diagonal
+    for ``"shared"`` and 1 otherwise. Matrices of at most 12 groups print their
+    values, and of at most 40 name their groups on the axes. By default the
+    figure grows with the groups up to the width of a page.
 
     Tables: ``matrix`` (groups by groups) and ``pairs``.
     """
@@ -803,17 +803,17 @@ def clone_tracking(
 ) -> PlotResult:
     """Plot the share of cells of chosen clones across groups of cells.
 
-    ``clones`` is a ``clones`` artifact. The plot follows the clones that
-    ``ds.clones.track`` chooses: the ``top`` with the most cells in each
-    group, or ``labels``. Each draws one line, labelled with its clone ID,
-    across the groups, such as time points or cell types, of its share of
-    each group's cells with a clone. Groups are placed by their labels in the
-    ``group_by`` columns and the ``groups`` artifact, joined by commas;
-    ``order`` lists those names from left to right, or values whose text is
-    the name, such as time points as integers, and by default the names
+    ``clones`` is a clone artifact, such as ``clones`` or ``clonotypes``. The
+    plot follows the clones that ``ds.clones.track`` chooses: the ``top`` with
+    the most cells in each group, or ``labels``. Each draws one line, labelled
+    with its clone ID, across the groups, such as time points or cell types, of
+    its share of each group's cells with a clone. Groups are placed by their
+    labels in the ``group_by`` columns and the ``groups`` artifact, joined by
+    commas; ``order`` lists those names from left to right, or values whose
+    text is the name, such as time points as integers, and by default the names
     follow their natural order. Plots of at most 40 groups name them on the
-    axis, and the legend lists at most 80 clones, the largest first. By
-    default the figure grows with the groups up to the width of a page.
+    axis, and the legend lists at most 80 clones, the largest first. By default
+    the figure grows with the groups up to the width of a page.
 
     Tables: ``cells`` (``clone``, ``group``, the key columns, ``cells`` and
     ``fraction``).
