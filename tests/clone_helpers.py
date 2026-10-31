@@ -1,7 +1,11 @@
 """Stores and checks shared by the tests of clones."""
 
+import gc
+import math
 import shutil
-from collections.abc import Mapping, Sequence
+import tracemalloc
+from collections.abc import Callable, Mapping, Sequence
+from fractions import Fraction
 from math import sqrt
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -358,13 +362,47 @@ def levenshtein_distance(first: str, second: str) -> int:
     return previous[-1]
 
 
+def traced_peak(call: Callable[[], object]) -> int:
+    """The most bytes that ``call`` held at once beyond what was held before it.
+
+    ``tracemalloc`` sees NumPy's arrays and those that compiled kernels
+    allocate.
+    """
+    gc.collect()
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        call()
+        return tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+
+
+def smallest_budget(call: Callable[[int], object], high: int) -> int:
+    """The smallest budget below ``high`` at which ``call`` raises no MemoryError.
+
+    Found by bisection, so ``call`` must succeed at every larger budget.
+    """
+    low = 0
+    while low < high:
+        middle = (low + high) // 2
+        try:
+            call(middle)
+        except MemoryError:
+            low = middle + 1
+        else:
+            high = middle
+    return low
+
+
 def within_distance(first: str, second: str, metric: str, cutoff: int) -> bool:
     """Whether two texts are within ``cutoff`` by ``metric``, as scirpy measures it.
 
     ``normalized_hamming`` rounds the substitutions' percentage of the length
-    half up, in integers.
+    half up, computed as an exact fraction. A cutoff of 0 is identity under
+    every metric, as scirpy's ``ir_dist`` makes it.
     """
-    if metric == "identity":
+    if metric == "identity" or cutoff == 0:
         return first == second
     if metric == "levenshtein":
         return levenshtein_distance(first, second) <= cutoff
@@ -373,4 +411,7 @@ def within_distance(first: str, second: str, metric: str, cutoff: int) -> bool:
     mismatches = sum(a != b for a, b in zip(first, second, strict=True))
     if metric == "hamming":
         return mismatches <= cutoff
-    return not first or (200 * mismatches + len(first)) // (2 * len(first)) <= cutoff
+    if not first:
+        return True
+    percent = Fraction(100 * mismatches, len(first))
+    return math.floor(percent + Fraction(1, 2)) <= cutoff

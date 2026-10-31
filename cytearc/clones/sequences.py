@@ -41,13 +41,23 @@ __all__ = ["DISTANCE_METRICS", "allowed_mismatches", "neighbor_pairs"]
 
 #: The metrics of :func:`neighbor_pairs`.
 DISTANCE_METRICS: tuple[str, ...] = ("hamming", "normalized_hamming", "levenshtein")
+# The bytes that a search of two or more texts holds whatever they are: the
+# buffers of its sorts, its random generator and the objects of its arrays.
+_FIXED_BYTES = 1 << 16
+# The bytes of an array's object beside its values, for the arrays that each
+# length or block, and each pass of keys, keeps until the search returns.
+_ARRAY_BYTES = 192
+# The bytes of each group of texts of one length and block: its start, end
+# and length, and under levenshtein its block and its block's start and end.
+_GROUP_BYTES = 48
 # The bytes that each pair found holds until the search returns: its two
 # positions, and their copy when the pairs of all lengths are joined.
 _FOUND_PAIR_BYTES = 32
 # The bytes of each text beside its characters while the search runs: its
 # place in the list of texts, its length, block, rank among the blocks, group
-# key and position in the order of blocks and lengths, and the sorted keys.
-_TEXT_BYTES = 64
+# key and position in the order of blocks and lengths, and the sorted keys,
+# with two copies of the lengths of the texts compared at once.
+_TEXT_BYTES = 72
 # The bytes of a pair while a compiled loop collects it: two buffers that
 # double as they fill, and the copies returned.
 _LOOP_PAIR_BYTES = 32
@@ -55,10 +65,11 @@ _LOOP_PAIR_BYTES = 32
 _KEY_BYTES = 8
 _CANDIDATE_BYTES = 8
 # The pairs that a pass of variant keys keeps hold their codes until the
-# passes are joined, which then hold about this many bytes per pair: the
-# joined codes, their sorted copy and the two positions of each pair.
+# passes are joined, which then needs this many bytes per pair beside them,
+# 32 in all: the joined codes, their sorted copy and the distinct ones, and
+# then the two positions of each distinct pair.
 _KEPT_PAIR_BYTES = 8
-_JOINED_PAIR_BYTES = 40
+_JOINED_PAIR_BYTES = 24
 # Variant keys take at most this share of the bytes a search has left for a
 # pass, so that the candidate pairs of the pass fit beside them, but a pass
 # holds at least _MIN_KEYS_PER_PASS keys, 8 MiB: a budget too small for them
@@ -633,11 +644,17 @@ def _keyed_pairs(
         del keys
         pairs.sort()
         kept = _check_pairs(codes, lengths, pairs, n_rows, limit, deletions)
+        # The pairs kept are copied out while the candidates are still held.
+        memory.check(
+            _CANDIDATE_BYTES * n_candidates + _KEPT_PAIR_BYTES * kept + _ARRAY_BYTES,
+            "the pairs found",
+        )
         found.append(pairs[:kept].copy())
         del pairs
         n_kept += kept
-        memory.held = held + _KEPT_PAIR_BYTES * n_kept
-    memory.check(_JOINED_PAIR_BYTES * n_kept, "the pairs found")
+        memory.held = held + _KEPT_PAIR_BYTES * n_kept + _ARRAY_BYTES * len(found)
+    # The two arrays of the pairs are then held until the search returns.
+    memory.check(_JOINED_PAIR_BYTES * n_kept + 2 * _ARRAY_BYTES, "the pairs found")
     if n_parts == 1:
         near = found[0]
     else:
@@ -692,8 +709,10 @@ def _encoded(texts: list[str], memory: _Memory) -> tuple[np.ndarray, np.ndarray]
     # The matrix, and two copies of the rows of one length or block while
     # they are searched, such as the rows and their words or the rows of two
     # lengths, and the codes that hash the keys, 257 for each position, held
-    # until the search returns.
-    held = 3 * len(texts) * width + _TEXT_BYTES * len(texts) + _table_bytes(width)
+    # until the search returns; fewer than two texts are never compared.
+    held = 3 * len(texts) * width + _TEXT_BYTES * len(texts)
+    if len(texts) > 1:
+        held += _table_bytes(width) + _FIXED_BYTES
     what = "the encoded texts"
     # Joined, the texts take a byte per character, and their codes another.
     memory.check(held + 2 * characters, what)
@@ -702,9 +721,12 @@ def _encoded(texts: list[str], memory: _Memory) -> tuple[np.ndarray, np.ndarray]
         points = np.frombuffer(joined.encode("latin-1"), dtype=np.uint8)
     except UnicodeEncodeError:
         # Four bytes per character joined and as code points, and about 32
-        # while the characters are ranked.
+        # while the characters are ranked. A lone surrogate is a character
+        # like any other.
         memory.check(held + 40 * characters, what)
-        wide = np.frombuffer(joined.encode("utf-32-le"), dtype=np.uint32)
+        wide = np.frombuffer(
+            joined.encode("utf-32-le", "surrogatepass"), dtype=np.uint32
+        )
         distinct, ranks = unique_inverse(wide)
         if len(distinct) > 256:
             raise ValueError("texts can hold at most 256 distinct characters") from None
@@ -745,7 +767,11 @@ def _edits_keyed(sizes: np.ndarray, lengths: np.ndarray, limit: int) -> bool:
 
 @dataclass(slots=True)
 class _Found:
-    """The pairs found so far, each holding ``_FOUND_PAIR_BYTES`` of ``memory``."""
+    """The pairs found so far, each holding ``_FOUND_PAIR_BYTES`` of ``memory``.
+
+    The pairs of each length or block that has any are kept as two arrays,
+    which hold ``_ARRAY_BYTES`` each beside their values.
+    """
 
     memory: _Memory
     firsts: list[np.ndarray]
@@ -753,10 +779,13 @@ class _Found:
 
     def most(self) -> int:
         """The most pairs that a compiled loop may collect in the memory left."""
-        return self.memory.room // _LOOP_PAIR_BYTES
+        return max(0, self.memory.room - 2 * _ARRAY_BYTES) // _LOOP_PAIR_BYTES
 
     def add(self, first: np.ndarray, second: np.ndarray) -> None:
-        self.memory.held += _FOUND_PAIR_BYTES * len(first)
+        """Keep the pairs of a length or block, if it has any."""
+        if not len(first):
+            return
+        self.memory.held += _FOUND_PAIR_BYTES * len(first) + 2 * _ARRAY_BYTES
         self.firsts.append(first)
         self.seconds.append(second)
 
@@ -767,7 +796,8 @@ class _Found:
         first, second, complete = found
         if not complete:
             self.memory.exceeded(
-                _LOOP_PAIR_BYTES * (self.most() + 1), "the pairs found"
+                _LOOP_PAIR_BYTES * (self.most() + 1) + 2 * _ARRAY_BYTES,
+                "the pairs found",
             )
         return first, second
 
@@ -792,15 +822,21 @@ def neighbor_pairs(
             of receptor chains or the distinct barcodes of a library.
         metric: ``"hamming"``, ``"normalized_hamming"`` or ``"levenshtein"``.
         cutoff: The largest distance that links two texts: substitutions,
-            percent of the length, or edits.
+            percent of the length, or edits. 0 links only equal texts, as
+            scirpy compares them, even where one substitution is less than
+            half a percent of the length.
         blocks: Each text's block as an integer code, such as its gene calls
             or its sample; only texts of one block are compared. None
             compares all.
         max_bytes: The most bytes the search may hold: the encoded texts,
-            about three times their longest length and 64 bytes more per
-            text, with 2 KiB of hash codes for each position of the longest,
-            the variant keys and candidate pairs of one pass, 8 bytes each,
-            and 32 bytes for each pair it finds. None sets no limit.
+            about three times their longest length and 72 bytes more per
+            text, with 2 KiB of hash codes for each position of the longest
+            and 64 KiB for its sorts and smaller arrays; 48 bytes for each
+            length of each block; the variant keys and candidate pairs of one
+            pass, 8 bytes each, and 8 more for each candidate within the
+            cutoff; and 32 bytes for each pair it finds, counted once for
+            each pass of keys that finds it, with 384 for the arrays of each
+            length or block that has pairs. None sets no limit.
 
     Returns:
         The positions of the pairs as int64, the first below the second,
@@ -808,8 +844,8 @@ def neighbor_pairs(
 
     Raises:
         TypeError: If ``texts`` is not a one-dimensional sequence of str,
-            ``blocks`` not one of integer codes, or ``max_bytes`` not an
-            integer.
+            ``blocks`` not one of integer codes, or the cutoff or
+            ``max_bytes`` not an integer.
         ValueError: If the metric is unknown, the cutoff or ``max_bytes`` is
             negative, ``blocks`` does not hold one block per text, or the
             texts hold more than 256 distinct characters.
@@ -819,12 +855,7 @@ def neighbor_pairs(
     """
     if metric not in DISTANCE_METRICS:
         raise ValueError(f"metric must be one of {', '.join(DISTANCE_METRICS)}")
-    if (
-        isinstance(cutoff, bool)
-        or not isinstance(cutoff, int | np.integer)
-        or cutoff < 0
-    ):
-        raise ValueError("cutoff must be a non-negative integer")
+    cutoff = integer_argument(cutoff, "cutoff", minimum=0)
     limit_bytes = (
         None
         if max_bytes is None
@@ -845,18 +876,30 @@ def neighbor_pairs(
     group_keys = ranks * (int(lengths.max()) + 1) + lengths
     order = np.argsort(group_keys, kind="stable")
     ordered = group_keys[order]
-    starts = np.flatnonzero(np.concatenate([[True], ordered[1:] != ordered[:-1]]))
+    first_of_group = np.concatenate([[True], ordered[1:] != ordered[:-1]])
+    n_groups = int(np.count_nonzero(first_of_group))
+    memory.check(_GROUP_BYTES * n_groups, "the lengths and blocks of the texts")
+    memory.held += _GROUP_BYTES * n_groups
+    starts = np.flatnonzero(first_of_group)
+    del first_of_group
     ends = np.append(starts[1:], n_texts)
     group_lengths = lengths[order[starts]]
     found = _Found(memory, [], [])
+    # The positions of the pairs among the members of a length or block are
+    # replaced in turn by their positions among all texts, so that no copy of
+    # them outlives the pairs found.
     if metric == "levenshtein":
-        limit = int(cutoff)
+        # Texts are at most as many edits apart as the longer is long, so a
+        # larger cutoff links every pair.
+        limit = min(cutoff, int(lengths.max()))
         group_ranks = ranks[order[starts]]
         block_starts = np.flatnonzero(
             np.concatenate([[True], group_ranks[1:] != group_ranks[:-1]])
         )
         block_ends = np.append(block_starts[1:], len(starts))
-        for low, high in zip(block_starts.tolist(), block_ends.tolist(), strict=True):
+        for block in range(len(block_starts)):
+            low = int(block_starts[block])
+            high = int(block_ends[block])
             members = order[starts[low] : ends[high - 1]]
             if len(members) < 2:
                 continue
@@ -865,7 +908,10 @@ def neighbor_pairs(
                 first, second = _keyed_pairs(
                     matrix[members], lengths[members], limit, True, table, memory
                 )
-                found.add(*_ordered(members[first], members[second]))
+                first = members[first]
+                second = members[second]
+                first, second = _ordered(first, second)
+                found.add(first, second)
                 continue
             # Each pair of lengths within the cutoff, the shorter first.
             for group in range(low, high):
@@ -887,17 +933,21 @@ def neighbor_pairs(
                             found.most(),
                         )
                     )
-                    found.add(*_ordered(texts_of[first], partners[second]))
+                    first = texts_of[first]
+                    second = partners[second]
+                    first, second = _ordered(first, second)
+                    found.add(first, second)
     else:
         for group in range(len(starts)):
             if ends[group] - starts[group] < 2:
                 continue
             members = order[starts[group] : ends[group]]
             length = int(group_lengths[group])
+            # A cutoff of 0 links only equal texts, as scirpy's identity.
             limit = (
-                int(cutoff)
-                if metric == "hamming"
-                else allowed_mismatches(length, int(cutoff))
+                cutoff
+                if metric == "hamming" or not cutoff
+                else allowed_mismatches(length, cutoff)
             )
             limit = min(limit, length)
             codes = matrix[members, :length]
@@ -909,7 +959,9 @@ def neighbor_pairs(
                 first, second = found.looped(
                     _hamming_pairs(_words(codes), limit, found.most())
                 )
-            found.add(members[first], members[second])
+            first = members[first]
+            second = members[second]
+            found.add(first, second)
     if not found.firsts:
         return empty, empty.copy()
     if len(found.firsts) == 1:
@@ -918,7 +970,10 @@ def neighbor_pairs(
 
 
 def _ordered(first: np.ndarray, second: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """The positions of pairs, the lower of each first; ``second`` is reused."""
+    """The positions of pairs, the lower of each first; ``second`` is reused.
+
+    The caller rebinds both names to the result, so that ``first`` is freed.
+    """
     low = np.minimum(first, second)
     np.maximum(first, second, out=second)
     return low, second

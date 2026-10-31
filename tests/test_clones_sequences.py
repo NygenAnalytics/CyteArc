@@ -13,6 +13,7 @@ from cytearc.clones.sequences import (
 )
 from cytearc.repertoire.clonotypes import METRICS
 from tests.clone_helpers import levenshtein_distance as _levenshtein
+from tests.clone_helpers import smallest_budget, traced_peak
 from tests.clone_helpers import within_distance as _within
 
 
@@ -139,20 +140,66 @@ def test_allowed_mismatches_round_half_up() -> None:
         1,
     ]
     assert allowed_mismatches(4, 100) == 4
+    # 1 of 40 is 2.5% and 1 of 8 is 12.5%, which round up to 3% and 13%, so
+    # no substitution is allowed; rounding half to even would allow one.
+    assert allowed_mismatches(40, 2) == 0
+    assert allowed_mismatches(8, 12) == 0
+    # 3 of 8 is 37.5%, which rounds up to 38%.
+    assert allowed_mismatches(8, 37) == 2
+    assert allowed_mismatches(8, 38) == 3
+
+
+@pytest.mark.parametrize("path", ["keyed", "pairwise"])
+def test_a_percentage_of_one_half_rounds_up(monkeypatch, path) -> None:
+    # 1 of 8 letters is 12.5% and 1 of 40 is 2.5%: within 13% and 3%, but
+    # not within 12% and 2%, as rounding half to even would have them.
+    _force(monkeypatch, path)
+    for length, below in ((8, 12), (40, 2)):
+        texts = ["A" * length, "A" * (length - 1) + "C"]
+        found = neighbor_pairs(texts, "normalized_hamming", below)
+        assert _pairs(*found) == set(), length
+        found = neighbor_pairs(texts, "normalized_hamming", below + 1)
+        assert _pairs(*found) == {(0, 1)}, length
+
+
+@pytest.mark.parametrize("path", ["keyed", "pairwise"])
+def test_a_cutoff_of_zero_links_only_equal_texts(monkeypatch, path) -> None:
+    # One substitution in 201 letters is 0.498%, which rounds to 0%, but
+    # scirpy compares identity at a cutoff of 0.
+    long = "A" * 201
+    texts = [long, long[:-1] + "C", long]
+    found = neighbor_pairs(texts, "normalized_hamming", 1)
+    assert _pairs(*found) == {(0, 1), (0, 2), (1, 2)}
+    _force(monkeypatch, path)
+    assert _pairs(*neighbor_pairs(texts, "normalized_hamming", 0)) == {(0, 2)}
 
 
 def test_neighbor_pairs_check_their_arguments() -> None:
     with pytest.raises(ValueError, match="metric must be one of"):
         neighbor_pairs(["A"], "identity", 0)
-    with pytest.raises(ValueError, match="cutoff must be a non-negative integer"):
+    with pytest.raises(ValueError, match="cutoff must be at least 0"):
         neighbor_pairs(["A"], "hamming", -1)
-    with pytest.raises(ValueError, match="cutoff must be a non-negative integer"):
-        neighbor_pairs(["A"], "hamming", 1.5)
+    for cutoff in (1.5, 1.0, True, "1"):
+        with pytest.raises(TypeError, match="cutoff must be an integer"):
+            neighbor_pairs(["A"], "hamming", cutoff)
     with pytest.raises(ValueError, match="blocks must hold one block per text"):
         neighbor_pairs(["A", "C"], "hamming", 1, blocks=[0])
     first, second = neighbor_pairs([], "levenshtein", 1)
     assert len(first) == len(second) == 0
     assert METRICS[0] == "identity"
+
+
+def test_a_cutoff_beyond_every_length_links_every_pair() -> None:
+    # Two texts are at most as many edits apart as the longer is long, and
+    # texts of one length differ in at most as many letters, whatever the
+    # cutoff beyond that, even past 64 bits.
+    texts = ["CASSF", "", "GG", "CAGSFW", "CASSF"]
+    every = set(itertools.combinations(range(len(texts)), 2))
+    for cutoff in (6, 2**40, 2**63 - 1, 2**63, 2**64):
+        found = neighbor_pairs(texts, "levenshtein", cutoff)
+        assert _pairs(*found) == every
+        found = neighbor_pairs(texts, "hamming", cutoff)
+        assert _pairs(*found) == {(0, 4)}
 
 
 @pytest.mark.parametrize(
@@ -286,6 +333,14 @@ def test_texts_compare_by_character_beyond_ascii() -> None:
         for metric, cutoff in (("hamming", 1), ("levenshtein", 1)):
             first, second = neighbor_pairs(texts, metric, cutoff)
             assert _pairs(first, second) == _expected(texts, metric, cutoff)
+    # Alpha is U+03B1 and the plus-minus sign U+00B1: coded by their low
+    # byte, they would be one character. A lone surrogate is a character.
+    for texts in (["α", "±"], ["α±", "±α"], ["\ud800a", "\udc00a", "\ud800b"]):
+        for metric in ("hamming", "levenshtein"):
+            for cutoff in (0, 1):
+                first, second = neighbor_pairs(texts, metric, cutoff)
+                assert _pairs(first, second) == _expected(texts, metric, cutoff)
+    assert _pairs(*neighbor_pairs(["α", "±"], "hamming", 0)) == set()
     with pytest.raises(ValueError, match="at most 256 distinct characters"):
         neighbor_pairs([chr(0x100 + index) for index in range(257)], "hamming", 1)
 
@@ -328,9 +383,94 @@ _VARIANTS = [_BASE] + [
 
 
 def _encoding_bytes(texts: list[str]) -> int:
-    """The bytes the encoded texts hold, as the search documents them."""
+    """The bytes the encoded texts hold, as the search documents them.
+
+    Three bytes for each letter of the longest text and 72 for each text,
+    257 codes of 8 bytes for each position of the longest, and 64 KiB for the
+    sorts and smaller arrays.
+    """
     width = max(map(len, texts))
-    return len(texts) * (3 * width + 64) + 8 * 257 * width
+    return len(texts) * (3 * width + 72) + 8 * 257 * width + 2**16
+
+
+def _group_bytes(texts: list[str]) -> int:
+    """The 48 bytes that the search holds for each length of the texts."""
+    return 48 * len(set(map(len, texts)))
+
+
+# The two arrays that each length or block with pairs keeps, 192 bytes each.
+_PAIR_ARRAYS = 2 * 192
+
+
+@pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
+@pytest.mark.parametrize("path", ["keyed", "passes", "pairwise"])
+def test_the_search_holds_no_more_than_the_smallest_budget_it_accepts(
+    monkeypatch, path, metric
+) -> None:
+    # Copies of two texts of two lengths, the longer last, pair with each
+    # other: their 30,450 pairs dominate what the search holds, the shorter
+    # copies' pairs are held while the longer copies' are found, and each
+    # pass of keys keeps more pairs than it holds keys. Small passes split
+    # the keys of each length into several.
+    texts = ["CASSF"] * 60 + ["CASSLGQAYEQYF"] * 240
+    _force(monkeypatch, "pairwise" if path == "pairwise" else "keyed")
+    if path == "passes":
+        monkeypatch.setattr(sequences, "_KEYS_PER_PASS", 800)
+        monkeypatch.setattr(sequences, "_MIN_KEYS_PER_PASS", 1)
+
+    def search(budget: int | None) -> tuple[np.ndarray, np.ndarray]:
+        return neighbor_pairs(texts, metric, 1, max_bytes=budget)
+
+    assert _pairs(*search(None)) == _expected(texts, metric, 1)
+    budget = smallest_budget(search, 1 << 23)
+    assert traced_peak(lambda: search(budget)) <= budget
+
+
+@pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
+def test_keys_of_distinct_texts_hold_no_more_than_the_smallest_budget(
+    monkeypatch, metric
+) -> None:
+    # 200 families of 20 distinct texts of 12 residues, the texts of each
+    # differing at one position: every pair of a family is one substitution
+    # or edit apart and shares the one key that masks or deletes that
+    # position. The 38,000 pairs, each a candidate once, outnumber the keys
+    # and take the most once joined and placed among all texts.
+    rng = np.random.default_rng(6)
+    letters = list("ACDEFGHIKLMNPQRSTVWY")
+    texts = []
+    for family in range(200):
+        text = list(rng.choice(letters, size=12))
+        for letter in letters:
+            text[family % 12] = letter
+            texts.append("".join(text))
+    _force(monkeypatch, "keyed")
+
+    def search(budget: int | None) -> tuple[np.ndarray, np.ndarray]:
+        return neighbor_pairs(texts, metric, 1, max_bytes=budget)
+
+    assert len(search(None)[0]) == 200 * 20 * 19 // 2
+    budget = smallest_budget(search, 1 << 23)
+    assert traced_peak(lambda: search(budget)) <= budget
+
+
+@pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
+@pytest.mark.parametrize("near", [True, False])
+def test_many_blocks_hold_no_more_than_the_smallest_budget_they_accept(
+    metric, near
+) -> None:
+    # Each of 1,500 blocks holds two texts, within one substitution of each
+    # other or not: what each block keeps, its pairs and their arrays or
+    # nothing, adds up over the blocks.
+    other = "CASSLGQAYEQYW" if near else "GGGGGGGGGGGGG"
+    texts = ["CASSLGQAYEQYF", other] * 1_500
+    blocks = np.repeat(np.arange(1_500), 2)
+
+    def search(budget: int | None) -> tuple[np.ndarray, np.ndarray]:
+        return neighbor_pairs(texts, metric, 1, blocks=blocks, max_bytes=budget)
+
+    assert len(search(None)[0]) == (1_500 if near else 0)
+    budget = smallest_budget(search, 1 << 23)
+    assert traced_peak(lambda: search(budget)) <= budget
 
 
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
@@ -344,7 +484,12 @@ def test_a_budget_below_the_pairs_found_raises_memory_error(
     # position pair with each other; variants at two positions are two
     # substitutions or edits apart.
     assert len(expected) == 36 + 4 * 9 * 8 // 2
-    needed = _encoding_bytes(_VARIANTS) + 32 * len(expected)
+    needed = (
+        _encoding_bytes(_VARIANTS)
+        + _group_bytes(_VARIANTS)
+        + 32 * len(expected)
+        + _PAIR_ARRAYS
+    )
     with pytest.raises(MemoryError, match="for the pairs found, more than the"):
         neighbor_pairs(_VARIANTS, metric, 1, max_bytes=needed - 1)
     roomy = neighbor_pairs(_VARIANTS, metric, 1, max_bytes=needed + 2**20)
@@ -358,12 +503,18 @@ def test_pairs_found_hold_memory_while_later_lengths_are_searched(
     _force(monkeypatch, "pairwise")
     # Two families of near variants, of 8 and 12 letters, more than one edit
     # apart: the shorter family's 36 pairs are found first and hold 32 bytes
-    # each while the longer family's 180 pairs are collected.
+    # each, and their arrays 384, while the longer family's 180 pairs are
+    # collected.
     short = [letter + "CDEFGHIK"[1:] for letter in "PQRSTVWYC"]
     texts = short + _VARIANTS
     expected = _expected(texts, metric, 1)
     assert len(expected) == 36 + 180
-    needed = _encoding_bytes(texts) + 32 * len(expected)
+    needed = (
+        _encoding_bytes(texts)
+        + _group_bytes(texts)
+        + 32 * len(expected)
+        + 2 * _PAIR_ARRAYS
+    )
     with pytest.raises(MemoryError, match="for the pairs found"):
         neighbor_pairs(texts, metric, 1, max_bytes=needed - 1)
     assert _pairs(*neighbor_pairs(texts, metric, 1, max_bytes=needed)) == expected
@@ -387,6 +538,13 @@ def test_the_encoded_texts_must_fit_the_budget() -> None:
         neighbor_pairs(texts, "levenshtein", 1, max_bytes=_encoding_bytes(texts))
     with pytest.raises(MemoryError, match="for the encoded texts"):
         neighbor_pairs(["A"], "hamming", 1, max_bytes=0)
+    # No text, or one, is never compared, so the codes that hash keys are
+    # neither built nor counted.
+    assert len(neighbor_pairs([], "hamming", 1, max_bytes=0)[0]) == 0
+    one = ["CASSLGQAYEQYF"]
+    # Three bytes per letter and 72 for the text, and 2 per letter joined.
+    needed = 3 * len(one[0]) + 72 + 2 * len(one[0])
+    assert len(neighbor_pairs(one, "hamming", 1, max_bytes=needed)[0]) == 0
     # Texts beyond Latin-1 take more bytes per character while they are coded.
     wide = ["αβγ", "αβδ"]
     enough_for_latin = _encoding_bytes(wide) + 2 * 6
@@ -394,24 +552,59 @@ def test_the_encoded_texts_must_fit_the_budget() -> None:
         neighbor_pairs(wide, "hamming", 1, max_bytes=enough_for_latin)
 
 
-def test_candidate_pairs_of_a_pass_must_fit_the_budget(monkeypatch) -> None:
+def test_the_keys_and_candidate_pairs_of_a_pass_must_fit_the_budget(
+    monkeypatch,
+) -> None:
     _force(monkeypatch, "keyed")
     # Every variant at position 0 shares the key that masks it: 9 texts, 36
     # candidate pairs, all within one substitution. The keys of the 9 texts
     # number 9 * 12, beside the 12 of one text's scratch space; the
     # candidates need 8 bytes each beside them.
     texts = [letter + _BASE[1:] for letter in "PQRSTVWYC"]
-    keys = 8 * (len(texts) + 1) * len(_BASE)
-    encoded = _encoding_bytes(texts)
+    held = _encoding_bytes(texts) + _group_bytes(texts) + 8 * len(_BASE)
+    keys = 8 * len(texts) * len(_BASE)
+    with pytest.raises(MemoryError, match="the variant keys of one pass"):
+        neighbor_pairs(texts, "hamming", 1, max_bytes=held + keys - 1)
     with pytest.raises(MemoryError, match="the candidate pairs of texts"):
-        neighbor_pairs(texts, "hamming", 1, max_bytes=encoded + keys + 8 * 36 - 1)
+        neighbor_pairs(texts, "hamming", 1, max_bytes=held + keys + 8 * 36 - 1)
+    # Joined, the 36 pairs need 32 bytes each and their arrays 384, beside
+    # the 192 of the array the pass kept: more than the keys and candidates.
+    budget = held + 32 * 36 + 192 + _PAIR_ARRAYS
     with pytest.raises(MemoryError, match="the pairs found"):
-        neighbor_pairs(texts, "hamming", 1, max_bytes=encoded + keys + 8 * 36)
-    # One text's scratch beside 48 bytes for each pair kept and joined.
-    found = neighbor_pairs(
-        texts, "hamming", 1, max_bytes=encoded + 8 * len(_BASE) + 48 * 36
-    )
+        neighbor_pairs(texts, "hamming", 1, max_bytes=budget - 1)
+    found = neighbor_pairs(texts, "hamming", 1, max_bytes=budget)
     assert _pairs(*found) == _expected(texts, "hamming", 1)
+    # Of two texts, whose 24 letters joined fit beside the encoded texts, the
+    # scratch space of one text's 12 keys is checked first.
+    two = texts[:2]
+    held = _encoding_bytes(two) + _group_bytes(two)
+    with pytest.raises(MemoryError, match="the variant keys of one text"):
+        neighbor_pairs(two, "hamming", 1, max_bytes=held + 8 * len(_BASE) - 1)
+
+
+@pytest.mark.parametrize(
+    ("text", "binding"),
+    [
+        # Copies of a text of 5 letters share its 5 keys: 10 copies yield 50
+        # keys and 5 * 45 candidate pairs, of 45 distinct pairs. Copying the
+        # pairs kept, and their array, beside the candidates takes the most.
+        ("CASSF", 8 * 225 + 8 * 45 + 192),
+        # Of 2 letters: 20 keys, 90 candidates and 45 pairs, which take the
+        # most once joined, 32 bytes each, with the array the pass kept and
+        # the two arrays of the pairs.
+        ("CA", 32 * 45 + 192 + 2 * 192),
+    ],
+)
+def test_the_pairs_kept_from_a_pass_must_fit_the_budget(
+    monkeypatch, text, binding
+) -> None:
+    _force(monkeypatch, "keyed")
+    texts = [text] * 10
+    budget = _encoding_bytes(texts) + _group_bytes(texts) + 8 * len(text) + binding
+    with pytest.raises(MemoryError, match="for the pairs found"):
+        neighbor_pairs(texts, "hamming", 1, max_bytes=budget - 1)
+    found = neighbor_pairs(texts, "hamming", 1, max_bytes=budget)
+    assert _pairs(*found) == set(itertools.combinations(range(10), 2))
 
 
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
