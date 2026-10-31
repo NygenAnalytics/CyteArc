@@ -129,6 +129,7 @@ def test_mixscape_separates_knocked_out_cells_from_escapers(store, template) -> 
     assert classes.assay == "RNA"
     result = store.perturbation.load_mixscape(classes)
     assert isinstance(result, MixscapeResult)
+    assert result.from_assay == "RNA"
     assert (result.perturbation_type, result.split_column) == ("KO", None)
     targets = result.targets.set_index("target")
     assert targets.index.tolist() == ["GENE_A", "GENE_B", "GENE_C"]

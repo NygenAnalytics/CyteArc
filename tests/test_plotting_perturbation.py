@@ -56,7 +56,7 @@ THRESHOLDS = ArtifactRef(
     scope="assay", assay="CRISPR", kind="guide_thresholds", artifact_id="b" * 64
 )
 CALLED = to_rgba("#2b6cb0")
-NOT_CALLED = to_rgba("#bdbdbd")
+NOT_CALLED = to_rgba("#9e9e9e")
 POSTERIORS = {
     "poisson_gaussian": poisson_gaussian_posterior,
     "gaussian": gaussian_posterior,
@@ -180,6 +180,23 @@ def test_a_small_library_labels_one_bar_per_guide() -> None:
         labels = [label.get_text() for label in ax.get_yticklabels()]
         assert sorted(labels) == ["g0", "g1", "g2", "g3", "g4"]
         assert ax.get_lines() == []
+    finally:
+        result.close()
+
+
+def test_cells_without_a_call_take_the_grey_of_the_threshold_panels() -> None:
+    result = guide_calls(_store(5), CALLS, max_guides_per_cell=3, show=False)
+
+    try:
+        # The bars of no guide, one guide, two guides, and three or more.
+        bars = result.axes["guides_per_cell"].patches
+        several = to_rgba("#d1495b")
+        assert [bar.get_facecolor() for bar in bars] == [
+            NOT_CALLED,
+            CALLED,
+            several,
+            several,
+        ]
     finally:
         result.close()
 
@@ -841,12 +858,12 @@ def _check_efficiency_rows(result: Any, *, alpha: float) -> None:
     table = result.tables["efficiency"]
     fold = table["log2_fold_change"].to_numpy()
     n_cells = table["n_cells"].to_numpy()
-    no_umi = np.isneginf(fold)
+    no_counts = np.isneginf(fold)
     # The first row is drawn at the top.
     heights = np.arange(len(table))[::-1]
     groups = [
         (chosen, marker)
-        for chosen, marker in ((~no_umi, "o"), (no_umi, "<"))
+        for chosen, marker in ((~no_counts, "o"), (no_counts, "<"))
         if chosen.any()
     ]
     assert len(ax.collections) == len(groups)
@@ -864,15 +881,15 @@ def _check_efficiency_rows(result: Any, *, alpha: float) -> None:
         x[chosen] = offsets[:, 0]
         colors[chosen] = collection.get_facecolors()
         sizes[chosen] = collection.get_sizes()
-    np.testing.assert_array_equal(x[~no_umi], fold[~no_umi])
+    np.testing.assert_array_equal(x[~no_counts], fold[~no_counts])
     left, right = ax.get_xlim()
     assert left < 0.0 < right
     assert ((left < x) & (x < right)).all()
-    if no_umi.any():
-        # The rows where no UMI remains share one position at the left edge.
-        edge = x[no_umi]
+    if no_counts.any():
+        # The rows without counts share one position at the left edge.
+        edge = x[no_counts]
         assert (edge == edge[0]).all()
-        assert edge[0] < fold[~no_umi].min(initial=0.0)
+        assert edge[0] < fold[~no_counts].min(initial=0.0)
         assert edge[0] - left < 0.05 * (right - left)
     significant = table["adjusted_p_value"].to_numpy() <= alpha
     expected_colors = np.asarray(
@@ -886,8 +903,8 @@ def _check_efficiency_rows(result: Any, *, alpha: float) -> None:
     )
     names = table[result.provenance.extras["by"]].tolist()
     assert _row_labels(ax) == [
-        f"{name} (no UMI remains)" if missing else name
-        for name, missing in zip(names, no_umi, strict=True)
+        f"{name} (no counts)" if missing else name
+        for name, missing in zip(names, no_counts, strict=True)
     ]
     (line,) = ax.get_lines()
     assert list(line.get_xdata()) == [0.0, 0.0]
@@ -901,7 +918,7 @@ def test_efficiency_draws_each_tested_target_from_knockdown_to_activation() -> N
 
     try:
         assert requests == [EFFICIENCY]
-        # No UMI of TP53 remains, so its fold change of minus infinity is first.
+        # TP53 has no counts, so its fold change of minus infinity is first.
         pd.testing.assert_frame_equal(
             result.tables["efficiency"],
             record.table.iloc[[1, 0, 2, 3]].reset_index(drop=True),
@@ -909,7 +926,7 @@ def test_efficiency_draws_each_tested_target_from_knockdown_to_activation() -> N
         assert list(result.axes) == ["efficiency"]
         _check_efficiency_rows(result, alpha=0.05)
         ax = result.axes["efficiency"]
-        assert _row_labels(ax) == ["TP53 (no UMI remains)", "MYC", "GATA1", "KLF1"]
+        assert _row_labels(ax) == ["TP53 (no counts)", "MYC", "GATA1", "KLF1"]
         assert ax.get_xlabel() == "Log2 fold change against control cells"
         assert ax.get_title().splitlines() == [
             "Perturbation efficiency by target",
@@ -919,7 +936,7 @@ def test_efficiency_draws_each_tested_target_from_knockdown_to_activation() -> N
         assert [text.get_text() for text in legend.get_texts()] == [
             "Significant at FDR 0.05",
             "Not significant",
-            "No UMI remains in the perturbed cells",
+            "No counts in the perturbed cells",
             "12 perturbed cells",
             "30 perturbed cells",
             "40 perturbed cells",
@@ -971,7 +988,7 @@ def test_efficiency_by_guide_draws_each_tested_guide() -> None:
         _check_efficiency_rows(result, alpha=0.01)
         ax = result.axes["efficiency"]
         assert _row_labels(ax) == [
-            "TP53_1 (no UMI remains)",
+            "TP53_1 (no counts)",
             "MYC_1",
             "GATA1_1",
             "MYC_2",
@@ -984,7 +1001,7 @@ def test_efficiency_by_guide_draws_each_tested_guide() -> None:
         assert [text.get_text() for text in legend.get_texts()] == [
             "Significant at FDR 0.01",
             "Not significant",
-            "No UMI remains in the perturbed cells",
+            "No counts in the perturbed cells",
             "6 perturbed cells",
             "15 perturbed cells",
             "20 perturbed cells",
@@ -1047,7 +1064,7 @@ def test_efficiency_without_a_finite_fold_change_still_shows_zero() -> None:
         (legend,) = lost.figure.legends
         assert [text.get_text() for text in legend.get_texts()] == [
             "Not significant",
-            "No UMI remains in the perturbed cells",
+            "No counts in the perturbed cells",
             "1 perturbed cell",
         ]
     finally:
@@ -1090,7 +1107,7 @@ def test_efficiency_draws_into_caller_axes_in_the_theme() -> None:
         assert [text.get_text() for text in ax.get_legend().get_texts()][:3] == [
             "Significant at FDR 0.05",
             "Not significant",
-            "No UMI remains in the perturbed cells",
+            "No counts in the perturbed cells",
         ]
         _check_efficiency_rows(result, alpha=0.05)
         (line,) = ax.get_lines()
@@ -1203,6 +1220,7 @@ def _edistance_record(
     return PerturbationEDistance(
         table=pd.DataFrame(columns),
         by=by,
+        from_assay="RNA",
         n_permutations=n_permutations,
         random_seed=7,
     )
@@ -1711,6 +1729,7 @@ def _mixscape_record(
         cells=frame,
         targets=table,
         de_genes=pd.DataFrame({"target": [], "split": [], "feature": []}),
+        from_assay="RNA",
         perturbation_type=perturbation_type,
         split_column=split_column,
     )
@@ -3023,8 +3042,8 @@ def test_association_volcano_moves_crowded_labels_apart() -> None:
         result.close()
 
 
-def test_association_volcano_rasterizes_more_than_100000_points() -> None:
-    n_pairs = 100_000
+def test_association_volcano_rasterizes_more_than_50000_points() -> None:
+    n_pairs = 50_000
     discovery = _pair_table(
         ["A"] * n_pairs + ["B"],
         [f"G{index}" for index in range(n_pairs + 1)],
@@ -3603,7 +3622,7 @@ def test_association_calibration_rasterizes_crowded_panels(
     crowded: str,
 ) -> None:
     monkeypatch.setattr(
-        "cytearc.plotting.perturbation._ASSOCIATION_RASTERIZE_THRESHOLD", threshold
+        "cytearc.plotting.perturbation.DEFAULT_RASTERIZE_THRESHOLD", threshold
     )
     store = _record_store(_associations_record(discovery))
 
@@ -4811,7 +4830,7 @@ COMPOSED_LEGENDS: dict[str, dict[int, list[str]]] = {
         0: [
             "Significant at FDR 0.05",
             "Not significant",
-            "No UMI remains in the perturbed cells",
+            "No counts in the perturbed cells",
             "12 perturbed cells",
             "30 perturbed cells",
             "40 perturbed cells",

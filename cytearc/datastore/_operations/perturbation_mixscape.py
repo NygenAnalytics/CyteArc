@@ -1036,6 +1036,7 @@ class _PerturbationMixscapeOperationsMixin(_PerturbationMixscapeOperationsBase):
                     "feature": feature_ids[read_array(group, "de_features")],
                 }
             ),
+            from_assay=assay.name,
             perturbation_type=str(parameters["perturbation_type"]),
             split_column=split_columns[0] if split_columns else None,
         )

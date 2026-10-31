@@ -581,6 +581,7 @@ class _PerturbationEffectOperationsMixin(_PerturbationEffectOperationsBase):
         return PerturbationEDistance(
             table=pd.DataFrame(columns),
             by=by,
+            from_assay=str(edistance.assay),
             n_permutations=int(parameters["n_permutations"]),
             random_seed=int(parameters["random_seed"]),
         )

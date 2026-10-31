@@ -860,10 +860,11 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
           guide, the fit can split them from the cells with ambient UMIs and
           call those; a warning names this case.
         - ``"fixed"`` calls every guide from ``min_umi`` UMIs, which it needs.
-        - ``"top_guide"`` calls each cell's top guide when its share of the
-          cell's guide UMIs exceeds ``fraction_threshold`` (default 0.8) and
-          it has ``min_umi`` UMIs (default 5), as SCEPTRE's maximum rule does.
-          A cell gets at most one call; a cell whose top guide falls short is
+        - ``"top_guide"`` calls each cell's top guide when the cell holds
+          ``min_umi`` guide UMIs (default 5) and the top guide's share of
+          them exceeds ``fraction_threshold`` (default 0.8), as the maximum
+          rule of the SCEPTRE book does. A cell gets at most one call; a cell
+          with fewer guide UMIs, or whose top guide holds a smaller share, is
           labelled ``"Negative"``.
 
         The fitted methods fit each guide in each sample of ``sample_column``
@@ -891,8 +892,10 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
                 its name.
             method: ``"poisson_gaussian"``, ``"gaussian"``, ``"fixed"`` or
                 ``"top_guide"``.
-            min_umi: The fewest UMIs of a called guide. None takes the
-                method's default; ``"fixed"`` needs a value.
+            min_umi: The UMI floor: the fewest UMIs of a called guide for
+                the fitted methods and ``"fixed"``, and the fewest guide UMIs
+                of a called cell for ``"top_guide"``. None takes the method's
+                default; ``"fixed"`` needs a value.
             fraction_threshold: For ``"top_guide"`` only, the share of the
                 cell's guide UMIs that its top guide must exceed, at least 0
                 and below 1. None takes 0.8.
@@ -1067,9 +1070,9 @@ class _PerturbationGuideOperationsMixin(_PerturbationGuideOperationsBase):
             )
             if short:
                 logger.info(
-                    f"{short} cells hold guide UMIs but no call: their top guide "
-                    f"holds at most {fraction:g} of their guide UMIs or fewer than "
-                    f"{resolved_min_umi} UMIs"
+                    f"{short} cells hold guide UMIs but no call: they hold fewer "
+                    f"than {resolved_min_umi} guide UMIs, or their top guide holds "
+                    f"at most {fraction:g} of them"
                 )
         return planned.ref
 

@@ -29,6 +29,7 @@ from cytearc.perturbation.mixtures import (
     fit_poisson_gaussian,
 )
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
+from cytearc.utils.logging import logger
 from tests.perturbation_helpers import (
     copy_store,
     open_store,
@@ -253,11 +254,32 @@ def test_top_guide_calls_the_top_guide_above_the_fraction(tmp_path) -> None:
     store = _top_guide_store(tmp_path)
     cells = _cells(store)
 
-    default = store.perturbation.call_guides(cells, method="top_guide")
+    messages: list[str] = []
+    sink = logger.add(lambda message: messages.append(message.record["message"]))
+    try:
+        default = store.perturbation.call_guides(cells, method="top_guide")
+        half = store.perturbation.call_guides(
+            cells, method="top_guide", fraction_threshold=0.5
+        )
+    finally:
+        logger.remove(sink)
     assert _call_sets(store, default) == {
         ("cell1", "CRISPR0", 5),
         ("cell2", "CRISPR0", 9),
     }
+    # The 5 guide UMIs of cell0 reach the floor of 5, though its top guide's 4
+    # do not, so its share of 0.8 calls it at a fraction of 0.5.
+    assert _call_sets(store, half) == {
+        ("cell0", "CRISPR0", 4),
+        ("cell1", "CRISPR0", 5),
+        ("cell2", "CRISPR0", 9),
+    }
+    assert [message for message in messages if "but no call" in message] == [
+        "4 cells hold guide UMIs but no call: they hold fewer than 5 guide UMIs, "
+        "or their top guide holds at most 0.8 of them",
+        "3 cells hold guide UMIs but no call: they hold fewer than 5 guide UMIs, "
+        "or their top guide holds at most 0.5 of them",
+    ]
     status = inspect_artifact(store.zw, default)
     assert status.parameters == {
         "method": "top_guide",
