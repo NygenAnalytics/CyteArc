@@ -22,9 +22,13 @@ from ._figure import (
 )
 from ._groups import cell_groups
 from ._style import (
+    LEGEND_SIDE_MAX_ENTRIES,
+    MAX_FIGURE_WIDTH_INCHES,
     apply_figure_chrome,
     categorical_color_map,
     colormap_palette,
+    legend_side_columns,
+    legend_side_rows,
     theme_context,
 )
 
@@ -567,8 +571,13 @@ def clonal_rarefaction(
     return plot_result
 
 
-# Overlap matrices of at most this many groups print their values.
+# Overlap matrices of at most this many groups print their values, and the
+# overlap and tracking plots of at most this many groups name them on their
+# axes; their tables name every group.
 _ANNOTATED_GROUPS = 12
+_NAMED_GROUPS = 40
+# Room in inches beside an overlap matrix for its colour bar.
+_COLORBAR_INCHES = 1.2
 _OVERLAP_TITLES = {
     "shared": "Shared clones",
     "jaccard": "Jaccard index",
@@ -605,7 +614,9 @@ def clonal_overlap(
     ``cell_selection``. The diagonal is left blank so that the colours span
     the pairs, and so are pairs that were not compared; the ``matrix`` table
     holds each group's clones on its diagonal for ``"shared"`` and 1
-    otherwise. Matrices of at most 12 groups print their values.
+    otherwise. Matrices of at most 12 groups print their values, and of at
+    most 40 name their groups on the axes. By default the figure grows with
+    the groups up to the width of a page.
 
     Tables: ``matrix`` (groups by groups) and ``pairs``.
     """
@@ -629,8 +640,11 @@ def clonal_overlap(
     )
     matrix = pd.DataFrame(values, index=pd.Index(names), columns=pd.Index(names))
     if figsize is None and target is None:
-        side = max(4.0, 0.55 * len(names) + 2.5)
-        figsize = (side + 1.2, side)
+        side = min(
+            max(4.0, 0.55 * len(names) + 2.5),
+            MAX_FIGURE_WIDTH_INCHES - _COLORBAR_INCHES,
+        )
+        figsize = (side + _COLORBAR_INCHES, side)
     require_matplotlib()
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
@@ -640,8 +654,12 @@ def clonal_overlap(
         drawn = values.copy()
         drawn[np.diag_indices(len(names))] = np.nan
         image = ax.imshow(np.ma.masked_invalid(drawn), cmap="viridis")
-        ax.set_xticks(np.arange(len(names)), names, rotation=90)
-        ax.set_yticks(np.arange(len(names)), names)
+        if len(names) <= _NAMED_GROUPS:
+            ax.set_xticks(np.arange(len(names)), names, rotation=90)
+            ax.set_yticks(np.arange(len(names)), names)
+        else:
+            ax.set_xticks([])
+            ax.set_yticks([])
         ax.set_title(_OVERLAP_TITLES[index])
         if len(names) <= _ANNOTATED_GROUPS:
             for row in range(len(names)):
@@ -709,10 +727,13 @@ def clone_tracking(
     ``ds.clones.track`` chooses: the ``top`` with the most cells in each
     group, or ``labels``. Each draws one line, labelled with its clone ID,
     across the groups, such as time points or cell types, of its share of
-    each group's cells with a clone. Groups are placed by their labels in the ``group_by``
-    columns and the ``groups`` artifact, joined by commas; ``order`` lists
-    those names from left to right, which by default follow their natural
-    order.
+    each group's cells with a clone. Groups are placed by their labels in the
+    ``group_by`` columns and the ``groups`` artifact, joined by commas;
+    ``order`` lists those names from left to right, or values whose text is
+    the name, such as time points as integers, and by default the names
+    follow their natural order. Plots of at most 40 groups name them on the
+    axis, and the legend lists at most 80 clones, the largest first. By
+    default the figure grows with the groups up to the width of a page.
 
     Tables: ``cells`` (``clone``, ``group``, the key columns, ``cells`` and
     ``fraction``).
@@ -747,12 +768,17 @@ def clone_tracking(
     if order is None:
         positions = list(present)
     else:
-        positions = list(order)
-        if sorted(map(str, positions)) != sorted(map(str, present)):
+        # Groups are placed by name, so an order of numbers names them by
+        # their text.
+        positions = [str(name) for name in order]
+        if sorted(positions) != sorted(map(str, present)):
             raise ValueError(f"order must list the groups {present}")
     by_clone = dict(tuple(placed.groupby("clone", sort=False)))
     if figsize is None and target is None:
-        figsize = (max(6.0, 0.7 * len(positions) + 4.0), 4.2)
+        figsize = (
+            min(max(6.0, 0.7 * len(positions) + 4.0), MAX_FIGURE_WIDTH_INCHES),
+            4.2,
+        )
     require_matplotlib()
     with theme_context(theme):
         figure, axes, owns = normalize_axes_target(
@@ -777,17 +803,30 @@ def clone_tracking(
                 color=colors[name],
                 label=name,
             )
-        ax.set_xticks(x, positions, rotation=45, ha="right")
+        if len(positions) <= _NAMED_GROUPS:
+            ax.set_xticks(x, positions, rotation=45, ha="right")
+        else:
+            ax.set_xticks([])
         ax.set_ylabel("Fraction of the group's cells")
         ax.set_title("Clones across groups")
         if show_legend:
+            # The largest clones, in columns that fit the figure's height.
+            lines = ax.get_lines()
+            shown = min(len(lines), LEGEND_SIDE_MAX_ENTRIES)
+            rows = legend_side_rows(float(figure.get_size_inches()[1]), title=True)
             ax.legend(
+                handles=lines[:shown],
                 frameon=False,
-                fontsize="x-small",
-                title="Clone",
-                title_fontsize="x-small",
+                fontsize="small",
+                title=(
+                    "Clone"
+                    if shown == len(lines)
+                    else f"Clone ({shown} of {len(lines)})"
+                ),
+                title_fontsize="small",
                 loc="upper left",
                 bbox_to_anchor=(1, 1),
+                ncols=legend_side_columns(shown, rows=rows),
             )
         apply_figure_chrome(figure, theme)
     plot_result = PlotResult(
