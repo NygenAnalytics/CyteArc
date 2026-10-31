@@ -416,20 +416,36 @@ def _got_multi_targets(table: _Table) -> tuple[_Target, ...]:
             if not set(columns.values()) <= set(frame.columns):
                 missing = sorted(set(columns.values()) - set(frame.columns))[0]
                 raise ValueError(f"{table.path} lacks the column {missing!r}")
-            reads = {
-                allele: _counts(
-                    part, f"{column.split('_calls_')[0]}_reads_per_umi_total_{channel}"
-                )
+            read_columns = {
+                allele: f"{column.split('_calls_')[0]}_reads_per_umi_total_{channel}"
                 for allele, column in columns.items()
-                if f"{column.split('_calls_')[0]}_reads_per_umi_total_{channel}"
-                in frame.columns
             }
+            present = [
+                column for column in read_columns.values() if column in frame.columns
+            ]
+            if present and len(present) < len(read_columns):
+                missing = sorted(set(read_columns.values()) - set(present))[0]
+                raise ValueError(
+                    f"{table.path} lacks the column {missing!r}, which its other "
+                    "reads_per_umi_total columns need"
+                )
             counts = {
                 allele: _counts(part, column) for allele, column in columns.items()
             }
-            for allele in list(reads):
-                # Reads exist only where UMIs do.
-                reads[allele] = np.where(np.isfinite(counts[allele]), reads[allele], 0)
+            reads: dict[str, np.ndarray] = {}
+            if present:
+                for allele, reads_column in read_columns.items():
+                    values = _counts(part, reads_column)
+                    unknown = (counts[allele] > 0) & ~np.isfinite(values)
+                    if unknown.any():
+                        cell = part.cells[int(np.flatnonzero(unknown)[0])]
+                        raise ValueError(
+                            f"The column {reads_column!r} of {table.path} is empty "
+                            f"for the cell {cell!r}, which has UMIs of that call"
+                        )
+                    # Reads are kept only beside UMIs; rows without UMIs are
+                    # not stored.
+                    reads[allele] = np.where(counts[allele] > 0, values, 0)
             result.append(
                 _Target(
                     name=name,

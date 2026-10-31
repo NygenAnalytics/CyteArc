@@ -9,7 +9,9 @@ neither matrix by itself, so a folder of its files holds the input VCF, the
 barcode list, and the two matrices, the reference one with ``ref`` in its
 name. Reads that VarTrix could not assign are left out, so its depth counts
 the reference and alternative only. Records with several alternatives keep
-empty rows and are skipped.
+empty rows and are skipped, and two records at one position, as a VCF with
+split multi-allelic sites holds, are refused, since each counts the
+reference reads apart.
 
 Whether the counts are reads or UMIs depends on ``--umi``, which the files do
 not say, so the import takes it as ``count_unit``.
@@ -126,7 +128,8 @@ def vartrix_source(path: str | os.PathLike[str]) -> VartrixSource:
 
     Raises:
         ValueError: If the folder does not hold one VCF, one barcode list and
-            the two matrices, a matrix's shape differs from the records and
+            the two matrices, the VCF lists two records with one alternative
+            at a position, a matrix's shape differs from the records and
             cells, or a matrix holds counts that are not whole numbers, as
             the ``alt_frac`` mode writes.
     """
@@ -144,6 +147,19 @@ def vartrix_source(path: str | os.PathLike[str]) -> VartrixSource:
         [bool(alt) and "," not in alt and alt != "." for alt in vcf.alt.tolist()],
         dtype=bool,
     )
+    seen: dict[tuple[str, int], int] = {}
+    for record in np.flatnonzero(single).tolist():
+        key = (str(vcf.chrom[record]), int(vcf.pos[record]))
+        earlier = seen.setdefault(key, record)
+        if earlier != record:
+            raise ValueError(
+                f"{vcf_path} lists two records at {key[0]}:{key[1]}, "
+                f"{vcf.ref[earlier]}>{vcf.alt[earlier]} and "
+                f"{vcf.ref[record]}>{vcf.alt[record]}, as a VCF with split "
+                "multi-allelic sites does; VarTrix counts each record's reference "
+                "reads apart, so they cannot be one site. Run VarTrix on a VCF "
+                "with one record per position"
+            )
     names = list(dict.fromkeys(vcf.chrom[single].tolist()))
     contig_of = {name: position for position, name in enumerate(names)}
     record_sites = np.full(len(vcf.pos), -1, dtype=np.int64)

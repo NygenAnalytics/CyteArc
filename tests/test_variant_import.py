@@ -217,6 +217,20 @@ def test_maegatk_strands_are_swapped_back(store, tmp_path) -> None:
     assert loaded.count_unit == "molecules"
     record = store.artifacts.inspect(ref).inputs["sources"][0]
     assert (record["format"], record["strands_swapped"]) == ("maegatk", True)
+    # Each strand's mean quality swaps back with its count, in every row.
+    rows = loaded.counts.assign(cell=loaded.counts["cell"].astype(str))
+    truth_rows = np.asarray([TRUTH.row_ids.index(cell) for cell in rows["cell"]])
+    positions = rows["site"].astype(str).str.split(":").str[1].astype(int).to_numpy()
+    bases = np.asarray([BASES.index(allele) for allele in rows["allele"]])
+    for strand, quality, count in (
+        (0, "quality_forward", "forward"),
+        (1, "quality_reverse", "reverse"),
+    ):
+        expected = TRUTH.quality[truth_rows, positions - 1, bases, strand]
+        values = rows[quality].to_numpy()
+        read = rows[count].to_numpy() > 0
+        np.testing.assert_allclose(values[read], expected[read], atol=1e-4)
+        assert np.isnan(values[~read]).all()
 
 
 def test_old_mgatk_needs_swap_strands_and_keeps_them_otherwise(store, tmp_path) -> None:
@@ -241,13 +255,14 @@ def test_cell_order_and_spills_to_disk_do_not_change_the_counts(
     template, tmp_path
 ) -> None:
     # Cells in another order than the store's, and a budget so small that
-    # the rows spill to sorted runs on disk, give the same artifact.
+    # the rows spill to sorted runs on disk, give the same artifact. The
+    # budget still leaves room for the chunks that writing rewrites.
     roomy = copy_variant_store(template, tmp_path / "roomy")
     tight = copy_variant_store(template, tmp_path / "tight")
     ids = [str(cell) for cell in roomy.cells.fetch_all("ids")]
     folder = tmp_path / "final"
     drawn = _large_mgatk(folder, ids, seed=4)
-    tight.memoryBytes = 1_700_000
+    tight.memoryBytes = 6_000_000
     groups = []
     for store in (roomy, tight):
         ref, _ = _import(store, folder)
@@ -291,7 +306,8 @@ def test_cellsnp_lite_reference_is_dp_less_ad_and_depth_adds_other_bases(
 ) -> None:
     folder = write_cellsnp(TRUTH, tmp_path / "cellsnp", compress=True)
     with pytest.raises(
-        ValueError, match="pass count_unit='umis' or count_unit='reads'"
+        ValueError,
+        match="does not say whether cellsnp_lite counted reads, UMIs or molecules",
     ):
         store.variants.import_counts(folder, cell_selection=every_cell(store))
     ref, _ = _import(store, folder, count_unit="umis")
@@ -694,9 +710,12 @@ def test_select_cells_and_load_values_read_the_mean_depth(store, tmp_path) -> No
     values = store.artifacts.load_values(ref)
     mean_depth = store.variants.load_counts(ref).cells["mean_depth"].to_numpy()
     np.testing.assert_allclose(values.values, mean_depth)
-    deep = store.select_cells(ref, low=20)
+    # A bound that one cell's mean depth equals keeps the cells above it only.
+    bound = float(np.sort(mean_depth)[len(mean_depth) // 2])
+    deep = store.select_cells(ref, low=bound)
     chosen = store.artifacts.load(deep)["values"][:]
-    assert chosen.sum() == int((mean_depth >= 20).sum())
+    assert chosen.sum() == int((mean_depth > bound).sum())
+    assert not chosen[mean_depth == bound].any()
     listed = store.artifacts.load_values(ref, value="listed")
     assert listed.values.all()
 
@@ -781,7 +800,7 @@ def test_load_counts_refuses_sites_and_cells_it_does_not_hold(store, tmp_path) -
     ):
         store.variants.load_counts(targets, sites=[1])
     store.memoryBytes = 5_000
-    with pytest.raises(MemoryError, match="Pass fewer"):
+    with pytest.raises(MemoryError, match="Raise mem_budget, or pass fewer cells"):
         store.variants.load_counts(ref)
 
 
@@ -920,3 +939,440 @@ def test_threads_parse_the_base_files_into_the_same_artifact(
     store = open_clone_store(tmp_path / "threads4" / template.name, nthreads=4)
     with pytest.raises(ValueError, match="holds a row that is not 4 fields"):
         store.variants.import_counts(folder, cell_selection=every_cell(store))
+
+
+def _pad_until_sorted(
+    padded: Path, digest, *, before: str | None = None, after: str | None = None
+) -> None:
+    """Append blank lines, which the readers skip, to a file of a source until
+    the source's SHA-256 sorts before or after another's, so an import takes
+    its sources in the canonical order a test wants."""
+    for _ in range(500):
+        value = digest()
+        if (before is None or value < before) and (after is None or value > after):
+            return
+        padded.write_text(padded.read_text() + "\n")
+    raise AssertionError("no padding gave the order wanted")
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _expected_got_multi(truth) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """GoT-Multi's UMIs and reads per channel, and the calls of its stage-1
+    and refined tables, as ``write_got_multi`` writes them."""
+    from tests.variant_truth import TARGETS
+
+    ids = truth.row_ids
+    counts, calls = [], []
+    for row in range(truth.n_cells):
+        for target, name in enumerate(TARGETS):
+            umis = truth.got[row, target].tolist()
+            if umis[0] < 0:
+                continue
+            reads = truth.got_reads[row, target].tolist()
+            for channel, extra in (("geneseq", 0), ("probebc", 1)):
+                for index, allele in enumerate(("WT", "MUT", "ambiguous")):
+                    count = umis[index] + (extra if index == 0 else 0)
+                    if count:
+                        counts.append(
+                            (
+                                ids[row],
+                                f"{name} ({channel})",
+                                allele,
+                                count,
+                                reads[index] + (extra if index == 0 else 0),
+                            )
+                        )
+            call = truth.got_call(row, target)
+            final = "FalsePositive" if call == "MUT" and row % 4 == 0 else call
+            for source, value in (
+                ("genotype_geneseq", call),
+                ("genotype_probebc", call),
+                ("genotype_merged", call),
+                ("genotype_final", final),
+            ):
+                calls.append((ids[row], name, "MUT", source, value))
+    return (
+        pd.DataFrame(counts, columns=["cell", "site", "allele", "count", "reads"]),
+        pd.DataFrame(calls, columns=["cell", "site", "allele", "source", "call"]),
+    )
+
+
+@pytest.mark.parametrize("refined_first", [True, False])
+def test_got_multi_stage_tables_keep_reads_and_calls_in_either_order(
+    store, tmp_path, refined_first
+) -> None:
+    # The refined table holds calls alone, so it must not decide which
+    # fields the counts keep, whichever source sorts first.
+    stage1 = write_got_multi(TRUTH, tmp_path / "ironthrone_out_pp.csv")
+    (tmp_path / "refined").mkdir()
+    refined = write_got_multi(
+        TRUTH, tmp_path / "refined" / "got_multi_out_refined.csv", refined=True
+    )
+    side = "before" if refined_first else "after"
+    _pad_until_sorted(refined, lambda: _sha256(refined), **{side: _sha256(stage1)})
+    ref, _ = _import(store, [stage1, refined])
+    sources = store.artifacts.inspect(ref).inputs["sources"]
+    assert [source["files"]["table"] for source in sources] == (
+        [_sha256(refined), _sha256(stage1)]
+        if refined_first
+        else [_sha256(stage1), _sha256(refined)]
+    )
+    group = store.artifacts.load(ref)
+    assert group.attrs["count_fields"] == ["reads"]
+    loaded = store.variants.load_counts(ref)
+    counts, calls = _expected_got_multi(TRUTH)
+    assert_tables(loaded.counts, counts)
+    # Calls that first appear in the later table, such as FalsePositive,
+    # keep their text whatever order the tables come in.
+    assert_tables(loaded.calls, calls)
+    # The refined table's genotype_final is read, not its genotype_merged.
+    assert group.attrs["n_repeated_calls"] == 0
+
+
+@pytest.mark.parametrize("six_first", [True, False])
+def test_folders_whose_counts_carry_different_fields_are_refused(
+    store, tmp_path, six_first
+) -> None:
+    from cytearc.readers._variant_files import source_sha256
+    from cytearc.readers.mgatk import mgatk_source
+
+    def digest(folder: Path) -> str:
+        reader = mgatk_source(folder, format="mgatk", swap_strands=False)
+        return source_sha256(reader.files)[0]
+
+    half = TRUTH.n_cells // 2
+    four = write_mgatk(TRUTH, tmp_path / "four", rows=range(half))
+    six = write_mgatk(
+        TRUTH, tmp_path / "six", rows=range(half, TRUTH.n_cells), six_columns=True
+    )
+    side = "before" if six_first else "after"
+    _pad_until_sorted(
+        six / "sample.depthTable.txt", lambda: digest(six), **{side: digest(four)}
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"give their counts different fields: .*six gives quality_forward and "
+        r".*four does not",
+    ):
+        store.variants.import_counts(
+            [four, six], cell_selection=every_cell(store), format="mgatk"
+        )
+
+
+def test_cellsnp_folders_with_and_without_other_bases_are_refused(
+    store, tmp_path
+) -> None:
+    folders = [
+        write_cellsnp(TRUTH, tmp_path / "with_other"),
+        write_cellsnp(TRUTH, tmp_path / "without_other", other=False),
+    ]
+    for order in (folders, folders[::-1]):
+        with pytest.raises(
+            ValueError,
+            match="define depth differently.*cellsnp-lite folders with and without OTH",
+        ):
+            store.variants.import_counts(
+                order, cell_selection=every_cell(store), count_unit="umis"
+            )
+
+
+def test_every_source_is_checked_against_the_unit_and_the_others() -> None:
+    from types import SimpleNamespace
+
+    from cytearc.datastore._operations.variants import _VariantOperationsMixin
+
+    def source(path: str, unit: str | None) -> SimpleNamespace:
+        return SimpleNamespace(
+            reader=SimpleNamespace(
+                path=path,
+                format="mito",
+                count_unit=unit,
+                depth_definition="all",
+                depth_roles=None,
+                reference_from_depth=False,
+                open_alleles=False,
+                count_fields=(),
+            )
+        )
+
+    rules = _VariantOperationsMixin._variant_import_rules
+    # A stated unit is checked in every source, not only in the first.
+    with pytest.raises(ValueError, match="mito counts molecules, not reads"):
+        rules([source("a.h5ad", None), source("b.h5ad", "molecules")], "reads")
+    with pytest.raises(
+        ValueError,
+        match="count in different units: a.h5ad counts molecules and b.h5ad reads",
+    ):
+        rules([source("a.h5ad", "molecules"), source("b.h5ad", "reads")], None)
+    assert rules([source("a.h5ad", None)], "umis").count_unit == "umis"
+
+
+def test_one_genome_under_two_contig_names_is_refused(store, tmp_path) -> None:
+    # Deposits prefix the reference file, which names mgatk's contig, so
+    # each library would count every position at a site of its own.
+    half = TRUTH.n_cells // 2
+    folders = []
+    for sample, rows in (("d2", range(half)), ("d4", range(half, TRUTH.n_cells))):
+        folder = write_mgatk(TRUTH, tmp_path / sample, rows=rows)
+        (folder / f"{CONTIG}_refAllele.txt").rename(
+            folder / f"{sample}_{CONTIG}_refAllele.txt"
+        )
+        folders.append(folder)
+    with pytest.raises(
+        ValueError,
+        match="one reference sequence under the contig names 'd2_chrM' and 'd4_chrM'",
+    ):
+        store.variants.import_counts(folders, cell_selection=every_cell(store))
+
+
+@pytest.mark.parametrize(
+    ("options", "unit"),
+    [
+        ({}, "molecules"),
+        ({"system": "mtscATAC", "pipeline": "mgatk", "molecules": True}, "molecules"),
+        ({"system": "RedeeM", "pipeline": "RedeemV"}, "molecules"),
+        ({"system": "mtscATAC", "pipeline": "mgatk"}, None),
+        ({"system": None, "pipeline": None}, None),
+    ],
+)
+def test_a_mito_matrix_states_its_unit_or_needs_count_unit(
+    store, tmp_path, options, unit
+) -> None:
+    path = write_mito_afm(TRUTH, tmp_path / "afm.h5ad", **options)
+    if unit is None:
+        # mgatk reads that MiTo left as reads, or a matrix without uns.
+        with pytest.raises(ValueError, match="does not say whether mito counted"):
+            store.variants.import_counts(path, cell_selection=every_cell(store))
+        ref, _ = _import(store, path, count_unit="reads")
+        assert store.variants.load_counts(ref, cells=[]).count_unit == "reads"
+        return
+    with pytest.raises(ValueError, match="mito counts molecules, not reads"):
+        store.variants.import_counts(
+            path, cell_selection=every_cell(store), count_unit="reads"
+        )
+    ref, _ = _import(store, path)
+    assert store.variants.load_counts(ref, cells=[]).count_unit == unit
+
+
+def test_short_tables_are_one_chunk_no_longer_than_their_rows(store, tmp_path) -> None:
+    ref, _ = _import(store, write_mgatk(TRUTH, tmp_path / "final"))
+    group = store.artifacts.load(ref)
+    _depth, counts = expected_mito(TRUTH)
+    # mgatk gives count rows only and a band derives depth from them, so no
+    # array of depth or counts needs more rows than the counts given.
+    for name in (
+        "depth_sites",
+        "depth",
+        "count_alleles",
+        "counts",
+        "counts_forward",
+        "counts_reverse",
+    ):
+        assert group[name].shape[0] <= group[name].chunks[0] <= len(counts)
+    calls_ref, _ = _import(
+        store, write_got(TRUTH, tmp_path / "CALR.tsv", style="geo_total")
+    )
+    calls = store.artifacts.load(calls_ref)
+    n_calls = len(expected_got_calls(TRUTH, site="CALR", source="Genotype"))
+    for name in ("call_alleles", "call_sources", "call_values"):
+        assert calls[name].shape[0] == calls[name].chunks[0] == n_calls
+
+
+def test_long_tables_are_chunked_in_bands_of_a_million_rows(tmp_path) -> None:
+    import zarr
+
+    from cytearc.datastore._operations.variants import _Appender
+
+    group = zarr.open_group(str(tmp_path / "g.zarr"), mode="w", use_consolidated=False)
+    appender = _Appender(
+        group,
+        {
+            "long": (np.uint32, 3_000_000),
+            "short": (np.int32, 10),
+            "empty": (np.int32, 0),
+        },
+    )
+    assert [appender.arrays[name].chunks for name in ("long", "short", "empty")] == [
+        (1 << 20,),
+        (10,),
+        (1,),
+    ]
+    appender.append("short", np.arange(10, dtype=np.int32))
+    np.testing.assert_array_equal(group["short"][:], np.arange(10))
+
+
+def test_load_counts_counts_the_chunks_a_read_decompresses(store, tmp_path) -> None:
+    ref, _ = _import(store, write_mgatk(TRUTH, tmp_path / "final"))
+    group = store.artifacts.load(ref)
+    # Every long array holds 4-byte values in one chunk here, which a read of
+    # even one cell decompresses whole.
+    chunk_bytes = 4 * max(
+        group[name].chunks[0]
+        for name in ("depth", "counts", "counts_forward", "call_values")
+    )
+    one_cell = [str(TRUTH.clones.cell_ids[0])]
+    one_site = [SITE_POSITIONS[0]]
+    store.memoryBytes = 2 * chunk_bytes
+    with pytest.raises(MemoryError, match="before it keeps a row"):
+        store.variants.load_counts(ref, sites=one_site, cells=one_cell)
+    store.memoryBytes = 2 * chunk_bytes + 10_000
+    loaded = store.variants.load_counts(ref, sites=one_site, cells=one_cell)
+    assert loaded.cells.index.tolist() == one_cell
+    # Without rows to read, no chunk is decompressed.
+    store.memoryBytes = 2 * chunk_bytes
+    assert store.variants.load_counts(ref, cells=[]).cells.empty
+
+
+def test_a_small_budget_parses_the_base_files_on_one_thread(
+    template, tmp_path, monkeypatch
+) -> None:
+    import cytearc.readers.mgatk as mgatk
+    from tests.clone_helpers import open_clone_store
+
+    real = mgatk.mgatk_source
+    threads: list[int] = []
+
+    def recording(path, **options):
+        threads.append(options["threads"])
+        return real(path, **options)
+
+    monkeypatch.setattr(mgatk, "mgatk_source", recording)
+    folder = write_mgatk(TRUTH, tmp_path / "final")
+    shutil.copytree(template, tmp_path / "store" / template.name)
+    store = open_clone_store(tmp_path / "store" / template.name, nthreads=4)
+    for budget in (512 << 20, 2 << 30):
+        store.memoryBytes = budget
+        _import(store, folder, invalidate_cache=True)
+    assert threads == [1, 4]
+
+
+def test_load_counts_takes_arrays_and_indexes_of_sites_and_cells(
+    store, tmp_path
+) -> None:
+    ref, _ = _import(store, write_mgatk(TRUTH, tmp_path / "final"))
+    ids = [str(cell) for cell in TRUTH.clones.cell_ids[[3, 1]]]
+    positions = [SITE_POSITIONS[4], SITE_POSITIONS[0]]
+    listed = store.variants.load_counts(ref, sites=positions, cells=ids)
+    for sites, cells in (
+        (np.asarray(positions), np.asarray(ids, dtype=object)),
+        (pd.Index(positions), pd.Index(ids)),
+        (np.asarray([mito_label(p) for p in positions]), np.asarray(ids, dtype=str)),
+    ):
+        loaded = store.variants.load_counts(ref, sites=sites, cells=cells)
+        assert_tables(loaded.counts, listed.counts)
+        assert loaded.cells.index.tolist() == listed.cells.index.tolist()
+    with pytest.raises(TypeError, match="sites must hold site labels or positions"):
+        store.variants.load_counts(ref, sites=np.zeros((2, 2), dtype=int))
+
+
+def test_cellsnp_lite_uppercases_the_alleles_of_its_vcf(store, tmp_path) -> None:
+    ref, _ = _import(
+        store,
+        write_cellsnp(TRUTH, tmp_path / "cellsnp", lowercase=True),
+        count_unit="umis",
+    )
+    loaded = store.variants.load_counts(ref)
+    depth, counts = expected_variant_sites(TRUTH, other=True)
+    assert_tables(loaded.depth, depth)
+    assert_tables(loaded.counts, counts)
+
+
+def test_giftwrap_support_in_any_column_order_follows_its_counts(
+    store, tmp_path
+) -> None:
+    ref, _ = _import(
+        store,
+        write_giftwrap_h5(TRUTH, tmp_path / "counts.1.h5", unsorted_support=True),
+    )
+    _depth, counts = expected_gift(TRUTH)
+    assert_tables(store.variants.load_counts(ref).counts, counts)
+
+
+def test_vartrix_records_split_at_one_position_are_refused(store, tmp_path) -> None:
+    folder = write_vartrix(TRUTH, tmp_path / "vartrix")
+    vcf = folder / "variants.vcf"
+    vcf.write_text(
+        vcf.read_text().replace(
+            f"{CONTIG}\t2\t.\tA\tC,G",
+            f"{CONTIG}\t2\t.\tA\tC\t.\t.\t.\n{CONTIG}\t2\t.\tA\tG",
+        )
+    )
+    # The truth's own variants may lie at chrM:2 too, so either pair is named.
+    with pytest.raises(
+        ValueError,
+        match="lists two records at chrM:2, A>[CG] and A>[CG], as a VCF with split "
+        "multi-allelic sites does",
+    ):
+        store.variants.import_counts(
+            folder, cell_selection=every_cell(store), count_unit="umis"
+        )
+
+
+def test_a_got_table_with_a_byte_order_mark_reads_alike(store, tmp_path) -> None:
+    path = write_got(TRUTH, tmp_path / "CALR.tsv", style="xv")
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
+    ref, _ = _import(store, path)
+    loaded = store.variants.load_counts(ref)
+    depth, counts = expected_got(TRUTH, site="CALR")
+    assert_tables(loaded.depth, depth)
+    assert_tables(loaded.counts, counts)
+
+
+def test_got_multi_reads_come_with_every_call_that_has_umis(store, tmp_path) -> None:
+    import re
+
+    path = write_got_multi(TRUTH, tmp_path / "ironthrone_out_pp.csv")
+    frame = pd.read_csv(path, dtype=str, keep_default_na=False)
+
+    def written(name: str, table: pd.DataFrame) -> Path:
+        (tmp_path / name).mkdir()
+        target = tmp_path / name / "ironthrone_out_pp.csv"
+        table.to_csv(target, index=False)
+        return target
+
+    partial = written("partial", frame.drop(columns="amb_reads_per_umi_total_geneseq"))
+    with pytest.raises(
+        ValueError,
+        match="lacks the column 'amb_reads_per_umi_total_geneseq', which its other "
+        "reads_per_umi_total columns need",
+    ):
+        store.variants.import_counts(partial, cell_selection=every_cell(store))
+    covered = frame["wt_calls_geneseq"].astype(int) > 0
+    row = int(np.flatnonzero(covered)[0])
+    empty = frame.copy()
+    empty.loc[row, "wt_reads_per_umi_total_geneseq"] = ""
+    with pytest.raises(
+        ValueError,
+        match="'wt_reads_per_umi_total_geneseq' of .* is empty for the cell "
+        + re.escape(repr(frame.loc[row, "BC"]))
+        + ", which has UMIs of that call",
+    ):
+        store.variants.import_counts(
+            written("empty", empty), cell_selection=every_cell(store)
+        )
+    # Reads beside no UMIs are never stored, so an empty one there reads.
+    idle = frame.copy()
+    unused = int(np.flatnonzero(frame["amb_calls_geneseq"].astype(int) == 0)[0])
+    idle.loc[unused, "amb_reads_per_umi_total_geneseq"] = ""
+    ref, _ = _import(store, written("idle", idle))
+    counts, _calls = _expected_got_multi(TRUTH)
+    assert_tables(store.variants.load_counts(ref).counts, counts)
+
+
+def test_a_budget_without_room_for_the_rewritten_chunks_writes_nothing(
+    store, tmp_path
+) -> None:
+    # The rows parse and spill within 3 MB, but appending them rewrites
+    # chunks of about four times the 134,000 rows' 4-byte values.
+    ids = [str(cell) for cell in store.cells.fetch_all("ids")]
+    folder = tmp_path / "final"
+    _large_mgatk(folder, ids, seed=4)
+    store.memoryBytes = 3_000_000
+    with pytest.raises(MemoryError, match="rewrites stored chunks of about"):
+        store.variants.import_counts(folder, cell_selection=every_cell(store))
+    assert store.artifacts.list(kind="variant_counts") == []

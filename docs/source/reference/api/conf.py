@@ -59,6 +59,7 @@ nitpick_ignore = [
     ("py:class", "numpy.dtype"),
     ("py:exc", "numpy.linalg.LinAlgError"),
     ("py:class", "pandas.DataFrame"),
+    ("py:class", "pandas.Index"),
     ("py:class", "pandas.Series"),
     ("py:class", "pandas.api.extensions.ExtensionArray"),
     ("py:class", "pandas.core.frame.DataFrame"),

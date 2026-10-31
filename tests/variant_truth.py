@@ -320,21 +320,35 @@ def cellsnp_rows(truth: VariantTruth) -> list[int]:
 
 
 def write_cellsnp(
-    truth: VariantTruth, folder: Path, *, other: bool = True, compress: bool = False
+    truth: VariantTruth,
+    folder: Path,
+    *,
+    other: bool = True,
+    compress: bool = False,
+    lowercase: bool = False,
 ) -> Path:
-    """A cellsnp-lite folder: the base VCF, the sorted cell list, AD, DP and OTH."""
+    """A cellsnp-lite folder: the base VCF, the sorted cell list, AD, DP and OTH.
+
+    With ``lowercase`` the VCF writes its alleles in lowercase, as a VCF
+    called against a soft-masked reference can.
+    """
     folder.mkdir(parents=True, exist_ok=True)
     rows = cellsnp_rows(truth)
     ids = truth.row_ids
     sites = truth.variant_sites()
     counts = _variant_counts(truth)
+
+    def case(text: str) -> str:
+        return text.lower() if lowercase else text
+
     _write(
         folder / ("cellSNP.base.vcf.gz" if compress else "cellSNP.base.vcf"),
         [
             "##fileformat=VCFv4.2",
             "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO",
             *(
-                f"{CONTIG}\t{position}\t.\t{ref}\t{alt}\t.\tPASS\tAD=0;DP=0;OTH=0"
+                f"{CONTIG}\t{position}\t.\t{case(ref)}\t{case(alt)}\t.\tPASS\t"
+                "AD=0;DP=0;OTH=0"
                 for position, ref, alt in sites
             ),
         ],
@@ -431,9 +445,21 @@ def write_vartrix(truth: VariantTruth, folder: Path) -> Path:
     return folder
 
 
-def write_mito_afm(truth: VariantTruth, path: Path) -> Path:
+def write_mito_afm(
+    truth: VariantTruth,
+    path: Path,
+    *,
+    system: str | None = "MAESTER",
+    pipeline: str | None = "maegatk",
+    molecules: bool = False,
+) -> Path:
     """MiTo's allele frequency matrix of the clone variants: CSR ``AD`` and
-    dense ``DP`` layers, ``pos``, ``ref`` and ``alt`` in ``var``."""
+    dense ``DP`` layers, ``pos``, ``ref`` and ``alt`` in ``var``.
+
+    ``uns`` holds ``scLT_system`` and ``pp_method`` where given, and with
+    ``molecules`` the record that MiTo 2 writes when it turns reads into
+    molecules; without any of them the file has no ``uns``.
+    """
     ids = truth.row_ids
     sites = truth.variant_sites()
     counts = _variant_counts(truth)
@@ -475,9 +501,17 @@ def write_mito_afm(truth: VariantTruth, path: Path) -> Path:
             ),
         )
         layers.create_dataset("DP", data=dp.astype(np.int16))
+        if system is None and pipeline is None and not molecules:
+            return path
         uns = handle.create_group("uns")
-        uns.create_dataset("scLT_system", data="MAESTER", dtype=string)
-        uns.create_dataset("pp_method", data="maegatk", dtype=string)
+        for key, value in (("scLT_system", system), ("pp_method", pipeline)):
+            if value is not None:
+                uns.create_dataset(key, data=value, dtype=string)
+        if molecules:
+            record = uns.create_group("molecules")
+            record.create_dataset("reads_per_molecule", data=1.66)
+            record.create_dataset("frac_both_mates", data=0.66)
+            record.create_dataset("alt_rule", data="both_strands", dtype=string)
     return path
 
 
@@ -487,11 +521,19 @@ def _gift_features(truth: VariantTruth) -> list[tuple[str, str]]:
 
 
 def write_giftwrap_h5(
-    truth: VariantTruth, path: Path, *, layout: str = "before 0.3.0"
+    truth: VariantTruth,
+    path: Path,
+    *,
+    layout: str = "before 0.3.0",
+    unsorted_support: bool = False,
 ) -> Path:
     """giftwrap's ``counts.N.h5``: CSR UMIs, reads and support of cells by
     probe and gapfill, whose zero support entries are left out, and the
-    probe metadata with ``nan`` for the gapfills it does not name."""
+    probe metadata with ``nan`` for the gapfills it does not name.
+
+    With ``unsorted_support`` each cell's support entries come in reverse
+    column order, which a CSR matrix allows.
+    """
     ids = truth.row_ids
     features = _gift_features(truth)
     column_of = {feature: column for column, feature in enumerate(features)}
@@ -516,17 +558,22 @@ def write_giftwrap_h5(
             for name in ("data", "total_reads", "percent_supporting")
         }
         for row in range(len(ids)):
-            for column, (umis, reads, share) in sorted(per_row.get(row, [])):
-                for name, value in (
-                    ("data", umis),
-                    ("total_reads", reads),
-                    ("percent_supporting", share),
-                ):
-                    if value == 0:
-                        continue
+            entries = sorted(per_row.get(row, []))
+            for name, position in (
+                ("data", 0),
+                ("total_reads", 1),
+                ("percent_supporting", 2),
+            ):
+                kept = [
+                    (column, values[position])
+                    for column, values in entries
+                    if values[position] != 0
+                ]
+                if unsorted_support and name == "percent_supporting":
+                    kept = kept[::-1]
+                for column, value in kept:
                     parts[name][0].append(value)
                     parts[name][1].append(column)
-            for name in parts:
                 parts[name][2].append(len(parts[name][0]))
         for name, (data, indices, indptr) in parts.items():
             group = matrix.create_group(name)

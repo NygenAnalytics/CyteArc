@@ -1,14 +1,21 @@
 """Read MiTo's allele frequency matrix of mitochondrial variants.
 
 MiTo assembles the counts of maegatk, mgatk or RedeemV into an AnnData file
-of cells by variants: ``layers['AD']`` holds each cell's molecules of the
+of cells by variants: ``layers['AD']`` holds each cell's count of the
 alternative base, sparse, and ``layers['DP']`` the coverage of the variant's
-site, dense and defined for every cell, in molecules; ``var`` holds each
-variant's ``pos``, ``ref`` and ``alt``, named ``<pos>_<ref>><alt>``, and
-cells are named ``{barcode}_{sample}``. A position with several alternatives
-is one site whose depth is the largest DP of its variants, since MiTo raises
-a variant's DP to its AD where that exceeds the coverage. The reference
-base is not counted. The file names no contig, so the contig is unnamed.
+site, dense and defined for every cell; ``var`` holds each variant's
+``pos``, ``ref`` and ``alt``, named ``<pos>_<ref>><alt>``, and cells are
+named ``{barcode}_{sample}``. A position with several alternatives is one
+site whose depth is the largest DP of its variants, since MiTo raises a
+variant's DP to its AD where that exceeds the coverage. The reference base
+is not counted. The file names no contig, so the contig is unnamed.
+
+The counts are molecules when ``uns`` says so: MiTo 2 records
+``uns['molecules']`` when it turned mtscATAC reads into molecules, and
+``uns['pp_method']`` names maegatk, whose counts are UMI consensus reads, or
+ReDeeM's pipelines, which count molecules. Otherwise, as for the mgatk reads
+that MiTo 1 assembled, the file does not say, so the import takes
+``count_unit``.
 """
 
 import os
@@ -24,6 +31,10 @@ from ._h5ad_columns import index_key, read_column, sparse_encoding, sparse_shape
 from ._text import as_text
 
 __all__ = ["MitoAfmSource", "mito_afm_source"]
+
+# The pipelines and assays of MiTo's uns whose counts are molecules.
+_MOLECULE_PIPELINES = frozenset({"maegatk", "redeem-v", "RedeemV", "RedeemR"})
+_MOLECULE_SYSTEMS = frozenset({"ReDeeM", "RedeeM"})
 
 
 def _texts(values: Any) -> np.ndarray:
@@ -186,6 +197,12 @@ def mito_afm_source(path: str | os.PathLike[str]) -> MitoAfmSource:
             for key in ("scLT_system", "pp_method")
             if isinstance(uns, h5py.Group) and key in uns
         }
+        converted = isinstance(uns, h5py.Group) and "molecules" in uns
+    molecules = (
+        converted
+        or notes.get("pp_method") in _MOLECULE_PIPELINES
+        or notes.get("scLT_system") in _MOLECULE_SYSTEMS
+    )
     if np.any(positions < 1):
         raise ValueError(f"var of {text} holds a position below 1")
     site_positions = list(dict.fromkeys(positions.tolist()))
@@ -235,7 +252,7 @@ def mito_afm_source(path: str | os.PathLike[str]) -> MitoAfmSource:
         path=text,
         format="mito",
         files=(("afm", text),),
-        count_unit="molecules",
+        count_unit="molecules" if molecules else None,
         depth_definition="all",
         count_fields=(),
         depth_roles=frozenset(ALLELE_ROLES),

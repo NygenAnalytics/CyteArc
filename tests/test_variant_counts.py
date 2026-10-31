@@ -235,6 +235,24 @@ def test_merge_refuses_conflicting_roles_alleles_and_references() -> None:
     assert merged.contigs == (Contig("chrM", 100, "a" * 64),)
 
 
+def test_merge_refuses_one_sequence_under_two_contig_names() -> None:
+    # mgatk names the contig after the reference file, so libraries whose
+    # files carry sample prefixes would count one genome as two contigs.
+    first = _coordinate_table([7], [REF_ALT], contig=Contig("d2_chrM", 100, "a" * 64))
+    second = _coordinate_table([7], [REF_ALT], contig=Contig("d4_chrM", 100, "a" * 64))
+    with pytest.raises(
+        ValueError,
+        match="one reference sequence under the contig names 'd2_chrM' and 'd4_chrM'",
+    ):
+        merge_sites([second, first], open_alleles=False)
+    # Contigs of other sequences, or without one, keep their names.
+    other = _coordinate_table([7], [REF_ALT], contig=Contig("chr1", 100, "b" * 64))
+    bare = _coordinate_table([7], [REF_ALT], contig=Contig("MT", 100))
+    merged, site_maps, _ = merge_sites([first, other, bare], open_alleles=False)
+    assert {contig.name for contig in merged.contigs} == {"chr1", "d2_chrM", "MT"}
+    assert merged.n_sites == 3 and [len(sites) for sites in site_maps] == [1, 1, 1]
+
+
 def test_count_rows_take_the_fields_their_source_has() -> None:
     assert count_dtype(()).names == ("cell", "key", "count")
     assert count_dtype(("reverse", "forward")).names == (

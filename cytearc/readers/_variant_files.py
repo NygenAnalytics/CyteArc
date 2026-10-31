@@ -68,10 +68,13 @@ def is_gzip(path: str | os.PathLike[str]) -> bool:
 
 
 def open_text(path: str | os.PathLike[str]) -> io.TextIOBase:
-    """Open a text file for reading, gzip-compressed or not, whatever its name."""
+    """Open a text file for reading, gzip-compressed or not, whatever its name.
+
+    A byte order mark, which Excel writes before UTF-8 text, is dropped.
+    """
     if is_gzip(path):
-        return io.TextIOWrapper(gzip.open(path, "rb"), encoding="utf-8", newline="")
-    return open(path, encoding="utf-8", newline="")
+        return io.TextIOWrapper(gzip.open(path, "rb"), encoding="utf-8-sig", newline="")
+    return open(path, encoding="utf-8-sig", newline="")
 
 
 def first_line(path: str | os.PathLike[str]) -> str:

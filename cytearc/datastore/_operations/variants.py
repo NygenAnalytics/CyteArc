@@ -55,8 +55,8 @@ if TYPE_CHECKING:
 else:
     _VariantOperationsBase = object
 
-# Rows of each chunk of a stored long table: the row bands that a reader of a
-# band of cells decompresses.
+# The most rows of a chunk of a stored long table, which a reader of a band
+# of cells decompresses whole; a shorter table is one chunk of its own size.
 _ROW_BAND = 1 << 20
 # Bytes held for each selected cell while counts are imported: whether a file
 # names it, its depth sum and covered sites, and three offsets.
@@ -73,6 +73,15 @@ _BAND_COPIES = 6
 _PARSE_SHARE = 5
 _BUFFER_SHARE = 10
 _BAND_SHARE = 2.5
+# The smallest budget that parses mgatk's base files on several threads:
+# each thread's parser and allocator hold a few megabytes beyond its rows,
+# which the shares above absorb only in a budget of this size.
+_THREADED_PARSE_BYTES = 1 << 30
+# Every stored long array holds 4-byte values. Appending a band rewrites the
+# chunks it ends in, read, decoded and encoded again: 2 to 4 chunks' bytes
+# at once, as measured on chunks of 1,048,576 rows.
+_STORED_BYTES = 4
+_REWRITTEN_CHUNKS = 4
 # The rows parsed at once lie in [_MIN_CHUNK_ROWS, _MAX_CHUNK_ROWS].
 _MIN_CHUNK_ROWS = 1_000
 _MAX_CHUNK_ROWS = 2_000_000
@@ -152,6 +161,25 @@ class _Source:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _ImportRules:
+    """What every source of one import shares: the unit of its counts, how
+    its depth is defined, and the fields that counts carry.
+
+    Attributes:
+        field_paths: For each count field, the first source, in canonical
+            order, whose counts carry it.
+    """
+
+    count_unit: CountUnit
+    depth_definition: str
+    depth_roles: frozenset[str] | None
+    reference_from_depth: bool
+    open_alleles: bool
+    count_fields: tuple[str, ...]
+    field_paths: dict[str, str]
+
+
 def _repeated_row(rows: np.ndarray, keys: Sequence[str]) -> int | None:
     """The first row whose keys equal the row before it, or None."""
     if len(rows) < 2:
@@ -210,9 +238,16 @@ class _Vocabulary:
 
 
 class _Appender:
-    """Append rows to one-dimensional arrays of an artifact in row bands."""
+    """Append rows to one-dimensional arrays of an artifact in row bands.
 
-    def __init__(self, group: zarr.Group, dtypes: Mapping[str, Any]) -> None:
+    Each array is given its dtype and the most rows it can receive, so a
+    short array is one chunk of about its own size rather than a band of
+    ``_ROW_BAND`` rows, which every read would decompress whole.
+    """
+
+    def __init__(
+        self, group: zarr.Group, arrays: Mapping[str, tuple[Any, int]]
+    ) -> None:
         compressors = get_compressors(
             resolve_storage_profile(group.store),
             zarrFormat=int(group.metadata.zarr_format),
@@ -221,13 +256,13 @@ class _Appender:
             name: group.create_array(
                 name,
                 shape=(0,),
-                chunks=(_ROW_BAND,),
+                chunks=(min(_ROW_BAND, max(1, int(most_rows))),),
                 dtype=dtype,
                 compressors=compressors,
             )
-            for name, dtype in dtypes.items()
+            for name, (dtype, most_rows) in arrays.items()
         }
-        self.n_rows = {name: 0 for name in dtypes}
+        self.n_rows = {name: 0 for name in arrays}
 
     def append(self, name: str, values: np.ndarray) -> None:
         if not len(values):
@@ -270,6 +305,25 @@ def _read(group: zarr.Group, name: str) -> np.ndarray:
     return np.asarray(as_zarr_array(group[name], name=name)[:])
 
 
+def _stored_row_bounds(sorter: CellRowSorter) -> tuple[int, int]:
+    """The most rows that the stored depth and counts, and the calls, hold.
+
+    A band derives depth from counts and reference counts from depth, so
+    neither stored table outnumbers the depth and count rows given.
+    """
+    entries = int(sorter.rows_per_cell("depth").sum()) + int(
+        sorter.rows_per_cell("counts").sum()
+    )
+    return entries, int(sorter.rows_per_cell("calls").sum())
+
+
+def _listed(values: Any) -> Any:
+    """A NumPy array or a pandas index or series as a list, other values as given."""
+    if isinstance(values, np.ndarray | pd.Index | pd.Series):
+        return values.tolist()
+    return values
+
+
 def _stored_sites(group: zarr.Group) -> SiteTable:
     records = cast(list[dict[str, Any]], group.attrs["contigs"])
     contigs = tuple(
@@ -296,6 +350,7 @@ def _site_positions(table: SiteTable, sites: Any) -> np.ndarray:
     """The sites that ``sites`` names, as ascending positions in the table."""
     if sites is None:
         return np.arange(table.n_sites, dtype=np.int64)
+    sites = _listed(sites)
     if isinstance(sites, str | bytes | int) or not isinstance(sites, Sequence):
         raise TypeError(
             "sites must be a sequence of site labels, such as ['chrM:310'], or of "
@@ -329,6 +384,21 @@ def _site_positions(table: SiteTable, sites: Any) -> np.ndarray:
             f"The artifact has no site {', '.join(repr(item) for item in unknown[:5])}"
         )
     return np.unique(np.asarray(chosen, dtype=np.int64))
+
+
+def _band_chunk_bytes(group: zarr.Group, tables: Mapping[str, Sequence[str]]) -> int:
+    """Bytes that reading a band decompresses beyond its own rows.
+
+    A read decompresses every chunk it touches, so a band's first and last
+    rows bring in the rest of their chunks: at most two chunks of the widest
+    array that ``tables`` names.
+    """
+    widest = 0
+    for names in tables.values():
+        for name in names:
+            array = as_zarr_array(group[name], name=name)
+            widest = max(widest, int(array.chunks[0]) * int(array.dtype.itemsize))
+    return 2 * widest
 
 
 class _VariantOperationsMixin(_VariantOperationsBase):
@@ -395,14 +465,21 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         Several paths must share a format, such as one mgatk folder per
         library with each library's prefix. Sites that they share are one
         site, so their counts must lie on the same reference: a contig with
-        another length or sequence raises ``ValueError``, as does a cell that
-        two files count at the same site.
+        another length or sequence raises ``ValueError``, as do one sequence
+        under two contig names and a cell that two files count at the same
+        site. The paths must also count in one unit, define depth alike and
+        give their counts the same fields, such as base qualities; a table of
+        calls alone, such as GoT-Multi's refined table, gives no counts.
 
         The canonical ``mean_depth`` holds each cell's depth summed over the
         sites and divided by their number, NaN for a selected cell that no
         file names; ``covered_sites`` counts its sites with depth above 0 and
         ``listed`` marks the cells a file names. ``ds.select_cells(counts,
         low=10)`` keeps cells with a mean depth above 10.
+
+        Rows that outgrow the memory budget are sorted in runs on local
+        disk, in the system's temporary folder (``TMPDIR`` on Linux and
+        macOS), and removed when the import ends.
 
         Args:
             paths: One file or folder, or several of one format.
@@ -423,7 +500,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 or None to recognise each path's format.
             count_unit: ``"reads"``, ``"umis"`` or ``"molecules"``: what
                 cellsnp-lite, MQuad and VarTrix counted, which their files do
-                not state, since it depends on how they were run. Other
+                not state, since it depends on how they were run, and what a
+                MiTo matrix counted when its ``uns`` does not say. Other
                 formats count in a unit of their own, which a given value must
                 match.
             swap_strands: Swap the forward and reverse counts of mgatk files
@@ -441,9 +519,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             ValueError: If a format is unknown or its files are malformed,
                 the paths hold several formats, a count unit is missing or
                 differs from the format's, the files lie on different
-                references, a cell is counted twice at a site, an option lists
-                a value for another number of paths, or the selection holds no
-                cell.
+                references, count in different units, define depth
+                differently or give their counts different fields, a cell is
+                counted twice at a site, an option lists a value for another
+                number of paths, or the selection holds no cell.
             FileNotFoundError: If a path or a file it needs is missing.
             PermissionError: If the store is read-only and the counts are not
                 saved yet.
@@ -468,11 +547,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 f"{count_unit!r}"
             )
         readers: dict[str, tuple[VariantSource, str, dict[str, str]]] = {}
+        threads = self.nthreads if self.memoryBytes >= _THREADED_PARSE_BYTES else 1
 
         def identify(path: str | os.PathLike[str]) -> str:
             key = os.fspath(path)
             if key not in readers:
-                reader = _read_source(key, format, swap_strands, self.nthreads)
+                reader = _read_source(key, format, swap_strands, threads)
                 digest, digests = source_sha256(reader.files)
                 readers[key] = (reader, digest, digests)
             return readers[key][1]
@@ -499,18 +579,17 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 f"The paths hold several formats, {', '.join(formats)}; import each "
                 "format on its own"
             )
-        first = sources[0].reader
-        unit = self._variant_count_unit(first, count_unit)
+        rules = self._variant_import_rules(sources, count_unit)
         site_table, site_maps, allele_maps = merge_sites(
             [source.reader.sites() for source in sources],
-            open_alleles=first.open_alleles,
+            open_alleles=rules.open_alleles,
         )
         cell_index = self._variant_selection_indices(cell_selection)
         n_cells = len(cell_index)
         arguments = VariantCountImportArguments(
             cell_selection=cell_selection,
             sources=tuple(source.record() for source in sources),
-            count_unit=unit,
+            count_unit=rules.count_unit,
             swap_strands=swap_strands,
             invalidate_cache=invalidate_cache,
         )
@@ -542,7 +621,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             memory_bytes=self.memoryBytes,
             held_bytes=_IMPORT_BYTES_PER_CELL * n_cells,
         )
-        counts_dtype = count_dtype(first.count_fields)
+        counts_dtype = count_dtype(rules.count_fields)
         sorter = CellRowSorter(
             {
                 "counts": (counts_dtype, ("cell", "key")),
@@ -580,21 +659,34 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                         listed=listed,
                         call_sources=call_sources,
                         call_values=call_values,
+                        path=source.reader.path,
+                        field_paths=rules.field_paths,
                     )
             if not n_rows:
                 raise ValueError(
                     f"No row of counts, depth, calls or cells is in {files_text}"
                 )
-            band_rows = max(
-                1, int(room / _BAND_SHARE) // (_BAND_COPIES * counts_dtype.itemsize)
+            # A band's rows sit beside the chunks that appending them rewrites.
+            n_entry_rows, _n_call_rows = _stored_row_bounds(sorter)
+            rewritten = (
+                _REWRITTEN_CHUNKS * min(_ROW_BAND, max(1, n_entry_rows)) * _STORED_BYTES
             )
+            band_bytes = int(room / _BAND_SHARE) - rewritten
+            if band_bytes < _BAND_COPIES * counts_dtype.itemsize:
+                raise MemoryError(
+                    f"Writing the variant counts rewrites stored chunks of about "
+                    f"{rewritten} bytes, more than the memory budget of "
+                    f"{self.memoryBytes} bytes leaves beside the sorted rows. Raise "
+                    "mem_budget."
+                )
+            band_rows = band_bytes // (_BAND_COPIES * counts_dtype.itemsize)
             attributes = {
                 **join.attributes(),
-                "format": first.format,
-                "count_unit": unit,
-                "depth_definition": first.depth_definition,
-                "stranded": "forward" in first.count_fields,
-                "count_fields": list(first.count_fields),
+                "format": formats[0],
+                "count_unit": rules.count_unit,
+                "depth_definition": rules.depth_definition,
+                "stranded": "forward" in rules.count_fields,
+                "count_fields": list(rules.count_fields),
                 "contigs": [contig.record() for contig in site_table.contigs],
                 "n_sorted_runs": 0,
             }
@@ -602,7 +694,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 planned,
                 sorter,
                 sites=site_table,
-                reader=first,
+                rules=rules,
                 counts_dtype=counts_dtype,
                 band_rows=int(band_rows),
                 cell_ids=cell_ids,
@@ -623,9 +715,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         if reader.count_unit is None:
             if count_unit is None:
                 raise ValueError(
-                    f"{reader.format} counts UMIs or reads depending on how it was "
-                    "run, and its files do not say which; pass count_unit='umis' or "
-                    "count_unit='reads'"
+                    f"{reader.path} does not say whether {reader.format} counted "
+                    "reads, UMIs or molecules, which depends on how it ran; pass "
+                    "count_unit='reads', count_unit='umis' or count_unit='molecules'"
                 )
             return cast(CountUnit, count_unit)
         if count_unit is not None and count_unit != reader.count_unit:
@@ -634,6 +726,64 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "count_unit names the unit of formats whose files do not state it"
             )
         return cast(CountUnit, reader.count_unit)
+
+    @classmethod
+    def _variant_import_rules(
+        cls, sources: Sequence[_Source], count_unit: str | None
+    ) -> _ImportRules:
+        """The unit, depth rules and count fields that every source shares.
+
+        Each source's unit and depth rules must agree with the others', so
+        the artifact records them once whatever order the sources take. The
+        count fields are those of all sources together: a table of calls
+        alone gives none, and counts that lack a field another source gives
+        are refused as they arrive.
+
+        Raises:
+            ValueError: If a source's unit is missing or differs from the
+                given one, or two sources count in different units or define
+                depth differently.
+        """
+        first = sources[0].reader
+        unit = cls._variant_count_unit(first, count_unit)
+        depth_rules = (
+            first.depth_definition,
+            first.depth_roles,
+            first.reference_from_depth,
+            first.open_alleles,
+        )
+        field_paths: dict[str, str] = {}
+        for source in sources:
+            reader = source.reader
+            other = cls._variant_count_unit(reader, count_unit)
+            if other != unit:
+                raise ValueError(
+                    f"The files count in different units: {first.path} counts {unit} "
+                    f"and {reader.path} {other}; import them separately"
+                )
+            if (
+                reader.depth_definition,
+                reader.depth_roles,
+                reader.reference_from_depth,
+                reader.open_alleles,
+            ) != depth_rules:
+                raise ValueError(
+                    f"The files define depth differently: {first.path} counts "
+                    f"{first.depth_definition!r} and {reader.path} "
+                    f"{reader.depth_definition!r}, as cellsnp-lite folders with "
+                    "and without OTH do; import them separately"
+                )
+            for name in reader.count_fields:
+                field_paths.setdefault(name, reader.path)
+        return _ImportRules(
+            count_unit=unit,
+            depth_definition=first.depth_definition,
+            depth_roles=first.depth_roles,
+            reference_from_depth=first.reference_from_depth,
+            open_alleles=first.open_alleles,
+            count_fields=tuple(name for name in COUNT_FIELDS if name in field_paths),
+            field_paths=field_paths,
+        )
 
     def _plan_variant_counts(
         self,
@@ -718,8 +868,27 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         listed: np.ndarray,
         call_sources: "_Vocabulary",
         call_values: "_Vocabulary",
+        path: str,
+        field_paths: Mapping[str, str],
     ) -> None:
-        """Join a batch's rows to cells and add those of selected cells."""
+        """Join a batch's rows to cells and add those of selected cells.
+
+        Raises:
+            ValueError: If counts lack a field that another source's counts
+                carry, or a value lies outside the stored range.
+        """
+        if batch.kind == "counts":
+            missing = [
+                name
+                for name in counts_dtype.names or ()
+                if name in COUNT_FIELDS and name not in batch.fields
+            ]
+            if missing:
+                raise ValueError(
+                    "The files give their counts different fields: "
+                    f"{field_paths[missing[0]]} gives {missing[0]} and {path} does "
+                    "not; import them separately"
+                )
         row_cells = cells[batch.barcode_codes]
         kept = row_cells >= 0
         listed[row_cells[kept]] = True
@@ -774,7 +943,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         sorter: CellRowSorter,
         *,
         sites: SiteTable,
-        reader: VariantSource,
+        rules: _ImportRules,
         counts_dtype: np.dtype[Any],
         band_rows: int,
         cell_ids: np.ndarray,
@@ -804,18 +973,22 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             site = int(sites.allele_site[allele])
             return f"{sites.allele[allele]!r} at the site {sites.label(site)}"
 
+        n_entry_rows, n_call_rows = _stored_row_bounds(sorter)
         with artifact_transaction(self.zw, planned) as group:
             appender = _Appender(
                 group,
                 {
-                    "depth_sites": np.int32,
-                    "depth": np.uint32,
-                    "count_alleles": np.int32,
-                    "counts": np.uint32,
-                    **{f"counts_{name}": COUNT_FIELDS[name] for name in fields},
-                    "call_alleles": np.int32,
-                    "call_sources": np.int32,
-                    "call_values": np.int32,
+                    "depth_sites": (np.int32, n_entry_rows),
+                    "depth": (np.uint32, n_entry_rows),
+                    "count_alleles": (np.int32, n_entry_rows),
+                    "counts": (np.uint32, n_entry_rows),
+                    **{
+                        f"counts_{name}": (COUNT_FIELDS[name], n_entry_rows)
+                        for name in fields
+                    },
+                    "call_alleles": (np.int32, n_call_rows),
+                    "call_sources": (np.int32, n_call_rows),
+                    "call_values": (np.int32, n_call_rows),
                 },
             )
             for first, stop, rows in sorter.bands(band_rows):
@@ -857,8 +1030,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                     counts_rows,
                     depth_rows,
                     sites=sites,
-                    depth_roles=reader.depth_roles,
-                    reference_from_depth=reader.reference_from_depth,
+                    depth_roles=rules.depth_roles,
+                    reference_from_depth=rules.reference_from_depth,
                     name_cell=name_cell,
                 )
                 width = stop - first
@@ -969,6 +1142,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                     "not hold; pass a selection within the counts' cell_selection"
                 )
             return np.asarray(positions, dtype=np.int64)
+        cells = _listed(cells)
         if isinstance(cells, str | bytes) or not isinstance(cells, Sequence):
             raise TypeError(
                 "cells must be a cell selection ArtifactRef, a sequence of cell IDs, "
@@ -1033,8 +1207,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         self,
         counts: ArtifactRef,
         *,
-        sites: Sequence[str | int] | None = None,
-        cells: ArtifactRef | Sequence[str] | None = None,
+        sites: Sequence[str | int] | np.ndarray | pd.Index | None = None,
+        cells: ArtifactRef | Sequence[str] | np.ndarray | pd.Index | None = None,
     ) -> VariantCounts:
         """Read saved variant counts as tables of sites, alleles, cells and rows.
 
@@ -1047,14 +1221,18 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         reads only the sites and alleles, with each site's depth summed over
         all cells.
 
+        The budget counts each row read, at about 120 bytes, and the two
+        stored chunks that a read's first and last rows decompress whole.
+
         Args:
             counts: A ``variant_counts`` artifact, such as one from
                 :meth:`~cytearc.datastore.namespaces.VariantsAccessor.import_counts`.
             sites: Site labels as the ``sites`` table names them, such as
                 ``"chrM:310"`` or ``"IDH2_Mut1"``, or positions of an
-                artifact of one contig, such as ``310``; None for all sites.
-            cells: A cell selection within the counts' cells, or cell IDs;
-                None for all cells.
+                artifact of one contig, such as ``310``, as a list, a NumPy
+                array or a pandas index; None for all sites.
+            cells: A cell selection within the counts' cells, or cell IDs as
+                a list, a NumPy array or a pandas index; None for all cells.
 
         Returns:
             A :class:`~cytearc.variants.VariantCounts` record.
@@ -1071,19 +1249,34 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         kept_sites = _site_positions(table, sites)
         cell_index = self._variant_cell_index(counts)
         positions = self._variant_cell_positions(counts, cell_index, cells)
+        fields = [str(name) for name in cast(list[str], group.attrs["count_fields"])]
+        count_arrays = (
+            "count_alleles",
+            "counts",
+            *(f"counts_{name}" for name in fields),
+        )
         resident = _LOADED_BYTES_PER_CELL * len(positions)
+        if len(positions) and len(kept_sites):
+            # Reads decompress whole chunks, as the bands of the statistics do.
+            resident += _band_chunk_bytes(
+                group,
+                {
+                    "depth": ("depth_sites", "depth"),
+                    "count": count_arrays,
+                    "call": ("call_alleles", "call_sources", "call_values"),
+                },
+            )
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Loading the counts of {len(positions)} cells holds about {resident} "
-                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
-                "Pass fewer cells."
+                "bytes before it keeps a row, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Raise mem_budget, or pass fewer cells."
             )
         rank = np.full(len(cell_index), -1, dtype=np.int64)
         rank[positions] = np.arange(len(positions))
         site_kept = np.zeros(table.n_sites, dtype=bool)
         site_kept[kept_sites] = True
         allele_kept = site_kept[table.allele_site]
-        fields = [str(name) for name in cast(list[str], group.attrs["count_fields"])]
         max_rows = max(1, self.memoryBytes // (4 * _LOADED_BYTES_PER_ROW))
         held = resident
 
@@ -1122,11 +1315,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
 
         depth_cells, depth = collect(
             "depth", ("depth_sites", "depth"), "depth_sites", site_kept
-        )
-        count_arrays = (
-            "count_alleles",
-            "counts",
-            *(f"counts_{name}" for name in fields),
         )
         count_cells, count_values = collect(
             "count", count_arrays, "count_alleles", allele_kept

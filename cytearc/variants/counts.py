@@ -340,7 +340,8 @@ def _merged_contigs(tables: Sequence[SiteTable]) -> tuple[Contig, ...]:
 
     Raises:
         ValueError: If two tables give one contig name different lengths or
-            sequences.
+            sequences, or one sequence two names, which would make each of
+            its positions two sites.
     """
     by_name: dict[str, Contig] = {}
     for table in tables:
@@ -380,6 +381,19 @@ def _merged_contigs(tables: Sequence[SiteTable]) -> tuple[Contig, ...]:
             "Some files name their contig and others do not, so their positions "
             "cannot be matched; import them separately"
         )
+    by_sequence: dict[str, str] = {}
+    for name in names:
+        digest = by_name[name].sequence_sha256
+        if digest is None:
+            continue
+        other = by_sequence.setdefault(digest, name)
+        if other != name:
+            raise ValueError(
+                f"The files hold one reference sequence under the contig names "
+                f"{other!r} and {name!r}, so each of its positions would be two "
+                "sites; give it one name in every file, such as by naming mgatk's "
+                "reference files <contig>_refAllele.txt alike"
+            )
     return tuple(by_name[name] for name in names)
 
 
@@ -405,9 +419,10 @@ def merge_sites(
         its sites and of each of its alleles.
 
     Raises:
-        ValueError: If the files hold one contig with different references,
-            mix named and unnamed contigs, give an allele two roles or, without
-            ``open_alleles``, give a shared site different alleles.
+        ValueError: If the files hold one contig with different references or
+            one reference sequence under two names, mix named and unnamed
+            contigs, give an allele two roles or, without ``open_alleles``,
+            give a shared site different alleles.
     """
     if not tables:
         raise ValueError("No site table to merge")
