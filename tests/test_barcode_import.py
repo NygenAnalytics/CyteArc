@@ -23,6 +23,7 @@ from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
     copy_clone_store,
     every_cell,
+    ids_read_bytes,
     open_clone_store,
     write_truth_store,
 )
@@ -801,7 +802,9 @@ def test_import_refuses_a_budget_too_small_and_writes_nothing(
         )
     assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []
     monkeypatch.setattr(store, "memoryBytes", 1_000)
-    with pytest.raises(MemoryError, match="Joining file barcodes to 48 selected cells"):
+    with pytest.raises(
+        MemoryError, match="Importing barcodes for 48 selected cells holds about"
+    ):
         store.clones.import_barcodes(
             paths, cell_selection=cells, barcode_prefix=_PREFIXES, barcode_suffix="-1"
         )
@@ -1149,6 +1152,7 @@ def test_a_small_budget_reads_a_file_in_several_chunks(
     store, tmp_path, monkeypatch
 ) -> None:
     from cytearc.clones import barcodes as barcodes_module
+    from cytearc.datastore._operations import lineage_barcodes as operations
 
     path = write_pycashier(BARCODES, tmp_path / "reads.tsv", sample="d4")
     n_reads = len(path.read_text().splitlines()) - 1
@@ -1160,7 +1164,10 @@ def test_a_small_budget_reads_a_file_in_several_chunks(
         return original(self, cells, *args, **kwargs)
 
     monkeypatch.setattr(barcodes_module.BarcodeCounter, "add", add)
-    monkeypatch.setattr(store, "memoryBytes", 2 * 2**20)
+    # A budget beyond the read of a stored chunk of the cells' IDs, of which a
+    # chunk of the file may take a 640th: the chunks of a 2 MiB budget.
+    monkeypatch.setattr(store, "memoryBytes", 64 * 2**20)
+    monkeypatch.setattr(operations, "_CHUNK_SHARE", 640)
     store.clones.import_barcodes(
         path,
         cell_selection=every_cell(store),
@@ -1263,14 +1270,15 @@ def test_the_keys_of_a_trex_table_count_against_the_budget(
 
     # 2,000 molecules of cells outside the store: no record is held, so only
     # the keys that find repeated molecules fill the budget, here counted at
-    # 4,000 bytes each.
+    # 40,000 bytes each, beyond a budget that holds the read of a stored
+    # chunk of the cells' IDs.
     lines = ["#cell_id\tumi\tclone_id\tread_count"] + [
         f"OUT{row % 50:04d}\tU{row:06d}\tTTTT\t3" for row in range(2_000)
     ]
     path = tmp_path / "molecules.txt"
     path.write_text("\n".join(lines) + "\n")
-    monkeypatch.setattr(operations, "_KEY_BYTES", 4_000)
-    monkeypatch.setattr(store, "memoryBytes", 6 * 2**20)
+    monkeypatch.setattr(operations, "_KEY_BYTES", 40_000)
+    monkeypatch.setattr(store, "memoryBytes", 64 * 2**20)
     with collect_warnings():
         read = _refused_before_reading(store, path, monkeypatch)
     assert len(read) == 1
@@ -1421,3 +1429,113 @@ def test_the_lookup_of_the_selected_cells_counts_as_the_records_grow(
             path, cell_selection=store.snapshot_cell_selection("every_cell")
         )
     assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []
+
+
+def test_the_selected_cells_and_the_read_of_their_ids_are_checked_first(
+    store, tmp_path, monkeypatch
+) -> None:
+    from cytearc.datastore._operations import lineage_barcodes as operations
+    from cytearc.datastore._operations.cell_barcodes import LOOKUP_BYTES_PER_CELL
+
+    path = write_bartab_counts(BARCODES, tmp_path / "counts.tsv", sample="d4")
+    # The lookup and the 64 bytes of arrays of each of the 48 cells, and the
+    # read of their IDs as text, which decodes a stored chunk of them.
+    reading = (LOOKUP_BYTES_PER_CELL + 64) * N_CELLS + ids_read_bytes(store, N_CELLS)
+    read: list[object] = []
+    original = operations.read_metadata_rows_chunkwise
+
+    def counted(*args):
+        read.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(operations, "read_metadata_rows_chunkwise", counted)
+    monkeypatch.setattr(store, "memoryBytes", reading - 1)
+    options = {"barcode_prefix": "d4__", "barcode_suffix": "-1"}
+    with pytest.raises(
+        MemoryError,
+        match=f"Importing barcodes for {N_CELLS} selected cells holds about "
+        f"{reading} bytes before the first barcode is read",
+    ):
+        store.clones.import_barcodes(path, cell_selection=every_cell(store), **options)
+    # Refused before a cell ID is read, and nothing is written; at the bound
+    # the IDs are read, and the reading of a chunk of them leaves room for
+    # the rest of this small import.
+    assert read == []
+    assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []
+    monkeypatch.setattr(store, "memoryBytes", reading)
+    with collect_warnings():
+        ref = store.clones.import_barcodes(
+            path, cell_selection=every_cell(store), **options
+        )
+    assert len(read) == 1
+    assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == [ref]
+
+
+def test_the_selected_cells_count_their_ids_as_the_join_holds_them(
+    store, tmp_path, monkeypatch
+) -> None:
+    import sys
+
+    from cytearc.clones import barcodes as barcodes_module
+    from cytearc.datastore._operations.cell_barcodes import LOOKUP_BYTES_PER_CELL
+    from cytearc.readers import lineage_barcodes as reader
+
+    ids = [str(cell_id) for cell_id in store.cells.fetch_all("ids")]
+    # Three of the store's cells, so that no barcode leaves a hash beside them.
+    path = tmp_path / "counts.tsv"
+    path.write_text(
+        "gene\tcell\tcount\n" + "".join(f"LB{k}\t{ids[k]}\t2\n" for k in range(3))
+    )
+    # The join's lookup, the 64 bytes of arrays of each of the 48 cells, and
+    # each cell's ID as the Python string that the lookup holds.
+    cells = (LOOKUP_BYTES_PER_CELL + 64) * N_CELLS + sum(map(sys.getsizeof, ids))
+    # Beyond the read of a stored chunk of IDs, which the check before the
+    # IDs are read counts.
+    budget = 64 * 2**20
+    monkeypatch.setattr(store, "memoryBytes", budget)
+    # Reading holds nothing else, so the records may take what the cells leave.
+    monkeypatch.setattr(reader.BarcodeLayout, "held_bytes", lambda self: 0)
+    monkeypatch.setattr(reader.BarcodeLayout, "chunk_bytes", lambda self, rows: 0)
+    for records in (budget - cells + 1, budget - cells):
+        monkeypatch.setattr(
+            barcodes_module.BarcodeCounter,
+            "peak_bytes",
+            property(lambda self, records=records: records if self.n_rows else 0),
+        )
+        if records > budget - cells:
+            with pytest.raises(
+                MemoryError,
+                match=f"holds about {budget + 1} bytes at its peak, {budget + 1} of "
+                "them for the selected cells",
+            ):
+                store.clones.import_barcodes(path, cell_selection=every_cell(store))
+        else:
+            ref = store.clones.import_barcodes(path, cell_selection=every_cell(store))
+    assert store.clones.load_barcodes(ref).records["barcode"].tolist() == [
+        "LB0",
+        "LB1",
+        "LB2",
+    ]
+
+
+def test_load_names_missing_and_incomplete_barcodes(store, tmp_path) -> None:
+    from cytearc.storage.artifacts import artifact_group
+    from cytearc.storage.refs import ArtifactRef
+
+    path = write_bartab_counts(BARCODES, tmp_path / "counts.tsv", sample="d4")
+    with collect_warnings():
+        ref = store.clones.import_barcodes(
+            path,
+            cell_selection=every_cell(store),
+            barcode_prefix="d4__",
+            barcode_suffix="-1",
+        )
+    missing = ArtifactRef(
+        scope="datastore", kind="lineage_barcodes", artifact_id="f" * 64, assay=None
+    )
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        store.clones.load_barcodes(missing)
+    # An import that stopped before it finished leaves an incomplete artifact.
+    artifact_group(store.zw, ref).attrs["complete"] = False
+    with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+        store.clones.load_barcodes(ref)

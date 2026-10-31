@@ -19,7 +19,8 @@ from ...clones.barcodes import (
 )
 from ...metadata.arguments import LineageBarcodeImportArguments
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
-from ...metadata.rows import read_metadata_rows_chunkwise
+from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
+from ...metadata.selection import cell_selection_indices
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
@@ -27,9 +28,9 @@ from ...storage.artifacts import (
     fingerprint_strings,
     require_complete_artifact,
 )
-from ...storage.selections import read_stored_selection_indices
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
+from ...utils.arguments import bool_argument
 from ...utils.logging import logger
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
@@ -229,8 +230,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         """
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
+        bool_argument(invalidate_cache, "invalidate_cache")
         if format is not None and not isinstance(format, str):
             raise TypeError("format must be a format name or None")
         files: tuple[BarcodeFile, ...] = ()
@@ -345,14 +345,29 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
     ) -> tuple[CountedBarcodes, dict[str, Any]]:
         """Count the barcodes of the files' rows that name selected cells."""
         n_cells = len(cell_index)
+        # What the import holds for the selected cells, and the read of their
+        # IDs as text, are checked before the IDs are read.
+        reading = (LOOKUP_BYTES_PER_CELL + _CELL_BYTES) * n_cells + text_read_bytes(
+            self.cells._get_array("ids"), n_cells
+        )
+        if reading > self.memoryBytes:
+            raise MemoryError(
+                f"Importing barcodes for {n_cells} selected cells holds about "
+                f"{reading} bytes before the first barcode is read, more than the "
+                f"memory budget of {self.memoryBytes} bytes. Raise mem_budget, or "
+                "pass a smaller cell_selection."
+            )
         # Only the selected cells' IDs are read, a sample's in a merged store.
         cell_ids = np.asarray(
             read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
         )
-        held = (LOOKUP_BYTES_PER_CELL + _CELL_BYTES) * n_cells
         join = CellBarcodeJoin(
             cell_ids, memory_bytes=self.memoryBytes, held_bytes=_CELL_BYTES * n_cells
         )
+        # The join counts what it holds for the cells: its lookup, their IDs
+        # as text and the bytes given for each cell; the hashes of barcodes
+        # that match no cell grow apart, as join.unmatched_bytes.
+        held = join.held_bytes
         counter = BarcodeCounter(merge_rows=self._merge_rows())
         n_empty = 0
         for file, layout in zip(files, layouts, strict=True):
@@ -366,14 +381,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         }
 
     def _barcode_selection_indices(self, cell_selection: ArtifactRef) -> np.ndarray:
-        cell_index = read_stored_selection_indices(
-            self.zw,
-            cell_selection,
-            kind="cell_selection",
-            scope="datastore",
-            assay=None,
-            table_path="cellData",
-        ).astype(np.int64, copy=False)
+        cell_index = cell_selection_indices(self.zw, cell_selection)
         if not len(cell_index):
             raise ValueError("cell_selection selects no cell")
         return cell_index
@@ -421,7 +429,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
 
         Args:
             counter: The records held so far.
-            cells: The bytes held for the selected cells, such as their lookup.
+            cells: The bytes held for the selected cells, as the join counts
+                them: their lookup, their IDs as text and their arrays.
             reading: The bytes held to read a file: its names, a chunk, the
                 keys of its molecules and the barcodes that match no cell.
         """
@@ -618,8 +627,11 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
 
         Raises:
             TypeError: If ``barcodes`` is not an ArtifactRef.
-            ValueError: If it is not a complete ``lineage_barcodes`` artifact.
-            MemoryError: If the tables do not fit the memory budget.
+            ValueError: If it is not a ``lineage_barcodes`` artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
+            MemoryError: If the tables, with the cells' IDs that they read as
+                text, do not fit the memory budget.
         """
         group = self._barcode_group(barcodes)
         n_records = int(

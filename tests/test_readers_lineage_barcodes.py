@@ -330,6 +330,83 @@ def test_rows_name_their_lines_when_a_value_is_wrong(tmp_path) -> None:
         _rows(barcode_layout(shifted))
 
 
+# Each case: a table whose bad row follows a row and two blank lines, or a
+# quoted field that holds a line break, the options that read it, and the
+# error, which names the file line where counting rows names line 3, or line
+# 2 in a table without a header.
+_PAST_BLANK_LINES = {
+    "a row without a cell": (
+        "gene\tcell\tcount\nLB\tA\t1\n\n\nLB\t\t2\n",
+        {},
+        "without a cell barcode on lines 5",
+    ),
+    "a count that is not whole": (
+        "gene\tcell\tcount\nLB\tA\t1\n\n\nLB\tB\t2.5\n",
+        {},
+        r"count must be a whole number .* on line 5",
+    ),
+    "a molecule without a UMI": (
+        "#cell_id\tumi\tclone_id\nA\tGG\tT\n\n\nB\tNA\tT\n",
+        {},
+        r"without a UMI \(umi\) on line 5",
+    ),
+    "a TREX molecule cut short": (
+        "#cell_id\tumi\tclone_id\tread_count\nAAAC\tGG\tTTT\t3\n\n\nAAAC\tGC\tTTT\n",
+        {},
+        "without read_count on line 5",
+    ),
+    "a pycashier row shifted by its read name": (
+        "info\tumi\tcell\tbarcode\n@r\tGG\tAA\tT\n\n\n@r_2\tx\tAA\tT\n",
+        {},
+        "holds 'AA' and 'x' on line 5",
+    ),
+    "a pycashier row of a table without a header": (
+        "@r1\tGGAT\tAAAC\tTTTG\n\n\n@r_2\tx\tAAAC\tTTTG\n",
+        {},
+        "holds 'AAAC' and 'x' on line 4",
+    ),
+    "a pair without its library": (
+        "c\tb\tl\nA\tT\tx\n\n\nB\tT\t\n",
+        {
+            "format": "pairs",
+            "columns": {"cell": "c", "barcode": "b", "library": "l"},
+        },
+        r"without a library \(l\) on line 5",
+    ),
+    "lists whose counts do not align": (
+        "cell\tbarcodes\tumis\nA\tx;y\t3;4\n\n\nC\tx;y\t3\n",
+        {
+            "format": "pairs",
+            "columns": {
+                "cell": "cell",
+                "barcode": "barcodes",
+                "umis": "umis",
+                "separator": ";",
+            },
+        },
+        "another number of umis than of barcodes on line 5",
+    ),
+    "a count after a quoted line break": (
+        'c\tb\tn\n"A\nZ"\tT\t3\nB\tT\tx\n',
+        {
+            "format": "pairs",
+            "columns": {"cell": "c", "barcode": "b", "umis": "n"},
+        },
+        "n must be a whole number of at least 0, but holds 'x' on line 4",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_PAST_BLANK_LINES))
+def test_text_tables_name_the_file_line_of_a_row_past_blank_lines(
+    tmp_path, case
+) -> None:
+    text, options, message = _PAST_BLANK_LINES[case]
+    path = _file(tmp_path, "table.tsv", text)
+    with pytest.raises(ValueError, match=message):
+        _rows(barcode_layout(path, **options), 10)
+
+
 def test_fatemap_tables_of_several_samples_are_refused(tmp_path) -> None:
     path = _file(
         tmp_path,
@@ -934,13 +1011,15 @@ def test_quicats_wide_table_parses_each_chunk_in_one_pass(
         "sample,cell," + ",".join(names) + "\n" + "\n".join(rows) + "\n",
     )
     calls = []
-    parse = reader.parse_integers
+    parse = reader._parsed_counts
 
     def counted(*arguments, **options):
         calls.append(1)
         return parse(*arguments, **options)
 
-    monkeypatch.setattr(reader, "parse_integers", counted)
+    # The parser of a text table's counts, which a column at a time would call
+    # once for each barcode.
+    monkeypatch.setattr(reader, "_parsed_counts", counted)
     chunks = _rows(barcode_layout(path), 10)
     # Parsing one column at a time made a wide table's cost grow with the
     # square of its barcodes.
@@ -1625,7 +1704,7 @@ def test_text_that_cannot_be_read_is_refused_naming_the_file(tmp_path) -> None:
     # A gzip header followed by bytes that do not inflate.
     corrupt = tmp_path / "counts.tsv.gz"
     corrupt.write_bytes(gzip.compress(b"gene\tcell\tcount\n")[:10] + b"\xff" * 64)
-    with pytest.raises(ValueError, match="counts.tsv.gz is malformed"):
+    with pytest.raises(ValueError, match="counts.tsv.gz is cut short or corrupt"):
         barcode_layout(corrupt)
     # A merged table whose line beyond the header's block of text is not UTF-8.
     path = tmp_path / "barcodes_output.csv"

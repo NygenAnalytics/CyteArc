@@ -60,7 +60,7 @@ import h5py
 import numpy as np
 import pandas as pd
 
-from ..metadata.records import MISSING_TEXT, file_lines, parse_integers, parse_text
+from ..metadata.records import MISSING_TEXT, file_lines, parse_text
 from ._delimited import (
     HDF5_SIGNATURE,
     TextLayout,
@@ -993,37 +993,55 @@ def _distinct_text(values: np.ndarray) -> np.ndarray:
     return parsed
 
 
-def _stripped_cells(values: np.ndarray, lines: np.ndarray, path: str) -> np.ndarray:
+def _on_lines(rows: np.ndarray, first_line: int, text: TextLayout) -> str:
+    """Name the file lines of rows of a chunk, such as ``"lines 4, 7"``.
+
+    ``first_line`` counts rows, as ``text_chunks`` yields it, so the lines
+    are found in the file past blank lines and quoted line breaks.
+    """
+    noun = "line" if len(rows) == 1 else "lines"
+    return f"{noun} {line_list(np.asarray(rows), first_line, text)}"
+
+
+def _stripped_cells(
+    values: np.ndarray, lines: np.ndarray, path: str, text: TextLayout | None = None
+) -> np.ndarray:
     """Strip cell barcodes once per distinct value, refusing rows without one.
 
-    A missing-value token is a cell barcode as any other text is.
+    A missing-value token is a cell barcode as any other text is. ``lines``
+    are the rows' file lines, or with ``text`` the lines that count rows.
     """
     codes, distinct = pd.factorize(np.asarray(values, dtype=object))
     stripped = np.asarray([value.strip() for value in distinct], dtype=object)
     cells: np.ndarray = stripped[codes]
-    _refuse_cellless(cells, lines, path)
+    _refuse_cellless(cells, lines, path, text)
     return cells
 
 
-def _refuse_cellless(cells: np.ndarray, lines: np.ndarray, path: str) -> None:
+def _refuse_cellless(
+    cells: np.ndarray, lines: np.ndarray, path: str, text: TextLayout | None = None
+) -> None:
     empty = np.flatnonzero(cells == "")
     if len(empty):
         raise ValueError(
             f"{path} has rows without a cell barcode on lines "
-            f"{line_list(lines[empty], 0)}"
+            f"{line_list(lines[empty], 0, text)}"
         )
 
 
 def _cell_texts(
-    chunk: pd.DataFrame, positions: Sequence[int], first_line: int, path: str
+    chunk: pd.DataFrame, positions: Sequence[int], first_line: int, text: TextLayout
 ) -> np.ndarray:
     lines = first_line + np.arange(len(chunk))
     if len(positions) > 1:
         cells = joined_columns(chunk, positions, COLUMN_SEPARATOR)
-        _refuse_cellless(cells, lines, path)
+        _refuse_cellless(cells, lines, text.path, text)
         return cells
     return _stripped_cells(
-        chunk[positions[0] if positions else 0].to_numpy(dtype=object), lines, path
+        chunk[positions[0] if positions else 0].to_numpy(dtype=object),
+        lines,
+        text.path,
+        text,
     )
 
 
@@ -1048,14 +1066,15 @@ def _barcode_texts(chunk: pd.DataFrame, positions: Sequence[int]) -> np.ndarray:
 
 
 def _required_text(
-    chunk: pd.DataFrame, position: int, name: str, first_line: int, path: str
+    chunk: pd.DataFrame, position: int, name: str, first_line: int, text: TextLayout
 ) -> np.ndarray:
     """Parse a text column that every row needs, naming the lines that lack it."""
     values = _distinct_text(chunk[position].to_numpy(dtype=object))
     missing = np.flatnonzero(pd.isna(values))
     if len(missing):
         raise ValueError(
-            f"{path} has rows without {name} on {file_lines(missing, first_line)}"
+            f"{text.path} has rows without {name} on "
+            + _on_lines(missing, first_line, text)
         )
     return values
 
@@ -1087,21 +1106,28 @@ def _parsed_counts(
 
 
 def _item_counts(
-    items: np.ndarray, origin: np.ndarray, name: str, first_line: int
+    items: np.ndarray,
+    origin: np.ndarray,
+    name: str,
+    first_line: int,
+    text: TextLayout,
 ) -> np.ndarray:
-    """Parse the counts of list items, naming the file lines of bad ones."""
+    """Parse counts, of fields or list items, naming the file lines of bad ones.
+
+    ``origin`` holds the row of the chunk that each item comes from.
+    """
     counts, _missing, bad, huge = _parsed_counts(items)
     if bad.any():
         raise ValueError(
             f"{name} must be a whole number of at least 0, but holds "
             f"{str(items[np.flatnonzero(bad)[0]]).strip()!r} on "
-            + file_lines(origin[bad], first_line)
+            + _on_lines(origin[bad], first_line, text)
         )
     if huge.any():
         raise ValueError(
             f"{name} holds a number too large for int64, "
             f"{str(items[np.flatnonzero(huge)[0]]).strip()!r}, on "
-            + file_lines(origin[huge], first_line)
+            + _on_lines(origin[huge], first_line, text)
         )
     return counts
 
@@ -1126,6 +1152,8 @@ def _exploded_rows(
     A row without barcodes keeps one item without a barcode, so that its
     cell is still joined and counted.
     """
+    text = layout._text
+    assert text is not None
     pattern = "[" + re.escape(str(layout.separator)) + "]"
     listed = np.asarray([value is not None for value in barcodes], dtype=bool)
     barcode_items = [items or [""] for items in _split(barcodes, pattern)]
@@ -1142,7 +1170,7 @@ def _exploded_rows(
         if len(unaligned):
             raise ValueError(
                 f"{layout.path} lists another number of {role} than of barcodes on "
-                + file_lines(unaligned, first_line)
+                + _on_lines(unaligned, first_line, text)
             )
         values = np.asarray(
             [
@@ -1154,7 +1182,7 @@ def _exploded_rows(
             ],
             dtype=object,
         )
-        parsed[role] = _item_counts(values, origin, role, first_line)
+        parsed[role] = _item_counts(values, origin, role, first_line, text)
     flat[np.asarray([item in MISSING_TEXT for item in flat.tolist()], dtype=bool)] = (
         None
     )
@@ -1176,7 +1204,7 @@ def _matches_none(values: np.ndarray) -> np.ndarray:
 
 
 def _check_pycashier(
-    cells: np.ndarray, umis: np.ndarray, first_line: int, path: str
+    cells: np.ndarray, umis: np.ndarray, first_line: int, text: TextLayout
 ) -> None:
     bad_cells = _matches_none(cells)
     bad_umis = _matches_none(umis)
@@ -1184,8 +1212,8 @@ def _check_pycashier(
     if len(bad):
         raise ValueError(
             f"pycashier's cell and umi fields must be nucleotide sequences, but "
-            f"{path} holds {str(cells[bad[0]])!r} and {str(umis[bad[0]])!r} on "
-            + file_lines(bad, first_line)
+            f"{text.path} holds {str(cells[bad[0]])!r} and {str(umis[bad[0]])!r} on "
+            + _on_lines(bad, first_line, text)
             + "; a read name that holds '_' shifts the fields of its row"
         )
 
@@ -1196,9 +1224,10 @@ def _refuse_unfilled(
     """Refuse rows that lack a value that the format fills in every row."""
     rows = np.flatnonzero(missing)
     if len(rows):
+        assert layout._text is not None
         raise ValueError(
             f"{layout.path} has rows without {column} on "
-            + file_lines(rows, first_line)
+            + _on_lines(rows, first_line, layout._text)
             + f", which format={layout.format!r} fills in every row; the file may "
             "be cut short"
         )
@@ -1212,7 +1241,7 @@ def _iter_table_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[Barcode
     barcode_positions = [index[name] for name in layout.barcode]
     samples: set[str] = set()
     for first_line, chunk in text_chunks(text, chunk_rows):
-        cells = _cell_texts(chunk, cell_positions, first_line, layout.path)
+        cells = _cell_texts(chunk, cell_positions, first_line, text)
         # A row cut short lacks the values that its tool writes in every row,
         # which is checked before the rules that such a row would break.
         for column in layout.required:
@@ -1221,15 +1250,11 @@ def _iter_table_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[Barcode
         umis = None
         if layout.umi is not None:
             umis = _required_text(
-                chunk,
-                index[layout.umi],
-                f"a UMI ({layout.umi})",
-                first_line,
-                layout.path,
+                chunk, index[layout.umi], f"a UMI ({layout.umi})", first_line, text
             )
         if layout.format == "pycashier":
             assert umis is not None
-            _check_pycashier(cells, umis, first_line, layout.path)
+            _check_pycashier(cells, umis, first_line, text)
         if layout.format == "fatemap" and "SampleNum" in index:
             samples.update(chunk[index["SampleNum"]].str.strip().unique().tolist())
             if len(samples) > 1:
@@ -1248,7 +1273,7 @@ def _iter_table_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[Barcode
                 index[layout.library_column],
                 f"a library ({layout.library_column})",
                 first_line,
-                layout.path,
+                text,
             )
         if layout.separator is not None:
             raw = {
@@ -1260,10 +1285,12 @@ def _iter_table_rows(layout: BarcodeLayout, chunk_rows: int) -> Iterator[Barcode
             yield _exploded_rows(layout, first_line, cells, lists, raw, libraries)
             continue
         counts = {
-            column: parse_integers(
+            column: _item_counts(
                 chunk[index[column]].to_numpy(dtype=object),
-                name=column,
-                first_line=first_line,
+                np.arange(len(chunk)),
+                column,
+                first_line,
+                text,
             )
             for column in (layout.umis, layout.reads)
             if column is not None
