@@ -11,6 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
+import h5py
 import numpy as np
 import pandas as pd
 import pytest
@@ -30,6 +31,7 @@ from tests.clone_truth import (
     N_CELLS,
     N_OUTSIDE,
     clone_truth,
+    write_anndata_h5ad,
     write_cassiopeia,
     write_celltag_multi,
     write_celltagr,
@@ -185,6 +187,33 @@ _CASES: dict[str, tuple[Callable[[Path], Path], dict, str, list[str], int]] = {
         [f"MT_{label}" for label in NUMBERED],
         _LISTS_EVERY,
     ),
+    # anndata writes the cell names and text columns as nullable string
+    # arrays, groups of values and a mask.
+    "mito_by_anndata": (
+        lambda folder: write_anndata_h5ad(TRUTH, folder / "afm.h5ad", content="mito"),
+        {},
+        "mito",
+        [f"MT_{label}" for label in NUMBERED],
+        _LISTS_EVERY,
+    ),
+    "cospar_h5ad_by_anndata": (
+        lambda folder: write_anndata_h5ad(
+            TRUTH, folder / "adata.h5ad", content="cospar"
+        ),
+        {},
+        "cospar_h5ad",
+        [str(clone) for clone in range(len(CLONE_SIZES))],
+        _LISTS_EVERY,
+    ),
+    "h5ad_columns_by_anndata": (
+        lambda folder: write_anndata_h5ad(
+            TRUTH, folder / "adata.h5ad", content="columns"
+        ),
+        {"columns": {"clone": "clone", "probability": "probability"}},
+        "h5ad",
+        NUMBERED,
+        _LISTS_EVERY,
+    ),
 }
 
 
@@ -244,6 +273,51 @@ def test_numbat_posteriors_become_the_clone_probability(shared, tmp_path) -> Non
     values = shared.store.artifacts.load_values(ref, value="clone_probability")
     np.testing.assert_array_equal(values.values, cells["clone_probability"].to_numpy())
     assert values.categorical is False
+
+
+def test_cell_names_that_anndata_writes_as_nullable_strings_are_read(
+    shared, tmp_path
+) -> None:
+    path = write_anndata_h5ad(TRUTH, tmp_path / "adata.h5ad", content="columns")
+    # The fixture stores its names and labels as current anndata does, or the
+    # rows of the format matrix written by anndata would test nothing new.
+    with h5py.File(path, "r") as handle:
+        assert isinstance(handle["obs/_index"], h5py.Group)
+        assert isinstance(handle["obs/clone"], h5py.Group)
+
+    with pytest.warns(UserWarning, match="match no selected cell"):
+        ref = shared.store.clones.import_clones(
+            path,
+            cell_selection=shared.cells,
+            columns={"clone": "clone", "probability": "probability"},
+        )
+
+    cells = shared.store.clones.load_clones(ref).cells
+    in_clone = TRUTH.clones >= 0
+    np.testing.assert_allclose(
+        cells["clone_probability"].to_numpy()[in_clone], TRUTH.probabilities[in_clone]
+    )
+    assert np.isnan(cells["clone_probability"].to_numpy()[~in_clone]).all()
+
+
+def test_an_anndata_file_with_a_cell_without_a_name_is_refused(
+    shared, tmp_path
+) -> None:
+    path = write_mito_h5ad(TRUTH, tmp_path / "afm.h5ad")
+    with h5py.File(path, "r+") as handle:
+        obs = handle["obs"]
+        names = obs["_index"][:]
+        del obs["_index"]
+        index = obs.create_group("_index")
+        index.attrs["encoding-type"] = "nullable-string-array"
+        index.attrs["encoding-version"] = "0.1.0"
+        index.create_dataset("values", data=names)
+        mask = np.zeros(len(names), dtype=bool)
+        mask[4] = True
+        index.create_dataset("mask", data=mask)
+
+    with pytest.raises(ValueError, match="cells without a name"):
+        shared.store.clones.import_clones(path, cell_selection=shared.cells)
 
 
 def test_clones_select_cells_and_read_as_per_cell_values(shared, tmp_path) -> None:

@@ -432,3 +432,58 @@ def write_mito_h5ad(truth: CloneTruth, path: Path) -> Path:
             ],
         )
     return path
+
+
+def write_anndata_h5ad(truth: CloneTruth, path: Path, *, content: str) -> Path:
+    """An AnnData file that anndata itself writes, as current releases store it.
+
+    anndata stores a text index and text columns as nullable string arrays,
+    groups of values and a mask, which the h5py writers above do not. With
+    ``content="mito"`` the clones are MiTo's ``obs['MiTo_clone']``, with
+    ``"cospar"`` CoSpar's sparse ``obsm['X_clone']`` numbered from 0, and with
+    ``"columns"`` the obs column ``clone`` in pandas' string dtype, NA for no
+    clone, beside each cell's ``probability``, NaN for none.
+    """
+    import anndata
+    import pandas as pd
+    from scipy import sparse
+
+    rows = _rows(truth, None, with_outside=True)
+    probability = dict(zip(truth.cell_ids.tolist(), truth.probabilities, strict=True))
+    index = pd.Index([cell for cell, _clone in rows], dtype="string")
+    obs = pd.DataFrame(index=index)
+    obsm = {}
+    if content == "mito":
+        obs["MiTo_clone"] = pd.Categorical(
+            [
+                f"MT_{number_label(clone)}" if clone >= 0 else "unassigned"
+                for _cell, clone in rows
+            ]
+        )
+    elif content == "cospar":
+        entries = [
+            (row, clone) for row, (_cell, clone) in enumerate(rows) if clone >= 0
+        ]
+        obsm["X_clone"] = sparse.csr_matrix(
+            (
+                np.ones(len(entries), dtype=np.float32),
+                ([row for row, _clone in entries], [clone for _row, clone in entries]),
+            ),
+            shape=(len(rows), truth.n_clones),
+        )
+    elif content == "columns":
+        obs["clone"] = pd.array(
+            [number_label(clone) if clone >= 0 else None for _cell, clone in rows],
+            dtype="string",
+        )
+        obs["probability"] = np.asarray(
+            [
+                probability.get(cell, np.nan) if clone >= 0 else np.nan
+                for cell, clone in rows
+            ],
+            dtype=np.float64,
+        )
+    else:
+        raise ValueError("content is mito, cospar or columns")
+    anndata.AnnData(obs=obs, obsm=obsm).write_h5ad(path)
+    return path

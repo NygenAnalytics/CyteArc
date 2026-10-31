@@ -57,7 +57,15 @@ import numpy as np
 import pandas as pd
 
 from ..clones.assignments import clone_label_texts
-from ._h5ad_columns import index_key, read_table_column, sparse_encoding, sparse_shape
+from ._h5ad_columns import (
+    column_length,
+    index_key,
+    is_nullable,
+    read_column,
+    read_table_column,
+    sparse_encoding,
+    sparse_shape,
+)
 from ._text import as_text
 
 __all__ = [
@@ -863,26 +871,50 @@ def _iter_table_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows
         )
 
 
-def _obs_names(handle: h5py.File) -> h5py.Dataset:
+def _obs_names(handle: h5py.File) -> h5py.Dataset | h5py.Group:
+    """Return the node of an AnnData file's cell names.
+
+    AnnData writes a text index as a dataset, or, in current releases, as a
+    nullable string array: a group of values and a mask.
+    """
     obs = handle["obs"]
     key = index_key(obs)
     names = obs.get(str(key))
-    if not isinstance(names, h5py.Dataset):
+    if not (isinstance(names, h5py.Dataset) and names.ndim == 1) and not is_nullable(
+        names
+    ):
         raise ValueError(
             f"{handle.filename} stores its cell names in a form CyteArc cannot read"
         )
     return names
 
 
+def _n_obs(names: h5py.Dataset | h5py.Group) -> int:
+    return int(column_length(names) or 0)
+
+
 def _decoded(values: np.ndarray) -> np.ndarray:
     return np.asarray([as_text(value) for value in values.tolist()], dtype=object)
+
+
+def _obs_name_rows(
+    names: h5py.Dataset | h5py.Group, start: int, stop: int, path: str
+) -> np.ndarray:
+    """Return the names of cells ``[start, stop)`` as text, refusing missing ones."""
+    values, missing = read_column(names, start, stop)
+    if missing.any():
+        raise ValueError(
+            f"{path} has cells without a name in its obs index, the first in row "
+            f"{start + int(np.flatnonzero(missing)[0]) + 1}"
+        )
+    return _decoded(np.asarray(values))
 
 
 def _iter_h5ad_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows]:
     with h5py.File(layout.path, "r") as handle:
         names = _obs_names(handle)
         obs = handle["obs"]
-        n_cells = int(names.shape[0])
+        n_cells = _n_obs(names)
         for start in range(0, n_cells, chunk_rows):
             stop = min(start + chunk_rows, n_cells)
             values, missing = read_table_column(
@@ -914,7 +946,7 @@ def _iter_h5ad_rows(layout: CloneLayout, chunk_rows: int) -> Iterator[CloneRows]
                     )
             yield CloneRows(
                 first_line=start + 1,
-                barcodes=_decoded(np.asarray(names[start:stop])),
+                barcodes=_obs_name_rows(names, start, stop, layout.path),
                 clones=labels,
                 probabilities=probabilities,
             )
@@ -950,8 +982,10 @@ def matrix_cells(layout: CloneLayout, chunk_rows: int) -> Iterator[np.ndarray]:
     if layout.format == "cospar_h5ad":
         with h5py.File(layout.path, "r") as handle:
             names = _obs_names(handle)
-            for start in range(0, int(names.shape[0]), chunk_rows):
-                yield _decoded(np.asarray(names[start : start + chunk_rows]))
+            n_cells = _n_obs(names)
+            for start in range(0, n_cells, chunk_rows):
+                stop = min(start + chunk_rows, n_cells)
+                yield _obs_name_rows(names, start, stop, layout.path)
         return
     text = layout._cells_text
     assert text is not None
@@ -1020,7 +1054,7 @@ def _x_clone_shape(handle: h5py.File) -> tuple[int, int]:
 
 def _x_clone_entries(layout: CloneLayout, chunk_rows: int) -> Iterator[MatrixEntries]:
     with h5py.File(layout.path, "r") as handle:
-        n_obs = int(_obs_names(handle).shape[0])
+        n_obs = _n_obs(_obs_names(handle))
         n_rows, n_columns = _x_clone_shape(handle)
         if n_rows != n_obs:
             raise ValueError(
