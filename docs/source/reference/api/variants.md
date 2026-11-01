@@ -60,6 +60,8 @@ Rows with an empty `ALT`, or alleles that are not sequences of bases, such as a 
 
 A DAb-seq file holds each cell's alternative and reference reads (`AD`, `RD`), its depth (`DP`) and its genotype (`GT`, coded as `NGT`, with `GQ`) at every variant, named `<gene>:<chrom>:<pos>:<ref>/<alt>`, with missing values written as -1. It flags no variant, so every variant whose alleles are bases is read; `variants` may name variants by their full name or as `chrom:pos:ref/alt`. The variants of one position count the same reference reads, which are stored once and must agree; FLT3-ITD's variant, which the pipeline adds from ITDseek, holds the depth in `RD`, so it gives alternative reads alone. Cells are named as `CELL_BARCODES` names them, such as `AACAACCTAGTCTTCTCG-1-all`, the barcode, the tube and the sample.
 
+Before it reads a file's candidate variants and cells, which it holds as text while it chooses the variants, the import checks them against the memory budget: about 700 bytes for each Tapestri variant (1,100 for DAb-seq, whose names it splits into more parts) and 300 for each cell, with two bytes for each byte of their text, so Mission Bio's example of 27,719 variants and 1,313 cells needs about 26 MB. Each block of cells then reads its cells' IDs with its reads, so the import holds no cell's ID beyond its block.
+
 ```python
 counts = ds.variants.import_counts(
     "sample.dna+protein.h5",
