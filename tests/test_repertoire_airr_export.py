@@ -26,6 +26,7 @@ from tests.clone_helpers import (
     TCR_ROWS,
     budget_refusals,
     receptor_store,
+    traced_peak,
     write_lines,
 )
 
@@ -901,3 +902,58 @@ def test_categorical_logical_values_are_written_as_flags(tmp_path) -> None:
     written = _read(path)
     assert written["productive"].tolist() == ["T", "", "F"]
     assert written["rev_comp"].tolist() == ["T", "F", ""]
+
+
+_LONG = 20_000
+_LONG_HEADER = (
+    "cell_id\tsequence_id\tlocus\tv_call\tj_call\tjunction_aa\tproductive\tsequence"
+)
+
+
+def _long_files(folder, kind: str) -> list:
+    """200 contigs of the eight cells, each holding one value of 20,000 bytes.
+
+    Long IDs come in two files of 100 contigs that name them alike, as the
+    TCR and BCR files of one cell do, so every ID of the second is named again.
+    """
+    rows = []
+    for index in range(200):
+        sequence_id = f"c{index}"
+        junction, sequence = "CARW", "ACGT"
+        if kind == "text":
+            # One distinct value, stored once and written in every row.
+            junction = "C" + "A" * _LONG + "F"
+        elif kind == "ragged":
+            sequence = "ACGT" * (_LONG // 4)
+        else:
+            sequence_id = f"{index % 100:05d}" + "x" * _LONG
+        rows.append(
+            f"cell{index % 8}\t{sequence_id}\tIGH\tIGHV1\tIGHJ1\t{junction}\tT\t{sequence}"
+        )
+    if kind != "ids":
+        return [write_lines(folder, "long.tsv", _LONG_HEADER, rows)]
+    return [
+        write_lines(folder, "first.tsv", _LONG_HEADER, rows[:100]),
+        write_lines(folder, "second.tsv", _LONG_HEADER, rows[100:]),
+    ]
+
+
+@pytest.mark.parametrize("kind", ["text", "ragged", "ids"])
+def test_exports_of_long_values_fit_the_smallest_budget(tmp_path, kind) -> None:
+    store = receptor_store(tmp_path)
+    receptors = store.repertoire.import_receptors(
+        _long_files(tmp_path, kind), cell_selection=store.snapshot_cell_selection()
+    )
+    path = tmp_path / "long_export.tsv"
+
+    def export():
+        return store.repertoire.export_airr(receptors, path)
+
+    export()
+    refusals = budget_refusals(store, export)
+    budget = refusals[-1][1]
+    store.memoryBytes = budget
+    peak = traced_peak(export)
+    assert peak <= budget, (peak, budget)
+    written = _read(path)
+    assert len(written) == 200 and written["sequence_id"].is_unique
