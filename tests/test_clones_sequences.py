@@ -1412,11 +1412,33 @@ def test_each_position_counts_the_best_text_of_each_component_that_holds_a_base(
 def test_texts_that_are_their_own_components_expect_as_without_components() -> None:
     rng = np.random.default_rng(41)
     texts = _random_texts(rng, 1_500, [10], (0.4, 0.3, 0.2, 0.1))
-    alone = np.arange(len(texts))
-    for metric, cutoff in (("hamming", 2), ("levenshtein", 2)):
+    # Every third text cut by two bases at its end.
+    cut = sorted(
+        {
+            text[:-2] + "--" if index % 3 == 0 else text
+            for index, text in enumerate(texts)
+        }
+    )
+    for metric, values, search in (
+        ("hamming", texts, {}),
+        ("levenshtein", texts, {}),
+        ("hamming", cut, {"unknown": "-", "min_compared": 8}),
+    ):
+        alone = np.arange(len(values))
         assert expected_chance_pairs(
-            texts, metric, cutoff, components=alone, priority=alone
-        ) == pytest.approx(expected_chance_pairs(texts, metric, cutoff), rel=1e-12)
+            values, metric, 2, components=alone, priority=alone, **search
+        ) == pytest.approx(
+            expected_chance_pairs(values, metric, 2, **search), rel=1e-12
+        )
+
+
+def test_a_block_of_one_text_expects_no_pairs() -> None:
+    # The third text is alone in its block, so only the first two can pair.
+    texts = ["ACGTAC", "ACGTAA", "TTTTTT"]
+    for metric in ("hamming", "levenshtein"):
+        assert expected_chance_pairs(
+            texts, metric, 1, blocks=[0, 0, 1]
+        ) == pytest.approx(expected_chance_pairs(texts[:2], metric, 1), rel=1e-12)
 
 
 def test_the_representatives_alone_give_the_frequencies() -> None:
