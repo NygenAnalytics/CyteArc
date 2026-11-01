@@ -410,10 +410,10 @@ _CONTRACTS = (
             # The clones label the genotypes' cells; the within columns'
             # labels are recorded by their fingerprint.
             **_classified("resolved_input", "cell_selection", "within_fingerprint"),
-            # Cells link through a Jaccard index of 1 with doublets removed, a
-            # fixed choice of the method.
+            # Cells link through a Jaccard index of 1 with ambiguous cells left
+            # out, a fixed choice of the method.
             **_classified(
-                "algorithm_policy", "method", "similarity", "inclusive", "doublets"
+                "algorithm_policy", "method", "similarity", "inclusive", "ambiguous"
             ),
         },
     ),

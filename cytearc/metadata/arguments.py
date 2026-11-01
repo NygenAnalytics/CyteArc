@@ -713,11 +713,12 @@ class GenotypeCloneArguments(OperationArguments):
     sites: tuple[str, ...] = parameter()
     within: tuple[str, ...] = parameter()
     # Fixed choices of the method: cells link through a Jaccard index of 1
-    # over the sites both know, and cells that join two clones are doublets.
+    # over the sites both know, and cells whose calls agree with two clones
+    # that disagree are ambiguous and join neither.
     method: str = parameter()
     similarity: float = parameter()
     inclusive: bool = parameter()
-    doublets: bool = parameter()
+    ambiguous: bool = parameter()
     invalidate_cache: bool = execution()
 
 

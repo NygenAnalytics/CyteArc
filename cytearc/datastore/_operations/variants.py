@@ -225,16 +225,16 @@ _LOADED_GENOTYPE_BYTES_PER_ROW = 220
 _GENOTYPE_CLONE_BYTES_PER_CELL = 80
 _GENOTYPE_CLONE_BYTES_PER_ROW = 48
 # Bytes held for each cell while genotype clones are written: its clone code,
-# doublet flag and size as called and as written.
+# ambiguous flag and size as called and as written.
 _GENOTYPE_CLONE_WRITE_BYTES_PER_CELL = 40
 # The columns of loaded genotype clones, which within columns may not name.
-_GENOTYPE_CLONE_COLUMNS = frozenset({"clone", "clone_size", "doublet"})
+_GENOTYPE_CLONE_COLUMNS = frozenset({"clone", "clone_size", "ambiguous"})
 # The attributes that saved genotype clones need to be reused.
 _GENOTYPE_CLONE_ATTRIBUTES = (
     "n_clones",
     "n_sites",
     "n_cells_mutant",
-    "n_doublets",
+    "n_ambiguous",
     "n_nodes",
     "n_edges",
 )
@@ -2795,12 +2795,14 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         or alternative present, form a set, and the sites it was not called at,
         missing or filtered, are unknown rather than wild type. Cells are
         linked when they agree at every site that both were called at, a
-        Jaccard index of 1 over the sites both know, and a cell that agrees
-        with two clones that disagree is removed as their doublet, as TREX
-        removes local cut vertices; the linked groups are the clones, numbered
-        by size as ``clone_1`` and on. A cell without a mutant call gets no
-        clone. ``within`` names cell metadata columns, such as the donor:
-        clones never join cells of two groups.
+        Jaccard index of 1 over the sites both know. Cells whose calls agree
+        with two cells that disagree at a site they were not called at, such
+        as cells that carry a founder mutation and were not read where a
+        subclone differs, cannot be placed and join neither: they are left
+        out as ambiguous, however many there are. The linked groups are the
+        clones, numbered by size as ``clone_1`` and on, and a cell without a
+        mutant call gets no clone. ``within`` names cell metadata columns,
+        such as the donor: clones never join cells of two groups.
 
         Args:
             genotypes: A ``variant_genotypes`` artifact from
@@ -2812,8 +2814,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
 
         Returns:
             A complete datastore-scoped ``clones`` artifact over the
-            genotypes' cells, which every clone summary reads. Its ``doublet``
-            array marks the cells removed as doublets. Read it with
+            genotypes' cells, which every clone summary reads. Its
+            ``ambiguous`` array marks the cells left out as ambiguous. Read it
+            with
             :meth:`~cytearc.datastore.namespaces.ClonesAccessor.load_clones`.
 
         Raises:
@@ -2879,7 +2882,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             method="jaccard",
             similarity=1.0,
             inclusive=True,
-            doublets=True,
+            ambiguous=True,
             invalidate_cache=invalidate_cache,
         )
         planned = plan_clones(
@@ -2889,7 +2892,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             n_cells,
             with_probability=False,
             required_attributes=_GENOTYPE_CLONE_ATTRIBUTES,
-            source_arrays={"doublet": "b"},
+            source_arrays={"ambiguous": "b"},
         )
         if planned.reused:
             return planned.ref
@@ -2926,7 +2929,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             method="jaccard",
             similarity=1.0,
             inclusive=True,
-            doublets=True,
+            ambiguous=True,
             max_bytes=self.memoryBytes - held - 64 * n_rows,
         )
         labels = clone_labels(len(called.sizes))
@@ -2941,7 +2944,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             "n_clones": len(labels),
             "n_sites": len(chosen),
             "n_cells_mutant": int(len(member_cells)),
-            "n_doublets": int(np.count_nonzero(called.doublets)),
+            "n_ambiguous": int(np.count_nonzero(called.ambiguous)),
             "n_nodes": called.n_nodes,
             "n_edges": called.n_edges,
         }
@@ -2958,7 +2961,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             planned,
             assignment,
             attributes,
-            source_arrays={"doublet": called.doublets.astype(bool)},
+            source_arrays={"ambiguous": called.ambiguous.astype(bool)},
         )
         log_clones(assignment, n_cells)
         return planned.ref

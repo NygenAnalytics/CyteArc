@@ -38,11 +38,13 @@ __all__ = [
 CLONE_PROBABILITY = "clone_probability"
 #: The per-cell arrays that a clone source may add, with the dtype that the
 #: table of loaded cells holds: each cell's probability of its clone, its
-#: barcodes and whether calling removed it as a doublet.
+#: barcodes, whether calling removed it as a doublet, and whether it left it
+#: out as ambiguous, its calls agreeing with two clones that disagree.
 SOURCE_ARRAYS: Mapping[str, Any] = {
     CLONE_PROBABILITY: np.float64,
     "n_barcodes": np.int64,
     "doublet": bool,
+    "ambiguous": bool,
 }
 
 
