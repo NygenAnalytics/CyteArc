@@ -155,10 +155,15 @@ def write_clones(
     if assignment.probabilities is not None:
         arrays[CLONE_PROBABILITY] = assignment.probabilities.astype(np.float64)
     for name, values in (source_arrays or {}).items():
-        if name not in SOURCE_ARRAYS or name in arrays:
+        if name not in SOURCE_ARRAYS:
             raise ValueError(
                 f"{name!r} is not a per-cell array that a clone source adds beside "
                 f"its clones; those are {', '.join(SOURCE_ARRAYS)}"
+            )
+        if name in arrays:
+            raise ValueError(
+                f"{name!r} is written from the assignment's probabilities already; "
+                "pass it once"
             )
         arrays[name] = values
     write_cell_data_artifact(root, planned, arrays, attributes=dict(attributes))

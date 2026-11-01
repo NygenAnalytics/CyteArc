@@ -239,6 +239,28 @@ def test_the_artifact_holds_barcodes_doublets_and_what_each_rule_removed(
     )
 
 
+def test_saved_clones_are_reused_only_with_their_barcodes_and_doublets(
+    store, tmp_path
+) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "trex")
+    clones = store.clones.barcode_clones(barcodes, preset="trex")
+    group = artifact_group(store.zw, clones)
+    # Each cell's barcodes and doublet flag are stored as the clones artifact
+    # declares them.
+    assert group["n_barcodes"].dtype == np.dtype(np.int32)
+    assert group["doublet"].dtype == np.dtype(bool)
+    doublet = np.asarray(group["doublet"][:])
+    assert store.clones.barcode_clones(barcodes, preset="trex") == clones
+    # Clones that lost one of the arrays that their source adds are called
+    # again, as a new artifact, rather than reused without it.
+    del group["doublet"]
+    again = store.clones.barcode_clones(barcodes, preset="trex")
+    assert again != clones
+    np.testing.assert_array_equal(store.artifacts.load(again)["doublet"][:], doublet)
+    loaded = store.clones.load_clones(again)
+    np.testing.assert_array_equal(loaded.cells["doublet"], doublet)
+
+
 def test_clones_within_groups_are_those_of_each_group_alone(store, tmp_path) -> None:
     calling, barcodes = _imported(store, tmp_path, "larry")
     within = store.clones.barcode_clones(barcodes, preset="larry", within="sample")

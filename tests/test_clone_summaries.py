@@ -260,6 +260,9 @@ def _source_clones(source) -> tuple[dict[tuple, str], dict[tuple, int]]:
     the clone's place in the source's table of clones, largest first.
     """
     loaded = source.store.clones.load_clones(source.clones)
+    # Every source numbers its clones by size, largest first, which the ranks
+    # and the tracking's ties follow, whatever rule its labels follow.
+    assert loaded.clones["n_cells"].is_monotonic_decreasing
     ranks = {str(label): rank for rank, label in enumerate(loaded.clones["clone"])}
     of_cell = loaded.cells["clone"].reindex(TRUTH.cell_ids)
     labels: dict[tuple, str] = {}

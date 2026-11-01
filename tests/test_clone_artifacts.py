@@ -110,7 +110,9 @@ def test_writing_refuses_arrays_that_no_source_adds(store) -> None:
             source_arrays={"barcodes": np.zeros(N_CELLS, dtype=np.int64)},
         )
     probable = dataclasses.replace(assignment, probabilities=np.ones(N_CELLS))
-    with pytest.raises(ValueError, match="'clone_probability' is not a per-cell"):
+    with pytest.raises(
+        ValueError, match="'clone_probability' is written from the assignment's"
+    ):
         write_clones(
             store.zw,
             planned,
