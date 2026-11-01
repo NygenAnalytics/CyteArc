@@ -194,14 +194,22 @@ _SPECTRATYPE_COLUMNS = frozenset(
 )
 # Finding the chains of the chosen slots that grouped cells hold holds, for
 # each, its cell, group and clonotype and the codes of its locus and of each
-# counted field, as int64, and while they are found, counted and ordered, as
-# much again in sorted and combined copies: up to 80 bytes and 16 more for
-# each field, as traced on 200,000 cells of two chains each.
-_CHAIN_BYTES = 100
+# counted field, as int64, and while they are found, counted and ordered,
+# sorted and combined copies of them: about 40 bytes and 16 more for each
+# field, the locus and the clonotype among them, as traced on 200,000 cells
+# of two chains each, counting cells and clonotypes.
+_CHAIN_BYTES = 64
 _CHAIN_BYTES_PER_FIELD = 24
+# Each group's labels and name stay held beside its row of the groups' keys:
+# 304 bytes for a group of one key column and 587 for one of three, as traced
+# on 200,000 groups of labels of their own.
+_KEY_BYTES_PER_GROUP = 200
+_KEY_BYTES_PER_GROUP_COLUMN = 160
 # Each row of the table, while it is built: its group, locus and values as
 # codes and as pointers to shared text, its count and fraction, and the
-# order of the rows; 8 more for each column of the table.
+# order of the rows, and 16 bytes for each column of the table; 114 to 130
+# bytes beside the chains, as traced on 400,000 rows of one and three key
+# columns.
 _ROW_BYTES = 120
 _ROW_BYTES_PER_COLUMN = 16
 # Ranking the codes of a field among its stored values holds, for each
@@ -1698,8 +1706,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             held_bytes=reads.held,
         )
         del rows
+        reads.held -= n_cells
+        # Each cell's group, and each group's labels, name and row of the keys.
+        keys_bytes = int(grouped.codes.nbytes) + len(grouped.keys) * (
+            _KEY_BYTES_PER_GROUP
+            + _KEY_BYTES_PER_GROUP_COLUMN * len(grouped.key_columns)
+        )
+        reads.reserve(keys_bytes)
         keys = group_frame(grouped.key_columns, grouped.keys)
-        reads.held += int(grouped.codes.nbytes) - n_cells
+        reads.held += keys_bytes
         # Each chain of a grouped cell in a chosen slot is counted, and the
         # stored codes of each contig's text field are read one field at a
         # time.
