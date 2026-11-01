@@ -32,7 +32,7 @@ from scipy import sparse
 import cytearc
 from cytearc.embeddings.umap import fit_transform
 from cytearc.neighbors.graph import build_connectivity_arrays
-from cytearc.utils.arrays import rolling_window
+from cytearc.utils.arrays import rolling_window, union_sorted
 from cytearc.utils.logging import logger
 from cytearc.utils.numba import (
     _build_token,
@@ -1519,16 +1519,20 @@ def _kernels(directory: Path, package: str) -> dict[str, tuple[Any, bool]]:
 def test_every_cytearc_kernel_has_the_build_scoped_cache() -> None:
     kernels = _kernels(CYTEARC_DIR, "cytearc")
     wrapped = sorted(name for name, (_, is_wrapped) in kernels.items() if is_wrapped)
-    # rolling_window compiles its kernel at its first call; a new kernel that
-    # compiles the same way needs its own line here.
-    assert wrapped == ["cytearc.utils.arrays._rolling_window_kernel"]
+    # rolling_window and union_sorted compile their kernels at their first
+    # call; a new kernel that compiles the same way needs its own line here.
+    assert wrapped == [
+        "cytearc.utils.arrays._rolling_window_kernel",
+        "cytearc.utils.arrays._union_kernel",
+    ]
     rolling_window(np.ones((3, 1)), 2)
+    union_sorted(np.asarray([1], dtype=np.int64), np.asarray([2], dtype=np.int64))
     dispatchers = {
         name: kernel for name, (kernel, is_wrapped) in kernels.items() if not is_wrapped
     }
-    dispatchers[wrapped[0]] = importlib.import_module(
-        "cytearc.utils.arrays"
-    )._rollingWindowImpl
+    arrays = importlib.import_module("cytearc.utils.arrays")
+    dispatchers[wrapped[0]] = arrays._rollingWindowImpl
+    dispatchers[wrapped[1]] = arrays._unionImpl
 
     assert len(dispatchers) > 200
     token = _cytearc_build_token()
