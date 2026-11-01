@@ -184,7 +184,7 @@ workflow mapping.
 
 ## Tapestri import
 
-Mission Bio's Tapestri genotypes hundreds of amplicons in each cell, often beside surface proteins, and its files hold no RNA. `TapestriReader` reads a Tapestri Pipeline 2.0 `<sample>.dna+protein.h5`, or a `.dna.h5` without proteins, in the [layout that Mission Bio documents](https://missionbio.github.io/mosaic/manual/data_structure.html), and `TapestriToZarr` writes it to a store of its own. Each cell's reads of each amplicon (`assays/dna_read_counts`) form the `CNV` assay, a generic `Assay`, with each amplicon's `CHROM`, `start_pos` and `end_pos` as feature metadata, and the reads of each antibody tag (`assays/protein_read_counts`) form the `ADT` assay. Each cell's `sample_name` and its `filtered` flag, True for a cell that the pipeline's default filters removed, become cell metadata. `all_barcodes`, the reads of every barcode, cells or not, is not read.
+Mission Bio's Tapestri genotypes hundreds of amplicons in each cell, often beside surface proteins. `TapestriReader` reads a Tapestri Pipeline 2.0 `<sample>.dna+protein.h5`, or a `.dna.h5` without proteins, in the [layout that Mission Bio documents](https://missionbio.github.io/mosaic/manual/data_structure.html), and `TapestriToZarr` writes it to a store of its own. Each cell's reads of each amplicon (`assays/dna_read_counts`) form the `CNV` assay, a generic `Assay`, with each amplicon's `CHROM`, `start_pos` and `end_pos` as feature metadata, and the reads of each antibody tag (`assays/protein_read_counts`) form the `ADT` assay. Each cell's `sample_name` and its `filtered` flag, True for a cell that the pipeline's default filters removed, become cell metadata. `all_barcodes`, the reads of every barcode, cells or not, is not read, and the reader warns about any other assay group, which the store does not hold.
 
 A cell's ID is its sample and barcode, `<sample>__<barcode>`, as a merged store names its cells, so the cells of several samples in one file stay apart where their barcodes repeat. The store's `tapestri` attribute, of the workspace when one is given, records the samples and the scalar metadata of each assay group, such as its `panel_name`, `genome_version` and `pipeline_version`, which can differ between the DNA and the protein libraries, and the file's own `metadata` group. The DNA variants go into the store with {meth}`ds.variants.import_counts(path, format="tapestri") <cytearc.datastore.namespaces.VariantsAccessor.import_counts>`, which names the file's cells as the store does; {doc}`variants` describes them.
 
@@ -197,6 +197,8 @@ counts = ds.variants.import_counts(
     "sample.dna+protein.h5", cell_selection=ds.snapshot_cell_selection()
 )
 ```
+
+The default count layout writes shards of up to 1 GB, which the narrow assays of a large run fill with many cells at once: 200,000 cells of 600 amplicons and 45 antibodies need about 35 GB to write that way. `TapestriToZarr` then raises `MemoryError` before it writes, naming the largest smaller layout that fits the budget, such as `policy=CountMatrixPolicy(unitBytes=62_500_000, chunkBytes=6_250_000)` from `cytearc.storage.count_matrix`, which wrote those cells in 25 seconds within a budget of 24 GB.
 
 ```{eval-rst}
 .. autoclass:: cytearc.TapestriReader
