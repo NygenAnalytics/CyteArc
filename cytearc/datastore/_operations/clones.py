@@ -13,7 +13,6 @@ import zarr
 from ...clones.assignments import (
     MULTIPLE_POLICIES,
     CloneAssigner,
-    CloneAssignment,
     Clones,
     clone_frames,
     MultiplePolicy,
@@ -82,7 +81,6 @@ from ...metadata.rows import (
 )
 from ...metadata.selection import category_codes, cell_selection_indices
 from ...repertoire.clonotypes import clonotype_noun
-from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
@@ -120,11 +118,6 @@ else:
 
 #: The values of ``export_clones``'s ``format``.
 EXPORT_FORMATS = ("table", "matrix")
-_PROBABILITY = "clone_probability"
-# The per-cell arrays that a clone source may add, with the dtype that the
-# table of loaded cells holds: each cell's probability of its clone, its
-# barcodes and whether calling removed it as a doublet.
-_SOURCE_ARRAYS = {_PROBABILITY: np.float64, "n_barcodes": np.int64, "doublet": bool}
 
 
 def _stored_diagnostics(group: zarr.Group, operation: str) -> dict[str, int | float]:
@@ -701,79 +694,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         )
         for entries in matrix_entries(layout, chunk_rows):
             assigner.add(cells[entries.cells], labels[entries.clones], source=source)
-
-    def _plan_clones(
-        self,
-        arguments: CloneImportArguments | CloneColumnArguments | BarcodeCloneArguments,
-        cell_selection: ArtifactRef,
-        n_cells: int,
-        *,
-        with_probability: bool,
-        required_attributes: tuple[str, ...],
-        source_arrays: Mapping[str, str] | None = None,
-    ) -> PlannedArtifact:
-        """Plan a ``clones`` artifact of ``n_cells`` cells.
-
-        ``source_arrays`` names further per-cell arrays that the source
-        saves, with their dtype kinds, such as barcode clones' ``n_barcodes``
-        and ``doublet``.
-        """
-        record = arguments.to_record()
-        arrays: dict[str, tuple[tuple[int | None, ...], str | None]] = {
-            "values": ((n_cells,), None),
-            "codes": ((n_cells,), "i"),
-            "clone_size": ((n_cells,), "i"),
-        }
-        if with_probability:
-            arrays[_PROBABILITY] = ((n_cells,), "f")
-        for name, kind in (source_arrays or {}).items():
-            arrays[name] = ((n_cells,), kind)
-
-        def has_clones(_ref: ArtifactRef, group: zarr.Group) -> bool:
-            ids = group.get("clone_ids")
-            sizes = group.get("clone_sizes")
-            return (
-                isinstance(ids, zarr.Array)
-                and isinstance(sizes, zarr.Array)
-                and ids.shape == sizes.shape
-            )
-
-        return plan_cell_data_artifact(
-            self.zw,
-            scope="datastore",
-            kind=arguments.artifact_kind,
-            operation=arguments.operation,
-            parameters=record.parameters,
-            inputs=record.inputs,
-            execution_options=record.execution_options,
-            cell_selection=cell_selection,
-            arrays=arrays,
-            invalidate_cache=arguments.invalidate_cache,
-            required_attributes=required_attributes,
-            reuse_validator=has_clones,
-        )
-
-    def _write_clones(
-        self,
-        planned: PlannedArtifact,
-        assignment: CloneAssignment,
-        attributes: Mapping[str, Any],
-        source_arrays: Mapping[str, np.ndarray] | None = None,
-    ) -> None:
-        arrays: dict[str, np.ndarray] = {
-            "values": assignment.values,
-            "codes": assignment.codes.astype(np.int32),
-            "clone_size": assignment.clone_size,
-            "clone_ids": assignment.clone_ids,
-            "clone_sizes": assignment.clone_sizes.astype(np.int64),
-        }
-        if assignment.probabilities is not None:
-            arrays[_PROBABILITY] = assignment.probabilities.astype(np.float64)
-        for name, values in (source_arrays or {}).items():
-            # The callers in this package name only the arrays of a source.
-            assert name in _SOURCE_ARRAYS and name not in arrays, name
-            arrays[name] = values
-        write_cell_data_artifact(self.zw, planned, arrays, attributes=dict(attributes))
 
     @validation_scoped
     def _clones_from_column(

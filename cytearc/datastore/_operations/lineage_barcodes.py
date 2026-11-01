@@ -1,7 +1,7 @@
 import io
 import os
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -53,6 +53,7 @@ from .cell_barcodes import (
     texts_per_file,
     warn_unmatched_barcodes,
 )
+from .clone_artifacts import plan_clones, write_clones
 from .record_tables import (
     read_array,
     record_arrays,
@@ -63,7 +64,6 @@ from .record_tables import (
 if TYPE_CHECKING:
     from ...readers.lineage_barcodes import BarcodeLayout, BarcodeRows
     from ..mapping_datastore import MappingDatastore as _BarcodeOperationsBase
-    from .clones import _CloneOperationsMixin
 else:
     _BarcodeOperationsBase = object
 
@@ -911,10 +911,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             trex_rules=record["trex_rules"],
             invalidate_cache=invalidate_cache,
         )
-        # The DataStore holds the clone operations, which plan and write the
-        # clones artifact that every clone source saves.
-        clone_operations = cast("_CloneOperationsMixin", self)
-        planned = clone_operations._plan_clones(
+        planned = plan_clones(
+            self.zw,
             arguments,
             cell_selection,
             n_cells,
@@ -1011,7 +1009,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             "doublets": int(sum(calls.n_doublet_nodes)),
             "cells_in_small_clones": calls.n_small_cells,
         }
-        clone_operations._write_clones(
+        write_clones(
+            self.zw,
             planned,
             assignment,
             {
