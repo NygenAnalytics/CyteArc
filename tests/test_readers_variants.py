@@ -407,7 +407,9 @@ def test_formats_are_recognised_from_files(tmp_path) -> None:
         folder_format(str(tmp_path))
     with h5py.File(tmp_path / "other.h5", "w") as handle:
         handle.create_group("matrix")
-    with pytest.raises(ValueError, match="neither giftwrap's counts nor MiTo's"):
+    with pytest.raises(
+        ValueError, match="none of giftwrap's counts, MiTo's allele frequency matrix"
+    ):
         hdf5_format(str(tmp_path / "other.h5"))
 
 

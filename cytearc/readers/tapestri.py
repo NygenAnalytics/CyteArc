@@ -126,11 +126,7 @@ def _metadata_value(value: Any) -> Any:
     array = np.asarray(value)
     if array.ndim == 0:
         item = array.item()
-        if isinstance(item, bytes):
-            return item.decode("utf-8")
-        if isinstance(item, np.generic):
-            return item.item()
-        return item
+        return item.decode("utf-8") if isinstance(item, bytes) else item
     return [_metadata_value(part) for part in array]
 
 
@@ -952,16 +948,8 @@ class TapestriSource:
             )
 
 
-def _requested(variants: Sequence[str] | None) -> tuple[str, ...]:
-    if variants is None:
-        return ()
-    if isinstance(variants, str) or not all(isinstance(item, str) for item in variants):
-        raise TypeError("variants must be a sequence of variant or position names")
-    return tuple(variants)
-
-
 def tapestri_source(
-    path: str | os.PathLike[str], variants: Sequence[str] | None = None
+    path: str | os.PathLike[str], variants: Sequence[str] = ()
 ) -> TapestriSource:
     """Describe the DNA variants of a Tapestri ``.h5`` file as a source of counts.
 
@@ -975,7 +963,7 @@ def tapestri_source(
             or no variant is left to import.
     """
     text = os.fspath(path)
-    requested = _requested(variants)
+    requested = tuple(variants)
     with h5py.File(text, "r") as handle:
         group = handle.get(_VARIANTS)
         if not isinstance(group, h5py.Group):
@@ -1065,7 +1053,7 @@ def tapestri_source(
 
 
 def dabseq_source(
-    path: str | os.PathLike[str], variants: Sequence[str] | None = None
+    path: str | os.PathLike[str], variants: Sequence[str] = ()
 ) -> TapestriSource:
     """Describe a DAb-seq ``.hdf5`` file of genotypes as a source of counts.
 
@@ -1080,7 +1068,7 @@ def dabseq_source(
             import.
     """
     text = os.fspath(path)
-    requested = _requested(variants)
+    requested = tuple(variants)
     with h5py.File(text, "r") as handle:
         names = _texts(_dataset(handle, "VARIANTS", text)[:])
         barcodes = _texts(_dataset(handle, "CELL_BARCODES", text)[:])

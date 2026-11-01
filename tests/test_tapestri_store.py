@@ -192,6 +192,24 @@ def _reverse_cells(handle, assay: str) -> None:
             "lacks assays/dna_read_counts/ra",
         ),
         (
+            lambda h: h["assays/dna_read_counts/ra"].__delitem__("barcode"),
+            "lacks assays/dna_read_counts/ra/barcode",
+        ),
+        (
+            lambda h: _replace(
+                h["assays/dna_read_counts/ra"], "sample_name", np.asarray([b"d2"] * 3)
+            ),
+            "ra of .* names 52 barcodes but 3 samples",
+        ),
+        (
+            lambda h: h["assays/dna_read_counts"].__delitem__("layers"),
+            "lacks assays/dna_read_counts/layers",
+        ),
+        (
+            lambda h: h["assays/dna_read_counts"].__delitem__("ca"),
+            "lacks assays/dna_read_counts/ca",
+        ),
+        (
             lambda h: (
                 _replace(
                     h["assays/protein_read_counts/ca"], "id", np.asarray([], "S1")

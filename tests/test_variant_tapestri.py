@@ -352,6 +352,14 @@ def _texts(handle, name):
             lambda h: h[f"{_COLUMNS}/filtered"].__setitem__(0, 2),
             "filtered of .* must hold 0 or 1",
         ),
+        (
+            lambda h: h["assays/dna_variants"].__delitem__("ca"),
+            "lacks assays/dna_variants/ca",
+        ),
+        (
+            lambda h: _replace(h[_COLUMNS], "POS", np.arange(3, dtype=np.int32)),
+            "The arrays of assays/dna_variants/ca of .* do not align",
+        ),
     ],
 )
 def test_malformed_tapestri_files_are_refused(store, tmp_path, edit, message) -> None:
@@ -672,3 +680,149 @@ def test_source_genotypes_of_several_alternatives_fit_the_smallest_budget_accept
 
     budget, peak = _smallest_and_peak(store, run)
     assert peak <= budget, (peak, budget)
+
+
+def test_a_spanning_deletion_is_read_as_its_allele(store, tmp_path) -> None:
+    # VCF's * stands for a deletion that spans the position, beside a
+    # reference of any length, so it is not extended.
+    def edit(handle) -> None:
+        _rename_variant(handle, 9, "G", "*")
+        _rename_variant(handle, 4, "T", "*")
+
+    path = _edit(write_tapestri(TRUTH, tmp_path / "run.h5"), edit)
+    loaded = store.variants.load_counts(_import(store, path)[0])
+    alleles = loaded.alleles.groupby("site", observed=True)["allele"].apply(set)
+    assert alleles["chr7:400"] == {"G", "*"}
+    assert alleles["chr1:2000"] == {"TC", "T", "*"}
+    shown = loaded.counts[loaded.counts["allele"] == "*"]
+    expected = {
+        (TRUTH.row_ids[row], site): int(TRUTH.alternative[row, column])
+        for column, site in ((9, "chr7:400"), (4, "chr1:2000"))
+        for row in range(TRUTH.n_rows)
+        if TRUTH.alternative[row, column]
+    }
+    assert {
+        (str(cell), str(site)): int(count)
+        for cell, site, count in zip(
+            shown["cell"], shown["site"], shown["count"], strict=True
+        )
+    } == expected
+
+
+def test_unit_labels_name_an_allele_without_a_reference() -> None:
+    from cytearc.datastore._operations.variants import _unit_alleles, _unit_labels
+    from cytearc.variants.counts import Contig, SiteTable
+
+    # A site with coordinates whose files name no reference allele.
+    table = SiteTable(
+        contigs=(Contig("chr1"),),
+        site_contig=np.zeros(2, dtype=np.int32),
+        site_position=np.asarray([5, 9]),
+        site_name=np.full(2, "", dtype=object),
+        site_channel=np.full(2, "", dtype=object),
+        allele_site=np.asarray([0, 1, 1]),
+        allele=np.asarray(["C", "A", "G"], dtype=object),
+        allele_role=np.asarray(
+            ["alternative", "reference", "alternative"], dtype=object
+        ),
+    )
+    genotyped = np.asarray([0, 1, 1])
+    units = np.asarray([0, 2, -1])
+    alleles = _unit_alleles(table, genotyped, units)
+    assert alleles == [("", "C"), ("A", "G"), ("", "")]
+    assert _unit_labels(table.labels(), genotyped, units, alleles) == (
+        "chr1:5:C",
+        "chr1:9:A/G",
+        "chr1:9",
+    )
+
+
+def test_calls_and_labels_are_coded_whatever_their_number() -> None:
+    from cytearc.datastore._operations.variants import (
+        _factorized,
+        _label_codes,
+        _sorted_unique,
+        _Vocabulary,
+    )
+
+    vocabulary = _Vocabulary()
+    assert vocabulary.codes(np.asarray(["2", "0", "2"], dtype=object)).tolist() == [
+        0,
+        1,
+        0,
+    ]
+    assert vocabulary.code("0") == 1 and vocabulary.code("3") == 2
+    assert vocabulary.codes(np.asarray([], dtype=object)).tolist() == []
+    # Stored, the texts are sorted and the codes follow them.
+    texts, remap = vocabulary.sorted()
+    assert texts == ["0", "2", "3"] and remap.tolist() == [1, 0, 2]
+    assert _label_codes(
+        {"": 0, "1": 1, "3": 2}, np.asarray(["3", "", "3"])
+    ).tolist() == [
+        2,
+        0,
+        2,
+    ]
+    with pytest.raises(ValueError, match="missing where text was expected"):
+        _factorized(np.asarray(["0", None], dtype=object))
+    values = np.asarray([5, 3, 5, 9, 3, 3], dtype=np.int64)
+    assert _sorted_unique(values).tolist() == [3, 5, 9]
+    assert _sorted_unique(values[:1]).tolist() == [5]
+    assert _sorted_unique(values[:0]).tolist() == []
+
+
+def test_a_source_must_give_each_call_one_quality() -> None:
+    from cytearc.datastore._operations.variants import (
+        _VariantOperationsMixin,
+        _Vocabulary,
+    )
+    from cytearc.variants.counts import (
+        CALL_DTYPE,
+        DEPTH_DTYPE,
+        EntryBatch,
+        count_dtype,
+    )
+    from cytearc.variants.sorting import CellRowSorter
+
+    counts_dtype = count_dtype(())
+    sorter = CellRowSorter(
+        {
+            "counts": (counts_dtype, ("cell", "key")),
+            "depth": (DEPTH_DTYPE, ("cell", "key")),
+            "calls": (CALL_DTYPE, ("cell", "key", "source")),
+        },
+        n_cells=2,
+        buffer_bytes=1 << 20,
+    )
+
+    def add(quality: np.ndarray) -> None:
+        _VariantOperationsMixin._add_variant_batch(
+            sorter,
+            EntryBatch(
+                kind="calls",
+                barcodes=np.asarray(["a", "b"], dtype=object),
+                barcode_codes=np.asarray([0, 1]),
+                keys=np.asarray([0, 0]),
+                call_source="NGT",
+                calls=np.asarray(["0", "1"], dtype=object),
+                call_quality=quality,
+            ),
+            cells=np.asarray([0, 1]),
+            site_map=np.asarray([0]),
+            allele_map=np.asarray([0]),
+            counts_dtype=counts_dtype,
+            listed=np.zeros(2, dtype=bool),
+            call_sources=_Vocabulary(),
+            call_values=_Vocabulary(),
+            path="run.h5",
+            field_paths={},
+        )
+
+    with sorter:
+        with pytest.raises(ValueError, match="run.h5 gives 1 call qualities for 2"):
+            add(np.asarray([30.0]))
+        add(np.asarray([30.0, 99.0]))
+        add(np.empty(0))
+        rows = next(sorter.bands(10))[2]["calls"]
+    assert rows["quality"][np.isfinite(rows["quality"])].tolist() == [30.0, 99.0]
+    assert int(np.isnan(rows["quality"]).sum()) == 2

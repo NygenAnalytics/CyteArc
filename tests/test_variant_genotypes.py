@@ -92,6 +92,15 @@ def test_the_vocabulary_names_six_calls_in_the_order_of_their_codes() -> None:
             [True, True, True, True, False],
             [WILD_TYPE, HETEROZYGOUS, HOMOZYGOUS_ALTERNATIVE, FILTERED, MISSING],
         ),
+        # DAb-seq's GT codes the genotypes as NGT does.
+        (
+            "GT",
+            ["3", "2", "1", "0", "3"],
+            [False, True, True, True, True],
+            [MISSING, HOMOZYGOUS_ALTERNATIVE, HETEROZYGOUS, WILD_TYPE, FILTERED],
+        ),
+        # No labels give no calls.
+        ("NGT", [], [], []),
     ],
 )
 def test_source_labels_map_to_calls(column, labels, covered, expected) -> None:
@@ -112,6 +121,13 @@ def test_unknown_source_columns_and_labels_are_refused() -> None:
     # GoT's tables do not write Unprofiled, so it is no label of theirs.
     with pytest.raises(ValueError, match="'Unprofiled'"):
         source_call_codes("Genotype", np.asarray(["Unprofiled"]), np.ones(1, bool))
+    # The first unknown label in text order is named, whatever the rows' order.
+    with pytest.raises(ValueError, match="holds the call '4'"):
+        source_call_codes("NGT", np.asarray(["7", "0", "4"]), np.ones(3, bool))
+    with pytest.raises(ValueError, match="'NGT' holds a call that is not text"):
+        source_call_codes(
+            "NGT", np.asarray(["0", None], dtype=object), np.ones(2, bool)
+        )
 
 
 def test_the_patient_rule_calls_one_mutant_umi_mutant() -> None:
