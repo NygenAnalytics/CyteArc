@@ -148,8 +148,6 @@ class AlleleBank:
 
     def positions(self, texts: np.ndarray) -> np.ndarray:
         """Each text's position among the bank's alleles, -1 for one it lacks."""
-        if not len(self.alleles):
-            return np.full(len(texts), -1, dtype=np.int64)
         return np.asarray(
             pd.Index(self.alleles, dtype=object).get_indexer(
                 np.asarray(texts, dtype=object)

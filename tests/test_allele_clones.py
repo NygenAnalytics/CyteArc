@@ -451,6 +451,11 @@ def test_allele_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -> 
             frequencies={"CA": calling.banks["CA"], "RA": calling.banks["RA"]},
             max_frequency=2e-5,
         )
+    for frequencies in ([calling.banks["CA"]], {"CA": dict(calling.banks["CA"])}):
+        with pytest.raises(TypeError, match="must map each character|pandas DataFrame"):
+            store.clones.allele_clones(
+                alleles, method="graph", frequencies=frequencies, max_frequency=2e-5
+            )
     with pytest.raises(ValueError, match="lacks the column 'normalized_count'"):
         store.clones.allele_clones(
             alleles,
