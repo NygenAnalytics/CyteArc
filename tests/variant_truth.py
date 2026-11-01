@@ -212,6 +212,64 @@ def variant_truth(seed: int = 0) -> VariantTruth:
     )
 
 
+def clone_variant_truth(clones: CloneTruth, seed: int = 0) -> VariantTruth:
+    """Mitochondrial reads of ``clones``' cells, from which their clones follow.
+
+    Each clone carries two variants of its own, which each of its cells holds
+    at a frequency drawn from 0.5 to 0.9; cells without a clone carry none.
+    Every cell and droplet is read at every position, at a depth around 60,
+    without read errors, so a cell shows a variant exactly when its clone
+    carries it, and the variants that two cells or more show join exactly the
+    cells of each clone of two cells or more. The experiment has no GoT or
+    GIFT counts.
+    """
+    rng = np.random.default_rng(seed + 300)
+    n_rows = len(clones.cell_ids) + len(clones.outside)
+    drawn = rng.choice(SITE_POSITIONS, size=2 * clones.n_clones, replace=False)
+    variants: dict[int, tuple[tuple[int, str], ...]] = {}
+    for clone in range(clones.n_clones):
+        positions = sorted(drawn[2 * clone : 2 * clone + 2].tolist())
+        variants[clone] = tuple(
+            (
+                int(position),
+                str(rng.choice([b for b in BASES if b != REFERENCE[position - 1]])),
+            )
+            for position in positions
+        )
+    clone_of = np.concatenate([clones.clones, np.full(len(clones.outside), -1)])
+    mito = np.zeros((n_rows, N_POSITIONS, len(BASES), 2), dtype=np.int64)
+    for row in range(n_rows):
+        heteroplasmy = {
+            position: (base, float(rng.uniform(0.5, 0.9)))
+            for position, base in variants.get(int(clone_of[row]), ())
+        }
+        for position in range(1, N_POSITIONS + 1):
+            reference = REFERENCE[position - 1]
+            shares = np.zeros(len(BASES))
+            if reference != "N":
+                shares[BASES.index(reference)] = 1.0
+            else:
+                shares[:] = 0.25
+            if position in heteroplasmy:
+                base, level = heteroplasmy[position]
+                shares *= 1 - level
+                shares[BASES.index(base)] += level
+            reads = rng.multinomial(int(rng.poisson(40)) + 20, shares / shares.sum())
+            forward = rng.binomial(reads, 0.5)
+            mito[row, position - 1, :, 0] = forward
+            mito[row, position - 1, :, 1] = reads - forward
+    quality = np.where(mito > 0, np.round(rng.uniform(20, 38, mito.shape), 1), 0.0)
+    return VariantTruth(
+        clones=clones,
+        mito=mito,
+        quality=quality,
+        variants=variants,
+        got=np.full((n_rows, len(TARGETS), 3), -1, dtype=np.int64),
+        got_reads=np.zeros((n_rows, len(TARGETS), 3), dtype=np.int64),
+        gift={},
+    )
+
+
 #: The clones of :func:`mito_clone_truth`, largest first.
 MITO_CLONE_SIZES = (60, 45, 35, 30, 20, 15)
 

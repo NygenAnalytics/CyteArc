@@ -17,7 +17,7 @@ code under test never computes.
 import gzip
 from collections import Counter
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import h5py
@@ -184,6 +184,23 @@ def clone_truth(seed: int = 0) -> CloneTruth:
 def number_label(clone: int) -> str:
     """A clone label as TREX and LARRY number clones, from 1."""
     return str(clone + 1)
+
+
+def without_single_cell_clones(truth: CloneTruth) -> CloneTruth:
+    """The truth with the cell of each clone of one cell left without a clone.
+
+    A source that joins each cell to the cells that share its evidence, such
+    as clones called from variants, calls no clone of one cell. The other
+    clones keep their order by size, numbered from 0 again.
+    """
+    clones = truth.clones
+    sizes = np.bincount(clones[clones >= 0], minlength=truth.n_clones)
+    kept = sizes >= 2
+    numbers = np.cumsum(kept) - 1
+    clone_of = np.where(clones >= 0, clones, 0)
+    return replace(
+        truth, clones=np.where((clones >= 0) & kept[clone_of], numbers[clone_of], -1)
+    )
 
 
 def _write(
