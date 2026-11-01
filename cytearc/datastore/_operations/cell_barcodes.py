@@ -86,11 +86,19 @@ def store_sha256(path: str | os.PathLike[str]) -> str:
     Each file adds its path below the directory, in POSIX form, and its bytes,
     each after its length and in the order of the paths, so no two directories
     of other files or paths hash alike. Empty directories add nothing.
+
+    Raises:
+        OSError: If the directory or a folder below it cannot be listed, which
+            would otherwise hash as if it held no file.
     """
     root = os.fspath(path)
+
+    def refuse(error: OSError) -> None:
+        raise error
+
     files = sorted(
         os.path.relpath(os.path.join(folder, name), root).replace(os.sep, "/")
-        for folder, _folders, names in os.walk(root)
+        for folder, _folders, names in os.walk(root, onerror=refuse)
         for name in names
     )
     digest = hashlib.sha256()

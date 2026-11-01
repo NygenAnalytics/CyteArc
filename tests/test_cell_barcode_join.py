@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,7 @@ from cytearc.datastore._operations.cell_barcodes import (
     barcode_pattern,
     derived_id_bytes,
     join_bytes,
+    store_sha256,
     unmatched_barcodes_warning,
 )
 from cytearc.utils.logging import collect_warnings, logger
@@ -761,6 +763,63 @@ def test_files_order_by_their_bytes_then_their_options(tmp_path) -> None:
         "barcode_suffix": None,
         "barcode_pattern": None,
     }
+
+
+def _store(path: Path, files: dict[str, bytes]) -> Path:
+    """A directory of files, written in the order given, such as a Zarr store's."""
+    for relative, data in files.items():
+        (path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (path / relative).write_bytes(data)
+    return path
+
+
+def test_a_store_is_identified_by_the_paths_and_bytes_of_its_files(tmp_path) -> None:
+    files = {"zarr.json": b'{"node_type": "group"}', "obsm/characters/c/0": b"abc"}
+    first = _store(tmp_path / "first.zarr", files)
+    digest = store_sha256(first)
+    assert len(digest) == 64 and int(digest, 16) >= 0
+    # Another location, files written in the other order and an empty folder
+    # give the same identity.
+    again = _store(tmp_path / "again.zarr", dict(reversed(files.items())))
+    (again / "empty").mkdir()
+    assert store_sha256(again) == digest
+    copy = tmp_path / "copy.zarr"
+    shutil.copytree(first, copy)
+    assert store_sha256(copy) == digest
+    # Other bytes, another path for the same bytes, and the same bytes split
+    # between the files at another place each give another identity.
+    edited = _store(tmp_path / "edited.zarr", {**files, "obsm/characters/c/0": b"abd"})
+    renamed = _store(
+        tmp_path / "renamed.zarr",
+        {"zarr.json": files["zarr.json"], "obsm/characters/c/1": b"abc"},
+    )
+    moved = _store(
+        tmp_path / "moved.zarr",
+        {"zarr.json": files["zarr.json"] + b"a", "obsm/characters/c/0": b"bc"},
+    )
+    # One file whose bytes spell the next file's length and path, and two
+    # files: their paths and bytes run together alike, but not their sizes.
+    record = len(b"b").to_bytes(8, "little") + b"b"
+    joined = _store(tmp_path / "joined.zarr", {"a": b"X" + record + b"Y"})
+    apart = _store(tmp_path / "apart.zarr", {"a": b"X", "b": b"Y"})
+    digests = {store_sha256(path) for path in (edited, renamed, moved, joined, apart)}
+    assert len(digests) == 5 and digest not in digests
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="permissions do not stop the superuser from listing a folder",
+)
+def test_a_store_whose_folder_cannot_be_listed_is_refused(tmp_path) -> None:
+    store = _store(tmp_path / "store.zarr", {"zarr.json": b"{}", "obsm/c/0": b"x"})
+    hidden = store / "obsm"
+    hidden.chmod(0)
+    try:
+        # Without the refusal, the folder would hash as if it held no file.
+        with pytest.raises(PermissionError):
+            store_sha256(store)
+    finally:
+        hidden.chmod(0o755)
 
 
 def test_an_empty_prefix_adds_nothing_and_identifies_the_file_alike(tmp_path) -> None:

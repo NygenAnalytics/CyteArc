@@ -166,6 +166,28 @@ def test_laml_files_hold_the_matrix_its_priors_and_states(
     }
 
 
+def test_an_edited_store_is_imported_again(store, truth, recorders, tmp_path):
+    alleles = _petracer_alleles(store, truth, recorders, tmp_path)
+    path = tmp_path / "out.zarr"
+    store.clones.export_characters(alleles, path)
+    cells = every_cell(store)
+    first = store.clones.import_alleles(path, cell_selection=cells)
+    assert store.clones.import_alleles(path, cell_selection=cells) == first
+    # A store is identified by the bytes of all its files, so the root's
+    # metadata with one space turned into a line break, of the same size and
+    # meaning, names another store, which is imported again.
+    root = path / "zarr.json"
+    metadata = root.read_bytes()
+    assert b" " in metadata
+    root.write_bytes(metadata.replace(b" ", b"\n", 1))
+    again = store.clones.import_alleles(path, cell_selection=cells)
+    assert again != first
+    pd.testing.assert_frame_equal(
+        store.clones.load_alleles(again).records,
+        store.clones.load_alleles(first).records,
+    )
+
+
 def test_exported_matrices_import_back_with_their_states(
     store, truth, recorders, tmp_path
 ):
