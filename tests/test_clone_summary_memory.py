@@ -12,7 +12,6 @@ held beside many rows.
 """
 
 import re
-import tracemalloc
 from collections.abc import Callable
 from types import SimpleNamespace
 
@@ -23,6 +22,7 @@ import pytest
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import logger
+from tests.perturbation_helpers import traced_peak
 from tests.storage_helpers import write_count_store
 
 pytestmark = pytest.mark.slow
@@ -373,12 +373,11 @@ def test_the_traced_peak_fits_the_smallest_budget_accepted(data, case) -> None:
         run(data)
         budget = _smallest_budget(store, lambda: run(data))
         store.memoryBytes = budget
-        tracemalloc.start()
-        try:
-            run(data)
-            _current, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+        # Python grows its table of interned strings in one allocation, 15 MB
+        # when the table passes about 350,000 strings, during whichever run
+        # adds the next one. A peak above the budget is therefore traced
+        # again: a summary that holds too much does so in both runs.
+        _result, peak = traced_peak(lambda: run(data), budget)
     finally:
         store.memoryBytes = full
     assert peak <= budget, (case, peak, budget)
@@ -602,18 +601,17 @@ def test_the_null_on_four_threads_stays_within_the_bytes_it_plans(data) -> None:
 
     try:
         run()
+        (line,) = [message for message in messages if "coupling of" in message]
+        found = re.search(r"holding about (\d+) bytes", line)
+        assert found is not None, line
+        planned = int(found.group(1))
         messages.clear()
-        tracemalloc.start()
-        try:
-            run()
-            _current, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+        # A peak above the plan is traced again, as the summaries' peaks are.
+        _result, peak = traced_peak(run, planned)
     finally:
         store.nthreads = threads
         logger.remove(sink)
-    (line,) = [message for message in messages if "coupling of" in message]
+    traced = [message for message in messages if "coupling of" in message]
+    assert traced and all(message == line for message in traced), traced
     assert "on 4 threads, 64 at once" in line, line
-    found = re.search(r"holding about (\d+) bytes", line)
-    assert found is not None, line
-    assert peak <= int(found.group(1)), (peak, line)
+    assert peak <= planned, (peak, line)
