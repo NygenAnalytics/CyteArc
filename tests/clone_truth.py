@@ -485,5 +485,8 @@ def write_anndata_h5ad(truth: CloneTruth, path: Path, *, content: str) -> Path:
         )
     else:
         raise ValueError("content is mito, cospar or columns")
-    anndata.AnnData(obs=obs, obsm=obsm).write_h5ad(path)
+    # Releases of anndata before pandas 3 write nullable strings, as current
+    # releases always do, only once that is allowed.
+    with anndata.settings.override(allow_write_nullable_strings=True):
+        anndata.AnnData(obs=obs, obsm=obsm).write_h5ad(path)
     return path
