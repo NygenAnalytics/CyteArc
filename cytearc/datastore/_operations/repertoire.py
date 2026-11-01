@@ -18,8 +18,14 @@ from ...metadata.records import (
     decode_ragged,
     decode_text,
     take_text,
+    unpack_text,
 )
-from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
+from ...metadata.rows import (
+    array_row_selection_parts,
+    read_array_rows_chunkwise,
+    read_metadata_rows_chunkwise,
+    text_read_bytes,
+)
 from ...metadata.selection import cell_selection_indices
 from ...repertoire.chains import (
     NO_RECEPTOR,
@@ -29,14 +35,18 @@ from ...repertoire.chains import (
     receptor_quality,
 )
 from ...repertoire.clonotypes import (
+    CLUSTER_SEARCH_BYTES,
     DUAL_IR,
+    METRICS,
     RECEPTOR_ARMS,
     REPRESENTATIVE_FIELDS,
     SEQUENCES,
     Clonotypes,
+    assign_clonotype_clusters,
     assign_clonotypes,
     clonotype_frames,
     clonotype_labels,
+    clonotype_noun,
     representative_cells,
     shared_text,
 )
@@ -53,9 +63,10 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
+from ...storage.geometry import array_geometry
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
-from ...utils.arguments import bool_argument
+from ...utils.arguments import bool_argument, integer_argument
 from ...utils.logging import logger
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
@@ -147,6 +158,15 @@ _FIELD_BYTES_PER_PACKED_BYTE = 7
 # bytes of Python objects while its batch is decoded.
 _DECODE_BATCH_VALUES = 2**16
 _DECODE_BYTES_PER_BATCH_VALUE = 160
+# Each junction that is decoded, such as one that names a clonotype in a
+# figure or one that clusters compare, while it is decoded: its bounds as read
+# and as Python integers, its object and its string's header; and each of its
+# bytes as read, joined and decoded, and up to four bytes per character in its
+# string. Once decoded, each keeps its bounds, its object and its string.
+_JUNCTION_BYTES_PER_VALUE = 200
+_JUNCTION_BYTES_PER_BYTE = 7
+_KEPT_JUNCTION_BYTES_PER_VALUE = 100
+_KEPT_JUNCTION_BYTES_PER_BYTE = 4
 # The columns of the tables of clonotypes, which a within column may not share.
 _CLONOTYPE_COLUMNS = frozenset(
     {"clonotype", "clone_size", "n_cells", "fraction", "n_configurations"}
@@ -386,6 +406,127 @@ def _slot_codes(group: zarr.Group, name: str, slots: np.ndarray) -> np.ndarray:
     filled = slots >= 0
     taken[filled] = codes[slots[filled]]
     return taken
+
+
+@dataclass(slots=True)
+class _Reads:
+    """What a sequence of reads holds, checked against the budget before each read.
+
+    Attributes:
+        limit: The memory budget.
+        held: The bytes held so far, by the caller and by earlier reads.
+        what: What the reads are for, named in errors.
+        remedy: What to do when a read does not fit, named in errors.
+    """
+
+    limit: int
+    held: int
+    what: str
+    remedy: str
+
+    def reserve(self, needed: int) -> None:
+        """Raise MemoryError if ``needed`` more bytes would exceed the budget."""
+        if self.held + needed > self.limit:
+            raise MemoryError(
+                f"{self.what} holds about {self.held + needed} bytes, more than the "
+                f"memory budget of {self.limit} bytes. {self.remedy}"
+            )
+
+    def rows(self, source: zarr.Group, name: str, wanted: np.ndarray) -> np.ndarray:
+        """Read distinct rows of an array a chunk at a time, keeping them held."""
+        array = as_zarr_array(source[name], name=name)
+        fixed, per_row = array_row_selection_parts(array)
+        self.reserve(fixed + len(wanted) * per_row)
+        values = np.asarray(read_array_rows_chunkwise(array, wanted))
+        self.held += int(values.nbytes)
+        return values
+
+
+def _decoded_values(
+    reads: _Reads, group: zarr.Group, name: str, codes: np.ndarray
+) -> np.ndarray:
+    """Decode the stored values of some codes of a contig text field.
+
+    The bounds of the values are read a chunk at a time, or whole where that
+    holds less, and their bytes a chunk at a time, so values that no code
+    names are never decoded. Each read, and the decoding, is checked first,
+    and the decoded values stay counted in ``reads``.
+
+    Args:
+        reads: What the caller holds, and the budget.
+        group: An ``immune_receptors`` artifact's group.
+        name: The text field, such as ``junction_aa``.
+        codes: Distinct codes of the field in ascending order.
+
+    Returns:
+        The value of each code, as an object array of text.
+    """
+    offsets = as_zarr_array(group[f"contig_{name}_offsets"], name=name)
+    values = as_zarr_array(group[f"contig_{name}_values"], name=name)
+    bound_rows = np.union1d(codes, codes + 1)
+    fixed, per_row = array_row_selection_parts(offsets)
+    serial = fixed + len(bound_rows) * per_row
+    whole = 2 * int(offsets.nbytes) + fixed
+    if whole < serial:
+        # Most values are named: reading the bounds whole holds less.
+        reads.reserve(whole)
+        stored = np.asarray(offsets[:], dtype=np.int64)
+        starts, ends = stored[codes], stored[codes + 1]
+        del stored
+        reads.held += int(starts.nbytes + ends.nbytes)
+    else:
+        bounds = reads.rows(group, f"contig_{name}_offsets", bound_rows)
+        starts = bounds[np.searchsorted(bound_rows, codes)].astype(np.int64)
+        ends = bounds[np.searchsorted(bound_rows, codes + 1)].astype(np.int64)
+    n_bytes = int((ends - starts).sum())
+    geometry = array_geometry(values)
+    chunk = 0 if geometry is None else geometry.nominalChunkBytes()
+    reads.reserve(
+        array_row_selection_parts(values)[0]
+        + chunk
+        + _JUNCTION_BYTES_PER_VALUE * len(codes)
+        + _JUNCTION_BYTES_PER_BYTE * n_bytes
+    )
+    lengths = np.zeros(len(codes) + 1, dtype=np.int64)
+    np.cumsum(ends - starts, out=lengths[1:])
+    text = unpack_text(_byte_ranges(values, starts, ends), lengths)
+    reads.held += (
+        _KEPT_JUNCTION_BYTES_PER_VALUE * len(codes)
+        + _KEPT_JUNCTION_BYTES_PER_BYTE * n_bytes
+    )
+    return text
+
+
+def _byte_ranges(array: Any, starts: np.ndarray, ends: np.ndarray) -> np.ndarray:
+    """The bytes of ascending, disjoint ranges of a one-dimensional array, joined.
+
+    Each physical chunk that a range touches is read once, as a slice, so the
+    read holds one chunk and its slice beside the bytes it returns.
+    """
+    length = int(array.shape[0])
+    geometry = array_geometry(array)
+    step = max(1, length) if geometry is None else geometry.axisChunk(0)
+    joined = np.empty(int((ends - starts).sum()), dtype=np.uint8)
+    block = np.empty(0, dtype=np.uint8)
+    block_start = -1
+    at = 0
+    for start, end in zip(starts.tolist(), ends.tolist(), strict=True):
+        position = start
+        while position < end:
+            chunk_start = position // step * step
+            if chunk_start != block_start:
+                del block
+                block = np.asarray(
+                    array[chunk_start : min(chunk_start + step, length)],
+                    dtype=np.uint8,
+                )
+                block_start = chunk_start
+            taken = min(end, chunk_start + step) - position
+            offset = position - chunk_start
+            joined[at : at + taken] = block[offset : offset + taken]
+            at += taken
+            position += taken
+    return joined
 
 
 def _sorted_codes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -823,6 +964,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         same_j_gene: bool = False,
         within: str | Sequence[str] | None = None,
         within_receptor_type: bool = True,
+        metric: str = "identity",
+        cutoff: int | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Group the cells of imported receptors into clonotypes.
@@ -843,6 +986,18 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         with different labels in the ``within`` cell metadata columns, such as
         the donor, never do. A cell without a receptor, or without a compared
         sequence among the chains that take part, has no clonotype.
+
+        ``metric`` links chains whose junctions are similar instead, as
+        scirpy's ``define_clonotype_clusters`` does: ``"hamming"`` (at most
+        ``cutoff`` substitutions between junctions of one length),
+        ``"normalized_hamming"`` (substitutions as a percentage of the length,
+        rounded half up, at most ``cutoff``) or ``"levenshtein"`` (at most
+        ``cutoff`` substitutions, insertions and deletions), under the same
+        rules for arms, dual chains, genes and groups. The resulting
+        clonotype clusters group T cells that likely share their epitope, or
+        B cells of one clone despite somatic mutations. ``cutoff`` has no
+        default for these metrics, since it decides the clusters, and a
+        cutoff of 0 links identical junctions alone, as in scirpy.
 
         Clonotypes are numbered by size, so ``clonotype_1`` is the largest;
         ties follow the receptor type in sorted order, then the ``within``
@@ -866,6 +1021,11 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 such as the donor; every cell with a receptor needs a label.
             within_receptor_type: Keep the clonotypes of each receptor type
                 apart.
+            metric: ``"identity"``, ``"hamming"``, ``"normalized_hamming"`` or
+                ``"levenshtein"``.
+            cutoff: The largest distance of linked chains for the distance
+                metrics: substitutions, percent, or edits; None with
+                ``"identity"``.
             invalidate_cache: Define again instead of reusing saved clonotypes.
 
         Returns:
@@ -876,17 +1036,22 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If ``receptors`` is not an ``immune_receptors``
-                artifact, an option is unknown, the receptors store no
-                junction of the compared kind, or a ``within`` column is not a
-                cell metadata column or has no label for a cell with a
-                receptor.
+                artifact, an option is unknown, a distance metric has no
+                cutoff, the receptors store no junction of the compared kind,
+                or a ``within`` column is not a cell metadata column or has
+                no label for a cell with a receptor.
             KeyError: If the store holds no such receptors.
             RuntimeError: If the receptors are incomplete.
             PermissionError: If the store is read-only and the clonotypes are
                 not saved yet.
             MemoryError: If reading the receptor types, grouping the cells
                 by their ``within`` labels, or the definition, 1,000 bytes per
-                cell and 12 per contig, does not fit the memory budget.
+                cell and 12 per contig and with a distance metric the 512 MiB
+                of the search, does not fit the memory budget; or, with a
+                distance metric, the junctions that the cells' chains hold,
+                decoded for the search, or the pairs of chains within the
+                cutoff and the links between the chains or arms that match, 32
+                bytes each, do not fit what is left.
         """
         group, fields = self._receptor_group(receptors)
         if sequence not in SEQUENCES:
@@ -903,6 +1068,29 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         ):
             bool_argument(flag, name)
         columns = group_columns(within, "within", _CLONOTYPE_COLUMNS)
+        if metric not in METRICS:
+            raise ValueError(f"metric must be one of {', '.join(METRICS)}")
+        if metric == "identity":
+            # Only the 0 that the artifact records stands for no cutoff.
+            if cutoff is not None and (
+                isinstance(cutoff, bool | np.bool_)
+                or not isinstance(cutoff, int | np.integer)
+                or cutoff != 0
+            ):
+                raise ValueError("metric='identity' takes no cutoff")
+            limit = 0
+        else:
+            if cutoff is None:
+                raise ValueError(
+                    f"metric={metric!r} needs a cutoff, such as 1 or 2 "
+                    "substitutions or edits, or 15 percent"
+                )
+            limit = integer_argument(cutoff, "cutoff", minimum=0)
+            if metric == "normalized_hamming" and limit > 100:
+                raise ValueError(
+                    "A normalized_hamming cutoff is a percentage of the length, "
+                    "at most 100"
+                )
         field_name = "junction" if sequence == "nt" else "junction_aa"
         if field_name not in fields:
             raise ValueError(
@@ -947,6 +1135,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             same_j_gene=same_j_gene,
             within=columns,
             within_receptor_type=within_receptor_type,
+            metric=metric,
+            cutoff=limit,
             invalidate_cache=invalidate_cache,
         )
         record = arguments.to_record()
@@ -976,6 +1166,10 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         resident = _CLONOTYPE_BYTES_PER_CELL * n_cells + int(contig_codes.shape[0]) * (
             contig_codes.dtype.itemsize + _CODE_BYTES
         )
+        if metric != "identity":
+            # A cluster search holds its encoded junctions, one pass of keys
+            # with their candidate pairs, and one chunk of candidate cells.
+            resident += CLUSTER_SEARCH_BYTES
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Defining the clonotypes of {n_cells} cells holds about {resident} "
@@ -983,14 +1177,57 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 "Raise mem_budget."
             )
         slots = _read(group, "chain_slots")
-        assignment = assign_clonotypes(
-            _slot_codes(group, field_name, slots),
-            groups=groups,
-            v_genes=_slot_codes(group, "v_call", slots) if same_v_gene else None,
-            j_genes=_slot_codes(group, "j_call", slots) if same_j_gene else None,
-            receptor_arms=receptor_arms,
-            dual_ir=dual_ir,
-        )
+        compared = _slot_codes(group, field_name, slots)
+        v_genes = _slot_codes(group, "v_call", slots) if same_v_gene else None
+        j_genes = _slot_codes(group, "j_call", slots) if same_j_gene else None
+        if metric == "identity":
+            assignment = assign_clonotypes(
+                compared,
+                groups=groups,
+                v_genes=v_genes,
+                j_genes=j_genes,
+                receptor_arms=receptor_arms,
+                dual_ir=dual_ir,
+            )
+        else:
+            # Only the junctions that the slots compare are decoded, so the
+            # contigs that no slot holds, such as non-productive ones, cost
+            # nothing, and the slots are coded by their position among them.
+            # The decoded junctions are held while the search and the
+            # linking run, which get what the budget leaves beside them.
+            present = compared >= 0
+            compared_codes, local = np.unique(compared[present], return_inverse=True)
+            compared[present] = local.reshape(-1)
+            reads = _Reads(
+                limit=self.memoryBytes,
+                held=resident - CLUSTER_SEARCH_BYTES,
+                what=(
+                    f"Decoding the {len(compared_codes)} junctions that the clonotype "
+                    f"clusters of {n_cells} cells compare"
+                ),
+                remedy="Raise mem_budget.",
+            )
+            texts = _decoded_values(reads, group, field_name, compared_codes)
+            held = reads.held + CLUSTER_SEARCH_BYTES
+            if held > self.memoryBytes:
+                raise MemoryError(
+                    f"Defining the clonotype clusters of {n_cells} cells holds about "
+                    f"{held} bytes with the {len(compared_codes)} junctions they "
+                    f"compare, more than the memory budget of {self.memoryBytes} "
+                    "bytes. Raise mem_budget."
+                )
+            assignment = assign_clonotype_clusters(
+                compared,
+                texts,
+                groups=groups,
+                metric=metric,
+                cutoff=limit,
+                v_genes=v_genes,
+                j_genes=j_genes,
+                receptor_arms=receptor_arms,
+                dual_ir=dual_ir,
+                max_bytes=self.memoryBytes - held,
+            )
         labels = clonotype_labels(assignment.n_clonotypes)
         has = assignment.codes >= 0
         values = np.full(n_cells, "", dtype=object)
@@ -1026,8 +1263,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             arrays,
             attributes={"n_clonotypes": assignment.n_clonotypes},
         )
+        defined = clonotype_noun(metric)
         logger.info(
-            f"Defined {assignment.n_clonotypes} clonotypes of {int(has.sum())} of "
+            f"Defined {assignment.n_clonotypes} {defined} of {int(has.sum())} of "
             f"{n_cells} cells; the largest holds "
             f"{int(assignment.sizes[0]) if assignment.n_clonotypes else 0} cells"
         )
@@ -1043,6 +1281,75 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             )
         require_complete_artifact(self.zw, clonotypes)
         return artifact_group(self.zw, clonotypes)
+
+    def _representative_junctions(
+        self, clonotypes: ArtifactRef, codes: np.ndarray, *, held_bytes: int = 0
+    ) -> np.ndarray:
+        """The junction amino acids that name some clonotypes in figures.
+
+        A clonotype is named by its representative cell's ``VDJ_1`` chain, or
+        its ``VJ_1`` chain without one; clonotypes defined by
+        ``receptor_arms="VJ"`` by the ``VJ_1`` chain first, which their
+        cells share. Of the receptors, only the representatives' slots and
+        junction codes, the bounds of the junctions they name, a chunk at a
+        time or whole where that holds less, and those junctions' bytes are
+        read, each array a physical chunk at a time. Before each read, what it
+        holds is checked against the memory budget beside ``held_bytes`` and
+        what earlier reads keep: one decoded chunk and its compressed bytes,
+        with three copies and the index arrays of each row it reads, and for
+        the junctions' bytes the chunk's slice, the bytes and each junction
+        while it is decoded.
+
+        Args:
+            clonotypes: A complete ``clonotypes`` artifact.
+            codes: The positions of some of its clonotypes, such as 0 for
+                ``clonotype_1``.
+            held_bytes: What the caller holds beside the reads.
+
+        Returns:
+            Each clonotype's junction, None where the chain that names it
+            has no junction amino-acid sequence, as an object array.
+
+        Raises:
+            MemoryError: If a read does not fit the memory budget.
+        """
+        group = self._clonotype_group(clonotypes)
+        status = inspect_artifact(self.zw, clonotypes)
+        receptor_group = artifact_group(self.zw, status.input_ref("receptors"))
+        naming = ("VJ_1", "VDJ_1")
+        if (status.parameters or {}).get("receptor_arms") != "VJ":
+            naming = ("VDJ_1", "VJ_1")
+        reads = _Reads(
+            limit=self.memoryBytes,
+            held=int(held_bytes),
+            what="Labelling clonotypes by their junctions",
+            remedy="Raise mem_budget, or label fewer clonotypes.",
+        )
+        wanted, back = np.unique(np.asarray(codes, dtype=np.int64), return_inverse=True)
+        cells = reads.rows(group, "representatives", wanted).astype(np.int64)
+        distinct_cells, cell_back = np.unique(cells, return_inverse=True)
+        stored_slots = reads.rows(receptor_group, "chain_slots", distinct_cells)
+        slots = np.asarray(
+            stored_slots[:, [SLOTS.index(slot) for slot in naming]], dtype=np.int64
+        )[cell_back.reshape(-1)]
+        contigs = np.where(slots[:, 0] >= 0, slots[:, 0], slots[:, 1])
+        junction_codes = np.full(len(contigs), -1, dtype=np.int64)
+        present = contigs >= 0
+        if present.any():
+            distinct_contigs, contig_back = np.unique(
+                contigs[present], return_inverse=True
+            )
+            junction_codes[present] = reads.rows(
+                receptor_group, "contig_junction_aa", distinct_contigs
+            ).astype(np.int64)[contig_back.reshape(-1)]
+        junctions = np.full(len(wanted), None, dtype=object)
+        named = junction_codes >= 0
+        if named.any():
+            # Only the bytes of the junctions needed are read and decoded.
+            needed, inverse = np.unique(junction_codes[named], return_inverse=True)
+            text = _decoded_values(reads, receptor_group, "junction_aa", needed)
+            junctions[np.flatnonzero(named)] = text[inverse.reshape(-1)]
+        return junctions[back.reshape(-1)]
 
     @validation_scoped
     def _repertoire_load_clonotypes(self, clonotypes: ArtifactRef) -> Clonotypes:
@@ -1155,4 +1462,6 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             same_j_gene=bool(parameters["same_j_gene"]),
             within=within,
             within_receptor_type=bool(parameters["within_receptor_type"]),
+            metric=str(parameters["metric"]),
+            cutoff=int(parameters["cutoff"]),
         )

@@ -1,5 +1,6 @@
 import os
 import sys
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,6 +80,7 @@ from ...metadata.rows import (
     text_width,
 )
 from ...metadata.selection import category_codes, cell_selection_indices
+from ...repertoire.clonotypes import clonotype_noun
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
@@ -104,7 +106,7 @@ from .cell_groups import cell_groups, group_columns, selection_chunk_bytes
 
 if TYPE_CHECKING:
     from ...readers.clone_tables import CloneLayout
-    from ..mapping_datastore import MappingDatastore as _CloneOperationsBase
+    from .repertoire import _RepertoireOperationsMixin as _CloneOperationsBase
 else:
     _CloneOperationsBase = object
 
@@ -138,6 +140,10 @@ _MAX_CHUNK_ROWS = 1_000_000
 _TABLE_BYTES_PER_CELL = 250
 # Bytes per cell of an export beside its ID: its label and its code.
 _EXPORT_BYTES_PER_CELL = 200
+# Bytes of each clone that a figure labels: its ID as given and as text, its
+# code, and its label, a string of up to four bytes per character, beside the
+# junction that the repertoire operations read.
+_FIGURE_LABEL_BYTES = 400
 # The kinds of clone artifact that every clone summary reads.
 _CLONE_SOURCE_KINDS = (
     CloneImportArguments.artifact_kind,
@@ -1139,6 +1145,110 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             selection_chunk_bytes(self.zw, measured),
             selection_chunk_bytes(self.zw, held),
             array_row_selection_parts(codes)[0],
+        )
+
+    def _clone_figure_noun(self, clones: ArtifactRef) -> str:
+        """What figures call the clones of a clone artifact, in the plural.
+
+        Clones are ``"clones"``, and clonotypes ``"clonotypes"``, or
+        ``"clonotype clusters"`` when a distance metric linked their chains,
+        as their definition logs them.
+
+        Raises:
+            TypeError: If ``clones`` is not an ArtifactRef.
+            ValueError: If it is not a clone artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
+        """
+        self._clone_group(clones)
+        if clones.kind != ClonotypeArguments.artifact_kind:
+            return "clones"
+        parameters = inspect_artifact(self.zw, clones).parameters or {}
+        return clonotype_noun(str(parameters["metric"]))
+
+    def _clone_figure_labels(
+        self, clones: ArtifactRef, ids: Sequence[str]
+    ) -> np.ndarray:
+        """The labels that one figure gives some clones of a clone artifact.
+
+        A clone is labelled by its ID. A clonotype is labelled by the junction
+        amino acids of its representative cell's ``VDJ_1`` chain, or of its
+        ``VJ_1`` chain without a VDJ chain, such as ``CASSLGQAYEQYF``, since
+        immunologists read clonotypes by their junctions; clonotypes defined
+        by ``receptor_arms="VJ"`` by the ``VJ_1`` chain first. Where two of
+        the clonotypes given share a junction, the label of each also shows
+        its number, the rank in its ID, such as ``CAVA 1`` and ``CAVA 3`` for
+        ``clonotype_1`` and ``clonotype_3``. The clonotypes' IDs are read to
+        find those given, and the repertoire operations read the junctions.
+
+        Args:
+            clones: A clone artifact: ``clones`` or ``clonotypes``.
+            ids: The IDs of the clones that one figure shows, such as
+                ``clonotype_1``; an ID given twice is one clonotype.
+
+        Returns:
+            The label of each clone, in the order of ``ids``, as an object
+            array.
+
+        Raises:
+            TypeError: If ``clones`` is not an ArtifactRef.
+            ValueError: If it is not a clone artifact, an ID names no
+                clonotype, or a representative has no junction to show.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
+            MemoryError: If reading the clonotypes' IDs, three times their
+                size as read, and 400 bytes for each clone given, or reading
+                their representatives' junctions, a chunk of each array at a
+                time, does not fit the memory budget.
+        """
+        group = self._clone_group(clones)
+        names = np.asarray([str(name) for name in ids], dtype=object)
+        if clones.kind != ClonotypeArguments.artifact_kind or not len(names):
+            return names
+        stored_ids = as_zarr_array(group["clonotype_ids"], name="clonotype_ids")
+        n_clonotypes = int(stored_ids.shape[0])
+        # The IDs as read, the buffer they are decoded from and their
+        # compressed bytes, each at most their size, and a comparison of them
+        # with an ID given: 56 MiB traced for 410,365 IDs of up to 16
+        # characters, 26 MB as read. Each clone given is held throughout.
+        held = _FIGURE_LABEL_BYTES * len(names)
+        resident = held + 3 * int(stored_ids.nbytes) + 2 * n_clonotypes
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Labelling clonotypes reads the IDs of {n_clonotypes} clonotypes, "
+                f"about {resident} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Raise mem_budget."
+            )
+        stored = np.asarray(stored_ids[:])
+        codes = np.full(len(names), -1, dtype=np.int64)
+        for at, name in enumerate(names.tolist()):
+            hits = np.flatnonzero(stored == name)
+            if len(hits):
+                codes[at] = hits[0]
+        del stored
+        if (codes < 0).any():
+            unknown = names[codes < 0].tolist()
+            raise ValueError(f"No clonotype is labelled {unknown[:5]}")
+        junctions = self._representative_junctions(clones, codes, held_bytes=held)
+        unnamed = np.asarray([junction is None for junction in junctions.tolist()])
+        if unnamed.any():
+            raise ValueError(
+                f"The representative cells of the clonotypes "
+                f"{names[unnamed].tolist()[:5]} have no junction amino-acid "
+                "sequence in the VDJ_1 or VJ_1 chain that names them"
+            )
+        # A junction that two of the clonotypes share names each with its
+        # number too.
+        distinct = np.unique(codes, return_index=True)[1]
+        counted = Counter(junctions[distinct].tolist())
+        return np.asarray(
+            [
+                f"{junction} {code + 1}" if counted[junction] > 1 else junction
+                for junction, code in zip(
+                    junctions.tolist(), codes.tolist(), strict=True
+                )
+            ],
+            dtype=object,
         )
 
     def _measured_clone_cells(

@@ -1,7 +1,9 @@
 """Stores and checks shared by the tests of clones."""
 
+import math
 import shutil
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from fractions import Fraction
 from math import sqrt
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -339,3 +341,59 @@ def bcr_file(folder: Path) -> Path:
 def airr_file(folder: Path) -> Path:
     """An AIRR Rearrangement file of cell6's B cell rows."""
     return write_lines(folder, "bcr.tsv", AIRR_HEADER, AIRR_ROWS)
+
+
+def levenshtein_distance(first: str, second: str) -> int:
+    """The substitutions, insertions and deletions between two texts, row by row."""
+    previous = list(range(len(second) + 1))
+    for row, left in enumerate(first, 1):
+        current = [row]
+        for column, right in enumerate(second, 1):
+            current.append(
+                min(
+                    previous[column - 1] + (left != right),
+                    previous[column] + 1,
+                    current[column - 1] + 1,
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def smallest_budget(call: Callable[[int], object], high: int) -> int:
+    """The smallest budget below ``high`` at which ``call`` raises no MemoryError.
+
+    Found by bisection, so ``call`` must succeed at every larger budget.
+    """
+    low = 0
+    while low < high:
+        middle = (low + high) // 2
+        try:
+            call(middle)
+        except MemoryError:
+            low = middle + 1
+        else:
+            high = middle
+    return low
+
+
+def within_distance(first: str, second: str, metric: str, cutoff: int) -> bool:
+    """Whether two texts are within ``cutoff`` by ``metric``, as scirpy measures it.
+
+    ``normalized_hamming`` rounds the substitutions' percentage of the length
+    half up, computed as an exact fraction. A cutoff of 0 is identity under
+    every metric, as scirpy's ``ir_dist`` makes it.
+    """
+    if metric == "identity" or cutoff == 0:
+        return first == second
+    if metric == "levenshtein":
+        return levenshtein_distance(first, second) <= cutoff
+    if len(first) != len(second):
+        return False
+    mismatches = sum(a != b for a, b in zip(first, second, strict=True))
+    if metric == "hamming":
+        return mismatches <= cutoff
+    if not first:
+        return True
+    percent = Fraction(100 * mismatches, len(first))
+    return math.floor(percent + Fraction(1, 2)) <= cutoff

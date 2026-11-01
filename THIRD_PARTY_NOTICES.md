@@ -182,7 +182,7 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - Source: <https://github.com/scverse/scirpy>
 - Copyright (c) 2020 Gregor Sturm, Tamas Szabo, Francesca Finotello, and the Institute of Bioinformatics, Medical University of Innsbruck; Copyright (c) 2025 scverse®
 - License: BSD-3-Clause
-- Used in: `cytearc/repertoire/chains.py` (the receptor model of version 0.25.1: the loci of each receptor arm, the rules that make a contig a chain and rank a cell's chains into two slots per arm, the inference of a contig's locus from its gene calls, and the names and rules of the receptor types, subtypes and chain pairings of `index_chains` and `chain_qc`), reimplemented on encoded contigs, and `cytearc/repertoire/clonotypes.py` (the options and rules of `define_clonotypes` that decide which chains of two cells must match), reimplemented on encoded chains.
+- Used in: `cytearc/repertoire/chains.py` (the receptor model of version 0.25.1: the loci of each receptor arm, the rules that make a contig a chain and rank a cell's chains into two slots per arm, the inference of a contig's locus from its gene calls, and the names and rules of the receptor types, subtypes and chain pairings of `index_chains` and `chain_qc`), reimplemented on encoded contigs, `cytearc/repertoire/clonotypes.py` (the options and rules of `define_clonotypes` and `define_clonotype_clusters` that decide which chains of two cells must match), reimplemented on encoded chains, and `cytearc/clones/sequences.py` (the Hamming, normalized Hamming and Levenshtein distances of `ir_dist`, with the normalized distance's percentage rounded half up as scirpy rounds it), reimplemented as an exact search for the pairs within a cutoff.
 
 ## Data in this repository
 

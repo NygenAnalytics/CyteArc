@@ -64,8 +64,10 @@ def test_without_groups_the_plot_counts_every_cell(plotted) -> None:
         "clone_size": [1, 3],
         "n_clones": [1, 1],
     }
+    # Clones are labelled by their IDs.
     assert result.tables["top"].to_dict("list") == {
         "clone": ["a", "b"],
+        "label": ["a", "b"],
         "cells": [3, 1],
     }
     assert set(result.axes) == {"sizes", "top"}
@@ -76,6 +78,7 @@ def test_without_groups_the_plot_counts_every_cell(plotted) -> None:
         "a",
         "b",
     ]
+    assert result.axes["top"].get_title() == "Largest 2 clones"
     plt.close(result.figure)
 
 
@@ -97,7 +100,12 @@ def test_a_grouping_column_splits_each_clone_by_group(plotted) -> None:
         "clone_size": [1, 2, 1],
         "n_clones": [1, 1, 1],
     }
-    assert result.tables["top"].to_dict("list") == {"clone": ["a"], "x": [2], "y": [1]}
+    assert result.tables["top"].to_dict("list") == {
+        "clone": ["a"],
+        "label": ["a"],
+        "x": [2],
+        "y": [1],
+    }
     assert result.legends[0].label == "group"
     assert len(result.axes["sizes"].get_lines()) == 2
     plt.close(result.figure)
@@ -114,6 +122,7 @@ def test_a_label_artifact_of_fewer_cells_leaves_the_others_ungrouped(plotted) ->
     # Of the first four cells, x holds a twice and b once and y holds a once.
     assert result.tables["top"].to_dict("list") == {
         "clone": ["a", "b"],
+        "label": ["a", "b"],
         "x": [2, 1],
         "y": [1, 0],
     }
@@ -147,6 +156,12 @@ def test_the_plot_refuses_clones_it_cannot_draw(plotted) -> None:
     )
     with pytest.raises(ValueError, match="^No cell with a group has a clone"):
         clone_abundance(store, clones, group_by="c4_group", show=False)
+    for name in ("label", "clone"):
+        store.cells.insert(
+            "named_group", np.asarray(["x", name, "x", "x", "x", None]), overwrite=True
+        )
+        with pytest.raises(ValueError, match=f"A group is named '{name}'"):
+            clone_abundance(store, clones, group_by="named_group", show=False)
     assert set(plt.get_fignums()) == figures
 
 
@@ -188,8 +203,10 @@ def test_clones_of_equal_size_list_in_rank_order(plotted) -> None:
 
     result = clone_abundance(store, tied, show=False)
 
+    # Clones are labelled by their IDs, in the same order.
     assert result.tables["top"].to_dict("list") == {
         "clone": ["9", "10", "x"],
+        "label": ["9", "10", "x"],
         "cells": [2, 2, 1],
     }
     plt.close(result.figure)
@@ -661,10 +678,11 @@ def test_the_tracking_plot_places_groups_by_all_their_labels(truth_plot) -> None
 
 
 class _TrackOnly:
-    """A store whose clones namespace can follow clones and nothing else."""
+    """A store that can follow clones and label them, and nothing else."""
 
     def __init__(self, store: DataStore) -> None:
         self.clones = SimpleNamespace(track=store.clones.track)
+        self._clone_figure_labels = store._clone_figure_labels
 
 
 def test_the_tracking_plot_needs_only_the_tracked_clones(truth_plot) -> None:

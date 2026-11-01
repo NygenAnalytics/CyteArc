@@ -36,6 +36,7 @@ pytestmark = pytest.mark.usefixtures("figures_closed")
 
 TRUTH = clone_truth()
 RECEPTORS = receptor_truth(TRUTH)
+MUTATED_RECEPTORS = receptor_truth(TRUTH, somatic_mutations=True)
 SAMPLES = ("d2", "d4")
 
 
@@ -52,11 +53,22 @@ def _clonotypes(store: DataStore, folder: Path) -> ArtifactRef:
     return store.repertoire.clonotypes(receptors, receptor_arms="any")
 
 
+def _clonotype_clusters(store: DataStore, folder: Path) -> ArtifactRef:
+    # The later cells of each B cell clone carry chains one substitution away,
+    # as somatic mutations give them, which identical junctions split;
+    # clusters within one substitution keep each clone whole.
+    receptors = import_truth_receptors(store, MUTATED_RECEPTORS, folder)
+    return store.repertoire.clonotypes(
+        receptors, receptor_arms="any", metric="hamming", cutoff=1
+    )
+
+
 #: How each clone source saves the truth's clones, in the order the stack adds
 #: them.
 SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
     "imported clones": _imported_clones,
     "clonotypes": _clonotypes,
+    "clonotype clusters": _clonotype_clusters,
 }
 #: The labels that a source's clones keep apart, by key column, for each of the
 #: truth's cells: every summary measures the cells of each label apart, so T
@@ -64,6 +76,11 @@ SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
 KEPT_APART: dict[str, dict[str, np.ndarray]] = {
     "clonotypes": {
         "receptor_type": RECEPTORS.expected["receptor_type"].to_numpy(dtype=object)
+    },
+    "clonotype clusters": {
+        "receptor_type": MUTATED_RECEPTORS.expected["receptor_type"].to_numpy(
+            dtype=object
+        )
     },
 }
 

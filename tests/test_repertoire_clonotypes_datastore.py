@@ -5,8 +5,10 @@ each receptor type apart, so their expected values here are counted by hand
 within the T cells and the B cells.
 """
 
+import re
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import matplotlib
 
@@ -25,15 +27,21 @@ from cytearc.metadata.rows import (
     text_read_bytes,
 )
 from cytearc.repertoire import SLOTS, Clonotypes
+from cytearc.repertoire.clonotypes import clonotype_noun
 from cytearc.storage.artifacts import artifact_group
+from cytearc.storage.refs import ArtifactRef
+from cytearc.utils.logging import logger
 from tests.clone_helpers import (
     CELLRANGER_HEADER,
     N_RECEPTOR_CELLS,
     ids_read_bytes,
+    import_truth_receptors,
     loaded_partition,
     receptor_store,
     write_lines,
+    write_truth_store,
 )
+from tests.clone_truth import B_CELL_LIGHT_LOCI, clone_truth, receptor_truth
 from tests.storage_helpers import insert_nullable_cell_column, write_count_store
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
@@ -117,6 +125,8 @@ def test_clonotypes_follow_identical_chains(tmp_path) -> None:
         "same_j_gene": False,
         "within": [],
         "within_receptor_type": True,
+        "metric": "identity",
+        "cutoff": 0,
     }
     assert status.input_ref("receptors") == receptors
     loaded = store.repertoire.load_clonotypes(ref)
@@ -355,9 +365,17 @@ def test_clone_abundance_counts_the_clonotypes_of_each_receptor_type(
         top = result.tables["top"]
         assert top.to_dict("list") == {
             "clone": ["clonotype_1", "clonotype_2", "clonotype_3"],
+            # Each clonotype is named by its representative's junction, and
+            # clonotype_1 and clonotype_3, which share their beta chain, by
+            # their numbers too.
+            "label": ["CASSA 1", "CARW", "CASSA 3"],
             "BCR": [0, 2, 0],
             "TCR": [3, 0, 1],
         }
+        ticks = [tick.get_text() for tick in result.axes["top"].get_yticklabels()]
+        assert ticks == top["label"].tolist()
+        # The title names clonotypes once, so their labels need not.
+        assert result.axes["top"].get_title() == "Largest 3 clonotypes"
         assert result.legends[0].label == "receptor_type"
         assert len(result.axes["sizes"].get_lines()) == 2
         assert result.provenance.n_cells == 7
@@ -402,8 +420,352 @@ def test_clone_abundance_splits_clonotypes_by_group_and_receptor_type(
     # Shown by default: on Agg the owned figure is closed.
     shown = plotting.clone_abundance(store, ref, top=2)
     assert shown.tables["top"]["clone"].tolist() == ["clonotype_1", "clonotype_2"]
+    # clonotype_3 is not drawn, so clonotype_1 shares its junction with no
+    # clonotype of the figure.
+    assert shown.tables["top"]["label"].tolist() == ["CASSA", "CARW"]
     with pytest.raises(TypeError, match="does not provide clones.load_clones"):
         plotting.clone_abundance(object(), ref, show=False)
+
+
+def test_clonotypes_without_a_beta_chain_are_named_by_their_alpha_chain(
+    tmp_path,
+) -> None:
+    rows = CLONAL_ROWS + [
+        "cell7,true,cell7_contig_1,true,500,TRA,TRAV9,,TRAJ9,TRAC,true,true,CAVZ,TGTGCTGTGTAA,10,1,ct9,ct9_1",
+    ]
+    store, receptors = _receptors(tmp_path, rows)
+    ref = store.repertoire.clonotypes(receptors)
+    result = plotting.clone_abundance(store, ref, show=False)
+    try:
+        labels = dict(zip(result.tables["top"]["clone"], result.tables["top"]["label"]))
+        clonotype_of = store.repertoire.load_clonotypes(ref).cells["clonotype"]
+        alone = {cell: str(clonotype_of[cell]) for cell in ("cell2", "cell3", "cell7")}
+        # cell7's alpha chain alone names its clonotype; cell2 and cell3 carry
+        # the beta chain CASSA of clonotype_1, so the three show their numbers.
+        assert labels == {
+            "clonotype_1": "CASSA 1",
+            "clonotype_2": "CARW",
+            alone["cell2"]: f"CASSA {alone['cell2'].removeprefix('clonotype_')}",
+            alone["cell3"]: f"CASSA {alone['cell3'].removeprefix('clonotype_')}",
+            alone["cell7"]: "CAVZ",
+        }
+    finally:
+        result.close()
+
+
+def test_figure_labels_name_clonotypes_by_their_representatives_junction(
+    tmp_path,
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    ref = store.repertoire.clonotypes(receptors)
+    # In any order and repeated; clonotype_4 is cell2's, of alpha CAVA and
+    # beta CASSA. An ID given twice is one clonotype, so CASSA names one.
+    labels = store._clone_figure_labels(
+        ref, ["clonotype_4", "clonotype_2", "clonotype_4"]
+    )
+    assert labels.tolist() == ["CASSA", "CARW", "CASSA"]
+    # clonotype_1, clonotype_3 (cell3's beta chain alone) and clonotype_4 all
+    # carry CASSA, so each shows its number, wherever it is listed.
+    assert store._clone_figure_labels(
+        ref, ["clonotype_4", "clonotype_2", "clonotype_1", "clonotype_3"]
+    ).tolist() == ["CASSA 4", "CARW", "CASSA 1", "CASSA 3"]
+    assert store._clone_figure_labels(ref, []).tolist() == []
+    with pytest.raises(ValueError, match=r"No clonotype is labelled \['clonotype_9'\]"):
+        store._clone_figure_labels(ref, ["clonotype_1", "clonotype_9"])
+    # Imported clones are labelled by their IDs alone.
+    path = tmp_path / "clonotypes.csv"
+    store.clones.export_clones(ref, path)
+    imported = store.clones.import_clones(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    assert store._clone_figure_labels(
+        imported, ["clonotype_2", "clonotype_1", "clonotype_3"]
+    ).tolist() == ["clonotype_2", "clonotype_1", "clonotype_3"]
+    assert store._clone_figure_labels(imported, []).tolist() == []
+    shown = plotting.clone_abundance(store, imported, top=3, show=False)
+    try:
+        assert shown.tables["top"]["label"].tolist() == [
+            "clonotype_1",
+            "clonotype_2",
+            "clonotype_3",
+        ]
+        assert shown.axes["top"].get_title() == "Largest 3 clones"
+    finally:
+        shown.close()
+
+
+def test_clonotypes_of_one_arm_are_named_by_the_chains_they_share(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    ids = ["clonotype_1", "clonotype_2", "clonotype_3"]
+    # By alpha and light chains: cell0, cell1 and cell4 share CAVA, the B
+    # cells CQQY, and cell2 has CAVA from other nucleotides; their beta and
+    # heavy chains would name them CASSA and CARW.
+    by_alpha = store.repertoire.clonotypes(receptors, receptor_arms="VJ")
+    assert _members(store.repertoire.load_clonotypes(by_alpha))["clonotype_1"] == [
+        "cell0",
+        "cell1",
+        "cell4",
+    ]
+    assert store._clone_figure_labels(by_alpha, ids).tolist() == [
+        "CAVA 1",
+        "CQQY",
+        "CAVA 3",
+    ]
+    by_beta = store.repertoire.clonotypes(receptors, receptor_arms="VDJ")
+    assert store._clone_figure_labels(by_beta, ids[:2]).tolist() == [
+        "CASSA",
+        "CARW",
+    ]
+
+
+def test_figure_labels_read_the_clonotype_ids_within_the_budget(
+    tmp_path, monkeypatch
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    ref = store.repertoire.clonotypes(receptors)
+    # Four IDs of 11 characters, read as fixed-width text of 4 bytes per
+    # character: 176 bytes, three times with the buffers of the read, 2 bytes
+    # each for a comparison, and 400 bytes for the clonotype labelled.
+    ids_bytes = 400 + 3 * 176 + 2 * 4
+    monkeypatch.setattr(store, "memoryBytes", ids_bytes - 1)
+    with pytest.raises(MemoryError, match="Labelling clonotypes reads the IDs of 4"):
+        store._clone_figure_labels(ref, ["clonotype_1"])
+    # Reading the junction that names it then decodes a chunk of each array
+    # of the receptors that it reads, which the IDs' budget does not hold.
+    budget = ids_bytes
+    refusals = []
+    for _attempt in range(10):
+        monkeypatch.setattr(store, "memoryBytes", budget)
+        try:
+            labels = store._clone_figure_labels(ref, ["clonotype_1"])
+            break
+        except MemoryError as error:
+            found = re.search(r"by their junctions holds about (\d+) bytes", str(error))
+            assert found is not None, str(error)
+            refusals.append(int(found.group(1)))
+            assert refusals[-1] > budget
+            budget = refusals[-1]
+    assert refusals and labels.tolist() == ["CASSA"]
+
+
+def test_a_representative_without_a_junction_is_refused(tmp_path) -> None:
+    from cytearc.storage.artifacts import artifact_group
+
+    store, receptors = _receptors(tmp_path)
+    ref = store.repertoire.clonotypes(receptors)
+    # Point clonotype_1's representative at cell7, which has no receptor.
+    representatives = artifact_group(store.zw, ref)["representatives"]
+    representatives[0] = 7
+    with pytest.raises(ValueError, match="no junction amino-acid sequence"):
+        store._clone_figure_labels(ref, ["clonotype_1"])
+
+
+def test_figure_labels_name_missing_and_incomplete_clonotypes(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    ref = store.repertoire.clonotypes(receptors)
+    missing = ArtifactRef(
+        scope="datastore", kind="clonotypes", artifact_id="0" * 64, assay=None
+    )
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        store._clone_figure_labels(missing, ["clonotype_1"])
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        store._clone_figure_noun(missing)
+    for read in (
+        lambda clones: store._clone_figure_labels(clones, ["clonotype_1"]),
+        store._clone_figure_noun,
+    ):
+        with pytest.raises(TypeError, match="clones must be an ArtifactRef"):
+            read("clonotype_1")
+        with pytest.raises(
+            ValueError,
+            match="clones must be a clones or clonotypes artifact, not "
+            "'immune_receptors'",
+        ):
+            read(receptors)
+    # A definition that stopped before it finished leaves an incomplete
+    # artifact.
+    artifact_group(store.zw, ref).attrs["complete"] = False
+    with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+        store._clone_figure_labels(ref, ["clonotype_1"])
+    with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+        store._clone_figure_noun(ref)
+
+
+def test_clone_abundance_needs_a_store_that_labels_clones(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    ref = store.repertoire.clonotypes(receptors)
+    loader = SimpleNamespace(
+        clones=SimpleNamespace(load_clones=store.clones.load_clones)
+    )
+    with pytest.raises(TypeError, match="does not provide the figure labels"):
+        plotting.clone_abundance(loader, ref, show=False)
+    # Labels without the name of the clones drawn do not title the figure.
+    loader._clone_figure_labels = store._clone_figure_labels
+    with pytest.raises(TypeError, match="does not provide what figures call clones"):
+        plotting.clone_abundance(loader, ref, show=False)
+
+
+# The cells' samples for following clonotypes: clonotype_1 holds cell0 and
+# cell4 of s1 and cell1 of s2, clonotype_2 the B cells cell5 of s1 and cell6
+# of s2, clonotype_3 cell3 of s2 and clonotype_4 cell2 of s1.
+TRACKED_SAMPLES = np.asarray(["s1", "s2", "s1", "s2", "s1", "s1", "s2", "s1"])
+
+
+class _TrackOnly:
+    """A store that follows clones and labels them, but loads neither."""
+
+    def __init__(self, store: DataStore) -> None:
+        self.clones = SimpleNamespace(track=store.clones.track, load_clones=_loads)
+        self.repertoire = SimpleNamespace(load_clonotypes=_loads)
+        self._clone_figure_labels = store._clone_figure_labels
+
+
+def _loads(*_args, **_kwargs):
+    raise AssertionError("the tracking plot loads the clones")
+
+
+def _legend(result) -> list[str]:
+    return [
+        text.get_text() for text in result.axes["tracking"].get_legend().get_texts()
+    ]
+
+
+def test_the_tracking_plot_labels_clonotypes_by_their_junctions(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    store.cells.insert("sample", TRACKED_SAMPLES)
+    ref = store.repertoire.clonotypes(receptors)
+    # The largest clonotype of each sample's T cells is clonotype_1, which in
+    # s2 ties cell3's clonotype_3 and wins as the larger one overall, and of
+    # each sample's B cells clonotype_2. Their junctions differ, so the lines
+    # show no numbers; the labels need neither the clones nor the clonotypes
+    # loaded.
+    result = plotting.clone_tracking(
+        _TrackOnly(store), ref, group_by="sample", top=1, show=False
+    )
+    try:
+        assert result.provenance.extras["tracked"] == ["clonotype_1", "clonotype_2"]
+        assert _legend(result) == ["CASSA", "CARW"]
+        legend = result.axes["tracking"].get_legend()
+        assert legend.get_title().get_text() == "Clone"
+    finally:
+        result.close()
+    unlabelled = _TrackOnly(store)
+    del unlabelled._clone_figure_labels
+    with pytest.raises(TypeError, match="does not provide the figure labels"):
+        plotting.clone_tracking(unlabelled, ref, group_by="sample", show=False)
+
+
+def test_the_tracking_plot_numbers_clonotypes_that_share_a_junction(
+    tmp_path,
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    store.cells.insert("sample", TRACKED_SAMPLES)
+    ref = store.repertoire.clonotypes(receptors)
+    # The two largest of each group add cell2's clonotype_4 in s1's T cells
+    # and cell3's clonotype_3 in s2's, whose beta chains are clonotype_1's
+    # CASSA, so the three show their numbers.
+    result = store.plots.clone_tracking(ref, group_by="sample", top=2, show=False)
+    try:
+        ax = result.axes["tracking"]
+        assert result.provenance.extras["tracked"] == [
+            "clonotype_1",
+            "clonotype_2",
+            "clonotype_3",
+            "clonotype_4",
+        ]
+        assert _legend(result) == ["CASSA 1", "CARW", "CASSA 3", "CASSA 4"]
+        # The T cells and B cells of a sample share its position. s1 holds
+        # three T cells with a clonotype and one B cell, s2 two and one.
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == ["s1", "s2"]
+        assert [line.get_ydata().tolist() for line in ax.get_lines()] == [
+            pytest.approx([2 / 3, 1 / 2]),
+            pytest.approx([1.0, 1.0]),
+            pytest.approx([0.0, 1 / 2]),
+            pytest.approx([1 / 3, 0.0]),
+        ]
+    finally:
+        result.close()
+    # A figure numbers only the clonotypes that share a junction among its
+    # own lines, whatever order they are named in.
+    for labels, expected in (
+        (["clonotype_1"], ["CASSA"]),
+        (["clonotype_3", "clonotype_1"], ["CASSA 1", "CASSA 3"]),
+        (["clonotype_3", "clonotype_2"], ["CARW", "CASSA"]),
+    ):
+        named = plotting.clone_tracking(
+            store, ref, group_by="sample", labels=labels, show=False
+        )
+        try:
+            assert _legend(named) == expected, labels
+        finally:
+            named.close()
+    # Imported clones keep their IDs.
+    path = tmp_path / "clonotypes.csv"
+    store.clones.export_clones(ref, path)
+    imported = store.clones.import_clones(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    plain = plotting.clone_tracking(
+        store, imported, group_by="sample", top=1, show=False
+    )
+    try:
+        assert _legend(plain) == ["clonotype_1"]
+    finally:
+        plain.close()
+
+
+def test_figures_name_clonotype_clusters_as_their_definition_does(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    store.cells.insert("sample", TRACKED_SAMPLES)
+    identical = store.repertoire.clonotypes(receptors)
+    # Within three substitutions cell2's alpha chain joins it to clonotype_1,
+    # which then holds four T cells; clonotype_2 holds the B cells and
+    # clonotype_3 cell3, whose beta chain alone is clonotype_1's CASSA.
+    near = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    assert store._clone_figure_noun(identical) == "clonotypes"
+    assert store._clone_figure_noun(near) == "clonotype clusters"
+    # A distance metric defines clusters even at a cutoff that links only
+    # identical junctions, as the definition's log names them.
+    exact = store.repertoire.clonotypes(receptors, metric="levenshtein", cutoff=0)
+    assert store._clone_figure_noun(exact) == "clonotype clusters"
+    path = tmp_path / "clusters.csv"
+    store.clones.export_clones(near, path)
+    imported = store.clones.import_clones(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    assert store._clone_figure_noun(imported) == "clones"
+    result = plotting.clone_abundance(store, near, top=3, show=False)
+    try:
+        top = result.tables["top"]
+        assert top["clone"].tolist() == ["clonotype_1", "clonotype_2", "clonotype_3"]
+        assert top["label"].tolist() == ["CASSA 1", "CARW", "CASSA 3"]
+        assert result.axes["top"].get_title() == "Largest 3 clonotype clusters"
+    finally:
+        result.close()
+    two = plotting.clone_abundance(store, near, top=2, show=False)
+    try:
+        assert two.axes["top"].get_title() == "Largest 2 clonotype clusters"
+        assert two.tables["top"]["label"].tolist() == ["CASSA", "CARW"]
+    finally:
+        two.close()
+    # One clone drawn is named in the singular, of each kind.
+    for ref, title in (
+        (near, "Largest clonotype cluster"),
+        (identical, "Largest clonotype"),
+        (imported, "Largest clone"),
+    ):
+        one = plotting.clone_abundance(store, ref, top=1, show=False)
+        try:
+            assert one.axes["top"].get_title() == title
+        finally:
+            one.close()
+    tracked = store.plots.clone_tracking(near, group_by="sample", top=2, show=False)
+    try:
+        assert _legend(tracked) == ["CASSA 1", "CARW", "CASSA 3"]
+    finally:
+        tracked.close()
+    with pytest.raises(ValueError, match="metric must be one of"):
+        clonotype_noun("tcrdist")
 
 
 def test_clonotypes_load_and_export_as_clones(tmp_path) -> None:
@@ -982,3 +1344,240 @@ def test_regrouped_expansion_plot_keeps_receptor_types_apart(tmp_path) -> None:
     store.cells.insert("receptor_type", np.asarray(["x"] * N_CELLS))
     with pytest.raises(ValueError, match="'receptor_type', whose labels the clones"):
         store.plots.clonal_expansion(expansion, group_by="receptor_type", show=False)
+
+
+def test_clonotype_clusters_need_room_for_their_search(tmp_path, monkeypatch) -> None:
+    store, receptors = _receptors(tmp_path)
+    monkeypatch.setattr(store, "memoryBytes", 1_000_000)
+    assert store.repertoire.clonotypes(receptors).kind == "clonotypes"
+    with pytest.raises(MemoryError, match="Raise mem_budget"):
+        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=1)
+
+
+def test_clonotype_clusters_get_what_the_budget_leaves_for_their_pairs(
+    tmp_path, monkeypatch
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    # Within three substitutions, cell0's alpha junction pairs with cell2's
+    # (3 substitutions) and with cell4's second one (2): two pairs of chains
+    # of 32 bytes each beyond the 1,000 bytes per cell, the stored junction
+    # code of each of the 14 contigs with its int64 copy, the search, and the
+    # 6 distinct junctions that the chains hold, 75 bases in all, decoded for
+    # the search: 100 bytes and 4 per base each, and their bounds, 16 bytes
+    # each. The T cells with both arms hold these chains in one group, so
+    # linking them adds two links of 32 bytes each.
+    junctions = 6 * (100 + 16) + 4 * 75
+    reserved = 1_000 * N_CELLS + 14 * (4 + 8) + 512 * 2**20 + junctions
+    # The definition's check fits, but not the decoded junctions beside it.
+    monkeypatch.setattr(store, "memoryBytes", reserved - 1)
+    with pytest.raises(
+        MemoryError, match=f"holds about {reserved} bytes with the 6 junctions"
+    ):
+        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    for budget, held in ((2 * 32 - 1, "the 2 pairs"), (4 * 32 - 1, "the 2 links")):
+        monkeypatch.setattr(store, "memoryBytes", reserved + budget)
+        with pytest.raises(MemoryError, match=f"bytes for {held}"):
+            store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    assert store.artifacts.list(kind="clonotypes", scope="datastore") == []
+    monkeypatch.setattr(store, "memoryBytes", reserved + 4 * 32)
+    assert store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+
+
+def test_clonotype_clusters_link_similar_junctions(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    # cell2's alpha junction differs from cell0's in 3 of 12 nucleotides.
+    identical = store.repertoire.clonotypes(receptors)
+    near = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    assert near != identical
+    loaded = store.repertoire.load_clonotypes(near)
+    assert loaded.metric == "hamming" and loaded.cutoff == 3
+    assert _members(loaded)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
+    status = store.artifacts.inspect(near)
+    assert (status.parameters["metric"], status.parameters["cutoff"]) == ("hamming", 3)
+    two = store.repertoire.load_clonotypes(
+        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=2)
+    )
+    assert _members(two)["clonotype_1"] == ["cell0", "cell1", "cell4"]
+    # 3 of 12 is 25 percent.
+    for cutoff, joined in ((25, True), (24, False)):
+        result = store.repertoire.load_clonotypes(
+            store.repertoire.clonotypes(
+                receptors, metric="normalized_hamming", cutoff=cutoff
+            )
+        )
+        assert ("cell2" in _members(result)["clonotype_1"]) is joined
+    edits = store.repertoire.load_clonotypes(
+        store.repertoire.clonotypes(receptors, metric="levenshtein", cutoff=3)
+    )
+    assert _members(edits)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
+    # Residues: cell2's alpha chain is identical, so amino-acid clusters
+    # equal amino-acid clonotypes.
+    residues = store.repertoire.load_clonotypes(
+        store.repertoire.clonotypes(
+            receptors, sequence="aa", metric="levenshtein", cutoff=1
+        )
+    )
+    assert _members(residues)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
+
+
+def test_clusters_ignore_the_junctions_of_contigs_that_are_not_chains(
+    tmp_path,
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    clusters = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    expected = _members(store.repertoire.load_clonotypes(clusters))
+    # Non-productive alpha contigs of cell3 and of cell7, which has no chain,
+    # one substitution from cell0's alpha chain: the import keeps them, but no
+    # slot holds them, so they link no cells.
+    rows = CLONAL_ROWS + [
+        "cell3,true,cell3_contig_9,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,false,CAVA,TGTGCTGTGGCA,5,1,ct3,ct3_9",
+        "cell7,true,cell7_contig_9,true,500,TRA,TRAV1,,TRAJ1,TRAC,true,false,CAVA,TGTGCTGTGGCC,5,1,ct7,ct7_9",
+    ]
+    other = tmp_path / "other"
+    other.mkdir()
+    shutil.copytree(tmp_path / "store.zarr", other / "store.zarr")
+    store, receptors = _receptors(other, rows)
+    assert len(store.repertoire.load_receptors(receptors).chains) == 16
+    near = store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    assert _members(store.repertoire.load_clonotypes(near)) == expected
+
+
+def test_decoded_values_read_only_the_codes_given(tmp_path, monkeypatch) -> None:
+    store, receptors = _receptors(tmp_path)
+    group = artifact_group(store.zw, receptors)
+    every = repertoire_operations._stored_text(group, "junction").categories
+    chunked: list[str] = []
+    rows = repertoire_operations._Reads.rows
+
+    def counted(self, source, name, wanted):
+        chunked.append(name)
+        return rows(self, source, name, wanted)
+
+    monkeypatch.setattr(repertoire_operations._Reads, "rows", counted)
+    parts = repertoire_operations.array_row_selection_parts
+    # The bounds of so few junctions are read whole, which holds less than a
+    # read of their rows; a read of rows as cheap as a byte each, as a few
+    # codes of a large store are, reads them a chunk at a time instead.
+    for cheap_rows in (False, True):
+        if cheap_rows:
+            monkeypatch.setattr(
+                repertoire_operations,
+                "array_row_selection_parts",
+                lambda array: (parts(array)[0], 1),
+            )
+        for codes in (np.asarray([1]), np.asarray([0, 2]), np.arange(len(every))):
+            chunked.clear()
+            reads = repertoire_operations._Reads(
+                limit=1 << 30, held=7, what="Reading junctions", remedy="Raise it."
+            )
+            decoded = repertoire_operations._decoded_values(
+                reads, group, "junction", codes
+            )
+            assert decoded.tolist() == every[codes].tolist()
+            assert chunked == (["contig_junction_offsets"] if cheap_rows else [])
+            # The decoded junctions stay counted: 100 bytes each and four per
+            # byte.
+            kept = sum(100 + 4 * len(value.encode()) for value in every[codes].tolist())
+            assert reads.held >= 7 + kept
+    monkeypatch.setattr(repertoire_operations, "array_row_selection_parts", parts)
+    reads = repertoire_operations._Reads(
+        limit=64, held=0, what="Reading junctions", remedy="Raise it."
+    )
+    with pytest.raises(MemoryError, match=r"Reading junctions holds about \d+ bytes"):
+        repertoire_operations._decoded_values(reads, group, "junction", np.asarray([1]))
+
+
+def test_the_log_names_clonotype_clusters_as_such(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="INFO"
+    )
+    try:
+        store.repertoire.clonotypes(receptors)
+        store.repertoire.clonotypes(receptors, metric="hamming", cutoff=3)
+    finally:
+        logger.remove(sink)
+    # Of the seven cells with a receptor, cell0, cell1 and cell4 share their
+    # chains, as do the B cells, and cell2 and cell3 stand alone; within
+    # three substitutions cell2's alpha chain joins it to cell0.
+    assert [message for message in messages if message.startswith("Defined")] == [
+        "Defined 4 clonotypes of 7 of 8 cells; the largest holds 3 cells",
+        "Defined 3 clonotype clusters of 7 of 8 cells; the largest holds 4 cells",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"metric": "tcrdist"}, ValueError, "metric must be one of"),
+        ({"metric": "identity", "cutoff": 1}, ValueError, "takes no cutoff"),
+        ({"metric": "identity", "cutoff": False}, ValueError, "takes no cutoff"),
+        ({"metric": "identity", "cutoff": 0.0}, ValueError, "takes no cutoff"),
+        (
+            {"metric": "identity", "cutoff": np.asarray([0])},
+            ValueError,
+            "takes no cutoff",
+        ),
+        ({"metric": "hamming"}, ValueError, "needs a cutoff"),
+        ({"metric": "hamming", "cutoff": 1.5}, TypeError, "cutoff must be an integer"),
+        ({"metric": "hamming", "cutoff": 1.0}, TypeError, "cutoff must be an integer"),
+        ({"metric": "levenshtein", "cutoff": True}, TypeError, "must be an integer"),
+        ({"metric": "hamming", "cutoff": -1}, ValueError, "cutoff must be at least 0"),
+        ({"metric": "normalized_hamming", "cutoff": 101}, ValueError, "at most 100"),
+    ],
+)
+def test_clonotype_cluster_options_are_checked(
+    tmp_path, kwargs, error, message
+) -> None:
+    store, receptors = _receptors(tmp_path)
+    with pytest.raises(error, match=message):
+        store.repertoire.clonotypes(receptors, **kwargs)
+
+
+def test_the_bounds_of_the_cutoff_are_accepted(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path)
+    # Identity records a cutoff of 0, so a cutoff of 0 is the same request.
+    identity = store.repertoire.clonotypes(receptors)
+    assert store.repertoire.clonotypes(receptors, cutoff=0) == identity
+    assert store.repertoire.clonotypes(receptors, cutoff=np.int64(0)) == identity
+    # Within 100 percent, every chain is near every chain of its length: the
+    # alpha chains of cell0, cell2 and cell4 join their T cells, and the B
+    # cells stay apart in their own receptor type.
+    whole = store.repertoire.load_clonotypes(
+        store.repertoire.clonotypes(receptors, metric="normalized_hamming", cutoff=100)
+    )
+    assert whole.cutoff == 100
+    assert _members(whole)["clonotype_1"] == ["cell0", "cell1", "cell2", "cell4"]
+    assert _members(whole)["clonotype_2"] == ["cell5", "cell6"]
+
+
+def test_clusters_keep_whole_the_b_cell_clones_that_mutations_split(tmp_path) -> None:
+    truth = clone_truth()
+    receptors_truth = receptor_truth(truth, somatic_mutations=True)
+    folder = tmp_path / "truth"
+    folder.mkdir()
+    store = write_truth_store(folder / "store.zarr", truth)
+    receptors = import_truth_receptors(store, receptors_truth, folder)
+    expected = truth.partition(
+        split_by=receptors_truth.expected["receptor_type"].to_numpy(dtype=object)
+    )
+    clusters = store.repertoire.clonotypes(
+        receptors, receptor_arms="any", metric="hamming", cutoff=1
+    )
+    assert loaded_partition(store, clusters) == expected
+    # Identical junctions split each B cell clone of several cells into its
+    # first cell and its mutated cells.
+    identity = loaded_partition(
+        store, store.repertoire.clonotypes(receptors, receptor_arms="any")
+    )
+    ids = truth.cell_ids
+    split = [
+        frozenset(str(cell) for cell in ids[truth.clones == clone])
+        for clone in B_CELL_LIGHT_LOCI
+        if (truth.clones == clone).sum() > 1
+    ]
+    assert split and all(clone in expected for clone in split)
+    assert identity == (expected - set(split)) | {
+        frozenset([cell]) for clone in split for cell in clone
+    }

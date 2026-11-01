@@ -2,7 +2,9 @@
 
 An import encodes the parsed contigs chunk by chunk, holding each distinct
 gene call and junction once, and then ranks each cell's chains and labels its
-receptor; clonotypes group the cells by identical chains. Each benchmark runs
+receptor; clonotypes group the cells by identical chains, and clonotype
+clusters by junctions within a distance, which the neighbour search of
+``cytearc.clones.sequences`` finds. Each benchmark runs
 one step on a simulated T cell repertoire in which most cells carry one alpha
 and one beta chain, some a second alpha chain, and clones of many sizes share
 their junctions, and checks the result, so it doubles as a test at the smoke
@@ -189,3 +191,61 @@ def test_assign_clonotypes(bench) -> None:
         assert (frame.groupby([0, 1, 2, 3])["code"].nunique() == 1).all()
 
     bench("repertoire.assign_clonotypes", make, LADDER, check=check)
+
+
+def test_neighbor_pairs(bench) -> None:
+    from cytearc.clones.sequences import neighbor_pairs
+
+    def junctions(n_cells: int) -> list[str]:
+        return sorted(set(_contigs(n_cells)["junction_aa"].tolist()))
+
+    def make(n_cells: int):
+        texts = junctions(n_cells)
+        return lambda: (
+            neighbor_pairs(texts, "hamming", 1),
+            neighbor_pairs(texts, "levenshtein", 1),
+        )
+
+    def check(n_cells: int, result) -> None:
+        texts = junctions(n_cells)
+        (first, second), (edit_first, edit_second) = result
+        for a, b in zip(first[:50].tolist(), second[:50].tolist(), strict=True):
+            assert len(texts[a]) == len(texts[b])
+            assert sum(x != y for x, y in zip(texts[a], texts[b], strict=True)) <= 1
+        # Every pair within one substitution is within one edit.
+        edits = set(zip(edit_first.tolist(), edit_second.tolist(), strict=True))
+        assert set(zip(first.tolist(), second.tolist(), strict=True)) <= edits
+
+    bench("repertoire.neighbor_pairs", make, LADDER, check=check)
+
+
+def test_assign_clonotype_clusters(bench) -> None:
+    from cytearc.repertoire.clonotypes import (
+        assign_clonotype_clusters,
+        assign_clonotypes,
+    )
+
+    def make(n_cells: int):
+        sequences = _slot_junctions(n_cells)
+        texts = _table(n_cells).text["junction_aa"].categories
+        groups = np.where((sequences >= 0).any(axis=1), 0, -1)
+        return lambda: assign_clonotype_clusters(
+            sequences, texts, groups=groups, metric="hamming", cutoff=1
+        )
+
+    def check(n_cells: int, assignment) -> None:
+        sequences = _slot_junctions(n_cells)
+        groups = np.where((sequences >= 0).any(axis=1), 0, -1)
+        has = (sequences >= 0).any(axis=1)
+        np.testing.assert_array_equal(assignment.codes >= 0, has)
+        assert assignment.sizes.sum() == has.sum()
+        assert (np.diff(assignment.sizes) <= 0).all()
+        # Identical chains are within any cutoff, so every clonotype lies
+        # within one cluster.
+        identity = assign_clonotypes(sequences, groups=groups)
+        frame = pd.DataFrame(
+            {"clonotype": identity.codes[has], "cluster": assignment.codes[has]}
+        )
+        assert (frame.groupby("clonotype")["cluster"].nunique() == 1).all()
+
+    bench("repertoire.assign_clonotype_clusters", make, LADDER, check=check)

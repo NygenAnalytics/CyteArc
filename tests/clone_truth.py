@@ -721,8 +721,39 @@ class _ChainDraws:
             "productive": True,
         }
 
+    def mutated(self, chain: dict[str, object], rng: np.random.Generator) -> dict:
+        """The chain with one substitution in its nucleotide and residue junctions.
 
-def receptor_truth(truth: CloneTruth, seed: int = 0) -> ReceptorTruth:
+        The junctions keep their conserved ends, and the residues stay
+        distinct from every junction drawn.
+        """
+        bases = str(chain["junction"])
+        position = int(rng.integers(3, len(bases) - 3))
+        base = str(
+            rng.choice([letter for letter in "ACGT" if letter != bases[position]])
+        )
+        residues = str(chain["junction_aa"])
+        while True:
+            at = int(rng.integers(1, len(residues) - 1))
+            residue = str(
+                rng.choice(
+                    [letter for letter in _AMINO_ACIDS if letter != residues[at]]
+                )
+            )
+            junction_aa = residues[:at] + residue + residues[at + 1 :]
+            if junction_aa not in self._junctions:
+                self._junctions.add(junction_aa)
+                break
+        return {
+            **chain,
+            "junction": bases[:position] + base + bases[position + 1 :],
+            "junction_aa": junction_aa,
+        }
+
+
+def receptor_truth(
+    truth: CloneTruth, seed: int = 0, *, somatic_mutations: bool = False
+) -> ReceptorTruth:
     """Give the truth's clones receptor chains and each cell its contigs.
 
     Each cell's contigs follow its profile in ``RECEPTOR_PROFILES``. A clone's
@@ -730,6 +761,13 @@ def receptor_truth(truth: CloneTruth, seed: int = 0) -> ReceptorTruth:
     a non-productive one (40), extra beta chains (2 and 1) and a heavy chain
     beside a T cell receptor (4) rank as the expected slots say. Each barcode
     outside the store has one beta chain.
+
+    With ``somatic_mutations``, the cells of each B cell clone after its
+    first carry the clone's chains with one substitution in each junction,
+    of nucleotides and of residues, as somatic hypermutation gives a B cell
+    clone's later cells: identical junctions split such a clone, and
+    junctions within one substitution keep it whole. The other draws stay
+    those of the truth without mutations.
     """
     rng = np.random.default_rng([seed, 5])
     draws = _ChainDraws(rng)
@@ -738,6 +776,16 @@ def receptor_truth(truth: CloneTruth, seed: int = 0) -> ReceptorTruth:
         light = B_CELL_LIGHT_LOCI.get(clone)
         vj, vdj = ("TRA", "TRB") if light is None else (light, "IGH")
         clone_chains.append((draws.chain(vj), draws.chain(vdj)))
+    # Each mutated cell's chains, by cell.
+    variants: dict[int, tuple[dict, dict]] = {}
+    if somatic_mutations:
+        mutations = np.random.default_rng([seed, 7])
+        for clone in B_CELL_LIGHT_LOCI:
+            later = np.flatnonzero(truth.clones == clone)[1:]
+            if len(later):
+                vj, vdj = clone_chains[clone]
+                mutated = (draws.mutated(vj, mutations), draws.mutated(vdj, mutations))
+                variants.update(dict.fromkeys(later.tolist(), mutated))
     profiles = _receptor_profiles(truth)
     rows: list[dict[str, object]] = []
     expected_rows = []
@@ -765,7 +813,7 @@ def receptor_truth(truth: CloneTruth, seed: int = 0) -> ReceptorTruth:
         clone = int(truth.clones[cell])
         slots: dict[str, str | None] = dict.fromkeys(RECEPTOR_SLOTS)
         if clone >= 0:
-            vj, vdj = clone_chains[clone]
+            vj, vdj = variants.get(cell, clone_chains[clone])
             if profile == "nonproductive_vj":
                 add(
                     cell,

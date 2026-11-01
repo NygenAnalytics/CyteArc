@@ -65,6 +65,22 @@ def _load_clones(store: Any, clones: ArtifactRef) -> Any:
     return _clones_method(store, "load_clones")(clones)
 
 
+def _figure_labels(store: Any, clones: ArtifactRef, ids: np.ndarray) -> list[str]:
+    """The labels that one figure gives some clones: IDs, or junctions for clonotypes."""
+    method = getattr(store, "_clone_figure_labels", None)
+    if not callable(method):
+        raise TypeError("store does not provide the figure labels of clones")
+    return [str(label) for label in method(clones, ids.tolist())]
+
+
+def _figure_noun(store: Any, clones: ArtifactRef) -> str:
+    """What figures call the clones: clones, clonotypes or clonotype clusters."""
+    method = getattr(store, "_clone_figure_noun", None)
+    if not callable(method):
+        raise TypeError("store does not provide what figures call clones")
+    return str(method(clones))
+
+
 def _kept_apart_groups(
     cells: pd.DataFrame,
     kept_apart: Sequence[str],
@@ -131,7 +147,16 @@ def clone_abundance(
     panel counts clones by their number of cells on log scales: in most
     experiments many clones hold one or a few cells, and expanded clones form
     the tail. The second panel draws the ``top`` clones with the most cells,
-    labelled with their IDs.
+    labelled with their IDs. Clonotypes are labelled instead by the junction
+    amino acids of their representative cell's ``VDJ_1`` chain, or of its
+    ``VJ_1`` chain without a VDJ chain, such as ``CASSLGQAYEQYF``, and those
+    defined by ``receptor_arms="VJ"`` by the ``VJ_1`` chain first, which
+    their cells share. Where two of the clonotypes drawn share a junction,
+    each label also shows the clonotype's number, the rank in its ID, such as
+    ``CAVA 1`` and ``CAVA 3``. For clonotypes the panel's title reads
+    ``Largest 20 clonotypes``, so the word appears once rather than on every
+    label, and for clonotype clusters, which a distance metric defines,
+    ``Largest 20 clonotype clusters``.
 
     ``group_by`` names a cell metadata column, such as the sample or time
     point, and ``groups`` a cell-label artifact, such as a clustering; with
@@ -144,7 +169,7 @@ def clone_abundance(
     ``"s1, TCR"``.
 
     Tables: ``sizes`` (``group``, ``clone_size``, ``n_clones``) and ``top``
-    (``clone``, then the cells of each group, or ``cells``).
+    (``clone``, ``label``, then the cells of each group, or ``cells``).
     """
     top = integer_argument(top, "top", minimum=1)
     loaded = _load_clones(store, clones)
@@ -182,6 +207,12 @@ def clone_abundance(
     )
     held = sorted_unique(pairs // n_clones)
     group_order = [names[code] for code in held.tolist()]
+    clashing = sorted({"clone", "label"} & {str(name) for name in group_order})
+    if clashing:
+        raise ValueError(
+            f"A group is named {clashing[0]!r}, which the table of the largest "
+            "clones uses for a column of its own; rename that label"
+        )
     pair_groups = np.searchsorted(held, pairs // n_clones)
     pair_codes = pairs % n_clones
     width = int(pair_cells.max()) + 1
@@ -204,11 +235,13 @@ def clone_abundance(
     taken = rows[pair_codes] >= 0
     matrix = np.zeros((len(chosen), len(group_order)), dtype=np.int64)
     matrix[rows[pair_codes[taken]], pair_groups[taken]] = pair_cells[taken]
-    ids = loaded.clones["clone"].to_numpy(dtype=object)
+    ids = loaded.clones["clone"].to_numpy(dtype=object)[chosen]
     top_table = pd.DataFrame(
         matrix, columns=pd.Index([str(name) for name in group_order])
     )
-    top_table.insert(0, "clone", ids[chosen])
+    top_table.insert(0, "clone", ids)
+    top_table.insert(1, "label", _figure_labels(store, clones, ids))
+    drawn = _figure_noun(store, clones)
     if not grouped:
         top_table = top_table.rename(columns={"all cells": "cells"})
     if figsize is None and target is None:
@@ -245,15 +278,18 @@ def clone_abundance(
         ax = axes["top"]
         positions = np.arange(len(top_table))[::-1]
         left = np.zeros(len(top_table))
-        for column in top_table.columns[1:]:
+        for column in top_table.columns[2:]:
             widths = top_table[column].to_numpy(dtype=np.float64)
             ax.barh(positions, widths, left=left, label=str(column))
             left += widths
-        ax.set_yticks(
-            positions, [str(clone) for clone in top_table["clone"]], fontsize="small"
-        )
+        ax.set_yticks(positions, top_table["label"].tolist(), fontsize="small")
         ax.set_xlabel("Cells")
-        ax.set_title(f"Largest {len(top_table)} clones")
+        # One clone drawn is named in the singular: "Largest clonotype".
+        ax.set_title(
+            f"Largest {len(top_table)} {drawn}"
+            if len(top_table) > 1
+            else f"Largest {drawn.removesuffix('s')}"
+        )
         if show_legend and grouped:
             ax.legend(frameon=False, fontsize="small", loc="lower right")
         apply_figure_chrome(figure, theme)
@@ -805,15 +841,19 @@ def clone_tracking(
 
     ``clones`` is a clone artifact, such as ``clones`` or ``clonotypes``. The
     plot follows the clones that ``ds.clones.track`` chooses: the ``top`` with
-    the most cells in each group, or ``labels``. Each draws one line, labelled
-    with its clone ID, across the groups, such as time points or cell types, of
-    its share of each group's cells with a clone. Groups are placed by their
-    labels in the ``group_by`` columns and the ``groups`` artifact, joined by
-    commas; ``order`` lists those names from left to right, or values whose
-    text is the name, such as time points as integers, and by default the names
-    follow their natural order. Plots of at most 40 groups name them on the
-    axis, and the legend lists at most 80 clones, the largest first. By default
-    the figure grows with the groups up to the width of a page.
+    the most cells in each group, or ``labels``. Each draws one line across the
+    groups, such as time points or cell types, of its share of each group's
+    cells with a clone. A line is labelled with its clone's ID, or for a
+    clonotype with its representative's junction, such as ``CASSA``, and also
+    its number where two of the clonotypes followed share a junction, such as
+    ``CASSA 1`` and ``CASSA 3``, as ``clone_abundance`` labels the largest
+    clones. Groups are placed by their labels in the ``group_by`` columns and
+    the ``groups`` artifact, joined by commas; ``order`` lists those names from
+    left to right, or values whose text is the name, such as time points as
+    integers, and by default the names follow their natural order. Plots of at
+    most 40 groups name them on the axis, and the legend lists at most 80
+    clones, the largest first. By default the figure grows with the groups up
+    to the width of a page.
 
     Tables: ``cells`` (``clone``, ``group``, the key columns, ``cells`` and
     ``fraction``).
@@ -830,6 +870,15 @@ def clone_tracking(
         cell_selection=cell_selection,
         top=top,
         labels=labels,
+    )
+    # Every followed clone is labelled at once, so that the junctions which
+    # two followed clonotypes share are found among the lines of this figure.
+    line_labels = dict(
+        zip(
+            tracked.tracked,
+            _figure_labels(store, clones, np.asarray(tracked.tracked, dtype=object)),
+            strict=True,
+        )
     )
     cells = tracked.cells
     keys = [
@@ -881,7 +930,7 @@ def clone_tracking(
                 markersize=3.5,
                 linewidth=1.2,
                 color=colors[name],
-                label=name,
+                label=line_labels[name],
             )
         if len(positions) <= _NAMED_GROUPS:
             ax.set_xticks(x, positions, rotation=45, ha="right")
