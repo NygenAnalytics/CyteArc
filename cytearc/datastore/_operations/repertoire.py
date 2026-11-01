@@ -2253,7 +2253,11 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             reads.reserve(_NAMING_BYTES_PER_ROW * len(hashes))
             naming = reads.held + _NAMING_BYTES_PER_ROW * len(hashes)
             per_id = _ID_BYTES + _ID_BYTES_PER_BYTE * contigs.width("sequence_id")
-            passing = contigs.id_pass_bytes(id_rows)
+            # The pass that reads the repeated IDs holds a block of IDs, their
+            # bytes and their offsets as read and searched.
+            passing = contigs.id_pass_bytes(id_rows) + (
+                contigs.width("sequence_id") + 16
+            ) * min(id_rows, contigs.n_contigs)
             asked = 0
 
             def ids_at(rows: np.ndarray) -> np.ndarray:
