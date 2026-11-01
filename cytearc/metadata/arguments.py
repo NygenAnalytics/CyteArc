@@ -741,6 +741,29 @@ class RecorderAlleleImportArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class AlleleCloneArguments(OperationArguments):
+    operation: ClassVar[str] = "call_allele_clones"
+    artifact_kind: ClassVar[str] = "clones"
+
+    alleles: ArtifactRef = artifact_input()
+    # The fingerprint of each edited cell's labels in the within columns, or
+    # None without columns.
+    within_fingerprint: str | None = artifact_input()
+    # The fingerprint of each character's bank, its sorted alleles with their
+    # frequencies and samples, or None when the frequencies come from the
+    # cells.
+    frequencies_fingerprint: str | None = artifact_input()
+    method: str = parameter()
+    max_frequency: float | None = parameter()
+    max_samples: int | None = parameter()
+    max_alleles: int | None = parameter()
+    # The false discovery rate of method="p_clonal", None for method="graph".
+    fdr: float | None = parameter()
+    within: tuple[str, ...] = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class GuideThresholdArguments(OperationArguments):
     operation: ClassVar[str] = "fit_guide_thresholds"
     artifact_kind: ClassVar[str] = "guide_thresholds"

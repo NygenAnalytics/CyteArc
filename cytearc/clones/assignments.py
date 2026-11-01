@@ -425,12 +425,14 @@ class Clones:
             when the source gave them, ``clone_probability`` (the probability
             of its clone, NaN without one), for clones called from lineage
             barcodes ``n_barcodes`` (its barcodes after the pair filters) and
-            ``doublet`` (whether TREX's rule removed it), and each column of
+            ``doublet`` (whether TREX's rule removed it), for clones called
+            from recorder alleles ``n_alleles`` (its distinct rare alleles),
+            and each column of
             ``kept_apart``, a categorical of the cell's labels.
         clones: One row per clone, largest first: ``clone`` and ``n_cells``.
         source: The operation that saved the clones, such as
-            ``"import_clones"``, ``"call_barcode_clones"`` or
-            ``"define_clonotypes"``.
+            ``"import_clones"``, ``"call_barcode_clones"``,
+            ``"call_allele_clones"`` or ``"define_clonotypes"``.
         kept_apart: The columns of ``cells`` whose labels the clones keep
             apart, such as ``("receptor_type",)`` for clonotypes: every clone
             summary measures the cells of each label apart. Clones keep none.

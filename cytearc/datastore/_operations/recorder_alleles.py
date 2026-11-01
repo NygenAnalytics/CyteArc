@@ -1,32 +1,45 @@
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
 import zarr
 
+from ...clones.allele_clones import (
+    AlleleBank,
+    AlleleObservations,
+    allele_banks,
+    allele_call_settings,
+    allele_clone_calls,
+)
+from ...clones.assignments import CloneAssignment
+from ...clones.barcode_clones import clone_labels
 from ...clones.recorders import (
     FIELDS,
+    MARK,
     STATES,
+    UNKNOWN_MARK,
     UNKNOWN_POLICIES,
     LineageAlleles,
     allele_chunk,
     cell_summaries,
     character_matrix,
+    character_name,
     empty_allele_chunk,
     lineage_allele_frames,
     records_in_line_order,
 )
-from ...metadata.arguments import RecorderAlleleImportArguments
+from ...metadata.arguments import AlleleCloneArguments, RecorderAlleleImportArguments
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
-from ...metadata.records import RecordEncoder, RecordTable
+from ...metadata.records import RecordEncoder, RecordTable, pack_text, unpack_text
 from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
 from ...metadata.selection import cell_selection_indices
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
+    ValueFingerprintBuilder,
     artifact_group,
     inspect_artifact,
     require_complete_artifact,
@@ -34,8 +47,10 @@ from ...storage.artifacts import (
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
+from ...utils.arrays import unique_rows
 from ...utils.logging import logger
 from ...utils.warnings import warn
+from .cell_groups import group_columns, within_groups
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
     BarcodeFile,
@@ -56,6 +71,7 @@ from .record_tables import (
 if TYPE_CHECKING:
     from ...readers.recorder_alleles import AlleleLayout
     from ..mapping_datastore import MappingDatastore as _AlleleOperationsBase
+    from .clones import _CloneOperationsMixin
 else:
     _AlleleOperationsBase = object
 
@@ -140,6 +156,35 @@ _STORE_BYTES_PER_CELL = 24
 # Bytes that writing a store takes per byte of the alleles of its table of
 # states: each value encoded as UTF-8 and the chunk's buffer of them.
 _STORE_BYTES_PER_ALLELE_BYTE = 2
+# The columns of the table of loaded clones, which a within column may not
+# share.
+_CLONE_COLUMNS = frozenset({"clone", "clone_size", "n_alleles"})
+# Bytes of each row of a bank while it is checked and held: its allele as a
+# Python string with its references, sorted copies and packed bytes for the
+# fingerprint, its frequency and samples with their copies, and its entry in
+# the table that looks alleles up; and of each character of its text.
+_BANK_ROW_BYTES = 200
+_BANK_CHARACTER_BYTES = 4
+# Calling clones holds, for each cell, its group and whether it has an edit;
+# while the states are read, each record's state and whether it is an edit;
+# while each other column is read, its int32 value per record; and for each
+# edit, its cell, allele, integration and site as int64 with the int32 copy
+# of one, and the character of each, which the distinct pairs of integration
+# and site give. It then holds each edit's cell, character and allele.
+_CALL_CELL_BYTES = 16
+_STATE_READ_BYTES = 2
+_COLUMN_READ_BYTES = 4
+_CALL_EDIT_BYTES = 96
+_HELD_EDIT_BYTES = 24
+# Bytes of each distinct allele, integration or site decoded as text: its
+# Python string beside its bytes and its reference.
+_CALL_TEXT_BYTES = 64
+# Writing the clones holds, for each cell, its clone code and rare alleles
+# from the calls, its label's pointer and its code and size as written, and
+# for each clone, its label as a Python string and its size; each label is
+# also written as fixed-width text of four bytes per character.
+_WRITE_CELL_BYTES = 40
+_WRITE_CLONE_BYTES = 120
 
 
 def _files_text(n_files: int) -> str:
@@ -945,6 +990,347 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             f"characters to {target}"
         )
         return int(len(matrix.cells))
+
+    @validation_scoped
+    def _clones_allele_clones(
+        self,
+        alleles: ArtifactRef,
+        *,
+        method: str,
+        frequencies: Mapping[str, pd.DataFrame] | None = None,
+        max_frequency: float | None = None,
+        max_samples: int | None = None,
+        max_alleles: int | None = None,
+        fdr: float = 0.05,
+        within: str | Sequence[str] | None = None,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Call clones from rare lineage recorder alleles.
+
+        Cells that share an edit descend from the cell in which it arose,
+        unless it arose more than once: CRISPR arrays repeat their most
+        likely edits in unrelated cells. So cells are linked through rare
+        alleles only, and the connected components of the cells that share
+        a rare allele, at any character, are the clones. An allele is one
+        character's edit, the text of a mark or of an unknown mark that names
+        its allele, such as a DARLIN array's ``23_268del,55_248del``; the
+        unedited state, placeholders of unknown marks such as CARLIN's ``X``,
+        and missing sites never link cells.
+
+        ``method="graph"`` follows DARLIN (Li et al., Cell 2023): an allele is
+        rare when its frequency is below ``max_frequency`` and it was found in
+        at most ``max_samples`` of its bank's samples; DARLIN used ``2e-5``
+        and one mouse. ``method="p_clonal"`` follows CARLIN (Bowling et al.,
+        Cell 2020): an allele of bank rate λ among the M cells of its group
+        with an edit at its character arose more than once with probability
+        p_clonal = (1 - e^(-λM) - λM e^(-λM)) / (1 - e^(-λM)), and is rare
+        when that p-value survives the Benjamini-Hochberg procedure at
+        ``fdr`` over the alleles of its group, and when it passes
+        ``max_samples``. A clone whose cells hold more than ``max_alleles``
+        distinct rare alleles leaves its cells without one, as DARLIN keeps
+        clones of at most three: a cell holds at most one allele per array,
+        so a clone of more is likely two that a homoplasic allele joined.
+
+        ``frequencies`` gives each character's bank, a DataFrame of each
+        allele's ``normalized_count``, its frequency among the bank's edited
+        observations, and optionally its ``sample_count``, as DARLIN's banks
+        hold them; ``pd.read_csv("allele_bank_Gr_CA.csv.gz")`` reads one. A
+        bank fits only alleles annotated by the pipeline that annotated it:
+        CARLIN's MATLAB notation and darlin-core's place some events one base
+        apart, so a bank in the other notation lists few of the alleles and
+        calls most of them rare. The artifact's ``bank_coverage`` attribute
+        reports, for each character, the share of its alleles and of their
+        cells that its bank lists. An allele missing from its bank counts as
+        rare, with frequency and rate 0, as DARLIN counts it; CARLIN gives such
+        alleles the mean rate of the alleles its bank model never observed,
+        which a table of rates does not hold. Without a bank, an allele's
+        frequency is the share of the cells of its group with an edit at its
+        character that hold it. Clonal expansion inflates these frequencies,
+        so the alleles of large clones look common, and ``"p_clonal"`` needs
+        a bank.
+
+        Clones are numbered by size, so ``clone_1`` is the largest, and ties
+        follow their first cell. The ``clones`` artifact also holds each
+        cell's ``n_alleles``, its distinct rare alleles; its attributes
+        record what each rule removed, and its parameters the rules.
+
+        Args:
+            alleles: A ``lineage_alleles`` artifact, such as one from
+                :meth:`~cytearc.datastore.namespaces.ClonesAccessor.import_alleles`.
+            method: ``"graph"`` or ``"p_clonal"``.
+            frequencies: Each character's bank, keyed by its name: its
+                integration, or ``{integration}-{site}`` for a named site, as
+                :meth:`~cytearc.datastore.namespaces.ClonesAccessor.export_characters`
+                names characters. Every character with an allele needs one.
+                None takes each allele's frequency from the cells.
+            max_frequency: For ``"graph"``, the frequency below which an
+                allele is rare, greater than 0 and at most 1, or None for no
+                such filter.
+            max_samples: The most samples of a bank in which a rare allele is
+                found, such as 1 for alleles of at most one bank mouse, or
+                None for no such filter; it needs banks with a
+                ``sample_count``.
+            max_alleles: The most distinct rare alleles of a clone, such as
+                3, or None for no such filter.
+            fdr: For ``"p_clonal"``, the false discovery rate, greater than 0
+                and less than 1.
+            within: Cell metadata columns whose labels keep clones apart, such
+                as the mouse; alleles are tested within each group, and every
+                cell with an edit needs a label.
+            invalidate_cache: Call again instead of reusing saved clones.
+
+        Returns:
+            A complete datastore-scoped ``clones`` artifact aligned to the
+            alleles' cells. Read it with
+            :meth:`~cytearc.datastore.namespaces.ClonesAccessor.load_clones`.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If the method is unknown, a rule is missing, out of
+                range or does not apply to the method, a bank is malformed,
+                names no character of the alleles or is missing for one, or a
+                within column is missing or has no label for a cell with an
+                edit.
+            PermissionError: If the store is read-only and the clones are not
+                saved yet.
+            MemoryError: If the calling does not fit the memory budget.
+        """
+        group = self._allele_group(alleles)
+        if not isinstance(invalidate_cache, bool):
+            raise TypeError("invalidate_cache must be a boolean")
+        banks = None
+        bank_bytes = 0
+        if frequencies is not None:
+            bank_bytes = _bank_bytes(frequencies)
+            if bank_bytes > self.memoryBytes:
+                raise MemoryError(
+                    f"Reading the banks of frequencies holds about {bank_bytes} bytes, "
+                    f"more than the memory budget of {self.memoryBytes} bytes. Raise "
+                    "mem_budget."
+                )
+            banks = allele_banks(frequencies)
+        settings = allele_call_settings(
+            method,
+            max_frequency=max_frequency,
+            max_samples=max_samples,
+            max_alleles=max_alleles,
+            fdr=fdr,
+            banks=banks,
+        )
+        columns = group_columns(within, "within", _CLONE_COLUMNS)
+        cell_selection = inspect_artifact(self.zw, alleles).input_ref("cell_selection")
+        counts = self._allele_counts(group)
+        n_cells = counts["cells"]
+        # Every cell with an edit needs a label in the within columns.
+        with_edits = read_array(group, "n_edits") > 0
+        group_codes, _keys, within_fingerprint = within_groups(
+            self.zw,
+            self.cells,
+            cell_selection,
+            columns,
+            with_edits,
+            memory_bytes=self.memoryBytes - bank_bytes,
+            reserved=_CLONE_COLUMNS,
+            what="an edit",
+        )
+        del with_edits
+        record = settings.record()
+        arguments = AlleleCloneArguments(
+            alleles=alleles,
+            within_fingerprint=within_fingerprint,
+            frequencies_fingerprint=None
+            if banks is None
+            else _banks_fingerprint(banks),
+            method=record["method"],
+            max_frequency=record["max_frequency"],
+            max_samples=record["max_samples"],
+            max_alleles=record["max_alleles"],
+            fdr=record["fdr"],
+            within=columns,
+            invalidate_cache=invalidate_cache,
+        )
+        # The DataStore holds the clone operations, which plan and write the
+        # clones artifact that every clone source saves.
+        clone_operations = cast("_CloneOperationsMixin", self)
+        planned = clone_operations._plan_clones(
+            arguments,
+            cell_selection,
+            n_cells,
+            with_probability=False,
+            required_attributes=("n_clones", "rule_counts", "bank_coverage"),
+            source_arrays={"n_alleles": "i"},
+        )
+        if planned.reused:
+            return planned.ref
+        self._require_writable(arguments.operation)
+        n_records = counts["records"]
+        # Writing the clones is checked first, as if every cell were a clone
+        # of its own, the most clones there can be.
+        width = len(f"clone_{n_cells}")
+        writing = n_cells * (_WRITE_CELL_BYTES + _WRITE_CLONE_BYTES + 8 * width)
+        held = bank_bytes + _CALL_CELL_BYTES * n_cells
+        if held + writing > self.memoryBytes:
+            raise MemoryError(
+                f"Calling clones from the alleles of {n_cells} cells holds about "
+                f"{held + writing} bytes as they are written, more than the memory "
+                f"budget of {self.memoryBytes} bytes. Raise mem_budget."
+            )
+        # The states are read first, so that only the records of edited sites
+        # are read on.
+        reading = held + _STATE_READ_BYTES * n_records + _FIXED_BYTES
+        if reading > self.memoryBytes:
+            raise MemoryError(
+                f"Calling clones from the {n_records} allele records of {n_cells} "
+                f"cells holds about {reading} bytes as their states are read, more "
+                f"than the memory budget of {self.memoryBytes} bytes. Raise mem_budget."
+            )
+        states = read_array(group, f"{_RECORDS}_state")
+        edited = (states == MARK) | (states == UNKNOWN_MARK)
+        del states
+        n_edited = int(np.count_nonzero(edited))
+        # The distinct alleles are decoded as text, beside their bytes.
+        texts = (
+            _CALL_TEXT_BYTES * counts["alleles"]
+            + 2 * counts["allele_bytes"]
+            + _CALL_TEXT_BYTES * (counts["integrations"] + counts["sites"])
+        )
+        reading = (
+            held
+            + n_records
+            + _COLUMN_READ_BYTES * n_records
+            + _CALL_EDIT_BYTES * n_edited
+            + texts
+            + _FIXED_BYTES
+        )
+        if reading > self.memoryBytes:
+            raise MemoryError(
+                f"Calling clones from the {n_edited} edited sites of {n_cells} cells "
+                f"holds about {reading} bytes as they are read, more than the memory "
+                f"budget of {self.memoryBytes} bytes. Raise mem_budget."
+            )
+        observations = _allele_observations(group, edited)
+        del edited
+        held += _HELD_EDIT_BYTES * n_edited + texts
+        called = allele_clone_calls(
+            observations,
+            n_cells,
+            groups=group_codes,
+            settings=settings,
+            banks=banks,
+            max_bytes=self.memoryBytes - held,
+        )
+        del observations, banks
+        labels = clone_labels(called.n_clones)
+        assignment = CloneAssignment(
+            codes=called.codes,
+            clone_ids=labels,
+            clone_sizes=called.sizes,
+            probabilities=None,
+            n_cells_in_several_clones=0,
+        )
+        clone_operations._write_clones(
+            planned,
+            assignment,
+            {
+                "n_clones": called.n_clones,
+                "rule_counts": called.counts,
+                "bank_coverage": called.coverage,
+            },
+            source_arrays={"n_alleles": called.n_alleles.astype(np.int32)},
+        )
+        for entry in called.coverage:
+            share = (
+                entry["observations_in_bank"] / entry["observations"]
+                if entry["observations"]
+                else 0.0
+            )
+            logger.info(
+                f"The bank of {entry['character']} lists {entry['alleles_in_bank']} of "
+                f"its {entry['alleles']} alleles, which {share:.1%} of their cells hold"
+            )
+        n_assigned = int(np.count_nonzero(called.codes >= 0))
+        largest = int(called.sizes[0]) if called.n_clones else 0
+        logger.info(
+            f"Called {called.n_clones} clones of {n_assigned} of {n_cells} cells from "
+            f"{called.counts['rare_alleles']} rare alleles; the largest holds "
+            f"{largest} cells"
+        )
+        return planned.ref
+
+
+def _bank_bytes(frequencies: Any) -> int:
+    """The bytes that checking and holding the banks of ``frequencies`` takes.
+
+    Values of the wrong type count nothing, so that the check of the banks
+    refuses them by name.
+    """
+    if not isinstance(frequencies, Mapping):
+        return 0
+    total = 0
+    for table in frequencies.values():
+        if not isinstance(table, pd.DataFrame) or "allele" not in table.columns:
+            continue
+        lengths = pd.to_numeric(
+            table["allele"]
+            .astype(object)
+            .map(lambda value: len(value) if isinstance(value, str) else 0),
+            errors="coerce",
+        )
+        characters = int(np.nansum(lengths.to_numpy(dtype=np.float64)))
+        total += _BANK_ROW_BYTES * len(table) + _BANK_CHARACTER_BYTES * characters
+    return total + _FIXED_BYTES
+
+
+def _banks_fingerprint(banks: Mapping[str, AlleleBank]) -> str:
+    """Fingerprint each character's bank: its sorted alleles, frequencies and samples."""
+    builder = ValueFingerprintBuilder()
+    for name in sorted(banks):
+        bank = banks[name]
+        builder.update_bytes("character", name.encode("utf-8"))
+        data, offsets = pack_text(bank.alleles)
+        builder.update_array("alleles", data)
+        builder.update_array("allele_offsets", offsets)
+        builder.update_array("frequencies", np.asarray(bank.frequencies, dtype="<f8"))
+        if bank.samples is None:
+            builder.update_bytes("samples", b"")
+        else:
+            builder.update_array("samples", np.asarray(bank.samples, dtype="<i8"))
+    return builder.hexdigest()
+
+
+def _allele_observations(group: zarr.Group, edited: np.ndarray) -> AlleleObservations:
+    """Read the records of edited sites: each one's cell, character and allele."""
+
+    def column(name: str) -> np.ndarray:
+        values = read_array(group, f"{_RECORDS}_{name}")
+        kept: np.ndarray = values[edited].astype(np.int64)
+        del values
+        return kept
+
+    def texts(name: str) -> np.ndarray:
+        return unpack_text(
+            read_array(group, f"{_RECORDS}_{name}_values"),
+            read_array(group, f"{_RECORDS}_{name}_offsets"),
+        )
+
+    alleles = column("allele")
+    integrations = column("integration")
+    sites = column("site")
+    cells = column("cells")
+    pairs, characters = unique_rows(np.stack([integrations, sites], axis=1))
+    del integrations, sites
+    integration_names = texts("integration")
+    site_names = texts("site")
+    return AlleleObservations(
+        cells=cells,
+        characters=characters,
+        alleles=alleles,
+        character_names=tuple(
+            character_name(str(integration_names[integration]), str(site_names[site]))
+            for integration, site in pairs.tolist()
+        ),
+        allele_texts=texts("allele"),
+    )
 
 
 def _utf8_width(largest: int) -> int:

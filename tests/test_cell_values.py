@@ -661,6 +661,13 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
         "cell5,4,5,6\n"
     )
     alleles = store.clones.import_alleles(characters, cell_selection=cells)
+    # Without a bank, each mark's frequency is its share of the cells with an
+    # edit at its site, a third or a half, so below 0.6 every mark is rare;
+    # no two cells share one, so cell0 and cell5 are clones of one, with two
+    # and three rare marks, and cell1's placeholder links nothing.
+    allele_clones = store.clones.allele_clones(
+        alleles, method="graph", max_frequency=0.6
+    )
 
     for ref, expected in (
         (clusters, np.array(list("aabbcc"))),
@@ -695,6 +702,7 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
         (variant_genotypes, np.array([1, 1, 1, 0, 1, 0])),
         (genotype_clones, np.array(["clone_1"] * 3 + [""] + ["clone_1", ""])),
         (alleles, np.array([2, 1, 0, 0, 0, 3])),
+        (allele_clones, np.array(["clone_1", "", "", "", "", "clone_2"])),
     ):
         loaded = store.artifacts.load_values(ref)
         np.testing.assert_array_equal(loaded.values, expected)
@@ -724,7 +732,8 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
         stored.setdefault(ref.kind, set()).update(per_cell - {"cell_index"})
     # Each kind's producers store every array it declares between them:
     # Numbat's clones their posteriors, barcode clones each cell's barcodes
-    # and doublet flag, and genotype clones each cell's ambiguous flag.
+    # and doublet flag, genotype clones each cell's ambiguous flag, and allele
+    # clones each cell's rare alleles.
     assert {kind: stored[kind] for kind in stored} == {
         kind: _declared(kind) for kind in stored
     }

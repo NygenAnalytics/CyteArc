@@ -14,10 +14,13 @@ import pandas as pd
 import pytest
 
 from tests.clone_truth import (
+    DARLIN_ARRAYS,
     SAMPLES,
+    AlleleCallingTruth,
     CallingTruth,
     CloneTruth,
     ReceptorTruth,
+    write_carlin_pair,
     write_cellranger_contigs,
     write_celltag_reads,
     write_cospar,
@@ -601,3 +604,44 @@ def import_calling_truth(
     return store.clones.import_barcodes(
         paths, cell_selection=selection, barcode_prefix=prefixes, **options
     )
+
+
+def import_allele_truth(
+    store: "DataStore",
+    calling: AlleleCallingTruth,
+    truth: CloneTruth,
+    folder: Path,
+    *,
+    cell_selection: "ArtifactRef | None" = None,
+    samples: Sequence[str] = SAMPLES,
+    arrays: Sequence[str] = DARLIN_ARRAYS,
+) -> "ArtifactRef":
+    """Import the allele calling truth as CARLIN pairs, one per sample and array.
+
+    Each sample's pairs join its cells through the sample's prefix, and the
+    first pair of d2 lists droplets outside the store, about which the import
+    warns. The pairs are listed sample by sample, in the order of ``samples``
+    and ``arrays``.
+    """
+    import warnings
+
+    paths, integrations, prefixes = [], [], []
+    for sample in samples:
+        for array in arrays:
+            pair = folder / f"{sample}_{array}"
+            write_carlin_pair(
+                calling.recorders, truth, pair, sample=sample, array=array
+            )
+            paths.append(pair)
+            integrations.append(array)
+            prefixes.append(f"{sample}__")
+    selection = every_cell(store) if cell_selection is None else cell_selection
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return store.clones.import_alleles(
+            paths,
+            cell_selection=selection,
+            integrations=integrations,
+            barcode_prefix=prefixes,
+            barcode_suffix="-1",
+        )

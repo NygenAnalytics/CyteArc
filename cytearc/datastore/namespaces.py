@@ -101,6 +101,7 @@ class ClonesAccessor(_Accessor):
     import_alleles = _bind(_RecorderAlleleOperationsMixin._clones_import_alleles)
     load_alleles = _bind(_RecorderAlleleOperationsMixin._clones_load_alleles)
     export_characters = _bind(_RecorderAlleleOperationsMixin._clones_export_characters)
+    allele_clones = _bind(_RecorderAlleleOperationsMixin._clones_allele_clones)
 
 
 class ClustersAccessor(_Accessor):
