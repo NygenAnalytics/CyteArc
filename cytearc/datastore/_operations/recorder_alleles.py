@@ -181,12 +181,14 @@ _COLUMN_READ_BYTES = 8
 _CALL_EDIT_BYTES = 80
 _HELD_EDIT_BYTES = 24
 # Bytes of each distinct allele, integration or site while its packed text is
-# read and decoded, beside four copies of its bytes: its offset as read and in
-# two lists of Python integers, its Python string and two references to it,
-# 145 as traced; and once decoded, its string and its reference beside its
-# bytes, 49 as traced.
-_DECODE_TEXT_BYTES = 152
-_HELD_TEXT_BYTES = 56
+# read and decoded, beside the copies of its bytes that decoding holds: its
+# offset as read and in two lists of Python integers, its Python string and
+# two references to it, 145 as traced for ASCII text; and once decoded, its
+# string and its reference beside its characters, 49 as traced for ASCII
+# text. A string beyond ASCII holds 16 bytes more and a terminator as wide as
+# its characters, up to 4 bytes.
+_DECODE_TEXT_BYTES = 168
+_HELD_TEXT_BYTES = 68
 # The records whose characters are keyed at a time, while both full columns
 # of integrations and sites are held.
 _KEY_BLOCK = 1 << 16
@@ -754,14 +756,17 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         Returns:
             ``records``, ``cells``, the distinct ``integrations``, ``sites``
             and ``alleles``, ``allele_bytes``, the bytes of the distinct
-            alleles, and ``decoded_bytes``, what decoding the distinct
-            integrations, sites and alleles holds beside their values.
+            alleles, ``text_bytes``, those of the distinct integrations,
+            sites and alleles, ``text_width``, the most bytes that a
+            character of them takes decoded per stored byte, and
+            ``decoded_bytes``, what decoding them holds beside their values.
         """
 
         def length(name: str) -> int:
             return int(as_zarr_array(group[name], name=name).shape[0])
 
         text_bytes = sum(length(f"{_RECORDS}_{name}_values") for name in _TEXT_FIELDS)
+        width = _text_width(group)
         return {
             "records": length(f"{_RECORDS}_cells"),
             "cells": length("n_edits"),
@@ -769,9 +774,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             "sites": length(f"{_RECORDS}_site_offsets") - 1,
             "alleles": length(f"{_RECORDS}_allele_offsets") - 1,
             "allele_bytes": length(f"{_RECORDS}_allele_values"),
-            "decoded_bytes": (
-                _STORED_TEXT_COPIES + _DECODED_TEXT_COPIES * _text_width(group)
-            )
+            "text_bytes": text_bytes,
+            "text_width": width,
+            "decoded_bytes": (_STORED_TEXT_COPIES + _DECODED_TEXT_COPIES * width)
             * text_bytes,
         }
 
@@ -1102,18 +1107,19 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If the method is unknown, a rule is missing, out of
-                range or does not apply to the method, a bank is malformed,
-                names no character with an edit or is missing for one, or a
-                within column is missing or has no label for a cell with an
-                edit.
+            ValueError: If ``alleles`` is not a ``lineage_alleles`` artifact,
+                the method is unknown, a rule is missing, out of range or
+                does not apply to the method, a bank is malformed, names no
+                character with an edit or is missing for one, or a within
+                column is missing or has no label for a cell with an edit.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
             PermissionError: If the store is read-only and the clones are not
                 saved yet.
             MemoryError: If the calling does not fit the memory budget.
         """
+        bool_argument(invalidate_cache, "invalidate_cache")
         group = self._allele_group(alleles)
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
         banks = None
         bank_bytes = 0
         if frequencies is not None:
@@ -1194,18 +1200,19 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             f"the clones of {n_cells} cells as they are written",
         )
         # The distinct alleles, integrations and sites are decoded as text
-        # before the records are read, and held while the clones are called.
+        # before the records are read, and held while the clones are called,
+        # each character at the width of the widest.
         n_texts = counts["alleles"] + counts["integrations"] + counts["sites"]
         _check_calling(
             held
             + _DECODE_TEXT_BYTES * n_texts
-            + 4 * counts["allele_bytes"]
+            + counts["decoded_bytes"]
             + _FIXED_BYTES,
             self.memoryBytes,
             f"the text of {counts['alleles']} distinct alleles as it is decoded",
         )
         texts = _record_texts(group)
-        held += _HELD_TEXT_BYTES * n_texts + counts["allele_bytes"]
+        held += _HELD_TEXT_BYTES * n_texts + counts["text_width"] * counts["text_bytes"]
         # The states are read first, so that only the records of edited sites
         # are read on.
         _check_calling(

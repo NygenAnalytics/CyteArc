@@ -519,6 +519,27 @@ def test_allele_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -> 
         )
 
 
+def test_allele_clones_name_missing_and_incomplete_alleles(store, tmp_path) -> None:
+    from cytearc.storage.artifacts import artifact_group
+    from cytearc.storage.refs import ArtifactRef
+
+    _calling, alleles = _imported(store, tmp_path)
+    missing = ArtifactRef(
+        scope="datastore", kind="lineage_alleles", artifact_id="f" * 64, assay=None
+    )
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        store.clones.allele_clones(missing, method="graph", max_frequency=0.5)
+    # The arguments are checked before the store is read.
+    with pytest.raises(TypeError, match="invalidate_cache must be a boolean"):
+        store.clones.allele_clones(
+            missing, method="graph", max_frequency=0.5, invalidate_cache=np.True_
+        )
+    # An import that stopped before it finished leaves an incomplete artifact.
+    artifact_group(store.zw, alleles).attrs["complete"] = False
+    with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+        store.clones.allele_clones(alleles, method="graph", max_frequency=0.5)
+
+
 def test_calling_refuses_a_budget_too_small_before_writing(
     store, tmp_path, monkeypatch
 ) -> None:
@@ -1011,6 +1032,62 @@ def test_each_step_on_millions_of_records_holds_no_more_than_its_check_states(
 
     # Compiled kernels are warmed before anything is traced.
     call()
+    _assert_steps_within(traced_steps(monkeypatch, call, budget))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("ending", ["é", "😀"])
+def test_each_step_on_wide_alleles_holds_no_more_than_its_check_states(
+    tmp_path, monkeypatch, ending
+) -> None:
+    """1,000 alleles of 5,000 characters, each shared by two cells, 5 MB of text.
+
+    An allele that ends in a character beyond ASCII is a Python string with
+    a longer header; one beyond U+FFFF, such as an emoji, makes Python hold
+    each of the allele's characters in four bytes, so decoding the text
+    holds up to ten bytes per stored byte and the decoded alleles four,
+    which the checks count by the alleles' largest UTF-8 byte.
+    """
+    rng = np.random.default_rng(24)
+    n_cells = 2_000
+    cells = [f"cell{index:06d}" for index in range(n_cells)]
+    letters = np.asarray(list("ACGT"))
+    # Each pair of cells shares an allele, which links them.
+    texts = [
+        "".join(rng.choice(letters, 4_987)) + f"{pair:012d}{ending}"
+        for pair in range(n_cells // 2)
+    ]
+    path = tmp_path / "alleles.tsv"
+    path.write_text(
+        "cell\tallele\n"
+        + "".join(f"{cell}\t{texts[index // 2]}\n" for index, cell in enumerate(cells)),
+        encoding="utf-8",
+    )
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((n_cells, 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=cells,
+    )
+    store = open_clone_store(tmp_path / "store.zarr")
+    alleles = store.clones.import_alleles(
+        path,
+        cell_selection=store.snapshot_cell_selection(),
+        columns={"cell": "cell", "allele": "allele"},
+        integrations="I",
+    )
+    budget = 1 << 34
+    monkeypatch.setattr(store, "memoryBytes", budget)
+
+    def call() -> object:
+        return store.clones.allele_clones(
+            alleles, method="graph", max_frequency=0.5, invalidate_cache=True
+        )
+
+    call()
+    assert store.clones.load_clones(call()).clones["n_cells"].tolist() == [2] * (
+        n_cells // 2
+    )
     _assert_steps_within(traced_steps(monkeypatch, call, budget))
 
 

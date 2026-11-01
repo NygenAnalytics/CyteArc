@@ -480,7 +480,7 @@ Calling checks the memory budget before each step that reads or allocates, and r
 | Checking the banks | 128 per row of a bank and 4 per character of its alleles, and 80 per row and 4 per character held after |
 | Grouping the cells | 9 per cell, beside what the grouping of `within` holds |
 | Writing the clones | 200 per cell, and 8 per cell for each character of the longest label, checked before reading as if every cell were a clone, and again before writing with the clones' number |
-| Decoding the alleles | 152 per distinct allele, integration and site and four times its bytes; 56 and its bytes held after |
+| Decoding the alleles | 168 per distinct allele, integration and site, and for each byte of their text 2 and twice the bytes that Python holds a character of the widest in: 1 up to U+00FF, 2 up to U+FFFF and 4 beyond; 68 per text and that width per byte held after |
 | Reading the records | 4 per record while the states are read, then 9 per record, while both columns of integrations and sites are read, and 80 per edited site; 24 per edited site held after |
 | Finding each cell's distinct edits | 16 per cell while each cell's group is copied, and 88 per edited site |
 | Testing the alleles | 96 per edit that names an allele, and 160 per allele of a group and character, beside 120 per allele and per row of its bank while a bank looks it up |

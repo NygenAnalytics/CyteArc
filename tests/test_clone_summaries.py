@@ -168,7 +168,7 @@ KEPT_APART: dict[str, dict[str, np.ndarray]] = {
 
 
 def _ranked_label(clone: int) -> str:
-    """A clone's label as barcode and genotype clones number them, counted from the truth.
+    """A clone's label as barcode, genotype and allele clones number them, from the truth.
 
     ``clone_1`` is the largest clone, and clones of one size follow their
     first cell.
@@ -185,14 +185,15 @@ def _ranked_label(clone: int) -> str:
 
 #: How each source that keeps no labels apart labels the truth's clones: the
 #: rule its labels follow from the truth, such as the labels of imported
-#: clones' files and the numbers by size of barcode and genotype clones, or
-#: None for a source whose labels follow from something else, such as variant
-#: clones, which number their clones by cluster.
+#: clones' files and the numbers by size of barcode, genotype and allele
+#: clones, or None for a source whose labels follow from something else,
+#: such as variant clones, which number their clones by cluster.
 LABELS: dict[str, Callable[[int], str] | None] = {
     "imported clones": number_label,
     "barcode clones": _ranked_label,
     "variant clones": None,
     "genotype clones": _ranked_label,
+    "allele clones": _ranked_label,
 }
 
 
