@@ -214,8 +214,9 @@ class TapestriReader(CrReader):
     Raises:
         ValueError: If the file holds neither the amplicon nor the protein
             reads, lacks an assay's arrays, its assays list other cells, a
-            sample's barcode repeats, a feature ID repeats or is blank, or a
-            ``ca`` or ``filtered`` array does not align with its assay.
+            sample's barcode repeats, an assay lists no features, a feature ID
+            repeats or is blank, or a ``ca`` or ``filtered`` array does not
+            align with its assay.
     """
 
     def __init__(self, h5_fn: str) -> None:
@@ -267,6 +268,8 @@ class TapestriReader(CrReader):
             if not isinstance(columns, h5py.Group):
                 raise ValueError(f"{self.path} lacks assays/{name}/ca")
             ids = _texts(_dataset(columns, "id", self.path)[:])
+            if not len(ids):
+                raise ValueError(f"assays/{name} of {self.path} lists no features")
             require_unique_identifiers(ids, f"The feature IDs of assays/{name}")
             if layer.shape != (len(cells.ids), len(ids)):
                 raise ValueError(
@@ -378,19 +381,24 @@ class TapestriReader(CrReader):
             rows, columns = np.nonzero(block)
             values = block[rows, columns]
             del block
-            yield coo_matrix(
+            matrix = coo_matrix(
                 (values, (rows, columns)), shape=(stop - start, self.nFeatures)
             )
+            del rows, columns, values
+            yield matrix
 
     def producer_staging_bytes(self, batch_size: int, lines_in_mem: int) -> int:
-        """Count the dense reads of one batch of cells and their nonzero positions.
+        """Count what one batch of cells holds as it is read, per value.
 
-        A batch reads each assay's cells by features, joins them, and finds
-        the nonzero entries' rows and columns before the values are taken.
+        A batch reads each assay's cells by features and joins them, two
+        dense copies; finds the nonzero entries' rows and columns, 16 bytes
+        each, and takes their values; and builds the sparse batch, whose
+        32-bit indices are copied from the 64-bit ones. Every value counts
+        the most of these at once: its dtype's bytes and 24.
         """
         rows = min(max(1, int(batch_size)), self.nCells)
         itemsize = self.matrix_dtype.itemsize
-        return int(rows * self.nFeatures * (2 * itemsize + 2 * 8))
+        return int(rows * self.nFeatures * (itemsize + 24))
 
     def _sparse_import_resident_bytes(self) -> int:
         """The cells' IDs, which the reader holds while it is open."""
@@ -833,7 +841,7 @@ class TapestriSource:
             raise ValueError(
                 f"{self._layers['AF']} of {self.path} gives the cell "
                 f"{self._cell(start, row)!r} at {self._columns.labels[column]!r} "
-                f"the allele frequency {frequency[row, column]!r}; frequencies lie "
+                f"the allele frequency {float(frequency[row, column])!r}; frequencies lie "
                 "from 0 to 100%"
             )
         reads = frequency * depth
@@ -846,7 +854,7 @@ class TapestriSource:
                 int(value) for value in np.argwhere(reads > _WHOLE_TOLERANCE)[0]
             )
             raise ValueError(
-                f"The allele frequency {frequency[row, column]!r} and depth "
+                f"The allele frequency {float(frequency[row, column])!r} and depth "
                 f"{int(depth[row, column])} of the cell {self._cell(start, row)!r} "
                 f"at {self._columns.labels[column]!r} in {self.path} do not give a "
                 "whole number of reads as AF × DP / 100"
@@ -940,7 +948,7 @@ class TapestriSource:
             raise ValueError(
                 f"{name} of {self.path} gives the cell {self._cell(start, row)!r} "
                 f"at {self._columns.labels[column]!r} the value "
-                f"{values[row, column]!r}; DAb-seq writes a missing value as -1"
+                f"{values[row, column].item()!r}; DAb-seq writes a missing value as -1"
             )
 
 

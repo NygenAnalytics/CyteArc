@@ -1463,3 +1463,96 @@ def write_dabseq(truth: TapestriTruth, path: Path) -> Path:
             "COUNTS", data=truth.amplicon_reads.astype(np.int32), compression="gzip"
         )
     return path
+
+
+def write_large_tapestri(
+    path: Path,
+    *,
+    n_cells: int,
+    n_variants: int,
+    n_amplicons: int = 120,
+    n_antibodies: int = 20,
+    seed: int = 0,
+    read_dtype: type = np.int64,
+    alternatives: int = 1,
+) -> Path:
+    """A Tapestri file of many cells with random reads, for memory tests.
+
+    Every variant passes; ``alternatives`` variants share each position and
+    its depth. A cell's alternative reads are a binomial share of its depth,
+    its NGT follows their frequency, and about 2% of entries are not
+    covered.
+    """
+    rng = np.random.default_rng(seed)
+    n_positions = -(-n_variants // alternatives)
+    depth = np.repeat(
+        rng.poisson(30, size=(n_cells, n_positions))
+        * (rng.random((n_cells, n_positions)) > 0.02),
+        alternatives,
+        axis=1,
+    )[:, :n_variants]
+    alternative = rng.binomial(depth, rng.choice([0.0, 0.5, 1.0], size=n_variants))
+    frequency = np.where(depth > 0, alternative / np.maximum(depth, 1) * 100, 0.0)
+    genotypes = np.where(
+        depth == 0, 3, np.where(frequency > 90, 2, np.where(frequency > 20, 1, 0))
+    )
+    # Each cell's number in base 4, one base per digit.
+    barcodes = [
+        "".join("ACGT"[(cell >> (2 * digit)) & 3] for digit in range(18))
+        for cell in range(n_cells)
+    ]
+    with h5py.File(path, "w") as handle:
+        variants = handle.create_group("assays/dna_variants")
+        columns = variants.create_group("ca")
+        positions = 1000 + 10 * (np.arange(n_variants) // alternatives)
+        alts = [("G", "T", "C")[column % alternatives] for column in range(n_variants)]
+        _texts_dataset(
+            columns,
+            "id",
+            [
+                f"chr1:{position}:A/{alt}"
+                for position, alt in zip(positions, alts, strict=True)
+            ],
+        )
+        _texts_dataset(columns, "CHROM", ["1"] * n_variants)
+        columns.create_dataset("POS", data=positions.astype(np.int32))
+        _texts_dataset(columns, "REF", ["A"] * n_variants)
+        _texts_dataset(columns, "ALT", alts)
+        columns.create_dataset("filtered", data=np.zeros(n_variants, dtype=np.uint8))
+        layers = variants.create_group("layers")
+        for name, values, dtype in (
+            ("AF", frequency, np.float64),
+            ("DP", depth, np.int16),
+            ("NGT", genotypes, np.int8),
+            ("GQ", np.full(depth.shape, 99), np.int8),
+        ):
+            layers.create_dataset(
+                name,
+                data=values.astype(dtype),
+                chunks=(min(64, n_cells), min(64, n_variants)),
+                compression="gzip",
+            )
+        for name, width in (
+            ("dna_variants", 0),
+            ("dna_read_counts", n_amplicons),
+            ("protein_read_counts", n_antibodies),
+        ):
+            assay = handle.require_group(f"assays/{name}")
+            rows = assay.create_group("ra")
+            _texts_dataset(rows, "barcode", barcodes)
+            _texts_dataset(rows, "sample_name", ["sample1"] * n_cells)
+            if name == "dna_variants":
+                rows.create_dataset("filtered", data=np.zeros(n_cells, dtype=np.uint8))
+                continue
+            _texts_dataset(
+                assay.create_group("ca"),
+                "id",
+                [f"{name}_{index}" for index in range(width)],
+            )
+            assay.create_group("layers").create_dataset(
+                "read_counts",
+                data=rng.poisson(20, size=(n_cells, width)).astype(read_dtype),
+                chunks=(min(64, n_cells), width),
+                compression="gzip",
+            )
+    return path

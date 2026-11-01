@@ -1,7 +1,7 @@
 ---
 myst:
   html_meta:
-    description: Read, write, merge, and subset CyteArc datasets using Cell Ranger, H5AD, Matrix Market, Seurat, and Zarr formats.
+    description: Read, write, merge, and subset CyteArc datasets using Cell Ranger, H5AD, Matrix Market, Seurat, Tapestri, and Zarr formats.
 ---
 
 # Import and export API reference
@@ -179,6 +179,30 @@ workflow mapping.
     :members:
 
 .. autoclass:: cytearc.SeuratToZarr
+    :members:
+```
+
+## Tapestri import
+
+Mission Bio's Tapestri genotypes hundreds of amplicons in each cell, often beside surface proteins, and its files hold no RNA. `TapestriReader` reads a Tapestri Pipeline 2.0 `<sample>.dna+protein.h5`, or a `.dna.h5` without proteins, in the [layout that Mission Bio documents](https://missionbio.github.io/mosaic/manual/data_structure.html), and `TapestriToZarr` writes it to a store of its own. Each cell's reads of each amplicon (`assays/dna_read_counts`) form the `CNV` assay, a generic `Assay`, with each amplicon's `CHROM`, `start_pos` and `end_pos` as feature metadata, and the reads of each antibody tag (`assays/protein_read_counts`) form the `ADT` assay. Each cell's `sample_name` and its `filtered` flag, True for a cell that the pipeline's default filters removed, become cell metadata. `all_barcodes`, the reads of every barcode, cells or not, is not read.
+
+A cell's ID is its sample and barcode, `<sample>__<barcode>`, as a merged store names its cells, so the cells of several samples in one file stay apart where their barcodes repeat. The store's `tapestri` attribute, of the workspace when one is given, records the samples and the scalar metadata of each assay group, such as its `panel_name`, `genome_version` and `pipeline_version`, which can differ between the DNA and the protein libraries, and the file's own `metadata` group. The DNA variants go into the store with {meth}`ds.variants.import_counts(path, format="tapestri") <cytearc.datastore.namespaces.VariantsAccessor.import_counts>`, which names the file's cells as the store does; {doc}`variants` describes them.
+
+```python
+reader = cytearc.TapestriReader("sample.dna+protein.h5")
+cytearc.TapestriToZarr(reader, zarr_loc="sample.zarr").dump()
+reader.close()
+ds = cytearc.DataStore("sample.zarr", default_assay="ADT")
+counts = ds.variants.import_counts(
+    "sample.dna+protein.h5", cell_selection=ds.snapshot_cell_selection()
+)
+```
+
+```{eval-rst}
+.. autoclass:: cytearc.TapestriReader
+    :members:
+
+.. autoclass:: cytearc.TapestriToZarr
     :members:
 ```
 
