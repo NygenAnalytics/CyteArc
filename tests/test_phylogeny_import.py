@@ -780,27 +780,18 @@ def test_cut_clones_read_as_cell_values_and_phylogenies_do_not(
 
 
 def test_a_zarr_store_is_identified_by_every_file_and_path(tmp_path) -> None:
+    # What identifies a store, its files' paths and bytes, is the shared
+    # join's store_sha256, which the join's tests pin; the tree import passes
+    # it for Zarr stores and the SHA-256 of a file's bytes otherwise.
     from cytearc.datastore._operations.cell_barcodes import barcode_files, store_sha256
     from cytearc.datastore._operations.phylogeny import _tree_file_sha256
 
     first = write_tree_zarr([TREE], tmp_path / "first.zarr")
     second = tmp_path / "second.zarr"
     shutil.copytree(first, second)
-    assert store_sha256(first) == store_sha256(second)
-    assert len(store_sha256(first)) == 64
-    # Renaming a file inside the store, or editing one, changes the identity.
-    nodes = next(
-        path
-        for path in sorted(second.rglob("*"))
-        if path.is_file() and path.parent.name == "nodes"
-    )
-    renamed = nodes.with_name(nodes.name + "_moved")
-    nodes.rename(renamed)
-    assert store_sha256(first) != store_sha256(second)
-    renamed.rename(nodes)
-    assert store_sha256(first) == store_sha256(second)
     (second / "zarr.json").write_text((second / "zarr.json").read_text() + " ")
-    assert store_sha256(first) != store_sha256(second)
+    assert _tree_file_sha256(first) == store_sha256(first)
+    assert _tree_file_sha256(second) == store_sha256(second) != store_sha256(first)
     (file,) = barcode_files(first, what="tree file", identify=_tree_file_sha256)
     assert file.sha256 == store_sha256(first)
     newick = _write_newick(tmp_path / "truth_tree.nwk")
@@ -907,6 +898,31 @@ def test_saved_phylogenies_that_lost_an_array_or_a_count_are_not_used(
     # An artifact without one of its arrays is not reused either.
     del artifact_group(store.zw, again)["tree_names"]
     assert _import(store, path)[0] not in (phylogeny, again)
+
+
+def test_saved_clones_of_a_cut_that_lost_its_count_are_cut_again(
+    store, tmp_path
+) -> None:
+    from cytearc.storage.artifacts import artifact_group
+
+    a, b, c, d = _cell_ids(4)
+    # c and d end at 3, before the cut at 3.5, so the cut counts them.
+    tree = _tree(
+        "uneven",
+        [("r", -1, 0.0), ("x", 0, 1.0), (a, 1, 4.0), (b, 1, 4.0), ("y", 0, 2.0)]
+        + [(c, 4, 3.0), (d, 4, 3.0)],
+    )
+    phylogeny, _messages = _import(store, write_newick([tree], tmp_path / "u.nwk"))
+    clones, _messages = _cut(store, phylogeny, time=3.5)
+    assert _cut(store, phylogeny, time=3.5)[0] == clones
+    # Saved clones without the count of cells that end before the cut are cut
+    # again, as a new artifact, rather than reused without it.
+    del artifact_group(store.zw, clones).attrs["n_cells_before_cut"]
+    again, messages = _cut(store, phylogeny, time=3.5)
+    assert again != clones
+    assert store.artifacts.load(again).attrs["n_cells_before_cut"] == 2
+    assert len(messages) == 1
+    assert _clone_sets(store, again) == {a: frozenset([a]), b: frozenset([b])}
 
 
 def test_a_reused_import_reads_neither_cells_nor_trees(
