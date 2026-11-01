@@ -1,5 +1,6 @@
 import gzip
 import io
+import re
 import zlib
 
 import numpy as np
@@ -979,3 +980,35 @@ def test_receptors_without_contigs_export_their_header(tmp_path) -> None:
         assert header.split("\t")[: len(AIRR_REQUIRED_FIELDS)] == list(
             AIRR_REQUIRED_FIELDS
         )
+
+
+def test_the_cells_ids_are_checked_before_each_read(tmp_path) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+    ids = store.cells._get_array("ids")
+    fixed = repertoire_operations.text_row_selection_parts(ids)[0]
+    refusals = []
+    limit = 1
+    while True:
+        reads = repertoire_operations._Reads(
+            limit=limit, held=0, what="Reading", remedy=""
+        )
+        try:
+            packed, longest = store._export_cell_ids(reads, receptors, 8, 1)
+            break
+        except MemoryError as error:
+            found = re.search(r"holds about (\d+) bytes", str(error))
+            assert found is not None and int(found.group(1)) > limit
+            refusals.append(int(found.group(1)))
+            limit = refusals[-1]
+    # The selection's positions, 32 bytes a cell as read and 8 as kept, and
+    # the offsets of the eight IDs; then each slice of one ID of 5 characters,
+    # stored in 20 bytes: one stored chunk, the row as text_read_bytes counts
+    # it, and its packing, three copies of the stored bytes and 24 more,
+    # beside the IDs packed before it, 5 bytes each.
+    per_row = (3 * 20 + 16 * 8) + 64 + 4 * 5 + 3 * 20 + 24
+    held = 8 * 8 + 8 * 9
+    assert refusals == [32 * 8] + [held + 5 * k + fixed + per_row for k in range(8)]
+    assert bytes(packed.data) == b"".join(f"cell{k}".encode() for k in range(8))
+    assert packed.offsets.tolist() == list(range(0, 45, 5)) and longest == 5
+    # The packed IDs and their offsets stay counted; the positions do not.
+    assert reads.held == 8 * 9 + 40
