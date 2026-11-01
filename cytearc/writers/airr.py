@@ -12,7 +12,9 @@ caller that streams its contigs holds one block at once, and
 are rendered as UTF-8 bytes and copied into its rows by a compiled loop; text
 given as ``EncodedText`` is copied from its packed bytes without being
 decoded. A value holding a tab, a newline, a carriage return or a double
-quote is quoted as pandas' ``to_csv`` quotes it, by a compiled loop too.
+quote is quoted as pandas' ``to_csv`` quotes it, by a compiled loop too; the
+AIRR TSV dialect leaves such values out, so a file that holds them warns with
+their number when it is closed.
 
 The schema requires unique ``sequence_id`` values. ``suffix_repeated_ids``
 names the later occurrences of a repeated ID from 64-bit hashes of every ID,
@@ -29,6 +31,7 @@ import numpy as np
 import pandas as pd
 
 from ..metadata.records import EncodedText, decode_text
+from ..utils.logging import logger
 from ..utils.numba import njit
 
 __all__ = [
@@ -286,12 +289,16 @@ def _add_quoted_widths(
     codes: np.ndarray,
     coded: bool,
     first: int,
-) -> None:
+) -> int:
     """Add the bytes of each row's value, quoted where it must be, to its width.
 
     Rows ``first`` on are the rows of ``widths``. A quoted value gains its two
     quotes and a second copy of each double quote that it holds.
+
+    Returns:
+        The number of rows whose value is quoted.
     """
+    n_quoted = 0
     for row in range(widths.shape[0]):
         code = codes[first + row] if coded else first + row
         if code < 0:
@@ -308,6 +315,8 @@ def _add_quoted_widths(
         widths[row] += offsets[code + 1] - offsets[code]
         if special:
             widths[row] += 2 + quotes
+            n_quoted += 1
+    return n_quoted
 
 
 @njit(cache=True, nogil=True)
@@ -355,7 +364,9 @@ def _scatter_quoted(
         cursor[row] = position + 1
 
 
-def _rows(columns: list[_Bytes | None], n_rows: int) -> Iterator[np.ndarray]:
+def _rows(
+    columns: list[_Bytes | None], n_rows: int, quoted: list[int]
+) -> Iterator[np.ndarray]:
     """Join the columns of rows with tabs, each row ending with a newline.
 
     A value that holds a tab, a newline, a carriage return or a double quote
@@ -363,7 +374,8 @@ def _rows(columns: list[_Bytes | None], n_rows: int) -> Iterator[np.ndarray]:
     pandas' ``to_csv`` quote it; ``None`` is an empty column. The rows come as
     one array of bytes, unless a value is quoted: then they are rendered
     again, in slices of rows that each hold at most the bytes of the first
-    rendering, or one row.
+    rendering, or one row, and ``quoted`` receives the number of quoted
+    values.
     """
     if not n_rows:
         return
@@ -396,10 +408,11 @@ def _rows(columns: list[_Bytes | None], n_rows: int) -> Iterator[np.ndarray]:
     limit = len(out)
     del out
     widths[:] = len(columns)
+    n_quoted = 0
     for column in columns:
         if column is not None:
             codes = column.codes
-            _add_quoted_widths(
+            n_quoted += _add_quoted_widths(
                 widths,
                 column.data,
                 column.offsets,
@@ -407,6 +420,7 @@ def _rows(columns: list[_Bytes | None], n_rows: int) -> Iterator[np.ndarray]:
                 codes is not None,
                 0,
             )
+    quoted.append(n_quoted)
     # Each row's end among the quoted rows, in place of its start.
     np.cumsum(widths, out=cursor)
     start = 0
@@ -520,6 +534,19 @@ def _integers(values: np.ndarray, missing: np.ndarray) -> _Bytes:
     return _Bytes(data, offsets, None)
 
 
+def _column_names(columns: Any) -> tuple[str, ...]:
+    """Check columns given as a sequence of distinct names."""
+    if isinstance(columns, str) or not isinstance(columns, Sequence):
+        raise TypeError("columns must be a sequence of column names")
+    names = tuple(columns)
+    if not all(isinstance(name, str) for name in names):
+        raise TypeError("columns must be a sequence of column names")
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(f"columns name {repeated} more than once")
+    return names
+
+
 def _n_values(values: Any) -> int:
     return len(values.codes) if isinstance(values, EncodedText) else len(values)
 
@@ -538,6 +565,9 @@ class AirrRearrangementWriter:
     distinct. A block may lack required fields, which are written empty. A path
     ending in ``.gz`` is gzip-compressed at level 6.
 
+    The schema requires unique ``sequence_id`` values, and the writer writes
+    each block as given, so a caller whose contigs' IDs may repeat gives the
+    later ones suffixes first, as :func:`suffix_repeated_ids` chooses them.
     Close the writer, or use it as a context manager::
 
         with AirrRearrangementWriter("contigs.tsv.gz", ["cell_id"]) as writer:
@@ -552,7 +582,9 @@ class AirrRearrangementWriter:
             every row before writing, so the blocks agree.
 
     Raises:
-        TypeError: If ``path`` is not a path.
+        TypeError: If ``path`` is not a path, or ``columns`` is not a sequence
+            of column names.
+        ValueError: If ``columns`` names a column more than once.
     """
 
     def __init__(
@@ -564,16 +596,23 @@ class AirrRearrangementWriter:
     ) -> None:
         if not isinstance(path, str | os.PathLike):
             raise TypeError("path must be a path")
+        names = _column_names(columns)
         self._rest = tuple(
-            column for column in columns if column not in AIRR_REQUIRED_FIELDS
+            column for column in names if column not in AIRR_REQUIRED_FIELDS
         )
         self._whole = frozenset(whole)
         self._n_rows = 0
+        self._n_quoted = 0
         target = os.fspath(path)
+        self._file: Any = open(target, "wb")
+        # A compressed file's header names no file and no time, so the same
+        # contigs give the same bytes.
         self._handle: Any = (
-            gzip.open(target, "wb", compresslevel=6)
+            gzip.GzipFile(
+                filename="", mode="wb", compresslevel=6, fileobj=self._file, mtime=0
+            )
             if target.endswith(".gz")
-            else open(target, "wb")
+            else self._file
         )
         self._handle.write(("\t".join(self.columns) + "\n").encode("utf-8"))
 
@@ -586,6 +625,11 @@ class AirrRearrangementWriter:
     def n_rows(self) -> int:
         """The number of rows written."""
         return self._n_rows
+
+    @property
+    def n_quoted(self) -> int:
+        """The number of values written quoted."""
+        return self._n_quoted
 
     @property
     def closed(self) -> bool:
@@ -631,17 +675,32 @@ class AirrRearrangementWriter:
             else None
             for column in self.columns
         ]
-        for rendered in _rows(columns, n_rows):
+        quoted: list[int] = []
+        for rendered in _rows(columns, n_rows, quoted):
             for start in range(0, len(rendered), _WRITE_BYTES):
                 self._handle.write(rendered[start : start + _WRITE_BYTES])
+            # A slice is let go before the next is rendered.
+            del rendered
         self._n_rows += n_rows
+        self._n_quoted += sum(quoted)
         return n_rows
 
     def close(self) -> None:
-        """Close the file; closing again does nothing."""
+        """Close the file; closing again does nothing.
+
+        A file that holds quoted values warns with their number, since the
+        AIRR TSV dialect leaves such values out.
+        """
         if self._handle is not None:
             handle, self._handle = self._handle, None
             handle.close()
+            self._file.close()
+            if self._n_quoted:
+                logger.warning(
+                    f"{self._n_quoted} values hold a tab, a newline, a carriage "
+                    "return or a double quote, which the AIRR TSV dialect leaves "
+                    "out; they are written quoted, as pandas' to_csv quotes them"
+                )
 
     def __enter__(self) -> Self:
         return self
@@ -677,19 +736,27 @@ def write_airr_rearrangements(
         The number of rows written.
 
     Raises:
-        TypeError: If ``path`` is not a path.
-        ValueError: If ``table`` holds no ``sequence_id``, or names a column
-            that it lacks.
+        TypeError: If ``table`` is not a DataFrame, ``path`` is not a path, or
+            ``columns`` is not a sequence of column names.
+        ValueError: If ``table`` holds no ``sequence_id`` or a ``sequence_id``
+            more than once, which the schema forbids, or ``columns`` names a
+            column more than once or one that the table lacks.
     """
+    if not isinstance(table, pd.DataFrame):
+        raise TypeError("table must be a pandas DataFrame")
     if not isinstance(path, str | os.PathLike):
         raise TypeError("path must be a path")
     if "sequence_id" not in table.columns:
         raise ValueError("The contigs need a sequence_id")
-    rest = (
-        [column for column in table.columns if column not in AIRR_REQUIRED_FIELDS]
-        if columns is None
-        else [column for column in columns if column not in AIRR_REQUIRED_FIELDS]
-    )
+    ids = table["sequence_id"]
+    if not ids.is_unique:
+        repeated = ids[ids.duplicated()].iloc[0]
+        raise ValueError(
+            f"sequence_id {repeated!r} repeats, but the schema requires each "
+            "contig's ID to be unique"
+        )
+    names = list(table.columns) if columns is None else list(_column_names(columns))
+    rest = [column for column in names if column not in AIRR_REQUIRED_FIELDS]
     missing = [column for column in rest if column not in table.columns]
     if missing:
         raise ValueError(f"The contigs have no column {missing}")

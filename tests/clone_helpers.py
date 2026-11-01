@@ -350,6 +350,18 @@ def write_lines(folder: Path, name: str, header: str, rows: list[str]) -> Path:
     return path
 
 
+def clonal_receptors(
+    folder: Path, rows: list[str] = CLONAL_ROWS
+) -> tuple["DataStore", "ArtifactRef"]:
+    """The store of cells cell0 to cell7 and the receptors of Cell Ranger rows."""
+    store = receptor_store(folder)
+    path = write_lines(folder, "clonal.csv", CELLRANGER_HEADER, rows)
+    receptors = store.repertoire.import_receptors(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    return store, receptors
+
+
 def tcr_file(folder: Path, rows: list[str] = TCR_ROWS, name: str = "tcr.csv") -> Path:
     """Cell Ranger's contig annotations of the T cell rows."""
     return write_lines(folder, name, CELLRANGER_HEADER, rows)

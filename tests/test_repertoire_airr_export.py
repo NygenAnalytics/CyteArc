@@ -1,6 +1,10 @@
+import asyncio
+import dataclasses
+import gc
 import gzip
 import io
 import re
+import tracemalloc
 import weakref
 import zlib
 
@@ -10,10 +14,12 @@ import pytest
 import zarr
 
 import cytearc.datastore._operations.repertoire as repertoire_operations
+import cytearc.metadata.rows as metadata_rows
 import cytearc.writers.airr as airr_writer
 from cytearc.metadata.records import EncodedText, encode_text
 from cytearc.storage.artifacts import artifact_group, inspect_artifact
 from cytearc.storage.refs import ArtifactRef
+from cytearc.utils.logging import logger
 from cytearc.writers import write_airr_rearrangements
 from cytearc.writers.airr import (
     AIRR_REQUIRED_FIELDS,
@@ -22,6 +28,7 @@ from cytearc.writers.airr import (
     suffix_repeated_ids,
 )
 from tests.clone_helpers import (
+    clonal_receptors,
     BCR_ROWS,
     CELLRANGER_HEADER,
     CLONAL_ROWS,
@@ -147,15 +154,6 @@ EXPECTED_EDGE_ALL = (
 )
 
 
-def _receptors(tmp_path, rows):
-    store = receptor_store(tmp_path)
-    path = write_lines(tmp_path, "clonal.csv", CELLRANGER_HEADER, rows)
-    receptors = store.repertoire.import_receptors(
-        path, cell_selection=store.snapshot_cell_selection()
-    )
-    return store, receptors
-
-
 def _edge_receptors(tmp_path):
     store = receptor_store(tmp_path)
     files = [
@@ -254,7 +252,7 @@ def test_the_writer_reads_logical_text_and_whole_counts(tmp_path) -> None:
 
 
 def test_export_writes_each_contig_with_its_cell_and_clonotype(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path, CLONAL_ROWS)
+    store, receptors = clonal_receptors(tmp_path, CLONAL_ROWS)
     clonotypes = store.repertoire.clonotypes(receptors)
     path = tmp_path / "export.tsv"
     assert store.repertoire.export_airr(clonotypes, path) == len(CLONAL_ROWS)
@@ -347,7 +345,7 @@ def test_export_keeps_only_chains_on_request(tmp_path) -> None:
     rows = CLONAL_ROWS + [
         "cell7,true,cell7_contig_1,true,500,TRB,TRBV9,,TRBJ9,TRBC1,true,false,CASSQ,TGTGCCAGCAGCCAG,10,1,ct9,ct9_1",
     ]
-    store, receptors = _receptors(tmp_path, rows)
+    store, receptors = clonal_receptors(tmp_path, rows)
     everything = store.repertoire.export_airr(receptors, tmp_path / "all.tsv")
     chains = store.repertoire.export_airr(
         receptors, tmp_path / "chains.tsv", chains_only=True
@@ -357,7 +355,7 @@ def test_export_keeps_only_chains_on_request(tmp_path) -> None:
 
 
 def test_export_refuses_other_sources_and_arguments(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path, CLONAL_ROWS)
+    store, receptors = clonal_receptors(tmp_path, CLONAL_ROWS)
     clonotypes = store.repertoire.clonotypes(receptors)
     expansion = store.clones.expansion(clonotypes)
     with pytest.raises(ValueError, match="immune_receptors or clonotypes artifact"):
@@ -588,7 +586,7 @@ def test_export_refuses_more_than_the_memory_budget(tmp_path, monkeypatch) -> No
 
 
 def test_export_names_missing_and_incomplete_sources(tmp_path) -> None:
-    store, receptors = _receptors(tmp_path, CLONAL_ROWS)
+    store, receptors = clonal_receptors(tmp_path, CLONAL_ROWS)
     clonotypes = store.repertoire.clonotypes(receptors)
     path = tmp_path / "refused.tsv"
     for source in (receptors, clonotypes):
@@ -655,12 +653,13 @@ def test_the_first_check_counts_one_chunk_of_the_first_text_values(tmp_path) -> 
     )
     values = group[f"contig_{first}_values"]
     # The Python objects of the arrays that the export opens, then the first
-    # text field's distinct values, read whole: one stored chunk and its
-    # compressed bytes beside the values.
+    # text field's distinct values, read whole: a stored chunk and its
+    # compressed bytes as they are decoded, and as much again for a chunk
+    # that a read before may still hold, beside the values.
     expected = (
         repertoire_operations._EXPORT_OBJECT_BYTES
         + repertoire_operations._EXPORT_OBJECT_BYTES_PER_FIELD * len(fields)
-        + repertoire_operations.array_row_selection_parts(values)[0]
+        + 2 * repertoire_operations.array_row_selection_parts(values)[0]
         + values.nbytes
     )
     refusals = budget_refusals(
@@ -765,7 +764,11 @@ def test_the_longest_value_sizes_the_blocks(tmp_path) -> None:
         contigs.hold_text()
         contigs.measure(10**9)
         planned[name] = contigs.plan_blocks(
-            n_columns=20, cell_width=5, clone_width=None, block_bytes=100_000
+            n_columns=20,
+            cell_width=5,
+            clone_width=None,
+            block_bytes=100_000,
+            compressed=False,
         )
     # One sequence of 20,000 bytes, read and rendered, leaves room for at
     # most two rows of 40,000 bytes in 100,000 bytes; short rows all fit.
@@ -804,11 +807,19 @@ def test_quoted_rows_render_in_slices_as_pandas_quotes_them(tmp_path) -> None:
         }
     ).to_csv(sep="\t", index=False, header=False, lineterminator="\n")
     assert path.read_bytes().decode("utf-8").split("\n", 1)[1] == expected
-    pieces = [bytes(piece) for piece in airr_writer._rows(columns, len(ids))]
+    quoted: list[int] = []
+    pieces = [bytes(piece) for piece in airr_writer._rows(columns, len(ids), quoted)]
     assert len(pieces) > 1 and b"".join(pieces).decode("utf-8") == expected
+    # Each ID twice, and each cell of the label q", is a quoted value.
+    special = set('\t\n\r"')
+    n_quoted = 2 * sum(bool(special & set(text)) for text in ids)
+    n_quoted += int((codes == 1).sum())
+    assert quoted == [n_quoted] and writer.n_quoted == n_quoted
     # One row whose quoted value takes more than the row's first rendering.
     one = [airr_writer._packed(np.asarray(['"' * 9], dtype=object))]
-    assert [bytes(piece) for piece in airr_writer._rows(one, 1)] == [b'"' * 20 + b"\n"]
+    assert [bytes(piece) for piece in airr_writer._rows(one, 1, [])] == [
+        b'"' * 20 + b"\n"
+    ]
 
 
 def test_rendered_rows_reach_the_file_in_bounded_writes(tmp_path, monkeypatch) -> None:
@@ -993,6 +1004,8 @@ def test_the_cells_ids_are_checked_before_each_read(tmp_path) -> None:
     store, receptors = _edge_receptors(tmp_path)
     ids = store.cells._get_array("ids")
     fixed = repertoire_operations.text_row_selection_parts(ids)[0]
+    selection = inspect_artifact(store.zw, receptors).input_ref("cell_selection")
+    mask = _chunk(artifact_group(store.zw, selection)["values"])
     refusals = []
     limit = 1
     while True:
@@ -1007,14 +1020,18 @@ def test_the_cells_ids_are_checked_before_each_read(tmp_path) -> None:
             assert found is not None and int(found.group(1)) > limit
             refusals.append(int(found.group(1)))
             limit = refusals[-1]
-    # The selection's positions, 32 bytes a cell as read and 8 as kept, and
-    # the offsets of the eight IDs; then each slice of one ID of 5 characters,
-    # stored in 20 bytes: one stored chunk, the row as text_read_bytes counts
-    # it, and its packing, three copies of the stored bytes and 24 more,
-    # beside the IDs packed before it, 5 bytes each.
+    # The selection's positions, 32 bytes a cell as read and 8 as kept, with
+    # two chunks of its mask, one read and one held from a read before; the
+    # offsets of the eight IDs; then each slice of one ID of 5 characters,
+    # stored in 20 bytes: two stored chunks, one decoded and one held from
+    # the read before, the row as text_read_bytes counts it, and its
+    # packing, three copies of the stored bytes and 24 more, beside the IDs
+    # packed before it, 5 bytes each.
     per_row = (3 * 20 + 16 * 8) + 64 + 4 * 5 + 3 * 20 + 24
     held = 8 * 8 + 8 * 9
-    assert refusals == [32 * 8] + [held + 5 * k + fixed + per_row for k in range(8)]
+    assert refusals == [32 * 8 + 2 * mask] + [
+        held + 5 * k + 2 * fixed + per_row for k in range(8)
+    ]
     assert bytes(packed.data) == b"".join(f"cell{k}".encode() for k in range(8))
     assert packed.offsets.tolist() == list(range(0, 45, 5)) and longest == 5
     # The packed IDs and their offsets stay counted; the positions do not.
@@ -1044,14 +1061,16 @@ def test_packing_text_counts_each_slice_and_their_join() -> None:
             assert found is not None and int(found.group(1)) > limit
             refusals.append(int(found.group(1)))
             limit = refusals[-1]
-    # The offsets; each slice of one row stored in 4,000 bytes, beside the
-    # slices packed before it; and the join, a second copy of every slice.
+    # The offsets; each slice of one row stored in 4,000 bytes, with two
+    # stored chunks, one decoded and one held from the read before, beside
+    # the slices packed before it; and the join, a second copy of every
+    # slice beside the chunk read last.
     per_row = (3 * 4_000 + 16 * 8) + 64 + 4 * 1_000 + 3 * 4_000 + 24
     offsets = 8 * 31
     assert refusals == [
         offsets,
-        *(offsets + 1_997 * k + fixed + per_row for k in range(30)),
-        offsets + 2 * 1_997 * 30,
+        *(offsets + 1_997 * k + 2 * fixed + per_row for k in range(30)),
+        offsets + 2 * 1_997 * 30 + fixed,
     ]
     assert bytes(packed.data).decode("utf-8") == "".join(values.tolist())
     assert longest == 1_997 and reads.held == offsets + 1_997 * 30
@@ -1094,8 +1113,8 @@ def test_measuring_is_checked_with_a_span_of_contigs(tmp_path) -> None:
     refusals = _walk(
         lambda limit: _edge_contigs(store, receptors, limit, fields).measure(10**9)
     )
-    # One stored chunk of the arrays read, and 64 bytes for each of the ten
-    # contigs of the span.
+    # Two stored chunks of the arrays read, one decoded and one held from
+    # the read before, and 64 bytes for each of the ten contigs of the span.
     reading = max(
         _chunk(group[name])
         for name in (
@@ -1105,7 +1124,7 @@ def test_measuring_is_checked_with_a_span_of_contigs(tmp_path) -> None:
             "contig_d_identity",
         )
     )
-    assert refusals == [reading + 64 * 10]
+    assert refusals == [2 * reading + 64 * 10]
 
 
 def test_hashing_the_ids_is_checked_with_the_hashes(tmp_path) -> None:
@@ -1120,12 +1139,13 @@ def test_hashing_the_ids_is_checked_with_the_hashes(tmp_path) -> None:
 
     # The hashes of the ten contigs; a block of all ten IDs, 300 bytes and 6
     # per byte of the longest, cell5_contig_1, as they are decoded and hashed;
-    # the window of the eleven offsets; and one stored chunk.
+    # the window of the eleven offsets; and two stored chunks, one decoded
+    # and one held from the read before.
     reading = max(
         _chunk(group[name])
         for name in ("contig_sequence_id_offsets", "contig_sequence_id")
     )
-    assert _walk(scan) == [8 * 10 + (300 + 6 * 14) * 10 + 11 * 8 + reading]
+    assert _walk(scan) == [8 * 10 + (300 + 6 * 14) * 10 + 11 * 8 + 2 * reading]
 
 
 def test_naming_repeated_ids_keeps_the_ids_read_before(tmp_path, monkeypatch) -> None:
@@ -1168,7 +1188,11 @@ def test_writing_a_block_counts_each_row_at_its_widest(
         contigs.hold_text()
         contigs.measure(10**9)
         return contigs.plan_blocks(
-            n_columns=16, cell_width=5, clone_width=None, block_bytes=32 * 2**20
+            n_columns=16,
+            cell_width=5,
+            clone_width=None,
+            block_bytes=32 * 2**20,
+            compressed=False,
         )
 
     refusals = _walk(plan)
@@ -1201,7 +1225,8 @@ def test_writing_a_block_counts_each_row_at_its_widest(
         # offsets and of identities span three chunks of two, and the codes
         # one chunk of four.
         rows, windows = 4, 4 * 4 + 6 * 8 + 4 * 4 + 6 * 8
-    assert refusals[-1] == held + per_row * rows + 2 * rendered + windows + reading
+    # Two stored chunks, one decoded and one held from the read before.
+    assert refusals[-1] == held + per_row * rows + 2 * rendered + windows + 2 * reading
 
 
 def test_renamed_ids_stay_held_while_the_blocks_are_written(
@@ -1302,3 +1327,277 @@ def test_clonotypes_hold_their_codes_and_labels_while_blocks_are_written(
     # with their offsets.
     packed = sum(len(str(label).encode()) for label in labels)
     assert held[1] - held[0] == 4 * 8 + 8 * (len(labels) + 1) + packed
+
+
+@pytest.mark.parametrize(
+    ("source", "suffix"),
+    [("receptors", ".tsv"), ("clonotypes", ".tsv"), ("receptors", ".tsv.gz")],
+)
+def test_each_step_counts_a_chunk_that_the_read_before_may_still_hold(
+    tmp_path, monkeypatch, source, suffix
+) -> None:
+    # Zarr's decoding thread may hold a read's decoded chunk a moment after
+    # the read returns. Each read here holds a chunk of 50 MiB, as the
+    # store's model counts it, until after the next read, so every step's
+    # traced peak must stay within the check made before it, also while a
+    # compressed file's deflate state is held. Zarr decodes inline here, so
+    # the chunks that this test holds are the only ones left behind.
+    async def inline(function, /, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", inline)
+    store, receptors = _edge_receptors(tmp_path)
+    ref = (
+        store.repertoire.clonotypes(receptors) if source == "clonotypes" else receptors
+    )
+    chunk = 50 * 2**20
+    parts = metadata_rows.array_row_selection_parts
+
+    def model(array):
+        return chunk, parts(array)[1]
+
+    monkeypatch.setattr(metadata_rows, "array_row_selection_parts", model)
+    monkeypatch.setattr(repertoire_operations, "array_row_selection_parts", model)
+    held: list[np.ndarray] = []
+    getitem = zarr.Array.__getitem__
+
+    def read(array, selection):
+        values = getitem(array, selection)
+        if np.asarray(values).size:
+            # The new chunk is held before the one before it is let go.
+            held[:] = [np.ones(chunk, dtype=np.uint8)]
+        return values
+
+    monkeypatch.setattr(zarr.Array, "__getitem__", read)
+    reserve = repertoire_operations._Reads.reserve
+    steps: list[tuple[int, int]] = []
+    estimate = 0
+
+    def recorded(reads, needed):
+        nonlocal estimate
+        reserve(reads, needed)
+        steps.append((estimate, tracemalloc.get_traced_memory()[1]))
+        tracemalloc.reset_peak()
+        # The bytes that the check counted, from its refusal of a copy of
+        # the reads with no budget.
+        with pytest.raises(MemoryError) as refused:
+            reserve(dataclasses.replace(reads, limit=-1), needed)
+        found = re.search(r"holds about (-?\d+) bytes", str(refused.value))
+        assert found is not None
+        estimate = int(found.group(1))
+
+    monkeypatch.setattr(repertoire_operations._Reads, "reserve", recorded)
+    gc.collect()
+    tracemalloc.start()
+    try:
+        store.repertoire.export_airr(ref, tmp_path / f"lingering{suffix}")
+        steps.append((estimate, tracemalloc.get_traced_memory()[1]))
+    finally:
+        tracemalloc.stop()
+        held.clear()
+    # The first record closes what ran before the first check.
+    over = [
+        (index, peak - bound)
+        for index, (bound, peak) in enumerate(steps[1:], start=1)
+        if peak > bound
+    ]
+    assert len(steps) > 10 and not over, over
+
+
+def test_the_export_warns_of_quoted_values_and_repeated_ids(tmp_path) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="WARNING"
+    )
+    try:
+        store.repertoire.export_airr(receptors, tmp_path / "all.tsv")
+    finally:
+        logger.remove(sink)
+    # The second and third X and the second Z take suffixes; a V call holds a
+    # tab, a constant gene call a newline and a clonotype ID a double quote.
+    assert (
+        "3 contig IDs repeat; their later occurrences are written with a suffix "
+        "such as _2"
+    ) in messages
+    quoting = [message for message in messages if "AIRR TSV dialect" in message]
+    assert len(quoting) == 1 and quoting[0].startswith("3 values hold a tab")
+
+
+def test_integers_of_every_length_are_written_whole(tmp_path) -> None:
+    values = [0, 9, 10, 99, 100, *(10**k for k in range(3, 19)), -10, -100]
+    values += [-(10**18), 2**63 - 1]
+    table = pd.DataFrame(
+        {
+            "sequence_id": [f"s{k}" for k in range(len(values))],
+            "np1_length": np.asarray(values, dtype=np.int64),
+        }
+    )
+    write_airr_rearrangements(table, tmp_path / "digits.tsv")
+    written = _read(tmp_path / "digits.tsv")["np1_length"].tolist()
+    assert written == [str(value) for value in values]
+
+
+def test_zero_counts_are_written_as_zero(tmp_path) -> None:
+    store = receptor_store(tmp_path)
+    header = (
+        "cell_id\tsequence_id\tlocus\tv_call\tj_call\tjunction_aa\tproductive"
+        "\tumi_count\tduplicate_count\tnp1_length"
+    )
+    rows = [
+        "cell0\tc0\tIGH\tIGHV1\tIGHJ1\tCARW\tT\t0\t0\t0",
+        "cell1\tc1\tIGH\tIGHV1\tIGHJ1\tCARW\tF\t5\t\t2",
+    ]
+    receptors = store.repertoire.import_receptors(
+        write_lines(tmp_path, "zeros.tsv", header, rows),
+        cell_selection=store.snapshot_cell_selection(),
+    )
+    store.repertoire.export_airr(receptors, tmp_path / "zeros_export.tsv")
+    written = _read(tmp_path / "zeros_export.tsv")
+    assert written["umi_count"].tolist() == ["0", "5"]
+    assert written["duplicate_count"].tolist() == ["0", ""]
+    assert written["np1_length"].tolist() == ["0", "2"]
+    assert written["productive"].tolist() == ["T", "F"]
+
+
+def test_clonotypes_replace_an_imported_clone_id(tmp_path) -> None:
+    store = receptor_store(tmp_path)
+    header = (
+        "cell_id\tsequence_id\tlocus\tv_call\tj_call\tjunction\tjunction_aa"
+        "\tproductive\tclone_id"
+    )
+    rows = [
+        "cell0\tc0\tTRB\tTRBV1\tTRBJ1\tTGTGCCAGC\tCAS\tT\timported_a",
+        "cell1\tc1\tTRB\tTRBV1\tTRBJ1\tTGTGCCAGC\tCAS\tT\timported_b",
+        "cell2\tc2\tTRB\tTRBV2\tTRBJ1\tTGTGCCTTT\tCAF\tT\timported_c",
+    ]
+    receptors = store.repertoire.import_receptors(
+        write_lines(tmp_path, "cloned.tsv", header, rows),
+        cell_selection=store.snapshot_cell_selection(),
+    )
+    clonotypes = store.repertoire.clonotypes(receptors)
+    store.repertoire.export_airr(receptors, tmp_path / "imported.tsv")
+    store.repertoire.export_airr(clonotypes, tmp_path / "defined.tsv")
+    imported = _read(tmp_path / "imported.tsv")
+    assert imported["clone_id"].tolist() == ["imported_a", "imported_b", "imported_c"]
+    defined = _read(tmp_path / "defined.tsv")
+    labels = store.repertoire.load_clonotypes(clonotypes).cells["clonotype"]
+    assert defined.columns.tolist().count("clone_id") == 1
+    assert defined["clone_id"].tolist() == [labels[f"cell{k}"] for k in range(3)]
+    # cell0 and cell1 share their junction, so their clonotype.
+    clones = defined["clone_id"].tolist()
+    assert clones[0] == clones[1] != clones[2]
+
+
+def test_a_selection_of_some_cells_exports_their_ids(tmp_path) -> None:
+    store = receptor_store(tmp_path)
+    store.cells.insert(
+        "chosen", np.asarray([False, False, True, False, True, True, False, True])
+    )
+    rows = [
+        f"cell{k},true,cell{k}_contig_1,true,500,TRB,TRBV{k},,TRBJ1,TRBC1,true,true,"
+        f"CASS{k},TGTGCCAGCAGC,100,5,ct{k},ct{k}_1"
+        for k in (0, 2, 4, 5, 7)
+    ]
+    with pytest.warns(UserWarning, match="match no selected cell"):
+        receptors = store.repertoire.import_receptors(
+            write_lines(tmp_path, "some.csv", CELLRANGER_HEADER, rows),
+            cell_selection=store.snapshot_cell_selection("chosen"),
+        )
+    assert store.repertoire.export_airr(receptors, tmp_path / "some.tsv") == 4
+    written = _read(tmp_path / "some.tsv")
+    assert written["cell_id"].tolist() == ["cell2", "cell4", "cell5", "cell7"]
+    assert written["sequence_id"].tolist() == [
+        f"cell{k}_contig_1" for k in (2, 4, 5, 7)
+    ]
+
+
+def test_blocks_hold_a_sixteenth_of_the_budget(tmp_path, monkeypatch) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+    plan = repertoire_operations._ExportContigs.plan_blocks
+    sizes = []
+
+    def recorded(contigs, **options):
+        sizes.append(options["block_bytes"])
+        return plan(contigs, **options)
+
+    monkeypatch.setattr(repertoire_operations._ExportContigs, "plan_blocks", recorded)
+    for budget in (160 * 2**20, 2**30):
+        monkeypatch.setattr(store, "memoryBytes", budget)
+        store.repertoire.export_airr(receptors, tmp_path / "sized.tsv")
+    # A sixteenth of 160 MiB, and at most 32 MiB.
+    assert sizes == [10 * 2**20, 32 * 2**20]
+
+
+def test_compressed_exports_are_reproducible(tmp_path) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+    first, second = tmp_path / "first.tsv.gz", tmp_path / "second.tsv.gz"
+    store.repertoire.export_airr(receptors, first)
+    store.repertoire.export_airr(receptors, second)
+    data = first.read_bytes()
+    assert data == second.read_bytes()
+    # The header names no file and no time, and its extra flags, 0, mark a
+    # level neither the fastest nor the best.
+    assert data[:10] == b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"
+    assert gzip.decompress(data) == _text(first).encode("utf-8")
+
+
+def test_tables_and_columns_are_checked_before_writing(tmp_path) -> None:
+    path = tmp_path / "checked.tsv"
+    table = pd.DataFrame({"sequence_id": ["a", "b"], "umi_count": [1, 2]})
+    with pytest.raises(TypeError, match="table must be a pandas DataFrame"):
+        write_airr_rearrangements({"sequence_id": ["a"]}, path)
+    with pytest.raises(TypeError, match="columns must be a sequence"):
+        write_airr_rearrangements(table, path, columns="umi_count")
+    with pytest.raises(ValueError, match=r"name \['umi_count'\] more than once"):
+        write_airr_rearrangements(table, path, columns=["umi_count", "umi_count"])
+    with pytest.raises(ValueError, match="sequence_id 'a' repeats"):
+        write_airr_rearrangements(pd.DataFrame({"sequence_id": ["a", "b", "a"]}), path)
+    with pytest.raises(TypeError, match="columns must be a sequence"):
+        AirrRearrangementWriter(path, "cell_id")
+    with pytest.raises(ValueError, match=r"name \['cell_id'\] more than once"):
+        AirrRearrangementWriter(path, ["cell_id", "cell_id"])
+    assert not path.exists()
+
+
+def test_fields_may_name_the_columns_that_are_always_written(tmp_path) -> None:
+    store, receptors = clonal_receptors(tmp_path)
+    clonotypes = store.repertoire.clonotypes(receptors)
+    plain = store.repertoire.export_airr(
+        receptors, tmp_path / "cells.tsv", fields=["cell_id", "v_call"]
+    )
+    labelled = store.repertoire.export_airr(
+        clonotypes, tmp_path / "clones.tsv", fields=["clone_id", "cell_id"]
+    )
+    assert plain == labelled == len(CLONAL_ROWS)
+    columns = _read(tmp_path / "cells.tsv").columns.tolist()
+    assert columns.count("cell_id") == 1 and "clone_id" not in columns
+    columns = _read(tmp_path / "clones.tsv").columns.tolist()
+    assert columns[len(AIRR_REQUIRED_FIELDS) :] == ["cell_id", "clone_id"]
+    # Receptors from Cell Ranger CSVs store no clone_id.
+    with pytest.raises(ValueError, match="store no field 'clone_id'"):
+        store.repertoire.export_airr(receptors, tmp_path / "x.tsv", fields=["clone_id"])
+
+
+def test_a_quoted_slice_is_let_go_before_the_next_is_rendered(
+    tmp_path, monkeypatch
+) -> None:
+    rows = airr_writer._rows
+    alive: list[bool] = []
+
+    def watched(columns, n_rows, quoted):
+        previous = None
+        for piece in rows(columns, n_rows, quoted):
+            if previous is not None:
+                alive.append(previous() is not None)
+            previous = weakref.ref(piece)
+            yield piece
+            del piece
+
+    monkeypatch.setattr(airr_writer, "_rows", watched)
+    ids = np.asarray(['"' * 20] * 200, dtype=object)
+    with AirrRearrangementWriter(tmp_path / "quoted.tsv") as writer:
+        writer.write({"sequence_id": ids})
+    # Quoted values double, so the rows take two slices, and the first is
+    # gone before the second is rendered.
+    assert alive == [False]

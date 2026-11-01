@@ -369,6 +369,29 @@ writing it, remove it with `discard_interrupted_assay` on a `DataStore` of its w
 .. autofunction:: cytearc.writers.write_airr_rearrangements
 ```
 
+`cytearc.writers.airr` writes AIRR Rearrangement files one block of contigs at a time, for contigs that do not fit in one table, and names repeated contig IDs from their hashes.
+
+```{eval-rst}
+.. autoclass:: cytearc.writers.airr.AirrRearrangementWriter
+    :members:
+```
+
+```{eval-rst}
+.. autofunction:: cytearc.writers.airr.suffix_repeated_ids
+```
+
+```{eval-rst}
+.. autofunction:: cytearc.writers.airr.sequence_id_hashes
+```
+
+```{eval-rst}
+.. autodata:: cytearc.writers.airr.AIRR_REQUIRED_FIELDS
+```
+
+```{eval-rst}
+.. autodata:: cytearc.writers.airr.AIRR_LOGICAL_FIELDS
+```
+
 ```{eval-rst}
 .. autofunction:: cytearc.writers.chunked_to_zarr
 ```

@@ -479,20 +479,35 @@ class _Reads:
         held: The bytes held so far, by the caller and by earlier reads.
         what: What the reads are for, named in errors.
         remedy: What to do when a read does not fit, named in errors.
+        lingering: What reading the stored chunk read last held, which Zarr's
+            decoding thread may still hold a moment after the read returns,
+            and every check counts. Reads that set it count two chunks.
     """
 
     limit: int
     held: int
     what: str
     remedy: str
+    lingering: int = 0
 
     def reserve(self, needed: int) -> None:
         """Raise MemoryError if ``needed`` more bytes would exceed the budget."""
-        if self.held + needed > self.limit:
+        total = self.held + self.lingering + needed
+        if total > self.limit:
             raise MemoryError(
-                f"{self.what} holds about {self.held + needed} bytes, more than the "
-                f"memory budget of {self.limit} bytes. {self.remedy}"
+                f"{self.what} holds about {total} bytes, more than the memory "
+                f"budget of {self.limit} bytes. {self.remedy}"
             )
+
+    def read_bytes(self, chunk: int) -> int:
+        """What reads of stored chunks of ``chunk`` bytes hold beside ``lingering``.
+
+        A read holds the chunk that it decodes while the chunk read before it
+        may still be held, so reads hold two chunks at once: the one that
+        ``lingering`` counts, or one of their own where that is larger, and
+        the one that they decode.
+        """
+        return chunk + max(0, chunk - self.lingering)
 
     def rows(self, source: zarr.Group, name: str, wanted: np.ndarray) -> np.ndarray:
         """Read distinct rows of an array a chunk at a time, keeping them held."""
@@ -507,12 +522,15 @@ class _Reads:
         """Read an array whole, keeping it held.
 
         Read under a Zarr concurrency of one, the read holds one decoded chunk
-        and its compressed bytes beside the array.
+        and its compressed bytes at a time beside the array, and the chunk read
+        before it may still be held.
         """
         array = as_zarr_array(source[name], name=name)
-        self.reserve(array_row_selection_parts(array)[0] + int(array.nbytes))
+        chunk = array_row_selection_parts(array)[0]
+        self.reserve(self.read_bytes(chunk) + int(array.nbytes))
         values = np.asarray(array[:])
         self.held += int(values.nbytes)
+        self.lingering = chunk
         return values
 
 
@@ -2117,27 +2135,32 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         ``clone_id``, the cell's clonotype label, empty for a cell without
         one, replacing any imported ``clone_id``. The schema's required
         fields come first, empty when the receptors do not store them;
-        logical fields are written ``T`` and ``F``. A ``sequence_id`` that
-        repeats, such as ``<barcode>_contig_1`` of the TCR and the BCR files
-        of one cell, gets ``_2``, ``_3`` and so on from its second
-        occurrence, in the order of the contigs, since the schema requires
-        unique identifiers. A path ending in ``.gz`` is gzip-compressed at
-        level 6.
+        logical fields are written ``T`` and ``F``. A value that holds a tab,
+        a newline, a carriage return or a double quote is quoted as pandas'
+        ``to_csv`` quotes it; the AIRR TSV dialect leaves such values out, so
+        the export warns with their number. A ``sequence_id`` that repeats,
+        such as ``<barcode>_contig_1`` of the TCR and the BCR files of one
+        cell, gets ``_2``, ``_3`` and so on from its second occurrence, in
+        the order of the contigs, since the schema requires unique
+        identifiers. A path ending in ``.gz`` is gzip-compressed at level 6.
 
         The contigs are read and written in blocks of about 32 MiB, at most a
         sixteenth of the memory budget, as many contigs as fit when each
         field holds its longest value. Beside one block, the export holds the
-        cells' IDs and clonotypes and the distinct values of the text fields,
-        and until it has named the repeated IDs, a hash of each contig's ID.
-        Every stored array is read a chunk at a time, and what each step
-        reads and holds is checked against the memory budget before the step
-        runs, all before the file is written.
+        cells' IDs and clonotypes, the distinct values of the text fields and
+        the repeated IDs' new names, and until it has named the repeated IDs,
+        a hash of each contig's ID. Every stored array is read a chunk at a
+        time, and what each step reads and holds is checked against the
+        memory budget before the step runs, all before the file is written;
+        each check counts the stored chunk read last, which Zarr may still
+        hold a moment after its read returns.
 
         Args:
             source: An ``immune_receptors`` or ``clonotypes`` artifact.
             path: The file to write.
             fields: The stored fields to write, or None for every stored
-                field; ``sequence_id`` is always written.
+                field; ``sequence_id`` and ``cell_id``, and with clonotypes
+                ``clone_id``, are always written.
             chains_only: Write only the contigs that count as chains.
 
         Returns:
@@ -2181,10 +2204,16 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         if fields is not None:
             if isinstance(fields, str) or not isinstance(fields, Sequence):
                 raise TypeError("fields must be a sequence of field names or None")
-            # Every row needs its contig ID.
+            # Every row needs its contig ID, and every file its cells' IDs and,
+            # with clonotypes, their labels, which no stored field holds.
+            written = {"cell_id", "clone_id"} if clonotypes else {"cell_id"}
             fields = [
                 "sequence_id",
-                *[name for name in fields if name != "sequence_id"],
+                *[
+                    name
+                    for name in fields
+                    if name != "sequence_id" and name not in written
+                ],
             ]
         group, stored = self._receptor_group(receptors)
         if fields is None:
@@ -2269,6 +2298,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                     held=naming + passing,
                     what=f"Naming {asked} repeated contig IDs",
                     remedy="Raise mem_budget.",
+                    lingering=reads.lingering,
                 ).reserve(per_id * asked)
                 return contigs.ids_at(rows, id_rows)
 
@@ -2281,6 +2311,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
                 cell_width=cell_width,
                 clone_width=clone_width if clones is not None else None,
                 block_bytes=block_bytes,
+                compressed=os.fspath(path).endswith(".gz"),
             )
             if len(renamed[0]):
                 logger.warning(
@@ -2309,9 +2340,15 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             The IDs, whose codes are unused, and the bytes of the longest.
         """
         selection = inspect_artifact(self.zw, receptors).input_ref("cell_selection")
-        reads.reserve(_SELECTION_BYTES_PER_CELL * n_cells)
+        # The selection's mask of the cell table is read a chunk at a time.
+        mask = as_zarr_array(
+            artifact_group(self.zw, selection)["values"], name="values"
+        )
+        chunk = array_row_selection_parts(mask)[0]
+        reads.reserve(reads.read_bytes(chunk) + _SELECTION_BYTES_PER_CELL * n_cells)
         cell_index = cell_selection_indices(self.zw, selection)
         reads.held += int(cell_index.nbytes)
+        reads.lingering = chunk
         packed = _packed_text(
             reads, self.cells._get_array("ids"), cell_index, slice_bytes
         )
@@ -2344,10 +2381,13 @@ _EXPORT_RENDER_BYTES = {TEXT: 0, RAGGED: 0, INTEGER: 9, FLAG: 10, NUMBER: 136}
 _EXPORT_ROW_BYTES = 96
 _EXPORT_CLONE_BYTES = 12
 # The Python objects of the stored arrays that an export opens, their
-# metadata, codecs and reads, held 50 KiB, and 106 KiB with the 16 fields of
-# a Cell Ranger file, as traced.
-_EXPORT_OBJECT_BYTES = 64 * 2**10
+# metadata, codecs and reads, and of the file and a block's columns while it
+# is written: 106 KB with two fields and 247 KB with 22, as traced.
+_EXPORT_OBJECT_BYTES = 128 * 2**10
 _EXPORT_OBJECT_BYTES_PER_FIELD = 8 * 2**10
+# Writing a compressed file holds zlib's deflate state at level 6 and the
+# file's buffer, about 300 KB as traced.
+_GZIP_BYTES = 384 * 2**10
 # Reading a cell selection's positions holds 25 bytes per cell at its peak,
 # as traced on 200,000 cells, and keeps 8.
 _SELECTION_BYTES_PER_CELL = 32
@@ -2410,12 +2450,13 @@ def _packed_text(
     longest = 0
     for start in range(0, n_rows, step):
         stop = min(start + step, n_rows)
-        reads.reserve(fixed + (stop - start) * per_row)
+        reads.reserve(reads.read_bytes(fixed) + (stop - start) * per_row)
         values = np.asarray(
             array[start:stop]
             if rows is None
             else read_array_rows_chunkwise(array, rows[start:stop])
         )
+        reads.lingering = fixed
         data, bounds = pack_text(values)
         del values
         offsets[start + 1 : stop + 1] = bounds[1:] + offsets[start]
@@ -2565,11 +2606,9 @@ class _ExportContigs:
             *(["contig_chain"] if self._chains_only else []),
         ]
         span = max(1, min(self._chunk, span_bytes // _MEASURE_BYTES_PER_ROW))
+        chunk = self._read_bytes(read)
         self.reads.reserve(
-            max(
-                (array_row_selection_parts(self._array(name))[0] for name in read),
-                default=0,
-            )
+            self.reads.read_bytes(chunk)
             + _MEASURE_BYTES_PER_ROW * min(span, self.n_contigs)
         )
         ends = dict.fromkeys(ragged, 0)
@@ -2607,6 +2646,8 @@ class _ExportContigs:
                 )
                 if whole[name] and len(present):
                     largest[name] = max(largest[name], float(np.abs(present).max()))
+        if self.n_contigs:
+            self.reads.lingering = chunk
         self._widths.update(longest)
         for name in numbers:
             # A whole number is written as an integer, with its sign.
@@ -2643,13 +2684,17 @@ class _ExportContigs:
             default=0,
         )
 
-    def id_pass_bytes(self, block_rows: int) -> int:
-        """What a pass over the contigs' IDs holds beside their own blocks."""
+    def _id_arrays(self) -> list[tuple[str, int]]:
         windows = [("contig_sequence_id_offsets", 1)]
         if self._chains_only:
             windows.append(("contig_chain", 0))
-        return self._window_bytes(windows, block_rows) + self._read_bytes(
-            [name for name, _ in windows] + ["contig_sequence_id"]
+        return windows
+
+    def id_pass_bytes(self, block_rows: int) -> int:
+        """What a pass over the contigs' IDs holds beside their own blocks."""
+        windows = self._id_arrays()
+        return self._window_bytes(windows, block_rows) + self.reads.read_bytes(
+            self._read_bytes([name for name, _ in windows] + ["contig_sequence_id"])
         )
 
     def scan(self, block_bytes: int) -> tuple[np.ndarray, int]:
@@ -2680,6 +2725,10 @@ class _ExportContigs:
             )
             hashes[n_rows : n_rows + len(block)] = block
             n_rows += len(block)
+        if self.n_contigs:
+            self.reads.lingering = self._read_bytes(
+                [name for name, _ in self._id_arrays()] + ["contig_sequence_id"]
+            )
         return hashes[:n_rows], block_rows
 
     def plan_blocks(
@@ -2689,6 +2738,7 @@ class _ExportContigs:
         cell_width: int,
         clone_width: int | None,
         block_bytes: int,
+        compressed: bool,
     ) -> int:
         """Choose the contigs of a block, and check what writing one holds.
 
@@ -2696,7 +2746,8 @@ class _ExportContigs:
         field holds its widest value: each row as rendered, the text that it
         reads and renders beside its row, the bytes of each field and of the
         rendering of one field, and one row quoted again. The windows of
-        stored chunks and one chunk's read come beside it.
+        stored chunks, two chunks' reads and, for a compressed file, its
+        compressor come beside it.
 
         Args:
             n_columns: The columns of the file.
@@ -2704,6 +2755,7 @@ class _ExportContigs:
             clone_width: The bytes of the longest clonotype label, or None
                 when no clonotype is written.
             block_bytes: The most bytes that a block's contigs should hold.
+            compressed: Whether the file is gzip-compressed.
 
         Returns:
             The contigs of a block.
@@ -2747,14 +2799,17 @@ class _ExportContigs:
         self.reads.reserve(
             per_row * min(block_rows, self.n_contigs)
             + 2 * rendered
+            + (_GZIP_BYTES if compressed else 0)
             + self._window_bytes(windows, block_rows)
-            + self._read_bytes(
-                [name for name, _ in windows]
-                + [
-                    f"contig_{name}"
-                    for name, kind in zip(self._fields, kinds)
-                    if kind == RAGGED
-                ]
+            + self.reads.read_bytes(
+                self._read_bytes(
+                    [name for name, _ in windows]
+                    + [
+                        f"contig_{name}"
+                        for name, kind in zip(self._fields, kinds)
+                        if kind == RAGGED
+                    ]
+                )
             )
         )
         return block_rows
