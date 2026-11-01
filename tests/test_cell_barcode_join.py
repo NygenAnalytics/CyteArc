@@ -6,12 +6,10 @@ warning repeated on reuse, the order of files and files listed twice. Each
 importer is a row of ``IMPORTERS``; a later importer adds a row.
 """
 
-import gc
 import hashlib
 import json
 import os
 import re
-import tracemalloc
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +37,7 @@ from tests.barcode_join_helpers import (
     write_clone_file,
     write_guide_call_file,
 )
+from tests.perturbation_helpers import traced_peak
 
 _REFERENCE = Path(__file__).parent / "guide_calls_import_reference.json"
 # Attributes that differ between two writes of one artifact.
@@ -770,19 +769,6 @@ _JOIN_OPTIONS = {
 }
 
 
-def _traced(call: Callable[[], Any]) -> int:
-    """Return the most bytes that ``call`` held beside what was held before it."""
-    gc.collect()
-    tracemalloc.start()
-    try:
-        start = tracemalloc.get_traced_memory()[0]
-        tracemalloc.reset_peak()
-        call()
-        return tracemalloc.get_traced_memory()[1] - start
-    finally:
-        tracemalloc.stop()
-
-
 @pytest.mark.parametrize("matched", [False, True])
 @pytest.mark.parametrize("name", sorted(_JOIN_OPTIONS))
 def test_the_join_holds_no_more_than_its_estimate(name, matched) -> None:
@@ -804,13 +790,15 @@ def test_the_join_holds_no_more_than_its_estimate(name, matched) -> None:
     # The lookup's table, which held_bytes counts, is built on the first use.
     join.cells(file, barcodes[:1])
     n_chars = sum(map(len, barcodes))
+    joining = join_bytes(file, len(barcodes), n_chars)
+    deriving = derived_id_bytes(file, len(barcodes), n_chars)
 
-    peak = _traced(lambda: join.cells(file, barcodes))
-    derived = _traced(lambda: file.cell_ids(barcodes))
+    _, peak = traced_peak(lambda: join.cells(file, barcodes), joining)
+    _, derived = traced_peak(lambda: file.cell_ids(barcodes), deriving)
 
     assert (join.n_unmatched_rows == 0) == matched
-    assert peak <= join_bytes(file, len(barcodes), n_chars)
-    assert derived <= derived_id_bytes(file, len(barcodes), n_chars)
+    assert peak <= joining
+    assert derived <= deriving
 
 
 def test_the_join_counts_distinct_barcodes_and_rows() -> None:
