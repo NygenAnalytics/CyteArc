@@ -20,6 +20,7 @@ from ...clones.groups import group_names
 from ...metadata.rows import (
     array_row_selection_parts,
     metadata_missing_mask,
+    previous_read_bytes,
     read_metadata_missing_rows,
     read_metadata_rows,
 )
@@ -29,7 +30,12 @@ from ...metadata.selection import (
     resolve_grouping,
 )
 from ...metadata.table import MetaData
-from ...storage.artifacts import ValueFingerprintBuilder, canonical_bytes, open_artifact
+from ...storage.artifacts import (
+    ValueFingerprintBuilder,
+    artifact_group,
+    canonical_bytes,
+    open_artifact,
+)
 from ...storage.refs import ArtifactRef
 from ...storage.selections import read_stored_selection_indices, validate_cell_selection
 from ...storage.types import as_zarr_array
@@ -150,6 +156,16 @@ def _selection_indices(zw: zarr.Group, selection: ArtifactRef) -> np.ndarray:
     ).astype(np.int64, copy=False)
 
 
+def selection_chunk_bytes(zw: zarr.Group, selection: ArtifactRef) -> int:
+    """The bytes of one stored chunk of a cell selection, which reading it holds.
+
+    A selection stores a flag for each cell of the store, so the chunk can
+    outweigh the cells it selects.
+    """
+    values = as_zarr_array(artifact_group(zw, selection)["values"], name="values")
+    return array_row_selection_parts(values)[0]
+
+
 def _column_chunk_bytes(cells: MetaData, column: str) -> int:
     """The bytes of one chunk of a column and its missing mask, which a read holds."""
     chunk, _per_row = array_row_selection_parts(cells._get_array(column))
@@ -265,6 +281,12 @@ def cell_groups(
     if cell_selection is not None:
         n_selected = validate_cell_selection(zw, cell_selection).selected_count
         resident += GROUPING_BYTES_PER_SELECTED_CELL * int(n_selected)
+        # The selection is read right after the artifact's cells, whose read
+        # can still hold its stored chunk, a flag for each cell of the store.
+        resident += previous_read_bytes(
+            selection_chunk_bytes(zw, artifact_cells),
+            selection_chunk_bytes(zw, cell_selection),
+        )
     if groups is not None:
         n_labelled, width, label_chunk = _label_extent(zw, groups)
         resident += n_labelled * (

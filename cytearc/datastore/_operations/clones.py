@@ -47,7 +47,9 @@ from ...metadata.arguments import (
 )
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from ...metadata.rows import (
+    array_row_selection_parts,
     metadata_column_fingerprint,
+    previous_read_bytes,
     read_metadata_missing_rows_chunkwise,
     read_metadata_rows_chunkwise,
     text_read_bytes,
@@ -75,7 +77,7 @@ from .cell_barcodes import (
     file_sha256,
     warn_unmatched_barcodes,
 )
-from .cell_groups import cell_groups, group_columns
+from .cell_groups import cell_groups, group_columns, selection_chunk_bytes
 
 if TYPE_CHECKING:
     from ...readers.clone_tables import CloneLayout
@@ -960,6 +962,31 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             kept_apart=(),
         )
 
+    def _matching_bytes(
+        self,
+        clones: ArtifactRef,
+        held: ArtifactRef,
+        measured: ArtifactRef,
+        n_measured: int,
+        n_labels: int,
+    ) -> int:
+        """The bytes that matching a clone artifact's cells to other measured cells holds.
+
+        Beside what :func:`_matched_bytes` counts for the cells, the two
+        selections, ``held`` of the clones' cells and ``measured``, are read
+        one after the other, and the read of each can still hold the stored
+        chunk of the read before, of the other selection or of the clones'
+        codes.
+        """
+        codes = as_zarr_array(artifact_group(self.zw, clones)["codes"], name="codes")
+        return _matched_bytes(
+            int(codes.shape[0]), n_measured, n_labels
+        ) + previous_read_bytes(
+            selection_chunk_bytes(self.zw, measured),
+            selection_chunk_bytes(self.zw, held),
+            array_row_selection_parts(codes)[0],
+        )
+
     def _measured_clone_cells(
         self, source: _CloneInput, cell_selection: ArtifactRef | None
     ) -> tuple[ArtifactRef, np.ndarray, tuple[tuple[str, np.ndarray], ...]]:
@@ -989,7 +1016,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         n_measured = int(
             validate_cell_selection(self.zw, cell_selection).selected_count
         )
-        resident = _matched_bytes(len(source.codes), n_measured, len(source.kept_apart))
+        resident = self._matching_bytes(
+            source.ref,
+            source.cell_selection,
+            cell_selection,
+            n_measured,
+            len(source.kept_apart),
+        )
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Matching the clones of {len(source.codes)} cells to "
@@ -1365,11 +1398,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         held = _SUMMARY_BYTES_PER_GROUP * int(n_groups)
         held += text_read_bytes(self.cells._get_array("ids"), int(n_cells))
         held += self._clone_input_bytes(clones, with_ids=True)
-        if measured != inspect_artifact(self.zw, clones).input_ref("cell_selection"):
-            clone_codes = as_zarr_array(
-                artifact_group(self.zw, clones)["codes"], name="codes"
-            )
-            held += _matched_bytes(int(clone_codes.shape[0]), n_cells, 0)
+        clone_cells = inspect_artifact(self.zw, clones).input_ref("cell_selection")
+        if measured != clone_cells:
+            held += self._matching_bytes(clones, clone_cells, measured, n_cells, 0)
         self._check_clone_table_budget(
             n_cells, _EXPANSION_TABLE_BYTES_PER_CELL, "clonal expansion", held=held
         )

@@ -16,7 +16,7 @@ from cytearc.datastore._operations.cell_groups import (
 )
 from cytearc.datastore.datastore import DataStore
 from cytearc.metadata.artifacts import plan_cell_data_artifact
-from cytearc.metadata.rows import array_row_selection_parts
+from cytearc.metadata.rows import READ_OBJECT_BYTES, array_row_selection_parts
 from cytearc.storage.arrays import MISSING_MASK_PREFIX
 from cytearc.storage.artifact_writer import artifact_transaction
 from cytearc.storage.artifacts import artifact_group
@@ -196,6 +196,13 @@ def _chunk(array) -> int:
     return array_row_selection_parts(array)[0]
 
 
+def _selection_chunk(store, name: str) -> int:
+    """The bytes of one chunk of a cell selection's flags, one per cell of the store."""
+    return _chunk(
+        artifact_group(store.zw, store.snapshot_cell_selection(name))["values"]
+    )
+
+
 def _assert_needs(store, needed: int, **options) -> None:
     """Grouping runs within ``needed`` bytes and refuses one byte fewer."""
     assert _group(store, memory_bytes=needed, **options).codes.shape == (N_CELLS,)
@@ -225,10 +232,16 @@ def test_a_selection_and_a_label_artifact_count_all_their_cells(store) -> None:
         + GROUPING_BYTES_PER_LABEL_BYTE * 4
     )
     selected = 4 * GROUPING_BYTES_PER_SELECTED_CELL
+    # The selection is read right after the artifact's cells, whose stored
+    # chunk the read before can still hold, with Zarr's objects.
+    before = (
+        max(_selection_chunk(store, "every_cell"), _selection_chunk(store, "odd"))
+        + READ_OBJECT_BYTES
+    )
     named = 2 * GROUPING_BYTES_PER_DISTINCT_LABEL + 2 * GROUPING_BYTES_PER_GROUP
     _assert_needs(
         store,
-        N_CELLS * per_cell + batch + selected + named,
+        N_CELLS * per_cell + batch + selected + before + named,
         group_by="batch",
         cell_selection=store.snapshot_cell_selection("odd"),
     )

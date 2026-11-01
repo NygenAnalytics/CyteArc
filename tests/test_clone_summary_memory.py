@@ -172,3 +172,79 @@ def test_the_traced_peak_fits_the_smallest_budget_accepted(data, case) -> None:
     finally:
         store.memoryBytes = full
     assert peak <= budget, (case, peak, budget)
+
+
+# The two summaries are run, each at the smallest budget it accepts, in a fresh
+# process whose Zarr reads no earlier test left running. Each finished task of
+# Zarr's pool is held until the next finishes, as the thread that ran it holds
+# its chunk, as stored and decoded, on a busy machine until after the next
+# read has begun.
+_HELD_READ_SCRIPT = """
+import json, re, sys, threading, tracemalloc
+from concurrent.futures import thread
+from cytearc.datastore.datastore import DataStore
+
+store = DataStore(sys.argv[1], default_assay="RNA", min_features_per_cell=0, nthreads=1)
+every = store.snapshot_cell_selection("every_cell")
+first = store.snapshot_cell_selection("first")
+long = store.clones.from_column("long_clone", cell_selection=every)
+few = store.clones.from_column("clone", cell_selection=first)
+cases = {
+    "expansion of a few of the clones' cells": lambda: store.clones.expansion(
+        long, cell_selection=first, invalidate_cache=True
+    ),
+    "diversity of a few cells within a selection of every cell": lambda: (
+        store.clones.diversity(few, cell_selection=every)
+    ),
+}
+lock, held, run = threading.Lock(), [None], thread._WorkItem.run
+
+def run_and_hold(item, *args):
+    run(item, *args)
+    with lock:
+        held[0] = item
+
+results = {}
+for name, call in cases.items():
+    call()
+    budget = 1
+    while True:
+        store.memoryBytes = budget
+        try:
+            call()
+            break
+        except MemoryError as error:
+            budget = int(re.search(r"about (\\d+) bytes", str(error)).group(1))
+    thread._WorkItem.run = run_and_hold
+    tracemalloc.start()
+    call()
+    results[name] = [tracemalloc.get_traced_memory()[1], budget]
+    tracemalloc.stop()
+    thread._WorkItem.run = run
+print(json.dumps(results))
+"""
+
+
+def test_the_budgets_count_the_read_that_zarr_still_holds(data) -> None:
+    import json
+    import subprocess
+    import sys
+
+    # Matching the clones to a few measured cells, and grouping a few cells
+    # within a selection of every cell, read cell selections whose stored
+    # chunk outweighs the cells they select; the read before can still hold
+    # such a chunk beside them.
+    traced = subprocess.run(
+        [sys.executable, "-c", _HELD_READ_SCRIPT, str(data.store.zarr_loc)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    results = json.loads(traced.stdout.strip().splitlines()[-1])
+
+    assert set(results) == {
+        "expansion of a few of the clones' cells",
+        "diversity of a few cells within a selection of every cell",
+    }
+    for case, (peak, budget) in results.items():
+        assert peak <= budget, (case, peak, budget)

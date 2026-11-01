@@ -14,6 +14,7 @@ import pytest
 
 from cytearc.clones import ClonalExpansion
 from cytearc.clones.expansion import DEFAULT_RANK_SPLITS
+from cytearc.metadata.rows import READ_OBJECT_BYTES, array_row_selection_parts
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
@@ -541,8 +542,18 @@ def test_expansion_of_some_cells_counts_every_clone_cell_it_reads(
     d2 = store.snapshot_cell_selection("is_d2")
     saved = store.clones.expansion(clones, cell_selection=d2)
     # Matching the clones' 48 cells to the cells of d2 takes 56 bytes for each
-    # clone cell and 32 for each measured cell.
-    matched = N_CELLS * 56 + n_d2 * 32
+    # clone cell and 32 for each measured cell, and the largest stored chunk of
+    # the reads before, of the two selections and the clones' codes, with
+    # Zarr's objects.
+    before = max(
+        array_row_selection_parts(artifact_group(store.zw, ref)[name])[0]
+        for ref, name in (
+            (d2, "values"),
+            (store.artifacts.inspect(clones).input_ref("cell_selection"), "values"),
+            (clones, "codes"),
+        )
+    )
+    matched = N_CELLS * 56 + n_d2 * 32 + before + READ_OBJECT_BYTES
     monkeypatch.setattr(store, "memoryBytes", matched - 1)
     with pytest.raises(
         MemoryError, match=f"48 cells to {n_d2} measured cells holds about {matched}"
