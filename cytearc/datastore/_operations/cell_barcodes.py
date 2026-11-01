@@ -362,7 +362,9 @@ class CellBarcodeJoin:
                 f"{self._memory_bytes} bytes. Raise mem_budget, or pass a smaller "
                 "cell_selection."
             )
-        self._lookup = pd.Index(ids)
+        # An object index keeps the IDs as the Python strings counted above;
+        # with pyarrow installed, pandas would otherwise copy them to Arrow.
+        self._lookup = pd.Index(ids, dtype=object)
         if not self._lookup.is_unique:
             raise ValueError(
                 "The selected cells' IDs repeat, so barcodes cannot name them"
@@ -410,7 +412,8 @@ class CellBarcodeJoin:
         texts = np.asarray(barcodes, dtype=object)
         identifiers_array, named = file.cell_ids(texts)
         positions = np.asarray(
-            self._lookup.get_indexer(identifiers_array), dtype=np.int64
+            self._lookup.get_indexer(pd.Index(identifiers_array, dtype=object)),
+            dtype=np.int64,
         )
         positions[~named] = -1
         matched = positions >= 0
@@ -420,7 +423,10 @@ class CellBarcodeJoin:
             unmatched = ~matched
             self.n_unmatched_rows += int(np.count_nonzero(unmatched))
             missing = pd.unique(identifiers_array[unmatched])
-            hashes = np.asarray(pd.util.hash_array(missing), dtype=np.uint64)
+            # The barcodes are distinct already, so they are hashed as they are.
+            hashes = np.asarray(
+                pd.util.hash_array(missing, categorize=False), dtype=np.uint64
+            )
             held = self._held_bytes + _UNMATCHED_BYTES_PER_BARCODE * (
                 len(self._unmatched) + len(hashes)
             )
