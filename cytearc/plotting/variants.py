@@ -29,6 +29,10 @@ _VMR_FLOOR = 1e-6
 _UNCOVERED_COLOR = "#d9d9d9"
 # The height of the bar of clone colours above the heatmap.
 _CLONE_BAR_INCHES = 0.25
+# The tallest figure of genotype bars that the plot draws by default, in
+# inches, which keeps a panel of many sites and groups within matplotlib's
+# pixel limits.
+_MAX_BARS_INCHES = 40.0
 # The colour of each genotype call.
 _CALL_COLORS = {
     "wild_type": "#4c78a8",
@@ -661,11 +665,16 @@ def genotypes(
                 "call": np.asarray(calls, dtype=object)[chosen],
             }
         )
+    # One bar for each site and group with cells, from the calls counted.
+    bar_sites, bar_groups = np.nonzero(
+        np.broadcast_to(totals[None, :] > 0, (len(site_names), len(names)))
+    )
+    bar_shares = counted[bar_sites, bar_groups] / totals[bar_groups][:, None]
     panel_keys = ["calls"] + (["layout"] if cells_table is not None else [])
     if figsize is None and target is None:
         figsize = (
             6.0 * len(panel_keys),
-            max(3.0, 0.45 * len(site_names) * len(names) + 1.5),
+            min(_MAX_BARS_INCHES, max(3.0, 0.45 * len(bar_sites) + 1.5)),
         )
     require_matplotlib()
     with theme_context(theme):
@@ -673,36 +682,26 @@ def genotypes(
             target, panel_keys=panel_keys, figsize=figsize, n_columns=len(panel_keys)
         )
         ax = axes["calls"]
-        bars = [
-            (name, str(group))
-            for name in site_names
-            for group in names
-            if not calls_table[
-                (calls_table["site"] == name) & (calls_table["group"] == str(group))
-            ].empty
-        ]
-        positions = np.arange(len(bars))
-        left = np.zeros(len(bars))
-        for call in calls:
-            shares = np.asarray(
-                [
-                    float(
-                        calls_table[
-                            (calls_table["site"] == name)
-                            & (calls_table["group"] == group)
-                            & (calls_table["call"] == call)
-                        ]["share"].sum()
-                    )
-                    for name, group in bars
-                ]
+        positions = np.arange(len(bar_sites))
+        left = np.zeros(len(bar_sites))
+        for code, call in enumerate(calls):
+            ax.barh(
+                positions,
+                bar_shares[:, code],
+                left=left,
+                color=_CALL_COLORS[call],
+                label=call,
             )
-            ax.barh(positions, shares, left=left, color=_CALL_COLORS[call], label=call)
-            left += shares
+            left += bar_shares[:, code]
         ax.set_yticks(
             positions,
             [
-                name if group_labels is None else f"{name}, {group}"
-                for name, group in bars
+                site_names[site]
+                if group_labels is None
+                else f"{site_names[site]}, {names[group]}"
+                for site, group in zip(
+                    bar_sites.tolist(), bar_groups.tolist(), strict=True
+                )
             ],
             fontsize="small",
         )

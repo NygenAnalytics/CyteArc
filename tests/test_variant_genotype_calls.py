@@ -168,6 +168,27 @@ def test_cells_without_a_refined_call_keep_their_merged_one(store, tmp_path) -> 
     assert _calls(store, genotypes) == expected
 
 
+def test_a_cell_read_without_a_call_of_the_source_is_filtered(store, tmp_path) -> None:
+    # The table reads the third cell, 4 WT and 1 MUT UMI, without a call,
+    # as two cells of GSE204845's MDS01 are.
+    ids = TRUTH.row_ids[:3]
+    path = tmp_path / "SF3B1.tsv"
+    path.write_text(
+        "\tWT.calls\tMUT.calls\tTotal.calls\tGenotype\tCell.Assignment\n"
+        f"{ids[0]}\t2\t0\t2\tWT\tEP\n"
+        f"{ids[1]}\t1\t1\t2\tMUT\tEP\n"
+        f"{ids[2]}\t4\t1\t5\tNA\tIMP\n"
+    )
+    found = _calls(
+        store, store.variants.genotypes(_import(store, path), method="source")
+    )
+    assert found == {
+        (ids[0], "SF3B1"): ("wild_type", "WT"),
+        (ids[1], "SF3B1"): ("alternative_present", "MUT"),
+        (ids[2], "SF3B1"): ("filtered", ""),
+    }
+
+
 def test_gotchas_labels_keep_heterozygotes_apart(store, tmp_path) -> None:
     counts = _import(store, write_gotcha(TRUTH, tmp_path / "CALR.csv"))
     found = _calls(store, store.variants.genotypes(counts, method="source"))
@@ -372,14 +393,24 @@ def test_sites_and_alleles_are_checked(store, tmp_path) -> None:
         store.variants.genotypes(gift, method="gift", sites=["KRAS"])
     with pytest.raises(ValueError, match="alleles names 'KRAS'"):
         store.variants.genotypes(gift, method="gift", alleles={"KRAS": ("A", "C")})
-    with pytest.raises(ValueError, match="reads each UMI's reads"):
-        got = _got(store, tmp_path, "xv")
+    with pytest.raises(ValueError, match="no site 'KRAS'"):
+        store.variants.genotypes(gift, method="gift", sites=["KRAS"])
+    with pytest.raises(ValueError, match="sites names no site"):
+        store.variants.genotypes(gift, method="gift", sites=[])
+    # A named wild type that no cell shows is refused, a named alternative
+    # that none shows is told of.
+    with pytest.raises(ValueError, match="'GTGG', which no cell shows there"):
         store.variants.genotypes(
-            got,
-            method="gift",
-            alleles={"CALR": ("WT", "MUT")},
-            swap_probabilities={1: 0.5},
+            gift, method="gift", alleles={"ASXL1 c.1772dup": ("GTGG", "GTAAG")}
         )
+    with pytest.warns(UserWarning, match="No cell shows the alternative 'GTTAG'"):
+        store.variants.genotypes(
+            gift, method="gift", alleles={"ASXL1 c.1772dup": ("GTAG", "GTTAG")}
+        )
+    # GoT's counts hold no gapfills to weigh.
+    got = _got(store, tmp_path, "xv")
+    with pytest.raises(ValueError, match="weighs the gapfills of giftwrap's probes"):
+        store.variants.genotypes(got, method="gift", alleles={"CALR": ("WT", "MUT")})
     # Tables without calls give the source method nothing to adopt.
     with pytest.raises(ValueError, match="no site holds calls of the source"):
         store.variants.genotypes(_got(store, tmp_path, "xv"), method="source")
@@ -438,6 +469,14 @@ def test_saved_genotypes_that_lost_an_array_are_called_again(store, tmp_path) ->
     again = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
     assert again != first
     assert "posterior_heterozygous" in store.artifacts.load(again)
+    # A long array cut short is no array of the calls either.
+    group = artifact_group(store.zw, again)
+    short = group["call_reference"][:-1]
+    del group["call_reference"]
+    group.create_array("call_reference", data=short)
+    assert store.variants.genotypes(counts, method="threshold", min_mutant_umis=1) != (
+        again
+    )
 
 
 @pytest.mark.parametrize(

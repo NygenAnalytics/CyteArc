@@ -475,7 +475,8 @@ def swap_probability_table(swap_probabilities: Any) -> tuple[np.ndarray, np.ndar
 
     Raises:
         TypeError: If it is not a mapping of whole numbers to numbers.
-        ValueError: If it is empty, or a key or probability lies out of range.
+        ValueError: If it is empty, a key or probability lies out of range,
+            or it gives no probability for UMIs of 1 read.
     """
     if not isinstance(swap_probabilities, Mapping):
         raise TypeError(
@@ -503,6 +504,11 @@ def swap_probability_table(swap_probabilities: Any) -> tuple[np.ndarray, np.ndar
             )
         reads.append(int(key))
         values.append(probability)
+    if min(reads) != 1:
+        raise ValueError(
+            f"swap_probabilities starts at UMIs of {min(reads)} reads; give the "
+            "probability of UMIs of 1 read too, so that every UMI has one"
+        )
     order = np.argsort(reads, kind="stable")
     return (
         np.asarray(reads, dtype=np.int64)[order],
@@ -617,8 +623,9 @@ def gift_calls(
 
     A row whose largest posterior exceeds ``min_posterior`` and that holds at
     least ``min_umis`` confident UMIs is called ``wild_type``,
-    ``heterozygous`` or ``homozygous_alternative``; ties go to that order, as
-    GIFT's code takes the first largest. Every other row is ``filtered``.
+    ``heterozygous`` or ``homozygous_alternative``. Ties, which only a
+    ``min_posterior`` below 0.5 can call, go to that order. Every other row
+    is ``filtered``.
     """
     posteriors = np.asarray(posteriors, dtype=np.float64)
     calls = np.full(len(posteriors), FILTERED, dtype=np.int8)
@@ -643,8 +650,6 @@ def genotype_frames(
     site_alternative: np.ndarray,
     site_sources: np.ndarray,
     chosen: np.ndarray,
-    n_mutant_sites: np.ndarray,
-    n_called_sites: np.ndarray,
     cells: np.ndarray,
     sites: np.ndarray,
     calls: np.ndarray,
@@ -660,11 +665,9 @@ def genotype_frames(
         site_labels: Each genotyped site's label.
         site_reference: Each genotyped site's wild type, or empty.
         site_alternative: Each genotyped site's alternative, or empty.
-        site_sources: The call column each site's calls came from, or empty.
+        site_sources: The call columns each site's calls came from, or empty.
         chosen: The sites to show, as ascending positions among the
             genotyped sites.
-        n_mutant_sites: Each cell's mutant sites.
-        n_called_sites: Each cell's sites called wild type or mutant.
         cells: Each call row's cell, as a position in ``cell_ids``.
         sites: Each call row's site, as a position among the genotyped sites.
         calls: Each call row's call code.
@@ -704,7 +707,14 @@ def genotype_frames(
         }
     )
     counts = np.zeros((len(chosen), len(CALLS)), dtype=np.int64)
-    np.add.at(counts, (site_rank[np.asarray(sites, dtype=np.int64)], call_codes), 1)
+    row_sites = site_rank[np.asarray(sites, dtype=np.int64)]
+    np.add.at(counts, (row_sites, call_codes), 1)
+    # The cells that the calls do not list at a site are missing there.
+    n_cells = len(cell_ids)
+    counts[:, MISSING] += n_cells - counts.sum(axis=1)
+    row_cells = np.asarray(cells, dtype=np.int64)
+    mutant = np.isin(call_codes, list(MUTANT_CALLS))
+    called = mutant | (call_codes == WILD_TYPE)
     site_table = pd.DataFrame(
         {
             "reference": pd.array(
@@ -722,8 +732,8 @@ def genotype_frames(
     )
     cell_table = pd.DataFrame(
         {
-            "n_mutant_sites": np.asarray(n_mutant_sites, dtype=np.int64),
-            "n_called_sites": np.asarray(n_called_sites, dtype=np.int64),
+            "n_mutant_sites": np.bincount(row_cells[mutant], minlength=n_cells),
+            "n_called_sites": np.bincount(row_cells[called], minlength=n_cells),
         },
         index=pd.Index(np.asarray(cell_ids, dtype=object), name="ids"),
     )
@@ -738,13 +748,14 @@ class VariantGenotypes:
     there, which is the call ``missing``.
 
     Attributes:
-        sites: One row per genotyped site, indexed by its label:
+        sites: One row per site shown, indexed by its label:
             ``reference`` and ``alternative``, the alleles the calls compare
-            (empty for adopted source calls), ``source`` (the call column
-            that ``method="source"`` adopted, else empty) and the counts of
-            cells of each call.
+            (empty for adopted source calls), ``source`` (the call columns
+            that ``method="source"`` adopted, in the order a cell's call is
+            taken from them, else empty) and the cells of each call, those
+            that the calls do not list counted ``missing``.
         cells: One row per cell, indexed by cell ID: ``n_mutant_sites``
-            (sites called heterozygous, homozygous alternative or
+            (sites shown called heterozygous, homozygous alternative or
             alternative present) and ``n_called_sites`` (those and the sites
             called wild type).
         calls: One row per cell and site with evidence: ``cell``, ``site``,

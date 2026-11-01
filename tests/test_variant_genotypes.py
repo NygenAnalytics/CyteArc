@@ -219,10 +219,9 @@ def test_swap_tables_are_step_functions_of_reads_per_umi() -> None:
         np.asarray([1, 3, 1, 2]), np.asarray([1, 13, 5, 400]), table
     )
     assert probabilities.tolist() == [0.9, 0.5, 0.05, 0.05]
-    with pytest.raises(ValueError, match="no probability for UMIs of 1 reads"):
-        unit_swap_probabilities(
-            np.asarray([1]), np.asarray([1]), swap_probability_table({2: 0.1})
-        )
+    # An entry whose UMIs hold no reads has no probability.
+    with pytest.raises(ValueError, match="no probability for UMIs of 0 reads"):
+        unit_swap_probabilities(np.asarray([2]), np.asarray([1]), table)
 
 
 @pytest.mark.parametrize(
@@ -235,6 +234,7 @@ def test_swap_tables_are_step_functions_of_reads_per_umi() -> None:
         ({1.5: 0.5}, TypeError, "whole numbers"),
         ({True: 0.5}, TypeError, "whole numbers"),
         ({1: "0.5"}, TypeError, "must be numbers"),
+        ({2: 0.1, 5: 0.0}, ValueError, "starts at UMIs of 2 reads"),
     ],
 )
 def test_swap_tables_are_checked(table, error, match) -> None:
@@ -300,6 +300,19 @@ def test_a_likely_swap_scores_every_genotype_alike() -> None:
     # Only the two wild-type UMIs lie below a swap probability of 0.1.
     assert confident.tolist() == [2]
     assert HIGH_CONFIDENCE_SWAP == 0.1
+
+
+def test_a_umi_confident_below_a_swap_probability_of_one_tenth() -> None:
+    # UMIs whose swap probability is exactly 0.1 are not confident; just
+    # below it they are, as GIFT counts the UMIs of a genotyped cell.
+    _posteriors, confident = gift_posteriors(
+        np.asarray([0, 0, 1], dtype=np.int64),
+        2,
+        np.asarray([3, 2, 4]),
+        np.asarray([0.99, 0.99, 0.99]),
+        np.asarray([0.1, np.nextafter(0.1, 0.0), 0.1]),
+    )
+    assert confident.tolist() == [2, 0]
 
 
 def test_many_umis_do_not_underflow() -> None:

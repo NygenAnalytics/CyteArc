@@ -520,3 +520,37 @@ def test_genotypes_refuse_what_they_cannot_draw(plotted) -> None:
         genotypes(store, targets, show=False)
     with pytest.raises(TypeError, match="does not provide variants.load_genotypes"):
         genotypes(object(), called, show=False)
+
+
+def test_genotypes_of_many_sites_and_groups_keep_a_drawable_height(tmp_path) -> None:
+    import warnings
+
+    from tests.clone_helpers import every_cell, write_cells_store
+
+    # 120 sites of 400 cells in 8 groups draw 960 bars.
+    rng = np.random.default_rng(3)
+    ids = [f"cell{cell:03d}-1" for cell in range(400)]
+    store = write_cells_store(tmp_path / "store.zarr", ids)
+    store.cells.insert(
+        "group", np.asarray([f"g{cell % 8}" for cell in range(400)], dtype=object)
+    )
+    paths = []
+    for site in range(120):
+        lines = ["BC\twtUMIs\tmutUMIs"] + [
+            f"{ids[cell]}\t{int(rng.integers(0, 3))}\t{int(rng.integers(0, 2))}"
+            for cell in range(400)
+        ]
+        path = tmp_path / f"S{site:03d}.tsv"
+        path.write_text("\n".join(lines) + "\n")
+        paths.append(path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        counts = store.variants.import_counts(paths, cell_selection=every_cell(store))
+    called = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
+    result = genotypes(store, called, group_by="group", show=False)
+    shares = result.tables["calls"].groupby(["site", "group"])["share"].sum()
+    assert len(shares) == 960
+    np.testing.assert_allclose(shares.to_numpy(), 1.0)
+    assert len(result.axes["calls"].get_yticks()) == 960
+    assert result.figure.get_size_inches()[1] == 40.0
+    plt.close(result.figure)

@@ -1,5 +1,6 @@
 import os
 import sys
+import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -2318,21 +2319,23 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             swap_probabilities=swap_probabilities,
             alleles=alleles,
         )
+        if method == "gift" and str(group.attrs["format"]) != "giftwrap":
+            raise ValueError(
+                "method='gift' weighs the gapfills of giftwrap's probes, and these "
+                f"counts come from {str(group.attrs['format'])!r} files; use "
+                "method='threshold' for the UMIs of wild type and mutant"
+            )
         table = _stored_sites(group)
         explicit = sites is not None
         chosen = _site_positions(table, sites)
+        if explicit and not len(chosen):
+            raise ValueError("sites names no site")
         labels = table.labels()
         if rules.alleles:
             unknown = sorted(set(rules.alleles) - set(labels.tolist()))
             if unknown:
                 raise ValueError(f"alleles names {unknown[0]!r}, which no site is")
         n_cells = _n_counts_cells(group)
-        count_fields = cast(list[str], group.attrs["count_fields"])
-        if rules.swap is not None and "reads" not in count_fields:
-            raise ValueError(
-                "swap_probabilities reads each UMI's reads, which these counts do "
-                "not hold; import the files with their reads, or call without it"
-            )
         if method == "source":
             genotyped, site_columns = self._source_call_sites(
                 group, table, chosen, explicit, n_cells
@@ -2452,7 +2455,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 column_place[rank, int(np.flatnonzero(source_codes == column)[0])] = (
                     place
                 )
-        labels_out = _Vocabulary()
+        # The labels the calls can take, coded in an order that the bands do
+        # not change: the source's labels, or none.
+        label_names = sorted(
+            {""} | (set(call_value_names.tolist()) if method == "source" else set())
+        )
+        label_index = {text: code for code, text in enumerate(label_names)}
         n_mutant = np.zeros(n_cells, dtype=np.int32)
         n_called = np.zeros(n_cells, dtype=np.int32)
         offsets = np.zeros(n_cells + 1, dtype=np.int64)
@@ -2506,7 +2514,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 call_counts += np.bincount(result.calls, minlength=len(CALLS))
                 appender.append("call_sites", result.sites.astype(np.int32))
                 appender.append("calls", result.calls.astype(np.int8))
-                appender.append("call_labels", labels_out.codes(result.labels))
+                appender.append("call_labels", _label_codes(label_index, result.labels))
                 appender.append("call_reference", result.reference.astype(np.int32))
                 appender.append("call_alternative", result.alternative.astype(np.int32))
                 for index, name in enumerate(
@@ -2519,9 +2527,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                     appender.append(
                         name, result.posteriors[:, index].astype(np.float32)
                     )
-            # Labels are stored in the order the bands first gave them.
-            texts, remap = labels_out.sorted()
-            label_names = np.asarray(texts, dtype=object)[remap]
             _write_array(out, "n_mutant_sites", n_mutant)
             _write_array(out, "n_called_sites", n_called)
             _write_array(out, "call_offsets", offsets)
@@ -2761,8 +2766,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             site_alternative=_read(group, "site_alternative").astype(str),
             site_sources=_read(group, "site_sources").astype(str),
             chosen=chosen,
-            n_mutant_sites=_read(group, "n_mutant_sites"),
-            n_called_sites=_read(group, "n_called_sites"),
             cells=cells_of_rows[keep],
             sites=call_sites[keep],
             calls=_read(group, "calls")[keep],
@@ -3038,11 +3041,13 @@ def _compared_alleles(
     A site is compared at its wild type and its one alternative: those that
     ``rules.alleles`` names for it, or its alleles of roles ``"reference"``
     and ``"alternative"``. Each allele's position among the counts' alleles
-    is -1 where the counts hold no such allele at the site.
+    is -1 where the counts hold no such allele at the site: an alternative
+    that no cell shows, of which a warning tells.
 
     Raises:
         ValueError: If a site that ``explicit`` sites name has no wild type
-            or not one alternative.
+            or not one alternative, or ``rules.alleles`` names a wild type
+            that no cell shows at its site.
     """
     labels = table.labels()
     allele_site = np.asarray(table.allele_site, dtype=np.int64)
@@ -3070,6 +3075,22 @@ def _compared_alleles(
                 continue
             wild_type, mutant = str(texts[wild[0]]), str(texts[mutants[0]])
         positions = {str(texts[allele]): int(allele) for allele in own}
+        if label in rules.alleles:
+            if wild_type not in positions:
+                raise ValueError(
+                    f"alleles gives the site {label!r} the wild type {wild_type!r}, "
+                    "which no cell shows there; its alleles are "
+                    f"{', '.join(map(repr, positions)) or 'none'}, in the "
+                    "orientation that the files give, such as a GIFT probe's"
+                )
+            if mutant not in positions:
+                warnings.warn(
+                    f"No cell shows the alternative {mutant!r} that alleles gives "
+                    f"the site {label!r}; its alleles are "
+                    f"{', '.join(map(repr, positions))}",
+                    UserWarning,
+                    stacklevel=4,
+                )
         kept.append(site)
         pairs.append((wild_type, mutant))
         reference.append(positions.get(wild_type, -1))
@@ -3101,6 +3122,15 @@ def _cover_ranks(table: SiteTable, site_rank: np.ndarray) -> np.ndarray:
         if channel and cover[site] < 0 and name in targets:
             cover[site] = site_rank[targets[name]]
     return cover
+
+
+def _label_codes(index: Mapping[str, int], labels: np.ndarray) -> np.ndarray:
+    """Each label's position in the vocabulary that ``index`` numbers."""
+    distinct, inverse = np.unique(np.asarray(labels, dtype=object), return_inverse=True)
+    lookup = np.asarray(
+        [index[str(text)] for text in distinct.tolist()], dtype=np.int32
+    )
+    return lookup[np.asarray(inverse).reshape(-1)]
 
 
 def _most_cell_rows(group: zarr.Group, tables: Mapping[str, Sequence[str]]) -> int:
