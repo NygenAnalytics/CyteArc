@@ -16,6 +16,7 @@ import tracemalloc
 from collections.abc import Callable
 from types import SimpleNamespace
 
+import numba
 import numpy as np
 import pytest
 
@@ -576,6 +577,10 @@ def test_grouping_by_columns_of_several_chunks_holds_its_budget(tmp_path) -> Non
         assert held_peak - peak > decoded[case] // 2, (case, peak, held_peak)
 
 
+@pytest.mark.skipif(
+    numba.config.NUMBA_NUM_THREADS < 4,
+    reason="the coupling plans four workers only where Numba has four threads",
+)
 def test_the_null_on_four_threads_stays_within_the_bytes_it_plans(data) -> None:
     """With room for four workers, the coupling's plan bounds its traced peak.
 
