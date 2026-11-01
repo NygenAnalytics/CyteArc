@@ -53,6 +53,8 @@ N_SINGLETONS = 50_000
 N_EXTRA_CELLS = 10_000
 # Clonotypes of one cell each, named by long junctions of wide characters.
 N_LABELLED = 5_000
+# Clonotypes of one cell each, of one chain of each arm.
+N_OWN_CLONOTYPES = 20_000
 
 
 @pytest.fixture(scope="module")
@@ -1058,3 +1060,39 @@ def test_lengths_of_long_wide_junctions_fit_the_smallest_budget(
         store, lambda: store.repertoire.spectratype(clonotypes)
     )
     assert peak <= budget, (peak, budget)
+
+
+@pytest.fixture(scope="module")
+def own_clonotypes(tmp_path_factory) -> SimpleNamespace:
+    """Clonotypes of one cell each, every cell with an alpha and a beta chain.
+
+    Counting each clonotype once then holds as many rows as chains, and no
+    contig beside a chain hides what they cost.
+    """
+    path = tmp_path_factory.mktemp("own_clonotypes") / "store.zarr"
+    ids = np.asarray([f"c{i}" for i in range(N_OWN_CLONOTYPES)])
+    counts = np.ones((N_OWN_CLONOTYPES, 2), dtype=np.uint16)
+    write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=ids)
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+    contigs = write_clone_contigs(
+        path.parent, "contigs.csv", ids, np.arange(N_OWN_CLONOTYPES)
+    )
+    every = store.snapshot_cell_selection()
+    clonotypes = store.repertoire.clonotypes(
+        store.repertoire.import_receptors(contigs, cell_selection=every)
+    )
+    return SimpleNamespace(store=store, clonotypes=clonotypes)
+
+
+def test_usage_of_clonotypes_of_one_cell_each_counted_once_fits_the_budget(
+    own_clonotypes,
+) -> None:
+    store, clonotypes = own_clonotypes.store, own_clonotypes.clonotypes
+    for run in (
+        lambda: store.repertoire.gene_usage(clonotypes, count="clonotypes"),
+        lambda: store.repertoire.spectratype(clonotypes, count="clonotypes"),
+    ):
+        peak, budget = _traced_at_smallest_budget(store, run)
+        assert peak <= budget, (peak, budget)

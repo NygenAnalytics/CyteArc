@@ -212,6 +212,13 @@ _KEY_BYTES_PER_GROUP_COLUMN = 160
 # columns.
 _ROW_BYTES = 120
 _ROW_BYTES_PER_COLUMN = 16
+# Counting each clonotype once holds, for each chain, its row of group,
+# locus, values and clonotype among the distinct rows: 80 bytes beside the
+# counts of cells with one field and 16 more for each field, as traced on
+# 400,000 chains of clonotypes of their own, checked at 16 bytes for each
+# column of the row and 32 more.
+_ONCE_BYTES_PER_CHAIN = 32
+_ONCE_BYTES_PER_COLUMN = 16
 # Ranking the codes of a field among its stored values holds, for each
 # value, whether a chain names it and its rank.
 _RANK_BYTES_PER_VALUE = 17
@@ -1762,16 +1769,28 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         return local, _decoded_values(reads, group, name, needed)
 
     def _check_count_budget(
-        self, reads: _Reads, keys: pd.DataFrame, n_chains: int, widths: list[int]
+        self,
+        reads: _Reads,
+        keys: pd.DataFrame,
+        n_chains: int,
+        widths: list[int],
+        count: str,
     ) -> None:
-        """Check the table of counted chains against the budget before it is built.
+        """Check the counting and its table against the budget before they run.
 
         The table holds a row for each distinct group, locus and values that
         a chain holds, at most one per chain and per combination of codes.
+        Counting each clonotype once also holds each chain's row with its
+        clonotype among the distinct rows.
         """
         n_rows = min(n_chains, math.prod([len(keys), *widths]))
         n_columns = len(keys.columns) + len(widths) + 2
-        reads.reserve(n_rows * (_ROW_BYTES + _ROW_BYTES_PER_COLUMN * n_columns))
+        needed = n_rows * (_ROW_BYTES + _ROW_BYTES_PER_COLUMN * n_columns)
+        if count == "clonotypes":
+            needed += n_chains * (
+                _ONCE_BYTES_PER_CHAIN + _ONCE_BYTES_PER_COLUMN * (len(widths) + 2)
+            )
+        reads.reserve(needed)
 
     @validation_scoped
     def _repertoire_gene_usage(
@@ -1872,6 +1891,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             keys,
             len(units["cell"]),
             [len(loci[1]), *(len(names) for _codes, names in named.values())],
+            count,
         )
         table, n_cells = count_chains(
             keys,
@@ -1977,7 +1997,7 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         names = np.arange(int(lengths.max(initial=-1)) + 1, dtype=np.int64)
         loci = self._value_names(reads, group, "locus", units.pop("locus"))
         self._check_count_budget(
-            reads, keys, len(units["cell"]), [len(loci[1]), len(names)]
+            reads, keys, len(units["cell"]), [len(loci[1]), len(names)], count
         )
         # Rows follow the groups' natural order, then the locus and length.
         table, n_cells = count_chains(
