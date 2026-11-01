@@ -885,3 +885,19 @@ def test_every_export_read_decodes_one_chunk_at_a_time(tmp_path, monkeypatch) ->
         if name.startswith(("contig_", "codes", "clonotype_ids"))
     } == {1}
     assert zarr.config.get("async.concurrency") != 1
+
+
+def test_categorical_logical_values_are_written_as_flags(tmp_path) -> None:
+    # A table read with categories may hold booleans as categories.
+    path = tmp_path / "categories.tsv"
+    table = pd.DataFrame(
+        {
+            "sequence_id": ["s1", "s2", "s3"],
+            "productive": pd.Categorical([True, None, False]),
+            "rev_comp": pd.Categorical(["T", "f", None]),
+        }
+    )
+    assert write_airr_rearrangements(table, path) == 3
+    written = _read(path)
+    assert written["productive"].tolist() == ["T", "", "F"]
+    assert written["rev_comp"].tolist() == ["T", "F", ""]
