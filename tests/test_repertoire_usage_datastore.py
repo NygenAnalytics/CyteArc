@@ -1007,3 +1007,33 @@ def test_every_stored_array_is_read_a_chunk_at_a_time(tmp_path, monkeypatch) -> 
     assert {"chain_slots", "codes", "contig_locus", "contig_v_call"} <= names
     assert {limit for _name, limit in limits} == {1}
     assert zarr.config.get("async.concurrency") != 1
+
+
+def test_junctions_are_measured_within_one_chunk_beside_their_bounds(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    group = artifact_group(store.zw, receptors)
+    packed = group["contig_junction_aa_values"]
+    offsets = group["contig_junction_aa_offsets"]
+    codes = np.arange(offsets.shape[0] - 1)
+    refusals = []
+    limit = 1
+    while True:
+        reads = repertoire_operations._Reads(
+            limit=limit, held=0, what="Measuring", remedy=""
+        )
+        try:
+            repertoire_operations._value_lengths(reads, group, "junction_aa", codes)
+            break
+        except MemoryError as error:
+            found = re.search(r"holds about (\d+) bytes", str(error))
+            assert found is not None
+            refusals.append(int(found.group(1)))
+            limit = refusals[-1]
+    n_values, n_bytes = len(codes), packed.shape[0]
+    # The bounds are read whole, beside each value's start and end; then one
+    # chunk of the packed bytes as it is read, the block that the read
+    # returns and its mask and count of 5 bytes per byte, and 48 bytes for
+    # each value.
+    bounds = 2 * offsets.nbytes + _chunk(offsets)
+    measuring = 16 * n_values + _chunk(packed) + 6 * n_bytes + 48 * n_values
+    assert refusals == sorted({bounds, measuring})
