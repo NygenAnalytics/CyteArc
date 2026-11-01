@@ -19,9 +19,12 @@ from ._figure import (
 )
 from ._groups import cell_groups
 from ._style import (
+    LEGEND_SIDE_MAX_ENTRIES,
     apply_figure_chrome,
     capped_figsize,
     categorical_color_map,
+    legend_side_columns,
+    legend_side_rows,
     theme_context,
 )
 
@@ -553,8 +556,8 @@ def spectratype(
 
     ``source`` and the options are those of ``ds.repertoire.spectratype``.
     Each panel draws, for one locus, each group's fraction of chains at each
-    junction length, one line per group, or bars without groups. Panels
-    stand two to a row. With ``count="clonotypes"`` the fractions count
+    junction length, one line per group, or bars without groups; the legend
+    names the first 80 groups. Panels stand two to a row. With ``count="clonotypes"`` the fractions count
     clonotypes, or clonotype clusters for clonotypes that a distance metric
     linked. The plot raises ``ValueError`` when no chain has a junction.
 
@@ -608,8 +611,24 @@ def spectratype(
             ax.set_ylabel(f"Fraction of {counted}")
             ax.set_title(locus)
         if show_legend and len(group_order) > 1:
-            axes[loci[-1]].legend(
-                frameon=False, fontsize="small", loc="upper left", bbox_to_anchor=(1, 1)
+            # The first groups, in columns that fit the figure's height.
+            ax = axes[loci[-1]]
+            lines = ax.get_lines()
+            shown = min(len(lines), LEGEND_SIDE_MAX_ENTRIES)
+            rows = legend_side_rows(float(figure.get_size_inches()[1]), title=True)
+            ax.legend(
+                handles=lines[:shown],
+                frameon=False,
+                fontsize="small",
+                title=(
+                    "Group"
+                    if shown == len(lines)
+                    else f"Group ({shown} of {len(lines)})"
+                ),
+                title_fontsize="small",
+                loc="upper left",
+                bbox_to_anchor=(1, 1),
+                ncols=legend_side_columns(shown, rows=rows),
             )
         apply_figure_chrome(figure, theme)
     plot_result = PlotResult(

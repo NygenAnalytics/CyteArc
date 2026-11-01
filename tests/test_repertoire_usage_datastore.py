@@ -30,8 +30,11 @@ from tests.clone_helpers import (
     CELLRANGER_HEADER,
     CLONAL_ROWS,
     airr_file,
+    every_cell,
     import_truth_receptors,
     receptor_store,
+    write_cells_store,
+    write_clone_contigs,
     write_lines,
     write_truth_store,
 )
@@ -729,3 +732,82 @@ def test_a_read_only_store_counts_as_a_writable_one(tmp_path) -> None:
     for name, table in expected.items():
         pd.testing.assert_frame_equal(found[name], table)
     reader.plots.gene_pairing(receptors, show=False).close()
+
+
+def test_the_lengths_legend_names_at_most_80_groups(tmp_path) -> None:
+    ids = [f"cell{i}" for i in range(100)]
+    folder = tmp_path / "many"
+    folder.mkdir()
+    store = write_cells_store(folder / "store.zarr", ids)
+    contigs = write_clone_contigs(folder, "contigs.csv", ids, np.arange(100))
+    receptors = store.repertoire.import_receptors(
+        contigs, cell_selection=every_cell(store)
+    )
+    store.cells.insert("own", np.asarray([f"g{i:03d}" for i in range(100)]))
+    result = store.plots.spectratype(receptors, group_by="own", show=False)
+    try:
+        legend = result.axes["TRB"].get_legend()
+        assert legend.get_title().get_text() == "Group (80 of 100)"
+        names = [text.get_text() for text in legend.get_texts()]
+        assert names[:2] == ["g000", "g001"] and len(names) == 80
+    finally:
+        result.close()
+
+
+def test_the_groups_keys_are_checked_before_their_frame_is_built(tmp_path) -> None:
+    # 4,096 cells, each a group of its own by 24 key columns of two labels,
+    # whose keys outweigh the grouping that names them.
+    n_cells, n_columns = 4_096, 24
+    ids = [f"c{i}" for i in range(n_cells)]
+    folder = tmp_path / "keys"
+    folder.mkdir()
+    store = write_cells_store(folder / "store.zarr", ids)
+    for column in range(n_columns):
+        bits = (np.arange(n_cells) >> (column % 12)) & 1
+        store.cells.insert(f"bit{column}", bits.astype(str).astype(object))
+    contigs = write_clone_contigs(folder, "contigs.csv", ids, np.arange(n_cells))
+    receptors = store.repertoire.import_receptors(
+        contigs, cell_selection=every_cell(store)
+    )
+    columns = [f"bit{column}" for column in range(n_columns)]
+    refusals = _refusals(
+        store, lambda: store.repertoire.spectratype(receptors, group_by=columns)
+    )
+    last_grouping = max(
+        at for at, (what, _bytes) in enumerate(refusals) if what.startswith("Grouping")
+    )
+    # Beside the two chosen int32 slots of each cell: each cell's group and,
+    # for each of the 4,096 groups, its labels, name and row of the keys.
+    keys = 4_096 * (
+        repertoire_operations._KEY_BYTES_PER_GROUP
+        + repertoire_operations._KEY_BYTES_PER_GROUP_COLUMN * n_columns
+    )
+    assert refusals[last_grouping + 1] == (
+        "Counting the junction lengths of the chains of 4096 cells",
+        n_cells * 2 * 4 + n_cells * 8 + keys,
+    )
+
+
+def test_counting_is_checked_with_its_table_before_it_runs(tmp_path) -> None:
+    store, _receptors, _clonotypes = _sources(tmp_path)
+    keys = pd.DataFrame({"group": ["s1", "s2"], "sample": ["s1", "s2"]})
+
+    def needs(n_chains: int, widths: list[int], count: str) -> int:
+        reads = repertoire_operations._Reads(
+            limit=0, held=0, what="Counting", remedy=""
+        )
+        with pytest.raises(MemoryError) as refused:
+            store._check_count_budget(reads, keys, n_chains, widths, count)
+        found = re.search(r"holds about (\d+) bytes", str(refused.value))
+        assert found is not None
+        return int(found.group(1))
+
+    # The table holds a row for each group, locus and value that the chains
+    # hold, at most 2 * 3 * 5 = 30 for 1,000 chains, each with its group,
+    # sample, locus, value, count and fraction: 120 + 6 * 16 bytes.
+    assert needs(1_000, [3, 5], "cells") == 30 * (120 + 6 * 16)
+    # At most one row per chain for 20 chains.
+    assert needs(20, [3, 5], "cells") == 20 * (120 + 6 * 16)
+    # Counting each clonotype once also holds each chain's row of group,
+    # locus, value and clonotype: 32 + 4 * 16 bytes.
+    assert needs(1_000, [3, 5], "clonotypes") == 30 * 216 + 1_000 * (32 + 4 * 16)
