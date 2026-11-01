@@ -645,3 +645,58 @@ def import_allele_truth(
             barcode_prefix=prefixes,
             barcode_suffix="-1",
         )
+
+
+def traced_steps(
+    monkeypatch: pytest.MonkeyPatch, call: Callable[[], object], budget: int
+) -> list[tuple[str, int, int]]:
+    """Each memory check of allele clone calling, with the bytes it states and its step's peak.
+
+    A step runs from its check to the next check, and the last one to the end
+    of ``call``; its peak is the most bytes that tracemalloc traced in it. The
+    bytes that a check states are the call's total under ``budget``: those of
+    the operation's checks as they state them, those of the domain's beside
+    what the operation holds, and those of ``clones/calling.py`` beside what
+    the domain holds.
+    """
+    import cytearc.clones.allele_clones as domain
+    import cytearc.clones.calling as calling
+    import cytearc.datastore._operations.recorder_alleles as operations
+
+    steps: list[list] = []
+
+    def note(what: str, stated: int) -> None:
+        _current, peak = tracemalloc.get_traced_memory()
+        if steps:
+            steps[-1][2] = peak
+        steps.append([what, int(stated), 0])
+        tracemalloc.reset_peak()
+
+    room_check = domain._Room.check
+    calling_check = calling._check
+    operation_check = operations._check_calling
+
+    def checked_room(self, needed: int, what: str) -> None:
+        held = 0 if self.limit is None else budget - self.limit
+        note(what, held + self.held + needed)
+        room_check(self, needed, what)
+
+    def checked_calling(needed: int, max_bytes: int | None, what: str) -> None:
+        note(what, needed + (0 if max_bytes is None else budget - max_bytes))
+        calling_check(needed, max_bytes, what)
+
+    def checked_operation(needed: int, limit: int, what: str) -> None:
+        note(what, needed)
+        operation_check(needed, limit, what)
+
+    monkeypatch.setattr(domain._Room, "check", checked_room)
+    monkeypatch.setattr(calling, "_check", checked_calling)
+    monkeypatch.setattr(operations, "_check_calling", checked_operation)
+    gc.collect()
+    tracemalloc.start()
+    try:
+        call()
+        steps[-1][2] = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    return [(str(what), int(stated), int(peak)) for what, stated, peak in steps]

@@ -47,7 +47,7 @@ from ...storage.artifacts import (
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
-from ...utils.arrays import unique_rows
+from ...utils.arrays import sorted_unique, unique_inverse
 from ...utils.logging import logger
 from ...utils.warnings import warn
 from .cell_groups import group_columns, within_groups
@@ -168,19 +168,24 @@ _BANK_ROW_BYTES = 128
 _BANK_HELD_ROW_BYTES = 80
 _BANK_CHARACTER_BYTES = 4
 # Calling clones holds, for each cell, its group and whether it has an edit;
-# while the states are read, each record's state and whether it is an edit;
-# while each other column is read, its int32 value per record; and for each
-# edit, its cell, allele, integration and site as int64 with the int32 copy
-# of one, and the character of each, which the distinct pairs of integration
-# and site give. It then holds each edit's cell, character and allele.
+# while the states are read, each record's state, whether it is an edit and
+# the comparison that adds unknown marks, 3 as traced; while the integrations
+# and sites are read, both full int32 columns and each record's edit flag;
+# and for each edit, its allele as int64, its integration and site as int32,
+# their key as int64 and the sort that numbers the keys, 57 at their peak, or
+# its cell as it is read beside the allele and character. It then holds each
+# edit's cell, character and allele.
 _CALL_CELL_BYTES = 16
-_STATE_READ_BYTES = 2
-_COLUMN_READ_BYTES = 4
-_CALL_EDIT_BYTES = 96
+_STATE_READ_BYTES = 4
+_COLUMN_READ_BYTES = 8
+_CALL_EDIT_BYTES = 80
 _HELD_EDIT_BYTES = 24
 # Bytes of each distinct allele, integration or site decoded as text: its
 # Python string beside its bytes and its reference.
 _CALL_TEXT_BYTES = 64
+# The records whose characters are keyed at a time, while both full columns
+# of integrations and sites are held.
+_KEY_BLOCK = 1 << 16
 # Writing the clones holds, for each cell, its clone code and rare alleles
 # from the calls, its label's pointer and its code and size as written, and
 # for each clone, its label as a Python string and its size; each label is
@@ -1027,8 +1032,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         with an edit at its character arose more than once with probability
         p_clonal = (1 - e^(-λM) - λM e^(-λM)) / (1 - e^(-λM)), and is rare
         when that p-value survives the Benjamini-Hochberg procedure at
-        ``fdr`` over the alleles of its group, and when it passes
-        ``max_samples``. A clone whose cells hold more than ``max_alleles``
+        ``fdr`` over the alleles of its group, every array's in one family,
+        and when it passes ``max_samples``. A clone whose cells hold more than ``max_alleles``
         distinct rare alleles leaves its cells without one, as DARLIN keeps
         clones of at most three: a cell holds at most one allele per array,
         so a clone of more is likely two that a homoplasic allele joined.
@@ -1041,11 +1046,14 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         CARLIN's MATLAB notation and darlin-core's place some events one base
         apart, so a bank in the other notation lists few of the alleles and
         calls most of them rare. The artifact's ``bank_coverage`` attribute
-        reports, for each character, the share of its alleles and of their
-        cells that its bank lists. An allele missing from its bank counts as
-        rare, with frequency and rate 0, as DARLIN counts it; CARLIN gives such
-        alleles the mean rate of the alleles its bank model never observed,
-        which a table of rates does not hold. Without a bank, an allele's
+        counts, for each character, its alleles and their observations, the
+        pairs of a cell and an allele, and how many of each its bank lists.
+        An allele missing from its bank counts as rare, with frequency and
+        rate 0, as DARLIN counts it; CARLIN gives such alleles the mean rate
+        of the alleles its bank model never observed, which a table of rates
+        does not hold. p_clonal grows with M, so among tens of thousands of
+        edited cells or more the listed alleles fail and the alleles missing
+        from the bank are the ones that survive. Without a bank, an allele's
         frequency is the share of the cells of its group with an edit at its
         character that hold it. Clonal expansion inflates these frequencies,
         so the alleles of large clones look common, and ``"p_clonal"`` needs
@@ -1187,7 +1195,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             f"the states of {n_records} allele records",
         )
         states = read_array(group, f"{_RECORDS}_state")
-        edited = (states == MARK) | (states == UNKNOWN_MARK)
+        edited = states == MARK
+        edited |= states == UNKNOWN_MARK
         del states
         n_edited = int(np.count_nonzero(edited))
         # The distinct alleles are decoded as text, beside their bytes.
@@ -1218,6 +1227,17 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             max_bytes=self.memoryBytes - held,
         )
         del observations, banks
+        # The clones are written beside each cell's group and calls, now that
+        # their number is known.
+        width = len(f"clone_{called.n_clones}")
+        _check_calling(
+            _CALL_CELL_BYTES * n_cells
+            + n_cells * (_WRITE_CELL_BYTES + 8 * width)
+            + _WRITE_CLONE_BYTES * called.n_clones
+            + _FIXED_BYTES,
+            self.memoryBytes,
+            f"the {called.n_clones} clones of {n_cells} cells as they are written",
+        )
         labels = clone_labels(called.n_clones)
         assignment = CloneAssignment(
             codes=called.codes,
@@ -1304,13 +1324,12 @@ def _banks_fingerprint(banks: Mapping[str, AlleleBank]) -> str:
 
 
 def _allele_observations(group: zarr.Group, edited: np.ndarray) -> AlleleObservations:
-    """Read the records of edited sites: each one's cell, character and allele."""
+    """Read the records of edited sites: each one's cell, character and allele.
 
-    def column(name: str) -> np.ndarray:
-        values = read_array(group, f"{_RECORDS}_{name}")
-        kept: np.ndarray = values[edited].astype(np.int64)
-        del values
-        return kept
+    A character is a pair of an integration and a site, coded as one integer
+    key, so the characters need one sort of the edits' keys. The characters
+    that hold no edit are found from both full columns a block at a time.
+    """
 
     def texts(name: str) -> np.ndarray:
         return unpack_text(
@@ -1318,23 +1337,46 @@ def _allele_observations(group: zarr.Group, edited: np.ndarray) -> AlleleObserva
             read_array(group, f"{_RECORDS}_{name}_offsets"),
         )
 
-    alleles = column("allele")
-    integrations = column("integration")
-    sites = column("site")
-    cells = column("cells")
-    pairs, characters = unique_rows(np.stack([integrations, sites], axis=1))
-    del integrations, sites
     integration_names = texts("integration")
     site_names = texts("site")
+    n_sites = max(1, len(site_names))
+    alleles = read_array(group, f"{_RECORDS}_allele")[edited].astype(np.int64)
+    integrations = read_array(group, f"{_RECORDS}_integration")
+    sites = read_array(group, f"{_RECORDS}_site")
+    every = [
+        sorted_unique(
+            integrations[start : start + _KEY_BLOCK].astype(np.int64) * n_sites
+            + sites[start : start + _KEY_BLOCK]
+        )
+        for start in range(0, len(integrations), _KEY_BLOCK)
+    ]
+    integrations = integrations[edited]
+    sites = sites[edited]
+    keys = integrations.astype(np.int64)
+    del integrations
+    keys *= n_sites
+    keys += sites
+    del sites
+    distinct, characters = unique_inverse(keys)
+    del keys
+    cells = read_array(group, f"{_RECORDS}_cells")[edited].astype(np.int64)
+
+    def name(key: int) -> str:
+        return character_name(
+            str(integration_names[key // n_sites]), str(site_names[key % n_sites])
+        )
+
+    edited_names = tuple(name(key) for key in distinct.tolist())
+    all_keys = sorted_unique(np.concatenate(every)) if every else distinct
     return AlleleObservations(
         cells=cells,
         characters=characters,
         alleles=alleles,
-        character_names=tuple(
-            character_name(str(integration_names[integration]), str(site_names[site]))
-            for integration, site in pairs.tolist()
-        ),
+        character_names=edited_names,
         allele_texts=texts("allele"),
+        unedited_characters=tuple(
+            sorted({name(key) for key in all_keys.tolist()} - set(edited_names))
+        ),
     )
 
 

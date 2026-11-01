@@ -23,7 +23,7 @@ from cytearc.clones.allele_clones import (
     benjamini_hochberg,
     clonal_p_values,
 )
-from tests.clone_helpers import smallest_budget, traced_peak
+from tests.clone_helpers import smallest_budget, traced_peak, traced_steps
 
 _TEXTS = ("a", "b", "c", "d", "e", "f", "g", "h")
 
@@ -120,6 +120,17 @@ def test_p_clonal_equals_carlins_formula_across_means() -> None:
     np.testing.assert_allclose(clonal_p_values(means, 1), expected, rtol=1e-8)
 
 
+def test_p_clonal_of_the_smallest_means_is_their_series_and_never_nan() -> None:
+    # Near the smallest floats the Poisson tails underflow, where the series
+    # x / 2 - x² / 12 is exact; the two meet at 1e-8.
+    means = [1e-310, 1e-200, 1e-12, np.nextafter(1e-8, 0.0), 1e-8]
+    found = clonal_p_values(means, 1)
+    assert not np.any(np.isnan(found))
+    np.testing.assert_allclose(
+        found, [x / 2 - x**2 / 12 for x in means], rtol=1e-12, atol=0
+    )
+
+
 @pytest.mark.parametrize(
     ("rates", "observations"),
     [([-0.1], [3]), ([np.nan], [3]), ([0.1], [np.inf]), ([0.1], [-1])],
@@ -194,6 +205,23 @@ def test_benjamini_hochberg_refuses_tests_without_one_family_each() -> None:
 
 
 # Banks ---------------------------------------------------------------------------
+
+
+def test_bank_alleles_compare_without_surrounding_spaces_as_the_import_reads_them() -> (
+    None
+):
+    bank = allele_banks(
+        {"CA": pd.DataFrame({"allele": [" b", "a "], "normalized_count": [0.1, 0.2]})}
+    )["CA"]
+    assert bank.alleles.tolist() == ["a", "b"]
+    with pytest.raises(ValueError, match="lists 1 alleles more than once, such as 'a'"):
+        allele_banks(
+            {
+                "CA": pd.DataFrame(
+                    {"allele": ["a", " a"], "normalized_count": [0.1, 0.2]}
+                )
+            }
+        )
 
 
 def test_banks_are_sorted_by_allele_and_look_alleles_up() -> None:
@@ -568,7 +596,7 @@ def test_p_clonal_corrects_for_the_alleles_of_each_group_apart() -> None:
 
 def test_banks_must_name_the_characters_of_the_alleles() -> None:
     rows = [(0, 0, 0), (1, 1, 1)]
-    with pytest.raises(ValueError, match="names 'XA', which no edited site"):
+    with pytest.raises(ValueError, match="names 'XA', which is no character"):
         _call(rows, 2, banks={"XA": _bank({"a": (0.1, 1)})}, max_frequency=0.5)
     with pytest.raises(ValueError, match="holds no bank of 'TA'"):
         _call(rows, 2, banks={"CA": _bank({"a": (0.1, 1)})}, max_frequency=0.5)
@@ -885,3 +913,37 @@ def test_calls_hold_no_more_than_the_smallest_budget_they_accept(
     assert traced_peak(lambda: call(budget)) <= budget
     with pytest.raises(MemoryError, match="Raise mem_budget"):
         call(budget - 1)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("method", "rules", "n_groups"),
+    [
+        ("graph", {"max_frequency": 2e-5, "max_samples": 1, "max_alleles": 3}, 1),
+        ("p_clonal", {"max_alleles": 3}, 40),
+    ],
+)
+def test_each_step_on_two_million_edits_holds_no_more_than_its_check_states(
+    monkeypatch, method, rules, n_groups
+) -> None:
+    observations, banks = _darlin_like(900_000, seed=4)
+    assert len(observations) > 2_000_000
+    settings = allele_call_settings(method, banks=banks, **rules)
+    groups = np.arange(900_000, dtype=np.int64) % n_groups
+    budget = 1 << 34
+
+    def call() -> object:
+        return allele_clone_calls(
+            observations,
+            900_000,
+            groups=groups,
+            settings=settings,
+            banks=banks,
+            max_bytes=budget,
+        )
+
+    call()
+    steps = traced_steps(monkeypatch, call, budget)
+    over = [(what, stated, peak) for what, stated, peak in steps if peak > stated]
+    assert not over, over
+    assert len(steps) > 10

@@ -97,19 +97,27 @@ _ITEM_BYTES = 40
 # Bytes of each rare pair of a cell and an allele while the clones' alleles
 # are counted: the clone of its cell, its item, their order and copies.
 _CLONE_ALLELE_BYTES = 40
-# Bytes of each cell: its group, sets' pointer, clone and the arrays that
-# number the clones.
-_CELL_BYTES = 48
+# Bytes of each cell while its group is copied as int64, and once copied; of
+# each cell while the clones are numbered, its flag and code; and of each
+# clone, its alleles, flag and rank.
+_GROUP_COPY_BYTES = 16
+_GROUP_BYTES = 8
+_NUMBERING_CELL_BYTES = 9
+_NUMBERING_CLONE_BYTES = 24
 # Bytes that each step holds whatever its size.
 _FIXED_BYTES = 1 << 16
+# Below this mean, p_clonal is its series x / 2 - x² / 12, exact to the
+# float's precision there, since the Poisson tails underflow near the
+# smallest floats.
+_SERIES_BELOW = 1e-8
 
 
 def _check(needed: int, max_bytes: int | None, what: str) -> None:
     if max_bytes is not None and needed > max_bytes:
         raise MemoryError(
             f"Calling clones from recorder alleles holds about {needed} bytes for "
-            f"{what}, more than the memory budget of {max_bytes} bytes. Raise "
-            "mem_budget."
+            f"{what}, more than the {max_bytes} bytes that the memory budget leaves "
+            "it. Raise mem_budget."
         )
 
 
@@ -169,7 +177,11 @@ def _bank_texts(values: pd.Series, character: str) -> np.ndarray:
             f"The bank of {character!r} holds {len(bad)} alleles that are not text, "
             f"such as {examples}; every allele must be text, as the import writes it"
         )
-    return texts
+    # The import strips each token, so the bank's alleles compare stripped.
+    stripped: np.ndarray = np.asarray(
+        [value.strip() for value in texts.tolist()], dtype=object
+    )
+    return stripped
 
 
 def _bank_numbers(values: pd.Series, character: str, column: str) -> np.ndarray:
@@ -197,8 +209,9 @@ def allele_banks(frequencies: Any) -> dict[str, AlleleBank]:
         frequencies: A mapping from each character's name, its integration
             or ``{integration}-{site}`` as ``export_characters`` names it, to
             a pandas DataFrame with the columns ``allele``, the allele's
-            text, and ``normalized_count``, its frequency among the bank's
-            edited observations from 0 to 1, and optionally
+            text, compared without surrounding spaces as the import reads
+            alleles, and ``normalized_count``, its frequency among the
+            bank's edited observations from 0 to 1, and optionally
             ``sample_count``, the samples that hold it, as DARLIN's banks
             write them. Other columns are not read.
 
@@ -322,9 +335,9 @@ def allele_call_settings(
     ``"graph"`` needs ``max_frequency``, ``max_samples`` or both, since a
     graph through every allele joins clones through their most frequent
     edits. ``"p_clonal"`` needs a bank, since rates measured in the cells
-    themselves make every allele's p_clonal at least that of an allele seen
-    once at its own rate, 1 - 2/e or about 0.42, and it tests each allele
-    in place of ``max_frequency``. ``max_samples`` needs banks that count
+    themselves give an allele seen in n cells a mean λM of n, so every
+    p_clonal is at least (e - 2) / (e - 1), about 0.42, and it tests each
+    allele in place of ``max_frequency``. ``max_samples`` needs banks that count
     each allele's samples.
 
     Raises:
@@ -414,7 +427,8 @@ def clonal_p_values(rates: Any, observations: Any) -> np.ndarray:
     observations, X Poisson with mean x = λM, and given that it was seen,
     p_clonal = P(X > 1 | X > 0) = (1 - e^(-x) - x e^(-x)) / (1 - e^(-x)).
     It is computed as the Poisson tails P(X ≥ 2) / P(X ≥ 1), which stay
-    accurate as x approaches 0, where p_clonal approaches x / 2; a rate of
+    accurate as x approaches 0, and below 1e-8 as x / 2 - x² / 12, the
+    leading terms of their ratio, where the tails would underflow; a rate of
     0, an allele missing from the bank, gives 0.
 
     Args:
@@ -430,8 +444,10 @@ def clonal_p_values(rates: Any, observations: Any) -> np.ndarray:
     if np.any(~np.isfinite(means)) or np.any(means < 0):
         raise ValueError("rates and observations must be finite and at least 0")
     p_values = np.zeros(means.shape, dtype=np.float64)
-    positive = means > 0
-    p_values[positive] = pdtrc(1, means[positive]) / pdtrc(0, means[positive])
+    tails = means >= _SERIES_BELOW
+    p_values[tails] = pdtrc(1, means[tails]) / pdtrc(0, means[tails])
+    small = ~tails
+    p_values[small] = means[small] / 2 - means[small] ** 2 / 12
     return p_values
 
 
@@ -489,6 +505,9 @@ class AlleleObservations:
         character_names: The name of each character, ``{integration}-{site}``
             or its integration alone.
         allele_texts: The text of each allele, as an object array.
+        unedited_characters: The names of the alleles' characters that hold
+            no edit, such as an array that every cell reads unedited, which a
+            bank may name.
     """
 
     cells: np.ndarray
@@ -496,6 +515,7 @@ class AlleleObservations:
     alleles: np.ndarray
     character_names: tuple[str, ...]
     allele_texts: np.ndarray = field(repr=False)
+    unedited_characters: tuple[str, ...] = ()
 
     def __len__(self) -> int:
         return len(self.cells)
@@ -598,24 +618,24 @@ def allele_clone_calls(
 
     Raises:
         ValueError: If the inputs are inconsistent, a bank names no
-            character with an edit, or two characters share a name that a
+            character of the alleles, or two characters share a name that a
             bank names.
         MemoryError: If a step does not fit ``max_bytes``.
     """
     room = _Room(None if max_bytes is None else int(max_bytes))
-    room.check(_CELL_BYTES * n_cells + _FIXED_BYTES, "the cells")
-    room.held += _CELL_BYTES * n_cells
+    room.check(_GROUP_COPY_BYTES * n_cells + _FIXED_BYTES, "the cells")
     group_codes = _group_codes(groups, n_cells)
+    room.held += _GROUP_BYTES * n_cells
     _check_observations(observations, n_cells)
     names = observations.character_names
     if banks is not None:
-        known = set(names)
+        known = set(names) | set(observations.unedited_characters)
         unknown = sorted(name for name in banks if name not in known)
         if unknown:
+            listed = ", ".join(map(repr, sorted(known))) if known else "none"
             raise ValueError(
-                f"frequencies names {unknown[0]!r}, which no edited site of these "
-                "alleles belongs to; the characters with edits are "
-                f"{', '.join(map(repr, sorted(known)))}"
+                f"frequencies names {unknown[0]!r}, which is no character of these "
+                f"alleles; their characters are {listed}"
             )
         shared = sorted(name for name in set(names) if names.count(name) > 1)
         if shared:
@@ -731,11 +751,19 @@ def allele_clone_calls(
     room.held += 8 * (n_cells + 1 + len(sets.items)) - 16 * n_linked
     calls = set_clones(sets, groups=group_codes, method="shared", max_bytes=room.left())
     n_alleles = sets.sizes
-    room.held += 8 * n_cells + 17 * n_cells
+    # The calls hold each cell's clone and doublet flag and each clone's size,
+    # beside each cell's rare alleles.
+    room.held += 17 * n_cells + 8 * calls.n_clones + 8 * n_cells
     counts["cells_with_rare_alleles"] = int(np.count_nonzero(n_alleles > 0))
 
     # A clone's alleles are the distinct rare alleles of its cells.
-    room.check(_CLONE_ALLELE_BYTES * len(sets.items) + _FIXED_BYTES, "the clones")
+    room.check(
+        _CLONE_ALLELE_BYTES * len(sets.items)
+        + _NUMBERING_CELL_BYTES * n_cells
+        + _NUMBERING_CLONE_BYTES * calls.n_clones
+        + _FIXED_BYTES,
+        "the clones",
+    )
     in_clone = calls.codes >= 0
     pair_clones = np.repeat(calls.codes, n_alleles)
     kept_pairs = pair_clones >= 0

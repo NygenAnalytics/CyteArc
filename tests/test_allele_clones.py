@@ -25,6 +25,7 @@ from tests.clone_helpers import (
     open_clone_store,
     smallest_budget,
     traced_peak,
+    traced_steps,
     write_truth_store,
 )
 from tests.clone_truth import (
@@ -437,7 +438,7 @@ def test_allele_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -> 
         store.clones.allele_clones(alleles, method="DARLIN", max_frequency=0.5)
     with pytest.raises(ValueError, match="needs frequencies"):
         store.clones.allele_clones(alleles, method="p_clonal")
-    with pytest.raises(ValueError, match="names 'CC', which no edited site"):
+    with pytest.raises(ValueError, match="names 'CC', which is no character"):
         store.clones.allele_clones(
             alleles,
             method="graph",
@@ -622,17 +623,23 @@ def test_calling_holds_no_more_than_the_smallest_budget_it_accepts(
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize(("n_cells", "placeholders"), [(2_000, None), (6_000, 0.97)])
 def test_calling_on_wide_characters_holds_no_more_than_the_smallest_budget_it_accepts(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, n_cells, placeholders
 ) -> None:
-    """PEtracer's characters of 2,000 cells by 300 sites: 600,000 records."""
+    """PEtracer's characters by 300 sites, drawn evenly or nearly all the placeholder !."""
     rng = np.random.default_rng(21)
-    cells = [f"cell{index:06d}" for index in range(2_000)]
+    cells = [f"cell{index:06d}" for index in range(n_cells)]
     header = ["cell_barcode"] + [
         f"intID{k}-{site}" for k in range(100) for site in ("EMX1", "HEK3", "RNF2")
     ]
+    weights = (
+        None
+        if placeholders is None
+        else [placeholders] + [(1 - placeholders) / 10] * 10
+    )
     tokens = rng.choice(
-        np.asarray(list("*-12345678!"), dtype=object), size=(2_000, 300)
+        np.asarray(list("!*-12345678"), dtype=object), size=(n_cells, 300), p=weights
     )
     path = tmp_path / "characters.csv"
     path.write_text(
@@ -666,3 +673,323 @@ def test_calling_on_wide_characters_holds_no_more_than_the_smallest_budget_it_ac
     assert peak <= budget
     # The records, not the fixed bytes, set the budget.
     assert budget > 4 * (8 << 20)
+
+
+def _characters_store(tmp_path: Path, rows: list[str], header: str):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    cells = [row.split(",")[0] for row in rows]
+    path = tmp_path / "characters.csv"
+    path.write_text(header + "\n" + "\n".join(rows) + "\n")
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((len(cells), 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=cells,
+    )
+    store = open_clone_store(tmp_path / "store.zarr")
+    alleles = store.clones.import_alleles(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    return store, alleles
+
+
+# PEtracer's characters of six cells on three sites of two integrations: the
+# mark 1 at intID1-EMX1 in c0 and c1 and at intID1-HEK3 in c2 and c3, the mark
+# 4 at intID2-RNF2 in c0 and c4, the mark 2 in c5 alone; ! is a placeholder of
+# an unknown mark, - a missing site and * an unedited one.
+_PETRACER = (
+    "cell_barcode,intID1-EMX1,intID1-HEK3,intID2-RNF2",
+    [
+        "c0,1,*,4",
+        "c1,1,!,*",
+        "c2,-,1,*",
+        "c3,-,1,!",
+        "c4,!,-,4",
+        "c5,2,-,!",
+    ],
+)
+_NAMES = ("intID1-EMX1", "intID1-HEK3", "intID2-RNF2")
+
+
+def test_marks_of_named_sites_are_alleles_of_their_own_characters(tmp_path) -> None:
+    header, rows = _PETRACER
+    store, alleles = _characters_store(tmp_path, rows, header)
+    # Banks keyed as export_characters names the characters, each lacking
+    # every mark, so that every mark is rare.
+    lacking = {
+        name: pd.DataFrame({"allele": ["9"], "normalized_count": [0.5]})
+        for name in _NAMES
+    }
+    clones = store.clones.allele_clones(
+        alleles, method="graph", frequencies=lacking, max_frequency=1e-9
+    )
+    # The same mark at two sites is two alleles: c0 and c1 share 1 at EMX1,
+    # c2 and c3 share it at HEK3, and the placeholders of c3 and c5 at RNF2
+    # name no allele.
+    assert loaded_partition(store, clones) == {
+        frozenset({"c0", "c1", "c4"}),
+        frozenset({"c2", "c3"}),
+        frozenset({"c5"}),
+    }
+    assert store.clones.load_clones(clones).cells["n_alleles"].tolist() == [
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+    ]
+    # A bank keyed by the integration alone names no character of these sites.
+    with pytest.raises(ValueError, match="names 'intID1', which is no character"):
+        store.clones.allele_clones(
+            alleles,
+            method="graph",
+            frequencies={**lacking, "intID1": lacking["intID1-EMX1"]},
+            max_frequency=1e-9,
+        )
+
+
+def test_p_clonal_counts_placeholders_and_not_missing_sites_among_the_edited_cells(
+    tmp_path,
+) -> None:
+    header, rows = _PETRACER
+    store, alleles = _characters_store(tmp_path, rows, header)
+    # At intID1-EMX1, c0, c1, c4 (a placeholder) and c5 hold an edit and c2
+    # and c3 are missing: M = 4, so the mark 1 at rate 0.025 has λM = 0.1 and
+    # p_clonal 0.0492, which survives beside three alleles missing from their
+    # banks (p 0) since 0.0492·4 ≤ 4·0.05. Counted as edits, the missing sites
+    # would make M = 6, λM = 0.15 and p 0.0731, which does not, and c1 would
+    # lose its only rare allele.
+    banks = {
+        "intID1-EMX1": pd.DataFrame({"allele": ["1"], "normalized_count": [0.025]}),
+        "intID1-HEK3": pd.DataFrame({"allele": ["9"], "normalized_count": [0.5]}),
+        "intID2-RNF2": pd.DataFrame({"allele": ["9"], "normalized_count": [0.5]}),
+    }
+    clones = store.clones.allele_clones(alleles, method="p_clonal", frequencies=banks)
+    assert loaded_partition(store, clones) == {
+        frozenset({"c0", "c1", "c4"}),
+        frozenset({"c2", "c3"}),
+        frozenset({"c5"}),
+    }
+    assert (
+        dict(store.artifacts.load(clones).attrs)["rule_counts"][
+            "alleles_not_significant"
+        ]
+        == 0
+    )
+
+
+def test_bank_coverage_counts_each_allele_once_across_groups(tmp_path) -> None:
+    header, rows = _PETRACER
+    store, alleles = _characters_store(tmp_path, rows, header)
+    store.cells.insert("mouse", np.asarray(["m1"] * 3 + ["m2"] * 3, dtype=object))
+    # The bank of HEK3 lists the mark 1, which c2 of m1 and c3 of m2 hold, a
+    # test in each group: one allele, two observations.
+    banks = {
+        "intID1-EMX1": pd.DataFrame({"allele": ["9"], "normalized_count": [0.5]}),
+        "intID1-HEK3": pd.DataFrame({"allele": ["1"], "normalized_count": [1e-6]}),
+        "intID2-RNF2": pd.DataFrame({"allele": ["9"], "normalized_count": [0.5]}),
+    }
+    clones = store.clones.allele_clones(
+        alleles, method="graph", frequencies=banks, max_frequency=2e-5, within="mouse"
+    )
+    attributes = dict(store.artifacts.load(clones).attrs)
+    assert attributes["bank_coverage"] == [
+        {
+            "character": "intID1-EMX1",
+            "alleles": 2,
+            "alleles_in_bank": 0,
+            "observations": 3,
+            "observations_in_bank": 0,
+        },
+        {
+            "character": "intID1-HEK3",
+            "alleles": 1,
+            "alleles_in_bank": 1,
+            "observations": 2,
+            "observations_in_bank": 2,
+        },
+        {
+            "character": "intID2-RNF2",
+            "alleles": 1,
+            "alleles_in_bank": 0,
+            "observations": 2,
+            "observations_in_bank": 0,
+        },
+    ]
+    # Each group's tests are its own: 1 at EMX1 in m1, 2 at EMX1 in m2, 1 at
+    # HEK3 in each, and 4 at RNF2 in each.
+    assert attributes["rule_counts"]["alleles"] == 6
+    # The groups split c0, c1 and c4, and c2 and c3.
+    assert loaded_partition(store, clones) == {
+        frozenset({"c0", "c1"}),
+        frozenset({"c2"}),
+        frozenset({"c3"}),
+        frozenset({"c4"}),
+        frozenset({"c5"}),
+    }
+
+
+def test_a_bank_may_name_a_character_whose_cells_are_all_unedited(tmp_path) -> None:
+    header = "cell_barcode,intID1-EMX1,intID1-HEK3"
+    rows = ["c0,1,*", "c1,1,*", "c2,-,*"]
+    store, alleles = _characters_store(tmp_path, rows, header)
+    banks = {
+        "intID1-EMX1": pd.DataFrame({"allele": ["2"], "normalized_count": [0.5]}),
+        "intID1-HEK3": pd.DataFrame({"allele": ["2"], "normalized_count": [0.5]}),
+    }
+    clones = store.clones.allele_clones(
+        alleles, method="graph", frequencies=banks, max_frequency=1e-9
+    )
+    assert loaded_partition(store, clones) == {frozenset({"c0", "c1"})}
+    with pytest.raises(
+        ValueError,
+        match="names 'RNF2', which is no character of these alleles; their "
+        "characters are 'intID1-EMX1', 'intID1-HEK3'",
+    ):
+        store.clones.allele_clones(
+            alleles,
+            method="graph",
+            frequencies={**banks, "RNF2": banks["intID1-EMX1"]},
+            max_frequency=1e-9,
+        )
+    # An artifact without a record has no character at all.
+    _store, empty = _characters_store(tmp_path / "empty", ["c0,-,-"], header)
+    with pytest.raises(ValueError, match="their characters are 'intID1-EMX1'"):
+        _store.clones.allele_clones(
+            empty,
+            method="graph",
+            frequencies={"XA": banks["intID1-EMX1"]},
+            max_frequency=0.5,
+        )
+
+
+def _assert_steps_within(steps: list[tuple[str, int, int]]) -> None:
+    over = [(what, stated, peak) for what, stated, peak in steps if peak > stated]
+    assert not over, over
+    assert len(steps) > 10
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        # Nearly every site the placeholder !, so the edits set the bytes.
+        {"!": 0.97, "*": 0.003, "-": 0.003, "1": 0.024},
+        # Nearly every site unedited or missing, so the records set them.
+        {"*": 0.5, "-": 0.45, "!": 0.01, "1": 0.02, "2": 0.02},
+    ],
+)
+def test_each_step_on_millions_of_records_holds_no_more_than_its_check_states(
+    tmp_path, monkeypatch, tokens
+) -> None:
+    """PEtracer's characters of 12,000 cells by 300 sites, 3.6 million records."""
+    rng = np.random.default_rng(22)
+    n_cells = 12_000
+    cells = [f"cell{index:06d}" for index in range(n_cells)]
+    header = ["cell_barcode"] + [
+        f"intID{k}-{site}" for k in range(100) for site in ("EMX1", "HEK3", "RNF2")
+    ]
+    drawn = rng.choice(
+        np.asarray(list(tokens), dtype=object),
+        size=(n_cells, 300),
+        p=list(tokens.values()),
+    )
+    path = tmp_path / "characters.csv"
+    path.write_text(
+        ",".join(header)
+        + "\n"
+        + "".join(
+            cell + "," + ",".join(row) + "\n"
+            for cell, row in zip(cells, drawn.tolist(), strict=True)
+        )
+    )
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((n_cells, 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=cells,
+    )
+    store = open_clone_store(tmp_path / "store.zarr")
+    alleles = store.clones.import_alleles(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    budget = 1 << 34
+    monkeypatch.setattr(store, "memoryBytes", budget)
+
+    def call() -> object:
+        return store.clones.allele_clones(
+            alleles, method="graph", max_frequency=0.5, invalidate_cache=True
+        )
+
+    # Compiled kernels are warmed before anything is traced.
+    call()
+    _assert_steps_within(traced_steps(monkeypatch, call, budget))
+
+
+@pytest.mark.slow
+def test_each_step_with_banks_and_groups_holds_no_more_than_its_check_states(
+    tmp_path, monkeypatch
+) -> None:
+    rng = np.random.default_rng(23)
+    n_cells = 60_000
+    barcodes = sorted(
+        {"".join(row) for row in rng.choice(list("ACGT"), size=(n_cells + 500, 16))}
+    )[:n_cells]
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((n_cells, 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=barcodes,
+    )
+    store = open_clone_store(tmp_path / "store.zarr")
+    store.cells.insert(
+        "mouse", np.asarray([f"m{index % 7}" for index in range(n_cells)], dtype=object)
+    )
+    banks, paths = {}, []
+    for array in DARLIN_ARRAYS:
+        read = np.flatnonzero(rng.random(n_cells) < 0.8)
+        drawn = np.minimum(rng.zipf(1.4, size=len(read)), 20_000)
+        texts = np.asarray(
+            [f"{20 + d % 200}_{40 + d % 200 + d // 200}del" for d in drawn],
+            dtype=object,
+        )
+        texts[rng.random(len(read)) < 0.02] = "X"
+        texts[drawn == 1] = "[]"
+        lines = (
+            pd.Series(np.asarray(barcodes, dtype=object)[read])
+            .groupby(texts)
+            .apply(list)
+        )
+        paths.append(_pair(tmp_path / array, dict(lines.items())))
+        listed = [allele for allele in lines.index if allele not in ("[]", "X")][::2]
+        filler = [f"{k}_{k + 5}delinsA" for k in range(50_000)]
+        banks[array] = pd.DataFrame(
+            {
+                "allele": listed + filler,
+                "normalized_count": rng.random(len(listed) + len(filler)) * 1e-4,
+                "sample_count": rng.integers(0, 4, size=len(listed) + len(filler)),
+            }
+        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        alleles = store.clones.import_alleles(
+            paths,
+            cell_selection=store.snapshot_cell_selection(),
+            integrations=list(DARLIN_ARRAYS),
+        )
+    budget = 1 << 34
+    monkeypatch.setattr(store, "memoryBytes", budget)
+    for method, rules in (("graph", DARLIN_RULES), ("p_clonal", {"max_alleles": 3})):
+
+        def call(method=method, rules=rules) -> object:
+            return store.clones.allele_clones(
+                alleles,
+                method=method,
+                frequencies=banks,
+                invalidate_cache=True,
+                **rules,
+            )
+
+        call()
+        _assert_steps_within(traced_steps(monkeypatch, call, budget))
