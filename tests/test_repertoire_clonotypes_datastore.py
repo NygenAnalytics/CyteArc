@@ -19,7 +19,11 @@ import pytest
 import cytearc.datastore._operations.repertoire as repertoire_operations
 from cytearc import plotting
 from cytearc.datastore.datastore import DataStore
-from cytearc.metadata.rows import text_read_bytes
+from cytearc.metadata.rows import (
+    READ_OBJECT_BYTES,
+    array_row_selection_parts,
+    text_read_bytes,
+)
 from cytearc.repertoire import SLOTS, Clonotypes
 from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import (
@@ -716,13 +720,22 @@ def test_loaded_expansion_of_other_cells_matches_their_receptor_types(
     store, receptors = _receptors(tmp_path)
     ref = store.repertoire.clonotypes(receptors)
     store.cells.insert("first_half", np.arange(N_CELLS) < 4)
-    saved = store.clones.expansion(
-        ref, cell_selection=store.snapshot_cell_selection("first_half")
-    )
+    measured = store.snapshot_cell_selection("first_half")
+    saved = store.clones.expansion(ref, cell_selection=measured)
     # The four measured cells are T cells of one group: 500 bytes each and
     # 2,000 for the group, their IDs as text, the clonotypes with their
     # labels, and the clonotypes' eight cells matched to the measured ones,
-    # 56 bytes each, and 32 for each measured cell and 8 for its receptor type.
+    # 56 bytes each, and 32 for each measured cell and 8 for its receptor type,
+    # with the read before: the largest stored chunk of the two selections and
+    # the clonotypes' codes, and Zarr's objects.
+    before = max(
+        array_row_selection_parts(artifact_group(store.zw, artifact)[name])[0]
+        for artifact, name in (
+            (measured, "values"),
+            (store.artifacts.inspect(ref).input_ref("cell_selection"), "values"),
+            (ref, "codes"),
+        )
+    )
     needed = (
         4 * 500
         + 2_000
@@ -731,6 +744,8 @@ def test_loaded_expansion_of_other_cells_matches_their_receptor_types(
         + CLONOTYPE_LABELS_READ
         + 8 * 56
         + 4 * (32 + 8)
+        + before
+        + READ_OBJECT_BYTES
     )
     monkeypatch.setattr(store, "memoryBytes", needed - 1)
     with pytest.raises(MemoryError, match=f"of 4 cells holds about {needed} bytes"):
