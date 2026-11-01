@@ -626,6 +626,9 @@ class VariantCountImportArguments(OperationArguments):
     # it, and the format's own unit otherwise.
     count_unit: Literal["reads", "umis", "molecules"] = parameter()
     swap_strands: bool = parameter()
+    # The variants or positions of Tapestri and DAb-seq files imported beside
+    # their passing variants, sorted and once each; empty for other formats.
+    variants: tuple[str, ...] = parameter()
     invalidate_cache: bool = execution()
 
 

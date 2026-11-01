@@ -1003,9 +1003,7 @@ def variant_count_frames(
             else array.astype(np.int64)
         )
     counts_frame = pd.DataFrame(count_columns)
-    call_cells, call_alleles, call_source_codes, call_value_codes, call_quality = (
-        calls
-    )
+    call_cells, call_alleles, call_source_codes, call_value_codes, call_quality = calls
     calls_frame = pd.DataFrame(
         {
             "cell": cell_column(call_cells),

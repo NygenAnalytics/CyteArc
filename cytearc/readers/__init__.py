@@ -5,6 +5,7 @@
     - CrDirReader: A class to read in CellRanger (Cr) data, in the form of a directory.
     - CrReader: A class to read in CellRanger (Cr) data.
     - H5adReader: A class to read in data in the form of a H5ad file (h5 file with AnnData information).
+    - TapestriReader: A class to read in Mission Bio Tapestri single-cell DNA and protein data.
 """
 
 from typing import TYPE_CHECKING
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
     from .h5ad import H5adInspectResult, H5adReader, inspect_h5ad
     from .mtx import CrDirReader, MtxCandidate, MtxReader, inspect_mtx
     from .seurat import SeuratInspectResult, SeuratReader, inspect_seurat
+    from .tapestri import TapestriReader
 
 __all__ = [
     "CrH5Reader",
@@ -32,6 +34,7 @@ __all__ = [
     "SeuratReader",
     "inspect_seurat",
     "CSVReader",
+    "TapestriReader",
 ]
 
 __getattr__, __dir__ = _lazy_facade(
@@ -50,6 +53,7 @@ __getattr__, __dir__ = _lazy_facade(
         "SeuratInspectResult": ".seurat",
         "SeuratReader": ".seurat",
         "inspect_seurat": ".seurat",
+        "TapestriReader": ".tapestri",
     },
     set_module=True,
 )

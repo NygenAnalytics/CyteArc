@@ -48,6 +48,8 @@ _EXPECTED_EXPORTS = {
     "PipelineRun": "cytearc.datastore.pipeline_run",
     "SparseToZarr": "cytearc.writers",
     "SubsetZarr": "cytearc.writers",
+    "TapestriReader": "cytearc.readers",
+    "TapestriToZarr": "cytearc.writers",
     "clean_array": "cytearc.utils",
     "configure_output": "cytearc.utils",
     "controlled_compute": "cytearc.utils",

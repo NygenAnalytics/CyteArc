@@ -439,7 +439,11 @@ def test_overlapping_alleles_bound_each_count_by_the_depth() -> None:
     )
     # The stated depth is kept whole, and no count is derived or dropped.
     assert depth.tolist() == [(0, 0, 1), (1, 0, 2)]
-    assert stored[["cell", "key", "count"]].tolist() == [(0, 1, 1), (0, 2, 1), (1, 2, 2)]
+    assert stored[["cell", "key", "count"]].tolist() == [
+        (0, 1, 1),
+        (0, 2, 1),
+        (1, 2, 2),
+    ]
     with pytest.raises(ValueError, match="add up to 2, more than its depth 1"):
         finish_band(
             counts,

@@ -21,6 +21,7 @@ from cytearc.readers import (
     MtxReader,
     SeuratInspectResult,
     SeuratReader,
+    TapestriReader,
 )
 from cytearc.readers._text import DuplicateFeatureIds
 from tests.signature_contracts import signature_digest
@@ -79,6 +80,14 @@ _PUBLIC_CLASS_METHODS = {
         "get_assay",
         "get_reduction",
     ),
+    TapestriReader: (
+        "__init__",
+        "consume",
+        "count_value_ranges",
+        "get_cell_columns",
+        "get_feature_columns",
+        "close",
+    ),
 }
 _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
     CrReader: "0237d8e7c63b64fb6526f3536d5f65c1d704fe56675bf38b41644be419a5607f",
@@ -90,6 +99,7 @@ _PUBLIC_CLASS_SIGNATURE_DIGESTS = {
     CSVReader: "8aa6c17c876afb62765584fc7ff64d2838c66ef53095da10d7198ca60ab83851",
     MtxReader: "b0ce7fc6984e0b49abd3e1e3d65ae97194af7b7de083b1d0ea0496735a8c5dd0",
     SeuratReader: "68678f67361080e8121eaae116ace832c1e0defc73ca36e3e3aa02d4d96718e6",
+    TapestriReader: "d23c113f0da998082610e4ca3f976752be27765824e55bf3473ae90bf90610be",
 }
 _MODULE_SIGNATURE_DIGEST = (
     "21c4a2974e1193da7ebe9be85417b73e2525e875e885c75367a61bf484d4c171"
@@ -125,6 +135,7 @@ def test_readers_facade_surface_is_stable():
         "SeuratReader",
         "inspect_seurat",
         "CSVReader",
+        "TapestriReader",
     ]
     expected = {
         "CSVReader",
@@ -140,6 +151,7 @@ def test_readers_facade_surface_is_stable():
         "inspect_h5ad",
         "inspect_mtx",
         "inspect_seurat",
+        "TapestriReader",
     }
     assert expected.issubset(dir(readers_module))
     assert not hasattr(readers_module, "get_file_handle")

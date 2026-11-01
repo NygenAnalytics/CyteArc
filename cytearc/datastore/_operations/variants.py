@@ -242,8 +242,33 @@ _GENOTYPE_CLONE_ATTRIBUTES = (
 )
 
 
+# The formats whose files hold a chosen subset of variants.
+_VARIANT_CHOICE_FORMATS = ("tapestri", "dabseq")
+
+
+def _variant_names(variants: Any) -> tuple[str, ...]:
+    """The variants or positions that ``variants`` names, sorted and once each."""
+    if variants is None:
+        return ()
+    variants = _listed(variants)
+    if (
+        isinstance(variants, str | bytes)
+        or not isinstance(variants, Sequence)
+        or not all(isinstance(item, str) for item in variants)
+    ):
+        raise TypeError(
+            "variants must be a sequence of variant or position names, such as "
+            "['chr1:115256513:G/T'], or None"
+        )
+    return tuple(sorted(set(variants)))
+
+
 def _read_source(
-    path: str, format: str | None, swap_strands: bool, threads: int
+    path: str,
+    format: str | None,
+    swap_strands: bool,
+    threads: int,
+    variants: tuple[str, ...] = (),
 ) -> VariantSource:
     """Read the description of one file or folder of variant counts."""
     from ...readers import _variant_files as files
@@ -265,6 +290,19 @@ def _read_source(
             "swap_strands applies to mgatk files from call or bcall of mgatk 0.4.0 "
             f"to 0.5.8, not to {detected} files"
         )
+    if variants and detected not in _VARIANT_CHOICE_FORMATS:
+        raise ValueError(
+            "variants chooses the variants of Tapestri and DAb-seq files, which "
+            f"import their passing variants by default, not of {detected} files"
+        )
+    if detected == "tapestri":
+        from ...readers.tapestri import tapestri_source
+
+        return tapestri_source(path, variants)
+    if detected == "dabseq":
+        from ...readers.tapestri import dabseq_source
+
+        return dabseq_source(path, variants)
     if detected in ("mgatk", "maegatk"):
         from ...readers.mgatk import mgatk_source
 
@@ -654,14 +692,16 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         format: str | None = None,
         count_unit: str | None = None,
         swap_strands: bool = False,
+        variants: Sequence[str] | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Import per-cell allele counts of mitochondrial or targeted variants.
 
         Mitochondrial lineage tracing (mtscATAC-seq, MAESTER) and targeted
-        genotyping (GoT, GIFT) count, for each cell, the reads or UMIs of each
-        allele at variant sites: the positions of the mitochondrial genome, or
-        targets and probes without coordinates. The import reads those counts,
+        genotyping (GoT, GIFT, Tapestri) count, for each cell, the reads or
+        UMIs of each allele at variant sites: the positions of the
+        mitochondrial genome or of a targeted panel, or targets and probes
+        without coordinates. The import reads those counts,
         joins each cell to a selected cell by barcode and saves a
         ``variant_counts`` artifact: the sites and their alleles, and for each
         cell its depth at each site, its count of each allele and the calls
@@ -674,10 +714,23 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         folder, a cellsnp-lite or MQuad folder, a VarTrix folder of its
         coverage matrices with the VCF and barcodes, MiTo's allele frequency
         matrix, giftwrap's ``counts.N.h5`` or a folder of its per-UMI table,
-        and the GoT tables of IronThrone, GoT-Multi, Gotcha and GEO. The
-        variants API reference lists the files and columns of each format.
-        Six-column mgatk files look like maegatk's, which counts strands the
-        other way round, so they need ``format``.
+        the GoT tables of IronThrone, GoT-Multi, Gotcha and GEO, a Tapestri
+        Pipeline ``.h5`` file of DNA variants and a DAb-seq ``.hdf5`` file of
+        genotypes. The variants API reference lists the files and columns of
+        each format. Six-column mgatk files look like maegatk's, which counts
+        strands the other way round, so they need ``format``.
+
+        A Tapestri file imports the variants that pass the pipeline's default
+        filters, and a DAb-seq file every variant, with those that
+        ``variants`` names. Each position is a site, whose alleles are its
+        reference and the alternatives of its variants; Tapestri gives each
+        variant's alternative reads as ``AF × DP / 100``, its depth ``DP`` and
+        its genotype ``NGT`` as a call with the genotype quality ``GQ``, and
+        DAb-seq its ``AD``, ``RD``, ``DP`` and ``GT`` with ``GQ``. Variants
+        with an empty ``ALT``, or alleles that are not bases, are skipped
+        with a warning and counted in the source record. A Tapestri file's
+        cells are named ``<sample>__<barcode>``, as
+        :class:`~cytearc.TapestriToZarr` names them.
 
         A cell's ID is its file's ``barcode_prefix``, the barcode and
         ``barcode_suffix``, matched exactly; ``barcode_pattern`` keeps the
@@ -723,8 +776,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 for every path, or one per path.
             format: One of ``"mgatk"``, ``"maegatk"``, ``"cellsnp_lite"``,
                 ``"mquad"``, ``"vartrix"``, ``"mito"``, ``"giftwrap"``,
-                ``"ironthrone"``, ``"got"``, ``"got_multi"`` and ``"gotcha"``,
-                or None to recognise each path's format.
+                ``"ironthrone"``, ``"got"``, ``"got_multi"``, ``"gotcha"``,
+                ``"tapestri"`` and ``"dabseq"``, or None to recognise each
+                path's format.
             count_unit: ``"reads"``, ``"umis"`` or ``"molecules"``: what
                 cellsnp-lite, MQuad and VarTrix counted, which their files do
                 not state, since it depends on how they were run, and what a
@@ -734,6 +788,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             swap_strands: Swap the forward and reverse counts of mgatk files
                 written by ``call`` or ``bcall`` of mgatk 0.4.0 to 0.5.8, which
                 counted reverse-aligned reads as forward.
+            variants: Variants of Tapestri or DAb-seq files to import beside
+                those that pass, named as the file names them, such as
+                ``"chr1:115256513:G/T"``, or positions, such as
+                ``"chr1:115256513"`` for every variant there; None for the
+                passing variants alone.
             invalidate_cache: Import again instead of reusing saved counts.
 
         Returns:
@@ -749,7 +808,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 references, count in different units, define depth
                 differently or give their counts different fields, a cell is
                 counted twice at a site, an option lists a value for another
-                number of paths, or the selection holds no cell.
+                number of paths, ``variants`` is given for another format or
+                names a variant that a file lacks or cannot be read, a file
+                has no variant to import, or the selection holds no cell.
             FileNotFoundError: If a path or a file it needs is missing.
             PermissionError: If the store is read-only and the counts are not
                 saved yet.
@@ -761,6 +822,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             raise TypeError("cell_selection must be an ArtifactRef")
         bool_argument(swap_strands, "swap_strands")
         bool_argument(invalidate_cache, "invalidate_cache")
+        chosen_variants = _variant_names(variants)
         if format is not None and format not in VARIANT_FORMATS:
             raise ValueError(
                 f"format must be one of {', '.join(VARIANT_FORMATS)}, or None, not "
@@ -777,7 +839,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         def identify(path: str | os.PathLike[str]) -> str:
             key = os.fspath(path)
             if key not in readers:
-                reader = _read_source(key, format, swap_strands, threads)
+                reader = _read_source(
+                    key, format, swap_strands, threads, chosen_variants
+                )
                 digest, digests = source_sha256(reader.files)
                 readers[key] = (reader, digest, digests)
             return readers[key][1]
@@ -816,6 +880,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             sources=tuple(source.record() for source in sources),
             count_unit=rules.count_unit,
             swap_strands=swap_strands,
+            variants=chosen_variants,
             invalidate_cache=invalidate_cache,
         )
         planned = self._plan_variant_counts(arguments, cell_selection, n_cells)
@@ -2353,6 +2418,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 f"counts come from {str(group.attrs['format'])!r} files; use "
                 "method='threshold' for the UMIs of wild type and mutant"
             )
+        if method == "threshold" and str(group.attrs["format"]) == "tapestri":
+            raise ValueError(
+                "method='threshold' compares the reads of the wild type and the "
+                "alternative, and Tapestri's files hold no reads of the reference; "
+                "use method='source' to adopt its NGT calls"
+            )
         table = _stored_sites(group)
         explicit = sites is not None
         chosen = _site_positions(table, sites)
@@ -2364,17 +2435,20 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             if unknown:
                 raise ValueError(f"alleles names {unknown[0]!r}, which no site is")
         n_cells = _n_counts_cells(group)
+        # Each genotyped unit is a site or, for source calls at a site with
+        # coordinates, one of its alternative alleles; -1 marks a whole site.
         if method == "source":
-            genotyped, site_columns = self._source_call_sites(
+            genotyped, unit_alleles, site_columns = self._source_call_sites(
                 group, table, chosen, explicit, n_cells
             )
             site_sources = [", ".join(columns) for columns in site_columns]
-            site_alleles: list[tuple[str, str]] = [("", "") for _ in genotyped]
+            site_alleles = _unit_alleles(table, genotyped, unit_alleles)
             reference_alleles = alternative_alleles = np.empty(0, dtype=np.int64)
         else:
             genotyped, site_alleles, reference_alleles, alternative_alleles = (
                 _compared_alleles(table, chosen, explicit, rules)
             )
+            unit_alleles = np.full(len(genotyped), -1, dtype=np.int64)
             site_columns = [() for _ in genotyped]
             site_sources = ["" for _ in genotyped]
         if not len(genotyped):
@@ -2392,7 +2466,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             cell_selection=cell_selection,
             counts=counts,
             method=cast(Literal["source", "threshold", "gift"], rules.method),
-            sites=tuple(str(labels[site]) for site in genotyped),
+            sites=_unit_labels(labels, genotyped, unit_alleles, site_alleles),
             alleles=tuple(site_alleles) if method != "source" else (),
             min_umis=rules.min_umis,
             min_mutant_umis=rules.min_mutant_umis,
@@ -2447,7 +2521,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             + _REWRITTEN_CHUNKS * min(_ROW_BAND, max(1, most_rows)) * _STORED_BYTES
             + zarr_write_buffer_bytes()
         )
-        per_row = _GENOTYPE_BYTES_PER_ROW[method]
+        site_rank, allele_rank, site_units, max_units = _unit_ranks(
+            table, genotyped, unit_alleles
+        )
+        # A depth row of a site of several units stands for each of them.
+        per_row = _GENOTYPE_BYTES_PER_ROW[method] * max_units
         max_rows = (self.memoryBytes - held) // per_row
         # A band holds at least _MIN_GENOTYPE_BAND_ROWS rows, or every row,
         # and every row of the cell that holds the most.
@@ -2461,9 +2539,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 f"{fewest} rows, more than the memory budget of {self.memoryBytes} "
                 "bytes. Raise mem_budget."
             )
-        site_rank = np.full(table.n_sites, -1, dtype=np.int64)
-        site_rank[genotyped] = np.arange(len(genotyped))
-        allele_rank = site_rank[np.asarray(table.allele_site, dtype=np.int64)]
         cover_rank = _cover_ranks(table, site_rank)
         wild_type_probabilities = np.zeros(0)
         if method == "gift":
@@ -2527,6 +2602,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                     column_place=column_place,
                     source_columns=source_codes,
                     call_value_names=call_value_names,
+                    site_units=site_units,
                 )
                 cells_of_rows = result.cells
                 per_cell = np.bincount(cells_of_rows - first, minlength=width)
@@ -2599,11 +2675,18 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         chosen: np.ndarray,
         explicit: bool,
         n_cells: int,
-    ) -> tuple[np.ndarray, list[tuple[str, ...]]]:
-        """The chosen sites that hold source calls, and each one's call columns.
+    ) -> tuple[np.ndarray, np.ndarray, list[tuple[str, ...]]]:
+        """The units of the chosen sites that hold source calls, with their columns.
 
-        A site's columns come in the order of ``SOURCE_PRECEDENCE``, which a
+        A named site, such as a GoT target, is one unit. A site with
+        coordinates gives one unit per alternative allele that holds calls,
+        since Tapestri and DAb-seq call each variant of a position apart. A
+        unit's columns come in the order of ``SOURCE_PRECEDENCE``, which a
         cell's call follows: the first column that holds one for the cell.
+
+        Returns:
+            Each unit's site, its allele or -1 for a whole site, and its
+            call columns.
         """
         alleles = as_zarr_array(group["call_alleles"], name="call_alleles")
         sources = as_zarr_array(group["call_sources"], name="call_sources")
@@ -2627,44 +2710,57 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         pairs: set[tuple[int, int]] = set()
         for start in range(0, n_rows, int(step)):
             stop = min(n_rows, start + int(step))
-            sites_of_rows = allele_site[np.asarray(alleles[start:stop], dtype=np.int64)]
+            allele_codes = np.asarray(alleles[start:stop], dtype=np.int64)
             codes = np.asarray(sources[start:stop], dtype=np.int64)
-            distinct = np.unique(np.stack([sites_of_rows, codes], axis=1), axis=0)
-            pairs.update((int(site), int(code)) for site, code in distinct.tolist())
-        columns: dict[int, list[str]] = {}
-        for site, code in pairs:
-            columns.setdefault(site, []).append(str(names[code]))
+            distinct = np.unique(np.stack([allele_codes, codes], axis=1), axis=0)
+            pairs.update((int(allele), int(code)) for allele, code in distinct.tolist())
+        # The columns of each unit: (site, allele) at a site with coordinates,
+        # (site, -1) at a named site.
+        columns: dict[tuple[int, int], list[str]] = {}
+        for allele, code in pairs:
+            site = int(allele_site[allele])
+            unit = (site, allele if table.site_contig[site] >= 0 else -1)
+            columns.setdefault(unit, []).append(str(names[code]))
+        units_of_site: dict[int, list[int]] = {}
+        for site, allele in columns:
+            units_of_site.setdefault(site, []).append(allele)
         labels = table.labels()
         kept: list[int] = []
+        kept_alleles: list[int] = []
         chosen_columns: list[tuple[str, ...]] = []
         for site in chosen.tolist():
-            present = columns.get(site, [])
-            if not present:
+            if site not in units_of_site:
                 if explicit:
                     raise ValueError(
                         f"The site {labels[site]!r} holds no call of the source, so "
                         "method='source' cannot genotype it; use method='threshold'"
                     )
                 continue
-            ranked = sorted(
-                present,
-                key=lambda column: (
-                    SOURCE_PRECEDENCE.index(column)
-                    if column in SOURCE_PRECEDENCE
-                    else len(SOURCE_PRECEDENCE),
-                    column,
-                ),
-            )
-            unknown = [column for column in ranked if column not in SOURCE_CALLS]
-            if unknown:
-                raise ValueError(
-                    f"The calls of the column {unknown[0]!r} at the site "
-                    f"{labels[site]!r} have no vocabulary; the known call columns "
-                    f"are {', '.join(SOURCE_CALLS)}"
+            for allele in sorted(units_of_site[site]):
+                ranked = sorted(
+                    columns[(site, allele)],
+                    key=lambda column: (
+                        SOURCE_PRECEDENCE.index(column)
+                        if column in SOURCE_PRECEDENCE
+                        else len(SOURCE_PRECEDENCE),
+                        column,
+                    ),
                 )
-            kept.append(site)
-            chosen_columns.append(tuple(ranked))
-        return np.asarray(kept, dtype=np.int64), chosen_columns
+                unknown = [column for column in ranked if column not in SOURCE_CALLS]
+                if unknown:
+                    raise ValueError(
+                        f"The calls of the column {unknown[0]!r} at the site "
+                        f"{labels[site]!r} have no vocabulary; the known call "
+                        f"columns are {', '.join(SOURCE_CALLS)}"
+                    )
+                kept.append(site)
+                kept_alleles.append(allele)
+                chosen_columns.append(tuple(ranked))
+        return (
+            np.asarray(kept, dtype=np.int64),
+            np.asarray(kept_alleles, dtype=np.int64),
+            chosen_columns,
+        )
 
     def _plan_variant_genotypes(
         self,
@@ -3133,6 +3229,85 @@ def _compared_alleles(
     )
 
 
+def _unit_alleles(
+    table: SiteTable, genotyped: np.ndarray, unit_alleles: np.ndarray
+) -> list[tuple[str, str]]:
+    """Each unit's reference and alternative: empty for a whole site."""
+    references = table.reference_alleles()
+    pairs: list[tuple[str, str]] = []
+    for site, allele in zip(genotyped.tolist(), unit_alleles.tolist(), strict=True):
+        if allele < 0:
+            pairs.append(("", ""))
+            continue
+        reference = int(references[site])
+        pairs.append(
+            (
+                str(table.allele[reference]) if reference >= 0 else "",
+                str(table.allele[allele]),
+            )
+        )
+    return pairs
+
+
+def _unit_labels(
+    labels: np.ndarray,
+    genotyped: np.ndarray,
+    unit_alleles: np.ndarray,
+    site_alleles: Sequence[tuple[str, str]],
+) -> tuple[str, ...]:
+    """Each unit's label: its site's, and for one allele of a site with
+    coordinates, its reference and alternative as Tapestri names variants,
+    such as ``chr1:115256513:G/A``."""
+    named: list[str] = []
+    for site, allele, (reference, alternative) in zip(
+        genotyped.tolist(), unit_alleles.tolist(), site_alleles, strict=True
+    ):
+        label = str(labels[site])
+        if allele < 0:
+            named.append(label)
+        elif reference:
+            named.append(f"{label}:{reference}/{alternative}")
+        else:
+            named.append(f"{label}:{alternative}")
+    return tuple(named)
+
+
+def _unit_ranks(
+    table: SiteTable, genotyped: np.ndarray, unit_alleles: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray] | None, int]:
+    """Where each site's and allele's evidence goes among the genotyped units.
+
+    A whole site's unit takes every allele of the site, and a unit of one
+    allele that allele. A site of one unit ranks it; a site of several
+    units ranks none and lists them, since its depth covers each.
+
+    Returns:
+        Each site's unit or -1, each allele's unit or -1, the units of the
+        sites of several as offsets over the sites and the units, or None,
+        and the most units of a site.
+    """
+    genotyped = np.asarray(genotyped, dtype=np.int64)
+    unit_alleles = np.asarray(unit_alleles, dtype=np.int64)
+    ranks = np.arange(len(genotyped), dtype=np.int64)
+    whole = unit_alleles < 0
+    whole_rank = np.full(table.n_sites, -1, dtype=np.int64)
+    whole_rank[genotyped[whole]] = ranks[whole]
+    allele_rank = whole_rank[np.asarray(table.allele_site, dtype=np.int64)]
+    allele_rank[unit_alleles[~whole]] = ranks[~whole]
+    per_site = np.bincount(genotyped, minlength=table.n_sites)
+    single = per_site[genotyped] == 1
+    site_rank = np.full(table.n_sites, -1, dtype=np.int64)
+    site_rank[genotyped[single]] = ranks[single]
+    site_units: tuple[np.ndarray, np.ndarray] | None = None
+    if not single.all():
+        counts = np.where(per_site > 1, per_site, 0)
+        offsets = np.zeros(table.n_sites + 1, dtype=np.int64)
+        np.cumsum(counts, out=offsets[1:])
+        order = np.lexsort((ranks[~single], genotyped[~single]))
+        site_units = (offsets, ranks[~single][order])
+    return site_rank, allele_rank, site_units, int(per_site.max(initial=1))
+
+
 def _cover_ranks(table: SiteTable, site_rank: np.ndarray) -> np.ndarray:
     """Each site's genotyped site whose evidence its reads are, or -1.
 
@@ -3226,14 +3401,41 @@ def _band_genotypes(
     column_place: np.ndarray,
     source_columns: np.ndarray,
     call_value_names: np.ndarray,
+    site_units: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> _BandCalls:
-    """Call the genotypes of a band's cells at the genotyped sites."""
+    """Call the genotypes of a band's cells at the genotyped units.
+
+    ``site_units`` lists the units of the sites of several, each of which a
+    depth row of the site covers.
+    """
     covered = np.empty(0, dtype=np.int64)
     if "depth" in rows:
         depth_cells, depth = rows["depth"]
-        ranks = cover_rank[depth["depth_sites"].astype(np.int64)]
-        on = (ranks >= 0) & (depth["depth"] > 0)
-        covered = np.unique(_band_keys(depth_cells[on], ranks[on], first, n_genotyped))
+        depth_sites = depth["depth_sites"].astype(np.int64)
+        positive = depth["depth"] > 0
+        ranks = cover_rank[depth_sites]
+        on = (ranks >= 0) & positive
+        covered = _band_keys(depth_cells[on], ranks[on], first, n_genotyped)
+        if site_units is not None:
+            offsets, units = site_units
+            width = (offsets[depth_sites + 1] - offsets[depth_sites]) * positive
+            if width.any():
+                ends = np.cumsum(width)
+                within = np.arange(int(ends[-1]), dtype=np.int64) - np.repeat(
+                    ends - width, width
+                )
+                covered = np.concatenate(
+                    [
+                        covered,
+                        _band_keys(
+                            np.repeat(depth_cells, width),
+                            units[np.repeat(offsets[depth_sites], width) + within],
+                            first,
+                            n_genotyped,
+                        ),
+                    ]
+                )
+        covered = np.unique(covered)
     labels: np.ndarray
     if method == "source":
         call_cells, values = rows["call"]

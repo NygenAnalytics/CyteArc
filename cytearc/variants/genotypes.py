@@ -13,10 +13,10 @@ Three methods call genotypes:
 - ``source`` adopts the calls that a tool wrote into its files, through
   :data:`SOURCE_CALLS`, which maps each call column's labels: GoT tables on
   GEO (``Genotype``), GoT-Multi (``genotype_merged``, ``genotype_final`` and
-  its channels), Gotcha (``genotype_pred``) and Tapestri (``NGT``). A label
-  that means no call becomes ``filtered`` where the cell holds evidence at
-  the site, such as Tapestri's ``NGT`` 3 at a covered site, and ``missing``
-  where it holds none.
+  its channels), Gotcha (``genotype_pred``), Tapestri (``NGT``) and DAb-seq
+  (``GT``). A label that means no call becomes ``filtered`` where the cell
+  holds evidence at the site, such as Tapestri's ``NGT`` 3 at a covered
+  site, and ``missing`` where it holds none.
 - ``threshold`` calls each cell from its UMIs of the wild type and the
   alternative by rules given as parameters, since GoT studies differ: at
   least one mutant UMI calls a patient's cell mutant, and in cell lines a
@@ -102,8 +102,8 @@ _GOT_MULTI = {**_GOT, "Unprofiled": MISSING}
 #: mutation, so its ``MUT`` is ``alternative_present``; GoT-Multi's
 #: ``Unprofiled`` means no evidence and its refined ``FalsePositive`` a mutant
 #: call that its model rejected; Gotcha's ``HET`` is ``heterozygous``; and
-#: Tapestri's ``NGT`` codes 0 to 3 are wild type, heterozygous, homozygous
-#: alternative and no call.
+#: Tapestri's ``NGT`` codes 0 to 3, and DAb-seq's ``GT`` codes, are wild type,
+#: heterozygous, homozygous alternative and no call.
 SOURCE_CALLS: Mapping[str, Mapping[str, int]] = {
     "Genotype": _GOT,
     "genotype": _GOT,
@@ -118,6 +118,12 @@ SOURCE_CALLS: Mapping[str, Mapping[str, int]] = {
         "2": HOMOZYGOUS_ALTERNATIVE,
         "3": MISSING,
     },
+    "GT": {
+        "0": WILD_TYPE,
+        "1": HETEROZYGOUS,
+        "2": HOMOZYGOUS_ALTERNATIVE,
+        "3": MISSING,
+    },
 }
 #: The order of a site's call columns, from which each cell takes the first
 #: call it holds: GoT-Multi's refined call, then its merged call of both
@@ -127,6 +133,7 @@ SOURCE_PRECEDENCE: tuple[str, ...] = (
     "genotype_final",
     "genotype_merged",
     "NGT",
+    "GT",
     "Genotype",
     "genotype",
     "genotype_pred",
