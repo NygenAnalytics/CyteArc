@@ -7,6 +7,7 @@ the file, state by state.
 """
 
 import shutil
+import sys
 import warnings
 from pathlib import Path
 
@@ -14,6 +15,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc.datastore._operations.cell_barcodes import LOOKUP_BYTES_PER_CELL
+from cytearc.datastore._operations.recorder_alleles import _CELL_BYTES, _FIXED_BYTES
 from tests.clone_helpers import copy_clone_store, every_cell, write_truth_store
 from tests.clone_truth import (
     CHAIN_TAPES,
@@ -624,8 +627,70 @@ def test_the_selected_cells_ids_count_once_as_the_join_holds_them(
         )
         # The first check comes before the IDs are read; the others hold them.
         held[extra] = set(checked[1:])
-    assert len(held[0]) == len(held[500]) == 1
+        # What the import holds for each cell, the join's lookup and each ID
+        # as the Python string that the lookup holds, each counted once.
+        assert held[extra] == {
+            (_CELL_BYTES + LOOKUP_BYTES_PER_CELL) * len(ids)
+            + sum(map(sys.getsizeof, ids))
+        }
     assert held[500].pop() - held[0].pop() == 200 * 500
+
+
+def test_the_check_before_the_ids_are_read_counts_the_cells_and_their_read(
+    tmp_path, monkeypatch
+):
+    """A budget one byte short of the cells' share refuses before an ID is read.
+
+    The share is what the import and the join's lookup hold for each selected
+    cell and the read of the cells' IDs, which decodes a stored chunk of
+    them, beside the bytes that the import holds whatever its size.
+    """
+    from cytearc.datastore._operations import recorder_alleles as operations
+    from tests.clone_helpers import ids_read_bytes, open_clone_store
+    from tests.storage_helpers import write_count_store
+
+    ids = [f"cell{index:04d}" for index in range(200)]
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((len(ids), 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=ids,
+    )
+    store = open_clone_store(tmp_path / "store.zarr")
+    path = tmp_path / "characters.csv"
+    path.write_text(
+        "cell_barcode,intID1-RNF2\n" + "".join(f"{cell},1\n" for cell in ids)
+    )
+    reads: list[int] = []
+    read_rows = operations.read_metadata_rows_chunkwise
+
+    def reading(*args, **options):
+        reads.append(1)
+        return read_rows(*args, **options)
+
+    monkeypatch.setattr(operations, "read_metadata_rows_chunkwise", reading)
+    share = (
+        _FIXED_BYTES
+        + (_CELL_BYTES + LOOKUP_BYTES_PER_CELL) * len(ids)
+        + ids_read_bytes(store, len(ids))
+    )
+    store.memoryBytes = share - 1
+    with pytest.raises(MemoryError, match="Importing alleles holds about"):
+        store.clones.import_alleles(
+            path, cell_selection=store.snapshot_cell_selection()
+        )
+    assert not reads
+    # The empty records that the import starts with take a few bytes more;
+    # beyond them the check passes and the IDs are read, whatever later
+    # checks refuse.
+    store.memoryBytes = share + 1_024
+    try:
+        store.clones.import_alleles(
+            path, cell_selection=store.snapshot_cell_selection()
+        )
+    except MemoryError:
+        pass
+    assert reads
 
 
 def test_saved_records_keep_each_rows_line_as_its_table_numbers_it(tmp_path):

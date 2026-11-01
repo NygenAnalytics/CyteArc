@@ -1284,7 +1284,14 @@ def test_character_matrices_without_a_cell_column_name_read_as_r_writes_them(
     with pytest.raises(ValueError, match="'' at 2, on lines 2, 3$"):
         read_all(path, format="characters")
     path.write_text("cell_barcode,intID1-RNF2\ncell1,1,\n")
-    with pytest.raises(ValueError, match="names sites ''"):
+    with pytest.raises(
+        ValueError,
+        match="names sites ''.*its first column, 'cell_barcode', reads as a character",
+    ):
+        read_all(path, format="petracer_characters")
+    # A header that names sites of other recorders gets no such hint.
+    path.write_text("cell_barcode,intID1-SITE\ncell1,1\n")
+    with pytest.raises(ValueError, match="characters are named intID<N>-<site>$"):
         read_all(path, format="petracer_characters")
 
 

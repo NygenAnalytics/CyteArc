@@ -999,6 +999,7 @@ def _matrix_columns(names: Sequence[str], path: str) -> tuple[tuple[str, str], .
 
 def _matrix_layout(path: str, format: str) -> AlleleLayout:
     text = text_layout(path, what="a character matrix")
+    rows_without_names = text.trailing_delimiter
     if text.trailing_delimiter:
         # A first row one field longer than the header, whose last field is
         # empty, reads in a table as a delimiter that ends each row. A
@@ -1019,10 +1020,20 @@ def _matrix_layout(path: str, format: str) -> AlleleLayout:
     if format == "petracer_characters":
         other = sorted({site for _integration, site in columns} - set(_PETRACER_SITES))
         if other:
+            # A first column named among characters read as R's row names is
+            # likely a cell column before rows that end in a delimiter.
+            hint = (
+                f"; its rows hold one field more than its header, so its first "
+                f"column, {text.names[1]!r}, reads as a character, as R's "
+                "write.table leaves the cells' column unnamed: write the matrix "
+                "without a delimiter at the end of each row"
+                if rows_without_names
+                else ""
+            )
             raise ValueError(
                 f"{path} names sites {', '.join(map(repr, other))}, which are none "
                 "of PEtracer's " + ", ".join(_PETRACER_SITES) + "; PEtracer's "
-                "characters are named intID<N>-<site>"
+                "characters are named intID<N>-<site>" + hint
             )
         rules = _PETRACER_CHARACTER_RULES
         tool, pipeline = "PEtracer", "PEtracer 2026"

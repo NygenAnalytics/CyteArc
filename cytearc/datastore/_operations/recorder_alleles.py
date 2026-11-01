@@ -1,5 +1,6 @@
 import os
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -127,8 +128,9 @@ _TABLE_BYTES_PER_TEXT = 160
 # arrays, the order of the rows, their groups, the keys of the edits and the
 # codes of each record.
 _EXPORT_BYTES_PER_RECORD = 260
-# Bytes that a distinct allele takes while it is ranked, beside twice its
-# bytes, and a character while it is named and ordered.
+# Bytes that a distinct allele takes while it is ranked, beside its text as
+# decoding holds it, which the counts of the saved import give, and a
+# character while it is named and ordered.
 _EXPORT_BYTES_PER_ALLELE = 150
 _EXPORT_BYTES_PER_CHARACTER = 1_000
 # Bytes that writing a store takes per exported cell: a character's column
@@ -533,7 +535,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         held = join.held_bytes
         named: list[np.ndarray | None] = []
         counted: list[dict[str, int]] = []
-        merge_text = 0
+        merged = _MergedText()
         # The integrations of contracted tapes that some file's rows name.
         tapes: set[str] = set()
         for position, (file, layout) in enumerate(zip(files, layouts, strict=True)):
@@ -542,7 +544,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 if layout.integration is not None
                 else None
             )
-            counts, merge_text = self._read_allele_file(
+            counts = self._read_allele_file(
                 encoder,
                 join,
                 file,
@@ -550,7 +552,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 position,
                 mask=mask,
                 held=held,
-                merge_text=merge_text,
+                merged=merged,
                 tapes=tapes,
             )
             named.append(mask)
@@ -558,7 +560,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         _check_shared_cells(files, layouts, named)
         _check_named_tapes(files, layouts, tapes)
         del named
-        self._check_allele_budget(encoder, cells=held, merge_text=merge_text)
+        self._check_allele_budget(encoder, cells=held, merge_text=merged.nbytes)
         table = encoder.finish()
         if any(layout.rows_hold_sites for layout in layouts):
             table = records_in_line_order(table)
@@ -592,19 +594,17 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         *,
         mask: np.ndarray | None,
         held: int,
-        merge_text: int,
+        merged: "_MergedText",
         tapes: set[str],
-    ) -> tuple[dict[str, int], int]:
+    ) -> dict[str, int]:
         """Read one file into the encoder.
 
-        ``tapes`` gains the integrations of contracted tapes that the file's
-        rows name.
+        ``merged`` gains the distinct text values of the file's chunks, and
+        ``tapes`` the integrations of contracted tapes that its rows name.
 
         Returns:
             The file's ``rows``, its ``records``, its edits ``beyond`` their
-            integration's length and its rows ``without_integration``; and
-            the bytes that merging takes for the distinct text values of the
-            chunks held, these included.
+            integration's length and its rows ``without_integration``.
         """
         from ...readers.recorder_alleles import classified_rows, iter_allele_rows
 
@@ -616,7 +616,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             encoder,
             cells=held,
             reading=reading + join.unmatched_bytes,
-            merge_text=merge_text,
+            merge_text=merged.nbytes,
         )
         counts = {"rows": 0, "records": 0, "beyond": 0, "without_integration": 0}
         for rows in iter_allele_rows(layout, chunk_rows):
@@ -625,7 +625,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             if mask is not None:
                 mask[cells[cells >= 0]] = True
             frame, record_cells = allele_chunk(rows, cells, classified)
-            merge_text += _merge_text_bytes(frame)
+            merged.add(frame)
             encoder.add(frame, record_cells, position)
             counts["rows"] += len(rows)
             counts["records"] += len(record_cells)
@@ -642,9 +642,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 encoder,
                 cells=held,
                 reading=reading + join.unmatched_bytes,
-                merge_text=merge_text,
+                merge_text=merged.nbytes,
             )
-        return counts, merge_text
+        return counts
 
     def _write_alleles(
         self,
@@ -975,26 +975,41 @@ def _text_width(group: zarr.Group) -> int:
     return _utf8_width(largest)
 
 
-def _merge_text_bytes(frame: pd.DataFrame) -> int:
-    """The bytes that merging takes for a chunk's distinct text values."""
-    total = 0
-    for name in _TEXT_FIELDS:
-        distinct = pd.unique(frame[name].to_numpy(dtype=object))
-        n_texts = n_bytes = largest = 0
-        for value in distinct.tolist():
-            if not isinstance(value, str):
-                continue
-            encoded = value.encode("utf-8")
-            n_texts += 1
-            n_bytes += len(encoded)
-            if not value.isascii():
-                largest = max(largest, int(np.frombuffer(encoded, np.uint8).max()))
-        total += (
-            _MERGE_BYTES_PER_TEXT * n_texts
-            + (_MERGED_TEXT_BYTES + _MERGED_TEXT_COPIES * _utf8_width(largest))
-            * n_bytes
+@dataclass(slots=True)
+class _MergedText:
+    """The distinct text values of the chunks held, which merging joins.
+
+    Merging joins every chunk's distinct values into one text before it
+    encodes them, so one value's widest character widens all of them.
+    """
+
+    texts: int = 0
+    bytes: int = 0
+    largest: int = 0
+
+    def add(self, frame: pd.DataFrame) -> None:
+        """Count a chunk's distinct integrations, sites and alleles."""
+        for name in _TEXT_FIELDS:
+            distinct = pd.unique(frame[name].to_numpy(dtype=object))
+            for value in distinct.tolist():
+                if not isinstance(value, str):
+                    continue
+                encoded = value.encode("utf-8")
+                self.texts += 1
+                self.bytes += len(encoded)
+                if not value.isascii():
+                    self.largest = max(
+                        self.largest, int(np.frombuffer(encoded, np.uint8).max())
+                    )
+
+    @property
+    def nbytes(self) -> int:
+        """The bytes that merging takes for these values."""
+        return (
+            _MERGE_BYTES_PER_TEXT * self.texts
+            + (_MERGED_TEXT_BYTES + _MERGED_TEXT_COPIES * _utf8_width(self.largest))
+            * self.bytes
         )
-    return total
 
 
 def _merge_site_rows(table: RecordTable, files: Sequence[Mapping[str, Any]]) -> None:

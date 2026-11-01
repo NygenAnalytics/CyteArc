@@ -9,8 +9,9 @@ refused plus one byte, below which no accepted budget falls. The shapes are
 those whose costs differ: a wide character matrix of few distinct tokens,
 CARLIN alleles each of its own long text, a long table of a few rows per
 cell among many integrations, whose matrix is mostly missing, and alleles of
-20,000 characters each, ASCII or ending in a character beyond U+FFFF, whose
-text outweighs the rest.
+20,000 characters each, ASCII or ending in a character of Latin-1, within
+U+FFFF or beyond it, or ASCII but for one allele that starts with an emoji,
+whose text outweighs the rest.
 """
 
 import re
@@ -211,11 +212,69 @@ def wide_text(tmp_path_factory):
     return _allele_table(tmp_path_factory.mktemp("wide_text"), alleles)
 
 
-_SHAPES = ["wide", "carlin", "long", "long_text", "wide_text"]
+@pytest.fixture(scope="module")
+def latin_text(tmp_path_factory):
+    """1,000 cells, each allele 20,000 characters that end in é.
+
+    A character beyond ASCII up to U+00FF leaves Python's strings at one byte
+    per character, but each string caches its UTF-8 as merging encodes it.
+    """
+    letters = np.array(list("ACGT"))
+    alleles = [
+        "".join(_RNG.choice(letters, 19_987)) + f"{cell:012d}é" for cell in range(1_000)
+    ]
+    return _allele_table(tmp_path_factory.mktemp("latin_text"), alleles)
+
+
+@pytest.fixture(scope="module")
+def plane_text(tmp_path_factory):
+    """600 cells, each allele 20,000 characters that end in 語.
+
+    A character beyond U+00FF and within U+FFFF makes Python hold each of the
+    allele's characters in two bytes.
+    """
+    letters = np.array(list("ACGT"))
+    alleles = [
+        "".join(_RNG.choice(letters, 19_987)) + f"{cell:012d}語" for cell in range(600)
+    ]
+    return _allele_table(tmp_path_factory.mktemp("plane_text"), alleles)
+
+
+@pytest.fixture(scope="module")
+def one_wide(tmp_path_factory):
+    """1,000 ASCII alleles of 20,000 characters and one that starts with an emoji.
+
+    The emoji's allele sorts last, so only the last chunks of the stored text
+    hold a byte from 0xF0, and only the last chunk of an import's file. Yet
+    decoding the text, and joining it as an import merges, widens every
+    character to four bytes.
+    """
+    letters = np.array(list("ACGT"))
+    alleles = [
+        "".join(_RNG.choice(letters, 19_988)) + f"{cell:012d}" for cell in range(1_000)
+    ]
+    alleles.append("😀" + "".join(_RNG.choice(letters, 19_999)))
+    return _allele_table(tmp_path_factory.mktemp("one_wide"), alleles)
+
+
+_TEXT_OPTIONS = {"columns": {"cell": "cell", "allele": "allele"}, "integrations": "I"}
+_SHAPES = [
+    "wide",
+    "carlin",
+    "long",
+    "long_text",
+    "latin_text",
+    "plane_text",
+    "wide_text",
+    "one_wide",
+]
 _OPTIONS = {
     "carlin": {"integrations": "CA", "barcode_suffix": "-1"},
-    "long_text": {"columns": {"cell": "cell", "allele": "allele"}, "integrations": "I"},
-    "wide_text": {"columns": {"cell": "cell", "allele": "allele"}, "integrations": "I"},
+    "long_text": _TEXT_OPTIONS,
+    "latin_text": _TEXT_OPTIONS,
+    "plane_text": _TEXT_OPTIONS,
+    "wide_text": _TEXT_OPTIONS,
+    "one_wide": _TEXT_OPTIONS,
 }
 
 
