@@ -180,17 +180,23 @@ _STATE_READ_BYTES = 4
 _COLUMN_READ_BYTES = 8
 _CALL_EDIT_BYTES = 80
 _HELD_EDIT_BYTES = 24
-# Bytes of each distinct allele, integration or site decoded as text: its
-# Python string beside its bytes and its reference.
-_CALL_TEXT_BYTES = 64
+# Bytes of each distinct allele, integration or site while its packed text is
+# read and decoded, beside four copies of its bytes: its offset as read and in
+# two lists of Python integers, its Python string and two references to it,
+# 145 as traced; and once decoded, its string and its reference beside its
+# bytes, 49 as traced.
+_DECODE_TEXT_BYTES = 152
+_HELD_TEXT_BYTES = 56
 # The records whose characters are keyed at a time, while both full columns
 # of integrations and sites are held.
 _KEY_BLOCK = 1 << 16
 # Writing the clones holds, for each cell, its clone code and rare alleles
 # from the calls, its label's pointer and its code and size as written, and
-# for each clone, its label as a Python string and its size; each label is
-# also written as fixed-width text of four bytes per character.
-_WRITE_CELL_BYTES = 40
+# for a cell of a clone, its clone's code and label or size as they are
+# gathered, 24 as traced; for each clone, its label as a Python string and
+# its size; each label is also written as fixed-width text of four bytes per
+# character.
+_WRITE_CELL_BYTES = 64
 _WRITE_CLONE_BYTES = 120
 
 
@@ -1187,6 +1193,19 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             self.memoryBytes,
             f"the clones of {n_cells} cells as they are written",
         )
+        # The distinct alleles, integrations and sites are decoded as text
+        # before the records are read, and held while the clones are called.
+        n_texts = counts["alleles"] + counts["integrations"] + counts["sites"]
+        _check_calling(
+            held
+            + _DECODE_TEXT_BYTES * n_texts
+            + 4 * counts["allele_bytes"]
+            + _FIXED_BYTES,
+            self.memoryBytes,
+            f"the text of {counts['alleles']} distinct alleles as it is decoded",
+        )
+        texts = _record_texts(group)
+        held += _HELD_TEXT_BYTES * n_texts + counts["allele_bytes"]
         # The states are read first, so that only the records of edited sites
         # are read on.
         _check_calling(
@@ -1199,25 +1218,18 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         edited |= states == UNKNOWN_MARK
         del states
         n_edited = int(np.count_nonzero(edited))
-        # The distinct alleles are decoded as text, beside their bytes.
-        texts = (
-            _CALL_TEXT_BYTES * counts["alleles"]
-            + 2 * counts["allele_bytes"]
-            + _CALL_TEXT_BYTES * (counts["integrations"] + counts["sites"])
-        )
         _check_calling(
             held
             + n_records
             + _COLUMN_READ_BYTES * n_records
             + _CALL_EDIT_BYTES * n_edited
-            + texts
             + _FIXED_BYTES,
             self.memoryBytes,
             f"the {n_edited} edited sites of {n_cells} cells as they are read",
         )
-        observations = _allele_observations(group, edited)
-        del edited
-        held += _HELD_EDIT_BYTES * n_edited + texts
+        observations = _allele_observations(group, edited, texts)
+        del edited, texts
+        held += _HELD_EDIT_BYTES * n_edited
         called = allele_clone_calls(
             observations,
             n_cells,
@@ -1323,13 +1335,8 @@ def _banks_fingerprint(banks: Mapping[str, AlleleBank]) -> str:
     return builder.hexdigest()
 
 
-def _allele_observations(group: zarr.Group, edited: np.ndarray) -> AlleleObservations:
-    """Read the records of edited sites: each one's cell, character and allele.
-
-    A character is a pair of an integration and a site, coded as one integer
-    key, so the characters need one sort of the edits' keys. The characters
-    that hold no edit are found from both full columns a block at a time.
-    """
+def _record_texts(group: zarr.Group) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The distinct integrations, sites and alleles of saved records, as text."""
 
     def texts(name: str) -> np.ndarray:
         return unpack_text(
@@ -1337,8 +1344,22 @@ def _allele_observations(group: zarr.Group, edited: np.ndarray) -> AlleleObserva
             read_array(group, f"{_RECORDS}_{name}_offsets"),
         )
 
-    integration_names = texts("integration")
-    site_names = texts("site")
+    return texts("integration"), texts("site"), texts("allele")
+
+
+def _allele_observations(
+    group: zarr.Group,
+    edited: np.ndarray,
+    texts: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> AlleleObservations:
+    """Read the records of edited sites: each one's cell, character and allele.
+
+    A character is a pair of an integration and a site, coded as one integer
+    key, so the characters need one sort of the edits' keys. The characters
+    that hold no edit are found from both full columns a block at a time.
+    ``texts`` holds the distinct integrations, sites and alleles as text.
+    """
+    integration_names, site_names, allele_texts = texts
     n_sites = max(1, len(site_names))
     alleles = read_array(group, f"{_RECORDS}_allele")[edited].astype(np.int64)
     integrations = read_array(group, f"{_RECORDS}_integration")
@@ -1373,7 +1394,7 @@ def _allele_observations(group: zarr.Group, edited: np.ndarray) -> AlleleObserva
         characters=characters,
         alleles=alleles,
         character_names=edited_names,
-        allele_texts=texts("allele"),
+        allele_texts=allele_texts,
         unedited_characters=tuple(
             sorted({name(key) for key in all_keys.tolist()} - set(edited_names))
         ),

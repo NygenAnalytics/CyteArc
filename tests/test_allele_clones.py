@@ -197,6 +197,59 @@ def _pair(folder: Path, lines: dict[str, list[str]]) -> Path:
     return folder
 
 
+def _spelled(number: int) -> str:
+    """A number written in bases, as the insertion of an allele of its own."""
+    bases = []
+    while True:
+        bases.append("ACGT"[number % 4])
+        number //= 4
+        if not number:
+            return "".join(bases)
+
+
+def _clones_of_their_own_alleles(
+    folder: Path,
+    n_cells: int,
+    n_clones: int,
+    clone_size: int,
+    arrays: tuple[str, ...],
+) -> tuple[DataStore, object]:
+    """A store whose clones each hold an allele of their own on each array.
+
+    The clones' cells are drawn at random on each array, so clones of more
+    than one cell need a single array to stay apart.
+    """
+    rng = np.random.default_rng(24)
+    barcodes = sorted(
+        {"".join(row) for row in rng.choice(list("ACGT"), size=(n_cells + 5_000, 16))}
+    )[:n_cells]
+    write_count_store(
+        str(folder / "store.zarr"),
+        {"RNA": np.ones((n_cells, 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=barcodes,
+    )
+    store = open_clone_store(folder / "store.zarr")
+    paths = []
+    for index, array in enumerate(arrays):
+        drawn = rng.permutation(n_cells)[: n_clones * clone_size]
+        lines = {
+            f"{2 + index}_{25 + index}del,60_61ins{_spelled(clone)}": [
+                barcodes[cell] for cell in cells
+            ]
+            for clone, cells in enumerate(drawn.reshape(n_clones, clone_size).tolist())
+        }
+        paths.append(_pair(folder / array, lines))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        alleles = store.clones.import_alleles(
+            paths,
+            cell_selection=store.snapshot_cell_selection(),
+            integrations=list(arrays),
+        )
+    return store, alleles
+
+
 def test_unedited_arrays_placeholders_and_missing_sites_never_link_cells(
     tmp_path,
 ) -> None:
@@ -478,6 +531,40 @@ def test_calling_refuses_a_budget_too_small_before_writing(
                 alleles, method="graph", frequencies=calling.banks, max_frequency=2e-5
             )
     assert len(store.artifacts.list(kind="clones", scope="datastore")) == before
+
+
+def test_a_budget_that_only_writing_the_clones_exceeds_is_refused_before_calling(
+    tmp_path, monkeypatch
+) -> None:
+    import cytearc.datastore._operations.recorder_alleles as operations
+
+    # 100 clones of two cells among 20,000: writing the clones, as if every
+    # cell were a clone of its own, needs more than any other step.
+    store, alleles = _clones_of_their_own_alleles(tmp_path, 20_000, 100, 2, ("CA",))
+
+    def call() -> object:
+        return store.clones.allele_clones(
+            alleles, method="graph", max_frequency=0.5, invalidate_cache=True
+        )
+
+    budget = 1 << 34
+    monkeypatch.setattr(store, "memoryBytes", budget)
+    # Every step but writing fits the most bytes that any of them states.
+    fitting = max(
+        stated
+        for what, stated, _peak in traced_steps(monkeypatch, call, budget)
+        if not what.endswith("as they are written")
+    )
+    entered: list[object] = []
+    monkeypatch.setattr(
+        operations, "allele_clone_calls", lambda *args, **kwargs: entered.append(args)
+    )
+    monkeypatch.setattr(store, "memoryBytes", fitting)
+    with pytest.raises(
+        MemoryError, match="for the clones of 20000 cells as they are written, more"
+    ):
+        call()
+    assert entered == []
 
 
 def test_real_darlin_alleles_join_the_cells_that_share_a_rare_one(tmp_path) -> None:
@@ -993,3 +1080,36 @@ def test_each_step_with_banks_and_groups_holds_no_more_than_its_check_states(
 
         call()
         _assert_steps_within(traced_steps(monkeypatch, call, budget))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("n_cells", "n_clones", "clone_size", "arrays"),
+    [
+        # Every cell holds an allele of its own on each of three arrays, so
+        # the alleles' text sets the bytes of reading the records.
+        (100_000, 100_000, 1, DARLIN_ARRAYS),
+        # Clones of four cells cover every cell, so the cells in clones set
+        # the bytes of writing them.
+        (400_000, 100_000, 4, ("CA",)),
+    ],
+)
+def test_each_step_on_many_alleles_and_clones_holds_no_more_than_its_check_states(
+    tmp_path, monkeypatch, n_cells, n_clones, clone_size, arrays
+) -> None:
+    store, alleles = _clones_of_their_own_alleles(
+        tmp_path, n_cells, n_clones, clone_size, arrays
+    )
+    budget = 1 << 34
+    monkeypatch.setattr(store, "memoryBytes", budget)
+
+    def call() -> object:
+        return store.clones.allele_clones(
+            alleles, method="graph", max_frequency=0.5, invalidate_cache=True
+        )
+
+    call()
+    steps = traced_steps(monkeypatch, call, budget)
+    written = f"the {n_clones} clones of {n_cells} cells as they are written"
+    assert steps[-1][0] == written
+    _assert_steps_within(steps)
