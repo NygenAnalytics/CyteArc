@@ -33,6 +33,7 @@ from ...clones.phylogeny import (
 )
 from ...metadata.arguments import PhylogenyCloneArguments, PhylogenyImportArguments
 from ...metadata.rows import read_array_rows_chunkwise, read_metadata_rows_chunkwise
+from ...metadata.selection import cell_selection_indices
 from ...storage.artifact_writer import ArrayRequirement, artifact_transaction
 from ...storage.arrays import (
     MetadataBlock,
@@ -45,9 +46,9 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
-from ...storage.selections import read_stored_selection_indices
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
+from ...utils.arguments import bool_argument
 from ...utils.arrays import sort_categories
 from ...utils.logging import logger
 from ...utils.warnings import warn
@@ -338,14 +339,18 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         n_nodes = sum(trees.n_nodes for trees in read)
         n_trees = sum(len(trees.tree_keys) for trees in read)
         held += _FOREST_BYTES_PER_NODE * n_nodes + _BYTES_PER_TREE * n_trees
-        held += self._phylogeny_id_bytes(len(join_cells))
+        # Reading the cells' IDs holds them at their stored width and decodes
+        # a stored chunk of them; the join then holds its lookup and the IDs
+        # as text, which it counts, beside what the trees hold.
         self._check_phylogeny_budget(
             f"Joining {n_nodes} nodes of {n_trees} trees to {len(join_cells)} cells",
-            held + LOOKUP_BYTES_PER_CELL * len(join_cells),
+            held
+            + LOOKUP_BYTES_PER_CELL * len(join_cells)
+            + self._phylogeny_id_bytes(len(join_cells)),
         )
         cell_ids = self._phylogeny_cell_ids(join_cells)
         join = CellBarcodeJoin(cell_ids, memory_bytes=self.memoryBytes, held_bytes=held)
-        held += LOOKUP_BYTES_PER_CELL * len(join_cells)
+        held = join.held_bytes
         # Each file's leaves are joined to cells, and its trees named.
         file_cells = []
         listed: list[tuple[str, int, int, int]] = []
@@ -535,8 +540,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         unit = _time_unit(time_unit)
         if format is not None and not isinstance(format, str):
             raise TypeError("format must be a format name or None")
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
+        bool_argument(invalidate_cache, "invalidate_cache")
         files = barcode_files(
             paths,
             barcode_prefix=barcode_prefix,
@@ -676,7 +680,10 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
 
         Raises:
             TypeError: If ``phylogeny`` is not an ArtifactRef.
-            ValueError: If it is not a complete ``cell_phylogeny`` artifact.
+            ValueError: If it is not a ``cell_phylogeny`` artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as an import that
+                stopped before it finished leaves it.
             MemoryError: If the tables do not fit the memory budget.
         """
         group = self._phylogeny_group(phylogeny)
@@ -684,14 +691,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
         n_nodes = int(names_array.shape[0])
         width = int(names_array.dtype.itemsize) // 4
         selection = self._phylogeny_cells(phylogeny)
-        cell_index = read_stored_selection_indices(
-            self.zw,
-            selection,
-            kind="cell_selection",
-            scope="datastore",
-            assay=None,
-            table_path="cellData",
-        ).astype(np.int64, copy=False)
+        cell_index = cell_selection_indices(self.zw, selection)
         n_named = _count(group, "n_cells_in_trees")
         # Names are read a stored chunk at a time: its bytes and their copy.
         rows = max(1, int(names_array.chunks[0]))
@@ -782,17 +782,19 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If both or neither of ``time`` and ``depth`` are
+            ValueError: If ``phylogeny`` is not a ``cell_phylogeny``
+                artifact, both or neither of ``time`` and ``depth`` are
                 given, ``time`` is not finite, ``depth`` is negative, the
                 trees were imported without a ``time_unit`` and ``time`` is
                 given, or a node has no time.
+            KeyError: If the store holds no such ``phylogeny`` artifact.
+            RuntimeError: If the ``phylogeny`` artifact is incomplete.
             PermissionError: If the store is read-only and the clones are not
                 saved yet.
             MemoryError: If the cut does not fit the memory budget.
         """
         cut = phylogeny_cut(time, depth)
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
+        bool_argument(invalidate_cache, "invalidate_cache")
         group = self._phylogeny_group(phylogeny)
         unit = group.attrs.get("time_unit")
         if cut.time is not None and unit is None:
@@ -809,16 +811,7 @@ class _PhylogenyOperationsMixin(_PhylogenyOperationsBase):
             depth=cut.depth,
             invalidate_cache=invalidate_cache,
         )
-        n_cells = int(
-            read_stored_selection_indices(
-                self.zw,
-                selection,
-                kind="cell_selection",
-                scope="datastore",
-                assay=None,
-                table_path="cellData",
-            ).shape[0]
-        )
+        n_cells = len(cell_selection_indices(self.zw, selection))
         planned = self._plan_clones(
             arguments,
             selection,

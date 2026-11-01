@@ -519,6 +519,33 @@ def test_loaded_phylogenies_list_every_node_and_tree(
     ]
 
 
+def test_missing_and_incomplete_phylogenies_are_refused(store, tmp_path) -> None:
+    from cytearc.storage.artifacts import artifact_group
+    from cytearc.storage.refs import ArtifactRef
+
+    phylogeny, _messages = _import(store, _write_newick(tmp_path / "t.nwk"))
+    readers = (
+        lambda ref: store.clones.load_phylogeny(ref),
+        lambda ref: store.clones.phylogeny_clones(ref, time=1.0, invalidate_cache=True),
+    )
+    missing = ArtifactRef(
+        scope=phylogeny.scope, kind=phylogeny.kind, artifact_id="f" * 64
+    )
+    for read in readers:
+        with pytest.raises(KeyError, match="Artifact does not exist"):
+            read(missing)
+    # An import that stopped before it finished leaves incomplete trees.
+    attributes = artifact_group(store.zw, phylogeny).attrs
+    attributes["complete"] = False
+    try:
+        for read in readers:
+            with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+                read(phylogeny)
+    finally:
+        attributes["complete"] = True
+    assert len(store.clones.load_phylogeny(phylogeny).nodes) == len(TREE.names)
+
+
 def test_wrong_inputs_are_refused(shared, truth_phylogeny_ref, tmp_path) -> None:
     store = shared.store
     clones, _messages = _cut(store, truth_phylogeny_ref, time=1.0)
@@ -723,6 +750,54 @@ def test_a_file_without_a_tree_extension_names_its_tree_whole(store, tmp_path) -
     assert store.clones.load_phylogeny(phylogeny).trees["tree"].tolist() == [
         "lineage.v2"
     ]
+
+
+def test_the_join_counts_the_cells_ids_once(tmp_path) -> None:
+    # The join counts the IDs that it holds as text, so an import runs within
+    # the budget that its check before it reads the IDs names; counting them
+    # again beside the join would refuse it.
+    import re
+    import warnings
+
+    from cytearc.datastore.datastore import DataStore
+
+    n_cells = 3_000
+    ids = [f"{'sample_with_a_long_name_' * 3}{cell:08d}-1" for cell in range(n_cells)]
+    write_count_store(
+        str(tmp_path / "long.zarr"),
+        {"RNA": np.ones((n_cells, 1), dtype=np.uint16)},
+        "uint16",
+        cell_ids=ids,
+    )
+    store = DataStore(
+        str(tmp_path / "long.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        nthreads=1,
+    )
+    pairs = ",".join(
+        f"({ids[cell]}:1,{ids[cell + 1]}:1)g{cell}:1" for cell in range(0, 2_000, 2)
+    )
+    path = tmp_path / "long.nwk"
+    path.write_text(f"({pairs})root;")
+    cells = store.snapshot_cell_selection()
+    refusals: list[str] = []
+    budget = 1
+    for _attempt in range(20):
+        store.memoryBytes = budget
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                store.clones.import_phylogeny(
+                    path, cell_selection=cells, time_unit="days", invalidate_cache=True
+                )
+            break
+        except MemoryError as error:
+            refusals.append(str(error))
+            found = re.search(r"about (\d+) bytes", str(error))
+            assert found is not None and int(found.group(1)) > budget, str(error)
+            budget = int(found.group(1))
+    assert refusals[-1].startswith(f"Joining 3001 nodes of 1 trees to {n_cells} cells")
 
 
 def test_a_budget_too_small_is_refused_before_anything_is_saved(
