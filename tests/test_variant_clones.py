@@ -395,16 +395,16 @@ def test_clones_within_long_labels_fit_the_smallest_budget_they_accept(
 
 
 @pytest.mark.slow
-def test_clones_of_a_few_listed_cells_among_many_fit_the_smallest_budget(
+def test_scoring_and_clones_of_a_few_listed_cells_among_many_fit_the_budget(
     tmp_path,
 ) -> None:
-    # Counts over 50,000 selected cells, of which the files name the truth's
-    # 230: the arrays over every cell and the labels written outweigh the
-    # frequencies of the cells that are scored.
+    # Counts over 30,000 selected cells, of which the files name the truth's
+    # 230: the offsets and arrays over every cell, and for clones the labels
+    # written, outweigh the rows of the cells that are scored.
     from cytearc.datastore.datastore import DataStore
     from tests.storage_helpers import write_count_store
 
-    n_cells = 50_000
+    n_cells = 30_000
     ids = [str(cell) for cell in TRUTH.clones.cell_ids]
     ids += [f"other{cell:07d}-1" for cell in range(n_cells - len(ids))]
     write_count_store(
@@ -426,10 +426,16 @@ def test_clones_of_a_few_listed_cells_among_many_fit_the_smallest_budget(
             cell_selection=store.snapshot_cell_selection(),
         )
     selection = store.variants.informative(counts, preset="atac")
-
-    def run() -> object:
-        return store.variants.clones(counts, variants=selection, invalidate_cache=True)
-
-    run()
-    budget = _smallest_accepted_budget(store, run)
-    assert _traced_peak(store, run, budget) <= budget
+    for name, run in {
+        "informative": lambda: store.variants.informative(
+            counts, preset="atac", invalidate_cache=True
+        ),
+        "clones": lambda: store.variants.clones(
+            counts, variants=selection, invalidate_cache=True
+        ),
+    }.items():
+        store.memoryBytes = 1 << 33
+        run()
+        budget = _smallest_accepted_budget(store, run)
+        peak = _traced_peak(store, run, budget)
+        assert peak <= budget, (name, peak, budget)

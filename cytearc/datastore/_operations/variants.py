@@ -135,6 +135,15 @@ _FILES_TEXT = ("the variant file", "the variant files")
 _STATISTIC_BYTES_PER_ROW = 200
 # Bytes per allele of the per-variant sums that statistics keep.
 _STATISTIC_BYTES_PER_VARIANT = 240
+# Reading bands holds, for each cell of the counts, chosen or not, each
+# table's offsets and their sum and whether the cell is chosen, and while the
+# cells are chosen its store row and position and whether a file named it:
+# about 40 bytes, as traced on 100,000 and 300,000 cells.
+_BAND_BYTES_PER_COUNTS_CELL = 48
+# Calling clones holds, for each cell of the counts, its store row, its row
+# among the scored cells and its group, while the frequencies are found and
+# the graph is partitioned.
+_CLONE_BYTES_PER_COUNTS_CELL = 24
 # Bytes per cell and informative variant of the allele frequency matrix.
 _FREQUENCY_BYTES_PER_ENTRY = 8
 # Bytes per cell of a band and informative variant while the band's
@@ -468,6 +477,11 @@ def _band_chunk_bytes(group: zarr.Group, tables: Mapping[str, Sequence[str]]) ->
             array = as_zarr_array(group[name], name=name)
             widest = max(widest, int(array.chunks[0]) * int(array.dtype.itemsize))
     return 2 * widest
+
+
+def _n_counts_cells(group: zarr.Group) -> int:
+    """The cells of a ``variant_counts`` artifact, read or not."""
+    return int(as_zarr_array(group["listed"], name="listed").shape[0])
 
 
 def _variant_bands(
@@ -1696,6 +1710,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             _STATISTIC_BYTES_PER_VARIANT * sites.n_alleles
             + 16 * sites.n_sites
             + _band_chunk_bytes(group, tables)
+            + _BAND_BYTES_PER_COUNTS_CELL * _n_counts_cells(group)
         )
         max_rows = (self.memoryBytes - held) // _STATISTIC_BYTES_PER_ROW
         if max_rows < 1:
@@ -2032,7 +2047,15 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             "depth": ("depth_sites", "depth"),
             "count": ("count_alleles", "counts"),
         }
-        held = matrix_bytes + _band_chunk_bytes(group, tables)
+        # Beside the frequencies, every cell of the counts holds its rows and
+        # group, and while bands are read its offsets.
+        cell_bytes = _CLONE_BYTES_PER_COUNTS_CELL * n_cells
+        held = (
+            matrix_bytes
+            + cell_bytes
+            + _BAND_BYTES_PER_COUNTS_CELL * n_cells
+            + _band_chunk_bytes(group, tables)
+        )
         # A band holds at most as many cells as rows, each with its dense
         # depths, counts and frequencies at the informative variants.
         per_row = _STATISTIC_BYTES_PER_ROW + _BAND_FREQUENCY_BYTES * len(alleles)
@@ -2070,7 +2093,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             n_neighbors=int(n_neighbors),
             resolution=resolution,
             random_seed=_CLONE_SEED,
-            memory_bytes=self.memoryBytes - matrix_bytes,
+            memory_bytes=self.memoryBytes - matrix_bytes - cell_bytes,
             nthreads=self.nthreads,
         )
         del frequencies
