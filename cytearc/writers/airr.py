@@ -13,10 +13,10 @@ are rendered as UTF-8 bytes and copied into its rows by a compiled loop; text
 given as ``EncodedText`` is copied from its packed bytes without being
 decoded.
 
-Values are written as they are, unquoted, as the dialect of the AIRR file
-format asks. The format forbids tabs and newlines in values, so a value that
-holds a tab, a newline or a carriage return, which readers take for the end
-of a line, is refused. The format advises against ``@``, ``#``, ``"`` and
+Values are written as they are, unquoted, as the AIRR format's dialect asks.
+It forbids tabs and newlines in values, which would end a field or a row, and
+readers take a carriage return for a row's end too, so a value that holds any
+of the three is refused. The format advises against ``@``, ``#``, ``"`` and
 ``'``, which readers may take differently, so a file whose values hold them
 warns with their number and fields when it is closed; ``quality`` and
 ``quality_alignment`` hold them by the format's own Phred encoding, and are
@@ -285,30 +285,6 @@ def _scatter(
         out[position] = separator
         cursor[row] = position + 1
     return n_forbidden, first, n_discouraged
-
-
-@njit(cache=True, nogil=True)
-def _forbidden_rows(
-    data: np.ndarray, offsets: np.ndarray, codes: np.ndarray, coded: bool, n_rows: int
-) -> tuple[int, int]:
-    """Count the rows whose value holds a tab, a newline or a carriage return.
-
-    Returns:
-        Their number, and the first of them or -1.
-    """
-    count = 0
-    first = -1
-    for row in range(n_rows):
-        code = codes[row] if coded else row
-        if code < 0:
-            continue
-        for index in range(offsets[code], offsets[code + 1]):
-            if _BYTE_CLASSES[data[index]] & 1:
-                count += 1
-                if first < 0:
-                    first = row
-                break
-    return count, first
 
 
 @njit(cache=True, nogil=True)
@@ -885,17 +861,14 @@ def _forbidden_columns(
             values = _bytes_column(
                 table[column].iloc[start : start + _CHUNK_ROWS], column, column in whole
             )
-            codes = values.codes
-            n_rows = len(values.offsets) - 1 if codes is None else len(codes)
-            n_found, row = _forbidden_rows(
-                values.data,
-                values.offsets,
-                _NO_CODES if codes is None else codes,
-                codes is not None,
-                n_rows,
-            )
+            # Only logical fields render with codes, and they are not read
+            # here, so each row holds its own value.
+            assert values.codes is None
+            n_found = _count_forbidden_values(values.data, values.offsets)
             if n_found and first < 0:
-                first = start + row
+                first = start + int(
+                    _forbidden_values(values.data, values.offsets, 1)[0]
+                )
             count += n_found
         if count:
             found.append((first, column, count))

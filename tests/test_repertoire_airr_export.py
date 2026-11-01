@@ -572,6 +572,12 @@ def test_the_writer_refuses_a_block_before_writing_any_of_it(tmp_path) -> None:
         f"{header}\na{empty}\tc1\ne{empty}\tc3\n"
     )
     assert writer.n_rows == 2
+    # A contig without an ID is named by its empty ID.
+    with AirrRearrangementWriter(tmp_path / "unnamed.tsv", ["cell_id"]) as writer:
+        with pytest.raises(ValueError, match="1 value of cell_id, in contig ''$"):
+            writer.write(
+                {"sequence_id": encode_text(["f", None]), "cell_id": ["c4", "c\t5"]}
+            )
 
 
 def test_the_writer_renders_each_kind_of_column(tmp_path) -> None:
