@@ -1442,21 +1442,44 @@ def test_clusters_ignore_the_junctions_of_contigs_that_are_not_chains(
     assert _members(store.repertoire.load_clonotypes(near)) == expected
 
 
-def test_decoded_values_read_only_the_codes_given(tmp_path) -> None:
+def test_decoded_values_read_only_the_codes_given(tmp_path, monkeypatch) -> None:
     store, receptors = _receptors(tmp_path)
     group = artifact_group(store.zw, receptors)
     every = repertoire_operations._stored_text(group, "junction").categories
-    # One code reads its bounds a chunk at a time, and every code reads them
-    # whole, which holds less.
-    for codes in (np.asarray([1]), np.asarray([0, 2]), np.arange(len(every))):
-        reads = repertoire_operations._Reads(
-            limit=1 << 30, held=7, what="Reading junctions", remedy="Raise it."
-        )
-        decoded = repertoire_operations._decoded_values(reads, group, "junction", codes)
-        assert decoded.tolist() == every[codes].tolist()
-        # The decoded junctions stay counted: 100 bytes each and four per byte.
-        kept = sum(100 + 4 * len(value.encode()) for value in every[codes].tolist())
-        assert reads.held >= 7 + kept
+    chunked: list[str] = []
+    rows = repertoire_operations._Reads.rows
+
+    def counted(self, source, name, wanted):
+        chunked.append(name)
+        return rows(self, source, name, wanted)
+
+    monkeypatch.setattr(repertoire_operations._Reads, "rows", counted)
+    parts = repertoire_operations.array_row_selection_parts
+    # The bounds of so few junctions are read whole, which holds less than a
+    # read of their rows; a read of rows as cheap as a byte each, as a few
+    # codes of a large store are, reads them a chunk at a time instead.
+    for cheap_rows in (False, True):
+        if cheap_rows:
+            monkeypatch.setattr(
+                repertoire_operations,
+                "array_row_selection_parts",
+                lambda array: (parts(array)[0], 1),
+            )
+        for codes in (np.asarray([1]), np.asarray([0, 2]), np.arange(len(every))):
+            chunked.clear()
+            reads = repertoire_operations._Reads(
+                limit=1 << 30, held=7, what="Reading junctions", remedy="Raise it."
+            )
+            decoded = repertoire_operations._decoded_values(
+                reads, group, "junction", codes
+            )
+            assert decoded.tolist() == every[codes].tolist()
+            assert chunked == (["contig_junction_offsets"] if cheap_rows else [])
+            # The decoded junctions stay counted: 100 bytes each and four per
+            # byte.
+            kept = sum(100 + 4 * len(value.encode()) for value in every[codes].tolist())
+            assert reads.held >= 7 + kept
+    monkeypatch.setattr(repertoire_operations, "array_row_selection_parts", parts)
     reads = repertoire_operations._Reads(
         limit=64, held=0, what="Reading junctions", remedy="Raise it."
     )
