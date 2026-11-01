@@ -1568,6 +1568,8 @@ def test_tables_and_columns_are_checked_before_writing(tmp_path) -> None:
         write_airr_rearrangements(pd.DataFrame({"sequence_id": ["a", "b", "a"]}), path)
     with pytest.raises(TypeError, match="columns must be a sequence"):
         AirrRearrangementWriter(path, "cell_id")
+    with pytest.raises(TypeError, match="columns must be a sequence of column names"):
+        AirrRearrangementWriter(path, ["cell_id", 3])
     with pytest.raises(ValueError, match=r"name \['cell_id'\] more than once"):
         AirrRearrangementWriter(path, ["cell_id", "cell_id"])
     assert not path.exists()
