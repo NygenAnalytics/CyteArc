@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+import zarr
 
 import cytearc.datastore._operations.repertoire as repertoire_operations
 from cytearc import plotting
@@ -986,3 +987,23 @@ def test_each_refusal_names_the_remedy_that_its_step_allows(tmp_path) -> None:
         "Raise mem_budget, or count fewer chains, of a smaller cell_selection "
         "or of fewer slots."
     )
+
+
+def test_every_stored_array_is_read_a_chunk_at_a_time(tmp_path, monkeypatch) -> None:
+    # The checks count one decoded chunk of each array read, which zarr's
+    # default concurrency would exceed for arrays of several chunks.
+    store, _receptors, clonotypes = _sources(tmp_path)
+    read = repertoire_operations._read
+    limits = []
+
+    def recorded(group, name):
+        limits.append((name, zarr.config.get("async.concurrency")))
+        return read(group, name)
+
+    monkeypatch.setattr(repertoire_operations, "_read", recorded)
+    store.repertoire.gene_usage(clonotypes, genes=("v_call", "j_call"))
+    store.repertoire.spectratype(clonotypes, sequence="nt")
+    names = {name for name, _limit in limits}
+    assert {"chain_slots", "codes", "contig_locus", "contig_v_call"} <= names
+    assert {limit for _name, limit in limits} == {1}
+    assert zarr.config.get("async.concurrency") != 1
