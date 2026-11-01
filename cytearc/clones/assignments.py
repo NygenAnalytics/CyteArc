@@ -13,6 +13,7 @@ by rank. These functions never touch storage.
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal
 
 import numpy as np
@@ -434,12 +435,21 @@ class Clones:
         kept_apart: The columns of ``cells`` whose labels the clones keep
             apart, such as ``("receptor_type",)`` for clonotypes: every clone
             summary measures the cells of each label apart. Clones keep none.
+        diagnostics: Numbers that the operation recorded about how it
+            defined the clones, by name, which callers can turn into
+            warnings. Clones called from lineage barcodes record
+            ``distinct_barcodes``, ``expected_chance_matches``,
+            ``merged_barcodes`` and ``largest_clone_share``; other sources
+            record none.
     """
 
     cells: pd.DataFrame = field(repr=False)
     clones: pd.DataFrame = field(repr=False)
     source: str
     kept_apart: tuple[str, ...] = ()
+    diagnostics: Mapping[str, int | float] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 def clone_frames(

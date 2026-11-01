@@ -758,7 +758,15 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
         cell's ``n_barcodes``, its barcodes after the pair filters, and
         ``doublet``, whether TREX's rule removed it as a doublet; its
         attributes record what each rule removed, and its parameters the
-        resolved rules.
+        resolved rules. Its ``diagnostics`` attribute, which
+        :meth:`~cytearc.datastore.namespaces.ClonesAccessor.load_clones`
+        returns, shows when correction merges unrelated barcodes:
+        ``distinct_barcodes``, the distinct barcodes of each group and
+        library that correction compares; ``expected_chance_matches``, the
+        pairs of them expected within ``distance`` by chance;
+        ``merged_barcodes``, those that correction merged into another; and
+        ``largest_clone_share``, the cells of the largest clone over the
+        cells given a clone.
 
         Args:
             barcodes: A ``lineage_barcodes`` artifact, such as one from
@@ -797,7 +805,8 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If ``barcodes`` is not a ``lineage_barcodes`` artifact,
                 the preset is unknown, a required rule is missing, a value is
-                out of range, an argument does not apply to the method, a
+                out of range, ``metric="levenshtein"`` has a ``distance``
+                above 8, an argument does not apply to the method, a
                 rule needs counts that a library does not hold, or a within
                 column is missing, is named like a column of the loaded
                 clones (``clone``, ``clone_size``, ``n_barcodes`` or
@@ -909,7 +918,12 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             cell_selection,
             n_cells,
             with_probability=False,
-            required_attributes=("n_clones", "rule_counts", "library_units"),
+            required_attributes=(
+                "n_clones",
+                "rule_counts",
+                "library_units",
+                "diagnostics",
+            ),
             source_arrays={"n_barcodes": "i", "doublet": "b"},
         )
         if planned.reused:
@@ -1005,6 +1019,7 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
                         strict=True,
                     )
                 ],
+                "diagnostics": called.diagnostics,
             },
             source_arrays={
                 "n_barcodes": called.n_barcodes.astype(np.int32),

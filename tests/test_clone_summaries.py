@@ -246,6 +246,23 @@ def _source_clones(source) -> tuple[dict[tuple, str], dict[tuple, int]]:
     return labels, {key: ranks[label] for key, label in labels.items()}
 
 
+def test_only_barcode_clones_record_diagnostics(source) -> None:
+    # The record of every source holds the field, which only the clones
+    # called from barcodes fill.
+    loaded = source.store.clones.load_clones(source.clones)
+    if inspect_artifact(source.store.zw, source.clones).operation == (
+        "call_barcode_clones"
+    ):
+        assert list(loaded.diagnostics) == [
+            "distinct_barcodes",
+            "expected_chance_matches",
+            "merged_barcodes",
+            "largest_clone_share",
+        ]
+    else:
+        assert dict(loaded.diagnostics) == {}
+
+
 def test_clone_abundance_counts_the_clones_of_each_size(source) -> None:
     result = source.store.plots.clone_abundance(
         source.clones, group_by="sample", show=False

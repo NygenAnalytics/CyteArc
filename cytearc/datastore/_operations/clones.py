@@ -4,6 +4,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -118,6 +119,30 @@ _PROBABILITY = "clone_probability"
 # table of loaded cells holds: each cell's probability of its clone, its
 # barcodes and whether calling removed it as a doublet.
 _SOURCE_ARRAYS = {_PROBABILITY: np.float64, "n_barcodes": np.int64, "doublet": bool}
+
+
+def _stored_diagnostics(group: zarr.Group) -> Mapping[str, int | float]:
+    """Read the numbers a clone artifact records about its calling, none if absent.
+
+    Raises:
+        ValueError: If the artifact records them as anything but a mapping of
+            names to numbers.
+    """
+    recorded = group.attrs.get("diagnostics", {})
+    numbers: dict[str, int | float] = {}
+    if isinstance(recorded, Mapping):
+        for name, value in recorded.items():
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                break
+            numbers[name] = value
+        else:
+            return MappingProxyType(numbers)
+    raise ValueError(
+        "The clones artifact's diagnostics attribute must map names to numbers, "
+        f"not {recorded!r}"
+    )
+
+
 # Bytes held for each selected cell while clones are gathered: its clone code,
 # whether it was given several clones, and its probability.
 _ASSIGNER_BYTES_PER_CELL = 24
@@ -952,6 +977,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             clones=table,
             source=str(inspect_artifact(self.zw, clones).operation),
             kept_apart=tuple(name for name, _labels in source.kept_apart),
+            diagnostics=_stored_diagnostics(group),
         )
 
     @validation_scoped

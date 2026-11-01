@@ -99,6 +99,11 @@ def test_each_preset_recovers_the_truth_under_the_noise_its_rules_remove(
         TRUTH, min_barcodes=min_barcodes, min_size=min_size
     )
     assert loaded_partition(store, clones) == expected
+    # The largest of the truth's clones over the cells of every clone.
+    diagnostics = store.clones.load_clones(clones).diagnostics
+    sizes = sorted(map(len, expected))
+    assert diagnostics["largest_clone_share"] == sizes[-1] / sum(sizes)
+    assert diagnostics["distinct_barcodes"] >= diagnostics["merged_barcodes"]
     # The noise is there to remove: the same barcodes without the rules call
     # other clones.
     loose = store.clones.barcode_clones(barcodes, method="sets")
@@ -207,6 +212,21 @@ def test_the_artifact_holds_barcodes_doublets_and_what_each_rule_removed(
     assert record.parameters["similarity"] == 0.7
     assert record.parameters["trex_rules"] is True
     assert record.operation == "call_barcode_clones"
+    # The diagnostics are one flat mapping of numbers, which load_clones
+    # returns as the artifact records them.
+    diagnostics = attributes["diagnostics"]
+    assert dict(loaded.diagnostics) == diagnostics
+    assert list(diagnostics) == [
+        "distinct_barcodes",
+        "expected_chance_matches",
+        "merged_barcodes",
+        "largest_clone_share",
+    ]
+    assert diagnostics["merged_barcodes"] == counts["barcodes_corrected"]
+    assert 0 < diagnostics["expected_chance_matches"] < diagnostics["merged_barcodes"]
+    assert diagnostics["largest_clone_share"] == (
+        loaded.clones["n_cells"].max() / loaded.clones["n_cells"].sum()
+    )
 
 
 def test_clones_within_groups_are_those_of_each_group_alone(store, tmp_path) -> None:
@@ -307,6 +327,40 @@ def test_saved_clones_are_reused_by_their_resolved_rules(store, tmp_path) -> Non
     )
 
 
+def test_reused_and_recomputed_clones_give_the_same_diagnostics(
+    store, tmp_path
+) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "trex")
+    clones = store.clones.barcode_clones(barcodes, preset="trex")
+    diagnostics = dict(store.clones.load_clones(clones).diagnostics)
+    again = store.clones.barcode_clones(barcodes, preset="trex")
+    assert again == clones
+    assert dict(store.clones.load_clones(again).diagnostics) == diagnostics
+    recomputed = store.clones.barcode_clones(
+        barcodes, preset="trex", invalidate_cache=True
+    )
+    assert recomputed != clones
+    assert dict(store.clones.load_clones(recomputed).diagnostics) == diagnostics
+    # Saved clones without diagnostics are called again rather than reused.
+    for saved in (clones, recomputed):
+        del artifact_group(store.zw, saved).attrs["diagnostics"]
+    called = store.clones.barcode_clones(barcodes, preset="trex")
+    assert called not in (clones, recomputed)
+    assert dict(store.clones.load_clones(called).diagnostics) == diagnostics
+
+
+def test_diagnostics_that_are_not_numbers_are_refused_on_loading(
+    store, tmp_path
+) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "larry")
+    clones = store.clones.barcode_clones(barcodes, preset="larry")
+    attributes = artifact_group(store.zw, clones).attrs
+    for wrong in ({"merged_barcodes": "3"}, {"merged_barcodes": True}, [1, 2]):
+        attributes["diagnostics"] = wrong
+        with pytest.raises(ValueError, match="must map names to numbers"):
+            store.clones.load_clones(clones)
+
+
 def test_a_read_only_store_reuses_saved_clones_and_refuses_new_ones(
     store, tmp_path
 ) -> None:
@@ -372,11 +426,14 @@ def test_calls_follow_neither_file_order_nor_chunks_nor_threads(
             }
         )
         stored[-1]["rule_counts"] = dict(group.attrs)["rule_counts"]
+        stored[-1]["diagnostics"] = dict(group.attrs)["diagnostics"]
     # The files of about 400 reads or molecules came in chunks of 7 rows.
     assert chunks[0] > 40
+    assert stored[0]["diagnostics"]["expected_chance_matches"] > 0
     for other in stored[1:]:
         for name, values in stored[0].items():
-            if name == "rule_counts":
+            if name in ("rule_counts", "diagnostics"):
+                # Equal to the last bit, the expectation's sum included.
                 assert other[name] == values
             else:
                 np.testing.assert_array_equal(other[name], values)
