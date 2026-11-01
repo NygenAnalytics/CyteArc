@@ -72,6 +72,7 @@ nitpick_ignore = [
     ("py:class", "pathlib._local.Path"),
     ("py:class", "os.PathLike"),
     ("py:class", "collections.abc.Callable"),
+    ("py:class", "collections.abc.Collection"),
     ("py:class", "collections.abc.Iterable"),
     ("py:class", "collections.abc.Iterator"),
     ("py:class", "collections.abc.Mapping"),
