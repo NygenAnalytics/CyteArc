@@ -3,19 +3,20 @@
 Clone import, clones from a cell column and clones called from variants all
 save the same artifact: per cell the clone label in ``values``, the clone's
 rank in ``codes`` and its size in ``clone_size``, and per clone
-``clone_ids`` and ``clone_sizes``. These helpers plan it, check that its
-labels fit the memory budget as the store saves them, write it and log it,
-once for every operation mixin that saves clones.
+``clone_ids`` and ``clone_sizes``, beside the per-cell arrays that a source
+adds, such as each cell's probability of its clone. These helpers plan it,
+check that its labels fit the memory budget as the store saves them, write
+it and log it, once for every operation mixin that saves clones.
 """
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, ClassVar, Protocol
 
 import numpy as np
 import zarr
 
 from ...clones.assignments import CloneAssignment
-from ...graph.arguments import OperationArguments
+from ...graph.arguments import ArgumentRecord
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import ArtifactRef
@@ -23,6 +24,8 @@ from ...utils.logging import logger
 
 __all__ = [
     "CLONE_PROBABILITY",
+    "SOURCE_ARRAYS",
+    "CloneArguments",
     "check_clone_write_budget",
     "log_clones",
     "plan_clones",
@@ -31,19 +34,45 @@ __all__ = [
 
 #: The per-cell array of each cell's probability of its clone.
 CLONE_PROBABILITY = "clone_probability"
+#: The per-cell arrays that a clone source may add, with the dtype that the
+#: table of loaded cells holds: each cell's probability of its clone, its
+#: barcodes and whether calling removed it as a doublet.
+SOURCE_ARRAYS: Mapping[str, Any] = {
+    CLONE_PROBABILITY: np.float64,
+    "n_barcodes": np.int64,
+    "doublet": bool,
+}
+
+
+class CloneArguments(Protocol):
+    """The arguments of an operation that saves clones, as ``plan_clones`` reads them."""
+
+    operation: ClassVar[str]
+    artifact_kind: ClassVar[str]
+
+    @property
+    def invalidate_cache(self) -> bool: ...
+
+    def to_record(self) -> ArgumentRecord: ...
 
 
 def plan_clones(
     root: zarr.Group,
-    arguments: OperationArguments,
+    arguments: CloneArguments,
     cell_selection: ArtifactRef,
     n_cells: int,
     *,
     with_probability: bool,
     required_attributes: tuple[str, ...],
-    invalidate_cache: bool,
+    source_arrays: Mapping[str, str] | None = None,
 ) -> PlannedArtifact:
-    """Reuse saved clones with these arguments, or plan new ones."""
+    """Reuse saved clones with these arguments, or plan new ones.
+
+    ``source_arrays`` names further per-cell arrays that the source saves,
+    each one of ``SOURCE_ARRAYS``, with their dtype kinds, such as barcode
+    clones' ``n_barcodes`` and ``doublet``; saved clones are reused only with
+    them.
+    """
     record = arguments.to_record()
     arrays: dict[str, tuple[tuple[int | None, ...], str | None]] = {
         "values": ((n_cells,), None),
@@ -52,6 +81,8 @@ def plan_clones(
     }
     if with_probability:
         arrays[CLONE_PROBABILITY] = ((n_cells,), "f")
+    for name, kind in (source_arrays or {}).items():
+        arrays[name] = ((n_cells,), kind)
 
     def has_clones(_ref: ArtifactRef, group: zarr.Group) -> bool:
         ids = group.get("clone_ids")
@@ -72,7 +103,7 @@ def plan_clones(
         execution_options=record.execution_options,
         cell_selection=cell_selection,
         arrays=arrays,
-        invalidate_cache=invalidate_cache,
+        invalidate_cache=arguments.invalidate_cache,
         required_attributes=required_attributes,
         reuse_validator=has_clones,
     )
@@ -106,8 +137,14 @@ def write_clones(
     planned: PlannedArtifact,
     assignment: CloneAssignment,
     attributes: Mapping[str, Any],
+    source_arrays: Mapping[str, np.ndarray] | None = None,
 ) -> None:
-    """Write planned clones with their attributes."""
+    """Write planned clones with their attributes and the arrays their source adds.
+
+    Raises:
+        ValueError: If ``source_arrays`` names an array that is not one of
+            ``SOURCE_ARRAYS``, or the assignment's probabilities already.
+    """
     arrays: dict[str, np.ndarray] = {
         "values": assignment.values,
         "codes": assignment.codes.astype(np.int32),
@@ -117,6 +154,13 @@ def write_clones(
     }
     if assignment.probabilities is not None:
         arrays[CLONE_PROBABILITY] = assignment.probabilities.astype(np.float64)
+    for name, values in (source_arrays or {}).items():
+        if name not in SOURCE_ARRAYS or name in arrays:
+            raise ValueError(
+                f"{name!r} is not a per-cell array that a clone source adds beside "
+                f"its clones; those are {', '.join(SOURCE_ARRAYS)}"
+            )
+        arrays[name] = values
     write_cell_data_artifact(root, planned, arrays, attributes=dict(attributes))
 
 

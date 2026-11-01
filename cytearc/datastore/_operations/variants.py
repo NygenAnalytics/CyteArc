@@ -2036,7 +2036,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             n_cells,
             with_probability=False,
             required_attributes=_CLONE_ATTRIBUTES,
-            invalidate_cache=invalidate_cache,
         )
         if planned.reused:
             return planned.ref

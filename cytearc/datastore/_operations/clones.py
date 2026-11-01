@@ -105,6 +105,7 @@ from .cell_barcodes import (
 )
 from .cell_groups import cell_groups, group_columns, selection_chunk_bytes
 from .clone_artifacts import (
+    SOURCE_ARRAYS,
     check_clone_write_budget,
     log_clones,
     plan_clones,
@@ -570,7 +571,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "n_clones",
                 "n_cells_in_several_clones",
             ),
-            invalidate_cache=invalidate_cache,
         )
         files_text = _files_text(len(files))
         if planned.reused:
@@ -849,7 +849,6 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             n_cells,
             with_probability=False,
             required_attributes=("n_clones",),
-            invalidate_cache=invalidate_cache,
         )
         if planned.reused:
             return planned.ref
@@ -954,7 +953,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         assert source.clone_ids is not None
         extra = {
             name: _read(group, name).astype(dtype)
-            for name, dtype in _SOURCE_ARRAYS.items()
+            for name, dtype in SOURCE_ARRAYS.items()
             if name in group
         }
         # Every saved clone holds a cell, so the codes give the clone sizes.
