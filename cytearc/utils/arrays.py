@@ -58,6 +58,72 @@ def sorted_unique(values: Any) -> np.ndarray:
     return ordered[keep]
 
 
+def _union_kernel(held: np.ndarray, new: np.ndarray, out: np.ndarray) -> int:
+    """Merge ascending ``held`` and ``new`` into ``out`` without repeats.
+
+    ``held`` holds distinct values and ``new`` may repeat them. With an empty
+    ``out``, the distinct values are counted and nothing is written.
+    """
+    n_held = len(held)
+    n_new = len(new)
+    write = len(out) > 0
+    i = 0
+    j = 0
+    k = 0
+    if n_held == 0 and n_new == 0:
+        return 0
+    last = new[0] if n_held == 0 else held[0]
+    while i < n_held or j < n_new:
+        if j == n_new or (i < n_held and held[i] <= new[j]):
+            value = held[i]
+            i += 1
+        else:
+            value = new[j]
+            j += 1
+        if k == 0 or value != last:
+            if write:
+                out[k] = value
+            last = value
+            k += 1
+    return k
+
+
+_unionImpl: Any = None
+
+
+def union_sorted(held: Any, values: Any) -> np.ndarray:
+    """Return the distinct values of ``held`` and ``values``, ascending.
+
+    ``held`` must be ascending and distinct, as this returns its values.
+    Beside ``held`` and ``values``, it holds the result, which it sizes
+    exactly, and a sorted copy of ``values``, so merging a chunk of values
+    into many held ones holds the held ones twice, where sorting them with
+    the chunk holds them about four times.
+
+    Raises:
+        TypeError: If either is not a one-dimensional array of integers, or
+            their dtypes differ.
+    """
+    global _unionImpl
+    known = _integer_vector(held, "union_sorted")
+    added = _integer_vector(values, "union_sorted")
+    if added.dtype != known.dtype:
+        raise TypeError(
+            f"union_sorted needs values of one dtype, not {known.dtype} and "
+            f"{added.dtype}"
+        )
+    if not len(added):
+        return known
+    if _unionImpl is None:
+        from .numba import njit
+
+        _unionImpl = njit(cache=True)(_union_kernel)
+    ordered = np.sort(added)
+    out = np.empty(int(_unionImpl(known, ordered, known[:0])), dtype=known.dtype)
+    _unionImpl(known, ordered, out)
+    return out
+
+
 def unique_inverse(values: Any) -> tuple[np.ndarray, np.ndarray]:
     """Return the distinct values of an integer array and each value's position.
 

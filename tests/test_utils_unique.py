@@ -3,7 +3,13 @@
 import numpy as np
 import pytest
 
-from cytearc.utils.arrays import sorted_unique, unique_inverse, unique_rows
+from cytearc.utils import arrays
+from cytearc.utils.arrays import (
+    sorted_unique,
+    union_sorted,
+    unique_inverse,
+    unique_rows,
+)
 
 
 @pytest.mark.parametrize("seed", range(5))
@@ -87,3 +93,81 @@ def test_unique_inverse_and_rows_refuse_other_arrays() -> None:
         unique_rows(np.asarray([1, 2]))
     with pytest.raises(TypeError, match="unique_rows needs a two-dimensional"):
         unique_rows(np.asarray([[True], [False]]))
+
+
+@pytest.mark.parametrize("seed", range(6))
+@pytest.mark.parametrize("high", [2, 50, 2**63 - 1])
+def test_union_sorted_equals_numpy(seed: int, high: int) -> None:
+    rng = np.random.default_rng(seed)
+    held = np.unique(rng.integers(0, high, size=int(rng.integers(0, 300)))).astype(
+        np.uint64
+    )
+    # Values repeat among themselves and with the held ones, in any order.
+    values = rng.integers(0, high, size=int(rng.integers(0, 300))).astype(np.uint64)
+    if len(held) and len(values):
+        values[: len(values) // 3] = rng.choice(held, size=len(values) // 3)
+    merged = union_sorted(held, values)
+    assert np.array_equal(merged, np.union1d(held, values))
+    assert merged.dtype == np.uint64
+
+
+def test_union_sorted_of_empty_and_extreme_values() -> None:
+    hashes = np.asarray([0, 2**64 - 1], dtype=np.uint64)
+    assert union_sorted(
+        hashes, np.asarray([2**64 - 1, 5, 5], dtype=np.uint64)
+    ).tolist() == [0, 5, 2**64 - 1]
+    empty = np.empty(0, dtype=np.uint64)
+    assert union_sorted(empty, np.asarray([3, 1, 3], dtype=np.uint64)).tolist() == [
+        1,
+        3,
+    ]
+    assert union_sorted(hashes, empty) is hashes
+    assert union_sorted(empty, empty).tolist() == []
+    signed = np.asarray([-5, 7], dtype=np.int64)
+    assert union_sorted(signed, np.asarray([-9, 7], dtype=np.int64)).tolist() == [
+        -9,
+        -5,
+        7,
+    ]
+
+
+def test_union_sorted_holds_the_held_values_twice_at_most() -> None:
+    import tracemalloc
+
+    held = np.arange(0, 2_000_000, 2, dtype=np.uint64)
+    values = np.arange(1, 20_001, 2, dtype=np.uint64)
+    union_sorted(held[:4], values[:4])
+    tracemalloc.start()
+    before = tracemalloc.get_traced_memory()[0]
+    merged = union_sorted(held, values)
+    peak = tracemalloc.get_traced_memory()[1] - before
+    tracemalloc.stop()
+    assert len(merged) == len(held) + len(values)
+    # Beside the held values and the new ones: the result, sized exactly, and
+    # the sorted copy of the new ones, where sorting all again holds the held
+    # ones three more times.
+    assert peak <= merged.nbytes + values.nbytes + 4_096, peak
+
+
+def test_union_sorted_kernel_runs_as_python_too() -> None:
+    held = np.asarray([1, 4, 9], dtype=np.int64)
+    new = np.asarray([0, 4, 4, 10], dtype=np.int64)
+    kernel = arrays._union_kernel
+    assert kernel(held, new, held[:0]) == 5
+    out = np.empty(5, dtype=np.int64)
+    assert kernel(held, new, out) == 5
+    assert out.tolist() == [0, 1, 4, 9, 10]
+    assert kernel(held[:0], new[:0], out[:0]) == 0
+
+
+@pytest.mark.parametrize(
+    ("held", "values"),
+    [
+        (np.zeros((2, 2), dtype=np.uint64), np.asarray([1], dtype=np.uint64)),
+        (np.asarray([1], dtype=np.uint64), np.asarray([1.5])),
+        (np.asarray([1], dtype=np.uint64), np.asarray([1], dtype=np.int64)),
+    ],
+)
+def test_union_sorted_refuses_other_arrays(held, values) -> None:
+    with pytest.raises(TypeError, match="union_sorted needs"):
+        union_sorted(held, values)

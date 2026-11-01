@@ -20,7 +20,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ...utils.arrays import sorted_unique
+from ...utils.arrays import union_sorted
 from ...utils.warnings import warn
 
 __all__ = [
@@ -45,7 +45,7 @@ UNMATCHED_EXAMPLES = 5
 #: the ID's slot and hash in the lookup, and whether a file named it.
 LOOKUP_BYTES_PER_CELL = 100
 # Bytes held for each distinct barcode that matches no selected cell: its
-# 64-bit hash and the copy that merging new hashes makes.
+# 64-bit hash and its copy in the hashes that a merge of new ones makes.
 _UNMATCHED_BYTES_PER_BARCODE = 16
 # Bytes of each barcode while its cell ID is derived, whatever the options:
 # the pandas copy of the pointers to the barcodes, and whether it names a cell.
@@ -63,6 +63,9 @@ _EXTRACTED_BYTES_PER_BARCODE = 176
 # hash and the unique arrays that count it. Hashing a barcode also encodes
 # its text, a byte for each character.
 _MATCH_BYTES_PER_BARCODE = 128
+# Bytes of each new hash of a chunk while it is merged: the hash, its sorted
+# copy and its place in the merged hashes.
+_NEW_HASH_BYTES = 24
 # The named group of a barcode pattern that holds the barcode.
 _BARCODE_GROUP = "barcode"
 # What the options of an import may be, for their errors.
@@ -452,8 +455,10 @@ class CellBarcodeJoin:
             hashes = np.asarray(
                 pd.util.hash_array(missing, categorize=False), dtype=np.uint64
             )
-            held = self._held_bytes + _UNMATCHED_BYTES_PER_BARCODE * (
-                len(self._unmatched) + len(hashes)
+            held = (
+                self._held_bytes
+                + _UNMATCHED_BYTES_PER_BARCODE * len(self._unmatched)
+                + _NEW_HASH_BYTES * len(hashes)
             )
             if held > self._memory_bytes:
                 raise MemoryError(
@@ -463,7 +468,7 @@ class CellBarcodeJoin:
                     "barcode_suffix, barcode_pattern and cell_selection, or raise "
                     "mem_budget."
                 )
-            self._unmatched = sorted_unique(np.concatenate([self._unmatched, hashes]))
+            self._unmatched = union_sorted(self._unmatched, hashes)
             if len(self._examples) < UNMATCHED_EXAMPLES:
                 for barcode in pd.unique(texts[unmatched]):
                     if len(self._examples) == UNMATCHED_EXAMPLES:

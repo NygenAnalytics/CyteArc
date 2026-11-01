@@ -410,7 +410,12 @@ def test_adding_many_small_chunks_costs_time_linear_in_the_chunks(monkeypatch) -
         counter.peak_bytes
     # Walking the waiting chunks on each call took about 6 million lengths.
     assert len(lengths) < 20 * n_chunks
-    assert counter.n_rows == n_chunks
+    # The chunks merge every 256 into the 35 pairs of 7 cells and 5 barcodes,
+    # each of a UMI for each of its rows.
+    assert counter.n_rows <= 35 + 255
+    table = counter.finish().table
+    assert table.n_records == 35
+    assert int(table.values["umis"].sum()) == n_chunks
 
 
 def test_the_counters_totals_follow_the_rows_it_holds() -> None:
@@ -429,7 +434,8 @@ def test_the_counters_totals_follow_the_rows_it_holds() -> None:
         n_rows = sum(len(part) for part in parts)
         n_text = sum(len(part.barcode_values) + len(part.umi_values) for part in parts)
         assert counter.n_rows == n_rows
-        assert counter.nbytes == sum(part.nbytes for part in parts)
+        # Each chunk held takes 1,300 bytes beside its rows and text.
+        assert counter.nbytes == sum(part.nbytes for part in parts) + 1_300 * len(parts)
         assert counter.peak_bytes == counter.nbytes + 110 * n_rows + 48 * n_text
 
 
@@ -479,3 +485,49 @@ def test_keys_listed_twice_in_many_parts_are_counted_at_once() -> None:
 def test_pair_keys_need_a_second_text_for_each_first() -> None:
     with pytest.raises(ValueError, match="Each pair needs two texts"):
         pair_keys(["AAAC", "CCCG"], ["TT"])
+
+
+def _held_by(call) -> int:
+    """The bytes that ``call`` leaves held, traced."""
+    import gc
+    import tracemalloc
+
+    gc.collect()
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        call()
+        return tracemalloc.get_traced_memory()[0] - before
+    finally:
+        tracemalloc.stop()
+
+
+def test_chunks_without_rows_are_not_kept() -> None:
+    counter = BarcodeCounter(merge_rows=10**9)
+    counter.add_library("lib", molecules=False)
+    # A chunk of a file's barcodes that all name no selected cell keeps no
+    # rows, and each such chunk held about 1,200 bytes for its empty arrays.
+    held = _held_by(
+        lambda: [counter.add([], [], [], umi_counts=[]) for _chunk in range(2_000)]
+    )
+    assert held < 64 * 1024, held
+    assert (counter.n_rows, counter.nbytes) == (0, 0)
+    assert counter.finish().table.n_records == 0
+
+
+def test_waiting_chunks_of_few_rows_count_their_bytes_and_merge() -> None:
+    counter = BarcodeCounter(merge_rows=10**9)
+
+    def add(first: int, n_chunks: int) -> None:
+        for chunk in range(first, first + n_chunks):
+            counter.add([chunk], ["lib"], [f"B{chunk}"], umi_counts=[2])
+
+    # 255 chunks of one row wait, each counted with its own arrays.
+    held = _held_by(lambda: add(0, 255))
+    waiting = counter.nbytes
+    assert held <= waiting, (held, waiting)
+    # The 256th merges them into one table of records, which holds less.
+    add(255, 1)
+    assert counter.nbytes < waiting / 4
+    assert counter.n_rows == 256
+    assert counter.finish().table.n_records == 256

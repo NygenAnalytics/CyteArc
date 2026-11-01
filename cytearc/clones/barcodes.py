@@ -88,6 +88,12 @@ _MERGE_TEXT_BYTES = 48
 # Merging begins once at least this many rows wait, so that small imports
 # merge once.
 _MIN_MERGE_ROWS = 250_000
+# Bytes that each held chunk takes whatever its rows: its eight arrays and its
+# record, about 1,100 to 1,250 traced for chunks of 0 to 5 rows.
+_PART_BYTES = 1_300
+# The waiting chunks merge once this many wait, so that the chunks of few rows
+# that a small budget reads hold little beside their rows.
+_MAX_WAITING_PARTS = 256
 
 
 @dataclass(slots=True)
@@ -218,9 +224,9 @@ class BarcodeCounter:
     """Collapse the rows of barcode files into molecules and pairs, chunk by chunk.
 
     Each chunk is collapsed on its own; once the rows that wait outnumber
-    the records held, and ``merge_rows``, the waiting chunks merge into the
-    records, so the counter holds at most about twice as many rows as there
-    are records.
+    the records held, and ``merge_rows``, or 256 chunks wait, the waiting
+    chunks merge into the records, so the counter holds at most about twice
+    as many rows as there are records. A chunk without rows is not kept.
 
     Args:
         merge_rows: The fewest waiting rows that merge into the records.
@@ -254,9 +260,10 @@ class BarcodeCounter:
 
     @property
     def nbytes(self) -> int:
-        """The bytes that the held rows and their distinct text take."""
+        """The bytes that the held rows, their distinct text and chunks take."""
         held = 0 if self._held is None else self._held.nbytes
-        return held + self._waiting_bytes
+        n_parts = len(self._waiting) + (self._held is not None)
+        return held + self._waiting_bytes + _PART_BYTES * n_parts
 
     @property
     def peak_bytes(self) -> int:
@@ -353,6 +360,8 @@ class BarcodeCounter:
             [self._library_code(str(name), molecules) for name in library_names],
             dtype=np.int32,
         )
+        if not n_rows:
+            return
         part = _collapsed(
             _Rows(
                 cells=cell_positions,
@@ -370,7 +379,10 @@ class BarcodeCounter:
         self._waiting_bytes += part.nbytes
         self._waiting_texts += len(part.barcode_values) + len(part.umi_values)
         held = 0 if self._held is None else len(self._held)
-        if self._waiting_rows >= max(held, self._merge_rows):
+        if (
+            self._waiting_rows >= max(held, self._merge_rows)
+            or len(self._waiting) >= _MAX_WAITING_PARTS
+        ):
             self._merge()
 
     def _merge(self) -> None:

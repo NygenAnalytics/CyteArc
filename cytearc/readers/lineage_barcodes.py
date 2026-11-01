@@ -61,6 +61,7 @@ import numpy as np
 import pandas as pd
 
 from ..metadata.records import MISSING_TEXT, file_lines, parse_text
+from ..utils.arrays import sorted_unique
 from ._delimited import (
     HDF5_SIGNATURE,
     TextLayout,
@@ -1035,6 +1036,9 @@ def _cell_texts(
     lines = first_line + np.arange(len(chunk))
     if len(positions) > 1:
         cells = joined_columns(chunk, positions, COLUMN_SEPARATOR)
+        # A row that lacks a part of its cell barcode has none.
+        for position in positions:
+            cells[(chunk[position].str.strip() == "").to_numpy(dtype=bool)] = ""
         _refuse_cellless(cells, lines, text.path, text)
         return cells
     return _stripped_cells(
@@ -1121,13 +1125,13 @@ def _item_counts(
         raise ValueError(
             f"{name} must be a whole number of at least 0, but holds "
             f"{str(items[np.flatnonzero(bad)[0]]).strip()!r} on "
-            + _on_lines(origin[bad], first_line, text)
+            + _on_lines(sorted_unique(origin[bad]), first_line, text)
         )
     if huge.any():
         raise ValueError(
             f"{name} holds a number too large for int64, "
             f"{str(items[np.flatnonzero(huge)[0]]).strip()!r}, on "
-            + _on_lines(origin[huge], first_line, text)
+            + _on_lines(sorted_unique(origin[huge]), first_line, text)
         )
     return counts
 

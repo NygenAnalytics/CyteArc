@@ -630,8 +630,10 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
             ValueError: If it is not a ``lineage_barcodes`` artifact.
             KeyError: If the store holds no such artifact.
             RuntimeError: If the artifact is incomplete.
-            MemoryError: If the tables, with the cells' IDs that they read as
-                text, do not fit the memory budget.
+            MemoryError: If the tables, about 120 bytes per record, 160 per
+                cell and per distinct barcode and UMI, and 64 per cell, or the
+                read of the cells' IDs and values, which
+                ``artifacts.load_values`` checks, do not fit the memory budget.
         """
         group = self._barcode_group(barcodes)
         n_records = int(

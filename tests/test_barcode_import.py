@@ -1128,7 +1128,9 @@ def test_the_budget_check_counts_the_lookup_and_a_chunk_beside_the_records(
     from cytearc.clones import barcodes as barcodes_module
 
     path = write_bartab_counts(BARCODES, tmp_path / "counts.tsv", sample="d4")
-    budget = 4 * 2**20
+    # Beyond the read of a stored chunk of the cells' IDs, which is checked
+    # before the IDs are read.
+    budget = 64 * 2**20
     monkeypatch.setattr(store, "memoryBytes", budget)
     # The records alone fit the budget; with the lookup of the cells and a
     # chunk of text beside them, they do not. Before the first row, the
@@ -1138,7 +1140,9 @@ def test_the_budget_check_counts_the_lookup_and_a_chunk_beside_the_records(
         "peak_bytes",
         property(lambda self: budget - 64 if self.n_rows else 0),
     )
-    with pytest.raises(MemoryError, match="Raise mem_budget"):
+    with pytest.raises(
+        MemoryError, match="Importing barcodes holds about .* at its peak"
+    ):
         store.clones.import_barcodes(
             path,
             cell_selection=every_cell(store),
@@ -1217,7 +1221,9 @@ def test_a_file_whose_reading_cannot_fit_the_budget_is_refused_before_a_row(
     assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []
 
 
-def _refused_before_reading(store, path, monkeypatch, **options) -> list:
+def _refused_before_reading(
+    store, path, monkeypatch, *, match: str = "Raise mem_budget", **options
+) -> list:
     """Import ``path`` expecting a refusal; return the chunk sizes that were read."""
     from cytearc.readers import lineage_barcodes as reader
 
@@ -1229,7 +1235,7 @@ def _refused_before_reading(store, path, monkeypatch, **options) -> list:
         return iterate(layout, chunk_rows)
 
     monkeypatch.setattr(reader, "iter_barcode_rows", recorded)
-    with pytest.raises(MemoryError, match="Raise mem_budget"):
+    with pytest.raises(MemoryError, match=match):
         store.clones.import_barcodes(path, cell_selection=every_cell(store), **options)
     assert store.artifacts.list(kind="lineage_barcodes", scope="datastore") == []
     return read
@@ -1311,7 +1317,9 @@ def test_a_library_column_of_many_long_labels_is_refused_before_it_is_read(
     import h5py
 
     path = write_quicat_h5ad(BARCODES, tmp_path / "barcodes_output.h5ad")
-    # A column that names each cell's library by 300 characters of its own.
+    # A column that names each cell's library by 1,000 characters of its own,
+    # 21 MB decoded, more than the budget leaves beside the check of the
+    # cells' IDs, which needs less than them.
     with h5py.File(path, "a") as handle:
         obs = handle["obs"]
         n_cells = obs["_index"].shape[0]
@@ -1323,7 +1331,8 @@ def test_a_library_column_of_many_long_labels_is_refused_before_it_is_read(
         labels = obs.create_dataset(
             "lane",
             data=np.asarray(
-                [f"{index:0300d}" for index in range(20_000)], dtype=h5py.string_dtype()
+                [f"{index:01000d}" for index in range(20_000)],
+                dtype=h5py.string_dtype(),
             ),
         )
         labels.attrs["encoding-type"] = "string-array"
@@ -1338,9 +1347,18 @@ def test_a_library_column_of_many_long_labels_is_refused_before_it_is_read(
         group.create_dataset("indices", data=np.zeros(20_000, dtype=np.int32))
         group.create_dataset("indptr", data=np.arange(20_001, dtype=np.int64))
     assert n_cells < 20_000
-    monkeypatch.setattr(store, "memoryBytes", 8 * 2**20)
+    from cytearc.datastore._operations.cell_barcodes import LOOKUP_BYTES_PER_CELL
+
+    # The budget of the check before the cells' IDs are read, to the byte.
+    budget = (LOOKUP_BYTES_PER_CELL + 64) * N_CELLS + ids_read_bytes(store, N_CELLS)
+    monkeypatch.setattr(store, "memoryBytes", budget)
     read = _refused_before_reading(
-        store, path, monkeypatch, format="h5ad", columns={"library": "lane"}
+        store,
+        path,
+        monkeypatch,
+        match="Importing barcodes holds about .* at its peak",
+        format="h5ad",
+        columns={"library": "lane"},
     )
     assert read == []
 
@@ -1369,13 +1387,15 @@ def test_the_join_s_unmatched_barcodes_count_beside_the_records(
 
     counted = write_bartab_counts(BARCODES, tmp_path / "counts.tsv.gz", sample="d4")
     rows = gzip.decompress(counted.read_bytes()).decode()
-    # 300 droplets outside the store, counted here at 4,000 bytes each.
+    # 300 droplets outside the store, counted here at 134,000 bytes each, 40
+    # MB beside a budget that holds the read of a stored chunk of the cells'
+    # IDs.
     droplets = "".join(f"LB{row}\tOUT{row:05d}\t2\n" for row in range(300))
     path = tmp_path / "counts.tsv"
     path.write_text(rows + droplets)
-    budget = 2 * 2**20
+    budget = 64 * 2**20
     monkeypatch.setattr(store, "memoryBytes", budget)
-    monkeypatch.setattr(cell_barcodes, "_UNMATCHED_BYTES_PER_BARCODE", 4_000)
+    monkeypatch.setattr(cell_barcodes, "_UNMATCHED_BYTES_PER_BARCODE", 134_000)
     # The records take half the budget, the droplets' hashes more than the
     # rest: each fits alone, but not both.
     monkeypatch.setattr(
@@ -1383,7 +1403,9 @@ def test_the_join_s_unmatched_barcodes_count_beside_the_records(
         "peak_bytes",
         property(lambda self: budget // 2 if self.n_rows else 0),
     )
-    with pytest.raises(MemoryError, match="Raise mem_budget"):
+    with pytest.raises(
+        MemoryError, match="Importing barcodes holds about .* at its peak"
+    ):
         store.clones.import_barcodes(
             path,
             cell_selection=every_cell(store),
@@ -1414,7 +1436,8 @@ def test_the_lookup_of_the_selected_cells_counts_as_the_records_grow(
         "gene\tcell\tcount\n"
         + "".join(f"LB{row % 3}\tC{row:05d}-1\t2\n" for row in range(20))
     )
-    budget = 4 * 2**20
+    # Beyond the read of a stored chunk of the cells' IDs.
+    budget = 64 * 2**20
     lookup = (LOOKUP_BYTES_PER_CELL + operations._CELL_BYTES) * len(cell_ids)
     monkeypatch.setattr(store, "memoryBytes", budget)
     # Once rows arrive, the records fill what the lookup leaves of the budget.
@@ -1424,7 +1447,9 @@ def test_the_lookup_of_the_selected_cells_counts_as_the_records_grow(
         property(lambda self: budget - lookup + 1 if self.n_rows else 0),
     )
     store.cells.insert("every_cell", np.ones(len(cell_ids), dtype=bool))
-    with pytest.raises(MemoryError, match="Raise mem_budget"):
+    with pytest.raises(
+        MemoryError, match="Importing barcodes holds about .* at its peak"
+    ):
         store.clones.import_barcodes(
             path, cell_selection=store.snapshot_cell_selection("every_cell")
         )
@@ -1539,3 +1564,76 @@ def test_load_names_missing_and_incomplete_barcodes(store, tmp_path) -> None:
     artifact_group(store.zw, ref).attrs["complete"] = False
     with pytest.raises(RuntimeError, match="Artifact is incomplete"):
         store.clones.load_barcodes(ref)
+
+
+def test_the_hashes_a_file_leaves_count_before_the_next_file_is_read(
+    store, tmp_path, monkeypatch
+) -> None:
+    from cytearc.datastore._operations import cell_barcodes
+    from cytearc.readers import lineage_barcodes as reader
+
+    # Each file holds 300 droplets outside the store, whose hashes are
+    # counted here at 100,000 bytes each: 30 MB once the first file, in the
+    # files' canonical order, is read. The second file's reading, set at
+    # 40 MiB, fits the budget beside them only if they are left out.
+    paths = []
+    for name in ("one", "two"):
+        path = tmp_path / f"{name}.tsv"
+        path.write_text(
+            "gene\tcell\tcount\n"
+            + "".join(f"LB{row}\t{name}{row:05d}\t2\n" for row in range(300))
+        )
+        paths.append(path)
+    asked: list[str] = []
+
+    def held_bytes(layout) -> int:
+        if str(layout.path) not in asked:
+            asked.append(str(layout.path))
+        return 0 if str(layout.path) == asked[0] else 40 * 2**20
+
+    monkeypatch.setattr(cell_barcodes, "_UNMATCHED_BYTES_PER_BARCODE", 100_000)
+    monkeypatch.setattr(reader.BarcodeLayout, "held_bytes", held_bytes)
+    monkeypatch.setattr(store, "memoryBytes", 64 * 2**20)
+    with collect_warnings():
+        read = _refused_before_reading(
+            store,
+            paths,
+            monkeypatch,
+            match="Importing barcodes holds about .* at its peak",
+        )
+    # The first file was read; the second was refused before its first row.
+    assert len(read) == 1
+    assert len(asked) == 2
+
+
+def test_the_load_counts_its_records_texts_and_cells_to_the_byte(
+    store, tmp_path, monkeypatch
+) -> None:
+    path = write_trex_molecules(BARCODES, tmp_path / "molecules.txt", sample="d2")
+    with collect_warnings():
+        ref = store.clones.import_barcodes(
+            path,
+            cell_selection=every_cell(store),
+            barcode_prefix="d2__",
+            barcode_suffix="-1",
+        )
+    records = store.clones.load_barcodes(ref).records
+    n_barcodes = records["barcode"].dropna().nunique()
+    n_umis = records["umi"].dropna().nunique()
+    # 120 bytes per record and 64 per cell, and 160 for each cell and each
+    # distinct barcode and UMI, each stored text with one bound more than its
+    # values.
+    needed = (
+        120 * len(records)
+        + 160 * ((n_barcodes + 1) + (n_umis + 1) + N_CELLS)
+        + 64 * N_CELLS
+    )
+    monkeypatch.setattr(store, "memoryBytes", needed - 1)
+    with pytest.raises(MemoryError, match=f"hold about {needed} bytes"):
+        store.clones.load_barcodes(ref)
+    # At the bound the tables fit, and reading the cells' IDs, which decodes a
+    # stored chunk of them, is refused by the read's own check.
+    monkeypatch.setattr(store, "memoryBytes", needed)
+    with pytest.raises(MemoryError) as refused:
+        store.clones.load_barcodes(ref)
+    assert "The tables of" not in str(refused.value)

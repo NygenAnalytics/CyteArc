@@ -397,6 +397,24 @@ _PAST_BLANK_LINES = {
 }
 
 
+def test_a_row_of_two_bad_list_items_is_named_once(tmp_path) -> None:
+    path = _file(tmp_path, "lists.tsv", "cell\tbarcodes\tumis\nA\tx;y\tz;w\n")
+    columns = {"cell": "cell", "barcode": "barcodes", "umis": "umis", "separator": ";"}
+    with pytest.raises(ValueError, match=r"holds 'z' on line 2$"):
+        _rows(barcode_layout(path, format="pairs", columns=columns), 10)
+
+
+def test_a_cell_barcode_joined_from_columns_needs_every_part(tmp_path) -> None:
+    columns = {"cell": ["s", "c"], "barcode": "b"}
+    whole = _file(tmp_path, "whole.tsv", "s\tc\tb\ns1\tAA\tT\ns2\tCC\tG\n")
+    chunks = _rows(barcode_layout(whole, format="pairs", columns=columns), 10)
+    assert chunks[0].cells.tolist() == ["s1__AA", "s2__CC"]
+    for name, row in (("cell.tsv", "s2\t\tG"), ("sample.tsv", " \tCC\tG")):
+        path = _file(tmp_path, name, f"s\tc\tb\ns1\tAA\tT\n\n{row}\n")
+        with pytest.raises(ValueError, match="without a cell barcode on lines 4"):
+            _rows(barcode_layout(path, format="pairs", columns=columns), 10)
+
+
 @pytest.mark.parametrize("case", list(_PAST_BLANK_LINES))
 def test_text_tables_name_the_file_line_of_a_row_past_blank_lines(
     tmp_path, case

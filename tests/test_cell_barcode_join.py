@@ -900,6 +900,51 @@ def test_the_join_refuses_repeated_cell_ids_and_budgets_too_small() -> None:
         )
 
 
+def test_the_join_counts_each_chunks_new_hashes_beside_those_it_holds() -> None:
+    # Five barcodes that name no cell, then a chunk of six others and one of
+    # the five: the join holds five hashes, 16 bytes each with their copy in
+    # the merged hashes, and each of the chunk's seven distinct hashes takes
+    # 24 bytes while it is merged.
+    first = np.asarray([f"x{k}" for k in range(5)], dtype=object)
+    second = np.asarray([f"y{k}" for k in range(6)] + ["x0"], dtype=object)
+    held = CellBarcodeJoin(np.asarray(["a"]), memory_bytes=10**6).held_bytes
+    needed = held + 16 * 5 + 24 * 7
+    short = CellBarcodeJoin(np.asarray(["a"]), memory_bytes=needed - 1)
+    short.cells(_plain(), first)
+    with pytest.raises(MemoryError, match=f"holds about {needed} bytes"):
+        short.cells(_plain(), second)
+    join = CellBarcodeJoin(np.asarray(["a"]), memory_bytes=needed)
+    join.cells(_plain(), first)
+    join.cells(_plain(), second)
+    assert join.n_unmatched_barcodes == 11
+    assert join.unmatched_bytes == 16 * 11
+
+
+@pytest.mark.slow
+def test_the_hashes_of_barcodes_that_match_no_cell_fit_the_smallest_budget() -> None:
+    from tests.clone_helpers import smallest_budget, traced_peak
+
+    # 50,000 barcodes outside the selection, in 100 chunks, set the budget:
+    # the join holds their hashes and merges each chunk's into them. Each
+    # chunk's rows take about 300 bytes each while they are joined, which the
+    # importer counts with its chunk.
+    cell_ids = np.asarray([f"c{index}" for index in range(10)])
+    chunks = [
+        np.asarray([f"out{chunk}_{row}" for row in range(500)], dtype=object)
+        for chunk in range(100)
+    ]
+
+    def run(budget: int) -> None:
+        join = CellBarcodeJoin(cell_ids, memory_bytes=budget)
+        for chunk in chunks:
+            join.cells(_plain(), chunk)
+
+    budget = smallest_budget(run, 1 << 22)
+    peak = traced_peak(lambda: run(budget))
+    # Merging by sorting every hash with each chunk's held 1.9 times as much.
+    assert peak <= budget + 300 * 500, (peak, budget)
+
+
 def test_the_join_counts_the_text_of_long_cell_ids() -> None:
     # One ID of 10,000 characters holds more than the budget by itself.
     with pytest.raises(MemoryError, match="memory budget of 5000 bytes"):
