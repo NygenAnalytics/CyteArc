@@ -15,12 +15,8 @@ from ...metadata.arguments import (
     VariantSelectionArguments,
 )
 from ...metadata.artifacts import plan_cell_data_artifact
-from ...metadata.rows import (
-    read_metadata_missing_rows_chunkwise,
-    read_metadata_rows_chunkwise,
-    text_read_bytes,
-)
-from ...metadata.selection import category_codes, cell_selection_indices
+from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
+from ...metadata.selection import cell_selection_indices
 from ...storage.arrays import create_metadata_column
 from ...storage.artifact_writer import (
     PlannedArtifact,
@@ -30,7 +26,6 @@ from ...storage.artifact_writer import (
 from ...storage.artifacts import (
     ArtifactRef,
     artifact_group,
-    fingerprint_strings,
     inspect_artifact,
     require_complete_artifact,
 )
@@ -80,7 +75,13 @@ from .cell_barcodes import (
     barcode_files,
     warn_unmatched_barcodes,
 )
-from .clone_artifacts import log_clones, plan_clones, write_clones
+from .cell_groups import cell_groups
+from .clone_artifacts import (
+    check_clone_write_budget,
+    log_clones,
+    plan_clones,
+    write_clones,
+)
 
 if TYPE_CHECKING:
     from ..mapping_datastore import MappingDatastore as _VariantOperationsBase
@@ -142,6 +143,9 @@ _FREQUENCY_BYTES_PER_ENTRY = 8
 _BAND_FREQUENCY_BYTES = 32
 # The Leiden seed of variant clones, CyteArc's default.
 _CLONE_SEED = 4444
+# Bytes held for each cell while called clones are written: its position,
+# group, cluster and status of the call, and its code and clone size.
+_CLONE_WRITE_BYTES_PER_CELL = 50
 # The smallest Jaccard index of two neighbourhoods that Seurat's shared
 # neighbour graph keeps.
 _SHARED_NEIGHBOR_PRUNE = 1 / 15
@@ -1614,13 +1618,16 @@ class _VariantOperationsMixin(_VariantOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``counts`` is not a complete ``variant_counts``
-                artifact, the preset, a threshold or a mask is unknown or
-                invalid, no threshold is set, a threshold tests a statistic
-                that the counts cannot give (strand tests without strand
-                counts, quality without base qualities), a mask meets a
-                contig that is not rCRS-sized, or no chosen cell is named by
-                the counts' files.
+            ValueError: If ``counts`` is not a ``variant_counts`` artifact,
+                the preset, a threshold or a mask is unknown or invalid, no
+                threshold is set, a threshold tests a statistic that the
+                counts cannot give (strand tests without strand counts,
+                quality without base qualities), a mask meets a contig that
+                is not rCRS-sized, or no chosen cell is named by the counts'
+                files.
+            KeyError: If the store holds no such ``counts`` artifact.
+            RuntimeError: If the ``counts`` artifact is incomplete, as an
+                import that stopped before it finished leaves it.
             PermissionError: If the store is read-only and the statistics are
                 not saved yet.
             MemoryError: If the statistics do not fit the memory budget.
@@ -1628,8 +1635,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         group = self._variant_group(counts)
         if cells is not None and not isinstance(cells, ArtifactRef):
             raise TypeError("cells must be a cell selection ArtifactRef or None")
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
+        bool_argument(invalidate_cache, "invalidate_cache")
         thresholds = resolve_thresholds(
             preset,
             {
@@ -1826,8 +1832,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
 
         Raises:
             TypeError: If ``informative`` is not an ArtifactRef.
-            ValueError: If it is not a complete ``variant_selection``
-                artifact.
+            ValueError: If it is not a ``variant_selection`` artifact.
+            KeyError: If the store holds no such artifact, or not the counts
+                that it scored.
+            RuntimeError: If the artifact or the counts that it scored are
+                incomplete.
         """
         group = self._selection_group(informative)
         counts = inspect_artifact(self.zw, informative).input_ref("counts")
@@ -1916,14 +1925,20 @@ class _VariantOperationsMixin(_VariantOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``variants`` did not score ``counts``, selects no
-                informative variant, ``n_neighbors`` is below 2, the
-                resolution is not finite and positive, or ``within`` is not a
-                cell metadata column.
+            ValueError: If ``counts`` is not a ``variant_counts`` artifact,
+                ``variants`` is not a ``variant_selection`` artifact or did
+                not score ``counts``, it selects no informative variant,
+                ``n_neighbors`` is below 2, the resolution is not finite and
+                positive, or ``within`` is not a cell metadata column.
+            KeyError: If the store holds no such ``counts`` or ``variants``
+                artifact.
+            RuntimeError: If the ``counts`` or ``variants`` artifact is
+                incomplete.
             PermissionError: If the store is read-only and the clones are not
                 saved yet.
-            MemoryError: If the frequencies, similarities or graph do not fit
-                the memory budget.
+            MemoryError: If grouping the cells by ``within``, the frequencies,
+                similarities or graph, or the clone labels as the store saves
+                them do not fit the memory budget.
         """
         from ...clustering.leiden import canonical_resolution
 
@@ -1949,8 +1964,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             raise TypeError("within must be a cell metadata column or None")
         if within is not None and within not in self.cells.columns:
             raise ValueError(f"{within!r} is not a cell metadata column")
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
+        bool_argument(invalidate_cache, "invalidate_cache")
         chosen = _read(selection, "informative").astype(bool)
         alleles = _read(selection, "variant_alleles").astype(np.int64)[chosen]
         if not len(alleles):
@@ -1972,21 +1986,22 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         group_names: list[str] = []
         fingerprint = None
         if within is not None:
-            labels = np.asarray(
-                read_metadata_rows_chunkwise(self.cells, within, cell_index),
-                dtype=object,
+            # The groups are those that the clone summaries group cells into,
+            # read and coded within the memory budget, and are identified by
+            # each cell's group and the groups' labels.
+            grouped = cell_groups(
+                self.zw,
+                self.cells,
+                cell_selection,
+                np.ones(n_cells, dtype=bool),
+                group_by=within,
+                groups=None,
+                cell_selection=None,
+                memory_bytes=self.memoryBytes,
             )
-            missing = read_metadata_missing_rows_chunkwise(
-                self.cells, within, cell_index
-            )
-            codes, group_names = category_codes(labels, missing)
-            group_codes = codes
-            fingerprint = fingerprint_strings(
-                np.asarray(
-                    [group_names[code] if code >= 0 else "" for code in codes.tolist()],
-                    dtype=object,
-                ).astype(str)
-            )
+            group_codes = grouped.codes
+            group_names = [key[within] for key in grouped.keys]
+            fingerprint = grouped.fingerprint()
         arguments = VariantCloneArguments(
             cell_selection=cell_selection,
             counts=counts,
@@ -2074,6 +2089,13 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             "n_cells_without_group": counts_by_status["no_group"],
             "n_edges": called.n_edges,
         }
+        check_clone_write_budget(
+            self.memoryBytes,
+            _CLONE_WRITE_BYTES_PER_CELL * n_cells
+            + sum(map(sys.getsizeof, assignment.clone_ids.tolist())),
+            assignment.clone_ids,
+            n_cells,
+        )
         write_clones(self.zw, planned, assignment, attributes)
         log_clones(assignment, n_cells)
         return planned.ref

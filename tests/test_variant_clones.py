@@ -48,7 +48,14 @@ def _inputs(store):
 
 
 def _called(store, clones) -> np.ndarray:
-    cells = store.clones.load_clones(clones).cells
+    # Loading reads the cells' IDs, which decodes a stored chunk of them, so
+    # the clones are read within a roomy budget whatever budget called them.
+    budget = store.memoryBytes
+    store.memoryBytes = max(budget, 1 << 30)
+    try:
+        cells = store.clones.load_clones(clones).cells
+    finally:
+        store.memoryBytes = budget
     labels = cells.loc[TRUTH.clones.cell_ids, "clone"].astype(object)
     return labels.where(labels.notna(), "").astype(str).to_numpy()
 
@@ -274,3 +281,155 @@ def test_variant_clones_feed_the_clone_plots_and_values(store) -> None:
     result = store.plots.clone_abundance(clones, show=False)
     assert result.tables["top"]["cells"].sum() == int(called.notna().sum())
     result.close()
+
+
+def test_variant_operations_name_inputs_of_another_kind_missing_or_incomplete(
+    store,
+) -> None:
+    from cytearc.storage.artifacts import artifact_group
+    from cytearc.storage.refs import ArtifactRef
+
+    counts, selection = _inputs(store)
+    clones = store.variants.clones(counts, variants=selection)
+    with pytest.raises(ValueError, match="counts must be a variant_counts artifact"):
+        store.variants.informative(clones, preset="atac")
+    with pytest.raises(ValueError, match="must be a variant_selection artifact"):
+        store.variants.load_informative(counts)
+    with pytest.raises(ValueError, match="must be a variant_selection artifact"):
+        store.variants.clones(counts, variants=counts)
+
+    def missing(ref: ArtifactRef) -> ArtifactRef:
+        return ArtifactRef(scope=ref.scope, kind=ref.kind, artifact_id="f" * 64)
+
+    for call in (
+        lambda: store.variants.informative(missing(counts), preset="atac"),
+        lambda: store.variants.load_informative(missing(selection)),
+        lambda: store.variants.clones(missing(counts), variants=selection),
+        lambda: store.variants.clones(counts, variants=missing(selection)),
+    ):
+        with pytest.raises(KeyError, match="Artifact does not exist"):
+            call()
+    # An import or a scoring that stopped before it finished leaves an
+    # incomplete artifact, which every reader of it refuses.
+    readers = {
+        counts: (
+            lambda: store.variants.informative(
+                counts, preset="atac", invalidate_cache=True
+            ),
+            lambda: store.variants.load_informative(selection),
+            lambda: store.variants.clones(
+                counts, variants=selection, invalidate_cache=True
+            ),
+        ),
+        selection: (
+            lambda: store.variants.load_informative(selection),
+            lambda: store.variants.clones(
+                counts, variants=selection, invalidate_cache=True
+            ),
+        ),
+    }
+    for ref, calls in readers.items():
+        attributes = artifact_group(store.zw, ref).attrs
+        attributes["complete"] = False
+        try:
+            for call in calls:
+                with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+                    call()
+        finally:
+            attributes["complete"] = True
+    assert len(store.variants.load_informative(selection).variants) > 0
+
+
+def _smallest_accepted_budget(store, run) -> int:
+    """The smallest budget at which ``run`` raises no ``MemoryError``."""
+    low, high = 1, 1 << 33
+    while low < high:
+        middle = (low + high) // 2
+        store.memoryBytes = middle
+        try:
+            run()
+            high = middle
+        except MemoryError:
+            low = middle + 1
+    return low
+
+
+def _traced_peak(store, run, budget: int) -> int:
+    import tracemalloc
+
+    store.memoryBytes = budget
+    tracemalloc.start()
+    try:
+        run()
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+@pytest.mark.slow
+def test_clones_within_long_labels_fit_the_smallest_budget_they_accept(
+    store,
+) -> None:
+    # A read of a within column decodes a stored chunk of its labels at the
+    # width of the longest, and each clone's label starts with its group's.
+    counts, selection = _inputs(store)
+    store.cells.insert(
+        "donor",
+        np.asarray(
+            [
+                f"{'donor_with_a_long_name_' * 3}{cell % 2}"
+                for cell in range(TRUTH.n_cells)
+            ],
+            dtype=object,
+        ),
+    )
+
+    def run() -> object:
+        return store.variants.clones(
+            counts, variants=selection, within="donor", invalidate_cache=True
+        )
+
+    run()
+    budget = _smallest_accepted_budget(store, run)
+    assert _traced_peak(store, run, budget) <= budget
+
+
+@pytest.mark.slow
+def test_clones_of_a_few_listed_cells_among_many_fit_the_smallest_budget(
+    tmp_path,
+) -> None:
+    # Counts over 50,000 selected cells, of which the files name the truth's
+    # 230: the arrays over every cell and the labels written outweigh the
+    # frequencies of the cells that are scored.
+    from cytearc.datastore.datastore import DataStore
+    from tests.storage_helpers import write_count_store
+
+    n_cells = 50_000
+    ids = [str(cell) for cell in TRUTH.clones.cell_ids]
+    ids += [f"other{cell:07d}-1" for cell in range(n_cells - len(ids))]
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((n_cells, 1), dtype=np.uint16)},
+        "uint16",
+        cell_ids=ids,
+    )
+    store = DataStore(
+        str(tmp_path / "store.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        nthreads=1,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        counts = store.variants.import_counts(
+            write_mgatk(TRUTH, tmp_path / "final"),
+            cell_selection=store.snapshot_cell_selection(),
+        )
+    selection = store.variants.informative(counts, preset="atac")
+
+    def run() -> object:
+        return store.variants.clones(counts, variants=selection, invalidate_cache=True)
+
+    run()
+    budget = _smallest_accepted_budget(store, run)
+    assert _traced_peak(store, run, budget) <= budget
