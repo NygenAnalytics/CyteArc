@@ -1,6 +1,6 @@
 # Immune receptor repertoires
 
-Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, or any pipeline that writes AIRR Rearrangement files with cell IDs), check each cell's chains, label cells by receptor type, subtype and chain pairing, and group them into clonotypes or clonotype clusters. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, or any pipeline that writes AIRR Rearrangement files with cell IDs), check each cell's chains, label cells by receptor type, subtype and chain pairing, group them into clonotypes or clonotype clusters, and count gene usage and junction lengths. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 
@@ -37,6 +37,11 @@ Import the T cell and B cell receptor contigs of single-cell immune profiling (1
 - Clonotypes are clones to every `ds.clones` summary (see `clones.md`): `load_clones`, `export_clones`, `expansion`, `diversity`, `rarefaction`, `overlap`, `track`, `coupling`, `fate_bias` and `ds.plots.clone_abundance` take a `clonotypes` artifact and keep each receptor type apart. Groups gain the key column `receptor_type` and names like `"s1, TCR"`; without `group_by` the groups are the receptor types. Only groups of one receptor type are compared, coupled or followed together. Fates name a receptor type each, and a late cell without a clonotype has no fate, so each clonotype's fate tests count only the late cells of its receptor type that have a clonotype. A clonotype that spans receptor types (only `within_receptor_type=False` makes one) counts as one clone per type; `fate_bias` refuses it when its early and late cells span types, so select cells of one type. `load_clones(clonotypes).cells` holds `receptor_type`, and `.kept_apart == ("receptor_type",)`. `group_by="receptor_type"` is refused. `clone_abundance` labels each top clonotype by its representative's `VDJ_1` junction, or `VJ_1` without a VDJ chain (`VJ_1` first for `receptor_arms="VJ"`), such as `CASSLGQAYEQYF`, and also by its number where two drawn clonotypes share a junction (`CAVA 1`, `CAVA 3`); the panel's title says `Largest 20 clonotypes`, or `Largest 20 clonotype clusters` for clusters; `ds.plots.clone_tracking` labels its lines alike.
 - Validated: clonotype clusters equal scirpy 0.25.1's `ir_dist` and `define_clonotype_clusters` for every cell under nine settings (Hamming 1 and 2, Levenshtein 1 and 2 on residues, normalized Hamming 15% on nucleotides; arms, dual chains and gene matches varied) on PBMC 10k and CD8+ donor 1.
 - Validated: clonotypes equal scirpy 0.25.1's identity clonotypes for every cell under ten option combinations on PBMC 10k and CD8+ donor 1; with `dual_ir="all"`, scRepertoire 2.8.0's `CTnt`, `CTaa` (`sequence="aa"`) and `CTstrict` (both gene matches) and Cell Ranger 3.0.2's clonotypes.
+- `ds.repertoire.gene_usage(source, genes="v_call", level="gene", slots=("VJ_1", "VDJ_1"), count="cells", group_by=None, groups=None, cell_selection=None)` returns a `GeneUsage` record (saves nothing): `.table` (`group`, key columns, `locus`, one column per gene field, `cells` or `clonotypes`, `fraction` within group and locus; rows by group in natural order, locus, count most first), `.n_cells` (cells with a counted chain). `source`: `immune_receptors` (cells with a chain) or `clonotypes` (cells with a clonotype; `count="clonotypes"` counts each clonotype once per group and value). `genes`: one of `v_call`, `d_call`, `j_call`, `c_call`, or several for combinations such as V-J pairs. `level`: `"allele"` (`TRBV12-3*01`), `"gene"` (`TRBV12-3`), `"family"` (`TRBV12`; `TRAV29/DV5` → `TRAV29`). First call of a multi-gene call is kept; chains without the value are left out. Groups as in the clone summaries; a key column named like a table column (`locus`, `v_call`, `cells`, `clonotypes`, `group`) is refused.
+- `ds.repertoire.spectratype(source, sequence="aa" or "nt", slots=..., count=..., group_by=..., groups=..., cell_selection=...)` returns a `Spectratype` record: `.table` (`group`, key columns, `locus`, `length` in characters, count, `fraction`; rows by group in natural order, locus, length).
+- Plots: `ds.plots.gene_usage(source, gene="v_call", group_by=..., top=30)` (one panel per locus, two to a row; heatmap of fractions by group, bars without groups; table `usage`), `ds.plots.gene_pairing(source, cell_selection=..., top=20)` (V × J heatmap per locus, of its `top` V and `top` J genes; table `pairs`), `ds.plots.spectratype(source, group_by=...)` (lines per group per locus; table `spectratype`). With `count="clonotypes"` the axes say clonotypes, or clonotype clusters for distance-metric clonotypes. A figure with no chain of the counted value raises `ValueError`.
+- Memory: the checks count the chain slots read whole, the grouping as the clone summaries count it, 200 bytes and 160 per key column for each group, 64 bytes and 24 per field for each counted chain beside each contig's stored codes, and 120 bytes and 16 per column for each table row; a million T cells take about 0.7 s and hold at most 300 MiB.
+- Validated: every V, J and V-J pair count and junction length count of `VJ_1` and `VDJ_1` equals scirpy 0.25.1 `group_abundance` and `spectratype` on PBMC 10k pseudo samples. scRepertoire's `percentGenes` counts via immApex string parsing and is not comparable.
 
 ## Recipe
 
@@ -91,6 +96,15 @@ families = ds.repertoire.clonotypes(  # B cell clonal families
     same_v_gene=True, same_j_gene=True, within="donor",
 )
 expanded = ds.select_cells(clonotypes, value="clone_size", low=2, keep_bounds=True)
+usage = ds.repertoire.gene_usage(clonotypes, genes="v_call", count="clonotypes", group_by="sample")
+print(usage.table.query("locus == 'TRB'").head())
+pairs = ds.repertoire.gene_usage(receptors, genes=("v_call", "j_call"))
+print(pairs.table.query("v_call == 'TRAV1-2' and j_call == 'TRAJ33'"))  # MAIT cells
+lengths = ds.repertoire.spectratype(receptors, group_by="sample").table
+for name in ("gene_usage", "gene_pairing", "spectratype"):
+    plot = getattr(ds.plots, name)(receptors, show=False)
+    plot.save(f"{name}.png")
+    plot.close()
 
 # A merged store: each sample's files with that sample's prefix.
 merged = ds.repertoire.import_receptors(
@@ -116,3 +130,4 @@ airr = ds.repertoire.import_receptors("airr_rearrangement.tsv", cell_selection=c
 - Orphan cells form their own clonotypes under `receptor_arms="all"`; with many orphan VDJ cells, also try `receptor_arms="VDJ"` and report both.
 - B cell clonotypes from identical junctions split clones that carry somatic mutations; they are exact sequence variants, not clonal families. Use `metric="normalized_hamming"` on nucleotides with V and J matches and the donor as `within` for families, and report the cutoff.
 - Summaries of clonotypes give ambiguous and multichain cells groups of their own, which are small and set the default common size and coverage of `diversity` low: pass `cell_selection=t_cells` (or B cells) to measure one receptor type.
+- Use `count="clonotypes"` for gene usage compared between samples, so expanded clones do not decide shares; compare genes within their locus.

@@ -1,14 +1,14 @@
 ---
 myst:
   html_meta:
-    description: CyteArc repertoire API for single-cell T cell and B cell receptor data, with contigs imported from Cell Ranger and AIRR Rearrangement files and joined to cells by barcode prefix, suffix or pattern, the ranked chains of each cell, its receptor type, subtype and chain pairing, clonotypes of cells that share their receptor, clonotype clusters of cells whose junctions are within a Hamming or Levenshtein distance, and the records of the receptors and clonotypes.
+    description: CyteArc repertoire API for single-cell T cell and B cell receptor data, with contigs imported from Cell Ranger and AIRR Rearrangement files and joined to cells by barcode prefix, suffix or pattern, the ranked chains of each cell, its receptor type, subtype and chain pairing, clonotypes of cells that share their receptor, clonotype clusters of cells whose junctions are within a Hamming or Levenshtein distance, the gene usage and junction lengths of groups of cells, and the records of the receptors, clonotypes and usage.
 ---
 
 # Repertoire API reference
 
 Single-cell immune profiling reads the T cell receptor (TCR) or B cell receptor (BCR) of each cell beside its transcriptome. A V(D)J library, such as 10x Genomics Chromium Single Cell Immune Profiling, assembles each cell's receptor transcripts into contigs: one chain each, with its locus, its V, D, J and constant genes, and its junction, the CDR3 with the conserved cysteine and phenylalanine or tryptophan on either side. A T cell receptor pairs an alpha chain (TRA) with a beta chain (TRB), or a gamma chain (TRG) with a delta chain (TRD), and a B cell receptor pairs a heavy chain (IGH) with a kappa (IGK) or lambda (IGL) light chain. `cytearc.repertoire` holds the record of the imported receptors and the constants of the receptor model; contig fields keep their names in the AIRR Community's Rearrangement schema ([Vander Heiden et al. 2018](https://doi.org/10.3389/fimmu.2018.02206)).
 
-The steps run on a `DataStore` whose cells are the cells of the expression library. {meth}`ds.repertoire.import_receptors <cytearc.datastore.namespaces.RepertoireAccessor.import_receptors>` reads the contigs of those cells and saves an `immune_receptors` artifact, {meth}`ds.repertoire.load_receptors <cytearc.datastore.namespaces.RepertoireAccessor.load_receptors>` reads it as an {class}`~cytearc.repertoire.ImmuneReceptors` record, and {meth}`ds.plots.receptor_qc <cytearc.datastore.plot_accessor.DataStorePlotAccessor.receptor_qc>` plots the receptor types, chain pairings and chains per cell. {meth}`ds.repertoire.clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.clonotypes>` groups the cells into clonotypes, by identical or by similar junctions, and saves a `clonotypes` artifact, which {meth}`ds.repertoire.load_clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.load_clonotypes>` reads as a {class}`~cytearc.repertoire.Clonotypes` record; the clone summaries that the {doc}`clones` describes measure clonotypes, each receptor type apart.
+The steps run on a `DataStore` whose cells are the cells of the expression library. {meth}`ds.repertoire.import_receptors <cytearc.datastore.namespaces.RepertoireAccessor.import_receptors>` reads the contigs of those cells and saves an `immune_receptors` artifact, {meth}`ds.repertoire.load_receptors <cytearc.datastore.namespaces.RepertoireAccessor.load_receptors>` reads it as an {class}`~cytearc.repertoire.ImmuneReceptors` record, and {meth}`ds.plots.receptor_qc <cytearc.datastore.plot_accessor.DataStorePlotAccessor.receptor_qc>` plots the receptor types, chain pairings and chains per cell. {meth}`ds.repertoire.clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.clonotypes>` groups the cells into clonotypes, by identical or by similar junctions, and saves a `clonotypes` artifact, which {meth}`ds.repertoire.load_clonotypes <cytearc.datastore.namespaces.RepertoireAccessor.load_clonotypes>` reads as a {class}`~cytearc.repertoire.Clonotypes` record; the clone summaries that the {doc}`clones` describes measure clonotypes, each receptor type apart. {meth}`ds.repertoire.gene_usage <cytearc.datastore.namespaces.RepertoireAccessor.gene_usage>` counts the genes of groups' chains as a {class}`~cytearc.repertoire.GeneUsage` record, {meth}`ds.repertoire.spectratype <cytearc.datastore.namespaces.RepertoireAccessor.spectratype>` their junction lengths as a {class}`~cytearc.repertoire.Spectratype` record, and {meth}`ds.plots.gene_usage <cytearc.datastore.plot_accessor.DataStorePlotAccessor.gene_usage>`, {meth}`ds.plots.gene_pairing <cytearc.datastore.plot_accessor.DataStorePlotAccessor.gene_pairing>` and {meth}`ds.plots.spectratype <cytearc.datastore.plot_accessor.DataStorePlotAccessor.spectratype>` plot them.
 
 ## Import contigs
 
@@ -151,6 +151,29 @@ ds.clones.overlap(clonotypes, group_by="sample").pairs  # pairs of one receptor 
 ds.clones.export_clones(clonotypes, "clonotypes.csv")  # CoSpar's clone table
 ```
 
+## Gene usage and junction lengths
+
+A repertoire's genes and junction lengths summarize how its receptors were assembled: an expanded clone shows its genes and length as peaks, invariant cells such as MAIT and iNKT cells show their gene pairs (TRAV1-2 with TRAJ33, and TRAV10 with TRAJ18), and naive repertoires show smooth length distributions. `gene_usage` and `spectratype` count each cell by its chains in `slots`, by default its primary chain of each arm, `VJ_1` and `VDJ_1`, as scirpy reads a slot, and each chain within its locus, so TRA and TRB genes get their own shares. Nothing is saved.
+
+```python
+usage = ds.repertoire.gene_usage(receptors, genes="v_call", group_by="sample")
+usage.table  # group, sample, locus, v_call, cells, fraction
+pairs = ds.repertoire.gene_usage(receptors, genes=("v_call", "j_call"))
+families = ds.repertoire.gene_usage(clonotypes, level="family", count="clonotypes")
+lengths = ds.repertoire.spectratype(receptors, group_by="sample")
+ds.plots.gene_usage(receptors, group_by="sample")
+ds.plots.gene_pairing(receptors, cell_selection=t_cells)
+ds.plots.spectratype(receptors, group_by="sample")
+```
+
+`genes` names one gene field, `v_call`, `d_call`, `j_call` or `c_call`, or several, such as `("v_call", "j_call")` for the V-J pairs of each chain. `level` names calls as called, with their allele (`"allele"`, such as `TRBV12-3*01`), as genes (`"gene"`, the default, `TRBV12-3`) or as families (`"family"`, `TRBV12`, the locus, segment and first number, so `TRAV29/DV5` becomes `TRAV29` and `IGKV1D-39` `IGKV1`); a call naming several genes, such as `TRBV6-2,TRBV6-3`, keeps its first. `spectratype` counts junction lengths in residues (`sequence="aa"`) or nucleotides (`"nt"`), in characters whatever their encoding; a junction includes its conserved cysteine and phenylalanine or tryptophan, as Cell Ranger's CDR3 does. A chain without the counted value is left out.
+
+The `source` is an `immune_receptors` artifact, whose cells with a chain count, or a `clonotypes` artifact, whose cells with a clonotype count; with a clonotypes artifact, `count="clonotypes"` counts each clonotype once per group and value instead of each cell, so expanded clones do not dominate the shares. The groups are the combinations of the labels of the `group_by` columns and of a `groups` label artifact among the cells of `cell_selection`, grouped as the clone summaries group them; without either, every cell is one group. A key column may not be named like a column of the table, such as `locus`, `v_call`, `length` or `clonotypes`. Each table holds `group`, the group's labels joined by commas (`"all cells"` without groups), the key columns, `locus`, the counted values, `cells` or `clonotypes`, and `fraction`, the share of the group's counted chains of that locus. Its rows follow the groups' natural order and then the loci; within a locus, gene usage orders its genes by count, most first, and spectratype its lengths. `ds.plots.gene_usage` draws, one panel per locus, the `top` (30) genes with the most chains as a heatmap of fractions by group, or bars without groups; `ds.plots.gene_pairing` draws each locus's `top` (20) V genes against its `top` J genes, those with the most chains; `ds.plots.spectratype` draws each group's length distribution, one panel per locus. Panels stand two to a row, and a figure whose chains have none of the counted values is refused. Counted with `count="clonotypes"`, the figures name what they count as `ds.plots.clone_abundance` does: clonotypes, or clonotype clusters for clonotypes that a distance metric linked.
+
+Each distinct gene call is decoded and named once, and each distinct junction measured once, from the packed bytes of the receptors without decoding them. The memory budget must allow, at each step, what the step holds beside the earlier ones: reading the chain slots whole, with the clonotypes' codes; grouping the cells, which counts as the clone summaries' grouping does; each group's labels and name, 200 bytes and 160 more for each key column; 64 bytes for each counted chain and 24 more for each of its fields, the locus and the clonotype among them, beside the stored codes of each contig's field and their int64 copy; the distinct gene calls as they are decoded, or the packed junctions and their offsets, read whole; and 120 bytes for each row of the table, with 16 more for each of its columns.
+
+On "Human PBMC from a Healthy Donor, 10k cells (v2)" with the TCR and BCR files imported together, the counts of every V gene, J gene and V-J pair of the `VJ_1` and `VDJ_1` slots, and of every junction length in residues and nucleotides, equal scirpy 0.25.1's `group_abundance` of the slot's calls and its `spectratype` for each of four pseudo samples drawn from a hash of each barcode: 95 VJ and 85 VDJ V genes, 61 and 19 J genes, 1,651 and 658 V-J pairs, and 16 and 22 lengths. scRepertoire's `percentGenes` and `percentAA` parse its concatenated clone strings through immApex rather than counting chains; its gene shares of a pseudo sample divide by 1,179 cells, which neither the cells with a beta chain (1,322) nor those with both chains (1,185) reproduce, so they serve as no reference here. On a million simulated T cells in eight samples, on one thread, `gene_usage` by sample takes 0.7 s and holds at most 150 MiB, V-J pairs 0.7 s and 177 MiB, V-J pairs counted once per clonotype 0.9 s and 291 MiB, and `spectratype` 0.7 s and 159 MiB, traced at the smallest budget each accepts, from 231 to 319 MiB.
+
 ## Immune receptors
 
 ```{eval-rst}
@@ -161,4 +184,11 @@ ds.clones.export_clones(clonotypes, "clonotypes.csv")  # CoSpar's clone table
 
 ```{eval-rst}
 .. autoclass:: cytearc.repertoire.Clonotypes
+```
+
+## Gene usage
+
+```{eval-rst}
+.. autoclass:: cytearc.repertoire.GeneUsage
+.. autoclass:: cytearc.repertoire.Spectratype
 ```

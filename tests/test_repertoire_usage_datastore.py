@@ -9,6 +9,7 @@ matplotlib.use("Agg")
 
 import re
 from collections import Counter
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -695,3 +696,19 @@ def test_gene_usage_recovers_the_truths_genes_in_each_sample(tmp_path) -> None:
                 locus = genes[junction][0]
                 expected_lengths[(str(truth.samples[cell]), locus, len(junction))] += 1
     assert _counts(lengths, "sample", "locus", "length") == dict(expected_lengths)
+
+
+def test_figures_of_clonotypes_need_the_store_to_name_them(tmp_path) -> None:
+    store, _receptors, clonotypes = _sources(tmp_path)
+    # A store that counts but cannot say what its clonotypes are called.
+    bare = SimpleNamespace(
+        repertoire=SimpleNamespace(
+            gene_usage=store.repertoire.gene_usage,
+            spectratype=store.repertoire.spectratype,
+        )
+    )
+    for plot in (plotting.gene_usage, plotting.spectratype):
+        with pytest.raises(TypeError, match="what figures call clonotypes"):
+            plot(bare, clonotypes, count="clonotypes", show=False)
+        # Cells need no name from the store.
+        plot(bare, clonotypes, show=False).close()
