@@ -803,10 +803,23 @@ def test_quoted_rows_render_in_slices_as_pandas_quotes_them(tmp_path) -> None:
 
 
 def test_rendered_rows_reach_the_file_in_bounded_writes(tmp_path, monkeypatch) -> None:
+    # Compressing a write holds what it compresses, so the rows reach the
+    # file a few bytes at a time.
     store, receptors = _edge_receptors(tmp_path)
     store.repertoire.export_airr(receptors, tmp_path / "whole.tsv")
     monkeypatch.setattr(airr_writer, "_WRITE_BYTES", 7)
+    write = gzip.GzipFile.write
+    sizes = []
+
+    def recorded(handle, data):
+        sizes.append(memoryview(data).nbytes)
+        return write(handle, data)
+
+    monkeypatch.setattr(gzip.GzipFile, "write", recorded)
     store.repertoire.export_airr(receptors, tmp_path / "pieces.tsv.gz")
+    monkeypatch.undo()
+    # After the header, no write holds more than 7 bytes.
+    assert len(sizes) > 10 and max(sizes[1:]) == 7
     assert _text(tmp_path / "pieces.tsv.gz") == _text(tmp_path / "whole.tsv")
 
 
