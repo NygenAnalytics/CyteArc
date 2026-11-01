@@ -8,6 +8,7 @@ import pandas as pd
 
 from ..clones.diversity import ORDERS
 from ..clones.expansion import DEFAULT_RANK_SPLITS, rank_window_labels, rank_windows
+from ..clones.overlap import OVERLAP_INDICES
 from ..storage.refs import ArtifactRef
 from ..utils.arguments import integer_argument
 from ..utils.arrays import sort_categories, sorted_unique
@@ -21,13 +22,23 @@ from ._figure import (
 )
 from ._groups import cell_groups
 from ._style import (
+    LEGEND_SIDE_MAX_ENTRIES,
+    MAX_FIGURE_WIDTH_INCHES,
     apply_figure_chrome,
     categorical_color_map,
     colormap_palette,
+    legend_side_columns,
+    legend_side_rows,
     theme_context,
 )
 
-__all__ = ["clonal_expansion", "clonal_rarefaction", "clone_abundance"]
+__all__ = [
+    "clonal_expansion",
+    "clonal_overlap",
+    "clonal_rarefaction",
+    "clone_abundance",
+    "clone_tracking",
+]
 
 _ORDER_TITLES = {
     0: "Clones (order 0)",
@@ -550,6 +561,290 @@ def clonal_rarefaction(
                 "base": base,
                 "endpoint": endpoint,
                 "knots": knots,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+# Overlap matrices of at most this many groups print their values, and the
+# overlap and tracking plots of at most this many groups name them on their
+# axes; their tables name every group.
+_ANNOTATED_GROUPS = 12
+_NAMED_GROUPS = 40
+# Room in inches beside an overlap matrix for its colour bar.
+_COLORBAR_INCHES = 1.2
+_OVERLAP_TITLES = {
+    "shared": "Shared clones",
+    "jaccard": "Jaccard index",
+    "sorensen": "Sørensen index",
+    "overlap": "Overlap coefficient",
+    "cosine": "Cosine of presence",
+    "morisita_horn": "Morisita-Horn index",
+    "abundance_cosine": "Cosine of clone sizes",
+}
+
+
+@close_figures_on_error
+def clonal_overlap(
+    store: Any,
+    clones: ArtifactRef,
+    *,
+    group_by: str | Sequence[str] | None = None,
+    groups: ArtifactRef | None = None,
+    cell_selection: ArtifactRef | None = None,
+    index: str = "morisita_horn",
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot an overlap index between every pair of groups as a heatmap.
+
+    ``clones`` is a ``clones`` artifact. ``index`` is one of ``"shared"``,
+    ``"jaccard"``, ``"sorensen"``, ``"overlap"``, ``"cosine"``,
+    ``"morisita_horn"`` (the default) and ``"abundance_cosine"``, as
+    ``ds.clones.overlap`` computes them for its groups: the ``group_by``
+    cell metadata columns and a ``groups`` label artifact, among the cells of
+    ``cell_selection``. The diagonal is left blank so that the colours span
+    the pairs, and so are pairs that were not compared; the ``matrix`` table
+    holds each group's clones on its diagonal for ``"shared"`` and 1
+    otherwise. Matrices of at most 12 groups print their values, and of at
+    most 40 name their groups on the axes. By default the figure grows with
+    the groups up to the width of a page.
+
+    Tables: ``matrix`` (groups by groups) and ``pairs``.
+    """
+    if index not in OVERLAP_INDICES:
+        raise ValueError(f"index must be one of {', '.join(OVERLAP_INDICES)}")
+    result = _clones_method(store, "overlap")(
+        clones, group_by=group_by, groups=groups, cell_selection=cell_selection
+    )
+    names = list(result.group_sizes["group"])
+    positions = pd.Index(names)
+    first = positions.get_indexer(result.pairs["group_1"])
+    second = positions.get_indexer(result.pairs["group_2"])
+    pair_values = result.pairs[index].to_numpy(dtype=np.float64)
+    values = np.full((len(names), len(names)), np.nan)
+    values[first, second] = pair_values
+    values[second, first] = pair_values
+    values[np.diag_indices(len(names))] = (
+        result.group_sizes["clones"].to_numpy(dtype=np.float64)
+        if index == "shared"
+        else 1.0
+    )
+    matrix = pd.DataFrame(values, index=pd.Index(names), columns=pd.Index(names))
+    if figsize is None and target is None:
+        side = min(
+            max(4.0, 0.55 * len(names) + 2.5),
+            MAX_FIGURE_WIDTH_INCHES - _COLORBAR_INCHES,
+        )
+        figsize = (side + _COLORBAR_INCHES, side)
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=["matrix"], figsize=figsize, n_columns=1
+        )
+        ax = axes["matrix"]
+        drawn = values.copy()
+        drawn[np.diag_indices(len(names))] = np.nan
+        image = ax.imshow(np.ma.masked_invalid(drawn), cmap="viridis")
+        if len(names) <= _NAMED_GROUPS:
+            ax.set_xticks(np.arange(len(names)), names, rotation=90)
+            ax.set_yticks(np.arange(len(names)), names)
+        else:
+            ax.set_xticks([])
+            ax.set_yticks([])
+        ax.set_title(_OVERLAP_TITLES[index])
+        if len(names) <= _ANNOTATED_GROUPS:
+            for row in range(len(names)):
+                for column in range(len(names)):
+                    value = drawn[row, column]
+                    if np.isnan(value):
+                        continue
+                    # Dark text on light cells, light text on dark ones.
+                    red, green, blue, _alpha = image.cmap(image.norm(value))
+                    light = 0.299 * red + 0.587 * green + 0.114 * blue > 0.5
+                    ax.text(
+                        column,
+                        row,
+                        f"{value:.0f}" if index == "shared" else f"{value:.3g}",
+                        ha="center",
+                        va="center",
+                        color="black" if light else "white",
+                        fontsize="x-small",
+                    )
+        if show_legend:
+            figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"matrix": matrix, "pairs": result.pairs},
+        legends=(LegendSpec(kind="continuous", label=index),),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(result.group_sizes["cells"].sum()),
+            renderer="matplotlib",
+            notes=("clones",),
+            extras={"clones": clones.to_dict(), "index": index, "groups": names},
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+@close_figures_on_error
+def clone_tracking(
+    store: Any,
+    clones: ArtifactRef,
+    *,
+    group_by: str | Sequence[str] | None = None,
+    groups: ArtifactRef | None = None,
+    cell_selection: ArtifactRef | None = None,
+    top: int = 10,
+    labels: Sequence[str] | None = None,
+    order: Sequence[str] | None = None,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot the share of cells of chosen clones across groups of cells.
+
+    ``clones`` is a ``clones`` artifact. The plot follows the clones that
+    ``ds.clones.track`` chooses: the ``top`` with the most cells in each
+    group, or ``labels``. Each draws one line, labelled with its clone ID,
+    across the groups, such as time points or cell types, of its share of
+    each group's cells with a clone. Groups are placed by their labels in the
+    ``group_by`` columns and the ``groups`` artifact, joined by commas;
+    ``order`` lists those names from left to right, or values whose text is
+    the name, such as time points as integers, and by default the names
+    follow their natural order. Plots of at most 40 groups name them on the
+    axis, and the legend lists at most 80 clones, the largest first. By
+    default the figure grows with the groups up to the width of a page.
+
+    Tables: ``cells`` (``clone``, ``group``, the key columns, ``cells`` and
+    ``fraction``).
+    """
+    if order is not None:
+        if isinstance(order, np.ndarray) and order.ndim == 1:
+            order = order.tolist()
+        if isinstance(order, str | bytes) or not isinstance(order, Sequence):
+            raise TypeError("order must be a sequence of group names")
+    tracked = _clones_method(store, "track")(
+        clones,
+        group_by=group_by,
+        groups=groups,
+        cell_selection=cell_selection,
+        top=top,
+        labels=labels,
+    )
+    cells = tracked.cells
+    keys = [
+        *tracked.group_by,
+        *((tracked.groups.kind,) if tracked.groups is not None else ()),
+    ]
+    # Groups that differ only in labels that the clones keep apart share a
+    # position, named by their labels in the grouping columns alone.
+    positions_of = cells["group"]
+    if keys:
+        positions_of = cells[keys[0]].astype(str)
+        for column in keys[1:]:
+            positions_of = positions_of + ", " + cells[column].astype(str)
+    placed = cells.assign(position=positions_of.to_numpy(dtype=object))
+    present = sort_categories(pd.unique(placed["position"]))
+    if order is None:
+        positions = list(present)
+    else:
+        # Groups are placed by name, so an order of numbers names them by
+        # their text.
+        positions = [str(name) for name in order]
+        if sorted(positions) != sorted(map(str, present)):
+            raise ValueError(f"order must list the groups {present}")
+    by_clone = dict(tuple(placed.groupby("clone", sort=False)))
+    if figsize is None and target is None:
+        figsize = (
+            min(max(6.0, 0.7 * len(positions) + 4.0), MAX_FIGURE_WIDTH_INCHES),
+            4.2,
+        )
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=["tracking"], figsize=figsize, n_columns=1
+        )
+        ax = axes["tracking"]
+        colors = categorical_color_map(list(tracked.tracked))
+        x = np.arange(len(positions))
+        for name in tracked.tracked:
+            rows = by_clone.get(name, placed.iloc[:0])
+            y = (
+                rows.set_index("position")["fraction"]
+                .reindex(positions)
+                .to_numpy(dtype=np.float64)
+            )
+            ax.plot(
+                x,
+                y,
+                marker="o",
+                markersize=3.5,
+                linewidth=1.2,
+                color=colors[name],
+                label=name,
+            )
+        if len(positions) <= _NAMED_GROUPS:
+            ax.set_xticks(x, positions, rotation=45, ha="right")
+        else:
+            ax.set_xticks([])
+        ax.set_ylabel("Fraction of the group's cells")
+        ax.set_title("Clones across groups")
+        if show_legend:
+            # The largest clones, in columns that fit the figure's height.
+            lines = ax.get_lines()
+            shown = min(len(lines), LEGEND_SIDE_MAX_ENTRIES)
+            rows = legend_side_rows(float(figure.get_size_inches()[1]), title=True)
+            ax.legend(
+                handles=lines[:shown],
+                frameon=False,
+                fontsize="small",
+                title=(
+                    "Clone"
+                    if shown == len(lines)
+                    else f"Clone ({shown} of {len(lines)})"
+                ),
+                title_fontsize="small",
+                loc="upper left",
+                bbox_to_anchor=(1, 1),
+                ncols=legend_side_columns(shown, rows=rows),
+            )
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"cells": cells},
+        legends=(LegendSpec(kind="categorical", label="Clone"),),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(cells["cells"].sum()),
+            renderer="matplotlib",
+            notes=("clones",),
+            extras={
+                "clones": clones.to_dict(),
+                "tracked": list(tracked.tracked),
+                "order": positions,
             },
         ),
         owns_figure=owns,

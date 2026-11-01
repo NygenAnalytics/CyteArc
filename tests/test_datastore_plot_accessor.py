@@ -20,8 +20,10 @@ _STORE_PLOT_METHODS = (
     "association_calibration",
     "association_volcano",
     "clonal_expansion",
+    "clonal_overlap",
     "clonal_rarefaction",
     "clone_abundance",
+    "clone_tracking",
     "cluster_connectivity",
     "cluster_tree",
     "composition",
@@ -367,6 +369,16 @@ def test_plot_accessor_type_hints_match_standalone_functions(name: str):
             (_CLONES_REF,),
             {"group_by": "sample", "orders": (0,), "base": "coverage"},
         ),
+        (
+            "clonal_overlap",
+            (_CLONES_REF,),
+            {"group_by": ["sample", "tissue"], "index": "jaccard"},
+        ),
+        (
+            "clone_tracking",
+            (_CLONES_REF,),
+            {"group_by": "timepoint", "labels": ["3"], "order": ["d0", "d7"]},
+        ),
     ],
 )
 def test_plot_accessor_forwards_to_canonical_function(
@@ -412,7 +424,12 @@ def test_plot_accessor_forwards_to_canonical_function(
         expected_args.append(expected_kwargs.pop("tests"))
     elif name == "perturbation_clusters":
         expected_args.append(expected_kwargs.pop("clusters"))
-    elif name in ("clone_abundance", "clonal_rarefaction"):
+    elif name in (
+        "clone_abundance",
+        "clonal_rarefaction",
+        "clonal_overlap",
+        "clone_tracking",
+    ):
         expected_args.append(expected_kwargs.pop("clones"))
     elif name == "clonal_expansion":
         expected_args.append(expected_kwargs.pop("expansion"))

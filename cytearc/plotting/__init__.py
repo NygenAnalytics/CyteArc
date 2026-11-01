@@ -34,8 +34,10 @@ if TYPE_CHECKING:
     )
     from .clones import (
         clonal_expansion as clonal_expansion,
+        clonal_overlap as clonal_overlap,
         clonal_rarefaction as clonal_rarefaction,
         clone_abundance as clone_abundance,
+        clone_tracking as clone_tracking,
     )
     from .composition import composition as composition
     from .cluster_connectivity import cluster_connectivity as cluster_connectivity
@@ -102,8 +104,10 @@ __all__ = [
     "association_calibration",
     "association_volcano",
     "clonal_expansion",
+    "clonal_overlap",
     "clonal_rarefaction",
     "clone_abundance",
+    "clone_tracking",
     "cluster_tree",
     "cluster_connectivity",
     "compose_results",
@@ -164,8 +168,10 @@ __getattr__, __dir__ = _lazy_facade(
         "association_calibration": ".perturbation",
         "association_volcano": ".perturbation",
         "clonal_expansion": ".clones",
+        "clonal_overlap": ".clones",
         "clonal_rarefaction": ".clones",
         "clone_abundance": ".clones",
+        "clone_tracking": ".clones",
         "cluster_tree": ".cluster_tree",
         "cluster_connectivity": ".cluster_connectivity",
         "compose_results": "._figure",

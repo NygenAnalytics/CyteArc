@@ -84,6 +84,8 @@ class ClonesAccessor(_Accessor):
     load_expansion = _bind(_CloneOperationsMixin._clones_load_expansion)
     diversity = _bind(_CloneOperationsMixin._clones_diversity)
     rarefaction = _bind(_CloneOperationsMixin._clones_rarefaction)
+    overlap = _bind(_CloneOperationsMixin._clones_overlap)
+    track = _bind(_CloneOperationsMixin._clones_track)
 
 
 class ClustersAccessor(_Accessor):

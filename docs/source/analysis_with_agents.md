@@ -422,7 +422,7 @@ A pooled screen labels each cell by the guides it carries, so every downstream c
 
 ### Clones and lineage tracing
 
-A clone is the set of cells that descend from one ancestor cell. Import the clones that a lineage tracing tool assigned with `clones.import_clones`, or take them from a cell metadata column with `clones.from_column`, and check the artifact's count of unmatched barcodes before measuring how the clones expand and how diverse each sample is.
+A clone is the set of cells that descend from one ancestor cell. Import the clones that a lineage tracing tool assigned with `clones.import_clones`, or take them from a cell metadata column with `clones.from_column`, and check the artifact's count of unmatched barcodes before measuring how the clones expand, how diverse each sample is and which clones groups share.
 
 - Measure expansion within each sample with `clones.expansion(clones, group_by=sample_column)`: a clone size is then a count of one sample's cells. Without `group_by` the cells of a clone in several samples add up, which suits a single sample or a question about the whole population.
 - Keep the default bounds in cells to compare samples of different sizes. Frequency bounds, such as scRepertoire's `(0.0001, 0.001, 0.01, 0.1, 1)`, depend on the sample's size: one cell of a sample of 1,000 cells already has the frequency 0.001, so compare frequency categories only between samples of similar size.
@@ -432,6 +432,8 @@ A clone is the set of cells that descend from one ancestor cell. Import the clon
 - Draw `plots.clonal_rarefaction` before trusting any comparison. Curves that still rise steeply at their observed point are far from complete, as when most clones are singletons: their richness and Chao1 are poorly determined, while the Hill numbers of order 2, dominated by expanded clones, are stable. Report orders 1 and 2 when coverage is low.
 - Chao1 has two common forms: `chao1`, iNEXT's and immunarch's, and `chao1_bias_corrected`, vegan's and scRepertoire's. Name the one you report. ACE is undefined when every rare clone is a singleton.
 - A group far smaller than the others sets the default common size and coverage low: leave such groups out with `cell_selection`, or pass `size` or `coverage`. Diversity within clusters measures the clonal structure of each cell state, but a cluster of few cells is mostly singletons whatever its biology.
+- Compare samples, tissues or cell types with `clones.overlap(clones, group_by=column)`. Report the Morisita-Horn index for how much the same expanded clones dominate two groups, and `shared_fraction_1` and `shared_fraction_2` for how much of each group's cells belong to clones the other holds. Presence indices such as Jaccard grow with both groups' cells, so compare them only between pairs of similar depth.
+- Follow clones across time points with `plots.clone_tracking(clones, group_by=time_point_column, order=[...])`, and across cell types to find clones whose cells took several fates. A clone found in one group only may be below detection in the others, not absent.
 - Compare expansion or diversity between conditions with one value per sample, such as each sample's fraction of cells in clones of more than two cells or its Hill number at a common coverage, since the cells of one sample are not independent observations.
 
 ### Methods outside CyteArc

@@ -40,6 +40,15 @@ from ...clones.expansion import (
     group_clone_sizes,
 )
 from ...clones.groups import group_frame, pair_counts
+from ...clones.overlap import (
+    CloneOverlap,
+    CloneTracking,
+    overlap_extent,
+    overlap_pairs,
+    top_clones,
+    tracking_cells,
+    tracking_reach,
+)
 from ...metadata.arguments import (
     ClonalExpansionArguments,
     CloneColumnArguments,
@@ -68,6 +77,7 @@ from ...storage.selections import validate_cell_selection
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
 from ...utils.arguments import bool_argument
+from ...utils.arrays import sorted_unique
 from ...utils.logging import logger
 from .cell_barcodes import (
     LOOKUP_BYTES_PER_CELL,
@@ -164,6 +174,23 @@ _DIVERSITY_COLUMNS = frozenset(
 _RAREFACTION_COLUMNS = frozenset(
     {"group", "order", "size", "method", "diversity", "coverage"}
 )
+_OVERLAP_COLUMNS = frozenset({"group", "cells", "clones"})
+_TRACK_COLUMNS = frozenset({"group", "clone", "cells", "fraction"})
+# Comparing groups holds, at its peak, about 220 bytes per pair of groups of
+# one stratum, the pairs' indices and their table, and 16 bytes per product of
+# two groups of the largest stratum, as measured on 1,000 and 2,000 groups;
+# 2,000 groups of a million cells, 2 million pairs, traced 374 MiB beyond
+# grouping the cells.
+_OVERLAP_BYTES_PER_PAIR = 250
+_OVERLAP_BYTES_PER_PRODUCT = 24
+# Each count of a clone's cells in a group holds its group, clone code and
+# cells, and its entries in the matrices that compare or follow the groups.
+_BYTES_PER_CLONE_COUNT = 40
+# Following clones holds, for each row of the table, about 82 bytes and 8
+# more for each key column, as traced on 3 million rows with 1 to 12 key
+# columns, and a byte per chosen clone and group.
+_TRACK_BYTES_PER_ROW = 100
+_TRACK_BYTES_PER_KEY_COLUMN = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -1667,6 +1694,318 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             cell_selection=cell_selection,
             orders=chosen,
         )
+
+    @validation_scoped
+    def _clones_overlap(
+        self,
+        clones: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        cell_selection: ArtifactRef | None = None,
+    ) -> CloneOverlap:
+        """Compare groups of cells by the clones they share.
+
+        The groups are the combinations of the labels of the ``group_by``
+        cell metadata columns, such as the sample or the tissue, and of the
+        ``groups`` label artifact, such as a clustering, among the cells of
+        ``cell_selection``. Cells without a clone or a label are left out.
+        Nothing is saved.
+
+        Each pair of groups gets presence indices, which count clones, and
+        abundance indices, which weigh them by their cells, as scRepertoire's
+        ``clonalOverlap`` and immunarch's ``repOverlap`` report them:
+        ``shared`` (the clones of both), ``jaccard``, ``sorensen``,
+        ``overlap`` (shared over the smaller group's clones), ``cosine``
+        (Ochiai's, of presence), ``morisita_horn`` and ``abundance_cosine``,
+        and the share of each group's cells whose clone the other holds.
+        Presence indices grow with the cells of both groups, since a larger
+        sample finds more of the rare clones; the Morisita-Horn index depends
+        little on them and is near 1 when the same expanded clones dominate
+        both groups.
+
+        Args:
+            clones: A ``clones`` artifact.
+            group_by: Cell metadata columns whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups.
+            cell_selection: Only these cells, or None for every cell of the
+                clones.
+
+        Returns:
+            The groups' cells and clones and the indices of every pair.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``clones`` is not a clone artifact, no cell has
+                both a clone and a group, fewer than two groups hold a cell
+                with a clone, no two groups share the labels that the clones
+                keep apart, a column of the groups is missing or named twice,
+                a key column names a column of the result, or two groups get
+                one name.
+            KeyError: If the store holds no such ``clones`` artifact.
+            RuntimeError: If the ``clones`` artifact is incomplete, as an
+                import that stopped before it finished leaves it.
+            MemoryError: If reading the clones, grouping the cells, or the
+                pairs of groups do not fit the memory budget.
+        """
+        source = self._read_clone_input(clones)
+        keys, pair_groups, pair_codes, pair_cells = self._clone_pair_counts(
+            source,
+            group_by=group_by,
+            groups=groups,
+            cell_selection=cell_selection,
+            reserved=_OVERLAP_COLUMNS,
+        )
+        if len(pair_cells) == 0:
+            raise ValueError("No cell has both a clone and a group")
+        if len(keys) < 2:
+            raise ValueError("Overlap needs at least two groups of cells with a clone")
+        strata = _kept_apart_strata(source, keys)
+        n_pairs, largest = overlap_extent(len(keys), strata)
+        if n_pairs == 0:
+            raise ValueError(
+                f"No two groups share their labels in {_kept_apart(source)}, "
+                "which the clones keep apart, so no pair of groups can be "
+                "compared"
+            )
+        # The pairs, and beside them the clones read, their counts in each
+        # group and each group's rows.
+        resident = (
+            _OVERLAP_BYTES_PER_PAIR * n_pairs
+            + _OVERLAP_BYTES_PER_PRODUCT * largest**2
+            + _BYTES_PER_CLONE_COUNT * len(pair_cells)
+            + _SUMMARY_BYTES_PER_GROUP * len(keys)
+            + self._clone_input_bytes(clones, with_ids=False)
+        )
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Comparing {len(keys)} groups gives {n_pairs} pairs and holds "
+                f"about {resident} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Compare fewer groups, with fewer "
+                "group_by columns or a cell_selection, or raise mem_budget."
+            )
+        pairs = overlap_pairs(
+            pair_groups, pair_codes, pair_cells, len(keys), strata=strata
+        )
+        names = keys["group"].to_numpy(dtype=object)
+        pairs.insert(0, "group_1", names[pairs.pop("first").to_numpy()])
+        pairs.insert(1, "group_2", names[pairs.pop("second").to_numpy()])
+        return CloneOverlap(
+            group_sizes=_group_sizes(keys, pair_groups, pair_cells),
+            pairs=pairs,
+            clones=clones,
+            group_by=group_columns(group_by),
+            groups=groups,
+            cell_selection=cell_selection,
+        )
+
+    @validation_scoped
+    def _clones_track(
+        self,
+        clones: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        cell_selection: ArtifactRef | None = None,
+        top: int = 10,
+        labels: Sequence[str] | None = None,
+    ) -> CloneTracking:
+        """Follow chosen clones across groups of cells.
+
+        By default the clones are the ``top`` with the most cells in each
+        group, together, as scRepertoire's ``clonalCompare`` chooses them,
+        with ties going to the larger clone overall; ``labels`` names them
+        instead, such as ``["3"]``. Each chosen clone gets its cells and share
+        of cells in every group, zeros included, so a clone that expands
+        between time points or spreads between cell types shows it. The
+        groups are those of
+        :meth:`~cytearc.datastore.namespaces.ClonesAccessor.overlap`. Nothing
+        is saved.
+
+        Args:
+            clones: A ``clones`` artifact.
+            group_by: Cell metadata columns whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups.
+            cell_selection: Only these cells, or None for every cell of the
+                clones.
+            top: The clones with the most cells to take from each group.
+            labels: Clone labels to follow instead, as a sequence or a
+                one-dimensional array, or None.
+
+        Returns:
+            One row per chosen clone and group, and the chosen clones' labels.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``clones`` is not a clone artifact, ``top`` is not
+                positive, ``labels`` is empty or a label names no clone, no
+                cell has both a clone and a group, a column of the groups is
+                missing or named twice, a key column names a column of the
+                result, or two groups get one name.
+            KeyError: If the store holds no such ``clones`` artifact.
+            RuntimeError: If the ``clones`` artifact is incomplete, as an
+                import that stopped before it finished leaves it.
+            MemoryError: If reading the clones, grouping the cells, or the
+                table of the chosen clones' groups does not fit the memory
+                budget.
+        """
+        if isinstance(top, bool) or not isinstance(top, int | np.integer):
+            raise TypeError("top must be a positive integer")
+        if top < 1:
+            raise ValueError("top must be a positive integer")
+        if labels is not None:
+            listed = _listed(labels)
+            if listed is None or not all(isinstance(label, str) for label in listed):
+                raise TypeError("labels must be a sequence of clone labels or None")
+            if not listed:
+                raise ValueError("labels must name at least one clone, or be None")
+            labels = listed
+        source = self._read_clone_input(clones, with_ids=True)
+        keys, pair_groups, pair_codes, pair_cells = self._clone_pair_counts(
+            source,
+            group_by=group_by,
+            groups=groups,
+            cell_selection=cell_selection,
+            reserved=_TRACK_COLUMNS,
+        )
+        if len(pair_cells) == 0:
+            raise ValueError("No cell has both a clone and a group")
+        assert source.clone_ids is not None
+        identifiers = source.clone_ids
+        if labels is None:
+            chosen = top_clones(
+                pair_groups, pair_codes, pair_cells, len(keys), int(top)
+            )
+        else:
+            positions = pd.Index(identifiers).get_indexer(list(labels))
+            unknown = [
+                label for label, at in zip(labels, positions, strict=True) if at < 0
+            ]
+            if unknown:
+                raise ValueError(f"No clone is labelled {unknown[:5]}")
+            chosen = sorted_unique(positions.astype(np.int64))
+        strata = _kept_apart_strata(source, keys)
+        if strata is None:
+            strata = np.zeros(len(keys), dtype=np.int64)
+        reach = tracking_reach(
+            pair_groups,
+            pair_codes,
+            chosen,
+            strata,
+            _fallback_strata(source, keys, strata, chosen),
+        )
+        n_rows = int((reach * np.bincount(strata, minlength=reach.shape[1])).sum())
+        # The rows, each with its clone, group, labels, cells and fraction,
+        # and beside them the clones read, their counts in each group and
+        # each group's rows.
+        n_key_columns = len(keys.columns) - 1
+        resident = (
+            n_rows
+            * (_TRACK_BYTES_PER_ROW + _TRACK_BYTES_PER_KEY_COLUMN * n_key_columns)
+            + reach.shape[0] * len(keys)
+            + _BYTES_PER_CLONE_COUNT * len(pair_cells)
+            + _SUMMARY_BYTES_PER_GROUP * len(keys)
+            + self._clone_input_bytes(clones, with_ids=True)
+        )
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Following {len(chosen)} clones through {len(keys)} groups "
+                f"gives {n_rows} rows and holds about {resident} bytes, more "
+                f"than the memory budget of {self.memoryBytes} bytes. Follow "
+                "fewer clones, with a smaller top or labels, or fewer groups, "
+                "or raise mem_budget."
+            )
+        followed, rows, counts = tracking_cells(
+            pair_groups, pair_codes, pair_cells, chosen, strata, reach
+        )
+        tracked = np.asarray(identifiers[chosen].tolist(), dtype=object)
+        # Without rows, the table keeps its columns and their types; clone
+        # labels are text of the groups' labels' type, which pandas 3 stores
+        # as its string type and pandas 2 as Python objects, never fixed-width.
+        sizes = _group_sizes(keys, pair_groups, pair_cells)
+        table = keys.take(rows).reset_index(drop=True)
+        table.insert(
+            0, "clone", pd.array(tracked[followed], dtype=table["group"].dtype)
+        )
+        table["cells"] = counts
+        table["fraction"] = counts / sizes["cells"].to_numpy()[rows]
+        return CloneTracking(
+            cells=table,
+            clones=clones,
+            tracked=tuple(str(label) for label in tracked.tolist()),
+            group_by=group_columns(group_by),
+            groups=groups,
+            cell_selection=cell_selection,
+        )
+
+
+def _group_sizes(
+    keys: pd.DataFrame, pair_groups: np.ndarray, pair_cells: np.ndarray
+) -> pd.DataFrame:
+    """One row per group: its name, labels, cells with a clone and clones."""
+    n_groups = len(keys)
+    return keys.assign(
+        cells=np.bincount(pair_groups, weights=pair_cells, minlength=n_groups).astype(
+            np.int64
+        ),
+        clones=np.bincount(pair_groups, minlength=n_groups),
+    )
+
+
+def _kept_apart(source: _CloneInput) -> list[str]:
+    return [name for name, _labels in source.kept_apart]
+
+
+def _kept_apart_strata(source: _CloneInput, keys: pd.DataFrame) -> np.ndarray | None:
+    """Each group's stratum: its labels in the key columns that the clones keep apart.
+
+    Groups of two strata share no clone, so only the groups of one stratum
+    are compared, and a clone is followed through the groups of its own
+    strata.
+
+    Returns:
+        Each group's stratum, a code from 0, or None when the clones keep no
+        labels apart and every group is of one stratum.
+    """
+    columns = _kept_apart(source)
+    if not columns:
+        return None
+    return np.asarray(keys.groupby(columns, sort=True).ngroup(), dtype=np.int64)
+
+
+def _fallback_strata(
+    source: _CloneInput, keys: pd.DataFrame, strata: np.ndarray, chosen: np.ndarray
+) -> np.ndarray:
+    """The stratum through which to follow each chosen clone without counted cells.
+
+    It is the stratum of the labels that the clones keep apart at the
+    clone's first cell, or -1 when no group holds those labels; clones that
+    keep no labels apart have the one stratum, 0.
+    """
+    columns = _kept_apart(source)
+    if not columns:
+        return np.zeros(len(chosen), dtype=np.int64)
+    # Every clone holds a cell of the artifact, so the first position of each
+    # chosen code among the sorted codes is one of its cells.
+    order = np.argsort(source.codes, kind="stable")
+    first = order[np.searchsorted(source.codes[order], chosen)]
+    lookup = {
+        row: int(stratum)
+        for row, stratum in zip(
+            keys[columns].itertuples(index=False, name=None),
+            strata.tolist(),
+            strict=True,
+        )
+    }
+    return np.asarray(
+        [
+            lookup.get(
+                tuple(str(values[cell]) for _name, values in source.kept_apart), -1
+            )
+            for cell in first.tolist()
+        ],
+        dtype=np.int64,
+    )
 
 
 def _matched_bytes(n_clone_cells: int, n_cells: int, n_labels: int) -> int:

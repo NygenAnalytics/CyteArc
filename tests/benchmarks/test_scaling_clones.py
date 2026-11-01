@@ -1,12 +1,14 @@
-"""Benchmarks of the clone summaries: expansion, diversity and rarefaction.
+"""Benchmarks of the clone summaries: expansion, diversity, rarefaction and overlap.
 
-Clonal expansion counts each clone's cells within samples, and diversity and
-rarefaction summarize each group's clone sizes. Each benchmark runs one step
-on simulated clones whose sizes follow a heavy-tailed draw, so a few clones
-hold many cells and most cells hold a clone of their own, with one cell in ten
-without a clone, and checks the result, so it doubles as a test at the smoke
-size. The summaries of groups, such as samples by clusters, are measured over
-the number of groups as well, on simulated groups of about 150 cells.
+Clonal expansion counts each clone's cells within samples, diversity and
+rarefaction summarize each group's clone sizes, and overlap compares groups
+by the clones they share. Each benchmark runs one step on simulated clones
+whose sizes follow a heavy-tailed draw, so a few clones hold many cells and
+most cells hold a clone of their own, with one cell in ten without a clone,
+and checks the result, so it doubles as a test at the smoke size. The
+summaries of groups, such as samples by clusters, are measured over the
+number of groups as well, on simulated groups of about 150 cells: diversity,
+rarefaction and the clones that groups share and follow.
 """
 
 from functools import lru_cache
@@ -24,6 +26,9 @@ LADDER = Ladder(sizes=(20_000, 40_000, 80_000, 160_000), smoke=500)
 # Groups such as samples by clusters: a few thousand in a large study.
 GROUPS = Ladder(
     sizes=(125, 250, 500, 1_000), smoke=8, unit="groups", targets=(2_000, 10_000)
+)
+TRACKED_GROUPS = Ladder(
+    sizes=(62, 125, 250, 500), smoke=8, unit="groups", targets=(2_000, 10_000)
 )
 
 
@@ -117,6 +122,35 @@ def test_rarefaction_curve(bench) -> None:
         assert richness[methods.index("observed")] == clones.richness
 
     bench("clones.rarefaction_curve", make, LADDER, check=check)
+
+
+def test_overlap_pairs(bench) -> None:
+    from cytearc.clones.groups import pair_counts
+    from cytearc.clones.overlap import overlap_pairs
+
+    n_groups = 16
+
+    def counts(n_cells: int):
+        codes = _clone_codes(n_cells)
+        has = codes >= 0
+        groups = np.random.default_rng([inputs.SEED, n_cells, n_groups]).integers(
+            0, n_groups, n_cells
+        )
+        return pair_counts(groups[has], codes[has])
+
+    def make(n_cells: int):
+        pair_groups, pair_codes, pair_cells = counts(n_cells)
+        return lambda: overlap_pairs(pair_groups, pair_codes, pair_cells, n_groups)
+
+    def check(n_cells: int, table) -> None:
+        pair_groups, pair_codes, _cells = counts(n_cells)
+        assert len(table) == n_groups * (n_groups - 1) // 2
+        first = set(pair_codes[pair_groups == 0].tolist())
+        second = set(pair_codes[pair_groups == 1].tolist())
+        assert table.iloc[0]["shared"] == len(first & second)
+        assert ((table["jaccard"] >= 0) & (table["jaccard"] <= 1)).all()
+
+    bench("clones.overlap_pairs", make, LADDER, check=check)
 
 
 @lru_cache(maxsize=1)
@@ -233,3 +267,46 @@ def test_rarefaction_curves(bench) -> None:
             assert np.all(np.diff(rows["coverage"].to_numpy()) >= -1e-12)
 
     bench("clones.rarefaction_curves", make, GROUPS, check=check)
+
+
+def test_tracking(bench) -> None:
+    from cytearc.clones.overlap import top_clones, tracking_cells, tracking_reach
+
+    top = 3
+
+    def make(n_groups: int):
+        pair_groups, pair_codes, pair_cells = _group_pairs(n_groups)
+        strata = np.zeros(n_groups, dtype=np.int64)
+
+        def run():
+            chosen = top_clones(pair_groups, pair_codes, pair_cells, n_groups, top)
+            fallback = np.zeros(len(chosen), dtype=np.int64)
+            reach = tracking_reach(pair_groups, pair_codes, chosen, strata, fallback)
+            return (
+                chosen,
+                reach,
+                tracking_cells(
+                    pair_groups, pair_codes, pair_cells, chosen, strata, reach
+                ),
+            )
+
+        return run
+
+    def check(n_groups: int, result) -> None:
+        pair_groups, pair_codes, pair_cells = _group_pairs(n_groups)
+        chosen, reach, (positions, groups, cells) = result
+        # The first group's largest clones, the lower code first on ties, are
+        # followed.
+        mine = pair_groups == 0
+        order = np.lexsort((pair_codes[mine], -pair_cells[mine]))
+        assert set(pair_codes[mine][order][:top].tolist()) <= set(chosen.tolist())
+        # Rows by clone and group, through every group, with all of each
+        # clone's cells.
+        keys = positions * n_groups + groups
+        assert np.all(np.diff(keys) > 0)
+        assert reach.all() and len(keys) == len(chosen) * n_groups
+        totals = pd.Series(pair_cells).groupby(pair_codes).sum()
+        followed = pd.Series(cells).groupby(chosen[positions]).sum()
+        assert followed.to_dict() == totals.loc[chosen].to_dict()
+
+    bench("clones.tracking", make, TRACKED_GROUPS, check=check)

@@ -202,8 +202,8 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # and perturbation.load_clusters, then clones.import_clones,
     # clones.from_column, clones.load_clones and clones.export_clones, then
     # clones.expansion, clones.load_expansion, clones.diversity and
-    # clones.rarefaction.
-    assert len(_NAMESPACE_METHODS) == 122
+    # clones.rarefaction, then clones.overlap and clones.track.
+    assert len(_NAMESPACE_METHODS) == 124
     assert {
         "import_clones",
         "from_column",
@@ -213,6 +213,8 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
         "load_expansion",
         "diversity",
         "rarefaction",
+        "overlap",
+        "track",
     } == {name for namespace, _, name, _ in _NAMESPACE_METHODS if namespace == "clones"}
     assert {
         "import_guide_calls",
