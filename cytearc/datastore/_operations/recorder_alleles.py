@@ -1,7 +1,7 @@
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -60,7 +60,7 @@ from .cell_barcodes import (
     store_sha256,
     warn_unmatched_barcodes,
 )
-from .clone_artifacts import zarr_write_buffer_bytes
+from .clone_artifacts import plan_clones, write_clones, zarr_write_buffer_bytes
 from .record_tables import (
     read_array,
     record_arrays,
@@ -71,7 +71,6 @@ from .record_tables import (
 if TYPE_CHECKING:
     from ...readers.recorder_alleles import AlleleLayout
     from ..mapping_datastore import MappingDatastore as _AlleleOperationsBase
-    from .clones import _CloneOperationsMixin
 else:
     _AlleleOperationsBase = object
 
@@ -1174,10 +1173,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             within=columns,
             invalidate_cache=invalidate_cache,
         )
-        # The DataStore holds the clone operations, which plan and write the
-        # clones artifact that every clone source saves.
-        clone_operations = cast("_CloneOperationsMixin", self)
-        planned = clone_operations._plan_clones(
+        planned = plan_clones(
+            self.zw,
             arguments,
             cell_selection,
             n_cells,
@@ -1267,7 +1264,8 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             probabilities=None,
             n_cells_in_several_clones=0,
         )
-        clone_operations._write_clones(
+        write_clones(
+            self.zw,
             planned,
             assignment,
             {

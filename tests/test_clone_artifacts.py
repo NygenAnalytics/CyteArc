@@ -65,12 +65,13 @@ def _arguments(store) -> CloneColumnArguments:
 
 def test_the_arrays_a_source_adds_are_saved_required_and_loaded(store) -> None:
     arguments = _arguments(store)
-    kinds = {"n_barcodes": "i", "doublet": "b", "ambiguous": "b"}
+    kinds = {"n_barcodes": "i", "doublet": "b", "ambiguous": "b", "n_alleles": "i"}
     planned = _plan(store, arguments, source_arrays=kinds)
     assert not planned.reused
     n_barcodes = (np.arange(N_CELLS) % 4).astype(np.int32)
     doublet = np.arange(N_CELLS) % 5 == 0
     ambiguous = np.arange(N_CELLS) % 7 == 1
+    n_alleles = (np.arange(N_CELLS) % 3).astype(np.int32)
     assignment = _assignment()
     write_clones(
         store.zw,
@@ -81,15 +82,18 @@ def test_the_arrays_a_source_adds_are_saved_required_and_loaded(store) -> None:
             "n_barcodes": n_barcodes,
             "doublet": doublet,
             "ambiguous": ambiguous,
+            "n_alleles": n_alleles,
         },
     )
     cells = store.clones.load_clones(planned.ref).cells.loc[TRUTH.cell_ids]
     np.testing.assert_array_equal(cells["n_barcodes"], n_barcodes)
     np.testing.assert_array_equal(cells["doublet"], doublet)
     np.testing.assert_array_equal(cells["ambiguous"], ambiguous)
+    np.testing.assert_array_equal(cells["n_alleles"], n_alleles)
     assert cells["n_barcodes"].dtype == SOURCE_ARRAYS["n_barcodes"]
     assert cells["doublet"].dtype == SOURCE_ARRAYS["doublet"]
     assert cells["ambiguous"].dtype == SOURCE_ARRAYS["ambiguous"]
+    assert cells["n_alleles"].dtype == np.int64
     assert "clone_probability" not in cells
     # Saved clones are reused with the arrays their source adds, and not once
     # one of them is lost.

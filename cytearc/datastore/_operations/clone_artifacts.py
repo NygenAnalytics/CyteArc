@@ -1,12 +1,13 @@
 """The ``clones`` artifact that every clone source saves.
 
-Clone import, clones from a cell column, barcode clones and clones called
-from variants all save the same artifact: per cell the clone label in
-``values``, the clone's rank in ``codes`` and its size in ``clone_size``, and
-per clone ``clone_ids`` and ``clone_sizes``, beside the per-cell arrays that a
-source adds, such as each cell's probability of its clone. These helpers plan
-it, check that its labels fit the memory budget as the store saves them,
-write it and log it, once for every operation mixin that saves clones.
+Clone import, clones from a cell column, barcode clones, clones called from
+variants and allele clones all save the same artifact: per cell the clone
+label in ``values``, the clone's rank in ``codes`` and its size in
+``clone_size``, and per clone ``clone_ids`` and ``clone_sizes``, beside the
+per-cell arrays that a source adds, such as each cell's probability of its
+clone. These helpers plan it, check that its labels fit the memory budget as
+the store saves them, write it and log it, once for every operation mixin that
+saves clones.
 """
 
 import io
@@ -38,13 +39,15 @@ __all__ = [
 CLONE_PROBABILITY = "clone_probability"
 #: The per-cell arrays that a clone source may add, with the dtype that the
 #: table of loaded cells holds: each cell's probability of its clone, its
-#: barcodes, whether calling removed it as a doublet, and whether it left it
-#: out as ambiguous, its calls agreeing with two clones that disagree.
+#: barcodes, whether calling removed it as a doublet, whether it left it out
+#: as ambiguous, its calls agreeing with two clones that disagree, and its
+#: distinct rare recorder alleles.
 SOURCE_ARRAYS: Mapping[str, Any] = {
     CLONE_PROBABILITY: np.float64,
     "n_barcodes": np.int64,
     "doublet": bool,
     "ambiguous": bool,
+    "n_alleles": np.int64,
 }
 
 
