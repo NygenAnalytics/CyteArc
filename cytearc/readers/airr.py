@@ -4,8 +4,9 @@ The AIRR Community's Rearrangement schema (Vander Heiden et al. 2018) holds one
 row per rearrangement, here one contig of a cell's receptor chain, in a
 tab-separated file with a header of field names. True and false are written
 ``T`` and ``F`` and a missing value is empty. Values are not quoted, so a
-quote is read as part of its value. A single-cell file joins each row to its
-cell through ``cell_id``. Cell Ranger writes such a file,
+quote is read as part of its value, also where a file's writer quoted it, as
+the airr library's writer quotes a value that holds a double quote. A
+single-cell file joins each row to its cell through ``cell_id``. Cell Ranger writes such a file,
 ``airr_rearrangement.tsv``, and other pipelines that follow the schema read
 the same when they hold the fields that an import needs.
 """

@@ -543,7 +543,11 @@ def _integers(values: np.ndarray, missing: np.ndarray) -> _Bytes:
 
 
 def _column_names(columns: Any) -> tuple[str, ...]:
-    """Check columns given as a sequence of distinct names."""
+    """Check columns given as a sequence of distinct names.
+
+    A name is a field of the header row, so it may not hold a tab, a newline
+    or a carriage return either.
+    """
     if isinstance(columns, str) or not isinstance(columns, Sequence):
         raise TypeError("columns must be a sequence of column names")
     names = tuple(columns)
@@ -552,6 +556,12 @@ def _column_names(columns: Any) -> tuple[str, ...]:
     repeated = sorted({name for name in names if names.count(name) > 1})
     if repeated:
         raise ValueError(f"columns name {repeated} more than once")
+    broken = [name for name in names if {"\t", "\n", "\r"} & set(name)]
+    if broken:
+        raise ValueError(
+            "Column names must not hold a tab, a newline or a carriage return, "
+            f"which {broken} do"
+        )
     return names
 
 
@@ -600,7 +610,8 @@ class AirrRearrangementWriter:
     Raises:
         TypeError: If ``path`` is not a path, or ``columns`` is not a sequence
             of column names.
-        ValueError: If ``columns`` names a column more than once.
+        ValueError: If ``columns`` names a column more than once, or a name
+            holds a tab, a newline or a carriage return.
     """
 
     def __init__(
@@ -791,9 +802,9 @@ def write_airr_rearrangements(
         TypeError: If ``table`` is not a DataFrame, ``path`` is not a path, or
             ``columns`` is not a sequence of column names.
         ValueError: If ``table`` holds no ``sequence_id`` or a ``sequence_id``
-            more than once, which the schema forbids, a value that holds a
-            tab, a newline or a carriage return, or ``columns`` names a column
-            more than once or one that the table lacks.
+            more than once, which the schema forbids, a value or a column's
+            name holds a tab, a newline or a carriage return, or ``columns``
+            names a column more than once or one that the table lacks.
     """
     if not isinstance(table, pd.DataFrame):
         raise TypeError("table must be a pandas DataFrame")
@@ -838,8 +849,9 @@ def _forbidden_columns(
     """Find the columns whose values hold a tab, a newline or a carriage return.
 
     Each column of ``order`` that the table holds is rendered as the writer
-    renders it, a chunk of rows at a time, except logical fields and columns of
-    numbers or booleans, which render as digits, ``T`` and ``F``.
+    renders it, a chunk of rows at a time, except logical fields, rendered as
+    ``T`` and ``F``, and columns of numbers or booleans, rendered as numbers,
+    ``True`` and ``False``, which hold no such character.
 
     Returns:
         Each such column, the number of its values that hold one, and the
@@ -873,8 +885,15 @@ def _forbidden_columns(
         if count:
             found.append((first, column, count))
     ids = table["sequence_id"]
+    # Each first contig is named by its ID as the file would write it.
     return [
-        (column, count, str(ids.iloc[first]))
+        (
+            column,
+            count,
+            _value_text(
+                _bytes_column(ids.iloc[first : first + 1], "sequence_id", False), 0
+            ),
+        )
         for first, column, count in sorted(found, key=lambda item: item[0])
     ]
 

@@ -527,7 +527,7 @@ def test_tables_of_values_that_hold_a_tab_or_a_line_break_are_refused(
     table = pd.DataFrame(
         {
             "sequence_id": ["s0", "s1", "s2", "s3"],
-            "v_call": ["V0", f"V{character}1", "V2", f"V{character}3"],
+            "v_call": ["V0", f"V{character}1", "V2", f"V{character}{character}3"],
             "c_call": pd.Categorical(["C0", "C1", f"C{character}2", "C3"]),
             "umi_count": [1, 2, 3, 4],
         }
@@ -539,7 +539,8 @@ def test_tables_of_values_that_hold_a_tab_or_a_line_break_are_refused(
         "these values of the table do: 2 values of v_call, the first in contig "
         "'s1'; 1 value of c_call, in contig 's2'"
     )
-    # An ID that holds one names itself.
+    # An ID that holds one names itself, and a contig without an ID is named
+    # by its empty ID, as the file would write it.
     ids = table.assign(sequence_id=["s0", "s1", f"s{character}2", "s3"])
     ids = ids.assign(v_call="V", c_call="C")
     with pytest.raises(ValueError) as refused:
@@ -547,6 +548,37 @@ def test_tables_of_values_that_hold_a_tab_or_a_line_break_are_refused(
     assert str(refused.value).endswith(
         f"1 value of sequence_id, in contig {'s' + character + '2'!r}"
     )
+    unnamed = table.assign(sequence_id=["s0", None, "s2", "s3"], c_call="C")
+    with pytest.raises(ValueError, match="2 values of v_call, the first in contig ''$"):
+        write_airr_rearrangements(unnamed, path)
+    # The fields come in the order of their first contigs, not of the file.
+    later = table.assign(c_call=[f"C{character}0", "C1", "C2", "C3"])
+    with pytest.raises(ValueError) as refused:
+        write_airr_rearrangements(later, path)
+    assert str(refused.value).endswith(
+        "1 value of c_call, in contig 's0'; 2 values of v_call, the first in "
+        "contig 's1'"
+    )
+    assert not path.exists()
+
+
+def test_a_table_refusal_names_the_first_contig_of_a_later_chunk(
+    tmp_path, monkeypatch
+) -> None:
+    # A table is checked three rows at a time, and the first value that holds
+    # a tab is in the third chunk.
+    monkeypatch.setattr(airr_writer, "_CHUNK_ROWS", 3)
+    table = pd.DataFrame(
+        {
+            "sequence_id": [f"s{k}" for k in range(9)],
+            "v_call": ["V"] * 7 + ["V\t7", "V\t8"],
+        }
+    )
+    path = tmp_path / "chunks.tsv"
+    with pytest.raises(
+        ValueError, match="2 values of v_call, the first in contig 's7'$"
+    ):
+        write_airr_rearrangements(table, path)
     assert not path.exists()
 
 
@@ -572,6 +604,19 @@ def test_the_writer_refuses_a_block_before_writing_any_of_it(tmp_path) -> None:
         f"{header}\na{empty}\tc1\ne{empty}\tc3\n"
     )
     assert writer.n_rows == 2
+    # The fields come in the order of their first contigs, not of the file.
+    with AirrRearrangementWriter(tmp_path / "ordered.tsv", ["cell_id"]) as writer:
+        with pytest.raises(ValueError) as refused:
+            writer.write(
+                {
+                    "sequence_id": ["g", "h"],
+                    "v_call": ["V", "V\n1"],
+                    "cell_id": ["c\r6", "c7"],
+                }
+            )
+    assert str(refused.value).endswith(
+        "1 value of cell_id, in contig 'g'; 1 value of v_call, in contig 'h'"
+    )
     # A contig without an ID is named by its empty ID.
     with AirrRearrangementWriter(tmp_path / "unnamed.tsv", ["cell_id"]) as writer:
         with pytest.raises(ValueError, match="1 value of cell_id, in contig ''$"):
@@ -1544,9 +1589,10 @@ def test_the_export_warns_of_discouraged_characters_and_repeated_ids(
     ]
 
 
-# T cell rows with a tab in three V calls, a newline in two constant gene
-# calls and a carriage return in one ID, all of which the AIRR format forbids
-# within a value; the contig with the carriage return is not a chain. Stored
+# T cell rows with tabs in three V calls, two of one value and one of two
+# tabs, a newline in two constant gene calls and a carriage return in one ID,
+# all of which the AIRR format forbids within a value; the contig with the
+# carriage return is not a chain. Stored
 # four contigs to a chunk of cells and 16 bytes to a chunk of IDs, the first
 # span's IDs take three pieces, the carriage return in the third, and the V
 # calls hold a tab in both spans.
@@ -1556,7 +1602,7 @@ FORBIDDEN_TCR = [
     'cell1,true,y_contig_1,true,500,TRB,TRBV2,,TRBJ2,"TR\nBC1",true,true,CASSB,TGTGCCAGCAGCGCA,80,8,ct2,ct2_1',
     'cell2,true,"z_con\rtig_1",true,500,TRA,"TRAV1\tB",,TRAJ2,"TR\nBC1",true,false,CAVB,TGTGCTGTGGCA,60,6,ct3,ct3_1',
     "cell3,true,w_contig_1,true,500,TRB,TRBV3,,TRBJ3,TRBC1,true,true,CASSC,TGTGCCAGCAGCTGT,70,7,ct4,ct4_1",
-    'cell4,true,v_contig_1,true,500,TRA,"TRAV1\tB",,TRAJ4,TRAC,true,true,CAVD,TGTGCTGTGGAT,50,5,ct5,ct5_1',
+    'cell4,true,v_contig_1,true,500,TRA,"TRAV4\t\tD",,TRAJ4,TRAC,true,true,CAVD,TGTGCTGTGGAT,50,5,ct5,ct5_1',
 ]
 _FORBIDDEN = (
     "AIRR values must not hold a tab, a newline or a carriage return, which these "
@@ -1619,6 +1665,63 @@ def test_export_refuses_values_the_format_forbids_before_the_file(
         )
         == 5
     )
+
+
+def test_a_chains_only_refusal_names_the_first_chain_that_holds_the_value(
+    tmp_path,
+) -> None:
+    # a_1 is no chain, so the first chain with a V call of a tab is a_2.
+    rows = [
+        "cell0,true,a_1,true,500,TRA,TRAV2,,TRAJ1,TRAC,true,false,CAVA,TGTGCT,80,8,ct1,ct1_1",
+        'cell0,true,a_2,true,500,TRB,"TRBV1\tB",,TRBJ1,TRBC1,true,true,CASSA,TGTGCC,80,8,ct1,ct1_1',
+    ]
+    store = receptor_store(tmp_path)
+    receptors = store.repertoire.import_receptors(
+        write_lines(tmp_path, "tcr.csv", CELLRANGER_HEADER, rows),
+        cell_selection=store.snapshot_cell_selection(),
+    )
+    path = tmp_path / "chains.tsv"
+    with pytest.raises(ValueError) as refused:
+        store.repertoire.export_airr(receptors, path, chains_only=True)
+    assert str(refused.value) == _FORBIDDEN + "1 value of v_call, in contig 'a_2'"
+    assert not path.exists()
+
+
+def test_ragged_values_of_discouraged_characters_are_written_and_counted(
+    tmp_path,
+) -> None:
+    # IDs and sequences, which each contig stores as its own bytes, may hold
+    # @, # and quotes, which are written as they are, not refused.
+    store = receptor_store(tmp_path)
+    header = (
+        "cell_id\tsequence_id\tlocus\tv_call\tj_call\tjunction_aa\tproductive\tsequence"
+    )
+    rows = [
+        "cell0\tc0#1\tIGH\tIGHV1\tIGHJ1\tCARW\tT\tAC@GT",
+        "cell1\tc1_1\tIGH\tIGHV1\tIGHJ1\tCARW\tT\tACGT",
+        "cell2\t\"c2'1\tIGK\tIGKV1\tIGKJ1\tCQQY\tT\tGG",
+    ]
+    receptors = store.repertoire.import_receptors(
+        write_lines(tmp_path, "airr.tsv", header, rows),
+        cell_selection=store.snapshot_cell_selection(),
+    )
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="WARNING"
+    )
+    try:
+        written = store.repertoire.export_airr(receptors, tmp_path / "ragged.tsv")
+    finally:
+        logger.remove(sink)
+    assert written == 3
+    exported = _read(tmp_path / "ragged.tsv")
+    assert exported["sequence_id"].tolist() == ["c0#1", "c1_1", "\"c2'1"]
+    assert exported["sequence"].tolist() == ["AC@GT", "ACGT", "GG"]
+    assert messages == [
+        "3 values of sequence_id and sequence hold @, #, a double quote or ', "
+        "which the AIRR format advises against since readers may take them "
+        "differently; they are written as they are"
+    ]
 
 
 def test_export_refuses_cell_ids_and_labels_the_format_forbids(tmp_path) -> None:
@@ -1690,13 +1793,14 @@ def test_measuring_counts_the_codes_of_values_that_hold_forbidden_characters(
             "contig_v_call",
         )
     )
-    # The code of the one V call that holds a tab, 8 bytes, stays held; then
-    # the span, as without such a value, but with a chunk of the V calls'
-    # codes, and a stored chunk of IDs, all 61 bytes of the six, five of 10
-    # bytes and z_con\rtig_1 of 11, and 64 bytes for each of the six contigs.
+    # The codes of the two V calls that hold a tab, one of them two, 8 bytes
+    # each, stay held; then the span, as without such values, but with a
+    # chunk of the V calls' codes, and a stored chunk of IDs, all 61 bytes of
+    # the six, five of 10 bytes and z_con\rtig_1 of 11, and 64 bytes for each
+    # of the six contigs.
     assert refusals == [
-        held + lingering + 8,
-        held + 8 + lingering + reading + max(0, reading - lingering) + 61 + 64 * 6,
+        held + lingering + 16,
+        held + 16 + lingering + reading + max(0, reading - lingering) + 61 + 64 * 6,
     ]
     # Reading the ID of the V call's first contig, x_contig_1, is checked too:
     # a stored chunk of the IDs' arrays beside the span's last, 16 bytes of
@@ -1709,7 +1813,7 @@ def test_measuring_counts_the_codes_of_values_that_hold_forbidden_characters(
         _chunk(group[name])
         for name in ("contig_sequence_id_offsets", "contig_sequence_id")
     )
-    reading_ids = held + 8 + reading + ids + max(0, ids - reading) + 16 + 11
+    reading_ids = held + 16 + reading + ids + max(0, ids - reading) + 16 + 11
     with pytest.raises(MemoryError, match=f"holds about {reading_ids} bytes"):
         contigs._contig_id(0)
 
@@ -1881,6 +1985,16 @@ def test_tables_and_columns_are_checked_before_writing(tmp_path) -> None:
         AirrRearrangementWriter(path, ["cell_id", 3])
     with pytest.raises(ValueError, match=r"name \['cell_id'\] more than once"):
         AirrRearrangementWriter(path, ["cell_id", "cell_id"])
+    # A column's name is a field of the header row.
+    with pytest.raises(
+        ValueError, match=r"Column names must not hold .* \['my\\tfield'\]"
+    ):
+        write_airr_rearrangements(
+            pd.DataFrame({"sequence_id": ["a"], "my\tfield": ["x"]}), path
+        )
+    for name in ("cell\nid", "cell\rid"):
+        with pytest.raises(ValueError, match="Column names must not hold"):
+            AirrRearrangementWriter(path, [name])
     assert not path.exists()
 
 
