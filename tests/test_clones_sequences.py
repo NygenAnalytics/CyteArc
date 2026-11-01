@@ -13,7 +13,8 @@ from cytearc.clones.sequences import (
 )
 from cytearc.repertoire.clonotypes import METRICS
 from tests.clone_helpers import levenshtein_distance as _levenshtein
-from tests.clone_helpers import smallest_budget, traced_peak
+from tests.clone_helpers import smallest_budget
+from tests.perturbation_helpers import traced_peak
 from tests.clone_helpers import within_distance as _within
 
 
@@ -423,7 +424,8 @@ def test_the_search_holds_no_more_than_the_smallest_budget_it_accepts(
 
     assert _pairs(*search(None)) == _expected(texts, metric, 1)
     budget = smallest_budget(search, 1 << 23)
-    assert traced_peak(lambda: search(budget)) <= budget
+    _, peak = traced_peak(lambda: search(budget), budget)
+    assert peak <= budget
 
 
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
@@ -450,7 +452,8 @@ def test_keys_of_distinct_texts_hold_no_more_than_the_smallest_budget(
 
     assert len(search(None)[0]) == 200 * 20 * 19 // 2
     budget = smallest_budget(search, 1 << 23)
-    assert traced_peak(lambda: search(budget)) <= budget
+    _, peak = traced_peak(lambda: search(budget), budget)
+    assert peak <= budget
 
 
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
@@ -470,7 +473,8 @@ def test_many_blocks_hold_no_more_than_the_smallest_budget_they_accept(
 
     assert len(search(None)[0]) == (1_500 if near else 0)
     budget = smallest_budget(search, 1 << 23)
-    assert traced_peak(lambda: search(budget)) <= budget
+    _, peak = traced_peak(lambda: search(budget), budget)
+    assert peak <= budget
 
 
 @pytest.mark.parametrize("metric", ["hamming", "levenshtein"])

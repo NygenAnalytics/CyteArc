@@ -30,10 +30,10 @@ from cytearc.utils.logging import logger
 from tests.clone_helpers import (
     CELLRANGER_HEADER,
     smallest_budget,
-    traced_peak,
     write_clone_contigs,
     write_lines,
 )
+from tests.perturbation_helpers import traced_peak
 from tests.storage_helpers import write_count_store
 
 pytestmark = pytest.mark.slow
@@ -870,7 +870,7 @@ def _cluster_peak(
         # the definition, so the smallest budget is found by bisection.
         budget = smallest_budget(attempt, 1 << 28)
         store.memoryBytes = budget
-        peak = traced_peak(run)
+        _, peak = traced_peak(run, budget)
     finally:
         store.memoryBytes = full
     return peak, budget

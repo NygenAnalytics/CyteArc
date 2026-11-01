@@ -11,7 +11,8 @@ from cytearc.repertoire.clonotypes import (
     assign_clonotype_clusters,
     assign_clonotypes,
 )
-from tests.clone_helpers import smallest_budget, traced_peak
+from tests.clone_helpers import smallest_budget
+from tests.perturbation_helpers import traced_peak
 from tests.clone_helpers import within_distance as _within
 
 
@@ -331,4 +332,5 @@ def test_linking_holds_no_more_than_the_smallest_budget_it_accepts(
     budget = smallest_budget(link, 1 << 26)
     assert np.array_equal(link(budget).codes, whole.codes)
     allowed = (1 << 20) + budget + _CLONOTYPE_BYTES_PER_CELL * n_cells
-    assert traced_peak(lambda: link(budget)) <= allowed
+    _, peak = traced_peak(lambda: link(budget), allowed)
+    assert peak <= allowed

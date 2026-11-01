@@ -1,9 +1,7 @@
 """Stores and checks shared by the tests of clones."""
 
-import gc
 import math
 import shutil
-import tracemalloc
 from collections.abc import Callable, Mapping, Sequence
 from fractions import Fraction
 from math import sqrt
@@ -360,22 +358,6 @@ def levenshtein_distance(first: str, second: str) -> int:
             )
         previous = current
     return previous[-1]
-
-
-def traced_peak(call: Callable[[], object]) -> int:
-    """The most bytes that ``call`` held at once beyond what was held before it.
-
-    ``tracemalloc`` sees NumPy's arrays and those that compiled kernels
-    allocate.
-    """
-    gc.collect()
-    tracemalloc.start()
-    try:
-        before = tracemalloc.get_traced_memory()[0]
-        call()
-        return tracemalloc.get_traced_memory()[1] - before
-    finally:
-        tracemalloc.stop()
 
 
 def smallest_budget(call: Callable[[int], object], high: int) -> int:
