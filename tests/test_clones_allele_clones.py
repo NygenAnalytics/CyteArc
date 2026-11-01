@@ -568,7 +568,7 @@ def test_p_clonal_corrects_for_the_alleles_of_each_group_apart() -> None:
 
 def test_banks_must_name_the_characters_of_the_alleles() -> None:
     rows = [(0, 0, 0), (1, 1, 1)]
-    with pytest.raises(ValueError, match="names 'XA', which is no character"):
+    with pytest.raises(ValueError, match="names 'XA', which no edited site"):
         _call(rows, 2, banks={"XA": _bank({"a": (0.1, 1)})}, max_frequency=0.5)
     with pytest.raises(ValueError, match="holds no bank of 'TA'"):
         _call(rows, 2, banks={"CA": _bank({"a": (0.1, 1)})}, max_frequency=0.5)

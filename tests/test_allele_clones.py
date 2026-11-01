@@ -437,7 +437,7 @@ def test_allele_clones_refuse_other_artifacts_and_arguments(store, tmp_path) -> 
         store.clones.allele_clones(alleles, method="DARLIN", max_frequency=0.5)
     with pytest.raises(ValueError, match="needs frequencies"):
         store.clones.allele_clones(alleles, method="p_clonal")
-    with pytest.raises(ValueError, match="names 'CC', which is no character"):
+    with pytest.raises(ValueError, match="names 'CC', which no edited site"):
         store.clones.allele_clones(
             alleles,
             method="graph",

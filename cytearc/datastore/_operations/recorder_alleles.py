@@ -1090,7 +1090,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             TypeError: If an argument has the wrong type.
             ValueError: If the method is unknown, a rule is missing, out of
                 range or does not apply to the method, a bank is malformed,
-                names no character of the alleles or is missing for one, or a
+                names no character with an edit or is missing for one, or a
                 within column is missing or has no label for a cell with an
                 edit.
             PermissionError: If the store is read-only and the clones are not
@@ -1120,7 +1120,13 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         cell_selection = inspect_artifact(self.zw, alleles).input_ref("cell_selection")
         counts = self._allele_counts(group)
         n_cells = counts["cells"]
-        # Every cell with an edit needs a label in the within columns.
+        # Every cell with an edit needs a label in the within columns: each
+        # cell's edits are read, then held as a mask while the cells group.
+        _check_calling(
+            bank_bytes + 9 * n_cells + _FIXED_BYTES,
+            self.memoryBytes,
+            f"the edits of {n_cells} cells",
+        )
         with_edits = read_array(group, "n_edits") > 0
         group_codes, _keys, within_fingerprint = within_groups(
             self.zw,
@@ -1128,7 +1134,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             cell_selection,
             columns,
             with_edits,
-            memory_bytes=self.memoryBytes - bank_bytes,
+            memory_bytes=self.memoryBytes - bank_bytes - n_cells,
             reserved=_CLONE_COLUMNS,
             what="an edit",
         )

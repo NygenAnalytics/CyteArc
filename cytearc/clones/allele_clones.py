@@ -598,8 +598,8 @@ def allele_clone_calls(
 
     Raises:
         ValueError: If the inputs are inconsistent, a bank names no
-            character of the observations, or two characters share a name
-            that a bank names.
+            character with an edit, or two characters share a name that a
+            bank names.
         MemoryError: If a step does not fit ``max_bytes``.
     """
     room = _Room(None if max_bytes is None else int(max_bytes))
@@ -613,8 +613,9 @@ def allele_clone_calls(
         unknown = sorted(name for name in banks if name not in known)
         if unknown:
             raise ValueError(
-                f"frequencies names {unknown[0]!r}, which is no character of these "
-                f"alleles; their characters are {', '.join(map(repr, sorted(known)))}"
+                f"frequencies names {unknown[0]!r}, which no edited site of these "
+                "alleles belongs to; the characters with edits are "
+                f"{', '.join(map(repr, sorted(known)))}"
             )
         shared = sorted(name for name in set(names) if names.count(name) > 1)
         if shared:
