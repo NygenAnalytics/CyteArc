@@ -481,6 +481,14 @@ def test_the_writer_refuses_blocks_without_their_columns(tmp_path) -> None:
             writer.write({"sequence_id": ["s1"]})
         with pytest.raises(ValueError, match="differ in length"):
             writer.write({"sequence_id": ["s1", "s2"], "cell_id": ["c1"]})
+        # A DataFrame whose columns repeat a label is refused by name.
+        repeated = pd.DataFrame(
+            [["s1", "c1", "c2"]], columns=["sequence_id", "cell_id", "cell_id"]
+        )
+        with pytest.raises(
+            ValueError, match=r"The block's columns name \['cell_id'\] more than once"
+        ):
+            writer.write(repeated)
     assert path.read_text() == "\t".join([*AIRR_REQUIRED_FIELDS, "cell_id"]) + "\n"
 
 
@@ -2013,6 +2021,14 @@ def test_tables_and_columns_are_checked_before_writing(tmp_path) -> None:
         write_airr_rearrangements(table, path, columns=["umi_count", "umi_count"])
     with pytest.raises(ValueError, match="sequence_id 'a' repeats"):
         write_airr_rearrangements(pd.DataFrame({"sequence_id": ["a", "b", "a"]}), path)
+    # A table whose columns repeat a label, sequence_id too, is refused by name.
+    for labels in (["sequence_id", "v_call", "v_call"], ["sequence_id", "sequence_id"]):
+        repeated = pd.DataFrame([["a"] * len(labels)], columns=labels)
+        with pytest.raises(
+            ValueError,
+            match=rf"The table's columns name \['{labels[-1]}'\] more than once",
+        ):
+            write_airr_rearrangements(repeated, path)
     with pytest.raises(TypeError, match="columns must be a sequence"):
         AirrRearrangementWriter(path, "cell_id")
     with pytest.raises(TypeError, match="columns must be a sequence of column names"):

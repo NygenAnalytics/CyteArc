@@ -579,6 +579,13 @@ def _column_names(columns: Any) -> tuple[str, ...]:
     return names
 
 
+def _refuse_repeated_labels(frame: pd.DataFrame, what: str) -> None:
+    """Refuse a DataFrame whose columns repeat a label, naming the labels."""
+    repeated = list(dict.fromkeys(frame.columns[frame.columns.duplicated()].tolist()))
+    if repeated:
+        raise ValueError(f"The {what}'s columns name {repeated} more than once")
+
+
 def _n_values(values: Any) -> int:
     return len(values.codes) if isinstance(values, EncodedText) else len(values)
 
@@ -703,13 +710,16 @@ class AirrRearrangementWriter:
 
         Raises:
             ValueError: If the writer is closed, ``block`` holds no
-                ``sequence_id``, lacks a column after the required fields or
-                holds columns of different lengths, a logical field holds a
-                value that is not logical, or a value holds a tab, a newline
-                or a carriage return; the block is then not written.
+                ``sequence_id``, lacks a column after the required fields,
+                holds columns of different lengths or, as a DataFrame, repeats
+                a column's label, a logical field holds a value that is not
+                logical, or a value holds a tab, a newline or a carriage
+                return; the block is then not written.
         """
         if self._handle is None:
             raise ValueError("The writer is closed")
+        if isinstance(block, pd.DataFrame):
+            _refuse_repeated_labels(block, "block")
         names = set(block.columns if isinstance(block, pd.DataFrame) else block)
         if "sequence_id" not in names:
             raise ValueError("The contigs need a sequence_id")
@@ -847,16 +857,18 @@ def write_airr_rearrangements(
     Raises:
         TypeError: If ``table`` is not a DataFrame, ``path`` is not a path, or
             ``columns`` is not a sequence of column names.
-        ValueError: If ``table`` holds no ``sequence_id`` or a ``sequence_id``
-            more than once, which the schema forbids, a value or a column's
-            name holds a tab, a newline or a carriage return, a logical field
-            holds a value that is not logical, or ``columns`` names a column
-            more than once or one that the table lacks.
+        ValueError: If ``table`` repeats a column's label, holds no
+            ``sequence_id`` or a ``sequence_id`` more than once, which the
+            schema forbids, a value or a column's name holds a tab, a newline
+            or a carriage return, a logical field holds a value that is not
+            logical, or ``columns`` names a column more than once or one that
+            the table lacks.
     """
     if not isinstance(table, pd.DataFrame):
         raise TypeError("table must be a pandas DataFrame")
     if not isinstance(path, str | os.PathLike):
         raise TypeError("path must be a path")
+    _refuse_repeated_labels(table, "table")
     if "sequence_id" not in table.columns:
         raise ValueError("The contigs need a sequence_id")
     ids = table["sequence_id"]
