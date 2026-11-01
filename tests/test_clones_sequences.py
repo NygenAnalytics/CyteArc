@@ -55,7 +55,7 @@ def _force(monkeypatch, path: str) -> None:
         monkeypatch.setattr(
             sequences,
             "_hamming_segments",
-            lambda codes, limit, room, split=0: (
+            lambda codes, limit, room, split=0, agree=None: (
                 max(codes.shape[1], 1)
                 if limit <= 3
                 else (limit + 1 if limit < codes.shape[1] else 0)
@@ -821,7 +821,9 @@ def test_every_split_into_segments_finds_the_same_pairs(
     rng = np.random.default_rng(segments)
     texts = _barcodes(rng, 600, 28, most=cutoff + 1)
     monkeypatch.setattr(
-        sequences, "_hamming_segments", lambda codes, limit, room, split=0: segments
+        sequences,
+        "_hamming_segments",
+        lambda codes, limit, room, split=0, agree=None: segments,
     )
     expected = _expected(texts, "hamming", cutoff)
     assert _pairs(*neighbor_pairs(texts, "hamming", cutoff)) == expected
@@ -1047,3 +1049,385 @@ def test_the_positions_of_partial_texts_count_against_the_budget() -> None:
         texts, "hamming", 0, unknown="-", max_bytes=held + 64 * 600 + 2**20
     )
     assert len(found[0]) == 0
+
+
+# The pairs that the search expects by chance, against counts of random texts.
+
+
+def _random_texts(
+    rng, n_texts: int, lengths, probabilities, fixed: dict[int, str] | None = None
+) -> list[str]:
+    """Distinct texts whose characters are drawn independently, position by position.
+
+    Each text takes one of ``lengths`` at random, and ``fixed`` gives the
+    letter that every text holds at some positions, as designed barcodes do.
+    """
+    letters = np.asarray(list("ACGT"))
+    texts = set()
+    for length in rng.choice(np.asarray(lengths), size=n_texts):
+        text = letters[rng.choice(4, size=int(length), p=probabilities)]
+        for position, letter in (fixed or {}).items():
+            text[position] = letter
+        texts.add("".join(text))
+    return sorted(texts)
+
+
+def _count_and_variance(
+    n_texts: int, first: np.ndarray, second: np.ndarray
+) -> tuple[int, float]:
+    """The pairs linked, and the variance of that count over draws of the texts.
+
+    Each pair's link varies on its own, and with every pair that shares one of
+    its texts: the cherries, two linked pairs that share a text, estimate how
+    much more often such pairs link together than apart.
+    """
+    count = len(first)
+    pairs = n_texts * (n_texts - 1) / 2
+    rate = count / pairs
+    linked = np.bincount(np.concatenate([first, second]), minlength=n_texts)
+    cherries = float(np.sum(linked * (linked - 1) / 2))
+    together = n_texts * (n_texts - 1) * (n_texts - 2) / 2 * rate**2
+    return count, pairs * rate * (1 - rate) + 2 * max(0.0, cherries - together)
+
+
+def _substitution_links(
+    texts: list[str], cutoff: int, unknown: str = "", min_compared: int = 0
+) -> tuple[np.ndarray, np.ndarray]:
+    """The pairs of texts of one length within ``cutoff`` substitutions, by brute force.
+
+    Positions where either text holds an ``unknown`` character are not
+    compared, and a pair needs ``min_compared`` positions compared.
+    """
+    firsts, seconds = [], []
+    lengths = np.fromiter(map(len, texts), dtype=np.int64)
+    for length in np.unique(lengths).tolist():
+        members = np.flatnonzero(lengths == length)
+        codes = np.asarray([list(texts[member]) for member in members])
+        known = ~np.isin(codes, list(unknown))
+        for row in range(len(members) - 1):
+            both = known[row] & known[row + 1 :]
+            differ = ((codes[row + 1 :] != codes[row]) & both).sum(axis=1)
+            linked = np.flatnonzero(
+                (differ <= cutoff) & (both.sum(axis=1) >= min_compared)
+            )
+            firsts.append(np.full(len(linked), members[row]))
+            seconds.append(members[row + 1 + linked])
+    return np.concatenate(firsts), np.concatenate(seconds)
+
+
+def _edit_links(texts: list[str], cutoff: int) -> tuple[np.ndarray, np.ndarray]:
+    """The pairs of texts within ``cutoff`` edits, the dynamic programming of every pair."""
+    n_texts = len(texts)
+    lengths = np.fromiter(map(len, texts), dtype=np.int64)
+    width = int(lengths.max())
+    codes = np.full((n_texts, width), -1, dtype=np.int64)
+    for row, text in enumerate(texts):
+        codes[row, : len(text)] = [ord(letter) for letter in text]
+    first, second = np.triu_indices(n_texts, 1)
+    near = np.abs(lengths[first] - lengths[second]) <= cutoff
+    first, second = first[near], second[near]
+    within = np.zeros(len(first), dtype=bool)
+    for start in range(0, len(first), 50_000):
+        rows = first[start : start + 50_000]
+        columns = second[start : start + 50_000]
+        left, right = codes[rows], codes[columns]
+        ends = lengths[columns]
+        previous = np.tile(np.arange(width + 1), (len(rows), 1))
+        distance = np.where(lengths[rows] == 0, ends, 0)
+        for row in range(1, width + 1):
+            current = np.empty_like(previous)
+            current[:, 0] = row
+            for column in range(1, width + 1):
+                current[:, column] = np.minimum(
+                    np.minimum(
+                        previous[:, column - 1]
+                        + (left[:, row - 1] != right[:, column - 1]),
+                        previous[:, column] + 1,
+                    ),
+                    current[:, column - 1] + 1,
+                )
+            done = lengths[rows] == row
+            distance[done] = current[done, ends[done]]
+            previous = current
+        within[start : start + 50_000] = distance <= cutoff
+    return first[within], second[within]
+
+
+def _assert_expected(count: int, variance: float, expected: float, slack: float = 0.0):
+    """The count lies within four standard deviations of the expectation.
+
+    ``slack`` widens the tolerance by that share of the count, for an
+    approximate expectation. The tolerance is tight enough that an
+    expectation off by a factor of 2 lies outside it.
+    """
+    tolerance = 4 * variance**0.5 + slack * count
+    assert abs(count - expected) <= tolerance, (count, expected, tolerance)
+    for wrong in (2 * expected, expected / 2):
+        assert abs(count - wrong) > tolerance, (count, wrong, tolerance)
+
+
+@pytest.mark.parametrize(
+    ("length", "probabilities", "cutoff", "fixed"),
+    [
+        (11, (0.25, 0.25, 0.25, 0.25), 2, None),
+        (16, (0.55, 0.25, 0.15, 0.05), 2, None),
+        # Pairs of short texts that would agree everywhere are a large share
+        # of those within one substitution, and distinct texts never do.
+        (8, (0.4, 0.3, 0.2, 0.1), 1, None),
+        (13, (0.25, 0.25, 0.25, 0.25), 2, {3: "A", 9: "T"}),
+    ],
+)
+def test_the_pairs_expected_by_chance_match_a_count_of_random_texts(
+    length, probabilities, cutoff, fixed
+) -> None:
+    rng = np.random.default_rng(length * 10 + cutoff)
+    texts = _random_texts(rng, 3_000, [length], probabilities, fixed)
+    first, second = _substitution_links(texts, cutoff)
+    count, variance = _count_and_variance(len(texts), first, second)
+    found, _second, expected = neighbor_pairs(
+        texts, "hamming", cutoff, return_expected=True
+    )
+    assert len(found) == count
+    _assert_expected(count, variance, expected)
+
+
+def test_texts_of_two_blocks_expect_only_the_pairs_of_one_block() -> None:
+    rng = np.random.default_rng(21)
+    texts = _random_texts(rng, 3_000, [11], (0.25, 0.25, 0.25, 0.25))
+    # Blocks drawn at random: sorted texts that share a prefix lie together,
+    # so blocks taken in turn would split near texts apart.
+    blocks = rng.integers(0, 2, size=len(texts))
+    first, second = _substitution_links(texts, 2)
+    same = blocks[first] == blocks[second]
+    count, variance = _count_and_variance(len(texts), first[same], second[same])
+    _first, _second, expected = neighbor_pairs(
+        texts, "hamming", 2, blocks=blocks, return_expected=True
+    )
+    _assert_expected(count, variance, expected)
+    # Every pair of every block: the pairs across blocks are not compared.
+    alone = sum(
+        neighbor_pairs(
+            [text for text, block in zip(texts, blocks, strict=True) if block == b],
+            "hamming",
+            2,
+            return_expected=True,
+        )[2]
+        for b in (0, 1)
+    )
+    assert expected == pytest.approx(alone, rel=1e-12)
+
+
+def test_partial_texts_expect_pairs_on_the_positions_both_hold() -> None:
+    rng = np.random.default_rng(14)
+    texts = []
+    for text in _random_texts(rng, 3_000, [14], (0.4, 0.3, 0.2, 0.1)):
+        cut = int(rng.integers(0, 6))
+        if cut and rng.random() < 0.5:
+            text = (
+                "-" * cut + text[cut:]
+                if rng.random() < 0.5
+                else text[:-cut] + "-" * cut
+            )
+        texts.append(text)
+    texts = sorted(set(texts))
+    first, second = _substitution_links(texts, 2, unknown="-", min_compared=9)
+    count, variance = _count_and_variance(len(texts), first, second)
+    found, _second, expected = neighbor_pairs(
+        texts, "hamming", 2, unknown="-", min_compared=9, return_expected=True
+    )
+    assert len(found) == count
+    _assert_expected(count, variance, expected)
+
+
+@pytest.mark.parametrize(
+    ("lengths", "cutoff", "n_texts"),
+    [((6, 7), 1, 1_500), ((8, 9), 2, 700), ((10, 11), 3, 500)],
+)
+def test_edits_expect_pairs_within_a_tenth_of_a_count_of_random_texts(
+    lengths, cutoff, n_texts
+) -> None:
+    rng = np.random.default_rng(cutoff)
+    texts = _random_texts(rng, n_texts, lengths, (0.25, 0.25, 0.25, 0.25))
+    first, second = _edit_links(texts, cutoff)
+    count, variance = _count_and_variance(len(texts), first, second)
+    found, _second, expected = neighbor_pairs(
+        texts, "levenshtein", cutoff, return_expected=True
+    )
+    assert len(found) == count
+    # The approximation treats the pairs of positions as independent.
+    _assert_expected(count, variance, expected, slack=0.1)
+
+
+def _pattern_edit_distance(matches: np.ndarray) -> int:
+    """The edit distance of two texts whose positions agree where ``matches`` holds."""
+    rows, columns = matches.shape
+    previous = list(range(columns + 1))
+    for row in range(1, rows + 1):
+        current = [row]
+        for column in range(1, columns + 1):
+            current.append(
+                min(
+                    previous[column - 1] + (not matches[row - 1, column - 1]),
+                    previous[column] + 1,
+                    current[column - 1] + 1,
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+@pytest.mark.parametrize(
+    ("rows", "columns", "limit"),
+    [(3, 3, 1), (3, 4, 1), (4, 3, 2), (2, 4, 2), (4, 4, 2), (3, 5, 2), (4, 4, 3)],
+)
+def test_the_chance_of_edits_follows_every_pattern_of_agreeing_positions(
+    rows, columns, limit
+) -> None:
+    # Every pattern of agreeing pairs of positions, weighted by its chance
+    # when each pair agrees independently, gives the chance exactly.
+    rng = np.random.default_rng(rows * 100 + columns * 10 + limit)
+    agree = rng.uniform(0.05, 0.95, size=(rows, columns))
+    exact = 0.0
+    for pattern in itertools.product((False, True), repeat=rows * columns):
+        matches = np.asarray(pattern).reshape(rows, columns)
+        if _pattern_edit_distance(matches) <= limit:
+            exact += float(np.prod(np.where(matches, agree, 1.0 - agree)))
+    chance = sequences._edit_chance(agree, limit, sequences._Memory(None))
+    assert chance == pytest.approx(exact, rel=1e-12, abs=1e-15)
+
+
+def test_the_edit_distances_of_chance_pairs_keep_only_the_states_that_can_end_within(
+    monkeypatch,
+) -> None:
+    # Capping each cell where it can no longer end within the cutoff keeps
+    # 534 states of 30 positions within 6 edits, with the same chance as the
+    # 2,213 states that a cap of one more than the cutoff in every cell keeps.
+    held: list[int] = []
+    check = sequences._Memory.check
+
+    def recorded(self, needed, what):
+        if what == "the edit distances of chance pairs":
+            held.append(needed - sequences._CHANCE_FIXED_BYTES)
+        return check(self, needed, what)
+
+    monkeypatch.setattr(sequences._Memory, "check", recorded)
+    sequences._edit_chance(np.full((30, 30), 0.25), 6, sequences._Memory(None))
+    assert max(held) // sequences._CHANCE_STATE_BYTES <= 600
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "neighbours"), [(1, 12), (2, 12 + 54), (3, 12 + 54 + 108), (4, 255)]
+)
+def test_every_text_of_a_length_expects_exactly_the_pairs_it_holds(
+    cutoff, neighbours
+) -> None:
+    # The 256 texts of four bases hold each base at each position as often,
+    # so they are the independent draws of the expectation, without repeats:
+    # each text has 4 * 3 others one substitution away, 6 * 3 * 3 two away,
+    # 4 * 3 * 3 * 3 three away, and every other within four.
+    texts = ["".join(bases) for bases in itertools.product("ACGT", repeat=4)]
+    found, _second, expected = neighbor_pairs(
+        texts, "hamming", cutoff, return_expected=True
+    )
+    assert len(found) == 256 * neighbours // 2
+    assert expected == pytest.approx(256 * neighbours / 2, rel=1e-12)
+
+
+def test_texts_that_cannot_pair_by_chance_expect_nothing() -> None:
+    # Two cut texts of one group agree wherever both hold a base, so the
+    # search finds them, while texts of one group that agree everywhere they
+    # are compared are none of the distinct texts that chance pairs.
+    found, _second, expected = neighbor_pairs(
+        ["ACGT-", "ACGT0"], "hamming", 0, unknown="-0", return_expected=True
+    )
+    assert len(found) == 1 and expected == 0.0
+    memory = sequences._Memory(None)
+    # Lengths more edits apart than the cutoff, and positions that never
+    # agree, are never within it.
+    assert sequences._edit_chance(np.full((3, 6), 0.5), 2, memory) == 0.0
+    assert sequences._edit_chance(np.zeros((6, 6)), 1, memory) == 0.0
+    # Texts of 5 and of 9 characters are 4 edits apart at least, so within 2
+    # each length expects only its own pairs.
+    rng = np.random.default_rng(13)
+    short = _random_texts(rng, 300, [5], (0.25, 0.25, 0.25, 0.25))
+    long = _random_texts(rng, 300, [9], (0.25, 0.25, 0.25, 0.25))
+    alone = [
+        neighbor_pairs(texts, "levenshtein", 2, return_expected=True)[2]
+        for texts in (short, long)
+    ]
+    both = neighbor_pairs(short + long, "levenshtein", 2, return_expected=True)[2]
+    assert both == pytest.approx(sum(alone), rel=1e-12)
+
+
+@pytest.mark.parametrize("metric", ["hamming", "levenshtein"])
+def test_a_cutoff_beyond_every_length_expects_every_pair(metric) -> None:
+    rng = np.random.default_rng(3)
+    texts = _random_texts(rng, 40, [6], (0.25, 0.25, 0.25, 0.25))
+    found, _second, expected = neighbor_pairs(texts, metric, 6, return_expected=True)
+    assert len(found) == len(texts) * (len(texts) - 1) // 2
+    assert expected == pytest.approx(len(found), rel=1e-12)
+
+
+def test_the_expectation_comes_only_on_request_and_needs_few_edits() -> None:
+    texts = ["ACGTACGT", "ACGTACGA", "TTTTACGT"]
+    assert len(neighbor_pairs(texts, "hamming", 1)) == 2
+    assert neighbor_pairs(["ACGT"], "levenshtein", 2, return_expected=True)[2] == 0.0
+    with pytest.raises(TypeError, match="return_expected must be a boolean"):
+        neighbor_pairs(texts, "hamming", 1, return_expected=1)
+    with pytest.raises(ValueError, match="at most 8"):
+        neighbor_pairs(texts, "levenshtein", 9, return_expected=True)
+    # The pairs alone need no limit on the edits.
+    assert len(neighbor_pairs(texts, "levenshtein", 9)[0]) == 3
+
+
+def test_the_frequencies_of_edited_texts_count_against_the_budget() -> None:
+    # Texts of lengths 7 and 8 in one block hold the frequency of each of 256
+    # codes at each of their 15 positions, and the 64 chances of agreeing of
+    # two lengths, while their expectation is found; counting one position
+    # copies the codes of the larger length's texts, widened to 8 bytes, and
+    # counts them in 256 bins.
+    rng = np.random.default_rng(5)
+    texts = _random_texts(rng, 200, [7, 8], (0.25, 0.25, 0.25, 0.25))
+    held = _encoding_bytes(texts) + _group_bytes(texts)
+    most = max(sum(len(text) == length for text in texts) for length in (7, 8))
+    frequencies = 8 * 256 * 15 + 8 * 8**2 + 9 * most + 8 * 256
+    with pytest.raises(MemoryError, match="frequencies of the texts' characters"):
+        neighbor_pairs(
+            texts,
+            "levenshtein",
+            1,
+            max_bytes=held + frequencies - 1,
+            return_expected=True,
+        )
+    with pytest.raises(MemoryError) as refused:
+        neighbor_pairs(
+            texts, "levenshtein", 1, max_bytes=held + frequencies, return_expected=True
+        )
+    assert "frequencies" not in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    ("metric", "cutoff", "lengths", "n_texts"),
+    [
+        ("levenshtein", 3, (9, 10, 11, 12), 600),
+        ("levenshtein", 8, (20, 22, 24), 60),
+        ("hamming", 2, (12,), 600),
+    ],
+)
+def test_the_expectation_holds_no_more_than_the_smallest_budget_it_accepts(
+    monkeypatch, metric, cutoff, lengths, n_texts
+) -> None:
+    # Pairs compared one by one hold little, so the frequencies of the
+    # texts' characters, and at 8 edits the states of their edit distances,
+    # take the most.
+    _force(monkeypatch, "pairwise")
+    rng = np.random.default_rng(cutoff)
+    texts = _random_texts(rng, n_texts, lengths, (0.25, 0.25, 0.25, 0.25))
+
+    def search(budget: int | None) -> tuple[np.ndarray, np.ndarray, float]:
+        return neighbor_pairs(
+            texts, metric, cutoff, max_bytes=budget, return_expected=True
+        )
+
+    budget = smallest_budget(search, 1 << 26)
+    assert traced_peak(lambda: search(budget)) <= budget
