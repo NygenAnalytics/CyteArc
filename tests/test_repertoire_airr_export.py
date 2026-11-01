@@ -1143,6 +1143,13 @@ def test_naming_repeated_ids_keeps_the_ids_read_before(tmp_path, monkeypatch) ->
         "Naming 7 repeated contig IDs",
     )
     assert second - first == 2 * (10**8 + 4 * 14)
+    # Finding the repeated hashes holds, for each of the ten contigs, the
+    # sorted hashes and a search's positions and matches, beside the naming.
+    monkeypatch.setattr(repertoire_operations, "_NAMING_BYTES_PER_ROW", 10**6)
+    widened = budget_refusals(
+        store, lambda: store.repertoire.export_airr(receptors, tmp_path / "named.tsv")
+    )
+    assert widened[-2] == (five, first + 10 * (10**6 - 40))
 
 
 @pytest.mark.parametrize("chunk_bytes", [None, 16])
