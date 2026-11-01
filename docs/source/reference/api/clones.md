@@ -486,7 +486,7 @@ Calling checks the memory budget before each step that reads or allocates, and r
 | Linking the cells | 40 per edit that names an allele, then the steps of `clones/calling.py` that link cells through any shared item |
 | Counting each clone's alleles | 40 per rare allele of a cell |
 
-The tests trace each step's peak against the bytes its check states at more than two million edits, on PEtracer-like characters of 7,000 cells by 300 sites, nearly all the placeholder `!`, and on DARLIN-like arrays with banks and groups, and each call holds no more than the smallest budget it accepts.
+The tests trace each step's peak against the bytes its check states at millions of records and two million edits, on PEtracer-like characters of 12,000 cells by 300 sites, dense or sparse in edits, and on DARLIN-like arrays with banks and groups, and each call holds no more than the smallest budget it accepts. On one thread, calling a million DARLIN-like cells against banks of about 99,000 alleles per array takes 3.4 s, and the smallest budget the call accepts is 372 MiB, at which tracemalloc traces a peak of 231 MiB. Calling PEtracer-like characters of 100,000 cells by 300 sites takes 21 s, and the smallest budget that call accepts is 3,072 MiB, at which the traced peak is 2,273 MiB. A fresh process also loads the compiled kernels, about 95 MiB resident at 300,000 cells, which the budget does not count and a second call does not repeat.
 
 ### DARLIN's published clones
 
