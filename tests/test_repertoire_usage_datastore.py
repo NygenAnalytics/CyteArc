@@ -963,6 +963,14 @@ def test_junctions_that_span_stored_chunks_are_measured_whole(
     assert packed.chunks == (7,) and packed.shape[0] > 3 * 7
     lengths = store.repertoire.spectratype(receptors).table
     assert _counts(lengths, "length") == {(len(junction),): 1 for junction in junctions}
+    # In the order of their text, CAŚSF and Cé lie between the junctions of
+    # cell1 and cell2, so leaving them out leaves a chunk that no junction
+    # measured touches.
+    store.cells.insert("ends", np.isin(np.arange(8), [1, 2]))
+    ends = store.repertoire.spectratype(
+        receptors, cell_selection=store.snapshot_cell_selection("ends")
+    ).table
+    assert _counts(ends, "length") == {(4,): 1, (13,): 1}
 
 
 def test_each_refusal_names_the_remedy_that_its_step_allows(tmp_path) -> None:
