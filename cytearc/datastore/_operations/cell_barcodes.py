@@ -33,6 +33,7 @@ __all__ = [
     "derived_id_bytes",
     "file_sha256",
     "join_bytes",
+    "store_sha256",
     "texts_per_file",
     "unmatched_barcodes_warning",
     "warn_unmatched_barcodes",
@@ -77,6 +78,31 @@ def file_sha256(path: str | os.PathLike[str]) -> str:
     """Return the SHA-256 digest of a file's bytes, as hexadecimal text."""
     with open(path, "rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def store_sha256(path: str | os.PathLike[str]) -> str:
+    """Return the SHA-256 of a directory's files, such as a Zarr store's.
+
+    Each file adds its path below the directory, in POSIX form, and its bytes,
+    each after its length and in the order of the paths, so no two directories
+    of other files or paths hash alike. Empty directories add nothing.
+    """
+    root = os.fspath(path)
+    files = sorted(
+        os.path.relpath(os.path.join(folder, name), root).replace(os.sep, "/")
+        for folder, _folders, names in os.walk(root)
+        for name in names
+    )
+    digest = hashlib.sha256()
+    for relative in files:
+        encoded = relative.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "little") + encoded)
+        location = os.path.join(root, *relative.split("/"))
+        digest.update(os.path.getsize(location).to_bytes(8, "little"))
+        with open(location, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+    return digest.hexdigest()
 
 
 def barcode_pattern(value: Any, name: str = "barcode_pattern") -> str | None:

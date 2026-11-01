@@ -86,7 +86,8 @@ _KINDS = (TEXT, RAGGED, INTEGER, FLAG, NUMBER)
 #: Text that stands for a missing value in the files of single-cell tools:
 #: AIRR files write nothing, Cell Ranger writes ``None``, R writes ``NA`` and
 #: spreadsheets ``#N/A``. These are the tokens that pandas reads as missing by
-#: default, and ``none``.
+#: default, and ``none``. The parsers take another set where a format says
+#: otherwise, as Cassiopeia writes ``None`` for a site that is not cut.
 MISSING_TEXT = frozenset(
     {
         "",
@@ -161,8 +162,10 @@ def file_lines(rows: np.ndarray, first_line: int) -> str:
     return f"{noun} " + ", ".join(lines) + (f" and {more} more" if more > 0 else "")
 
 
-def _stripped(values: Any) -> tuple[pd.Series, np.ndarray]:
-    """Return values as stripped text and a mask of missing-value tokens."""
+def _stripped(
+    values: Any, missing: frozenset[str] = MISSING_TEXT
+) -> tuple[pd.Series, np.ndarray]:
+    """Return values as stripped text and a mask of ``missing`` tokens and NAs."""
     raw = np.asarray(values, dtype=object).reshape(-1)
     try:
         stripped = [value.strip() for value in raw]
@@ -170,29 +173,39 @@ def _stripped(values: Any) -> tuple[pd.Series, np.ndarray]:
         # A missing value that is not text, such as None or NaN.
         stripped = [value.strip() if isinstance(value, str) else None for value in raw]
     text = pd.Series(stripped, dtype=object)
-    missing = (text.isna() | text.isin(MISSING_TEXT)).to_numpy(dtype=bool)
-    return text, missing
+    absent = text.isna()
+    if missing:
+        absent |= text.isin(missing)
+    return text, absent.to_numpy(dtype=bool)
 
 
-def parse_text(values: Any) -> np.ndarray:
+def parse_text(values: Any, *, missing: frozenset[str] = MISSING_TEXT) -> np.ndarray:
     """Return text with every missing-value token as None.
 
     Args:
         values: One value per record, as read from a file.
+        missing: The text that stands for a missing value, after stripping;
+            an empty set keeps every text, the empty string included.
 
     Returns:
         An object array of stripped text, None where a value is missing.
     """
-    text, missing = _stripped(values)
+    text, absent = _stripped(values, missing)
     parsed: np.ndarray = text.to_numpy(dtype=object, copy=True)
-    parsed[missing] = None
+    parsed[absent] = None
     return parsed
 
 
 _FLAG_VALUES = {**dict.fromkeys(_TRUE, 1), **dict.fromkeys(_FALSE, 0)}
 
 
-def parse_flags(values: Any, *, name: str, first_line: int = 2) -> np.ndarray:
+def parse_flags(
+    values: Any,
+    *,
+    name: str,
+    first_line: int = 2,
+    missing: frozenset[str] = MISSING_TEXT,
+) -> np.ndarray:
     """Parse true or false values as -1 (missing), 0 (False) or 1 (True).
 
     Args:
@@ -201,6 +214,7 @@ def parse_flags(values: Any, *, name: str, first_line: int = 2) -> np.ndarray:
             missing-value token.
         name: The field, named in errors.
         first_line: The file line of the first value, named in errors.
+        missing: The text that stands for a missing value.
 
     Returns:
         The flags as int8.
@@ -208,9 +222,9 @@ def parse_flags(values: Any, *, name: str, first_line: int = 2) -> np.ndarray:
     Raises:
         ValueError: If a value is not a recognised true, false or missing token.
     """
-    text, missing = _stripped(values)
+    text, absent = _stripped(values, missing)
     mapped = text.map(_FLAG_VALUES)
-    unknown = ~missing & mapped.isna().to_numpy(dtype=bool)
+    unknown = ~absent & mapped.isna().to_numpy(dtype=bool)
     if unknown.any():
         rows = np.flatnonzero(unknown)
         raise ValueError(
@@ -221,22 +235,33 @@ def parse_flags(values: Any, *, name: str, first_line: int = 2) -> np.ndarray:
     return flags
 
 
-def _numbers(values: Any) -> tuple[pd.Series, np.ndarray, np.ndarray]:
+def _numbers(
+    values: Any, missing: frozenset[str]
+) -> tuple[pd.Series, np.ndarray, np.ndarray]:
     """Return stripped text, its missing mask, and its values as float64."""
-    text, missing = _stripped(values)
-    numbers = pd.to_numeric(text.where(~missing), errors="coerce").to_numpy(
+    text, absent = _stripped(values, missing)
+    numbers = pd.to_numeric(text.where(~absent), errors="coerce").to_numpy(
         dtype=np.float64, copy=True
     )
-    return text, missing, numbers
+    return text, absent, numbers
 
 
-def parse_integers(values: Any, *, name: str, first_line: int = 2) -> np.ndarray:
+def parse_integers(
+    values: Any,
+    *,
+    name: str,
+    first_line: int = 2,
+    missing: frozenset[str] = MISSING_TEXT,
+) -> np.ndarray:
     """Parse whole numbers of at least 0, with -1 for a missing value.
 
     Args:
         values: One value per record.
         name: The field, named in errors.
         first_line: The file line of the first value, named in errors.
+        missing: The text that stands for a missing value; with an empty set
+            every value must be a number, as in a tool's table that always
+            writes one.
 
     Returns:
         The numbers as int64.
@@ -244,8 +269,8 @@ def parse_integers(values: Any, *, name: str, first_line: int = 2) -> np.ndarray
     Raises:
         ValueError: If a value is not a whole number of at least 0.
     """
-    text, missing, numbers = _numbers(values)
-    present = ~missing
+    text, absent, numbers = _numbers(values, missing)
+    present = ~absent
     bad = present & (
         ~np.isfinite(numbers) | (numbers < 0) | (numbers != np.floor(numbers))
     )
@@ -262,13 +287,20 @@ def parse_integers(values: Any, *, name: str, first_line: int = 2) -> np.ndarray
     return parsed
 
 
-def parse_numbers(values: Any, *, name: str, first_line: int = 2) -> np.ndarray:
+def parse_numbers(
+    values: Any,
+    *,
+    name: str,
+    first_line: int = 2,
+    missing: frozenset[str] = MISSING_TEXT,
+) -> np.ndarray:
     """Parse finite real numbers, with NaN for a missing value.
 
     Args:
         values: One value per record.
         name: The field, named in errors.
         first_line: The file line of the first value, named in errors.
+        missing: The text that stands for a missing value.
 
     Returns:
         The numbers as float64.
@@ -276,20 +308,24 @@ def parse_numbers(values: Any, *, name: str, first_line: int = 2) -> np.ndarray:
     Raises:
         ValueError: If a value is not a finite number.
     """
-    text, missing, numbers = _numbers(values)
-    bad = ~missing & ~np.isfinite(numbers)
+    text, absent, numbers = _numbers(values, missing)
+    bad = ~absent & ~np.isfinite(numbers)
     if bad.any():
         rows = np.flatnonzero(bad)
         raise ValueError(
             f"{name} must be a finite number, but holds {text.iloc[rows[0]]!r} on "
             + file_lines(rows, first_line)
         )
-    numbers[missing] = np.nan
+    numbers[absent] = np.nan
     return numbers
 
 
 def parse_columns(
-    frame: pd.DataFrame, fields: Mapping[str, FieldKind], *, first_line: int
+    frame: pd.DataFrame,
+    fields: Mapping[str, FieldKind],
+    *,
+    first_line: int,
+    missing: frozenset[str] = MISSING_TEXT,
 ) -> dict[str, np.ndarray]:
     """Parse the columns of a chunk of rows by the kind of each field.
 
@@ -298,6 +334,7 @@ def parse_columns(
             outside ``fields`` are not parsed.
         fields: The kind of each field.
         first_line: The file line of the chunk's first row, named in errors.
+        missing: The text that stands for a missing value in every field.
 
     Returns:
         Each field that the chunk holds, in the order of ``fields``: text and
@@ -314,13 +351,19 @@ def parse_columns(
             continue
         raw = frame[name].to_numpy(dtype=object)
         if kind == FLAG:
-            parsed[name] = parse_flags(raw, name=name, first_line=first_line)
+            parsed[name] = parse_flags(
+                raw, name=name, first_line=first_line, missing=missing
+            )
         elif kind == INTEGER:
-            parsed[name] = parse_integers(raw, name=name, first_line=first_line)
+            parsed[name] = parse_integers(
+                raw, name=name, first_line=first_line, missing=missing
+            )
         elif kind == NUMBER:
-            parsed[name] = parse_numbers(raw, name=name, first_line=first_line)
+            parsed[name] = parse_numbers(
+                raw, name=name, first_line=first_line, missing=missing
+            )
         else:
-            parsed[name] = parse_text(raw)
+            parsed[name] = parse_text(raw, missing=missing)
     return parsed
 
 
