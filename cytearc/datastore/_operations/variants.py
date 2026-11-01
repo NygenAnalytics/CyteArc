@@ -193,6 +193,14 @@ _CLONE_ATTRIBUTES = (
     "n_cells_without_group",
     "n_edges",
 )
+# Bytes that calling genotypes, or the clones they define, holds whatever the
+# counts: zarr's objects for the arrays that planning, writing and validating
+# the artifact open, the chunk of the cell selection that planning validates,
+# and the garbage that appending bands leaves until Python collects it.
+_GENOTYPE_FIXED_BYTES = 1 << 20
+# A band of genotypes holds at least this many rows, or every row, so that a
+# small budget does not append the calls a few rows at a time.
+_MIN_GENOTYPE_BAND_ROWS = 1_000
 # Bytes per call row read while the sites of a source's calls are found: its
 # allele, site and source, as read and stacked, and their distinct pairs.
 _SOURCE_SITE_BYTES_PER_ROW = 64
@@ -202,13 +210,15 @@ _GENOTYPE_BYTES_PER_CELL = 24
 # And for each of the counts' alleles, its site's rank and its gapfill's
 # probability of the wild type.
 _GENOTYPE_BYTES_PER_ALLELE = 24
-# Bytes per stored row of a band that genotypes read: the rows of the depth,
-# counts or calls with their cells, the keys of their cells and sites and
-# their order, and the calls, labels, UMIs and posteriors derived per key.
-_GENOTYPE_BYTES_PER_ROW = 240
+# Bytes per stored row of a band that genotypes read, by method: the rows of
+# the depth, counts or calls with their cells, the keys of their cells and
+# sites and their order, and what the method derives per key, the UMIs and
+# calls, the source's labels, or GIFT's scores and posteriors; 73, 58 and 248
+# bytes as traced on bands of 20,000 to 80,000 rows.
+_GENOTYPE_BYTES_PER_ROW = {"threshold": 96, "source": 80, "gift": 320}
 # Bytes per call row of loaded genotypes: its row of the table of calls and
-# the stored arrays read beside it.
-_LOADED_GENOTYPE_BYTES_PER_ROW = 120
+# the stored arrays read beside it, 174 as traced on 128,000 rows.
+_LOADED_GENOTYPE_BYTES_PER_ROW = 220
 # Genotype clones hold, for each cell of the genotypes, its offsets, group,
 # membership and the arrays that number its clone; and for each call row its
 # cell, site, rank and call as read, and its membership masks.
@@ -2381,23 +2391,38 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             }
         # Every cell of the counts holds its offsets while bands are read, and
         # its call counts and offsets as they are written; each allele its
-        # site, rank and gapfill probability; and each call label its text.
+        # site, rank and gapfill probability; each call label its text; and
+        # appending a band rewrites the chunks it ends in.
         n_alleles = table.n_alleles
-        call_value_names = _read(group, "call_value_names").astype(str)
+        # Each call row's label refers to one of these texts rather than a copy.
+        call_value_names = np.asarray(
+            _read(group, "call_value_names").astype(str), dtype=object
+        )
+        most_rows = sum(
+            int(as_zarr_array(group[names[0]], name=names[0]).shape[0])
+            for names in tables.values()
+        )
         held = (
-            _BAND_BYTES_PER_COUNTS_CELL * n_cells
-            + _GENOTYPE_BYTES_PER_CELL * n_cells
+            _GENOTYPE_FIXED_BYTES
+            + (_BAND_BYTES_PER_COUNTS_CELL + _GENOTYPE_BYTES_PER_CELL) * n_cells
             + _GENOTYPE_BYTES_PER_ALLELE * n_alleles
             + sum(map(sys.getsizeof, call_value_names.tolist()))
             + _band_chunk_bytes(group, tables)
+            + _REWRITTEN_CHUNKS * min(_ROW_BAND, max(1, most_rows)) * _STORED_BYTES
         )
-        max_rows = (self.memoryBytes - held) // _GENOTYPE_BYTES_PER_ROW
-        if max_rows < 1:
+        per_row = _GENOTYPE_BYTES_PER_ROW[method]
+        max_rows = (self.memoryBytes - held) // per_row
+        # A band holds at least _MIN_GENOTYPE_BAND_ROWS rows, or every row,
+        # and every row of the cell that holds the most.
+        fewest = max(1, min(most_rows, _MIN_GENOTYPE_BAND_ROWS))
+        if max_rows >= fewest:
+            fewest = max(fewest, _most_cell_rows(group, tables))
+        if max_rows < fewest:
             raise MemoryError(
                 f"Calling the genotypes of {n_cells} cells holds about "
-                f"{held + _GENOTYPE_BYTES_PER_ROW} bytes before a row is read, more "
-                f"than the memory budget of {self.memoryBytes} bytes. Raise "
-                "mem_budget."
+                f"{held + fewest * per_row} bytes for a band of "
+                f"{fewest} rows, more than the memory budget of {self.memoryBytes} "
+                "bytes. Raise mem_budget."
             )
         site_rank = np.full(table.n_sites, -1, dtype=np.int64)
         site_rank[genotyped] = np.arange(len(genotyped))
@@ -2424,10 +2449,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         offsets = np.zeros(n_cells + 1, dtype=np.int64)
         call_counts = np.zeros(len(CALLS), dtype=np.int64)
         positions = np.arange(n_cells, dtype=np.int64)
-        most_rows = sum(
-            int(as_zarr_array(group[names[0]], name=names[0]).shape[0])
-            for names in tables.values()
-        )
         with artifact_transaction(self.zw, planned) as out:
             appender = _Appender(
                 out,
@@ -2540,16 +2561,18 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         sources = as_zarr_array(group["call_sources"], name="call_sources")
         names = _read(group, "call_source_names").astype(str)
         n_rows = int(alleles.shape[0])
-        # Each call row read holds its allele, site and source, and their
-        # distinct pairs: about 64 bytes.
-        step = (
-            self.memoryBytes
-            - _band_chunk_bytes(group, {"call": ("call_alleles", "call_sources")})
-        ) // _SOURCE_SITE_BYTES_PER_ROW
-        if step < 1:
+        # The call rows are read in steps of at least _MIN_GENOTYPE_BAND_ROWS
+        # rows, or all of them, beside the chunks that a step decompresses.
+        held = _GENOTYPE_FIXED_BYTES + _band_chunk_bytes(
+            group, {"call": ("call_alleles", "call_sources")}
+        )
+        step = (self.memoryBytes - held) // _SOURCE_SITE_BYTES_PER_ROW
+        fewest = max(1, min(n_rows, _MIN_GENOTYPE_BAND_ROWS))
+        if step < fewest:
             raise MemoryError(
                 f"Finding the sites of the source calls of {n_cells} cells holds "
-                f"more than the memory budget of {self.memoryBytes} bytes. Raise "
+                f"about {held + fewest * _SOURCE_SITE_BYTES_PER_ROW} bytes, more "
+                f"than the memory budget of {self.memoryBytes} bytes. Raise "
                 "mem_budget."
             )
         allele_site = np.asarray(table.allele_site, dtype=np.int64)
@@ -2713,7 +2736,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         ids = np.asarray(
             read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
         )
-        label_names = _read(group, "call_label_names").astype(str)
+        # Each row's label refers to one of a few texts rather than a copy.
+        label_names = np.asarray(
+            _read(group, "call_label_names").astype(str), dtype=object
+        )
         frames = genotype_frames(
             cell_ids=ids,
             site_labels=site_labels,
@@ -2815,7 +2841,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         n_cells = len(offsets) - 1
         n_rows = int(offsets[-1])
         # The calls are read whole: each row's cell, site and call.
-        held = _GENOTYPE_CLONE_BYTES_PER_CELL * n_cells
+        held = _GENOTYPE_FIXED_BYTES + _GENOTYPE_CLONE_BYTES_PER_CELL * n_cells
         reading = held + _GENOTYPE_CLONE_BYTES_PER_ROW * n_rows
         if reading > self.memoryBytes:
             raise MemoryError(
@@ -2921,7 +2947,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         }
         check_clone_write_budget(
             self.memoryBytes,
-            _GENOTYPE_CLONE_WRITE_BYTES_PER_CELL * n_cells
+            _GENOTYPE_FIXED_BYTES
+            + _GENOTYPE_CLONE_WRITE_BYTES_PER_CELL * n_cells
             + sum(map(sys.getsizeof, labels.tolist())),
             assignment.clone_ids,
             n_cells,
@@ -3036,6 +3063,12 @@ def _compared_alleles(
         np.asarray(reference, dtype=np.int64),
         np.asarray(alternative, dtype=np.int64),
     )
+
+
+def _most_cell_rows(group: zarr.Group, tables: Mapping[str, Sequence[str]]) -> int:
+    """The most rows that one cell holds in ``tables`` together."""
+    combined = np.sum([_read(group, f"{name}_offsets") for name in tables], axis=0)
+    return int(np.diff(combined).max(initial=0))
 
 
 def _chosen_genotype_sites(site_labels: np.ndarray, sites: Any) -> np.ndarray:
