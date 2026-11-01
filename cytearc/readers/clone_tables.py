@@ -339,21 +339,32 @@ def _first_lines(path: str, compression: str | None, n_lines: int) -> list[str]:
     return lines
 
 
-def _records(lines: Iterable[str]) -> Iterator[str]:
-    """Yield the rows of a table's text, each without its line ending.
+def _records(lines: Iterable[str], path: str) -> Iterator[str]:
+    """Yield the rows of a table's text after its header, each without its line ending.
 
     Blank lines are skipped, and a row whose quotes are open goes on to the
-    next line.
+    next line; each line's quotes are counted once.
+
+    Raises:
+        ValueError: If a quote is still open where the file ends.
     """
-    record = ""
-    for line in lines:
+    parts: list[str] = []
+    # The line on which the quote that is still open opened, 0 for none.
+    opened = 0
+    for number, line in enumerate(lines, start=2):
         text = line.rstrip("\r\n")
-        record = f"{record}\n{text}" if record else text
-        if not record.strip():
-            record = ""
-        elif not record.count('"') % 2:
-            yield record
-            record = ""
+        if not parts and not text.strip():
+            continue
+        parts.append(text)
+        if text.count('"') % 2:
+            opened = 0 if opened else number
+        if not opened:
+            yield "\n".join(parts)
+            parts = []
+    if opened:
+        raise ValueError(
+            f"{path} is malformed: the quote opened on line {opened} is never closed"
+        )
 
 
 def _header_and_rows(path: str, compression: str | None) -> tuple[str, list[str]]:
@@ -363,17 +374,19 @@ def _header_and_rows(path: str, compression: str | None) -> tuple[str, list[str]
     """
     with _text_errors(path), _open_text(path, compression) as handle:
         header = next(handle, "").rstrip("\r\n")
-        rows = list(itertools.islice(_records(handle), _SAMPLE_ROWS))
+        rows = list(itertools.islice(_records(handle, path), _SAMPLE_ROWS))
     return header, rows
 
 
 def _ends_in_delimiter(row: str, delimiter: str) -> bool:
-    """Return whether a row ends in its delimiter, with nothing after it.
+    """Return whether a row ends in its delimiter, with nothing but spaces after it.
 
     Space-separated rows lose the spaces at their ends when they are split,
     so none ends in its delimiter.
     """
-    return delimiter != " " and row.endswith(delimiter)
+    if delimiter == " ":
+        return False
+    return row.rstrip(" \t".replace(delimiter, "")).endswith(delimiter)
 
 
 def _rows_hold_values_after_their_names(
@@ -386,7 +399,7 @@ def _rows_hold_values_after_their_names(
     """
     with _text_errors(path), _open_text(path, compression) as handle:
         next(handle, "")
-        for row in _records(handle):
+        for row in _records(handle, path):
             if len(_fields(row, delimiter)) == n_names + 1 and not _ends_in_delimiter(
                 row, delimiter
             ):
@@ -445,13 +458,13 @@ def _text_layout(path: str) -> _TextLayout:
                 path, compression, delimiter, len(header)
             ):
                 raise ValueError(
-                    f"The header of {path} names {len(header)} columns, and each "
-                    f"of its rows holds {len(header) + 1} fields, the last one "
-                    "empty: R's row names under a header that leaves them out, "
-                    "with an empty last column, or a delimiter after each row's "
-                    "last field. Name the row names in the header, as R's "
-                    "write.table(..., col.names=NA) writes them, or end the header "
-                    "with the delimiter too"
+                    f"The header of {path} names {len(header)} columns, and its "
+                    f"rows of {len(header) + 1} fields all end in a delimiter with "
+                    "nothing after it: R's row names under a header that leaves "
+                    "them out, with an empty last column, or a delimiter after "
+                    "each row's last field. Name the row names in the header, as "
+                    "R's write.table(..., col.names=NA) writes them, or end the "
+                    "header with the delimiter too"
                 )
             row_names = True
             header = ["", *header]

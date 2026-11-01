@@ -185,6 +185,46 @@ def test_rows_past_the_first_ones_can_show_r_row_names(tmp_path) -> None:
     assert clones == [None] * 150 + ["c1"]
 
 
+def test_space_separated_r_row_names_take_rows_that_end_in_spaces(tmp_path) -> None:
+    # Spaces at the end of a space-separated row end no field, so the row
+    # still holds a row name beside the header's names.
+    path = _write(
+        tmp_path / "celltag_data.txt",
+        '"CellTagD0" "CellTagD3"\n"AAA-1" 16 NA \n"CCC-1" NA 2  \n',
+    )
+
+    assert _rows(path, columns={"clone": "CellTagD3"})[:2] == (
+        ["AAA-1", "CCC-1"],
+        [None, "2"],
+    )
+
+
+def test_spaces_after_the_last_delimiter_end_no_value(tmp_path) -> None:
+    # A row whose field after the named columns holds only spaces ends in its
+    # delimiter, so the table is refused as ambiguous rather than read as R's
+    # row names, which would shift every column.
+    path = _write(tmp_path / "clones.csv", "cell,clone\nAAAC,1, \nCCCG,2,\t\n")
+    with pytest.raises(ValueError, match="all end in a delimiter with nothing after"):
+        clone_layout(path)
+
+
+def test_a_quote_that_never_closes_is_named_by_its_line(tmp_path) -> None:
+    # The quote on line 6 swallows the 20,000 rows after it, which each line's
+    # quotes, counted once, make quick to find.
+    rows = [f"cell{index},{index}" for index in range(20_000)]
+    rows[4] = 'cell4,"4'
+    path = _write(tmp_path / "clones.csv", "Cell_ID,Clone_ID\n" + "\n".join(rows))
+    with pytest.raises(ValueError, match="the quote opened on line 6 is never closed"):
+        clone_layout(path)
+    # Past the sampled rows, the search for R's row names meets it too.
+    ended = [f"cell{index},{index}," for index in range(150)] + ['cell150,"150,']
+    late = _write(tmp_path / "late.csv", "cell,clone\n" + "\n".join(ended) + "\n")
+    with pytest.raises(
+        ValueError, match="the quote opened on line 152 is never closed"
+    ):
+        clone_layout(late)
+
+
 @pytest.mark.parametrize("delimiter", [",", "\t"])
 def test_rows_that_each_end_in_an_empty_field_need_a_header_that_says_why(
     tmp_path, delimiter
@@ -199,8 +239,9 @@ def test_rows_that_each_end_in_an_empty_field_need_a_header_that_says_why(
     )
     with pytest.raises(
         ValueError,
-        match=r"names 2 columns, and each of its rows holds 3 fields, the last one "
-        r"empty: R's row names .* or a delimiter after each row's last field. Name "
+        match=r"names 2 columns, and its rows of 3 fields all end in a delimiter "
+        r"with nothing after it: R's row names .* or a delimiter after each row's "
+        r"last field. Name "
         r"the row names in the header, as R's write.table\(\.\.\., col.names=NA\) "
         r"writes them, or end the header with the delimiter too",
     ):
