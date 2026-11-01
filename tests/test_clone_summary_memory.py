@@ -12,6 +12,9 @@ held beside many rows. Clonotypes, whose receptor types every summary keeps
 apart, are measured alike, as are the steps that define and load them, also
 within those labels and for cells with long IDs, the labels that figures give
 them, and clonotype clusters, whose smallest budget is found by bisection.
+Gene usage and junction lengths count the chains of receptors and clonotypes
+within the same labels, of every slot, of cells with contigs beside their
+chains and of junctions of wide characters.
 """
 
 import re
@@ -25,6 +28,7 @@ import pytest
 import cytearc.datastore._operations.repertoire as repertoire_operations
 import cytearc.repertoire.clonotypes as clonotypes_module
 from cytearc.datastore.datastore import DataStore
+from cytearc.repertoire import SLOTS
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import logger
 from tests.clone_helpers import (
@@ -464,6 +468,45 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
     ),
     "figure labels of every clonotype": lambda data: data.store._clone_figure_labels(
         data.clonotypes, data.clonotype_ids
+    ),
+    "gene usage of clonotypes by two columns of long labels": lambda data: (
+        data.store.repertoire.gene_usage(
+            data.clonotypes, group_by=["donor", "condition"]
+        )
+    ),
+    "V-J pairs of clonotypes counted once within a label of each cell": (
+        lambda data: data.store.repertoire.gene_usage(
+            data.clonotypes,
+            genes=("v_call", "j_call"),
+            count="clonotypes",
+            group_by="label_of_each_cell",
+        )
+    ),
+    "three genes of every slot by emoji labels": lambda data: (
+        data.store.repertoire.gene_usage(
+            data.receptors,
+            genes=("v_call", "j_call", "c_call"),
+            slots=SLOTS,
+            group_by="emoji",
+        )
+    ),
+    "gene usage of a few cells by labels of every cell": lambda data: (
+        data.store.repertoire.gene_usage(
+            data.receptors, cell_selection=data.first, groups=data.labels
+        )
+    ),
+    "junction lengths of nucleotides by a label for each of many cells": (
+        lambda data: data.store.repertoire.spectratype(
+            data.receptors, sequence="nt", group_by="own"
+        )
+    ),
+    "junction lengths of clonotypes counted once by 13 key columns": lambda data: (
+        data.store.repertoire.spectratype(
+            data.clonotypes,
+            count="clonotypes",
+            group_by=[f"own_{copy}" for copy in range(12)],
+            groups=data.own_labels[800],
+        )
     ),
 }
 
@@ -923,6 +966,20 @@ def extra_contigs(tmp_path_factory) -> SimpleNamespace:
     return SimpleNamespace(store=store, receptors=receptors)
 
 
+def test_usage_of_cells_with_contigs_beside_their_chains_fits_the_budget(
+    extra_contigs,
+) -> None:
+    # Gene usage reads the code of every contig's field, and junction lengths
+    # every stored junction, whose bytes four in five contigs own.
+    store, receptors = extra_contigs.store, extra_contigs.receptors
+    for run in (
+        lambda: store.repertoire.gene_usage(receptors, genes=("v_call", "j_call")),
+        lambda: store.repertoire.spectratype(receptors, sequence="nt"),
+    ):
+        peak, budget = _traced_at_smallest_budget(store, run)
+        assert peak <= budget, (peak, budget)
+
+
 def test_clusters_of_cells_with_contigs_beside_their_chains_fit_the_budget(
     extra_contigs, monkeypatch
 ) -> None:
@@ -983,5 +1040,21 @@ def test_labels_of_long_wide_junctions_fit_the_smallest_budget(
     assert {len(label) for label in labels} == {302}
     peak, budget = _traced_at_smallest_budget(
         store, lambda: store._clone_figure_labels(clonotypes, ids)
+    )
+    assert peak <= budget, (peak, budget)
+
+
+def test_lengths_of_long_wide_junctions_fit_the_smallest_budget(
+    wide_junctions,
+) -> None:
+    store, clonotypes = wide_junctions.store, wide_junctions.clonotypes
+    lengths = store.repertoire.spectratype(clonotypes).table
+    # Every beta chain's 302 characters take four bytes each.
+    assert dict(zip(lengths["locus"], lengths["length"], strict=True)) == {
+        "TRA": 14,
+        "TRB": 302,
+    }
+    peak, budget = _traced_at_smallest_budget(
+        store, lambda: store.repertoire.spectratype(clonotypes)
     )
     assert peak <= budget, (peak, budget)

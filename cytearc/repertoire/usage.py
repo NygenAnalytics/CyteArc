@@ -113,7 +113,9 @@ def text_lengths(
     ASCII text, such as junction residues and nucleotides, has one byte per
     character, so its lengths follow from the offsets. In other text, each
     character starts with the one byte of its encoding that does not continue
-    another, so those bytes are counted without decoding the text.
+    another, so those bytes are counted without decoding the text. The count
+    holds a byte and four more for each packed byte, or eight more beyond
+    ``2**31`` bytes.
 
     Args:
         data: The packed bytes.
@@ -127,12 +129,19 @@ def text_lengths(
     lengths: np.ndarray = ends - starts
     if not len(data) or int(data.max()) < 0x80:
         return lengths
-    # Bytes of the form 0b10xxxxxx continue a character.
-    continued = np.zeros(
-        len(data) + 1, dtype=np.int32 if len(data) < 2**31 else np.int64
+    # Each byte's count of the bytes up to it that continue a character, of
+    # the form 0b10xxxxxx, summed in place: a sum into another type would
+    # first copy every byte in that type.
+    continued = ((data & 0xC0) == 0x80).astype(
+        np.int32 if len(data) < 2**31 else np.int64
     )
-    np.cumsum((data & 0xC0) == 0x80, out=continued[1:])
-    lengths -= continued[ends] - continued[starts]
+    np.cumsum(continued, out=continued)
+
+    def before(points: np.ndarray) -> np.ndarray:
+        """The continuation bytes before each point."""
+        return np.where(points > 0, continued[np.maximum(points - 1, 0)], 0)
+
+    lengths -= before(ends) - before(starts)
     return lengths
 
 

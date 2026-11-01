@@ -233,3 +233,34 @@ def test_wide_keys_are_counted_row_by_row() -> None:
         )
         assert [tuple(row) for row in got[0].tolist()] == [key for key, _ in expected]
         assert got[1].tolist() == [count for _, count in expected]
+
+
+def test_text_lengths_count_wide_characters_without_decoding() -> None:
+    # Characters of two, three and four bytes, an empty value between them,
+    # and ASCII values beside them, measured in any order and more than once.
+    values = np.asarray(
+        ["CAŚSF", "", "C中文F", "C\U0001f600\U0001f600F", "CASSLF", "é", "ÅÅÅÅ"],
+        dtype=object,
+    )
+    data, offsets = pack_text(values)
+    positions = np.asarray([3, 0, 1, 6, 2, 4, 3, 5])
+    expected = [len(values[at]) for at in positions.tolist()]
+    assert expected == [4, 5, 0, 4, 4, 6, 4, 1]
+    assert text_lengths(data, offsets, positions).tolist() == expected
+    # Bytes as the store keeps them, any integer type, measure alike.
+    assert (
+        text_lengths(
+            data.astype(np.int64), offsets.astype(np.int32), positions
+        ).tolist()
+        == expected
+    )
+    # A value of ASCII text among wide ones is measured by its bytes.
+    assert text_lengths(data, offsets, np.asarray([4])).tolist() == [6]
+    # An empty first value has no byte before it.
+    data, offsets = pack_text(np.asarray(["", "é", ""], dtype=object))
+    assert text_lengths(data, offsets, np.asarray([0, 1, 2, 0])).tolist() == [
+        0,
+        1,
+        0,
+        0,
+    ]
