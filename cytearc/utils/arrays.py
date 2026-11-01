@@ -35,15 +35,20 @@ def has_duplicates(values: Any) -> bool:
     return bool(np.any(ordered[1:] == ordered[:-1]))
 
 
+def _integer_vector(values: Any, name: str) -> np.ndarray:
+    array = np.asarray(values)
+    if array.ndim != 1 or array.dtype.kind not in "biu":
+        raise TypeError(f"{name} needs a one-dimensional array of integers")
+    return array
+
+
 def sorted_unique(values: Any) -> np.ndarray:
     """Return the distinct values of a one-dimensional integer array, ascending.
 
     It equals ``np.unique(values)``, by sorting and comparing neighbours, which
     stays fast where ``np.unique`` hashes many distinct integers slowly.
     """
-    array = np.asarray(values)
-    if array.ndim != 1 or array.dtype.kind not in "biu":
-        raise TypeError("sorted_unique needs a one-dimensional array of integers")
+    array = _integer_vector(values, "sorted_unique")
     ordered = np.sort(array)
     if len(ordered) < 2:
         return ordered
@@ -51,6 +56,59 @@ def sorted_unique(values: Any) -> np.ndarray:
     keep[0] = True
     np.not_equal(ordered[1:], ordered[:-1], out=keep[1:])
     return ordered[keep]
+
+
+def unique_inverse(values: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Return the distinct values of an integer array and each value's position.
+
+    It equals ``np.unique(values, return_inverse=True)``, with the positions as
+    int64, by one argsort.
+    """
+    array = _integer_vector(values, "unique_inverse")
+    inverse = np.empty(len(array), dtype=np.int64)
+    if not len(array):
+        return array.copy(), inverse
+    order = np.argsort(array)
+    ordered = array[order]
+    starts = np.empty(len(ordered), dtype=bool)
+    starts[0] = True
+    np.not_equal(ordered[1:], ordered[:-1], out=starts[1:])
+    inverse[order] = np.cumsum(starts) - 1
+    return ordered[starts], inverse
+
+
+def unique_rows(rows: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Return the distinct rows of an integer matrix and each row's position.
+
+    It equals ``np.unique(rows, axis=0, return_inverse=True)``: the rows in
+    lexicographic order, and the inverse as int64. The columns are combined
+    one at a time into one-dimensional codes, which avoids the slow sort of
+    rows as structured values.
+    """
+    matrix = np.asarray(rows)
+    if matrix.ndim != 2 or matrix.dtype.kind not in "iu":
+        raise TypeError("unique_rows needs a two-dimensional array of integers")
+    n_rows, n_columns = matrix.shape
+    if not n_rows or not n_columns:
+        return np.unique(matrix, axis=0), np.zeros(n_rows, dtype=np.int64)
+    codes = np.zeros(n_rows, dtype=np.int64)
+    n_codes = 1
+    for column in range(n_columns):
+        values = matrix[:, column]
+        low = values.min()
+        width = int(values.max()) - int(low) + 1
+        if n_codes * width < 2**62:
+            offsets = (values - low).astype(np.int64)
+        else:
+            # Wide columns are made dense first, so the codes never overflow.
+            _distinct, offsets = unique_inverse(values)
+            width = int(offsets.max()) + 1
+        _distinct, codes = unique_inverse(codes * width + offsets)
+        n_codes = int(codes.max()) + 1
+    # Every row of a code holds the same values, so any of them serves.
+    representative = np.empty(n_codes, dtype=np.int64)
+    representative[codes] = np.arange(n_rows)
+    return matrix[representative], codes
 
 
 def read_only_copy(values: Any, dtype: DTypeLike | None = None) -> np.ndarray:

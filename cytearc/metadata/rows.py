@@ -60,6 +60,26 @@ def _read_array_rows(array: Any, rows: np.ndarray) -> np.ndarray:
     return np.asarray(array[indices])
 
 
+#: The objects that Zarr makes to read a stored chunk, its tasks, futures,
+#: specs and selections, whatever the chunk's size: about 25 KB, and 35 KB
+#: beside those of the previous read, on Python 3.13 to 3.15.
+READ_OBJECT_BYTES = 64 * 1024
+
+
+def previous_read_bytes(*stored: int) -> int:
+    """Return what the read before a read of stored arrays can still hold beside it.
+
+    ``stored`` holds the bytes of one stored chunk of each array that is read
+    one after another, as stored and decoded, as
+    :func:`array_row_selection_parts` counts them. The thread of Zarr's pool
+    that decoded a chunk lets go of it only when that thread next runs, which
+    on a busy machine can come after the next read has begun, so a read can
+    hold the largest of those chunks beside its own, with the objects that
+    Zarr makes for both reads.
+    """
+    return max(stored, default=0) + READ_OBJECT_BYTES
+
+
 def array_row_selection_parts(array: Any) -> tuple[int, int]:
     """Return fixed and per-row bytes for one chunk-serial selection."""
     row_values = int(np.prod(tuple(array.shape)[1:], dtype=np.int64))

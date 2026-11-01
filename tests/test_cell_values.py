@@ -586,6 +586,8 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
         )
     )
     clones = store.clones.import_clones(numbat, cell_selection=cells)
+    # Clone 1 holds three cells and clone 2 two.
+    expansion = store.clones.expansion(clones)
 
     for ref, expected in (
         (clusters, np.array(list("aabbcc"))),
@@ -593,6 +595,10 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
         (imported, coordinates),
         (enrichment, scores),
         (clones, np.array(["2", "2", "1", "", "1", "1"])),
+        (
+            expansion,
+            np.array(["2 cells", "2 cells", "3 to 5 cells", ""] + ["3 to 5 cells"] * 2),
+        ),
     ):
         loaded = store.artifacts.load_values(ref)
         np.testing.assert_array_equal(loaded.values, expected)

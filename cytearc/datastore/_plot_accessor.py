@@ -580,6 +580,44 @@ class DataStorePlotAccessor:
         """Plot how many clones have each size, and the largest clones."""
         return self._forward(PlotResult, "clone_abundance", locals())
 
+    def clonal_expansion(
+        self,
+        expansion: ArtifactRef,
+        *,
+        group_by: str | None = None,
+        groups: ArtifactRef | None = None,
+        count: str = "cells",
+        normalize: bool = True,
+        splits: Sequence[int] = (10, 100, 1_000, 10_000, 30_000, 100_000),
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the clonal expansion and clonal space of groups of cells."""
+        return self._forward(PlotResult, "clonal_expansion", locals())
+
+    def clonal_rarefaction(
+        self,
+        clones: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        cell_selection: ArtifactRef | None = None,
+        orders: Sequence[int] = (0, 1, 2),
+        base: str = "size",
+        endpoint: int | None = None,
+        knots: int = 40,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the rarefaction and extrapolation curves of groups of cells."""
+        return self._forward(PlotResult, "clonal_rarefaction", locals())
+
     def guide_calls(
         self,
         calls: ArtifactRef,

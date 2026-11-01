@@ -292,6 +292,12 @@ _CONTRACTS = (
         model_only=_classified("resolved_input", "labels_fingerprint"),
     ),
     OperationContract(
+        ClonesAccessor.expansion,
+        metadata_arguments.ClonalExpansionArguments,
+        # Each measured cell's group is recorded by its fingerprint.
+        model_only=_classified("resolved_input", "group_assignments_fingerprint"),
+    ),
+    OperationContract(
         PerturbationAccessor.import_guide_calls,
         metadata_arguments.GuideCallImportArguments,
         # The file is identified by the SHA-256 of its bytes, not its path.

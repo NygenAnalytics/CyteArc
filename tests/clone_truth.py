@@ -10,6 +10,7 @@ never computes.
 """
 
 import gzip
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,6 +94,46 @@ class CloneTruth:
             key = (int(self.clones[position]), keys[position])
             groups.setdefault(key, set()).add(str(ids[position]))
         return {frozenset(group) for group in groups.values()}
+
+    def _counted(
+        self, groups: np.ndarray | None, cells: np.ndarray | None
+    ) -> tuple[list[tuple[object, int] | None], Counter]:
+        """Each cell's group and clone, None when it is not counted, and the counts."""
+        keep = np.ones(N_CELLS, dtype=bool) if cells is None else cells
+        labels = np.zeros(N_CELLS, dtype=object) if groups is None else groups
+        pairs: list[tuple[object, int] | None] = [
+            (label, clone) if counted and clone >= 0 else None
+            for label, clone, counted in zip(
+                labels.tolist(), self.clones.tolist(), keep.tolist(), strict=True
+            )
+        ]
+        return pairs, Counter(pair for pair in pairs if pair is not None)
+
+    def cell_clone_sizes(
+        self, groups: np.ndarray | None = None, cells: np.ndarray | None = None
+    ) -> np.ndarray:
+        """Each cell's clone size within its group, counted cell by cell.
+
+        Args:
+            groups: Each cell's group, or None for one group of every cell.
+            cells: The cells counted, as a mask, or None for every cell.
+
+        Returns:
+            The cells of each counted cell's clone in its group, 0 for a cell
+            without a clone or outside ``cells``.
+        """
+        pairs, counts = self._counted(groups, cells)
+        return np.asarray([0 if pair is None else counts[pair] for pair in pairs])
+
+    def group_clone_sizes(
+        self, groups: np.ndarray | None = None, cells: np.ndarray | None = None
+    ) -> dict[object, list[int]]:
+        """Each group's clone sizes, largest first, counted cell by cell."""
+        _pairs, counts = self._counted(groups, cells)
+        sizes: dict[object, list[int]] = {}
+        for (group, _clone), size in counts.items():
+            sizes.setdefault(group, []).append(size)
+        return {group: sorted(found, reverse=True) for group, found in sizes.items()}
 
 
 def clone_truth(seed: int = 0) -> CloneTruth:

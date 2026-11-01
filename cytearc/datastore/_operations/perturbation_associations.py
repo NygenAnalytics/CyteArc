@@ -11,6 +11,7 @@ from ...metadata.arguments import (
 )
 from ...metadata.artifacts import write_cell_data_artifact
 from ...metadata.rows import (
+    READ_OBJECT_BYTES,
     apply_missing_mask,
     array_row_selection_parts,
     read_array_rows_chunkwise,
@@ -70,10 +71,6 @@ _ASSOCIATION_HELD_SHARE = 0.5
 # counts and results, and the copies that the tests, the adjustment and the
 # write make of them.
 _ASSOCIATION_PAIR_BYTES = 320
-# The objects that Zarr makes to read a stored chunk, its tasks, futures,
-# specs and selections, whatever the chunk's size: about 25 KB, and 35 KB
-# beside those of the previous read, on Python 3.13 to 3.15.
-_READ_OBJECT_BYTES = 64 * 1024
 # The integer and floating-point columns of a perturbation association table,
 # one row per pair; each pair's group of treatment cells names its target and
 # guides once per group.
@@ -126,7 +123,7 @@ def _chunk_read_bytes(codes: zarr.Array) -> int:
     """
     stored, _ = array_row_selection_parts(codes)
     row_bytes = int(np.prod(codes.shape[1:], dtype=np.int64)) * codes.dtype.itemsize
-    return 2 * stored + _chunk_rows(codes) * row_bytes + _READ_OBJECT_BYTES
+    return 2 * stored + _chunk_rows(codes) * row_bytes + READ_OBJECT_BYTES
 
 
 def _association_warnings(

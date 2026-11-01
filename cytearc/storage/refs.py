@@ -17,6 +17,7 @@ ARTIFACT_KINDS = frozenset(
         "cell_calling",
         "cell_cycle",
         "cell_selection",
+        "clonal_expansion",
         "cluster_cut",
         "clones",
         "cluster_hierarchy",

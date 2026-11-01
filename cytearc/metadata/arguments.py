@@ -494,6 +494,25 @@ class CloneColumnArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class ClonalExpansionArguments(OperationArguments):
+    operation: ClassVar[str] = "measure_clonal_expansion"
+    artifact_kind: ClassVar[str] = "clonal_expansion"
+
+    clones: ArtifactRef = artifact_input()
+    groups: ArtifactRef | None = artifact_input()
+    # The cells measured: the selection given, or the clones' cells.
+    cell_selection: ArtifactRef = artifact_input()
+    # The fingerprint of each measured cell's group, or None without group_by
+    # columns.
+    group_assignments_fingerprint: str | None = artifact_input()
+    group_by: tuple[str, ...] = parameter()
+    # Exactly one of the two bounds is recorded; the other is None.
+    breakpoints: tuple[int, ...] | None = parameter()
+    frequency_breakpoints: tuple[float, ...] | None = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class GuideThresholdArguments(OperationArguments):
     operation: ClassVar[str] = "fit_guide_thresholds"
     artifact_kind: ClassVar[str] = "guide_thresholds"
