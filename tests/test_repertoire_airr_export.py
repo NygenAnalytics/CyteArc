@@ -1012,3 +1012,39 @@ def test_the_cells_ids_are_checked_before_each_read(tmp_path) -> None:
     assert packed.offsets.tolist() == list(range(0, 45, 5)) and longest == 5
     # The packed IDs and their offsets stay counted; the positions do not.
     assert reads.held == 8 * 9 + 40
+
+
+def test_packing_text_counts_each_slice_and_their_join() -> None:
+    # 30 values of 1,000 characters beyond ASCII, 1,997 bytes each, in
+    # chunks of two rows, so joining the packed slices outweighs any slice.
+    values = np.asarray([f"{k:03d}" + "é" * 997 for k in range(30)])
+    array = zarr.create_array(
+        store=zarr.storage.MemoryStore(), shape=(30,), chunks=(2,), dtype=values.dtype
+    )
+    array[:] = values
+    fixed = repertoire_operations.text_row_selection_parts(array)[0]
+    refusals = []
+    limit = 1
+    while True:
+        reads = repertoire_operations._Reads(
+            limit=limit, held=0, what="Packing", remedy=""
+        )
+        try:
+            packed, longest = repertoire_operations._packed_text(reads, array, None, 1)
+            break
+        except MemoryError as error:
+            found = re.search(r"holds about (\d+) bytes", str(error))
+            assert found is not None and int(found.group(1)) > limit
+            refusals.append(int(found.group(1)))
+            limit = refusals[-1]
+    # The offsets; each slice of one row stored in 4,000 bytes, beside the
+    # slices packed before it; and the join, a second copy of every slice.
+    per_row = (3 * 4_000 + 16 * 8) + 64 + 4 * 1_000 + 3 * 4_000 + 24
+    offsets = 8 * 31
+    assert refusals == [
+        offsets,
+        *(offsets + 1_997 * k + fixed + per_row for k in range(30)),
+        offsets + 2 * 1_997 * 30,
+    ]
+    assert bytes(packed.data).decode("utf-8") == "".join(values.tolist())
+    assert longest == 1_997 and reads.held == offsets + 1_997 * 30
