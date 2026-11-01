@@ -22,6 +22,7 @@ from ...metadata.records import (
     chunk_rows_for,
     decode_ragged,
     decode_text,
+    pack_text,
     take_text,
     unpack_text,
 )
@@ -30,6 +31,7 @@ from ...metadata.rows import (
     read_array_rows_chunkwise,
     read_metadata_rows_chunkwise,
     text_read_bytes,
+    text_row_selection_parts,
 )
 from ...metadata.selection import cell_selection_indices
 from ...repertoire.chains import (
@@ -498,6 +500,18 @@ class _Reads:
         fixed, per_row = array_row_selection_parts(array)
         self.reserve(fixed + len(wanted) * per_row)
         values = np.asarray(read_array_rows_chunkwise(array, wanted))
+        self.held += int(values.nbytes)
+        return values
+
+    def whole(self, source: zarr.Group, name: str) -> np.ndarray:
+        """Read an array whole, keeping it held.
+
+        Read under a Zarr concurrency of one, the read holds one decoded chunk
+        and its compressed bytes beside the array.
+        """
+        array = as_zarr_array(source[name], name=name)
+        self.reserve(array_row_selection_parts(array)[0] + int(array.nbytes))
+        values = np.asarray(array[:])
         self.held += int(values.nbytes)
         return values
 
@@ -2110,9 +2124,14 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         unique identifiers. A path ending in ``.gz`` is gzip-compressed at
         level 6.
 
-        The contigs are read and written in blocks of about 32 MiB of
-        rendered text, so the export holds one block, the cells' IDs and
-        clonotypes, and the distinct values of the text fields at once.
+        The contigs are read and written in blocks of about 32 MiB, at most a
+        sixteenth of the memory budget, as many contigs as fit when each
+        field holds its longest value. Beside one block, the export holds the
+        cells' IDs and clonotypes and the distinct values of the text fields,
+        and until it has named the repeated IDs, a hash of each contig's ID.
+        Every stored array is read a chunk at a time, and what each step
+        reads and holds is checked against the memory budget before the step
+        runs, all before the file is written.
 
         Args:
             source: An ``immune_receptors`` or ``clonotypes`` artifact.
@@ -2133,8 +2152,8 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             RuntimeError: If the ``source`` artifact or the receptors of the
                 clonotypes are incomplete, as an import that stopped before
                 it finished leaves them.
-            MemoryError: If the export's estimated peak exceeds the memory
-                budget.
+            MemoryError: If a step of the export would hold more than the
+                memory budget.
         """
         from ...writers.airr import (
             AIRR_REQUIRED_FIELDS,
@@ -2189,100 +2208,222 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             if name in columns
         ]
         order = [*leading, *[name for name in columns if name not in leading]]
+        n_cells = int(as_zarr_array(group["values"], name="values").shape[0])
         # A clonotypes artifact's labels replace an imported clone_id.
         contigs = _ExportContigs(
             group,
             tuple(name for name in chosen if not (clonotypes and name == "clone_id")),
             chains_only=chains_only,
+            reads=_Reads(
+                limit=self.memoryBytes,
+                held=_EXPORT_OBJECT_BYTES
+                + _EXPORT_OBJECT_BYTES_PER_FIELD * len(chosen),
+                what=(
+                    f"Exporting the {_n_contigs(group)} contigs of {n_cells} cells "
+                    f"with {len(chosen)} fields"
+                ),
+                remedy="Raise mem_budget, or pass fields= with fewer fields.",
+            ),
         )
-        n_cells = int(as_zarr_array(group["values"], name="values").shape[0])
-        plan = contigs.plan(
-            n_cells=n_cells,
-            n_columns=len(AIRR_REQUIRED_FIELDS)
-            + sum(name not in AIRR_REQUIRED_FIELDS for name in order),
-            clonotypes=clonotypes,
-            budget=self.memoryBytes,
-        )
-        if plan.peak > self.memoryBytes:
-            raise MemoryError(
-                f"Exporting the {contigs.n_contigs} contigs of {n_cells} cells with "
-                f"{len(chosen)} fields holds about {plan.peak} bytes at its peak, "
-                f"more than the memory budget of {self.memoryBytes} bytes. Raise "
-                "mem_budget, or pass fields= with fewer fields."
-            )
-        clones = None
-        if clonotype_group is not None:
-            # Each cell's clonotype is its code among the clonotypes' labels,
-            # which follow the receptors' cells.
-            clones = EncodedText.from_categories(
-                _read(clonotype_group, "codes"),
-                _read(clonotype_group, "clonotype_ids"),
-            )
-        cells = EncodedText.from_categories(
-            np.empty(0, np.int32), self._artifact_cell_ids(receptors)
-        )
-        hashes, whole = contigs.scan(plan.block_rows)
-
-        def ids_at(rows: np.ndarray) -> np.ndarray:
-            held = plan.held + _ID_BYTES * len(rows)
-            if held > self.memoryBytes:
-                raise MemoryError(
-                    f"Naming {len(rows)} repeated contig IDs holds about {held} "
-                    f"bytes, more than the memory budget of {self.memoryBytes} "
-                    "bytes. Raise mem_budget."
+        reads = contigs.reads
+        block_bytes = max(1, min(_EXPORT_BLOCK_BYTES, self.memoryBytes // 16))
+        with zarr_io_concurrency(1):
+            contigs.hold_text()
+            clones: EncodedText | None = None
+            clone_width = 0
+            if clonotype_group is not None:
+                # Each cell's clonotype is its code among the clonotypes'
+                # labels, which follow the receptors' cells.
+                codes = reads.whole(clonotype_group, "codes")
+                labels, clone_width = _packed_text(
+                    reads,
+                    as_zarr_array(
+                        clonotype_group["clonotype_ids"], name="clonotype_ids"
+                    ),
+                    None,
+                    block_bytes,
                 )
-            return contigs.ids_at(rows, plan.block_rows)
-
-        renamed = suffix_repeated_ids(hashes, ids_at)
-        del hashes
-        if len(renamed[0]):
-            logger.warning(
-                f"{len(renamed[0])} contig IDs repeat; their later occurrences "
-                "are written with a suffix such as _2"
+                clones = EncodedText(codes, labels.data, labels.offsets)
+            cells, cell_width = self._export_cell_ids(
+                reads, receptors, n_cells, block_bytes
             )
-        with AirrRearrangementWriter(path, order, whole=whole) as writer:
-            for block in contigs.blocks(plan.block_rows, cells, clones, renamed):
-                writer.write(block)
+            contigs.measure(block_bytes)
+            hashes, id_rows = contigs.scan(block_bytes)
+            # Sorting the hashes and finding those that repeat.
+            reads.reserve(_NAMING_BYTES_PER_ROW * len(hashes))
+            naming = reads.held + _NAMING_BYTES_PER_ROW * len(hashes)
+            per_id = _ID_BYTES + _ID_BYTES_PER_BYTE * contigs.width("sequence_id")
+            passing = contigs.id_pass_bytes(id_rows)
+            asked = 0
+
+            def ids_at(rows: np.ndarray) -> np.ndarray:
+                # The IDs read earlier stay held while later ones are read.
+                nonlocal asked
+                asked += len(rows)
+                _Reads(
+                    limit=self.memoryBytes,
+                    held=naming + passing,
+                    what=f"Naming {asked} repeated contig IDs",
+                    remedy="Raise mem_budget.",
+                ).reserve(per_id * asked)
+                return contigs.ids_at(rows, id_rows)
+
+            renamed = suffix_repeated_ids(hashes, ids_at)
+            del hashes
+            reads.held += per_id * len(renamed[0]) - contigs.hash_bytes
+            block_rows = contigs.plan_blocks(
+                n_columns=len(AIRR_REQUIRED_FIELDS)
+                + sum(name not in AIRR_REQUIRED_FIELDS for name in order),
+                cell_width=cell_width,
+                clone_width=clone_width if clones is not None else None,
+                block_bytes=block_bytes,
+            )
+            if len(renamed[0]):
+                logger.warning(
+                    f"{len(renamed[0])} contig IDs repeat; their later occurrences "
+                    "are written with a suffix such as _2"
+                )
+            with AirrRearrangementWriter(path, order, whole=contigs.whole) as writer:
+                for block in contigs.blocks(block_rows, cells, clones, renamed):
+                    writer.write(block)
+                    # The block is let go before the next is read.
+                    del block
         written = writer.n_rows
         logger.info(f"Wrote {written} contigs to {os.fspath(path)}")
         return written
 
+    def _export_cell_ids(
+        self, reads: _Reads, receptors: ArtifactRef, n_cells: int, slice_bytes: int
+    ) -> tuple[EncodedText, int]:
+        """The IDs of the receptors' cells as packed text, for an AIRR export.
 
-# An AIRR export renders its contigs in blocks of about this many bytes of
-# text, a whole number of blocks per stored chunk.
+        The positions of the receptors' cell selection are read, then the IDs
+        a slice at a time, as :func:`_packed_text` reads them; each step is
+        checked first, and the packed IDs stay counted in ``reads``.
+
+        Returns:
+            The IDs, whose codes are unused, and the bytes of the longest.
+        """
+        selection = inspect_artifact(self.zw, receptors).input_ref("cell_selection")
+        reads.reserve(_SELECTION_BYTES_PER_CELL * n_cells)
+        cell_index = cell_selection_indices(self.zw, selection)
+        reads.held += int(cell_index.nbytes)
+        packed = _packed_text(
+            reads, self.cells._get_array("ids"), cell_index, slice_bytes
+        )
+        reads.held -= int(cell_index.nbytes)
+        return packed
+
+
+# An AIRR export renders its contigs in blocks of about this many bytes, at
+# most a sixteenth of the memory budget, a whole number of blocks per stored
+# chunk.
 _EXPORT_BLOCK_BYTES = 32 * 2**20
-# The rendered bytes of a cell ID, a clonotype label, and a value of each kind
-# of field besides text.
-_EXPORT_CELL_ID_BYTES = 32
-_EXPORT_LABEL_BYTES = 16
-_EXPORT_VALUE_BYTES = {"integer": 7, "flag": 2, "number": 20}
-# The bytes that a block holds per contig and field while it is written,
-# besides the text that it reads and writes: a text field's codes, and an
-# integer, flag or number as it is rendered.
-_EXPORT_FIELD_BYTES = {"text": 8, "integer": 25, "flag": 16, "number": 70}
-# Resident memory grows by about 1.6 bytes per byte that a block holds, and by
-# up to 64 MiB for Zarr's reads, as measured on 100,000 cells of AIRR files
-# and 200,000 cells of Cell Ranger files.
-_EXPORT_BLOCK_FACTOR = 1.7
-_EXPORT_READ_BYTES = 64 * 2**20
-# Reading and packing the cells' IDs holds up to about 600 bytes per cell at
-# its peak, and reading their clonotype labels 250 more; packed, both hold 48.
-_EXPORT_SETUP_BYTES_PER_CELL = 600
-_EXPORT_LABEL_BYTES_PER_CELL = 250
-_EXPORT_HELD_BYTES_PER_CELL = 48
-# Hashing the contig IDs holds about this many bytes per contig, and naming a
-# repeated ID about this many per ID read.
-_HASH_BYTES = 40
+# The rendered bytes of an integer, whose missing values are negative, of a
+# logical value, and of a real number as repr writes it.
+_INTEGER_TEXT_BYTES = 19
+_FLAG_TEXT_BYTES = 1
+_REAL_TEXT_BYTES = 24
+# Bytes per contig that a block holds for each field, beside the text that it
+# reads and renders: a text field's codes as read and as int64, a ragged
+# field's offsets as read, searched and renumbered, an integer's codes and
+# mask with its digits' offsets, a logical value's codes and flags, and a
+# number's offsets.
+_EXPORT_FIELD_BYTES = {TEXT: 12, RAGGED: 24, INTEGER: 17, FLAG: 11, NUMBER: 16}
+# Bytes per contig that rendering one field holds while it runs, for a number
+# beside four per byte of its widest text: its values, flags and text as
+# Python objects, and their joined bytes.
+_EXPORT_RENDER_BYTES = {TEXT: 0, RAGGED: 0, INTEGER: 9, FLAG: 10, NUMBER: 136}
+# Bytes per contig of a block's rows: their cells, positions, widths and
+# cursors, and one field's lengths while they are summed; and of each cell's
+# clonotype, its code as gathered and as int64.
+_EXPORT_ROW_BYTES = 96
+_EXPORT_CLONE_BYTES = 12
+# The Python objects of the stored arrays that an export opens, their
+# metadata, codecs and reads, held 50 KiB, and 106 KiB with the 16 fields of
+# a Cell Ranger file, as traced.
+_EXPORT_OBJECT_BYTES = 64 * 2**10
+_EXPORT_OBJECT_BYTES_PER_FIELD = 8 * 2**10
+# Reading a cell selection's positions holds 25 bytes per cell at its peak,
+# as traced on 200,000 cells, and keeps 8.
+_SELECTION_BYTES_PER_CELL = 32
+# Bytes per contig that measuring a span of contigs holds: a ragged field's
+# offsets, running ends and lengths, or a number field's values and flags.
+_MEASURE_BYTES_PER_ROW = 64
+# Hashing a block's IDs holds about this many bytes per contig, beside this
+# many per byte of the longest ID: the IDs as read, as Python strings and as
+# their UTF-8 bytes for hashing, and their offsets and hashes.
+_SCAN_BYTES_PER_ROW = 300
+_SCAN_BYTES_PER_ID_BYTE = 6
+# Finding the hashes that repeat holds this many bytes per contig beside the
+# hashes: their sorted copy, and the positions and matches of a search.
+_NAMING_BYTES_PER_ROW = 40
+# Naming a repeated ID holds about this many bytes, beside this many per byte
+# of the longest ID: its text, code, occurrence and new name.
 _ID_BYTES = 200
+_ID_BYTES_PER_BYTE = 4
 
 
-@dataclass(frozen=True, slots=True)
-class _ExportPlan:
-    """The block size of an AIRR export and the bytes it holds."""
+def _n_contigs(group: zarr.Group) -> int:
+    return int(as_zarr_array(group["contig_cells"], name="contig_cells").shape[0])
 
-    block_rows: int
-    held: int
-    peak: int
+
+def _even_rows(chunk: int, wanted: int) -> int:
+    """Rows of blocks that divide a stored chunk evenly, at most ``wanted``."""
+    wanted = max(1, min(chunk, wanted))
+    return -(-chunk // -(-chunk // wanted))
+
+
+def _packed_text(
+    reads: _Reads, array: zarr.Array, rows: np.ndarray | None, slice_bytes: int
+) -> tuple[EncodedText, int]:
+    """Read rows of a stored text array as packed UTF-8 bytes, a slice at a time.
+
+    Each slice is read as :func:`text_read_bytes` counts it, then packed,
+    which holds its joined text, the text's UTF-8 bytes and their copy, up to
+    four bytes per character each, and its lengths and offsets. The packed
+    slices are joined once all are read. Each step is checked first, and the
+    packed text stays counted in ``reads``.
+
+    Args:
+        reads: What the caller holds, and the budget.
+        array: A stored text array.
+        rows: The rows to read, in this order, or None for every row.
+        slice_bytes: About the most bytes that reading and packing a slice
+            holds; a slice holds at least one row.
+
+    Returns:
+        The text, whose codes are unused, and the bytes of its longest value.
+    """
+    n_rows = int(array.shape[0]) if rows is None else len(rows)
+    fixed, per_row = text_row_selection_parts(array)
+    per_row += 3 * int(np.dtype(array.dtype).itemsize) + 24
+    step = max(1, slice_bytes // per_row)
+    reads.reserve(8 * (n_rows + 1))
+    offsets = np.zeros(n_rows + 1, dtype=np.int64)
+    reads.held += int(offsets.nbytes)
+    parts = []
+    longest = 0
+    for start in range(0, n_rows, step):
+        stop = min(start + step, n_rows)
+        reads.reserve(fixed + (stop - start) * per_row)
+        values = np.asarray(
+            array[start:stop]
+            if rows is None
+            else read_array_rows_chunkwise(array, rows[start:stop])
+        )
+        data, bounds = pack_text(values)
+        del values
+        offsets[start + 1 : stop + 1] = bounds[1:] + offsets[start]
+        longest = max(longest, int(np.diff(bounds).max()))
+        del bounds
+        parts.append(data)
+        reads.held += int(data.nbytes)
+    # The packed slices, and the bytes that they are joined into.
+    reads.reserve(int(offsets[-1]))
+    joined = np.concatenate(parts) if parts else np.empty(0, dtype=np.uint8)
+    del parts
+    return EncodedText(np.empty(0, dtype=np.int32), joined, offsets), longest
 
 
 class _Window:
@@ -2292,12 +2433,15 @@ class _Window:
         self._array = array
         self._chunk = max(1, int(array.chunks[0]))
         self._start = 0
-        self._values = np.asarray(array[0:0])
+        self._empty = np.asarray(array[0:0])
+        self._values = self._empty
 
     def read(self, start: int, stop: int) -> np.ndarray:
         if start < self._start or stop > self._start + len(self._values):
             first = start - start % self._chunk
             last = min(-(-stop // self._chunk) * self._chunk, self._array.shape[0])
+            # The chunks read before are let go before the next are read.
+            self._values = self._empty
             self._values = np.asarray(self._array[first:last])
             self._start = first
         return self._values[start - self._start : stop - self._start]
@@ -2347,82 +2491,269 @@ class _ExportContigs:
 
     Each pass reads blocks of contigs in order from the first; with
     ``chains_only``, a block's rows are its contigs that count as chains.
+    Each step checks what it reads and holds in ``reads`` first, and what it
+    keeps stays counted there.
     """
 
     def __init__(
-        self, group: zarr.Group, fields: tuple[str, ...], *, chains_only: bool
+        self,
+        group: zarr.Group,
+        fields: tuple[str, ...],
+        *,
+        chains_only: bool,
+        reads: _Reads,
     ) -> None:
         self._group = group
         self._fields = fields
         self._chains_only = chains_only
-        cells = as_zarr_array(group["contig_cells"], name="contig_cells")
+        self.reads = reads
+        cells = self._array("contig_cells")
         self.n_contigs = int(cells.shape[0])
         self._chunk = max(1, int(cells.chunks[0]))
+        self._texts: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self._widths: dict[str, int] = {}
+        #: The number fields whose rows hold only whole numbers, which are
+        #: written as integers.
+        self.whole: set[str] = set()
+
+    @property
+    def hash_bytes(self) -> int:
+        """The bytes of the hashes of the contigs' IDs."""
+        return 8 * self.n_contigs
 
     def _array(self, name: str) -> zarr.Array:
         return as_zarr_array(self._group[name], name=name)
 
-    def plan(
-        self, *, n_cells: int, n_columns: int, clonotypes: bool, budget: int
-    ) -> _ExportPlan:
-        """Choose the contigs of a block and count the bytes that the export holds.
+    def width(self, name: str) -> int:
+        """The rendered bytes of a field's widest value."""
+        return self._widths[name]
+
+    def hold_text(self) -> None:
+        """Read the distinct values of the text fields, which every block uses."""
+        for name in self._fields:
+            if FIELDS[name] != TEXT:
+                continue
+            data = self.reads.whole(self._group, f"contig_{name}_values")
+            offsets = self.reads.whole(self._group, f"contig_{name}_offsets")
+            # Each value's length, while the longest is found.
+            self.reads.reserve(int(offsets.nbytes))
+            self._widths[name] = int(np.diff(offsets).max()) if len(offsets) > 1 else 0
+            self._texts[name] = (data, offsets)
+
+    def measure(self, span_bytes: int) -> None:
+        """Find the widest value of each field and the whole number fields.
+
+        The ragged fields' offsets and the number fields' values are read a
+        span of contigs at a time, at most a stored chunk of contigs, after
+        one check of what a span holds. With ``chains_only``, only the
+        chains' values count.
+        """
+        ragged = [name for name in self._fields if FIELDS[name] == RAGGED]
+        numbers = [name for name in self._fields if FIELDS[name] == NUMBER]
+        for name in self._fields:
+            if FIELDS[name] == INTEGER:
+                self._widths[name] = _INTEGER_TEXT_BYTES
+            elif FIELDS[name] == FLAG:
+                self._widths[name] = _FLAG_TEXT_BYTES
+        read = [
+            *(f"contig_{name}_offsets" for name in ragged),
+            *(f"contig_{name}" for name in numbers),
+            *(["contig_chain"] if self._chains_only else []),
+        ]
+        span = max(1, min(self._chunk, span_bytes // _MEASURE_BYTES_PER_ROW))
+        self.reads.reserve(
+            max(
+                (array_row_selection_parts(self._array(name))[0] for name in read),
+                default=0,
+            )
+            + _MEASURE_BYTES_PER_ROW * min(span, self.n_contigs)
+        )
+        ends = dict.fromkeys(ragged, 0)
+        longest = dict.fromkeys(ragged, 0)
+        whole = dict.fromkeys(numbers, True)
+        largest = dict.fromkeys(numbers, 0.0)
+        for first in range(0, self.n_contigs, span):
+            last = min(first + span, self.n_contigs)
+            kept = (
+                np.flatnonzero(np.asarray(self._array("contig_chain")[first:last]))
+                if self._chains_only
+                else None
+            )
+            for name in ragged:
+                stored = self._array(f"contig_{name}_offsets")[first + 1 : last + 1]
+                bounds = np.empty(last - first + 1, dtype=np.int64)
+                bounds[0] = ends[name]
+                # A missing value's end is -1: it ends where the one before does.
+                np.maximum.accumulate(
+                    np.maximum(np.asarray(stored), ends[name]), out=bounds[1:]
+                )
+                ends[name] = int(bounds[-1])
+                lengths = _kept(np.diff(bounds), kept)
+                if len(lengths):
+                    longest[name] = max(longest[name], int(lengths.max()))
+            for name in numbers:
+                if not whole[name]:
+                    continue
+                values = _kept(
+                    np.asarray(self._array(f"contig_{name}")[first:last]), kept
+                )
+                present = values[~np.isnan(values)]
+                whole[name] = bool(
+                    np.isfinite(present).all() and (present == np.round(present)).all()
+                )
+                if whole[name] and len(present):
+                    largest[name] = max(largest[name], float(np.abs(present).max()))
+        self._widths.update(longest)
+        for name in numbers:
+            # A whole number is written as an integer, with its sign.
+            self._widths[name] = (
+                len(str(int(largest[name]))) + 1 if whole[name] else _REAL_TEXT_BYTES
+            )
+        self.whole = {name for name, flag in whole.items() if flag}
+
+    def _window_bytes(self, names: list[tuple[str, int]], block_rows: int) -> int:
+        """The most bytes that windows on stored arrays hold for blocks of contigs.
 
         Args:
-            n_cells: The receptors' cells.
-            n_columns: The columns of the file.
-            clonotypes: Whether each cell's clonotype is written.
-            budget: The memory budget; a block takes at most a sixteenth.
+            names: Each array, and the rows by which a block's rows are after
+                its contigs' positions: 1 for the ends of ragged values.
+            block_rows: The contigs of a block.
         """
-        n_contigs = max(1, self.n_contigs)
-        # Each contig's rendered row, with its tabs and newline, and the other
-        # bytes that a block holds per contig: its cell's and clonotype's
-        # codes, and its row's offsets.
-        rendered = n_columns + _EXPORT_CELL_ID_BYTES
-        working = 32
-        if clonotypes:
-            rendered += _EXPORT_LABEL_BYTES
-            working += 8
-        categories = 0
-        # A stored chunk of contig_cells and contig_chain, and of each field.
-        windows = 9 * self._chunk
-        for name in self._fields:
-            kind = FIELDS[name]
-            if kind == TEXT:
-                data = int(self._array(f"contig_{name}_values").shape[0])
-                n_values = int(self._array(f"contig_{name}_offsets").shape[0]) - 1
-                categories += data + 8 * (n_values + 1)
-                rendered += data // max(1, n_values)
-                working += _EXPORT_FIELD_BYTES[kind]
-                windows += 4 * self._chunk
-            elif kind == RAGGED:
-                # The bytes read, which are also written.
-                text = int(self._array(f"contig_{name}").shape[0]) // n_contigs
-                rendered += text
-                working += text
-                windows += 8 * self._chunk
+        held = 0
+        for name, shift in names:
+            array = self._array(name)
+            chunk = max(1, int(array.chunks[0]))
+            if shift == 0 and chunk % self._chunk == 0:
+                # Blocks stay within a stored chunk of contigs, so within one
+                # of the array's.
+                touched = 1
             else:
-                rendered += _EXPORT_VALUE_BYTES[kind]
-                working += _EXPORT_FIELD_BYTES[kind]
-                windows += 8 * self._chunk
-        block_bytes = max(1, min(_EXPORT_BLOCK_BYTES, budget // 16))
-        wanted = max(1, min(self._chunk, block_bytes // rendered))
-        # Blocks divide each stored chunk evenly, so a chunk is read once.
-        block_rows = -(-self._chunk // -(-self._chunk // wanted))
-        held = categories + _EXPORT_HELD_BYTES_PER_CELL * n_cells
-        setup = n_cells * (
-            _EXPORT_SETUP_BYTES_PER_CELL
-            + (_EXPORT_LABEL_BYTES_PER_CELL if clonotypes else 0)
+                touched = 1 + -(-max(block_rows - 1, 1) // chunk)
+            held += min(touched * chunk, int(array.shape[0])) * array.dtype.itemsize
+        return held
+
+    def _read_bytes(self, names: list[str]) -> int:
+        """What reading one stored chunk of the arrays holds, the most of any."""
+        return max(
+            (array_row_selection_parts(self._array(name))[0] for name in names),
+            default=0,
         )
-        block = (
-            windows
-            + int(_EXPORT_BLOCK_FACTOR * (rendered + working) * block_rows)
-            + _EXPORT_READ_BYTES
+
+    def id_pass_bytes(self, block_rows: int) -> int:
+        """What a pass over the contigs' IDs holds beside their own blocks."""
+        windows = [("contig_sequence_id_offsets", 1)]
+        if self._chains_only:
+            windows.append(("contig_chain", 0))
+        return self._window_bytes(windows, block_rows) + self._read_bytes(
+            [name for name, _ in windows] + ["contig_sequence_id"]
         )
-        return _ExportPlan(
-            block_rows=block_rows,
-            held=held + _HASH_BYTES * self.n_contigs,
-            peak=held + max(setup, _HASH_BYTES * self.n_contigs, block),
+
+    def scan(self, block_bytes: int) -> tuple[np.ndarray, int]:
+        """Hash the ID of each row of the file, checked first.
+
+        Returns:
+            The ``sequence_id_hashes`` of the rows, whose ``hash_bytes`` stay
+            counted, and the contigs of a block of IDs.
+        """
+        from ...writers.airr import sequence_id_hashes
+
+        per_row = _SCAN_BYTES_PER_ROW + _SCAN_BYTES_PER_ID_BYTE * self.width(
+            "sequence_id"
         )
+        block_rows = _even_rows(self._chunk, block_bytes // per_row)
+        self.reads.reserve(
+            self.hash_bytes
+            + per_row * min(block_rows, self.n_contigs)
+            + self.id_pass_bytes(block_rows)
+        )
+        hashes = np.empty(self.n_contigs, dtype=np.uint64)
+        self.reads.held += self.hash_bytes
+        ids = _RaggedWindow(self._group, "sequence_id")
+        n_rows = 0
+        for start, stop, kept in self._spans(block_rows):
+            block = sequence_id_hashes(
+                _kept(decode_ragged(*ids.read(start, stop)), kept)
+            )
+            hashes[n_rows : n_rows + len(block)] = block
+            n_rows += len(block)
+        return hashes[:n_rows], block_rows
+
+    def plan_blocks(
+        self,
+        *,
+        n_columns: int,
+        cell_width: int,
+        clone_width: int | None,
+        block_bytes: int,
+    ) -> int:
+        """Choose the contigs of a block, and check what writing one holds.
+
+        A block holds as many contigs as fit in ``block_bytes`` when each
+        field holds its widest value: each row as rendered, the text that it
+        reads and renders beside its row, the bytes of each field and of the
+        rendering of one field, and one row quoted again. The windows of
+        stored chunks and one chunk's read come beside it.
+
+        Args:
+            n_columns: The columns of the file.
+            cell_width: The bytes of the longest cell ID.
+            clone_width: The bytes of the longest clonotype label, or None
+                when no clonotype is written.
+            block_bytes: The most bytes that a block's contigs should hold.
+
+        Returns:
+            The contigs of a block.
+        """
+        kinds = [FIELDS[name] for name in self._fields]
+        rendered = (
+            n_columns
+            + cell_width
+            + (clone_width or 0)
+            + sum(self._widths[name] for name in self._fields)
+        )
+        beside = sum(
+            self._widths[name]
+            for name in self._fields
+            if FIELDS[name] in (RAGGED, INTEGER, NUMBER)
+        )
+        working = (
+            _EXPORT_ROW_BYTES
+            + (_EXPORT_CLONE_BYTES if clone_width is not None else 0)
+            + sum(_EXPORT_FIELD_BYTES[kind] for kind in kinds)
+        )
+        rendering = max(
+            (
+                _EXPORT_RENDER_BYTES[FIELDS[name]]
+                + (4 * self._widths[name] if FIELDS[name] == NUMBER else 0)
+                for name in self._fields
+            ),
+            default=0,
+        )
+        per_row = rendered + beside + working + rendering
+        block_rows = _even_rows(self._chunk, block_bytes // per_row)
+        windows = [("contig_cells", 0)]
+        if self._chains_only:
+            windows.append(("contig_chain", 0))
+        for name, kind in zip(self._fields, kinds, strict=True):
+            windows.append(
+                (f"contig_{name}_offsets", 1)
+                if kind == RAGGED
+                else (f"contig_{name}", 0)
+            )
+        self.reads.reserve(
+            per_row * min(block_rows, self.n_contigs)
+            + 2 * rendered
+            + self._window_bytes(windows, block_rows)
+            + self._read_bytes(
+                [name for name, _ in windows]
+                + [
+                    f"contig_{name}"
+                    for name, kind in zip(self._fields, kinds)
+                    if kind == RAGGED
+                ]
+            )
+        )
+        return block_rows
 
     def _spans(self, block_rows: int) -> Iterator[tuple[int, int, np.ndarray | None]]:
         """Yield each block's contigs and the rows of the file among them."""
@@ -2436,40 +2767,6 @@ class _ExportContigs:
                     stop,
                     None if chain is None else np.flatnonzero(chain.read(start, stop)),
                 )
-
-    def scan(self, block_rows: int) -> tuple[np.ndarray, set[str]]:
-        """Hash the ID of each row and find the number fields that are whole.
-
-        Returns:
-            The ``sequence_id_hashes`` of the rows, and the number fields
-            whose rows hold only whole numbers, which are written as integers.
-        """
-        from ...writers.airr import sequence_id_hashes
-
-        ids = _RaggedWindow(self._group, "sequence_id")
-        numbers = {
-            name: _Window(self._array(f"contig_{name}"))
-            for name in self._fields
-            if FIELDS[name] == NUMBER
-        }
-        whole = dict.fromkeys(numbers, True)
-        hashes = []
-        for start, stop, kept in self._spans(block_rows):
-            hashes.append(
-                sequence_id_hashes(_kept(decode_ragged(*ids.read(start, stop)), kept))
-            )
-            for name, window in numbers.items():
-                if whole[name]:
-                    values = _kept(window.read(start, stop), kept)
-                    present = values[~np.isnan(values)]
-                    whole[name] = bool(
-                        np.isfinite(present).all()
-                        and (present == np.round(present)).all()
-                    )
-        return (
-            np.concatenate([np.empty(0, dtype=np.uint64), *hashes]),
-            {name for name, flag in whole.items() if flag},
-        )
 
     def ids_at(self, rows: np.ndarray, block_rows: int) -> np.ndarray:
         """Return the IDs of rows, given their positions in ascending order."""
@@ -2510,70 +2807,96 @@ class _ExportContigs:
             renamed: The rows whose ID is written with a suffix, ascending,
                 and their new IDs.
         """
-        positions = _Window(self._array("contig_cells"))
-        text = {
-            name: (
-                _Window(self._array(f"contig_{name}")),
-                _read(self._group, f"contig_{name}_values"),
-                _read(self._group, f"contig_{name}_offsets"),
-            )
-            for name in self._fields
-            if FIELDS[name] == TEXT
-        }
-        ragged = {
-            name: _RaggedWindow(self._group, name)
-            for name in self._fields
-            if FIELDS[name] == RAGGED
-        }
-        values = {
-            name: _Window(self._array(f"contig_{name}"))
-            for name in self._fields
-            if FIELDS[name] not in (TEXT, RAGGED)
-        }
-        renamed_rows, renamed_ids = renamed
+        windows = _BlockWindows(
+            positions=_Window(self._array("contig_cells")),
+            codes={
+                name: _Window(self._array(f"contig_{name}"))
+                for name in self._fields
+                if FIELDS[name] == TEXT
+            },
+            ragged={
+                name: _RaggedWindow(self._group, name)
+                for name in self._fields
+                if FIELDS[name] == RAGGED
+            },
+            values={
+                name: _Window(self._array(f"contig_{name}"))
+                for name in self._fields
+                if FIELDS[name] not in (TEXT, RAGGED)
+            },
+        )
         before = 0
         for start, stop, kept in self._spans(block_rows):
-            rows = np.arange(stop - start) if kept is None else kept
-            cell = _kept(positions.read(start, stop), kept)
-            block: dict[str, Any] = {
-                "cell_id": EncodedText(cell, cells.data, cells.offsets)
-            }
-            if clones is not None:
-                block["clone_id"] = EncodedText(
-                    np.asarray(clones.codes)[cell], clones.data, clones.offsets
-                )
-            for name, (window, data, offsets) in text.items():
-                block[name] = EncodedText(
-                    _kept(window.read(start, stop), kept), data, offsets
-                )
-            for name, reader in ragged.items():
-                data, bounds = reader.read(start, stop)
-                codes = rows
-                if name == "sequence_id":
-                    first, last = np.searchsorted(
-                        renamed_rows, [before, before + len(rows)]
-                    )
-                    if last > first:
-                        # A renamed row takes a value after the block's.
-                        extra = EncodedText.from_categories(
-                            np.empty(0, np.int32), renamed_ids[first:last]
-                        )
-                        data = np.concatenate([data, extra.data])
-                        bounds = np.concatenate(
-                            [bounds, extra.offsets[1:] + bounds[-1]]
-                        )
-                        codes = rows.copy()
-                        codes[renamed_rows[first:last] - before] = (
-                            stop - start + np.arange(last - first)
-                        )
-                block[name] = EncodedText(codes, data, bounds)
-            for name, window in values.items():
-                stored = _kept(window.read(start, stop), kept)
-                if FIELDS[name] == INTEGER:
-                    block[name] = pd.arrays.IntegerArray(stored, stored < 0)
-                elif FIELDS[name] == FLAG:
-                    block[name] = pd.arrays.BooleanArray(stored == 1, stored < 0)
-                else:
-                    block[name] = stored
+            block = self._block(
+                windows, start, stop, kept, before, cells, clones, renamed
+            )
             yield block
-            before += len(rows)
+            # The block is let go before the next is read.
+            del block
+            before += stop - start if kept is None else len(kept)
+
+    def _block(
+        self,
+        windows: "_BlockWindows",
+        start: int,
+        stop: int,
+        kept: np.ndarray | None,
+        before: int,
+        cells: EncodedText,
+        clones: EncodedText | None,
+        renamed: tuple[np.ndarray, np.ndarray],
+    ) -> dict[str, Any]:
+        """The columns of one block's rows, which follow ``before`` rows."""
+        rows = np.arange(stop - start) if kept is None else kept
+        cell = _kept(windows.positions.read(start, stop), kept)
+        block: dict[str, Any] = {
+            "cell_id": EncodedText(cell, cells.data, cells.offsets)
+        }
+        if clones is not None:
+            block["clone_id"] = EncodedText(
+                np.asarray(clones.codes)[cell], clones.data, clones.offsets
+            )
+        for name, window in windows.codes.items():
+            data, offsets = self._texts[name]
+            block[name] = EncodedText(
+                _kept(window.read(start, stop), kept), data, offsets
+            )
+        renamed_rows, renamed_ids = renamed
+        for name, reader in windows.ragged.items():
+            data, bounds = reader.read(start, stop)
+            codes = rows
+            if name == "sequence_id":
+                first, last = np.searchsorted(
+                    renamed_rows, [before, before + len(rows)]
+                )
+                if last > first:
+                    # A renamed row takes a value after the block's.
+                    extra = EncodedText.from_categories(
+                        np.empty(0, np.int32), renamed_ids[first:last]
+                    )
+                    data = np.concatenate([data, extra.data])
+                    bounds = np.concatenate([bounds, extra.offsets[1:] + bounds[-1]])
+                    codes = rows.copy()
+                    codes[renamed_rows[first:last] - before] = (
+                        stop - start + np.arange(last - first)
+                    )
+            block[name] = EncodedText(codes, data, bounds)
+        for name, window in windows.values.items():
+            stored = _kept(window.read(start, stop), kept)
+            if FIELDS[name] == INTEGER:
+                block[name] = pd.arrays.IntegerArray(stored, stored < 0)
+            elif FIELDS[name] == FLAG:
+                block[name] = pd.arrays.BooleanArray(stored == 1, stored < 0)
+            else:
+                block[name] = stored
+        return block
+
+
+@dataclass(frozen=True, slots=True)
+class _BlockWindows:
+    """The windows that an AIRR export's blocks read their contigs through."""
+
+    positions: _Window
+    codes: dict[str, _Window]
+    ragged: dict[str, _RaggedWindow]
+    values: dict[str, _Window]

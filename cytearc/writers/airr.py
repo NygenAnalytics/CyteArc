@@ -12,25 +12,23 @@ caller that streams its contigs holds one block at once, and
 are rendered as UTF-8 bytes and copied into its rows by a compiled loop; text
 given as ``EncodedText`` is copied from its packed bytes without being
 decoded. A value holding a tab, a newline, a carriage return or a double
-quote is quoted as pandas' ``to_csv`` quotes it.
+quote is quoted as pandas' ``to_csv`` quotes it, by a compiled loop too.
 
 The schema requires unique ``sequence_id`` values. ``suffix_repeated_ids``
 names the later occurrences of a repeated ID from 64-bit hashes of every ID,
 reading the text of only the IDs whose hashes repeat.
 """
 
-import csv
 import gzip
-import io
 import os
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from types import TracebackType
 from typing import Any, NamedTuple, Self
 
 import numpy as np
 import pandas as pd
 
-from ..metadata.records import EncodedText, decode_text, take_text
+from ..metadata.records import EncodedText, decode_text
 from ..utils.numba import njit
 
 __all__ = [
@@ -61,6 +59,9 @@ AIRR_REQUIRED_FIELDS = (
 )
 # Rows of a table written at once, which bounds the text held in memory.
 _CHUNK_ROWS = 100_000
+# Rendered bytes handed to the file at once, which bounds what compressing
+# them holds.
+_WRITE_BYTES = 2**20
 #: The logical fields, written ``T`` and ``F``.
 AIRR_LOGICAL_FIELDS = frozenset(
     {
@@ -277,29 +278,95 @@ def _lengths(column: _Bytes) -> np.ndarray:
     return lengths
 
 
-def _strings(column: _Bytes | None, n_rows: int) -> list[str]:
-    """Decode each row's value of a column, each distinct value once."""
-    if column is None:
-        return [""] * n_rows
-    codes = np.arange(n_rows) if column.codes is None else column.codes
-    needed, inverse = np.unique(codes, return_inverse=True)
-    values = np.full(len(needed), "", dtype=object)
-    present = needed >= 0
-    if present.any():
-        values[present] = take_text(column.data, column.offsets, needed[present])
-    texts: list[str] = values[inverse.reshape(-1)].tolist()
-    return texts
+@njit(cache=True, nogil=True)
+def _add_quoted_widths(
+    widths: np.ndarray,
+    data: np.ndarray,
+    offsets: np.ndarray,
+    codes: np.ndarray,
+    coded: bool,
+    first: int,
+) -> None:
+    """Add the bytes of each row's value, quoted where it must be, to its width.
+
+    Rows ``first`` on are the rows of ``widths``. A quoted value gains its two
+    quotes and a second copy of each double quote that it holds.
+    """
+    for row in range(widths.shape[0]):
+        code = codes[first + row] if coded else first + row
+        if code < 0:
+            continue
+        quotes = 0
+        special = False
+        for index in range(offsets[code], offsets[code + 1]):
+            byte = data[index]
+            if byte == 34:
+                quotes += 1
+                special = True
+            elif byte == 9 or byte == 10 or byte == 13:
+                special = True
+        widths[row] += offsets[code + 1] - offsets[code]
+        if special:
+            widths[row] += 2 + quotes
 
 
-def _rows(columns: list[_Bytes | None], n_rows: int) -> np.ndarray | bytes:
+@njit(cache=True, nogil=True)
+def _scatter_quoted(
+    out: np.ndarray,
+    cursor: np.ndarray,
+    data: np.ndarray,
+    offsets: np.ndarray,
+    codes: np.ndarray,
+    coded: bool,
+    first: int,
+    separator: int,
+) -> None:
+    """Copy each row's value, quoted where it must be, and then ``separator``.
+
+    Rows ``first`` on are the rows of ``cursor``. A value that holds a tab, a
+    newline, a carriage return or a double quote is quoted, with its double
+    quotes doubled.
+    """
+    for row in range(cursor.shape[0]):
+        code = codes[first + row] if coded else first + row
+        position = cursor[row]
+        if code >= 0:
+            start, end = offsets[code], offsets[code + 1]
+            special = False
+            for index in range(start, end):
+                byte = data[index]
+                if byte == 9 or byte == 10 or byte == 13 or byte == 34:
+                    special = True
+                    break
+            if special:
+                out[position] = 34
+                position += 1
+            for index in range(start, end):
+                byte = data[index]
+                out[position] = byte
+                position += 1
+                if special and byte == 34:
+                    out[position] = 34
+                    position += 1
+            if special:
+                out[position] = 34
+                position += 1
+        out[position] = separator
+        cursor[row] = position + 1
+
+
+def _rows(columns: list[_Bytes | None], n_rows: int) -> Iterator[np.ndarray]:
     """Join the columns of rows with tabs, each row ending with a newline.
 
     A value that holds a tab, a newline, a carriage return or a double quote
     is quoted, with its double quotes doubled, as Python's csv module and
-    pandas' ``to_csv`` quote it; ``None`` is an empty column.
+    pandas' ``to_csv`` quote it; ``None`` is an empty column. The rows come as
+    one array of bytes, unless a value is quoted: then they are rendered
+    again, in slices of rows that each hold at most the bytes of the first
+    rendering, or one row.
     """
     if not n_rows:
-        return b""
+        return
     widths = np.full(n_rows, len(columns), dtype=np.int64)
     for column in columns:
         if column is not None:
@@ -324,13 +391,51 @@ def _rows(columns: list[_Bytes | None], n_rows: int) -> np.ndarray | bytes:
             separator,
         )
     if not special:
-        return out
+        yield out
+        return
+    limit = len(out)
     del out
-    buffer = io.StringIO()
-    csv.writer(buffer, delimiter="\t", lineterminator="\n").writerows(
-        zip(*(_strings(column, n_rows) for column in columns))
-    )
-    return buffer.getvalue().encode("utf-8")
+    widths[:] = len(columns)
+    for column in columns:
+        if column is not None:
+            codes = column.codes
+            _add_quoted_widths(
+                widths,
+                column.data,
+                column.offsets,
+                _NO_CODES if codes is None else codes,
+                codes is not None,
+                0,
+            )
+    # Each row's end among the quoted rows, in place of its start.
+    np.cumsum(widths, out=cursor)
+    start = 0
+    while start < n_rows:
+        before = int(cursor[start - 1]) if start else 0
+        stop = int(np.searchsorted(cursor, before + limit, side="right"))
+        stop = min(max(stop, start + 1), n_rows)
+        positions = cursor[start:stop] - widths[start:stop]
+        out = np.empty(int(cursor[stop - 1]) - before, dtype=np.uint8)
+        positions -= before
+        for position, column in enumerate(columns):
+            separator = _NEWLINE if position == len(columns) - 1 else _TAB
+            if column is None:
+                _separate(positions, out, separator)
+                continue
+            codes = column.codes
+            _scatter_quoted(
+                out,
+                positions,
+                column.data,
+                column.offsets,
+                _NO_CODES if codes is None else codes,
+                codes is not None,
+                start,
+                separator,
+            )
+        yield out
+        del out
+        start = stop
 
 
 def _real_text(numbers: np.ndarray, whole: bool) -> np.ndarray:
@@ -526,7 +631,9 @@ class AirrRearrangementWriter:
             else None
             for column in self.columns
         ]
-        self._handle.write(_rows(columns, n_rows))
+        for rendered in _rows(columns, n_rows):
+            for start in range(0, len(rendered), _WRITE_BYTES):
+                self._handle.write(rendered[start : start + _WRITE_BYTES])
         self._n_rows += n_rows
         return n_rows
 
@@ -615,6 +722,18 @@ def sequence_id_hashes(ids: Any) -> np.ndarray:
     return np.asarray(pd.util.hash_array(text, categorize=False), dtype=np.uint64)
 
 
+def _found(ordered: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """Whether each value is among ``ordered``, which is sorted and not empty.
+
+    Searching the sorted values holds two int64 arrays and a mask the length
+    of ``values``, where ``np.isin`` sorts both arrays together.
+    """
+    at = np.searchsorted(ordered, values)
+    np.minimum(at, len(ordered) - 1, out=at)
+    found: np.ndarray = ordered[at] == values
+    return found
+
+
 def suffix_repeated_ids(
     hashes: np.ndarray, ids_at: Callable[[np.ndarray], np.ndarray]
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -643,7 +762,7 @@ def suffix_repeated_ids(
     shared = ordered[1:][ordered[1:] == ordered[:-1]]
     if not len(shared):
         return none
-    candidates = np.flatnonzero(np.isin(hashes, shared))
+    candidates = np.flatnonzero(_found(shared, hashes))
     texts = np.asarray(ids_at(candidates), dtype=object)
     codes = pd.factorize(texts)[0]
     occurrence = pd.Series(codes).groupby(codes).cumcount().to_numpy()
@@ -662,7 +781,7 @@ def suffix_repeated_ids(
         wanted = [value for value in np.unique(values).tolist() if value not in held]
         if not wanted:
             return
-        found = np.flatnonzero(np.isin(hashes, np.asarray(wanted, dtype=np.uint64)))
+        found = np.flatnonzero(_found(np.asarray(wanted, dtype=np.uint64), hashes))
         held.update((value, set()) for value in wanted)
         for value, text in zip(
             hashes[found].tolist(), np.asarray(ids_at(found)).tolist(), strict=True
@@ -677,7 +796,7 @@ def suffix_repeated_ids(
         hold(np.asarray([value], dtype=np.uint64))
         return text in held[int(value)]
 
-    hold(first_hashes[np.isin(first_hashes, ordered)])
+    hold(first_hashes[_found(ordered, first_hashes)])
     taken: set[str] = set()
     names = np.empty(len(rows), dtype=object)
     for index, (base, number, name) in enumerate(

@@ -1,6 +1,7 @@
 """Stores and checks shared by the tests of clones."""
 
 import math
+import re
 import shutil
 from collections.abc import Callable, Mapping, Sequence
 from fractions import Fraction
@@ -379,6 +380,34 @@ def levenshtein_distance(first: str, second: str) -> int:
             )
         previous = current
     return previous[-1]
+
+
+def budget_refusals(
+    store: "DataStore", run: Callable[[], object]
+) -> list[tuple[str, int]]:
+    """Each refusal on the way from a budget of one byte to one that runs.
+
+    The budget rises to each refusal's own estimate, so each later step's
+    check shows once the earlier ones pass.
+    """
+    found: list[tuple[str, int]] = []
+    budget, full = 1, store.memoryBytes
+    try:
+        for _attempt in range(100):
+            store.memoryBytes = budget
+            try:
+                run()
+                return found
+            except MemoryError as error:
+                matched = re.search(r"^(.*) holds about (\d+) bytes", str(error))
+                assert matched is not None, str(error)
+                estimate = int(matched.group(2))
+                assert estimate > budget, str(error)
+                found.append((matched.group(1), estimate))
+                budget = estimate
+    finally:
+        store.memoryBytes = full
+    raise AssertionError("the budget did not settle")
 
 
 def smallest_budget(call: Callable[[int], object], high: int) -> int:

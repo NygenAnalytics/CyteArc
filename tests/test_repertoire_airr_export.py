@@ -1,12 +1,17 @@
 import gzip
 import io
+import zlib
 
 import numpy as np
 import pandas as pd
 import pytest
+import zarr
 
 import cytearc.datastore._operations.repertoire as repertoire_operations
-from cytearc.metadata.records import encode_text
+import cytearc.writers.airr as airr_writer
+from cytearc.metadata.records import EncodedText, encode_text
+from cytearc.storage.artifacts import artifact_group, inspect_artifact
+from cytearc.storage.refs import ArtifactRef
 from cytearc.writers import write_airr_rearrangements
 from cytearc.writers.airr import (
     AIRR_REQUIRED_FIELDS,
@@ -19,6 +24,7 @@ from tests.clone_helpers import (
     CELLRANGER_HEADER,
     CLONAL_ROWS,
     TCR_ROWS,
+    budget_refusals,
     receptor_store,
     write_lines,
 )
@@ -570,3 +576,299 @@ def test_export_refuses_more_than_the_memory_budget(tmp_path, monkeypatch) -> No
     with pytest.raises(MemoryError, match="Naming 5 repeated contig IDs"):
         store.repertoire.export_airr(receptors, path)
     assert not path.exists()
+
+
+def test_export_names_missing_and_incomplete_sources(tmp_path) -> None:
+    store, receptors = _receptors(tmp_path, CLONAL_ROWS)
+    clonotypes = store.repertoire.clonotypes(receptors)
+    path = tmp_path / "refused.tsv"
+    for source in (receptors, clonotypes):
+        unsaved = ArtifactRef(
+            scope=source.scope, kind=source.kind, artifact_id="f" * 64
+        )
+        with pytest.raises(KeyError, match="Artifact does not exist"):
+            store.repertoire.export_airr(unsaved, path)
+    # An import that stopped before it finished leaves incomplete receptors,
+    # which the clonotypes read too.
+    attributes = artifact_group(store.zw, receptors).attrs
+    attributes["complete"] = False
+    try:
+        for source in (receptors, clonotypes):
+            with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+                store.repertoire.export_airr(source, path)
+    finally:
+        attributes["complete"] = True
+    attributes = artifact_group(store.zw, clonotypes).attrs
+    attributes["complete"] = False
+    try:
+        with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+            store.repertoire.export_airr(clonotypes, path)
+    finally:
+        attributes["complete"] = True
+    # Clonotypes whose receptors the store no longer holds.
+    folder = tmp_path / "store.zarr" / inspect_artifact(store.zw, receptors).path
+    folder.rename(folder.with_name(folder.name + "_moved"))
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        store.repertoire.export_airr(clonotypes, path)
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("source", ["receptors", "clonotypes"])
+def test_every_refusal_comes_before_the_file_is_written(tmp_path, source) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+    ref = (
+        store.repertoire.clonotypes(receptors) if source == "clonotypes" else receptors
+    )
+    n_fields = len(artifact_group(store.zw, receptors).attrs["fields"])
+    attempts = []
+
+    def export():
+        path = tmp_path / f"attempt_{len(attempts)}.tsv.gz"
+        attempts.append(path)
+        return store.repertoire.export_airr(ref, path, chains_only=True)
+
+    refusals = budget_refusals(store, export)
+    assert len(refusals) > 1
+    assert {what for what, _estimate in refusals} == {
+        f"Exporting the 10 contigs of 8 cells with {n_fields} fields"
+    }
+    # Only the export that ran created its file, which holds the 9 chains.
+    assert [path.exists() for path in attempts] == [False] * len(refusals) + [True]
+    assert len(_read(attempts[-1])) == 9
+
+
+def test_the_first_check_counts_one_chunk_of_the_first_text_values(tmp_path) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+    group = artifact_group(store.zw, receptors)
+    fields = group.attrs["fields"]
+    first = next(
+        name for name in fields if repertoire_operations.FIELDS[name] == "text"
+    )
+    values = group[f"contig_{first}_values"]
+    # The Python objects of the arrays that the export opens, then the first
+    # text field's distinct values, read whole: one stored chunk and its
+    # compressed bytes beside the values.
+    expected = (
+        repertoire_operations._EXPORT_OBJECT_BYTES
+        + repertoire_operations._EXPORT_OBJECT_BYTES_PER_FIELD * len(fields)
+        + repertoire_operations.array_row_selection_parts(values)[0]
+        + values.nbytes
+    )
+    refusals = budget_refusals(
+        store, lambda: store.repertoire.export_airr(receptors, tmp_path / "x.tsv")
+    )
+    assert refusals[0] == (
+        f"Exporting the 10 contigs of 8 cells with {len(fields)} fields",
+        expected,
+    )
+
+
+def test_measuring_finds_the_longest_value_of_each_field(tmp_path) -> None:
+    store = receptor_store(tmp_path)
+    header = "cell_id\tsequence_id\tlocus\tv_call\tj_call\tjunction_aa\tproductive\tumi_count\tv_identity\td_identity\tsequence"
+    rows = [
+        # A chain of an 8-base sequence and whole identities.
+        "cell0\tc0_1\tIGH\tIGHV1\tIGHJ1\tCARW\tT\t3\t1\t123456\tACGTACGT",
+        # A sequence of 50 bases beyond ASCII in a contig that is no chain,
+        # and an identity that is not whole.
+        "cell1\tc1_1\tIGH\tIGHV1\tIGHJ1\tCARW\tF\t2\t0.5\t\t" + "\u00e9" * 25,
+        "cell2\tc2_1\tIGK\tIGKV1\tIGKJ1\tCQQY\tT\t1\t-2\t-7\tGG",
+    ]
+    path = write_lines(tmp_path, "airr.tsv", header, rows)
+    receptors = store.repertoire.import_receptors(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    group = artifact_group(store.zw, receptors)
+    fields = tuple(group.attrs["fields"])
+    widths = {}
+    for chains_only in (False, True):
+        contigs = repertoire_operations._ExportContigs(
+            group,
+            fields,
+            chains_only=chains_only,
+            reads=repertoire_operations._Reads(
+                limit=10**9, held=0, what="Measuring", remedy=""
+            ),
+        )
+        contigs.measure(10**9)
+        widths[chains_only] = {
+            name: contigs.width(name)
+            for name in ("sequence_id", "sequence", "umi_count", "productive")
+            + ("v_identity", "d_identity")
+        } | {"whole": contigs.whole}
+    # The 25 two-byte characters are 50 bytes; without them, 8. Whole numbers
+    # are written as integers with a sign: 123456 takes 7 bytes and 1 or -2
+    # takes 2, and other numbers as repr writes them, in at most 24 bytes.
+    assert widths[False] == {
+        "sequence_id": 4,
+        "sequence": 50,
+        "umi_count": 19,
+        "productive": 1,
+        "v_identity": 24,
+        "d_identity": 7,
+        "whole": {"d_identity"},
+    }
+    assert widths[True] == {
+        "sequence_id": 4,
+        "sequence": 8,
+        "umi_count": 19,
+        "productive": 1,
+        "v_identity": 2,
+        "d_identity": 7,
+        "whole": {"v_identity", "d_identity"},
+    }
+    # Only the chains' identities are whole, so they are written as integers.
+    store.repertoire.export_airr(receptors, tmp_path / "chains.tsv", chains_only=True)
+    store.repertoire.export_airr(receptors, tmp_path / "all.tsv")
+    assert _read(tmp_path / "chains.tsv")["v_identity"].tolist() == ["1", "-2"]
+    assert _read(tmp_path / "all.tsv")["v_identity"].tolist() == ["1.0", "0.5", "-2.0"]
+
+
+def test_the_longest_value_sizes_the_blocks(tmp_path) -> None:
+    store = receptor_store(tmp_path)
+    header = (
+        "cell_id\tsequence_id\tlocus\tv_call\tj_call\tjunction_aa\tproductive\tsequence"
+    )
+    rows = [
+        f"cell{cell % 8}\tc{index}\tIGH\tIGHV1\tIGHJ1\tCARW\tT\tACGT"
+        for index, cell in enumerate(range(40))
+    ]
+    plain = store.repertoire.import_receptors(
+        write_lines(tmp_path, "short.tsv", header, rows),
+        cell_selection=store.snapshot_cell_selection(),
+    )
+    rows[17] = rows[17].replace("\tACGT", "\t" + "A" * 20_000)
+    long = store.repertoire.import_receptors(
+        write_lines(tmp_path, "long.tsv", header, rows),
+        cell_selection=store.snapshot_cell_selection(),
+    )
+    planned = {}
+    for name, receptors in (("short", plain), ("long", long)):
+        group = artifact_group(store.zw, receptors)
+        contigs = repertoire_operations._ExportContigs(
+            group,
+            tuple(group.attrs["fields"]),
+            chains_only=False,
+            reads=repertoire_operations._Reads(
+                limit=10**9, held=0, what="Planning", remedy=""
+            ),
+        )
+        contigs.hold_text()
+        contigs.measure(10**9)
+        planned[name] = contigs.plan_blocks(
+            n_columns=20, cell_width=5, clone_width=None, block_bytes=100_000
+        )
+    # One sequence of 20,000 bytes, read and rendered, leaves room for at
+    # most two rows of 40,000 bytes in 100,000 bytes; short rows all fit.
+    assert planned["short"] == 40 and planned["long"] <= 2
+
+
+def test_quoted_rows_render_in_slices_as_pandas_quotes_them(tmp_path) -> None:
+    # Values of double quotes double in width, so the quoted rows take more
+    # than the bytes of the first rendering, and are rendered in slices.
+    rng = np.random.default_rng(3)
+    letters = np.asarray(list('ab"\t\n\r\u00e9'))
+    ids = np.asarray(
+        ["".join(rng.choice(letters, rng.integers(0, 12))) for _ in range(300)],
+        dtype=object,
+    )
+    ids[7] = '"' * 40
+    labels = ["c1", 'q"', None, "t\tu"]
+    codes = rng.integers(-1, len(labels) - 1, size=len(ids))
+    cells = EncodedText.from_categories(codes, [label or "" for label in labels[:-1]])
+    path = tmp_path / "quoted.tsv"
+    block = {"sequence_id": ids, "cell_id": cells, "c_call": ids}
+    with AirrRearrangementWriter(path, ["cell_id", "c_call"]) as writer:
+        writer.write(block)
+        columns = [
+            airr_writer._bytes_column(block[name], name, False)
+            if name in block
+            else None
+            for name in writer.columns
+        ]
+    expected = pd.DataFrame(
+        {
+            "sequence_id": ids,
+            **{name: "" for name in AIRR_REQUIRED_FIELDS[1:]},
+            "cell_id": [labels[code] or "" if code >= 0 else "" for code in codes],
+            "c_call": ids,
+        }
+    ).to_csv(sep="\t", index=False, header=False, lineterminator="\n")
+    assert path.read_bytes().decode("utf-8").split("\n", 1)[1] == expected
+    pieces = [bytes(piece) for piece in airr_writer._rows(columns, len(ids))]
+    assert len(pieces) > 1 and b"".join(pieces).decode("utf-8") == expected
+    # One row whose quoted value takes more than the row's first rendering.
+    one = [airr_writer._packed(np.asarray(['"' * 9], dtype=object))]
+    assert [bytes(piece) for piece in airr_writer._rows(one, 1)] == [b'"' * 20 + b"\n"]
+
+
+def test_rendered_rows_reach_the_file_in_bounded_writes(tmp_path, monkeypatch) -> None:
+    store, receptors = _edge_receptors(tmp_path)
+    store.repertoire.export_airr(receptors, tmp_path / "whole.tsv")
+    monkeypatch.setattr(airr_writer, "_WRITE_BYTES", 7)
+    store.repertoire.export_airr(receptors, tmp_path / "pieces.tsv.gz")
+    assert _text(tmp_path / "pieces.tsv.gz") == _text(tmp_path / "whole.tsv")
+
+
+def test_repeated_ids_match_a_count_of_every_id(monkeypatch) -> None:
+    # Hashes of one byte collide often, so most IDs are read as text.
+    rng = np.random.default_rng(11)
+    ids = np.asarray(
+        [f"X{value}" for value in rng.integers(0, 40, size=2_000)]
+        + [f"X{value}_2" for value in rng.integers(0, 40, size=50)],
+        dtype=object,
+    )
+    rng.shuffle(ids)
+
+    def weak(texts) -> np.ndarray:
+        return np.asarray(
+            [zlib.crc32(str(text).encode()) % 251 for text in texts], dtype=np.uint64
+        )
+
+    monkeypatch.setattr(airr_writer, "sequence_id_hashes", weak)
+    rows, names = suffix_repeated_ids(weak(ids), lambda positions: ids[positions])
+    # Each later occurrence takes the next suffix that no row holds and no
+    # earlier occurrence took.
+    expected_rows, expected_names = [], []
+    taken = set(ids.tolist())
+    seen: dict[str, int] = {}
+    for row, text in enumerate(ids.tolist()):
+        seen[text] = seen.get(text, 0) + 1
+        if seen[text] == 1:
+            continue
+        number = seen[text]
+        while f"{text}_{number}" in taken:
+            number += 1
+        taken.add(f"{text}_{number}")
+        expected_rows.append(row)
+        expected_names.append(f"{text}_{number}")
+    assert rows.tolist() == expected_rows
+    assert names.tolist() == expected_names
+
+
+def test_every_export_read_decodes_one_chunk_at_a_time(tmp_path, monkeypatch) -> None:
+    # The checks count one decoded chunk of each array read, which zarr's
+    # default concurrency would exceed for arrays of several chunks.
+    store, receptors = _edge_receptors(tmp_path)
+    clonotypes = store.repertoire.clonotypes(receptors)
+    getitem = zarr.Array.__getitem__
+    limits = []
+
+    def recorded(array, selection):
+        limits.append(
+            (array.path.rsplit("/", 1)[-1], zarr.config.get("async.concurrency"))
+        )
+        return getitem(array, selection)
+
+    monkeypatch.setattr(zarr.Array, "__getitem__", recorded)
+    store.repertoire.export_airr(clonotypes, tmp_path / "x.tsv", chains_only=True)
+    monkeypatch.undo()
+    names = {name for name, _limit in limits}
+    assert {"codes", "clonotype_ids", "contig_cells", "contig_chain"} <= names
+    assert {"contig_sequence_id", "contig_v_call_values", "contig_umi_count"} <= names
+    assert {
+        limit
+        for name, limit in limits
+        if name.startswith(("contig_", "codes", "clonotype_ids"))
+    } == {1}
+    assert zarr.config.get("async.concurrency") != 1
