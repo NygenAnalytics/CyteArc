@@ -40,6 +40,7 @@ from ._heatmap_utils import (
     annotation_colors,
     annotation_legend_handles,
     draw_annotation_strips,
+    draw_dendrogram,
     normalize_annotations,
     order_heatmap,
     validate_linkage,
@@ -312,41 +313,6 @@ def _feature_rows(
         noun="features",
     )
     return [row for label in label_order for row in rows if row[1] == label]
-
-
-def _draw_dendrogram(
-    ax: Any,
-    linkage: np.ndarray,
-    *,
-    side: str,
-    color: str,
-) -> Any:
-    """Draw a linkage's dendrogram beside a heatmap's leaves.
-
-    ``side`` is ``"top"`` for the column leaves or ``"right"`` for the row
-    leaves. The dendrogram's leaves align with the heatmap cells.
-    """
-    from matplotlib.collections import LineCollection
-    from scipy.cluster.hierarchy import dendrogram
-
-    tree = dendrogram(linkage, no_plot=True)
-    # SciPy places leaf k at 10 * k + 5.
-    leaves = (np.asarray(tree["icoord"], dtype=np.float64) - 5.0) / 10.0
-    heights = np.asarray(tree["dcoord"], dtype=np.float64)
-    if side == "top":
-        inset = ax.inset_axes([0.0, 1.02, 1.0, 0.14])
-        segments = np.stack((leaves, heights), axis=-1)
-        inset.set_xlim(ax.get_xlim())
-        inset.set_ylim(0.0, max(float(heights.max()), 1e-12))
-    else:
-        inset = ax.inset_axes([1.02, 0.0, 0.14, 1.0])
-        segments = np.stack((heights, leaves), axis=-1)
-        inset.set_ylim(ax.get_ylim())
-        inset.set_xlim(0.0, max(float(heights.max()), 1e-12))
-    inset.add_collection(LineCollection(list(segments), colors=color, linewidths=0.8))
-    inset.set_axis_off()
-    inset.set_gid(f"{side}-dendrogram")
-    return inset
 
 
 def _group_axis_labels(df: pd.DataFrame, roles: tuple[str, ...]) -> pd.Series:
@@ -1057,11 +1023,11 @@ def matrixplot(
         # Clustered axes show their hierarchy beside the matrix.
         dendrogram_color = foreground_color(theme)
         if column_linkage is not None:
-            axes["column_dendrogram"] = _draw_dendrogram(
+            axes["column_dendrogram"] = draw_dendrogram(
                 ax, column_linkage, side="top", color=dendrogram_color
             )
         if row_linkage is not None:
-            axes["row_dendrogram"] = _draw_dendrogram(
+            axes["row_dendrogram"] = draw_dendrogram(
                 ax, row_linkage, side="right", color=dendrogram_color
             )
         bracket_count = (

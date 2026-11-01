@@ -143,6 +143,19 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
                 "group_clone_frequency": False,
             },
         ),
+        # codes holds each early cell's clone and fate_codes its dominant fate,
+        # a position in the artifact's group_keys attribute, -1 for none;
+        # fractions holds one column per fate.
+        "clone_fate_bias": CellValueSpec(
+            "values",
+            True,
+            {
+                "codes": True,
+                "fate_codes": True,
+                "late_cells": False,
+                "fractions": False,
+            },
+        ),
         # clone_probability is stored when the clone source gives each cell's
         # posterior, such as Numbat's p_opt.
         "clones": CellValueSpec(

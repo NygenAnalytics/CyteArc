@@ -513,6 +513,23 @@ class ClonalExpansionArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class CloneFateBiasArguments(OperationArguments):
+    operation: ClassVar[str] = "measure_clone_fate_bias"
+    artifact_kind: ClassVar[str] = "clone_fate_bias"
+
+    clones: ArtifactRef = artifact_input()
+    groups: ArtifactRef | None = artifact_input()
+    # The early cells, which the artifact labels.
+    cell_selection: ArtifactRef = artifact_input()
+    late: ArtifactRef = artifact_input()
+    # The fingerprint of each late cell's fate, or None without group_by
+    # columns.
+    group_assignments_fingerprint: str | None = artifact_input()
+    group_by: tuple[str, ...] = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class GuideThresholdArguments(OperationArguments):
     operation: ClassVar[str] = "fit_guide_thresholds"
     artifact_kind: ClassVar[str] = "guide_thresholds"

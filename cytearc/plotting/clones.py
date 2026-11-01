@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from ..clones.diversity import ORDERS
+from ..clones.fate import CloneCoupling, dominant_fates
 from ..clones.expansion import DEFAULT_RANK_SPLITS, rank_window_labels, rank_windows
 from ..clones.overlap import OVERLAP_INDICES
 from ..storage.refs import ArtifactRef
@@ -21,12 +22,14 @@ from ._figure import (
     normalize_axes_target,
 )
 from ._groups import cell_groups
+from ._heatmap_utils import draw_dendrogram
 from ._style import (
     LEGEND_SIDE_MAX_ENTRIES,
     MAX_FIGURE_WIDTH_INCHES,
     apply_figure_chrome,
     categorical_color_map,
     colormap_palette,
+    foreground_color,
     legend_side_columns,
     legend_side_rows,
     theme_context,
@@ -37,6 +40,8 @@ __all__ = [
     "clonal_overlap",
     "clonal_rarefaction",
     "clone_abundance",
+    "clone_coupling",
+    "clone_fates",
     "clone_tracking",
 ]
 
@@ -845,6 +850,300 @@ def clone_tracking(
                 "clones": clones.to_dict(),
                 "tracked": list(tracked.tracked),
                 "order": positions,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+_COUPLING_TITLES = {
+    "share_cosine": "Cosine of clone shares",
+    "abundance_cosine": "Cosine of clone sizes",
+    "normalized_covariance": "Normalized covariance",
+    "jaccard": "Jaccard index",
+}
+_COUPLING_VALUES = ("z_score", "coupling")
+
+
+@close_figures_on_error
+def clone_coupling(
+    store: Any,
+    coupling: CloneCoupling,
+    *,
+    value: str = "z_score",
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot the fate coupling of every pair of groups as a heatmap with its dendrogram.
+
+    ``coupling`` is the result of ``ds.clones.coupling``. ``value`` is
+    ``"z_score"`` (the default), the coupling's distance from its null in
+    null standard deviations, on a colour scale centred on 0, or
+    ``"coupling"``, the method's value. The groups follow the result's
+    average-linkage order, whose dendrogram is drawn above the matrix. The
+    diagonal is left blank, and so are pairs that were not compared and
+    z-scores that are not finite; a coupling measured without permutations
+    has no z-scores and is refused. Matrices of at most 12 groups print their
+    values, and of at most 40 name their groups on the axes. By default the
+    figure grows with the groups up to the width of a page.
+
+    Tables: ``matrix`` (groups by groups, in the drawn order) and ``pairs``.
+    """
+    if not isinstance(coupling, CloneCoupling):
+        raise TypeError("coupling must be the CloneCoupling of ds.clones.coupling")
+    if value not in _COUPLING_VALUES:
+        raise ValueError(f"value must be one of {', '.join(_COUPLING_VALUES)}")
+    if value == "z_score" and not coupling.permutations:
+        raise ValueError(
+            "The coupling was measured without permutations, so it has no "
+            "z-scores; plot value='coupling', or measure it with permutations"
+        )
+    names = list(coupling.order)
+    positions = pd.Index(names)
+    first = positions.get_indexer(coupling.pairs["group_1"])
+    second = positions.get_indexer(coupling.pairs["group_2"])
+    pair_values = coupling.pairs[value].to_numpy(dtype=np.float64)
+    values = np.full((len(names), len(names)), np.nan)
+    values[first, second] = pair_values
+    values[second, first] = pair_values
+    matrix = pd.DataFrame(values, index=pd.Index(names), columns=pd.Index(names))
+    drawn = np.where(np.isfinite(values), values, np.nan)
+    finite = drawn[np.isfinite(drawn)]
+    centred = value == "z_score" or bool((finite < 0).any())
+    if figsize is None and target is None:
+        side = min(
+            max(4.0, 0.55 * len(names) + 2.5),
+            MAX_FIGURE_WIDTH_INCHES - _COLORBAR_INCHES,
+        )
+        figsize = (side + _COLORBAR_INCHES, side + 0.8)
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=["matrix"], figsize=figsize, n_columns=1
+        )
+        ax = axes["matrix"]
+        limit = float(np.abs(finite).max()) if finite.size else 1.0
+        image = ax.imshow(
+            np.ma.masked_invalid(drawn),
+            cmap="RdBu_r" if centred else "viridis",
+            vmin=-limit if centred else None,
+            vmax=limit if centred else None,
+        )
+        if len(names) <= _NAMED_GROUPS:
+            ax.set_xticks(np.arange(len(names)), names, rotation=90)
+            ax.set_yticks(np.arange(len(names)), names)
+        else:
+            ax.set_xticks([])
+            ax.set_yticks([])
+        title = _COUPLING_TITLES.get(coupling.method, str(coupling.method))
+        ax.set_title(f"{title}, z-score" if value == "z_score" else title, y=1.18)
+        if len(names) <= _ANNOTATED_GROUPS:
+            for row in range(len(names)):
+                for column in range(len(names)):
+                    shown = drawn[row, column]
+                    if np.isnan(shown):
+                        continue
+                    # Dark text on light cells, light text on dark ones.
+                    red, green, blue, _alpha = image.cmap(image.norm(shown))
+                    light = 0.299 * red + 0.587 * green + 0.114 * blue > 0.5
+                    ax.text(
+                        column,
+                        row,
+                        f"{shown:.2g}" if value == "z_score" else f"{shown:.3g}",
+                        ha="center",
+                        va="center",
+                        color="black" if light else "white",
+                        fontsize="x-small",
+                    )
+        axes["dendrogram"] = draw_dendrogram(
+            ax,
+            _ordered_linkage(coupling),
+            side="top",
+            color=foreground_color(theme),
+        )
+        if show_legend:
+            figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"matrix": matrix, "pairs": coupling.pairs},
+        legends=(LegendSpec(kind="continuous", label=value),),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(coupling.group_sizes["cells"].sum()),
+            renderer="matplotlib",
+            notes=("clones",),
+            extras={
+                "clones": coupling.clones.to_dict(),
+                "method": coupling.method,
+                "value": value,
+                "groups": names,
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+def _ordered_linkage(coupling: Any) -> np.ndarray:
+    """The coupling's tree, checked to place its leaves in the drawn order."""
+    from scipy.cluster.hierarchy import leaves_list
+
+    tree = np.asarray(coupling.linkage, dtype=np.float64)
+    names = coupling.group_sizes["group"].to_numpy(dtype=object)
+    if [str(name) for name in names[leaves_list(tree)].tolist()] != list(
+        coupling.order
+    ):
+        raise ValueError("The coupling's order does not follow its linkage")
+    return tree
+
+
+@close_figures_on_error
+def clone_fates(
+    store: Any,
+    bias: ArtifactRef,
+    *,
+    top: int = 40,
+    normalize: bool = False,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot the fates of the clones of early cells, each clone's late cells by fate.
+
+    ``bias`` is a ``clone_fate_bias`` artifact, such as one from
+    ``ds.clones.fate_bias``. The plot draws the ``top`` clones with the most
+    late cells, ties to the larger clone overall, grouped by their dominant
+    fate, the fate that holds the most of their late cells, in the order of
+    the fates, and within a fate from the most late cells to the fewest;
+    clones whose late cells tie between fates come last. The lower panel
+    stacks each clone's late cells by fate, or their shares with
+    ``normalize=True``, and the upper panel draws its early cells, whose
+    fractions follow the clone's late cells. Plots of at most 40 clones name
+    them on the axis. By default the figure grows with the clones up to the
+    width of a page.
+
+    Tables: ``clones`` (``clone``, ``fate``, the dominant fate, missing for a
+    tie, ``early_cells``, ``late_cells``, then the late cells of each fate).
+    """
+    top = integer_argument(top, "top", minimum=1)
+    if not isinstance(normalize, bool):
+        raise TypeError("normalize must be a boolean")
+    loaded = _clones_method(store, "load_fate_bias")(bias)
+    fate_names = [str(name) for name in loaded.fates["fate"].tolist()]
+    rows = loaded.clone_fates
+    clone_codes = np.asarray(rows["clone"].cat.codes, dtype=np.int64)
+    fate_codes = np.asarray(rows["fate"].cat.codes, dtype=np.int64)
+    # One row per clone, in the order of the clone codes, with its late cells
+    # in each fate.
+    codes, at = np.unique(clone_codes, return_inverse=True)
+    cells = np.zeros((len(codes), len(fate_names)), dtype=np.int64)
+    np.add.at(cells, (at.reshape(-1), fate_codes), rows["cells"].to_numpy(np.int64))
+    early_cells = np.zeros(len(codes), dtype=np.int64)
+    early_cells[at.reshape(-1)] = rows["early_cells"].to_numpy(np.int64)
+    late_cells = cells.sum(axis=1)
+    dominant = dominant_fates(cells)
+    # The clones with the most late cells, ties to the lower code, the larger
+    # clone overall, drawn by dominant fate and then by late cells.
+    chosen = np.lexsort((codes, -late_cells))[:top]
+    rank = np.where(dominant[chosen] >= 0, dominant[chosen], len(fate_names))
+    chosen = chosen[np.lexsort((codes[chosen], -late_cells[chosen], rank))]
+    labels = rows["clone"].cat.categories.to_numpy(dtype=object)
+    shown_labels = [str(label) for label in labels[codes[chosen]].tolist()]
+    table = pd.DataFrame(cells[chosen], columns=pd.Index(fate_names, dtype=object))
+    table.insert(0, "clone", shown_labels)
+    table.insert(
+        1,
+        "fate",
+        pd.Categorical.from_codes(dominant[chosen], categories=pd.Index(fate_names)),
+    )
+    table.insert(2, "early_cells", early_cells[chosen])
+    table.insert(3, "late_cells", late_cells[chosen])
+    if figsize is None and target is None:
+        figsize = (
+            min(max(6.0, 0.22 * len(chosen) + 3.5), MAX_FIGURE_WIDTH_INCHES),
+            5.0,
+        )
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=["early", "fates"], figsize=figsize, n_columns=1
+        )
+        if owns:
+            # The early cells take a quarter of the height.
+            axes["early"].get_gridspec().set_height_ratios([1, 3])
+        colors = categorical_color_map(fate_names)
+        x = np.arange(len(chosen))
+        ax = axes["early"]
+        ax.bar(x, early_cells[chosen], color=foreground_color(theme), width=0.8)
+        ax.set_ylabel("Early cells")
+        ax.set_xticks([])
+        ax.set_title("Fates of the clones of early cells")
+        ax = axes["fates"]
+        drawn = cells[chosen].astype(np.float64)
+        if normalize:
+            totals = drawn.sum(axis=1, keepdims=True)
+            drawn = np.divide(drawn, totals, out=np.zeros_like(drawn), where=totals > 0)
+        bottom = np.zeros(len(chosen))
+        for position, name in enumerate(fate_names):
+            ax.bar(
+                x,
+                drawn[:, position],
+                bottom=bottom,
+                color=colors[name],
+                label=name,
+                width=0.8,
+            )
+            bottom += drawn[:, position]
+        if len(chosen) <= _NAMED_GROUPS:
+            ax.set_xticks(x, shown_labels, rotation=90, fontsize="small")
+        else:
+            ax.set_xticks([])
+        ax.set_xlabel("Clone")
+        ax.set_ylabel("Share of late cells" if normalize else "Late cells")
+        axes["early"].set_xlim(ax.get_xlim())
+        if show_legend:
+            ax.legend(
+                title="Fate",
+                frameon=False,
+                fontsize="small",
+                title_fontsize="small",
+                loc="upper left",
+                bbox_to_anchor=(1, 1),
+            )
+        apply_figure_chrome(figure, theme)
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables={"clones": table},
+        legends=(LegendSpec(kind="categorical", label="Fate"),),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(late_cells[chosen].sum()),
+            renderer="matplotlib",
+            notes=("clones",),
+            extras={
+                "bias": bias.to_dict(),
+                "top": top,
+                "normalize": normalize,
+                "clones": shown_labels,
             },
         ),
         owns_figure=owns,

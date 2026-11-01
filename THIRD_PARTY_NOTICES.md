@@ -170,6 +170,13 @@ CyteArc is copyright Nygen Analytics AB and is licensed under the BSD 3-Clause L
 - License: MIT
 - Used in: `cytearc/perturbation/mixtures.py` (the Poisson-Gaussian model of `ga_poisson_gauss` at v0.9.11: its priors, the cells and guides it fits, and its threshold rule).
 
+### CoSpar
+
+- Source: <https://github.com/ShouWenWang-Lab/cospar>
+- Copyright (c) 2020 Shou-Wen Wang
+- License: MIT
+- Used in: `cytearc/clones/fate.py`, whose fate coupling methods follow the definitions of CoSpar 0.5.0's `get_normalized_covariance` and `coarse_grain_clone_over_cell_clusters` (the `"SW"`, `"Weinreb"` and `"Jaccard"` methods and the normalisation of each group and then each clone), whose null shuffles labels as `pvalue_for_fate_coupling` does, and whose fate fractions and Fisher tests follow `compute_state_potential` on the clonal transition map of `infer_Tmap_from_clonal_info_alone` and `clonal_fate_bias`, written from that source without its pseudocounts. `tests/cospar_0_5_0_golden.json` holds CoSpar 0.5.0's outputs on a synthetic experiment that the test suite compares with.
+
 ## Data in this repository
 
 - **JASPAR** (<https://jaspar.elixir.no>), CC BY 4.0: the motif matrices MA0004.1 (Arnt) and
@@ -835,4 +842,17 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+### CoSpar (MIT License)
+
+```text
+The MIT License (MIT)
+Copyright (c) 2020 Shou-Wen Wang
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```

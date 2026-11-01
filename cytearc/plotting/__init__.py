@@ -37,6 +37,8 @@ if TYPE_CHECKING:
         clonal_overlap as clonal_overlap,
         clonal_rarefaction as clonal_rarefaction,
         clone_abundance as clone_abundance,
+        clone_coupling as clone_coupling,
+        clone_fates as clone_fates,
         clone_tracking as clone_tracking,
     )
     from .composition import composition as composition
@@ -107,6 +109,8 @@ __all__ = [
     "clonal_overlap",
     "clonal_rarefaction",
     "clone_abundance",
+    "clone_coupling",
+    "clone_fates",
     "clone_tracking",
     "cluster_tree",
     "cluster_connectivity",
@@ -171,6 +175,8 @@ __getattr__, __dir__ = _lazy_facade(
         "clonal_overlap": ".clones",
         "clonal_rarefaction": ".clones",
         "clone_abundance": ".clones",
+        "clone_coupling": ".clones",
+        "clone_fates": ".clones",
         "clone_tracking": ".clones",
         "cluster_tree": ".cluster_tree",
         "cluster_connectivity": ".cluster_connectivity",

@@ -86,6 +86,9 @@ class ClonesAccessor(_Accessor):
     rarefaction = _bind(_CloneOperationsMixin._clones_rarefaction)
     overlap = _bind(_CloneOperationsMixin._clones_overlap)
     track = _bind(_CloneOperationsMixin._clones_track)
+    coupling = _bind(_CloneOperationsMixin._clones_coupling)
+    fate_bias = _bind(_CloneOperationsMixin._clones_fate_bias)
+    load_fate_bias = _bind(_CloneOperationsMixin._clones_load_fate_bias)
 
 
 class ClustersAccessor(_Accessor):

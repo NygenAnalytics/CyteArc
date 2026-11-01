@@ -39,6 +39,17 @@ from ...clones.expansion import (
     frequency_labels,
     group_clone_sizes,
 )
+from ...clones.fate import (
+    COUPLING_METHODS,
+    FATE_CELL_COLUMNS,
+    CloneCoupling,
+    CloneFateBias,
+    clone_coupling,
+    coupling_plan,
+    fate_bias,
+    fate_bias_bytes,
+    fate_bias_tables,
+)
 from ...clones.groups import group_frame, pair_counts
 from ...clones.overlap import (
     CloneOverlap,
@@ -52,6 +63,7 @@ from ...clones.overlap import (
 from ...metadata.arguments import (
     ClonalExpansionArguments,
     CloneColumnArguments,
+    CloneFateBiasArguments,
     CloneImportArguments,
 )
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
@@ -191,6 +203,31 @@ _BYTES_PER_CLONE_COUNT = 40
 # columns, and a byte per chosen clone and group.
 _TRACK_BYTES_PER_ROW = 100
 _TRACK_BYTES_PER_KEY_COLUMN = 16
+# The columns of the tables of coupling and fate bias besides the groups'
+# labels, which a key column of the groups may not share.
+_COUPLING_COLUMNS = frozenset({"group", "cells", "clones"})
+_FATE_BIAS_COLUMNS = frozenset(
+    {"group", "clone", "fate", "early_cells", "late_cells", "cells"}
+    | {"fraction", "p_value", "q_value"}
+)
+# Checking that no cell is both early and late holds, for each cell of the
+# two selections, its row and its place in their sorted union.
+_SELECTION_BYTES_PER_CELL = 40
+# Each pair of a fate and a clone holds its fate, clone code and cells.
+_BYTES_PER_FATE_PAIR = 24
+# Writing the fate bias holds, for each early cell, its dominant fate as
+# text of four bytes per character, and its other arrays.
+_BIAS_WRITE_BYTES_PER_CELL = 40
+_BIAS_WRITE_BYTES_PER_CHARACTER = 4
+# The tables of loaded fate bias hold, for each early cell, its ID, clone,
+# fate and late cells and the pandas index, for each of its fractions the
+# value read and its column in the table, and for each row of the table of
+# clones and fates its labels, counts and tests: 92 to 113 bytes at their
+# peak as traced on 1 to 3 million rows with one to three key columns.
+_BIAS_TABLE_BYTES_PER_CELL = 200
+_BIAS_TABLE_BYTES_PER_FRACTION = 24
+_BIAS_TABLE_BYTES_PER_ROW = 160
+_BIAS_TABLE_BYTES_PER_KEY_COLUMN = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -1936,6 +1973,545 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             group_by=group_columns(group_by),
             groups=groups,
             cell_selection=cell_selection,
+        )
+
+    @validation_scoped
+    def _clones_coupling(
+        self,
+        clones: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        cell_selection: ArtifactRef | None = None,
+        method: str = COUPLING_METHODS[0],
+        permutations: int = 1000,
+        seed: int = 0,
+    ) -> CloneCoupling:
+        """Measure how strongly groups of cells share clones, against shuffled labels.
+
+        Cell types whose cells often share a clone descend from common
+        progenitors, so the clones that two groups share measure how closely
+        their fates are coupled. The groups are the combinations of the
+        labels of the ``group_by`` cell metadata columns, such as the cell
+        type, and of the ``groups`` label artifact, among the cells of
+        ``cell_selection``, such as the cells of one time point. Cells
+        without a clone or a label are left out. Nothing is saved.
+
+        ``method`` names how a pair's coupling is measured from each clone's
+        cells in each group, as CoSpar's ``fate_coupling`` measures it:
+        ``"share_cosine"``, CoSpar's default, the cosine over the clones of
+        each group's share of each clone, after each group's cells of a clone
+        are divided by its cells with a clone and each clone's shares by
+        their sum, so every clone counts once; ``"abundance_cosine"``, the
+        cosine of the clone sizes, which ``overlap`` also reports;
+        ``"normalized_covariance"``, the covariance over the clones of the
+        two groups' cells over the product of their mean cells per clone,
+        negative when they share fewer clones than chance; and ``"jaccard"``,
+        the clones of both groups over the clones of either.
+
+        Each value is compared with a null: the group labels of the cells with
+        a clone are shuffled ``permutations`` times, which keeps each clone's
+        cells and each group's cells, and the coupling measured again. The
+        z-score is the value's distance from the null mean in null standard
+        deviations, so groups of different sizes compare. Permutation ``k``
+        draws from a random stream keyed by ``seed`` and ``k``, so the result
+        does not depend on ``nthreads``. The groups are ordered by average
+        linkage on the coupling, the most coupled together.
+
+        Args:
+            clones: A ``clones`` artifact.
+            group_by: Cell metadata columns whose labels define the groups.
+            groups: A cell-label artifact whose labels define the groups.
+            cell_selection: Only these cells, or None for every cell of the
+                clones.
+            method: ``"share_cosine"``, ``"abundance_cosine"``,
+                ``"normalized_covariance"`` or ``"jaccard"``.
+            permutations: The permutations of the null, 0 for none, or at
+                least 2 to estimate its spread.
+            seed: The seed of the permutations, a non-negative integer below
+                2**64.
+
+        Returns:
+            The groups' cells and clones, each pair's coupling with its null
+            and z-score, and the groups' order.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``clones`` is not a clone artifact, ``method`` is
+                unknown, ``permutations`` is 1 or negative, ``seed`` is
+                negative or 2**64 or more, no cell has both a clone and a
+                group, fewer than two groups hold a cell with a clone, no two
+                groups share the labels that the clones keep apart, a column
+                of the groups is missing or named twice, a key column names a
+                column of the result, two groups get one name, or
+                ``"normalized_covariance"`` meets fewer than two clones.
+            KeyError: If the store holds no such ``clones`` artifact.
+            RuntimeError: If the ``clones`` artifact is incomplete, as an
+                import that stopped before it finished leaves it.
+            MemoryError: If reading the clones, grouping the cells, or the
+                coupling and one worker of its null do not fit the memory
+                budget.
+        """
+        if not isinstance(method, str) or method not in COUPLING_METHODS:
+            raise ValueError(
+                f"method must be one of {', '.join(COUPLING_METHODS)}, not {method!r}"
+            )
+        if isinstance(permutations, bool) or not isinstance(
+            permutations, int | np.integer
+        ):
+            raise TypeError("permutations must be a non-negative integer")
+        if permutations < 0 or permutations == 1:
+            raise ValueError(
+                "permutations must be 0, for no null, or at least 2, to estimate "
+                "its spread"
+            )
+        if isinstance(seed, bool) or not isinstance(seed, int | np.integer):
+            raise TypeError("seed must be a non-negative integer")
+        if not 0 <= seed < 2**64:
+            raise ValueError("seed must be a non-negative integer below 2**64")
+        source = self._read_clone_input(clones)
+        keys, pair_groups, pair_codes, pair_cells = self._clone_pair_counts(
+            source,
+            group_by=group_by,
+            groups=groups,
+            cell_selection=cell_selection,
+            reserved=_COUPLING_COLUMNS,
+        )
+        if len(pair_cells) == 0:
+            raise ValueError("No cell has both a clone and a group")
+        if len(keys) < 2:
+            raise ValueError("Coupling needs at least two groups of cells with a clone")
+        strata = _kept_apart_strata(source, keys)
+        n_pairs, _largest = overlap_extent(len(keys), strata)
+        if n_pairs == 0:
+            raise ValueError(
+                f"No two groups share their labels in {_kept_apart(source)}, "
+                "which the clones keep apart, so no pair of groups can be "
+                "compared"
+            )
+        # Beside the coupling: the clones read, their counts in each group
+        # and each group's rows.
+        held = (
+            _BYTES_PER_CLONE_COUNT * len(pair_cells)
+            + _SUMMARY_BYTES_PER_GROUP * len(keys)
+            + self._clone_input_bytes(clones, with_ids=False)
+        )
+        import numba
+
+        workers, batch, needed = coupling_plan(
+            len(keys),
+            n_pairs,
+            int(pair_cells.sum()),
+            len(pair_cells),
+            permutations=int(permutations),
+            # More workers than Numba's threads would only hold scratch.
+            nthreads=min(
+                self.nthreads, int(getattr(numba.config, "NUMBA_NUM_THREADS"))
+            ),
+            available=self.memoryBytes - held,
+        )
+        resident = held + needed
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Measuring the coupling of {len(keys)} groups, {n_pairs} pairs, "
+                f"holds about {resident} bytes, more than the memory budget of "
+                f"{self.memoryBytes} bytes. Compare fewer groups, with fewer "
+                "group_by columns or a cell_selection, or raise mem_budget."
+            )
+        from scipy.cluster.hierarchy import leaves_list
+
+        pairs, tree = clone_coupling(
+            pair_groups,
+            pair_codes,
+            pair_cells,
+            len(keys),
+            method=method,
+            strata=strata,
+            permutations=int(permutations),
+            seed=int(seed),
+            workers=workers,
+            batch=batch,
+        )
+        names = keys["group"].to_numpy(dtype=object)
+        pairs.insert(0, "group_1", names[pairs.pop("first").to_numpy()])
+        pairs.insert(1, "group_2", names[pairs.pop("second").to_numpy()])
+        logger.info(
+            f"Measured the {method} coupling of {n_pairs} pairs of {len(keys)} "
+            f"groups against {int(permutations)} permutations on {workers} "
+            f"threads, {batch} at once, holding about {resident} bytes"
+        )
+        return CloneCoupling(
+            group_sizes=_group_sizes(keys, pair_groups, pair_cells),
+            pairs=pairs,
+            order=tuple(str(name) for name in names[leaves_list(tree)].tolist()),
+            linkage=tree,
+            method=method,
+            permutations=int(permutations),
+            seed=int(seed),
+            clones=clones,
+            group_by=group_columns(group_by),
+            groups=groups,
+            cell_selection=cell_selection,
+        )
+
+    @validation_scoped
+    def _clones_fate_bias(
+        self,
+        clones: ArtifactRef,
+        *,
+        group_by: str | Sequence[str] | None = None,
+        groups: ArtifactRef | None = None,
+        early: ArtifactRef,
+        late: ArtifactRef,
+        invalidate_cache: bool = False,
+    ) -> ArtifactRef:
+        """Follow each early cell's clone to its late cells, and test each clone's fates.
+
+        The late cells of an early cell's clone, such as its clone-mates
+        sampled days later, show which fates its progenitor took. The fates
+        are the groups of the late cells: the combinations of the labels of
+        the ``group_by`` cell metadata columns, such as the cell type, and of
+        the ``groups`` label artifact. A late cell without a label has no
+        fate. No cell may be both early and late.
+
+        For each early cell the artifact holds the share of its clone's late
+        cells in each fate, the clonal fate map of CoSpar's ``fate_map`` on a
+        transition map of clones alone, its dominant fate, the fate that
+        holds the most of them, and its clone's late cells. An early cell
+        whose clone has no late cell has no fractions and no dominant fate,
+        and neither has one whose clone's late cells tie between fates. For
+        each clone with late cells it holds their count in each fate and a
+        one-sided Fisher test per fate: the chance of at least that many of
+        the clone's late cells in the fate if they were drawn at random from
+        all late cells with a fate, those without a clone included, as
+        CoSpar's ``clonal_fate_bias`` tests a clone among the late cells,
+        with the Benjamini and Hochberg adjustment over the clones within
+        each fate. When the clones keep labels apart, such as receptor types,
+        each fate holds one such label, which a late cell without a clone
+        lacks, so it has no fate.
+
+        The artifact's canonical ``values`` hold each early cell's dominant
+        fate, empty for none, so ``ds.select_cells(bias, include=["Neutrophil"])``
+        keeps the early cells whose clones went mostly to neutrophils.
+        ``codes``, each cell's clone, ``fate_codes``, its dominant fate's
+        position, ``late_cells`` and ``fractions``, one column per fate, are
+        its other per-cell arrays.
+
+        Args:
+            clones: A ``clones`` artifact.
+            group_by: Cell metadata columns whose labels define the fates.
+            groups: A cell-label artifact whose labels define the fates.
+            early: The early cells, a cell selection.
+            late: The late cells, a cell selection.
+            invalidate_cache: Measure again instead of reusing a saved result.
+
+        Returns:
+            A complete datastore-scoped ``clone_fate_bias`` artifact that
+            labels the early cells. Read it with
+            :meth:`~cytearc.datastore.namespaces.ClonesAccessor.load_fate_bias`
+            or plot it with ``ds.plots.clone_fates``.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``clones`` is not a clone artifact, ``early`` or
+                ``late`` is not a cell selection or selects no cell, a cell is
+                both early and late, no late cell has both a clone and a fate,
+                fewer than two fates hold a late cell, a column of the fates
+                is missing or named twice, a key column names a column of the
+                result, two fates get one name, or a fate is named
+                ``"clone"``, ``"late_cells"`` or ``"fate"``.
+            KeyError: If the store holds no such ``clones`` artifact.
+            RuntimeError: If the ``clones`` artifact is incomplete, as an
+                import that stopped before it finished leaves it.
+            PermissionError: If the store is read-only and the result is not
+                saved yet.
+            MemoryError: If reading the clones, grouping the late cells, or
+                the measurement does not fit the memory budget.
+        """
+        bool_argument(invalidate_cache, "invalidate_cache")
+        for name, selection in (("early", early), ("late", late)):
+            if not isinstance(selection, ArtifactRef):
+                raise TypeError(f"{name} must be an ArtifactRef")
+            if selection.kind != "cell_selection":
+                raise ValueError(
+                    f"{name} must be a cell_selection artifact, not {selection.kind!r}"
+                )
+        source = self._read_clone_input(clones)
+        held = self._clone_input_bytes(clones, with_ids=False)
+        n_early = int(validate_cell_selection(self.zw, early).selected_count)
+        n_late = int(validate_cell_selection(self.zw, late).selected_count)
+        for name, count in (("early", n_early), ("late", n_late)):
+            if count == 0:
+                raise ValueError(f"{name} selects no cell")
+        resident = held + _SELECTION_BYTES_PER_CELL * (n_early + n_late)
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Checking that none of {n_early} early cells is among {n_late} "
+                f"late cells holds about {resident} bytes, more than the memory "
+                f"budget of {self.memoryBytes} bytes. Raise mem_budget."
+            )
+        shared = np.intersect1d(
+            self._clone_selection_indices(early),
+            self._clone_selection_indices(late),
+            assume_unique=True,
+        )
+        if len(shared):
+            raise ValueError(
+                f"early and late share {len(shared)} cells; pass cell selections "
+                "that no cell is in both, such as two time points"
+            )
+        del shared
+        _late, late_codes, late_kept = self._measured_clone_cells(source, late)
+        # The labels that the clones keep apart belong to the clones, so a late
+        # cell without a clone has none, and no fate, whatever label its
+        # source gives it.
+        without_clone = late_codes < 0
+        cleared = []
+        for name, labels in late_kept:
+            kept_labels = np.array(labels, dtype=object)
+            kept_labels[without_clone] = None
+            cleared.append((name, kept_labels))
+        late_kept = tuple(cleared)
+        grouped = cell_groups(
+            self.zw,
+            self.cells,
+            late,
+            np.ones(len(late_codes), dtype=bool),
+            group_by=group_by,
+            groups=groups,
+            cell_selection=None,
+            memory_bytes=self.memoryBytes,
+            kept_apart=late_kept,
+            reserved=_FATE_BIAS_COLUMNS,
+        )
+        counted = (late_codes >= 0) & (grouped.codes >= 0)
+        if not counted.any():
+            raise ValueError("No cell has both a clone and a group")
+        keys = group_frame(grouped.key_columns, grouped.keys)
+        if len(keys) < 2:
+            raise ValueError("Fate bias needs at least two fates among the late cells")
+        names = keys["group"].to_numpy(dtype=object)
+        clashes = [name for name in names.tolist() if name in FATE_CELL_COLUMNS]
+        if clashes:
+            raise ValueError(
+                f"A fate is named {clashes[0]!r}, which is also a column of the "
+                "table of early cells; rename its label"
+            )
+        columns = group_columns(group_by)
+        n_fates = len(keys)
+        arguments = CloneFateBiasArguments(
+            clones=clones,
+            groups=groups,
+            cell_selection=early,
+            late=late,
+            # Each late cell's fate by its labels, so other labels in the
+            # columns give another result.
+            group_assignments_fingerprint=grouped.fingerprint() if columns else None,
+            group_by=columns,
+            invalidate_cache=invalidate_cache,
+        )
+        record = arguments.to_record()
+
+        def has_clones(_ref: ArtifactRef, group: zarr.Group) -> bool:
+            shapes = {
+                name: getattr(group.get(name), "shape", None)
+                for name in (
+                    "clone_codes",
+                    "clone_early_cells",
+                    "clone_fate_cells",
+                    "clone_p_values",
+                    "clone_q_values",
+                    "fate_cells",
+                )
+            }
+            n_tested = (shapes["clone_codes"] or (None,))[0]
+            return (
+                shapes["clone_early_cells"] == (n_tested,)
+                and shapes["clone_fate_cells"] == (n_tested, n_fates)
+                and shapes["clone_p_values"] == (n_tested, n_fates)
+                and shapes["clone_q_values"] == (n_tested, n_fates)
+                and shapes["fate_cells"] == (n_fates,)
+            )
+
+        planned = plan_cell_data_artifact(
+            self.zw,
+            scope="datastore",
+            kind=arguments.artifact_kind,
+            operation=arguments.operation,
+            parameters=record.parameters,
+            inputs=record.inputs,
+            execution_options=record.execution_options,
+            cell_selection=early,
+            arrays={
+                "values": ((n_early,), None),
+                "codes": ((n_early,), "i"),
+                "fate_codes": ((n_early,), "i"),
+                "late_cells": ((n_early,), "i"),
+                "fractions": ((n_early, n_fates), "f"),
+            },
+            invalidate_cache=invalidate_cache,
+            required_attributes=("group_keys", "key_columns"),
+            reuse_validator=has_clones,
+        )
+        if planned.reused:
+            return planned.ref
+        self._require_writable(arguments.operation)
+        # Counting each clone's late cells in each fate holds a key per late
+        # cell, less than grouping them held.
+        pair_fates, pair_codes, pair_cells = pair_counts(
+            grouped.codes[counted], late_codes[counted]
+        )
+        fate_cells = np.bincount(
+            grouped.codes[grouped.codes >= 0], minlength=n_fates
+        ).astype(np.int64)
+        strata = _kept_apart_strata(source, keys)
+        # Nothing per late cell is held beyond the counts.
+        group_keys, key_columns = grouped.keys, list(grouped.key_columns)
+        del grouped, late_codes, late_kept, counted
+        n_tested = len(sorted_unique(pair_codes))
+        n_late_counted = int(pair_cells.sum())
+        _early, early_codes, _kept = self._measured_clone_cells(source, early)
+        width = max(len(str(name)) for name in names.tolist())
+        resident = (
+            held
+            + _BYTES_PER_FATE_PAIR * len(pair_cells)
+            + fate_bias_bytes(n_early, n_tested, n_fates)
+            + n_early
+            * (_BIAS_WRITE_BYTES_PER_CELL + _BIAS_WRITE_BYTES_PER_CHARACTER * width)
+        )
+        if resident > self.memoryBytes:
+            raise MemoryError(
+                f"Measuring the fate bias of {n_early} early cells and {n_tested} "
+                f"clones in {n_fates} fates holds about {resident} bytes, more "
+                f"than the memory budget of {self.memoryBytes} bytes. Group the "
+                "late cells into fewer fates, or raise mem_budget."
+            )
+        result = fate_bias(
+            early_codes, pair_fates, pair_codes, pair_cells, fate_cells, strata
+        )
+        del pair_fates, pair_codes, pair_cells
+        values = np.full(n_early, "", dtype=object)
+        has_fate = result.dominant >= 0
+        values[has_fate] = names[result.dominant[has_fate]]
+        write_cell_data_artifact(
+            self.zw,
+            planned,
+            {
+                "values": values,
+                "codes": early_codes.astype(np.int32),
+                "fate_codes": result.dominant.astype(np.int32),
+                "late_cells": result.late_cells,
+                "fractions": result.fractions,
+                "clone_codes": result.clones,
+                "clone_early_cells": result.clone_early_cells,
+                "clone_fate_cells": result.clone_cells,
+                "clone_p_values": result.p_values,
+                "clone_q_values": result.q_values,
+                "fate_cells": result.fate_cells,
+            },
+            attributes={"group_keys": group_keys, "key_columns": key_columns},
+        )
+        logger.info(
+            f"Measured the fate bias of {int(np.count_nonzero(result.late_cells))} "
+            f"of {n_early} early cells, whose clones hold {n_late_counted} late "
+            f"cells in {n_fates} fates, and tested {n_tested} clones"
+        )
+        return planned.ref
+
+    @validation_scoped
+    def _clones_load_fate_bias(self, bias: ArtifactRef) -> CloneFateBias:
+        """Read saved fate bias as tables of early cells, clones and fates.
+
+        Args:
+            bias: A ``clone_fate_bias`` artifact, such as one from
+                :meth:`~cytearc.datastore.namespaces.ClonesAccessor.fate_bias`.
+
+        Returns:
+            The fate bias, with one row per early cell, one per clone with
+            late cells and fate of its stratum, and one per fate.
+
+        Raises:
+            TypeError: If ``bias`` is not an ArtifactRef.
+            ValueError: If it is not a ``clone_fate_bias`` artifact.
+            KeyError: If the store holds no such artifact, or not the clones
+                that it measured.
+            RuntimeError: If the artifact or the clones that it measured are
+                incomplete.
+            MemoryError: If the tables, about 200 bytes per early cell, 24 per
+                fraction and 160 per row of clone and fate, beside the early
+                cells' IDs as text and the clone labels that they read, do not
+                fit the memory budget.
+        """
+        if not isinstance(bias, ArtifactRef):
+            raise TypeError("bias must be an ArtifactRef")
+        if bias.kind != CloneFateBiasArguments.artifact_kind:
+            raise ValueError(
+                f"bias must be a clone_fate_bias artifact, not {bias.kind!r}"
+            )
+        require_complete_artifact(self.zw, bias)
+        group = artifact_group(self.zw, bias)
+        status = inspect_artifact(self.zw, bias)
+        parameters = dict(status.parameters or {})
+        clones = status.input_ref("clones")
+        groups = (
+            None
+            if (status.inputs or {}).get("groups") is None
+            else status.input_ref("groups")
+        )
+        group_keys = [
+            {str(column): str(label) for column, label in key.items()}
+            for key in cast(list[dict[str, str]], group.attrs["group_keys"])
+        ]
+        key_columns = tuple(
+            str(column) for column in cast(list[str], group.attrs["key_columns"])
+        )
+        n_early = int(as_zarr_array(group["codes"], name="codes").shape[0])
+        n_tested = int(as_zarr_array(group["clone_codes"], name="clone_codes").shape[0])
+        n_fates = len(group_keys)
+        resident = (
+            n_early
+            * (_BIAS_TABLE_BYTES_PER_CELL + _BIAS_TABLE_BYTES_PER_FRACTION * n_fates)
+            + n_tested
+            * n_fates
+            * (
+                _BIAS_TABLE_BYTES_PER_ROW
+                + _BIAS_TABLE_BYTES_PER_KEY_COLUMN * len(key_columns)
+            )
+            + _SUMMARY_BYTES_PER_GROUP * n_fates
+            # The early cells' IDs, read as text for the index of their table.
+            + text_read_bytes(self.cells._get_array("ids"), n_early)
+            + self._clone_input_bytes(clones, with_ids=True)
+        )
+        self._check_clone_table_budget(n_early, 0, "fate bias", held=resident)
+        source = self._read_clone_input(clones, with_ids=True)
+        assert source.clone_ids is not None
+        keys = group_frame(key_columns, group_keys)
+        cells, clone_fates = fate_bias_tables(
+            self._clone_cell_ids(bias),
+            codes=_read(group, "codes"),
+            dominant=_read(group, "fate_codes"),
+            late_cells=_read(group, "late_cells"),
+            fractions=_read(group, "fractions"),
+            clone_ids=source.clone_ids,
+            clones=_read(group, "clone_codes"),
+            clone_cells=_read(group, "clone_fate_cells"),
+            clone_early_cells=_read(group, "clone_early_cells"),
+            p_values=_read(group, "clone_p_values"),
+            q_values=_read(group, "clone_q_values"),
+            fates=keys,
+        )
+        fates = keys.rename(columns={"group": "fate"}).assign(
+            late_cells=_read(group, "fate_cells").astype(np.int64)
+        )
+        return CloneFateBias(
+            cells=cells,
+            clone_fates=clone_fates,
+            fates=fates,
+            clones=clones,
+            early=status.input_ref("cell_selection"),
+            late=status.input_ref("late"),
+            group_by=tuple(str(column) for column in parameters["group_by"]),
+            groups=groups,
         )
 
 

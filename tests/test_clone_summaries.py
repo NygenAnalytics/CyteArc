@@ -19,6 +19,7 @@ from cytearc.datastore.datastore import DataStore
 from cytearc.storage.artifacts import artifact_group
 from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
+    coupling_reference,
     import_truth_clones,
     overlap_reference,
     write_truth_store,
@@ -48,6 +49,7 @@ def source(request, tmp_path_factory) -> SimpleNamespace:
     folder = tmp_path_factory.mktemp(request.param.replace(" ", "_"))
     store = write_truth_store(folder / "store.zarr", TRUTH)
     store.cells.insert("is_d2", TRUTH.samples == "d2")
+    store.cells.insert("is_d4", TRUTH.samples == "d4")
     insert_nullable_cell_column(
         store, "unlabelled", TRUTH.samples, np.ones(N_CELLS, dtype=bool)
     )
@@ -147,6 +149,49 @@ def test_track_follows_each_samples_largest_clones(source) -> None:
     ]
 
 
+def test_coupling_couples_the_cell_types_that_share_clones(source) -> None:
+    result = source.store.clones.coupling(
+        source.clones, group_by="cell_type", method="abundance_cosine"
+    )
+    by_type = TRUTH.group_clone_cells(TRUTH.cell_types)
+    assert result.group_sizes["cells"].tolist() == [
+        sum(by_type[name].values()) for name in sorted(by_type)
+    ]
+    for row in result.pairs.itertuples(index=False):
+        assert row.coupling == pytest.approx(
+            coupling_reference(by_type, row.group_1, row.group_2, "abundance_cosine"),
+            rel=1e-12,
+        )
+    assert np.isfinite(result.pairs["z_score"]).all()
+    assert sorted(result.order) == sorted(by_type)
+
+
+def test_fate_bias_follows_early_cells_to_their_clones_late_cells(source) -> None:
+    store = source.store
+    early = store.snapshot_cell_selection("is_d2")
+    late = store.snapshot_cell_selection("is_d4")
+    loaded = store.clones.load_fate_bias(
+        store.clones.fate_bias(
+            source.clones, group_by="cell_type", early=early, late=late
+        )
+    )
+    in_d4 = TRUTH.group_clone_cells(TRUTH.cell_types, cells=TRUTH.samples == "d4")
+    types = sorted(in_d4)
+    for (cell_id, row), clone in zip(
+        loaded.cells.iterrows(), TRUTH.clones[TRUTH.samples == "d2"], strict=True
+    ):
+        late_cells = [in_d4[name].get(int(clone), 0) for name in types]
+        assert row["late_cells"] == (sum(late_cells) if clone >= 0 else 0), cell_id
+        if clone >= 0 and sum(late_cells):
+            assert row[types].tolist() == pytest.approx(
+                [count / sum(late_cells) for count in late_cells]
+            )
+    tested = {int(clone) for clone in TRUTH.clones[TRUTH.samples == "d4"] if clone >= 0}
+    assert set(loaded.clone_fates["clone"].astype(str)) == {
+        number_label(clone) for clone in tested
+    }
+
+
 def test_summaries_keep_to_a_cell_selection(source) -> None:
     store = source.store
     d2 = TRUTH.samples == "d2"
@@ -174,16 +219,30 @@ def test_summaries_keep_to_a_cell_selection(source) -> None:
     assert tracked.cells[["clone", "cells"]].values.tolist() == [
         ["1", TRUTH.group_clone_cells(cells=d2)[0][0]]
     ]
+    coupling = store.clones.coupling(
+        source.clones, group_by="cell_type", cell_selection=selection, permutations=0
+    )
+    assert coupling.group_sizes["cells"].tolist() == [
+        sum(by_type[name].values()) for name in sorted(by_type)
+    ]
 
 
 def test_summaries_refuse_a_grouping_that_leaves_out_every_clone(source) -> None:
     store = source.store
+    early = store.snapshot_cell_selection("is_d2")
+    late = store.snapshot_cell_selection("is_d4")
+
+    def fate_bias(clones, **options):
+        return store.clones.fate_bias(clones, early=early, late=late, **options)
+
     for summary in (
         store.clones.expansion,
         store.clones.diversity,
         store.clones.rarefaction,
         store.clones.overlap,
         store.clones.track,
+        store.clones.coupling,
+        fate_bias,
     ):
         with pytest.raises(ValueError, match="No cell has both a clone and a group"):
             summary(source.clones, group_by="unlabelled")
@@ -191,25 +250,46 @@ def test_summaries_refuse_a_grouping_that_leaves_out_every_clone(source) -> None
 
 def test_summaries_name_missing_and_incomplete_clones(source) -> None:
     store = source.store
+    early = store.snapshot_cell_selection("is_d2")
+    late = store.snapshot_cell_selection("is_d4")
+
+    def fate_bias(clones):
+        return store.clones.fate_bias(
+            clones, group_by="cell_type", early=early, late=late
+        )
+
     summaries = (
         store.clones.expansion,
         store.clones.diversity,
         store.clones.rarefaction,
         lambda clones: store.clones.overlap(clones, group_by="sample"),
         store.clones.track,
+        lambda clones: store.clones.coupling(
+            clones, group_by="cell_type", permutations=0
+        ),
+        fate_bias,
     )
-    saved = store.clones.expansion(source.clones)
+    # Each saved result, with the loader that reads it.
+    saved = {
+        store.clones.expansion(source.clones): store.clones.load_expansion,
+        fate_bias(source.clones): store.clones.load_fate_bias,
+    }
     # Artifacts that the store does not hold raise KeyError.
     for summary in summaries:
         with pytest.raises(KeyError, match="Artifact does not exist"):
             summary(_unsaved(source.clones))
-    with pytest.raises(KeyError, match="Artifact does not exist"):
-        store.clones.load_expansion(_unsaved(saved))
+    for result, load in saved.items():
+        with pytest.raises(KeyError, match="Artifact does not exist"):
+            load(_unsaved(result))
     # An import that stopped before it finished leaves incomplete clones,
-    # which raise RuntimeError, also where a saved expansion reads them.
+    # which raise RuntimeError, also where a saved result reads them.
+    loads_of_saved = tuple(
+        lambda _ref, result=result, load=load: load(result)
+        for result, load in saved.items()
+    )
     for ref, readers in (
-        (source.clones, (*summaries, lambda _ref: store.clones.load_expansion(saved))),
-        (saved, (store.clones.load_expansion,)),
+        (source.clones, (*summaries, *loads_of_saved)),
+        *((result, (load,)) for result, load in saved.items()),
     ):
         attributes = artifact_group(store.zw, ref).attrs
         attributes["complete"] = False
@@ -219,7 +299,8 @@ def test_summaries_name_missing_and_incomplete_clones(source) -> None:
                     read(ref)
         finally:
             attributes["complete"] = True
-    assert store.clones.load_expansion(saved).cells.shape[0] == N_CELLS
+    for result, load in saved.items():
+        assert len(load(result).cells) > 0
 
 
 def _unsaved(ref: ArtifactRef) -> ArtifactRef:

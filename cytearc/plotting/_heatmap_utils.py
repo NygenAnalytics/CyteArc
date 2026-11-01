@@ -294,3 +294,38 @@ def draw_annotation_strips(
             -0.5 - len(column_colors.columns) * column_height,
         ),
     )
+
+
+def draw_dendrogram(
+    ax: Any,
+    linkage: np.ndarray,
+    *,
+    side: str,
+    color: str,
+) -> Any:
+    """Draw a linkage's dendrogram beside a heatmap's leaves.
+
+    ``side`` is ``"top"`` for the column leaves or ``"right"`` for the row
+    leaves. The dendrogram's leaves align with the heatmap cells.
+    """
+    from matplotlib.collections import LineCollection
+    from scipy.cluster.hierarchy import dendrogram
+
+    tree = dendrogram(linkage, no_plot=True)
+    # SciPy places leaf k at 10 * k + 5.
+    leaves = (np.asarray(tree["icoord"], dtype=np.float64) - 5.0) / 10.0
+    heights = np.asarray(tree["dcoord"], dtype=np.float64)
+    if side == "top":
+        inset = ax.inset_axes([0.0, 1.02, 1.0, 0.14])
+        segments = np.stack((leaves, heights), axis=-1)
+        inset.set_xlim(ax.get_xlim())
+        inset.set_ylim(0.0, max(float(heights.max()), 1e-12))
+    else:
+        inset = ax.inset_axes([1.02, 0.0, 0.14, 1.0])
+        segments = np.stack((heights, leaves), axis=-1)
+        inset.set_ylim(ax.get_ylim())
+        inset.set_xlim(0.0, max(float(heights.max()), 1e-12))
+    inset.add_collection(LineCollection(list(segments), colors=color, linewidths=0.8))
+    inset.set_axis_off()
+    inset.set_gid(f"{side}-dendrogram")
+    return inset
