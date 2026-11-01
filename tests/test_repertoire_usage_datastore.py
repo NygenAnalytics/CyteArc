@@ -7,18 +7,34 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import re
+from collections import Counter
+
 import numpy as np
+import pandas as pd
 import pytest
 
+import cytearc.datastore._operations.repertoire as repertoire_operations
 from cytearc import plotting
-from cytearc.repertoire import GeneUsage, Spectratype
+from cytearc.datastore._operations.cell_groups import (
+    GROUPING_BYTES_PER_CELL,
+    GROUPING_BYTES_PER_COLUMN,
+    GROUPING_BYTES_PER_LABEL_BYTE,
+)
+from cytearc.metadata.rows import array_row_selection_parts
+from cytearc.repertoire import SLOTS, GeneUsage, Spectratype
+from cytearc.storage.artifacts import artifact_group, inspect_artifact
+from cytearc.storage.refs import ArtifactRef
 from tests.clone_helpers import (
     CELLRANGER_HEADER,
     CLONAL_ROWS,
     airr_file,
+    import_truth_receptors,
     receptor_store,
     write_lines,
+    write_truth_store,
 )
+from tests.clone_truth import clone_truth, receptor_truth
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -322,3 +338,360 @@ def test_spectratype_plot_draws_lines_per_group(tmp_path) -> None:
     assert shown.provenance.extras["sequence"] == "aa"
     with pytest.raises(TypeError, match="does not provide spectratype"):
         plotting.spectratype(object(), receptors, show=False)
+
+
+def _unsaved(ref: ArtifactRef) -> ArtifactRef:
+    """A reference of the same kind to an artifact that no store holds."""
+    return ArtifactRef(scope=ref.scope, kind=ref.kind, artifact_id="f" * 64)
+
+
+def _counts(table, *columns: str) -> dict[tuple, int]:
+    return {
+        tuple(row[:-1]): row[-1]
+        for row in table[[*columns, table.columns[-2]]].values.tolist()
+    }
+
+
+def test_a_clonotypes_source_counts_only_cells_with_a_clonotype(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    # Under receptor_arms="VJ", cell3, with a beta chain alone, has no
+    # clonotype, so its TRBV1 chain is not counted: four TRB cells, not five.
+    alpha = store.repertoire.clonotypes(receptors, receptor_arms="VJ")
+    usage = store.repertoire.gene_usage(alpha).table
+    assert _counts(usage, "locus", "v_call") == {
+        ("IGH", "IGHV1"): 2,
+        ("IGK", "IGKV1"): 2,
+        ("TRA", "TRAV1"): 3,
+        ("TRA", "TRAV2"): 1,
+        ("TRB", "TRBV1"): 4,
+    }
+    assert store.repertoire.gene_usage(alpha).n_cells == 6
+    lengths = store.repertoire.spectratype(alpha).table
+    assert _counts(lengths, "locus", "length")[("TRB", 5)] == 4
+
+
+def test_cells_outside_a_selection_or_without_a_label_are_left_out(tmp_path) -> None:
+    store, receptors, clonotypes = _sources(tmp_path)
+    store.cells.insert("first_four", np.arange(8) < 4)
+    first = store.snapshot_cell_selection("first_four")
+    usage = store.repertoire.gene_usage(clonotypes, cell_selection=first)
+    # cell0 to cell3: TRAV1 twice and TRAV2 once, TRBV1 four times.
+    assert _counts(usage.table, "locus", "v_call") == {
+        ("TRA", "TRAV1"): 2,
+        ("TRA", "TRAV2"): 1,
+        ("TRB", "TRBV1"): 4,
+    }
+    assert usage.n_cells == 4 and usage.cell_selection == first
+    # A label artifact of the first four cells leaves the others ungrouped.
+    labels = store.snapshot_cluster_labels("sample", cell_selection=first)
+    grouped = store.repertoire.spectratype(receptors, groups=labels).table
+    assert grouped.columns[:3].tolist() == ["group", labels.kind, "locus"]
+    assert _counts(grouped, "group", "locus", "length") == {
+        ("s1", "TRA", 4): 2,
+        ("s1", "TRB", 5): 2,
+        ("s2", "TRA", 4): 1,
+        ("s2", "TRB", 5): 2,
+    }
+
+
+def test_groups_of_two_columns_follow_the_natural_order_of_each(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    store.cells.insert("batch", np.asarray(["b10", "b2"] * 4))
+    usage = store.repertoire.gene_usage(receptors, group_by=["batch", "sample"])
+    table = usage.table
+    assert table.columns[:4].tolist() == ["group", "batch", "sample", "locus"]
+    assert list(dict.fromkeys(table["group"])) == [
+        "b2, s1",
+        "b2, s2",
+        "b10, s1",
+        "b10, s2",
+    ]
+    assert usage.group_by == ("batch", "sample")
+    # Each group's shares of a locus sum to one.
+    totals = table.groupby(["group", "locus"])["fraction"].sum()
+    np.testing.assert_allclose(totals.to_numpy(), 1.0)
+
+
+def test_group_columns_may_not_share_a_name_with_the_result(tmp_path) -> None:
+    store, receptors, clonotypes = _sources(tmp_path)
+    for column in ("locus", "v_call", "length", "group"):
+        store.cells.insert(column, SAMPLES)
+    for measure, column in (
+        (store.repertoire.gene_usage, "locus"),
+        (store.repertoire.gene_usage, "v_call"),
+        (store.repertoire.spectratype, "length"),
+        (store.repertoire.spectratype, "group"),
+    ):
+        with pytest.raises(ValueError, match=f"'{column}', which is also a column"):
+            measure(receptors, group_by=column)
+    # Gene usage has no length column, nor junction lengths a gene column.
+    assert len(store.repertoire.gene_usage(receptors, group_by="length").table)
+    assert len(store.repertoire.spectratype(receptors, group_by="v_call").table)
+    # Clonotypes as labels would name a key column after a count column.
+    with pytest.raises(ValueError, match="key column 'clonotypes' is also a column"):
+        store.repertoire.gene_usage(receptors, groups=clonotypes)
+
+
+@pytest.mark.parametrize("measure", ["gene_usage", "spectratype"])
+def test_missing_incomplete_and_other_sources_are_named(tmp_path, measure) -> None:
+    store, receptors, clonotypes = _sources(tmp_path)
+    runs = (
+        getattr(store.repertoire, measure),
+        lambda source: getattr(store.plots, measure)(source, show=False),
+        *(
+            (lambda source: store.plots.gene_pairing(source, show=False),)
+            if measure == "gene_usage"
+            else ()
+        ),
+    )
+    expansion = store.clones.expansion(clonotypes)
+    for run in runs:
+        with pytest.raises(ValueError, match="immune_receptors or clonotypes artifact"):
+            run(expansion)
+        for source in (receptors, clonotypes):
+            with pytest.raises(KeyError, match="Artifact does not exist"):
+                run(_unsaved(source))
+    # An import that stopped before it finished leaves incomplete receptors,
+    # which their clonotypes read too.
+    for ref, sources in (
+        (receptors, (receptors, clonotypes)),
+        (clonotypes, (clonotypes,)),
+    ):
+        attributes = artifact_group(store.zw, ref).attrs
+        attributes["complete"] = False
+        try:
+            for run in runs:
+                for source in sources:
+                    with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+                        run(source)
+        finally:
+            attributes["complete"] = True
+    # Clonotypes whose receptors the store no longer holds.
+    path = inspect_artifact(store.zw, receptors).path
+    folder = tmp_path / "store.zarr" / path
+    folder.rename(folder.with_name(folder.name + "_moved"))
+    for run in runs:
+        with pytest.raises(KeyError, match="Artifact does not exist"):
+            run(clonotypes)
+
+
+def _refusals(store, run) -> list[tuple[str, int]]:
+    """Each refusal on the way from a budget of one byte to one that runs.
+
+    The budget rises to each refusal's own estimate, so each later step's
+    check shows once the earlier ones pass.
+    """
+    found: list[tuple[str, int]] = []
+    budget, full = 1, store.memoryBytes
+    try:
+        for _attempt in range(100):
+            store.memoryBytes = budget
+            try:
+                run()
+                return found
+            except MemoryError as error:
+                matched = re.search(r"^(.*) holds about (\d+) bytes", str(error))
+                assert matched is not None, str(error)
+                estimate = int(matched.group(2))
+                assert estimate > budget, str(error)
+                found.append((matched.group(1), estimate))
+                budget = estimate
+    finally:
+        store.memoryBytes = full
+    raise AssertionError("the budget did not settle")
+
+
+def _chunk(array) -> int:
+    """The bytes of one chunk that reading an array holds, by the store's model."""
+    return array_row_selection_parts(array)[0]
+
+
+@pytest.mark.parametrize("source", ["receptors", "clonotypes"])
+def test_each_step_is_checked_before_it_reads_or_allocates(tmp_path, source) -> None:
+    store, receptors, clonotypes = _sources(tmp_path)
+    group = artifact_group(store.zw, receptors)
+    of_clonotypes = source == "clonotypes"
+    # Reading the eight cells' slots: the stored int32 array whole and one
+    # chunk of it, and for each cell its two chosen slots, whether each holds
+    # a chain and whether either does; clonotypes also read each cell's code,
+    # with its int64 copy and whether it has one.
+    reading = _chunk(group["chain_slots"]) + 8 * 4 * 4 + 8 * (2 * 4 + 2 + 1)
+    if of_clonotypes:
+        codes = artifact_group(store.zw, clonotypes)["codes"]
+        reading += _chunk(codes) + 8 * 4 + 8 * (8 + 1)
+    # Grouping by the samples, labels of two characters stored in 8 bytes,
+    # holds what the summaries' grouping holds for each cell and a stored
+    # chunk of the column, beside the chosen slots, the cells with a chain
+    # and the clonotypes' codes.
+    held = 8 * 2 * 4 + 8 + (8 * 8 if of_clonotypes else 0)
+    per_cell = GROUPING_BYTES_PER_CELL + GROUPING_BYTES_PER_COLUMN
+    per_cell += GROUPING_BYTES_PER_LABEL_BYTE * 8
+    grouping = held + 8 * per_cell + _chunk(store.cells._get_array("sample"))
+    # Without a grouping, the 13 chains of VJ_1 and VDJ_1, with their locus
+    # and V call, and the clonotype of each with clonotypes: beside each
+    # cell's group and the one group's keys, a mask of the slots, and the 14
+    # stored loci read with their int64 copy.
+    held += 8 * 8 + repertoire_operations._KEY_BYTES_PER_GROUP - 8
+    n_fields = 3 if of_clonotypes else 2
+    per_chain = (
+        repertoire_operations._CHAIN_BYTES
+        + repertoire_operations._CHAIN_BYTES_PER_FIELD * n_fields
+    )
+    chains = held + 16 + _chunk(group["contig_locus"]) + 14 * (4 + 8)
+    chains += 13 * per_chain
+    ref = clonotypes if of_clonotypes else receptors
+    for measure, what in (
+        (store.repertoire.gene_usage, "genes"),
+        (store.repertoire.spectratype, "junction lengths"),
+    ):
+        counting = f"Counting the {what} of the chains of 8 cells"
+        assert _refusals(store, lambda measure=measure: measure(ref))[:2] == [
+            (counting, reading),
+            (counting, chains),
+        ]
+        assert _refusals(
+            store, lambda measure=measure: measure(ref, group_by="sample")
+        )[:2] == [(counting, reading), ("Grouping 8 cells by 1 columns", grouping)]
+
+
+def test_every_slot_is_read_for_its_chains(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    usage = store.repertoire.gene_usage(receptors, slots=SLOTS)
+    # cell4's second alpha chain, TRAV3, joins the primary chains.
+    assert _counts(usage.table, "locus", "v_call")[("TRA", "TRAV3")] == 1
+    assert usage.slots == SLOTS and usage.n_cells == 7
+
+
+def test_junctions_beyond_ascii_are_measured_in_characters(tmp_path) -> None:
+    store = receptor_store(tmp_path)
+    rows = [
+        "cell0,true,cell0_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,"
+        "CAŚSF,TGTGCCAGCAGCTTT,200,8,ct1,ct1_1",
+        "cell1,true,cell1_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,"
+        "C\U0001f600F,TGTTTT,200,8,ct2,ct2_1",
+        "cell2,true,cell2_contig_1,true,500,TRB,TRBV1,,TRBJ1,TRBC1,true,true,"
+        "CASSLF,TGTGCCAGCAGCCTGTTT,200,8,ct3,ct3_1",
+    ]
+    path = write_lines(tmp_path, "wide.csv", CELLRANGER_HEADER, rows)
+    receptors = store.repertoire.import_receptors(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    lengths = store.repertoire.spectratype(receptors).table
+    assert _counts(lengths, "length") == {(3,): 1, (5,): 1, (6,): 1}
+    nucleotides = store.repertoire.spectratype(receptors, sequence="nt").table
+    assert _counts(nucleotides, "length") == {(6,): 1, (15,): 1, (18,): 1}
+
+
+def test_figures_name_what_they_count(tmp_path) -> None:
+    store, receptors, clonotypes = _sources(tmp_path)
+    clusters = store.repertoire.clonotypes(
+        receptors, sequence="aa", metric="hamming", cutoff=1
+    )
+    for source, count, noun in (
+        (receptors, "cells", "cells"),
+        (clonotypes, "clonotypes", "clonotypes"),
+        (clusters, "clonotypes", "clonotype clusters"),
+    ):
+        usage = store.plots.gene_usage(source, count=count, show=False)
+        lengths = store.plots.spectratype(source, count=count, show=False)
+        try:
+            assert usage.axes["TRB"].get_xlabel() == f"Fraction of {noun}"
+            assert lengths.axes["TRB"].get_ylabel() == f"Fraction of {noun}"
+        finally:
+            usage.close()
+            lengths.close()
+    # Four loci stand two to a row, within the width of a page.
+    figure = store.plots.gene_usage(receptors, show=False)
+    try:
+        rows = {round(ax.get_position().y0, 3) for ax in figure.axes.values()}
+        assert len(rows) == 2
+        assert figure.figure.get_size_inches()[0] <= 7.5
+    finally:
+        figure.close()
+
+
+def test_figures_with_nothing_to_draw_are_refused(tmp_path) -> None:
+    store, receptors, _clonotypes = _sources(tmp_path)
+    # No chain of the clonal rows has a D call.
+    assert store.repertoire.gene_usage(receptors, genes="d_call").table.empty
+    with pytest.raises(ValueError, match="has a d_call, so there is nothing to plot"):
+        store.plots.gene_usage(receptors, gene="d_call", show=False)
+    store.cells.insert("nobody", np.zeros(8, dtype=bool))
+    nobody = store.snapshot_cell_selection("nobody")
+    for plot in (store.plots.gene_usage, store.plots.gene_pairing):
+        with pytest.raises(ValueError, match="nothing to plot"):
+            plot(receptors, cell_selection=nobody, show=False)
+    with pytest.raises(ValueError, match="has a junction, so there is nothing"):
+        store.plots.spectratype(receptors, cell_selection=nobody, show=False)
+
+
+def _slot_genes(receptors, fields: tuple[str, ...]) -> dict[str, tuple]:
+    """Each of the truth's chains, by its junction, as its locus and gene calls.
+
+    The truth draws every chain's junction apart, so a slot's junction names
+    the contig that fills it.
+    """
+    contigs = receptors.contigs.drop_duplicates("junction_aa")
+    return {
+        row[0]: tuple(row[1:])
+        for row in contigs[["junction_aa", "locus", *fields]].values.tolist()
+    }
+
+
+def test_gene_usage_recovers_the_truths_genes_in_each_sample(tmp_path) -> None:
+    truth = clone_truth()
+    receptors_truth = receptor_truth(truth)
+    folder = tmp_path / "truth"
+    folder.mkdir()
+    store = write_truth_store(folder / "store.zarr", truth)
+    receptors = import_truth_receptors(store, receptors_truth, folder)
+    clonotypes = store.repertoire.clonotypes(receptors, receptor_arms="any")
+    genes = _slot_genes(receptors_truth, ("v_call", "j_call"))
+    expected = receptors_truth.expected.loc[truth.cell_ids]
+    by_cells: Counter = Counter()
+    clones_of: dict[tuple, set] = {}
+    for cell, row in enumerate(expected.itertuples()):
+        for slot in ("VJ_1", "VDJ_1"):
+            junction = getattr(row, f"{slot}_junction_aa")
+            if pd.isna(junction):
+                continue
+            key = (str(truth.samples[cell]), *genes[junction])
+            by_cells[key] += 1
+            # Within its receptor type, each of the truth's clones is one
+            # clonotype.
+            clone = (int(truth.clones[cell]), row.receptor_type)
+            clones_of.setdefault(key, set()).add(clone)
+    usage = store.repertoire.gene_usage(
+        receptors, genes=("v_call", "j_call"), level="allele", group_by="sample"
+    ).table
+    assert _counts(usage, "sample", "locus", "v_call", "j_call") == dict(by_cells)
+    once = store.repertoire.gene_usage(
+        clonotypes,
+        genes=("v_call", "j_call"),
+        level="allele",
+        group_by="sample",
+        count="clonotypes",
+    ).table
+    assert _counts(once, "sample", "locus", "v_call", "j_call") == {
+        key: len(found) for key, found in clones_of.items()
+    }
+    # The fractions are each count's share of its sample's chains of the locus.
+    totals = Counter()
+    for (sample, locus, *_genes), cells in by_cells.items():
+        totals[(sample, locus)] += cells
+    for row in usage.itertuples():
+        assert row.fraction == pytest.approx(
+            row.cells / totals[(row.sample, row.locus)]
+        )
+    # At the gene level the alleles of the truth's calls fall away.
+    genes_only = store.repertoire.gene_usage(receptors, group_by="sample").table
+    assert not genes_only["v_call"].str.contains("*", regex=False).any()
+    lengths = store.repertoire.spectratype(receptors, group_by="sample").table
+    expected_lengths: Counter = Counter()
+    for cell, row in enumerate(expected.itertuples()):
+        for slot in ("VJ_1", "VDJ_1"):
+            junction = getattr(row, f"{slot}_junction_aa")
+            if not pd.isna(junction):
+                locus = genes[junction][0]
+                expected_lengths[(str(truth.samples[cell]), locus, len(junction))] += 1
+    assert _counts(lengths, "sample", "locus", "length") == dict(expected_lengths)
