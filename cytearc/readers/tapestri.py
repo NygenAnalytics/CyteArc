@@ -38,6 +38,7 @@ Mission Bio's mosaic is GPL-3.0 and its pipeline proprietary, and the DAb-seq
 pipeline's documented layout.
 """
 
+import hashlib
 import os
 import re
 import sys
@@ -81,13 +82,25 @@ _STORE_ASSAYS = (
     ("protein_read_counts", PROTEIN_FEATURE_TYPE),
 )
 _VARIANTS = "assays/dna_variants"
+# The variants' metadata that the source record keeps: the panel, genome and
+# pipeline, and the thresholds of the pipeline's genotype filters.
+_RECORDED_METADATA = (
+    "panel_name",
+    "genome_version",
+    "pipeline_version",
+    "gq_cutoff",
+    "dp_cutoff",
+    "af_cutoff",
+)
 # The labels of the genotype codes 0 to 3, as Tapestri and DAb-seq write them.
 _CALL_LABELS = np.asarray(["0", "1", "2", "3"], dtype=object)
 _NO_CALL = 3
 # DAb-seq writes a missing depth, read count or quality as -1.
 _MISSING = -1
-# AF times DP over 100 is a whole number of reads up to float64 rounding.
+# AF times DP over 100 is a whole number of reads up to the rounding of AF's
+# dtype: a few of its epsilons of each read, and 1e-6 beside them.
 _WHOLE_TOLERANCE = 1e-6
+_WHOLE_EPSILONS = 16
 # A REF or ALT that is a sequence of bases; an ALT may also be VCF's "*", a
 # deletion that spans the position.
 _BASES = re.compile(r"[ACGTN]+")
@@ -107,8 +120,8 @@ _DABSEQ_VARIANT_BYTES = 1_100
 _CELL_BYTES = 300
 # The copies of each text byte that the description holds at once.
 _DESCRIBED_TEXT_COPIES = 2
-# The text bytes assumed for variable-length text.
-_VARIABLE_TEXT_WIDTH = 64
+# The variable-length texts read at once to find the longest.
+_WIDTH_CHUNK = 4_096
 # A block of cells counts each cell's ID as this many entries, since an ID
 # holds about as much as two entries of reads and calls.
 _ID_ENTRIES = 2
@@ -212,7 +225,8 @@ class TapestriReader(CrReader):
     reader to :class:`~cytearc.TapestriToZarr`, which also records the file's
     metadata, such as its panel, genome and pipeline version. Variants are
     imported into a store with
-    ``ds.variants.import_counts(path, format="tapestri")``.
+    ``ds.variants.import_counts(path, format="tapestri")``. The reader warns
+    about any other assay group of the file, which the store does not hold.
 
     Args:
         h5_fn: The Tapestri ``.h5`` file.
@@ -261,6 +275,15 @@ class TapestriReader(CrReader):
                 "assays/protein_read_counts; it is not a Tapestri file of amplicon "
                 "or protein reads"
             )
+        assert isinstance(assays, h5py.Group)
+        read = {name for name, _type in present} | {"dna_variants"}
+        others = sorted(name for name in assays if name not in read)
+        if others:
+            warn(
+                f"{self.path} holds {', '.join(f'assays/{name}' for name in others)}, "
+                "which the store does not hold: it holds the amplicon and protein "
+                "reads, and import_counts reads the DNA variants"
+            )
         self._assays = present
         cells = _assay_cells(handle, present[0][0], self.path)
         for name, _feature_type in present[1:]:
@@ -298,7 +321,6 @@ class TapestriReader(CrReader):
         self._featureTypeList = feature_types
         self._widths = widths
         self._filtered: np.ndarray | None = None
-        assert isinstance(assays, h5py.Group)
         if "dna_variants" in assays:
             variants = _assay_cells(handle, "dna_variants", self.path)
             if not np.array_equal(variants.ids, cells.ids):
@@ -316,7 +338,6 @@ class TapestriReader(CrReader):
                 )
             self._filtered = flags.astype(bool)
         self.samples = list(dict.fromkeys(cells.samples.tolist()))
-        assert isinstance(assays, h5py.Group)
         self.metadata = {
             "assays": {
                 name: _metadata(node.get("metadata"))
@@ -415,9 +436,17 @@ class TapestriReader(CrReader):
         return int(rows * self.nFeatures * (itemsize + 24))
 
     def _sparse_import_resident_bytes(self) -> int:
-        """The cells' IDs, which the reader holds while it is open."""
+        """The cells' samples, barcodes and IDs, which the reader holds while
+        it is open."""
         return int(
-            sum(map(sys.getsizeof, self._cells.ids.tolist())) + 8 * len(self._cells.ids)
+            sum(
+                sum(map(sys.getsizeof, values.tolist())) + 8 * len(values)
+                for values in (
+                    self._cells.samples,
+                    self._cells.barcodes,
+                    self._cells.ids,
+                )
+            )
         )
 
     def get_cell_columns(self) -> Iterator[tuple[str, np.ndarray]]:
@@ -434,6 +463,9 @@ class TapestriReader(CrReader):
         """
         yield from super().get_feature_columns()
         offsets = np.r_[0, np.cumsum(self._widths)]
+        # A name that both assays use is one column, each assay's values in
+        # its own features.
+        merged: dict[str, np.ndarray] = {}
         for index, (name, _feature_type) in enumerate(self._assays):
             columns = self.h5obj[f"assays/{name}/ca"]
             for key, node in columns.items():
@@ -445,11 +477,13 @@ class TapestriReader(CrReader):
                         f"assays/{name}/ca/{key} of {self.path} has shape "
                         f"{values.shape}; expected ({self._widths[index]},)"
                     )
-                column = np.full(self.nFeatures, None, dtype=object)
+                column = merged.setdefault(
+                    key, np.full(self.nFeatures, None, dtype=object)
+                )
                 column[offsets[index] : offsets[index + 1]] = (
                     _texts(values) if values.dtype.kind in "SUO" else values.tolist()
                 )
-                yield key, column
+        yield from merged.items()
 
     def close(self) -> None:
         """Close the file."""
@@ -513,7 +547,9 @@ def _chosen_columns(
 
     Returns:
         The chosen columns, ascending, and what the source record keeps of
-        the choice.
+        the choice: the variants added beside the passing ones are counted
+        and named by the SHA-256 of their names, one per line, so an import
+        is identified by what it reads rather than how ``requested`` names it.
 
     Raises:
         ValueError: If a requested item names no variant of the file, a
@@ -592,10 +628,15 @@ def _chosen_columns(
             "and variants names none that can be read; name variants or positions "
             "with variants"
         )
+    added = variants.names[columns[~variants.passing[columns]]].tolist()
     record = {
         "n_variants": n_columns,
         "n_passing_variants": int(np.count_nonzero(variants.passing)),
         "n_imported_variants": len(columns),
+        "n_added_variants": len(added),
+        "added_variants_sha256": hashlib.sha256(
+            "\n".join(added).encode("utf-8")
+        ).hexdigest(),
         "n_skipped_empty_alternative": n_empty,
         "n_skipped_other_alleles": n_other,
         "skipped_examples": examples,
@@ -613,27 +654,35 @@ def _sites(
     position do once split from one record, the longest reference is the
     site's and each shorter one is extended by its remaining bases, with
     its alternative, as VCF writes several alternatives of one record.
+    DAb-seq's FLT3-ITD variants (``itd``), which carry ITDseek's depth rather
+    than the caller's, are named sites of their own, named as the file names
+    them.
 
     Raises:
         ValueError: If two references of one position differ beyond their
             shared bases, or two variants name the same allele of a site.
     """
     labels = variants.names[columns]
-    keys = list(
-        zip(
-            variants.contig[columns].tolist(),
-            variants.position[columns].tolist(),
-            strict=True,
+    # A named site's key has no contig and its name in place of a position.
+    keys: list[tuple[str, int | str]] = [
+        ("", str(label)) if itd is not None and itd[chosen] else (contig, position)
+        for chosen, (label, contig, position) in enumerate(
+            zip(
+                labels.tolist(),
+                variants.contig[columns].tolist(),
+                variants.position[columns].tolist(),
+                strict=True,
+            )
         )
-    )
-    site_of: dict[tuple[str, int], int] = {}
+    ]
+    site_of: dict[tuple[str, int | str], int] = {}
     members: list[list[int]] = []
     for chosen, key in enumerate(keys):
         site = site_of.setdefault(key, len(site_of))
         if site == len(members):
             members.append([])
         members[site].append(chosen)
-    contig_names = list(dict.fromkeys(key[0] for key in site_of))
+    contig_names = list(dict.fromkeys(key[0] for key in site_of if key[0]))
     contig_of = {name: index for index, name in enumerate(contig_names)}
     allele_site: list[int] = []
     allele_text: list[str] = []
@@ -656,7 +705,8 @@ def _sites(
                 raise ValueError(
                     f"The variants {other!r} and {label!r} of {path} give one "
                     f"position the references {longest!r} and {reference!r}, which "
-                    "differ beyond their shared bases; import them apart"
+                    "differ beyond their shared bases, so they cannot be alleles of "
+                    "one site"
                 )
             alternative = str(variants.alternative[columns[chosen]])
             text = (
@@ -672,7 +722,7 @@ def _sites(
             if text in seen:
                 raise ValueError(
                     f"The variants {labels[seen[text]]!r} and {label!r} of {path} "
-                    f"name the same allele {text!r} of one site; import them apart"
+                    f"name the same allele {text!r} of one site"
                 )
             seen[text] = chosen
             column_allele[chosen] = len(allele_text)
@@ -683,9 +733,15 @@ def _sites(
                 reference_column[site] = chosen
     table = SiteTable(
         contigs=tuple(Contig(name=name) for name in contig_names),
-        site_contig=np.asarray([contig_of[key[0]] for key in site_of], dtype=np.int32),
-        site_position=np.asarray([key[1] for key in site_of], dtype=np.int64),
-        site_name=np.full(len(site_of), "", dtype=object),
+        site_contig=np.asarray(
+            [contig_of[key[0]] if key[0] else -1 for key in site_of], dtype=np.int32
+        ),
+        site_position=np.asarray(
+            [key[1] if key[0] else -1 for key in site_of], dtype=np.int64
+        ),
+        site_name=np.asarray(
+            ["" if key[0] else str(key[1]) for key in site_of], dtype=object
+        ),
         site_channel=np.full(len(site_of), "", dtype=object),
         allele_site=np.asarray(allele_site, dtype=np.int32),
         allele=np.asarray(allele_text, dtype=object),
@@ -793,7 +849,8 @@ class TapestriSource:
                 f"The variants {chosen.labels[first]!r} and "
                 f"{chosen.labels[column]!r} of {self.path} share a position but "
                 f"give the cell {ids[row]!r} the DP {int(depth[row, first])} and "
-                f"{int(depth[row, column])}; import them apart"
+                f"{int(depth[row, column])}, while the variants of one position "
+                "are alleles of one site, whose depth they share"
             )
         return site_depth
 
@@ -815,11 +872,13 @@ class TapestriSource:
         ids: np.ndarray,
         source: str,
     ) -> EntryBatch:
-        """The calls of a block: every call, and no-calls where the cell has reads.
+        """The calls of a block where the cell has reads at the position.
 
-        A no-call without reads says what the missing depth says.
+        A call without reads says nothing of the cell: Tapestri calls some
+        such cells wild type at genotype quality 0, and DAb-seq calls FLT3-ITD
+        wild type in every cell where ITDseek found none, read or not.
         """
-        rows, columns = np.nonzero((calls != _NO_CALL) | (depth > 0))
+        rows, columns = np.nonzero(depth > 0)
         return EntryBatch(
             kind="calls",
             barcodes=ids,
@@ -858,6 +917,11 @@ class TapestriSource:
         site_depth = self._site_depth(depth, ids)
         yield self._depth_batch(site_depth, ids)
         del site_depth
+        epsilon = (
+            float(np.finfo(layers["AF"].dtype).eps)
+            if layers["AF"].dtype.kind == "f"
+            else 0.0
+        )
         frequency = self._read(layers["AF"], start, stop).astype(np.float64)
         outside = ~np.isfinite(frequency) | (frequency < 0) | (frequency > 100)
         if outside.any():
@@ -872,10 +936,10 @@ class TapestriSource:
         whole = np.rint(reads)
         np.subtract(reads, whole, out=reads)
         np.abs(reads, out=reads)
-        if np.any(reads > _WHOLE_TOLERANCE):
-            row, column = (
-                int(value) for value in np.argwhere(reads > _WHOLE_TOLERANCE)[0]
-            )
+        # A whole number of reads stays within the rounding of AF times depth.
+        reads -= _WHOLE_TOLERANCE + _WHOLE_EPSILONS * epsilon * depth
+        if np.any(reads > 0):
+            row, column = (int(value) for value in np.argwhere(reads > 0)[0])
             raise ValueError(
                 f"The allele frequency {float(frequency[row, column])!r} and depth "
                 f"{int(depth[row, column])} of the cell {ids[row]!r} at "
@@ -925,13 +989,11 @@ class TapestriSource:
         self._check_missing(reference, ids, "RD")
         sites = np.flatnonzero(chosen.reference_column >= 0)
         site_reference = reference[:, chosen.reference_column[sites]]
-        # Every variant of a site but FLT3-ITD counts the same reference reads.
+        # Every variant of a site counts the same reference reads, but
+        # FLT3-ITD's sites, whose RD holds ITDseek's depth, have none.
         rank = np.full(chosen.sites.n_sites, -1, dtype=np.int64)
         rank[sites] = np.arange(len(sites))
-        itd = np.asarray(
-            [str(label).startswith(_ITD_PREFIX) for label in chosen.labels], dtype=bool
-        )
-        compared = np.flatnonzero(~itd & (rank[chosen.column_site] >= 0))
+        compared = np.flatnonzero(rank[chosen.column_site] >= 0)
         disagree = (
             reference[:, compared]
             != site_reference[:, rank[chosen.column_site[compared]]]
@@ -944,8 +1006,8 @@ class TapestriSource:
                 f"The variants {chosen.labels[first]!r} and "
                 f"{chosen.labels[column]!r} of {self.path} share a position but "
                 f"give the cell {ids[row]!r} the reference reads "
-                f"{int(reference[row, first])} and {int(reference[row, column])}; "
-                "import them apart"
+                f"{int(reference[row, first])} and {int(reference[row, column])}, "
+                "while the variants of one position count its reference reads once"
             )
         del reference
         rows, at = np.nonzero(site_reference > 0)
@@ -977,10 +1039,16 @@ class TapestriSource:
 
 
 def _text_width(dataset: h5py.Dataset) -> int:
-    """The bytes of a text dataset's longest value, or a nominal 64 for
-    variable-length text."""
+    """The bytes of a text dataset's longest value: its fixed width, or the
+    longest of its variable-length values, read a chunk at a time."""
     dtype = dataset.dtype
-    return int(dtype.itemsize) if dtype.kind == "S" else _VARIABLE_TEXT_WIDTH
+    if dtype.kind == "S":
+        return int(dtype.itemsize)
+    longest = 0
+    for start in range(0, int(dataset.shape[0]), _WIDTH_CHUNK):
+        values = np.asarray(dataset[start : start + _WIDTH_CHUNK]).tolist()
+        longest = max([longest, *map(len, values)])
+    return longest
 
 
 def _check_description(
@@ -1017,7 +1085,10 @@ def tapestri_source(
 
     The variants that pass the pipeline's default filters (``filtered`` 0)
     are read, with those that ``variants`` names. Before it reads them, the
-    description checks what it holds against ``memory_bytes``.
+    description checks what it holds against ``memory_bytes``. The notes
+    keep the variants' panel, genome and pipeline version, and the
+    thresholds of the pipeline's genotype filters, ``gq_cutoff``,
+    ``dp_cutoff`` and ``af_cutoff``.
 
     Raises:
         ValueError: If the file lacks the DNA variants or their arrays, a
@@ -1109,7 +1180,7 @@ def tapestri_source(
         "samples": list(dict.fromkeys(cells.samples.tolist())),
         **{
             name: assays_metadata[name]
-            for name in ("panel_name", "genome_version", "pipeline_version")
+            for name in _RECORDED_METADATA
             if name in assays_metadata
         },
     }
@@ -1143,12 +1214,14 @@ def dabseq_source(
 
     DAb-seq flags no variant as failing, so every variant whose alleles are
     bases is read, and ``variants`` may name others only to check that the
-    file holds them. Before it reads them, the description checks what it
-    holds against ``memory_bytes``.
+    file holds them. FLT3-ITD variants are named sites of their own. Before
+    it reads them, the description checks what it holds against
+    ``memory_bytes``.
 
     Raises:
         ValueError: If the file lacks one of its arrays, a variant name is
-            not ``gene:chrom:pos:ref/alt``, a barcode repeats, ``variants``
+            neither ``gene:chrom:pos:ref/alt`` nor ``chrom:pos:ref/alt``, a
+            barcode repeats, ``variants``
             names an unknown or unreadable variant, or no variant is left to
             import.
         MemoryError: If describing the variants and cells does not fit
@@ -1181,11 +1254,14 @@ def dabseq_source(
     contigs, positions, references, alternatives, shorts = [], [], [], [], []
     for index, name in enumerate(names.tolist()):
         parts = name.split(":")
+        # The pipeline's non-human mode names variants without a gene.
+        if len(parts) == 3:
+            parts = ["", *parts]
         alleles = parts[3].split("/") if len(parts) == 4 else []
         if len(alleles) != 2 or not parts[2].isdigit():
             raise ValueError(
-                f"VARIANTS[{index}] of {text} is {name!r}, not "
-                "<gene>:<chrom>:<pos>:<ref>/<alt>"
+                f"VARIANTS[{index}] of {text} is {name!r}, neither "
+                "<gene>:<chrom>:<pos>:<ref>/<alt> nor <chrom>:<pos>:<ref>/<alt>"
             )
         contigs.append(parts[1])
         positions.append(int(parts[2]))

@@ -165,6 +165,10 @@ class GenotypeRules:
         swap: GIFT's swap probabilities as ascending reads and their
             probabilities, or None.
         alleles: Each named site's wild type and alternative, by label.
+        min_quality: The quality that an adopted ``"source"`` call needs, or
+            None.
+        min_depth: The depth that an adopted ``"source"`` call needs, or
+            None.
     """
 
     method: str
@@ -174,6 +178,8 @@ class GenotypeRules:
     min_posterior: float | None
     swap: tuple[np.ndarray, np.ndarray] | None
     alleles: Mapping[str, tuple[str, str]]
+    min_quality: float | None
+    min_depth: int | None
 
     @property
     def swap_record(self) -> tuple[tuple[int, float], ...]:
@@ -194,6 +200,8 @@ class GenotypeRules:
             "min_fraction": self.min_fraction,
             "min_posterior": self.min_posterior,
             "swap_probabilities": [list(pair) for pair in self.swap_record],
+            "min_quality": self.min_quality,
+            "min_depth": self.min_depth,
         }
 
 
@@ -205,6 +213,21 @@ def _count_rule(value: Any, name: str) -> int | None:
     if int(value) < 1:
         raise ValueError(f"{name} must be at least 1")
     return int(value)
+
+
+def _quality_rule(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool | np.bool_) or not isinstance(
+        value, int | float | np.integer | np.floating
+    ):
+        raise TypeError("min_quality must be a number or None")
+    number = float(value)
+    if not np.isfinite(number) or number < 0:
+        raise ValueError(
+            f"min_quality must be a finite number of 0 or more, not {number}"
+        )
+    return number
 
 
 def _share(value: Any, name: str, low: float, high: float) -> float:
@@ -256,6 +279,8 @@ def genotype_rules(
     min_posterior: Any = 0.6,
     swap_probabilities: Any = None,
     alleles: Any = None,
+    min_quality: Any = None,
+    min_depth: Any = None,
 ) -> GenotypeRules:
     """Check a genotype method's arguments and resolve its rules.
 
@@ -273,6 +298,8 @@ def genotype_rules(
     )
     posterior = _share(min_posterior, "min_posterior", 0.0, 1.0)
     pairs = _site_alleles(alleles)
+    quality = _quality_rule(min_quality)
+    depth = _count_rule(min_depth, "min_depth")
     given = {
         "min_umis": umis is not None,
         "min_mutant_umis": mutant_umis is not None,
@@ -280,9 +307,11 @@ def genotype_rules(
         "min_posterior": posterior != 0.6,
         "swap_probabilities": swap_probabilities is not None,
         "alleles": bool(pairs),
+        "min_quality": quality is not None,
+        "min_depth": depth is not None,
     }
     uses = {
-        "source": set(),
+        "source": {"min_quality", "min_depth"},
         "threshold": {"min_umis", "min_mutant_umis", "min_fraction", "alleles"},
         "gift": {"min_umis", "min_posterior", "swap_probabilities", "alleles"},
     }[method]
@@ -291,7 +320,8 @@ def genotype_rules(
         raise ValueError(
             f"method={method!r} uses no {', '.join(unused)}; "
             + {
-                "source": "it adopts the calls that the tool wrote",
+                "source": "it adopts the calls that the tool wrote, those of too "
+                "low a quality or depth filtered by min_quality and min_depth",
                 "threshold": "it calls cells from their UMIs by min_umis, "
                 "min_mutant_umis and min_fraction",
                 "gift": "it calls cells by GIFT's posterior, min_posterior, "
@@ -316,6 +346,8 @@ def genotype_rules(
             else swap_probability_table(swap_probabilities)
         ),
         alleles=pairs,
+        min_quality=quality,
+        min_depth=depth,
     )
 
 

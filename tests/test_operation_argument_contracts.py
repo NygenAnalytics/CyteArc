@@ -369,7 +369,8 @@ _CONTRACTS = (
         # Each source is identified by its format, the SHA-256 of each file it
         # reads by role and how its barcodes name cells, in canonical order;
         # its path is not recorded. The count unit is recorded as the format's
-        # own when the files state it.
+        # own when the files state it, and the variants of Tapestri and
+        # DAb-seq files by those they add to the passing ones.
         signature_only=_classified(
             "transformed",
             "paths",
@@ -377,6 +378,7 @@ _CONTRACTS = (
             "barcode_suffix",
             "barcode_pattern",
             "format",
+            "variants",
         ),
         model_only=_classified("resolved_input", "sources"),
     ),

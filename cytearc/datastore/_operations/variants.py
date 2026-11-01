@@ -66,6 +66,7 @@ from ...variants.frequencies import (
 from ...variants.genotypes import (
     CALLS,
     FILTERED,
+    MISSING,
     MUTANT_CALLS,
     SOURCE_CALLS,
     SOURCE_PRECEDENCE,
@@ -827,7 +828,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 those that pass, named as the file names them, such as
                 ``"chr1:115256513:G/T"``, or positions, such as
                 ``"chr1:115256513"`` for every variant there; None for the
-                passing variants alone.
+                passing variants alone. The source record counts the variants
+                added, so names that add the same variants reuse the import.
             invalidate_cache: Import again instead of reusing saved counts.
 
         Returns:
@@ -920,7 +922,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             sources=tuple(source.record() for source in sources),
             count_unit=rules.count_unit,
             swap_strands=swap_strands,
-            variants=chosen_variants,
             invalidate_cache=invalidate_cache,
         )
         planned = self._plan_variant_counts(arguments, cell_selection, n_cells)
@@ -2351,6 +2352,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         min_fraction: float | None = None,
         min_posterior: float = 0.6,
         swap_probabilities: Mapping[int, float] | None = None,
+        min_quality: float | None = None,
+        min_depth: int | None = None,
         invalidate_cache: bool = False,
     ) -> ArtifactRef:
         """Call each cell's genotype at targeted sites, in one vocabulary of calls.
@@ -2370,7 +2373,15 @@ class _VariantOperationsMixin(_VariantOperationsBase):
           call column, and its channels' calls last. A label of no call where
           the cell holds evidence at the site or at its channels, such as
           ``Unprofiled`` beside ambiguous UMIs, is ``filtered``, and a cell
-          with evidence but no call is ``filtered`` too.
+          with evidence but no call is ``filtered`` too. Tapestri and DAb-seq
+          call each variant of a position apart, so each alternative of a
+          position is genotyped as a site of its own, labelled like
+          ``chr1:115256513:G/T``. ``min_quality`` and ``min_depth`` filter
+          the adopted calls, as Tapestri's pipeline filters genotypes by
+          their quality and depth: a call whose quality, such as Tapestri's
+          ``GQ``, is below ``min_quality`` or missing, or whose cell's depth
+          at the site, or at the deepest of its channels, is below
+          ``min_depth``, is ``filtered``.
         - ``"threshold"`` calls each cell from its UMIs of the site's wild type
           and alternative by the rules given, since GoT studies apply
           different ones: ``min_mutant_umis=1`` calls a cell
@@ -2416,6 +2427,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 each number of reads came from template switching, from 1
                 read up; a UMI takes the value of the most reads given that
                 it reaches, and its reads are its entry's reads per UMI.
+            min_quality: For ``"source"``, the quality that an adopted call
+                needs, or None to adopt calls whatever their quality.
+            min_depth: For ``"source"``, the depth at the site that an adopted
+                call needs, or None to adopt calls whatever their depth.
             invalidate_cache: Call the genotypes again instead of reusing them.
 
         Returns:
@@ -2449,6 +2464,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             min_posterior=min_posterior,
             swap_probabilities=swap_probabilities,
             alleles=alleles,
+            min_quality=min_quality,
+            min_depth=min_depth,
         )
         if method == "gift" and str(group.attrs["format"]) != "giftwrap":
             raise ValueError(
@@ -2511,6 +2528,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             min_fraction=rules.min_fraction,
             min_posterior=rules.min_posterior,
             swap_probabilities=rules.swap_record,
+            min_quality=rules.min_quality,
+            min_depth=rules.min_depth,
             invalidate_cache=invalidate_cache,
         )
         planned = self._plan_variant_genotypes(arguments, cell_selection, n_cells)
@@ -2520,7 +2539,12 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         tables: dict[str, tuple[str, ...]]
         if method == "source":
             tables = {
-                "call": ("call_alleles", "call_sources", "call_values"),
+                "call": (
+                    "call_alleles",
+                    "call_sources",
+                    "call_values",
+                    *(("call_quality",) if rules.min_quality is not None else ()),
+                ),
                 "depth": ("depth_sites", "depth"),
             }
         elif method == "threshold":
@@ -3427,6 +3451,49 @@ def _band_keys(
     )
 
 
+def _covered_keys(
+    cells: np.ndarray,
+    sites: np.ndarray,
+    chosen: np.ndarray,
+    *,
+    cover_rank: np.ndarray,
+    first: int,
+    n_genotyped: int,
+    site_units: tuple[np.ndarray, np.ndarray] | None,
+) -> np.ndarray:
+    """The keys of the genotyped units that the ``chosen`` depth rows cover.
+
+    A row covers its site's unit, or each unit of a site of several units
+    that ``site_units`` lists.
+
+    Returns:
+        The distinct keys, ascending.
+    """
+    ranks = cover_rank[sites]
+    on = (ranks >= 0) & chosen
+    keys = _band_keys(cells[on], ranks[on], first, n_genotyped)
+    if site_units is not None:
+        offsets, units = site_units
+        width = (offsets[sites + 1] - offsets[sites]) * chosen
+        if width.any():
+            ends = np.cumsum(width)
+            within = np.arange(int(ends[-1]), dtype=np.int64) - np.repeat(
+                ends - width, width
+            )
+            keys = np.concatenate(
+                [
+                    keys,
+                    _band_keys(
+                        np.repeat(cells, width),
+                        units[np.repeat(offsets[sites], width) + within],
+                        first,
+                        n_genotyped,
+                    ),
+                ]
+            )
+    return _sorted_unique(keys)
+
+
 def _band_genotypes(
     rows: Mapping[str, tuple[np.ndarray, dict[str, np.ndarray]]],
     *,
@@ -3447,36 +3514,34 @@ def _band_genotypes(
     """Call the genotypes of a band's cells at the genotyped units.
 
     ``site_units`` lists the units of the sites of several, each of which a
-    depth row of the site covers.
+    depth row of the site covers. A cell's adopted source call is filtered
+    where its quality or depth falls below the rules' ``min_quality`` or
+    ``min_depth``.
     """
     covered = np.empty(0, dtype=np.int64)
+    deep = np.empty(0, dtype=np.int64)
     if "depth" in rows:
         depth_cells, depth = rows["depth"]
         depth_sites = depth["depth_sites"].astype(np.int64)
-        positive = depth["depth"] > 0
-        ranks = cover_rank[depth_sites]
-        on = (ranks >= 0) & positive
-        covered = _band_keys(depth_cells[on], ranks[on], first, n_genotyped)
-        if site_units is not None:
-            offsets, units = site_units
-            width = (offsets[depth_sites + 1] - offsets[depth_sites]) * positive
-            if width.any():
-                ends = np.cumsum(width)
-                within = np.arange(int(ends[-1]), dtype=np.int64) - np.repeat(
-                    ends - width, width
-                )
-                covered = np.concatenate(
-                    [
-                        covered,
-                        _band_keys(
-                            np.repeat(depth_cells, width),
-                            units[np.repeat(offsets[depth_sites], width) + within],
-                            first,
-                            n_genotyped,
-                        ),
-                    ]
-                )
-        covered = _sorted_unique(covered)
+        covered = _covered_keys(
+            depth_cells,
+            depth_sites,
+            depth["depth"] > 0,
+            cover_rank=cover_rank,
+            first=first,
+            n_genotyped=n_genotyped,
+            site_units=site_units,
+        )
+        if rules.min_depth is not None:
+            deep = _covered_keys(
+                depth_cells,
+                depth_sites,
+                depth["depth"] >= rules.min_depth,
+                cover_rank=cover_rank,
+                first=first,
+                n_genotyped=n_genotyped,
+                site_units=site_units,
+            )
     labels: np.ndarray
     if method == "source":
         call_cells, values = rows["call"]
@@ -3508,6 +3573,15 @@ def _band_genotypes(
                 str(source_columns[code]), call_labels[of_column], is_covered[of_column]
             )
         labels[at] = call_labels
+        if rules.min_quality is not None or rules.min_depth is not None:
+            failing = np.zeros(len(call_keys), dtype=bool)
+            if rules.min_quality is not None:
+                # A missing quality, NaN, fails every threshold.
+                failing |= ~(values["call_quality"][picked] >= rules.min_quality)
+            if rules.min_depth is not None:
+                failing |= ~np.isin(call_keys, deep)
+            gated = at[failing]
+            calls[gated[calls[gated] != MISSING]] = FILTERED
         reference = alternative = np.full(len(keys), -1, dtype=np.int64)
         posteriors = np.full((len(keys), 3), np.nan)
     else:

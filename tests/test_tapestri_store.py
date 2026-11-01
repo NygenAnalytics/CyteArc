@@ -92,6 +92,22 @@ def test_a_store_holds_the_amplicon_and_protein_reads(tmp_path) -> None:
     assert recorded["file"] == {"date_created": "2026-01-01", "sdk_version": "3.1.2"}
 
 
+def test_the_log_names_tapestri_as_the_source(tmp_path) -> None:
+    from cytearc.utils.logging import logger
+
+    messages: list[str] = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), level="INFO"
+    )
+    try:
+        _write_store(write_tapestri(TRUTH, tmp_path / "run.h5"), tmp_path / "a.zarr")
+    finally:
+        logger.remove(sink)
+    assert f"Wrote {TRUTH.n_rows} cells and 7 features from Tapestri to 2 assay(s)" in (
+        messages
+    )
+
+
 def test_a_file_without_proteins_gives_the_amplicons_alone(tmp_path) -> None:
     file = write_tapestri(TRUTH, tmp_path / "run.dna.h5", protein=False)
     _write_store(file, tmp_path / "store.zarr", workspace="tapestri")
@@ -245,6 +261,54 @@ def test_a_misaligned_feature_column_is_refused(tmp_path) -> None:
             list(reader.get_feature_columns())
     finally:
         reader.close()
+
+
+def test_assay_groups_that_the_store_does_not_hold_are_named(tmp_path) -> None:
+    from cytearc.readers import TapestriReader
+
+    file = write_tapestri(TRUTH, tmp_path / "run.h5")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        TapestriReader(str(file)).close()
+    assert not [w for w in caught if "does not hold" in str(w.message)]
+    _edit(file, lambda h: h.create_group("assays/rna_read_counts"))
+    with pytest.warns(
+        UserWarning,
+        match="holds assays/rna_read_counts, which the store does not hold: it "
+        "holds the amplicon and protein reads",
+    ):
+        TapestriReader(str(file)).close()
+
+
+def test_a_feature_column_of_both_assays_is_one_column(tmp_path) -> None:
+    from cytearc.readers import TapestriReader
+
+    amplicons = [f"amplicon {index}" for index in range(len(TAPESTRI_AMPLICONS))]
+    antibodies = [f"antibody {index}" for index in range(len(TAPESTRI_ANTIBODIES))]
+
+    def add(handle) -> None:
+        for assay, notes in (
+            ("dna_read_counts", amplicons),
+            ("protein_read_counts", antibodies),
+        ):
+            handle[f"assays/{assay}/ca"].create_dataset(
+                "note", data=np.char.encode(np.asarray(notes))
+            )
+
+    file = _edit(write_tapestri(TRUTH, tmp_path / "run.h5"), add)
+    reader = TapestriReader(str(file))
+    try:
+        notes = [
+            values for key, values in reader.get_feature_columns() if key == "note"
+        ]
+    finally:
+        reader.close()
+    assert len(notes) == 1
+    assert notes[0].tolist() == amplicons + antibodies
+    _write_store(file, tmp_path / "store.zarr")
+    ds = _open(tmp_path / "store.zarr", default_assay="ADT")
+    assert ds.CNV.feats.fetch_all("note").tolist() == amplicons
+    assert ds.ADT.feats.fetch_all("note").tolist() == antibodies
 
 
 def test_a_store_imports_its_variants_and_calls_their_clones(tmp_path) -> None:

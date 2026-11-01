@@ -501,7 +501,8 @@ TAPESTRI_REFERENCES = {
 }
 #: The variants that pass and whose alleles are bases.
 TAPESTRI_PASSING = (0, 1, 3, 4, 5, 9)
-DABSEQ_ITD_SITE = "chr13:28608251"
+#: DAb-seq's FLT3-ITD is a site of its own, named as the file names it.
+DABSEQ_ITD_SITE = "FLT3-ITD:chr13:28608251:T/TCTC"
 
 
 def dabseq_ids(truth: TapestriTruth) -> list[str]:
@@ -518,8 +519,8 @@ def expected_tapestri(
     """The depth, counts and calls that an import of the chosen variants gives.
 
     The depth is each position's DP, the counts each variant's alternative
-    reads, and the calls each variant's NGT with its GQ, a no-call kept
-    only where the cell has reads.
+    reads, and the calls each variant's NGT with its GQ where the cell has
+    reads.
     """
     ids = truth.row_ids
     depth_rows, count_rows, call_rows = [], [], []
@@ -534,15 +535,14 @@ def expected_tapestri(
             reads = int(truth.alternative[row, column])
             if reads:
                 count_rows.append((ids[row], site, allele, reads))
-            genotype = int(truth.genotypes[row, column])
-            if genotype != 3 or depth:
+            if depth:
                 call_rows.append(
                     (
                         ids[row],
                         site,
                         allele,
                         "NGT",
-                        str(genotype),
+                        str(int(truth.genotypes[row, column])),
                         float(truth.quality[row, column]),
                     )
                 )
@@ -565,7 +565,8 @@ def expected_dabseq(
     the alternatives' reads, the overlap cell's second one dropped; the
     reference reads of a position, those that no alternative claims, once
     per position; FLT3-ITD's 25 of 60 reads in the cells of clone 4, without
-    reference reads; and every GT with its GQ, NaN where GQ is missing.
+    reference reads, at a site of its own; and the GT with its GQ where the
+    cell has reads, NaN where GQ is missing.
     """
     ids = dabseq_ids(truth)
     columns = tuple(sorted(TAPESTRI_ALLELES))
@@ -585,7 +586,7 @@ def expected_dabseq(
                     (ids[row], site, allele, int(alternative[row, column]))
                 )
             genotype = int(truth.genotypes[row, column])
-            if genotype != 3 or truth.depth[row, column] > 0:
+            if truth.depth[row, column] > 0:
                 quality = np.nan if genotype == 3 else float(truth.quality[row, column])
                 call_rows.append((ids[row], site, allele, "GT", str(genotype), quality))
         for site, depth in depth_at.items():
@@ -595,13 +596,12 @@ def expected_dabseq(
                 count_rows.append(
                     (ids[row], site, TAPESTRI_REFERENCES[site], depth - claimed[site])
                 )
+        # DAb-seq's wild-type FLT3-ITD calls, in cells without ITDseek's
+        # reads, are left out.
         if row in itd_rows:
             depth_rows.append((ids[row], DABSEQ_ITD_SITE, 60))
             count_rows.append((ids[row], DABSEQ_ITD_SITE, "TCTC", 25))
             call_rows.append((ids[row], DABSEQ_ITD_SITE, "TCTC", "GT", "1", 100.0))
-        else:
-            # DAb-seq calls FLT3-ITD wild type where ITDseek found none.
-            call_rows.append((ids[row], DABSEQ_ITD_SITE, "TCTC", "GT", "0", 0.0))
     return (
         pd.DataFrame(depth_rows, columns=["cell", "site", "depth"]),
         pd.DataFrame(count_rows, columns=["cell", "site", "allele", "count"]),

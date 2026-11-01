@@ -5,7 +5,7 @@ Mission Bio's example (Zenodo 10.5281/zenodo.20818440) is CC BY-SA 4.0, and
 GEO serves GSM9567643 without a stated licence. The expected numbers were
 computed from the files with h5py and NumPy alone: depth rows are the
 positions' DP above 0, Tapestri's alternative reads AF × DP / 100 rounded,
-and the calls every NGT or GT but the no-calls of cells without reads.
+and the calls each NGT or GT of a cell with reads at its variant.
 """
 
 import warnings
@@ -113,6 +113,34 @@ def test_the_tapestri_example_reads_into_a_store_and_its_variants(tmp_path) -> N
         "homozygous_alternative": 9_476,
         "filtered": 151,
     }
+    # Four cell lines give four clones at the variants that some but not
+    # most called cells carry, each line's own, while every variant that
+    # passes splits them wherever allelic dropout turns a call.
+    sites = genotypes.sites
+    mutant = sites["heterozygous"] + sites["homozygous_alternative"]
+    share = mutant / (mutant + sites["wild_type"])
+    chosen = share[share.between(0.15, 0.4)].index.tolist()
+    assert len(chosen) == 16
+    genotype_ref = ds.variants.genotypes(counts, method="source")
+    sizes = {}
+    for name, clone_sites in (("chosen", chosen), ("every", None)):
+        clones = ds.clones.load_clones(
+            ds.variants.genotype_clones(genotype_ref, sites=clone_sites)
+        ).clones
+        sizes[name] = clones["n_cells"].sort_values(ascending=False).tolist()
+    assert sizes["chosen"][:5] == [351, 223, 200, 194, 43]
+    assert sum(sizes["chosen"][:4]) > 0.7 * 1313
+    assert (len(sizes["every"]), sizes["every"][0]) == (587, 51)
+    # Filtering calls by quality and depth leaves more cells ambiguous.
+    filtered_ref = ds.variants.genotypes(
+        counts, method="source", min_quality=30, min_depth=10
+    )
+    sites = ds.variants.load_genotypes(filtered_ref).sites
+    mutant = sites["heterozygous"] + sites["homozygous_alternative"]
+    share = mutant / (mutant + sites["wild_type"])
+    chosen = share[share.between(0.15, 0.4)].index.tolist()
+    clones = ds.variants.genotype_clones(filtered_ref, sites=chosen)
+    assert (len(chosen), ds.artifacts.load(clones).attrs["n_ambiguous"]) == (17, 809)
 
 
 @pytest.mark.slow
@@ -128,10 +156,19 @@ def test_a_dabseq_file_of_geo_reads_into_variant_counts(tmp_path) -> None:
     ):
         counts = store.variants.import_counts(file, cell_selection=every_cell(store))
     loaded = store.variants.load_counts(counts)
-    # 4,481 variants whose alleles are bases, at 4,266 positions: 194 hold
-    # several, and FLT3-ITD has a position of its own.
+    # 4,481 variants whose alleles are bases, at 4,265 positions, 194 of
+    # which hold several, and FLT3-ITD, a named site of its own.
     assert len(loaded.sites) == 4266
     assert len(loaded.alleles) == 4266 + 4481
+    itd = "FLT3-ITD:chr13:28608251:T/TCTC"
+    assert loaded.sites.index[-1] == itd
+    shown = loaded.depth[loaded.depth["site"] == itd]
+    assert (len(shown), int(shown["depth"].sum())) == (6, 595)
+    shown = loaded.counts[loaded.counts["site"] == itd]
+    assert (shown["allele"].astype(str).tolist(), int(shown["count"].sum())) == (
+        ["TCTC"] * 6,
+        365,
+    )
     assert (len(loaded.depth), int(loaded.depth["depth"].sum())) == (
         265_144,
         11_883_293,
@@ -142,8 +179,9 @@ def test_a_dabseq_file_of_geo_reads_into_variant_counts(tmp_path) -> None:
         267_212,
         11_881_636,
     )
+    # Each GT of a cell with reads, so FLT3-ITD's six carriers alone.
     assert loaded.calls["call"].value_counts().to_dict() == {
-        "0": 274_590,
+        "0": 274_065,
         "2": 4_312,
         "1": 1_854,
         "3": 950,
@@ -153,8 +191,14 @@ def test_a_dabseq_file_of_geo_reads_into_variant_counts(tmp_path) -> None:
     )
     assert len(genotypes.sites) == 4481
     assert _call_shares(genotypes) == {
-        "wild_type": 274_590,
+        "wild_type": 274_065,
         "heterozygous": 1_854,
         "homozygous_alternative": 4_312,
         "filtered": 950,
     }
+    assert genotypes.sites.loc[
+        itd, ["heterozygous", "homozygous_alternative"]
+    ].tolist() == [
+        5,
+        1,
+    ]

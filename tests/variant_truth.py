@@ -1326,7 +1326,13 @@ def write_tapestri(
         )
         _metadata_group(
             variants.create_group("metadata"),
-            {**TAPESTRI_METADATA, "n_passing_variants": 7, "gq_cutoff": 30},
+            {
+                **TAPESTRI_METADATA,
+                "n_passing_variants": 7,
+                "gq_cutoff": 30,
+                "dp_cutoff": 10,
+                "af_cutoff": 20,
+            },
             samples,
         )
         assay_layouts = [

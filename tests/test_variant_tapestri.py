@@ -5,6 +5,7 @@ in the layouts that Mission Bio documents and the DAb-seq pipeline writes,
 and every import must recover the truth's depth, reads and calls exactly.
 """
 
+import hashlib
 import re
 import warnings
 from pathlib import Path
@@ -129,6 +130,9 @@ def test_tapestri_counts_are_the_passing_variants_read_from_af_and_dp(
             "panel_name",
             "genome_version",
             "pipeline_version",
+            "gq_cutoff",
+            "dp_cutoff",
+            "af_cutoff",
         )
     } == {
         "n_variants": 10,
@@ -141,6 +145,9 @@ def test_tapestri_counts_are_the_passing_variants_read_from_af_and_dp(
         "panel_name": "AML",
         "genome_version": "hg19",
         "pipeline_version": "2.0.2",
+        "gq_cutoff": 30,
+        "dp_cutoff": 10,
+        "af_cutoff": 20,
     }
     assert any(re.search(_SKIPPED, message) for message in messages)
 
@@ -184,12 +191,33 @@ def test_variants_add_failing_variants_and_positions(store, tmp_path) -> None:
         )
         == 1
     )
-    assert _source_record(store, ref)["n_imported_variants"] == 7
-    # Naming a passing variant, or a variant by its full name, adds nothing,
-    # but the list is part of the identity.
-    named, _ = _import(store, path, variants=["chr2:500:A/C"])
-    assert named != ref
-    assert_tables(store.variants.load_counts(named).counts, counts)
+    record = _source_record(store, ref)
+    assert (record["n_imported_variants"], record["n_added_variants"]) == (7, 1)
+    assert (
+        record["added_variants_sha256"] == hashlib.sha256(b"chr2:500:A/C").hexdigest()
+    )
+    # Naming the variant rather than its position adds the same variant, and
+    # naming a passing one adds none, so both reuse their imports.
+    assert _import(store, path, variants=["chr2:500:A/C", "chr1:1000"])[0] == ref
+    plain, _ = _import(store, path)
+    assert plain != ref
+    assert _import(store, path, variants=["chr7:400:G/A"])[0] == plain
+    assert _source_record(store, plain)["n_added_variants"] == 0
+    # With chr7:400 failing too, adding it or chr2:500:A/C imports as many
+    # variants, which their names tell apart.
+    failing = _edit(
+        write_tapestri(TRUTH, tmp_path / "failing.h5"),
+        lambda h: h[f"{_COLUMNS}/filtered"].__setitem__(9, 1),
+    )
+    first, _ = _import(store, failing, variants=["chr7:400:G/A"])
+    second, _ = _import(store, failing, variants=["chr2:500:A/C"])
+    assert first != second
+    assert store.variants.load_counts(first).sites.index.tolist() == [
+        "chr1:1000",
+        "chr1:2000",
+        "chr2:500",
+        "chr7:400",
+    ]
 
 
 def test_variants_that_cannot_be_read_are_skipped_or_refused(store, tmp_path) -> None:
@@ -279,6 +307,196 @@ def test_dabseq_counts_are_its_reads_and_calls(dabseq_store, tmp_path) -> None:
     ) == (11, 8, 2, 1)
 
 
+def test_dabseq_variants_named_without_a_gene_read_alike(
+    dabseq_store, tmp_path
+) -> None:
+    # The pipeline's non-human mode names variants <chrom>:<pos>:<ref>/<alt>.
+    def strip(handle) -> None:
+        names = _texts(handle, "VARIANTS")
+        _replace(
+            handle,
+            "VARIANTS",
+            np.asarray(
+                [
+                    name if name.startswith("FLT3-ITD:") else name.split(":", 1)[1]
+                    for name in names
+                ]
+            ),
+        )
+
+    path = _edit(write_dabseq(TRUTH, tmp_path / "GSM0.hdf5"), strip)
+    with h5py.File(path, "r") as handle:
+        assert _texts(handle, "VARIANTS")[0] == "chr1:1000:G/A"
+    loaded = dabseq_store.variants.load_counts(_import(dabseq_store, path)[0])
+    depth, counts, calls = expected_dabseq(TRUTH)
+    assert_tables(loaded.depth, depth)
+    assert_tables(loaded.counts, counts)
+    assert_tables(loaded.calls.drop(columns="quality"), calls.drop(columns="quality"))
+
+
+def _add_itds(handle, names: list[str]) -> None:
+    """Rename DAb-seq's FLT3-ITD column, the last, to the first name, and add
+    one column per other name, each carried by the cells after the previous
+    one's."""
+    variants = _texts(handle, "VARIANTS")
+    layers = {name: handle[name][:] for name in ("AD", "RD", "DP", "GQ", "GT")}
+    variants[-1] = names[0]
+    for name in names[1:]:
+        variants.append(name)
+        for layer, values in layers.items():
+            layers[layer] = np.column_stack([values, np.roll(values[:, -1], 1)])
+    for layer, values in layers.items():
+        _replace(handle, layer, values)
+    _replace(handle, "VARIANTS", np.asarray(variants))
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        # GATK's DP at chr7:400 and ITDseek's depth never meet.
+        ["FLT3-ITD:chr7:400:G/GCTC"],
+        ["FLT3-ITD:chr13:28608251:T/TCTC", "FLT3-ITD:chr13:28608251:T/TCTCGG"],
+    ],
+)
+def test_flt3_itd_variants_are_sites_of_their_own(
+    dabseq_store, tmp_path, names
+) -> None:
+    path = _edit(
+        write_dabseq(TRUTH, tmp_path / "GSM0.hdf5"), lambda h: _add_itds(h, names)
+    )
+    loaded = dabseq_store.variants.load_counts(_import(dabseq_store, path)[0])
+    assert loaded.sites.index.tolist() == [*TAPESTRI_REFERENCES, *names]
+    ids = np.asarray(dabseq_ids(TRUTH), dtype=object)
+    expected_depth, _counts, _calls = expected_dabseq(TRUTH)
+    coordinates = expected_depth[expected_depth["site"] != DABSEQ_ITD_SITE]
+    assert_tables(loaded.depth[~loaded.depth["site"].isin(names)], coordinates)
+    carriers = np.flatnonzero(TRUTH.clones.clones == 4)
+    for name in names:
+        alternative = name.rsplit("/", 1)[1]
+        rows = ids[carriers].tolist()
+        shown = {
+            kind: frame[frame["site"] == name]
+            for kind, frame in (
+                ("depth", loaded.depth),
+                ("counts", loaded.counts),
+                ("calls", loaded.calls),
+            )
+        }
+        assert_tables(
+            shown["depth"],
+            pd.DataFrame({"cell": rows, "site": name, "depth": 60}),
+        )
+        # 25 reads of the ITD and no reads of the reference, since RD holds
+        # ITDseek's depth.
+        assert_tables(
+            shown["counts"],
+            pd.DataFrame(
+                {"cell": rows, "site": name, "allele": alternative, "count": 25}
+            ),
+        )
+        assert_tables(
+            shown["calls"],
+            pd.DataFrame(
+                {
+                    "cell": rows,
+                    "site": name,
+                    "allele": alternative,
+                    "source": "GT",
+                    "call": "1",
+                    "quality": 100.0,
+                }
+            ),
+        )
+        carriers = (carriers + 1) % TRUTH.n_rows
+
+
+def _batch_tables(
+    source, chunk_rows: int
+) -> tuple[int, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """The blocks of a source's batches, and the depth, counts and calls they
+    give by cell ID, site label and allele."""
+    sites = source.sites()
+    labels = sites.labels()
+    allele_sites = labels[sites.allele_site]
+    depth, counts, calls = [], [], []
+    blocks = 0
+    for batch in source.batches(chunk_rows):
+        cells = np.asarray(batch.barcodes, dtype=object)[batch.barcode_codes]
+        if batch.kind == "cells":
+            blocks += 1
+            assert len(cells) == len(batch.barcodes)
+        elif batch.kind == "depth":
+            depth.extend(zip(cells, labels[batch.keys], batch.values, strict=True))
+        elif batch.kind == "counts":
+            counts.extend(
+                zip(
+                    cells,
+                    allele_sites[batch.keys],
+                    sites.allele[batch.keys],
+                    batch.values,
+                    strict=True,
+                )
+            )
+        else:
+            calls.extend(
+                zip(
+                    cells,
+                    allele_sites[batch.keys],
+                    sites.allele[batch.keys],
+                    [batch.call_source] * len(cells),
+                    batch.calls,
+                    batch.call_quality,
+                    strict=True,
+                )
+            )
+    return (
+        blocks,
+        pd.DataFrame(depth, columns=["cell", "site", "depth"]),
+        pd.DataFrame(counts, columns=["cell", "site", "allele", "count"]),
+        pd.DataFrame(
+            calls, columns=["cell", "site", "allele", "source", "call", "quality"]
+        ),
+    )
+
+
+@pytest.mark.parametrize(("chunk_rows", "n_blocks"), [(1, 52), (20, 26), (10_000, 1)])
+@pytest.mark.parametrize("file_format", ["tapestri", "dabseq"])
+def test_a_source_gives_the_truth_in_blocks_of_any_size(
+    tmp_path, file_format, chunk_rows, n_blocks
+) -> None:
+    from cytearc.readers.tapestri import dabseq_source, tapestri_source
+
+    # A block holds chunk_rows // (variants + 2) cells: 6 variants of
+    # Tapestri's and 8 of DAb-seq's, so 1 cell at a time, then 2, then all.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        if file_format == "tapestri":
+            source = tapestri_source(write_tapestri(TRUTH, tmp_path / "run.h5"))
+            expected = expected_tapestri(TRUTH)
+        else:
+            source = dabseq_source(write_dabseq(TRUTH, tmp_path / "GSM0.hdf5"))
+            expected = expected_dabseq(TRUTH)
+    blocks, *tables = _batch_tables(source, chunk_rows)
+    assert blocks == n_blocks
+    for loaded, wanted in zip(tables, expected, strict=True):
+        assert_tables(loaded, wanted)
+
+
+def test_the_store_reader_gives_every_read_in_batches(tmp_path) -> None:
+    from cytearc.readers import TapestriReader
+
+    reader = TapestriReader(str(write_tapestri(TRUTH, tmp_path / "run.h5")))
+    try:
+        batches = [matrix.toarray() for matrix in reader.consume(7)]
+    finally:
+        reader.close()
+    # 52 cells in batches of 7, the last of 3.
+    assert [len(batch) for batch in batches] == [7] * 7 + [3]
+    np.testing.assert_array_equal(
+        np.vstack(batches), np.hstack([TRUTH.amplicon_reads, TRUTH.protein_reads])
+    )
+
+
 def test_tapestri_and_dabseq_files_are_recognised(tmp_path) -> None:
     from cytearc.readers._variant_files import hdf5_format
 
@@ -357,6 +575,10 @@ def _texts(handle, name):
             "lacks assays/dna_variants/ca",
         ),
         (
+            lambda h: h["assays/dna_variants"].__delitem__("ra"),
+            "lacks assays/dna_variants/ra",
+        ),
+        (
             lambda h: _replace(h[_COLUMNS], "POS", np.arange(3, dtype=np.int32)),
             "The arrays of assays/dna_variants/ca of .* do not align",
         ),
@@ -366,6 +588,37 @@ def test_malformed_tapestri_files_are_refused(store, tmp_path, edit, message) ->
     path = _edit(write_tapestri(TRUTH, tmp_path / "run.h5"), edit)
     with pytest.raises(ValueError, match=message):
         _import(store, path)
+
+
+def _float32_frequencies(handle, frequency: float = 33.3) -> None:
+    """Store AF as float32, the first cell reading chr7:400 1,000 times at
+    ``frequency``."""
+    values = handle[f"{_LAYERS}/AF"][:]
+    values[0, 9] = frequency
+    handle[f"{_LAYERS}/DP"][0, 9] = 1_000
+    del handle[f"{_LAYERS}/AF"]
+    handle.create_dataset(f"{_LAYERS}/AF", data=values.astype(np.float32))
+
+
+def test_float32_allele_frequencies_give_whole_reads(store, tmp_path) -> None:
+    from dataclasses import replace
+
+    # float32 holds 33.3 as 33.29999924, so 1,000 reads give 332.9999924
+    # alternative reads, which float64's rounding alone would refuse.
+    path = _edit(write_tapestri(TRUTH, tmp_path / "run.h5"), _float32_frequencies)
+    loaded = store.variants.load_counts(_import(store, path)[0])
+    depth, alternative = TRUTH.depth.copy(), TRUTH.alternative.copy()
+    depth[0, 9], alternative[0, 9] = 1_000, 333
+    expected = expected_tapestri(replace(TRUTH, depth=depth, alternative=alternative))
+    assert_tables(loaded.depth, expected[0])
+    assert_tables(loaded.counts, expected[1])
+    # Half a read off a whole number is still refused.
+    off = _edit(
+        write_tapestri(TRUTH, tmp_path / "off.h5"),
+        lambda h: _float32_frequencies(h, 33.35),
+    )
+    with pytest.raises(ValueError, match="do not give a whole number of reads"):
+        _import(store, off)
 
 
 def _rename_variant(handle, column: int, reference: str, alternative: str) -> None:
@@ -445,7 +698,7 @@ def test_tapestri_layers_and_cells_must_align(store, tmp_path) -> None:
                 "VARIANTS",
                 np.asarray(["NRAS:chr1:1000:G>A", *_texts(h, "VARIANTS")[1:]]),
             ),
-            r"VARIANTS\[0\] of .* is 'NRAS:chr1:1000:G>A', not <gene>:<chrom>",
+            r"VARIANTS\[0\] of .* is 'NRAS:chr1:1000:G>A', neither <gene>:<chrom>",
         ),
         (
             lambda h: h["RD"].__setitem__((0, 1), int(h["RD"][0, 0]) + 1),
@@ -478,11 +731,66 @@ def test_malformed_dabseq_files_are_refused(
         _import(dabseq_store, path)
 
 
-def _call_name(genotype: int, depth: int) -> str | None:
-    """Tapestri's NGT as a call, None for a cell that the calls leave out."""
+def _call_name(
+    genotype: int,
+    depth: int,
+    quality: float = 0.0,
+    *,
+    min_quality: float | None = None,
+    min_depth: int | None = None,
+) -> str | None:
+    """Tapestri's NGT as a call, None for a cell without reads, whose call
+    the import leaves out; a call below either rule is filtered."""
+    if not depth:
+        return None
     if genotype == 3:
-        return "filtered" if depth > 0 else None
+        return "filtered"
+    if (min_quality is not None and not quality >= min_quality) or (
+        min_depth is not None and depth < min_depth
+    ):
+        return "filtered"
     return ("wild_type", "heterozygous", "homozygous_alternative")[genotype]
+
+
+#: Tapestri's genotype units, by column of ``TAPESTRI_VARIANTS``, in the
+#: order of the counts' alleles. A unit is labelled by its site and alleles,
+#: Tapestri's name unless the reference was extended, as chr1:2000:T/G is.
+_TAPESTRI_UNITS = {
+    0: "chr1:1000:G/A",
+    1: "chr1:1000:G/T",
+    4: "chr1:2000:TC/GC",
+    3: "chr1:2000:TC/T",
+    5: "chr2:500:A/G",
+    9: "chr7:400:G/A",
+}
+
+
+def _expected_calls(
+    units: dict[int, str],
+    *,
+    min_quality: float | None = None,
+    min_depth: int | None = None,
+) -> pd.DataFrame:
+    """Each cell's call and NGT label at each unit, from the truth."""
+    ids = TRUTH.row_ids
+    return pd.DataFrame(
+        [
+            (ids[row], unit, call, str(int(TRUTH.genotypes[row, column])))
+            for column, unit in units.items()
+            for row in range(TRUTH.n_rows)
+            if (
+                call := _call_name(
+                    int(TRUTH.genotypes[row, column]),
+                    int(TRUTH.depth[row, column]),
+                    float(TRUTH.quality[row, column]),
+                    min_quality=min_quality,
+                    min_depth=min_depth,
+                )
+            )
+            is not None
+        ],
+        columns=["cell", "site", "call", "label"],
+    )
 
 
 def test_source_genotypes_of_tapestri_counts_follow_ngt(store, tmp_path) -> None:
@@ -490,43 +798,136 @@ def test_source_genotypes_of_tapestri_counts_follow_ngt(store, tmp_path) -> None
     counts, _ = _import(store, path)
     genotypes = store.variants.genotypes(counts, method="source")
     loaded = store.variants.load_genotypes(genotypes)
-    # One genotype per variant, named as Tapestri names it, in the order of
-    # the counts' alleles.
-    units = {
-        0: "chr1:1000:G/A",
-        1: "chr1:1000:G/T",
-        4: "chr1:2000:TC/GC",
-        3: "chr1:2000:TC/T",
-        5: "chr2:500:A/G",
-        9: "chr7:400:G/A",
-    }
-    assert loaded.sites.index.tolist() == list(units.values())
+    # One genotype per variant.
+    assert loaded.sites.index.tolist() == list(_TAPESTRI_UNITS.values())
     assert loaded.sites["reference"].tolist() == ["G", "G", "TC", "TC", "A", "G"]
     assert loaded.sites["alternative"].tolist() == ["A", "T", "GC", "T", "G", "A"]
     assert set(loaded.sites["source"]) == {"NGT"}
     ids = TRUTH.row_ids
-    expected = pd.DataFrame(
-        [
-            (ids[row], unit, call, str(int(TRUTH.genotypes[row, column])))
-            for column, unit in units.items()
-            for row in range(TRUTH.n_rows)
-            if (
-                call := _call_name(
-                    int(TRUTH.genotypes[row, column]), int(TRUTH.depth[row, column])
-                )
-            )
-            is not None
-        ],
-        columns=["cell", "site", "call", "label"],
+    assert_tables(
+        loaded.calls.astype({"call": str, "label": str}),
+        _expected_calls(_TAPESTRI_UNITS),
     )
-    assert_tables(loaded.calls.astype({"call": str, "label": str}), expected)
     calls = loaded.calls.set_index(["cell", "site"])
-    # No call with reads is filtered, without reads missing, and a wild-type
-    # call without reads is kept as the file wrote it.
+    # No call with reads is filtered, and without reads missing, as is the
+    # wild-type call that Tapestri writes without reads.
     assert calls.loc[(ids[TRUTH.no_call_row], "chr7:400:G/A"), "call"] == "filtered"
     assert (ids[TRUTH.uncovered_row], "chr7:400:G/A") not in calls.index
-    assert calls.loc[(ids[TRUTH.wild_type_row], "chr1:1000:G/A"), "call"] == "wild_type"
+    assert int(TRUTH.genotypes[TRUTH.wild_type_row, 0]) == 0
+    assert (ids[TRUTH.wild_type_row], "chr1:1000:G/A") not in calls.index
     assert calls.loc[(ids[TRUTH.overlap_row], "chr2:500:A/G"), "call"] == "filtered"
+
+
+@pytest.mark.parametrize(
+    ("min_quality", "min_depth"),
+    [(60, None), (None, 33), (45.5, 30), (0, 1)],
+)
+def test_source_calls_below_a_quality_or_depth_are_filtered(
+    store, tmp_path, min_quality, min_depth
+) -> None:
+    path = write_tapestri(TRUTH, tmp_path / "run.h5")
+    counts, _ = _import(store, path)
+    plain = store.variants.genotypes(counts, method="source")
+    ref = store.variants.genotypes(
+        counts, method="source", min_quality=min_quality, min_depth=min_depth
+    )
+    assert ref != plain
+    loaded = store.variants.load_genotypes(ref)
+    expected = _expected_calls(
+        _TAPESTRI_UNITS, min_quality=min_quality, min_depth=min_depth
+    )
+    assert_tables(loaded.calls.astype({"call": str, "label": str}), expected)
+    if (min_quality, min_depth) != (0, 1):
+        # The rules filter some calls, and keep the labels Tapestri wrote.
+        assert len(expected) == len(store.variants.load_genotypes(plain).calls)
+        assert (expected["call"] == "filtered").sum() > (
+            _expected_calls(_TAPESTRI_UNITS)["call"] == "filtered"
+        ).sum()
+    rules = store.artifacts.load(ref).attrs["rules"]
+    assert (rules["min_quality"], rules["min_depth"]) == (
+        None if min_quality is None else float(min_quality),
+        min_depth,
+    )
+    assert (
+        store.variants.genotypes(
+            counts, method="source", min_quality=min_quality, min_depth=min_depth
+        )
+        == ref
+    )
+
+
+def test_a_call_without_a_quality_fails_every_min_quality(
+    dabseq_store, tmp_path
+) -> None:
+    row = int(np.flatnonzero(TRUTH.clones.clones == 4)[0])
+    path = _edit(
+        write_dabseq(TRUTH, tmp_path / "GSM0.hdf5"),
+        lambda h: h["GQ"].__setitem__((row, 5), -1),
+    )
+    counts, _ = _import(dabseq_store, path)
+    cell = (dabseq_ids(TRUTH)[row], "chr2:500:A/G")
+    for options, call in (
+        ({}, "heterozygous"),
+        ({"min_quality": 0}, "filtered"),
+    ):
+        loaded = dabseq_store.variants.load_genotypes(
+            dabseq_store.variants.genotypes(counts, method="source", **options)
+        )
+        assert loaded.calls.set_index(["cell", "site"]).loc[cell, "call"] == call
+
+
+def test_the_rules_of_several_alternatives_reach_each_of_them(store, tmp_path) -> None:
+    path = write_tapestri(TRUTH, tmp_path / "run.h5")
+    counts, _ = _import(store, path, variants=["chr2:500"])
+    units = {**_TAPESTRI_UNITS, 6: "chr2:500:A/C"}
+    for options in ({}, {"min_depth": 33}, {"min_quality": 50}):
+        loaded = store.variants.load_genotypes(
+            store.variants.genotypes(counts, method="source", **options)
+        )
+        assert set(loaded.sites.index) == set(units.values())
+        assert_tables(
+            loaded.calls.astype({"call": str, "label": str}),
+            _expected_calls(units, **options),
+        )
+    # The overlap cell's one read leaves both alternatives of chr2:500
+    # filtered, beside a cell that reads them and calls one wild type.
+    calls = loaded.calls.set_index(["cell", "site"])["call"].astype(str)
+    overlap = TRUTH.row_ids[TRUTH.overlap_row]
+    assert (
+        calls[(overlap, "chr2:500:A/G")]
+        == calls[(overlap, "chr2:500:A/C")]
+        == ("filtered")
+    )
+
+
+@pytest.mark.parametrize(
+    ("options", "error", "message"),
+    [
+        ({"min_quality": -1}, ValueError, "min_quality must be a finite number of 0"),
+        ({"min_quality": float("nan")}, ValueError, "finite number of 0 or more"),
+        ({"min_quality": "30"}, TypeError, "min_quality must be a number or None"),
+        ({"min_quality": True}, TypeError, "min_quality must be a number or None"),
+        ({"min_depth": 0}, ValueError, "min_depth must be at least 1"),
+        ({"min_depth": 1.5}, TypeError, "min_depth must be a whole number"),
+        (
+            {"min_depth": 10, "method": "threshold", "min_mutant_umis": 1},
+            ValueError,
+            "method='threshold' uses no min_depth",
+        ),
+        (
+            {"min_umis": 2},
+            ValueError,
+            "method='source' uses no min_umis; it adopts the calls that the tool "
+            "wrote, those of too low a quality or depth filtered by min_quality",
+        ),
+    ],
+)
+def test_source_call_rules_are_checked(
+    store, tmp_path, options, error, message
+) -> None:
+    counts, _ = _import(store, write_tapestri(TRUTH, tmp_path / "run.h5"))
+    with pytest.raises(error, match=re.escape(message)):
+        store.variants.genotypes(counts, **{"method": "source", **options})
 
 
 def test_genotype_clones_of_tapestri_calls_are_the_truth_clones(
@@ -560,16 +961,17 @@ def test_dabseq_genotypes_adopt_gt_and_flt3_itd(dabseq_store, tmp_path) -> None:
         "chr2:500:A/C",
         "chr2:500:A/G",
         "chr7:400:G/A",
-        "chr13:28608251:T/TCTC",
+        DABSEQ_ITD_SITE,
     ]
     assert set(loaded.sites["source"]) == {"GT"}
-    itd = loaded.calls[loaded.calls["site"] == "chr13:28608251:T/TCTC"]
+    # FLT3-ITD is called only where ITDseek found it, since the wild-type
+    # calls that DAb-seq writes elsewhere have no reads.
+    itd = loaded.calls[loaded.calls["site"] == DABSEQ_ITD_SITE]
     clone_4 = {
         dabseq_ids(TRUTH)[row] for row in np.flatnonzero(TRUTH.clones.clones == 4)
     }
-    assert set(itd[itd["call"] == "heterozygous"]["cell"].astype(str)) == clone_4
-    assert len(itd) == TRUTH.n_rows
-    assert (itd[itd["call"] != "heterozygous"]["call"] == "wild_type").all()
+    assert set(itd["cell"].astype(str)) == clone_4
+    assert set(itd["call"].astype(str)) == {"heterozygous"}
 
 
 def test_threshold_rules_refuse_tapestri_counts(store, tmp_path) -> None:
@@ -660,13 +1062,16 @@ def test_the_traced_peak_of_a_tapestri_import_fits_the_smallest_budget_accepted(
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize(
+    "rules", [{}, {"min_quality": 30, "min_depth": 30}], ids=["adopted", "filtered"]
+)
 def test_source_genotypes_of_several_alternatives_fit_the_smallest_budget_accepted(
-    tmp_path,
+    tmp_path, rules
 ) -> None:
     from tests.variant_truth import write_large_tapestri
 
     # Three variants share each position, so each depth row covers three
-    # genotyped units.
+    # genotyped units, which the depth that the rules compare covers too.
     file = write_large_tapestri(
         tmp_path / "large.h5", n_cells=8_000, n_variants=30, alternatives=3
     )
@@ -676,7 +1081,9 @@ def test_source_genotypes_of_several_alternatives_fit_the_smallest_budget_accept
     assert len(loaded.sites) == 10 and len(loaded.alleles) == 40
 
     def run() -> None:
-        store.variants.genotypes(counts, method="source", invalidate_cache=True)
+        store.variants.genotypes(
+            counts, method="source", invalidate_cache=True, **rules
+        )
 
     budget, peak = _smallest_and_peak(store, run)
     assert peak <= budget, (peak, budget)
@@ -828,34 +1235,64 @@ def test_a_source_must_give_each_call_one_quality() -> None:
     assert int(np.isnan(rows["quality"]).sum()) == 2
 
 
-def _wide_tapestri(path: Path, *, n_cells: int, n_variants: int, sample: str) -> Path:
+def _write_texts(group, name: str, values: list[str], variable_length: bool) -> None:
+    if variable_length:
+        group.create_dataset(
+            name, data=np.asarray(values, dtype=object), dtype=h5py.string_dtype()
+        )
+    else:
+        group.create_dataset(name, data=np.char.encode(np.asarray(values)))
+
+
+def _barcodes(n_cells: int) -> list[str]:
+    return [
+        "".join("ACGT"[(cell >> (2 * digit)) & 3] for digit in range(18))
+        for cell in range(n_cells)
+    ]
+
+
+def _alternatives(n_variants: int, length: int) -> list[str]:
+    """``G`` for a SNV, or an insertion of ``length`` bases after the ``A``."""
+    if length == 1:
+        return ["G"] * n_variants
+    rng = np.random.default_rng(5)
+    return ["A" + "".join(rng.choice(list("ACGT"), length)) for _ in range(n_variants)]
+
+
+def _wide_tapestri(
+    path: Path,
+    *,
+    n_cells: int,
+    n_variants: int,
+    sample: str,
+    alternative_length: int = 1,
+    variable_length: bool = False,
+) -> Path:
     """A Tapestri file of many candidate variants of which two pass."""
     rng = np.random.default_rng(3)
     with h5py.File(path, "w") as handle:
         variants = handle.create_group("assays/dna_variants")
         columns = variants.create_group("ca")
         positions = 1_000 + np.arange(n_variants)
-        names = [f"chr1:{position}:A/G" for position in positions]
+        alternatives = _alternatives(n_variants, alternative_length)
+        names = [
+            f"chr1:{position}:A/{alternative}"
+            for position, alternative in zip(positions, alternatives, strict=True)
+        ]
         for name, values in (
             ("id", names),
             ("CHROM", ["1"] * n_variants),
             ("REF", ["A"] * n_variants),
-            ("ALT", ["G"] * n_variants),
+            ("ALT", alternatives),
         ):
-            columns.create_dataset(name, data=np.char.encode(np.asarray(values)))
+            _write_texts(columns, name, values, variable_length)
         columns.create_dataset("POS", data=positions.astype(np.int32))
         filtered = np.ones(n_variants, dtype=np.uint8)
         filtered[[0, n_variants // 2]] = 0
         columns.create_dataset("filtered", data=filtered)
         rows = variants.create_group("ra")
-        barcodes = [
-            "".join("ACGT"[(cell >> (2 * digit)) & 3] for digit in range(18))
-            for cell in range(n_cells)
-        ]
-        rows.create_dataset("barcode", data=np.char.encode(np.asarray(barcodes)))
-        rows.create_dataset(
-            "sample_name", data=np.char.encode(np.asarray([sample] * n_cells))
-        )
+        _write_texts(rows, "barcode", _barcodes(n_cells), variable_length)
+        _write_texts(rows, "sample_name", [sample] * n_cells, variable_length)
         depth = rng.poisson(20, size=(n_cells, n_variants)).astype(np.int16)
         for name, values in (
             ("DP", depth),
@@ -872,22 +1309,78 @@ def _wide_tapestri(path: Path, *, n_cells: int, n_variants: int, sample: str) ->
     return path
 
 
-def test_a_description_beyond_the_budget_is_refused_before_it_is_read(tmp_path) -> None:
-    from cytearc.readers.tapestri import dabseq_source, tapestri_source
+def _wide_dabseq(
+    path: Path,
+    *,
+    n_cells: int,
+    n_variants: int,
+    alternative_length: int,
+    variable_length: bool,
+) -> Path:
+    """A DAb-seq file of many variants, every cell without reads."""
+    with h5py.File(path, "w") as handle:
+        positions = 1_000 + np.arange(n_variants)
+        alternatives = _alternatives(n_variants, alternative_length)
+        _write_texts(
+            handle,
+            "VARIANTS",
+            [
+                f"GENE:chr1:{position}:A/{alternative}"
+                for position, alternative in zip(positions, alternatives, strict=True)
+            ],
+            variable_length,
+        )
+        _write_texts(
+            handle,
+            "CELL_BARCODES",
+            [f"{barcode}-1-s" for barcode in _barcodes(n_cells)],
+            variable_length,
+        )
+        for name, dtype in (
+            ("AD", np.int16),
+            ("RD", np.int16),
+            ("DP", np.int16),
+            ("GQ", np.int8),
+            ("GT", np.int8),
+        ):
+            handle.create_dataset(
+                name, data=np.zeros((n_cells, n_variants), dtype), chunks=(50, 64)
+            )
+    return path
 
-    path = _wide_tapestri(
-        tmp_path / "wide.h5", n_cells=50, n_variants=2_000, sample="s"
-    )
-    # 2,000 variants of 700 bytes and 2 copies of their 13-byte IDs, such as
-    # chr1:1000:A/G, and 1-byte CHROM, REF and ALT; and 50 cells of 300 bytes
-    # and 2 copies of their 18-byte barcode and 1-byte sample.
-    needed = 2_000 * (700 + 2 * (13 + 1 + 1 + 1)) + 50 * (300 + 2 * (18 + 1))
-    with pytest.raises(MemoryError, match=f"holds about {needed} bytes"):
-        tapestri_source(path, memory_bytes=needed - 1)
-    assert tapestri_source(path, memory_bytes=needed).notes["n_imported_variants"] == 2
-    dabseq = write_dabseq(TRUTH, tmp_path / "GSM0.hdf5")
-    with pytest.raises(MemoryError, match="11 variants and 52 cells"):
-        dabseq_source(dabseq, memory_bytes=1_000)
+
+@pytest.mark.parametrize("variable_length", [False, True])
+@pytest.mark.parametrize("file_format", ["tapestri", "dabseq"])
+def test_describing_a_file_holds_no_more_than_the_smallest_budget_accepted(
+    tmp_path, file_format, variable_length
+) -> None:
+    from cytearc.readers.tapestri import dabseq_source, tapestri_source
+    from tests.clone_helpers import traced_peak
+
+    # Insertions of 1,000 bases make the variants' texts most of what the
+    # description holds, however the file stores them.
+    options = {
+        "n_cells": 50,
+        "n_variants": 2_000,
+        "alternative_length": 1_000,
+        "variable_length": variable_length,
+    }
+    if file_format == "tapestri":
+        path = _wide_tapestri(tmp_path / "wide.h5", sample="s", **options)
+        describe = tapestri_source
+    else:
+        path = _wide_dabseq(tmp_path / "wide.hdf5", **options)
+        describe = dabseq_source
+    with pytest.raises(MemoryError, match=r"holds about \d+ bytes") as refused:
+        describe(path, memory_bytes=1)
+    found = re.search(r"holds about (\d+) bytes", str(refused.value))
+    assert found is not None
+    # The smallest budget accepted is the one the refusal names.
+    budget = int(found.group(1))
+    with pytest.raises(MemoryError):
+        describe(path, memory_bytes=budget - 1)
+    peak = traced_peak(lambda: describe(path, memory_bytes=budget))
+    assert peak <= budget, (peak, budget)
 
 
 @pytest.mark.slow

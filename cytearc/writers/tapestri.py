@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from ..readers.tapestri import AMPLICON_FEATURE_TYPE, TapestriReader
+from ..readers.tapestri import TapestriReader
 from ..storage.count_matrix import CountMatrixPolicy
 from ..storage.io_policy import StorageIoPolicy
 from ..storage.profiles import StorageProfile, ZarrLocation
@@ -15,9 +15,9 @@ __all__ = ["TapestriToZarr"]
 class TapestriToZarr(CrToZarr):
     """Convert a Tapestri file of single-cell DNA and protein to a store.
 
-    Tapestri files hold no RNA: the store holds the amplicons' reads as the
-    ``CNV`` assay, recorded as a generic ``Assay``, and the antibody tags'
-    reads as the ``ADT`` assay, with each cell's ``sample_name`` and
+    The store holds the amplicons' reads as the ``CNV`` assay, recorded as a
+    generic ``Assay``, and the antibody tags' reads as the ``ADT`` assay,
+    with each cell's ``sample_name`` and
     ``filtered`` flag as cell metadata and the amplicons' intervals as
     feature metadata, as :class:`~cytearc.readers.TapestriReader` reads
     them. The file's metadata, such as each assay's ``panel_name``,
@@ -60,6 +60,8 @@ class TapestriToZarr(CrToZarr):
             destination is created.
     """
 
+    source_name = "Tapestri"
+
     def __init__(
         self,
         reader: TapestriReader,
@@ -79,15 +81,8 @@ class TapestriToZarr(CrToZarr):
             raise TypeError(
                 f"reader must be a TapestriReader, not {type(reader).__name__}"
             )
-        # The amplicons' assay takes the generic type unless renamed to a
-        # preset or given another type.
-        amplicons = [
-            str(name)
-            for name, feature_type in reader.assayFeats.T["type"].items()
-            if feature_type == AMPLICON_FEATURE_TYPE
-        ]
-        types = {name: "Assay" for name in amplicons}
-        types.update(assay_types or {})
+        # The amplicons' assay, CNV, is no preset, so it takes the generic
+        # type unless assay_types gives another.
         super().__init__(
             reader,
             zarr_loc,
@@ -98,7 +93,7 @@ class TapestriToZarr(CrToZarr):
             profile=profile,
             policy=policy,
             io=io,
-            assay_types=types,
+            assay_types=assay_types,
             overwrite=overwrite,
         )
         root = (
