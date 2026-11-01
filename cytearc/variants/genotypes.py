@@ -26,7 +26,8 @@ Three methods call genotypes:
   a probability that falls with its reads; each observed gapfill is assigned
   to the wild type or the mutant by its edit distance to them; and the UMIs
   of a cell give the posterior of each genotype under a uniform prior, called
-  above ``min_posterior``.
+  above ``min_posterior``. The model adapts the genotype functions of GIFT's
+  MIT-licensed reproducibility code, as ``THIRD_PARTY_NOTICES.md`` records.
 
 These functions never touch storage.
 """
