@@ -795,18 +795,19 @@ class _LineageBarcodeOperationsMixin(_BarcodeOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If the preset is unknown, a required rule is missing,
-                a value is out of range, an argument does not apply to the
-                method, a rule needs counts that a library does not hold, or
-                a within column is missing or has no label for a cell with a
-                barcode.
+            ValueError: If ``barcodes`` is not a ``lineage_barcodes`` artifact,
+                the preset is unknown, a required rule is missing, a value is
+                out of range, an argument does not apply to the method, a
+                rule needs counts that a library does not hold, or a within
+                column is missing or has no label for a cell with a barcode.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
             PermissionError: If the store is read-only and the clones are not
                 saved yet.
             MemoryError: If the calling does not fit the memory budget.
         """
         group = self._barcode_group(barcodes)
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
+        bool_argument(invalidate_cache, "invalidate_cache")
         listed = None
         if allowlist is not None and not isinstance(allowlist, bool | np.bool_):
             if isinstance(allowlist, str | bytes) or not hasattr(allowlist, "__len__"):

@@ -4,8 +4,9 @@ Each source saves the synthetic truth's clones its own way, in a store of the
 truth's cells, and every summary must measure the truth's clones whatever
 saved them. The expected values are counted cell by cell from the truth, so
 they never come from the code under test. A pull request that adds a clone
-source adds a row to ``SOURCES``, and to ``KEPT_APART`` when its clones keep
-labels apart; one that adds a summary adds a test here.
+source adds a row to ``SOURCES``, to ``KEPT_APART`` when its clones keep
+labels apart, and to ``LABELS`` when its labels follow from the truth; one
+that adds a summary adds a test here.
 """
 
 from collections import Counter
@@ -104,6 +105,31 @@ KEPT_APART: dict[str, dict[str, np.ndarray]] = {
 }
 
 
+def _ranked_label(clone: int) -> str:
+    """A clone's label as barcode clones number them, counted from the truth.
+
+    ``clone_1`` is the largest clone, and clones of one size follow their
+    first cell.
+    """
+    sizes = np.bincount(TRUTH.clones[TRUTH.clones >= 0], minlength=TRUTH.n_clones)
+    first = [
+        int(np.flatnonzero(TRUTH.clones == other)[0]) for other in range(TRUTH.n_clones)
+    ]
+    ranked = sorted(
+        range(TRUTH.n_clones), key=lambda other: (-sizes[other], first[other])
+    )
+    return f"clone_{ranked.index(clone) + 1}"
+
+
+#: How a source labels each of the truth's clones, where the label follows
+#: from the truth alone: imported clones keep the labels of their file, and
+#: barcode clones are numbered by size.
+LABELS: dict[str, Callable[[int], str]] = {
+    "imported clones": number_label,
+    "barcode clones": _ranked_label,
+}
+
+
 @pytest.fixture(scope="module", params=list(SOURCES))
 def source(request, tmp_path_factory) -> SimpleNamespace:
     folder = tmp_path_factory.mktemp(request.param.replace(" ", "_"))
@@ -117,6 +143,7 @@ def source(request, tmp_path_factory) -> SimpleNamespace:
         store=store,
         clones=SOURCES[request.param](store, folder),
         kept_apart=KEPT_APART.get(request.param, {}),
+        labels=LABELS.get(request.param),
     )
 
 
@@ -303,8 +330,8 @@ def test_overlap_compares_the_clones_that_samples_share(source) -> None:
 def test_track_follows_each_samples_largest_clones(source) -> None:
     tracked = source.store.clones.track(source.clones, group_by="sample", top=2)
     labels, ranks = _source_clones(source)
-    if not source.kept_apart:
-        assert labels == {(clone,): number_label(clone) for (clone,) in labels}
+    if source.labels is not None:
+        assert labels == {(clone,): source.labels(clone) for (clone,) in labels}
     by_group = _group_cells(source, TRUTH.samples)
     kept = _kept_labels(source, TRUTH.samples)
     # Each group's two largest clones, ties to the larger clone overall.

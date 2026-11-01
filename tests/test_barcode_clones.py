@@ -16,6 +16,8 @@ import pandas as pd
 import pytest
 
 from cytearc.datastore.datastore import DataStore
+from cytearc.storage.artifacts import artifact_group
+from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import (
     copy_clone_store,
@@ -389,10 +391,25 @@ def test_barcode_clones_refuse_other_artifacts_and_arguments(store, tmp_path) ->
         store.clones.barcode_clones("barcodes", preset="larry")
     with pytest.raises(TypeError, match="invalidate_cache"):
         store.clones.barcode_clones(barcodes, preset="larry", invalidate_cache=1)
+    with pytest.raises(TypeError, match="invalidate_cache must be a boolean"):
+        store.clones.barcode_clones(barcodes, preset="larry", invalidate_cache=np.True_)
     with pytest.raises(ValueError, match="needs a preset or a method"):
         store.clones.barcode_clones(barcodes)
     with pytest.raises(TypeError, match="as text"):
         store.clones.barcode_clones(barcodes, method="sets", allowlist=[1, 2])
+
+
+def test_barcode_clones_name_missing_and_incomplete_barcodes(store, tmp_path) -> None:
+    _calling, barcodes = _imported(store, tmp_path, "larry")
+    missing = ArtifactRef(
+        scope="datastore", kind="lineage_barcodes", artifact_id="f" * 64, assay=None
+    )
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        store.clones.barcode_clones(missing, preset="larry")
+    # An import that stopped before it finished leaves an incomplete artifact.
+    artifact_group(store.zw, barcodes).attrs["complete"] = False
+    with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+        store.clones.barcode_clones(barcodes, preset="larry")
 
 
 def test_counts_that_a_table_leaves_unknown_are_refused_by_the_rules_that_read_them(
