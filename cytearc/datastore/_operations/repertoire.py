@@ -12,6 +12,9 @@ from ...clones.groups import group_frame
 from ...metadata.arguments import ClonotypeArguments, ImmuneReceptorImportArguments
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from ...metadata.records import (
+    FLAG,
+    INTEGER,
+    NUMBER,
     RAGGED,
     TEXT,
     EncodedText,
@@ -2079,3 +2082,498 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
             cell_selection=cell_selection,
             n_cells=n_cells,
         )
+
+    @validation_scoped
+    def _repertoire_export_airr(
+        self,
+        source: ArtifactRef,
+        path: str | os.PathLike[str],
+        *,
+        fields: Sequence[str] | None = None,
+        chains_only: bool = False,
+    ) -> int:
+        """Write imported contigs as an AIRR Rearrangement file.
+
+        The AIRR Community's Rearrangement TSV is what Immcantation
+        (Change-O, SHazaM, dowser), dandelion and scirpy read, so exported
+        contigs carry a CyteArc analysis to their clonal lineage, somatic
+        hypermutation or other analyses. Each row is one contig: its
+        ``cell_id``, the cell's ID in this store, the AIRR fields that the
+        receptors store, and with a ``clonotypes`` artifact as ``source``,
+        ``clone_id``, the cell's clonotype label, empty for a cell without
+        one, replacing any imported ``clone_id``. The schema's required
+        fields come first, empty when the receptors do not store them;
+        logical fields are written ``T`` and ``F``. A ``sequence_id`` that
+        repeats, such as ``<barcode>_contig_1`` of the TCR and the BCR files
+        of one cell, gets ``_2``, ``_3`` and so on from its second
+        occurrence, in the order of the contigs, since the schema requires
+        unique identifiers. A path ending in ``.gz`` is gzip-compressed at
+        level 6.
+
+        The contigs are read and written in blocks of about 32 MiB of
+        rendered text, so the export holds one block, the cells' IDs and
+        clonotypes, and the distinct values of the text fields at once.
+
+        Args:
+            source: An ``immune_receptors`` or ``clonotypes`` artifact.
+            path: The file to write.
+            fields: The stored fields to write, or None for every stored
+                field; ``sequence_id`` is always written.
+            chains_only: Write only the contigs that count as chains.
+
+        Returns:
+            The number of contigs written.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If ``source`` is not an ``immune_receptors`` or
+                ``clonotypes`` artifact, or a field is not stored.
+            KeyError: If the store holds no such ``source`` artifact, or not
+                the receptors of the clonotypes.
+            RuntimeError: If the ``source`` artifact or the receptors of the
+                clonotypes are incomplete, as an import that stopped before
+                it finished leaves them.
+            MemoryError: If the export's estimated peak exceeds the memory
+                budget.
+        """
+        from ...writers.airr import (
+            AIRR_REQUIRED_FIELDS,
+            AirrRearrangementWriter,
+            suffix_repeated_ids,
+        )
+
+        bool_argument(chains_only, "chains_only")
+        if not isinstance(path, str | os.PathLike):
+            raise TypeError("path must be a path")
+        if not isinstance(source, ArtifactRef):
+            raise TypeError("source must be an ArtifactRef")
+        clonotypes = source.kind == ClonotypeArguments.artifact_kind
+        clonotype_group: zarr.Group | None = None
+        if clonotypes:
+            clonotype_group = self._clonotype_group(source)
+            receptors = inspect_artifact(self.zw, source).input_ref("receptors")
+        elif source.kind == ImmuneReceptorImportArguments.artifact_kind:
+            receptors = source
+        else:
+            raise ValueError(
+                "source must be an immune_receptors or clonotypes artifact, not "
+                f"{source.kind!r}"
+            )
+        if fields is not None:
+            if isinstance(fields, str) or not isinstance(fields, Sequence):
+                raise TypeError("fields must be a sequence of field names or None")
+            # Every row needs its contig ID.
+            fields = [
+                "sequence_id",
+                *[name for name in fields if name != "sequence_id"],
+            ]
+        group, stored = self._receptor_group(receptors)
+        if fields is None:
+            chosen = stored
+        else:
+            unknown = [name for name in fields if name not in stored]
+            if unknown:
+                raise ValueError(
+                    "The receptors store no field "
+                    + ", ".join(repr(str(name)) for name in unknown)
+                    + "; they store "
+                    + ", ".join(stored)
+                )
+            chosen = tuple(name for name in stored if name in set(fields))
+        columns = ["cell_id", *chosen]
+        if clonotypes and "clone_id" not in columns:
+            columns.append("clone_id")
+        leading = [
+            name
+            for name in ("cell_id", "clone_id", "locus", "c_call", "umi_count")
+            if name in columns
+        ]
+        order = [*leading, *[name for name in columns if name not in leading]]
+        # A clonotypes artifact's labels replace an imported clone_id.
+        contigs = _ExportContigs(
+            group,
+            tuple(name for name in chosen if not (clonotypes and name == "clone_id")),
+            chains_only=chains_only,
+        )
+        n_cells = int(as_zarr_array(group["values"], name="values").shape[0])
+        plan = contigs.plan(
+            n_cells=n_cells,
+            n_columns=len(AIRR_REQUIRED_FIELDS)
+            + sum(name not in AIRR_REQUIRED_FIELDS for name in order),
+            clonotypes=clonotypes,
+            budget=self.memoryBytes,
+        )
+        if plan.peak > self.memoryBytes:
+            raise MemoryError(
+                f"Exporting the {contigs.n_contigs} contigs of {n_cells} cells with "
+                f"{len(chosen)} fields holds about {plan.peak} bytes at its peak, "
+                f"more than the memory budget of {self.memoryBytes} bytes. Raise "
+                "mem_budget, or pass fields= with fewer fields."
+            )
+        clones = None
+        if clonotype_group is not None:
+            # Each cell's clonotype is its code among the clonotypes' labels,
+            # which follow the receptors' cells.
+            clones = EncodedText.from_categories(
+                _read(clonotype_group, "codes"),
+                _read(clonotype_group, "clonotype_ids"),
+            )
+        cells = EncodedText.from_categories(
+            np.empty(0, np.int32), self._artifact_cell_ids(receptors)
+        )
+        hashes, whole = contigs.scan(plan.block_rows)
+
+        def ids_at(rows: np.ndarray) -> np.ndarray:
+            held = plan.held + _ID_BYTES * len(rows)
+            if held > self.memoryBytes:
+                raise MemoryError(
+                    f"Naming {len(rows)} repeated contig IDs holds about {held} "
+                    f"bytes, more than the memory budget of {self.memoryBytes} "
+                    "bytes. Raise mem_budget."
+                )
+            return contigs.ids_at(rows, plan.block_rows)
+
+        renamed = suffix_repeated_ids(hashes, ids_at)
+        del hashes
+        if len(renamed[0]):
+            logger.warning(
+                f"{len(renamed[0])} contig IDs repeat; their later occurrences "
+                "are written with a suffix such as _2"
+            )
+        with AirrRearrangementWriter(path, order, whole=whole) as writer:
+            for block in contigs.blocks(plan.block_rows, cells, clones, renamed):
+                writer.write(block)
+        written = writer.n_rows
+        logger.info(f"Wrote {written} contigs to {os.fspath(path)}")
+        return written
+
+
+# An AIRR export renders its contigs in blocks of about this many bytes of
+# text, a whole number of blocks per stored chunk.
+_EXPORT_BLOCK_BYTES = 32 * 2**20
+# The rendered bytes of a cell ID, a clonotype label, and a value of each kind
+# of field besides text.
+_EXPORT_CELL_ID_BYTES = 32
+_EXPORT_LABEL_BYTES = 16
+_EXPORT_VALUE_BYTES = {"integer": 7, "flag": 2, "number": 20}
+# The bytes that a block holds per contig and field while it is written,
+# besides the text that it reads and writes: a text field's codes, and an
+# integer, flag or number as it is rendered.
+_EXPORT_FIELD_BYTES = {"text": 8, "integer": 25, "flag": 16, "number": 70}
+# Resident memory grows by about 1.6 bytes per byte that a block holds, and by
+# up to 64 MiB for Zarr's reads, as measured on 100,000 cells of AIRR files
+# and 200,000 cells of Cell Ranger files.
+_EXPORT_BLOCK_FACTOR = 1.7
+_EXPORT_READ_BYTES = 64 * 2**20
+# Reading and packing the cells' IDs holds up to about 600 bytes per cell at
+# its peak, and reading their clonotype labels 250 more; packed, both hold 48.
+_EXPORT_SETUP_BYTES_PER_CELL = 600
+_EXPORT_LABEL_BYTES_PER_CELL = 250
+_EXPORT_HELD_BYTES_PER_CELL = 48
+# Hashing the contig IDs holds about this many bytes per contig, and naming a
+# repeated ID about this many per ID read.
+_HASH_BYTES = 40
+_ID_BYTES = 200
+
+
+@dataclass(frozen=True, slots=True)
+class _ExportPlan:
+    """The block size of an AIRR export and the bytes it holds."""
+
+    block_rows: int
+    held: int
+    peak: int
+
+
+class _Window:
+    """Read a stored array in ascending slices, one stored chunk at a time."""
+
+    def __init__(self, array: zarr.Array) -> None:
+        self._array = array
+        self._chunk = max(1, int(array.chunks[0]))
+        self._start = 0
+        self._values = np.asarray(array[0:0])
+
+    def read(self, start: int, stop: int) -> np.ndarray:
+        if start < self._start or stop > self._start + len(self._values):
+            first = start - start % self._chunk
+            last = min(-(-stop // self._chunk) * self._chunk, self._array.shape[0])
+            self._values = np.asarray(self._array[first:last])
+            self._start = first
+        return self._values[start - self._start : stop - self._start]
+
+
+class _RaggedWindow:
+    """Read a stored ragged field in consecutive blocks of contigs."""
+
+    def __init__(self, group: zarr.Group, name: str) -> None:
+        self._data = as_zarr_array(group[f"contig_{name}"], name=name)
+        self._ends = _Window(as_zarr_array(group[f"contig_{name}_offsets"], name=name))
+        self._end = 0
+
+    def _bounds(self, start: int, stop: int) -> np.ndarray:
+        ends = self._ends.read(start + 1, stop + 1)
+        bounds = np.empty(len(ends) + 1, dtype=np.int64)
+        bounds[0] = self._end
+        # A missing value's end is -1: it ends where the value before it does.
+        np.maximum.accumulate(np.maximum(ends, self._end), out=bounds[1:])
+        return bounds
+
+    def read(self, start: int, stop: int) -> tuple[np.ndarray, np.ndarray]:
+        """Read the block after the last one read, from contig 0 on.
+
+        Returns:
+            The bytes of the block's values, and the offsets of each value in
+            them, the last its end; a missing value is empty.
+        """
+        bounds = self._bounds(start, stop)
+        data = np.asarray(self._data[self._end : int(bounds[-1])])
+        bounds -= self._end
+        self._end += int(bounds[-1])
+        return data, bounds
+
+    def skip(self, start: int, stop: int) -> None:
+        """Pass over the block after the last one read, reading only its ends."""
+        self._end = int(self._bounds(start, stop)[-1])
+
+
+def _kept(values: np.ndarray, kept: np.ndarray | None) -> np.ndarray:
+    """Return a block's values of the rows of the file, all without ``kept``."""
+    return values if kept is None else values[kept]
+
+
+class _ExportContigs:
+    """The contigs of an ``immune_receptors`` artifact, read for an AIRR export.
+
+    Each pass reads blocks of contigs in order from the first; with
+    ``chains_only``, a block's rows are its contigs that count as chains.
+    """
+
+    def __init__(
+        self, group: zarr.Group, fields: tuple[str, ...], *, chains_only: bool
+    ) -> None:
+        self._group = group
+        self._fields = fields
+        self._chains_only = chains_only
+        cells = as_zarr_array(group["contig_cells"], name="contig_cells")
+        self.n_contigs = int(cells.shape[0])
+        self._chunk = max(1, int(cells.chunks[0]))
+
+    def _array(self, name: str) -> zarr.Array:
+        return as_zarr_array(self._group[name], name=name)
+
+    def plan(
+        self, *, n_cells: int, n_columns: int, clonotypes: bool, budget: int
+    ) -> _ExportPlan:
+        """Choose the contigs of a block and count the bytes that the export holds.
+
+        Args:
+            n_cells: The receptors' cells.
+            n_columns: The columns of the file.
+            clonotypes: Whether each cell's clonotype is written.
+            budget: The memory budget; a block takes at most a sixteenth.
+        """
+        n_contigs = max(1, self.n_contigs)
+        # Each contig's rendered row, with its tabs and newline, and the other
+        # bytes that a block holds per contig: its cell's and clonotype's
+        # codes, and its row's offsets.
+        rendered = n_columns + _EXPORT_CELL_ID_BYTES
+        working = 32
+        if clonotypes:
+            rendered += _EXPORT_LABEL_BYTES
+            working += 8
+        categories = 0
+        # A stored chunk of contig_cells and contig_chain, and of each field.
+        windows = 9 * self._chunk
+        for name in self._fields:
+            kind = FIELDS[name]
+            if kind == TEXT:
+                data = int(self._array(f"contig_{name}_values").shape[0])
+                n_values = int(self._array(f"contig_{name}_offsets").shape[0]) - 1
+                categories += data + 8 * (n_values + 1)
+                rendered += data // max(1, n_values)
+                working += _EXPORT_FIELD_BYTES[kind]
+                windows += 4 * self._chunk
+            elif kind == RAGGED:
+                # The bytes read, which are also written.
+                text = int(self._array(f"contig_{name}").shape[0]) // n_contigs
+                rendered += text
+                working += text
+                windows += 8 * self._chunk
+            else:
+                rendered += _EXPORT_VALUE_BYTES[kind]
+                working += _EXPORT_FIELD_BYTES[kind]
+                windows += 8 * self._chunk
+        block_bytes = max(1, min(_EXPORT_BLOCK_BYTES, budget // 16))
+        wanted = max(1, min(self._chunk, block_bytes // rendered))
+        # Blocks divide each stored chunk evenly, so a chunk is read once.
+        block_rows = -(-self._chunk // -(-self._chunk // wanted))
+        held = categories + _EXPORT_HELD_BYTES_PER_CELL * n_cells
+        setup = n_cells * (
+            _EXPORT_SETUP_BYTES_PER_CELL
+            + (_EXPORT_LABEL_BYTES_PER_CELL if clonotypes else 0)
+        )
+        block = (
+            windows
+            + int(_EXPORT_BLOCK_FACTOR * (rendered + working) * block_rows)
+            + _EXPORT_READ_BYTES
+        )
+        return _ExportPlan(
+            block_rows=block_rows,
+            held=held + _HASH_BYTES * self.n_contigs,
+            peak=held + max(setup, _HASH_BYTES * self.n_contigs, block),
+        )
+
+    def _spans(self, block_rows: int) -> Iterator[tuple[int, int, np.ndarray | None]]:
+        """Yield each block's contigs and the rows of the file among them."""
+        chain = _Window(self._array("contig_chain")) if self._chains_only else None
+        for first in range(0, self.n_contigs, self._chunk):
+            last = min(first + self._chunk, self.n_contigs)
+            for start in range(first, last, block_rows):
+                stop = min(start + block_rows, last)
+                yield (
+                    start,
+                    stop,
+                    None if chain is None else np.flatnonzero(chain.read(start, stop)),
+                )
+
+    def scan(self, block_rows: int) -> tuple[np.ndarray, set[str]]:
+        """Hash the ID of each row and find the number fields that are whole.
+
+        Returns:
+            The ``sequence_id_hashes`` of the rows, and the number fields
+            whose rows hold only whole numbers, which are written as integers.
+        """
+        from ...writers.airr import sequence_id_hashes
+
+        ids = _RaggedWindow(self._group, "sequence_id")
+        numbers = {
+            name: _Window(self._array(f"contig_{name}"))
+            for name in self._fields
+            if FIELDS[name] == NUMBER
+        }
+        whole = dict.fromkeys(numbers, True)
+        hashes = []
+        for start, stop, kept in self._spans(block_rows):
+            hashes.append(
+                sequence_id_hashes(_kept(decode_ragged(*ids.read(start, stop)), kept))
+            )
+            for name, window in numbers.items():
+                if whole[name]:
+                    values = _kept(window.read(start, stop), kept)
+                    present = values[~np.isnan(values)]
+                    whole[name] = bool(
+                        np.isfinite(present).all()
+                        and (present == np.round(present)).all()
+                    )
+        return (
+            np.concatenate([np.empty(0, dtype=np.uint64), *hashes]),
+            {name for name, flag in whole.items() if flag},
+        )
+
+    def ids_at(self, rows: np.ndarray, block_rows: int) -> np.ndarray:
+        """Return the IDs of rows, given their positions in ascending order."""
+        rows = np.asarray(rows, dtype=np.int64)
+        found = np.empty(len(rows), dtype=object)
+        ids = _RaggedWindow(self._group, "sequence_id")
+        done = before = 0
+        for start, stop, kept in self._spans(block_rows):
+            if done == len(rows):
+                break
+            n_rows = stop - start if kept is None else len(kept)
+            upto = int(np.searchsorted(rows, before + n_rows))
+            if upto > done:
+                data, bounds = ids.read(start, stop)
+                local = rows[done:upto] - before
+                found[done:upto] = take_text(
+                    data, bounds, local if kept is None else kept[local]
+                )
+                done = upto
+            else:
+                ids.skip(start, stop)
+            before += n_rows
+        return found
+
+    def blocks(
+        self,
+        block_rows: int,
+        cells: EncodedText,
+        clones: EncodedText | None,
+        renamed: tuple[np.ndarray, np.ndarray],
+    ) -> Iterator[dict[str, Any]]:
+        """Yield the columns of each block's rows, for the AIRR writer.
+
+        Args:
+            block_rows: The contigs of a block.
+            cells: Each cell's ID; its codes are unused.
+            clones: Each cell's clonotype label, or None to write none.
+            renamed: The rows whose ID is written with a suffix, ascending,
+                and their new IDs.
+        """
+        positions = _Window(self._array("contig_cells"))
+        text = {
+            name: (
+                _Window(self._array(f"contig_{name}")),
+                _read(self._group, f"contig_{name}_values"),
+                _read(self._group, f"contig_{name}_offsets"),
+            )
+            for name in self._fields
+            if FIELDS[name] == TEXT
+        }
+        ragged = {
+            name: _RaggedWindow(self._group, name)
+            for name in self._fields
+            if FIELDS[name] == RAGGED
+        }
+        values = {
+            name: _Window(self._array(f"contig_{name}"))
+            for name in self._fields
+            if FIELDS[name] not in (TEXT, RAGGED)
+        }
+        renamed_rows, renamed_ids = renamed
+        before = 0
+        for start, stop, kept in self._spans(block_rows):
+            rows = np.arange(stop - start) if kept is None else kept
+            cell = _kept(positions.read(start, stop), kept)
+            block: dict[str, Any] = {
+                "cell_id": EncodedText(cell, cells.data, cells.offsets)
+            }
+            if clones is not None:
+                block["clone_id"] = EncodedText(
+                    np.asarray(clones.codes)[cell], clones.data, clones.offsets
+                )
+            for name, (window, data, offsets) in text.items():
+                block[name] = EncodedText(
+                    _kept(window.read(start, stop), kept), data, offsets
+                )
+            for name, reader in ragged.items():
+                data, bounds = reader.read(start, stop)
+                codes = rows
+                if name == "sequence_id":
+                    first, last = np.searchsorted(
+                        renamed_rows, [before, before + len(rows)]
+                    )
+                    if last > first:
+                        # A renamed row takes a value after the block's.
+                        extra = EncodedText.from_categories(
+                            np.empty(0, np.int32), renamed_ids[first:last]
+                        )
+                        data = np.concatenate([data, extra.data])
+                        bounds = np.concatenate(
+                            [bounds, extra.offsets[1:] + bounds[-1]]
+                        )
+                        codes = rows.copy()
+                        codes[renamed_rows[first:last] - before] = (
+                            stop - start + np.arange(last - first)
+                        )
+                block[name] = EncodedText(codes, data, bounds)
+            for name, window in values.items():
+                stored = _kept(window.read(start, stop), kept)
+                if FIELDS[name] == INTEGER:
+                    block[name] = pd.arrays.IntegerArray(stored, stored < 0)
+                elif FIELDS[name] == FLAG:
+                    block[name] = pd.arrays.BooleanArray(stored == 1, stored < 0)
+                else:
+                    block[name] = stored
+            yield block
+            before += len(rows)

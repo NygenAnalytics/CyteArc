@@ -11,6 +11,7 @@ if TYPE_CHECKING:
         create_zarr_dataset,
         create_zarr_obj_array,
     )
+    from .airr import write_airr_rearrangements
     from .cellranger import CrToZarr, MtxToZarr
     from .csv import CSVtoZarr
     from .export import to_h5ad, to_mtx
@@ -37,6 +38,7 @@ __all__ = [
     "to_h5ad",
     "to_mtx",
     "CSVtoZarr",
+    "write_airr_rearrangements",
 ]
 
 __getattr__, __dir__ = _lazy_facade(
@@ -50,6 +52,7 @@ __getattr__, __dir__ = _lazy_facade(
         "CrToZarr": ".cellranger",
         "MtxToZarr": ".cellranger",
         "CSVtoZarr": ".csv",
+        "write_airr_rearrangements": ".airr",
         "to_h5ad": ".export",
         "to_mtx": ".export",
         "H5adImportResult": ".h5ad",
