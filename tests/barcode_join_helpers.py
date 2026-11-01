@@ -65,12 +65,22 @@ def build_guide_store(path: Path) -> tuple["DataStore", "ArtifactRef"]:
     return store, store.snapshot_cell_selection("screened")
 
 
+# The gzip case's file as gzip wrote it when the reference was written. The
+# reference holds the SHA-256 of the file's bytes, which another zlib, such
+# as Python 3.15's, compresses differently.
+GZIP_CALL_FILE = (
+    Path(__file__).parent / "data" / "guide_calls" / "protospacer_calls_per_cell.csv.gz"
+)
+
+
 def write_case(name: str, folder: Path) -> Path:
     """Write one case's call file into ``folder``."""
     text, compressed, _prefix = CASES[name]
     if compressed:
+        data = GZIP_CALL_FILE.read_bytes()
+        assert gzip.decompress(data).decode() == text
         path = folder / f"{name}.csv.gz"
-        path.write_bytes(gzip.compress(text.encode(), mtime=0))
+        path.write_bytes(data)
     else:
         path = folder / f"{name}.csv"
         path.write_text(text)
