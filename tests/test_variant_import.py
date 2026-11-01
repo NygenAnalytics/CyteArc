@@ -757,6 +757,51 @@ def test_the_import_counts_the_read_of_cell_ids_before_it_reads_them(
     )
 
 
+def test_the_parse_shares_what_the_join_leaves(template, tmp_path) -> None:
+    # A store whose IDs are one chunk of their own size, as columns written
+    # from AnnData files are stored, reads them cheaply, so the least parse,
+    # 1,000 rows, sets the import's smallest budget beside what the join
+    # holds: its lookup, the IDs as text and the bytes held for each cell.
+    import sys
+
+    from cytearc.datastore._operations import variants as operations
+    from cytearc.datastore._operations.cell_barcodes import LOOKUP_BYTES_PER_CELL
+    from cytearc.storage.arrays import create_metadata_column
+    from tests.clone_helpers import open_clone_store
+
+    path = tmp_path / "store" / template.name
+    shutil.copytree(template, path)
+    ids = np.asarray(open_clone_store(path).cells.fetch_all("ids"))
+    create_metadata_column(
+        open_clone_store(path).cells._group,
+        "ids",
+        data=ids,
+        dtype=ids.dtype,
+        chunkSize=len(ids),
+        overwrite=True,
+    )
+    store = open_clone_store(path)
+    assert store.cells._get_array("ids").chunks == (len(ids),)
+    got = write_got(TRUTH, tmp_path / "CALR.tsv", style="xv")
+
+    def run() -> object:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return store.variants.import_counts(got, cell_selection=every_cell(store))
+
+    reading = _refused_estimate(store, run, 1)
+    held = _refused_estimate(store, run, reading)
+    assert held == (LOOKUP_BYTES_PER_CELL + operations._IMPORT_BYTES_PER_CELL) * len(
+        ids
+    ) + sum(map(sys.getsizeof, ids.astype(object).tolist()))
+    store.memoryBytes = held + (
+        operations._PARSE_SHARE
+        * operations._PARSE_BYTES_PER_ROW
+        * operations._MIN_CHUNK_ROWS
+    )
+    assert store.variants.load_counts(run(), sites=[]).cells["listed"].any()
+
+
 def test_load_counts_counts_the_ids_it_reads_and_finds_cells_among(
     store, tmp_path, monkeypatch
 ) -> None:
