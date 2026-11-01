@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cytearc.metadata.rows import text_read_bytes
 from cytearc.utils.logging import collect_warnings
 from tests.clone_helpers import every_cell
 from tests.variant_helpers import (
@@ -72,8 +73,24 @@ def _import(store, path, **options):
     return ref, list(messages)
 
 
+def _refused_estimate(store, run, budget: int) -> int:
+    """The bytes that ``run`` names when it refuses ``budget``."""
+    import re
+
+    full = store.memoryBytes
+    store.memoryBytes = budget
+    try:
+        with pytest.raises(MemoryError) as refused:
+            run()
+    finally:
+        store.memoryBytes = full
+    found = re.search(r"holds about (\d+) bytes", str(refused.value))
+    assert found is not None, str(refused.value)
+    return int(found.group(1))
+
+
 def _large_mgatk(
-    folder: Path, store_ids: list[str], seed: int
+    folder: Path, store_ids: list[str], seed: int, n_positions: int = 1_000
 ) -> dict[str, np.ndarray]:
     """An mgatk folder of many positions, its cells in shuffled order.
 
@@ -81,7 +98,6 @@ def _large_mgatk(
     shaped (cells, positions, bases, strands).
     """
     rng = np.random.default_rng(seed)
-    n_positions = 1_000
     reference = rng.choice(list("ACGT"), size=n_positions)
     reference[100] = "N"
     reads = rng.poisson(0.6, size=(len(store_ids), n_positions, 4, 2))
@@ -256,13 +272,15 @@ def test_cell_order_and_spills_to_disk_do_not_change_the_counts(
 ) -> None:
     # Cells in another order than the store's, and a budget so small that
     # the rows spill to sorted runs on disk, give the same artifact. The
-    # budget still leaves room for the chunks that writing rewrites.
+    # budget covers the read of the cells' IDs, which decodes a stored chunk
+    # of 100,000 of them, and leaves room for the chunks that writing
+    # rewrites; the rows outgrow the sort buffer that the rest leaves.
     roomy = copy_variant_store(template, tmp_path / "roomy")
     tight = copy_variant_store(template, tmp_path / "tight")
     ids = [str(cell) for cell in roomy.cells.fetch_all("ids")]
     folder = tmp_path / "final"
-    drawn = _large_mgatk(folder, ids, seed=4)
-    tight.memoryBytes = 6_000_000
+    drawn = _large_mgatk(folder, ids, seed=4, n_positions=4_000)
+    tight.memoryBytes = 24_000_000
     groups = []
     for store in (roomy, tight):
         ref, _ = _import(store, folder)
@@ -705,6 +723,94 @@ def test_a_memory_budget_too_small_for_the_cells_is_refused(store, tmp_path) -> 
         )
 
 
+def test_the_import_counts_the_read_of_cell_ids_before_it_reads_them(
+    store, tmp_path, monkeypatch
+) -> None:
+    import cytearc.datastore._operations.variants as operations
+
+    path = write_got(TRUTH, tmp_path / "CALR.tsv", style="xv")
+
+    def run() -> object:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return store.variants.import_counts(path, cell_selection=every_cell(store))
+
+    reading = _refused_estimate(store, run, 1)
+    # A read of IDs decodes a whole stored chunk of them, however few cells
+    # the selection holds.
+    ids = store.cells._get_array("ids")
+    assert reading > ids.chunks[0] * ids.dtype.itemsize
+
+    def unread(*_arguments, **_options):
+        raise AssertionError("the cell IDs were read")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(operations, "read_metadata_rows_chunkwise", unread)
+        store.memoryBytes = reading - 1
+        with pytest.raises(MemoryError, match=f"holds about {reading} bytes"):
+            run()
+    store.memoryBytes = reading
+    ref = run()
+    store.memoryBytes = 1 << 30
+    assert store.variants.load_counts(ref, sites=[]).cells.shape[0] == len(
+        TRUTH.clones.cell_ids
+    )
+
+
+def test_load_counts_counts_the_ids_it_reads_and_finds_cells_among(
+    store, tmp_path, monkeypatch
+) -> None:
+    import cytearc.datastore._operations.variants as operations
+
+    ref, _ = _import(store, write_got(TRUTH, tmp_path / "CALR.tsv", style="xv"))
+    ids = store.cells._get_array("ids")
+    chunk = ids.chunks[0] * ids.dtype.itemsize
+    named = [str(TRUTH.clones.cell_ids[1])]
+    # Loading every cell reads their IDs, a stored chunk at a time, and
+    # finding cells by ID reads the IDs of every cell of the counts.
+    loads = {
+        "every cell": lambda: store.variants.load_counts(ref),
+        "cells by ID": lambda: store.variants.load_counts(ref, cells=named),
+    }
+
+    def unread(*_arguments, **_options):
+        raise AssertionError("the cell IDs were read")
+
+    for name, load in loads.items():
+        needed = _refused_estimate(store, load, 1)
+        assert needed > chunk, name
+        with monkeypatch.context() as patched:
+            patched.setattr(operations, "read_metadata_rows_chunkwise", unread)
+            store.memoryBytes = needed - 1
+            with pytest.raises(MemoryError, match=f"holds about {needed} bytes"):
+                load()
+    # Without a cell, no ID is read, so a budget far below a chunk of IDs
+    # loads the sites.
+    store.memoryBytes = chunk // 10
+    assert store.variants.load_counts(ref, cells=[]).cells.empty
+
+
+def test_load_counts_names_counts_of_another_kind_missing_or_incomplete(
+    store, tmp_path
+) -> None:
+    from cytearc.storage.artifacts import artifact_group
+    from cytearc.storage.refs import ArtifactRef
+
+    ref, _ = _import(store, write_got(TRUTH, tmp_path / "CALR.tsv", style="xv"))
+    with pytest.raises(ValueError, match="counts must be a variant_counts artifact"):
+        store.variants.load_counts(every_cell(store))
+    missing = ArtifactRef(scope=ref.scope, kind=ref.kind, artifact_id="f" * 64)
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        store.variants.load_counts(missing)
+    # An import that stopped before it finished leaves incomplete counts.
+    attributes = artifact_group(store.zw, ref).attrs
+    attributes["complete"] = False
+    with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+        store.variants.load_counts(ref)
+    attributes["complete"] = True
+    assert len(store.variants.load_counts(ref).cells) == len(TRUTH.clones.cell_ids)
+
+
 def test_select_cells_and_load_values_read_the_mean_depth(store, tmp_path) -> None:
     ref, _ = _import(store, write_mgatk(TRUTH, tmp_path / "final"))
     values = store.artifacts.load_values(ref)
@@ -906,8 +1012,9 @@ def test_an_artifact_that_lost_a_table_is_not_reused(store, tmp_path) -> None:
 
 def test_load_counts_refuses_rows_beyond_the_memory_budget(store, tmp_path) -> None:
     ref, _ = _import(store, write_mgatk(TRUTH, tmp_path / "final"))
-    # The cells fit; their rows do not.
-    store.memoryBytes = 60_000
+    # The cells, their IDs among them, fit; their rows do not.
+    cells = _refused_estimate(store, lambda: store.variants.load_counts(ref), 1)
+    store.memoryBytes = cells + 60_000
     with pytest.raises(MemoryError, match="Pass fewer sites or cells"):
         store.variants.load_counts(ref)
     assert len(store.variants.load_counts(ref, sites=[SITE_POSITIONS[0]]).sites) == 1
@@ -1217,11 +1324,18 @@ def test_load_counts_counts_the_chunks_a_read_decompresses(store, tmp_path) -> N
     )
     one_cell = [str(TRUTH.clones.cell_ids[0])]
     one_site = [SITE_POSITIONS[0]]
-    store.memoryBytes = 2 * chunk_bytes
+    # The one cell is read by a selection, and its ID as text, which decodes
+    # a stored chunk of IDs, beside the chunks of the long arrays.
+    store.cells.insert(
+        "is_first", np.arange(len(store.cells.fetch_all("ids"))) == 0, overwrite=True
+    )
+    first = store.snapshot_cell_selection("is_first")
+    ids_bytes = text_read_bytes(store.cells._get_array("ids"), 1)
+    store.memoryBytes = ids_bytes + 2 * chunk_bytes
     with pytest.raises(MemoryError, match="before it keeps a row"):
-        store.variants.load_counts(ref, sites=one_site, cells=one_cell)
-    store.memoryBytes = 2 * chunk_bytes + 10_000
-    loaded = store.variants.load_counts(ref, sites=one_site, cells=one_cell)
+        store.variants.load_counts(ref, sites=one_site, cells=first)
+    store.memoryBytes = ids_bytes + 2 * chunk_bytes + 10_000
+    loaded = store.variants.load_counts(ref, sites=one_site, cells=first)
     assert loaded.cells.index.tolist() == one_cell
     # Without rows to read, no chunk is decompressed.
     store.memoryBytes = 2 * chunk_bytes
@@ -1367,12 +1481,86 @@ def test_got_multi_reads_come_with_every_call_that_has_umis(store, tmp_path) -> 
 def test_a_budget_without_room_for_the_rewritten_chunks_writes_nothing(
     store, tmp_path
 ) -> None:
-    # The rows parse and spill within 3 MB, but appending them rewrites
-    # chunks of about four times the 134,000 rows' 4-byte values.
+    # The rows parse and spill within the budget that reading the cells' IDs
+    # takes, but appending them rewrites chunks of about four times the
+    # 536,000 rows' 4-byte values.
     ids = [str(cell) for cell in store.cells.fetch_all("ids")]
     folder = tmp_path / "final"
-    _large_mgatk(folder, ids, seed=4)
-    store.memoryBytes = 3_000_000
+    _large_mgatk(folder, ids, seed=4, n_positions=4_000)
+
+    def run() -> object:
+        return store.variants.import_counts(folder, cell_selection=every_cell(store))
+
+    store.memoryBytes = _refused_estimate(store, run, 1)
     with pytest.raises(MemoryError, match="rewrites stored chunks of about"):
-        store.variants.import_counts(folder, cell_selection=every_cell(store))
+        run()
     assert store.artifacts.list(kind="variant_counts") == []
+
+
+def _smallest_accepted_budget(store, run) -> int:
+    """The smallest budget at which ``run`` raises no ``MemoryError``."""
+    low, high = 1, 1 << 33
+    while low < high:
+        middle = (low + high) // 2
+        store.memoryBytes = middle
+        try:
+            run()
+            high = middle
+        except MemoryError:
+            low = middle + 1
+    return low
+
+
+@pytest.mark.slow
+def test_the_traced_peaks_of_import_and_load_fit_the_smallest_budget_accepted(
+    tmp_path,
+) -> None:
+    """With 80-character IDs, reading them dominates what each step holds."""
+    import tracemalloc
+
+    from cytearc.datastore.datastore import DataStore
+    from tests.storage_helpers import write_count_store
+
+    n_cells = 20_000
+    ids = [f"{'sample_with_a_long_name_' * 3}{cell:08d}-1" for cell in range(n_cells)]
+    write_count_store(
+        str(tmp_path / "long.zarr"),
+        {"RNA": np.ones((n_cells, 1), dtype=np.uint16)},
+        "uint16",
+        cell_ids=ids,
+    )
+    store = DataStore(
+        str(tmp_path / "long.zarr"),
+        default_assay="RNA",
+        min_features_per_cell=0,
+        nthreads=1,
+    )
+    got = tmp_path / "CALR.tsv"
+    got.write_text(
+        "BC\twtUMIs\tmutUMIs\n"
+        + "".join(
+            f"{ids[cell]}\t{1 + cell % 3}\t{cell % 2}\n"
+            for cell in range(0, n_cells, 100)
+        )
+    )
+    cells = store.snapshot_cell_selection()
+    counts = store.variants.import_counts(got, cell_selection=cells)
+    steps = {
+        "import": lambda: store.variants.import_counts(
+            got, cell_selection=cells, invalidate_cache=True
+        ),
+        "load": lambda: store.variants.load_counts(counts),
+        "load by ID": lambda: store.variants.load_counts(counts, cells=ids[:50:10]),
+    }
+    for name, run in steps.items():
+        store.memoryBytes = 1 << 33
+        run()
+        budget = _smallest_accepted_budget(store, run)
+        store.memoryBytes = budget
+        tracemalloc.start()
+        try:
+            run()
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak <= budget, (name, peak, budget)

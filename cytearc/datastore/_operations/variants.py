@@ -1,4 +1,5 @@
 import os
+import sys
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -9,7 +10,8 @@ import zarr
 
 from ...metadata.arguments import VariantCountImportArguments
 from ...metadata.artifacts import plan_cell_data_artifact
-from ...metadata.rows import read_metadata_rows_chunkwise
+from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
+from ...metadata.selection import cell_selection_indices
 from ...storage.arrays import create_metadata_column
 from ...storage.artifact_writer import PlannedArtifact, artifact_transaction
 from ...storage.artifacts import (
@@ -20,9 +22,9 @@ from ...storage.artifacts import (
 )
 from ...storage.layout import get_compressors
 from ...storage.profiles import resolve_storage_profile
-from ...storage.selections import read_stored_selection_indices
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
+from ...utils.arguments import bool_argument
 from ...utils.logging import logger
 from ...variants.counts import (
     CALL_DTYPE,
@@ -403,14 +405,7 @@ def _band_chunk_bytes(group: zarr.Group, tables: Mapping[str, Sequence[str]]) ->
 
 class _VariantOperationsMixin(_VariantOperationsBase):
     def _variant_selection_indices(self, cell_selection: ArtifactRef) -> np.ndarray:
-        cell_index = read_stored_selection_indices(
-            self.zw,
-            cell_selection,
-            kind="cell_selection",
-            scope="datastore",
-            assay=None,
-            table_path="cellData",
-        ).astype(np.int64, copy=False)
+        cell_index = cell_selection_indices(self.zw, cell_selection)
         if not len(cell_index):
             raise ValueError("cell_selection selects no cell")
         return cell_index
@@ -532,10 +527,8 @@ class _VariantOperationsMixin(_VariantOperationsBase):
 
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
-        if not isinstance(swap_strands, bool):
-            raise TypeError("swap_strands must be a boolean")
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
+        bool_argument(swap_strands, "swap_strands")
+        bool_argument(invalidate_cache, "invalidate_cache")
         if format is not None and format not in VARIANT_FORMATS:
             raise ValueError(
                 f"format must be one of {', '.join(VARIANT_FORMATS)}, or None, not "
@@ -600,7 +593,31 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 artifact_group(self.zw, planned.ref).attrs, files_text
             )
             return planned.ref
-        held = (LOOKUP_BYTES_PER_CELL + _IMPORT_BYTES_PER_CELL) * n_cells
+        # What the import holds for the selected cells, and the read of their
+        # IDs as text, which decodes a stored chunk of them, are checked before
+        # the IDs are read.
+        reading = (
+            LOOKUP_BYTES_PER_CELL + _IMPORT_BYTES_PER_CELL
+        ) * n_cells + text_read_bytes(self.cells._get_array("ids"), n_cells)
+        if reading > self.memoryBytes:
+            raise MemoryError(
+                f"Reading the IDs of {n_cells} selected cells holds about {reading} "
+                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
+                "Raise mem_budget, or pass a smaller cell_selection."
+            )
+        self._require_writable(arguments.operation)
+        cell_ids = np.asarray(
+            read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
+        )
+        join = CellBarcodeJoin(
+            cell_ids,
+            memory_bytes=self.memoryBytes,
+            held_bytes=_IMPORT_BYTES_PER_CELL * n_cells,
+        )
+        # The parsed chunks, the sort buffer and the bands share what the join
+        # leaves: it holds its lookup, the cells' IDs as text and the bytes
+        # held for each cell.
+        held = join.held_bytes
         room = self.memoryBytes - held
         chunk_rows = int(
             min(room // (_PARSE_SHARE * _PARSE_BYTES_PER_ROW), _MAX_CHUNK_ROWS)
@@ -612,15 +629,6 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 f"budget of {self.memoryBytes} bytes to read the files. Raise "
                 "mem_budget, or pass a smaller cell_selection."
             )
-        self._require_writable(arguments.operation)
-        cell_ids = np.asarray(
-            read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
-        )
-        join = CellBarcodeJoin(
-            cell_ids,
-            memory_bytes=self.memoryBytes,
-            held_bytes=_IMPORT_BYTES_PER_CELL * n_cells,
-        )
         counts_dtype = count_dtype(rules.count_fields)
         sorter = CellRowSorter(
             {
@@ -1109,14 +1117,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
     def _variant_cell_index(self, counts: ArtifactRef) -> np.ndarray:
         """The store rows of a variant_counts artifact's cells, in its order."""
         selection = inspect_artifact(self.zw, counts).input_ref("cell_selection")
-        return read_stored_selection_indices(
-            self.zw,
-            selection,
-            kind="cell_selection",
-            scope="datastore",
-            assay=None,
-            table_path="cellData",
-        ).astype(np.int64, copy=False)
+        return cell_selection_indices(self.zw, selection)
 
     def _variant_cell_positions(
         self, counts: ArtifactRef, cell_index: np.ndarray, cells: Any
@@ -1125,14 +1126,7 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         if cells is None:
             return np.arange(len(cell_index), dtype=np.int64)
         if isinstance(cells, ArtifactRef):
-            chosen = read_stored_selection_indices(
-                self.zw,
-                cells,
-                kind="cell_selection",
-                scope="datastore",
-                assay=None,
-                table_path="cellData",
-            ).astype(np.int64, copy=False)
+            chosen = cell_selection_indices(self.zw, cells)
             positions = np.searchsorted(cell_index, chosen)
             inside = positions < len(cell_index)
             inside[inside] = cell_index[positions[inside]] == chosen[inside]
@@ -1148,13 +1142,29 @@ class _VariantOperationsMixin(_VariantOperationsBase):
                 "cells must be a cell selection ArtifactRef, a sequence of cell IDs, "
                 "or None"
             )
+        wanted = np.asarray(list(cells), dtype=object)
+        if not len(wanted):
+            return np.empty(0, dtype=np.int64)
+        # Cells named by ID are found among the IDs of every cell of the
+        # counts, read as text into a lookup.
+        lookup = (
+            text_read_bytes(self.cells._get_array("ids"), len(cell_index))
+            + LOOKUP_BYTES_PER_CELL * len(cell_index)
+            + sum(map(sys.getsizeof, wanted.tolist()))
+        )
+        if lookup > self.memoryBytes:
+            raise MemoryError(
+                f"Finding {len(wanted)} cells among the {len(cell_index)} cells of "
+                f"the counts holds about {lookup} bytes, more than the memory budget "
+                f"of {self.memoryBytes} bytes. Raise mem_budget, or pass a cell "
+                "selection."
+            )
         ids = pd.Index(
             np.asarray(
                 read_metadata_rows_chunkwise(self.cells, "ids", cell_index),
                 dtype=object,
             )
         )
-        wanted = np.asarray(list(cells), dtype=object)
         positions = np.asarray(ids.get_indexer(wanted), dtype=np.int64)
         if np.any(positions < 0):
             missing = wanted[positions < 0][:5]
@@ -1221,8 +1231,10 @@ class _VariantOperationsMixin(_VariantOperationsBase):
         reads only the sites and alleles, with each site's depth summed over
         all cells.
 
-        The budget counts each row read, at about 120 bytes, and the two
-        stored chunks that a read's first and last rows decompress whole.
+        The budget counts each row read, at about 120 bytes, the two stored
+        chunks that a read's first and last rows decompress whole, and the
+        cells' IDs as text, whose read decodes a stored chunk of them; cells
+        named by ID are found among the IDs of every cell of the counts.
 
         Args:
             counts: A ``variant_counts`` artifact, such as one from
@@ -1239,8 +1251,11 @@ class _VariantOperationsMixin(_VariantOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``counts`` is not a complete ``variant_counts``
-                artifact, or a site or cell is not in it.
+            ValueError: If ``counts`` is not a ``variant_counts`` artifact, or
+                a site or cell is not in it.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete, as an import that
+                stopped before it finished leaves it.
             MemoryError: If the tables do not fit the memory budget; pass
                 fewer sites or cells.
         """
@@ -1256,6 +1271,9 @@ class _VariantOperationsMixin(_VariantOperationsBase):
             *(f"counts_{name}" for name in fields),
         )
         resident = _LOADED_BYTES_PER_CELL * len(positions)
+        if len(positions):
+            # The cells' IDs are read as text, a stored chunk at a time.
+            resident += text_read_bytes(self.cells._get_array("ids"), len(positions))
         if len(positions) and len(kept_sites):
             # Reads decompress whole chunks, as the bands of the statistics do.
             resident += _band_chunk_bytes(

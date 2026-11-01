@@ -68,7 +68,7 @@ The unit of the counts is the format's own, except for cellsnp-lite, MQuad and V
 
 Depth 0 means the cell was not covered at the site, so an allele frequency there is undefined rather than 0. Signac's `AlleleFreq` turns such cells into frequency 0; CyteArc stores no depth for them, so a reader can tell "not covered" from "covered, without the allele", which VarTrix's explicit zeros mark.
 
-The import sorts each file's rows by cell, whatever their order, and rows that outgrow the memory budget go to sorted runs in the system's temporary folder (`TMPDIR` on Linux and macOS), about 4 bytes per count row of mgatk's files, removed when the import ends. mgatk's four base files parse on up to four threads when the budget is 1 GiB or more.
+The import sorts each file's rows by cell, whatever their order, and rows that outgrow the memory budget go to sorted runs in the system's temporary folder (`TMPDIR` on Linux and macOS), about 4 bytes per count row of mgatk's files, removed when the import ends. mgatk's four base files parse on up to four threads when the budget is 1 GiB or more. Before it reads a row, the import checks the selected cells' IDs against the budget, as text and as their read, which decodes a stored chunk of IDs at the width of the longest; the parsed chunks, the sort buffer and the bands share what the barcode join leaves.
 
 ## Read counts
 
@@ -82,7 +82,7 @@ table = loaded.counts.merge(loaded.depth, on=["cell", "site"])
 table["frequency"] = table["count"] / table["depth"]
 ```
 
-`sites` takes site labels, or positions on an artifact of one contig, and `cells` a cell selection within the counts' cells or cell IDs, as a list, a NumPy array or a pandas index; `cells=[]` reads only the sites with their sums. The tables are checked against the memory budget, at about 120 bytes per row, with the two stored chunks that a read's first and last rows decompress whole.
+`sites` takes site labels, or positions on an artifact of one contig, and `cells` a cell selection within the counts' cells or cell IDs, as a list, a NumPy array or a pandas index; `cells=[]` reads only the sites with their sums. The tables are checked against the memory budget, at about 120 bytes per row, with the two stored chunks that a read's first and last rows decompress whole and the cells' IDs as text, whose read decodes a stored chunk of them. Cells named by ID are found among the IDs of every cell of the counts, which a cell selection does not need.
 
 ## The variant_counts artifact
 
