@@ -1,6 +1,6 @@
 # Immune receptor repertoires
 
-Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, or any pipeline that writes AIRR Rearrangement files with cell IDs), check each cell's chains, and label cells by receptor type, subtype and chain pairing. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
+Import the T cell and B cell receptor contigs of single-cell immune profiling (10x Genomics Chromium Single Cell Immune Profiling, or any pipeline that writes AIRR Rearrangement files with cell IDs), check each cell's chains, label cells by receptor type, subtype and chain pairing, and group them into clonotypes. Docs: <https://docs.nygen.io/CyteArc/api/repertoire.html>, <https://docs.nygen.io/CyteArc/analysis_with_agents.html>.
 
 ## When to use
 
@@ -24,6 +24,17 @@ Import the T cell and B cell receptor contigs of single-cell immune profiling (1
 - `ds.repertoire.load_receptors(receptors, fields=None)` returns an `ImmuneReceptors` record: `.cells` (indexed by `ids`: the three labels, `multichain`, `n_vj`, `n_vdj`, `n_contigs`, then per slot `<slot>_locus`, `_v_call`, `_d_call` (VDJ slots only), `_j_call`, `_c_call`, `_junction`, `_junction_aa`, `_umi_count`, `_consensus_count`), `.chains` (one row per contig: `ids`, `slot` (`""` for none), `chain` (counts as a chain) and each field; missing text is NA, counts `Int64`, flags `boolean`), `.fields` and `.productive_only`. `fields=[...]` loads only those fields, into `.chains` and into the slots of `.cells`; large AIRR files with sequences and alignments need it.
 - `ds.plots.receptor_qc(receptors)` draws cells per receptor type, per chain pairing, and cells by chains of each arm (0, 1, 2, 3+). `group_by="sample"` (a cell column) or `groups=clusters_ref` (a label artifact, which may hold fewer cells) stacks one bar per group, as fractions unless `normalize=False`. Tables: `receptor_type`, `chain_pairing`, `chains_per_cell`.
 - Validated: every cell's labels and every slot's locus, gene calls and junctions equal scirpy 0.25.1's on 10x PBMC 10k (TCR and BCR, Cell Ranger 4.0.0 and 5.0.0) and CD8+ donor 1 (Cell Ranger 3.0.2), from the filtered and unfiltered contig annotations and from the AIRR files.
+- `ds.repertoire.clonotypes(receptors)` groups cells into clonotypes by identical chains (scirpy's `define_clonotypes` rules) and saves a datastore-scoped `clonotypes` artifact. Options:
+  - `sequence="nt"` (default) or `"aa"`: junction nucleotides or residues.
+  - `receptor_arms="all"` (default: both arms for cells with both, one arm for cells with one; a paired cell never joins an orphan), `"any"` (either arm), `"VJ"` or `"VDJ"` (that arm; cells without it get no clonotype).
+  - `dual_ir="any"` (default: one chain of an arm matches one of the other's), `"all"` (same number of chains, all matched, either order), `"primary_only"`.
+  - `same_v_gene=False`, `same_j_gene=False`: also require matched chains' gene calls to match.
+  - `within=None`: cell metadata columns (such as the donor) whose labels keep clonotypes apart; every cell with a receptor needs a label. `within_receptor_type=True` keeps TCR, BCR, ambiguous and multichain cells apart.
+- Clonotypes are the connected components of the links, so a cell matching two others joins them. Labels `clonotype_1` (largest), `clonotype_2`, ...; ties follow the receptor type (`BCR` before `TCR`), then the `within` labels, then the sorted chains, so labels do not depend on cell order. Arrays: canonical `values` (label, empty and treated as missing for a cell without one), `codes` (rank minus one, -1 without), `clone_size` (0 without). `select_cells(clonotypes, include=["clonotype_1"])` selects a clonotype's cells; `select_cells(clonotypes, value="clone_size", low=2, keep_bounds=True)` the expanded cells. On an embedding, cells without a clonotype take the missing colour.
+- Reuse follows the receptors, the options and the `within` labels; `invalidate_cache=True` defines again. The memory checks count the receptor types read, the `within` grouping as the clone summaries count theirs, and 1,000 bytes per cell and 12 per contig to define; a million cells take about 2 s and hold about 340 bytes per cell. A `within` column that the cell metadata lacks raises `ValueError`.
+- `ds.repertoire.load_clonotypes(clonotypes)` returns a `Clonotypes` record: `.cells` (indexed by `ids`: `clonotype`, a categorical in rank order, NA without, and `clone_size`), `.clonotypes` (one row per clonotype, largest first: `clonotype`, `n_cells`, `fraction` of cells with a clonotype, `n_configurations`, `receptor_type`, each `within` column, and the representative cell's chains per slot: `VJ_1_junction_aa`, `VJ_1_junction`, `VJ_1_v_call`, `VJ_1_j_call`, ..., `VDJ_2_j_call`), and the options (`.sequence`, `.receptor_arms`, `.dual_ir`, `.same_v_gene`, `.same_j_gene`, `.within`, `.within_receptor_type`, `.receptors`).
+- Clonotypes are clones to every `ds.clones` summary (see `clones.md`): `load_clones`, `export_clones`, `expansion`, `diversity`, `rarefaction`, `overlap`, `track`, `coupling`, `fate_bias` and `ds.plots.clone_abundance` take a `clonotypes` artifact and keep each receptor type apart. Groups gain the key column `receptor_type` and names like `"s1, TCR"`; without `group_by` the groups are the receptor types. Only groups of one receptor type are compared, coupled or followed together. Fates name a receptor type each, and a late cell without a clonotype has no fate, so each clonotype's fate tests count only the late cells of its receptor type that have a clonotype. A clonotype that spans receptor types (only `within_receptor_type=False` makes one) counts as one clone per type; `fate_bias` refuses it when its early and late cells span types, so select cells of one type. `load_clones(clonotypes).cells` holds `receptor_type`, and `.kept_apart == ("receptor_type",)`. `group_by="receptor_type"` is refused.
+- Validated: clonotypes equal scirpy 0.25.1's identity clonotypes for every cell under ten option combinations on PBMC 10k and CD8+ donor 1; with `dual_ir="all"`, scRepertoire 2.8.0's `CTnt`, `CTaa` (`sequence="aa"`) and `CTstrict` (both gene matches) and Cell Ranger 3.0.2's clonotypes.
 
 ## Recipe
 
@@ -60,6 +71,20 @@ plot = ds.plots.embedding(layout=umap_ref, color_by=receptors, show=False)  # re
 plot.save("receptor_type_umap.png")
 plot.close()
 
+clonotypes = ds.repertoire.clonotypes(receptors)  # nt, both arms, either chain
+table = ds.repertoire.load_clonotypes(clonotypes)
+print(table.clonotypes.head(10)[["clonotype", "n_cells", "receptor_type", "VJ_1_junction_aa", "VDJ_1_junction_aa"]])
+print((table.cells["clone_size"] >= 2).sum(), "cells in expanded clonotypes")
+plot = ds.plots.clone_abundance(clonotypes, group_by="sample", show=False)  # one line per sample and receptor type
+plot.save("clonotype_abundance.png")
+plot.close()
+diversity = ds.clones.diversity(clonotypes, group_by="sample", cell_selection=t_cells)
+print(diversity.hill.query("order == 1")[["group", "observed", "at_coverage"]])
+expansion = ds.clones.expansion(clonotypes, group_by="sample")
+by_donor = ds.repertoire.clonotypes(receptors, within="donor")  # several donors
+residues = ds.repertoire.clonotypes(receptors, sequence="aa")  # shared specificity
+expanded = ds.select_cells(clonotypes, value="clone_size", low=2, keep_bounds=True)
+
 # A merged store: each sample's files with that sample's prefix.
 merged = ds.repertoire.import_receptors(
     ["s1/vdj_t.csv", "s1/vdj_b.csv", "s2/vdj_t.csv", "s2/vdj_b.csv"],
@@ -79,3 +104,8 @@ airr = ds.repertoire.import_receptors("airr_rearrangement.tsv", cell_selection=c
 - Keep `productive_only=True` for clonotypes; `False` is for studying non-productive rearrangements.
 - Import TCR and BCR files together: imported apart, a cell with both kinds of chain is not `"ambiguous"` in either artifact.
 - Gamma-delta chains need a gamma-delta enrichment kit; a standard TCR library holds few TRG or TRD contigs.
+- Report the clonotype options. Keep `sequence="nt"` to count clones (identical amino acids from different nucleotides are independent recombinations); use `"aa"` for shared specificity.
+- With several donors, pass the donor as `within`; never the tissue or time point of one donor, whose clones the study follows across samples.
+- Orphan cells form their own clonotypes under `receptor_arms="all"`; with many orphan VDJ cells, also try `receptor_arms="VDJ"` and report both.
+- B cell clonotypes from identical junctions split clones that carry somatic mutations; they are exact sequence variants, not clonal families.
+- Summaries of clonotypes give ambiguous and multichain cells groups of their own, which are small and set the default common size and coverage of `diversity` low: pass `cell_selection=t_cells` (or B cells) to measure one receptor type.

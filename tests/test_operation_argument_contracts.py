@@ -323,6 +323,12 @@ _CONTRACTS = (
         model_only=_classified("resolved_input", "sources"),
     ),
     OperationContract(
+        RepertoireAccessor.clonotypes,
+        metadata_arguments.ClonotypeArguments,
+        # The labels of the within columns are recorded by their fingerprint.
+        model_only=_classified("resolved_input", "within_fingerprint"),
+    ),
+    OperationContract(
         PerturbationAccessor.import_guide_calls,
         metadata_arguments.GuideCallImportArguments,
         # The file is identified by the SHA-256 of its bytes, not its path.

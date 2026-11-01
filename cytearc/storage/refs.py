@@ -21,6 +21,7 @@ ARTIFACT_KINDS = frozenset(
         "clone_fate_bias",
         "cluster_cut",
         "clones",
+        "clonotypes",
         "cluster_hierarchy",
         "cluster_labels",
         "cluster_selection",

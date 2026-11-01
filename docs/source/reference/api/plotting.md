@@ -68,7 +68,7 @@ Granular workflows pass exact refs to the same datastore-owned plotting surface:
 | fold change and p-value of each tested pair of a target and a gene | `association_volcano(tests_ref)`, or `association_volcano(tests_ref, targets=[...])` for the pairs of some targets |
 | calibration of the association tests on negative controls, and their power on positive controls | `association_calibration(tests_ref)` |
 | clusters of perturbations by their profiles | `perturbation_clusters(clusters_ref)` for the heatmap of their correlations in leaf order, or `perturbation_clusters(clusters_ref, panel="embedding", label=[...])` for their layout with chosen perturbations named |
-| clones per clone size and the largest clones | `clone_abundance(clones_ref)`, or `clone_abundance(clones_ref, group_by="sample")` for one line per group |
+| clones per clone size and the largest clones, of clones or clonotypes | `clone_abundance(clones_ref)`, or `clone_abundance(clones_ref, group_by="sample")` for one line per group, and per receptor type for clonotypes |
 | expansion categories and the clonal space of each group of cells | `clonal_expansion(expansion_ref)`, or `clonal_expansion(expansion_ref, group_by="cell_type")` to regroup the cells |
 | rarefaction and extrapolation curves of the Hill numbers of each group | `clonal_rarefaction(clones_ref, group_by="sample")`, or `base="coverage"` against the sample coverage |
 | clones shared between samples or cell types | `clonal_overlap(clones_ref, group_by="cell_type")`, or `index="jaccard"` for another index |
@@ -135,7 +135,7 @@ as missing, never as their stored placeholder. Dot plots and matrix plots leave 
 every group and report their number as `dropped_group_cells`. Composition plots count a missing
 category in the NA category and leave cells with a missing sample label out of every sample.
 Embeddings and cluster trees show missing colors or fill values as missing, and
-`cluster_connectivity` rejects missing group labels and coordinates.
+`cluster_connectivity` rejects missing group labels and coordinates. An embedding colored by a label artifact also draws a blank label, such as that of a cell without a clone or clonotype, in the missing color rather than as a category.
 
 A feature has no value in a cell that its assay did not measure, which the assay's membership
 column `<assay>_I` marks False ([Assay membership](../developers/zarr-internals#assay-membership)); such a cell holds zero counts, which are no

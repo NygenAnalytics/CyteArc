@@ -199,7 +199,9 @@ def test_diversity_refuses_other_artifacts_and_large_stores(
     copied, monkeypatch
 ) -> None:
     store, clones = copied.store, copied.clones
-    with pytest.raises(ValueError, match="clones must be a clones artifact, not"):
+    with pytest.raises(
+        ValueError, match="clones must be a clones or clonotypes artifact, not"
+    ):
         store.clones.diversity(copied.cells)
     with pytest.raises(TypeError, match="clones must be an ArtifactRef"):
         store.clones.rarefaction("clones")

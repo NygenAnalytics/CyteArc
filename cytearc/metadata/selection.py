@@ -163,6 +163,11 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
             True,
             {"codes": True, "clone_size": False, "clone_probability": False},
         ),
+        # codes holds each cell's clonotype, a position in the artifact's
+        # clonotype_ids, -1 for none.
+        "clonotypes": CellValueSpec(
+            "values", True, {"codes": True, "clone_size": False}
+        ),
         "cluster_cut": CellValueSpec("labels", True),
         "cluster_labels": CellValueSpec("values", True),
         "doublet_score": CellValueSpec(

@@ -65,6 +65,7 @@ from ...metadata.arguments import (
     CloneColumnArguments,
     CloneFateBiasArguments,
     CloneImportArguments,
+    ClonotypeArguments,
 )
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from ...metadata.rows import (
@@ -77,7 +78,7 @@ from ...metadata.rows import (
     text_row_selection_parts,
     text_width,
 )
-from ...metadata.selection import cell_selection_indices
+from ...metadata.selection import category_codes, cell_selection_indices
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
@@ -131,12 +132,35 @@ _BYTES_PER_LISTED_CELL = 8
 _MIN_CHUNK_ROWS = 1_000
 _MAX_CHUNK_ROWS = 1_000_000
 # Bytes per cell of the tables of loaded clones beside its ID: the clone
-# code, size and probability, and the pandas index.
-_TABLE_BYTES_PER_CELL = 200
+# code, size and probability, the labels kept apart, and the pandas index;
+# with the ID, about 220 bytes per cell, and 230 with the receptor types of
+# clonotypes, as traced on 200,000 cells.
+_TABLE_BYTES_PER_CELL = 250
 # Bytes per cell of an export beside its ID: its label and its code.
 _EXPORT_BYTES_PER_CELL = 200
 # The kinds of clone artifact that every clone summary reads.
-_CLONE_SOURCE_KINDS = ("clones",)
+_CLONE_SOURCE_KINDS = (
+    CloneImportArguments.artifact_kind,
+    ClonotypeArguments.artifact_kind,
+)
+# The key column of each cell's receptor type, which clonotypes keep apart.
+_RECEPTOR_TYPE_COLUMN = "receptor_type"
+# The array of each kind's clone labels, and the key columns whose labels its
+# clones keep apart.
+_CLONE_ID_ARRAYS = {
+    CloneImportArguments.artifact_kind: "clone_ids",
+    ClonotypeArguments.artifact_kind: "clonotype_ids",
+}
+_KEPT_APART_COLUMNS: dict[str, tuple[str, ...]] = {
+    CloneImportArguments.artifact_kind: (),
+    ClonotypeArguments.artifact_kind: (_RECEPTOR_TYPE_COLUMN,),
+}
+# Reading the receptor types of clonotypes holds each cell's stored text and,
+# while it is coded, a Python string and a code for each cell, 92 bytes beside
+# the text as traced on 200,000 cells. Each cell then keeps a label in each
+# column that the clones keep apart, a pointer to one of a few shared labels.
+_RECEPTOR_TYPE_CODING_BYTES = 100
+_KEPT_LABEL_BYTES = 8
 # Reading a clone artifact holds, for each of its cells, the stored code and
 # this many bytes for its int64 copy.
 _CLONE_CODE_BYTES = 8
@@ -240,7 +264,8 @@ class _CloneInput:
         codes: Each cell's clone, as int64, -1 for none.
         clone_ids: Each clone's label, by code, or None when not read.
         kept_apart: The key columns whose labels the clones keep apart, each
-            with every cell's label; clones keep no labels apart.
+            with every cell's label: clones keep none, and clonotypes keep the
+            receptor type.
     """
 
     ref: ArtifactRef
@@ -808,23 +833,27 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         return planned.ref
 
     def _clone_group(self, clones: ArtifactRef) -> zarr.Group:
-        """Return a complete ``clones`` artifact's group."""
+        """Return a complete clone artifact's group, of a kind the summaries read."""
         if not isinstance(clones, ArtifactRef):
             raise TypeError("clones must be an ArtifactRef")
-        if clones.kind != CloneImportArguments.artifact_kind:
-            raise ValueError(f"clones must be a clones artifact, not {clones.kind!r}")
+        if clones.kind not in _CLONE_SOURCE_KINDS:
+            raise ValueError(
+                f"clones must be a {' or '.join(_CLONE_SOURCE_KINDS)} artifact, "
+                f"not {clones.kind!r}"
+            )
         require_complete_artifact(self.zw, clones)
         return artifact_group(self.zw, clones)
 
-    def _clone_text_bytes(self, group: zarr.Group, n_cells: int) -> int:
+    def _clone_text_bytes(self, clones: ArtifactRef, n_cells: int) -> int:
         """Bytes of reading saved clones' labels and their cells' IDs as text."""
-        clone_ids = as_zarr_array(group["clone_ids"], name="clone_ids")
-        return text_read_bytes(clone_ids, int(clone_ids.shape[0])) + (
+        name = _CLONE_ID_ARRAYS[clones.kind]
+        labels = as_zarr_array(artifact_group(self.zw, clones)[name], name=name)
+        return text_read_bytes(labels, int(labels.shape[0])) + (
             text_read_bytes(self.cells._get_array("ids"), n_cells)
         )
 
     def _clone_cell_ids(self, clones: ArtifactRef) -> np.ndarray:
-        """The IDs of a clones artifact's cells, in the order of its arrays."""
+        """The IDs of a clone artifact's cells, in the order of its arrays."""
         selection = inspect_artifact(self.zw, clones).input_ref("cell_selection")
         cell_index = cell_selection_indices(self.zw, selection)
         return np.asarray(read_metadata_rows_chunkwise(self.cells, "ids", cell_index))
@@ -833,9 +862,15 @@ class _CloneOperationsMixin(_CloneOperationsBase):
     def _clones_load_clones(self, clones: ArtifactRef) -> Clones:
         """Read saved clones as a table of cells and a table of clones.
 
+        Clonotypes read as clones too, labelled ``clonotype_1`` and so on,
+        and their table of cells also holds each cell's ``receptor_type``,
+        whose labels every clone summary measures apart.
+
         Args:
-            clones: A ``clones`` artifact, such as one from
-                :meth:`~cytearc.datastore.namespaces.ClonesAccessor.import_clones`.
+            clones: A clone artifact: ``clones``, such as one from
+                :meth:`~cytearc.datastore.namespaces.ClonesAccessor.import_clones`,
+                or ``clonotypes``, from
+                :meth:`~cytearc.datastore.namespaces.RepertoireAccessor.clonotypes`.
 
         Returns:
             The clones, with one row per cell and one row per clone, largest
@@ -843,40 +878,53 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef.
-            ValueError: If it is not a ``clones`` artifact.
-            KeyError: If the store holds no such artifact.
-            RuntimeError: If the artifact is incomplete, as an import that
-                stopped before it finished leaves it.
-            MemoryError: If the tables, about 200 bytes per cell beside the
-                text of its ID and of the clone labels, do not fit the memory
-                budget.
+            ValueError: If it is not a ``clones`` or ``clonotypes`` artifact.
+            KeyError: If the store holds no such artifact, or not the
+                receptors of the clonotypes.
+            RuntimeError: If the artifact or the receptors of the clonotypes
+                are incomplete, as an import that stopped before it finished
+                leaves them.
+            MemoryError: If the tables, about 250 bytes per cell beside the
+                clones that they read and the text of the cells' IDs and of
+                the clone labels, do not fit the memory budget.
         """
         group = self._clone_group(clones)
         n_cells = int(as_zarr_array(group["codes"], name="codes").shape[0])
-        resident = (
-            self._clone_text_bytes(group, n_cells) + _TABLE_BYTES_PER_CELL * n_cells
+        # The tables are built beside the codes and kept labels read, and the
+        # clone labels and the cells' IDs as text.
+        self._check_clone_table_budget(
+            n_cells,
+            _TABLE_BYTES_PER_CELL,
+            "clones",
+            held=self._clone_input_bytes(clones, with_ids=False)
+            + self._clone_text_bytes(clones, n_cells),
         )
-        if resident > self.memoryBytes:
-            raise MemoryError(
-                f"Loading the clones of {n_cells} cells holds about {resident} "
-                f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
-                "Raise mem_budget."
-            )
+        source = self._read_clone_input(clones, with_ids=True)
+        assert source.clone_ids is not None
         extra = {}
         if _PROBABILITY in group:
             extra[_PROBABILITY] = _read(group, _PROBABILITY).astype(np.float64)
+        # Every saved clone holds a cell, so the codes give the clone sizes.
+        assigned = source.codes >= 0
+        clone_sizes = np.bincount(
+            source.codes[assigned], minlength=len(source.clone_ids)
+        )
+        clone_size = np.zeros(len(source.codes), dtype=np.int64)
+        clone_size[assigned] = clone_sizes[source.codes[assigned]]
         cells, table = clone_frames(
             self._clone_cell_ids(clones),
-            codes=_read(group, "codes"),
-            clone_size=_read(group, "clone_size"),
-            clone_ids=_read(group, "clone_ids").astype(object),
-            clone_sizes=_read(group, "clone_sizes"),
+            codes=source.codes,
+            clone_size=clone_size,
+            clone_ids=source.clone_ids,
+            clone_sizes=clone_sizes,
             extra=extra,
+            kept_apart=dict(source.kept_apart),
         )
         return Clones(
             cells=cells,
             clones=table,
             source=str(inspect_artifact(self.zw, clones).operation),
+            kept_apart=tuple(name for name, _labels in source.kept_apart),
         )
 
     @validation_scoped
@@ -900,7 +948,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         probabilities are not written.
 
         Args:
-            clones: A ``clones`` artifact.
+            clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             path: The file to write.
             format: ``"table"`` or ``"matrix"``.
 
@@ -909,16 +957,19 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``clones`` is not a ``clones`` artifact, ``format``
-                is unknown, a ``"table"`` would hold a clone label that reads
-                as no clone, such as ``"NA"``, or a ``"matrix"`` would list a
-                label or cell ID that holds a line break.
-            KeyError: If the store holds no such artifact.
-            RuntimeError: If the artifact is incomplete, as an import that
-                stopped before it finished leaves it.
+            ValueError: If ``clones`` is not a ``clones`` or ``clonotypes``
+                artifact, ``format`` is unknown, a ``"table"`` would hold a
+                clone label that reads as no clone, such as ``"NA"``, or a
+                ``"matrix"`` would list a label or cell ID that holds a line
+                break.
+            KeyError: If the store holds no such artifact, or not the
+                receptors of the clonotypes.
+            RuntimeError: If the artifact or the receptors of the clonotypes
+                are incomplete, as an import that stopped before it finished
+                leaves them.
             MemoryError: If the export, about 200 bytes per cell beside the
-                text of its ID and of the clone labels, does not fit the
-                memory budget.
+                clones that it reads and the text of the cells' IDs and of the
+                clone labels, does not fit the memory budget.
         """
         from ...readers.clone_tables import MISSING_TEXT
         from ...writers.clone_tables import write_clone_matrix, write_clone_table
@@ -930,17 +981,23 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 f"format must be one of {', '.join(EXPORT_FORMATS)}, not {format!r}"
             )
         group = self._clone_group(clones)
-        codes = _read(group, "codes").astype(np.int64)
-        resident = self._clone_text_bytes(group, len(codes)) + (
-            _EXPORT_BYTES_PER_CELL * len(codes)
+        n_cells = int(as_zarr_array(group["codes"], name="codes").shape[0])
+        # The file is written from the codes and kept labels read, and the
+        # clone labels and the cells' IDs as text.
+        resident = (
+            _EXPORT_BYTES_PER_CELL * n_cells
+            + self._clone_input_bytes(clones, with_ids=False)
+            + self._clone_text_bytes(clones, n_cells)
         )
         if resident > self.memoryBytes:
             raise MemoryError(
-                f"Exporting the clones of {len(codes)} cells holds about {resident} "
+                f"Exporting the clones of {n_cells} cells holds about {resident} "
                 f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
                 "Raise mem_budget."
             )
-        clone_ids = _read(group, "clone_ids").astype(object)
+        source = self._read_clone_input(clones, with_ids=True)
+        assert source.clone_ids is not None
+        codes, clone_ids = source.codes, source.clone_ids
         if format == "table":
             # A clone table reads these labels back as cells without a clone.
             lost = [label for label in clone_ids.tolist() if label in MISSING_TEXT]
@@ -962,32 +1019,52 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Only the arrays' metadata is read: each cell's code and, with
         ``with_ids``, each clone's label, which costs as much as its stored
-        text is wide.
+        text is wide. Clonotypes also read each cell's receptor type as text,
+        code it, and keep a label for each cell.
 
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef.
             ValueError: If it is not a kind of clone artifact that the
                 summaries read.
-            KeyError: If the store holds no such artifact.
-            RuntimeError: If the artifact is incomplete.
+            KeyError: If the store holds no such artifact, or not the
+                receptors of the clonotypes.
+            RuntimeError: If the artifact or the receptors of the clonotypes
+                are incomplete.
         """
-        if not isinstance(clones, ArtifactRef):
-            raise TypeError("clones must be an ArtifactRef")
-        if clones.kind not in _CLONE_SOURCE_KINDS:
-            raise ValueError(
-                f"clones must be a {' or '.join(_CLONE_SOURCE_KINDS)} artifact, "
-                f"not {clones.kind!r}"
-            )
-        require_complete_artifact(self.zw, clones)
-        group = artifact_group(self.zw, clones)
+        group = self._clone_group(clones)
         codes = as_zarr_array(group["codes"], name="codes")
-        resident = int(codes.shape[0]) * (codes.dtype.itemsize + _CLONE_CODE_BYTES)
+        n_cells = int(codes.shape[0])
+        resident = n_cells * (codes.dtype.itemsize + _CLONE_CODE_BYTES)
         if with_ids:
-            ids = as_zarr_array(group["clone_ids"], name="clone_ids")
+            name = _CLONE_ID_ARRAYS[clones.kind]
+            ids = as_zarr_array(group[name], name=name)
             resident += int(ids.shape[0]) * (
                 _CLONE_ID_BYTES + _CLONE_ID_COPIES * ids.dtype.itemsize
             )
-        return resident
+        if clones.kind == ClonotypeArguments.artifact_kind:
+            receptor_type = self._receptor_types(clones)
+            resident += int(receptor_type.shape[0]) * (
+                receptor_type.dtype.itemsize + _RECEPTOR_TYPE_CODING_BYTES
+            )
+        return resident + n_cells * _KEPT_LABEL_BYTES * len(
+            _KEPT_APART_COLUMNS[clones.kind]
+        )
+
+    def _receptor_types(self, clonotypes: ArtifactRef) -> zarr.Array:
+        """The stored receptor type of each cell of saved clonotypes.
+
+        Clonotypes label the cells of their receptors, in the same order, and
+        the receptors' canonical values are the receptor types.
+
+        Raises:
+            KeyError: If the store holds no such receptors.
+            RuntimeError: If the receptors are incomplete.
+        """
+        receptors = inspect_artifact(self.zw, clonotypes).input_ref("receptors")
+        require_complete_artifact(self.zw, receptors)
+        return as_zarr_array(
+            artifact_group(self.zw, receptors)["values"], name="values"
+        )
 
     def _read_clone_input(
         self, clones: ArtifactRef, *, with_ids: bool = False
@@ -996,14 +1073,19 @@ class _CloneOperationsMixin(_CloneOperationsBase):
 
         Each cell's clone code is read, and with ``with_ids`` the label of
         each clone. Every kind of clone artifact that the summaries accept is
-        read here, with the labels of the groups that its clones keep apart.
+        read here, with the labels of the groups that its clones keep apart:
+        clones keep none, and clonotypes keep each cell's receptor type apart,
+        the canonical values of their receptors, so the summaries measure T
+        cells and B cells apart.
 
         Raises:
             TypeError: If ``clones`` is not an ArtifactRef.
             ValueError: If it is not a kind of clone artifact that the
                 summaries read.
-            KeyError: If the store holds no such artifact.
-            RuntimeError: If the artifact is incomplete.
+            KeyError: If the store holds no such artifact, or not the
+                receptors of the clonotypes.
+            RuntimeError: If the artifact or the receptors of the clonotypes
+                are incomplete.
             MemoryError: If the codes, and the labels when read, do not fit
                 the memory budget.
         """
@@ -1016,14 +1098,22 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 f"bytes, more than the memory budget of {self.memoryBytes} bytes. "
                 "Raise mem_budget."
             )
+        kept_apart: tuple[tuple[str, np.ndarray], ...] = ()
+        if clones.kind == ClonotypeArguments.artifact_kind:
+            # Each of the few receptor types becomes one shared label, so the
+            # summaries code the cells' labels without a string per cell.
+            codes, names = category_codes(np.asarray(self._receptor_types(clones)[:]))
+            labels = np.asarray([*names, None], dtype=object)[codes]
+            kept_apart = ((_RECEPTOR_TYPE_COLUMN, labels),)
+        ids = _CLONE_ID_ARRAYS[clones.kind]
         return _CloneInput(
             ref=clones,
             cell_selection=inspect_artifact(self.zw, clones).input_ref(
                 "cell_selection"
             ),
             codes=_read(group, "codes").astype(np.int64, copy=False),
-            clone_ids=_read(group, "clone_ids").astype(object) if with_ids else None,
-            kept_apart=(),
+            clone_ids=_read(group, ids).astype(object) if with_ids else None,
+            kept_apart=kept_apart,
         )
 
     def _matching_bytes(
@@ -1220,7 +1310,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         such as a clustering. Without a grouping, a clone's size counts its
         cells in every sample, as scirpy's ``clonal_expansion`` does without
         ``expanded_in``. Cells without a clone or a label are counted in no
-        group.
+        group. Clonotypes are counted within each receptor type, which joins
+        the groups' key columns as ``receptor_type``.
 
         ``breakpoints`` sorts the cells by their clone's cells in the group,
         as scirpy's ``breakpoints`` do: the default ``(1, 2, 5, 20, 100)``
@@ -1245,7 +1336,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         arrays.
 
         Args:
-            clones: A ``clones`` artifact.
+            clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups,
                 such as the sample.
             groups: A cell-label artifact whose labels define the groups.
@@ -1269,9 +1360,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 are given, the bounds are invalid, no measured cell has both a
                 clone and a group, a column of the groups is missing or named
                 twice, or two groups get one name.
-            KeyError: If the store holds no such ``clones`` artifact.
-            RuntimeError: If the ``clones`` artifact is incomplete, as an
-                import that stopped before it finished leaves it.
+            KeyError: If the store holds no such ``clones`` artifact, or not the
+                receptors of the clonotypes.
+            RuntimeError: If the ``clones`` artifact or the receptors of the
+                clonotypes are incomplete, as an import that stopped before it
+                finished leaves them.
             PermissionError: If the store is read-only and the result is not
                 saved yet.
             MemoryError: If reading the clones, grouping the cells, or the
@@ -1350,9 +1443,10 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         if planned.reused:
             return planned.ref
         self._require_writable(arguments.operation)
-        resident = _EXPANSION_BYTES_PER_CELL * n_cells + _SUMMARY_BYTES_PER_GROUP * len(
-            grouped.keys
-        )
+        # The labels that the clones keep apart stay beside the measurement.
+        resident = (
+            _EXPANSION_BYTES_PER_CELL + _KEPT_LABEL_BYTES * len(kept_apart)
+        ) * n_cells + _SUMMARY_BYTES_PER_GROUP * len(grouped.keys)
         if resident > self.memoryBytes:
             raise MemoryError(
                 f"Measuring the clonal expansion of {n_cells} cells holds about "
@@ -1429,9 +1523,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ValueError: If ``expansion`` is not a ``clonal_expansion``
                 artifact, or ``splits`` are invalid.
             KeyError: If the store holds no such artifact, or not the clones
-                that it measured.
-            RuntimeError: If the artifact or the clones that it measured are
-                incomplete.
+                that it measured or the receptors of clonotypes.
+            RuntimeError: If the artifact, the clones that it measured or the
+                receptors of clonotypes are incomplete.
             MemoryError: If the tables, about 500 bytes per cell and 2,000
                 per group besides the cells' IDs as text and the clones and
                 labels that they read, do not fit the memory budget.
@@ -1464,7 +1558,13 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         held += self._clone_input_bytes(clones, with_ids=True)
         clone_cells = inspect_artifact(self.zw, clones).input_ref("cell_selection")
         if measured != clone_cells:
-            held += self._matching_bytes(clones, clone_cells, measured, n_cells, 0)
+            held += self._matching_bytes(
+                clones,
+                clone_cells,
+                measured,
+                n_cells,
+                len(_KEPT_APART_COLUMNS[clones.kind]),
+            )
         self._check_clone_table_budget(
             n_cells, _EXPANSION_TABLE_BYTES_PER_CELL, "clonal expansion", held=held
         )
@@ -1537,6 +1637,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         cell metadata columns, such as the sample, and of the ``groups``
         label artifact, such as a clustering. Cells without a clone or a
         label are left out. A clone's size in a group is its cells there.
+        Clonotypes are measured within each receptor type, which joins the
+        groups' key columns as ``receptor_type``.
 
         The indices are those of scRepertoire's ``clonalDiversity``,
         immunarch's ``repDiversity`` and vegan's ``estimateR``: Shannon
@@ -1551,7 +1653,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         these standardized numbers. Nothing is saved.
 
         Args:
-            clones: A ``clones`` artifact.
+            clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups.
             groups: A cell-label artifact whose labels define the groups.
             cell_selection: Only these cells, or None for every cell of the
@@ -1569,9 +1671,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ValueError: If ``clones`` is not a clone artifact, no cell has a
                 clone and a group, a column of the groups is missing or named
                 twice, or ``size`` is not positive.
-            KeyError: If the store holds no such ``clones`` artifact.
-            RuntimeError: If the ``clones`` artifact is incomplete, as an
-                import that stopped before it finished leaves it.
+            KeyError: If the store holds no such ``clones`` artifact, or not the
+                receptors of the clonotypes.
+            RuntimeError: If the ``clones`` artifact or the receptors of the
+                clonotypes are incomplete, as an import that stopped before it
+                finished leaves them.
             MemoryError: If reading the clones or grouping the cells does not
                 fit the memory budget.
         """
@@ -1638,7 +1742,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         instead.
 
         Args:
-            clones: A ``clones`` artifact.
+            clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups.
             groups: A cell-label artifact whose labels define the groups.
             cell_selection: Only these cells, or None for every cell of the
@@ -1658,9 +1762,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ValueError: If ``clones`` is not a clone artifact, an order,
                 size, endpoint or knots is invalid, or no cell has a clone and
                 a group.
-            KeyError: If the store holds no such ``clones`` artifact.
-            RuntimeError: If the ``clones`` artifact is incomplete, as an
-                import that stopped before it finished leaves it.
+            KeyError: If the store holds no such ``clones`` artifact, or not the
+                receptors of the clonotypes.
+            RuntimeError: If the ``clones`` artifact or the receptors of the
+                clonotypes are incomplete, as an import that stopped before it
+                finished leaves them.
             MemoryError: If reading the clones, grouping the cells, or the
                 curves do not fit the memory budget.
         """
@@ -1747,7 +1853,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         cell metadata columns, such as the sample or the tissue, and of the
         ``groups`` label artifact, such as a clustering, among the cells of
         ``cell_selection``. Cells without a clone or a label are left out.
-        Nothing is saved.
+        Clonotypes are grouped within each receptor type, which joins the
+        groups' key columns as ``receptor_type``, and only groups of one
+        receptor type are compared. Nothing is saved.
 
         Each pair of groups gets presence indices, which count clones, and
         abundance indices, which weigh them by their cells, as scRepertoire's
@@ -1762,7 +1870,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         both groups.
 
         Args:
-            clones: A ``clones`` artifact.
+            clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups.
             groups: A cell-label artifact whose labels define the groups.
             cell_selection: Only these cells, or None for every cell of the
@@ -1779,9 +1887,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 keep apart, a column of the groups is missing or named twice,
                 a key column names a column of the result, or two groups get
                 one name.
-            KeyError: If the store holds no such ``clones`` artifact.
-            RuntimeError: If the ``clones`` artifact is incomplete, as an
-                import that stopped before it finished leaves it.
+            KeyError: If the store holds no such ``clones`` artifact, or not the
+                receptors of the clonotypes.
+            RuntimeError: If the ``clones`` artifact or the receptors of the
+                clonotypes are incomplete, as an import that stopped before it
+                finished leaves them.
             MemoryError: If reading the clones, grouping the cells, or the
                 pairs of groups do not fit the memory budget.
         """
@@ -1856,11 +1966,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         of cells in every group, zeros included, so a clone that expands
         between time points or spreads between cell types shows it. The
         groups are those of
-        :meth:`~cytearc.datastore.namespaces.ClonesAccessor.overlap`. Nothing
-        is saved.
+        :meth:`~cytearc.datastore.namespaces.ClonesAccessor.overlap`, and a
+        clonotype is followed through the groups of its own receptor type.
+        Nothing is saved.
 
         Args:
-            clones: A ``clones`` artifact.
+            clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups.
             groups: A cell-label artifact whose labels define the groups.
             cell_selection: Only these cells, or None for every cell of the
@@ -1879,9 +1990,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 cell has both a clone and a group, a column of the groups is
                 missing or named twice, a key column names a column of the
                 result, or two groups get one name.
-            KeyError: If the store holds no such ``clones`` artifact.
-            RuntimeError: If the ``clones`` artifact is incomplete, as an
-                import that stopped before it finished leaves it.
+            KeyError: If the store holds no such ``clones`` artifact, or not the
+                receptors of the clonotypes.
+            RuntimeError: If the ``clones`` artifact or the receptors of the
+                clonotypes are incomplete, as an import that stopped before it
+                finished leaves them.
             MemoryError: If reading the clones, grouping the cells, or the
                 table of the chosen clones' groups does not fit the memory
                 budget.
@@ -1995,7 +2108,12 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         labels of the ``group_by`` cell metadata columns, such as the cell
         type, and of the ``groups`` label artifact, among the cells of
         ``cell_selection``, such as the cells of one time point. Cells
-        without a clone or a label are left out. Nothing is saved.
+        without a clone or a label are left out. Clonotypes are grouped within
+        each receptor type, which joins the groups' key columns as
+        ``receptor_type``: only groups of one receptor type are coupled, the
+        null shuffles labels within each receptor type, and a clonotype that
+        spans receptor types, as ``within_receptor_type=False`` allows,
+        counts as one clone in each. Nothing is saved.
 
         ``method`` names how a pair's coupling is measured from each clone's
         cells in each group, as CoSpar's ``fate_coupling`` measures it:
@@ -2019,7 +2137,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         linkage on the coupling, the most coupled together.
 
         Args:
-            clones: A ``clones`` artifact.
+            clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the groups.
             groups: A cell-label artifact whose labels define the groups.
             cell_selection: Only these cells, or None for every cell of the
@@ -2045,9 +2163,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 of the groups is missing or named twice, a key column names a
                 column of the result, two groups get one name, or
                 ``"normalized_covariance"`` meets fewer than two clones.
-            KeyError: If the store holds no such ``clones`` artifact.
-            RuntimeError: If the ``clones`` artifact is incomplete, as an
-                import that stopped before it finished leaves it.
+            KeyError: If the store holds no such ``clones`` artifact, or not the
+                receptors of the clonotypes.
+            RuntimeError: If the ``clones`` artifact or the receptors of the
+                clonotypes are incomplete, as an import that stopped before it
+                finished leaves them.
             MemoryError: If reading the clones, grouping the cells, or the
                 coupling and one worker of its null do not fit the memory
                 budget.
@@ -2089,6 +2209,8 @@ class _CloneOperationsMixin(_CloneOperationsBase):
                 "which the clones keep apart, so no pair of groups can be "
                 "compared"
             )
+        if strata is not None:
+            pair_codes = _clones_by_stratum(pair_codes, strata[pair_groups])
         # Beside the coupling: the clones read, their counts in each group
         # and each group's rows.
         held = (
@@ -2188,7 +2310,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         with the Benjamini and Hochberg adjustment over the clones within
         each fate. When the clones keep labels apart, such as receptor types,
         each fate holds one such label, which a late cell without a clone
-        lacks, so it has no fate.
+        lacks, so it has no fate. The fates of clonotypes therefore name a
+        receptor type each, such as ``"Neutrophil, TCR"``, and each clonotype
+        is tested among the late cells of its receptor type that have a
+        clonotype. A clonotype whose early and late cells span receptor types,
+        as ``within_receptor_type=False`` allows, is refused.
 
         The artifact's canonical ``values`` hold each early cell's dominant
         fate, empty for none, so ``ds.select_cells(bias, include=["Neutrophil"])``
@@ -2198,7 +2324,7 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         its other per-cell arrays.
 
         Args:
-            clones: A ``clones`` artifact.
+            clones: A clone artifact, such as ``clones`` or ``clonotypes``.
             group_by: Cell metadata columns whose labels define the fates.
             groups: A cell-label artifact whose labels define the fates.
             early: The early cells, a cell selection.
@@ -2216,13 +2342,16 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             ValueError: If ``clones`` is not a clone artifact, ``early`` or
                 ``late`` is not a cell selection or selects no cell, a cell is
                 both early and late, no late cell has both a clone and a fate,
-                fewer than two fates hold a late cell, a column of the fates
+                a clone's early and late cells carry two labels that the clones
+                keep apart, fewer than two fates hold a late cell, a column of the fates
                 is missing or named twice, a key column names a column of the
                 result, two fates get one name, or a fate is named
                 ``"clone"``, ``"late_cells"`` or ``"fate"``.
-            KeyError: If the store holds no such ``clones`` artifact.
-            RuntimeError: If the ``clones`` artifact is incomplete, as an
-                import that stopped before it finished leaves it.
+            KeyError: If the store holds no such ``clones`` artifact, or not the
+                receptors of the clonotypes.
+            RuntimeError: If the ``clones`` artifact or the receptors of the
+                clonotypes are incomplete, as an import that stopped before it
+                finished leaves them.
             PermissionError: If the store is read-only and the result is not
                 saved yet.
             MemoryError: If reading the clones, grouping the late cells, or
@@ -2370,7 +2499,11 @@ class _CloneOperationsMixin(_CloneOperationsBase):
         del grouped, late_codes, late_kept, counted
         n_tested = len(sorted_unique(pair_codes))
         n_late_counted = int(pair_cells.sum())
-        _early, early_codes, _kept = self._measured_clone_cells(source, early)
+        _early, early_codes, early_kept = self._measured_clone_cells(source, early)
+        _refuse_clones_across_kept_labels(
+            keys, pair_fates, pair_codes, early_codes, early_kept
+        )
+        del early_kept
         width = max(len(str(name)) for name in names.tolist())
         resident = (
             held
@@ -2434,9 +2567,9 @@ class _CloneOperationsMixin(_CloneOperationsBase):
             TypeError: If ``bias`` is not an ArtifactRef.
             ValueError: If it is not a ``clone_fate_bias`` artifact.
             KeyError: If the store holds no such artifact, or not the clones
-                that it measured.
-            RuntimeError: If the artifact or the clones that it measured are
-                incomplete.
+                that it measured or the receptors of clonotypes.
+            RuntimeError: If the artifact, the clones that it measured or the
+                receptors of clonotypes are incomplete.
             MemoryError: If the tables, about 200 bytes per early cell, 24 per
                 fraction and 160 per row of clone and fate, beside the early
                 cells' IDs as text and the clone labels that they read, do not
@@ -2530,6 +2663,84 @@ def _group_sizes(
 
 def _kept_apart(source: _CloneInput) -> list[str]:
     return [name for name, _labels in source.kept_apart]
+
+
+def _clones_by_stratum(codes: np.ndarray, code_strata: np.ndarray) -> np.ndarray:
+    """Code each clone once in each stratum that its counted cells reach.
+
+    Every clone source promises that a clone's cells share the labels that
+    it keeps apart, but clonotypes that ``within_receptor_type=False``
+    defines can hold cells of several receptor types. Such a clone counts as
+    one clone in each stratum, as it counts its cells of each receptor type
+    in that type's groups in the other summaries. The codes come back
+    unchanged when no clone spans two strata, and otherwise in the order of
+    the clones and then of their strata.
+
+    Args:
+        codes: The clone code of each count of a clone in a group.
+        code_strata: The stratum of each count's group.
+    """
+    n_strata = int(code_strata.max()) + 1 if len(code_strata) else 1
+    units, recoded = np.unique(
+        codes.astype(np.int64) * n_strata + code_strata, return_inverse=True
+    )
+    if len(units) == len(sorted_unique(codes)):
+        return codes
+    return recoded.reshape(-1).astype(np.int64)
+
+
+def _refuse_clones_across_kept_labels(
+    fates: pd.DataFrame,
+    pair_fates: np.ndarray,
+    pair_codes: np.ndarray,
+    early_codes: np.ndarray,
+    early_kept: tuple[tuple[str, np.ndarray], ...],
+) -> None:
+    """Refuse clones whose early and late cells carry two labels kept apart.
+
+    Fate bias tests a clone in the fates of the labels that its cells share
+    in each column that the clones keep apart. Clonotypes that
+    ``within_receptor_type=False`` defines can hold cells of several receptor
+    types, and such a clonotype has no one receptor type in which to test it.
+
+    Args:
+        fates: One row per fate, with its labels in the key columns.
+        pair_fates: The fate of each count of a clone's late cells in a fate.
+        pair_codes: The clone code of each count.
+        early_codes: Each early cell's clone code, -1 for none.
+        early_kept: Each column that the clones keep apart, with each early
+            cell's label.
+
+    Raises:
+        ValueError: If a clone's late cells lie in fates of two labels of
+            such a column, or an early cell's label differs from that of its
+            clone's late cells.
+    """
+    for column, early_labels in early_kept:
+        late = pd.DataFrame(
+            {
+                "clone": pair_codes,
+                "label": fates[column].to_numpy(dtype=object)[pair_fates],
+            }
+        ).drop_duplicates()
+        across = set(late.loc[late["clone"].duplicated(keep=False), "clone"].tolist())
+        late = late.drop_duplicates("clone")
+        at = pd.Index(late["clone"]).get_indexer(early_codes)
+        reached = at >= 0
+        differs = (
+            np.asarray(early_labels, dtype=object)[reached]
+            != (late["label"].to_numpy(dtype=object)[at[reached]])
+        )
+        across |= set(early_codes[reached][differs].tolist())
+        if across:
+            raise ValueError(
+                f"{len(across)} clones hold early or late cells of two labels in "
+                f"{column!r}, which the clones keep apart, as clonotypes that "
+                "within_receptor_type=False defines can span receptor types; "
+                "fate bias tests each clone in the fates of one label. Define "
+                "the clonotypes with within_receptor_type=True, or pass early "
+                "and late cells of one receptor type."
+            )
 
 
 def _kept_apart_strata(source: _CloneInput, keys: pd.DataFrame) -> np.ndarray | None:

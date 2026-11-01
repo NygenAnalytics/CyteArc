@@ -416,22 +416,27 @@ class CloneAssigner:
 
 @dataclass(frozen=True, slots=True)
 class Clones:
-    """The clones of a set of cells, read from a ``clones`` artifact.
+    """The clones of a set of cells, read from a clone artifact.
 
     Attributes:
         cells: One row per cell, indexed by cell ``ids``: ``clone`` (its
             label, as a categorical of the labels in rank order, NA without
-            one), ``clone_size`` (the cells of its clone, 0 without one) and,
+            one), ``clone_size`` (the cells of its clone, 0 without one),
             when the source gave them, ``clone_probability`` (the probability
-            of its clone, NaN without one).
+            of its clone, NaN without one), and each column of
+            ``kept_apart``, a categorical of the cell's labels.
         clones: One row per clone, largest first: ``clone`` and ``n_cells``.
         source: The operation that saved the clones, such as
-            ``"import_clones"``.
+            ``"import_clones"`` or ``"define_clonotypes"``.
+        kept_apart: The columns of ``cells`` whose labels the clones keep
+            apart, such as ``("receptor_type",)`` for clonotypes: every clone
+            summary measures the cells of each label apart. Clones keep none.
     """
 
     cells: pd.DataFrame = field(repr=False)
     clones: pd.DataFrame = field(repr=False)
     source: str
+    kept_apart: tuple[str, ...] = ()
 
 
 def clone_frames(
@@ -442,6 +447,7 @@ def clone_frames(
     clone_ids: np.ndarray,
     clone_sizes: np.ndarray,
     extra: Mapping[str, np.ndarray] | None = None,
+    kept_apart: Mapping[str, np.ndarray] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return the tables of cells and clones of stored clones.
 
@@ -452,6 +458,9 @@ def clone_frames(
         clone_ids: The clone labels, by rank.
         clone_sizes: The cells of each clone.
         extra: Further per-cell columns, such as ``clone_probability``.
+        kept_apart: Each cell's labels that the clones keep apart, such as its
+            receptor type, by column; the table holds them as categoricals
+            of the labels in natural order.
     """
     # The labels are categories coded by the stored codes, ordered as the
     # clones rank, so the table holds no text per cell.
@@ -464,6 +473,11 @@ def clone_frames(
     }
     for name, values in (extra or {}).items():
         columns[name] = np.asarray(values)
+    for name, labels in (kept_apart or {}).items():
+        values = np.asarray(labels, dtype=object)
+        columns[name] = pd.Categorical(
+            values, categories=sort_categories(pd.unique(values[pd.notna(values)]))
+        )
     cells = pd.DataFrame(columns, index=pd.Index(np.asarray(cell_ids), name="ids"))
     table = pd.DataFrame(
         {

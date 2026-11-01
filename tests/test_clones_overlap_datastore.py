@@ -175,7 +175,9 @@ def test_overlap_arguments_are_checked(shared, kwargs, error, message) -> None:
 def test_overlap_and_track_refuse_other_artifacts(shared) -> None:
     store = shared.store
     for method in (store.clones.overlap, store.clones.track):
-        with pytest.raises(ValueError, match="clones must be a clones artifact, not"):
+        with pytest.raises(
+            ValueError, match="clones must be a clones or clonotypes artifact, not"
+        ):
             method(shared.cells, group_by="sample")
         with pytest.raises(TypeError, match="clones must be an ArtifactRef"):
             method("clones", group_by="sample")

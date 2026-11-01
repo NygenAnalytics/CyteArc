@@ -206,9 +206,15 @@ def test_datastore_namespace_bindings_cover_all_moved_methods_and_find():
     # clones.expansion, clones.load_expansion, clones.diversity and
     # clones.rarefaction, then clones.overlap and clones.track, then
     # clones.coupling, clones.fate_bias and clones.load_fate_bias, then
-    # repertoire.import_receptors and repertoire.load_receptors.
-    assert len(_NAMESPACE_METHODS) == 129
-    assert {"import_receptors", "load_receptors"} == {
+    # repertoire.import_receptors and repertoire.load_receptors, then
+    # repertoire.clonotypes and repertoire.load_clonotypes.
+    assert len(_NAMESPACE_METHODS) == 131
+    assert {
+        "import_receptors",
+        "load_receptors",
+        "clonotypes",
+        "load_clonotypes",
+    } == {
         name
         for namespace, _, name, _ in _NAMESPACE_METHODS
         if namespace == "repertoire"

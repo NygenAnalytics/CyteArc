@@ -9,7 +9,14 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from tests.clone_truth import N_CELLS, CloneTruth, write_cospar
+from tests.clone_truth import (
+    N_CELLS,
+    SAMPLES,
+    CloneTruth,
+    ReceptorTruth,
+    write_cellranger_contigs,
+    write_cospar,
+)
 from tests.storage_helpers import write_count_store
 
 if TYPE_CHECKING:
@@ -168,6 +175,39 @@ def benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
     return adjusted
 
 
+def import_truth_receptors(
+    store: "DataStore",
+    receptors: ReceptorTruth,
+    folder: Path,
+    *,
+    cell_selection: "ArtifactRef | None" = None,
+) -> "ArtifactRef":
+    """Import the truth's receptors from each sample's contig annotations.
+
+    Each sample's T cell and B cell contigs of called cells go in files of
+    their own, as ``cellranger multi`` writes them, joined to the store's
+    cells with the sample's prefix. The files also list barcodes outside the
+    store, about which the import warns.
+    """
+    paths = [
+        write_cellranger_contigs(
+            receptors,
+            folder / f"{sample}_{receptor}_contigs.csv",
+            sample=sample,
+            receptor=receptor,
+        )
+        for sample in SAMPLES
+        for receptor in ("TCR", "BCR")
+    ]
+    selection = every_cell(store) if cell_selection is None else cell_selection
+    with pytest.warns(UserWarning, match="match no selected cell"):
+        return store.repertoire.import_receptors(
+            paths,
+            cell_selection=selection,
+            barcode_prefix=[f"{sample}__" for sample in SAMPLES for _ in range(2)],
+        )
+
+
 # The cells of the receptor store are cell0 to cell7.
 N_RECEPTOR_CELLS = 8
 CELLRANGER_HEADER = (
@@ -212,6 +252,55 @@ AIRR_ROWS = [
     "cell6\tcell6_contig_1\tIGHV3-30*01\t\tIGHJ4*02\tIGHG1\tTGTGCG\tCARW\tT\t12\t300\t0.95\tACGTACGT\tACGT-ACGT",
     "cell6\tcell6_contig_2\tIGLV1-40*01\t\tIGLJ2*01\tIGLC2\tTGTCAG\tCQSY\tT\t9\t200\t\tGGCC\t",
 ]
+
+
+# One codon for each residue, so distinct junction residues have distinct
+# nucleotides.
+_CODONS = dict(
+    zip(
+        "ACDEFGHIKLMNPQRSTVWY",
+        "GCT TGT GAT GAA TTT GGT CAT ATT AAA CTG ATG AAT CCG CAG CGT AGC ACC GTG "
+        "TGG TAT".split(),
+        strict=True,
+    )
+)
+
+
+def write_clone_contigs(
+    folder: Path,
+    name: str,
+    cell_ids: Sequence[str],
+    clone_of: np.ndarray,
+    *,
+    chains_per_arm: int = 1,
+) -> Path:
+    """Write Cell Ranger contig annotations in which each clone has its receptor.
+
+    Every fifth clone is a B cell clone with heavy and kappa chains, and the
+    others are T cell clones with alpha and beta chains, ``chains_per_arm`` of
+    each, the first with the most UMIs. Each cell carries every chain of its
+    clone, and a cell of clone -1 has no contig. A clone's junctions spell its
+    number in residues, so clonotypes of identical chains are the clones.
+    """
+    residues = "ACDEFGHIKLMNPQRSTVWY"
+    rows = []
+    for cell, clone in zip(cell_ids, np.asarray(clone_of).tolist(), strict=True):
+        if clone < 0:
+            continue
+        digits = "".join(residues[clone // 20**power % 20] for power in range(5))
+        loci = ("IGK", "IGH") if clone % 5 == 4 else ("TRA", "TRB")
+        index = 0
+        for arm, locus in enumerate(loci):
+            for chain in range(chains_per_arm):
+                index += 1
+                junction_aa = f"C{digits}{residues[chain]}{'FW'[arm]}"
+                junction = "".join(_CODONS[residue] for residue in junction_aa)
+                rows.append(
+                    f"{cell},true,{cell}_contig_{index},true,500,{locus},{locus}V1,,"
+                    f"{locus}J1,{locus}C,true,true,{junction_aa},{junction},100,"
+                    f"{9 - chain},ct{clone},ct{clone}_{index}"
+                )
+    return write_lines(folder, name, CELLRANGER_HEADER, rows)
 
 
 def receptor_store(folder: Path, **options: object) -> "DataStore":

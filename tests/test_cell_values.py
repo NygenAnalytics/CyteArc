@@ -607,6 +607,9 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
         )
     )
     receptors = store.repertoire.import_receptors(contigs, cell_selection=cells)
+    # The file has no nucleotide junctions, so clonotypes compare residues:
+    # cell0 and cell4 share both chains, and ties follow the receptor types.
+    clonotypes = store.repertoire.clonotypes(receptors, sequence="aa")
 
     for ref, expected in (
         (clusters, np.array(list("aabbcc"))),
@@ -619,6 +622,19 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
             np.array(["2 cells", "2 cells", "3 to 5 cells", ""] + ["3 to 5 cells"] * 2),
         ),
         (receptors, np.array(["TCR", "TCR", "no IR", "BCR", "TCR", "multichain"])),
+        (
+            clonotypes,
+            np.array(
+                [
+                    "clonotype_1",
+                    "clonotype_3",
+                    "",
+                    "clonotype_2",
+                    "clonotype_1",
+                    "clonotype_4",
+                ]
+            ),
+        ),
     ):
         loaded = store.artifacts.load_values(ref)
         np.testing.assert_array_equal(loaded.values, expected)

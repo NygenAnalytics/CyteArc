@@ -8,7 +8,9 @@ that stress each estimate: long and emoji labels, long clone labels, a few
 measured cells of many clone cells, a label artifact and a cell selection of
 more cells than the clones hold, a label for each of many cells, many sizes,
 many pairs of groups, one-cell clones, 13 key columns, and clone labels
-held beside many rows.
+held beside many rows. Clonotypes, whose receptor types every summary keeps
+apart, are measured alike, as are the steps that define and load them, also
+within those labels and for cells with long IDs.
 """
 
 import re
@@ -22,6 +24,7 @@ import pytest
 from cytearc.datastore.datastore import DataStore
 from cytearc.storage.refs import ArtifactRef
 from cytearc.utils.logging import logger
+from tests.clone_helpers import write_clone_contigs
 from tests.perturbation_helpers import traced_peak
 from tests.storage_helpers import write_count_store
 
@@ -29,6 +32,11 @@ pytestmark = pytest.mark.slow
 
 N_CELLS = 10_000
 N_MEASURED = 500
+N_LONG_IDS = 2_000
+# Clonotypes of one cell each, as in most T cell repertoires, cost more for
+# their clonotypes than for their cells; with more cells than one chunk of
+# cell IDs holds, the IDs' chunk does not hide their cost.
+N_SINGLETONS = 50_000
 
 
 @pytest.fixture(scope="module")
@@ -97,6 +105,9 @@ def data(tmp_path_factory) -> SimpleNamespace:
         "state",
         np.asarray([f"f{k:03d}" for k in rng.integers(0, 200, size=N_CELLS)]),
     )
+    store.cells.insert(
+        "label_of_each_cell", np.asarray([f"c{i:06d}" for i in range(N_CELLS)])
+    )
     every = store.snapshot_cell_selection("every_cell")
     first = store.snapshot_cell_selection("first")
     # Label artifacts of a label for each of the first cells: their small
@@ -108,14 +119,26 @@ def data(tmp_path_factory) -> SimpleNamespace:
         for n_first in (220, 300, 800)
     }
     next_300 = store.snapshot_cell_selection("next_300")
+    # Each clone's cells carry its receptor, so its clonotypes are the clones,
+    # with T cell and B cell clones.
+    contigs = write_clone_contigs(
+        path.parent, "contigs.csv", ids, np.where(labels == "", -1, clone_of)
+    )
+    receptors = store.repertoire.import_receptors(contigs, cell_selection=every)
     return SimpleNamespace(
         store=store,
+        folder=path.parent,
         every=every,
         first=first,
         after_first=store.snapshot_cell_selection("after_first"),
         next_300=next_300,
         # A fate of its own for each of the 300 cells after the first.
         own_next_300=store.snapshot_cluster_labels("own", cell_selection=next_300),
+        receptors=receptors,
+        clonotypes=store.repertoire.clonotypes(receptors),
+        own_clonotypes=store.repertoire.clonotypes(
+            receptors, within="label_of_each_cell"
+        ),
         clones=store.clones.from_column("clone", cell_selection=every),
         long=store.clones.from_column("long_clone", cell_selection=every),
         emoji=store.clones.from_column("emoji_clone", cell_selection=every),
@@ -343,6 +366,83 @@ CASES: dict[str, Callable[[SimpleNamespace], object]] = {
             )
         )
     ),
+    "expansion of clonotypes": lambda data: data.store.clones.expansion(
+        data.clonotypes, invalidate_cache=True
+    ),
+    "expansion of clonotypes by two columns of long labels": lambda data: (
+        data.store.clones.expansion(
+            data.clonotypes, group_by=["donor", "condition"], invalidate_cache=True
+        )
+    ),
+    "loaded expansion of the clonotypes of a few cells": lambda data: (
+        data.store.clones.load_expansion(
+            data.store.clones.expansion(data.clonotypes, cell_selection=data.first)
+        )
+    ),
+    "diversity of clonotypes by emoji labels": lambda data: data.store.clones.diversity(
+        data.clonotypes, group_by="emoji"
+    ),
+    "rarefaction of clonotypes": lambda data: data.store.clones.rarefaction(
+        data.clonotypes, orders=(0, 1)
+    ),
+    "clonotypes loaded as clones": lambda data: data.store.clones.load_clones(
+        data.clonotypes
+    ),
+    "expansion of clonotypes within a label of each cell": lambda data: (
+        data.store.clones.expansion(data.own_clonotypes, invalidate_cache=True)
+    ),
+    "diversity of clonotypes within a label of each cell": lambda data: (
+        data.store.clones.diversity(data.own_clonotypes)
+    ),
+    "clonotypes within a label of each cell loaded as clones": lambda data: (
+        data.store.clones.load_clones(data.own_clonotypes)
+    ),
+    "overlap of clonotypes by two columns of long labels": lambda data: (
+        data.store.clones.overlap(data.clonotypes, group_by=["donor", "condition"])
+    ),
+    "track of clonotypes by a label for each of 300 cells": lambda data: (
+        data.store.clones.track(data.clonotypes, groups=data.own_labels[300], top=1)
+    ),
+    "coupling of clonotypes by two columns of long labels": _coupling(
+        "clonotypes", group_by=["donor", "condition"], permutations=50
+    ),
+    "fate bias of clonotypes by long labels": _fate_bias(
+        "clonotypes", group_by="donor"
+    ),
+    "loaded fate bias of the clonotypes of a few early cells": _saved_fate_bias(
+        "clonotypes", group_by="donor"
+    ),
+    "clonotypes exported as a clone matrix": lambda data: (
+        data.store.clones.export_clones(
+            data.clonotypes, data.folder / "clonotypes.mtx", format="matrix"
+        )
+    ),
+    "clonotypes": lambda data: data.store.repertoire.clonotypes(
+        data.receptors, invalidate_cache=True
+    ),
+    "clonotypes within two columns of long labels": lambda data: (
+        data.store.repertoire.clonotypes(
+            data.receptors, within=["donor", "condition"], invalidate_cache=True
+        )
+    ),
+    "clonotypes within emoji labels": lambda data: data.store.repertoire.clonotypes(
+        data.receptors, within="emoji", invalidate_cache=True
+    ),
+    "clonotypes within a label of each cell": lambda data: (
+        data.store.repertoire.clonotypes(
+            data.receptors, within="label_of_each_cell", invalidate_cache=True
+        )
+    ),
+    "loaded clonotypes": lambda data: data.store.repertoire.load_clonotypes(
+        data.clonotypes
+    ),
+    "loaded clonotypes within a label of each cell": lambda data: (
+        data.store.repertoire.load_clonotypes(
+            data.store.repertoire.clonotypes(
+                data.receptors, within="label_of_each_cell"
+            )
+        )
+    ),
 }
 
 
@@ -364,22 +464,29 @@ def _smallest_budget(store: DataStore, run: Callable[[], object]) -> int:
     raise AssertionError("the budget did not settle")
 
 
-@pytest.mark.parametrize("case", list(CASES))
-def test_the_traced_peak_fits_the_smallest_budget_accepted(data, case) -> None:
-    store, full = data.store, data.store.memoryBytes
-    run = CASES[case]
+def _traced_at_smallest_budget(
+    store: DataStore, run: Callable[[], object]
+) -> tuple[int, int]:
+    """The peak that tracemalloc records at the smallest budget accepted."""
+    full = store.memoryBytes
     try:
         # Compiled kernels and caches are warmed before anything is traced.
-        run(data)
-        budget = _smallest_budget(store, lambda: run(data))
+        run()
+        budget = _smallest_budget(store, run)
         store.memoryBytes = budget
         # Python grows its table of interned strings in one allocation, 15 MB
         # when the table passes about 350,000 strings, during whichever run
         # adds the next one. A peak above the budget is therefore traced
         # again: a summary that holds too much does so in both runs.
-        _result, peak = traced_peak(lambda: run(data), budget)
+        _result, peak = traced_peak(run, budget)
     finally:
         store.memoryBytes = full
+    return peak, budget
+
+
+@pytest.mark.parametrize("case", list(CASES))
+def test_the_traced_peak_fits_the_smallest_budget_accepted(data, case) -> None:
+    peak, budget = _traced_at_smallest_budget(data.store, lambda: CASES[case](data))
     assert peak <= budget, (case, peak, budget)
 
 
@@ -615,3 +722,75 @@ def test_the_null_on_four_threads_stays_within_the_bytes_it_plans(data) -> None:
     assert traced and all(message == line for message in traced), traced
     assert "on 4 threads, 64 at once" in line, line
     assert peak <= planned, (peak, line)
+
+
+@pytest.fixture(scope="module")
+def long_ids(tmp_path_factory) -> SimpleNamespace:
+    """Clonotypes of cells whose IDs, 80 characters, are wider than all else."""
+    path = tmp_path_factory.mktemp("clonotype_ids") / "store.zarr"
+    ids = np.asarray(
+        [f"{'sample_with_a_long_name_' * 3}{i:08d}-1" for i in range(N_LONG_IDS)]
+    )
+    assert ids.dtype == np.dtype("<U82")
+    counts = np.ones((N_LONG_IDS, 2), dtype=np.uint16)
+    write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=ids)
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+    contigs = write_clone_contigs(
+        path.parent, "contigs.csv", ids, np.arange(N_LONG_IDS) // 4
+    )
+    every = store.snapshot_cell_selection()
+    clonotypes = store.repertoire.clonotypes(
+        store.repertoire.import_receptors(contigs, cell_selection=every)
+    )
+    return SimpleNamespace(store=store, clonotypes=clonotypes)
+
+
+def test_loaded_clonotypes_of_long_cell_ids_fit_the_smallest_budget(
+    long_ids,
+) -> None:
+    peak, budget = _traced_at_smallest_budget(
+        long_ids.store,
+        lambda: long_ids.store.repertoire.load_clonotypes(long_ids.clonotypes),
+    )
+    assert peak <= budget, (peak, budget)
+
+
+@pytest.fixture(scope="module")
+def singletons(tmp_path_factory) -> SimpleNamespace:
+    """Clonotypes of one cell each, every cell with two chains of each arm."""
+    path = tmp_path_factory.mktemp("clonotype_singletons") / "store.zarr"
+    ids = np.asarray([f"c{i}" for i in range(N_SINGLETONS)])
+    counts = np.ones((N_SINGLETONS, 2), dtype=np.uint16)
+    write_count_store(str(path), {"RNA": counts}, "uint16", cell_ids=ids)
+    store = DataStore(
+        str(path), default_assay="RNA", min_features_per_cell=0, nthreads=1
+    )
+    contigs = write_clone_contigs(
+        path.parent,
+        "contigs.csv",
+        ids,
+        np.arange(N_SINGLETONS),
+        chains_per_arm=2,
+    )
+    every = store.snapshot_cell_selection()
+    clonotypes = store.repertoire.clonotypes(
+        store.repertoire.import_receptors(contigs, cell_selection=every)
+    )
+    return SimpleNamespace(store=store, clonotypes=clonotypes)
+
+
+def test_loaded_clonotypes_of_one_cell_each_fit_the_smallest_budget(
+    singletons,
+) -> None:
+    store, clonotypes = singletons.store, singletons.clonotypes
+    loaded = store.repertoire.load_clonotypes(clonotypes)
+    assert len(loaded.clonotypes) == N_SINGLETONS
+    # Each of the 50,000 clonotypes has four chains to decode, so their
+    # values pass through several batches.
+    assert loaded.clonotypes["VJ_2_junction_aa"].notna().all()
+    peak, budget = _traced_at_smallest_budget(
+        store, lambda: store.repertoire.load_clonotypes(clonotypes)
+    )
+    assert peak <= budget, (peak, budget)

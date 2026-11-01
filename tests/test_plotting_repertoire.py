@@ -1,5 +1,6 @@
-"""The receptor QC plot, on the hand-written contigs of eight cells."""
+"""The receptor QC plot and clonotypes on an embedding, on eight cells' contigs."""
 
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -10,6 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+from matplotlib.colors import to_hex
 
 from cytearc import plotting
 from cytearc.datastore.datastore import DataStore
@@ -122,6 +124,48 @@ def test_receptor_qc_groups_by_labels_of_fewer_cells(receptors) -> None:
         assert result.provenance.n_cells == 4
         assert result.tables["chains_per_cell"].sum().tolist() == [4, 4]
         assert result.provenance.extras["grouping"] == "cluster_labels"
+    finally:
+        result.close()
+
+
+def test_embedding_draws_cells_without_a_clonotype_as_missing(receptors) -> None:
+    from cytearc.embeddings.imported import write_imported_embedding
+    from cytearc.storage.artifacts import fingerprint_array
+
+    store, ref = receptors
+    cells = store.snapshot_cell_selection()
+    coordinates = np.column_stack([np.arange(N_CELLS), np.zeros(N_CELLS)]).astype(
+        np.float32
+    )
+    layout = write_imported_embedding(
+        store.zw,
+        assay="RNA",
+        dimreduc_key="umap",
+        role="umap",
+        coordinates=coordinates,
+        source_digest=hashlib.sha256(b"layout").digest(),
+        payload_fingerprints={"values": fingerprint_array(coordinates)},
+        source_cell_ids=np.asarray(store.cells.fetch_all("ids")).astype(str),
+        cell_selection=cells,
+        block_rows=4,
+    )
+    clonotypes = store.repertoire.clonotypes(ref)
+    labels = store.artifacts.load_values(clonotypes).to_pandas()
+    without = int((labels.astype(str) == "").sum())
+    assert without > 0
+    result = store.plots.embedding(layout=layout, color_by=clonotypes, show=False)
+    try:
+        scale = next(
+            scale
+            for scale in result.scales
+            if isinstance(scale, plotting.CategoricalScale)
+        )
+        # Blank labels are missing: drawn in the missing colour, not as a category.
+        assert "" not in scale.palette
+        assert set(scale.palette) == set(labels[labels.astype(str) != ""])
+        (points,) = result.axes[next(iter(result.axes))].collections
+        drawn = [to_hex(color) for color in points.get_facecolors()]
+        assert drawn.count(to_hex(scale.missing_color)) == without
     finally:
         result.close()
 
