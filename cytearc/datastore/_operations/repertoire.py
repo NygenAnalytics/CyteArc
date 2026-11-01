@@ -2140,7 +2140,9 @@ class _RepertoireOperationsMixin(_RepertoireOperationsBase):
         and newlines in values, so a value that holds a tab, a newline or a
         carriage return is refused before the file is opened; it advises
         against ``@``, ``#``, ``"`` and ``'``, so the export warns with the
-        number of values that hold them and their fields. A ``sequence_id``
+        number of values that hold them and their fields, and apart, in every
+        field, with the values that start with a double quote, which readers
+        that take quotes read as an opening quote. A ``sequence_id``
         that repeats, such as ``<barcode>_contig_1`` of the TCR and the BCR
         files of one cell, gets ``_2``, ``_3`` and so on from its second
         occurrence, in the order of the contigs, since the schema requires

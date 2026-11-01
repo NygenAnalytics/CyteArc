@@ -20,7 +20,10 @@ of the three is refused. The format advises against ``@``, ``#``, ``"`` and
 ``'``, which readers may take differently, so a file whose values hold them
 warns with their number and fields when it is closed; ``quality`` and
 ``quality_alignment`` hold them by the format's own Phred encoding, and are
-not counted.
+not counted. A value that starts with a double quote is counted apart, in
+every field: airr's ``read_rearrangement``, scirpy's ``read_airr`` and
+pandas' default reader take it for an opening quote, and can join or drop
+rows without an error, so it has a warning of its own.
 
 The schema requires unique ``sequence_id`` values. ``suffix_repeated_ids``
 names the later occurrences of a repeated ID from 64-bit hashes of every ID,
@@ -255,23 +258,33 @@ def _scatter(
     coded: bool,
     separator: int,
     count_discouraged: bool,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int]:
     """Copy each row's value and then ``separator`` to the row's cursor.
 
     Returns:
         The number of rows whose value holds a tab, a newline or a carriage
-        return, the first of them or -1, and with ``count_discouraged`` the
-        number of rows whose value holds a double quote, #, ' or @.
+        return, and the first of them or -1; with ``count_discouraged``, the
+        number of rows whose value holds @, #, ' or a double quote past its
+        first byte; and the number of rows whose value starts with a double
+        quote.
     """
     n_forbidden = 0
     first = -1
     n_discouraged = 0
+    n_leading = 0
     for row in range(cursor.shape[0]):
         code = codes[row] if coded else row
         position = cursor[row]
         if code >= 0:
+            start, end = offsets[code], offsets[code + 1]
+            # A double quote that starts a value is counted on its own.
+            if start < end and data[start] == 34:
+                n_leading += 1
+                out[position] = 34
+                position += 1
+                start += 1
             found = 0
-            for index in range(offsets[code], offsets[code + 1]):
+            for index in range(start, end):
                 byte = data[index]
                 found |= _BYTE_CLASSES[byte]
                 out[position] = byte
@@ -284,7 +297,7 @@ def _scatter(
                 n_discouraged += 1
         out[position] = separator
         cursor[row] = position + 1
-    return n_forbidden, first, n_discouraged
+    return n_forbidden, first, n_discouraged, n_leading
 
 
 @njit(cache=True, nogil=True)
@@ -404,7 +417,7 @@ def _lengths(column: _Bytes) -> np.ndarray:
 
 def _rows(
     columns: list[_Bytes | None], n_rows: int, counted: list[bool]
-) -> tuple[np.ndarray, list[tuple[int, int, int]]]:
+) -> tuple[np.ndarray, list[tuple[int, int, int, int]]]:
     """Join the columns of rows with tabs, each row ending with a newline.
 
     Values are copied as they are; ``None`` is an empty column.
@@ -412,16 +425,17 @@ def _rows(
     Args:
         columns: The columns, in order.
         n_rows: The rows of each column.
-        counted: Whether to count each column's values that hold a double
-            quote, #, ' or @.
+        counted: Whether to count each column's values that hold @, #, '
+            or a double quote past their first byte.
 
     Returns:
         The rows as one array of bytes, and for each column the number of
         rows whose value holds a tab, a newline or a carriage return, the
-        first of them or -1, and the number of counted values that hold a
-        double quote, #, ' or @.
+        first of them or -1, the number of counted values that hold @, #, '
+        or a double quote past their first byte, and the number of values
+        that start with a double quote.
     """
-    marks = [(0, -1, 0)] * len(columns)
+    marks = [(0, -1, 0, 0)] * len(columns)
     if not n_rows:
         return np.empty(0, dtype=np.uint8), marks
     widths = np.full(n_rows, len(columns), dtype=np.int64)
@@ -586,10 +600,12 @@ class AirrRearrangementWriter:
 
     A block that holds a value with a tab, a newline or a carriage return,
     which the AIRR format forbids, is refused before any of its rows is
-    written. Values that hold ``@``, ``#``, ``"`` or ``'``, which the format
-    advises against, are written as they are and counted, outside ``quality``
-    and ``quality_alignment``, and closing the writer warns with their number
-    and fields.
+    written. Values that hold ``@``, ``#``, ``'`` or a double quote past their
+    first character, which the format advises against, are written as they
+    are and counted, outside ``quality`` and ``quality_alignment``; values
+    that start with a double quote, which readers that take quotes read as an
+    opening quote, are counted apart, in every field. Closing the writer warns
+    with each count and its fields.
 
     The schema requires unique ``sequence_id`` values, and the writer writes
     each block as given, so a caller whose contigs' IDs may repeat gives the
@@ -629,8 +645,10 @@ class AirrRearrangementWriter:
         )
         self._whole = frozenset(whole)
         self._n_rows = 0
-        # The values of each field that hold a double quote, #, ' or @.
+        # The values of each field that hold @, #, ' or a double quote past
+        # their first character, and those that start with a double quote.
         self._discouraged: dict[str, int] = {}
+        self._leading_quotes: dict[str, int] = {}
         target = os.fspath(path)
         self._file: Any = open(target, "wb")
         # A compressed file's header names no file and no time, so the same
@@ -656,12 +674,18 @@ class AirrRearrangementWriter:
 
     @property
     def n_discouraged(self) -> int:
-        """The number of values written that hold ``@``, ``#``, ``"`` or ``'``.
+        """The values written that hold ``@``, ``#``, ``'`` or an inner ``"``.
 
-        The AIRR format advises against these characters; values of
-        ``quality`` and ``quality_alignment`` are not counted.
+        The AIRR format advises against these characters. A double quote
+        counts here past a value's first character, and values of ``quality``
+        and ``quality_alignment`` are not counted.
         """
         return sum(self._discouraged.values())
+
+    @property
+    def n_leading_quotes(self) -> int:
+        """The number of values written that start with a double quote, in any field."""
+        return sum(self._leading_quotes.values())
 
     @property
     def closed(self) -> bool:
@@ -713,7 +737,7 @@ class AirrRearrangementWriter:
         )
         forbidden = sorted(
             (first, position, count)
-            for position, (count, first, _) in enumerate(marks)
+            for position, (count, first, _, _) in enumerate(marks)
             if count
         )
         if forbidden:
@@ -732,35 +756,56 @@ class AirrRearrangementWriter:
         for start in range(0, len(rendered), _WRITE_BYTES):
             self._handle.write(rendered[start : start + _WRITE_BYTES])
         self._n_rows += n_rows
-        for name, (_, _, count) in zip(self.columns, marks, strict=True):
-            if count:
-                self._discouraged[name] = self._discouraged.get(name, 0) + count
+        for name, (_, _, discouraged, leading) in zip(self.columns, marks, strict=True):
+            if discouraged:
+                self._discouraged[name] = self._discouraged.get(name, 0) + discouraged
+            if leading:
+                self._leading_quotes[name] = self._leading_quotes.get(name, 0) + leading
         return n_rows
 
     def close(self) -> None:
         """Close the file; closing again does nothing.
 
-        A file whose values hold ``@``, ``#``, ``"`` or ``'``, which the AIRR
-        format advises against, warns with their number and fields.
+        A file whose values start with a double quote warns with their number
+        and fields, and so does one whose values hold ``@``, ``#``, ``'`` or a
+        double quote past their first character, which the AIRR format advises
+        against.
         """
         if self._handle is not None:
             handle, self._handle = self._handle, None
             handle.close()
             self._file.close()
-            if self._discouraged:
-                fields = [name for name in self.columns if name in self._discouraged]
-                named = (
-                    fields[0]
-                    if len(fields) == 1
-                    else ", ".join(fields[:-1]) + " and " + fields[-1]
-                )
-                count = self.n_discouraged
+            if self._leading_quotes:
                 logger.warning(
-                    f"{count} value{'s' if count > 1 else ''} of {named} "
-                    f"hold{'' if count > 1 else 's'} @, #, a double quote or ', "
-                    "which the AIRR format advises against since readers may take "
-                    "them differently; they are written as they are"
+                    self._counted(self._leading_quotes, "start", "starts")
+                    + " with a double quote, which airr's read_rearrangement, "
+                    "scirpy's read_airr and pandas' default reader take for an "
+                    "opening quote, so they can join or drop rows without an "
+                    "error; pandas reads every value as written with "
+                    "sep='\\t', dtype=str, keep_default_na=False and "
+                    "quoting=csv.QUOTE_NONE"
                 )
+            if self._discouraged:
+                logger.warning(
+                    self._counted(self._discouraged, "hold", "holds")
+                    + " @, #, ' or a double quote past the first character, which "
+                    "the AIRR format advises against since readers may take them "
+                    "differently; they are written as they are"
+                )
+
+    def _counted(self, counts: dict[str, int], verb: str, verb_one: str) -> str:
+        """Name how many values of which fields, in the file's order, and the verb."""
+        fields = [name for name in self.columns if name in counts]
+        named = (
+            fields[0]
+            if len(fields) == 1
+            else ", ".join(fields[:-1]) + " and " + fields[-1]
+        )
+        count = sum(counts.values())
+        return (
+            f"{count} value{'s' if count > 1 else ''} of {named} "
+            f"{verb if count > 1 else verb_one}"
+        )
 
     def __enter__(self) -> Self:
         return self

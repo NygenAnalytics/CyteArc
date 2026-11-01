@@ -164,6 +164,21 @@ _CELLS = EncodedText.from_categories(
 )
 
 
+# The ends of the two warnings: values that start with a double quote, and
+# values that hold another character that the AIRR format advises against.
+LEADING_QUOTES = (
+    " with a double quote, which airr's read_rearrangement, scirpy's read_airr "
+    "and pandas' default reader take for an opening quote, so they can join or "
+    "drop rows without an error; pandas reads every value as written with "
+    "sep='\\t', dtype=str, keep_default_na=False and quoting=csv.QUOTE_NONE"
+)
+DISCOURAGED = (
+    " @, #, ' or a double quote past the first character, which the AIRR format "
+    "advises against since readers may take them differently; they are written "
+    "as they are"
+)
+
+
 def _edge_receptors(tmp_path):
     store = receptor_store(tmp_path)
     files = [
@@ -471,8 +486,11 @@ def test_the_writer_writes_values_as_they_are(tmp_path) -> None:
     assert written["sequence_id"].tolist() == ids.tolist()
     assert written["c_call"].tolist() == ids.tolist()
     assert written["cell_id"].tolist() == ['"c1', "", "c1", "c'2", "c'2", "c1"]
-    # Five IDs, the same five calls and three cells hold such characters.
-    assert writer.n_discouraged == 13
+    # A double quote that starts a value is counted on its own: in "a, the
+    # same call and the cell "c1, which hold no other such character. The
+    # other characters are in four IDs, the same four calls and two cells.
+    assert writer.n_leading_quotes == 3
+    assert writer.n_discouraged == 10
 
 
 def test_values_the_format_advises_against_warn_outside_phred_scores(
@@ -484,8 +502,9 @@ def test_values_the_format_advises_against_warn_outside_phred_scores(
             "v_call": ["IGHV1@2", "IGHV1", "IGHV#3"],
             "junction_aa": ["CAR'W", 'CAR"W', "CARW"],
             # Phred scores, ASCII 33 to 126, hold these characters by the
-            # format's own encoding.
-            "quality": ["II#@\"'", "IIII", "@@@@"],
+            # format's own encoding, but one that starts with a double quote
+            # is counted, as in any field.
+            "quality": ["II#@\"'", "IIII", '"@@@'],
             "quality_alignment": ["#'\"@", "", "IIII"],
         }
     )
@@ -495,20 +514,20 @@ def test_values_the_format_advises_against_warn_outside_phred_scores(
     )
     try:
         assert write_airr_rearrangements(table, tmp_path / "phred.tsv") == 3
+        # Each count adds up over the blocks of a file.
         with AirrRearrangementWriter(tmp_path / "scores.tsv", ["quality"]) as writer:
-            writer.write({"sequence_id": ["s9"], "quality": ['@"#']})
-            writer.write({"sequence_id": ["t9"], "quality": ["'"], "d_call": ["D'1"]})
+            writer.write({"sequence_id": ["s9"], "quality": ['@"#'], "d_call": ["D#1"]})
+            writer.write({"sequence_id": ["t9"], "quality": ['"I'], "d_call": ["D'1"]})
+            writer.write({"sequence_id": ["u9"], "quality": ['"J']})
     finally:
         logger.remove(sink)
     assert messages == [
-        "4 values of v_call and junction_aa hold @, #, a double quote or ', which "
-        "the AIRR format advises against since readers may take them differently; "
-        "they are written as they are",
-        "1 value of d_call holds @, #, a double quote or ', which the AIRR format "
-        "advises against since readers may take them differently; they are "
-        "written as they are",
+        "1 value of quality starts" + LEADING_QUOTES,
+        "4 values of v_call and junction_aa hold" + DISCOURAGED,
+        "2 values of quality start" + LEADING_QUOTES,
+        "2 values of d_call hold" + DISCOURAGED,
     ]
-    assert writer.n_discouraged == 1
+    assert (writer.n_discouraged, writer.n_leading_quotes) == (2, 2)
     written = _read(tmp_path / "phred.tsv")
     for name in table.columns:
         assert written[name].tolist() == table[name].tolist()
@@ -1572,20 +1591,13 @@ def test_the_export_warns_of_discouraged_characters_and_repeated_ids(
     finally:
         logger.remove(sink)
     # The second and third X and the second Z take suffixes; a V call holds
-    # @, a constant gene call a double quote, ' and #, and a clonotype ID a
-    # double quote.
-    assert (
-        messages.count(
-            "3 contig IDs repeat; their later occurrences are written with a "
-            "suffix such as _2"
-        )
-        == 2
-    )
-    discouraged = [message for message in messages if "advises against" in message]
-    assert discouraged == 2 * [
-        "3 values of v_call, c_call and raw_clonotype_id hold @, #, a double quote "
-        "or ', which the AIRR format advises against since readers may take them "
-        "differently; they are written as they are"
+    # @, a constant gene call starts with a double quote and holds ' and #,
+    # and a clonotype ID holds a double quote past its first character.
+    assert messages == 2 * [
+        "3 contig IDs repeat; their later occurrences are written with a suffix "
+        "such as _2",
+        "1 value of c_call starts" + LEADING_QUOTES,
+        "3 values of v_call, c_call and raw_clonotype_id hold" + DISCOURAGED,
     ]
 
 
@@ -1717,10 +1729,11 @@ def test_ragged_values_of_discouraged_characters_are_written_and_counted(
     exported = _read(tmp_path / "ragged.tsv")
     assert exported["sequence_id"].tolist() == ["c0#1", "c1_1", "\"c2'1"]
     assert exported["sequence"].tolist() == ["AC@GT", "ACGT", "GG"]
+    # One ID starts with a double quote; it and another hold ' and #, and a
+    # sequence @.
     assert messages == [
-        "3 values of sequence_id and sequence hold @, #, a double quote or ', "
-        "which the AIRR format advises against since readers may take them "
-        "differently; they are written as they are"
+        "1 value of sequence_id starts" + LEADING_QUOTES,
+        "3 values of sequence_id and sequence hold" + DISCOURAGED,
     ]
 
 
