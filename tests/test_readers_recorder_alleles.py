@@ -1120,6 +1120,96 @@ def test_errors_name_the_file_line_past_blank_lines_and_quoted_breaks(tmp_path, 
         read_all(path, **options)
 
 
+# Each table holds the rows of c1, c2 and c3 on file lines 2, 4 and 5 or 6:
+# a blank line follows c1, and a quoted field of c2 holds a line break where
+# the format quotes. A table numbers its rows from its header, line 1, so
+# blank lines and line breaks within quoted fields do not count: 2, 3 and 4.
+_ROW_CASES = {
+    "petracer": (
+        "alleles.csv",
+        'intID,cellBC,RNF2,HEK3,EMX1\ni1,c1,None,None,None\n\ni1,c2,"None\n",None,'
+        "None\ni2,c3,None,None,None\n",
+        {},
+    ),
+    "cassiopeia": (
+        "alleles.txt",
+        'cellBC\tintBC\tr1\nc1\tI1\tNone\n\nc2\tI1\t"None\n"\nc3\tI1\tNone\n',
+        {},
+    ),
+    "darlin": (
+        "step4_final.tsv",
+        "n_UMIs\tCR\tmutation\n2\tc1\t23_268del\n\n"
+        '2\tc2\t"23_268del\n"\n2\tc3\t23_268del\n',
+        {"integrations": "CA"},
+    ),
+    "characters": (
+        "matrix.csv",
+        ',a-1\nc1,1\n\nc2,"1\n"\nc3,1\n',
+        {"format": "characters"},
+    ),
+    "typewriter_chains": (
+        "chains.csv",
+        'cell,ACGTACGT\nc1,ACG\n\nc2,"ACG\n"\nc3,ACG\n',
+        {},
+    ),
+    "table": (
+        "table.tsv",
+        'c\ta\nc1\tx\n\nc2\t"x\n"\nc3\tx\n',
+        {"columns": {"cell": "c", "allele": "a"}, "integrations": "I"},
+    ),
+    "typewriter": (
+        "typewriter.csv",
+        "Cell,TargetBC,Site1,Site2,Site3,Site4,Site5,nUMI\n"
+        "c1,AAAAAAAA,CCGGGA,,,,,2\n\nc2,AAAAAAAA,CCGGGA,,,,,2\n"
+        "c3,AAAAAAAA,CCGGGA,,,,,2\n",
+        {},
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_ROW_CASES))
+def test_records_keep_each_rows_line_as_its_table_numbers_it(tmp_path, case):
+    name, body, options = _ROW_CASES[case]
+    folder = tmp_path / case
+    folder.mkdir()
+    path = folder / name
+    path.write_text(body)
+    read = read_all(path, **options)
+    rows = dict(read.groupby("barcode")["row"].first())
+    assert rows == {"c1": 2, "c2": 3, "c3": 4}
+
+
+def test_carlin_records_keep_the_line_of_their_allele(tmp_path):
+    # Line 2 lists no cell, so the cells of line 3 keep its number, which
+    # names their allele in both files.
+    folder = tmp_path / "pair"
+    folder.mkdir()
+    (folder / "AlleleAnnotations.txt").write_text("[]\n23_268del\n24_100del\n")
+    first, second, third = "AAACCTGAGAAACCAT", "AAACCTGAGAAACCGC", "AAACCTGAGAAACGAG"
+    (folder / "AlleleColonies.txt").write_text(f"{first}\n\n{second},{third}\n")
+    read = read_all(folder, integrations="CA")
+    assert dict(read.groupby("barcode")["row"].first()) == {
+        first: 1,
+        second: 3,
+        third: 3,
+    }
+    assert dict(read.groupby("barcode")["allele"].first()) == {
+        first: None,
+        second: "24_100del",
+        third: "24_100del",
+    }
+
+
+def test_typewriter_tokens_refused_after_a_blank_line_name_their_file_line(tmp_path):
+    path = tmp_path / "typewriter.csv"
+    path.write_text(
+        "Cell,TargetBC,Site1,Site2,Site3,Site4,Site5,nUMI\n"
+        "c1,AAAAAAAA,CCGGGA,,,,,2\n\nc2,AAAAAAAA,XYZ,,,,,2\n"
+    )
+    with pytest.raises(ValueError, match="'XYZ' at 1, on line 4$"):
+        read_all(path)
+
+
 def _darlin_pair(tmp_path, final: str, molecules: str) -> Path:
     folder = tmp_path / "darlin"
     folder.mkdir(parents=True)

@@ -628,6 +628,35 @@ def test_the_selected_cells_ids_count_once_as_the_join_holds_them(
     assert held[500].pop() - held[0].pop() == 200 * 500
 
 
+def test_saved_records_keep_each_rows_line_as_its_table_numbers_it(tmp_path):
+    """A table's rows are numbered from its header, past blank lines and quoted breaks."""
+    from tests.clone_helpers import open_clone_store
+    from tests.storage_helpers import write_count_store
+
+    write_count_store(
+        str(tmp_path / "store.zarr"),
+        {"RNA": np.ones((3, 2), dtype=np.uint16)},
+        "uint16",
+        cell_ids=["c1", "c2", "c3"],
+    )
+    store = open_clone_store(tmp_path / "store.zarr")
+    path = tmp_path / "alleles.csv"
+    # The rows of c1, c2 and c3 sit on file lines 2, 4 and 6.
+    path.write_text(
+        'intID,cellBC,RNF2,HEK3,EMX1\ni1,c1,None,None,None\n\ni1,c2,"None\n",None,'
+        "None\ni2,c3,None,None,None\n"
+    )
+    ref = store.clones.import_alleles(
+        path, cell_selection=store.snapshot_cell_selection()
+    )
+    records = store.clones.load_alleles(ref).records
+    assert dict(records.groupby("cell", observed=True)["row"].first()) == {
+        "c1": 2,
+        "c2": 3,
+        "c3": 4,
+    }
+
+
 def test_artifacts_without_their_counts_or_files_are_refused(
     store, truth, recorders, tmp_path
 ):

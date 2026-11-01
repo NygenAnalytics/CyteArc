@@ -147,10 +147,12 @@ ALLELE_FORMATS: tuple[str, ...] = (
 _ONE_INTEGRATION = ("carlin", "darlin")
 # The formats of ordered slots, whose shorter integrations the caller names.
 _ORDERED = ("typewriter", "typewriter_chains")
-# How each format numbers its rows, for errors: the tables that text_chunks
-# reads count rows from line 2, past blank lines and quoted line breaks; a
-# CARLIN pair and DNA Typewriter's table of 2022 number them by file line;
-# parquet tables and TreeData files by position from 1.
+# How each format numbers its rows, which the records keep and errors name:
+# a table's header is line 1 and each row the next line, so blank lines and
+# line breaks within quoted fields do not count, and errors find the rows'
+# lines in the file; a CARLIN pair numbers them by the line of their allele,
+# the same in both files; parquet tables and TreeData files by position
+# from 1.
 _COUNTED_LINES = frozenset(
     {
         "darlin",
@@ -158,11 +160,12 @@ _COUNTED_LINES = frozenset(
         "petracer",
         "petracer_characters",
         "characters",
+        "typewriter",
         "typewriter_chains",
         "table",
     }
 )
-_FILE_LINES = frozenset({"carlin", "typewriter"})
+_FILE_LINES = frozenset({"carlin"})
 _PARQUET_SIGNATURE = b"PAR1"
 # CARLIN's notation: deletions, insertions, deletion-insertions and
 # single-base substitutions on the array, joined by commas.
@@ -1891,7 +1894,12 @@ def _iter_typewriter(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRo
     n_slots = int(layout.n_slots or 0)
     has_umis = bool(layout._read["has_umis"])
     width = 2 + n_slots + (1 if has_umis else 0)
+    # Rows are numbered as the other tables number them, from line 2 past
+    # blank lines; errors name the file lines that line_chunks gives.
+    next_row = 2
     for numbers, lines in line_chunks(text, chunk_rows):
+        rows = np.arange(next_row, next_row + len(lines), dtype=np.int64)
+        next_row += len(lines)
         fields = list(csv.reader(lines, delimiter=text.delimiter))
         short = [position for position, row in enumerate(fields) if len(row) < width]
         if short:
@@ -1928,7 +1936,7 @@ def _iter_typewriter(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRo
             barcodes=_cells(
                 np.asarray([row[0] for row in fields], dtype=object), numbers, text.path
             ),
-            rows=np.asarray(numbers, dtype=np.int64),
+            rows=rows,
             columns=tuple((None, str(slot)) for slot in range(1, n_slots + 1)),
             tokens=tokens,
             integrations=_integration_names(
