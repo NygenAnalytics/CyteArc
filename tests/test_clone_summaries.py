@@ -44,7 +44,12 @@ from tests.clone_truth import (
     without_single_cell_clones,
 )
 from tests.storage_helpers import insert_nullable_cell_column
-from tests.variant_truth import clone_variant_truth, write_mgatk
+from tests.variant_truth import (
+    clone_variant_truth,
+    genotype_clone_truth,
+    write_genotype_tables,
+    write_mgatk,
+)
 
 pytestmark = pytest.mark.usefixtures("figures_closed")
 
@@ -98,6 +103,18 @@ def _variant_clones(store: DataStore, folder: Path) -> ArtifactRef:
     return store.variants.clones(counts, variants=variants)
 
 
+def _genotype_clones(store: DataStore, folder: Path) -> ArtifactRef:
+    # Each clone carries a mutation of its own, called from one mutant UMI or
+    # more; other targets read wild type or not at all, which leaves them
+    # unknown, so cells of one clone agree wherever both were read.
+    paths = write_genotype_tables(
+        genotype_clone_truth(TRUTH), TRUTH.cell_ids.tolist(), folder / "got"
+    )
+    counts = store.variants.import_counts(paths, cell_selection=every_cell(store))
+    genotypes = store.variants.genotypes(counts, method="threshold", min_mutant_umis=1)
+    return store.variants.genotype_clones(genotypes)
+
+
 #: How each clone source saves the truth's clones, in the order the stack adds
 #: them.
 SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
@@ -106,6 +123,7 @@ SOURCES: dict[str, Callable[[DataStore, Path], ArtifactRef]] = {
     "clonotype clusters": _clonotype_clusters,
     "barcode clones": _barcode_clones,
     "variant clones": _variant_clones,
+    "genotype clones": _genotype_clones,
 }
 #: The truth's clones as a source saves them, where it cannot save every one:
 #: variant clones join each cell to the cells that share its variants, so the
@@ -129,7 +147,7 @@ KEPT_APART: dict[str, dict[str, np.ndarray]] = {
 
 
 def _ranked_label(clone: int) -> str:
-    """A clone's label as barcode clones number them, counted from the truth.
+    """A clone's label as barcode and genotype clones number them, counted from the truth.
 
     ``clone_1`` is the largest clone, and clones of one size follow their
     first cell.
@@ -146,13 +164,14 @@ def _ranked_label(clone: int) -> str:
 
 #: How each source that keeps no labels apart labels the truth's clones: the
 #: rule its labels follow from the truth, such as the labels of imported
-#: clones' files and barcode clones' numbers by size, or None for a source
-#: whose labels follow from something else, such as variant clones, which
-#: number their clones by cluster.
+#: clones' files and the numbers by size of barcode and genotype clones, or
+#: None for a source whose labels follow from something else, such as variant
+#: clones, which number their clones by cluster.
 LABELS: dict[str, Callable[[int], str] | None] = {
     "imported clones": number_label,
     "barcode clones": _ranked_label,
     "variant clones": None,
+    "genotype clones": _ranked_label,
 }
 
 

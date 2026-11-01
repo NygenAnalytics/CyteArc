@@ -397,6 +397,27 @@ _CONTRACTS = (
         },
     ),
     OperationContract(
+        VariantsAccessor.genotypes,
+        metadata_arguments.VariantGenotypeArguments,
+        # The genotypes cover the counts' cells; sites, alleles and swap
+        # probabilities are recorded as resolved for the sites genotyped.
+        model_only=_classified("resolved_input", "cell_selection"),
+    ),
+    OperationContract(
+        VariantsAccessor.genotype_clones,
+        metadata_arguments.GenotypeCloneArguments,
+        model_only={
+            # The clones label the genotypes' cells; the within columns'
+            # labels are recorded by their fingerprint.
+            **_classified("resolved_input", "cell_selection", "within_fingerprint"),
+            # Cells link through a Jaccard index of 1 with doublets removed, a
+            # fixed choice of the method.
+            **_classified(
+                "algorithm_policy", "method", "similarity", "inclusive", "doublets"
+            ),
+        },
+    ),
+    OperationContract(
         PerturbationAccessor.import_guide_calls,
         metadata_arguments.GuideCallImportArguments,
         # The file is identified by the SHA-256 of its bytes, not its path.

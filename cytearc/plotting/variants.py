@@ -18,7 +18,7 @@ from ._figure import (
 from ._groups import cell_groups
 from ._style import apply_figure_chrome, palette_for_n, theme_context
 
-__all__ = ["allele_frequencies", "variant_depth", "variant_statistics"]
+__all__ = ["allele_frequencies", "genotypes", "variant_depth", "variant_statistics"]
 
 # Bins of the histogram of the cells' mean depth, on a log scale.
 _DEPTH_BINS = 40
@@ -29,6 +29,15 @@ _VMR_FLOOR = 1e-6
 _UNCOVERED_COLOR = "#d9d9d9"
 # The height of the bar of clone colours above the heatmap.
 _CLONE_BAR_INCHES = 0.25
+# The colour of each genotype call, in the vocabulary's order.
+_CALL_COLORS = {
+    "wild_type": "#4c78a8",
+    "heterozygous": "#f58518",
+    "homozygous_alternative": "#e45756",
+    "alternative_present": "#b279a2",
+    "missing": "#e5e5e5",
+    "filtered": "#9d9d9d",
+}
 
 
 def _load_counts(store: Any, counts: ArtifactRef, **options: Any) -> Any:
@@ -36,6 +45,13 @@ def _load_counts(store: Any, counts: ArtifactRef, **options: Any) -> Any:
     if not callable(loader):
         raise TypeError("store does not provide variants.load_counts")
     return loader(counts, **options)
+
+
+def _load_genotypes(store: Any, genotypes: ArtifactRef, **options: Any) -> Any:
+    loader = getattr(getattr(store, "variants", None), "load_genotypes", None)
+    if not callable(loader):
+        raise TypeError("store does not provide variants.load_genotypes")
+    return loader(genotypes, **options)
 
 
 def _load_selection(store: Any, variants: ArtifactRef) -> Any:
@@ -512,6 +528,222 @@ def allele_frequencies(
                 "variants": variants.to_dict(),
                 "clones": None if clones is None else clones.to_dict(),
                 "n_variants": len(chosen),
+            },
+        ),
+        owns_figure=owns,
+        theme=theme,
+    )
+    if show:
+        plot_result.show()
+    return plot_result
+
+
+@close_figures_on_error
+def genotypes(
+    store: Any,
+    genotypes: ArtifactRef,
+    *,
+    sites: Any | None = None,
+    group_by: str | None = None,
+    groups: ArtifactRef | None = None,
+    layout_key: str | None = None,
+    site: str | None = None,
+    target: Any | None = None,
+    figsize: tuple[float, float] | None = None,
+    theme: str = "notebook",
+    show_legend: bool = True,
+    show: bool = True,
+) -> PlotResult:
+    """Plot the cells' genotype calls by group and on a two-dimensional layout.
+
+    ``genotypes`` is a ``variant_genotypes`` artifact, such as one from
+    ``ds.variants.genotypes``. The first panel draws, for each site, one bar
+    per group whose segments are the shares of the group's cells with each
+    call; a cell that the calls do not list at a site is ``missing`` there.
+    ``group_by`` names a cell metadata column, such as the cell type, and
+    ``groups`` a cell-label artifact; without either, each site has one bar
+    of all cells. Cells without a group are left out.
+
+    With ``layout_key``, such as ``"UMAP"``, the second panel draws the cells
+    on the layout stored in the cell metadata columns ``<layout_key>1`` and
+    ``<layout_key>2``, coloured by their call at ``site``, which may be left
+    out when one site is drawn.
+
+    Tables: ``calls`` (``site``, ``group``, ``call``, ``cells``, ``share``)
+    and, with a layout, ``cells`` (``cell``, ``x``, ``y``, ``call``).
+
+    Raises:
+        ValueError: If no cell has a group, ``site`` names a site that is not
+            drawn, or several sites are drawn on a layout without ``site``.
+    """
+    from ._data import _fetch_cell_column
+
+    loaded = _load_genotypes(store, genotypes, sites=sites)
+    site_names = [str(name) for name in loaded.sites.index]
+    calls = list(_CALL_COLORS)
+    n_cells = len(loaded.cells)
+    group_labels, names, group_name = cell_groups(
+        store, genotypes, group_by=group_by, groups=groups
+    )
+    if group_labels is None:
+        cell_group = np.zeros(n_cells, dtype=np.int64)
+        names = ["all cells"]
+    else:
+        cell_group = np.asarray(group_labels, dtype=np.int64)
+    if not np.any(cell_group >= 0):
+        raise ValueError(
+            "No cell of the genotypes has a group, so there is nothing to plot"
+        )
+    table = loaded.calls
+    row_cells = table["cell"].cat.codes.to_numpy(dtype=np.int64)
+    row_sites = table["site"].cat.codes.to_numpy(dtype=np.int64)
+    row_calls = table["call"].cat.codes.to_numpy(dtype=np.int64)
+    # Each cell's call at each drawn site, missing where the calls list none.
+    matrix = np.full((n_cells, len(site_names)), calls.index("missing"), dtype=np.int64)
+    matrix[row_cells, row_sites] = row_calls
+    records = []
+    for site_rank, name in enumerate(site_names):
+        for group_rank, group in enumerate(names):
+            members = cell_group == group_rank
+            total = int(members.sum())
+            if not total:
+                continue
+            found = np.bincount(matrix[members, site_rank], minlength=len(calls))
+            for code, call in enumerate(calls):
+                records.append(
+                    {
+                        "site": name,
+                        "group": str(group),
+                        "call": call,
+                        "cells": int(found[code]),
+                        "share": float(found[code]) / total,
+                    }
+                )
+    calls_table = pd.DataFrame.from_records(
+        records, columns=["site", "group", "call", "cells", "share"]
+    )
+    cells_table = None
+    if layout_key is not None:
+        if site is None:
+            if len(site_names) != 1:
+                raise ValueError(
+                    f"The plot draws {len(site_names)} sites; name the one to colour "
+                    "the layout by with site"
+                )
+            site = site_names[0]
+        if site not in site_names:
+            raise ValueError(f"site {site!r} is not among the drawn sites")
+        from ..metadata.selection import cell_selection_indices
+        from ..storage.artifacts import inspect_artifact
+
+        selection = inspect_artifact(store.zw, genotypes).input_ref("cell_selection")
+        rows = cell_selection_indices(store.zw, selection)
+        x = np.asarray(
+            _fetch_cell_column(store, f"{layout_key}1", cell_idx=rows), dtype=np.float64
+        )
+        y = np.asarray(
+            _fetch_cell_column(store, f"{layout_key}2", cell_idx=rows), dtype=np.float64
+        )
+        chosen = matrix[:, site_names.index(site)]
+        cells_table = pd.DataFrame(
+            {
+                "cell": loaded.cells.index.to_numpy(dtype=object),
+                "x": x,
+                "y": y,
+                "call": np.asarray(calls, dtype=object)[chosen],
+            }
+        )
+    panel_keys = ["calls"] + (["layout"] if cells_table is not None else [])
+    if figsize is None and target is None:
+        figsize = (
+            6.0 * len(panel_keys),
+            max(3.0, 0.45 * len(site_names) * len(names) + 1.5),
+        )
+    require_matplotlib()
+    with theme_context(theme):
+        figure, axes, owns = normalize_axes_target(
+            target, panel_keys=panel_keys, figsize=figsize, n_columns=len(panel_keys)
+        )
+        ax = axes["calls"]
+        bars = [
+            (name, str(group))
+            for name in site_names
+            for group in names
+            if not calls_table[
+                (calls_table["site"] == name) & (calls_table["group"] == str(group))
+            ].empty
+        ]
+        positions = np.arange(len(bars))
+        left = np.zeros(len(bars))
+        for call in calls:
+            shares = np.asarray(
+                [
+                    float(
+                        calls_table[
+                            (calls_table["site"] == name)
+                            & (calls_table["group"] == group)
+                            & (calls_table["call"] == call)
+                        ]["share"].sum()
+                    )
+                    for name, group in bars
+                ]
+            )
+            ax.barh(positions, shares, left=left, color=_CALL_COLORS[call], label=call)
+            left += shares
+        ax.set_yticks(
+            positions,
+            [
+                name if group_labels is None else f"{name}, {group}"
+                for name, group in bars
+            ],
+            fontsize="small",
+        )
+        ax.invert_yaxis()
+        ax.set_xlim(0, 1)
+        ax.set_xlabel("Share of cells")
+        ax.set_title("Calls by group" if group_labels is not None else "Calls")
+        if show_legend:
+            ax.legend(frameon=False, fontsize="small", loc="lower right")
+        if cells_table is not None:
+            ax = axes["layout"]
+            for call in calls:
+                chosen_rows = (cells_table["call"] == call).to_numpy()
+                if chosen_rows.any():
+                    ax.scatter(
+                        cells_table["x"].to_numpy()[chosen_rows],
+                        cells_table["y"].to_numpy()[chosen_rows],
+                        s=6,
+                        color=_CALL_COLORS[call],
+                        label=call,
+                        rasterized=True,
+                    )
+            ax.set_xlabel(f"{layout_key}1")
+            ax.set_ylabel(f"{layout_key}2")
+            ax.set_title(str(site))
+            if show_legend:
+                ax.legend(frameon=False, fontsize="small", markerscale=2)
+        apply_figure_chrome(figure, theme)
+    tables = {"calls": calls_table}
+    if cells_table is not None:
+        tables["cells"] = cells_table
+    plot_result = PlotResult(
+        figure=figure,
+        axes=axes,
+        tables=tables,
+        legends=(LegendSpec(kind="categorical", label="call"),),
+        scales=(),
+        provenance=PlotProvenance(
+            assay=None,
+            cell_key=None,
+            n_cells=int(np.count_nonzero(cell_group >= 0)),
+            renderer="matplotlib",
+            notes=("variant_genotypes",),
+            extras={
+                "genotypes": genotypes.to_dict(),
+                "grouping": group_name,
+                "method": loaded.method,
+                "layout_key": layout_key,
+                "site": site,
             },
         ),
         owns_figure=owns,

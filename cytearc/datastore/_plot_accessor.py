@@ -815,6 +815,24 @@ class DataStorePlotAccessor:
         """Plot each cell's allele frequency of each informative variant."""
         return self._forward(PlotResult, "allele_frequencies", locals())
 
+    def genotypes(
+        self,
+        genotypes: ArtifactRef,
+        *,
+        sites: Any | None = None,
+        group_by: str | None = None,
+        groups: ArtifactRef | None = None,
+        layout_key: str | None = None,
+        site: str | None = None,
+        target: Any | None = None,
+        figsize: tuple[float, float] | None = None,
+        theme: str = "notebook",
+        show_legend: bool = True,
+        show: bool = True,
+    ) -> PlotResult:
+        """Plot the cells' genotype calls by group and on a two-dimensional layout."""
+        return self._forward(PlotResult, "genotypes", locals())
+
     def guide_calls(
         self,
         calls: ArtifactRef,

@@ -157,8 +157,9 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
             },
         ),
         # clone_probability is stored when the clone source gives each cell's
-        # posterior, such as Numbat's p_opt; n_barcodes and doublet when the
-        # clones were called from lineage barcodes.
+        # posterior, such as Numbat's p_opt; n_barcodes when the clones were
+        # called from lineage barcodes; doublet when calling removed cells as
+        # doublets, as barcode and genotype clones do.
         "clones": CellValueSpec(
             "values",
             True,
@@ -274,6 +275,12 @@ CELL_VALUE_NAMES: Mapping[str, CellValueSpec] = MappingProxyType(
         # listed marks the cells that a file names.
         "variant_counts": CellValueSpec(
             "mean_depth", False, {"covered_sites": False, "listed": True}
+        ),
+        # n_mutant_sites counts the sites called heterozygous, homozygous
+        # alternative or alternative present; n_called_sites those and the
+        # sites called wild type.
+        "variant_genotypes": CellValueSpec(
+            "n_mutant_sites", False, {"n_called_sites": False}
         ),
     }
 )

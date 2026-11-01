@@ -642,6 +642,11 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
         )
     )
     variant_counts = store.variants.import_counts(got, cell_selection=cells)
+    # One mutant UMI calls a cell mutant: cells 0, 1, 2 and 4; cell 3 is wild
+    # type and the sixth has no evidence.
+    variant_genotypes = store.variants.genotypes(
+        variant_counts, method="threshold", min_mutant_umis=1
+    )
     stored: dict[str, set[str]] = {}
 
     for ref, expected in (
@@ -674,6 +679,7 @@ def test_real_producers_store_the_declared_arrays(store, tmp_path) -> None:
             np.array(["clone_1", "clone_2", "", "clone_3", "", "clone_4"]),
         ),
         (variant_counts, np.array([4.0, 2.0, 4.0, 1.0, 5.0, np.nan])),
+        (variant_genotypes, np.array([1, 1, 1, 0, 1, 0])),
     ):
         loaded = store.artifacts.load_values(ref)
         np.testing.assert_array_equal(loaded.values, expected)

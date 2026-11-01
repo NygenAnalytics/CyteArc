@@ -674,6 +674,54 @@ class VariantCloneArguments(OperationArguments):
 
 
 @dataclass(frozen=True, slots=True)
+class VariantGenotypeArguments(OperationArguments):
+    operation: ClassVar[str] = "call_variant_genotypes"
+    artifact_kind: ClassVar[str] = "variant_genotypes"
+
+    # The counts' cells, which the genotypes cover.
+    cell_selection: ArtifactRef = artifact_input()
+    counts: ArtifactRef = artifact_input()
+    method: Literal["source", "threshold", "gift"] = parameter()
+    # The genotyped sites by label, in the counts' order.
+    sites: tuple[str, ...] = parameter()
+    # For each genotyped site, its wild-type and alternative alleles as the
+    # method compares them; empty for adopted source calls.
+    alleles: tuple[tuple[str, str], ...] = parameter()
+    # The rules as resolved for the method, None where it applies none.
+    min_umis: int | None = parameter()
+    min_mutant_umis: int | None = parameter()
+    min_fraction: float | None = parameter()
+    min_posterior: float | None = parameter()
+    # GIFT's swap probabilities by reads per UMI, as (reads, probability),
+    # or empty for none.
+    swap_probabilities: tuple[tuple[int, float], ...] = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
+class GenotypeCloneArguments(OperationArguments):
+    operation: ClassVar[str] = "genotype_clones"
+    artifact_kind: ClassVar[str] = "clones"
+
+    # The genotypes' cells, which the clones label.
+    cell_selection: ArtifactRef = artifact_input()
+    genotypes: ArtifactRef = artifact_input()
+    # The fingerprint of each mutant cell's within labels, or None without
+    # within columns.
+    within_fingerprint: str | None = artifact_input()
+    # The sites whose mutant calls define the clones, by label.
+    sites: tuple[str, ...] = parameter()
+    within: tuple[str, ...] = parameter()
+    # Fixed choices of the method: cells link through a Jaccard index of 1
+    # over the sites both know, and cells that join two clones are doublets.
+    method: str = parameter()
+    similarity: float = parameter()
+    inclusive: bool = parameter()
+    doublets: bool = parameter()
+    invalidate_cache: bool = execution()
+
+
+@dataclass(frozen=True, slots=True)
 class GuideThresholdArguments(OperationArguments):
     operation: ClassVar[str] = "fit_guide_thresholds"
     artifact_kind: ClassVar[str] = "guide_thresholds"

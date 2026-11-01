@@ -351,3 +351,6 @@ class VariantsAccessor(_Accessor):
     informative = _bind(_VariantOperationsMixin._variants_informative)
     load_informative = _bind(_VariantOperationsMixin._variants_load_informative)
     clones = _bind(_VariantOperationsMixin._variants_clones)
+    genotypes = _bind(_VariantOperationsMixin._variants_genotypes)
+    load_genotypes = _bind(_VariantOperationsMixin._variants_load_genotypes)
+    genotype_clones = _bind(_VariantOperationsMixin._variants_genotype_clones)
