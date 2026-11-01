@@ -1637,3 +1637,27 @@ def test_the_load_counts_its_records_texts_and_cells_to_the_byte(
     with pytest.raises(MemoryError) as refused:
         store.clones.load_barcodes(ref)
     assert "The tables of" not in str(refused.value)
+
+
+def test_selecting_cells_by_their_barcodes_follows_the_documented_bounds(
+    shared, tmp_path
+) -> None:
+    # The API page's example: select_cells keeps the values above low, so
+    # low=0 keeps the cells with a barcode and low=1 those with two or more.
+    path = write_bartab_counts(BARCODES, tmp_path / "counts.tsv", sample="d4")
+    with collect_warnings():
+        barcodes = shared.store.clones.import_barcodes(
+            path,
+            cell_selection=shared.cells,
+            barcode_prefix="d4__",
+            barcode_suffix="-1",
+        )
+    records = shared.store.clones.load_barcodes(barcodes).records
+    # Each cell's distinct barcodes, counted from its records.
+    distinct = records.groupby("cell", observed=True)["barcode"].nunique()
+    assert (distinct == 1).any() and (distinct >= 2).any()
+    for low, fewest in ((0, 1), (1, 2)):
+        selected = shared.store.select_cells(barcodes, low=low)
+        kept = shared.store.artifacts.load_values(barcodes, cell_selection=selected)
+        expected = {str(cell) for cell in distinct.index[distinct >= fewest]}
+        assert set(kept.cell_ids.tolist()) == expected, low
