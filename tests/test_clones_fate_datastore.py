@@ -17,6 +17,8 @@ from scipy.cluster.hierarchy import leaves_list
 from scipy.stats import fisher_exact
 
 from cytearc.clones import COUPLING_METHODS, CloneCoupling, CloneFateBias
+from cytearc.datastore._operations import clones as clone_operations
+from cytearc.metadata.rows import READ_OBJECT_BYTES, array_row_selection_parts
 from cytearc.storage.artifacts import artifact_group
 from tests.clone_helpers import (
     benjamini_hochberg,
@@ -583,12 +585,33 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
     monkeypatch.setattr(store, "memoryBytes", checked - 1)
     with pytest.raises(MemoryError, match=f"late cells holds about {checked} bytes"):
         store.clones.fate_bias(clones, group_by="cell_type", early=early, late=late)
-    # A fate of its own for each late cell, named by three characters, makes
-    # the measurement the largest step: per early cell 64 bytes, 24 per
-    # fraction, 40 to write and 4 per character of a fate's name; per clone
-    # with late cells and fate 80 bytes; 1,000 per fate; and 24 per count of
-    # a clone in a fate, here one per late cell with a clone.
+    # Matching the clones' 48 cells to the late cells comes next: 56 bytes per
+    # clone cell, 32 per late cell, and the read before, the largest stored
+    # chunk of the two selections and the clones' codes, with Zarr's objects.
+    # A selection stores a flag for each cell of the store, so its chunk
+    # outweighs this store's cells.
     fates = _own_labels(store, LATE)
+    options = {"groups": fates, "early": early, "late": late}
+    before = max(
+        array_row_selection_parts(artifact_group(store.zw, ref)[name])[0]
+        for ref, name in (
+            (late, "values"),
+            (store.artifacts.inspect(clones).input_ref("cell_selection"), "values"),
+            (clones, "codes"),
+        )
+    )
+    matched = N_CELLS * 56 + n_late * 32 + before + READ_OBJECT_BYTES
+    monkeypatch.setattr(store, "memoryBytes", matched - 1)
+    with pytest.raises(
+        MemoryError, match=f"48 cells to {n_late} measured cells holds about {matched}"
+    ):
+        store.clones.fate_bias(clones, **options)
+    # Without the read before, a fate of its own for each late cell, named by
+    # three characters, makes the measurement the largest step: per early cell
+    # 64 bytes, 24 per fraction, 40 to write and 4 per character of a fate's
+    # name; per clone with late cells and fate 80 bytes; 1,000 per fate; and
+    # 24 per count of a clone in a fate, here one per late cell with a clone.
+    monkeypatch.setattr(clone_operations, "previous_read_bytes", lambda *chunks: 0)
     tested = len({int(c) for c in TRUTH.clones[LATE] if c >= 0})
     with_clone = int(np.count_nonzero(TRUTH.clones[LATE] >= 0))
     measured = (
@@ -599,7 +622,6 @@ def test_fate_bias_steps_refuse_budgets_below_their_needs(copied, monkeypatch) -
         + CODES_READ
     )
     assert (tested, with_clone, measured) == (8, 19, 61_356)
-    options = {"groups": fates, "early": early, "late": late}
     monkeypatch.setattr(store, "memoryBytes", measured - 1)
     with pytest.raises(
         MemoryError, match=f"8 clones in {n_late} fates holds about {measured}"
