@@ -1035,9 +1035,167 @@ def test_rows_without_a_cell_are_refused(tmp_path):
     path = tmp_path / "alleles.csv"
     path.write_text("intID,cellBC,RNF2,HEK3,EMX1\ni1,,None,None,None\n")
     with pytest.raises(
-        ValueError, match="without a cell barcode or integration on lines 2"
+        ValueError, match="without a cell barcode or integration on line 2$"
     ):
         read_all(path)
+
+
+# Each table holds, before its bad row, a row, a blank line and a row whose
+# quoted field holds a line break, so the bad row is the 4th row of the
+# table but sits on file line 6 (5 in DNA Typewriter's table of 2022, which
+# quotes nothing).
+_LINE_CASES = {
+    "a row without a cell": (
+        "alleles.csv",
+        'intID,cellBC,RNF2,HEK3,EMX1\ni1,c1,None,None,None\n\ni1,"c\n2",None,None,'
+        "None\ni2,,None,None,None\n",
+        {},
+        "without a cell barcode or integration on line 6$",
+    ),
+    "a count that is no whole number": (
+        "alleles.csv",
+        "intID,cellBC,RNF2,HEK3,EMX1,UMI,readCount\ni1,c1,None,None,None,2,5\n\n"
+        'i1,"c\n2",None,None,None,2,5\ni2,c3,None,None,None,x,5\n',
+        {},
+        "UMI must be a whole number of at least 0, but holds 'x' on line 6$",
+    ),
+    "a token that the format does not read": (
+        "alleles.csv",
+        'intID,cellBC,RNF2,HEK3,EMX1\ni1,c1,None,None,None\n\ni1,"c\n2",None,None,'
+        "None\ni2,c3,XYZ,None,None\n",
+        {},
+        "'XYZ' at RNF2, on line 6$",
+    ),
+    "a Cassiopeia read count": (
+        "alleles.txt",
+        'cellBC\tintBC\tr1\tUMI\treadCount\nc1\tI1\tNone\t2\t5\n\n"c\n2"\tI1\tNone'
+        "\t2\t5\nc3\tI1\tNone\t2\tq\n",
+        {},
+        "readCount must be a whole number of at least 0, but holds 'q' on line 6$",
+    ),
+    "a matrix's state": (
+        "matrix.csv",
+        ',a-1,a-2\nc1,1,2\n\n"c\n2",1,2\nc3,1,\n',
+        {"format": "characters"},
+        "'' at 2, on line 6$",
+    ),
+    "a DNA Typewriter chain without a cell": (
+        "chains.csv",
+        'cell,ACGTACGT\nc1,ACG\n\n"c\n2",ACG\n,ACG\n',
+        {},
+        "without a cell barcode or integration on line 6$",
+    ),
+    "an allele split into other sites": (
+        "table.tsv",
+        'c\ta\nc1\tx;y\n\n"c\n2"\tx;y\nc3\tx;y;z\n',
+        {
+            "columns": {"cell": "c", "allele": "a", "separator": ";"},
+            "integrations": "I",
+        },
+        "than the 2 of its first allele on line 6$",
+    ),
+    "a count of a table read through columns": (
+        "table.tsv",
+        'c\ta\tu\nc1\tx\t1\n\n"c\n2"\tx\t1\nc3\tx\t-1\n',
+        {"columns": {"cell": "c", "allele": "a", "umis": "u"}, "integrations": "I"},
+        "u must be a whole number of at least 0, but holds '-1' on line 6$",
+    ),
+    "a count of DNA Typewriter's table of 2022": (
+        "typewriter.csv",
+        "Cell,TargetBC,Site1,Site2,Site3,Site4,Site5,nUMI\n"
+        "c1,AAAAAAAA,CCGGGA,ATAGGA,,,,2\nc2,AAAAAAAA,CCGGGA,,,,,2\n\n"
+        "c3,AAAAAAAA,CCGGGA,,,,,x\n",
+        {},
+        "nUMI must be a whole number of at least 0, but holds 'x' on line 5$",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_LINE_CASES))
+def test_errors_name_the_file_line_past_blank_lines_and_quoted_breaks(tmp_path, case):
+    name, body, options, expected = _LINE_CASES[case]
+    path = tmp_path / name
+    path.write_text(body)
+    with pytest.raises(ValueError, match=expected):
+        read_all(path, **options)
+
+
+def _darlin_pair(tmp_path, final: str, molecules: str) -> Path:
+    folder = tmp_path / "darlin"
+    folder.mkdir(parents=True)
+    (folder / "step4_final.tsv").write_text(final)
+    (folder / "step4_annotated.tsv").write_text(molecules)
+    return folder / "step4_final.tsv"
+
+
+_FINAL_HEADER = "n_UMIs\tCR\tmutation\taligned_LR\taligned_ref\n"
+_MOLECULE_HEADER = "CR\tLR\tUR\treads\tmutations\taligned_LR\taligned_ref\n"
+
+
+def test_darlin_errors_name_the_file_line_of_each_table(tmp_path):
+    # The molecule of AAAC3 is missing; its row is the 3rd of step4_final.tsv,
+    # on file line 6 past a blank line and a quoted line break.
+    final = (
+        _FINAL_HEADER
+        + "2\tAAAC1\t23_268del\tLB1\tREF\n\n"
+        + '2\tAAAC2\t"23_268del\n"\tLB2\tREF\n'
+        + "2\tAAAC3\t23_268del\tLB3\tREF\n"
+    )
+    molecules = _MOLECULE_HEADER + "".join(
+        f"AAAC{cell}\tx\tu{umi}\t3\tm\tLB{cell}\tREF\n"
+        for cell in (1, 2)
+        for umi in (1, 2)
+    )
+    path = _darlin_pair(tmp_path / "missing", final, molecules)
+    with pytest.raises(ValueError, match="holds no molecule of, on line 6$"):
+        read_all(path, integrations="CA")
+    # A molecule's reads that are no count, on file line 6 of
+    # step4_annotated.tsv, its 4th row.
+    molecules = (
+        _MOLECULE_HEADER
+        + "AAAC1\tx\tu1\t3\tm\tLB1\tREF\n\n"
+        + 'AAAC1\tx\t"u\n2"\t3\tm\tLB1\tREF\n'
+        + "AAAC2\tx\tu1\tq\tm\tLB2\tREF\n"
+    )
+    path = _darlin_pair(tmp_path / "reads", final, molecules)
+    with pytest.raises(
+        ValueError, match="reads must be a whole number of at least 0, .* on line 6$"
+    ):
+        read_all(path, integrations="CA")
+
+
+def test_character_matrices_without_a_cell_column_name_read_as_r_writes_them(
+    tmp_path,
+):
+    # R's write.table leaves the row names' column unnamed, so each row holds
+    # one field more than the header. PEtracer's empty state, a site of an
+    # integration that the cell's embryo lacks, can end every row.
+    path = tmp_path / "characters.csv"
+    path.write_text("intID1-RNF2,intID1-HEK3\ncell1,1,\ncell2,2,\n")
+    read = read_all(path, format="petracer_characters")
+    assert read[["barcode", "site", "state", "allele"]].values.tolist() == [
+        ["cell1", "RNF2", "mark", "1"],
+        ["cell1", "HEK3", "not_applicable", None],
+        ["cell2", "RNF2", "mark", "2"],
+        ["cell2", "HEK3", "not_applicable", None],
+    ]
+    # A first row that ends empty, beside rows that do not: the empty state is
+    # none that a character matrix writes.
+    path.write_text("a-1,a-2\ncell1,0,\ncell2,2,3\n")
+    with pytest.raises(ValueError, match="'' at 2, on line 2$"):
+        read_all(path, format="characters")
+    path.write_text("a-1,a-2\ncell1,1,-1\ncell2,2,3\n")
+    read = read_all(path, format="characters")
+    assert read["allele"].tolist() == ["1", None, "2", "3"]
+    # A matrix whose rows end in a delimiter after a named cell column gives
+    # an empty last state, or PEtracer a cell column among its characters,
+    # and is refused rather than read one column over.
+    path.write_text("cell,a-1,a-2\ncell1,1,2,\ncell2,2,3,\n")
+    with pytest.raises(ValueError, match="'' at 2, on lines 2, 3$"):
+        read_all(path, format="characters")
+    path.write_text("cell_barcode,intID1-RNF2\ncell1,1,\n")
+    with pytest.raises(ValueError, match="names sites ''"):
+        read_all(path, format="petracer_characters")
 
 
 def test_counts_must_be_whole_numbers_in_tool_tables(tmp_path):
@@ -1079,7 +1237,7 @@ def test_gzip_files_read_as_plain_ones(tmp_path):
     pd.testing.assert_frame_equal(read_all(plain), read_all(packed))
     cut = tmp_path / "cut.csv.gz"
     cut.write_bytes(packed.read_bytes()[:-40])
-    with pytest.raises(ValueError, match="malformed"):
+    with pytest.raises(ValueError, match="cut.csv.gz is cut short or corrupt"):
         read_all(cut)
 
 

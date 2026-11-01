@@ -237,7 +237,7 @@ def test_carlin_files_cut_short_are_refused(tmp_path, damaged):
     folder = _carlin_copy(tmp_path)
     data = gzip.compress((folder / damaged).read_bytes())
     (folder / damaged).write_bytes(data[: len(data) // 2])
-    with pytest.raises(ValueError, match="is malformed"):
+    with pytest.raises(ValueError, match="is cut short or corrupt"):
         _rows(folder, integrations="CA")
 
 

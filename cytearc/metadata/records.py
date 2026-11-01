@@ -31,7 +31,7 @@ A missing value is stored as follows:
 These functions never touch storage.
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
@@ -252,6 +252,7 @@ def parse_integers(
     name: str,
     first_line: int = 2,
     missing: frozenset[str] = MISSING_TEXT,
+    lines: Callable[[np.ndarray], str] | None = None,
 ) -> np.ndarray:
     """Parse whole numbers of at least 0, with -1 for a missing value.
 
@@ -262,6 +263,9 @@ def parse_integers(
         missing: The text that stands for a missing value; with an empty set
             every value must be a number, as in a tool's table that always
             writes one.
+        lines: Names the file lines of values given by position, such as
+            ``"lines 4, 7"``, for errors where the values' lines do not
+            follow one another from ``first_line``, as past blank lines.
 
     Returns:
         The numbers as int64.
@@ -276,9 +280,10 @@ def parse_integers(
     )
     if bad.any():
         rows = np.flatnonzero(bad)
+        where = file_lines(rows, first_line) if lines is None else lines(rows)
         raise ValueError(
             f"{name} must be a whole number of at least 0, but holds "
-            f"{text.iloc[rows[0]]!r} on " + file_lines(rows, first_line)
+            f"{text.iloc[rows[0]]!r} on {where}"
         )
     if present.any() and numbers[present].max() >= 2.0**63:
         raise ValueError(f"{name} holds a number too large for int64")

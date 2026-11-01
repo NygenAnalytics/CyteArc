@@ -22,6 +22,7 @@ from ...metadata.arguments import RecorderAlleleImportArguments
 from ...metadata.artifacts import plan_cell_data_artifact, write_cell_data_artifact
 from ...metadata.records import RecordEncoder, RecordTable
 from ...metadata.rows import read_metadata_rows_chunkwise, text_read_bytes
+from ...metadata.selection import cell_selection_indices
 from ...storage.artifact_writer import PlannedArtifact
 from ...storage.artifacts import (
     ArtifactRef,
@@ -29,9 +30,9 @@ from ...storage.artifacts import (
     inspect_artifact,
     require_complete_artifact,
 )
-from ...storage.selections import read_stored_selection_indices
 from ...storage.types import as_zarr_array
 from ...storage.validation_scope import validation_scoped
+from ...utils.arguments import bool_argument
 from ...utils.logging import logger
 from ...utils.warnings import warn
 from .cell_barcodes import (
@@ -83,10 +84,17 @@ _CELL_BYTES = 64
 # text of their distinct values, as a multiple of the bytes of the chunks it
 # holds: the chunks, the merged codes, their order and the table.
 _MERGE_FACTOR = 2
-# Bytes that merging takes for each distinct text value that a chunk holds,
-# beside twice its bytes: its Python string, its entry in the table that codes
-# the text, and its rank.
+# Bytes that merging takes for each distinct text value that a chunk holds:
+# its Python string, its entry in the table that codes the text, and its
+# rank.
 _MERGE_BYTES_PER_TEXT = 150
+# Beside the chunks' packed bytes, which the merge factor counts, merging
+# holds for each byte of a chunk's distinct text its UTF-8 copy as each
+# string caches it, and at the widest character's bytes per byte, each
+# value's string, the values joined, and the encoder's buffer of the joined
+# text, which takes up to four bytes per character of the widest strings.
+_MERGED_TEXT_BYTES = 1
+_MERGED_TEXT_COPIES = 3
 # Bytes that writing takes per record beside the table: the int32 copies of
 # its cells and files, the int8 copy of its states, and the keys that count
 # each cell's integrations, 43 as traced over 6 million records. The chunks
@@ -101,6 +109,17 @@ _FIXED_BYTES = 8 * 2**20
 # Bytes that a loaded record takes at the peak of building the tables: its
 # stored arrays and its row of the table of records.
 _TABLE_BYTES_PER_RECORD = 120
+# Decoding a stored text field holds, for each byte stored, the bytes read
+# and their copy as one buffer, and, at the widest character's bytes per
+# stored byte, the buffer decoded as one text and each value's string.
+_STORED_TEXT_COPIES = 2
+_DECODED_TEXT_COPIES = 2
+# The text fields of the records, which loads and exports decode.
+_TEXT_FIELDS = ("integration", "site", "allele")
+# Python holds a character in one byte up to U+00FF, two up to U+FFFF and
+# four beyond, and UTF-8 writes it in at least as many bytes, from these lead
+# bytes, so each stored byte decodes to at most that width.
+_WIDE_LEAD_BYTES = ((0xF0, 4), (0xC4, 2))
 # Bytes that a loaded distinct integration, site or allele, or a cell ID,
 # takes as a Python string with its entry in the index of its categories.
 _TABLE_BYTES_PER_TEXT = 160
@@ -115,6 +134,9 @@ _EXPORT_BYTES_PER_CHARACTER = 1_000
 # Bytes that writing a store takes per exported cell: a character's column
 # copied as int64 and Zarr's buffer of its chunk.
 _STORE_BYTES_PER_CELL = 24
+# Bytes that writing a store takes per byte of the alleles of its table of
+# states: each value encoded as UTF-8 and the chunk's buffer of them.
+_STORE_BYTES_PER_ALLELE_BYTE = 2
 
 
 def _files_text(n_files: int) -> str:
@@ -303,8 +325,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         """
         if not isinstance(cell_selection, ArtifactRef):
             raise TypeError("cell_selection must be an ArtifactRef")
-        if not isinstance(invalidate_cache, bool):
-            raise TypeError("invalidate_cache must be a boolean")
+        bool_argument(invalidate_cache, "invalidate_cache")
         if format is not None and not isinstance(format, str):
             raise TypeError("format must be a format name or None")
         files, layouts = self._allele_layouts(
@@ -403,14 +424,7 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         return files, layouts
 
     def _allele_selection_indices(self, cell_selection: ArtifactRef) -> np.ndarray:
-        cell_index = read_stored_selection_indices(
-            self.zw,
-            cell_selection,
-            kind="cell_selection",
-            scope="datastore",
-            assay=None,
-            table_path="cellData",
-        ).astype(np.int64, copy=False)
+        cell_index = cell_selection_indices(self.zw, cell_selection)
         if not len(cell_index):
             raise ValueError("cell_selection selects no cell")
         return cell_index
@@ -494,24 +508,29 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         """Read the alleles of the files' rows that name selected cells."""
         n_cells = len(cell_index)
         single = sum(1 for layout in layouts if layout.integration is not None)
-        ids_bytes = text_read_bytes(self.cells._get_array("ids"), n_cells)
-        # The per-cell arrays, the lookup and a mask of each file of one
-        # array's cells, which find arrays that share no cell.
-        held = (LOOKUP_BYTES_PER_CELL + _CELL_BYTES + single) * n_cells + ids_bytes
+        # The per-cell arrays and a mask of each file of one array's cells,
+        # which find arrays that share no cell.
+        own = (_CELL_BYTES + single) * n_cells
         encoder = RecordEncoder(FIELDS)
         # Files that hold no row, such as a header alone, give no records.
         encoder.add(*empty_allele_chunk(), 0)
-        # The selected cells' share is checked before a cell ID is read.
-        self._check_allele_budget(encoder, cells=held)
+        # The selected cells' share, with the join's lookup and the read of
+        # their IDs, which decodes a stored chunk of them, is checked before
+        # a cell ID is read.
+        self._check_allele_budget(
+            encoder,
+            cells=own
+            + LOOKUP_BYTES_PER_CELL * n_cells
+            + text_read_bytes(self.cells._get_array("ids"), n_cells),
+        )
         cell_ids = np.asarray(
             read_metadata_rows_chunkwise(self.cells, "ids", cell_index), dtype=object
         )
-        join = CellBarcodeJoin(
-            cell_ids,
-            memory_bytes=self.memoryBytes,
-            held_bytes=(_CELL_BYTES + single) * n_cells + ids_bytes,
-        )
+        join = CellBarcodeJoin(cell_ids, memory_bytes=self.memoryBytes, held_bytes=own)
         del cell_ids
+        # From here the import holds what the join counts: its lookup, the
+        # cells' IDs as text and the import's own bytes per cell.
+        held = join.held_bytes
         named: list[np.ndarray | None] = []
         counted: list[dict[str, int]] = []
         merge_text = 0
@@ -673,13 +692,15 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
 
         Returns:
             ``records``, ``cells``, the distinct ``integrations``, ``sites``
-            and ``alleles``, and ``allele_bytes``, the bytes of the distinct
-            alleles.
+            and ``alleles``, ``allele_bytes``, the bytes of the distinct
+            alleles, and ``decoded_bytes``, what decoding the distinct
+            integrations, sites and alleles holds beside their values.
         """
 
         def length(name: str) -> int:
             return int(as_zarr_array(group[name], name=name).shape[0])
 
+        text_bytes = sum(length(f"{_RECORDS}_{name}_values") for name in _TEXT_FIELDS)
         return {
             "records": length(f"{_RECORDS}_cells"),
             "cells": length("n_edits"),
@@ -687,6 +708,10 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
             "sites": length(f"{_RECORDS}_site_offsets") - 1,
             "alleles": length(f"{_RECORDS}_allele_offsets") - 1,
             "allele_bytes": length(f"{_RECORDS}_allele_values"),
+            "decoded_bytes": (
+                _STORED_TEXT_COPIES + _DECODED_TEXT_COPIES * _text_width(group)
+            )
+            * text_bytes,
         }
 
     @validation_scoped
@@ -703,7 +728,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
 
         Raises:
             TypeError: If ``alleles`` is not an ArtifactRef.
-            ValueError: If it is not a complete ``lineage_alleles`` artifact.
+            ValueError: If it is not a ``lineage_alleles`` artifact.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
             MemoryError: If the tables do not fit the memory budget.
         """
         group = self._allele_group(alleles)
@@ -711,12 +738,13 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         n_records, n_cells = counts["records"], counts["cells"]
         n_text = counts["integrations"] + counts["sites"] + counts["alleles"]
         # The stored arrays and the tables built from them, each distinct
-        # text and cell ID as a category, and the cells' IDs as they are read.
+        # text and cell ID as a category, the texts as they are decoded, and
+        # the cells' IDs as they are read.
         resident = (
             _FIXED_BYTES
             + _TABLE_BYTES_PER_RECORD * n_records
             + _TABLE_BYTES_PER_TEXT * (n_text + n_cells)
-            + 2 * counts["allele_bytes"]
+            + counts["decoded_bytes"]
             + _CELL_BYTES * n_cells
             + text_read_bytes(self.cells._get_array("ids"), n_cells)
         )
@@ -796,12 +824,14 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If ``alleles`` is not a complete ``lineage_alleles``
-                artifact, ``format`` or ``unknown`` is unknown, no cell
-                reads a character, two integrations give one character name,
-                a character's states pass the int32 range, or, for LAML, a
-                cell or character name holds a character that its files
-                cannot hold.
+            ValueError: If ``alleles`` is not a ``lineage_alleles`` artifact,
+                ``format`` or ``unknown`` is unknown, no cell reads a
+                character, two integrations give one character name, a
+                character's states pass the int32 range, or, for LAML, a cell
+                or character name holds a character that its files cannot
+                hold.
+            KeyError: If the store holds no such artifact.
+            RuntimeError: If the artifact is incomplete.
             FileExistsError: For ``"cassiopeia"``, if ``path`` exists.
             MemoryError: If the export does not fit the memory budget.
         """
@@ -827,19 +857,25 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         counts = self._allele_counts(group)
         n_records, n_cells = counts["records"], counts["cells"]
         # The records and what the matrix builds from them, each distinct
-        # allele as it is ranked, each character as it is named and ordered
-        # (at most every integration at every site), the exported cells' IDs,
-        # and a store's column as it is written; the matrix's codes are
-        # counted once their size is known.
+        # allele as it is ranked, the texts as they are decoded, each
+        # character as it is named and ordered (at most every integration at
+        # every site), the exported cells' IDs, and a store's column and its
+        # alleles as they are written; the matrix's codes are counted once
+        # their size is known.
         resident = (
             _FIXED_BYTES
             + _EXPORT_BYTES_PER_RECORD * n_records
             + _EXPORT_BYTES_PER_ALLELE * counts["alleles"]
-            + 2 * counts["allele_bytes"]
+            + counts["decoded_bytes"]
             + _EXPORT_BYTES_PER_CHARACTER
             * min(n_records, counts["integrations"] * max(1, counts["sites"]))
             + text_read_bytes(self.cells._get_array("ids"), n_cells)
             + _STORE_BYTES_PER_CELL * n_cells
+            + (
+                _STORE_BYTES_PER_ALLELE_BYTE * counts["allele_bytes"]
+                if format == "cassiopeia"
+                else 0
+            )
         )
         if resident > self.memoryBytes:
             raise MemoryError(
@@ -861,14 +897,9 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
                 "No cell reads a character of these alleles, so there is no character "
                 "matrix to export"
             )
-        cell_index = read_stored_selection_indices(
-            self.zw,
-            inspect_artifact(self.zw, alleles).input_ref("cell_selection"),
-            kind="cell_selection",
-            scope="datastore",
-            assay=None,
-            table_path="cellData",
-        ).astype(np.int64, copy=False)
+        cell_index = cell_selection_indices(
+            self.zw, inspect_artifact(self.zw, alleles).input_ref("cell_selection")
+        )
         cell_ids = np.asarray(
             read_metadata_rows_chunkwise(self.cells, "ids", cell_index[matrix.cells]),
             dtype=object,
@@ -912,14 +943,56 @@ class _RecorderAlleleOperationsMixin(_AlleleOperationsBase):
         return int(len(matrix.cells))
 
 
+def _utf8_width(largest: int) -> int:
+    """The most bytes per UTF-8 byte that Python holds a text in, by its largest byte.
+
+    A lead byte from 0xF0 starts a character beyond U+FFFF, which Python
+    holds in four bytes, and one from 0xC4 a character beyond U+00FF, which
+    it holds in two; ASCII and Latin-1 text takes one.
+    """
+    for lead, width in _WIDE_LEAD_BYTES:
+        if largest >= lead:
+            return width
+    return 1
+
+
+def _text_width(group: zarr.Group) -> int:
+    """The most bytes that a decoded character takes per stored byte of the texts.
+
+    The stored UTF-8 bytes of the integrations, sites and alleles are read a
+    chunk at a time for their largest byte.
+    """
+    largest = 0
+    for name in _TEXT_FIELDS:
+        values = as_zarr_array(
+            group[f"{_RECORDS}_{name}_values"], name=f"{_RECORDS}_{name}_values"
+        )
+        block = max(1, int(values.chunks[0]))
+        for start in range(0, int(values.shape[0]), block):
+            chunk = np.asarray(values[start : start + block])
+            if len(chunk):
+                largest = max(largest, int(chunk.max()))
+    return _utf8_width(largest)
+
+
 def _merge_text_bytes(frame: pd.DataFrame) -> int:
     """The bytes that merging takes for a chunk's distinct text values."""
     total = 0
-    for name in ("integration", "site", "allele"):
+    for name in _TEXT_FIELDS:
         distinct = pd.unique(frame[name].to_numpy(dtype=object))
-        texts = [value for value in distinct.tolist() if isinstance(value, str)]
-        total += _MERGE_BYTES_PER_TEXT * len(texts) + 2 * sum(
-            len(value.encode("utf-8")) for value in texts
+        n_texts = n_bytes = largest = 0
+        for value in distinct.tolist():
+            if not isinstance(value, str):
+                continue
+            encoded = value.encode("utf-8")
+            n_texts += 1
+            n_bytes += len(encoded)
+            if not value.isascii():
+                largest = max(largest, int(np.frombuffer(encoded, np.uint8).max()))
+        total += (
+            _MERGE_BYTES_PER_TEXT * n_texts
+            + (_MERGED_TEXT_BYTES + _MERGED_TEXT_COPIES * _utf8_width(largest))
+            * n_bytes
         )
     return total
 

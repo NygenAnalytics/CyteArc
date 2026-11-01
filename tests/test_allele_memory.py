@@ -7,8 +7,10 @@ then narrows the gap to the last budget refused to within one percent. tracemall
 the smallest budget accepted, which must not pass the largest budget
 refused plus one byte, below which no accepted budget falls. The shapes are
 those whose costs differ: a wide character matrix of few distinct tokens,
-CARLIN alleles each of its own long text, and a long table of a few rows
-per cell among many integrations, whose matrix is mostly missing.
+CARLIN alleles each of its own long text, a long table of a few rows per
+cell among many integrations, whose matrix is mostly missing, and alleles of
+20,000 characters each, ASCII or ending in a character beyond U+FFFF, whose
+text outweighs the rest.
 """
 
 import re
@@ -165,34 +167,86 @@ def long(tmp_path_factory):
     return store, cells_ref, path, folder
 
 
+def _allele_table(folder: Path, alleles: list[str]):
+    """A table of one allele per cell, read through columns."""
+    cells = [f"cell{index:06d}" for index in range(len(alleles))]
+    path = folder / "alleles.tsv"
+    path.write_text(
+        "cell\tallele\n"
+        + "".join(
+            f"{cell}\t{text}\n" for cell, text in zip(cells, alleles, strict=True)
+        ),
+        encoding="utf-8",
+    )
+    store, cells_ref = _store(folder, cells)
+    return store, cells_ref, path, folder
+
+
+@pytest.fixture(scope="module")
+def long_text(tmp_path_factory):
+    """1,000 cells, each allele its own ASCII text of 20,000 characters.
+
+    The alleles' text, 20 MB, outweighs what an import, a load and an export
+    hold whatever their size, so each step's bytes per byte of text set its
+    budget.
+    """
+    letters = np.array(list("ACGT"))
+    alleles = [
+        "".join(_RNG.choice(letters, 19_988)) + f"{cell:012d}" for cell in range(1_000)
+    ]
+    return _allele_table(tmp_path_factory.mktemp("long_text"), alleles)
+
+
+@pytest.fixture(scope="module")
+def wide_text(tmp_path_factory):
+    """400 cells, each allele 20,000 characters that end in an emoji.
+
+    One character beyond U+FFFF makes Python hold each of the allele's
+    characters in four bytes, four times the bytes that UTF-8 stores.
+    """
+    letters = np.array(list("ACGT"))
+    alleles = [
+        "".join(_RNG.choice(letters, 19_987)) + f"{cell:012d}😀" for cell in range(400)
+    ]
+    return _allele_table(tmp_path_factory.mktemp("wide_text"), alleles)
+
+
+_SHAPES = ["wide", "carlin", "long", "long_text", "wide_text"]
+_OPTIONS = {
+    "carlin": {"integrations": "CA", "barcode_suffix": "-1"},
+    "long_text": {"columns": {"cell": "cell", "allele": "allele"}, "integrations": "I"},
+    "wide_text": {"columns": {"cell": "cell", "allele": "allele"}, "integrations": "I"},
+}
+
+
 def _import(store, cells, path, **options):
     return store.clones.import_alleles(
         path, cell_selection=cells, invalidate_cache=True, **options
     )
 
 
-@pytest.mark.parametrize("name", ["wide", "carlin", "long"])
+@pytest.mark.parametrize("name", _SHAPES)
 def test_imports_fit_the_smallest_budget_they_accept(request, name) -> None:
     store, cells, path, _folder = request.getfixturevalue(name)
-    options = {"integrations": "CA", "barcode_suffix": "-1"} if name == "carlin" else {}
+    options = _OPTIONS.get(name, {})
     _check(store, lambda: _import(store, cells, path, **options))
 
 
-@pytest.mark.parametrize("name", ["wide", "carlin", "long"])
+@pytest.mark.parametrize("name", _SHAPES)
 def test_loads_fit_the_smallest_budget_they_accept(request, name) -> None:
     store, cells, path, _folder = request.getfixturevalue(name)
-    options = {"integrations": "CA", "barcode_suffix": "-1"} if name == "carlin" else {}
+    options = _OPTIONS.get(name, {})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         alleles = store.clones.import_alleles(path, cell_selection=cells, **options)
     _check(store, lambda: store.clones.load_alleles(alleles))
 
 
-@pytest.mark.parametrize("name", ["wide", "carlin", "long"])
+@pytest.mark.parametrize("name", _SHAPES)
 @pytest.mark.parametrize("format", ["cassiopeia", "laml"])
 def test_exports_fit_the_smallest_budget_they_accept(request, name, format) -> None:
     store, cells, path, folder = request.getfixturevalue(name)
-    options = {"integrations": "CA", "barcode_suffix": "-1"} if name == "carlin" else {}
+    options = _OPTIONS.get(name, {})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         alleles = store.clones.import_alleles(path, cell_selection=cells, **options)

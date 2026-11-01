@@ -76,12 +76,10 @@ their last hyphen; a name without one is an integration of one site.
 """
 
 import csv
-import gzip
 import os
 import re
-import zlib
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -99,18 +97,20 @@ from ..clones.recorders import (
     SiteRules,
     chunk_states,
 )
-from ..metadata.records import MISSING_TEXT, file_lines, parse_integers
+from ..metadata.records import MISSING_TEXT, parse_integers
 from ._delimited import (
     TextLayout,
     compression,
     delimiter,
     first_lines,
     line_chunks,
+    line_list,
     open_text,
     require_columns,
     signature,
     split_fields,
     text_chunks,
+    text_errors,
     text_layout,
 )
 from ._treedata import (
@@ -147,6 +147,22 @@ ALLELE_FORMATS: tuple[str, ...] = (
 _ONE_INTEGRATION = ("carlin", "darlin")
 # The formats of ordered slots, whose shorter integrations the caller names.
 _ORDERED = ("typewriter", "typewriter_chains")
+# How each format numbers its rows, for errors: the tables that text_chunks
+# reads count rows from line 2, past blank lines and quoted line breaks; a
+# CARLIN pair and DNA Typewriter's table of 2022 number them by file line;
+# parquet tables and TreeData files by position from 1.
+_COUNTED_LINES = frozenset(
+    {
+        "darlin",
+        "cassiopeia",
+        "petracer",
+        "petracer_characters",
+        "characters",
+        "typewriter_chains",
+        "table",
+    }
+)
+_FILE_LINES = frozenset({"carlin", "typewriter"})
 _PARQUET_SIGNATURE = b"PAR1"
 # CARLIN's notation: deletions, insertions, deletion-insertions and
 # single-base substitutions on the array, joined by commas.
@@ -611,14 +627,9 @@ def _lines(path: Path | str) -> Iterator[str]:
             short or corrupt.
     """
     text = os.fspath(path)
-    try:
-        with open_text(text, compression(text)) as handle:
-            for line in handle:
-                yield line.rstrip("\r\n")
-    except UnicodeDecodeError:
-        raise ValueError(f"{text} is not a text file that CyteArc can read") from None
-    except (EOFError, zlib.error, gzip.BadGzipFile) as error:
-        raise ValueError(f"{text} is malformed: {error}") from None
+    with text_errors(text), open_text(text, compression(text)) as handle:
+        for line in handle:
+            yield line.rstrip("\r\n")
 
 
 def _text_lines(path: Path) -> list[str]:
@@ -628,13 +639,9 @@ def _text_lines(path: Path) -> list[str]:
         ValueError: If the file is not UTF-8 text, or a gzip file is cut
             short or corrupt.
     """
-    try:
-        with open_text(os.fspath(path), compression(os.fspath(path))) as handle:
-            text = handle.read()
-    except UnicodeDecodeError:
-        raise ValueError(f"{path} is not a text file that CyteArc can read") from None
-    except (EOFError, zlib.error, gzip.BadGzipFile) as error:
-        raise ValueError(f"{path} is malformed: {error}") from None
+    location = os.fspath(path)
+    with text_errors(location), open_text(location, compression(location)) as handle:
+        text = handle.read()
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
@@ -989,6 +996,21 @@ def _matrix_columns(names: Sequence[str], path: str) -> tuple[tuple[str, str], .
 
 def _matrix_layout(path: str, format: str) -> AlleleLayout:
     text = text_layout(path, what="a character matrix")
+    if text.trailing_delimiter:
+        # A first row one field longer than the header, whose last field is
+        # empty, reads in a table as a delimiter that ends each row. A
+        # matrix's first column holds its cells, so the header lacks the row
+        # names' column, as R's write.table leaves it, and the row's last
+        # state is empty, as PEtracer writes a site that the cell's embryo
+        # lacks. A matrix whose rows do end in a delimiter then gives an empty
+        # last state, or a cell column among the characters, which the
+        # states and names refuse.
+        text = replace(
+            text,
+            names=("", *text.names),
+            row_names=True,
+            trailing_delimiter=False,
+        )
     names = list(text.names[1:])
     columns = _matrix_columns(names, path)
     if format == "petracer_characters":
@@ -1432,34 +1454,59 @@ def _stripped(values: Any) -> np.ndarray:
     )
 
 
+def _on_lines(lines: np.ndarray, text: TextLayout | None) -> str:
+    """Name up to five lines of rows, such as ``"lines 4, 7"``.
+
+    With ``text``, the lines count rows, as ``text_chunks`` yields them, and
+    the rows' lines are found in the file past blank lines and quoted line
+    breaks; without it, they are the file's lines already.
+    """
+    noun = "line" if len(lines) == 1 else "lines"
+    return f"{noun} {line_list(np.asarray(lines), 0, text)}"
+
+
 def _counts(
-    values: Any, name: str, first_line: int, path: str, *, table: bool
+    values: Any,
+    name: str,
+    lines: np.ndarray,
+    path: str,
+    *,
+    table: bool,
+    text: TextLayout | None = None,
 ) -> np.ndarray:
     """Counts of a column, -1 where a table read through columns has none.
 
     A tool's table writes a count in every row, so there a missing value is
-    a row cut short.
+    a row cut short. ``lines`` are the rows' lines, which errors name as
+    ``_on_lines`` finds them with ``text``.
     """
+    numbers = np.asarray(lines, dtype=np.int64)
     try:
         return parse_integers(
             np.asarray(values, dtype=object),
             name=name,
-            first_line=first_line,
             missing=MISSING_TEXT if table else frozenset(),
+            lines=lambda rows: _on_lines(numbers[rows], text),
         )
     except ValueError as error:
         raise ValueError(f"{path}: {error}") from None
 
 
-def _cells(values: Any, lines: np.ndarray, path: str) -> np.ndarray:
-    """Cell barcodes, or integration names, stripped; an empty one is refused."""
+def _cells(
+    values: Any, lines: np.ndarray, path: str, text: TextLayout | None = None
+) -> np.ndarray:
+    """Cell barcodes, or integration names, stripped; an empty one is refused.
+
+    ``lines`` are the rows' lines, which ``text`` finds in the file as
+    ``_on_lines`` does.
+    """
     cells = _stripped(values)
     empty = np.asarray([not value for value in cells.tolist()], dtype=bool)
     if empty.any():
         rows = np.flatnonzero(empty)
         raise ValueError(
-            f"{path} has rows without a cell barcode or integration on lines "
-            + ", ".join(str(int(line)) for line in np.asarray(lines)[rows][:5])
+            f"{path} has rows without a cell barcode or integration on "
+            + _on_lines(np.asarray(lines)[rows], text)
         )
     return cells
 
@@ -1554,9 +1601,10 @@ def _read_sums(
         reads = _counts(
             chunk[positions["reads"]].to_numpy(dtype=object),
             "reads",
-            line,
+            np.arange(line, line + len(chunk), dtype=np.int64),
             molecules.path,
             table=False,
+            text=molecules,
         )
         parts.append((keys, reads))
     if not parts:
@@ -1598,13 +1646,16 @@ def _iter_darlin(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
         sums = _read_sums(layout, chunk_rows)
     for line, chunk in text_chunks(text, chunk_rows):
         lines = np.arange(line, line + len(chunk), dtype=np.int64)
-        cells = _cells(chunk[positions["CR"]].to_numpy(dtype=object), lines, text.path)
+        cells = _cells(
+            chunk[positions["CR"]].to_numpy(dtype=object), lines, text.path, text
+        )
         umis = _counts(
             chunk[positions["n_UMIs"]].to_numpy(dtype=object),
             "n_UMIs",
-            line,
+            lines,
             text.path,
             table=False,
+            text=text,
         )
         reads = None
         if sums is not None:
@@ -1615,7 +1666,7 @@ def _iter_darlin(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
                 raise ValueError(
                     f"{text.path} names cells and lineage barcodes that "
                     f"{layout._read['reads_from']} holds no molecule of, on "
-                    + file_lines(rows, line)
+                    + _on_lines(lines[rows], text)
                 )
             molecules = sums[2][found]
             mismatched = np.flatnonzero(molecules != umis)
@@ -1623,7 +1674,7 @@ def _iter_darlin(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
                 raise ValueError(
                     f"{text.path} counts other UMIs than the molecules that "
                     f"{layout._read['reads_from']} lists for the same cell and lineage "
-                    "barcode, on " + file_lines(mismatched, line)
+                    "barcode, on " + _on_lines(lines[mismatched], text)
                 )
             reads = sums[1][found]
         yield AlleleRows(
@@ -1655,19 +1706,23 @@ def _iter_cassiopeia(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRo
                     "molecule tables do; import its allele table, whose UMI counts "
                     "molecules"
                 )
-            umis = _counts(raw, "UMI", line, text.path, table=False)
+            umis = _counts(raw, "UMI", lines, text.path, table=False, text=text)
         if "readCount" in positions:
             reads = _counts(
                 chunk[positions["readCount"]].to_numpy(dtype=object),
                 "readCount",
-                line,
+                lines,
                 text.path,
                 table=False,
+                text=text,
             )
         tokens = np.stack([_stripped(chunk[positions[site]]) for site in sites], axis=1)
         yield AlleleRows(
             barcodes=_cells(
-                chunk[positions["cellBC"]].to_numpy(dtype=object), lines, text.path
+                chunk[positions["cellBC"]].to_numpy(dtype=object),
+                lines,
+                text.path,
+                text,
             ),
             rows=lines,
             columns=tuple((None, site) for site in sites),
@@ -1761,7 +1816,10 @@ def _iter_petracer(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows
         )
         yield AlleleRows(
             barcodes=_cells(
-                chunk[positions["cellBC"]].to_numpy(dtype=object), lines, text.path
+                chunk[positions["cellBC"]].to_numpy(dtype=object),
+                lines,
+                text.path,
+                text,
             ),
             rows=lines,
             columns=tuple((None, site) for site in _PETRACER_SITES),
@@ -1774,18 +1832,20 @@ def _iter_petracer(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows
             else _counts(
                 chunk[positions["UMI"]].to_numpy(dtype=object),
                 "UMI",
-                line,
+                lines,
                 text.path,
                 table=False,
+                text=text,
             ),
             reads=None
             if "readCount" not in positions
             else _counts(
                 chunk[positions["readCount"]].to_numpy(dtype=object),
                 "readCount",
-                line,
+                lines,
                 text.path,
                 table=False,
+                text=text,
             ),
         )
 
@@ -1804,7 +1864,7 @@ def _iter_matrix(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
         if layout.format == "characters":
             tokens = _whole_numbers(tokens)
         yield AlleleRows(
-            barcodes=_cells(chunk[0].to_numpy(dtype=object), lines, text.path),
+            barcodes=_cells(chunk[0].to_numpy(dtype=object), lines, text.path, text),
             rows=lines,
             columns=columns,
             tokens=tokens,
@@ -1860,7 +1920,7 @@ def _iter_typewriter(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRo
             umis = _counts(
                 np.asarray([row[-1] for row in fields], dtype=object),
                 "nUMI",
-                int(numbers[0]),
+                numbers,
                 text.path,
                 table=False,
             )
@@ -1950,7 +2010,7 @@ def _iter_chains(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
             axis=1,
         )
         yield AlleleRows(
-            barcodes=_cells(chunk[0].to_numpy(dtype=object), lines, text.path),
+            barcodes=_cells(chunk[0].to_numpy(dtype=object), lines, text.path, text),
             rows=lines,
             columns=columns,
             tokens=tokens,
@@ -2019,7 +2079,7 @@ def _iter_table(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
             if other:
                 raise ValueError(
                     f"{text.path} splits alleles into {what} on "
-                    + file_lines(np.asarray(other), line)
+                    + _on_lines(lines[other], text)
                 )
             tokens = np.full((len(split), n_sites), None, dtype=object)
             for row, parts in enumerate(split):
@@ -2054,6 +2114,7 @@ def _iter_table(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
                         chunk[positions[roles["cell"]]].to_numpy(dtype=object),
                         lines,
                         text.path,
+                        text,
                     ),
                     np.asarray(
                         [
@@ -2067,19 +2128,22 @@ def _iter_table(layout: AlleleLayout, chunk_rows: int) -> Iterator[AlleleRows]:
                 )
             )
             yield from _site_rows(
-                layout, chunk, positions, lines, line, tokens, integrations, site_names
+                layout, chunk, positions, lines, tokens, integrations, site_names
             )
             continue
         yield AlleleRows(
             barcodes=_cells(
-                chunk[positions[roles["cell"]]].to_numpy(dtype=object), lines, text.path
+                chunk[positions[roles["cell"]]].to_numpy(dtype=object),
+                lines,
+                text.path,
+                text,
             ),
             rows=lines,
             columns=columns,
             tokens=tokens,
             integrations=integrations,
-            umis=_table_counts(layout, chunk, positions, "umis", line),
-            reads=_table_counts(layout, chunk, positions, "reads", line),
+            umis=_table_counts(layout, chunk, positions, "umis", lines),
+            reads=_table_counts(layout, chunk, positions, "reads", lines),
         )
     repeated = repeated_keys(keys) if keys else 0
     if repeated:
@@ -2094,7 +2158,7 @@ def _table_counts(
     chunk: pd.DataFrame,
     positions: Mapping[str, int],
     role: str,
-    line: int,
+    lines: np.ndarray,
 ) -> np.ndarray | None:
     name = layout.columns.get(role)
     if name is None:
@@ -2102,9 +2166,10 @@ def _table_counts(
     return _counts(
         chunk[positions[name]].to_numpy(dtype=object),
         name,
-        line,
+        lines,
         layout.path,
         table=True,
+        text=layout._text,
     )
 
 
@@ -2113,7 +2178,6 @@ def _site_rows(
     chunk: pd.DataFrame,
     positions: Mapping[str, int],
     lines: np.ndarray,
-    line: int,
     tokens: np.ndarray,
     integrations: np.ndarray | None,
     site_names: np.ndarray,
@@ -2121,10 +2185,13 @@ def _site_rows(
     """Yield the rows of a table whose rows each hold one site, site by site."""
     roles = layout.columns
     cells = _cells(
-        chunk[positions[roles["cell"]]].to_numpy(dtype=object), lines, layout.path
+        chunk[positions[roles["cell"]]].to_numpy(dtype=object),
+        lines,
+        layout.path,
+        layout._text,
     )
-    umis = _table_counts(layout, chunk, positions, "umis", line)
-    reads = _table_counts(layout, chunk, positions, "reads", line)
+    umis = _table_counts(layout, chunk, positions, "umis", lines)
+    reads = _table_counts(layout, chunk, positions, "reads", lines)
     codes, distinct = pd.factorize(site_names)
     for position, site in enumerate(np.asarray(distinct, dtype=object).tolist()):
         rows = np.flatnonzero(codes == position)
@@ -2181,8 +2248,17 @@ def classified_rows(layout: AlleleLayout, rows: AlleleRows) -> ChunkStates:
         shown = ", ".join(
             f"{token!r} at {site or 'its allele'}" for site, token in refused.tokens
         )
-        lines = ", ".join(str(int(row)) for row in rows.rows[list(refused.rows)][:5])
         raise ValueError(
             f"{layout.path} holds tokens that {layout.format!r} does not read, "
-            f"{shown}, on rows {lines}"
+            f"{shown}, on {_where(layout, rows.rows[list(refused.rows)])}"
         ) from None
+
+
+def _where(layout: AlleleLayout, rows: np.ndarray) -> str:
+    """Name up to five rows of a file: their lines in a text file, else positions."""
+    if layout.format in _COUNTED_LINES:
+        return _on_lines(rows, layout._text)
+    if layout.format in _FILE_LINES:
+        return _on_lines(rows, None)
+    noun = "row" if len(rows) == 1 else "rows"
+    return f"{noun} {line_list(np.asarray(rows), 0)}"

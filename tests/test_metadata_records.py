@@ -108,6 +108,23 @@ def test_integers_refuse_values_that_are_not_counts(value) -> None:
         parse_integers(["1", value], name="umi_count", first_line=10)
 
 
+def test_integers_name_lines_by_the_callers_rule_where_one_is_given() -> None:
+    # Rows 1 and 3 hold no count; the caller places them on file lines 7 and
+    # 12, as rows after blank lines sit.
+    file_lines_of_rows = np.array([5, 7, 9, 12])
+    named: list[list[int]] = []
+
+    def lines(rows: np.ndarray) -> str:
+        named.append(rows.tolist())
+        return "lines " + ", ".join(str(file_lines_of_rows[row]) for row in rows)
+
+    with pytest.raises(ValueError, match=r"holds 'x' on lines 7, 12$"):
+        parse_integers(["1", "x", "2", "y"], name="umis", first_line=5, lines=lines)
+    assert named == [[1, 3]]
+    with pytest.raises(ValueError, match=r"holds 'x' on lines 6, 8$"):
+        parse_integers(["1", "x", "2", "y"], name="umis", first_line=5)
+
+
 def test_integers_refuse_values_beyond_int64() -> None:
     with pytest.raises(ValueError, match="too large"):
         parse_integers(["1", str(2**64)], name="umi_count")

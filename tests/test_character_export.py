@@ -279,6 +279,25 @@ def test_convexmls_matrix_survives_an_import_and_an_export(tmp_path):
     )
 
 
+def test_exports_name_missing_and_incomplete_alleles(store, truth, recorders, tmp_path):
+    from cytearc.storage.artifacts import artifact_group
+    from cytearc.storage.refs import ArtifactRef
+
+    alleles = _petracer_alleles(store, truth, recorders, tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    missing = ArtifactRef(
+        scope="datastore", kind="lineage_alleles", artifact_id="f" * 64, assay=None
+    )
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        store.clones.export_characters(missing, out / "missing.zarr")
+    # An import that stopped before it finished leaves an incomplete artifact.
+    artifact_group(store.zw, alleles).attrs["complete"] = False
+    with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+        store.clones.export_characters(alleles, out / "incomplete.csv", format="laml")
+    assert not any(out.iterdir())
+
+
 def test_exports_refuse_what_they_cannot_write(store, truth, recorders, tmp_path):
     alleles = _petracer_alleles(store, truth, recorders, tmp_path)
     out = tmp_path / "out"

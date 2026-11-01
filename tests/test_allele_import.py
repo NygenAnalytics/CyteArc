@@ -532,6 +532,102 @@ def test_import_arguments_are_checked(store, tmp_path, truth, recorders):
         )
 
 
+def test_invalidate_cache_is_checked_before_the_store_is_read(
+    store, truth, recorders, tmp_path
+):
+    from cytearc.storage.errors import ArtifactResolutionError
+    from cytearc.storage.refs import ArtifactRef
+
+    path = write_petracer_long(recorders, truth, tmp_path / "d2.csv", sample="d2")
+    missing = ArtifactRef(
+        scope="datastore", kind="cell_selection", artifact_id="f" * 64, assay=None
+    )
+    with pytest.raises(TypeError, match="invalidate_cache must be a boolean"):
+        store.clones.import_alleles(
+            path, cell_selection=missing, invalidate_cache=np.True_
+        )
+    with pytest.raises(ArtifactResolutionError, match="does not exist"):
+        store.clones.import_alleles(path, cell_selection=missing)
+
+
+def test_loads_name_missing_incomplete_and_other_artifacts(
+    store, truth, recorders, tmp_path
+):
+    from cytearc.storage.artifacts import artifact_group
+    from cytearc.storage.refs import ArtifactRef
+
+    path = write_petracer_long(recorders, truth, tmp_path / "d2.csv", sample="d2")
+    cells = every_cell(store)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ref = store.clones.import_alleles(path, cell_selection=cells)
+    missing = ArtifactRef(
+        scope="datastore", kind="lineage_alleles", artifact_id="f" * 64, assay=None
+    )
+    with pytest.raises(KeyError, match="Artifact does not exist"):
+        store.clones.load_alleles(missing)
+    clones = store.clones.from_column("cell_type", cell_selection=cells)
+    with pytest.raises(
+        ValueError, match="alleles must be a lineage_alleles artifact, not 'clones'"
+    ):
+        store.clones.load_alleles(clones)
+    # An import that stopped before it finished leaves an incomplete artifact.
+    artifact_group(store.zw, ref).attrs["complete"] = False
+    with pytest.raises(RuntimeError, match="Artifact is incomplete"):
+        store.clones.load_alleles(ref)
+
+
+def test_the_selected_cells_ids_count_once_as_the_join_holds_them(
+    tmp_path, monkeypatch
+):
+    """The checks after the IDs are read count each ID as the string the join holds.
+
+    Lengthening each of 200 IDs by 500 ASCII characters lengthens each of
+    their Python strings by 500 bytes, so the bytes counted for the selected
+    cells grow by 100,000, once, whatever the stored width of the IDs.
+    """
+    from cytearc.datastore._operations.recorder_alleles import (
+        _RecorderAlleleOperationsMixin,
+    )
+    from tests.clone_helpers import open_clone_store
+    from tests.storage_helpers import write_count_store
+
+    checked: list[int] = []
+    check = _RecorderAlleleOperationsMixin._check_allele_budget
+
+    def counting(self, encoder, *, cells, **options):
+        checked.append(cells)
+        return check(self, encoder, cells=cells, **options)
+
+    monkeypatch.setattr(
+        _RecorderAlleleOperationsMixin, "_check_allele_budget", counting
+    )
+    held: dict[int, set[int]] = {}
+    for extra in (0, 500):
+        folder = tmp_path / f"ids_{extra}"
+        folder.mkdir()
+        ids = [f"cell{index:04d}" + "x" * extra for index in range(200)]
+        write_count_store(
+            str(folder / "store.zarr"),
+            {"RNA": np.ones((len(ids), 2), dtype=np.uint16)},
+            "uint16",
+            cell_ids=ids,
+        )
+        store = open_clone_store(folder / "store.zarr")
+        path = folder / "characters.csv"
+        path.write_text(
+            "cell_barcode,intID1-RNF2\n" + "".join(f"{cell},1\n" for cell in ids)
+        )
+        checked.clear()
+        store.clones.import_alleles(
+            path, cell_selection=store.snapshot_cell_selection()
+        )
+        # The first check comes before the IDs are read; the others hold them.
+        held[extra] = set(checked[1:])
+    assert len(held[0]) == len(held[500]) == 1
+    assert held[500].pop() - held[0].pop() == 200 * 500
+
+
 def test_artifacts_without_their_counts_or_files_are_refused(
     store, truth, recorders, tmp_path
 ):
